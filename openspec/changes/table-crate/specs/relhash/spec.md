@@ -186,8 +186,10 @@ damaged table. A mask is refused as "The masks of rows" says.
   a split of no records; partitions that are not a power of two up to
   the limit, or whose bits pass the 32 bits of a hash; a Bloom filter
   of the wrong size or alignment, for more records than it may hold,
-  or a shared one not built yet; a reference or a cursor the caller
-  passed that names no chunk or lies outside its chunk.
+  or a shared one not built yet; a source of keys that cannot give a
+  row's key; a slot of a payload cursor past its slots or holding no
+  reference; a reference or a cursor the caller passed that names no
+  chunk or lies outside its chunk.
 - **A damaged table**: a header with a field that breaks its rule, the
   field named; a reference read from the table that names no chunk or
   lies outside its chunk; a record, whoever named it, whose size is not
