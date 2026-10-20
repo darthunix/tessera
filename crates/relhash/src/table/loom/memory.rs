@@ -4,9 +4,9 @@
 use std::cell::UnsafeCell as StdUnsafeCell;
 use std::sync::atomic::{AtomicU8, AtomicU64 as PlainU64, Ordering as Plain};
 
+use crate::error::Result;
 use ::loom::cell::UnsafeCell;
 use ::loom::sync::atomic::{AtomicU32, AtomicU64};
-use anyhow::Result;
 use core::sync::atomic::Ordering;
 
 use super::model::CONFIG;

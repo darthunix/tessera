@@ -55,7 +55,7 @@ type Corruption<'a> = (&'a str, &'a dyn Fn(&mut [u64]));
 /// An empty table for `capacity` records of `config` over chunks of
 /// [`CHUNK`] bytes.
 fn local(config: &TableConfig, capacity: u64) -> Result<OwnedTable> {
-    OwnedTable::new(config, capacity, CHUNK)
+    Ok(OwnedTable::new(config, capacity, CHUNK)?)
 }
 
 /// The bytes of one field, whatever the word boundaries.
@@ -334,7 +334,7 @@ impl KeySource for Mixed<'_> {
         }
     }
 
-    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
+    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
         match &self.0[key] {
             Key::Int4(column) => normalize_word(column, index, selected, out),
             Key::Int8(column) => normalize_word(column, index, selected, out),
@@ -1673,8 +1673,8 @@ fn whole_words_normalize_like(values: &[i32], non_null: &[bool], selected: &[boo
                 drawn,
             ] {
                 let (mut from_block, mut from_rows) = ([7; 64], [7; 64]);
-                let block_bits = normalize_word(&dense, index, selected, &mut from_block)?;
-                let row_bits = normalize_word(&rows, index, selected, &mut from_rows)?;
+                let block_bits = normalize_word(&dense, index, selected, &mut from_block).unwrap();
+                let row_bits = normalize_word(&rows, index, selected, &mut from_rows).unwrap();
                 assert_eq!(block_bits, row_bits, "{nrows} rows, word {index}");
                 for bit in (0..64).filter(|bit| selected >> bit & 1 != 0) {
                     assert_eq!(from_block[bit], from_rows[bit], "{nrows} rows, row {bit}");

@@ -18,8 +18,8 @@
 use core::arch::asm;
 use core::mem::MaybeUninit;
 
+use crate::error::{Kind, Result};
 use crate::ones;
-use anyhow::Result;
 
 use super::keys::WordKeys;
 use super::record::Access;
@@ -118,7 +118,7 @@ pub(super) fn probe_word<R: Region, const N: usize>(
         access.check_steps(steps)?;
         steps += 1;
         for bit in ones(pending) {
-            let place = access.place(unsafe { lanes.current[bit].assume_init() })?;
+            let place = access.place(unsafe { lanes.current[bit].assume_init() }, Kind::Damaged)?;
             // SAFETY: `place` accepted it.
             let spot = unsafe { access.spot(place) };
             lanes.spot[bit].write(spot);

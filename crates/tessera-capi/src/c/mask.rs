@@ -45,7 +45,7 @@ impl Mask {
             // SAFETY: the caller guarantees `words` valid, initialized words.
             unsafe { slice::from_raw_parts(self.bits.cast_const(), words) }
         };
-        RowMaskView::try_new(nrows, bits)
+        Ok(RowMaskView::try_new(nrows, bits)?)
     }
 
     /// Borrow the mask for narrowing.
@@ -64,7 +64,7 @@ impl Mask {
             // that nothing else accesses.
             unsafe { slice::from_raw_parts_mut(self.bits, words) }
         };
-        RowMask::try_new(nrows, bits)
+        Ok(RowMask::try_new(nrows, bits)?)
     }
 
     /// Borrow an optional mask for reading: null means absent.

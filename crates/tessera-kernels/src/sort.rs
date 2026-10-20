@@ -331,7 +331,9 @@ fn candidates_as<K: KeySource + ?Sized, const W: usize>(
             continue;
         }
         for key in 0..nkeys {
-            non_null[key] = source.word(key, index, selected, &mut slots[key])?;
+            non_null[key] = source
+                .word(key, index, selected, &mut slots[key])
+                .context("the source of keys cannot give a selected row's key")?;
         }
         let mut keep = 0;
         let bits = selected;
@@ -403,7 +405,9 @@ fn lanes_as<K: KeySource + ?Sized, const W: usize>(
             continue;
         }
         for key in 0..nkeys {
-            non_null[key] = source.word(key, index, selected, &mut slots[key])?;
+            non_null[key] = source
+                .word(key, index, selected, &mut slots[key])
+                .context("the source of keys cannot give a selected row's key")?;
         }
         let bits = selected;
         for bit in ones(bits) {

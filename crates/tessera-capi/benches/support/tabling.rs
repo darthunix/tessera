@@ -39,7 +39,7 @@ impl<C: ColumnReader<Value = i32>> KeySource for OneKey<'_, C> {
         self.0.nrows()
     }
 
-    fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
+    fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
         normalize_word(self.0, index, selected, out)
     }
 }
@@ -110,7 +110,8 @@ pub fn probe_all<K: KeySource>(setup: &mut Setup, keys: &K, hashes: &[u32]) -> R
     let table = setup.table.table()?;
     setup.found.copy_from_slice(&setup.valid);
     let mut matches = Matches::new(&mut setup.found, &mut setup.matches)?;
-    table.probe(hashes, keys, &mut matches).map(drop)
+    table.probe(hashes, keys, &mut matches)?;
+    Ok(())
 }
 
 /// Resolve every valid row to its record.
