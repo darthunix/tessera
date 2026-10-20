@@ -1,8 +1,8 @@
 //! The models of the table: participants that append and link at once,
 //! and probes that read what was published.
 
+use crate::error::{Kind, Result};
 use ::loom::thread;
-use anyhow::Result;
 use core::sync::atomic::Ordering;
 
 use super::memory::{HEADS, Heads, LoomRegion};
@@ -40,7 +40,7 @@ fn chain_and_walk(region: &LoomRegion, layout: &Layout) -> Result<(usize, usize)
     let mut chain = 0;
     while offset != 0 {
         chain += 1;
-        offset = access.locate(offset)?.next();
+        offset = access.locate(offset, Kind::Damaged)?.next();
     }
     let mut out = [0; 8];
     let walked = scan(region, layout, &mut Cursor::start(), &mut out)?;

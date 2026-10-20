@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, ensure};
+use crate::error::{Error, Result, Rule, ensure};
 
 use crate::bits::ones;
 
@@ -15,13 +15,14 @@ fn validate_words(nrows: usize, words: &[u64]) -> Result<()> {
     let expected = word_count(nrows);
     ensure!(
         words.len() == expected,
-        "expected {expected} bitmap words, got {}",
-        words.len()
+        Error::wrong_call(Rule::MaskWords)
+            .with(expected)
+            .and(words.len())
     );
     let tail = nrows % 64;
     ensure!(
         tail == 0 || words[expected - 1] >> tail == 0,
-        "bitmap has set bits beyond its physical row count"
+        Error::wrong_call(Rule::MaskPadding)
     );
     Ok(())
 }
@@ -31,7 +32,7 @@ fn validate_words(nrows: usize, words: &[u64]) -> Result<()> {
 fn validate_row(row: usize, nrows: usize) -> Result<()> {
     ensure!(
         row < nrows,
-        "physical row {row} is out of bounds for {nrows} rows"
+        Error::wrong_call(Rule::Row).with(row).and(nrows)
     );
     Ok(())
 }
@@ -58,7 +59,7 @@ fn validate_row(row: usize, nrows: usize) -> Result<()> {
 /// // One word is not enough for 70 rows, and row 70 is past the batch.
 /// assert!(RowMaskView::try_new(70, &[1 << 0 | 1 << 2]).is_err());
 /// assert!(RowMaskView::try_new(70, &[0, 1 << (70 - 64)]).is_err());
-/// # Ok::<(), anyhow::Error>(())
+/// # Ok::<(), relhash::Error>(())
 /// ```
 ///
 /// A view cannot outlive the words it borrows. Here `words` is one word
@@ -230,14 +231,14 @@ impl<'a> RowMask<'a> {
     /// rows.intersect_word(0, 1 << 0 | 1 << 2)?;
     /// rows.intersect_word(1, u64::MAX)?;
     /// assert_eq!(rows.as_view().selected_rows().collect::<Vec<_>>(), [0, 2, 64]);
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), relhash::Error>(())
     /// ```
     #[inline]
     pub fn intersect_word(&mut self, index: usize, bits: u64) -> Result<()> {
         let word = self
             .words
             .get_mut(index)
-            .context("mask word is out of bounds")?;
+            .ok_or(Error::wrong_call(Rule::MaskWord))?;
         *word &= bits;
         Ok(())
     }
@@ -257,18 +258,18 @@ impl<'a> RowMask<'a> {
     /// rows.set_word(1, 1 << (64 - 64))?;
     /// assert!(rows.set_word(1, 1 << (65 - 64)).is_err());
     /// assert_eq!(rows.as_view().selected_rows().collect::<Vec<_>>(), [0, 2, 64]);
-    /// # Ok::<(), anyhow::Error>(())
+    /// # Ok::<(), relhash::Error>(())
     /// ```
     #[inline]
     pub fn set_word(&mut self, index: usize, bits: u64) -> Result<()> {
         let word = self
             .words
             .get_mut(index)
-            .context("mask word is out of bounds")?;
+            .ok_or(Error::wrong_call(Rule::MaskWord))?;
         let valid = (self.nrows - index * 64).min(64);
         ensure!(
             valid == 64 || bits >> valid == 0,
-            "mask word has set padding bits"
+            Error::wrong_call(Rule::WordPadding)
         );
         *word = bits;
         Ok(())
@@ -280,9 +281,9 @@ impl<'a> RowMask<'a> {
     pub fn intersect(&mut self, other: RowMaskView<'_>) -> Result<()> {
         ensure!(
             self.nrows == other.nrows,
-            "expected {} physical rows, got {}",
-            self.nrows,
-            other.nrows
+            Error::wrong_call(Rule::MaskRows)
+                .with(self.nrows)
+                .and(other.nrows)
         );
         for (word, other) in self.words.iter_mut().zip(other.words()) {
             *word &= other;
@@ -292,26 +293,16 @@ impl<'a> RowMask<'a> {
 }
 
 /// Check that the masks and arrays of a call all have its `nrows` rows:
-/// `counts` holds their row counts, and `call` names the kind of call in
-/// the error.
+/// `counts` holds their row counts.
 ///
-/// A count other than `nrows` returns an error, so that a call fails
-/// before it changes anything.
+/// A count other than `nrows` returns an error with `nrows` and that
+/// count, so that a call fails before it changes anything.
 #[inline]
-pub fn check_rows(nrows: usize, counts: &[usize], call: &str) -> Result<()> {
-    if counts.iter().all(|&rows| rows == nrows) {
-        Ok(())
-    } else {
-        Err(rows_differ(call))
+pub fn check_rows(nrows: usize, counts: &[usize]) -> Result<()> {
+    match counts.iter().find(|&&rows| rows != nrows) {
+        None => Ok(()),
+        Some(&rows) => Err(Error::wrong_call(Rule::RowCounts).with(nrows).and(rows)),
     }
-}
-
-/// The error of [`check_rows`], built out of line so that a call's check
-/// stays a comparison and a branch.
-#[cold]
-#[inline(never)]
-fn rows_differ(call: &str) -> anyhow::Error {
-    anyhow!("the masks of a {call} call have different row counts")
 }
 
 #[cfg(test)]

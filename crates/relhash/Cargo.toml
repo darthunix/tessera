@@ -11,10 +11,8 @@ default = ["alloc"]
 # OwnedTable, the table that owns its memory and so allocates it.
 alloc = []
 
-[dependencies]
-anyhow.workspace = true
-
 [dev-dependencies]
+anyhow.workspace = true
 proptest.workspace = true
 
 # The model table of the table module, which other crates' loom models run

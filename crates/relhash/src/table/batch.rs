@@ -5,8 +5,8 @@
 
 use core::mem::MaybeUninit;
 
+use crate::error::{Error, Kind, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView, check_rows, ones};
-use anyhow::{Result, ensure};
 
 use super::header::{Layout, Place, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
@@ -58,7 +58,7 @@ impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
         refs: &'b mut [u32],
     ) -> Result<Self> {
         let nrows = pending.as_view().nrows();
-        check_rows(nrows, &[keys.nrows(), hashes.len(), refs.len()], "table")?;
+        check_rows(nrows, &[keys.nrows(), hashes.len(), refs.len()])?;
         Ok(Self {
             hashes,
             keys,
@@ -119,7 +119,7 @@ impl<'b> Matches<'b> {
     /// A lookup of the rows of `rows`, a mask of `refs.len()` rows.
     #[inline]
     pub fn from_mask(rows: RowMask<'b>, refs: &'b mut [u32]) -> Result<Self> {
-        check_rows(refs.len(), &[rows.as_view().nrows()], "table")?;
+        check_rows(refs.len(), &[rows.as_view().nrows()])?;
         Ok(Self { rows, refs })
     }
 
@@ -157,7 +157,7 @@ impl<'a> MatchesView<'a> {
     /// record's reference at its row in `refs`.
     #[inline]
     pub fn new(rows: RowMaskView<'a>, refs: &'a [u32]) -> Result<Self> {
-        check_rows(refs.len(), &[rows.nrows()], "table")?;
+        check_rows(refs.len(), &[rows.nrows()])?;
         Ok(Self { rows, refs })
     }
 
@@ -194,7 +194,7 @@ pub(super) fn check<K: KeySource + ?Sized>(
     out: usize,
 ) -> Result<()> {
     check_keys(layout, keys)?;
-    check_rows(nrows, &[keys.nrows(), hashes, out], "table")
+    check_rows(nrows, &[keys.nrows(), hashes, out])
 }
 
 /// Reject keys that are not the table's, before anything is read or
@@ -202,9 +202,9 @@ pub(super) fn check<K: KeySource + ?Sized>(
 pub(super) fn check_keys<K: KeySource + ?Sized>(layout: &Layout, keys: &K) -> Result<()> {
     ensure!(
         keys.nkeys() == layout.nkeys,
-        "the table has {} keys, the batch {}",
-        layout.nkeys,
-        keys.nkeys()
+        Error::wrong_call(Rule::Keys)
+            .with(layout.nkeys)
+            .and(keys.nkeys())
     );
     Ok(())
 }
@@ -213,10 +213,12 @@ pub(super) fn check_keys<K: KeySource + ?Sized>(layout: &Layout, keys: &K) -> Re
 /// rows.
 fn check_payload(payload: Option<&[u8]>, nrows: usize, payload_size: usize) -> Result<()> {
     if let Some(payload) = payload {
+        let needed = nrows.checked_mul(payload_size);
         ensure!(
-            nrows.checked_mul(payload_size) == Some(payload.len()),
-            "the payload has {} bytes, not {payload_size} per row of {nrows}",
-            payload.len()
+            needed == Some(payload.len()),
+            Error::wrong_call(Rule::PayloadBytes)
+                .with(payload.len())
+                .and(needed.unwrap_or(usize::MAX))
         );
     }
     Ok(())
@@ -352,11 +354,11 @@ pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
     check_keys(layout, *keys)?;
     ensure!(
         layout.payload_size == 8 * (columns.null_words() + columns.len()),
-        "the table's payload has {} bytes, not its words of NULL bits and {} columns",
-        layout.payload_size,
-        columns.len()
+        Error::wrong_call(Rule::PayloadColumns)
+            .with(layout.payload_size)
+            .and(columns.len())
     );
-    check_rows(nrows, &[columns.nrows()], "table")?;
+    check_rows(nrows, &[columns.nrows()])?;
     shaped!(
         layout.nkeys,
         layout.tail_words(),
@@ -453,14 +455,14 @@ pub(super) fn check_partitions<R: Region>(region: &R, partitions: &Partitions<'_
     let count = partitions.chunks.len();
     ensure!(
         count.is_power_of_two() && count <= MAX_PARTITIONS,
-        "{count} partitions are not a power of two up to {MAX_PARTITIONS}"
+        Error::wrong_call(Rule::Partitions).with(count)
     );
     let bits = count.trailing_zeros();
     ensure!(
         partitions.shift < 32 && partitions.shift + bits <= 32,
-        "partition bits {} to {} lie past the 32 bits of a hash",
-        partitions.shift,
-        partitions.shift + bits
+        Error::wrong_call(Rule::PartitionBits)
+            .with(partitions.shift)
+            .and(partitions.shift + bits)
     );
     if let Some(&chunk) = partitions
         .chunks
@@ -498,17 +500,17 @@ pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
     check_keys(layout, *keys)?;
     ensure!(
         layout.payload_size == 8 * (1 + columns.len()) && columns.len() <= 64,
-        "the table's payload has {} bytes, not a word of NULL bits and {} columns, 64 at most",
-        layout.payload_size,
-        columns.len()
+        Error::wrong_call(Rule::PartitionColumns)
+            .with(layout.payload_size)
+            .and(columns.len())
     );
-    check_rows(nrows, &[columns.nrows()], "table")?;
+    check_rows(nrows, &[columns.nrows()])?;
     let mask = check_partitions(region, partitions)?;
     ensure!(
         rows.len() == partitions.chunks.len(),
-        "{} row counts for {} partitions",
-        rows.len(),
-        partitions.chunks.len()
+        Error::wrong_call(Rule::PartitionRows)
+            .with(rows.len())
+            .and(partitions.chunks.len())
     );
     shaped!(
         layout.nkeys,
@@ -614,16 +616,13 @@ pub(super) fn split<R: Region>(
     let mask = check_partitions(region, partitions)?;
     ensure!(
         offsets.len() == hashes.len(),
-        "the offsets and hashes of a split have different lengths"
+        Error::wrong_call(Rule::SplitLengths)
     );
     // A count of 0 means the source is done, so a call copies one at least.
-    ensure!(
-        !offsets.is_empty(),
-        "a split copies at least one record a call"
-    );
+    ensure!(!offsets.is_empty(), Error::wrong_call(Rule::EmptySplit));
     ensure!(
         !partitions.chunks.contains(&(source as u32)),
-        "table chunk {source} is split into itself"
+        Error::wrong_call(Rule::SplitIntoItself).with(source)
     );
     let access = Access::for_chunks(region, layout);
     let record_size = access.record_size();
@@ -818,7 +817,7 @@ pub(super) fn next_match<R: Region>(
     rows: &mut RowMask<'_>,
 ) -> Result<usize> {
     let nrows = rows.as_view().nrows();
-    check_rows(nrows, &[offsets.len()], "table")?;
+    check_rows(nrows, &[offsets.len()])?;
     let mut access = Access::new(region, layout);
     let mut left = 0;
     for (index, word) in rows.words_mut().iter_mut().enumerate() {
@@ -826,7 +825,7 @@ pub(super) fn next_match<R: Region>(
         let mut hits = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
-            let record = access.locate(offsets[row])?;
+            let record = access.locate(offsets[row], Kind::WrongCall)?;
             let after = access.find_same(
                 record.next(),
                 record.hash(),
@@ -857,21 +856,22 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     out: &mut [u64],
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_rows(nrows, &[offsets.len(), out.len()], "table")?;
+    check_rows(nrows, &[offsets.len(), out.len()])?;
     ensure!(
         at.is_multiple_of(8)
             && at
                 .checked_add(8)
                 .is_some_and(|end| end <= layout.payload_size),
-        "a payload word at byte {at} is not a word of the payload of {} bytes",
-        layout.payload_size
+        Error::wrong_call(Rule::PayloadWord)
+            .with(at)
+            .and(layout.payload_size)
     );
     let mut access = Access::new(region, layout);
     if !PREFETCH {
         for index in 0..nrows.div_ceil(64) {
             for bit in ones(rows.word(index)) {
                 let row = index * 64 + bit;
-                let payload = access.locate(offsets[row])?.payload();
+                let payload = access.locate(offsets[row], Kind::WrongCall)?.payload();
                 let mut word = [0; 8];
                 word.copy_from_slice(&payload[at..at + 8]);
                 out[row] = u64::from_ne_bytes(word);
@@ -888,7 +888,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word(index);
         for bit in ones(selected) {
-            let place = access.place(offsets[index * 64 + bit])?;
+            let place = access.place(offsets[index * 64 + bit], Kind::WrongCall)?;
             // SAFETY: `place` accepted it.
             let spot = unsafe { access.spot(place) };
             spots[bit].write(spot);
@@ -925,7 +925,7 @@ pub(super) fn gather_words<R: Region>(
     let nrows = rows.nrows();
     ensure!(
         offsets.len() == nrows && out.iter().all(|words| words.len() == nrows),
-        "the offsets, mask and outputs of the batch have different row counts"
+        Error::wrong_call(Rule::BatchRows)
     );
     ensure!(
         !out.is_empty()
@@ -933,9 +933,9 @@ pub(super) fn gather_words<R: Region>(
                 .checked_add(out.len())
                 .and_then(|end| end.checked_mul(8))
                 .is_some_and(|end| end <= layout.payload_size),
-        "{} payload words from word {first} are none or past the payload of {} bytes",
-        out.len(),
-        layout.payload_size
+        Error::wrong_call(Rule::PayloadWords)
+            .with(out.len())
+            .and(first)
     );
     let access = Access::new(region, layout);
     let first_at = RECORD_HEADER + 8 * (access.nkeys() + first);
@@ -944,7 +944,7 @@ pub(super) fn gather_words<R: Region>(
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word(index);
         for bit in ones(selected) {
-            let place = access.place(offsets[index * 64 + bit])?;
+            let place = access.place(offsets[index * 64 + bit], Kind::WrongCall)?;
             // SAFETY: `place` accepted it.
             let spot = unsafe { access.spot(place) };
             spots[bit].write(spot);
@@ -982,7 +982,7 @@ pub(super) fn next_in_group<R: Region>(
     rows: &mut RowMask<'_>,
 ) -> Result<usize> {
     let nrows = rows.as_view().nrows();
-    check_rows(nrows, &[offsets.len()], "table")?;
+    check_rows(nrows, &[offsets.len()])?;
     let mut access = Access::new(region, layout);
     let mut left = 0;
     for (index, word) in rows.words_mut().iter_mut().enumerate() {
@@ -990,12 +990,12 @@ pub(super) fn next_in_group<R: Region>(
         let mut hits = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
-            let record = access.locate(offsets[row])?;
+            let record = access.locate(offsets[row], Kind::WrongCall)?;
             let next = record.next();
             if next == 0 {
                 continue;
             }
-            let other = access.locate(next)?;
+            let other = access.locate(next, Kind::Damaged)?;
             if other.hash() == record.hash()
                 && other.null_bits() == record.null_bits()
                 && same_keys(other.keys(), record.keys())
@@ -1024,18 +1024,17 @@ pub(super) fn gather_key<R: Region>(
     nulls: &mut [bool],
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_rows(nrows, &[offsets.len(), values.len(), nulls.len()], "table")?;
+    check_rows(nrows, &[offsets.len(), values.len(), nulls.len()])?;
     ensure!(
         key < layout.nkeys,
-        "key {key} is past the table's {} keys",
-        layout.nkeys
+        Error::wrong_call(Rule::Key).with(key).and(layout.nkeys)
     );
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
         let bits = rows.word(index);
         for bit in ones(bits) {
             let row = index * 64 + bit;
-            let record = access.locate(offsets[row])?;
+            let record = access.locate(offsets[row], Kind::WrongCall)?;
             let null = (record.null_bits() >> key) & 1 == 1;
             values[row] = if null { 0 } else { record.keys()[key] as u64 };
             nulls[row] = null;

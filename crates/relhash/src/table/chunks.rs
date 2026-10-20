@@ -5,7 +5,7 @@
 
 use core::marker::PhantomData;
 
-use anyhow::{Result, anyhow, ensure};
+use crate::error::{Error, Result, Rule, ensure};
 
 use super::batch::{self, Batch};
 use super::header::{
@@ -47,21 +47,15 @@ pub(super) fn chunk_len_fits(len: usize) -> bool {
 /// The error of a chunk of a table that cannot be one.
 #[cold]
 #[inline(never)]
-pub(super) fn bad_chunk(chunk: usize, len: usize) -> anyhow::Error {
-    anyhow!(
-        "table chunk {chunk} of {len} bytes is not aligned to 8 or not a multiple of 8 \
-         of {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
-    )
+pub(super) fn bad_chunk(chunk: usize, len: usize) -> Error {
+    Error::wrong_call(Rule::Chunk).with(chunk).and(len)
 }
 
 /// The error of a block a caller gave as a chunk that cannot be one.
 #[cold]
 #[inline(never)]
-fn bad_block(len: usize) -> anyhow::Error {
-    anyhow!(
-        "a table chunk of {len} bytes is not aligned to 8 or not a multiple of 8 of \
-         {CHUNK_HEADER} to {MAX_CHUNK_LEN} bytes"
-    )
+fn bad_block(len: usize) -> Error {
+    Error::wrong_call(Rule::Block).with(len)
 }
 
 /// The used mark `raw` of a chunk of `len` bytes whose records take
@@ -114,9 +108,9 @@ impl<'a> Chunks<'a> {
     pub unsafe fn new(bases: &'a [*mut u8], lens: &'a [usize]) -> Result<Self> {
         ensure!(
             bases.len() == lens.len() && bases.len() <= MAX_CHUNKS,
-            "a table has at most {MAX_CHUNKS} chunks with a length each, not {} bases and {} lengths",
-            bases.len(),
-            lens.len()
+            Error::wrong_call(Rule::Chunks)
+                .with(bases.len())
+                .and(lens.len())
         );
         Ok(Self { bases, lens })
     }
@@ -210,12 +204,11 @@ pub unsafe fn chunk_used(base: *const u8, len: usize, record_size: usize) -> Res
     // SAFETY: the caller's contract; the used mark is the chunk's first
     // word, aligned as the block is.
     let used = unsafe { base.cast::<u64>().read() };
-    used_mark(used, len, record_size).ok_or_else(|| {
-        anyhow!(
-            "a table chunk of {len} bytes has a used mark of {used} bytes that ends no \
-                 record of {record_size} bytes"
-        )
-    })
+    used_mark(used, len, record_size).ok_or(
+        Error::damaged(Rule::BlockUsedMark)
+            .with(used)
+            .and(record_size),
+    )
 }
 
 /// The chunks alone as a region, with an empty index, which the calls

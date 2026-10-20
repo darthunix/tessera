@@ -679,8 +679,9 @@ fn states_of(table: &mut OwnedTable, keys: &[i32]) -> Vec<[i64; 5]> {
         .collect()
 }
 
-/// A rule that adds the first words of two payloads.
-fn add_first(incoming: &[u8], ours: &mut [u8]) -> Result<()> {
+/// A rule that adds the first words of two payloads, with an error of the
+/// caller's own.
+fn add_first(incoming: &[u8], ours: &mut [u8]) -> anyhow::Result<()> {
     let theirs = i64::from_ne_bytes(incoming[..8].try_into()?);
     let sum = i64::from_ne_bytes(ours[..8].try_into()?) + theirs;
     ours[..8].copy_from_slice(&sum.to_ne_bytes());

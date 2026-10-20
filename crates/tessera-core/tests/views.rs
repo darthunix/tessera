@@ -9,7 +9,23 @@
 use std::cell::Cell;
 
 use anyhow::Context;
+use relhash::{Kind, Rule};
 use tessera_core::{ColumnView, RowMask, RowMaskView, check_rows};
+
+/// What a mask refused: the kind, rule and numbers of its error, through
+/// any context a column added.
+fn refused(error: impl Into<anyhow::Error>) -> (Kind, Rule, (u32, u32)) {
+    let error = error.into();
+    let error = error
+        .downcast_ref::<relhash::Error>()
+        .expect("an error of a mask");
+    (error.kind(), error.rule(), error.numbers())
+}
+
+/// A count as an error holds it, up to `u32::MAX`.
+fn held(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
 
 fn sizes() -> impl Iterator<Item = usize> {
     (0..=129).chain([255, 256, 257, 1025])
@@ -69,10 +85,11 @@ fn assert_mask(mask: RowMaskView<'_>, expected: &[bool]) {
     assert_eq!(iter.next(), None);
     for row in [expected.len(), usize::MAX] {
         assert_eq!(
-            mask.contains(row).unwrap_err().to_string(),
-            format!(
-                "physical row {row} is out of bounds for {} rows",
-                expected.len()
+            refused(mask.contains(row).unwrap_err()),
+            (
+                Kind::WrongCall,
+                Rule::Row,
+                (held(row), held(expected.len()))
             )
         );
     }
@@ -210,14 +227,18 @@ fn bitmap_constructors_reject_wrong_word_counts_without_mutation() {
             }
             let mut words = vec![u64::MAX; actual];
             let original = words.clone();
-            let message = format!("expected {expected} bitmap words, got {actual}");
-            assert_eq!(
-                RowMaskView::try_new(nrows, &words).unwrap_err().to_string(),
-                message
+            let refusal = (
+                Kind::WrongCall,
+                Rule::MaskWords,
+                (held(expected), held(actual)),
             );
             assert_eq!(
-                RowMask::try_new(nrows, &mut words).unwrap_err().to_string(),
-                message
+                refused(RowMaskView::try_new(nrows, &words).unwrap_err()),
+                refusal
+            );
+            assert_eq!(
+                refused(RowMask::try_new(nrows, &mut words).unwrap_err()),
+                refusal
             );
             assert_eq!(words, original);
         }
@@ -231,13 +252,14 @@ fn bitmap_constructors_reject_nonzero_tail_bits_without_mutation() {
             let mut words = words_for(&vec![false; nrows]);
             *words.last_mut().unwrap() |= 1_u64 << bit;
             let original = words.clone();
+            let refusal = (Kind::WrongCall, Rule::MaskPadding, (0, 0));
             assert_eq!(
-                RowMaskView::try_new(nrows, &words).unwrap_err().to_string(),
-                "bitmap has set bits beyond its physical row count"
+                refused(RowMaskView::try_new(nrows, &words).unwrap_err()),
+                refusal
             );
             assert_eq!(
-                RowMask::try_new(nrows, &mut words).unwrap_err().to_string(),
-                "bitmap has set bits beyond its physical row count"
+                refused(RowMask::try_new(nrows, &mut words).unwrap_err()),
+                refusal
             );
             assert_eq!(words, original);
         }
@@ -248,14 +270,14 @@ fn bitmap_constructors_reject_nonzero_tail_bits_without_mutation() {
 fn extreme_dimensions_fail_without_large_allocations_or_overflow() {
     for nrows in [usize::MAX - 63, usize::MAX - 62, usize::MAX] {
         let expected = nrows / 64 + usize::from(nrows % 64 != 0);
-        let message = format!("expected {expected} bitmap words, got 0");
+        let refusal = (Kind::WrongCall, Rule::MaskWords, (held(expected), 0));
         assert_eq!(
-            RowMaskView::try_new(nrows, &[]).unwrap_err().to_string(),
-            message
+            refused(RowMaskView::try_new(nrows, &[]).unwrap_err()),
+            refusal
         );
         assert_eq!(
-            RowMask::try_new(nrows, &mut []).unwrap_err().to_string(),
-            message
+            refused(RowMask::try_new(nrows, &mut []).unwrap_err()),
+            refusal
         );
     }
 }
@@ -295,8 +317,12 @@ fn failed_intersections_preserve_every_word() {
                 let other_words = words_for(&vec![false; other_nrows]);
                 let other = RowMaskView::try_new(other_nrows, &other_words).unwrap();
                 assert_eq!(
-                    mask.intersect(other).unwrap_err().to_string(),
-                    format!("expected {nrows} physical rows, got {other_nrows}")
+                    refused(mask.intersect(other).unwrap_err()),
+                    (
+                        Kind::WrongCall,
+                        Rule::MaskRows,
+                        (held(nrows), held(other_nrows))
+                    )
                 );
                 assert_mask(mask.as_view(), &vec![true; nrows]);
             }
@@ -333,9 +359,10 @@ fn all_non_null_matches_explicit_bitmap_including_bounds() {
             assert_eq!(all_non_null.get(row).unwrap(), bitmap.get(row).unwrap());
         }
         for row in [nrows, usize::MAX] {
+            assert!(all_non_null.get(row).is_err());
             assert_eq!(
-                all_non_null.get(row).unwrap_err().to_string(),
-                bitmap.get(row).unwrap_err().to_string()
+                refused(bitmap.get(row).unwrap_err()),
+                (Kind::WrongCall, Rule::Row, (held(row), held(nrows)))
             );
         }
     }
@@ -360,8 +387,8 @@ fn columns_borrow_original_non_copy_values_and_distinguish_null_from_bounds() {
             }
             for row in [nrows, usize::MAX] {
                 assert_eq!(
-                    column.get(row).unwrap_err().to_string(),
-                    format!("physical row {row} is out of bounds for {nrows} rows")
+                    refused(column.get(row).unwrap_err()),
+                    (Kind::WrongCall, Rule::Row, (held(row), held(nrows)))
                 );
             }
         }
@@ -446,7 +473,7 @@ fn dropping_a_column_does_not_drop_any_values_even_at_null_positions() {
 
 #[test]
 fn errors_support_anyhow_results_and_context() {
-    let result: anyhow::Result<RowMaskView<'_>> = RowMaskView::try_new(65, &[0]);
+    let result = RowMaskView::try_new(65, &[0]);
     let error = result.context("cannot borrow row mask").unwrap_err();
     assert_eq!(error.to_string(), "cannot borrow row mask");
     assert_eq!(
@@ -461,13 +488,14 @@ fn errors_support_anyhow_results_and_context() {
 
 #[test]
 fn a_call_checks_that_its_masks_have_its_rows() {
-    check_rows(65, &[], "test").unwrap();
-    check_rows(65, &[65, 65], "test").unwrap();
-    for counts in [[64, 65], [65, 66], [0, 65]] {
-        let error = check_rows(65, &counts, "test").unwrap_err();
+    check_rows(65, &[]).unwrap();
+    check_rows(65, &[65, 65]).unwrap();
+    // The error names the call's rows and the first count that differs.
+    for (counts, rows) in [([64, 65], 64), ([65, 66], 66), ([0, 65], 0)] {
+        let error = check_rows(65, &counts).unwrap_err();
         assert_eq!(
-            error.to_string(),
-            "the masks of a test call have different row counts"
+            (error.kind(), error.rule(), error.numbers()),
+            (Kind::WrongCall, Rule::RowCounts, (65, rows))
         );
     }
 }

@@ -8,11 +8,11 @@
 //! when the records outgrow it, as a node does with its memory.
 
 use crate::RowMask;
-use anyhow::{Result, ensure};
+use crate::error::{Error, Result, Rule, ensure};
 
 use super::{
-    Batch, CHUNK_HEADER, Chunks, KeySource, MAX_CHUNK_LEN, MAX_CHUNKS, Table, TableConfig,
-    TableMut, index_size, init_chunk,
+    Batch, CHUNK_HEADER, Chunks, KeySource, MAX_CHUNKS, Table, TableConfig, TableMut, index_size,
+    init_chunk,
 };
 
 /// A block of words owned through a raw pointer.
@@ -76,8 +76,7 @@ impl OwnedTable {
     pub fn new(config: &TableConfig, capacity: u64, chunk_bytes: usize) -> Result<Self> {
         ensure!(
             super::chunks::chunk_len_fits(chunk_bytes),
-            "a chunk of {chunk_bytes} bytes is not a multiple of 8 of {CHUNK_HEADER} to \
-             {MAX_CHUNK_LEN}"
+            Error::wrong_call(Rule::Block).with(chunk_bytes)
         );
         let index = Block::new(index_size(config, capacity)?.div_ceil(8));
         // SAFETY: the block is this table's alone, aligned to 8 and of the
@@ -148,7 +147,7 @@ impl OwnedTable {
     pub fn add_chunk(&mut self) -> Result<usize> {
         ensure!(
             self.chunks.len() < MAX_CHUNKS,
-            "a table has at most {MAX_CHUNKS} chunks"
+            Error::wrong_call(Rule::ChunkLimit)
         );
         let block = Block::new(self.chunk_bytes / 8);
         // SAFETY: the block is new, aligned to 8 and of a checked length.
@@ -166,7 +165,7 @@ impl OwnedTable {
     pub fn add_chunk_copy(&mut self, words: &[u64]) -> Result<usize> {
         ensure!(
             self.chunks.len() < MAX_CHUNKS,
-            "a table has at most {MAX_CHUNKS} chunks"
+            Error::wrong_call(Rule::ChunkLimit)
         );
         let mut block = Block::new(words.len());
         block.words_mut().copy_from_slice(words);
@@ -212,7 +211,7 @@ impl OwnedTable {
             for (chunk, from) in linked.iter_mut().enumerate() {
                 table.link(chunk, from)?;
             }
-            Ok::<_, anyhow::Error>(())
+            Ok::<_, Error>(())
         })();
         self.linked = linked;
         result?;
@@ -235,7 +234,7 @@ impl OwnedTable {
             for (chunk, from) in linked.iter_mut().enumerate() {
                 duplicates += table.link_grouped(chunk, from)?.1;
             }
-            Ok::<_, anyhow::Error>(())
+            Ok::<_, Error>(())
         })();
         self.linked = linked;
         result?;
@@ -261,8 +260,7 @@ impl OwnedTable {
             }
             ensure!(
                 count > 0 || !self.chunk_is_empty(chunk),
-                "a record does not fit a chunk of {} bytes",
-                self.chunk_bytes
+                Error::wrong_call(Rule::RecordRoom).with(self.chunk_bytes)
             );
             self.add_chunk()?;
         }

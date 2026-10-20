@@ -6,7 +6,6 @@
 //! are a type on the caller's side, an enum of columns in a wrapper, whose
 //! `word` dispatches to `normalize_word`.
 
-use anyhow::Result;
 use tessera_core::{ColumnReader, WordBlock};
 
 use crate::table::KeySource;
@@ -55,13 +54,15 @@ impl KeyValue for i64 {
 /// the selected rows only, a NULL as 0, without a call per row; other
 /// words go through the column's row iterator. Only selected rows are
 /// visited either way, so a sparse selection costs its rows, not the word.
+/// `None` when the column cannot give a selected row, one it has not
+/// prepared.
 #[inline]
 pub fn normalize_word<C, V>(
     column: &C,
     index: usize,
     selected: u64,
     out: &mut [i64; 64],
-) -> Result<u64>
+) -> Option<u64>
 where
     C: ColumnReader<Value = V>,
     V: KeyValue,
@@ -78,7 +79,7 @@ where
                 let present = non_nulls >> bit & 1 != 0;
                 out[bit] = if present { values[bit].widen() } else { 0 };
             }
-            Ok(non_nulls & selected)
+            Some(non_nulls & selected)
         }
         Some(WordBlock::Datum { values, isnull }) => {
             let mut non_nulls = 0;
@@ -94,18 +95,18 @@ where
                 };
                 non_nulls |= u64::from(!null) << bit;
             }
-            Ok(non_nulls)
+            Some(non_nulls)
         }
         None => {
             let mut non_nulls = 0;
-            for (row, value) in column.word_values(index, selected)? {
+            for (row, value) in column.word_values(index, selected).ok()? {
                 let bit = row % 64;
                 out[bit] = value.map_or(0, |value| {
                     non_nulls |= 1 << bit;
                     value.widen()
                 });
             }
-            Ok(non_nulls)
+            Some(non_nulls)
         }
     }
 }
@@ -127,7 +128,7 @@ where
         self.0.first().map_or(0, ColumnReader::nrows)
     }
 
-    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
+    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
         normalize_word(&self.0[key], index, selected, out)
     }
 }

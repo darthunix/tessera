@@ -2,7 +2,7 @@
 //! steps of the table's own models over the memory of [`super::memory`].
 
 use crate::RowMask;
-use anyhow::Result;
+use crate::error::{Kind, Result};
 
 use super::memory::{HEADS, LoomRegion};
 use crate::table::header::{CHUNK_HEADER, Header, Layout, TableConfig, chunk_layout};
@@ -150,7 +150,7 @@ pub(super) fn check_record(
     key: i32,
 ) -> Result<()> {
     let mut access = Access::new(region, layout);
-    let view = access.locate(offset)?;
+    let view = access.locate(offset, Kind::WrongCall)?;
     assert_eq!(view.keys(), [i64::from(key)]);
     assert_eq!(view.payload(), payload(&[key]));
     Ok(())

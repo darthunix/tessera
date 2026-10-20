@@ -11,7 +11,7 @@
 use core::mem::MaybeUninit;
 
 use super::record::View;
-use anyhow::Result;
+use crate::error::{Error, Result, Rule};
 
 /// The keys of a batch, one word at a time.
 pub trait KeySource {
@@ -24,8 +24,10 @@ pub trait KeySource {
     /// Copy key `key` of the rows in `selected` of word `index` into
     /// `out`, indexed by row within the word, a NULL as 0, and return the
     /// bits of the selected rows that are not NULL. Other slots of `out`
-    /// keep their contents.
-    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64>;
+    /// keep their contents. `None` when the source cannot give the key of
+    /// a selected row: the call then fails with
+    /// [`Rule::KeyRead`](crate::Rule::KeyRead).
+    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64>;
 }
 
 /// Storage for the slots of a word's keys: made uninitialized on the
@@ -86,7 +88,10 @@ impl<'a> WordKeys<'a> {
     ) -> Result<()> {
         self.null_bits = [0; 64];
         for (key, slots) in self.slots.iter_mut().enumerate() {
-            let mut nulls = selected & !keys.word(key, index, selected, slots)?;
+            let present = keys
+                .word(key, index, selected, slots)
+                .ok_or_else(|| Error::wrong_call(Rule::KeyRead).with(index).and(key))?;
+            let mut nulls = selected & !present;
             // The walk of `ones` written out, as the row loops that inline
             // this one write theirs; `.cargo/mutants.toml` leaves the step
             // out.
