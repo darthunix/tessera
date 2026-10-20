@@ -823,6 +823,10 @@ mod tests {
             &COMBINES,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("into itself"), "{error}");
+        let error = error.downcast_ref::<relhash::Error>().unwrap();
+        assert_eq!(
+            (error.kind(), error.rule()),
+            (relhash::Kind::WrongCall, relhash::Rule::MergeIntoItself)
+        );
     }
 }

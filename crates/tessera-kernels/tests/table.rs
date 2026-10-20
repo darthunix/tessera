@@ -8,6 +8,7 @@
 
 use anyhow::{Result, ensure};
 use proptest::prelude::*;
+use relhash::{Kind, Rule};
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::accumulate::{self, ExtremeSlot, Fold, Slot, SumSlot};
 use tessera_kernels::column_keys::{KeyColumns, normalize_word};
@@ -51,6 +52,15 @@ const ONE_INT4: TableConfig = TableConfig {
 
 /// A named way to damage an index.
 type Corruption<'a> = (&'a str, &'a dyn Fn(&mut [u64]));
+
+/// The kind and rule of a table's error, through any context added to
+/// it; `None` for another error.
+fn refusal(error: impl Into<anyhow::Error>) -> Option<(Kind, Rule)> {
+    let error = error.into();
+    error
+        .downcast_ref::<relhash::Error>()
+        .map(|error| (error.kind(), error.rule()))
+}
 
 /// An empty table for `capacity` records of `config` over chunks of
 /// [`CHUNK`] bytes.
@@ -763,7 +773,7 @@ fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
             &mut Batch::new(&[hash_i32(1)], &KeyColumns(&keys), &mut pending, &mut [0]).unwrap(),
         )
         .unwrap_err();
-    assert!(error.to_string().contains("does not fit"), "{error}");
+    assert_eq!(refusal(error), Some((Kind::WrongCall, Rule::RecordRoom)));
 
     // A table is not even sized for a record that no chunk can hold: one
     // key and the largest payload fill a chunk of 1 MiB after its used
@@ -782,7 +792,7 @@ fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
             payload_size,
         })
         .unwrap_err();
-        assert!(error.to_string().contains("does not fit"), "{error}");
+        assert_eq!(refusal(error), Some((Kind::WrongCall, Rule::RecordFit)));
         let config = TableConfig {
             nkeys: 1,
             payload_size,
@@ -976,12 +986,12 @@ fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
     let absent = [999; 5];
     let absent_keys = [ColumnView::try_new(&absent, None)?];
     let error = table_probe_one(&table, &hashes, &absent_keys).unwrap_err();
-    assert!(error.to_string().contains("longer"), "{error}");
+    assert_eq!(refusal(error), Some((Kind::Damaged, Rule::Chain)));
     // A count of records far past what the chunks hold does not keep the
     // walk going around the loop: the places of the chunks bound it too.
     set_u64(table.index_words(), NRECORDS, u64::MAX);
     let error = table_probe_one(&table, &hashes, &absent_keys).unwrap_err();
-    assert!(error.to_string().contains("longer"), "{error}");
+    assert_eq!(refusal(error), Some((Kind::Damaged, Rule::Chain)));
 
     // A used mark that ends no record, or lies past the chunk.
     for used in [12, CHUNK as u64 + 8] {
@@ -1768,12 +1778,12 @@ fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
     let absent = [999; 64];
     let absent_keys = [ColumnView::try_new(&absent, None)?];
     let error = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64)).unwrap_err();
-    assert!(error.to_string().contains("longer"), "{error}");
+    assert_eq!(refusal(error), Some((Kind::Damaged, Rule::Chain)));
     // As a row alone does, the word stops at the places of the chunks
     // when the count of records is damaged too.
     set_u64(table.index_words(), NRECORDS, u64::MAX);
     let error = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64)).unwrap_err();
-    assert!(error.to_string().contains("longer"), "{error}");
+    assert_eq!(refusal(error), Some((Kind::Damaged, Rule::Chain)));
     Ok(())
 }
 
