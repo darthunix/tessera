@@ -228,6 +228,9 @@ pub fn scan_unmarked(
 mod tests {
     use proptest::prelude::*;
 
+    use crate::table::testing::refusal;
+    use crate::{Kind, Rule};
+
     use super::*;
 
     proptest! {
@@ -296,7 +299,7 @@ mod tests {
                 assert_eq!(walked.unwrap(), 0, "an empty chunk of {len} bytes");
             } else {
                 assert!(
-                    walked.is_err_and(|error| error.to_string().contains("not aligned to 8")),
+                    refusal(walked) == Some((Kind::WrongCall, Rule::Chunk)),
                     "a chunk of {len} bytes"
                 );
             }
@@ -335,8 +338,8 @@ mod tests {
         let used = (CHUNK_HEADER + 2 * SIZE) as u64;
         assert_eq!(walk(used, at(CHUNK_HEADER + 2 * SIZE)).unwrap(), 0);
         assert!(
-            walk(used, at(CHUNK_HEADER + 3 * SIZE))
-                .is_err_and(|error| error.to_string().contains("past its chunk's records")),
+            refusal(walk(used, at(CHUNK_HEADER + 3 * SIZE)))
+                == Some((Kind::WrongCall, Rule::CursorPast)),
             "a cursor past the used mark"
         );
         for used in [0, 4, len as u64 + 8, (CHUNK_HEADER + 4) as u64] {
