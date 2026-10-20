@@ -52,6 +52,8 @@ exclude_globs = [
 # buckets, and asks for twice them: an index for that capacity has twice
 # the buckets, and so has one for two records more, so * 2 and + 2 make
 # one index.
+# decimal::read_with keeps the rows of a word outside its selection and
+# adds the rows it found in it: the two share no bit, so | is ^.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -71,9 +73,10 @@ exclude_re = [
     "int/aggregate\\.rs:7[12]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
     "int/arith\\.rs:21[01]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
     "int/compare\\.rs:51:69: replace && with \\|\\| in run$",
-    "table/owned\\.rs:316:61: replace \\| with \\^ in OwnedTable::find_or_insert$",
+    "table/owned\\.rs:298:61: replace \\| with \\^ in OwnedTable::find_or_insert$",
     "table/header\\.rs:81:44: replace \\| with \\^ in Place::reference$",
-    "table/owned\\.rs:309:37: replace \\* with \\+ in OwnedTable::find_or_insert$",
+    "table/owned\\.rs:307:37: replace \\* with \\+ in OwnedTable::find_or_insert$",
+    "decimal\\.rs:1503:41: replace \\| with \\^ in read_with$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the
