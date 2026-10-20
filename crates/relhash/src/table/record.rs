@@ -24,7 +24,7 @@
 //! changes; the one writer of a table may change its next field, a key or
 //! its payload.
 
-use anyhow::{Result, ensure};
+use crate::error::{Error, Kind, Result, Rule, ensure};
 
 use super::header::{CHUNK_HEADER, KEY_SLOT, Layout, NRECORDS, Place, RECORD_HEADER, UNIT_BITS};
 use super::keys::WordKeys;
@@ -182,10 +182,11 @@ impl<'r, R: Region> Access<'r, R> {
     }
 
     /// The record at `offset`, which must lie within a chunk past its used
-    /// mark's word and claim the table's record length.
+    /// mark's word and claim the table's record length; `kind` says who
+    /// gave the offset, the caller or the table's blocks.
     #[inline(always)]
-    pub(super) fn locate(&mut self, offset: u32) -> Result<View<'r>> {
-        self.place(offset)?;
+    pub(super) fn locate(&mut self, offset: u32, kind: Kind) -> Result<View<'r>> {
+        self.place(offset, kind)?;
         // SAFETY: `place` just accepted the offset.
         unsafe { self.open(offset) }
     }
@@ -197,15 +198,17 @@ impl<'r, R: Region> Access<'r, R> {
     /// The bound is the chunk's length, not its used mark: references come
     /// from calls over the same table, and reading the mark would race with
     /// the participants appending to a shared table. A reference past the
-    /// mark reads the chunk's unused bytes, never memory outside it.
+    /// mark reads the chunk's unused bytes, never memory outside it. An
+    /// offset outside is an error of `kind`: who gave it, the caller or the
+    /// table's blocks.
     #[inline(always)]
-    pub(super) fn place(&self, offset: u32) -> Result<Place> {
+    pub(super) fn place(&self, offset: u32, kind: Kind) -> Result<Place> {
         let Place { chunk, byte } = Place::of(offset);
         if chunk >= self.region.chunks()
             || byte < CHUNK_HEADER
             || byte + self.record_size > self.region.chunk_len(chunk)
         {
-            return Err(outside(offset));
+            return Err(outside(kind, offset));
         }
         Ok(Place { chunk, byte })
     }
@@ -254,9 +257,9 @@ impl<'r, R: Region> Access<'r, R> {
     /// Where the payload of the record at `offset` starts, the record
     /// checked as [`Self::locate`] checks it.
     #[inline(always)]
-    pub(super) fn payload_spot(&mut self, offset: u32) -> Result<R::Spot> {
-        self.locate(offset)?;
-        let Place { chunk, byte } = self.place(offset)?;
+    pub(super) fn payload_spot(&mut self, offset: u32, kind: Kind) -> Result<R::Spot> {
+        self.locate(offset, kind)?;
+        let Place { chunk, byte } = self.place(offset, kind)?;
         // SAFETY: the payload lies within a record that `locate` accepted.
         Ok(unsafe {
             self.spot(Place {
@@ -403,7 +406,7 @@ impl<'r, R: Region> Access<'r, R> {
                 }
             }
             steps += 1;
-            let view = self.locate(offset)?;
+            let view = self.locate(offset, Kind::Damaged)?;
             if view.hash() == hash && matches(&view) {
                 return Ok(offset);
             }
@@ -539,14 +542,14 @@ impl<'a> PayloadColumns<'a> {
     pub fn new(values: &'a [&'a [u64]], nulls: &'a [&'a [bool]], nrows: usize) -> Result<Self> {
         ensure!(
             values.len() == nulls.len() && values.len() <= MAX_PAYLOAD_COLUMNS,
-            "a payload has up to {MAX_PAYLOAD_COLUMNS} columns of values and NULL flags, not {} and {}",
-            values.len(),
-            nulls.len()
+            Error::wrong_call(Rule::PayloadShape)
+                .with(values.len())
+                .and(nulls.len())
         );
         ensure!(
             values.iter().all(|column| column.len() == nrows)
                 && nulls.iter().all(|column| column.len() == nrows),
-            "a payload column does not have the batch's {nrows} rows"
+            Error::wrong_call(Rule::PayloadRows).with(nrows)
         );
         Ok(Self {
             values,
@@ -892,40 +895,40 @@ fn zero_words(dst: &mut [[u8; 8]]) {
     }
 }
 
-/// The error of a record offset outside the records, kept out of the
-/// loops that walk chains.
+/// The error of a record offset outside the records, of `kind`, kept out
+/// of the loops that walk chains.
 #[cold]
 #[inline(never)]
-fn outside(offset: u32) -> anyhow::Error {
-    anyhow::anyhow!("table record offset {offset} lies outside the records")
+fn outside(kind: Kind, offset: u32) -> Error {
+    Error::new(kind, Rule::Outside).with(offset)
 }
 
 /// The error of a chunk number past the chunks.
 #[cold]
 #[inline(never)]
-pub(super) fn no_chunk(chunk: usize) -> anyhow::Error {
-    anyhow::anyhow!("table chunk {chunk} does not exist")
+pub(super) fn no_chunk(chunk: usize) -> Error {
+    Error::wrong_call(Rule::NoChunk).with(chunk)
 }
 
 /// The error of a used mark that is not a record boundary of its chunk.
 #[cold]
 #[inline(never)]
-fn bad_used(chunk: usize, used: u64) -> anyhow::Error {
-    anyhow::anyhow!("table chunk {chunk} has a used mark of {used} bytes that ends no record")
+fn bad_used(chunk: usize, used: u64) -> Error {
+    Error::damaged(Rule::UsedMark).with(chunk).and(used)
 }
 
 /// The error of an offset that does not start a record.
 #[cold]
 #[inline(never)]
-fn misplaced(offset: u32) -> anyhow::Error {
-    anyhow::anyhow!("table record offset {offset} does not start a record")
+fn misplaced(offset: u32) -> Error {
+    Error::damaged(Rule::Misplaced).with(offset)
 }
 
 /// The error of a chain longer than the record count.
 #[cold]
 #[inline(never)]
-fn cycle() -> anyhow::Error {
-    anyhow::anyhow!("table chain is longer than its record count")
+fn cycle() -> Error {
+    Error::damaged(Rule::Chain)
 }
 
 /// The first bytes of a chunk's records from byte `from` to its used
@@ -940,7 +943,7 @@ pub(super) fn unlinked<R: Region>(
         from >= CHUNK_HEADER
             && from <= used
             && (from - CHUNK_HEADER).is_multiple_of(access.record_size()),
-        "byte {from} of table chunk {chunk} is no record boundary below its {used} used bytes"
+        Error::wrong_call(Rule::Boundary).with(from).and(chunk)
     );
     Ok((from..used).step_by(access.record_size()))
 }
@@ -969,9 +972,9 @@ pub(super) unsafe fn check_record_at<R: Region>(
     let view = unsafe { access.view_at(spot) };
     ensure!(
         view.len() == access.record_size(),
-        "table chunk {} holds no record at byte {}",
-        place.chunk,
-        place.byte
+        Error::damaged(Rule::NoRecord)
+            .with(place.chunk)
+            .and(place.byte)
     );
     Ok(view.hash())
 }

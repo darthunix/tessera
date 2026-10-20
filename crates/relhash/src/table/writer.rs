@@ -7,8 +7,8 @@
 //! and a larger index rebuilds the buckets and every record's next field.
 //! Records never move.
 
+use crate::error::{Error, Kind, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView, check_rows, ones};
-use anyhow::{Result, bail, ensure};
 
 use super::batch::{check_keys, check_partitions, shaped};
 use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, Place, RECORD_HEADER};
@@ -102,7 +102,7 @@ fn resolve<R: Region, K: KeySource + ?Sized>(
     } = batch;
     let nrows = offsets.len();
     check_keys(layout, *keys)?;
-    check_rows(nrows, &[inserted.as_view().nrows()], "table")?;
+    check_rows(nrows, &[inserted.as_view().nrows()])?;
     let partitions = match partitions {
         Some(partitions) => Some((partitions, check_partitions(region, partitions)?)),
         None => None,
@@ -328,7 +328,7 @@ pub(super) fn payload_mut<'r, R: Region>(
     layout: &'r Layout,
     offset: u32,
 ) -> Result<&'r mut [u8]> {
-    payload_at(&mut Access::new(region, layout), offset)
+    payload_at(&mut Access::new(region, layout), offset, Kind::WrongCall)
 }
 
 /// Hand `each` the payload of each selected row's record, row by row, to
@@ -343,12 +343,12 @@ pub(super) fn each_payload<R: Region>(
     mut each: impl FnMut(usize, &mut [u8]),
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_rows(nrows, &[offsets.len()], "table")?;
+    check_rows(nrows, &[offsets.len()])?;
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word(index)) {
             let row = index * 64 + bit;
-            each(row, payload_at(&mut access, offsets[row])?);
+            each(row, payload_at(&mut access, offsets[row], Kind::WrongCall)?);
         }
     }
     Ok(())
@@ -361,8 +361,7 @@ pub(super) fn each_payload<R: Region>(
 pub(super) fn clear_key<R: Region>(region: &R, layout: &Layout, key: usize) -> Result<u64> {
     ensure!(
         key < layout.nkeys,
-        "key {key} of a table of {} keys",
-        layout.nkeys
+        Error::wrong_call(Rule::Key).with(key).and(layout.nkeys)
     );
     let access = Access::new(region, layout);
     let mut count = 0;
@@ -397,8 +396,7 @@ pub(super) fn scan<R: Region>(
         byte >= CHUNK_HEADER
             && (byte - CHUNK_HEADER).is_multiple_of(layout.record_size)
             && chunk <= region.chunks(),
-        "table cursor {:#x} lies outside the records",
-        cursor.0
+        Error::wrong_call(Rule::Cursor).with(chunk).and(byte)
     );
     let mut count = 0;
     while count < out.len() && chunk < region.chunks() {
@@ -432,7 +430,7 @@ pub(super) fn regrow<R: Region>(
     let grown = header.validate(to.len())?;
     ensure!(
         grown.record_size == layout.record_size && grown.nkeys == layout.nkeys,
-        "the table changed while it grew"
+        Error::damaged(Rule::Grew)
     );
     header.store(to);
     // SAFETY: the caller has the new index to itself.
@@ -447,10 +445,14 @@ pub(super) fn regrow<R: Region>(
 }
 
 /// The payload of the record at `offset`, to change in place, the record
-/// checked.
+/// checked; `kind` says who gave the offset.
 #[inline(always)]
-fn payload_at<'r, R: Region>(access: &mut Access<'r, R>, offset: u32) -> Result<&'r mut [u8]> {
-    let spot = access.payload_spot(offset)?;
+fn payload_at<'r, R: Region>(
+    access: &mut Access<'r, R>,
+    offset: u32,
+    kind: Kind,
+) -> Result<&'r mut [u8]> {
+    let spot = access.payload_spot(offset, kind)?;
     // SAFETY: the spot is this record's payload, just checked; the caller
     // has the table to itself, and the slice is dropped before the next
     // row's is made.
@@ -486,7 +488,7 @@ impl<'t> PayloadCursor<'t> {
     /// error for a reference that names no record of the table.
     #[inline(always)]
     pub fn payload(&mut self, reference: u32) -> Result<&mut [u8]> {
-        let spot = self.access.payload_spot(reference)?;
+        let spot = self.access.payload_spot(reference, Kind::WrongCall)?;
         // SAFETY: the spot is this record's payload, just checked; the
         // slice borrows the cursor, which borrows the writer's table, so
         // no other slice of a payload is alive while it is.
@@ -498,9 +500,9 @@ impl<'t> PayloadCursor<'t> {
     /// [`Self::held`] to open later; a slot holds one place at a time.
     #[inline(always)]
     pub fn hold(&mut self, slot: usize, reference: u32) -> Result<()> {
-        let spot = self.access.payload_spot(reference)?;
+        let spot = self.access.payload_spot(reference, Kind::WrongCall)?;
         let Some(held) = self.held.get_mut(slot) else {
-            bail!("slot {slot} of a payload cursor's {HELD}");
+            return Err(Error::wrong_call(Rule::Slot).with(slot));
         };
         *held = spot;
         Ok(())
@@ -511,7 +513,7 @@ impl<'t> PayloadCursor<'t> {
     #[inline(always)]
     pub fn held(&mut self, slot: usize) -> Result<&mut [u8]> {
         let Some(&spot) = self.held.get(slot).filter(|spot| !spot.is_null()) else {
-            bail!("slot {slot} of a payload cursor holds no reference");
+            return Err(Error::wrong_call(Rule::EmptySlot).with(slot));
         };
         // SAFETY: the place was checked by `hold` over this cursor's table,
         // which the cursor borrows, so the record is still there; the
@@ -541,17 +543,17 @@ pub enum CombineStop {
 /// rule fails, its error is returned, the records before it merged. The
 /// source is none of the table's linked chunks, and a record found in it
 /// is a damaged table: the rule's two payloads never share bytes.
-pub(super) fn merge<R: Region>(
+pub(super) fn merge<R: Region, E: From<Error>>(
     region: &R,
     layout: &Layout,
     source: usize,
     from: &mut usize,
     chunk: usize,
-    mut rule: impl FnMut(&[u8], &mut [u8]) -> Result<()>,
-) -> Result<(usize, CombineStop)> {
+    mut rule: impl FnMut(&[u8], &mut [u8]) -> Result<(), E>,
+) -> Result<(usize, CombineStop), E> {
     ensure!(
         source != chunk,
-        "table chunk {source} is merged into itself"
+        Error::wrong_call(Rule::MergeIntoItself).with(source)
     );
     let mut access = Access::new(region, layout);
     let record_size = access.record_size();
@@ -604,9 +606,9 @@ pub(super) fn merge<R: Region>(
         } else {
             ensure!(
                 Place::of(same).chunk != source,
-                "table record {same} found in chunk {source}, which is merged"
+                Error::damaged(Rule::MergedFound).with(same).and(source)
             );
-            let payload = payload_at(&mut access, same)?;
+            let payload = payload_at(&mut access, same, Kind::Damaged)?;
             if let Err(error) = rule(record.payload(), payload) {
                 // SAFETY: as below.
                 unsafe { access.set_used(chunk, used) };

@@ -23,7 +23,7 @@
 
 use core::mem::{offset_of, size_of};
 
-use anyhow::{Result, bail, ensure};
+use crate::error::{Error, Kind, Result, Rule, ensure};
 
 use super::region::Region;
 
@@ -34,7 +34,7 @@ pub const MAX_KEYS: usize = 16;
 /// The first eight bytes of a region: `RELHASH` in ASCII and a zero.
 const MAGIC: u64 = u64::from_le_bytes(*b"RELHASH\0");
 /// The fewest buckets a table has, as pg_batch chooses them.
-const MIN_BUCKETS: u64 = 1024;
+pub(crate) const MIN_BUCKETS: u64 = 1024;
 /// The most buckets: the count stays below 2^32.
 const MAX_BUCKETS: u64 = 1 << 31;
 /// Bytes of a record before its keys: hash, next, null bits, length.
@@ -186,15 +186,16 @@ pub fn record_bytes(config: &TableConfig) -> Result<usize> {
 
 /// The record size of a configuration, after checking its count of keys.
 fn check_config(config: &TableConfig) -> Result<u32> {
-    check_nkeys(config.nkeys)?;
+    check_nkeys(config.nkeys, Kind::WrongCall)?;
     record_size(config.nkeys, config.payload_size)
 }
 
-/// Refuse a count of keys a table cannot have, given or read.
-fn check_nkeys(nkeys: usize) -> Result<()> {
+/// Refuse a count of keys a table cannot have, given or read: `kind`
+/// says which.
+fn check_nkeys(nkeys: usize, kind: Kind) -> Result<()> {
     ensure!(
         (1..=MAX_KEYS).contains(&nkeys),
-        "a table has 1 to {MAX_KEYS} keys, not {nkeys}"
+        Error::new(kind, Rule::KeyCount).with(nkeys)
     );
     Ok(())
 }
@@ -206,7 +207,7 @@ fn check_nkeys(nkeys: usize) -> Result<()> {
 pub(super) fn check_record_size(size: usize) -> Result<()> {
     ensure!(
         record_size_fits(size),
-        "records of {size} bytes are not the records of a table"
+        Error::wrong_call(Rule::RecordBytes).with(size)
     );
     Ok(())
 }
@@ -227,10 +228,9 @@ fn record_size_fits(size: usize) -> bool {
 fn record_size(nkeys: usize, payload_size: usize) -> Result<u32> {
     let size = record_size_of(nkeys, payload_size).filter(|&size| record_size_fits(size as usize));
     let Some(size) = size else {
-        bail!(
-            "a record of {nkeys} keys and a payload of {payload_size} bytes \
-             does not fit in a chunk of {MAX_CHUNK_LEN} bytes"
-        );
+        return Err(Error::wrong_call(Rule::RecordFit)
+            .with(payload_size)
+            .and(nkeys));
     };
     Ok(size)
 }
@@ -277,13 +277,12 @@ impl Header {
         let record_size = check_config(config)?;
         ensure!(
             len.is_multiple_of(8),
-            "a table index of {len} bytes is not a multiple of 8"
+            Error::wrong_call(Rule::IndexLen).with(len)
         );
         let needed = index_size(config, capacity)?;
         ensure!(
             len >= needed,
-            "a table index of {len} bytes is smaller than the {needed} bytes \
-             that {capacity} records need"
+            Error::wrong_call(Rule::IndexSmall).with(len).and(needed)
         );
         let nbuckets = bucket_count(capacity);
         Ok(Self {
@@ -311,12 +310,13 @@ impl Header {
         let nbuckets = bucket_count(capacity);
         ensure!(
             len.is_multiple_of(8) && HEADER_SIZE + nbuckets as usize * 4 <= len,
-            "a table index of {len} bytes cannot hold {nbuckets} buckets"
+            Error::wrong_call(Rule::IndexBuckets)
+                .with(len)
+                .and(nbuckets)
         );
         ensure!(
             nbuckets >= self.nbuckets,
-            "a table index does not shrink from {} buckets",
-            self.nbuckets
+            Error::wrong_call(Rule::IndexShrinks).with(self.nbuckets)
         );
         Ok(Self {
             region_len: len as u64,
@@ -380,13 +380,13 @@ impl Header {
     /// return the layout the table works with.
     ///
     /// Every call of the table checks the header, so the checks run as
-    /// plain comparisons; the messages are built only when one fails, by
-    /// the same checks in [`Self::explain`], kept out of line.
+    /// plain comparisons; the rule that failed is found only then, by the
+    /// same checks in [`Self::explain`], kept out of line.
     #[inline]
     pub(super) fn validate(&self, len: usize) -> Result<Layout> {
         match self.layout_if_valid(len) {
             Some(layout) => Ok(layout),
-            None => Err(self.invalid(len)),
+            None => self.refused(len),
         }
     }
 
@@ -429,76 +429,81 @@ impl Header {
         })
     }
 
-    /// The error of a header the fast checks refused.
+    /// The rule of a header the fast checks refused. The two checks are
+    /// one rule written twice, so they never judge apart; were they to,
+    /// the full one decides.
     #[cold]
     #[inline(never)]
-    fn invalid(&self, len: usize) -> anyhow::Error {
-        match self.explain(len) {
-            Err(error) => error,
-            Ok(_) => anyhow::anyhow!("the table header is inconsistent"),
-        }
+    fn refused(&self, len: usize) -> Result<Layout> {
+        let layout = self.explain(len);
+        debug_assert!(
+            layout.is_err(),
+            "the fast check of a header refused what the full one accepts"
+        );
+        layout
     }
 
-    /// The checks of [`Self::validate`], each with its message.
+    /// The checks of [`Self::validate`], each with its rule.
     fn explain(&self, len: usize) -> Result<Layout> {
-        ensure!(self.magic == MAGIC, "the index does not hold a table");
+        ensure!(self.magic == MAGIC, Error::damaged(Rule::Magic));
         ensure!(
             self.version == FORMAT_VERSION,
-            "table format version {} is not the supported {FORMAT_VERSION}",
-            self.version
+            Error::damaged(Rule::Version).with(self.version)
         );
         ensure!(
             self.header_size as usize == HEADER_SIZE,
-            "table header size {} is not {HEADER_SIZE}",
-            self.header_size
+            Error::damaged(Rule::HeaderSize).with(self.header_size)
         );
         ensure!(
             self.flags == 0,
-            "table header has unknown flags {:#x}",
-            self.flags
+            Error::damaged(Rule::Flags).with(self.flags)
         );
         let region_len = usize::try_from(self.region_len).ok();
         let Some(region_len) = region_len.filter(|&n| n <= len) else {
-            bail!(
-                "table index length {} exceeds the {len} bytes given",
-                self.region_len
-            );
+            return Err(Error::damaged(Rule::IndexLength)
+                .with(len)
+                .and(self.region_len));
         };
         ensure!(
             region_len.is_multiple_of(8) && region_len >= HEADER_SIZE,
-            "table index length {region_len} is not a multiple of 8 past the header"
+            Error::damaged(Rule::IndexShape).with(region_len)
         );
         let nkeys = self.nkeys as usize;
-        check_nkeys(nkeys)?;
+        check_nkeys(nkeys, Kind::Damaged)?;
         let payload_size = self.payload_size as usize;
+        let record_size = record_size_of(nkeys, payload_size);
         ensure!(
-            Some(self.record_size) == record_size_of(nkeys, payload_size),
-            "table record size {} does not match {nkeys} keys and a payload of \
-             {payload_size} bytes",
-            self.record_size
+            Some(self.record_size) == record_size,
+            Error::damaged(Rule::RecordSize)
+                .with(self.record_size)
+                .and(record_size.unwrap_or(u32::MAX))
         );
         let nbuckets = self.nbuckets;
         ensure!(
             nbuckets.is_power_of_two() && u64::from(nbuckets) >= MIN_BUCKETS,
-            "table bucket count {nbuckets} is not a power of two of at least {MIN_BUCKETS}"
+            Error::damaged(Rule::BucketCount).with(nbuckets)
         );
         ensure!(
             self.bucket_shift == bucket_shift(nbuckets),
-            "table bucket shift {} does not match {nbuckets} buckets",
-            self.bucket_shift
+            Error::damaged(Rule::BucketShift)
+                .with(nbuckets)
+                .and(self.bucket_shift)
         );
         let buckets_offset = usize::try_from(self.buckets_offset).ok();
         let buckets_end = buckets_offset.and_then(|off| off.checked_add(nbuckets as usize * 4));
+        let buckets = Error::damaged(Rule::Buckets)
+            .with(region_len)
+            .and(self.buckets_offset);
         let (Some(buckets_offset), Some(buckets_end)) = (buckets_offset, buckets_end) else {
-            bail!("table buckets lie outside the region");
+            return Err(buckets);
         };
         ensure!(
             buckets_offset == HEADER_SIZE && buckets_end <= region_len,
-            "table buckets at {buckets_offset} lie outside the index of {region_len} bytes"
+            buckets
         );
         ensure!(
             self.reserved_used == 0 && self.reserved == [0; 3],
-            "table header has a reserved word set"
+            Error::damaged(Rule::Reserved)
         );
         Ok(Layout {
             region_len,

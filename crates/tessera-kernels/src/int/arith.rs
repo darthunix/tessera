@@ -109,7 +109,7 @@ where
         evaluate: &E,
     ) -> Result<()> {
         if selected == 0 {
-            return output.non_nulls.set_word(index, 0);
+            return Ok(output.non_nulls.set_word(index, 0)?);
         }
         let mut present = 0;
         match self {
@@ -142,7 +142,7 @@ where
                 }
             }
         }
-        output.non_nulls.set_word(index, present)
+        Ok(output.non_nulls.set_word(index, present)?)
     }
 
     /// The whole-word operands of `index` with the non-NULL rows of the

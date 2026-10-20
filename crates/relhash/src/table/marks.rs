@@ -7,8 +7,8 @@
 //! a record comes from the caller; the entry points check it against the
 //! index when the table has one.
 
+use crate::error::{Error, Result, Rule, ensure};
 use crate::{RowMaskView, check_rows, ones};
-use anyhow::{Context, Result, ensure};
 
 use super::Chunks;
 use super::header::{CHUNK_HEADER, MAX_CHUNK_LEN, Place, check_record_size};
@@ -42,7 +42,7 @@ impl PerRecord {
     fn new(size: usize) -> Result<Self> {
         ensure!(
             size > 0 && size < 2 * MAX_CHUNK_LEN,
-            "records of {size} bytes in chunks of at most {MAX_CHUNK_LEN}"
+            Error::wrong_call(Rule::RecordBytes).with(size)
         );
         Ok(Self {
             size,
@@ -104,7 +104,7 @@ impl Chunks<'_> {
             .filter(|&used| used <= len)
             .and_then(|used| used.checked_sub(CHUNK_HEADER))
             .and_then(|bytes| per_record.starting(bytes))
-            .with_context(|| format!("table chunk {chunk} has a used mark of {used} bytes"))
+            .ok_or(Error::damaged(Rule::UsedMark).with(chunk).and(used))
     }
 }
 
@@ -123,17 +123,17 @@ pub fn mark(
     let nrows = rows.nrows();
     check_record_size(record_size)?;
     let per_record = PerRecord::new(record_size)?;
-    check_rows(nrows, &[refs.len()], "marks")?;
+    check_rows(nrows, &[refs.len()])?;
     // The references a mark names, a record's; the mark set.
     let set = |reference: u32| -> Result<()> {
         let Place { chunk, byte } = Place::of(reference);
         let len = lens.get(chunk).copied().unwrap_or(0);
         ensure!(
             byte >= CHUNK_HEADER && byte + record_size <= len,
-            "table reference {reference:#x} names no record"
+            Error::wrong_call(Rule::Reference).with(reference)
         );
         let (record, starts) = per_record.record(byte - CHUNK_HEADER);
-        ensure!(starts, "table reference {reference:#x} names no record");
+        ensure!(starts, Error::wrong_call(Rule::Reference).with(reference));
         // SAFETY: the chunk is the table's and the record within its
         // length, so its word is below the chunk's marks.
         unsafe { marks.set(chunk, record / 64, 1 << (record % 64)) };
@@ -148,7 +148,7 @@ pub fn mark(
     }
     if !rest.is_empty() {
         for bit in ones(rows.word(blocks.len())) {
-            set(*rest.get(bit).context("a row mask's bit past its rows")?)?;
+            set(*rest.get(bit).ok_or(Error::wrong_call(Rule::MaskPadding))?)?;
         }
     }
     Ok(())
@@ -175,13 +175,18 @@ pub fn scan_unmarked(
         .checked_sub(CHUNK_HEADER)
         .and_then(|offset| per_record.starting(offset))
         .filter(|_| first_chunk <= chunks.len())
-        .with_context(|| format!("table cursor {:#x} lies outside the records", cursor.raw()))?;
+        .ok_or(
+            Error::wrong_call(Rule::Cursor)
+                .with(first_chunk)
+                .and(cursor.byte()),
+        )?;
     // Past the used mark the walk would skip the rest of the chunk.
     if first_chunk < chunks.len() {
         ensure!(
             first <= chunks.records(first_chunk, per_record)?,
-            "table cursor {:#x} lies past its chunk's records",
-            cursor.raw()
+            Error::wrong_call(Rule::CursorPast)
+                .with(first_chunk)
+                .and(cursor.byte())
         );
     }
     // Every loop is bounded: by the chunks, their words and a word's bits.

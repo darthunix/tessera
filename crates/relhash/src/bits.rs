@@ -17,7 +17,7 @@
 //!     }
 //! }
 //! assert_eq!(selected, [2, 5, 7, 65]);
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), relhash::Error>(())
 //! ```
 //!
 //! Each step takes the lowest one and clears it (`word &= word - 1`). A

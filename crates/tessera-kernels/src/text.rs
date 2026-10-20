@@ -247,7 +247,7 @@ fn filter_rows(
     mut test: impl FnMut(usize) -> Option<Option<bool>>,
 ) -> Result<()> {
     let nrows = rows.as_view().nrows();
-    check_rows(nrows, &[rest.as_view().nrows()], "text")?;
+    check_rows(nrows, &[rest.as_view().nrows()])?;
     for word in 0..nrows.div_ceil(64) {
         let look = rows.as_view().word(word);
         let (mut keep, mut other) = (0, 0);
@@ -363,7 +363,6 @@ pub fn lengths(
             non_nulls.as_view().nrows(),
             rest.as_view().nrows(),
         ],
-        "text",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
         let look = rows.word(word);
@@ -504,7 +503,6 @@ pub fn pieces(
             out.non_nulls.as_view().nrows(),
             out.rest.as_view().nrows(),
         ],
-        "text",
     )?;
     for word in 0..rows.nrows().div_ceil(64) {
         let look = rows.word(word);

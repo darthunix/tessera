@@ -80,17 +80,18 @@
 //! follows it, and it walks a chain no further than the records the
 //! chunks can hold. Bytes that are not a table give an error, never a
 //! crash or an endless walk; the spec of `hash-table` lists the rules in
-//! its requirement "Errors of a call". Wrong arguments fail before the
-//! call changes anything. A full chunk or index is not an error: the rows
-//! without room stay in the mask, and the caller adds a chunk or a larger
-//! index and calls again.
+//! its requirement "Errors of a call". An error is an [`Error`]: the
+//! [`Rule`] broken, its [`Kind`], a wrong call or a damaged table, and up
+//! to two numbers, in one word that allocates nothing. Wrong arguments
+//! fail before the call changes anything. A full chunk or index is not an
+//! error: the rows without room stay in the mask, and the caller adds a
+//! chunk or a larger index and calls again.
 //!
 //! This module may use `unsafe` for its blocks of raw memory, which it
 //! reaches only through `region.rs`. [`OwnedTable`] owns its blocks and
 //! needs no `unsafe`: the tests and benchmarks build their tables with it.
 //!
 //! ```
-//! use anyhow::Result;
 //! use relhash::{Batch, KeySource, Matches, OwnedTable, RowMask, TableConfig, ones};
 //!
 //! // The caller hands keys over a word of 64 rows at a time: here one key
@@ -99,11 +100,11 @@
 //! impl KeySource for Keys<'_> {
 //!     fn nkeys(&self) -> usize { 1 }
 //!     fn nrows(&self) -> usize { self.0.len() }
-//!     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
+//!     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
 //!         for bit in ones(selected) {
 //!             out[bit] = i64::from(self.0[index * 64 + bit]);
 //!         }
-//!         Ok(selected) // the bits of the rows that are not NULL
+//!         Some(selected) // the bits of the rows that are not NULL
 //!     }
 //! }
 //!
@@ -135,15 +136,17 @@
 //! assert_eq!(table.next_match(&mut matches)?, 1);
 //! assert_eq!(matches.rows().selected_rows().collect::<Vec<_>>(), [0]);
 //! assert_eq!(table.record(matches.refs()[0])?.payload, 1u64.to_ne_bytes());
-//! # Ok::<(), anyhow::Error>(())
+//! # Ok::<(), relhash::Error>(())
 //! ```
 
 #![deny(unsafe_code)]
 
 mod bits;
+mod error;
 mod row_mask;
 mod table;
 
 pub use bits::ones;
+pub use error::{Error, Kind, Rule};
 pub use row_mask::{RowMask, RowMaskView, check_rows};
 pub use table::*;

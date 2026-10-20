@@ -288,9 +288,8 @@ pub fn probe(setup: &mut Setup, batch: usize, kind: Kind) -> Result<()> {
     let table = setup.table.table()?;
     setup.found = setup.all;
     let mut matches = Matches::new(&mut setup.found, &mut setup.matches)?;
-    table
-        .probe(hashes, &KeyColumns(&column), &mut matches)
-        .map(drop)
+    table.probe(hashes, &KeyColumns(&column), &mut matches)?;
+    Ok(())
 }
 
 /// Check batch `batch` of a kind against the filter and, with `then`,
@@ -318,9 +317,8 @@ pub fn bloom_probe(setup: &mut Setup, batch: usize, kind: Kind, then: bool) -> R
     let column = [ColumnView::try_new(keys, None)?];
     let table = setup.table.table()?;
     let mut matches = Matches::from_mask(found, &mut setup.matches)?;
-    table
-        .probe(hashes, &KeyColumns(&column), &mut matches)
-        .map(drop)
+    table.probe(hashes, &KeyColumns(&column), &mut matches)?;
+    Ok(())
 }
 
 /// Resolve batch `batch` of present keys to their records.

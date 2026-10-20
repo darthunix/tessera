@@ -2,10 +2,10 @@
 //! readers that wait for it to be ready.
 
 use crate::RowMask;
+use crate::error::Result;
 use ::loom::sync::Arc;
 use ::loom::sync::atomic::AtomicU64;
 use ::loom::thread;
-use anyhow::Result;
 use core::sync::atomic::Ordering;
 
 use super::memory::{HEADS, LoomRegion};

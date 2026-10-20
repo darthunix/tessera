@@ -39,7 +39,7 @@ impl KeySource for Rows {
         self.values[0].len()
     }
 
-    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Result<u64> {
+    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
         let mut non_null = 0;
         for (bit, slot) in out.iter_mut().enumerate() {
             let row = index * 64 + bit;
@@ -51,7 +51,7 @@ impl KeySource for Rows {
                 non_null |= 1 << bit;
             }
         }
-        Ok(non_null)
+        Some(non_null)
     }
 }
 
