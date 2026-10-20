@@ -124,7 +124,7 @@ impl OwnedTable {
     }
 
     /// The chunks, as a caller passes them without the index.
-    pub fn chunk_set(&self) -> Result<Chunks<'_>> {
+    pub(super) fn chunk_set(&self) -> Result<Chunks<'_>> {
         // SAFETY: the owned chunks are valid for their lengths while `self`
         // lives, and only tables over this owner access them.
         unsafe { Chunks::new(&self.bases, &self.lens) }
@@ -162,7 +162,8 @@ impl OwnedTable {
     /// Add a chunk holding a copy of `words`, a chunk's words from another
     /// table of the same layout, such as one read back from disk, and
     /// return its number; its records are not linked.
-    pub fn add_chunk_copy(&mut self, words: &[u64]) -> Result<usize> {
+    #[cfg(test)]
+    pub(super) fn add_chunk_copy(&mut self, words: &[u64]) -> Result<usize> {
         ensure!(
             self.chunks.len() < MAX_CHUNKS,
             Error::wrong_call(Rule::ChunkLimit)
@@ -221,7 +222,8 @@ impl OwnedTable {
     /// As [`Self::insert`], linking by [`TableMut::link_grouped`]: the
     /// records of a key lie next to each other. Returns the count inserted
     /// and, of them, those whose keys the table held already.
-    pub fn insert_grouped<K: KeySource + ?Sized>(
+    #[cfg(test)]
+    pub(super) fn insert_grouped<K: KeySource + ?Sized>(
         &mut self,
         payload: Option<&[u8]>,
         batch: &mut Batch<'_, '_, K>,
@@ -314,12 +316,14 @@ impl OwnedTable {
     }
 
     /// The index's words, for a test to read or damage.
-    pub fn index_words(&mut self) -> &mut [u64] {
+    #[cfg(test)]
+    pub(super) fn index_words(&mut self) -> &mut [u64] {
         self.index.words_mut()
     }
 
     /// A chunk's words, for a test to read or damage.
-    pub fn chunk_words(&mut self, chunk: usize) -> &mut [u64] {
+    #[cfg(test)]
+    pub(super) fn chunk_words(&mut self, chunk: usize) -> &mut [u64] {
         self.chunks[chunk].words_mut()
     }
 }
