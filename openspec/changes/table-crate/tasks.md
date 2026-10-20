@@ -145,7 +145,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `make installcheck`; machine code; the maintainer's run of
       counters on `table_int32`, `table_large` and the aggregate
       programs
-- [ ] 3.8 Move the table's tests into the crate, over a source of keys
+- [x] 3.8 Move the table's tests into the crate, over a source of keys
       of the crate's own, and take the hooks for tests out of the
       public API: `OwnedTable::index_words`, `chunk_words`,
       `add_chunk_copy`, `insert_grouped` and `chunk_set`. Check:
