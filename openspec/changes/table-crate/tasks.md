@@ -157,7 +157,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `OwnedTable::find_or_insert` take the rows to place as a mask
       they only read. Check: `make rust-check`; machine code, every loop
       that changes with its reason; `cargo public-api -p relhash`
-- [ ] 3.10 Make `find_or_insert` and its form by partition, in the crate
+- [x] 3.10 Make `find_or_insert` and its form by partition, in the crate
       and in the C API, add the rows whose record they made to the mask
       of inserted rows, which the caller clears once a batch; the
       grouping nodes and the owning table stop adding the masks up.
