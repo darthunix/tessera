@@ -5,6 +5,7 @@
 use anyhow::{Result, ensure};
 
 use super::*;
+use crate::ones;
 use crate::table::testing::{Column, Keys};
 
 /// Marks a test keeps: a run of words per chunk.
@@ -369,6 +370,55 @@ fn the_owning_table_places_every_row_of_its_mask() -> Result<()> {
         }
     }
     assert_eq!(rows_of(&mask), placed, "the rows stay as they were");
+    Ok(())
+}
+
+/// Rows 0 and 1 of key 5, rows 2 and 3 NULL, whose slots the source
+/// leaves holding 7 and 8.
+struct NullSlotsHeld;
+
+impl KeySource for NullSlotsHeld {
+    fn nkeys(&self) -> usize {
+        1
+    }
+
+    fn nrows(&self) -> usize {
+        4
+    }
+
+    fn word(&self, _: usize, _: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
+        for bit in ones(selected) {
+            out[bit] = [5, 5, 7, 8][bit];
+        }
+        Some(selected & 0b0011)
+    }
+}
+
+/// A NULL key is 0 in its slot whatever the source wrote there, so the
+/// rows of NULL keys find one record.
+#[test]
+fn values_a_source_leaves_in_null_slots_split_no_group() -> Result<()> {
+    let hashes = [
+        hash_i32(5),
+        hash_i32(5),
+        hash_i32(GROUP_KEY),
+        hash_i32(GROUP_KEY),
+    ];
+    let mut table = local(&ONE_INT4, 4)?;
+    let mut refs = [0; 4];
+    let mut inserted = [0];
+    table.find_or_insert(
+        &hashes,
+        &NullSlotsHeld,
+        RowMaskView::try_new(4, &[0b1111])?,
+        &mut refs,
+        &mut RowMask::try_new(4, &mut inserted)?,
+    )?;
+    assert_eq!(inserted, [0b0101], "rows 0 and 2 made the two groups");
+    assert_eq!((refs[0], refs[2]), (refs[1], refs[3]));
+    let shared = table.table()?;
+    let null = shared.record(refs[2])?;
+    assert_eq!((null.null_bits, null.keys), (1, &[0][..]));
     Ok(())
 }
 

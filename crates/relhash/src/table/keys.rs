@@ -22,11 +22,13 @@ pub trait KeySource {
     fn nrows(&self) -> usize;
 
     /// Copy key `key` of the rows in `selected` of word `index` into
-    /// `out`, indexed by row within the word, a NULL as 0, and return the
-    /// bits of the selected rows that are not NULL. Other slots of `out`
-    /// keep their contents. `None` when the source cannot give the key of
-    /// a selected row: the call then fails with
-    /// [`Rule::KeyRead`](crate::Rule::KeyRead).
+    /// `out`, indexed by row within the word, and return the bits of the
+    /// selected rows that are not NULL. The slot of a NULL may hold
+    /// anything: the table stores 0 for it. Other slots of `out` keep their
+    /// contents. `None` when the source cannot give the key of a selected
+    /// row: the call then fails with
+    /// [`Rule::KeyRead`](crate::Rule::KeyRead), and the words of the batch
+    /// before stay placed, as [`Batch`](crate::Batch) says.
     fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64>;
 }
 
@@ -96,7 +98,10 @@ impl<'a> WordKeys<'a> {
             // this one write theirs; `.cargo/mutants.toml` leaves the step
             // out.
             while nulls != 0 {
-                self.null_bits[nulls.trailing_zeros() as usize] |= 1 << key;
+                let bit = nulls.trailing_zeros() as usize;
+                self.null_bits[bit] |= 1 << key;
+                // A NULL key is 0 in its slot, whatever the source wrote.
+                slots[bit] = 0;
                 nulls &= nulls - 1;
             }
         }
