@@ -126,23 +126,43 @@ fn a_filter_of_the_wrong_size_is_refused() -> Result<()> {
     let rows = RowMaskView::try_new(4, &all)?;
     for nwords in [0, 3] {
         let mut filter = vec![7; nwords];
-        assert!(table.table()?.bloom(&mut filter).is_err(), "fill {nwords}");
-        assert!(
-            bloom::add(&mut filter, &hashes, &rows).is_err(),
+        assert_eq!(
+            refusal(table.table()?.bloom(&mut filter)),
+            Some((Kind::WrongCall, Rule::FilterSize)),
+            "fill {nwords}"
+        );
+        assert_eq!(
+            refusal(bloom::add(&mut filter, &hashes, &rows)),
+            Some((Kind::WrongCall, Rule::FilterSize)),
             "add {nwords}"
         );
         let mut found = [9];
         let result = bloom::probe(&filter, &hashes, &mut RowMask::try_new(4, &mut found)?);
-        assert!(result.is_err(), "probe {nwords}");
+        assert_eq!(
+            refusal(result),
+            Some((Kind::WrongCall, Rule::FilterSize)),
+            "probe {nwords}"
+        );
         assert_eq!((filter, found), (vec![7; nwords], [9]), "{nwords} words");
     }
     let mut filter = vec![7; 4];
-    assert!(bloom::add(&mut filter, &hashes[..3], &rows).is_err());
+    assert_eq!(
+        refusal(bloom::add(&mut filter, &hashes[..3], &rows)),
+        Some((Kind::WrongCall, Rule::RowCounts))
+    );
     let mut found = [9];
     let result = bloom::probe(&filter, &hashes, &mut RowMask::try_new(5, &mut found)?);
-    assert!(result.is_err(), "a mask of another row count");
+    assert_eq!(
+        refusal(result),
+        Some((Kind::WrongCall, Rule::RowCounts)),
+        "a mask of another row count"
+    );
     let result = bloom::probe(&filter, &hashes[..3], &mut RowMask::try_new(4, &mut found)?);
-    assert!(result.is_err(), "hashes of another row count");
+    assert_eq!(
+        refusal(result),
+        Some((Kind::WrongCall, Rule::RowCounts)),
+        "hashes of another row count"
+    );
     assert_eq!((filter, found), (vec![7; 4], [9]));
     Ok(())
 }
@@ -165,8 +185,14 @@ fn the_words_of_a_filter_for_its_records() -> Result<()> {
     ] {
         assert_eq!(bloom::words_within(5000, limit)?, words, "within {limit}");
     }
-    assert!(bloom::words_for(u64::MAX).is_err());
-    assert!(bloom::words_within(u64::MAX, usize::MAX).is_err());
+    assert_eq!(
+        refusal(bloom::words_for(u64::MAX)),
+        Some((Kind::WrongCall, Rule::FilterRecords))
+    );
+    assert_eq!(
+        refusal(bloom::words_within(u64::MAX, usize::MAX)),
+        Some((Kind::WrongCall, Rule::FilterRecords))
+    );
     Ok(())
 }
 
@@ -199,10 +225,23 @@ fn an_empty_table_rejects_everything_and_sizes_are_checked() -> Result<()> {
     let hashes: Vec<u32> = (0..200).map(hash_i32).collect();
     assert_eq!(probe_filter(&filter, &hashes)?, 0);
     // Not a power of two, and hashes of another row count.
-    assert!(probe_filter(&[0; 3], &hashes).is_err());
+    assert_eq!(
+        refusal(probe_filter(&[0; 3], &hashes)),
+        Some((Kind::WrongCall, Rule::FilterSize))
+    );
     let mut rows = all_rows(4);
-    assert!(bloom::probe(&filter, &[1, 2], &mut RowMask::try_new(4, &mut rows)?).is_err());
-    assert!(bloom::words_for(u64::MAX).is_err());
+    assert_eq!(
+        refusal(bloom::probe(
+            &filter,
+            &[1, 2],
+            &mut RowMask::try_new(4, &mut rows)?
+        )),
+        Some((Kind::WrongCall, Rule::RowCounts))
+    );
+    assert_eq!(
+        refusal(bloom::words_for(u64::MAX)),
+        Some((Kind::WrongCall, Rule::FilterRecords))
+    );
     Ok(())
 }
 
@@ -221,7 +260,10 @@ fn a_spill_filter_stays_within_an_eighth_of_its_memory() -> Result<()> {
             assert!(words.is_power_of_two() && words <= bloom::words_for(records)?);
         }
     }
-    assert!(bloom::words_within(u64::MAX, 1 << 30).is_err());
+    assert_eq!(
+        refusal(bloom::words_within(u64::MAX, 1 << 30)),
+        Some((Kind::WrongCall, Rule::FilterRecords))
+    );
     Ok(())
 }
 

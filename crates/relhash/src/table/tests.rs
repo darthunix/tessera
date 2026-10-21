@@ -340,7 +340,10 @@ fn one_of_four_threads_builds_a_shared_filter_every_key_passes() {
     filter.init();
     let mut found_words = all_rows.clone();
     let mut found = RowMask::try_new(count as usize, &mut found_words).unwrap();
-    assert!(bloom::probe_shared(&filter, &hashes, &mut found).is_err());
+    assert_eq!(
+        refusal(bloom::probe_shared(&filter, &hashes, &mut found)),
+        Some((Kind::WrongCall, Rule::FilterNotBuilt))
+    );
     let built: usize = std::thread::scope(|scope| {
         let threads: Vec<_> = (0..4)
             .map(|_| {
@@ -1019,8 +1022,20 @@ fn misaligned_or_odd_blocks_are_refused() {
     // vector, which nothing else uses meanwhile.
     unsafe {
         let misaligned = base.add(4);
-        assert!(TableMut::create(misaligned, len, &config, 1000, Chunks::none()).is_err());
-        assert!(Table::attach(misaligned, len, Chunks::none()).is_err());
+        assert_eq!(
+            refusal(TableMut::create(
+                misaligned,
+                len,
+                &config,
+                1000,
+                Chunks::none()
+            )),
+            Some((Kind::WrongCall, Rule::IndexAlign))
+        );
+        assert_eq!(
+            refusal(Table::attach(misaligned, len, Chunks::none())),
+            Some((Kind::WrongCall, Rule::IndexAlign))
+        );
         let odd = TableMut::create(base, len - 4, &config, 1000, Chunks::none());
         assert_eq!(refusal(odd), Some((Kind::WrongCall, Rule::IndexLen)));
         let short = index_size(&config, 1000).unwrap() - 8;
@@ -1054,15 +1069,20 @@ fn misaligned_or_odd_blocks_are_refused() {
             // The array is taken as it is; the chunk, when a call
             // writes or walks it.
             let chunks = Chunks::new(&bases, &lens).unwrap();
-            assert!(chunks.check_all().is_err(), "{what}");
+            assert_eq!(
+                refusal(chunks.check_all()),
+                Some((Kind::WrongCall, Rule::Chunk)),
+                "{what}"
+            );
             let appended = append_one(chunks);
             assert!(
                 refusal(appended) == Some((Kind::WrongCall, Rule::Chunk)),
                 "an append to a chunk {what}"
             );
         }
-        assert!(
-            Chunks::new(&[block_base], &[32, 32]).is_err(),
+        assert_eq!(
+            refusal(Chunks::new(&[block_base], &[32, 32])),
+            Some((Kind::WrongCall, Rule::Chunks)),
             "mismatched arrays"
         );
         let bases = [block_base];
@@ -1070,7 +1090,10 @@ fn misaligned_or_odd_blocks_are_refused() {
         let chunks = Chunks::new(&bases, &lens).unwrap();
         chunks.check_all().unwrap();
         assert_eq!(append_one(chunks).unwrap(), 1);
-        assert!(Chunks::init(block_base, 20).is_err());
+        assert_eq!(
+            refusal(Chunks::init(block_base, 20)),
+            Some((Kind::WrongCall, Rule::Block))
+        );
         Chunks::init(block_base, 32).unwrap();
     }
     assert_eq!(block[0], CHUNK_HEADER as u64);
@@ -1109,19 +1132,26 @@ fn chunks_past_the_limits_are_refused() {
         let one = [base];
         let too_long = [MAX_CHUNK_LEN + 8];
         let longest = Chunks::new(&one, &too_long).unwrap();
-        assert!(longest.check_all().is_err());
+        assert_eq!(
+            refusal(longest.check_all()),
+            Some((Kind::WrongCall, Rule::Chunk))
+        );
         assert!(
             refusal(append_one(longest)) == Some((Kind::WrongCall, Rule::Chunk)),
             "an append to a chunk longer than 1 MiB"
         );
-        assert!(Chunks::init(base, MAX_CHUNK_LEN + 8).is_err());
+        assert_eq!(
+            refusal(Chunks::init(base, MAX_CHUNK_LEN + 8)),
+            Some((Kind::WrongCall, Rule::Block))
+        );
         let long = [MAX_CHUNK_LEN];
         let longest = Chunks::new(&one, &long).unwrap();
         longest.check_all().unwrap();
         assert_eq!(append_one(longest).unwrap(), 1);
         assert!(Chunks::new(&bases[..MAX_CHUNKS], &lens[..MAX_CHUNKS]).is_ok());
-        assert!(
-            Chunks::new(&bases, &lens).is_err(),
+        assert_eq!(
+            refusal(Chunks::new(&bases, &lens)),
+            Some((Kind::WrongCall, Rule::Chunks)),
             "more chunks than a reference can number"
         );
     }

@@ -250,7 +250,11 @@ mod tests {
         assert_eq!(mark_words(CHUNK_HEADER + 65 * 24 + 23, 24).unwrap(), 2);
         // A size no record has: too small, between the records, too large.
         for size in [0, 16, 28, MAX_CHUNK_LEN] {
-            assert!(mark_words(MAX_CHUNK_LEN, size).is_err(), "{size}");
+            assert_eq!(
+                refusal(mark_words(MAX_CHUNK_LEN, size)),
+                Some((Kind::WrongCall, Rule::RecordBytes)),
+                "{size}"
+            );
         }
         assert!(mark_words(MAX_CHUNK_LEN, MAX_CHUNK_LEN - CHUNK_HEADER).is_ok());
     }
@@ -338,16 +342,22 @@ mod tests {
             "a cursor past the used mark"
         );
         for used in [0, 4, len as u64 + 8, (CHUNK_HEADER + 4) as u64] {
-            assert!(
-                walk(used, at(CHUNK_HEADER)).is_err(),
+            assert_eq!(
+                refusal(walk(used, at(CHUNK_HEADER))),
+                Some((Kind::Damaged, Rule::UsedMark)),
                 "a used mark of {used}"
             );
         }
         for byte in [0, CHUNK_HEADER + 4, CHUNK_HEADER + (1 << 21), 1 << 31] {
-            assert!(walk(len as u64, at(byte)).is_err(), "a cursor at {byte}");
+            assert_eq!(
+                refusal(walk(len as u64, at(byte))),
+                Some((Kind::WrongCall, Rule::Cursor)),
+                "a cursor at {byte}"
+            );
         }
-        assert!(
-            walk(len as u64, Cursor::at(2, CHUNK_HEADER)).is_err(),
+        assert_eq!(
+            refusal(walk(len as u64, Cursor::at(2, CHUNK_HEADER))),
+            Some((Kind::WrongCall, Rule::Cursor)),
             "past the chunks"
         );
         assert_eq!(
@@ -380,7 +390,13 @@ mod tests {
                 );
             }
         }
-        assert!(PerRecord::new(0).is_err());
-        assert!(PerRecord::new(2 * MAX_CHUNK_LEN).is_err());
+        assert_eq!(
+            refusal(PerRecord::new(0)),
+            Some((Kind::WrongCall, Rule::RecordBytes))
+        );
+        assert_eq!(
+            refusal(PerRecord::new(2 * MAX_CHUNK_LEN)),
+            Some((Kind::WrongCall, Rule::RecordBytes))
+        );
     }
 }

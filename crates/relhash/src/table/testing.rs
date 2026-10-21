@@ -3,13 +3,19 @@
 
 use super::keys::KeySource;
 #[cfg(test)]
-use crate::error::{Kind, Result, Rule};
+use crate::error::{Kind, Rule};
 use crate::ones;
 
-/// The kind and rule of a call's error, `None` when it succeeded.
+/// The kind and rule of a call's error, through any context a test added
+/// to it; `None` when it succeeded, or failed with an error not the
+/// crate's.
 #[cfg(test)]
-pub(crate) fn refusal<T>(result: Result<T>) -> Option<(Kind, Rule)> {
-    result.err().map(|error| (error.kind(), error.rule()))
+pub(crate) fn refusal<T, E: Into<anyhow::Error>>(
+    result: core::result::Result<T, E>,
+) -> Option<(Kind, Rule)> {
+    let error = result.err()?.into();
+    let error = error.downcast_ref::<crate::Error>()?;
+    Some((error.kind(), error.rule()))
 }
 
 /// One key of int4 values with no NULL: the keys of the table's own tests

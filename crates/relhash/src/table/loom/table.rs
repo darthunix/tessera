@@ -116,6 +116,15 @@ fn three_records_of_one_key_count_twice() {
     concurrent_links(&[&[5, 5], &[5]], 2);
 }
 
+/// Two participants link one key and count it while a third links
+/// another key into the same bucket: a walk for the same keys meets
+/// records its count did not know of yet, refreshes the count, and the
+/// key is counted once.
+#[test]
+fn a_third_participant_links_while_two_count_one_key() {
+    concurrent_links(&[&[5], &[5], &[6]], 1);
+}
+
 /// One participant appends and links a key while another probes until it
 /// finds it, then reads the record: the head's acquire must order the
 /// reading after the writing.
