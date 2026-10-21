@@ -471,9 +471,12 @@ impl<'a> TableMut<'a> {
     /// one with a zero payload in chunk `chunk` where none exists, in row
     /// order, until the chunk has no room or the index holds records for
     /// half its buckets: resolved rows leave the pending rows and get their
-    /// record references, the rows whose record this call created form
-    /// `inserted`, and the count resolved is returned. Rows left pending
-    /// need another chunk or a larger index ([`TableMut::regrow`]).
+    /// record references, the rows whose record this call created are
+    /// added to `inserted`, whose other bits stay, and the count resolved
+    /// is returned. Rows left pending need another chunk or a larger index
+    /// ([`TableMut::regrow`]). Over the calls of a batch `inserted` gathers
+    /// every row that made a record: the caller clears it once, before the
+    /// first.
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
         chunk: usize,

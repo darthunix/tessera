@@ -212,7 +212,6 @@ typedef struct TessAggState
 	uint64	   *valid_bits;
 	uint64	   *pending_bits;
 	uint64	   *inserted_bits;
-	uint64	   *call_bits;
 	/* The rows an aggregate's FILTER keeps, for the aggregate at hand. */
 	uint64	   *filter_bits;
 	int			filter_words;

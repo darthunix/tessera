@@ -1240,7 +1240,8 @@ pub unsafe extern "C" fn tess_table_record(
 }
 
 /// `tess_table_find_or_insert`: give each pending row the record of its
-/// keys, creating one where none exists.
+/// keys, creating one where none exists, and add the rows that created one
+/// to `inserted`.
 ///
 /// # Safety
 ///
