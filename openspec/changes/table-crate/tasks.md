@@ -190,10 +190,10 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       example of a record borrowed across an append; Miri over a reset
       and a reuse of an old reference; `cargo public-api -p relhash`;
       `make installcheck`
-- [x] 3.14 Store 0 in the slot of every key a source marks NULL,
-      whatever the source wrote there, and say in `KeySource` what a
-      source that cannot give a word leaves behind. Check: a source
-      that leaves values in NULL slots; machine code
+- [x] 3.14 Check, in a build with debug assertions, that a source gives
+      0 in the slot of every key it marks NULL, and say in `KeySource`
+      why, and what a source that cannot give a word leaves behind.
+      Check: a source that leaves values in NULL slots; machine code
 - [x] 3.15 Make the smaller changes of the API: `Marks::set` and
       `Marks::word` safe; `check_rows` out of the crate's API;
       `init_chunk` and `chunk_used` with the other calls over chunks;

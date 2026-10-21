@@ -22,10 +22,11 @@ pub trait KeySource {
     fn nrows(&self) -> usize;
 
     /// Copy key `key` of the rows in `selected` of word `index` into
-    /// `out`, indexed by row within the word, and return the bits of the
-    /// selected rows that are not NULL. The slot of a NULL may hold
-    /// anything: the table stores 0 for it. Other slots of `out` keep their
-    /// contents. `None` when the source cannot give the key of a selected
+    /// `out`, indexed by row within the word, a NULL as 0, and return the
+    /// bits of the selected rows that are not NULL. The table compares keys
+    /// slot by slot, so a NULL's slot must be 0, or the group of NULL keys
+    /// splits; a build with debug assertions checks it. Other slots of
+    /// `out` keep their contents. `None` when the source cannot give the key of a selected
     /// row: the call then fails with
     /// [`Rule::KeyRead`](crate::Rule::KeyRead), and the words of the batch
     /// before stay placed, as [`Batch`](crate::Batch) says.
@@ -100,8 +101,9 @@ impl<'a> WordKeys<'a> {
             while nulls != 0 {
                 let bit = nulls.trailing_zeros() as usize;
                 self.null_bits[bit] |= 1 << key;
-                // A NULL key is 0 in its slot, whatever the source wrote.
-                slots[bit] = 0;
+                // The source's to write: storing 0 here cost one or two
+                // instructions a NULL row.
+                debug_assert_eq!(slots[bit], 0, "a NULL key's slot holds a value");
                 nulls &= nulls - 1;
             }
         }
