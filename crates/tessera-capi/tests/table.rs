@@ -1936,7 +1936,11 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         );
         assert_eq!(code, Code::Ok, "{}", status.message());
         assert_eq!(pending_words, [0, 0]);
-        assert_eq!(inserted_words, [0b11_1111_0000, 0], "keys 4 to 9 are new");
+        assert_eq!(
+            inserted_words,
+            [0b11_1111_1111, 0],
+            "the two calls add up: keys 0 to 3, then 4 to 9 are new"
+        );
         for row in 0..100 {
             assert_eq!(offsets[row], offsets[row % 10]);
             let mut payload: *mut u8 = ptr::null_mut();

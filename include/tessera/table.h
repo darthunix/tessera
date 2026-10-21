@@ -502,9 +502,11 @@ extern TessStatusCode tess_table_record(const TessTableRef *table,
  * zero payload in chunk `chunk` where none exists, in row order, until the
  * chunk is full or the records reach half the buckets: resolved rows
  * leave pending and get their record references in offsets; the rows
- * whose record this call created form inserted, a mask this call fills
- * whole. Rows left pending need another chunk or, when the stats show
- * records at half the buckets, a larger index (tess_table_regrow).
+ * whose record this call created are added to inserted, whose other bits
+ * stay, so that over the calls of a batch inserted gathers every row that
+ * made a record: the caller clears it once, before the first. Rows left
+ * pending need another chunk or, when the stats show records at half the
+ * buckets, a larger index (tess_table_regrow).
  */
 extern TessStatusCode tess_table_find_or_insert(const TessTableRef *table,
 												int chunk,
@@ -522,8 +524,9 @@ extern TessStatusCode tess_table_find_or_insert(const TessTableRef *table,
  * tess_table_find_or_insert, but a new record goes to chunk
  * partition_chunks[(hash >> shift) & (npartitions - 1)]; a row whose
  * partition's chunk is full stays pending while the rows after it go on,
- * and every row stops once the records reach half the buckets. The
- * caller is the one writer of the table.
+ * and every row stops once the records reach half the buckets. The rows
+ * whose record it created are added to inserted, as by
+ * tess_table_find_or_insert. The caller is the one writer of the table.
  */
 extern TessStatusCode tess_table_find_or_insert_partitioned(const TessTableRef *table,
 															const uint32 *partition_chunks,

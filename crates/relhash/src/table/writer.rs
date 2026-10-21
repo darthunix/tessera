@@ -57,8 +57,8 @@ impl Cursor {
 /// with a zero payload in chunk `chunk` where none exists, until the chunk
 /// has no room for a new one or the index holds as many records as half
 /// its buckets: resolved rows leave the pending rows and get their
-/// references, and the rows whose record this call created form
-/// `inserted`.
+/// references, and the rows whose record this call created are added to
+/// `inserted`, whose other bits stay.
 pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
@@ -254,7 +254,9 @@ fn resolve_rows<
             }
         }
         pending.intersect_word(index, !done)?;
-        inserted.set_word(index, created)?;
+        if created != 0 {
+            inserted.set_word(index, inserted.as_view().word(index) | created)?;
+        }
     }
     if partitions.is_none() {
         // SAFETY: this is the chunk's writer, and `used` ends its records.

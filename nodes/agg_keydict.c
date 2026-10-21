@@ -205,7 +205,6 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 		set->offsets = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
 		set->pending_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
 		set->inserted_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
-		set->call_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
 		set->capacity = nrows;
 	}
 	pending = (TessRowMask) {nrows, set->pending_bits};
@@ -241,21 +240,14 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 	for (;;)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
-		TessRowMask call = {nrows, set->call_bits};
 
-		/*
-		 * Each call fills its mask of new pairs whole: they add up. A mask
-		 * has no bits past its rows on entry, which a longer batch left.
-		 */
-		memset(set->call_bits, 0, sizeof(uint64) * nwords);
+		/* Each call adds the pairs it makes to inserted, cleared above. */
 		check(state, state->kernels->table_find_or_insert(&set->table,
 														  set->table.nchunks - 1,
 														  set->hashes, set->nkeys,
 														  keys, &pending,
-														  set->offsets, &call,
+														  set->offsets, &inserted,
 														  &state->status));
-		for (int word = 0; word < nwords; word++)
-			set->inserted_bits[word] |= set->call_bits[word];
 		if (tess_row_mask_count(&pending) == 0)
 			break;
 		check(state, state->kernels->table_stats(&set->table, &stats,

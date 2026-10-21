@@ -422,6 +422,50 @@ fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
     Ok(())
 }
 
+/// The calls of one batch add the rows whose record they made to one mask
+/// of inserted rows, which the caller clears once, and leave its other
+/// bits as they were. The pending rows are another thing: a row that
+/// finds its record leaves them too, but made none.
+#[test]
+fn inserted_rows_add_up_over_the_calls_of_a_batch() -> Result<()> {
+    // Keys 0 to 5 twice, key 0 in the table before the batch, row 11 left
+    // out, into chunks of two records.
+    let values: Vec<i32> = (0..12).map(|row| row % 6).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = OwnedTable::new(&ONE_INT4, 16, CHUNK_HEADER + 2 * 32)?;
+    let (known, _) = resolve_all(
+        &mut table,
+        &hashes[..1],
+        &Keys(&[Column::new(&values[..1], None)]),
+    )?;
+    let mut pending = [(1 << 11) - 1];
+    let mut refs = vec![0; 12];
+    // Row 11's bit, set before the batch, is not the calls' to clear.
+    let mut inserted_words = [1 << 11];
+    let source = Keys(&keys);
+    let mut batch = Batch::new(&hashes, &source, &mut pending, &mut refs)?;
+    let mut inserted = RowMask::try_new(12, &mut inserted_words)?;
+    let mut calls = 0;
+    while batch.pending().selected_count() > 0 {
+        let chunk = table.add_chunk()?;
+        table
+            .table_mut()?
+            .find_or_insert(chunk, &mut batch, &mut inserted)?;
+        calls += 1;
+    }
+    assert_eq!(calls, 3, "two new records a chunk: rows 1, 2; 3, 4; 5");
+    assert_eq!(pending, [0], "every row found or made its record");
+    assert_eq!(
+        inserted_words,
+        [0b11_1110 | (1 << 11)],
+        "rows 1 to 5 made one"
+    );
+    assert_eq!(refs[0], known[0], "row 0 found the record of key 0");
+    assert_eq!(refs[6..11], refs[..5], "rows 6 to 10 found those of 0 to 4");
+    Ok(())
+}
+
 #[test]
 fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
     let values: Vec<i32> = (0..20).collect();

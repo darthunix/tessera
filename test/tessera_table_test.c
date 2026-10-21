@@ -595,8 +595,9 @@ tessera_test_table_groups(PG_FUNCTION_ARGS)
 						&status) != TESS_OK || count != 0)
 		PG_RETURN_BOOL(false);
 
-	/* A second pass creates nothing. */
+	/* A second pass creates nothing; a call adds to inserted. */
 	memcpy(pending, batch->all, sizeof(pending));
+	memset(inserted, 0, sizeof(inserted));
 	if (tess_table_find_or_insert(&table->ref, 0, batch->hashes, 1, &batch->key,
 								  &pending_mask, offsets, &inserted_mask,
 								  &status) != TESS_OK ||
@@ -1198,6 +1199,7 @@ tessera_test_table_combine(PG_FUNCTION_ARGS)
 	if (!add_chunk(other, CHUNK_LEN * 2))
 		PG_RETURN_BOOL(false);
 	memcpy(pending_words, theirs->valid, sizeof(pending_words));
+	memset(inserted_words, 0, sizeof(inserted_words));
 	if (tess_table_find_or_insert(&other->ref, 0, theirs->hashes, 1, &theirs->key,
 								  &pending, offsets, &inserted, &status) != TESS_OK ||
 		!set_states(other, theirs, offsets))
@@ -1216,6 +1218,7 @@ tessera_test_table_combine(PG_FUNCTION_ARGS)
 		PG_RETURN_BOOL(false);
 	/* Look their keys up: counts 2 for the 36 groups of both, 1 for theirs alone. */
 	memcpy(pending_words, theirs->valid, sizeof(pending_words));
+	memset(inserted_words, 0, sizeof(inserted_words));
 	if (tess_table_find_or_insert(&table->ref, chunks[1], theirs->hashes, 1, &theirs->key,
 								  &pending, offsets, &inserted, &status) != TESS_OK ||
 		count_bits(inserted_words) != 0)

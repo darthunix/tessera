@@ -120,6 +120,8 @@ pub fn probe_all<K: KeySource>(setup: &mut Setup, keys: &K, hashes: &[u32]) -> R
 pub fn resolve_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
     let nrows = setup.hashes.len();
     setup.pending.copy_from_slice(&setup.valid);
+    // The call adds the rows it creates: a caller clears them once a batch.
+    setup.inserted.fill(0);
     let mut inserted = RowMask::try_new(nrows, &mut setup.inserted)?;
     let chunk = setup.table.chunks() - 1;
     setup.table.table_mut()?.find_or_insert(
