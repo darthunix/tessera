@@ -311,9 +311,9 @@ impl OwnedTable {
     /// Give each row of `rows` the record of its keys, as
     /// [`TableMut::find_or_insert`] does, adding chunks and building a
     /// larger index as needed: each row gets the reference of its record
-    /// in `refs`, at its row, the rows whose record this call created form
-    /// `inserted`, and the count resolved is returned. `rows` stays as it
-    /// is.
+    /// in `refs`, at its row, the rows whose record this call created are
+    /// added to `inserted`, and the count resolved is returned. `rows`
+    /// stays as it is.
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
         hashes: &[u32],
@@ -334,26 +334,13 @@ impl OwnedTable {
         batch: &mut Batch<'_, K>,
         inserted: &mut RowMask<'_>,
     ) -> Result<usize> {
-        let nrows = batch.pending().nrows();
-        let mut words = vec![0u64; nrows.div_ceil(64)];
-        for index in 0..words.len() {
-            inserted.set_word(index, 0)?;
-        }
         let mut resolved = 0;
         loop {
             if self.chunks.is_empty() {
                 self.add_chunk()?;
             }
             let chunk = self.chunks.len() - 1;
-            let mut created = RowMask::try_new(nrows, &mut words)?;
-            let count = self
-                .table_mut()?
-                .find_or_insert(chunk, batch, &mut created)?;
-            resolved += count;
-            for (index, word) in words.iter().enumerate() {
-                let merged = inserted.as_view().word(index) | word;
-                inserted.set_word(index, merged)?;
-            }
+            resolved += self.table_mut()?.find_or_insert(chunk, batch, inserted)?;
             if batch.pending().selected_count() == 0 {
                 return Ok(resolved);
             }
@@ -364,8 +351,6 @@ impl OwnedTable {
             } else {
                 self.add_chunk()?;
             }
-            // The rows `inserted` holds were created by earlier rounds.
-            words.fill(0);
         }
     }
 

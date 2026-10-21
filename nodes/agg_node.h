@@ -147,7 +147,6 @@ typedef struct DistinctSet
 	uint32	   *offsets;
 	uint64	   *pending_bits;
 	uint64	   *inserted_bits;
-	uint64	   *call_bits;
 } DistinctSet;
 
 struct AggValue

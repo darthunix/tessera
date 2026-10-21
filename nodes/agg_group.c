@@ -154,7 +154,6 @@ reserve_rows(TessAggState *state, int nrows)
 	state->valid_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->pending_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->inserted_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
-	state->call_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->sum_rest_bits = MemoryContextAlloc(state->table_context,
 											  sizeof(uint64) * nwords * TESS_TABLE_MAX_SUMS);
 	state->capacity = nrows;
@@ -370,15 +369,12 @@ group_batch(TessAggState *state, TessBatch *batch)
 	for (; !probe && state->spill == NULL && !state->frozen;)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
-		TessRowMask call = {nrows, state->call_bits};
 
 		/*
-		 * Each call fills its mask of new groups whole: they add up, or the
-		 * groups made before a chunk ran out would miss their initial
-		 * states. A mask has no bits past its rows on entry, which a longer
-		 * batch left.
+		 * Each call adds the groups it makes to inserted, cleared once for
+		 * the batch above: the groups made before a chunk ran out keep
+		 * their mark, and get their initial states below.
 		 */
-		memset(state->call_bits, 0, sizeof(uint64) * nwords);
 		check(state, state->kernels->table_find_or_insert(&state->table,
 														  state->table.nchunks - 1,
 														  state->hashes,
@@ -386,10 +382,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 														  state->table_keys,
 														  &pending,
 														  state->offsets,
-														  &call,
+														  &inserted,
 														  &state->status));
-		for (int word = 0; word < nwords; word++)
-			state->inserted_bits[word] |= state->call_bits[word];
 		if (tess_row_mask_count(&pending) == 0)
 			break;
 		/*

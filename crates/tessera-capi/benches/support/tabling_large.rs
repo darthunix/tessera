@@ -325,6 +325,8 @@ pub fn resolve(setup: &mut Setup, batch: usize) -> Result<()> {
     let chunk = setup.table.chunks() - 1;
     let mut table = setup.table.table_mut()?;
     setup.pending = setup.all;
+    // The call adds the rows it creates: a caller clears them once a batch.
+    setup.inserted = [0; BATCH / 64];
     let mut inserted = RowMask::try_new(BATCH, &mut setup.inserted)?;
     table.find_or_insert(
         chunk,
