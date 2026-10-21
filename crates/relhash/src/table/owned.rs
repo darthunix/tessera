@@ -56,6 +56,11 @@ impl Drop for Block {
 }
 
 /// A table with its index and chunks in this process's memory.
+///
+/// Its calls may come in any order: an insertion links the records it
+/// appended and no others, a find or insert links each record it makes
+/// at once, and a larger index or a reset keeps the table whole. Chunks
+/// too small for a record are refused when the table is made.
 #[derive(Debug)]
 pub struct OwnedTable {
     index: Block,
@@ -64,8 +69,6 @@ pub struct OwnedTable {
     lens: Vec<usize>,
     /// Bytes of each new chunk.
     chunk_bytes: usize,
-    /// Per chunk: the byte linking has reached.
-    linked: Vec<usize>,
     /// The words of the rows a call has still to place, kept between calls
     /// so that a call allocates them once.
     pending: Vec<u64>,
@@ -93,16 +96,22 @@ impl OwnedTable {
                 Chunks::none(),
             )
         }?;
-        Ok(Self {
+        let table = Self {
             index,
             chunks: Vec::new(),
             bases: Vec::new(),
             lens: Vec::new(),
             chunk_bytes,
-            linked: Vec::new(),
             pending: Vec::new(),
             capacity,
-        })
+        };
+        // A chunk must hold a record, or the calls that add chunks as they
+        // fill would add them to the limit.
+        ensure!(
+            table.table()?.record_size() <= chunk_bytes - CHUNK_HEADER,
+            Error::wrong_call(Rule::RecordRoom).with(chunk_bytes)
+        );
+        Ok(table)
     }
 
     /// Empty the table, keeping its index and chunks, for a caller that
@@ -123,7 +132,6 @@ impl OwnedTable {
                 init_chunk(block.base(), block.bytes())?;
             }
         }
-        self.linked.fill(CHUNK_HEADER);
         Ok(())
     }
 
@@ -159,7 +167,6 @@ impl OwnedTable {
         self.bases.push(block.base());
         self.lens.push(block.bytes());
         self.chunks.push(block);
-        self.linked.push(CHUNK_HEADER);
         Ok(self.chunks.len() - 1)
     }
 
@@ -177,7 +184,6 @@ impl OwnedTable {
         self.bases.push(block.base());
         self.lens.push(block.bytes());
         self.chunks.push(block);
-        self.linked.push(CHUNK_HEADER);
         Ok(self.chunks.len() - 1)
     }
 
@@ -214,19 +220,15 @@ impl OwnedTable {
         payload: Option<&[u8]>,
         refs: &mut [u32],
     ) -> Result<usize> {
+        let (first, start) = self.append_start();
         let appended = self.place(hashes, keys, rows, refs, |table, batch| {
             table.append_all(payload, batch)
         })?;
-        let mut linked = core::mem::take(&mut self.linked);
-        let result = (|| {
-            let table = self.table()?;
-            for (chunk, from) in linked.iter_mut().enumerate() {
-                table.link(chunk, from)?;
-            }
-            Ok::<_, Error>(())
-        })();
-        self.linked = linked;
-        result?;
+        let table = self.table()?;
+        for chunk in first..self.chunks.len() {
+            let mut from = if chunk == first { start } else { CHUNK_HEADER };
+            table.link(chunk, &mut from)?;
+        }
         Ok(appended)
     }
 
@@ -242,20 +244,17 @@ impl OwnedTable {
         payload: Option<&[u8]>,
         refs: &mut [u32],
     ) -> Result<(usize, usize)> {
+        let (first, start) = self.append_start();
         let appended = self.place(hashes, keys, rows, refs, |table, batch| {
             table.append_all(payload, batch)
         })?;
-        let mut linked = core::mem::take(&mut self.linked);
+        let chunks = self.chunks.len();
+        let mut table = self.table_mut()?;
         let mut duplicates = 0;
-        let result = (|| {
-            let mut table = self.table_mut()?;
-            for (chunk, from) in linked.iter_mut().enumerate() {
-                duplicates += table.link_grouped(chunk, from)?.1;
-            }
-            Ok::<_, Error>(())
-        })();
-        self.linked = linked;
-        result?;
+        for chunk in first..chunks {
+            let mut from = if chunk == first { start } else { CHUNK_HEADER };
+            duplicates += table.link_grouped(chunk, &mut from)?.1;
+        }
         Ok((appended, duplicates))
     }
 
@@ -277,6 +276,18 @@ impl OwnedTable {
             .and_then(|mut batch| call(self, &mut batch));
         self.pending = pending;
         result
+    }
+
+    /// Where an append starts: the last chunk and its used mark, or the
+    /// start of the first chunk, which the append adds. The insertions
+    /// link from there what they appended, and nothing else, whatever
+    /// other calls appended, linked or found before.
+    fn append_start(&mut self) -> (usize, usize) {
+        let chunks = self.chunks.len();
+        match self.chunks.last_mut() {
+            Some(last) => (chunks - 1, last.words_mut()[0] as usize),
+            None => (0, CHUNK_HEADER),
+        }
     }
 
     /// Append every pending row of `batch`, adding chunks as they fill.

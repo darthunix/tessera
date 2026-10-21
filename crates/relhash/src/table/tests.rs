@@ -1,11 +1,13 @@
 //! The table's tests, over keys of their own (`testing.rs`). This file
 //! holds those of blocks, partitions, merges and threads, and the helpers
 //! of all; the files under `tests/` hold those of the format, the
-//! lookups, the records, the filter and the calls that fail part way.
+//! lookups, the records, the filter, the calls that fail part way and
+//! the owning table under any order of its calls.
 
 mod filter;
 mod format;
 mod lookup;
+mod owned;
 mod partial;
 mod records;
 
