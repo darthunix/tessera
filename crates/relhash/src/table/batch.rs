@@ -783,12 +783,6 @@ pub(super) fn split<R: Region>(
     Ok(Split { count, full })
 }
 
-/// Link the records of chunk `chunk` from byte `*from` to its used mark
-/// into their buckets, first in their chains, and move `*from` past them:
-/// they are counted first, so that a probe that finds one also sees a
-/// count that covers its chain, then published one by one. Several
-/// participants may link chunks of their own at once. The count linked is
-/// returned.
 /// End a link of chunk `chunk` that stops on `error` before the record at
 /// `stop`: the records from there to the chunk's used mark are not linked,
 /// so they leave the count, and the next link starts at `stop`. It reads
@@ -811,6 +805,12 @@ fn unlinked_from<R: Region>(
     error
 }
 
+/// Link the records of chunk `chunk` from byte `*from` to its used mark
+/// into their buckets, first in their chains, and move `*from` past them:
+/// they are counted first, so that a probe that finds one also sees a
+/// count that covers its chain, then published one by one. Several
+/// participants may link chunks of their own at once. The count linked is
+/// returned.
 pub(super) fn link<R: Region>(
     region: &R,
     layout: &Layout,
@@ -843,7 +843,10 @@ pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
     // The chunk resolved once: a store into a record may not reload it.
     // SAFETY: `unlinked` checked the chunk and its used mark.
     let first = unsafe { region.spot(chunk, 0) };
-    for byte in bytes {
+    // By the byte up to the end: through the iterator of the bytes the
+    // loop kept a count of its own, a move a record more.
+    let mut byte = *from;
+    while byte != end {
         let spot = R::advance(first, byte);
         // SAFETY: the record lies in the chunk, below its used mark.
         let hash = unsafe { check_record_at(&access, spot, Place { chunk, byte }) }
@@ -867,6 +870,7 @@ pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
                 })?;
             duplicates += usize::from(same != 0);
         }
+        byte += access.record_size();
     }
     *from = end;
     Ok((count, duplicates))
