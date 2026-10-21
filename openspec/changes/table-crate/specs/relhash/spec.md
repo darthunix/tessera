@@ -129,6 +129,37 @@ and SHALL return how many rows are left.
 - **Verified by:**
   `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`
 
+### Requirement: A batch to place
+A batch to place SHALL be one value: the hashes and the keys of its
+rows, a mask of the rows still to place and, for each row, the
+reference of its record. Hashes, keys, a mask and references of
+different row counts SHALL be refused when the batch is made. A call
+that places rows SHALL clear the bit of each row it places and write
+the reference of its record at the row, SHALL write no place of a row
+outside the mask, and SHALL return how many rows it placed. The calls
+of the owning table SHALL take the rows to place as a mask they do not
+change, and SHALL place every one of them.
+
+#### Scenario: A batch over two chunks
+- **WHEN** a batch of four rows, one of them left out of its mask, is
+  appended to chunks with room for two records each
+- **THEN** the first call places two rows and leaves one pending, the
+  second places it, each placed row has the reference of its record,
+  and the row left out keeps what its place held
+- **Verified by:** pending
+
+#### Scenario: The owning table places every row
+- **WHEN** the owning table inserts, and finds or inserts, the rows of
+  a mask over more records than its first chunk holds
+- **THEN** every row of the mask gets the reference of its record, and
+  the mask is as it was
+- **Verified by:** pending
+
+#### Scenario: A batch of other row counts
+- **WHEN** a batch is made of a mask of 70 rows and 69 references
+- **THEN** it is refused
+- **Verified by:** pending
+
 ### Requirement: Any bytes, a bounded call
 The caller promises that every block it gives is memory of the length
 it states, aligned to 8 bytes and initialized, and that no other
