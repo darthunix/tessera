@@ -95,11 +95,12 @@ impl Setup {
 pub fn insert_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
     let nrows = setup.hashes.len();
     setup.table.reset()?;
-    setup.pending.copy_from_slice(&setup.valid);
-    let mut pending = RowMask::try_new(nrows, &mut setup.pending)?;
     setup.table.insert(
+        &setup.hashes,
+        keys,
+        RowMaskView::try_new(nrows, &setup.valid)?,
         None,
-        &mut Batch::new(&setup.hashes, keys, &mut pending, &mut setup.offsets)?,
+        &mut setup.offsets,
     )?;
     Ok(())
 }
@@ -119,12 +120,11 @@ pub fn probe_all<K: KeySource>(setup: &mut Setup, keys: &K, hashes: &[u32]) -> R
 pub fn resolve_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
     let nrows = setup.hashes.len();
     setup.pending.copy_from_slice(&setup.valid);
-    let mut pending = RowMask::try_new(nrows, &mut setup.pending)?;
     let mut inserted = RowMask::try_new(nrows, &mut setup.inserted)?;
     let chunk = setup.table.chunks() - 1;
     setup.table.table_mut()?.find_or_insert(
         chunk,
-        &mut Batch::new(&setup.hashes, keys, &mut pending, &mut setup.offsets)?,
+        &mut Batch::new(&setup.hashes, keys, &mut setup.pending, &mut setup.offsets)?,
         &mut inserted,
     )?;
     Ok(())

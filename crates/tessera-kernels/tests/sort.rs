@@ -140,11 +140,10 @@ fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> 
             let chunk = table.chunks() - 1;
             {
                 let shared = table.table()?;
-                let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
                 shared.append(
                     chunk,
                     None,
-                    &mut Batch::new(&hashes, rows, &mut pending, &mut references)?,
+                    &mut Batch::new(&hashes, rows, &mut pending_words, &mut references)?,
                 )?;
             }
             if pending_words.iter().all(|&word| word == 0) {
@@ -328,11 +327,10 @@ fn top_rows(keys: &[SortKey], rows: &Rows, n: usize) -> Result<Vec<Vec<Option<i6
             let chunk = table.chunks() - 1;
             {
                 let shared = table.table()?;
-                let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
                 shared.append(
                     chunk,
                     None,
-                    &mut Batch::new(&hashes, rows, &mut pending, &mut references)?,
+                    &mut Batch::new(&hashes, rows, &mut pending_words, &mut references)?,
                 )?;
             }
             if pending_words.iter().all(|&word| word == 0) {

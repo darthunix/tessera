@@ -43,11 +43,12 @@ pub(super) use shaped;
 /// and a call that finds or inserts also stops when the records reach
 /// half the buckets. The caller then adds a chunk or makes a larger
 /// index and calls again with the same batch.
-/// [`OwnedTable`](super::OwnedTable) does that itself, so its calls
-/// place every row.
+/// [`OwnedTable`](super::OwnedTable) does that itself: its calls take
+/// the rows to place as a mask they only read, and place every one.
 ///
 /// Besides each row's hash and keys, a batch holds two arrays of the
-/// caller's, each with a place for every row:
+/// caller's, each with a place for every row; [`Batch::new`] takes the
+/// mask's words, [`Batch::from_mask`] a mask made of them:
 ///
 /// - `pending`, a mask, a bit per row: the rows still to place. Before
 ///   the first call it holds the rows to place, such as those whose keys
@@ -83,20 +84,34 @@ pub(super) use shaped;
 ///
 /// [`ChunkWriter::append_partitioned_columns`]: crate::ChunkWriter::append_partitioned_columns
 /// [`TableMut::find_or_insert_partitioned`]: crate::TableMut::find_or_insert_partitioned
-pub struct Batch<'b, 'm, K: ?Sized> {
+pub struct Batch<'b, K: ?Sized> {
     pub(super) hashes: &'b [u32],
     pub(super) keys: &'b K,
-    pub(super) pending: &'b mut RowMask<'m>,
+    pub(super) pending: RowMask<'b>,
     pub(super) refs: &'b mut [u32],
 }
 
-impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
-    /// The rows of `pending`, whose row count the keys, the hashes and the
-    /// references must have.
+impl<'b, K: KeySource + ?Sized> Batch<'b, K> {
+    /// A batch of the rows set in `pending`, a word for each 64 of the
+    /// `refs.len()` rows, each with its hash, its keys and its slot in
+    /// `refs`.
+    #[inline]
     pub fn new(
         hashes: &'b [u32],
         keys: &'b K,
-        pending: &'b mut RowMask<'m>,
+        pending: &'b mut [u64],
+        refs: &'b mut [u32],
+    ) -> Result<Self> {
+        Self::from_mask(hashes, keys, RowMask::try_new(refs.len(), pending)?, refs)
+    }
+
+    /// A batch of the rows of `pending`, whose row count the hashes, the
+    /// keys and the references must have.
+    #[inline]
+    pub fn from_mask(
+        hashes: &'b [u32],
+        keys: &'b K,
+        pending: RowMask<'b>,
         refs: &'b mut [u32],
     ) -> Result<Self> {
         let nrows = pending.as_view().nrows();
@@ -277,7 +292,7 @@ pub(super) fn append<R: Region, K: KeySource + ?Sized>(
     layout: &Layout,
     chunk: usize,
     payload: Option<&[u8]>,
-    batch: &mut Batch<'_, '_, K>,
+    batch: &mut Batch<'_, K>,
 ) -> Result<usize> {
     check_keys(layout, batch.keys)?;
     check_payload(payload, batch.refs.len(), layout.payload_size)?;
@@ -382,7 +397,7 @@ pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
     layout: &Layout,
     chunk: usize,
     columns: &PayloadColumns<'_>,
-    batch: &mut Batch<'_, '_, K>,
+    batch: &mut Batch<'_, K>,
 ) -> Result<usize> {
     let Batch {
         hashes,
@@ -524,7 +539,7 @@ pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
     layout: &Layout,
     partitions: &Partitions<'_>,
     columns: &PayloadColumns<'_>,
-    batch: &mut Batch<'_, '_, K>,
+    batch: &mut Batch<'_, K>,
     appended: &mut Appended<'_>,
 ) -> Result<usize> {
     let Batch {

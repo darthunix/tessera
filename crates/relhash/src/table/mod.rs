@@ -206,7 +206,7 @@ impl<'a> Table<'a> {
         &self,
         chunk: usize,
         payload: Option<&[u8]>,
-        batch: &mut Batch<'_, '_, K>,
+        batch: &mut Batch<'_, K>,
     ) -> Result<usize> {
         batch::append(&self.region, &self.layout, chunk, payload, batch)
     }
@@ -218,7 +218,7 @@ impl<'a> Table<'a> {
         &self,
         chunk: usize,
         columns: &PayloadColumns<'_>,
-        batch: &mut Batch<'_, '_, K>,
+        batch: &mut Batch<'_, K>,
     ) -> Result<usize> {
         batch::append_columns(&self.region, &self.layout, chunk, columns, batch)
     }
@@ -477,7 +477,7 @@ impl<'a> TableMut<'a> {
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
         chunk: usize,
-        batch: &mut Batch<'_, '_, K>,
+        batch: &mut Batch<'_, K>,
         inserted: &mut RowMask<'_>,
     ) -> Result<usize> {
         writer::find_or_insert(&self.0.region, &self.0.layout, chunk, batch, inserted)
@@ -491,7 +491,7 @@ impl<'a> TableMut<'a> {
     pub fn find_or_insert_partitioned<K: KeySource + ?Sized>(
         &mut self,
         partitions: &Partitions<'_>,
-        batch: &mut Batch<'_, '_, K>,
+        batch: &mut Batch<'_, K>,
         inserted: &mut RowMask<'_>,
     ) -> Result<usize> {
         writer::find_or_insert_partitioned(
