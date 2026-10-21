@@ -245,6 +245,85 @@ inside the call, which is far more across the C boundary than a mask.
 Dropping the count a call returns, which the mask tells as well: the
 owning table checks by it that an empty chunk took a record.
 
+### What an outside review found
+
+A review of the whole crate by another model, after the tests had moved
+into it, found no path by which damaged bytes lead a call over the
+caller's blocks to undefined behavior, a panic or an endless loop. It
+found these at the edges of the promise, the first three reproduced,
+and the maintainer took all of them, with its advice on the interface,
+the documentation and the tests.
+
+- **A call that fails part way.** `append_rows`, `append_column_rows`
+  and `resolve_rows` store a chunk's used mark once, after the loop
+  over words. A source of keys that cannot give the second word fails
+  the call with the first word's records written, their references
+  given and their pending bits cleared, but the mark where it was: the
+  next append writes over them, and in `find_or_insert` over records
+  already counted and linked. The calls by partition clear the pending
+  bits of a word only after it, so a partition's chunk refused in the
+  middle of a word leaves rows placed but pending, which a retry places
+  twice; `link_counting` adds the count of the whole range before it
+  checks a record. Tessera never reads a table after an error, since
+  every error ends the query, but a caller of the crate may.
+  **Will be:** every exit of these calls stores the marks of the chunks
+  it wrote, and the masks say what was done: the rows placed before the
+  error have left the pending mask with their references, and those
+  that made a record are in the mask of inserted rows; a link counts
+  what it linked and moves `*from` past it.
+- **The owning table.** `find_or_insert` and `regrow` do not move the
+  place up to which `insert` has linked a chunk, so an `insert` after
+  them links records a second time: their count grows past the records
+  and a chain turns into a cycle. A chunk too small for a record makes
+  `find_or_insert` add chunks up to the limit of 32768 before it fails,
+  and with another rule than `insert`. **Will be:** both calls move
+  that place to the chunks' used marks, and `OwnedTable::new` refuses
+  such chunks.
+- **A borrowed record and a write.** `Table::append`, `append_columns`,
+  `link` and `link_counting` write chunks and the index through a shared
+  `&Table`, the handle a shared build needs; the rule of one writer a
+  chunk lives only in `Table::attach`'s contract. `OwnedTable::table` is
+  safe, so safe code can borrow a record, after a `reset` by an old
+  reference, and write the same bytes with an append while the borrow
+  lives, which Miri reports. **Will be:** these calls are safe on
+  `TableMut`, which has the table to itself, and `unsafe` on `Table`,
+  whose contract names the chunks the caller writes and that no record
+  of them is borrowed; `scan`, which reads the marks that writers move,
+  moves to `TableMut`. Refused: a handle of its own for a participant
+  of a shared build, which would add a type for what a contract on four
+  calls says.
+- **The keys of NULL rows.** A record's slot of a NULL key holds 0, and
+  keys are compared slot by slot, but the table takes the slot from the
+  source as it is: a source that leaves a value there splits the
+  group of NULL keys. **Will be:** the table stores 0 in the slots of
+  the rows the source marks NULL.
+- **A cycle under a damaged count.** A walk down a chain stops after as
+  many steps as the count of records, which `refresh` bounds by 2^17 a
+  chunk; over hundreds of chunks a cycle with a damaged count takes
+  hours a batch. **Will be:** a walk stops at a cycle by Brent's method,
+  a compare a step and a saved place at each power of two, if the
+  counters of the probe and the find stay as they are; if not, the
+  cost is written here and the bound stays.
+- **The interface.** `Marks::set` and `Marks::word` become safe: the
+  crate keeps their word within the chunk's marks. `check_rows`, a
+  helper, leaves the crate's API. `init_chunk` and `chunk_used` go with
+  the other calls over chunks. `CombineStop` is named for `merge`.
+  `Batch` gets `refs`, as `Matches` has. `mark` and `scan_unmarked`
+  take the record size from the table, not from the caller, who could
+  give a wrong one and mark other records.
+- **The documentation.** The calls a rule of one writer binds say so
+  where they are; `record`, the gathers and the next match say what a
+  reference past a chunk's used mark reads while a writer writes it;
+  `KeySource::word` says what a source that cannot give a word leaves
+  behind.
+- **The tests.** Most refusals were checked by `is_err()`, which a
+  wrong rule or kind passes: they compare the kind and the rule. New:
+  sources that fail at a chosen word, random sequences of the owning
+  table's calls against a model, the longest chunk filled to its last
+  record, chunk 32767, the largest record end to end, a loom model of
+  `link_counting` beside a third participant's link, Miri over the doc
+  tests, and a build without `alloc` free of warnings.
+
 ### The kinds of keys
 
 **Was:** a table was created with a kind for each key, `int4` or
