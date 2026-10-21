@@ -11,15 +11,13 @@ use crate::table::testing::{Column, Keys};
 /// Marks a test keeps: a run of words per chunk.
 struct TestMarks(Vec<Vec<std::cell::Cell<u64>>>);
 
-// The table calls the marks only for words of its records.
-#[allow(unsafe_code)]
 impl Marks for TestMarks {
-    unsafe fn set(&self, chunk: usize, word: usize, bit: u64) {
+    fn set(&self, chunk: usize, word: usize, bit: u64) {
         let cell = &self.0[chunk][word];
         cell.set(cell.get() | bit);
     }
 
-    unsafe fn word(&self, chunk: usize, word: usize) -> u64 {
+    fn word(&self, chunk: usize, word: usize) -> u64 {
         self.0[chunk][word].get()
     }
 }
@@ -53,6 +51,31 @@ fn a_record_s_mark_is_its_bit_of_its_chunk_s_run() -> Result<()> {
         .map(|run| run.iter().map(std::cell::Cell::get).collect())
         .collect();
     assert_eq!(words, [vec![0, 0], vec![0, 1 << 6]]);
+    Ok(())
+}
+
+/// A table marks its records and walks the unmarked ones over its own
+/// chunks, with its own record size.
+#[test]
+fn a_table_marks_and_walks_with_its_own_record_size() -> Result<()> {
+    let values: Vec<i32> = (0..10).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 10)?;
+    let refs = insert_all(&mut table, &hashes, &Keys(&keys), None)?;
+    let shared = table.table()?;
+    let words_of_marks = mark_words(CHUNK, shared.record_size())?;
+    let marks = TestMarks(vec![vec![std::cell::Cell::new(0); words_of_marks]]);
+    // Rows 1, 4 and 7 find a pair.
+    let paired = words(&(0..10).map(|row| row % 3 == 1).collect::<Vec<_>>());
+    shared.mark(&refs, &RowMaskView::try_new(10, &paired)?, &marks)?;
+    let mut out = [0; 16];
+    let count = shared.scan_unmarked(&mut Cursor::start(), Some(&marks), &mut out)?;
+    let unpaired: Vec<u32> = (0..10)
+        .filter(|row| row % 3 != 1)
+        .map(|row| refs[row])
+        .collect();
+    assert_eq!(out[..count], unpaired);
     Ok(())
 }
 

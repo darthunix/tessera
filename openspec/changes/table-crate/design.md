@@ -309,12 +309,17 @@ the documentation and the tests.
   counters of the probe and the find stay as they are; if not, the
   cost is written here and the bound stays.
 - **The interface.** `Marks::set` and `Marks::word` become safe: the
-  crate keeps their word within the chunk's marks. `check_rows`, a
-  helper, leaves the crate's API. `init_chunk` and `chunk_used` go with
-  the other calls over chunks. `CombineStop` is named for `merge`.
-  `Batch` gets `refs`, as `Matches` has. `mark` and `scan_unmarked`
-  take the record size from the table, not from the caller, who could
-  give a wrong one and mark other records.
+  crate keeps their word within the chunk's marks, and says so on the
+  trait. `check_rows`, a helper, leaves the crate's API; `tessera-core`,
+  whose kernels check the rows of their own arrays, keeps one of its
+  own with the same text. `init_chunk` and `chunk_used` become
+  `Chunks::init` and `Chunks::used`, beside the other calls over chunks.
+  `CombineStop` is `MergeStop`, for `merge`; the C API keeps its enum.
+  `Batch` gets `refs`, as `Matches` has, and `Batch::new` an example that
+  binds its source of keys. `Table::mark` and `Table::scan_unmarked`
+  take the record size and the chunks from the table, which a caller
+  cannot get wrong; `mark` and `scan_unmarked` stay for chunks without
+  an index, such as a partition read back from disk.
 - **The documentation.** The calls a rule of one writer binds say so
   where they are; `record`, the gathers and the next match say what a
   reference past a chunk's used mark reads while a writer writes it;

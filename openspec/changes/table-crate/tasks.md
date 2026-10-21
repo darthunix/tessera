@@ -194,7 +194,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       whatever the source wrote there, and say in `KeySource` what a
       source that cannot give a word leaves behind. Check: a source
       that leaves values in NULL slots; machine code
-- [ ] 3.15 Make the smaller changes of the API: `Marks::set` and
+- [x] 3.15 Make the smaller changes of the API: `Marks::set` and
       `Marks::word` safe; `check_rows` out of the crate's API;
       `init_chunk` and `chunk_used` with the other calls over chunks;
       `CombineStop` named for `merge`; `Batch::refs`; `mark` and
