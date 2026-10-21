@@ -371,7 +371,9 @@ change of a payload in place.
   first
 - **THEN** after the second call the mask holds every row that made a
   record, those of the first call too
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::inserted_rows_add_up_over_the_calls_of_a_batch`;
+  `crates/tessera-capi/tests/table.rs::the_writer_entry_points_round_trip`
 
 #### Scenario: A larger index keeps the records
 - **WHEN** a table moves to a larger index, or to one with fewer buckets
