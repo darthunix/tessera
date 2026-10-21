@@ -150,7 +150,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       public API: `OwnedTable::index_words`, `chunk_words`,
       `add_chunk_copy`, `insert_grouped` and `chunk_set`. Check:
       `cargo test -p relhash`; `cargo public-api -p relhash`
-- [ ] 3.9 Make a batch to place one value, as a lookup is: `Batch`
+- [x] 3.9 Make a batch to place one value, as a lookup is: `Batch`
       holds its mask of pending rows by value, has one lifetime, and is
       made from the caller's words or from a mask; its references are
       `refs` in the whole crate; `OwnedTable::insert` and
