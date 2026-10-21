@@ -298,6 +298,80 @@ fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
     Ok(())
 }
 
+/// The batch that `Batch`'s documentation draws: four rows, row 2 left
+/// out as a NULL key would be, into chunks of two records each.
+#[test]
+fn a_batch_goes_through_two_chunks() -> Result<()> {
+    let values = [10, 11, 12, 13];
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = OwnedTable::new(&ONE_INT4, 4, CHUNK_HEADER + 2 * 32)?;
+    let (first, second) = (table.add_chunk()?, table.add_chunk()?);
+    let shared = table.table()?;
+    let mut pending = [0b1011];
+    let mut refs = [u32::MAX; 4];
+    let source = Keys(&keys);
+    let mut batch = Batch::new(&hashes, &source, &mut pending, &mut refs)?;
+    assert_eq!(shared.append(first, None, &mut batch)?, 2);
+    assert_eq!(rows_of(&batch.pending()), [3], "the chunk is full");
+    assert_eq!(shared.append(second, None, &mut batch)?, 1);
+    assert_eq!(pending, [0], "the batch is done");
+    let places = [
+        (first, CHUNK_HEADER),
+        (first, CHUNK_HEADER + 32),
+        (second, CHUNK_HEADER),
+    ];
+    for (row, place) in [0, 1, 3].into_iter().zip(places) {
+        assert_eq!(placement(refs[row]), place, "row {row}");
+        assert_eq!(shared.record(refs[row])?.keys, [i64::from(values[row])]);
+    }
+    assert_eq!(refs[2], u32::MAX, "the row left out keeps its place");
+    Ok(())
+}
+
+/// The owning table's calls read the rows to place and place them all,
+/// over more records than a chunk holds and, for a grouping, more than
+/// its first index takes.
+#[test]
+fn the_owning_table_places_every_row_of_its_mask() -> Result<()> {
+    let values: Vec<i32> = (0..100).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    // Every row but each seventh.
+    let rows = words(&(0..100).map(|row| row % 7 != 0).collect::<Vec<_>>());
+    let placed: Vec<usize> = (0..100).filter(|row| row % 7 != 0).collect();
+    let mask = RowMaskView::try_new(100, &rows)?;
+    for grouping in [false, true] {
+        let mut table = OwnedTable::new(&ONE_INT4, 4, CHUNK_HEADER + 16 * 32)?;
+        let mut refs = vec![0; 100];
+        let count = if grouping {
+            let mut inserted = vec![0; 2];
+            table.find_or_insert(
+                &hashes,
+                &Keys(&keys),
+                mask,
+                &mut refs,
+                &mut RowMask::try_new(100, &mut inserted)?,
+            )?
+        } else {
+            table.insert(&hashes, &Keys(&keys), mask, None, &mut refs)?
+        };
+        assert_eq!(count, placed.len());
+        assert!(table.chunks() > 1, "the records span chunks");
+        let shared = table.table()?;
+        for row in 0..100 {
+            if row % 7 == 0 {
+                assert_eq!(refs[row], 0, "row {row} is not placed");
+            } else {
+                let record = shared.record(refs[row])?;
+                assert_eq!(record.keys, [i64::from(values[row])], "row {row}");
+            }
+        }
+    }
+    assert_eq!(rows_of(&mask), placed, "the rows stay as they were");
+    Ok(())
+}
+
 #[test]
 fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
     let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
@@ -361,15 +435,12 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
     let mut inserted_words = [0];
     {
         let mut writer = table.table_mut()?;
-        let mut pending = RowMask::try_new(20, &mut pending_words)?;
+        let source = Keys(&keys);
+        let mut batch = Batch::new(&hashes, &source, &mut pending_words, &mut refs)?;
         let mut inserted = RowMask::try_new(20, &mut inserted_words)?;
-        let resolved = writer.find_or_insert(
-            chunk,
-            &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs)?,
-            &mut inserted,
-        )?;
+        let resolved = writer.find_or_insert(chunk, &mut batch, &mut inserted)?;
         assert_eq!(resolved, 4);
-        assert_eq!(rows_of(&pending.as_view()), (4..20).collect::<Vec<_>>());
+        assert_eq!(rows_of(&batch.pending()), (4..20).collect::<Vec<_>>());
     }
     assert_eq!(inserted_words, [0b1111]);
 
@@ -384,7 +455,7 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
         &mut Batch::new(
             &known_hashes,
             &Keys(&known_keys),
-            &mut RowMask::try_new(5, &mut known_pending)?,
+            &mut known_pending,
             &mut known_refs,
         )?,
         &mut RowMask::try_new(5, &mut created)?,
@@ -410,12 +481,7 @@ fn an_index_takes_records_up_to_half_its_buckets_and_regrows() -> Result<()> {
     let mut inserted_words = all_rows(1500);
     let resolved = table.table_mut()?.find_or_insert(
         chunk,
-        &mut Batch::new(
-            &hashes,
-            &Keys(&keys),
-            &mut RowMask::try_new(1500, &mut pending_words)?,
-            &mut refs,
-        )?,
+        &mut Batch::new(&hashes, &Keys(&keys), &mut pending_words, &mut refs)?,
         &mut RowMask::try_new(1500, &mut inserted_words)?,
     )?;
     assert_eq!(resolved, 512, "1024 buckets take 512 records");
@@ -544,17 +610,18 @@ fn insert_grouped_rows(
     refs: &mut [u32],
 ) -> Result<usize> {
     let nrows = hashes.len();
-    let mut pending_words = vec![0; nrows.div_ceil(64)];
+    let mut selected = vec![0; nrows.div_ceil(64)];
     for &row in rows {
-        pending_words[row / 64] |= 1 << (row % 64);
+        selected[row / 64] |= 1 << (row % 64);
     }
-    let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
     let (inserted, duplicates) = table.insert_grouped(
+        hashes,
+        &Keys(keys),
+        RowMaskView::try_new(nrows, &selected)?,
         Some(payload),
-        &mut Batch::new(hashes, &Keys(keys), &mut pending, refs)?,
+        refs,
     )?;
     assert_eq!(inserted, rows.len());
-    assert_eq!(pending.as_view().selected_count(), 0);
     Ok(duplicates)
 }
 
@@ -713,19 +780,12 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
                 n => n - 1,
             };
             let shared = table.table()?;
-            let mut pending = RowMask::try_new(ROWS, &mut pending_words)?;
+            let source = Keys(&keys);
+            let mut batch = Batch::new(&hashes, &source, &mut pending_words, &mut refs)?;
             if from_columns {
-                shared.append_columns(
-                    chunk,
-                    &columns,
-                    &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs)?,
-                )?;
+                shared.append_columns(chunk, &columns, &mut batch)?;
             } else {
-                shared.append(
-                    chunk,
-                    Some(&payload_bytes),
-                    &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs)?,
-                )?;
+                shared.append(chunk, Some(&payload_bytes), &mut batch)?;
             }
             if pending_words.iter().all(|&word| word == 0) {
                 break;
@@ -752,7 +812,6 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     let mut table = OwnedTable::new(&config, 0, CHUNK)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = selected.clone();
-    let mut pending = RowMask::try_new(ROWS, &mut pending_words)?;
     let mut refs = vec![0u32; ROWS];
     assert!(
         table
@@ -760,7 +819,7 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
             .append_columns(
                 chunk,
                 &two,
-                &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs).unwrap()
+                &mut Batch::new(&hashes, &Keys(&keys), &mut pending_words, &mut refs).unwrap()
             )
             .is_err()
     );

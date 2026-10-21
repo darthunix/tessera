@@ -63,7 +63,7 @@ pub(super) fn find_or_insert<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
     chunk: usize,
-    batch: &mut Batch<'_, '_, K>,
+    batch: &mut Batch<'_, K>,
     inserted: &mut RowMask<'_>,
 ) -> Result<usize> {
     resolve(region, layout, chunk, None, batch, inserted)
@@ -77,7 +77,7 @@ pub(super) fn find_or_insert_partitioned<R: Region, K: KeySource + ?Sized>(
     region: &R,
     layout: &Layout,
     partitions: &Partitions<'_>,
-    batch: &mut Batch<'_, '_, K>,
+    batch: &mut Batch<'_, K>,
     inserted: &mut RowMask<'_>,
 ) -> Result<usize> {
     resolve(region, layout, 0, Some(partitions), batch, inserted)
@@ -91,7 +91,7 @@ fn resolve<R: Region, K: KeySource + ?Sized>(
     layout: &Layout,
     chunk: usize,
     partitions: Option<&Partitions<'_>>,
-    batch: &mut Batch<'_, '_, K>,
+    batch: &mut Batch<'_, K>,
     inserted: &mut RowMask<'_>,
 ) -> Result<usize> {
     let Batch {

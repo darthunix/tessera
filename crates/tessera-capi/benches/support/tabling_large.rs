@@ -20,7 +20,7 @@
 //! A debug build, which only checks the model, uses a small table.
 
 use anyhow::{Result, ensure};
-use tessera_core::{ColumnView, RowMask};
+use tessera_core::{ColumnView, RowMask, RowMaskView};
 use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::murmurhash32;
 use tessera_kernels::table::{Batch, MAX_CHUNK_LEN, Matches, OwnedTable, TableConfig, bloom};
@@ -209,21 +209,14 @@ impl Setup {
             for batch in 0..BATCHES {
                 let rows = batch * BATCH..(batch + 1) * BATCH;
                 let column = [ColumnView::try_new(&keys.inserted[rows.clone()], None)?];
-                let mut pending_words = [u64::MAX; BATCH / 64];
-                let mut pending = RowMask::try_new(BATCH, &mut pending_words)?;
-                table.insert(
+                let inserted = table.insert(
+                    &inserted_hashes[rows],
+                    &KeyColumns(&column),
+                    RowMaskView::try_new(BATCH, &[u64::MAX; BATCH / 64])?,
                     None,
-                    &mut Batch::new(
-                        &inserted_hashes[rows],
-                        &KeyColumns(&column),
-                        &mut pending,
-                        &mut offsets,
-                    )?,
+                    &mut offsets,
                 )?;
-                ensure!(
-                    pending_words == [0; BATCH / 64],
-                    "the table ran out of room"
-                );
+                ensure!(inserted == BATCH, "the table ran out of room");
             }
         }
         let mut filter = vec![0; bloom::words_for(RECORDS as u64)?];
@@ -332,14 +325,13 @@ pub fn resolve(setup: &mut Setup, batch: usize) -> Result<()> {
     let chunk = setup.table.chunks() - 1;
     let mut table = setup.table.table_mut()?;
     setup.pending = setup.all;
-    let mut pending = RowMask::try_new(BATCH, &mut setup.pending)?;
     let mut inserted = RowMask::try_new(BATCH, &mut setup.inserted)?;
     table.find_or_insert(
         chunk,
         &mut Batch::new(
             &setup.present_hashes[rows],
             &KeyColumns(&column),
-            &mut pending,
+            &mut setup.pending,
             &mut setup.matches,
         )?,
         &mut inserted,
