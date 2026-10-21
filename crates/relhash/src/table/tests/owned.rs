@@ -116,3 +116,35 @@ fn the_owning_table_stays_whole_under_any_order_of_its_calls() {
         Ok(())
     });
 }
+
+/// An old reference after a reset reads what its place holds now, and new
+/// rows take the place again; Miri runs this among the table's tests.
+#[test]
+fn an_old_reference_after_a_reset_reads_what_its_place_holds() -> Result<()> {
+    let mut table = local(&ONE_INT4, 4)?;
+    let one = [Column::new(&[1], None)];
+    let old = insert_all(
+        &mut table,
+        &[hash_i32(1)],
+        &Keys(&one),
+        Some(&7u64.to_ne_bytes()),
+    )?;
+    table.reset()?;
+    {
+        let shared = table.table()?;
+        let record = shared.record(old[0])?;
+        ensure!(record.keys == [1], "the bytes stay until written");
+    }
+    let two = [Column::new(&[2], None)];
+    let new = insert_all(
+        &mut table,
+        &[hash_i32(2)],
+        &Keys(&two),
+        Some(&9u64.to_ne_bytes()),
+    )?;
+    ensure!(new == old, "the place is taken again");
+    let shared = table.table()?;
+    let record = shared.record(old[0])?;
+    ensure!(record.keys == [2] && record.payload == 9u64.to_ne_bytes());
+    Ok(())
+}

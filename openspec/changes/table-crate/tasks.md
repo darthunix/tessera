@@ -176,10 +176,11 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `make rust-check`; machine code
 - [x] 3.12 Keep the owning table whole under any order of its calls:
       an insertion links what it appended and nothing else, and
-      `OwnedTable::new` refuses chunks too small for a record. Check: a property test of random sequences of `insert`,
-      `find_or_insert`, `regrow` and `reset` against a model of the
-      records; `cargo test -p relhash`
-- [ ] 3.13 Take the writes of chunks and the index off the shared
+      `OwnedTable::new` refuses chunks too small for a record. Check: a
+      property test of random sequences of `insert`, `find_or_insert`,
+      `regrow` and `reset` against a model of the records;
+      `cargo test -p relhash`
+- [x] 3.13 Take the writes of chunks and the index off the shared
       handle: `append`, `append_columns`, `link` and `link_counting`
       safe on `TableMut` and `unsafe` on `Table`, whose contract names
       the chunks the caller writes and that no record of them is

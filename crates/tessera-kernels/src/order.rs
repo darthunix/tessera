@@ -11,7 +11,7 @@
 
 use anyhow::{Result, ensure};
 
-use crate::table::{Cursor, Table};
+use crate::table::{Cursor, Table, TableMut};
 use tessera_core::{RowMaskView, ones};
 
 use crate::sort::{Encoder, SortKey, heap_push, with_item_words};
@@ -29,12 +29,13 @@ fn check_keys(table: &Table<'_>, keys: &[SortKey]) -> Result<()> {
 }
 
 /// Write the item of every record into `items`, one after another, and
-/// return the count; `items` must hold them all.
-pub fn items(table: &Table<'_>, keys: &[SortKey], items: &mut [u64]) -> Result<usize> {
+/// return the count; `items` must hold them all. The walk over the records
+/// needs the table to itself.
+pub fn items(table: &TableMut<'_>, keys: &[SortKey], items: &mut [u64]) -> Result<usize> {
     items_inner(table, keys, items)
 }
 
-fn items_inner(table: &Table<'_>, keys: &[SortKey], items: &mut [u64]) -> Result<usize> {
+fn items_inner(table: &TableMut<'_>, keys: &[SortKey], items: &mut [u64]) -> Result<usize> {
     check_keys(table, keys)?;
     let encoder = Encoder::new(keys)?;
     with_item_words!(encoder.words(), |W| items_as::<W>(table, &encoder, items))
@@ -43,7 +44,7 @@ fn items_inner(table: &Table<'_>, keys: &[SortKey], items: &mut [u64]) -> Result
 /// [`items`] for items of `W` words: the scan gives the records'
 /// references a few at a time, and the reading cursor their keys.
 fn items_as<const W: usize>(
-    table: &Table<'_>,
+    table: &TableMut<'_>,
     encoder: &Encoder<'_>,
     items: &mut [u64],
 ) -> Result<usize> {
