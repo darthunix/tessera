@@ -212,13 +212,15 @@ record.
   indexes and resets run over an owning table
 - **THEN** after each call its records, their count and the keys it
   finds are those of a model of the sequence
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::the_owning_table_stays_whole_under_any_order_of_its_calls`
 
 #### Scenario: A chunk too small for a record
 - **WHEN** an owning table is made with chunks shorter than a record
 - **THEN** it is refused with a wrong call and the rule of a record's
   room
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::a_record_larger_than_a_chunk_is_refused`
 
 ### Requirement: Safe calls are sound
 No sequence of the crate's safe calls SHALL let a record that a caller

@@ -354,16 +354,9 @@ fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
         nkeys: 1,
         payload_size: 64,
     };
-    let values = [1];
-    let keys = [Column::new(&values, None)];
-    let mut table = OwnedTable::new(&config, 1, CHUNK_HEADER + 64)?;
-    let result = table.insert(
-        &[hash_i32(1)],
-        &Keys(&keys),
-        RowMaskView::try_new(1, &[1])?,
-        None,
-        &mut [0],
-    );
+    // The owning table refuses chunks too small for a record as it is
+    // made, before a call would add them up to the limit.
+    let result = OwnedTable::new(&config, 1, CHUNK_HEADER + 64);
     assert_eq!(refusal(result), Some((Kind::WrongCall, Rule::RecordRoom)));
 
     // A table is not even sized for a record that no chunk can hold: one
