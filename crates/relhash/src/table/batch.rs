@@ -87,7 +87,7 @@ pub struct Batch<'b, 'm, K: ?Sized> {
     pub(super) hashes: &'b [u32],
     pub(super) keys: &'b K,
     pub(super) pending: &'b mut RowMask<'m>,
-    pub(super) offsets: &'b mut [u32],
+    pub(super) refs: &'b mut [u32],
 }
 
 impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
@@ -105,7 +105,7 @@ impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
             hashes,
             keys,
             pending,
-            offsets: refs,
+            refs,
         })
     }
 
@@ -280,19 +280,17 @@ pub(super) fn append<R: Region, K: KeySource + ?Sized>(
     batch: &mut Batch<'_, '_, K>,
 ) -> Result<usize> {
     check_keys(layout, batch.keys)?;
-    check_payload(payload, batch.offsets.len(), layout.payload_size)?;
+    check_payload(payload, batch.refs.len(), layout.payload_size)?;
     let Batch {
         hashes,
         keys,
         pending,
-        offsets,
+        refs,
     } = batch;
     shaped!(
         layout.nkeys,
         layout.tail_words(),
-        append_rows(
-            region, layout, chunk, hashes, *keys, payload, pending, offsets
-        )
+        append_rows(region, layout, chunk, hashes, *keys, payload, pending, refs)
     )
 }
 
@@ -310,7 +308,7 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
     keys: &K,
     payload: Option<&[u8]>,
     pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    refs: &mut [u32],
 ) -> Result<usize> {
     // Made here, not passed in, so that its fields stay in registers; the
     // index is not read.
@@ -359,7 +357,7 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
                     row_payload,
                 )
             };
-            offsets[row] = Place { chunk, byte: used }.reference();
+            refs[row] = Place { chunk, byte: used }.reference();
             used += record_size;
             done |= 1 << bit;
         }
@@ -390,9 +388,9 @@ pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
         hashes,
         keys,
         pending,
-        offsets,
+        refs,
     } = batch;
-    let nrows = offsets.len();
+    let nrows = refs.len();
     check_keys(layout, *keys)?;
     ensure!(
         layout.payload_size == 8 * (columns.null_words() + columns.len()),
@@ -404,9 +402,7 @@ pub(super) fn append_columns<R: Region, K: KeySource + ?Sized>(
     shaped!(
         layout.nkeys,
         layout.tail_words(),
-        append_column_rows(
-            region, layout, chunk, hashes, *keys, columns, pending, offsets
-        )
+        append_column_rows(region, layout, chunk, hashes, *keys, columns, pending, refs)
     )
 }
 
@@ -431,7 +427,7 @@ fn append_column_rows<
     keys: &K,
     columns: &PayloadColumns<'_>,
     pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    refs: &mut [u32],
 ) -> Result<usize> {
     let access = Access::for_chunks(region, layout);
     let (mut used, mut room) = access.room(chunk)?;
@@ -474,7 +470,7 @@ fn append_column_rows<
                     row,
                 )
             };
-            offsets[row] = Place { chunk, byte: used }.reference();
+            refs[row] = Place { chunk, byte: used }.reference();
             used += record_size;
             done |= 1 << bit;
         }
@@ -535,10 +531,10 @@ pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
         hashes,
         keys,
         pending,
-        offsets,
+        refs,
     } = batch;
     let Appended { rows, nulls } = appended;
-    let nrows = offsets.len();
+    let nrows = refs.len();
     check_keys(layout, *keys)?;
     ensure!(
         layout.payload_size == 8 * (1 + columns.len()) && columns.len() <= 64,
@@ -558,7 +554,7 @@ pub(super) fn append_partitioned_columns<R: Region, K: KeySource + ?Sized>(
         layout.nkeys,
         layout.tail_words(),
         append_partitioned_column_rows(
-            region, layout, partitions, mask, hashes, *keys, columns, pending, offsets, rows, nulls
+            region, layout, partitions, mask, hashes, *keys, columns, pending, refs, rows, nulls
         )
     )
 }
@@ -582,7 +578,7 @@ fn append_partitioned_column_rows<
     keys: &K,
     columns: &PayloadColumns<'_>,
     pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    refs: &mut [u32],
     rows: &mut [u64],
     nulls: &mut u64,
 ) -> Result<usize> {
@@ -625,7 +621,7 @@ fn append_partitioned_column_rows<
                     row,
                 )
             };
-            offsets[row] = Place { chunk, byte: used }.reference();
+            refs[row] = Place { chunk, byte: used }.reference();
             // SAFETY: the caller is the chunk's one writer, and the record
             // just written ends at the new mark.
             unsafe { access.set_used(chunk, used + record_size) };
@@ -641,8 +637,8 @@ fn append_partitioned_column_rows<
 
 /// Copy the records of chunk `source` from byte `*from` on, whole and in
 /// order, each to the chunk of its hash's partition, whose one writer the
-/// caller is, and move `*from` past them: at most `offsets.len()` of them,
-/// the new references into `offsets` and their hashes into `hashes`. The
+/// caller is, and move `*from` past them: at most `refs.len()` of them,
+/// the new references into `refs` and their hashes into `hashes`. The
 /// copies are not linked. It stops before a record
 /// whose partition's chunk is full, which [`Split::full`] names. A call
 /// copies at least one record, so that a count of 0 means the end.
@@ -652,16 +648,16 @@ pub(super) fn split<R: Region>(
     partitions: &Partitions<'_>,
     source: usize,
     from: &mut usize,
-    offsets: &mut [u32],
+    refs: &mut [u32],
     hashes: &mut [u32],
 ) -> Result<Split> {
     let mask = check_partitions(region, partitions)?;
     ensure!(
-        offsets.len() == hashes.len(),
+        refs.len() == hashes.len(),
         Error::wrong_call(Rule::SplitLengths)
     );
     // A count of 0 means the source is done, so a call copies one at least.
-    ensure!(!offsets.is_empty(), Error::wrong_call(Rule::EmptySplit));
+    ensure!(!refs.is_empty(), Error::wrong_call(Rule::EmptySplit));
     ensure!(
         !partitions.chunks.contains(&(source as u32)),
         Error::wrong_call(Rule::SplitIntoItself).with(source)
@@ -672,7 +668,7 @@ pub(super) fn split<R: Region>(
     let mut count = 0;
     let mut full = None;
     for byte in places {
-        if count == offsets.len() {
+        if count == refs.len() {
             break;
         }
         let hash = check_record(
@@ -700,7 +696,7 @@ pub(super) fn split<R: Region>(
             copy[4..8].fill(0);
             access.set_used(chunk, used + record_size);
         }
-        offsets[count] = Place { chunk, byte: used }.reference();
+        refs[count] = Place { chunk, byte: used }.reference();
         hashes[count] = hash;
         count += 1;
         *from = byte + record_size;
@@ -849,17 +845,17 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
     Ok(left)
 }
 
-/// For each row of `rows`, replace `offsets[row]` by the record after it
+/// For each row of `rows`, replace `refs[row]` by the record after it
 /// in its chain with the same hash and keys; the rows without one leave
 /// `rows` and keep their offset. The count of rows left is returned.
 pub(super) fn next_match<R: Region>(
     region: &R,
     layout: &Layout,
-    offsets: &mut [u32],
+    refs: &mut [u32],
     rows: &mut RowMask<'_>,
 ) -> Result<usize> {
     let nrows = rows.as_view().nrows();
-    check_rows(nrows, &[offsets.len()])?;
+    check_rows(nrows, &[refs.len()])?;
     let mut access = Access::new(region, layout);
     let mut left = 0;
     for (index, word) in rows.words_mut().iter_mut().enumerate() {
@@ -867,7 +863,7 @@ pub(super) fn next_match<R: Region>(
         let mut hits = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
-            let record = access.locate(offsets[row], Kind::WrongCall)?;
+            let record = access.locate(refs[row], Kind::WrongCall)?;
             let after = access.find_same(
                 record.next(),
                 record.hash(),
@@ -875,7 +871,7 @@ pub(super) fn next_match<R: Region>(
                 record.keys(),
             )?;
             if after != 0 {
-                offsets[row] = after;
+                refs[row] = after;
                 hits |= 1 << bit;
             }
         }
@@ -886,19 +882,19 @@ pub(super) fn next_match<R: Region>(
 }
 
 /// For each row of `rows`, the word at byte `at` of the payload of the
-/// record at `offsets[row]` into `out[row]`; other rows of `out` keep
+/// record at `refs[row]` into `out[row]`; other rows of `out` keep
 /// their values. A payload is words, so `at` is a multiple of 8, as for
 /// the calls that fold rows into a payload.
 pub(super) fn gather<R: Region, const PREFETCH: bool>(
     region: &R,
     layout: &Layout,
-    offsets: &[u32],
+    refs: &[u32],
     rows: &RowMaskView<'_>,
     at: usize,
     out: &mut [u64],
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_rows(nrows, &[offsets.len(), out.len()])?;
+    check_rows(nrows, &[refs.len(), out.len()])?;
     ensure!(
         at.is_multiple_of(8)
             && at
@@ -913,7 +909,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
         for index in 0..nrows.div_ceil(64) {
             for bit in ones(rows.word(index)) {
                 let row = index * 64 + bit;
-                let payload = access.locate(offsets[row], Kind::WrongCall)?.payload();
+                let payload = access.locate(refs[row], Kind::WrongCall)?.payload();
                 let mut word = [0; 8];
                 word.copy_from_slice(&payload[at..at + 8]);
                 out[row] = u64::from_ne_bytes(word);
@@ -930,7 +926,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word(index);
         for bit in ones(selected) {
-            let place = access.place(offsets[index * 64 + bit], Kind::WrongCall)?;
+            let place = access.place(refs[index * 64 + bit], Kind::WrongCall)?;
             // SAFETY: `place` accepted it.
             let spot = unsafe { access.spot(place) };
             spots[bit].write(spot);
@@ -941,7 +937,7 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
             let row = index * 64 + bit;
             // SAFETY: the loop above resolved the spot of every row of
             // `selected` from an offset `place` accepted.
-            let record = unsafe { access.open_at(spots[bit].assume_init(), offsets[row]) }?;
+            let record = unsafe { access.open_at(spots[bit].assume_init(), refs[row]) }?;
             let payload = record.payload();
             let mut word = [0; 8];
             word.copy_from_slice(&payload[at..at + 8]);
@@ -952,21 +948,21 @@ pub(super) fn gather<R: Region, const PREFETCH: bool>(
 }
 
 /// For each row of `rows`, payload word `first + n` (in 8-byte units) of
-/// the record at `offsets[row]` into `out[n][row]` for every `out[n]`,
+/// the record at `refs[row]` into `out[n][row]` for every `out[n]`,
 /// records in no order, as [`gather`] with its prefetch reads one: a
 /// record is located once for all its words, and every cache line they lie
 /// on prefetched. Other slots of `out` keep their values.
 pub(super) fn gather_words<R: Region>(
     region: &R,
     layout: &Layout,
-    offsets: &[u32],
+    refs: &[u32],
     rows: &RowMaskView<'_>,
     first: usize,
     out: &mut [&mut [u64]],
 ) -> Result<()> {
     let nrows = rows.nrows();
     ensure!(
-        offsets.len() == nrows && out.iter().all(|words| words.len() == nrows),
+        refs.len() == nrows && out.iter().all(|words| words.len() == nrows),
         Error::wrong_call(Rule::BatchRows)
     );
     ensure!(
@@ -986,7 +982,7 @@ pub(super) fn gather_words<R: Region>(
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.word(index);
         for bit in ones(selected) {
-            let place = access.place(offsets[index * 64 + bit], Kind::WrongCall)?;
+            let place = access.place(refs[index * 64 + bit], Kind::WrongCall)?;
             // SAFETY: `place` accepted it.
             let spot = unsafe { access.spot(place) };
             spots[bit].write(spot);
@@ -1002,7 +998,7 @@ pub(super) fn gather_words<R: Region>(
             let row = index * 64 + bit;
             // SAFETY: the loop above resolved the spot of every row of
             // `selected` from an offset `place` accepted.
-            let record = unsafe { access.open_at(spots[bit].assume_init(), offsets[row]) }?;
+            let record = unsafe { access.open_at(spots[bit].assume_init(), refs[row]) }?;
             let payload = &record.payload()[8 * first..8 * (first + out.len())];
             for (words, bytes) in out.iter_mut().zip(payload.as_chunks::<8>().0) {
                 words[row] = u64::from_ne_bytes(*bytes);
@@ -1012,7 +1008,7 @@ pub(super) fn gather_words<R: Region>(
     Ok(())
 }
 
-/// For each row of `rows`, the record right after `offsets[row]` in its
+/// For each row of `rows`, the record right after `refs[row]` in its
 /// chain when it has the same hash, null bits and keys: the next record of
 /// the key in a table built by grouped insertion, where they lie next to
 /// each other. The rows without one leave `rows` and keep their offset;
@@ -1020,11 +1016,11 @@ pub(super) fn gather_words<R: Region>(
 pub(super) fn next_in_group<R: Region>(
     region: &R,
     layout: &Layout,
-    offsets: &mut [u32],
+    refs: &mut [u32],
     rows: &mut RowMask<'_>,
 ) -> Result<usize> {
     let nrows = rows.as_view().nrows();
-    check_rows(nrows, &[offsets.len()])?;
+    check_rows(nrows, &[refs.len()])?;
     let mut access = Access::new(region, layout);
     let mut left = 0;
     for (index, word) in rows.words_mut().iter_mut().enumerate() {
@@ -1032,7 +1028,7 @@ pub(super) fn next_in_group<R: Region>(
         let mut hits = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
-            let record = access.locate(offsets[row], Kind::WrongCall)?;
+            let record = access.locate(refs[row], Kind::WrongCall)?;
             let next = record.next();
             if next == 0 {
                 continue;
@@ -1042,7 +1038,7 @@ pub(super) fn next_in_group<R: Region>(
                 && other.null_bits() == record.null_bits()
                 && same_keys(other.keys(), record.keys())
             {
-                offsets[row] = next;
+                refs[row] = next;
                 hits |= 1 << bit;
             }
         }
@@ -1052,21 +1048,21 @@ pub(super) fn next_in_group<R: Region>(
     Ok(left)
 }
 
-/// For each row of `rows`, key `key` of the record at `offsets[row]` into
+/// For each row of `rows`, key `key` of the record at `refs[row]` into
 /// `values[row]` as the bits of its slot, an int4 sign-extended as its
 /// Datum is, and whether it is NULL into `nulls[row]`; other rows keep
 /// their values.
 pub(super) fn gather_key<R: Region>(
     region: &R,
     layout: &Layout,
-    offsets: &[u32],
+    refs: &[u32],
     rows: &RowMaskView<'_>,
     key: usize,
     values: &mut [u64],
     nulls: &mut [bool],
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_rows(nrows, &[offsets.len(), values.len(), nulls.len()])?;
+    check_rows(nrows, &[refs.len(), values.len(), nulls.len()])?;
     ensure!(
         key < layout.nkeys,
         Error::wrong_call(Rule::Key).with(key).and(layout.nkeys)
@@ -1076,7 +1072,7 @@ pub(super) fn gather_key<R: Region>(
         let bits = rows.word(index);
         for bit in ones(bits) {
             let row = index * 64 + bit;
-            let record = access.locate(offsets[row], Kind::WrongCall)?;
+            let record = access.locate(refs[row], Kind::WrongCall)?;
             let null = (record.null_bits() >> key) & 1 == 1;
             values[row] = if null { 0 } else { record.keys()[key] as u64 };
             nulls[row] = null;
