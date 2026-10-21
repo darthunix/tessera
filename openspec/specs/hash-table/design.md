@@ -1784,7 +1784,7 @@ How a spilled chunk of records is written to disk is in
 
 - The unit tests in `crates/relhash/src/table/tests/`: the format and
   every call, with damaged headers, chunks, references and chains, over
-  keys of their own; they also run under Miri.
+  keys of their own; they also run under Miri, at smaller sizes.
 - The unit tests in `crates/relhash/src/table/tests.rs`: blocks
   that are not chunks or an index, partitions, merges, and a shared
   filter that threads race to build.
