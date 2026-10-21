@@ -329,3 +329,95 @@ partition.
 - **THEN** it fails, and `*from` and the chunks are as they were
 - **Verified by:**
   `crates/relhash/src/table/tests.rs::a_split_that_cannot_be_done_is_refused`
+
+### Requirement: Calls of one writer
+These calls SHALL run only when no other call uses the table:
+`tess_table_link_grouped`, `tess_table_find_or_insert`,
+`tess_table_regrow`, `tess_table_scan`, `tess_table_clear_key`, and a
+change of a payload in place.
+
+- `tess_table_find_or_insert` SHALL give each row of the pending mask,
+  in row order, the record of its keys, and SHALL make one with a
+  payload of zeros, linked at once, when the table has none. It SHALL
+  stop at the first row that needs a new record when the chunk is full
+  or the records are half the buckets; the rows not done stay pending.
+  The call SHALL add to the mask of inserted rows exactly the rows whose
+  record it made, and SHALL leave the mask's other bits as they were, so
+  that the masks of the calls of one batch add up.
+- `tess_table_regrow` SHALL move the table to a new index for a
+  capacity, with at least the buckets of the old one, and link every
+  record of every chunk it is given again, grouped. No record moves,
+  and every reference stays valid.
+- `tess_table_scan` SHALL visit every record below the used marks,
+  chunk by chunk in the order appended, at least one a call, from a
+  cursor that starts at 0; a count of 0 SHALL mean the end.
+- `tess_table_clear_key` SHALL write 0 into one key of every record and
+  keep its NULL bit.
+
+#### Scenario: Rows find or make their record
+- **WHEN** a batch with repeated keys is resolved, a chunk fills, and
+  the records reach half the buckets
+- **THEN** each key gets one record with a zero payload, inserted marks
+  its first row, a full chunk resolves the known keys only, and half the
+  buckets stops the call until a larger index
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::rows_find_or_create_the_record_of_their_keys`;
+  `crates/relhash/src/table/tests/records.rs::a_full_chunk_resolves_known_keys_only`;
+  `crates/relhash/src/table/tests/records.rs::an_index_takes_records_up_to_half_its_buckets_and_regrows`
+
+#### Scenario: Inserted rows add up over the calls of a batch
+- **WHEN** a batch of new keys is resolved by two calls, a full chunk
+  between them, with the mask of inserted rows cleared once before the
+  first
+- **THEN** after the second call the mask holds every row that made a
+  record, those of the first call too
+- **Verified by:** pending
+
+#### Scenario: A larger index keeps the records
+- **WHEN** a table moves to a larger index, or to one with fewer buckets
+- **THEN** the walk, the references, the payloads and the chains are as
+  before; fewer buckets are refused
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::regrowing_keeps_records_and_their_references`;
+  `test/sql/table.sql::tessera_test_table_regrow`
+
+#### Scenario: A walk and a cleared key
+- **WHEN** the records are walked a few at a time, a walk of no records
+  is asked for, and a key is cleared
+- **THEN** the walk visits each record once in the order appended and
+  ends with 0, the walk of no records is refused, and the key is 0 in
+  every record with its NULL bit kept
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_walk_visits_every_record_once_in_appended_order`;
+  `crates/tessera-capi/tests/table.rs::the_writer_entry_points_round_trip`;
+  `crates/relhash/src/table/tests/lookup.rs::a_cleared_key_is_zero_in_every_record`
+
+### Requirement: Groups by partition
+`tess_table_find_or_insert_partitioned` SHALL give each row of the
+pending mask the record of its keys as `tess_table_find_or_insert`
+does, but SHALL write a new record to the chunk of its partition. A row
+whose partition's chunk has no room SHALL stay pending while the rows
+after it go on. Once the linked records reach half the buckets, the call
+SHALL resolve no more rows: the rows not done stay pending, those of a
+known key too, until the caller moves the table to a larger index. The
+call SHALL add to the mask of inserted rows the rows whose record it
+made, as `tess_table_find_or_insert` does. The caller is the one writer
+of the table.
+
+#### Scenario: Groups go to the chunks of their partitions
+- **WHEN** three batches of keys go to 4 partitions whose chunks hold 8
+  records, each partition with pending rows getting a new chunk
+- **THEN** each row's record has its key and lies in its partition, a
+  key keeps one record across the batches, and the inserted rows are
+  the first row of each new key
+- **Verified by:**
+  `crates/relhash/src/table/tests.rs::groups_go_to_the_chunks_of_their_partitions`;
+  `test/sql/table.sql::tessera_test_table_combine`
+
+#### Scenario: Half the buckets stops every row
+- **WHEN** a batch brings more new keys than half the buckets can take
+- **THEN** the call stops at the first row that needs a new record past
+  that count, and that row and every row after it stay pending,
+  including rows of keys the table holds
+- **Verified by:**
+  `crates/relhash/src/table/tests.rs::half_the_buckets_stops_every_row_of_a_lookup_by_partition`

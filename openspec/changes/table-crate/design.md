@@ -191,6 +191,60 @@ lookup moves each row one record a call, and its references are where
 it goes on. Two masks in the value, which would keep the old loops but
 move each call's result into the next call's rows.
 
+### A batch to place as one value
+
+**Was:** a call that places rows takes a `Batch`: the hashes and the
+keys of its rows, the mask of the rows still to place, and the
+reference of each placed row's record, at its row. The documentation
+of `Batch` says why the mask exists and how a batch lives through
+several calls, for a caller of the crate, whom it may surprise. Three
+things in the form of the value made it harder to use than a lookup:
+
+- The batch borrows the mask as a `&mut RowMask`, which itself borrows
+  the caller's words: two lifetimes, and four or five lines to make a
+  batch, the words, the mask, the references and the batch. The
+  references are `refs` in `Batch::new` and `offsets` in the rest of
+  the crate.
+- `OwnedTable::insert` and `OwnedTable::find_or_insert` take the same
+  batch, though they add chunks and grow the index themselves and
+  always leave the mask empty. Their caller copies the rows to place
+  into a mask only to see it cleared.
+- `find_or_insert` and its form by partition, in the crate and in the
+  C API, fill the mask of inserted rows whole at each call. A caller
+  that calls again after a full chunk must add the masks of the calls
+  up itself, or the groups made before the chunk ran out lose their
+  initial states. The grouping node clears a mask of its own before
+  each call and adds it into the batch's; the owning table does the
+  same with a vector it allocates.
+
+**Will be:**
+
+- `Batch` is made as `Matches` is: it holds its mask by value, has one
+  lifetime, and is made from the caller's words, `Batch::new(hashes,
+  keys, pending, refs)`, or from a mask, `Batch::from_mask`, as the C
+  entry points have one. Its references are `refs` in the whole crate.
+- The calls of `Table`, `TableMut` and `ChunkWriter` keep the mask of
+  pending rows: it is where the next call goes on, and what a call by
+  partition leaves has gaps that a row number would not say.
+- `OwnedTable::insert` and `OwnedTable::find_or_insert` take the rows
+  to place as a mask they only read, with the hashes, the keys and the
+  references, and keep the mask of pending rows to themselves.
+- `find_or_insert` and its form by partition add the rows whose record
+  they made to the mask of inserted rows, and leave its other bits as
+  they were. The caller clears it once, before the first call of a
+  batch. The grouping node and the owning table stop adding the masks
+  up.
+
+Refused: the number of the row to go on from, for the calls into one
+chunk, which place a run of rows from the start; the calls by
+partition need the mask, and two ways to go on for calls side by side
+are more to learn than one mask. A call that asks the caller for a new
+chunk and never stops: a larger index changes the table under the call
+that holds it, and a partition that fills would have to spill from
+inside the call, which is far more across the C boundary than a mask.
+Dropping the count a call returns, which the mask tells as well: the
+owning table checks by it that an empty chunk took a record.
+
 ### The kinds of keys
 
 **Was:** a table was created with a kind for each key, `int4` or
