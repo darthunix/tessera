@@ -61,6 +61,37 @@ impl Drop for Block {
 /// appended and no others, a find or insert links each record it makes
 /// at once, and a larger index or a reset keeps the table whole. Chunks
 /// too small for a record are refused when the table is made.
+///
+/// A record read from the table borrows it, and the calls that write
+/// need it to themselves, so a record borrowed across an append does not
+/// compile:
+///
+/// ```compile_fail
+/// use relhash::{KeySource, OwnedTable, RowMaskView, TableConfig, ones};
+///
+/// struct Keys<'a>(&'a [i32]);
+/// impl KeySource for Keys<'_> {
+///     fn nkeys(&self) -> usize { 1 }
+///     fn nrows(&self) -> usize { self.0.len() }
+///     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
+///         for bit in ones(selected) {
+///             out[bit] = i64::from(self.0[index * 64 + bit]);
+///         }
+///         Some(selected)
+///     }
+/// }
+///
+/// let mut table = OwnedTable::new(&TableConfig { nkeys: 1, payload_size: 8 }, 4, 4096)?;
+/// let one = RowMaskView::try_new(1, &[1])?;
+/// let mut refs = [0];
+/// table.insert(&[7], &Keys(&[7]), one, None, &mut refs)?;
+/// let shared = table.table()?;
+/// let record = shared.record(refs[0])?;
+/// // A record borrowed across an append: refused.
+/// table.insert(&[8], &Keys(&[8]), one, None, &mut refs)?;
+/// assert_eq!(record.keys, [7]);
+/// # Ok::<(), relhash::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct OwnedTable {
     index: Block,
@@ -224,8 +255,9 @@ impl OwnedTable {
         let appended = self.place(hashes, keys, rows, refs, |table, batch| {
             table.append_all(payload, batch)
         })?;
-        let table = self.table()?;
-        for chunk in first..self.chunks.len() {
+        let chunks = self.chunks.len();
+        let mut table = self.table_mut()?;
+        for chunk in first..chunks {
             let mut from = if chunk == first { start } else { CHUNK_HEADER };
             table.link(chunk, &mut from)?;
         }
@@ -302,7 +334,7 @@ impl OwnedTable {
                 self.add_chunk()?;
             }
             let chunk = self.chunks.len() - 1;
-            let count = self.table()?.append(chunk, payload, batch)?;
+            let count = self.table_mut()?.append(chunk, payload, batch)?;
             appended += count;
             if batch.pending().selected_count() == 0 {
                 return Ok(appended);

@@ -307,7 +307,7 @@ fn a_batch_goes_through_two_chunks() -> Result<()> {
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let mut table = OwnedTable::new(&ONE_INT4, 4, CHUNK_HEADER + 2 * 32)?;
     let (first, second) = (table.add_chunk()?, table.add_chunk()?);
-    let shared = table.table()?;
+    let mut shared = table.table_mut()?;
     let mut pending = [0b1011];
     let mut refs = [u32::MAX; 4];
     let source = Keys(&keys);
@@ -823,7 +823,7 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
                 0 => table.add_chunk()?,
                 n => n - 1,
             };
-            let shared = table.table()?;
+            let mut shared = table.table_mut()?;
             let source = Keys(&keys);
             let mut batch = Batch::new(&hashes, &source, &mut pending_words, &mut refs)?;
             if from_columns {
@@ -859,7 +859,7 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     let mut refs = vec![0u32; ROWS];
     assert!(
         table
-            .table()?
+            .table_mut()?
             .append_columns(
                 chunk,
                 &two,

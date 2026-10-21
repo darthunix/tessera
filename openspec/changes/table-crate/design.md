@@ -292,7 +292,8 @@ the documentation and the tests.
   `TableMut`, which has the table to itself, and `unsafe` on `Table`,
   whose contract names the chunks the caller writes and that no record
   of them is borrowed; `scan`, which reads the marks that writers move,
-  moves to `TableMut`. Refused: a handle of its own for a participant
+  moves to `TableMut`, by `&self`, since a sort walks the records while
+  a cursor reads them. Refused: a handle of its own for a participant
   of a shared build, which would add a type for what a contract on four
   calls says.
 - **The keys of NULL rows.** A record's slot of a NULL key holds 0, and

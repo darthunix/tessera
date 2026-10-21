@@ -20,7 +20,7 @@ use tessera_kernels::table::MAX_KEYS;
 
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
-use super::table::{TableKey, TableKeys, TableRef, attach, slots, values};
+use super::table::{TableKey, TableKeys, TableRef, attach, attach_mut, slots, values};
 
 /// `TESS_SORT_DESCENDING`.
 pub const DESCENDING: u32 = 0x1;
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn tess_sort_items(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let table = attach(table)?;
+            let table = attach_mut(table)?;
             let mut decoded = [UNUSED; MAX_KEYS];
             let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
             let items = slots(items, nwords, "items")?;

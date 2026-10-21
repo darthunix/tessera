@@ -233,13 +233,15 @@ the chunks each writer writes.
 - **WHEN** a caller borrows a record of the owning table and then
   appends to its chunk
 - **THEN** the code does not compile
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/owned.rs::A record borrowed across an append`
 
 #### Scenario: An old reference after a reset
 - **WHEN** an owning table is reset, an old reference is read, and new
   rows are appended, under Miri
 - **THEN** Miri reports no undefined behavior
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::an_old_reference_after_a_reset_reads_what_its_place_holds`
 
 ### Requirement: Keys from a source
 A key that the source of keys marks NULL SHALL be stored and compared
