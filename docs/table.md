@@ -120,7 +120,7 @@ sort itself does not change.
 The tests of the crate, in `crates/relhash/src/table/tests/`, cover the
 format and every operation, including corrupt headers, chunks, chains
 and references, over `OwnedTable`, a table that owns its index and
-chunks, with keys of their own, and run under Miri;
+chunks, with keys of their own, and run under Miri at smaller sizes;
 `crates/tessera-kernels/tests/table.rs` reads keys from columns and
 folds and merges the states of groups in records;
 `crates/tessera-capi/tests/table.rs` compares Datum and
