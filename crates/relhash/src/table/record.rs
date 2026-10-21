@@ -35,6 +35,10 @@ const NEXT: usize = 4;
 const NULL_BITS: usize = 8;
 const LEN: usize = 12;
 
+/// The steps down a chain after which a walk goes on out of line, where
+/// it also stops at a cycle: a healthy table's chains are far shorter.
+pub(super) const LONG_CHAIN: u64 = 64;
+
 /// A record as the table exposes it.
 #[derive(Debug, Clone, Copy)]
 pub struct Record<'a> {
@@ -129,6 +133,16 @@ pub(super) struct Access<'r, R> {
     /// chunks: a walk longer than this repeats a record.
     nrecords: u64,
 }
+
+// A copy shares the region; written out, since a derive would ask `R` to
+// be `Copy`.
+impl<R> Clone for Access<'_, R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R> Copy for Access<'_, R> {}
 
 impl<'r, R: Region> Access<'r, R> {
     #[inline]
@@ -389,7 +403,8 @@ impl<'r, R: Region> Access<'r, R> {
     /// Walk the chain from `offset` to the first record with `hash` that
     /// `matches` and return its offset, 0 for none (a record never lies at
     /// 0, chunk 0's used mark does); a chain longer than the record count is
-    /// corrupt.
+    /// corrupt. Past [`LONG_CHAIN`] steps the walk goes on in
+    /// [`Self::find_long`], where it also stops at a cycle.
     #[inline(always)]
     pub(super) fn find(
         &mut self,
@@ -398,8 +413,50 @@ impl<'r, R: Region> Access<'r, R> {
         mut matches: impl FnMut(&View<'r>) -> bool,
     ) -> Result<u32> {
         let mut steps = 0;
+        // One compare a step, as the bound alone took: the record count or
+        // a long chain, whichever comes first.
+        let mut limit = self.nrecords.min(LONG_CHAIN);
         while offset != 0 {
-            if steps == self.nrecords {
+            if steps == limit {
+                if steps == LONG_CHAIN {
+                    // A copy: given `self`, the loops would keep it in
+                    // memory, not in registers.
+                    return (*self).find_long(offset, hash, steps, matches);
+                }
+                self.refresh();
+                if steps >= self.nrecords {
+                    return Err(cycle());
+                }
+                limit = self.nrecords.min(LONG_CHAIN);
+            }
+            steps += 1;
+            let view = self.locate(offset, Kind::Damaged)?;
+            if view.hash() == hash && matches(&view) {
+                return Ok(offset);
+            }
+            offset = view.next();
+        }
+        Ok(0)
+    }
+
+    /// [`Self::find`] from `offset`, `steps` down its chain: the walk also
+    /// stops at a cycle, by Brent's method. A saved place moves to where
+    /// the walk is at each doubling of its steps, and a walk that meets it
+    /// again has gone round a cycle: it stops within a few times the
+    /// records of the chain, whatever the record count says.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn find_long(
+        mut self,
+        mut offset: u32,
+        hash: u32,
+        mut steps: u64,
+        mut matches: impl FnMut(&View<'r>) -> bool,
+    ) -> Result<u32> {
+        let mut saved = offset;
+        let mut save_at = steps * 2;
+        while offset != 0 {
+            if steps >= self.nrecords {
                 self.refresh();
                 if steps >= self.nrecords {
                     return Err(cycle());
@@ -411,6 +468,13 @@ impl<'r, R: Region> Access<'r, R> {
                 return Ok(offset);
             }
             offset = view.next();
+            if offset == saved {
+                return Err(cycle());
+            }
+            if steps == save_at {
+                saved = offset;
+                save_at *= 2;
+            }
         }
         Ok(0)
     }

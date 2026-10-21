@@ -599,14 +599,11 @@ fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
     let result = table_probe_one(&table, &hashes, &absent_keys);
     assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
     // A count of records far past what the chunks hold does not keep the
-    // walk going around the loop: the places of the chunks bound it too.
-    // Miri would take minutes over the 2^17 steps of the walk, the steps
-    // above again; the bound has a test of its own.
-    if !cfg!(miri) {
-        set_u64(table.index_words(), NRECORDS, u64::MAX);
-        let result = table_probe_one(&table, &hashes, &absent_keys);
-        assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
-    }
+    // walk going around the loop: past a long chain's steps it meets the
+    // place it saved, and stops.
+    set_u64(table.index_words(), NRECORDS, u64::MAX);
+    let result = table_probe_one(&table, &hashes, &absent_keys);
+    assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
 
     // A used mark that ends no record, or lies past the chunk.
     for used in [12, CHUNK as u64 + 8] {
@@ -747,14 +744,44 @@ fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
     let absent_keys = [Column::new(&absent, None)];
     let result = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64));
     assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
-    // As a row alone does, the word stops at the places of the chunks
-    // when the count of records is damaged too; not under Miri, for the
-    // reason `a_corrupt_reference_chain_or_used_mark_is_an_error` gives.
-    if !cfg!(miri) {
-        set_u64(table.index_words(), NRECORDS, u64::MAX);
-        let result = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64));
-        assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
+    // As a row alone does, the word stops at the cycle when the count of
+    // records is damaged too.
+    set_u64(table.index_words(), NRECORDS, u64::MAX);
+    let result = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64));
+    assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
+    Ok(())
+}
+
+/// A cycle of many records under a count damaged past every bound but the
+/// chunks' stops a walk soon, row by row, by whole words and in a find or
+/// insert: a walk past a long chain's steps meets the place it saved.
+#[test]
+fn a_cycle_under_a_damaged_count_stops_a_walk_soon() -> Result<()> {
+    // A hundred records of one hash: each new one heads the chain.
+    let values: Vec<i32> = (0..100).collect();
+    let keys = [Column::new(&values, None)];
+    let mut table = local(&ONE_INT4, 100)?;
+    let refs = insert_all(&mut table, &[7; 100], &Keys(&keys), None)?;
+    // The first record, last in the chain, leads back to its head.
+    let (chunk, byte) = placement(refs[0]);
+    set_u32(table.chunk_words(chunk), byte + 4, refs[99]);
+    set_u64(table.index_words(), NRECORDS, u64::MAX);
+    for nrows in [1, 64] {
+        let absent = [Column::new(&vec![1000; nrows], None)];
+        let result = probe_rows(&table.table()?, &vec![7; nrows], &absent, &all_rows(nrows));
+        assert_eq!(
+            refusal(result),
+            Some((Kind::Damaged, Rule::Chain)),
+            "{nrows} rows"
+        );
     }
+    let absent = [Column::new(&[1000], None)];
+    let found = table.table_mut()?.find_or_insert(
+        chunk,
+        &mut Batch::new(&[7], &Keys(&absent), &mut [1], &mut [0])?,
+        &mut RowMask::try_new(1, &mut [0])?,
+    );
+    assert_eq!(refusal(found), Some((Kind::Damaged, Rule::Chain)));
     Ok(())
 }
 
