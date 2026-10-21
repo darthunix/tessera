@@ -63,8 +63,10 @@ fn a_record_s_mark_is_its_bit_of_its_chunk_s_run() -> Result<()> {
 fn marked_records_are_left_out_of_the_walk() {
     let record = local(&ONE_INT4, 4).unwrap().table().unwrap().record_size();
     let chunk_bytes = CHUNK_HEADER + 100 * record;
+    // Seven chunks at most; three under Miri, which would take minutes.
+    let most: usize = if cfg!(miri) { 300 } else { 700 };
     property(
-        (1..700_usize, 1..9_u64, 1..70_usize),
+        (1..most, 1..9_u64, 1..70_usize),
         |(nkeys, every, step)| -> Result<()> {
             let values: Vec<i32> = (0..nkeys as i32).collect();
             let keys = [Column::new(&values, None)];
@@ -659,11 +661,14 @@ fn grouped_chains_span_chunks_and_survive_a_larger_index() -> Result<()> {
 fn payload_columns_append_the_records_a_payload_array_does() -> Result<()> {
     payload_columns_of(3)?;
     payload_columns_of(64)?;
-    payload_columns_of(130)
+    // Three words of NULL bits; two under Miri, which would take minutes.
+    payload_columns_of(if cfg!(miri) { 65 } else { 130 })
 }
 
 fn payload_columns_of(ncolumns: usize) -> Result<()> {
-    const ROWS: usize = 150;
+    // Two words of rows; under Miri, which would take minutes, a few rows
+    // past the first.
+    const ROWS: usize = if cfg!(miri) { 70 } else { 150 };
     let null_words = payload_null_words(ncolumns);
     let keys_values: Vec<i32> = (0..ROWS as i32).map(|row| row * 7 % 50).collect();
     let keys = [Column::new(&keys_values, None)];
