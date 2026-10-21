@@ -153,12 +153,27 @@ fn resolve_rows<
     let mut lanes = Lanes::new();
     let mut resolved = 0;
     let mut full = false;
+    // A source that cannot give a word, or a partition's chunk refused,
+    // stops the call out of line, in `stopped`, which keeps the rows
+    // resolved before it: the loops keep their shape.
+    let written = partitions.is_none();
     for index in 0..nrows.div_ceil(64) {
         let selected = pending.as_view().word(index);
         let mut done = 0;
         let mut created = 0;
         if selected != 0 && !full {
-            word_keys.load(keys, index, selected)?;
+            word_keys.load(keys, index, selected).map_err(|error| {
+                stopped(
+                    region,
+                    written.then_some((chunk, used)),
+                    pending,
+                    inserted,
+                    index,
+                    0,
+                    0,
+                    error,
+                )
+            })?;
             // Rows whose record exists are found for the whole word at
             // once; the others then go in row order, so that a row finds
             // the record an earlier row of the word created.
@@ -190,6 +205,8 @@ fn resolve_rows<
                 let row = index * 64 + bit;
                 let hash = hashes[row];
                 let head = access.head(hash);
+                // A damaged chain fails the call as it is: the promise of a
+                // call that fails part way is for the caller's errors.
                 // SAFETY: the records are this table's, whose key count the
                 // buffer was made for and `N` is 0 or.
                 let found = access.find(head, hash, |record| unsafe {
@@ -211,7 +228,12 @@ fn resolve_rows<
                                 let target = partitions.chunks
                                     [((hash >> partitions.shift) & mask) as usize]
                                     as usize;
-                                let (at, space) = access.room(target)?;
+                                let (at, space) = access.room(target).map_err(|error| {
+                                    stopped(
+                                        region, None, pending, inserted, index, done, created,
+                                        error,
+                                    )
+                                })?;
                                 // The row waits for a new chunk of its partition.
                                 if space == 0 {
                                     continue;
@@ -263,6 +285,34 @@ fn resolve_rows<
         unsafe { access.set_used(chunk, used) };
     }
     Ok(resolved)
+}
+
+/// End a find or insert that stops on `error` in word `index`, keeping
+/// the rows it resolved: those of the word, `done`, leave the pending
+/// rows, those that made a record, `created`, join the inserted ones,
+/// and the chunk it wrote, when it wrote one chunk, gets its used mark.
+/// It takes the region, not the access, whose fields stay in registers.
+#[cold]
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn stopped<R: Region>(
+    region: &R,
+    written: Option<(usize, usize)>,
+    pending: &mut RowMask<'_>,
+    inserted: &mut RowMask<'_>,
+    index: usize,
+    done: u64,
+    created: u64,
+    error: Error,
+) -> Error {
+    if let Some((chunk, used)) = written {
+        // SAFETY: this is the chunk's writer, and `used` ends its records.
+        unsafe { region.set_chunk_used(chunk, used as u64) };
+    }
+    // The word is one of the masks' words, so neither call fails.
+    let _ = pending.intersect_word(index, !done);
+    let _ = inserted.set_word(index, inserted.as_view().word(index) | created);
+    error
 }
 
 /// Link the records of chunk `chunk` from byte `*from` to its used mark
