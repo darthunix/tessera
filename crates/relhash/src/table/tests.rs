@@ -1,11 +1,12 @@
 //! The table's tests, over keys of their own (`testing.rs`). This file
 //! holds those of blocks, partitions, merges and threads, and the helpers
 //! of all; the files under `tests/` hold those of the format, the
-//! lookups, the records and the filter.
+//! lookups, the records, the filter and the calls that fail part way.
 
 mod filter;
 mod format;
 mod lookup;
+mod partial;
 mod records;
 
 use proptest::strategy::Strategy;

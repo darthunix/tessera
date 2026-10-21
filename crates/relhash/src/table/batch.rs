@@ -8,7 +8,7 @@ use core::mem::MaybeUninit;
 use crate::error::{Error, Kind, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView, check_rows, ones};
 
-use super::header::{Layout, Place, RECORD_HEADER};
+use super::header::{Layout, NRECORDS, Place, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
 use super::record::no_chunk;
@@ -81,6 +81,12 @@ pub(super) use shaped;
 /// partitions need a new chunk. One mask serves every call, and every
 /// caller runs the same loop: call, and while rows are pending, add a
 /// chunk or a larger index and call again.
+///
+/// A call that fails at a row, because the source cannot give a word's
+/// keys or a partition's chunk is refused, keeps what it placed before:
+/// those rows have left `pending` with their references, the rows that
+/// made a record are in the mask of inserted rows, and each chunk's used
+/// mark covers their records. The batch given again places the rest.
 ///
 /// [`ChunkWriter::append_partitioned_columns`]: crate::ChunkWriter::append_partitioned_columns
 /// [`TableMut::find_or_insert_partitioned`]: crate::TableMut::find_or_insert_partitioned
@@ -343,7 +349,9 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
         if room == 0 {
             break;
         }
-        word_keys.load(keys, index, selected)?;
+        word_keys
+            .load(keys, index, selected)
+            .map_err(|error| stopped(region, chunk, used, error))?;
         let wanted = selected.count_ones() as usize;
         let count = wanted.min(room);
         // The walk of `ones` written out, counted: through the iterator
@@ -387,6 +395,19 @@ fn append_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize,
     // records just written.
     unsafe { access.set_used(chunk, used) };
     Ok(appended)
+}
+
+/// End an append that stops at a word on `error`, the source unable to
+/// give its keys: the words before stay placed, so the chunk's used mark
+/// covers their records. Out of the loop, which keeps its shape; it takes
+/// the region, not the access, whose fields stay in registers.
+#[cold]
+#[inline(never)]
+fn stopped<R: Region>(region: &R, chunk: usize, used: usize, error: Error) -> Error {
+    // SAFETY: the caller is the chunk's one writer, and `used` ends the
+    // records it wrote.
+    unsafe { region.set_chunk_used(chunk, used as u64) };
+    error
 }
 
 /// As [`append`], with each row's payload taken from `columns`: a word of
@@ -459,7 +480,9 @@ fn append_column_rows<
         if room == 0 {
             break;
         }
-        word_keys.load(keys, index, selected)?;
+        word_keys
+            .load(keys, index, selected)
+            .map_err(|error| stopped(region, chunk, used, error))?;
         let wanted = selected.count_ones() as usize;
         let count = wanted.min(room);
         // The walk of `ones` written out, counted: through the iterator
@@ -610,7 +633,12 @@ fn append_partitioned_column_rows<
         if selected == 0 {
             continue;
         }
-        word_keys.load(keys, index, selected)?;
+        // A failure leaves the rows written before placed: their marks are
+        // stored record by record, and the masks get them below.
+        if let Err(error) = word_keys.load(keys, index, selected) {
+            *nulls |= seen;
+            return Err(error);
+        }
         let bits = selected;
         let mut done = 0;
         for bit in ones(bits) {
@@ -618,7 +646,14 @@ fn append_partitioned_column_rows<
             let partition = ((hashes[row] >> shift) & mask) as usize;
             // Checked: every partition's chunk exists, and has a count.
             let chunk = partitions.chunks[partition] as usize;
-            let (used, room) = access.room(chunk)?;
+            let (used, room) = match access.room(chunk) {
+                Ok(room) => room,
+                Err(error) => {
+                    pending.intersect_word(index, !done)?;
+                    *nulls |= seen;
+                    return Err(error);
+                }
+            };
             if room == 0 {
                 continue;
             }
@@ -725,6 +760,28 @@ pub(super) fn split<R: Region>(
 /// count that covers its chain, then published one by one. Several
 /// participants may link chunks of their own at once. The count linked is
 /// returned.
+/// End a link of chunk `chunk` that stops on `error` before the record at
+/// `stop`: the records from there to the chunk's used mark are not linked,
+/// so they leave the count, and the next link starts at `stop`. It reads
+/// what it needs again, so that the loop keeps no more of it.
+#[cold]
+#[inline(never)]
+fn unlinked_from<R: Region>(
+    region: &R,
+    layout: &Layout,
+    chunk: usize,
+    from: &mut usize,
+    stop: usize,
+    error: Error,
+) -> Error {
+    // SAFETY: the caller links this chunk alone, and checked its mark.
+    let used = unsafe { region.chunk_used(chunk) } as usize;
+    let left = (used - stop) / layout.record_size;
+    region.fetch_add_u64(NRECORDS, (left as u64).wrapping_neg());
+    *from = stop;
+    error
+}
+
 pub(super) fn link<R: Region>(
     region: &R,
     layout: &Layout,
@@ -760,13 +817,25 @@ pub(super) fn link_counting<R: Region, const DUPLICATES: bool>(
     for byte in bytes {
         let spot = R::advance(first, byte);
         // SAFETY: the record lies in the chunk, below its used mark.
-        let hash = unsafe { check_record_at(&access, spot, Place { chunk, byte }) }?;
+        let hash = unsafe { check_record_at(&access, spot, Place { chunk, byte }) }
+            .map_err(|error| unlinked_from(region, layout, chunk, from, byte, error))?;
         // SAFETY: as above, and the caller alone links this chunk.
         let rest = unsafe { access.push_at(Place { chunk, byte }.reference(), spot, hash) };
         if DUPLICATES && rest != 0 {
             // SAFETY: the record is published and never written again.
             let record = unsafe { access.view_at(spot) };
-            let same = access.find_same(rest, hash, record.null_bits(), record.keys())?;
+            let same = access
+                .find_same(rest, hash, record.null_bits(), record.keys())
+                .map_err(|error| {
+                    unlinked_from(
+                        region,
+                        layout,
+                        chunk,
+                        from,
+                        byte + layout.record_size,
+                        error,
+                    )
+                })?;
             duplicates += usize::from(same != 0);
         }
     }
