@@ -22,7 +22,7 @@ use crate::error::{Kind, Result};
 use crate::ones;
 
 use super::keys::WordKeys;
-use super::record::Access;
+use super::record::{Access, LONG_CHAIN};
 use super::region::Region;
 
 /// Ask for the cache line at `address` to be loaded for reading. A hint:
@@ -114,8 +114,21 @@ pub(super) fn probe_word<R: Region, const N: usize>(
     }
     let mut hits = 0;
     let mut steps = 0;
+    // One compare a round, as the bound alone took: the record count or a
+    // long chain, whichever comes first.
+    let mut limit = access.records().min(LONG_CHAIN);
     while pending != 0 {
-        access.check_steps(steps)?;
+        if steps == limit {
+            if steps == LONG_CHAIN {
+                // A copy of the access: given it, the loops would keep it
+                // in memory, not in registers.
+                return finish_alone::<R, N>(
+                    *access, word_keys, lanes, pending, hits, matches, steps,
+                );
+            }
+            access.check_steps(steps)?;
+            limit = access.records().min(LONG_CHAIN);
+        }
         steps += 1;
         for bit in ones(pending) {
             let place = access.place(unsafe { lanes.current[bit].assume_init() }, Kind::Damaged)?;
@@ -143,6 +156,42 @@ pub(super) fn probe_word<R: Region, const N: usize>(
             }
         }
         pending = rest;
+    }
+    Ok(hits)
+}
+
+/// The rows of a word still walking after [`LONG_CHAIN`] rounds, which are
+/// rare and may go round a cycle: each walks on alone, where a walk stops
+/// at one. Returns the rows found, `hits` with them.
+#[cold]
+#[inline(never)]
+fn finish_alone<R: Region, const N: usize>(
+    access: Access<'_, R>,
+    word_keys: &WordKeys<'_>,
+    lanes: &Lanes<R::Spot>,
+    pending: u64,
+    mut hits: u64,
+    matches: &mut [u32],
+    steps: u64,
+) -> Result<u64> {
+    for bit in ones(pending) {
+        // SAFETY: the rounds wrote the hash and the next offset of every
+        // row of `pending`.
+        let (offset, hash) = unsafe {
+            (
+                lanes.current[bit].assume_init(),
+                lanes.hash[bit].assume_init(),
+            )
+        };
+        // SAFETY: the records are this table's, whose key count the buffer
+        // was made for and `N` is 0 or.
+        let found = access.find_long(offset, hash, steps, |record| unsafe {
+            word_keys.equal::<N>(bit, record)
+        })?;
+        if found != 0 {
+            matches[bit] = found;
+            hits |= 1 << bit;
+        }
     }
     Ok(hits)
 }
