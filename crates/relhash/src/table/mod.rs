@@ -70,6 +70,12 @@ fn other_config(config: &TableConfig) -> Error {
 
 /// A table over an index and chunks, as several participants may share it.
 ///
+/// It reads the table. Its calls that write chunks or the index, the
+/// appends and the links, are `unsafe`: they are for the participants of
+/// a shared build, each the one writer of its own chunks, and their
+/// contracts say what the type cannot. [`TableMut`], which one writer has
+/// to itself, makes the same calls safely.
+///
 /// It is neither `Send` nor `Sync`: each participant attaches its own.
 #[derive(Debug)]
 pub struct Table<'a> {
@@ -200,9 +206,14 @@ impl<'a> Table<'a> {
     /// count appended is returned, and rows still pending need another
     /// chunk. The batch's keys are the table's keys; `payload` is the
     /// payload of every physical row one after another, or `None` for
-    /// zeros. The records are not in the buckets until linked. The caller
-    /// must be the chunk's one writer.
-    pub fn append<K: KeySource + ?Sized>(
+    /// zeros. The records are not in the buckets until linked.
+    ///
+    /// # Safety
+    ///
+    /// The caller is the chunk's one writer: no other call writes it while
+    /// this one runs, and no record of the chunk past its used mark is
+    /// borrowed. [`TableMut::append`] is the same call, safe.
+    pub unsafe fn append<K: KeySource + ?Sized>(
         &self,
         chunk: usize,
         payload: Option<&[u8]>,
@@ -214,7 +225,11 @@ impl<'a> Table<'a> {
     /// As [`Table::append`], with each row's payload taken from `columns`:
     /// a word of its NULL bits, then a word per column, which must be the
     /// table's whole payload.
-    pub fn append_columns<K: KeySource + ?Sized>(
+    ///
+    /// # Safety
+    ///
+    /// As [`Table::append`].
+    pub unsafe fn append_columns<K: KeySource + ?Sized>(
         &self,
         chunk: usize,
         columns: &PayloadColumns<'_>,
@@ -228,7 +243,13 @@ impl<'a> Table<'a> {
     /// past them; the count linked is returned. Several participants may
     /// link at once, each its own chunks; equal keys make separate
     /// records. `*from` starts at [`CHUNK_HEADER`].
-    pub fn link(&self, chunk: usize, from: &mut usize) -> Result<usize> {
+    ///
+    /// # Safety
+    ///
+    /// The caller alone links the chunk, and no record of it from `*from`
+    /// to its used mark is borrowed: linking writes their links.
+    /// [`TableMut::link`] is the same call, safe.
+    pub unsafe fn link(&self, chunk: usize, from: &mut usize) -> Result<usize> {
         batch::link(&self.region, &self.layout, chunk, from)
     }
 
@@ -236,7 +257,11 @@ impl<'a> Table<'a> {
     /// held already, each once, even while other participants link: a
     /// published record walks the rest of its chain for its keys. Returns
     /// the count linked and the duplicates.
-    pub fn link_counting(&self, chunk: usize, from: &mut usize) -> Result<(usize, usize)> {
+    ///
+    /// # Safety
+    ///
+    /// As [`Table::link`].
+    pub unsafe fn link_counting(&self, chunk: usize, from: &mut usize) -> Result<(usize, usize)> {
         batch::link_counting::<_, true>(&self.region, &self.layout, chunk, from)
     }
 
@@ -386,7 +411,11 @@ impl<'a> Table<'a> {
         bloom::try_build(&self.region, &self.layout, filter)
     }
 
-    /// The record at a reference a call of this table returned.
+    /// The record at a reference a call of this table returned. A
+    /// reference is checked against its chunk's length, not its used mark,
+    /// which a writer moves: in a shared build one past the mark reads
+    /// bytes that the chunk's writer may be writing, so a caller reads
+    /// only the references the calls gave it.
     pub fn record(&self, reference: u32) -> Result<Record<'_>> {
         Ok(Access::new(&self.region, &self.layout)
             .locate(reference, Kind::WrongCall)?
@@ -401,14 +430,6 @@ impl<'a> Table<'a> {
         RecordCursor {
             access: Access::new(&self.region, &self.layout),
         }
-    }
-
-    /// Visit the records from `cursor` on, chunk by chunk in the order
-    /// they were appended, as many as `out` holds: their references fill
-    /// `out`, the count is returned and the cursor moves past them; 0
-    /// means the walk is over.
-    pub fn scan(&self, cursor: &mut Cursor, out: &mut [u32]) -> Result<usize> {
-        writer::scan(&self.region, &self.layout, cursor, out)
     }
 }
 
@@ -532,6 +553,52 @@ impl<'a> TableMut<'a> {
     /// already.
     pub fn link_grouped(&mut self, chunk: usize, from: &mut usize) -> Result<(usize, usize)> {
         writer::link_grouped(&self.0.region, &self.0.layout, chunk, from)
+    }
+
+    /// As [`Table::append`], over a table this writer has to itself.
+    pub fn append<K: KeySource + ?Sized>(
+        &mut self,
+        chunk: usize,
+        payload: Option<&[u8]>,
+        batch: &mut Batch<'_, K>,
+    ) -> Result<usize> {
+        // SAFETY: the writer has the table to itself, and a record borrowed
+        // from it would hold this handle.
+        unsafe { self.0.append(chunk, payload, batch) }
+    }
+
+    /// As [`Table::append_columns`], over a table this writer has to
+    /// itself.
+    pub fn append_columns<K: KeySource + ?Sized>(
+        &mut self,
+        chunk: usize,
+        columns: &PayloadColumns<'_>,
+        batch: &mut Batch<'_, K>,
+    ) -> Result<usize> {
+        // SAFETY: as in `append`.
+        unsafe { self.0.append_columns(chunk, columns, batch) }
+    }
+
+    /// As [`Table::link`], over a table this writer has to itself.
+    pub fn link(&mut self, chunk: usize, from: &mut usize) -> Result<usize> {
+        // SAFETY: as in `append`.
+        unsafe { self.0.link(chunk, from) }
+    }
+
+    /// As [`Table::link_counting`], over a table this writer has to
+    /// itself.
+    pub fn link_counting(&mut self, chunk: usize, from: &mut usize) -> Result<(usize, usize)> {
+        // SAFETY: as in `append`.
+        unsafe { self.0.link_counting(chunk, from) }
+    }
+
+    /// Visit the records from `cursor` on, chunk by chunk in the order
+    /// they were appended, as many as `out` holds: their references fill
+    /// `out`, the count is returned and the cursor moves past them; 0
+    /// means the walk is over. A walk reads the chunks' used marks, which
+    /// writers move, so it needs the table to itself.
+    pub fn scan(&self, cursor: &mut Cursor, out: &mut [u32]) -> Result<usize> {
+        writer::scan(&self.0.region, &self.0.layout, cursor, out)
     }
 
     /// A cursor over the payloads of the table's records, to change them

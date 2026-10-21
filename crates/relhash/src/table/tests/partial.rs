@@ -41,8 +41,10 @@ fn place(
     let columns = PayloadColumns::new(&value_columns, &null_columns, 128)?;
     let mut batch = Batch::new(&hashes, keys, pending, refs)?;
     match call {
-        Call::Append => table.table()?.append(chunk, None, &mut batch),
-        Call::Columns => table.table()?.append_columns(chunk, &columns, &mut batch),
+        Call::Append => table.table_mut()?.append(chunk, None, &mut batch),
+        Call::Columns => table
+            .table_mut()?
+            .append_columns(chunk, &columns, &mut batch),
         Call::Find => table.table_mut()?.find_or_insert(
             chunk,
             &mut batch,
@@ -230,7 +232,7 @@ fn a_link_that_meets_a_damaged_record_counts_what_it_linked() -> Result<()> {
     let chunk = table.add_chunk()?;
     let mut pending = [0b1111];
     let mut refs = [0; 4];
-    table.table()?.append(
+    table.table_mut()?.append(
         chunk,
         None,
         &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs)?,
@@ -240,12 +242,12 @@ fn a_link_that_meets_a_damaged_record_counts_what_it_linked() -> Result<()> {
     let (_, byte) = placement(refs[2]);
     set_u32(table.chunk_words(chunk), byte + 12, words + 1);
     let mut from = CHUNK_HEADER;
-    let failed = table.table()?.link(chunk, &mut from);
+    let failed = table.table_mut()?.link(chunk, &mut from);
     assert_eq!(refusal(failed), Some((Kind::Damaged, Rule::NoRecord)));
     assert_eq!(table.table()?.stats().records, 2, "the records linked");
     assert_eq!(from, byte, "the next link starts at the damaged record");
     set_u32(table.chunk_words(chunk), byte + 12, words);
-    assert_eq!(table.table()?.link(chunk, &mut from)?, 2);
+    assert_eq!(table.table_mut()?.link(chunk, &mut from)?, 2);
     assert_eq!(table.table()?.stats().records, 4);
     let (found, matches) = probe_all(&table.table()?, &hashes, &Keys(&keys))?;
     assert_eq!(found, [0, 1, 2, 3]);

@@ -740,7 +740,8 @@ mod tests {
         let mut sources = Vec::new();
         while batch.pending().selected_count() > 0 {
             let source = into.add_chunk()?;
-            into.table()?.append(source, Some(&payload), &mut batch)?;
+            into.table_mut()?
+                .append(source, Some(&payload), &mut batch)?;
             sources.push(source);
         }
         for source in sources {

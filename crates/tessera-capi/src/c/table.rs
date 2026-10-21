@@ -180,7 +180,7 @@ pub(super) unsafe fn attach<'a>(table: *const TableRef) -> Result<Table<'a>> {
 /// # Safety
 ///
 /// As [`attach`], and as [`TableMut::attach_mut`].
-unsafe fn attach_mut<'a>(table: *const TableRef) -> Result<TableMut<'a>> {
+pub(super) unsafe fn attach_mut<'a>(table: *const TableRef) -> Result<TableMut<'a>> {
     // SAFETY: the caller's contract.
     unsafe {
         let (table, chunks) = chunks_of(table)?;
@@ -570,6 +570,8 @@ pub unsafe extern "C" fn tess_table_append(
             };
             let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
             match indexed {
+                // SAFETY: `table.h` makes the caller the chunk's one writer,
+                // and the C side borrows no record of the chunk.
                 Some(table) => table.append(chunk, payload, &mut batch)?,
                 None => ChunkWriter::new(&config, chunks)?.append(chunk, payload, &mut batch)?,
             };
@@ -624,6 +626,7 @@ pub unsafe extern "C" fn tess_table_append_columns(
             let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
             let append = |payload: &PayloadColumns<'_>| -> Result<usize> {
                 Ok(match &indexed {
+                    // SAFETY: as in `tess_table_append`.
                     Some(table) => table.append_columns(chunk, payload, &mut batch)?,
                     None => ChunkWriter::new(&config, chunks)?
                         .append_columns(chunk, payload, &mut batch)?,
@@ -881,6 +884,8 @@ pub unsafe extern "C" fn tess_table_link(
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let from = from.as_mut().context("a null link cursor")?;
             let table = attach(table)?;
+            // SAFETY: `table.h` lets each participant link its own chunks,
+            // and the C side borrows no record of them.
             let count = match duplicates.as_mut() {
                 Some(duplicates) => {
                     let (count, repeated) = table.link_counting(chunk, from)?;

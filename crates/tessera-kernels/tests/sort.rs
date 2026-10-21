@@ -139,7 +139,7 @@ fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> 
         loop {
             let chunk = table.chunks() - 1;
             {
-                let shared = table.table()?;
+                let mut shared = table.table_mut()?;
                 shared.append(
                     chunk,
                     None,
@@ -154,7 +154,7 @@ fn sorted_rows(keys: &[SortKey], rows: &Rows) -> Result<(Vec<usize>, Vec<u32>)> 
     }
     let words = item_words(keys)?;
     let mut items = vec![0u64; nrows * words];
-    let count = order::items(&table.table()?, keys, &mut items)?;
+    let count = order::items(&table.table_mut()?, keys, &mut items)?;
     assert_eq!(count, nrows, "every record makes an item");
     let mut out = vec![0u32; nrows];
     sort_items(&mut items, words, &mut out)?;
@@ -278,9 +278,9 @@ fn misuse_is_an_error() -> Result<()> {
         nkeys: 1,
         payload_size: 8,
     };
-    let table = OwnedTable::new(&config, 0, CHUNK)?;
+    let mut table = OwnedTable::new(&config, 0, CHUNK)?;
     let keys = [key(Int32, false, false, false)];
-    assert_eq!(order::items(&table.table()?, &keys, &mut [])?, 0);
+    assert_eq!(order::items(&table.table_mut()?, &keys, &mut [])?, 0);
     let mut items = [0u64; 4];
     assert!(sort_items(&mut items, 1, &mut [0u32; 3]).is_err());
     assert!(sort_items(&mut items, 3, &mut [0u32; 1]).is_err());
@@ -326,7 +326,7 @@ fn top_rows(keys: &[SortKey], rows: &Rows, n: usize) -> Result<Vec<Vec<Option<i6
         loop {
             let chunk = table.chunks() - 1;
             {
-                let shared = table.table()?;
+                let mut shared = table.table_mut()?;
                 shared.append(
                     chunk,
                     None,

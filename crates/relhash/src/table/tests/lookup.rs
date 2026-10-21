@@ -261,7 +261,7 @@ fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
     let mut pending_words = all_rows(100);
     let mut refs = vec![0; 100];
     {
-        let shared = table.table()?;
+        let mut shared = table.table_mut()?;
         let source = Keys(&keys);
         let mut batch = Batch::new(&hashes, &source, &mut pending_words, &mut refs)?;
         let appended = shared.append(chunk, None, &mut batch)?;
@@ -287,7 +287,7 @@ fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
     assert_eq!(table.chunk_words(chunk)[0], (CHUNK_HEADER + 16 * 32) as u64);
     // The rest go into a second chunk and are found alongside.
     let second = table.add_chunk()?;
-    let shared = table.table()?;
+    let mut shared = table.table_mut()?;
     shared.append(
         second,
         None,
@@ -326,7 +326,7 @@ fn linking_counts_the_records_whose_keys_were_there_already() -> Result<()> {
     let second: Vec<i32> = (30..60).collect();
     let mut table = OwnedTable::new(&ONE_INT4, 100, 4096)?;
     let chunks = [table.add_chunk()?, table.add_chunk()?];
-    let shared = table.table()?;
+    let mut shared = table.table_mut()?;
     for (chunk, values) in chunks.iter().zip([&first, &second]) {
         let keys = [Column::new(values, None)];
         let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
@@ -440,7 +440,7 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
     let rows_words = all_rows(70);
     let rows = RowMaskView::try_new(70, &rows_words)?;
     {
-        let shared = table.table()?;
+        let mut shared = table.table_mut()?;
         assert!(
             shared
                 .append(
@@ -570,7 +570,7 @@ fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
                 .is_err()
         );
         let mut from = CHUNK_HEADER;
-        assert!(table.table()?.link(0, &mut from).is_err());
+        assert!(table.table_mut()?.link(0, &mut from).is_err());
     }
     Ok(())
 }
@@ -821,7 +821,7 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
             0 => table.add_chunk()?,
             n => n - 1,
         };
-        table.table()?.append(
+        table.table_mut()?.append(
             chunk,
             Some(&payload),
             &mut Batch::new(&hashes, &Keys(&keys), &mut pending_words, &mut refs)?,
