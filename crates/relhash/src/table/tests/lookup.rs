@@ -200,7 +200,10 @@ fn a_cleared_key_is_zero_in_every_record() -> Result<()> {
     let refs = insert_all(&mut table, &hashes, &Keys(&keys), Some(&payload))?;
     assert!(table.chunks() > 1, "the records span chunks");
     assert_eq!(table.table_mut()?.clear_key(1)?, nrows as u64);
-    assert!(table.table_mut()?.clear_key(2).is_err());
+    assert_eq!(
+        refusal(table.table_mut()?.clear_key(2)),
+        Some((Kind::WrongCall, Rule::Key))
+    );
     let table = table.table()?;
     for (row, &offset) in refs.iter().enumerate() {
         let record = table.record(offset)?;
@@ -300,21 +303,29 @@ fn a_full_chunk_leaves_the_rest_pending_until_linked_elsewhere() -> Result<()> {
     assert_eq!(found, (0..32).collect::<Vec<_>>());
     // Appending to or linking a chunk that does not exist, or linking from
     // inside a record or past the used mark, fails.
-    assert!(
-        shared
-            .append(
-                9,
-                None,
-                &mut Batch::new(&hashes, &Keys(&keys), &mut pending_words, &mut refs).unwrap()
-            )
-            .is_err()
+    assert_eq!(
+        refusal(shared.append(
+            9,
+            None,
+            &mut Batch::new(&hashes, &Keys(&keys), &mut pending_words, &mut refs).unwrap()
+        )),
+        Some((Kind::WrongCall, Rule::NoChunk))
     );
     let mut from = CHUNK_HEADER;
-    assert!(shared.link(9, &mut from).is_err());
+    assert_eq!(
+        refusal(shared.link(9, &mut from)),
+        Some((Kind::WrongCall, Rule::NoChunk))
+    );
     let mut inside = CHUNK_HEADER + 4;
-    assert!(shared.link(chunk, &mut inside).is_err());
+    assert_eq!(
+        refusal(shared.link(chunk, &mut inside)),
+        Some((Kind::WrongCall, Rule::Boundary))
+    );
     let mut past = CHUNK_HEADER + 17 * 32;
-    assert!(shared.link(chunk, &mut past).is_err());
+    assert_eq!(
+        refusal(shared.link(chunk, &mut past)),
+        Some((Kind::WrongCall, Rule::Boundary))
+    );
     Ok(())
 }
 
@@ -380,7 +391,10 @@ fn a_record_larger_than_a_chunk_is_refused() -> Result<()> {
             nkeys: 1,
             payload_size,
         };
-        assert!(index_size(&config, 1).is_err());
+        assert_eq!(
+            refusal(index_size(&config, 1)),
+            Some((Kind::WrongCall, Rule::RecordFit))
+        );
     }
     Ok(())
 }
@@ -441,46 +455,70 @@ fn dimension_errors_come_before_any_change() -> Result<()> {
     let rows = RowMaskView::try_new(70, &rows_words)?;
     {
         let mut shared = table.table_mut()?;
-        assert!(
-            shared
-                .append(
-                    chunk,
-                    None,
-                    &mut Batch::new(&hashes, &Keys(&one_key), &mut pending_words, &mut refs)
-                        .unwrap()
-                )
-                .is_err()
+        assert_eq!(
+            refusal(shared.append(
+                chunk,
+                None,
+                &mut Batch::new(&hashes, &Keys(&one_key), &mut pending_words, &mut refs).unwrap()
+            )),
+            Some((Kind::WrongCall, Rule::Keys))
         );
         // Row counts that differ are refused as the batch is made.
         let two = Keys(&two_keys);
-        assert!(Batch::new(&hashes[..69], &two, &mut pending_words, &mut refs).is_err());
-        assert!(Batch::new(&hashes, &two, &mut pending_words, &mut refs[..69]).is_err());
+        assert_eq!(
+            refusal(Batch::new(
+                &hashes[..69],
+                &two,
+                &mut pending_words,
+                &mut refs
+            )),
+            Some((Kind::WrongCall, Rule::RowCounts))
+        );
+        assert_eq!(
+            refusal(Batch::new(
+                &hashes,
+                &two,
+                &mut pending_words,
+                &mut refs[..69]
+            )),
+            Some((Kind::WrongCall, Rule::MaskPadding))
+        );
         let mask = RowMask::try_new(70, &mut pending_words)?;
-        assert!(Batch::from_mask(&hashes, &two, mask, &mut refs[..69]).is_err());
-        assert!(
-            shared
-                .append(
-                    chunk,
-                    Some(&payload[..8]),
-                    &mut Batch::new(&hashes, &two, &mut pending_words, &mut refs).unwrap()
-                )
-                .is_err()
+        assert_eq!(
+            refusal(Batch::from_mask(&hashes, &two, mask, &mut refs[..69])),
+            Some((Kind::WrongCall, Rule::RowCounts))
+        );
+        assert_eq!(
+            refusal(shared.append(
+                chunk,
+                Some(&payload[..8]),
+                &mut Batch::new(&hashes, &two, &mut pending_words, &mut refs).unwrap()
+            )),
+            Some((Kind::WrongCall, Rule::PayloadBytes))
         );
         assert_eq!(pending_words, all_rows(70), "no row left the batch");
         assert_eq!(shared.stats().records, 0);
         let mut found_words = rows_words.clone();
         let mut matches = vec![0; 70];
         let mut found = Matches::new(&mut found_words, &mut matches)?;
-        assert!(shared.probe(&hashes, &Keys(&one_key), &mut found).is_err());
-        assert!(
-            shared
-                .probe(&hashes[..69], &Keys(&two_keys), &mut found)
-                .is_err()
+        assert_eq!(
+            refusal(shared.probe(&hashes, &Keys(&one_key), &mut found)),
+            Some((Kind::WrongCall, Rule::Keys))
+        );
+        assert_eq!(
+            refusal(shared.probe(&hashes[..69], &Keys(&two_keys), &mut found)),
+            Some((Kind::WrongCall, Rule::RowCounts))
         );
         // A mask and references of other lengths are refused as the
         // matches are made.
-        assert!(Matches::new(&mut found_words, &mut refs[..69]).is_err());
-        assert!(MatchesView::new(rows, &refs[..69]).is_err());
+        assert_eq!(
+            refusal(Matches::new(&mut found_words, &mut refs[..69])),
+            Some((Kind::WrongCall, Rule::MaskPadding))
+        );
+        assert_eq!(
+            refusal(MatchesView::new(rows, &refs[..69])),
+            Some((Kind::WrongCall, Rule::RowCounts))
+        );
     }
     assert_eq!(
         table.chunk_words(chunk)[0],
@@ -523,22 +561,32 @@ fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
     assert!(table_probe_one(&table, &hashes, &keys)?);
     let bucket = HEADER + (hashes[0] >> 22) as usize * 4;
     let head = table.index_words()[bucket / 8];
-    for (what, damaged) in [
-        ("a chunk that does not exist", reference(3, CHUNK_HEADER)),
-        ("a chunk's used mark", reference(0, 0) | 1 << UNIT_BITS),
-        ("past the chunk", reference(0, CHUNK - 8)),
-        ("inside a record", refs[0] + 1),
+    for (what, damaged, rule) in [
+        (
+            "a chunk that does not exist",
+            reference(3, CHUNK_HEADER),
+            Rule::Outside,
+        ),
+        (
+            "a chunk's used mark",
+            reference(0, 0) | 1 << UNIT_BITS,
+            Rule::Outside,
+        ),
+        ("past the chunk", reference(0, CHUNK - 8), Rule::Outside),
+        ("inside a record", refs[0] + 1, Rule::Misplaced),
     ] {
         set_u32(table.index_words(), bucket, damaged);
-        assert!(
-            table_probe_one(&table, &hashes, &keys).is_err(),
+        assert_eq!(
+            refusal(table_probe_one(&table, &hashes, &keys)),
+            Some((Kind::Damaged, rule)),
             "a head at {what}"
         );
         table.index_words()[bucket / 8] = head;
     }
     assert!(table_probe_one(&table, &hashes, &keys)?);
-    assert!(
-        table.table()?.record(refs[0] + 1).is_err(),
+    assert_eq!(
+        refusal(table.table()?.record(refs[0] + 1)),
+        Some((Kind::Damaged, Rule::Misplaced)),
         "a reference inside a record"
     );
 
@@ -563,14 +611,15 @@ fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
     // A used mark that ends no record, or lies past the chunk.
     for used in [12, CHUNK as u64 + 8] {
         table.chunk_words(0)[0] = used;
-        assert!(
-            table
-                .table_mut()?
-                .scan(&mut Cursor::start(), &mut [0; 8])
-                .is_err()
+        assert_eq!(
+            refusal(table.table_mut()?.scan(&mut Cursor::start(), &mut [0; 8])),
+            Some((Kind::Damaged, Rule::UsedMark))
         );
         let mut from = CHUNK_HEADER;
-        assert!(table.table_mut()?.link(0, &mut from).is_err());
+        assert_eq!(
+            refusal(table.table_mut()?.link(0, &mut from)),
+            Some((Kind::Damaged, Rule::UsedMark))
+        );
     }
     Ok(())
 }
@@ -598,17 +647,18 @@ fn reference_zero_names_no_record() -> Result<()> {
     assert_eq!(heads, refs);
     // Reference 0 is chunk 0's used mark: no call takes it for a record.
     let table = table.table()?;
-    assert!(table.record(0).is_err());
-    let rows = RowMaskView::try_new(1, &[1])?;
-    assert!(
-        table
-            .gather(MatchesView::new(rows, &[0])?, 0, &mut [0])
-            .is_err()
+    assert_eq!(
+        refusal(table.record(0)),
+        Some((Kind::WrongCall, Rule::Outside))
     );
-    assert!(
-        table
-            .next_match(&mut Matches::new(&mut [1], &mut [0])?)
-            .is_err()
+    let rows = RowMaskView::try_new(1, &[1])?;
+    assert_eq!(
+        refusal(table.gather(MatchesView::new(rows, &[0])?, 0, &mut [0])),
+        Some((Kind::WrongCall, Rule::Outside))
+    );
+    assert_eq!(
+        refusal(table.next_match(&mut Matches::new(&mut [1], &mut [0])?)),
+        Some((Kind::WrongCall, Rule::Outside))
     );
     Ok(())
 }
@@ -761,38 +811,35 @@ fn gather_reads_one_payload_word_of_each_selected_match() -> Result<()> {
     // A word past the payload or not at a multiple of 8, short buffers and
     // a bad reference are errors.
     let mut out = vec![0; nrows];
-    assert!(
-        table
-            .gather(MatchesView::new(rows, &matches)?, 9, &mut out)
-            .is_err()
+    assert_eq!(
+        refusal(table.gather(MatchesView::new(rows, &matches)?, 9, &mut out)),
+        Some((Kind::WrongCall, Rule::PayloadWord))
     );
-    assert!(
-        table
-            .gather(MatchesView::new(rows, &matches)?, 4, &mut out)
-            .is_err()
+    assert_eq!(
+        refusal(table.gather(MatchesView::new(rows, &matches)?, 4, &mut out)),
+        Some((Kind::WrongCall, Rule::PayloadWord))
     );
-    assert!(
-        table
-            .gather_scattered(MatchesView::new(rows, &matches)?, 4, &mut out)
-            .is_err()
+    assert_eq!(
+        refusal(table.gather_scattered(MatchesView::new(rows, &matches)?, 4, &mut out)),
+        Some((Kind::WrongCall, Rule::PayloadWord))
     );
-    assert!(
-        table
-            .gather(MatchesView::new(rows, &matches)?, usize::MAX, &mut out)
-            .is_err()
+    assert_eq!(
+        refusal(table.gather(MatchesView::new(rows, &matches)?, usize::MAX, &mut out)),
+        Some((Kind::WrongCall, Rule::PayloadWord))
     );
-    assert!(MatchesView::new(rows, &matches[1..]).is_err());
-    assert!(
-        table
-            .gather(MatchesView::new(rows, &matches)?, 0, &mut out[1..])
-            .is_err()
+    assert_eq!(
+        refusal(MatchesView::new(rows, &matches[1..])),
+        Some((Kind::WrongCall, Rule::RowCounts))
+    );
+    assert_eq!(
+        refusal(table.gather(MatchesView::new(rows, &matches)?, 0, &mut out[1..])),
+        Some((Kind::WrongCall, Rule::RowCounts))
     );
     let mut inside = matches.clone();
     inside[0] += 1;
-    assert!(
-        table
-            .gather(MatchesView::new(rows, &inside)?, 0, &mut out)
-            .is_err()
+    assert_eq!(
+        refusal(table.gather(MatchesView::new(rows, &inside)?, 0, &mut out)),
+        Some((Kind::Damaged, Rule::Misplaced))
     );
     Ok(())
 }
@@ -858,10 +905,9 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
         }
     }
     let mut out = vec![0u64; ROWS];
-    assert!(
-        shared
-            .gather_scattered(MatchesView::new(rows, &shuffled)?, 16, &mut out)
-            .is_err()
+    assert_eq!(
+        refusal(shared.gather_scattered(MatchesView::new(rows, &shuffled)?, 16, &mut out)),
+        Some((Kind::WrongCall, Rule::PayloadWord))
     );
     // Both words in one call read what a word at a time reads.
     let mut first = vec![u64::MAX; ROWS];
@@ -883,24 +929,21 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
     assert_eq!(second, expected);
     // No words, words past the payload, outputs of another row count.
     let (mut a, mut b, mut short) = (vec![0; ROWS], vec![0; ROWS], vec![0; ROWS - 1]);
-    assert!(
-        shared
-            .gather_words(MatchesView::new(rows, &shuffled)?, 0, &mut [])
-            .is_err()
+    assert_eq!(
+        refusal(shared.gather_words(MatchesView::new(rows, &shuffled)?, 0, &mut [])),
+        Some((Kind::WrongCall, Rule::PayloadWords))
     );
-    assert!(
-        shared
-            .gather_words(MatchesView::new(rows, &shuffled)?, 1, &mut [&mut a, &mut b])
-            .is_err()
+    assert_eq!(
+        refusal(shared.gather_words(MatchesView::new(rows, &shuffled)?, 1, &mut [&mut a, &mut b])),
+        Some((Kind::WrongCall, Rule::PayloadWords))
     );
-    assert!(
-        shared
-            .gather_words(
-                MatchesView::new(rows, &shuffled)?,
-                0,
-                &mut [&mut a, &mut short]
-            )
-            .is_err()
+    assert_eq!(
+        refusal(shared.gather_words(
+            MatchesView::new(rows, &shuffled)?,
+            0,
+            &mut [&mut a, &mut short]
+        )),
+        Some((Kind::WrongCall, Rule::BatchRows))
     );
     Ok(())
 }
