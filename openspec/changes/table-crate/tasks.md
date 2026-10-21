@@ -190,7 +190,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       example of a record borrowed across an append; Miri over a reset
       and a reuse of an old reference; `cargo public-api -p relhash`;
       `make installcheck`
-- [ ] 3.14 Store 0 in the slot of every key a source marks NULL,
+- [x] 3.14 Store 0 in the slot of every key a source marks NULL,
       whatever the source wrote there, and say in `KeySource` what a
       source that cannot give a word leaves behind. Check: a source
       that leaves values in NULL slots; machine code
