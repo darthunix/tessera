@@ -100,7 +100,31 @@ pub struct Batch<'b, K: ?Sized> {
 impl<'b, K: KeySource + ?Sized> Batch<'b, K> {
     /// A batch of the rows set in `pending`, a word for each 64 of the
     /// `refs.len()` rows, each with its hash, its keys and its slot in
-    /// `refs`.
+    /// `refs`. The batch borrows its source of keys for as long as it
+    /// lives, so a source made for the call is bound first:
+    ///
+    /// ```
+    /// use relhash::{Batch, KeySource, ones};
+    ///
+    /// struct Keys<'a>(&'a [i32]);
+    /// impl KeySource for Keys<'_> {
+    ///     fn nkeys(&self) -> usize { 1 }
+    ///     fn nrows(&self) -> usize { self.0.len() }
+    ///     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
+    ///         for bit in ones(selected) {
+    ///             out[bit] = i64::from(self.0[index * 64 + bit]);
+    ///         }
+    ///         Some(selected)
+    ///     }
+    /// }
+    ///
+    /// let values = [7, 8, 7];
+    /// let keys = Keys(&values);
+    /// let (mut pending, mut refs) = ([0b111], [0; 3]);
+    /// let batch = Batch::new(&[1, 2, 1], &keys, &mut pending, &mut refs)?;
+    /// assert_eq!(batch.pending().selected_count(), 3);
+    /// # Ok::<(), relhash::Error>(())
+    /// ```
     #[inline]
     pub fn new(
         hashes: &'b [u32],
@@ -133,6 +157,11 @@ impl<'b, K: KeySource + ?Sized> Batch<'b, K> {
     /// The rows still to place.
     pub fn pending(&self) -> RowMaskView<'_> {
         self.pending.as_view()
+    }
+
+    /// The reference of each placed row's record, at its row.
+    pub fn refs(&self) -> &[u32] {
+        self.refs
     }
 }
 

@@ -15,7 +15,7 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView, ones};
 
 use crate::decimal::{self, ExtremeState, Offer, Partial, Partials, SumState, Term, Terms};
 use crate::ops::ArithmeticError;
-use crate::table::{CombineStop, HELD, TableMut};
+use crate::table::{HELD, MergeStop, TableMut};
 
 /// How an aggregate's state in a payload takes a row's value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -606,7 +606,7 @@ pub fn combine(
     from: &mut usize,
     chunk: usize,
     combines: &[Combine],
-) -> Result<(usize, CombineStop)> {
+) -> Result<(usize, MergeStop)> {
     combine_inner(table, source, from, chunk, combines)
 }
 
@@ -616,7 +616,7 @@ fn combine_inner(
     from: &mut usize,
     chunk: usize,
     combines: &[Combine],
-) -> Result<(usize, CombineStop)> {
+) -> Result<(usize, MergeStop)> {
     ensure!(
         combines.len() <= 64 && 8 * (1 + combines.len()) <= table.payload_size(),
         "{} aggregates do not fit a payload of {} bytes with a word of flags",
@@ -749,9 +749,9 @@ mod tests {
             loop {
                 let (_, stop) = combine(&mut into.table_mut()?, source, &mut at, chunk, &COMBINES)?;
                 match stop {
-                    CombineStop::Done => break,
-                    CombineStop::ChunkFull => chunk = into.add_chunk()?,
-                    CombineStop::IndexFull => {
+                    MergeStop::Done => break,
+                    MergeStop::ChunkFull => chunk = into.add_chunk()?,
+                    MergeStop::IndexFull => {
                         let records = into.table()?.stats().records;
                         into.regrow(records * 2)?;
                     }

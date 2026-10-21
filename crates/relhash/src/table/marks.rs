@@ -70,21 +70,16 @@ impl PerRecord {
 
 /// The marks of a table's records, a run of words per chunk, each of at
 /// least [`mark_words`] of the chunk's length.
+///
+/// The crate calls these for a chunk of the table and a `word` below
+/// [`mark_words`] of its length, never past them, so an implementation
+/// over raw words may trust the two numbers.
 pub trait Marks {
     /// Set bit `bit` of word `word` of chunk `chunk`'s marks.
-    ///
-    /// # Safety
-    ///
-    /// `chunk` is a chunk of the table, and `word` is below [`mark_words`]
-    /// of its length.
-    unsafe fn set(&self, chunk: usize, word: usize, bit: u64);
+    fn set(&self, chunk: usize, word: usize, bit: u64);
 
     /// Word `word` of chunk `chunk`'s marks.
-    ///
-    /// # Safety
-    ///
-    /// As for [`Marks::set`].
-    unsafe fn word(&self, chunk: usize, word: usize) -> u64;
+    fn word(&self, chunk: usize, word: usize) -> u64;
 }
 
 impl Chunks<'_> {
@@ -134,9 +129,9 @@ pub fn mark(
         );
         let (record, starts) = per_record.record(byte - CHUNK_HEADER);
         ensure!(starts, Error::wrong_call(Rule::Reference).with(reference));
-        // SAFETY: the chunk is the table's and the record within its
-        // length, so its word is below the chunk's marks.
-        unsafe { marks.set(chunk, record / 64, 1 << (record % 64)) };
+        // The chunk is the table's and the record within its length, so
+        // its word is below the chunk's marks, as `Marks` promises.
+        marks.set(chunk, record / 64, 1 << (record % 64));
         Ok(())
     };
     // A full word's 64 references at once, which its bits index unchecked.
@@ -200,7 +195,7 @@ pub fn scan_unmarked(
             let high = (end - word * 64).min(64);
             // SAFETY: the chunk is the table's, and the word's records lie
             // below its used mark, within its length.
-            let taken = marks.map_or(0, |marks| unsafe { marks.word(chunk, word) });
+            let taken = marks.map_or(0, |marks| marks.word(chunk, word));
             let mut free = !taken >> low << low;
             if high < 64 {
                 free &= (1 << high) - 1;
@@ -264,9 +259,9 @@ mod tests {
     struct Unmarked;
 
     impl Marks for Unmarked {
-        unsafe fn set(&self, _: usize, _: usize, _: u64) {}
+        fn set(&self, _: usize, _: usize, _: u64) {}
 
-        unsafe fn word(&self, _: usize, _: usize) -> u64 {
+        fn word(&self, _: usize, _: usize) -> u64 {
             0
         }
     }

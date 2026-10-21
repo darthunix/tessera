@@ -18,11 +18,10 @@ use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Sl
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::phases::{Participant, SharedCounters, StopWord};
 use tessera_kernels::table::{
-    Appended, Batch, ChunkWriter, Chunks, CombineStop, Cursor, FORMAT_VERSION, HEADER_SIZE,
-    KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, Marks, Matches, MatchesView, Partitions,
-    PayloadColumns, Table, TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, bloom::SharedFilter,
-    chunk_used, index_size, init_chunk, mark, mark_words, payload_null_words, record_bytes,
-    scan_unmarked,
+    Appended, Batch, ChunkWriter, Chunks, Cursor, FORMAT_VERSION, HEADER_SIZE, KeySource, MAX_KEYS,
+    MAX_PAYLOAD_COLUMNS, Marks, Matches, MatchesView, MergeStop, Partitions, PayloadColumns, Table,
+    TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, bloom::SharedFilter, index_size, mark,
+    mark_words, payload_null_words, record_bytes, scan_unmarked,
 };
 
 use super::args::reader;
@@ -489,7 +488,7 @@ pub unsafe extern "C" fn tess_table_chunk_init(
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
-    unsafe { guard(status, || Ok(init_chunk(base, len)?)) }
+    unsafe { guard(status, || Ok(Chunks::init(base, len)?)) }
 }
 
 /// `tess_table_chunk_used`: the used mark of a chunk, checked.
@@ -511,7 +510,7 @@ pub unsafe extern "C" fn tess_table_chunk_used(
     unsafe {
         guard(status, || {
             let used = used.as_mut().context("a null used mark")?;
-            *used = chunk_used(base, len, record_size)?;
+            *used = Chunks::used(base, len, record_size)?;
             Ok(())
         })
     }
@@ -1375,9 +1374,9 @@ pub unsafe extern "C" fn tess_table_combine(
                 accumulate::combine(&mut table, source, from, chunk, &decoded[..count])?;
             *merged = count_merged as c_int;
             *stop = match stopped {
-                CombineStop::Done => 0,
-                CombineStop::ChunkFull => 1,
-                CombineStop::IndexFull => 2,
+                MergeStop::Done => 0,
+                MergeStop::ChunkFull => 1,
+                MergeStop::IndexFull => 2,
             };
             Ok(())
         })
@@ -1507,8 +1506,10 @@ impl RawMarks {
 
 // A shared word is only accessed atomically, by every participant at once.
 impl Marks for RawMarks {
-    unsafe fn set(&self, chunk: usize, word: usize, bit: u64) {
-        // SAFETY: the caller's contract.
+    fn set(&self, chunk: usize, word: usize, bit: u64) {
+        // SAFETY: the crate calls this for a chunk of the table and a word
+        // below its marks, and `tess_table_mark`'s caller sized the runs
+        // of words so.
         unsafe {
             let at = self.at(chunk, word);
             if self.shared {
@@ -1523,8 +1524,8 @@ impl Marks for RawMarks {
         }
     }
 
-    unsafe fn word(&self, chunk: usize, word: usize) -> u64 {
-        // SAFETY: the caller's contract.
+    fn word(&self, chunk: usize, word: usize) -> u64 {
+        // SAFETY: as in `set`.
         unsafe {
             let at = self.at(chunk, word);
             if self.shared {

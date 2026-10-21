@@ -298,7 +298,7 @@ impl<'a> RowMask<'a> {
 /// A count other than `nrows` returns an error with `nrows` and that
 /// count, so that a call fails before it changes anything.
 #[inline]
-pub fn check_rows(nrows: usize, counts: &[usize]) -> Result<()> {
+pub(crate) fn check_rows(nrows: usize, counts: &[usize]) -> Result<()> {
     match counts.iter().find(|&&rows| rows != nrows) {
         None => Ok(()),
         Some(&rows) => Err(Error::wrong_call(Rule::RowCounts).with(nrows).and(rows)),

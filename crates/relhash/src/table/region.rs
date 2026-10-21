@@ -220,6 +220,21 @@ impl RawRegion {
         }
     }
 
+    /// The chunks the region was made over.
+    pub(super) fn chunk_list(&self) -> super::Chunks<'_> {
+        if self.nchunks == 0 {
+            return super::Chunks::none();
+        }
+        // SAFETY: the constructor's contract: `nchunks` entries of each,
+        // which stay unchanged while the region is used.
+        unsafe {
+            super::Chunks {
+                bases: core::slice::from_raw_parts(self.chunk_bases, self.nchunks),
+                lens: core::slice::from_raw_parts(self.chunk_lens, self.nchunks),
+            }
+        }
+    }
+
     /// The same chunks with another index, of `len` bytes at `base`.
     ///
     /// # Safety

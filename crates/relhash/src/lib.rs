@@ -146,5 +146,6 @@ mod table;
 
 pub use bits::ones;
 pub use error::{Error, Kind, Rule};
-pub use row_mask::{RowMask, RowMaskView, check_rows};
+pub(crate) use row_mask::check_rows;
+pub use row_mask::{RowMask, RowMaskView};
 pub use table::*;

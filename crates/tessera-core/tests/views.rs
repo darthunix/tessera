@@ -494,8 +494,8 @@ fn a_call_checks_that_its_masks_have_its_rows() {
     for (counts, rows) in [([64, 65], 64), ([65, 66], 66), ([0, 65], 0)] {
         let error = check_rows(65, &counts).unwrap_err();
         assert_eq!(
-            (error.kind(), error.rule(), error.numbers()),
-            (Kind::WrongCall, Rule::RowCounts, (65, rows))
+            error.to_string(),
+            format!("the masks of a call have different row counts: 65 and {rows}")
         );
     }
 }
