@@ -163,6 +163,87 @@ change, and SHALL place every one of them.
 - **Verified by:**
   `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`
 
+### Requirement: A batch that fails part way
+When a call that places rows fails at a row, because the source of keys
+cannot give a word's keys or a partition's chunk is refused, the rows
+it placed before SHALL stay placed: they SHALL have left the pending
+mask with the references of their records, those that made a record
+SHALL be in the mask of inserted rows, and the used mark of each chunk
+SHALL cover the records written in it. A link that fails SHALL count
+only the records it linked and SHALL move `*from` past them. The same
+batch, given again, SHALL place the rest once.
+
+#### Scenario: A source fails at the second word
+- **WHEN** a batch of 128 rows is appended, or found or inserted, and
+  the source of keys cannot give its second word
+- **THEN** the call fails with a wrong call and the rule of the source,
+  the first word's rows have left the pending mask with their
+  references, a walk of the chunk sees their records, and the batch
+  given again with a source that gives every word places the second
+  word after them
+- **Verified by:** pending
+
+#### Scenario: A partition's chunk is refused
+- **WHEN** a call by partition meets, in the middle of a word, a
+  partition whose chunk does not exist
+- **THEN** the rows placed before it are placed once, also after the
+  call is made again with that partition's chunk given
+- **Verified by:** pending
+
+#### Scenario: A link fails part way
+- **WHEN** a link meets a damaged record after it has linked others
+- **THEN** the count of records grows by the records linked, and
+  `*from` lies past them
+- **Verified by:** pending
+
+### Requirement: The owning table
+Every order of the owning table's calls SHALL keep its table whole:
+each record linked once, and each key found where it was placed. The
+owning table SHALL refuse, when it is made, chunks too small for one
+record.
+
+#### Scenario: Calls in any order
+- **WHEN** random sequences of insertions, finds or insertions, larger
+  indexes and resets run over an owning table
+- **THEN** after each call its records, their count and the keys it
+  finds are those of a model of the sequence
+- **Verified by:** pending
+
+#### Scenario: A chunk too small for a record
+- **WHEN** an owning table is made with chunks shorter than a record
+- **THEN** it is refused with a wrong call and the rule of a record's
+  room
+- **Verified by:** pending
+
+### Requirement: Safe calls are sound
+No sequence of the crate's safe calls SHALL let a record that a caller
+has borrowed change while it is borrowed. The calls that write a chunk
+or the index SHALL need the table to themselves; over a table that
+several writers share they SHALL be unsafe calls, whose contract names
+the chunks each writer writes.
+
+#### Scenario: A record borrowed across an append
+- **WHEN** a caller borrows a record of the owning table and then
+  appends to its chunk
+- **THEN** the code does not compile
+- **Verified by:** pending
+
+#### Scenario: An old reference after a reset
+- **WHEN** an owning table is reset, an old reference is read, and new
+  rows are appended, under Miri
+- **THEN** Miri reports no undefined behavior
+- **Verified by:** pending
+
+### Requirement: Keys from a source
+A key that the source of keys marks NULL SHALL be stored and compared
+as 0, whatever the source wrote in its slot.
+
+#### Scenario: Values left in NULL slots
+- **WHEN** a source marks keys NULL but leaves values in their slots
+- **THEN** the rows of NULL keys find one record, and its slot of the
+  NULL key holds 0
+- **Verified by:** pending
+
 ### Requirement: Any bytes, a bounded call
 The caller promises that every block it gives is memory of the length
 it states, aligned to 8 bytes and initialized, and that no other
