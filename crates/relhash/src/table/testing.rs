@@ -81,3 +81,26 @@ impl KeySource for Keys<'_> {
         Some(non_null)
     }
 }
+
+/// A source of keys that cannot give word `.1` of the batch and gives the
+/// others as `.0` does: a call that fails part way.
+#[cfg(test)]
+pub(crate) struct Failing<'a, K: ?Sized>(pub(crate) &'a K, pub(crate) usize);
+
+#[cfg(test)]
+impl<K: KeySource + ?Sized> KeySource for Failing<'_, K> {
+    fn nkeys(&self) -> usize {
+        self.0.nkeys()
+    }
+
+    fn nrows(&self) -> usize {
+        self.0.nrows()
+    }
+
+    fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
+        if index == self.1 {
+            return None;
+        }
+        self.0.word(key, index, selected, out)
+    }
+}

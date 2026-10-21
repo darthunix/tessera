@@ -164,7 +164,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       Check: `make rust-check`; `make installcheck`; machine code;
       `cargo ab measure` of the grouping cases of `win`, no case
       slower
-- [ ] 3.11 Keep a table whole when a call that places rows fails part
+- [x] 3.11 Keep a table whole when a call that places rows fails part
       way: `append`, `append_columns`, `find_or_insert` and their forms
       by partition store the used mark of every chunk they wrote on
       every exit; the rows placed before the error leave the pending

@@ -181,20 +181,25 @@ batch, given again, SHALL place the rest once.
   references, a walk of the chunk sees their records, and the batch
   given again with a source that gives every word places the second
   word after them
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/partial.rs::a_source_that_fails_at_the_second_word_leaves_the_first_placed`
 
 #### Scenario: A partition's chunk is refused
 - **WHEN** a call by partition meets, in the middle of a word, a
-  partition whose chunk does not exist
-- **THEN** the rows placed before it are placed once, also after the
-  call is made again with that partition's chunk given
-- **Verified by:** pending
+  partition whose chunk's used mark is damaged
+- **THEN** it fails with a damaged table; the rows placed before it
+  have left the pending mask and, for a find, are in the mask of
+  inserted rows; and once the mark is repaired, the batch given again
+  places the rest, each row once
+- **Verified by:**
+  `crates/relhash/src/table/tests/partial.rs::a_partition_with_a_damaged_mark_leaves_the_rows_before_placed`
 
 #### Scenario: A link fails part way
 - **WHEN** a link meets a damaged record after it has linked others
 - **THEN** the count of records grows by the records linked, and
   `*from` lies past them
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/partial.rs::a_link_that_meets_a_damaged_record_counts_what_it_linked`
 
 ### Requirement: The owning table
 Every order of the owning table's calls SHALL keep its table whole:
