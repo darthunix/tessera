@@ -299,8 +299,11 @@ the documentation and the tests.
 - **The keys of NULL rows.** A record's slot of a NULL key holds 0, and
   keys are compared slot by slot, but the table takes the slot from the
   source as it is: a source that leaves a value there splits the
-  group of NULL keys. **Will be:** the table stores 0 in the slots of
-  the rows the source marks NULL.
+  group of NULL keys. **Will be:** the source's duty stays, as
+  `KeySource::word` says, and a build with debug assertions checks it.
+  Refused: the table storing 0 in those slots, which the counters showed
+  at one or two instructions a NULL row, up to 2.8 per cent of a batch of
+  NULLs; every source of Tessera gives 0 already.
 - **A cycle under a damaged count.** A walk down a chain stops after as
   many steps as the count of records, which `refresh` bounds by 2^17 a
   chunk; over hundreds of chunks a cycle with a damaged count takes

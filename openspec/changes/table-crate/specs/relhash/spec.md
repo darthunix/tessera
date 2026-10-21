@@ -244,15 +244,17 @@ the chunks each writer writes.
   `crates/relhash/src/table/tests/owned.rs::an_old_reference_after_a_reset_reads_what_its_place_holds`
 
 ### Requirement: Keys from a source
-A key that the source of keys marks NULL SHALL be stored and compared
-as 0, whatever the source wrote in its slot.
+A source of keys SHALL give 0 in the slot of every key it marks NULL:
+the table stores and compares keys slot by slot, so another value would
+split the group of NULL keys. A build with debug assertions SHALL check
+it.
 
-#### Scenario: Values left in NULL slots
-- **WHEN** a source marks keys NULL but leaves values in their slots
-- **THEN** the rows of NULL keys find one record, and its slot of the
-  NULL key holds 0
+#### Scenario: A value left in a NULL slot
+- **WHEN** a source marks keys NULL but leaves values in their slots,
+  in a build with debug assertions
+- **THEN** the call stops on the assertion
 - **Verified by:**
-  `crates/relhash/src/table/tests/records.rs::values_a_source_leaves_in_null_slots_split_no_group`
+  `crates/relhash/src/table/tests/records.rs::a_value_a_source_leaves_in_a_null_slot_is_caught`
 
 ### Requirement: Any bytes, a bounded call
 The caller promises that every block it gives is memory of the length
