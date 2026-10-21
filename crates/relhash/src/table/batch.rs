@@ -36,11 +36,53 @@ macro_rules! shaped {
 }
 pub(super) use shaped;
 
-/// The rows of a call that places them in a table: each row's hash and
-/// keys, the rows still to place, which leave `pending` as the call
-/// places them, and the reference of each placed row's record, at its
-/// row in `refs`. A batch may go through several calls, each placing
-/// what it can.
+/// The rows of a batch to place in a table, through one call or several.
+///
+/// A call takes no memory: a table's chunks and its index are the
+/// caller's. So a call that places rows stops when its chunk is full,
+/// and a call that finds or inserts also stops when the records reach
+/// half the buckets. The caller then adds a chunk or makes a larger
+/// index and calls again with the same batch.
+/// [`OwnedTable`](super::OwnedTable) does that itself, so its calls
+/// place every row.
+///
+/// Besides each row's hash and keys, a batch holds two arrays of the
+/// caller's, each with a place for every row:
+///
+/// - `pending`, a mask, a bit per row: the rows still to place. Before
+///   the first call it holds the rows to place, such as those whose keys
+///   are not NULL. Each call clears the bit of every row it places, so the
+///   mask only shrinks, and the batch is done when it is empty.
+/// - `refs`: for each row a call places, the reference of its record,
+///   which [`Table::record`](crate::Table::record) reads and through
+///   which a caller changes the record's payload. The places of the rows
+///   left out of the mask keep what they held. The place of a row still
+///   pending holds nothing to read: a call that finds or inserts may have
+///   written there the record it found before it stopped.
+///
+/// A batch of four rows, whose row 2 has a NULL key, appended to chunks
+/// with room for two records each:
+///
+/// ```text
+///                        pending     refs
+///   before the calls     {0, 1, 3}   [ -,  -,  -,  - ]
+///   append to chunk 5    {3}         [r1, r2,  -,  - ]   chunk 5 is full
+///   append to chunk 6    {}          [r1, r2,  -, r3 ]   the batch is done
+/// ```
+///
+/// The rows still to place are a mask, not the number of a row to go on
+/// from. A call into one chunk places the rows in row order and stops at
+/// the first that does not fit, so it leaves the end of the batch. A call
+/// by partition, [`ChunkWriter::append_partitioned_columns`] or
+/// [`TableMut::find_or_insert_partitioned`], leaves pending a row whose
+/// partition's chunk is full and goes on with the rows after it: what it
+/// leaves has gaps, and the caller reads those rows to learn which
+/// partitions need a new chunk. One mask serves every call, and every
+/// caller runs the same loop: call, and while rows are pending, add a
+/// chunk or a larger index and call again.
+///
+/// [`ChunkWriter::append_partitioned_columns`]: crate::ChunkWriter::append_partitioned_columns
+/// [`TableMut::find_or_insert_partitioned`]: crate::TableMut::find_or_insert_partitioned
 pub struct Batch<'b, 'm, K: ?Sized> {
     pub(super) hashes: &'b [u32],
     pub(super) keys: &'b K,
@@ -50,7 +92,7 @@ pub struct Batch<'b, 'm, K: ?Sized> {
 
 impl<'b, 'm, K: KeySource + ?Sized> Batch<'b, 'm, K> {
     /// The rows of `pending`, whose row count the keys, the hashes and the
-    /// offsets must have.
+    /// references must have.
     pub fn new(
         hashes: &'b [u32],
         keys: &'b K,
