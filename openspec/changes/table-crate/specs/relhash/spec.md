@@ -146,19 +146,22 @@ change, and SHALL place every one of them.
 - **THEN** the first call places two rows and leaves one pending, the
   second places it, each placed row has the reference of its record,
   and the row left out keeps what its place held
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_batch_goes_through_two_chunks`
 
 #### Scenario: The owning table places every row
 - **WHEN** the owning table inserts, and finds or inserts, the rows of
   a mask over more records than its first chunk holds
 - **THEN** every row of the mask gets the reference of its record, and
   the mask is as it was
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::the_owning_table_places_every_row_of_its_mask`
 
 #### Scenario: A batch of other row counts
 - **WHEN** a batch is made of a mask of 70 rows and 69 references
 - **THEN** it is refused
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`
 
 ### Requirement: Any bytes, a bounded call
 The caller promises that every block it gives is memory of the length
