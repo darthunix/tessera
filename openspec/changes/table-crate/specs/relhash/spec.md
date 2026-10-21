@@ -251,7 +251,8 @@ as 0, whatever the source wrote in its slot.
 - **WHEN** a source marks keys NULL but leaves values in their slots
 - **THEN** the rows of NULL keys find one record, and its slot of the
   NULL key holds 0
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::values_a_source_leaves_in_null_slots_split_no_group`
 
 ### Requirement: Any bytes, a bounded call
 The caller promises that every block it gives is memory of the length
