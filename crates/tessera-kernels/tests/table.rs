@@ -22,7 +22,7 @@ use tessera_kernels::decimal::{
 use tessera_kernels::int32::murmurhash32;
 use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
-    Batch, CHUNK_HEADER, Cursor, KeySource, Matches, MatchesView, OwnedTable, Table, TableConfig,
+    CHUNK_HEADER, Cursor, KeySource, Matches, MatchesView, OwnedTable, Table, TableConfig,
 };
 use tessera_testing::{flags, integer, property, values, words};
 
@@ -71,15 +71,16 @@ fn insert_all<K: KeySource + ?Sized>(
     payload: Option<&[u8]>,
 ) -> Result<Vec<u32>> {
     let nrows = hashes.len();
-    let mut pending_words = all_rows(nrows);
-    let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
+    let rows = all_rows(nrows);
     let mut offsets = vec![0; nrows];
     let inserted = table.insert(
+        hashes,
+        keys,
+        RowMaskView::try_new(nrows, &rows)?,
         payload,
-        &mut Batch::new(hashes, keys, &mut pending, &mut offsets)?,
+        &mut offsets,
     )?;
     assert_eq!(inserted, nrows);
-    assert_eq!(pending.as_view().selected_count(), 0);
     Ok(offsets)
 }
 
@@ -108,17 +109,18 @@ fn resolve_all<K: KeySource + ?Sized>(
     keys: &K,
 ) -> Result<(Vec<u32>, Vec<usize>)> {
     let nrows = hashes.len();
-    let mut pending_words = all_rows(nrows);
-    let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
+    let rows = all_rows(nrows);
     let mut offsets = vec![0; nrows];
     let mut inserted_words = vec![0; nrows.div_ceil(64)];
     let mut inserted = RowMask::try_new(nrows, &mut inserted_words)?;
     let resolved = table.find_or_insert(
-        &mut Batch::new(hashes, keys, &mut pending, &mut offsets)?,
+        hashes,
+        keys,
+        RowMaskView::try_new(nrows, &rows)?,
+        &mut offsets,
         &mut inserted,
     )?;
     assert_eq!(resolved, nrows);
-    assert_eq!(pending.as_view().selected_count(), 0);
     let created = rows_of(&inserted.as_view());
     Ok((offsets, created))
 }

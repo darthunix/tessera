@@ -656,7 +656,7 @@ fn combine_inner(
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use tessera_core::{ColumnView, RowMask};
+    use tessera_core::{ColumnView, RowMask, RowMaskView};
 
     use super::*;
     use crate::column_keys::KeyColumns;
@@ -685,18 +685,15 @@ mod tests {
         };
         let mut table = OwnedTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
         let column = [ColumnView::try_new(keys, None).unwrap()];
-        let (hashes, mut pending_words) = key_batch(keys);
-        let mut inserted_words = vec![0; pending_words.len()];
+        let (hashes, rows) = key_batch(keys);
+        let mut inserted_words = vec![0; rows.len()];
         let mut offsets = vec![0; keys.len()];
         table
             .find_or_insert(
-                &mut Batch::new(
-                    &hashes,
-                    &KeyColumns(&column),
-                    &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
-                    &mut offsets,
-                )
-                .unwrap(),
+                &hashes,
+                &KeyColumns(&column),
+                RowMaskView::try_new(keys.len(), &rows).unwrap(),
+                &mut offsets,
                 &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
             )
             .unwrap();
@@ -732,14 +729,13 @@ mod tests {
         let column = [ColumnView::try_new(keys, None)?];
         let columns = KeyColumns(&column);
         let (hashes, mut pending_words) = key_batch(keys);
-        let mut pending = RowMask::try_new(keys.len(), &mut pending_words)?;
         let mut refs = vec![0; keys.len()];
         let payload: Vec<u8> = keys
             .iter()
             .flat_map(|&key| of(key))
             .flat_map(i64::to_ne_bytes)
             .collect();
-        let mut batch = Batch::new(&hashes, &columns, &mut pending, &mut refs)?;
+        let mut batch = Batch::new(&hashes, &columns, &mut pending_words, &mut refs)?;
         let mut chunk = into.chunks() - 1;
         let mut sources = Vec::new();
         while batch.pending().selected_count() > 0 {
@@ -781,17 +777,14 @@ mod tests {
         merge(&mut into, &(25..100).collect::<Vec<_>>(), theirs).unwrap();
         let keys: Vec<i32> = (0..100).collect();
         let column = [ColumnView::try_new(&keys, None).unwrap()];
-        let (hashes, mut pending_words) = key_batch(&keys);
-        let mut inserted_words = vec![0; pending_words.len()];
+        let (hashes, rows) = key_batch(&keys);
+        let mut inserted_words = vec![0; rows.len()];
         let mut offsets = vec![0; keys.len()];
         into.find_or_insert(
-            &mut Batch::new(
-                &hashes,
-                &KeyColumns(&column),
-                &mut RowMask::try_new(keys.len(), &mut pending_words).unwrap(),
-                &mut offsets,
-            )
-            .unwrap(),
+            &hashes,
+            &KeyColumns(&column),
+            RowMaskView::try_new(keys.len(), &rows).unwrap(),
+            &mut offsets,
             &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
         )
         .unwrap();

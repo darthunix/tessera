@@ -556,7 +556,7 @@ pub unsafe extern "C" fn tess_table_append(
                 payload_size,
             };
             let indexed = indexed(table, chunks, &config)?;
-            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
@@ -568,7 +568,7 @@ pub unsafe extern "C" fn tess_table_append(
                     .context("the payload does not fit in memory")?;
                 Some(values(payload, bytes, "payload")?)
             };
-            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
+            let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
             match indexed {
                 Some(table) => table.append(chunk, payload, &mut batch)?,
                 None => ChunkWriter::new(&config, chunks)?.append(chunk, payload, &mut batch)?,
@@ -616,12 +616,12 @@ pub unsafe extern "C" fn tess_table_append_columns(
                 payload_size: 8 * (payload_null_words(ncolumns) + ncolumns),
             };
             let indexed = indexed(table, chunks, &config)?;
-            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
             let columns = values(columns, ncolumns, "payload columns")?;
-            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
+            let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
             let append = |payload: &PayloadColumns<'_>| -> Result<usize> {
                 Ok(match &indexed {
                     Some(table) => table.append_columns(chunk, payload, &mut batch)?,
@@ -762,7 +762,7 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
             };
             // As an append does, a table with an index is checked against it.
             indexed(table, chunks, &config)?;
-            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
@@ -788,7 +788,7 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
                 &*(&raw const flags[..ncolumns] as *const [&[bool]]),
             );
             let payload = PayloadColumns::new(words, flags, nrows)?;
-            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
+            let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
             ChunkWriter::new(&config, chunks)?.append_partitioned_columns(
                 &partitions,
                 &payload,
@@ -1268,12 +1268,12 @@ pub unsafe extern "C" fn tess_table_find_or_insert(
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
-            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let mut inserted = inserted.as_mut().context("a null inserted mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
-            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
+            let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
             table.find_or_insert(chunk, &mut batch, &mut inserted)?;
             Ok(())
         })
@@ -1308,12 +1308,12 @@ pub unsafe extern "C" fn tess_table_find_or_insert_partitioned(
             let partitions = partitions(partition_chunks, npartitions, shift)?;
             let mut decoded = TableKeys::empty();
             table_keys(nkeys, keys, &mut decoded)?;
-            let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
+            let pending = pending.as_mut().context("a null pending mask")?.mask()?;
             let mut inserted = inserted.as_mut().context("a null inserted mask")?.mask()?;
             let nrows = pending.as_view().nrows();
             let hashes = values(hashes, nrows, "hashes")?;
             let offsets = slots(offsets, nrows, "offsets")?;
-            let mut batch = Batch::new(hashes, &decoded, &mut pending, offsets)?;
+            let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
             table.find_or_insert_partitioned(&partitions, &mut batch, &mut inserted)?;
             Ok(())
         })
