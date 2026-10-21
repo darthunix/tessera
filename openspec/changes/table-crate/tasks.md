@@ -150,7 +150,21 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       public API: `OwnedTable::index_words`, `chunk_words`,
       `add_chunk_copy`, `insert_grouped` and `chunk_set`. Check:
       `cargo test -p relhash`; `cargo public-api -p relhash`
-- [ ] 3.9 Set `publish = true` for the crate and refuse a target whose
+- [ ] 3.9 Make a batch to place one value, as a lookup is: `Batch`
+      holds its mask of pending rows by value, has one lifetime, and is
+      made from the caller's words or from a mask; its references are
+      `refs` in the whole crate; `OwnedTable::insert` and
+      `OwnedTable::find_or_insert` take the rows to place as a mask
+      they only read. Check: `make rust-check`; machine code, every loop
+      that changes with its reason; `cargo public-api -p relhash`
+- [ ] 3.10 Make `find_or_insert` and its form by partition, in the crate
+      and in the C API, add the rows whose record they made to the mask
+      of inserted rows, which the caller clears once a batch; the
+      grouping nodes and the owning table stop adding the masks up.
+      Check: `make rust-check`; `make installcheck`; machine code;
+      `cargo ab measure` of the grouping cases of `win`, no case
+      slower
+- [ ] 3.11 Set `publish = true` for the crate and refuse a target whose
       pointers are not 64 bits wide with `compile_error!`; add to CI a
       build for a 32-bit target that must fail, the crate's tests alone,
       a build without `alloc`, a dry run of `cargo publish`, and a

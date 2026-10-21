@@ -54,6 +54,11 @@ none of these:
 - An error of a call is of one of two kinds, a wrong call or a damaged
   table, and names the rule it broke, instead of a text. A call
   allocates no memory.
+- A batch to place is one value with one lifetime, as a lookup is, and
+  its references are named references throughout. The owning table's
+  calls take the rows to place as a mask they only read. The calls that
+  find or insert add to their mask of inserted rows instead of filling
+  it whole, so that the masks of the calls of one batch add up.
 - The promise over damaged bytes is narrowed to a table that no other
   process or thread writes while the call runs. Under it, the crate is
   checked by: a list of every place where the table reads its own
@@ -85,8 +90,9 @@ none of these:
   changes; `check-specs.sh` learns to read contracts, from the base of
   a pull request.
 - The C API gains one call, `tess_table_chunk_used`, which gives a
-  chunk's used mark checked; nothing else changes in it, in what SQL
-  sees, or in a format. A
+  chunk's used mark checked, and `tess_table_find_or_insert` and its
+  form by partition add to their mask of inserted rows; nothing else
+  changes in it, in what SQL sees, or in a format. A
   step that only moves code leaves the machine code of every benchmark
   program as it was.
 
@@ -98,13 +104,14 @@ none of these:
 - `relhash`: the crate of its own, its documentation, the masks of
   rows, the promise over any bytes, errors of two kinds, no memory
   taken, the same calls giving the same bytes, threads, records by
-  reference, and a merge by the caller's rule. The capability is made
-  by the changes `relhash-spec-table` and `relhash-spec-partitions`,
-  which close first; this change adds its requirements to it, and its
-  errors of two kinds take the place of the part of "Errors of a call"
-  that moved.
+  reference, a merge by the caller's rule, and a batch to place. The
+  capability is made by the changes `relhash-spec-table` and
+  `relhash-spec-partitions`, which close first; this change adds its
+  requirements to it, and its errors of two kinds take the place of the
+  part of "Errors of a call" that moved.
 - `hash-table`: a call of the C API that gives a chunk's used mark,
-  checked, so that no node reads it by itself.
+  checked, so that no node reads it by itself; the masks of inserted
+  rows of the calls that find or insert add up over a batch.
 
 ## Impact
 
@@ -116,9 +123,14 @@ none of these:
   from the new crate. The grouping node of C takes the payloads of its
   generic states from the C API, and the spills of the grouping and the
   join read a chunk's used mark through it, not by offsets of their
-  own.
+  own. The grouping nodes stop adding up the masks of inserted rows of
+  their calls.
 - C API: `include/tessera/table.h` gains `tess_table_chunk_used`; the
   requirement "The used mark of a chunk" of `hash-table` describes it.
+  `tess_table_find_or_insert` and
+  `tess_table_find_or_insert_partitioned` add to their mask of inserted
+  rows, which a caller clears once a batch; the requirements "Calls of
+  one writer" and "Groups by partition" say so.
 - SQL suites: none change.
 - Tests: `crates/tessera-kernels/tests/table.rs` is split between the
   crate and the kernels; new: Kani proofs, the matrix of damage, fuzz
