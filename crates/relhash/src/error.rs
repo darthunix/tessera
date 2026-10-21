@@ -162,7 +162,7 @@ rules! {
     PayloadWord,
     /// Payload words that are none or past the payload.
     PayloadWords,
-    /// The offsets, mask and outputs of a batch have different row
+    /// The references, mask and outputs of a batch have different row
     /// counts.
     BatchRows,
 
@@ -208,7 +208,7 @@ rules! {
     PartitionBits,
     /// Row counts and partitions that do not pair up.
     PartitionRows,
-    /// The offsets and hashes of a split differ in length.
+    /// The references and hashes of a split differ in length.
     SplitLengths,
     /// A split of no records.
     EmptySplit,
@@ -421,9 +421,9 @@ impl fmt::Display for Error {
                 f,
                 "{a} payload words from word {b} are none or past the payload"
             ),
-            Rule::BatchRows => {
-                f.write_str("the offsets, mask and outputs of the batch have different row counts")
-            }
+            Rule::BatchRows => f.write_str(
+                "the references, mask and outputs of the batch have different row counts",
+            ),
             Rule::NoChunk => write!(f, "table chunk {a} does not exist"),
             Rule::Chunk => write!(
                 f,
@@ -479,7 +479,7 @@ impl fmt::Display for Error {
             }
             Rule::PartitionRows => write!(f, "{a} row counts for {b} partitions"),
             Rule::SplitLengths => {
-                f.write_str("the offsets and hashes of a split have different lengths")
+                f.write_str("the references and hashes of a split have different lengths")
             }
             Rule::EmptySplit => f.write_str("a split copies at least one record a call"),
             Rule::SplitIntoItself => write!(f, "table chunk {a} is split into itself"),
