@@ -198,7 +198,7 @@ fn a_payload_cursor_changes_payloads_by_reference() -> Result<()> {
             opened.push(offset);
             Ok(())
         });
-        assert!(failed.is_err());
+        assert_eq!(refusal(failed), Some((Kind::Damaged, Rule::Misplaced)));
     }
     assert_eq!(opened, refs[..2]);
     for &offset in &refs[..2] {
@@ -217,7 +217,11 @@ fn a_payload_cursor_holds_checked_references_to_open_later() -> Result<()> {
     {
         let mut writer = table.table_mut()?;
         let mut payloads = writer.payloads();
-        assert!(payloads.held(0).is_err(), "a slot that holds nothing");
+        assert_eq!(
+            refusal(payloads.held(0)),
+            Some((Kind::WrongCall, Rule::EmptySlot)),
+            "a slot that holds nothing"
+        );
         // Check the first HELD references now, then open them in reverse.
         for (slot, &offset) in refs[..HELD].iter().enumerate() {
             payloads.hold(slot, offset)?;
@@ -227,9 +231,21 @@ fn a_payload_cursor_holds_checked_references_to_open_later() -> Result<()> {
                 .held(slot)?
                 .copy_from_slice(&(slot as u64 + 100).to_ne_bytes());
         }
-        assert!(payloads.hold(HELD, refs[0]).is_err(), "past the slots");
-        assert!(payloads.held(HELD).is_err(), "past the slots");
-        assert!(payloads.hold(0, refs[0] + 1).is_err(), "inside a record");
+        assert_eq!(
+            refusal(payloads.hold(HELD, refs[0])),
+            Some((Kind::WrongCall, Rule::Slot)),
+            "past the slots"
+        );
+        assert_eq!(
+            refusal(payloads.held(HELD)),
+            Some((Kind::WrongCall, Rule::EmptySlot)),
+            "past the slots"
+        );
+        assert_eq!(
+            refusal(payloads.hold(0, refs[0] + 1)),
+            Some((Kind::Damaged, Rule::Misplaced)),
+            "inside a record"
+        );
         // A slot that took a new reference opens that one.
         payloads.hold(0, refs[HELD])?;
         payloads.held(0)?.copy_from_slice(&7u64.to_ne_bytes());
@@ -266,8 +282,16 @@ fn a_record_cursor_reads_records_by_reference() -> Result<()> {
         assert_eq!(record.keys, &[(row % 10) as i64]);
         assert_eq!(record.hash, hashes[row]);
     }
-    assert!(records.record(refs[0] + 1).is_err(), "inside a record");
-    assert!(records.record(0).is_err(), "reference 0");
+    assert_eq!(
+        refusal(records.record(refs[0] + 1)),
+        Some((Kind::Damaged, Rule::Misplaced)),
+        "inside a record"
+    );
+    assert_eq!(
+        refusal(records.record(0)),
+        Some((Kind::WrongCall, Rule::Outside)),
+        "reference 0"
+    );
     // The records it gave outlive the next read.
     let first = records.record(refs[0])?;
     let second = records.record(refs[1])?;
@@ -310,14 +334,14 @@ fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
     let failed = table
         .table_mut()?
         .each_payload(&refs, &rows, |row, _| seen.push(row));
-    assert!(failed.is_err());
+    assert_eq!(refusal(failed), Some((Kind::Damaged, Rule::Misplaced)));
     assert_eq!(seen, [3, 13]);
     // Offsets for another count of rows than the mask's fail first.
     seen.clear();
     let short = table
         .table_mut()?
         .each_payload(&refs[..99], &rows, |row, _| seen.push(row));
-    assert!(short.is_err());
+    assert_eq!(refusal(short), Some((Kind::WrongCall, Rule::RowCounts)));
     assert!(seen.is_empty());
     Ok(())
 }
@@ -470,7 +494,10 @@ fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
                 .payload_mut(offset)?
                 .copy_from_slice(&(key as u64 * 7).to_ne_bytes());
         }
-        assert!(writer.payload_mut(refs[0] + 1).is_err());
+        assert_eq!(
+            refusal(writer.payload_mut(refs[0] + 1)),
+            Some((Kind::Damaged, Rule::Misplaced))
+        );
     }
     for (row, &offset) in refs.iter().enumerate() {
         let payload = table.table()?.record(offset)?.payload.to_vec();
@@ -646,8 +673,9 @@ fn a_walk_visits_every_record_once_in_appended_order() -> Result<()> {
         ("past the chunks", (6u64 << 32) | CHUNK_HEADER as u64),
     ] {
         let mut cursor = Cursor::from_raw(raw);
-        assert!(
-            writer.scan(&mut cursor, &mut [0; 8]).is_err(),
+        assert_eq!(
+            refusal(writer.scan(&mut cursor, &mut [0; 8])),
+            Some((Kind::WrongCall, Rule::Cursor)),
             "a cursor {what}"
         );
     }
@@ -711,7 +739,11 @@ fn regrowing_keeps_records_and_their_references() -> Result<()> {
             .chain(vec![3; 20])
             .collect::<Vec<_>>()
     );
-    assert!(table.regrow(16).is_err(), "no shrinking");
+    assert_eq!(
+        refusal(table.regrow(16)),
+        Some((Kind::WrongCall, Rule::IndexShrinks)),
+        "no shrinking"
+    );
     assert_eq!(table.table()?.stats().records, 100);
     Ok(())
 }
@@ -924,21 +956,22 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     }
     // Refusals: a column shorter than the batch, a payload of another size.
     let short: Vec<&[u64]> = vec![&values[0][..ROWS - 1]; ncolumns];
-    assert!(PayloadColumns::new(&short, &null_slices, ROWS).is_err());
+    assert_eq!(
+        refusal(PayloadColumns::new(&short, &null_slices, ROWS)),
+        Some((Kind::WrongCall, Rule::PayloadRows))
+    );
     let two = PayloadColumns::new(&value_slices[..2], &null_slices[..2], ROWS)?;
     let mut table = OwnedTable::new(&config, 0, CHUNK)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = selected.clone();
     let mut refs = vec![0u32; ROWS];
-    assert!(
-        table
-            .table_mut()?
-            .append_columns(
-                chunk,
-                &two,
-                &mut Batch::new(&hashes, &Keys(&keys), &mut pending_words, &mut refs).unwrap()
-            )
-            .is_err()
+    assert_eq!(
+        refusal(table.table_mut()?.append_columns(
+            chunk,
+            &two,
+            &mut Batch::new(&hashes, &Keys(&keys), &mut pending_words, &mut refs).unwrap()
+        )),
+        Some((Kind::WrongCall, Rule::PayloadColumns))
     );
     Ok(())
 }

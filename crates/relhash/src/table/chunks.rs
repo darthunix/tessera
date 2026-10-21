@@ -38,7 +38,9 @@ pub(super) fn chunk_fits(base: *const u8, len: usize) -> bool {
 }
 
 /// Whether a chunk can have `len` bytes: a multiple of 8 of
-/// [`CHUNK_HEADER`] to [`MAX_CHUNK_LEN`].
+/// [`CHUNK_HEADER`] to [`MAX_CHUNK_LEN`]. The owning table checks its
+/// chunks' length by it.
+#[cfg(feature = "alloc")]
 #[inline(always)]
 pub(super) fn chunk_len_fits(len: usize) -> bool {
     len.is_multiple_of(8) && (CHUNK_HEADER..=MAX_CHUNK_LEN).contains(&len)

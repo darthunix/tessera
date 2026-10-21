@@ -208,7 +208,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       of two and of many records under a damaged count; machine code;
       the maintainer's run of counters on `table_int32` and
       `table_large`
-- [ ] 3.17 Strengthen the tests: every refusal compared by its kind and
+- [x] 3.17 Strengthen the tests: every refusal compared by its kind and
       rule, not by `is_err()`; the longest chunk filled to its last
       record, chunk 32767, and the largest record end to end; a loom
       model of `link_counting` beside a third participant's link; Miri

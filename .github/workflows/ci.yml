@@ -171,6 +171,7 @@ jobs:
       - name: The tests of the unsafe code
         run: |
           cargo miri test --locked -p relhash --lib table::
+          cargo miri test --locked -p relhash --doc
           cargo miri test --locked -p tessera-capi --test columns --test table
 
   postgres:
