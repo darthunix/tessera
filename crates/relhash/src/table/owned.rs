@@ -12,7 +12,6 @@ use crate::{RowMask, RowMaskView};
 
 use super::{
     Batch, CHUNK_HEADER, Chunks, KeySource, MAX_CHUNKS, Table, TableConfig, TableMut, index_size,
-    init_chunk,
 };
 
 /// A block of words owned through a raw pointer.
@@ -160,7 +159,7 @@ impl OwnedTable {
                 Chunks::none(),
             )?;
             for block in &self.chunks {
-                init_chunk(block.base(), block.bytes())?;
+                Chunks::init(block.base(), block.bytes())?;
             }
         }
         Ok(())
@@ -194,7 +193,7 @@ impl OwnedTable {
         );
         let block = Block::new(self.chunk_bytes / 8);
         // SAFETY: the block is new, aligned to 8 and of a checked length.
-        unsafe { init_chunk(block.base(), block.bytes()) }?;
+        unsafe { Chunks::init(block.base(), block.bytes()) }?;
         self.bases.push(block.base());
         self.lens.push(block.bytes());
         self.chunks.push(block);

@@ -43,4 +43,22 @@ mod reader;
 
 pub use column::ColumnView;
 pub use reader::{ColumnReader, WordBlock, WordValues};
-pub use relhash::{RowMask, RowMaskView, check_rows, ones};
+pub use relhash::{RowMask, RowMaskView, ones};
+
+/// Check that each of `counts` is `nrows`, the rows of a call, as its
+/// arrays and masks must have: the error names the call's rows and the
+/// first count that differs.
+#[inline]
+pub fn check_rows(nrows: usize, counts: &[usize]) -> anyhow::Result<()> {
+    match counts.iter().find(|&&rows| rows != nrows) {
+        None => Ok(()),
+        Some(&rows) => Err(other_rows(nrows, rows)),
+    }
+}
+
+/// The error of [`check_rows`], a cold path out of line.
+#[cold]
+#[inline(never)]
+fn other_rows(nrows: usize, rows: usize) -> anyhow::Error {
+    anyhow::anyhow!("the masks of a call have different row counts: {nrows} and {rows}")
+}

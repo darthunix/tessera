@@ -576,7 +576,7 @@ impl<'t> PayloadCursor<'t> {
 
 /// Where [`TableMut::merge`](super::TableMut::merge) stopped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CombineStop {
+pub enum MergeStop {
     /// Every record of the source was merged.
     Done,
     /// A record of a new group needs another chunk.
@@ -602,7 +602,7 @@ pub(super) fn merge<R: Region, E: From<Error>>(
     from: &mut usize,
     chunk: usize,
     mut rule: impl FnMut(&[u8], &mut [u8]) -> Result<(), E>,
-) -> Result<(usize, CombineStop), E> {
+) -> Result<(usize, MergeStop), E> {
     ensure!(
         source != chunk,
         Error::wrong_call(Rule::MergeIntoItself).with(source)
@@ -613,7 +613,7 @@ pub(super) fn merge<R: Region, E: From<Error>>(
     let (mut used, mut room) = access.room(chunk)?;
     let places = unlinked(&access, source, *from)?;
     let mut merged = 0;
-    let mut stop = CombineStop::Done;
+    let mut stop = MergeStop::Done;
     for byte in places {
         let hash = check_record(
             &access,
@@ -633,11 +633,11 @@ pub(super) fn merge<R: Region, E: From<Error>>(
         let same = access.find_same(head, hash, record.null_bits(), record.keys())?;
         if same == 0 {
             if room == 0 {
-                stop = CombineStop::ChunkFull;
+                stop = MergeStop::ChunkFull;
                 break;
             }
             if access.records() >= limit {
-                stop = CombineStop::IndexFull;
+                stop = MergeStop::IndexFull;
                 break;
             }
             let place = Place { chunk, byte: used };

@@ -28,9 +28,7 @@ use crate::error::{Error, Kind, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView};
 
 pub use batch::{Batch, Matches, MatchesView};
-pub use chunks::{
-    Appended, ChunkWriter, Chunks, MAX_PARTITIONS, Partitions, Split, chunk_used, init_chunk,
-};
+pub use chunks::{Appended, ChunkWriter, Chunks, MAX_PARTITIONS, Partitions, Split};
 pub(crate) use header::MIN_BUCKETS;
 pub use header::{
     CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS, TableConfig,
@@ -44,7 +42,7 @@ pub use owned::OwnedTable;
 use record::Access;
 pub use record::{MAX_PAYLOAD_COLUMNS, PayloadColumns, Record, payload_null_words};
 use region::{RawRegion, Region};
-pub use writer::{CombineStop, Cursor, HELD, PayloadCursor};
+pub use writer::{Cursor, HELD, MergeStop, PayloadCursor};
 
 /// What a table holds, for planning and EXPLAIN.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -411,6 +409,28 @@ impl<'a> Table<'a> {
         bloom::try_build(&self.region, &self.layout, filter)
     }
 
+    /// Set the marks of the records at `refs`, as [`mark`] does, over this
+    /// table's chunks and with its record size, which a caller cannot get
+    /// wrong.
+    pub fn mark(&self, refs: &[u32], rows: &RowMaskView<'_>, marks: &impl Marks) -> Result<()> {
+        let chunks = self.region.chunk_list();
+        marks::mark(chunks.lens(), self.layout.record_size, refs, rows, marks)
+    }
+
+    /// Visit the records without a mark, as [`scan_unmarked`] does, over
+    /// this table's chunks and with its record size. It reads the chunks'
+    /// used marks: call it, like [`Table::bloom`], while no chunk takes
+    /// records.
+    pub fn scan_unmarked(
+        &self,
+        cursor: &mut Cursor,
+        marks: Option<&impl Marks>,
+        out: &mut [u32],
+    ) -> Result<usize> {
+        let chunks = self.region.chunk_list();
+        marks::scan_unmarked(&chunks, self.layout.record_size, cursor, marks, out)
+    }
+
     /// The record at a reference a call of this table returned. A
     /// reference is checked against its chunk's length, not its used mark,
     /// which a writer moves: in a shared build one past the mark reads
@@ -541,7 +561,7 @@ impl<'a> TableMut<'a> {
         from: &mut usize,
         chunk: usize,
         rule: impl FnMut(&[u8], &mut [u8]) -> Result<(), E>,
-    ) -> Result<(usize, CombineStop), E> {
+    ) -> Result<(usize, MergeStop), E> {
         writer::merge(&self.0.region, &self.0.layout, source, from, chunk, rule)
     }
 

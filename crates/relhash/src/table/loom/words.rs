@@ -58,11 +58,11 @@ impl FilterOr for LoomWord {
 
 /// The marks of a chunk of up to 64 records, set by every participant.
 impl Marks for LoomWord {
-    unsafe fn set(&self, _: usize, _: usize, bit: u64) {
+    fn set(&self, _: usize, _: usize, bit: u64) {
         self.or(bit);
     }
 
-    unsafe fn word(&self, _: usize, _: usize) -> u64 {
+    fn word(&self, _: usize, _: usize) -> u64 {
         self.word.load(order::LOAD)
     }
 }

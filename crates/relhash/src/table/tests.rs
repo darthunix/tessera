@@ -390,7 +390,7 @@ impl Blocks {
         let mut block = vec![0_u64; len / 8];
         let base = block.as_mut_ptr().cast::<u8>();
         // SAFETY: the block is aligned to 8, `len` bytes, used only here.
-        unsafe { init_chunk(base, len) }.unwrap();
+        unsafe { Chunks::init(base, len) }.unwrap();
         self._storage.push(block);
         self.bases.push(base);
         self.lens.push(len);
@@ -847,9 +847,9 @@ fn a_merge_stops_for_a_chunk_or_a_larger_index() {
             assert_eq!(at, CHUNK_HEADER + here * record, "on the first not merged");
             stops.push(stop);
             match stop {
-                CombineStop::Done => break,
-                CombineStop::ChunkFull => chunk = into.add_chunk().unwrap(),
-                CombineStop::IndexFull => {
+                MergeStop::Done => break,
+                MergeStop::ChunkFull => chunk = into.add_chunk().unwrap(),
+                MergeStop::IndexFull => {
                     let records = into.table().unwrap().stats().records;
                     assert_eq!(records, 512, "half of 1024 buckets");
                     // A regrow links every record of every chunk it is
@@ -866,11 +866,11 @@ fn a_merge_stops_for_a_chunk_or_a_larger_index() {
         total += here;
     }
     assert_eq!(total, 600);
-    assert!(stops.contains(&CombineStop::ChunkFull));
+    assert!(stops.contains(&MergeStop::ChunkFull));
     assert_eq!(
         stops
             .iter()
-            .filter(|&&stop| stop == CombineStop::IndexFull)
+            .filter(|&&stop| stop == MergeStop::IndexFull)
             .count(),
         1
     );
@@ -914,7 +914,7 @@ fn a_merge_by_a_rule_changes_known_keys_and_copies_new_ones() {
         .unwrap()
         .merge(source, &mut at, chunk, add_first)
         .unwrap();
-    assert_eq!((merged, stop), (10, CombineStop::Done));
+    assert_eq!((merged, stop), (10, MergeStop::Done));
     // Keys 5 to 9 add theirs to ours; keys 10 to 14 are whole copies.
     let expected: Vec<[i64; 5]> = (0..15)
         .map(|key| match key {
@@ -1070,8 +1070,8 @@ fn misaligned_or_odd_blocks_are_refused() {
         let chunks = Chunks::new(&bases, &lens).unwrap();
         chunks.check_all().unwrap();
         assert_eq!(append_one(chunks).unwrap(), 1);
-        assert!(init_chunk(block_base, 20).is_err());
-        init_chunk(block_base, 32).unwrap();
+        assert!(Chunks::init(block_base, 20).is_err());
+        Chunks::init(block_base, 32).unwrap();
     }
     assert_eq!(block[0], CHUNK_HEADER as u64);
 }
@@ -1114,7 +1114,7 @@ fn chunks_past_the_limits_are_refused() {
             refusal(append_one(longest)) == Some((Kind::WrongCall, Rule::Chunk)),
             "an append to a chunk longer than 1 MiB"
         );
-        assert!(init_chunk(base, MAX_CHUNK_LEN + 8).is_err());
+        assert!(Chunks::init(base, MAX_CHUNK_LEN + 8).is_err());
         let long = [MAX_CHUNK_LEN];
         let longest = Chunks::new(&one, &long).unwrap();
         longest.check_all().unwrap();
