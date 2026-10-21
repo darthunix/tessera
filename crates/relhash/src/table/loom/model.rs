@@ -108,8 +108,7 @@ pub(super) fn append(
     let nrows = keys.len();
     let hashes = vec![HASH; nrows];
     let columns = IntKeys(keys);
-    let mut pending_bits = [(1u64 << nrows) - 1];
-    let mut pending = RowMask::try_new(nrows, &mut pending_bits)?;
+    let mut pending = [(1u64 << nrows) - 1];
     let mut refs = vec![0; nrows];
     let payload = payload(keys);
     let mut rows = Batch::new(&hashes, &columns, &mut pending, &mut refs)?;

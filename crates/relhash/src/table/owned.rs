@@ -7,8 +7,8 @@
 //! as they fill and never move, and a larger index replaces the old one
 //! when the records outgrow it, as a node does with its memory.
 
-use crate::RowMask;
 use crate::error::{Error, Result, Rule, ensure};
+use crate::{RowMask, RowMaskView};
 
 use super::{
     Batch, CHUNK_HEADER, Chunks, KeySource, MAX_CHUNKS, Table, TableConfig, TableMut, index_size,
@@ -66,6 +66,9 @@ pub struct OwnedTable {
     chunk_bytes: usize,
     /// Per chunk: the byte linking has reached.
     linked: Vec<usize>,
+    /// The words of the rows a call has still to place, kept between calls
+    /// so that a call allocates them once.
+    pending: Vec<u64>,
     /// The capacity the index was last sized for.
     capacity: u64,
 }
@@ -97,6 +100,7 @@ impl OwnedTable {
             lens: Vec::new(),
             chunk_bytes,
             linked: Vec::new(),
+            pending: Vec::new(),
             capacity,
         })
     }
@@ -197,15 +201,22 @@ impl OwnedTable {
         Ok(())
     }
 
-    /// Append the pending rows of `batch` to the last chunk, adding chunks
-    /// as they fill, and link them: the count inserted is returned, and
-    /// every row leaves the pending rows with its reference.
+    /// Append the rows of `rows` to the last chunk, adding chunks as they
+    /// fill, and link them: each row gets the reference of its record in
+    /// `refs`, at its row, and the count inserted is returned. `hashes`,
+    /// `keys` and `payload` are those of every row of the batch, as for
+    /// [`Batch`] and [`Table::append`]; `rows` stays as it is.
     pub fn insert<K: KeySource + ?Sized>(
         &mut self,
+        hashes: &[u32],
+        keys: &K,
+        rows: RowMaskView<'_>,
         payload: Option<&[u8]>,
-        batch: &mut Batch<'_, '_, K>,
+        refs: &mut [u32],
     ) -> Result<usize> {
-        let appended = self.append_all(payload, batch)?;
+        let appended = self.place(hashes, keys, rows, refs, |table, batch| {
+            table.append_all(payload, batch)
+        })?;
         let mut linked = core::mem::take(&mut self.linked);
         let result = (|| {
             let table = self.table()?;
@@ -225,10 +236,15 @@ impl OwnedTable {
     #[cfg(test)]
     pub(super) fn insert_grouped<K: KeySource + ?Sized>(
         &mut self,
+        hashes: &[u32],
+        keys: &K,
+        rows: RowMaskView<'_>,
         payload: Option<&[u8]>,
-        batch: &mut Batch<'_, '_, K>,
+        refs: &mut [u32],
     ) -> Result<(usize, usize)> {
-        let appended = self.append_all(payload, batch)?;
+        let appended = self.place(hashes, keys, rows, refs, |table, batch| {
+            table.append_all(payload, batch)
+        })?;
         let mut linked = core::mem::take(&mut self.linked);
         let mut duplicates = 0;
         let result = (|| {
@@ -243,11 +259,31 @@ impl OwnedTable {
         Ok((appended, duplicates))
     }
 
+    /// Make a batch of the rows of `rows` over the table's own words of
+    /// pending rows, and give it to `call`, which places every row.
+    fn place<K: KeySource + ?Sized, T>(
+        &mut self,
+        hashes: &[u32],
+        keys: &K,
+        rows: RowMaskView<'_>,
+        refs: &mut [u32],
+        call: impl FnOnce(&mut Self, &mut Batch<'_, K>) -> Result<T>,
+    ) -> Result<T> {
+        let mut pending = core::mem::take(&mut self.pending);
+        pending.clear();
+        pending.extend(rows.words());
+        let result = RowMask::try_new(rows.nrows(), &mut pending)
+            .and_then(|mask| Batch::from_mask(hashes, keys, mask, refs))
+            .and_then(|mut batch| call(self, &mut batch));
+        self.pending = pending;
+        result
+    }
+
     /// Append every pending row of `batch`, adding chunks as they fill.
     fn append_all<K: KeySource + ?Sized>(
         &mut self,
         payload: Option<&[u8]>,
-        batch: &mut Batch<'_, '_, K>,
+        batch: &mut Batch<'_, K>,
     ) -> Result<usize> {
         let mut appended = 0;
         loop {
@@ -272,12 +308,30 @@ impl OwnedTable {
         self.chunks[chunk].words_mut()[0] == CHUNK_HEADER as u64
     }
 
-    /// Give each pending row of `batch` the record of its keys, as
+    /// Give each row of `rows` the record of its keys, as
     /// [`TableMut::find_or_insert`] does, adding chunks and building a
-    /// larger index as needed: every row leaves the pending rows.
+    /// larger index as needed: each row gets the reference of its record
+    /// in `refs`, at its row, the rows whose record this call created form
+    /// `inserted`, and the count resolved is returned. `rows` stays as it
+    /// is.
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
-        batch: &mut Batch<'_, '_, K>,
+        hashes: &[u32],
+        keys: &K,
+        rows: RowMaskView<'_>,
+        refs: &mut [u32],
+        inserted: &mut RowMask<'_>,
+    ) -> Result<usize> {
+        self.place(hashes, keys, rows, refs, |table, batch| {
+            table.resolve_all(batch, inserted)
+        })
+    }
+
+    /// Resolve every pending row of `batch`, adding chunks and building a
+    /// larger index as they fill.
+    fn resolve_all<K: KeySource + ?Sized>(
+        &mut self,
+        batch: &mut Batch<'_, K>,
         inserted: &mut RowMask<'_>,
     ) -> Result<usize> {
         let nrows = batch.pending().nrows();

@@ -270,7 +270,7 @@ impl<'a> ChunkWriter<'a> {
         &self,
         chunk: usize,
         payload: Option<&[u8]>,
-        batch: &mut Batch<'_, '_, K>,
+        batch: &mut Batch<'_, K>,
     ) -> Result<usize> {
         batch::append(&self.region, &self.layout, chunk, payload, batch)
     }
@@ -282,7 +282,7 @@ impl<'a> ChunkWriter<'a> {
         &self,
         chunk: usize,
         columns: &PayloadColumns<'_>,
-        batch: &mut Batch<'_, '_, K>,
+        batch: &mut Batch<'_, K>,
     ) -> Result<usize> {
         batch::append_columns(&self.region, &self.layout, chunk, columns, batch)
     }
@@ -295,7 +295,7 @@ impl<'a> ChunkWriter<'a> {
         &self,
         partitions: &Partitions<'_>,
         columns: &PayloadColumns<'_>,
-        batch: &mut Batch<'_, '_, K>,
+        batch: &mut Batch<'_, K>,
         appended: &mut Appended<'_>,
     ) -> Result<usize> {
         batch::append_partitioned_columns(

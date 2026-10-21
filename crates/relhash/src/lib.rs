@@ -92,7 +92,7 @@
 //! needs no `unsafe`: the tests and benchmarks build their tables with it.
 //!
 //! ```
-//! use relhash::{Batch, KeySource, Matches, OwnedTable, RowMask, TableConfig, ones};
+//! use relhash::{KeySource, Matches, OwnedTable, RowMaskView, TableConfig, ones};
 //!
 //! // The caller hands keys over a word of 64 rows at a time: here one key
 //! // of int4 values with no NULL.
@@ -117,12 +117,10 @@
 //! let keys = Keys(&[7, 8, 7]);
 //! let hashes: Vec<u32> = [7u32, 8, 7].map(|key| key.wrapping_mul(0x9e37_79b1)).into();
 //! let payload = [1u64, 2, 3].map(u64::to_ne_bytes).concat();
-//! let mut pending = [1 << 0 | 1 << 1 | 1 << 2]; // all three rows
+//! let all = RowMaskView::try_new(3, &[1 << 0 | 1 << 1 | 1 << 2])?;
 //! let mut refs = [0; 3];
-//! let mut mask = RowMask::try_new(3, &mut pending)?;
-//! let mut batch = Batch::new(&hashes, &keys, &mut mask, &mut refs)?;
-//! table.insert(Some(&payload), &mut batch)?;
-//! assert_eq!(pending, [0], "every row found room");
+//! assert_eq!(table.insert(&hashes, &keys, all, Some(&payload), &mut refs)?, 3);
+//! assert!(refs.iter().all(|&reference| reference != 0), "each row has its record");
 //!
 //! // Look up rows 0 and 1 of the three.
 //! let table = table.table()?;
