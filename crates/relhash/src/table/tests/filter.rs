@@ -33,7 +33,12 @@ fn probe_filter(filter: &[u64], hashes: &[u32]) -> Result<usize> {
 
 #[test]
 fn a_filter_lets_every_key_through_and_few_others() -> Result<()> {
-    let count = 5000;
+    // A tenth of the keys under Miri, which would take minutes.
+    let (count, nabsent) = if cfg!(miri) {
+        (500, 10_000)
+    } else {
+        (5000, 100_000)
+    };
     let (table, filter) = filtered_table(count)?;
     assert!(table.chunks() > 1, "the records span chunks");
     assert_eq!(filter.len(), (count * 16).div_ceil(64).next_power_of_two());
@@ -44,9 +49,12 @@ fn a_filter_lets_every_key_through_and_few_others() -> Result<()> {
         "no key of the table is rejected"
     );
     // Keys 1, 4, 7, ... are absent: about one in a hundred gets through.
-    let absent: Vec<u32> = (0..100_000).map(|key| hash_i32(key * 3 + 1)).collect();
+    let absent: Vec<u32> = (0..nabsent).map(|key| hash_i32(key * 3 + 1)).collect();
     let through = probe_filter(&filter, &absent)?;
-    assert!(through < 3000, "{through} of 100000 absent keys passed");
+    assert!(
+        through < nabsent as usize * 3 / 100,
+        "{through} of {nabsent} absent keys passed"
+    );
     Ok(())
 }
 
@@ -163,15 +171,24 @@ fn the_words_of_a_filter_for_its_records() -> Result<()> {
 }
 
 /// At 16 bits a key the filter's false passes are measured, not guessed:
-/// 4096 keys fill exactly 1024 words.
+/// 4096 keys fill exactly 1024 words; under Miri, which would take
+/// minutes, 1024 keys fill 256.
 #[test]
 fn few_absent_keys_pass_a_filter_of_16_bits_a_key() -> Result<()> {
-    let (_, filter) = filtered_table(4096)?;
-    assert_eq!(filter.len(), 1024, "16 bits a key exactly");
-    let absent: Vec<u32> = (0..100_000).map(|key| hash_i32(key * 3 + 1)).collect();
+    let (count, nabsent) = if cfg!(miri) {
+        (1024, 10_000)
+    } else {
+        (4096, 100_000)
+    };
+    let (_, filter) = filtered_table(count)?;
+    assert_eq!(filter.len(), count / 4, "16 bits a key exactly");
+    let absent: Vec<u32> = (0..nabsent).map(|key| hash_i32(key * 3 + 1)).collect();
     let through = probe_filter(&filter, &absent)?;
-    eprintln!("{through} of 100000 absent keys passed");
-    assert!(through < 1000, "{through} of 100000 absent keys passed");
+    eprintln!("{through} of {nabsent} absent keys passed");
+    assert!(
+        through < nabsent as usize / 100,
+        "{through} of {nabsent} absent keys passed"
+    );
     Ok(())
 }
 

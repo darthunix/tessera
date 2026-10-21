@@ -561,9 +561,13 @@ fn a_corrupt_reference_chain_or_used_mark_is_an_error() -> Result<()> {
     assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
     // A count of records far past what the chunks hold does not keep the
     // walk going around the loop: the places of the chunks bound it too.
-    set_u64(table.index_words(), NRECORDS, u64::MAX);
-    let result = table_probe_one(&table, &hashes, &absent_keys);
-    assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
+    // Miri would take minutes over the 2^17 steps of the walk, the steps
+    // above again; the bound has a test of its own.
+    if !cfg!(miri) {
+        set_u64(table.index_words(), NRECORDS, u64::MAX);
+        let result = table_probe_one(&table, &hashes, &absent_keys);
+        assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
+    }
 
     // A used mark that ends no record, or lies past the chunk.
     for used in [12, CHUNK as u64 + 8] {
@@ -642,15 +646,25 @@ const EDGES: [i32; 7] = [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MA
 #[test]
 fn a_word_probed_at_once_answers_as_rows_probed_alone() -> Result<()> {
     // Three thousand records over 8192 buckets, and over many chunks, with
-    // equal keys and equal hashes of different rows in chains.
-    let values: Vec<i32> = (0..3000).map(|row| row % 1700).collect();
+    // equal keys and equal hashes of different rows in chains, probed by
+    // batches of up to 200 rows; under Miri, which would take minutes, a
+    // fifth of the records, over several chunks, and batches of up to 70.
+    let (nrecords, distinct, most) = if cfg!(miri) {
+        (600, 340, 70)
+    } else {
+        (3000, 1700, 200)
+    };
+    let values: Vec<i32> = (0..nrecords).map(|row| row % distinct).collect();
     let keys = [Column::new(&values, None)];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
-    let mut table = local(&ONE_INT4, 3000)?;
+    let mut table = local(&ONE_INT4, nrecords as u64)?;
     insert_all(&mut table, &hashes, &Keys(&keys), None)?;
     let table = table.table()?;
     // Present keys, absent ones past them, and edges.
-    let probes = proptest::collection::vec(prop_oneof![0..2000, select(EDGES.to_vec())], 0..=200);
+    let probes = proptest::collection::vec(
+        prop_oneof![0..distinct + 300, select(EDGES.to_vec())],
+        0..=most,
+    );
     property(probes, |probe_values| -> Result<()> {
         let nrows = probe_values.len();
         let probe_keys = [Column::new(&probe_values, None)];
@@ -665,7 +679,7 @@ fn a_word_probed_at_once_answers_as_rows_probed_alone() -> Result<()> {
             assert_eq!(found[row / 64] >> (row % 64) & 1, hit, "row {row}");
             assert_eq!(
                 hit == 1,
-                (0..1700).contains(&probe_values[row]),
+                (0..distinct).contains(&probe_values[row]),
                 "row {row}"
             );
             if hit == 1 {
@@ -693,10 +707,13 @@ fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
     let result = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64));
     assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
     // As a row alone does, the word stops at the places of the chunks
-    // when the count of records is damaged too.
-    set_u64(table.index_words(), NRECORDS, u64::MAX);
-    let result = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64));
-    assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
+    // when the count of records is damaged too; not under Miri, for the
+    // reason `a_corrupt_reference_chain_or_used_mark_is_an_error` gives.
+    if !cfg!(miri) {
+        set_u64(table.index_words(), NRECORDS, u64::MAX);
+        let result = probe_rows(&table.table()?, &hashes, &absent_keys, &all_rows(64));
+        assert_eq!(refusal(result), Some((Kind::Damaged, Rule::Chain)));
+    }
     Ok(())
 }
 
