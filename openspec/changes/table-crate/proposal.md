@@ -54,6 +54,13 @@ none of these:
 - An error of a call is of one of two kinds, a wrong call or a damaged
   table, and names the rule it broke, instead of a text. A call
   allocates no memory.
+- What an outside review of the crate found is fixed before the crate
+  is published: a batch that fails part way leaves the table whole; the
+  owning table stays whole under any order of its calls; the writes of
+  chunks and the index leave the shared handle, so that no safe call
+  can change a borrowed record; the table stores 0 for NULL keys; a
+  walk stops at a cycle when that costs nothing; and its advice on the
+  interface, the documentation and the tests is taken.
 - A batch to place is one value with one lifetime, as a lookup is, and
   its references are named references throughout. The owning table's
   calls take the rows to place as a mask they only read. The calls that
@@ -104,11 +111,12 @@ none of these:
 - `relhash`: the crate of its own, its documentation, the masks of
   rows, the promise over any bytes, errors of two kinds, no memory
   taken, the same calls giving the same bytes, threads, records by
-  reference, a merge by the caller's rule, and a batch to place. The
-  capability is made by the changes `relhash-spec-table` and
-  `relhash-spec-partitions`, which close first; this change adds its
-  requirements to it, and its errors of two kinds take the place of the
-  part of "Errors of a call" that moved.
+  reference, a merge by the caller's rule, a batch to place, a batch
+  that fails part way, the owning table, safe calls that are sound,
+  and keys from a source. The capability is made by the changes
+  `relhash-spec-table` and `relhash-spec-partitions`, which close
+  first; this change adds its requirements to it, and its errors of two
+  kinds take the place of the part of "Errors of a call" that moved.
 - `hash-table`: a call of the C API that gives a chunk's used mark,
   checked, so that no node reads it by itself; the masks of inserted
   rows of the calls that find or insert add up over a batch.

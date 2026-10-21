@@ -164,7 +164,57 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       Check: `make rust-check`; `make installcheck`; machine code;
       `cargo ab measure` of the grouping cases of `win`, no case
       slower
-- [ ] 3.11 Set `publish = true` for the crate and refuse a target whose
+- [ ] 3.11 Keep a table whole when a call that places rows fails part
+      way: `append`, `append_columns`, `find_or_insert` and their forms
+      by partition store the used mark of every chunk they wrote on
+      every exit; the rows placed before the error leave the pending
+      mask with their references and, when they made a record, enter
+      the mask of inserted rows; `link_counting` counts what it linked
+      and moves `*from` past it. Check: for each of these calls, a
+      source of keys that fails at a chosen word or a partition's chunk
+      refused in the middle of a word, then the same batch placed again;
+      `make rust-check`; machine code
+- [ ] 3.12 Keep the owning table whole under any order of its calls:
+      `find_or_insert` and `regrow` move the place up to which `insert`
+      links, and `OwnedTable::new` refuses chunks too small for a
+      record. Check: a property test of random sequences of `insert`,
+      `find_or_insert`, `regrow` and `reset` against a model of the
+      records; `cargo test -p relhash`
+- [ ] 3.13 Take the writes of chunks and the index off the shared
+      handle: `append`, `append_columns`, `link` and `link_counting`
+      safe on `TableMut` and `unsafe` on `Table`, whose contract names
+      the chunks the caller writes and that no record of them is
+      borrowed; `scan` on `TableMut`; the documentation of `record`, the
+      gathers and the next match says what a reference past a chunk's
+      used mark reads while a writer writes it. Check: a compile-fail
+      example of a record borrowed across an append; Miri over a reset
+      and a reuse of an old reference; `cargo public-api -p relhash`;
+      `make installcheck`
+- [ ] 3.14 Store 0 in the slot of every key a source marks NULL,
+      whatever the source wrote there, and say in `KeySource` what a
+      source that cannot give a word leaves behind. Check: a source
+      that leaves values in NULL slots; machine code
+- [ ] 3.15 Make the smaller changes of the API: `Marks::set` and
+      `Marks::word` safe; `check_rows` out of the crate's API;
+      `init_chunk` and `chunk_used` with the other calls over chunks;
+      `CombineStop` named for `merge`; `Batch::refs`; `mark` and
+      `scan_unmarked` taking the record size from the table; the
+      documentation of `Batch::new` binding its source of keys. Check:
+      `cargo public-api -p relhash`; `make rust-check`;
+      `make installcheck`
+- [ ] 3.16 Stop a walk down a chain at a cycle by Brent's method, if the
+      counters of the probe and the find stay as they are; otherwise
+      write the cost into the design and keep the bound. Check: cycles
+      of two and of many records under a damaged count; machine code;
+      the maintainer's run of counters on `table_int32` and
+      `table_large`
+- [ ] 3.17 Strengthen the tests: every refusal compared by its kind and
+      rule, not by `is_err()`; the longest chunk filled to its last
+      record, chunk 32767, and the largest record end to end; a loom
+      model of `link_counting` beside a third participant's link; Miri
+      over the doc tests in CI; the build without `alloc` free of
+      warnings. Check: `cargo test -p relhash`; `make rust-loom`; CI
+- [ ] 3.18 Set `publish = true` for the crate and refuse a target whose
       pointers are not 64 bits wide with `compile_error!`; add to CI a
       build for a 32-bit target that must fail, the crate's tests alone,
       a build without `alloc`, a dry run of `cargo publish`, and a
