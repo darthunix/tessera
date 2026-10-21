@@ -276,9 +276,12 @@ the documentation and the tests.
   them links records a second time: their count grows past the records
   and a chain turns into a cycle. A chunk too small for a record makes
   `find_or_insert` add chunks up to the limit of 32768 before it fails,
-  and with another rule than `insert`. **Will be:** both calls move
-  that place to the chunks' used marks, and `OwnedTable::new` refuses
-  such chunks.
+  and with another rule than `insert`. **Will be:** the owning table
+  keeps no such place: an insertion links what it appended, from the
+  last chunk's used mark before it, and nothing else, whatever other
+  calls appended, linked or found before; `OwnedTable::new` refuses
+  such chunks. Refused: moving the kept place after every other call,
+  which each new call would have to remember.
 - **A borrowed record and a write.** `Table::append`, `append_columns`,
   `link` and `link_counting` write chunks and the index through a shared
   `&Table`, the handle a shared build needs; the rule of one writer a

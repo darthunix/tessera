@@ -174,10 +174,9 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       source of keys that fails at a chosen word or a partition's chunk
       refused in the middle of a word, then the same batch placed again;
       `make rust-check`; machine code
-- [ ] 3.12 Keep the owning table whole under any order of its calls:
-      `find_or_insert` and `regrow` move the place up to which `insert`
-      links, and `OwnedTable::new` refuses chunks too small for a
-      record. Check: a property test of random sequences of `insert`,
+- [x] 3.12 Keep the owning table whole under any order of its calls:
+      an insertion links what it appended and nothing else, and
+      `OwnedTable::new` refuses chunks too small for a record. Check: a property test of random sequences of `insert`,
       `find_or_insert`, `regrow` and `reset` against a model of the
       records; `cargo test -p relhash`
 - [ ] 3.13 Take the writes of chunks and the index off the shared
