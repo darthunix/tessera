@@ -142,18 +142,18 @@ fn a_payload_cursor_changes_payloads_by_reference() -> Result<()> {
     let keys = [Column::new(&values, None)];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let mut table = local(&ONE_INT4, 20)?;
-    let (offsets, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    let (refs, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
     {
         let mut writer = table.table_mut()?;
         let mut payloads = writer.payloads();
-        for (row, &offset) in offsets.iter().enumerate() {
+        for (row, &offset) in refs.iter().enumerate() {
             let payload = payloads.payload(offset)?;
             let sum = u64::from_ne_bytes(payload[..8].try_into()?) + row as u64;
             payload[..8].copy_from_slice(&sum.to_ne_bytes());
         }
     }
     // Key k has the rows k, k + 10, ..., k + 90.
-    for (key, &offset) in offsets[..10].iter().enumerate() {
+    for (key, &offset) in refs[..10].iter().enumerate() {
         let sum = 10 * key as u64 + 450;
         assert_eq!(table.table()?.record(offset)?.payload, sum.to_ne_bytes());
     }
@@ -161,13 +161,13 @@ fn a_payload_cursor_changes_payloads_by_reference() -> Result<()> {
     // The record of the third of five references claims another length:
     // the cursor fails there, and the first two payloads keep what it
     // wrote.
-    let (chunk, byte) = placement(offsets[2]);
+    let (chunk, byte) = placement(refs[2]);
     set_u32(table.chunk_words(chunk), byte + 12, 99);
     let mut opened = Vec::new();
     {
         let mut writer = table.table_mut()?;
         let mut payloads = writer.payloads();
-        let failed = offsets[..5].iter().try_for_each(|&offset| -> Result<()> {
+        let failed = refs[..5].iter().try_for_each(|&offset| -> Result<()> {
             payloads
                 .payload(offset)?
                 .copy_from_slice(&7u64.to_ne_bytes());
@@ -176,8 +176,8 @@ fn a_payload_cursor_changes_payloads_by_reference() -> Result<()> {
         });
         assert!(failed.is_err());
     }
-    assert_eq!(opened, offsets[..2]);
-    for &offset in &offsets[..2] {
+    assert_eq!(opened, refs[..2]);
+    for &offset in &refs[..2] {
         assert_eq!(table.table()?.record(offset)?.payload, 7u64.to_ne_bytes());
     }
     Ok(())
@@ -189,13 +189,13 @@ fn a_payload_cursor_holds_checked_references_to_open_later() -> Result<()> {
     let keys = [Column::new(&values, None)];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let mut table = local(&ONE_INT4, 40)?;
-    let (offsets, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    let (refs, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
     {
         let mut writer = table.table_mut()?;
         let mut payloads = writer.payloads();
         assert!(payloads.held(0).is_err(), "a slot that holds nothing");
         // Check the first HELD references now, then open them in reverse.
-        for (slot, &offset) in offsets[..HELD].iter().enumerate() {
+        for (slot, &offset) in refs[..HELD].iter().enumerate() {
             payloads.hold(slot, offset)?;
         }
         for slot in (0..HELD).rev() {
@@ -203,14 +203,14 @@ fn a_payload_cursor_holds_checked_references_to_open_later() -> Result<()> {
                 .held(slot)?
                 .copy_from_slice(&(slot as u64 + 100).to_ne_bytes());
         }
-        assert!(payloads.hold(HELD, offsets[0]).is_err(), "past the slots");
+        assert!(payloads.hold(HELD, refs[0]).is_err(), "past the slots");
         assert!(payloads.held(HELD).is_err(), "past the slots");
-        assert!(payloads.hold(0, offsets[0] + 1).is_err(), "inside a record");
+        assert!(payloads.hold(0, refs[0] + 1).is_err(), "inside a record");
         // A slot that took a new reference opens that one.
-        payloads.hold(0, offsets[HELD])?;
+        payloads.hold(0, refs[HELD])?;
         payloads.held(0)?.copy_from_slice(&7u64.to_ne_bytes());
     }
-    for (slot, &offset) in offsets[..HELD].iter().enumerate().skip(1) {
+    for (slot, &offset) in refs[..HELD].iter().enumerate().skip(1) {
         let expected = slot as u64 + 100;
         assert_eq!(
             table.table()?.record(offset)?.payload,
@@ -218,11 +218,11 @@ fn a_payload_cursor_holds_checked_references_to_open_later() -> Result<()> {
         );
     }
     assert_eq!(
-        table.table()?.record(offsets[0])?.payload,
+        table.table()?.record(refs[0])?.payload,
         100u64.to_ne_bytes()
     );
     assert_eq!(
-        table.table()?.record(offsets[HELD])?.payload,
+        table.table()?.record(refs[HELD])?.payload,
         7u64.to_ne_bytes()
     );
     Ok(())
@@ -234,19 +234,19 @@ fn a_record_cursor_reads_records_by_reference() -> Result<()> {
     let keys = [Column::new(&values, None)];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let mut table = local(&ONE_INT4, 20)?;
-    let (offsets, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    let (refs, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
     let reader = table.table()?;
     let mut records = reader.records();
-    for (row, &offset) in offsets.iter().enumerate() {
+    for (row, &offset) in refs.iter().enumerate() {
         let record = records.record(offset)?;
         assert_eq!(record.keys, &[(row % 10) as i64]);
         assert_eq!(record.hash, hashes[row]);
     }
-    assert!(records.record(offsets[0] + 1).is_err(), "inside a record");
+    assert!(records.record(refs[0] + 1).is_err(), "inside a record");
     assert!(records.record(0).is_err(), "reference 0");
     // The records it gave outlive the next read.
-    let first = records.record(offsets[0])?;
-    let second = records.record(offsets[1])?;
+    let first = records.record(refs[0])?;
+    let second = records.record(refs[1])?;
     assert_ne!(first.keys, second.keys);
     Ok(())
 }
@@ -257,20 +257,20 @@ fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
     let keys = [Column::new(&values, None)];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let mut table = local(&ONE_INT4, 20)?;
-    let (mut offsets, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    let (mut refs, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
     // Rows 3 and 13 share a record, row 64 is in the second word.
     let words = [1u64 << 3 | 1 << 13 | 1 << 40, 1 << 0 | 1 << 35];
     let rows = RowMaskView::try_new(100, &words)?;
     let mut seen = Vec::new();
     table
         .table_mut()?
-        .each_payload(&offsets, &rows, |row, payload| {
+        .each_payload(&refs, &rows, |row, payload| {
             let count = u64::from_ne_bytes(payload[..8].try_into().unwrap());
             payload[..8].copy_from_slice(&(count + 1).to_ne_bytes());
             seen.push(row);
         })?;
     assert_eq!(seen, [3, 13, 40, 64, 99], "the selected rows, in order");
-    for (key, &offset) in offsets[..10].iter().enumerate() {
+    for (key, &offset) in refs[..10].iter().enumerate() {
         let payload = table.table()?.record(offset)?.payload.to_vec();
         let expected: u64 = match key {
             3 => 2,
@@ -281,18 +281,18 @@ fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
     }
 
     // A reference that names no record fails, after the rows before it.
-    offsets[40] += 1;
+    refs[40] += 1;
     seen.clear();
     let failed = table
         .table_mut()?
-        .each_payload(&offsets, &rows, |row, _| seen.push(row));
+        .each_payload(&refs, &rows, |row, _| seen.push(row));
     assert!(failed.is_err());
     assert_eq!(seen, [3, 13]);
     // Offsets for another count of rows than the mask's fail first.
     seen.clear();
     let short = table
         .table_mut()?
-        .each_payload(&offsets[..99], &rows, |row, _| seen.push(row));
+        .each_payload(&refs[..99], &rows, |row, _| seen.push(row));
     assert!(short.is_err());
     assert!(seen.is_empty());
     Ok(())
@@ -304,7 +304,7 @@ fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
     let keys = [Column::new(&values, None)];
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let mut table = local(&ONE_INT4, 20)?;
-    let (offsets, created) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    let (refs, created) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
     assert_eq!(
         created,
         (0..10).collect::<Vec<_>>(),
@@ -312,23 +312,20 @@ fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
     );
     assert_eq!(table.table()?.stats().records, 10);
     for row in 0..100 {
-        assert_eq!(offsets[row], offsets[row % 10]);
-        assert_eq!(
-            table.table()?.record(offsets[row])?.keys,
-            &[(row % 10) as i64]
-        );
-        assert_eq!(table.table()?.record(offsets[row])?.payload, [0; 8]);
+        assert_eq!(refs[row], refs[row % 10]);
+        assert_eq!(table.table()?.record(refs[row])?.keys, &[(row % 10) as i64]);
+        assert_eq!(table.table()?.record(refs[row])?.payload, [0; 8]);
     }
     {
         let mut writer = table.table_mut()?;
-        for (key, &offset) in offsets[..10].iter().enumerate() {
+        for (key, &offset) in refs[..10].iter().enumerate() {
             writer
                 .payload_mut(offset)?
                 .copy_from_slice(&(key as u64 * 7).to_ne_bytes());
         }
-        assert!(writer.payload_mut(offsets[0] + 1).is_err());
+        assert!(writer.payload_mut(refs[0] + 1).is_err());
     }
-    for (row, &offset) in offsets.iter().enumerate() {
+    for (row, &offset) in refs.iter().enumerate() {
         let payload = table.table()?.record(offset)?.payload.to_vec();
         assert_eq!(payload, ((row % 10) as u64 * 7).to_ne_bytes());
     }
@@ -336,18 +333,18 @@ fn rows_find_or_create_the_record_of_their_keys() -> Result<()> {
     let more: Vec<i32> = (5..15).collect();
     let more_keys = [Column::new(&more, None)];
     let more_hashes: Vec<u32> = more.iter().map(|&value| hash_i32(value)).collect();
-    let (more_offsets, created) = resolve_all(&mut table, &more_hashes, &Keys(&more_keys))?;
+    let (more_refs, created) = resolve_all(&mut table, &more_hashes, &Keys(&more_keys))?;
     assert_eq!(
         created,
         (5..10).collect::<Vec<_>>(),
         "keys 10 to 14 are new"
     );
-    assert_eq!(more_offsets[..5], offsets[5..10]);
+    assert_eq!(more_refs[..5], refs[5..10]);
     let table = table.table()?;
     assert_eq!(table.stats().records, 15);
     let (found, matches) = probe_all(&table, &more_hashes, &Keys(&more_keys))?;
     assert_eq!(found.len(), 10);
-    assert_eq!(matches, more_offsets);
+    assert_eq!(matches, more_refs);
     Ok(())
 }
 
@@ -360,7 +357,7 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
     let mut table = OwnedTable::new(&ONE_INT4, 20, CHUNK_HEADER + 4 * 32)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = all_rows(20);
-    let mut offsets = vec![0; 20];
+    let mut refs = vec![0; 20];
     let mut inserted_words = [0];
     {
         let mut writer = table.table_mut()?;
@@ -368,7 +365,7 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
         let mut inserted = RowMask::try_new(20, &mut inserted_words)?;
         let resolved = writer.find_or_insert(
             chunk,
-            &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut offsets)?,
+            &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs)?,
             &mut inserted,
         )?;
         assert_eq!(resolved, 4);
@@ -380,7 +377,7 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
     let known_keys = [Column::new(&known, None)];
     let known_hashes: Vec<u32> = known.iter().map(|&value| hash_i32(value)).collect();
     let mut known_pending = all_rows(5);
-    let mut known_offsets = vec![0; 5];
+    let mut known_refs = vec![0; 5];
     let mut created = [0];
     let resolved = table.table_mut()?.find_or_insert(
         chunk,
@@ -388,15 +385,15 @@ fn a_full_chunk_resolves_known_keys_only() -> Result<()> {
             &known_hashes,
             &Keys(&known_keys),
             &mut RowMask::try_new(5, &mut known_pending)?,
-            &mut known_offsets,
+            &mut known_refs,
         )?,
         &mut RowMask::try_new(5, &mut created)?,
     )?;
     assert_eq!(resolved, 5, "no room is needed for known keys");
     assert_eq!(created, [0]);
-    assert_eq!(known_offsets[0], offsets[3]);
-    assert_eq!(known_offsets[4], offsets[3]);
-    assert_eq!(known_offsets[3], offsets[0]);
+    assert_eq!(known_refs[0], refs[3]);
+    assert_eq!(known_refs[4], refs[3]);
+    assert_eq!(known_refs[3], refs[0]);
     assert_eq!(table.table()?.stats().records, 4);
     Ok(())
 }
@@ -409,7 +406,7 @@ fn an_index_takes_records_up_to_half_its_buckets_and_regrows() -> Result<()> {
     let mut table = OwnedTable::new(&ONE_INT4, 1, MAX_CHUNK_LEN)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = all_rows(1500);
-    let mut offsets = vec![0; 1500];
+    let mut refs = vec![0; 1500];
     let mut inserted_words = all_rows(1500);
     let resolved = table.table_mut()?.find_or_insert(
         chunk,
@@ -417,13 +414,13 @@ fn an_index_takes_records_up_to_half_its_buckets_and_regrows() -> Result<()> {
             &hashes,
             &Keys(&keys),
             &mut RowMask::try_new(1500, &mut pending_words)?,
-            &mut offsets,
+            &mut refs,
         )?,
         &mut RowMask::try_new(1500, &mut inserted_words)?,
     )?;
     assert_eq!(resolved, 512, "1024 buckets take 512 records");
     // The owner builds larger indexes as it goes; references stay.
-    let first = offsets[..512].to_vec();
+    let first = refs[..512].to_vec();
     let (all, created) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
     assert_eq!(all[..512], first);
     assert_eq!(created, (512..1500).collect::<Vec<_>>());
@@ -443,13 +440,13 @@ fn a_walk_visits_every_record_once_in_appended_order() -> Result<()> {
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let mut table = local(&ONE_INT4, 400)?;
     assert!(scan_all(&mut table, 64)?.is_empty());
-    let mut offsets = insert_all(
+    let mut refs = insert_all(
         &mut table,
         &hashes[..120],
         &Keys(&[Column::new(&values[..120], None)]),
         None,
     )?;
-    offsets.extend(insert_all(
+    refs.extend(insert_all(
         &mut table,
         &hashes[120..],
         &Keys(&[Column::new(&values[120..], None)]),
@@ -457,7 +454,7 @@ fn a_walk_visits_every_record_once_in_appended_order() -> Result<()> {
     )?);
     assert_eq!(table.chunks(), 4);
     for step in [1, 7, 64, 500] {
-        assert_eq!(scan_all(&mut table, step)?, offsets, "walks of {step}");
+        assert_eq!(scan_all(&mut table, step)?, refs, "walks of {step}");
     }
     let writer = table.table_mut()?;
     for (what, raw) in [
@@ -488,7 +485,7 @@ fn regrowing_keeps_records_and_their_references() -> Result<()> {
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let payload = payload_for(100);
     let mut table = local(&ONE_INT4, 16)?;
-    let offsets = insert_all(&mut table, &hashes, &Keys(&keys), Some(&payload))?;
+    let refs = insert_all(&mut table, &hashes, &Keys(&keys), Some(&payload))?;
     assert_eq!(table.table()?.stats().buckets, 1024);
     let before = scan_all(&mut table, 64)?;
     table.regrow(5000)?;
@@ -502,7 +499,7 @@ fn regrowing_keeps_records_and_their_references() -> Result<()> {
         before,
         "the records stay where they were"
     );
-    assert_eq!(before, offsets);
+    assert_eq!(before, refs);
     let shared = table.table()?;
     assert_eq!(shared.stats().records, 100);
     let (found, matches) = probe_all(&shared, &hashes, &Keys(&keys))?;
@@ -511,7 +508,7 @@ fn regrowing_keeps_records_and_their_references() -> Result<()> {
         let record = shared.record(matches[row])?;
         assert_eq!(record.keys, &[(row % 30) as i64]);
         assert_eq!(
-            shared.record(offsets[row])?.payload,
+            shared.record(refs[row])?.payload,
             (row as u64 * 10).to_ne_bytes()
         );
     }
@@ -544,7 +541,7 @@ fn insert_grouped_rows(
     keys: &[Column],
     payload: &[u8],
     rows: &[usize],
-    offsets: &mut [u32],
+    refs: &mut [u32],
 ) -> Result<usize> {
     let nrows = hashes.len();
     let mut pending_words = vec![0; nrows.div_ceil(64)];
@@ -554,7 +551,7 @@ fn insert_grouped_rows(
     let mut pending = RowMask::try_new(nrows, &mut pending_words)?;
     let (inserted, duplicates) = table.insert_grouped(
         Some(payload),
-        &mut Batch::new(hashes, &Keys(keys), &mut pending, offsets)?,
+        &mut Batch::new(hashes, &Keys(keys), &mut pending, refs)?,
     )?;
     assert_eq!(inserted, rows.len());
     assert_eq!(pending.as_view().selected_count(), 0);
@@ -570,14 +567,12 @@ fn grouped_records_of_a_key_lie_together() -> Result<()> {
     let hashes = vec![0x1234_5678; 100];
     let payload = payload_for(100);
     let mut table = local(&ONE_INT4, 100)?;
-    let mut offsets = vec![0; 100];
+    let mut refs = vec![0; 100];
     let first: Vec<usize> = (0..30).collect();
     let second: Vec<usize> = (30..100).collect();
-    let duplicates =
-        insert_grouped_rows(&mut table, &hashes, &keys, &payload, &first, &mut offsets)?;
+    let duplicates = insert_grouped_rows(&mut table, &hashes, &keys, &payload, &first, &mut refs)?;
     assert_eq!(duplicates, 20, "a key's first row is new");
-    let duplicates =
-        insert_grouped_rows(&mut table, &hashes, &keys, &payload, &second, &mut offsets)?;
+    let duplicates = insert_grouped_rows(&mut table, &hashes, &keys, &payload, &second, &mut refs)?;
     assert_eq!(duplicates, 70, "every key was there already");
 
     // From the probe's record, the group gives every row of the key, one
@@ -593,11 +588,11 @@ fn grouped_records_of_a_key_lie_together() -> Result<()> {
             let row = u64::from_ne_bytes(record.payload.try_into().unwrap()) / 10;
             assert_eq!(values[row as usize], values[key]);
             seen[values[key] as usize] += 1;
-            let mut offsets = [offset];
-            if table.next_in_group(&mut Matches::new(&mut [1], &mut offsets)?)? == 0 {
+            let mut refs = [offset];
+            if table.next_in_group(&mut Matches::new(&mut [1], &mut refs)?)? == 0 {
                 break;
             }
-            offset = offsets[0];
+            offset = refs[0];
         }
     }
     assert_eq!(seen, [10; 10], "each group holds the ten rows of its key");
@@ -611,10 +606,9 @@ fn grouped_chains_span_chunks_and_survive_a_larger_index() -> Result<()> {
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     let payload = payload_for(400);
     let mut table = local(&ONE_INT4, 64)?;
-    let mut offsets = vec![0; 400];
+    let mut refs = vec![0; 400];
     let rows: Vec<usize> = (0..400).collect();
-    let duplicates =
-        insert_grouped_rows(&mut table, &hashes, &keys, &payload, &rows, &mut offsets)?;
+    let duplicates = insert_grouped_rows(&mut table, &hashes, &keys, &payload, &rows, &mut refs)?;
     assert_eq!(duplicates, 393, "the first row of each key is new");
     assert!(table.chunks() > 3);
     table.regrow(1000)?;
@@ -712,7 +706,7 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     for from_columns in [false, true] {
         let mut table = OwnedTable::new(&config, 0, CHUNK)?;
         let mut pending_words = selected.clone();
-        let mut offsets = vec![0u32; ROWS];
+        let mut refs = vec![0u32; ROWS];
         loop {
             let chunk = match table.chunks() {
                 0 => table.add_chunk()?,
@@ -724,13 +718,13 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
                 shared.append_columns(
                     chunk,
                     &columns,
-                    &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut offsets)?,
+                    &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs)?,
                 )?;
             } else {
                 shared.append(
                     chunk,
                     Some(&payload_bytes),
-                    &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut offsets)?,
+                    &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs)?,
                 )?;
             }
             if pending_words.iter().all(|&word| word == 0) {
@@ -738,18 +732,15 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
             }
             table.add_chunk()?;
         }
-        tables.push((table, offsets));
+        tables.push((table, refs));
     }
-    let (by_rows, offsets) = &tables[0];
-    let (by_columns, column_offsets) = &tables[1];
-    assert_eq!(
-        offsets, column_offsets,
-        "the records lie in the same places"
-    );
+    let (by_rows, refs) = &tables[0];
+    let (by_columns, column_refs) = &tables[1];
+    assert_eq!(refs, column_refs, "the records lie in the same places");
     let (rows_table, columns_table) = (by_rows.table()?, by_columns.table()?);
     for row in (0..ROWS).filter(|row| row % 3 != 0) {
-        let expected = rows_table.record(offsets[row])?;
-        let got = columns_table.record(column_offsets[row])?;
+        let expected = rows_table.record(refs[row])?;
+        let got = columns_table.record(column_refs[row])?;
         assert_eq!(got.payload, expected.payload, "row {row}");
         assert_eq!(got.keys, expected.keys);
         assert_eq!(got.hash, expected.hash);
@@ -762,14 +753,14 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     let chunk = table.add_chunk()?;
     let mut pending_words = selected.clone();
     let mut pending = RowMask::try_new(ROWS, &mut pending_words)?;
-    let mut offsets = vec![0u32; ROWS];
+    let mut refs = vec![0u32; ROWS];
     assert!(
         table
             .table()?
             .append_columns(
                 chunk,
                 &two,
-                &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut offsets).unwrap()
+                &mut Batch::new(&hashes, &Keys(&keys), &mut pending, &mut refs).unwrap()
             )
             .is_err()
     );

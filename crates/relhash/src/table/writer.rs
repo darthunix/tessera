@@ -98,9 +98,9 @@ fn resolve<R: Region, K: KeySource + ?Sized>(
         hashes,
         keys,
         pending,
-        offsets,
+        refs,
     } = batch;
-    let nrows = offsets.len();
+    let nrows = refs.len();
     check_keys(layout, *keys)?;
     check_rows(nrows, &[inserted.as_view().nrows()])?;
     let partitions = match partitions {
@@ -111,7 +111,7 @@ fn resolve<R: Region, K: KeySource + ?Sized>(
         layout.nkeys,
         layout.tail_words(),
         resolve_rows(
-            region, layout, chunk, partitions, hashes, *keys, pending, offsets, inserted
+            region, layout, chunk, partitions, hashes, *keys, pending, refs, inserted
         )
     )
 }
@@ -136,7 +136,7 @@ fn resolve_rows<
     hashes: &[u32],
     keys: &K,
     pending: &mut RowMask<'_>,
-    offsets: &mut [u32],
+    refs: &mut [u32],
     inserted: &mut RowMask<'_>,
 ) -> Result<usize> {
     // Made here, not passed in, so that its fields stay in registers.
@@ -171,7 +171,7 @@ fn resolve_rows<
                     &word_keys,
                     &hashes[base..end],
                     selected,
-                    &mut offsets[base..end],
+                    &mut refs[base..end],
                     &mut lanes,
                 )?;
             }
@@ -195,7 +195,7 @@ fn resolve_rows<
                 let found = access.find(head, hash, |record| unsafe {
                     word_keys.equal::<N>(bit, record)
                 })?;
-                offsets[row] = match found {
+                refs[row] = match found {
                     0 => {
                         if access.records() >= limit {
                             full = true;
@@ -338,17 +338,17 @@ pub(super) fn payload_mut<'r, R: Region>(
 pub(super) fn each_payload<R: Region>(
     region: &R,
     layout: &Layout,
-    offsets: &[u32],
+    refs: &[u32],
     rows: &RowMaskView<'_>,
     mut each: impl FnMut(usize, &mut [u8]),
 ) -> Result<()> {
     let nrows = rows.nrows();
-    check_rows(nrows, &[offsets.len()])?;
+    check_rows(nrows, &[refs.len()])?;
     let mut access = Access::new(region, layout);
     for index in 0..nrows.div_ceil(64) {
         for bit in ones(rows.word(index)) {
             let row = index * 64 + bit;
-            each(row, payload_at(&mut access, offsets[row], Kind::WrongCall)?);
+            each(row, payload_at(&mut access, refs[row], Kind::WrongCall)?);
         }
     }
     Ok(())
