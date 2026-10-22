@@ -683,11 +683,13 @@ fn the_entry_points_round_trip() -> Result<()> {
 
         // The second record of each key, in place; then no third.
         let mut chain = matches.clone();
+        let mut steps = 0;
         let code = tess_table_next_match(
             table.ptr(),
             chain.as_mut_ptr(),
             &raw const valid_view,
             &raw mut found,
+            &raw mut steps,
             &raw mut status,
         );
         assert_eq!(code, Code::Ok, "{}", status.message());
@@ -717,10 +719,12 @@ fn the_entry_points_round_trip() -> Result<()> {
             chain.as_mut_ptr(),
             &raw const twin_rows,
             &raw mut found,
+            &raw mut steps,
             &raw mut status,
         );
         assert_eq!(code, Code::Ok);
         assert_eq!(found_words, vec![0; 2], "no key has three records");
+        assert_eq!(steps, 2, "two steps with rows to move");
 
         // Errors: a null or foreign index, a short length, a reference
         // past the chunks, the wrong key count or kind, an undersized
@@ -2340,6 +2344,7 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
         // From each key's first row: three more records, one step each.
         let mut current = offsets.clone();
         let mut rows_words = [0xffff];
+        let mut steps = 0;
         for step in 0..4 {
             let rows = Mask {
                 nrows: 64,
@@ -2355,6 +2360,7 @@ fn grouped_insertion_steps_through_a_key_in_one_call_each() -> Result<()> {
                 current.as_mut_ptr(),
                 &raw const rows,
                 &raw mut found,
+                &raw mut steps,
                 &raw mut status,
             );
             assert_eq!(code, Code::Ok, "{}", status.message());
@@ -2497,6 +2503,7 @@ fn the_lookups_narrow_a_mask_in_place() -> Result<()> {
             let bits = words.as_mut_ptr();
             let rows = Mask { nrows: 64, bits };
             let mut found = Mask { nrows: 64, bits };
+            let mut steps = 0;
             for step in 0..4 {
                 let step_of = if in_group {
                     tess_table_next_in_group
@@ -2508,12 +2515,60 @@ fn the_lookups_narrow_a_mask_in_place() -> Result<()> {
                     current.as_mut_ptr(),
                     &raw const rows,
                     &raw mut found,
+                    &raw mut steps,
                     &raw mut status,
                 );
                 assert_eq!(code, Code::Ok, "{}", status.message());
                 let left = if step < 3 { 0xffff } else { 0 };
                 assert_eq!(*bits, left, "step {step}, in a group: {in_group}");
             }
+        }
+
+        // A record that names itself: each step finds it again, and a step
+        // past the table's 64 records fails.
+        let reference = first[0];
+        let (chunk, byte) = (
+            (reference >> 17) as usize,
+            (reference as usize & 0x1_ffff) * 8,
+        );
+        table.bases[chunk]
+            .add(byte + 4)
+            .cast::<u32>()
+            .write(reference);
+        for in_group in [true, false] {
+            let mut current = first.clone();
+            let mut words = [1_u64];
+            let bits = words.as_mut_ptr();
+            let rows = Mask { nrows: 64, bits };
+            let mut found = Mask { nrows: 64, bits };
+            let mut steps = 0;
+            let mut taken = 0;
+            let code = loop {
+                let step_of = if in_group {
+                    tess_table_next_in_group
+                } else {
+                    tess_table_next_match
+                };
+                let code = step_of(
+                    table.ptr(),
+                    current.as_mut_ptr(),
+                    &raw const rows,
+                    &raw mut found,
+                    &raw mut steps,
+                    &raw mut status,
+                );
+                if code != Code::Ok {
+                    break code;
+                }
+                assert_eq!(*bits, 1, "the record found again");
+                taken += 1;
+                assert!(taken <= 64, "the walk ends");
+            };
+            assert_eq!(
+                (code, taken),
+                (Code::InvalidArgument, 64),
+                "in a group: {in_group}"
+            );
         }
 
         // The filter, plain and shared, with two masks and in place.

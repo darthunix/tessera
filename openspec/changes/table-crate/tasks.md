@@ -239,14 +239,14 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       one record written through their pointers after the call, by the
       crate's call and by the C entry point; `make installcheck`;
       machine code
-- [ ] 3.21 Bound a walk over matches: `Matches` counts the steps to a
+- [x] 3.21 Bound a walk over matches: `Matches` counts the steps to a
       next match or a next in a group, and a step past the count of
       records fails as a damaged chain; `tess_table_next_match` and
       `tess_table_next_in_group` take the count from the caller, and
       Tessera's joins give it. Check: a record whose next names itself
       and a cycle of two equal keys, stepped through in Rust and in C;
-      `make installcheck`; machine code; the maintainer's run of
-      counters on `table_int32` and `table_large`
+      `make installcheck`; machine code, since no benchmark steps to a
+      next match
 - [ ] 3.22 Write the rules of the calls over every chunk: the contracts
       of `Table::attach` and `Chunks::new` name `bloom`,
       `try_build_bloom` and both forms of `scan_unmarked`, and the

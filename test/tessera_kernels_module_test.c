@@ -730,6 +730,7 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	uint64		pending_word;
 	uint64		found_word = 0;
 	uint64		inserted_word = 0;
+	uint64		steps = 0;
 	TessRowMask all_rows = {TABLE_ROWS, &all};
 	TessRowMask valid = {TABLE_ROWS, &valid_word};
 	TessRowMask pending = {TABLE_ROWS, &pending_word};
@@ -845,13 +846,13 @@ tessera_test_kernels_module_table(PG_FUNCTION_ARGS)
 	for (count = 0; count < 3; count++)
 	{
 		valid_word = found_word;
-		if (ops->table_next_match(&table, matches, &valid, &found,
+		if (ops->table_next_match(&table, matches, &valid, &found, &steps,
 								  &status) != TESS_OK ||
 			found_word != all)
 			cycle_failed("chain step", &status);
 	}
 	valid_word = found_word;
-	if (ops->table_next_match(&table, matches, &valid, &found,
+	if (ops->table_next_match(&table, matches, &valid, &found, &steps,
 							  &status) != TESS_OK ||
 		found_word != 0)
 		cycle_failed("chain end", &status);

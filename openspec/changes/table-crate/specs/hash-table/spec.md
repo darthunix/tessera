@@ -56,7 +56,8 @@ at a step past the table's count of records.
   match again and again, giving back the count of steps
 - **THEN** a step past the count of records fails with
   `TESS_ERROR_INVALID_ARGUMENT`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::the_lookups_narrow_a_mask_in_place`
 
 #### Scenario: A lookup in place refused
 - **WHEN** a probe in place is given two keys for a table of one, or a

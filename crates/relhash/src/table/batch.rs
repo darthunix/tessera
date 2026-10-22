@@ -12,7 +12,7 @@ use super::header::{Layout, NRECORDS, Place, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
 use super::record::no_chunk;
-use super::record::{Access, PayloadColumns, same_keys};
+use super::record::{Access, PayloadColumns, cycle, same_keys};
 use super::record::{check_record, check_record_at, unlinked};
 use super::region::Region;
 use super::{Appended, MAX_PARTITIONS, Partitions, Split};
@@ -194,10 +194,17 @@ impl<'b, K: KeySource + ?Sized> Batch<'b, K> {
 ///
 /// The mask and `refs` must have the same rows. That is checked once,
 /// when a lookup is made, and not again by each call.
+///
+/// A lookup also counts its steps: the calls to a next match or a next in
+/// a group that had rows to move. A key has no more records than the
+/// table, so a step past the table's count of records is a cycle of
+/// matching records, which each call alone would not see: it fails as a
+/// damaged chain. A probe starts the count again.
 #[derive(Debug)]
 pub struct Matches<'b> {
     pub(super) rows: RowMask<'b>,
     pub(super) refs: &'b mut [u32],
+    pub(super) steps: u64,
 }
 
 impl<'b> Matches<'b> {
@@ -212,7 +219,24 @@ impl<'b> Matches<'b> {
     #[inline]
     pub fn from_mask(rows: RowMask<'b>, refs: &'b mut [u32]) -> Result<Self> {
         check_rows(refs.len(), &[rows.as_view().nrows()])?;
-        Ok(Self { rows, refs })
+        Ok(Self {
+            rows,
+            refs,
+            steps: 0,
+        })
+    }
+
+    /// The same lookup with `steps` steps taken: for a caller that keeps
+    /// the count between calls, such as C, which makes a lookup a call.
+    #[inline]
+    pub fn with_steps(self, steps: u64) -> Self {
+        Self { steps, ..self }
+    }
+
+    /// The steps the lookup has taken since its probe.
+    #[inline]
+    pub fn steps(&self) -> u64 {
+        self.steps
     }
 
     /// The rows still in the lookup.
@@ -962,6 +986,19 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
     Ok(left)
 }
 
+/// Count a step of a lookup that has rows to move, and fail one past the
+/// table's count of records: the matches of a key go round a cycle.
+#[inline(always)]
+fn step<R: Region>(access: &Access<'_, R>, rows: &RowMask<'_>, steps: &mut u64) -> Result<()> {
+    if rows.as_view().words().any(|word| word != 0) {
+        *steps += 1;
+        if *steps > access.records() {
+            return Err(cycle());
+        }
+    }
+    Ok(())
+}
+
 /// For each row of `rows`, replace `refs[row]` by the record after it
 /// in its chain with the same hash and keys; the rows without one leave
 /// `rows` and keep their offset. The count of rows left is returned.
@@ -970,10 +1007,12 @@ pub(super) fn next_match<R: Region>(
     layout: &Layout,
     refs: &mut [u32],
     rows: &mut RowMask<'_>,
+    steps: &mut u64,
 ) -> Result<usize> {
     let nrows = rows.as_view().nrows();
     check_rows(nrows, &[refs.len()])?;
     let mut access = Access::new(region, layout);
+    step(&access, rows, steps)?;
     let mut left = 0;
     for (index, word) in rows.words_mut().iter_mut().enumerate() {
         let bits = *word;
@@ -1135,10 +1174,12 @@ pub(super) fn next_in_group<R: Region>(
     layout: &Layout,
     refs: &mut [u32],
     rows: &mut RowMask<'_>,
+    steps: &mut u64,
 ) -> Result<usize> {
     let nrows = rows.as_view().nrows();
     check_rows(nrows, &[refs.len()])?;
     let mut access = Access::new(region, layout);
+    step(&access, rows, steps)?;
     let mut left = 0;
     for (index, word) in rows.words_mut().iter_mut().enumerate() {
         let bits = *word;

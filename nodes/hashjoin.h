@@ -634,6 +634,8 @@ typedef struct JoinProbe
 	/* What this round already gathered from the records. */
 	bool		nulls_gathered;
 	bool	   *gathered;
+	/* The steps to the next records since the probe, which the kernels count. */
+	uint64		steps;
 } JoinProbe;
 
 /* Compact mode, for a table with duplicate keys. */
