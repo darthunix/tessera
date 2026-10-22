@@ -4521,3 +4521,76 @@ fn a_mark_that_ends_no_record() {
         assert_eq!(code, Code::InvalidArgument, "no place for the mark");
     }
 }
+
+/// A gather of 17 words from a payload of 16 is refused before it writes
+/// an output, those of the first group of 16 too; the 16 words gather.
+#[test]
+fn a_gather_of_many_words_past_the_payload_writes_nothing() {
+    let values = [7_u64];
+    let isnull = [false];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 1,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes = [int32::murmurhash32(7)];
+    let payload = [9_u64; 16];
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut table = CTable::new(128, 1);
+        let mut pending_words = [1_u64];
+        let mut pending = Mask {
+            nrows: 1,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = [0_u32];
+        table.insert(
+            4096,
+            hashes.as_ptr(),
+            &raw const key,
+            payload.as_ptr().cast(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            false,
+        );
+        let mut row = [1_u64];
+        let rows = Mask {
+            nrows: 1,
+            bits: row.as_mut_ptr(),
+        };
+        let mut output = [[999_u64; 1]; 17];
+        let pointers = output.each_mut().map(|out| out.as_mut_ptr());
+        let code = tess_table_gather_words(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            0,
+            17,
+            pointers.as_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+        assert_eq!(output, [[999]; 17], "no output written");
+        let code = tess_table_gather_words(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            0,
+            16,
+            pointers.as_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(output[..16], [[9]; 16]);
+        assert_eq!(output[16], [999]);
+    }
+}

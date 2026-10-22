@@ -720,10 +720,21 @@ fn a_walk_visits_every_record_once_in_appended_order() -> Result<()> {
             "a cursor {what}"
         );
     }
+    // A cursor on a record's place past its chunk's used mark: the walk
+    // would skip the rest of the chunk.
+    let (chunk, byte) = placement(*refs.last().unwrap());
+    let past = byte + 2 * writer.layout.record_size;
+    let mut cursor = Cursor::from_raw(((chunk as u64) << 32) | past as u64);
+    assert_eq!(
+        refusal(writer.scan(&mut cursor, &mut [0; 8])),
+        Some((Kind::WrongCall, Rule::CursorPast)),
+        "a cursor past the used mark"
+    );
+    // Nowhere to put records: a count of 0 would read as the end.
     let mut cursor = Cursor::start();
     assert_eq!(
-        writer.scan(&mut cursor, &mut [])?,
-        0,
+        refusal(writer.scan(&mut cursor, &mut [])),
+        Some((Kind::WrongCall, Rule::EmptyWalk)),
         "nowhere to put records"
     );
     assert_eq!(cursor, Cursor::start());

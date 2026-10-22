@@ -240,3 +240,24 @@ fn an_old_reference_after_a_reset_reads_what_its_place_holds() -> Result<()> {
     ensure!(record.keys == [2] && record.payload == 9u64.to_ne_bytes());
     Ok(())
 }
+
+/// What the owning table does when a find or insert left rows pending:
+/// another chunk below half the buckets, a larger index at half, and the
+/// rule of the most records at half the largest index, where growing to
+/// the same size would not end. Tested at the decision: the limit is 2^30
+/// records.
+#[test]
+fn the_owning_table_grows_up_to_the_most_records_and_then_fails() -> Result<()> {
+    use crate::table::owned::larger_index;
+    ensure!(larger_index(5, 1024)?.is_none(), "another chunk");
+    ensure!(larger_index(512, 1024)? == Some(1024), "a larger index");
+    ensure!(
+        larger_index(1 << 29, 1 << 30)? == Some(1 << 30),
+        "the largest index"
+    );
+    ensure!(
+        refusal(larger_index(1 << 30, 1 << 31)) == Some((Kind::WrongCall, Rule::MostRecords)),
+        "the most records"
+    );
+    Ok(())
+}

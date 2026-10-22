@@ -36,7 +36,7 @@ const MAGIC: u64 = u64::from_le_bytes(*b"RELHASH\0");
 /// The fewest buckets a table has, as pg_batch chooses them.
 pub(crate) const MIN_BUCKETS: u64 = 1024;
 /// The most buckets: the count stays below 2^32.
-const MAX_BUCKETS: u64 = 1 << 31;
+pub(super) const MAX_BUCKETS: u64 = 1 << 31;
 /// Bytes of a record before its keys: hash, next, null bits, length.
 pub(super) const RECORD_HEADER: usize = 16;
 /// Bytes of one key slot.

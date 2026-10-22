@@ -163,6 +163,8 @@ pub fn scan_unmarked(
     out: &mut [u32],
 ) -> Result<usize> {
     check_record_size(record_size)?;
+    // A count of 0 would read as the end of the walk.
+    ensure!(!out.is_empty(), Error::wrong_call(Rule::EmptyWalk));
     let per_record = PerRecord::new(record_size)?;
     let first_chunk = cursor.chunk();
     let first = cursor
@@ -365,6 +367,20 @@ mod tests {
             0,
             "at the end"
         );
+        // Nowhere to put records: a count of 0 would read as the end.
+        let mut words = vec![0_u64; len / 8];
+        words[0] = len as u64;
+        let bases = [words.as_mut_ptr().cast::<u8>()];
+        let lens = [len];
+        // SAFETY: the chunk is the vector's, used only here.
+        let chunks = unsafe { Chunks::new(&bases, &lens) }.unwrap();
+        let mut cursor = at(CHUNK_HEADER);
+        let empty = scan_unmarked(&chunks, SIZE, &mut cursor, None::<&Unmarked>, &mut []);
+        assert!(
+            refusal(empty) == Some((Kind::WrongCall, Rule::EmptyWalk)),
+            "nowhere to put records"
+        );
+        assert!(cursor == at(CHUNK_HEADER));
     }
 
     #[test]

@@ -452,6 +452,8 @@ pub(super) fn scan<R: Region>(
     cursor: &mut Cursor,
     out: &mut [u32],
 ) -> Result<usize> {
+    // A count of 0 would read as the end of the walk.
+    ensure!(!out.is_empty(), Error::wrong_call(Rule::EmptyWalk));
     let access = Access::new(region, layout);
     let (mut chunk, mut byte) = (cursor.chunk(), cursor.byte());
     ensure!(
@@ -460,6 +462,14 @@ pub(super) fn scan<R: Region>(
             && chunk <= region.chunks(),
         Error::wrong_call(Rule::Cursor).with(chunk).and(byte)
     );
+    // Past the used mark the walk would skip the rest of the chunk.
+    if chunk < region.chunks() {
+        let (used, _) = access.room(chunk)?;
+        ensure!(
+            byte <= used,
+            Error::wrong_call(Rule::CursorPast).with(chunk).and(byte)
+        );
+    }
     let mut count = 0;
     while count < out.len() && chunk < region.chunks() {
         let (used, _) = access.room(chunk)?;

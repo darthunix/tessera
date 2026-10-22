@@ -10,9 +10,26 @@
 use crate::error::{Error, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView};
 
+use super::header::MAX_BUCKETS;
 use super::{
     Batch, CHUNK_HEADER, Chunks, KeySource, MAX_CHUNKS, Table, TableConfig, TableMut, index_size,
 };
+
+/// What a find or insert that left rows pending needs, for a table of
+/// `records` records over `buckets` buckets: a larger index, for the
+/// capacity returned, once the records are half the buckets, or else
+/// another chunk. An index at the most buckets cannot grow, so a table
+/// at half of them fails: growing it to the same size would not end.
+pub(super) fn larger_index(records: u64, buckets: u64) -> Result<Option<u64>> {
+    if records < buckets / 2 {
+        return Ok(None);
+    }
+    ensure!(
+        buckets < MAX_BUCKETS,
+        Error::wrong_call(Rule::MostRecords).with(records)
+    );
+    Ok(Some(records * 2))
+}
 
 /// A block of words owned through a raw pointer.
 #[derive(Debug)]
@@ -370,7 +387,9 @@ impl OwnedTable {
     ///
     /// An error in the middle leaves the records made before it linked
     /// and found, as each is linked when it is made: the same rows given
-    /// again find them and make the rest.
+    /// again find them and make the rest. A table holds at most 2^30
+    /// records a find or insert made, half the largest index's buckets;
+    /// past them the call fails with [`Rule::MostRecords`].
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
         hashes: &[u32],
@@ -401,12 +420,12 @@ impl OwnedTable {
             if batch.pending().selected_count() == 0 {
                 return Ok(resolved);
             }
-            let table = self.table()?;
-            let records = table.stats().records;
-            if records >= table.layout.most_records() {
-                self.regrow(records * 2)?;
-            } else {
-                self.add_chunk()?;
+            let stats = self.table()?.stats();
+            match larger_index(stats.records, stats.buckets)? {
+                Some(capacity) => self.regrow(capacity)?,
+                None => {
+                    self.add_chunk()?;
+                }
             }
         }
     }

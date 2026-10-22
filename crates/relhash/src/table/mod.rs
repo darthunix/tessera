@@ -415,6 +415,9 @@ impl<'a> Table<'a> {
     /// Build a shared filter of this table's records unless another
     /// participant has claimed it: true for the one that built it. Call
     /// it, like [`Table::bloom`], once every writer's appends are done.
+    /// A build that fails after it claimed the filter, at a damaged record,
+    /// leaves it building: it never reads ready, the probes refuse it, and
+    /// nobody waits for it.
     pub fn try_build_bloom(&self, filter: &bloom::SharedFilter<'_>) -> Result<bool> {
         bloom::try_build(&self.region, &self.layout, filter)
     }
@@ -526,7 +529,9 @@ impl<'a> TableMut<'a> {
     /// record references, the rows whose record this call created are
     /// added to `inserted`, whose other bits stay, and the count resolved
     /// is returned. Rows left pending need another chunk or a larger index
-    /// ([`TableMut::regrow`]). Over the calls of a batch `inserted` gathers
+    /// ([`TableMut::regrow`]); an index has at most 2^31 buckets, so a
+    /// table holds at most 2^30 records that a find or insert or a merge
+    /// made. Over the calls of a batch `inserted` gathers
     /// every row that made a record: the caller clears it once, before the
     /// first.
     pub fn find_or_insert<K: KeySource + ?Sized>(
@@ -563,8 +568,9 @@ impl<'a> TableMut<'a> {
     /// table has and the payload of the table's record, to change; a
     /// record of new keys is copied whole to chunk `chunk` and linked.
     /// `*from` moves past the records merged, and the call stops where a
-    /// record of new keys needs another chunk or a larger index; the
-    /// count merged is returned. When the rule fails, the call returns
+    /// record of new keys needs another chunk or a larger index, at most
+    /// 2^30 records as for [`TableMut::find_or_insert`]; the count merged
+    /// is returned. When the rule fails, the call returns
     /// its error, the records before it merged.
     ///
     /// Chunk `source` is one of the table's chunks while it merges, so the
@@ -701,6 +707,7 @@ impl<'a> TableMut<'a> {
     /// `capacity` records, over the same chunks: every record is linked
     /// there again, grouped chains stay grouped, and the old index is no
     /// longer the table's. Records and their references stay as they were.
+    /// An index has at most 2^31 buckets, however large the capacity.
     ///
     /// The chunks are the table's whole set of records: a record appended
     /// but not linked yet is linked here too, and a link of it afterwards

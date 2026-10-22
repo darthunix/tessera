@@ -225,7 +225,8 @@ anything, and a chunk before it reads or writes it.
 #### Scenario: A gather of many words refused late
 - **WHEN** a gather of 17 words is asked of a payload of 16
 - **THEN** it fails, and every output is as it was, the first 16 too
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::a_gather_of_many_words_past_the_payload_writes_nothing`
 
 #### Scenario: Arguments are checked first
 - **WHEN** a call is given arrays of the wrong length, a missing output

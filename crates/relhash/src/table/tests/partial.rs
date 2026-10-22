@@ -254,3 +254,45 @@ fn a_link_that_meets_a_damaged_record_counts_what_it_linked() -> Result<()> {
     assert_eq!(matches, refs);
     Ok(())
 }
+
+/// A count of rows of a partition that one more row would carry past 2^64
+/// fails before that row is written, the rows before it placed and
+/// counted, in a debug build and a release one alike.
+#[test]
+fn a_full_count_of_a_partition_fails_before_its_row() -> Result<()> {
+    // Rows 0 to 9 go to partition 0, rows 10 to 19 to partition 1, whose
+    // count has room for three more rows.
+    let hashes: Vec<u32> = (0..20).map(|row| u32::from(row >= 10)).collect();
+    let mut table = OwnedTable::new(&ONE_COLUMN, 64, CHUNK_HEADER + 32 * 40)?;
+    let chunks = [table.add_chunk()? as u32, table.add_chunk()? as u32];
+    let partitions = Partitions {
+        shift: 0,
+        chunks: &chunks,
+    };
+    let mut pending = [(1 << 20) - 1];
+    let mut refs = [0; 20];
+    let mut rows = [0, u64::MAX - 3];
+    let failed = place_by_partition(
+        &mut table,
+        false,
+        &partitions,
+        &hashes,
+        &mut pending,
+        &mut refs,
+        &mut [0],
+        &mut rows,
+    );
+    assert_eq!(
+        refusal(failed),
+        Some((Kind::WrongCall, Rule::PartitionCount))
+    );
+    assert_eq!(rows, [10, u64::MAX], "the rows before it counted");
+    assert_eq!(pending, [((1 << 20) - 1) ^ ((1 << 13) - 1)], "and placed");
+    let size = table.table()?.layout.record_size;
+    assert_eq!(
+        table.chunk_words(chunks[1] as usize)[0],
+        (CHUNK_HEADER + 3 * size) as u64,
+        "three records in partition 1"
+    );
+    Ok(())
+}

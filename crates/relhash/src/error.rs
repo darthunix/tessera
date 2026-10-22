@@ -238,6 +238,14 @@ rules! {
     FilterFillAlign,
     /// A shared Bloom filter not built yet.
     FilterNotBuilt,
+    /// A walk into an output with room for no record.
+    EmptyWalk,
+    /// A count of rows of a partition that one more row would carry past
+    /// 2^64.
+    PartitionCount,
+    /// An owning table that holds the most records a find or insert may
+    /// make.
+    MostRecords,
 }
 
 impl Error {
@@ -500,6 +508,12 @@ impl fmt::Display for Error {
                 f.write_str("the words of a filter filled at once must be aligned to 8 bytes")
             }
             Rule::FilterNotBuilt => f.write_str("the shared filter is not built yet"),
+            Rule::EmptyWalk => f.write_str("a walk gives at least one record a call"),
+            Rule::PartitionCount => write!(f, "the count of rows of partition {a} is full"),
+            Rule::MostRecords => write!(
+                f,
+                "a table of {a} records holds the most a find or insert may make"
+            ),
         }
     }
 }
