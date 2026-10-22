@@ -1,9 +1,9 @@
 ## 0. How the work goes
 
-Every task below is a pull request into the branch `relhash`, of one to
-three commits, read by the maintainer; `main` is merged into the branch
-as it moves, and one pull request brings the branch into `main` at the
-end (task 7.4). A task that moves a file named by the spec or the
+Every task below is a pull request of one to three commits, read by
+the maintainer: up to 3.17 into the branch `relhash`, rebased onto
+`main` as it moved and brought into it fast-forward after 3.17; from
+3.18 on into `main`. A task that moves a file named by the spec or the
 design of `hash-table` edits those paths in the same commit. Each
 commit of sections 2 and 3 is checked by `make rust-check` and by
 `tessera-bench --base <previous> --disasm` on every program and with
@@ -356,6 +356,5 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       and put what is left into `openspec/roadmap.md`. Check:
       `openspec validate --all --strict`;
       `.github/scripts/check-specs.sh`
-- [ ] 7.4 Merge `main` into the branch a last time and open the pull
-      request of the branch into `main`. Check: CI; the maintainer's
-      review of the outcome
+- [ ] 7.4 Open the pull request that closes the change, into `main`.
+      Check: CI; the maintainer's review of the outcome

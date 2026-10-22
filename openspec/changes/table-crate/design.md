@@ -744,13 +744,14 @@ read through `git diff -M` and `cargo ab moved`.
 - A move that takes a file named by the spec or the design of
   `hash-table` edits those paths in the same commit, so that
   `check-specs.sh` passes at every step of the branch.
-- When `main` moves, it is merged into the branch, so its history is
-  never rewritten. Work on the table in `main`, such as the prefetch
-  hint of `simd-primitives-avx2`, waits for the branch, or the branch
-  takes it right after.
-- At the end one pull request brings the branch into `main`. When
-  `main` has not moved since its last merge into the branch, that merge
-  is fast-forward, and every small commit stays as it was read.
+- When `main` moves, the branch is rebased onto it, so that `main`
+  never gets a merge commit. Work on the table in `main`, such as the
+  prefetch hint of `simd-primitives-avx2`, waits for the branch, or the
+  branch takes it right after.
+- Once the crate is whole and an outside review's fixes are in, the
+  branch comes into `main` fast-forward, every small commit as it was
+  read, under a new hash. The tasks after it are pull requests into
+  `main`, and the branch is no longer kept.
 
 ### The documentation of the crate
 
@@ -906,8 +907,9 @@ approves them.
 - [This change's spec is written before the requirements it builds on
   are moved] → a task sets it on top of the moved ones before its
   checks start.
-- [The branch lives long while `main` moves] → `main` is merged into
-  it as it moves; work on the table in `main` waits for the branch.
+- [The branch lives long while `main` moves] → it is rebased onto
+  `main` as it moves, and comes into `main` once the crate is whole;
+  work on the table in `main` waits for it.
 
 ## Migration Plan
 
