@@ -348,6 +348,101 @@ the documentation and the tests.
   `link_counting` beside a third participant's link, Miri over the doc
   tests, and a build without `alloc` free of warnings.
 
+### What a second review found
+
+A second review by the same model, after the fixes of the first,
+found them sound and the walk, the checks of the format and the
+publishing of records as before. Two faults were left at the edges of
+the safe interface, both reproduced, and gaps in the contracts and the
+documentation that a caller embedding the crate would fall into. The
+maintainer took all of them.
+
+- **A chunk writer and a borrowed record.** The writes left the shared
+  `Table`, but `ChunkWriter`, which writes the chunks of a table that
+  has no index yet, stayed safe to make and to call. `Chunks` is
+  `Copy`, so a `Table` and a `ChunkWriter` over the same chunks, each
+  made within its contract, let safe code write a record that
+  `Table::record` has lent, which Miri reports. **Will be:**
+  `ChunkWriter::new` is `unsafe`: while the writer lives, it is the one
+  writer of the chunks it writes, and nothing borrows a record or a
+  payload of them while one of its calls runs. `Chunks::new` says that
+  a chunk has one writer across every table and chunk writer over it.
+  Refused: its four writes `unsafe` and the making safe, which would
+  repeat at every call what the maker knows once.
+- **An insertion of the owning table that fails part way.**
+  `OwnedTable::insert` links what it appended only after the append
+  returns, so a source that fails at a word leaves the records of the
+  words before it in the chunk and never linked: a probe misses them, a
+  walk sees them, and the same rows given again are appended twice.
+  **Will be:** the insertion links what it appended before it returns
+  the error. Its documentation and that of `find_or_insert` say what an
+  error leaves: the rows of the words before the failed one are placed
+  and found, and the same rows given again to an insertion are placed
+  again, as a join's table allows.
+- **The calls that read every chunk's used mark.** `bloom`,
+  `try_build_bloom` and `Table::scan_unmarked` read the used mark of
+  every chunk, other participants' too, by plain loads. Their
+  documentation asks for no chunk taking records, but they are safe
+  calls, and no contract of an `unsafe` call forbids running them
+  beside another participant's append: a data race, with every
+  contract met. **Will be:** the contracts of `Table::attach` and
+  `Chunks::new` name these calls and say they run only once every
+  writer's appends are done and ordered before them, as by a barrier,
+  which is what Tessera's shared build does. Refused: a used mark read
+  and written atomically. It would make the read defined but not the
+  answer: a filter or a walk beside an append misses the records after
+  the mark it read, and the barrier that makes the answer right orders
+  plain loads already.
+- **A call that fails after it changed the table.** `regrow` and
+  `clear_key` meet a chunk that cannot be one only when they reach it,
+  after they changed the chunks before it, though a wrong argument is
+  promised to fail before the call changes anything. And a find, a
+  merge or a regrow that meets damaged bytes in the middle returns at
+  once: the records before it may lie past the used mark, and a caller
+  that goes on writes over them. **Will be:** `regrow`, `clear_key`,
+  `bloom` and `try_build_bloom` check every chunk before the first
+  change. A table that a call found damaged is to be dropped or reset:
+  the crate promises that later calls over it stay bounded and sound,
+  as over any bytes, but not what they answer. Refused: storing the
+  marks on those exits too. The chains are damaged whatever the marks
+  say, and a stop on that path would cost the hot loops, as the stop
+  of a call that fails part way did.
+- **Smaller faults.** A walk given a cursor past its chunk's used mark
+  skips the rest of the chunk; it fails with the rule a walk of
+  unmarked records uses. The most records of a find or insert and of a
+  merge, half of 2^31 buckets, is written on those calls and on
+  `regrow`, and the owning table at that limit fails with a wrong call
+  instead of growing to the same index again and again. A shared
+  filter whose build fails stays building: it never reads ready,
+  probes refuse it, and nobody waits; `try_build_bloom` says so.
+  Refused: setting the state back to none, which lets the next
+  participant fail the same way. The chunks given to `regrow`, `bloom`,
+  `clear_key` and a walk are the table's whole set of records: `regrow`
+  links records not linked yet, a link of them afterwards makes a cycle
+  of one record, and a merge's source leaves the list before a regrow;
+  their documentation says so.
+- **The interface before it is published.** `OwnedTable` owns its
+  blocks, and every handle to it borrows it, so it may pass to another
+  thread: it becomes `Send`. The types the crate gives back, `Stats`,
+  `Split`, `Record` and `MergeStop`, become `#[non_exhaustive]`, so
+  that a count or a reason can be added later; the types a caller
+  builds, `TableConfig`, `Partitions` and `Appended`, stay open, and
+  `Kind` keeps its two kinds. A reference the caller passed that lands
+  inside a record or on unused bytes reads as a damaged table, since
+  the crate cannot tell it from damage: `Kind::Damaged`, `record`, the
+  gathers and the next match say so. `KeySource::word` keeps its
+  `Option`: a source that must say why it failed keeps its own error,
+  which the caller reads after the error of a key it could not read.
+  The documentation of `Cursor::from_raw`, of `Marks::set` (by `&self`,
+  so an implementation needs interior mutability) and of `Matches`
+  after a key not read in the middle of a probe fills the gaps found.
+- **The tests.** Every test of the walk past 64 steps has a cycle, so a
+  mutant of Brent's step that took every long chain for one passes
+  them: a healthy chain of 300 records of one hash is walked to its
+  end, by row, by word, down its matches and by a find or insert. The
+  owning table's model gets sources that fail at a chosen word. The
+  crate's tests that need no owning table run without `alloc`.
+
 ### The kinds of keys
 
 **Was:** a table was created with a kind for each key, `int4` or

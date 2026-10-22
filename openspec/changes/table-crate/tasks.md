@@ -214,13 +214,61 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       model of `link_counting` beside a third participant's link; Miri
       over the doc tests in CI; the build without `alloc` free of
       warnings. Check: `cargo test -p relhash`; `make rust-loom`; CI
-- [ ] 3.18 Set `publish = true` for the crate and refuse a target whose
-      pointers are not 64 bits wide with `compile_error!`; add to CI a
-      build for a 32-bit target that must fail, the crate's tests alone,
-      a build without `alloc`, a dry run of `cargo publish`, and a
-      snapshot of the crate's public API that CI compares; name these
-      checks in the contract's rules "Free of Tessera" and "A small
-      surface". Check: `cargo package -p relhash`; CI
+- [ ] 3.18 Make `ChunkWriter::new` `unsafe`, with the contract that the
+      writer is the one writer of the chunks it writes and that nothing
+      borrows their records or payloads while one of its calls runs;
+      say on `Chunks::new` that a chunk has one writer across every
+      table and chunk writer over it; the callers in `tessera-capi` and
+      `tessera-kernels` give their SAFETY. Check: a compile-fail example
+      of a chunk writer made in safe code; `cargo public-api -p
+      relhash`; `make installcheck`
+- [ ] 3.19 Link what an insertion of the owning table appended before
+      it returns an error, and say on `insert` and `find_or_insert`
+      what an error leaves behind. Check: the model of the owning
+      table's calls with sources that fail at a chosen word; `cargo
+      test -p relhash`
+- [ ] 3.20 Write the rules of the calls over every chunk: the contracts
+      of `Table::attach` and `Chunks::new` name `bloom`,
+      `try_build_bloom` and `scan_unmarked` and the barrier after every
+      writer's appends; `regrow`, `bloom`, `clear_key`, a walk and
+      `merge` say that their chunks are the table's whole set of
+      records. Check: `RUSTDOCFLAGS="-D warnings" cargo doc -p relhash
+      --no-deps`; the maintainer's review of the texts
+- [ ] 3.21 Check every chunk before the first change in `regrow`,
+      `clear_key`, `bloom` and `try_build_bloom`, and say in the
+      documentation that a table a call found damaged is dropped or
+      reset. Check: a larger index and a cleared key given a wrong last
+      chunk leave the table as it was; machine code
+- [ ] 3.22 Mend the smaller faults: a walk from a cursor past its
+      chunk's used mark fails as a walk of unmarked records does; the
+      most records of a find or insert and of a merge written on those
+      calls and on `regrow`, and the owning table failing at that limit;
+      a shared filter whose build fails documented as never ready.
+      Check: a walk from such a cursor; the owning table at its limit;
+      `cargo test -p relhash`; machine code
+- [ ] 3.23 Settle the interface before it is published: `OwnedTable`
+      `Send`; `Stats`, `Split`, `Record` and `MergeStop`
+      `#[non_exhaustive]`; the documentation of a caller's reference
+      that reads as damage, of a source's own error behind the error of
+      a key not read, of `Cursor::from_raw`, `Marks::set`, and `Matches`
+      after a key not read in the middle of a probe. Check: an owning
+      table filled on one thread and probed on another; `cargo
+      public-api -p relhash`; `make installcheck`
+- [ ] 3.24 Add the tests the review found missing: a healthy chain of
+      300 records of one hash walked to its end by row, by word, down
+      its matches and by a find or insert; the crate's tests that need
+      no owning table run without `alloc`, in CI. Check: `cargo test -p
+      relhash`; `cargo test -p relhash --no-default-features`; the
+      mutants of `find_long` and `finish_alone`
+- [ ] 3.25 Set `publish = true` for the crate and refuse a target whose
+      pointers are not 64 bits wide with `compile_error!`; give the
+      manifest its description, repository, readme, documentation,
+      keywords and categories; add to CI a build for a 32-bit target
+      that must fail, the crate's tests alone, a build without `alloc`,
+      a dry run of `cargo publish`, and a snapshot of the crate's public
+      API that CI compares; name these checks in the contract's rules
+      "Free of Tessera" and "A small surface". Check: `cargo package -p
+      relhash`; CI
 
 ## 4. The spec of the crate
 
