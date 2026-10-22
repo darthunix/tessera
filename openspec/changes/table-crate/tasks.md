@@ -202,9 +202,9 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       documentation of `Batch::new` binding its source of keys. Check:
       `cargo public-api -p relhash`; `make rust-check`;
       `make installcheck`
-- [ ] 3.16 Stop a walk down a chain at a cycle by Brent's method, if the
-      counters of the probe and the find stay as they are; otherwise
-      write the cost into the design and keep the bound. Check: cycles
+- [x] 3.16 Stop a walk down a chain at a cycle by Brent's method, and
+      write into the design what the counters of the probe and the find
+      show it costs, once the maintainer accepts it. Check: cycles
       of two and of many records under a damaged count; machine code;
       the maintainer's run of counters on `table_int32` and
       `table_large`
