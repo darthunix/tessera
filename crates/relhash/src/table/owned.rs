@@ -243,6 +243,13 @@ impl OwnedTable {
     /// `refs`, at its row, and the count inserted is returned. `hashes`,
     /// `keys` and `payload` are those of every row of the batch, as for
     /// [`Batch`] and [`Table::append`]; `rows` stays as it is.
+    ///
+    /// An error in the middle, such as a word of keys the source cannot
+    /// give, leaves the rows placed before it in the table, linked and
+    /// found, with their references in `refs`, and the others not placed.
+    /// The same rows given again are all placed again, as a join's table
+    /// allows: a caller that wants each row once drops or resets the
+    /// table.
     pub fn insert<K: KeySource + ?Sized>(
         &mut self,
         hashes: &[u32],
@@ -252,16 +259,18 @@ impl OwnedTable {
         refs: &mut [u32],
     ) -> Result<usize> {
         let (first, start) = self.append_start();
+        // Linked also when the append fails part way: no later insertion
+        // links the rows placed before the error.
         let appended = self.place(hashes, keys, rows, refs, |table, batch| {
             table.append_all(payload, batch)
-        })?;
+        });
         let chunks = self.chunks.len();
         let mut table = self.table_mut()?;
         for chunk in first..chunks {
             let mut from = if chunk == first { start } else { CHUNK_HEADER };
             table.link(chunk, &mut from)?;
         }
-        Ok(appended)
+        appended
     }
 
     /// As [`Self::insert`], linking by [`TableMut::link_grouped`]: the
@@ -277,9 +286,10 @@ impl OwnedTable {
         refs: &mut [u32],
     ) -> Result<(usize, usize)> {
         let (first, start) = self.append_start();
+        // Linked also when the append fails part way, as by `insert`.
         let appended = self.place(hashes, keys, rows, refs, |table, batch| {
             table.append_all(payload, batch)
-        })?;
+        });
         let chunks = self.chunks.len();
         let mut table = self.table_mut()?;
         let mut duplicates = 0;
@@ -287,7 +297,7 @@ impl OwnedTable {
             let mut from = if chunk == first { start } else { CHUNK_HEADER };
             duplicates += table.link_grouped(chunk, &mut from)?.1;
         }
-        Ok((appended, duplicates))
+        Ok((appended?, duplicates))
     }
 
     /// Make a batch of the rows of `rows` over the table's own words of
@@ -357,6 +367,10 @@ impl OwnedTable {
     /// in `refs`, at its row, the rows whose record this call created are
     /// added to `inserted`, and the count resolved is returned. `rows`
     /// stays as it is.
+    ///
+    /// An error in the middle leaves the records made before it linked
+    /// and found, as each is linked when it is made: the same rows given
+    /// again find them and make the rest.
     pub fn find_or_insert<K: KeySource + ?Sized>(
         &mut self,
         hashes: &[u32],

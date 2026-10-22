@@ -225,7 +225,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `tessera-capi` and `tessera-kernels` to match. Check: a
       compile-fail example of a chunk writer made in safe code; `cargo
       public-api -p relhash`; `make installcheck`
-- [ ] 3.19 Link what an insertion of the owning table appended before
+- [x] 3.19 Link what an insertion of the owning table appended before
       it returns an error, and say on `insert` and `find_or_insert`
       what an error leaves behind. Check: the model of the owning
       table's calls with sources that fail at a chosen word, in the
