@@ -134,7 +134,8 @@ records ends a walk over the matches.
 - **THEN** every known key is found at the end of its walk, the absent
   key finds nothing, the matches visit all 300 records, and no call
   takes the chain for a cycle
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::a_healthy_chain_longer_than_a_short_walk_is_walked_to_its_end`
 
 #### Scenario: A mask and references of other row counts
 - **WHEN** a lookup is made of a mask of 70 rows and 69 references

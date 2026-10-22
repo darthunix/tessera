@@ -17,7 +17,10 @@ mod record;
 mod region;
 #[cfg(any(test, loom))]
 mod testing;
+// The tests build their tables with the owning table. Two attributes, not
+// one `all`: Clippy takes a module for tests by `cfg(test)` alone.
 #[cfg(test)]
+#[cfg(feature = "alloc")]
 mod tests;
 mod writer;
 

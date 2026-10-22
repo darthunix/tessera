@@ -5,7 +5,6 @@
 use anyhow::{Result, ensure};
 
 use super::*;
-use crate::ones;
 use crate::table::testing::{Column, Keys, refusal};
 
 /// Marks a test keeps: a run of words per chunk.
@@ -467,8 +466,10 @@ fn the_owning_table_places_every_row_of_its_mask() -> Result<()> {
 
 /// Rows 0 and 1 of key 5, rows 2 and 3 NULL, whose slots the source
 /// leaves holding 7 and 8.
+#[cfg(debug_assertions)]
 struct NullSlotsHeld;
 
+#[cfg(debug_assertions)]
 impl KeySource for NullSlotsHeld {
     fn nkeys(&self) -> usize {
         1
@@ -479,7 +480,7 @@ impl KeySource for NullSlotsHeld {
     }
 
     fn word(&self, _: usize, _: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
-        for bit in ones(selected) {
+        for bit in crate::ones(selected) {
             out[bit] = [5, 5, 7, 8][bit];
         }
         Some(selected & 0b0011)

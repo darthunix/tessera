@@ -282,7 +282,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       error, which allocates nothing. Check: an owning table filled on
       one thread and probed on another; `RUSTDOCFLAGS="-D
       missing_docs"`; `cargo public-api -p relhash`; `make installcheck`
-- [ ] 3.26 Add the tests the reviews found missing: a healthy chain of
+- [x] 3.26 Add the tests the reviews found missing: a healthy chain of
       300 records of one hash walked to its end by row, by word, down
       its matches and by a find or insert; the crate's tests that need
       no owning table, its documentation and its doc tests built and
