@@ -272,7 +272,8 @@ it the one writer of the chunks it writes.
 #### Scenario: A chunk writer made in safe code
 - **WHEN** a program makes a writer of chunks outside an unsafe block
 - **THEN** the code does not compile
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/chunks.rs::A chunk writer made in safe code`
 
 #### Scenario: An old reference after a reset
 - **WHEN** an owning table is reset, an old reference is read, and new

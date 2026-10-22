@@ -401,8 +401,9 @@ impl Blocks {
     }
 
     fn chunks(&self) -> Chunks<'_> {
-        // SAFETY: the blocks live as long as `self` and are accessed
-        // only through tables and `records`.
+        // SAFETY: the blocks live as long as `self`, each a vector of its
+        // own, and are accessed only through tables, chunk writers and
+        // `records`.
         unsafe { Chunks::new(&self.bases, &self.lens) }.unwrap()
     }
 
@@ -484,7 +485,7 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
     let source = blocks.add(CHUNK_HEADER + 200 * 32);
     let mut words = all_rows(200);
     let mut refs = vec![0; 200];
-    ChunkWriter::new(&ONE_WORD, blocks.chunks())
+    writer(&ONE_WORD, blocks.chunks())
         .unwrap()
         .append(
             source as usize,
@@ -504,7 +505,7 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
             shift: 9,
             chunks: &current,
         };
-        let split = ChunkWriter::new(&ONE_WORD, blocks.chunks())
+        let split = writer(&ONE_WORD, blocks.chunks())
             .unwrap()
             .split(
                 &partitions,
@@ -558,7 +559,7 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
     let (hashes, all) = key_batch(&keys);
     for (shift, chunks, rule) in cases {
         let mut from = CHUNK_HEADER;
-        let split = ChunkWriter::new(&ONE_WORD, blocks.chunks()).unwrap().split(
+        let split = writer(&ONE_WORD, blocks.chunks()).unwrap().split(
             &Partitions { shift, chunks },
             4,
             &mut from,
@@ -578,7 +579,7 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         assert_eq!(table.table().unwrap().stats().records, 0);
     }
     let mut from = CHUNK_HEADER;
-    let split = ChunkWriter::new(&ONE_WORD, blocks.chunks()).unwrap().split(
+    let split = writer(&ONE_WORD, blocks.chunks()).unwrap().split(
         &Partitions {
             shift: 0,
             chunks: &[0, 1],
@@ -605,7 +606,7 @@ fn a_split_that_cannot_be_done_is_refused() {
     let source = blocks.add(CHUNK_HEADER + 200 * 32);
     let mut words = all_rows(200);
     let mut refs = vec![0; 200];
-    ChunkWriter::new(&ONE_WORD, blocks.chunks())
+    writer(&ONE_WORD, blocks.chunks())
         .unwrap()
         .append(
             source as usize,
@@ -636,7 +637,7 @@ fn a_split_that_cannot_be_done_is_refused() {
     for (config, capacity, first, refused) in cases {
         let chunks = [first, targets[1], targets[2], targets[3]];
         let mut from = CHUNK_HEADER;
-        let split = ChunkWriter::new(config, blocks.chunks()).unwrap().split(
+        let split = writer(config, blocks.chunks()).unwrap().split(
             &Partitions {
                 shift: 9,
                 chunks: &chunks,
@@ -652,6 +653,13 @@ fn a_split_that_cannot_be_done_is_refused() {
             assert!(blocks.records(target).is_empty(), "{refused:?}: copied");
         }
     }
+}
+
+/// A chunk writer of a table of `config` over `chunks`.
+fn writer<'a>(config: &TableConfig, chunks: Chunks<'a>) -> Result<ChunkWriter<'a>, Error> {
+    // SAFETY: a test's chunk writer is the one writer of the chunks it
+    // writes while it lives, and no record of them is borrowed meanwhile.
+    unsafe { ChunkWriter::new(config, chunks) }
 }
 
 /// Keys and their hashes as a batch's key column.
@@ -1107,7 +1115,7 @@ fn append_one(chunks: Chunks<'_>) -> Result<usize> {
     let (hashes, mut words) = key_batch(&keys);
     let mut refs = [0];
     let config = KEY_ONLY;
-    ChunkWriter::new(&config, chunks)?.append(
+    writer(&config, chunks)?.append(
         0,
         None,
         &mut Batch::new(&hashes, &column, &mut words, &mut refs)?,
@@ -1224,7 +1232,7 @@ fn rows_go_from_payload_columns_to_chunks_alone() {
     let values: [&[u64]; 1] = [&[30, 40, 50]];
     let nulls: [&[bool]; 1] = [&[false, true, false]];
     let columns = PayloadColumns::new(&values, &nulls, 3).unwrap();
-    let appended = ChunkWriter::new(&config, table.chunk_set().unwrap())
+    let appended = writer(&config, table.chunk_set().unwrap())
         .unwrap()
         .append_columns(
             0,

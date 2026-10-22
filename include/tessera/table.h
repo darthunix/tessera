@@ -19,8 +19,10 @@
  * between calls, and the table's memory is all the caller's: a record is
  * addressed by its chunk number and its place in the chunk, so the bytes
  * mean the same in every process whatever address a chunk has there.
- * Every block must be aligned to 8; tess_table_size says how many bytes
- * an index for a capacity needs, tess_table_create lays the index out,
+ * Every block must be aligned to 8, and no two blocks overlap: the index,
+ * the chunks, and the arrays of their addresses and lengths. A chunk has
+ * one writer at a time, across every process. tess_table_size says how
+ * many bytes an index for a capacity needs, tess_table_create lays the index out,
  * tess_table_chunk_init makes a block an empty chunk, and every other
  * call checks the chunks it writes or walks (a debug build every chunk
  * it is given), the whole header when it reads the index, and every
@@ -352,7 +354,8 @@ extern TessStatusCode tess_table_append_partitioned_columns(const TessTableRef *
  * record whose partition's chunk is full, *full receiving that partition,
  * -1 otherwise; *count receives the records copied, 0 at the source's end.
  * The copies are not linked; the source must be none of the partitions'
- * chunks. For a table's first spill and a partition split further.
+ * chunks, and the caller is the one writer of every partition's chunk.
+ * For a table's first spill and a partition split further.
  */
 extern TessStatusCode tess_table_split(const TessTableRef *table,
 									   int nkeys,
