@@ -308,14 +308,21 @@ the documentation and the tests.
   many steps as the count of records, which `refresh` bounds by 2^17 a
   chunk; over hundreds of chunks a cycle with a damaged count takes
   hours a batch. **Will be:** a walk stops at a cycle by Brent's method,
-  a compare a step and a saved place at each doubling of its steps, if
-  the counters of the probe and the find stay as they are; if not, the
-  cost is written here and the bound stays. The method runs only past
-  64 steps, in a function out of line, which a word's probe hands its
-  rows still walking to: below that the loops compare the steps once a
-  step against the smaller of the record count and 64, as they compared
-  them against the count alone, so a healthy table's walks are as they
-  were.
+  a compare a step and a saved place at each doubling of its steps. The
+  method runs only past 64 steps, in a function out of line, which a
+  word's probe hands its rows still walking to: below that the loops
+  compare the steps once a step against the smaller of the record count
+  and 64, as they compared them against the count alone. The counters
+  show what this costs a healthy table, and the cost is accepted. A
+  found row costs 0.6 to 0.9 instructions fewer, and a probe that misses
+  0.1 more. A call of a find or insert that finds few rows costs 36 to
+  56 instructions more, out of 430 to 730, and about 13 more a word of
+  one row: the call keeps more of the access on the stack. A probe pays
+  5 to 8 more a call and 1 to 3 a word of one row. A full word of 64
+  found rows costs what it did. Refused: the access keeping the bound,
+  set as it reads the count. That saved 19 instructions a call, but took
+  a register from the walk, which then read a pointer from the stack at
+  each step: 1.2 instructions a found row more.
 - **The interface.** `Marks::set` and `Marks::word` become safe: the
   crate keeps their word within the chunk's marks, and says so on the
   trait. `check_rows`, a helper, leaves the crate's API; `tessera-core`,
