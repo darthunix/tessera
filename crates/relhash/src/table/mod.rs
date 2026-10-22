@@ -134,7 +134,10 @@ impl<'a> Table<'a> {
     /// them. During `'a` the index and the chunks are accessed only
     /// through tables and chunk writers, here or in other processes
     /// mapping the same memory; probes run only once the records they may
-    /// find are linked, and a chunk has one writer.
+    /// find are linked, and a chunk has one writer. [`Table::bloom`],
+    /// [`Table::try_build_bloom`] and [`Table::scan_unmarked`], which read
+    /// every chunk's used mark, run only once every writer's appends are
+    /// done and ordered before them, as by a barrier.
     pub unsafe fn attach(index: *mut u8, len: usize, chunks: Chunks<'a>) -> Result<Self> {
         check_region(index, len)?;
         // SAFETY: the caller's contract, and `Chunks::new`'s for the chunks.
@@ -401,15 +404,17 @@ impl<'a> Table<'a> {
 
     /// Fill a Bloom filter of [`bloom::words_for`] this table's records
     /// words (or any power of two) with the hash of every record of every
-    /// chunk, after clearing it: a probe row it rejects has no record with
-    /// its hash. No chunk may take records at the same time.
+    /// chunk, linked or not, after clearing it: a probe row it rejects has
+    /// no record with its hash. It reads every chunk's used mark, so over a
+    /// shared table it runs once every writer's appends are done, as
+    /// [`Table::attach`] says.
     pub fn bloom(&self, words: &mut [u64]) -> Result<()> {
         bloom::fill(&self.region, &self.layout, words)
     }
 
     /// Build a shared filter of this table's records unless another
     /// participant has claimed it: true for the one that built it. Call
-    /// it, like [`Table::bloom`], while no chunk takes records.
+    /// it, like [`Table::bloom`], once every writer's appends are done.
     pub fn try_build_bloom(&self, filter: &bloom::SharedFilter<'_>) -> Result<bool> {
         bloom::try_build(&self.region, &self.layout, filter)
     }
@@ -424,8 +429,8 @@ impl<'a> Table<'a> {
 
     /// Visit the records without a mark, as [`scan_unmarked`] does, over
     /// this table's chunks and with its record size. It reads the chunks'
-    /// used marks: call it, like [`Table::bloom`], while no chunk takes
-    /// records.
+    /// used marks: call it, like [`Table::bloom`], once every writer's
+    /// appends are done.
     pub fn scan_unmarked(
         &self,
         cursor: &mut Cursor,
@@ -561,6 +566,11 @@ impl<'a> TableMut<'a> {
     /// record of new keys needs another chunk or a larger index; the
     /// count merged is returned. When the rule fails, the call returns
     /// its error, the records before it merged.
+    ///
+    /// Chunk `source` is one of the table's chunks while it merges, so the
+    /// calls over every chunk would take its records for the table's: it
+    /// leaves the chunks, or is reset, before a larger index, a filter, a
+    /// cleared key or a walk.
     pub fn merge<E: From<Error>>(
         &mut self,
         source: usize,
@@ -621,7 +631,8 @@ impl<'a> TableMut<'a> {
     /// Visit the records from `cursor` on, chunk by chunk in the order
     /// they were appended, as many as `out` holds: their references fill
     /// `out`, the count is returned and the cursor moves past them; 0
-    /// means the walk is over. A walk reads the chunks' used marks, which
+    /// means the walk is over. It visits every record below the used
+    /// marks, linked or not. A walk reads the chunks' used marks, which
     /// writers move, so it needs the table to itself.
     pub fn scan(&self, cursor: &mut Cursor, out: &mut [u32]) -> Result<usize> {
         writer::scan(&self.0.region, &self.0.layout, cursor, out)
@@ -678,8 +689,8 @@ impl<'a> TableMut<'a> {
         writer::payload_ptrs(&self.0.region, &self.0.layout, refs, rows, out)
     }
 
-    /// Write 0 into key `key` of every record, its NULL bit kept; the count
-    /// of records is returned. The key then orders no two records that are
+    /// Write 0 into key `key` of every record of the chunks, linked or not,
+    /// its NULL bit kept; the count of records is returned. The key then orders no two records that are
     /// not NULL, and a probe by it no longer finds them: for records nothing
     /// looks up by their keys, such as a sort's.
     pub fn clear_key(&mut self, key: usize) -> Result<u64> {
@@ -690,6 +701,11 @@ impl<'a> TableMut<'a> {
     /// `capacity` records, over the same chunks: every record is linked
     /// there again, grouped chains stay grouped, and the old index is no
     /// longer the table's. Records and their references stay as they were.
+    ///
+    /// The chunks are the table's whole set of records: a record appended
+    /// but not linked yet is linked here too, and a link of it afterwards
+    /// pushes it onto its own chain, a cycle of one record. A merge's
+    /// source leaves the chunks before.
     ///
     /// # Safety
     ///

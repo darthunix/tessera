@@ -247,7 +247,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       and a cycle of two equal keys, stepped through in Rust and in C;
       `make installcheck`; machine code, since no benchmark steps to a
       next match
-- [ ] 3.22 Write the rules of the calls over every chunk: the contracts
+- [x] 3.22 Write the rules of the calls over every chunk: the contracts
       of `Table::attach` and `Chunks::new` name `bloom`,
       `try_build_bloom` and both forms of `scan_unmarked`, and the
       barrier after every writer's appends; `regrow`, `bloom`,

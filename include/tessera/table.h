@@ -801,7 +801,8 @@ extern TessStatusCode tess_table_bloom_words_within(uint64 records, Size limit,
 
 /*
  * Clear the nwords words at words and set the bits of every record of the
- * table's chunks: no append may run at the same time, as for a walk.
+ * table's chunks: no append may run at the same time, and those before
+ * are ordered before the call, as by a barrier, as for a walk.
  */
 extern TessStatusCode tess_table_bloom(const TessTableRef *table,
 									   uint64 *words, Size nwords,
@@ -847,7 +848,8 @@ extern TessStatusCode tess_bloom_shared_init(uint64 *words, Size nwords,
 /*
  * Build the shared filter from the table's records unless another
  * participant has claimed it: *built is true for the one that did. No
- * append may run at the same time.
+ * append may run at the same time, and those before are ordered before
+ * the call, as by a barrier.
  */
 extern TessStatusCode tess_table_try_build_bloom(const TessTableRef *table,
 												 uint64 *words, Size nwords,
@@ -1077,7 +1079,8 @@ extern TessStatusCode tess_table_mark(const TessTableRef *table,
  * read from the chunks. The cursor, 0 at first, then names the first
  * record not given, and a count of 0 ends the walk; a cursor off a record
  * or past its chunk's used mark is refused. Nothing sets the marks or
- * appends to the chunks meanwhile; shared marks are read atomically.
+ * appends to the chunks meanwhile, and every append before is ordered
+ * before the call; shared marks are read atomically.
  */
 extern TessStatusCode tess_table_next_unmarked(const TessTableRef *table,
 											   Size record_size,
