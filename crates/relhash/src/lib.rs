@@ -195,6 +195,11 @@
 // links to it have nothing to point to.
 #![cfg_attr(not(feature = "alloc"), allow(rustdoc::broken_intra_doc_links))]
 
+// The arithmetic of offsets assumes a usize of 64 bits: the bytes of 2^31
+// buckets would wrap on a narrower one and pass the check of an index.
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("relhash needs a target whose pointers are 64 bits wide");
+
 mod bits;
 mod error;
 mod row_mask;

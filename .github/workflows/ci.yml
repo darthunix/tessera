@@ -32,6 +32,46 @@ jobs:
       - name: Format, Clippy, debug and release tests
         run: make rust-check
 
+  # The crate relhash alone, as its contract asks ("Free of Tessera", "A
+  # small surface"): its tests as the only package, a dry run of its
+  # publishing, which builds it from its packed files, a 32-bit target
+  # refused by its compile_error!, and its public API against the
+  # snapshot beside it. It is not published.
+  relhash:
+    name: relhash alone (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    env:
+      API_TOOLCHAIN: nightly-2026-09-11
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: relhash
+      - name: The crate's tests alone
+        run: cargo test --locked -p relhash
+      - name: A dry run of publishing, from the packed files
+        run: cargo publish --dry-run --locked -p relhash
+      - name: A 32-bit target refused
+        run: |
+          rustup target add i686-unknown-linux-gnu
+          mkdir -p target
+          if cargo check --locked -p relhash --target i686-unknown-linux-gnu 2> target/i686.log; then
+            echo "relhash built for a 32-bit target"
+            exit 1
+          fi
+          grep -q "relhash needs a target whose pointers are 64 bits wide" target/i686.log
+      - name: The nightly of the public API's listing
+        run: rustup toolchain install "$API_TOOLCHAIN" --profile minimal
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api@0.51.0
+      - name: The public API against its snapshot
+        run: |
+          cargo +"$API_TOOLCHAIN" public-api -p relhash -sss > target/public-api.txt
+          diff -u crates/relhash/public-api.txt target/public-api.txt
+
   # openspec/ against the repository (CONTRIBUTING.md, "Specs"): the
   # form of every spec and change, the test each scenario names, the
   # files each design names, no closed change kept in the tree.

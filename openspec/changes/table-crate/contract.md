@@ -11,7 +11,12 @@ happen and why; how the code is laid out is left to the work.
 ### Free of Tessera
 The crate builds without any crate of Tessera and without PostgreSQL,
 so that it can be used, and checked, alone.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::cargo test --locked -p relhash`;
+  `.github/workflows/ci.yml::cargo publish --dry-run --locked -p relhash`;
+  `.github/workflows/ci.yml::relhash needs a target whose pointers
+  are 64 bits wide`;
+  `Makefile::test --locked -p relhash --no-default-features`
 
 ### One way to memory
 Every read and write of a table's blocks goes through one layer of
@@ -51,7 +56,9 @@ fails, so that an engine keeps its memory in its own hands.
 ### A small surface
 The public API grows only with a reason the change gives, so that what
 callers rely on, and what must be proven, stays small.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::diff -u crates/relhash/public-api.txt
+  target/public-api.txt`
 
 ### No cost to Tessera
 A hot loop of Tessera compiles no longer through the crate's API than

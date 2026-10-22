@@ -27,18 +27,22 @@ other target it SHALL fail to build, with an error that says why.
 - **WHEN** the crate is packed, as for publishing
 - **THEN** it builds from the packed files and the crates it names,
   none of them Tessera's
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo publish --dry-run --locked -p relhash`
 
 #### Scenario: The crate's tests run alone
 - **WHEN** the tests of the crate run as the only package
 - **THEN** they pass
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo test --locked -p relhash`
 
 #### Scenario: A target of 32 bits
 - **WHEN** the crate is built for a target whose pointers are 32 bits
   wide
 - **THEN** the build fails with an error that names 64-bit targets
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::relhash needs a target whose pointers
+  are 64 bits wide`
 
 ### Requirement: The documentation of the crate
 Every public item of the crate SHALL have a text that says what it is
@@ -426,7 +430,8 @@ without the crate's feature `alloc` leaves it out.
 - **WHEN** the crate is built and tested without its feature `alloc`
 - **THEN** it builds, its tests that need no owning table run, and it
   has no table that owns its memory
-- **Verified by:** pending
+- **Verified by:**
+  `Makefile::test --locked -p relhash --no-default-features`
 
 ### Requirement: The same calls, the same bytes
 Calls in one process over the same bytes, with the same arguments and

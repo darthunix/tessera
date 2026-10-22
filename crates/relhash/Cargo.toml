@@ -4,7 +4,9 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-publish.workspace = true
+# A crate meant for use outside Tessera, whose API a spec may name
+# (CONTRIBUTING.md); it is not published on crates.io for now.
+publish = true
 
 [features]
 default = ["alloc"]
