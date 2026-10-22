@@ -19,12 +19,12 @@ or the chunks of a table.
 
 ### Requirement: A crate of its own
 The table SHALL be the Rust crate `relhash`, which depends on no crate
-of Tessera. The crate SHALL build, pass its tests and pack for
-publishing alone, on targets whose pointers are 64 bits wide; on any
+of Tessera. The crate SHALL build, pass its tests and pack alone, on
+targets whose pointers are 64 bits wide; on any
 other target it SHALL fail to build, with an error that says why.
 
 #### Scenario: The crate packs alone
-- **WHEN** the crate is packed for publishing
+- **WHEN** the crate is packed, as for publishing
 - **THEN** it builds from the packed files and the crates it names,
   none of them Tessera's
 - **Verified by:** pending
@@ -62,11 +62,8 @@ A mask of rows SHALL say which rows of a batch a call works on: one bit
 a row, 1 for a row that takes part. A mask made of words SHALL have
 exactly the words its rows need, row `r` in bit `r % 64` of word
 `r / 64`, and SHALL be refused, its words left as they were, when it
-has more or fewer words or a bit set past its last row. A mask read
-from bytes SHALL take its rows from a window that starts at any bit of
-a byte array, ignoring the bits outside the window, and SHALL be
-refused when the window runs past the array. A mask that a call writes
-SHALL keep every bit past its last row 0.
+has more or fewer words or a bit set past its last row. A mask that a
+call writes SHALL keep every bit past its last row 0.
 
 ```
  a mask of 70 rows made of words: two words
@@ -79,11 +76,6 @@ SHALL keep every bit past its last row 0.
 - **WHEN** a mask of 70 rows is made of one word or of three, or of two
   words with bit 6 of the second set
 - **THEN** it is refused, and its words are not changed
-- **Verified by:** pending
-
-#### Scenario: A window past the bytes
-- **WHEN** a mask of 10 rows is read from 2 bytes starting at bit 7
-- **THEN** it is refused
 - **Verified by:** pending
 
 #### Scenario: The bits past the rows of a mask a call writes
@@ -99,7 +91,10 @@ different row counts SHALL be refused when the lookup is made. A
 probe, a step to the next match or to the next in a group, and a Bloom
 filter's probe SHALL keep in the mask the rows that find what they
 look for, SHALL leave the reference of a row that leaves as it was,
-and SHALL return how many rows are left.
+and SHALL return how many rows are left. A lookup SHALL count its steps
+to a next match or a next in a group, and SHALL fail as a damaged table
+at a step past the count of records, so that a cycle of matching
+records ends a walk over the matches.
 
 #### Scenario: A walk down the matches of a key
 - **WHEN** ten rows, one for each of ten keys of ten records, step with
@@ -122,6 +117,14 @@ and SHALL return how many rows are left.
 - **THEN** the same 50 rows stay, and the call returns 50
 - **Verified by:**
   `crates/relhash/src/table/tests/filter.rs::a_probe_narrows_its_rows_in_place`
+
+#### Scenario: A cycle of matching records
+- **WHEN** a record's next names itself, or two records of equal keys
+  name each other, and a lookup steps to its next match, or its next in
+  a group, again and again
+- **THEN** within as many steps as the table has records, the step
+  fails with a damaged table and the rule of a chain
+- **Verified by:** pending
 
 #### Scenario: A chain longer than a short walk
 - **WHEN** 300 records of one hash are linked, and their keys and an
@@ -308,8 +311,10 @@ it.
 
 ### Requirement: Any bytes, a bounded call
 The caller promises that every block it gives is memory of the length
-it states, aligned to 8 bytes and initialized, and that no other
-process or thread writes the table while the call runs. Under that
+it states, aligned to 8 bytes and initialized, that no two blocks
+overlap, that no other process or thread writes the table while the
+call runs, and that nothing else reads or writes the chunks of a table
+that has itself to itself, whatever index names them. Under that
 promise a call SHALL end after a number of steps bounded by the
 lengths of its blocks and its arguments, whatever bytes the blocks
 hold; SHALL return a result or an error; SHALL NOT panic; and SHALL
@@ -367,8 +372,9 @@ damaged table. A mask is refused as "The masks of rows" says.
   row's key; a slot of a payload cursor past its slots or holding no
   reference; a reference or a cursor the caller passed that names no
   chunk or lies outside its chunk, or a cursor of a walk past its
-  chunk's used mark; an owning table that holds the most records a
-  find or insert may make.
+  chunk's used mark, or an empty output of a walk; a count of rows of
+  a partition that one more row would carry past 2^64; an owning table
+  that holds the most records a find or insert may make.
 - **A damaged table**: a header with a field that breaks its rule, the
   field named; a reference read from the table that names no chunk or
   lies outside its chunk; a record, whoever named it, whose size is not
@@ -460,6 +466,10 @@ lookup checks it, and only one payload SHALL be open for change at a
 time. A writer SHALL be able to check a reference first and open its
 payload later through the same cursor. When a reference fails its
 check, the call fails; the payloads it changed before stay changed.
+A call SHALL also give, for each selected row, a raw pointer to the
+payload of its record, two rows of one record the same pointer, each
+usable to read and write until the chunk is reset, after the call and
+beside the others, within Rust's rules of aliasing.
 
 #### Scenario: Records read by reference
 - **WHEN** a cursor reads the record of each row's reference, and of a
@@ -482,6 +492,14 @@ check, the call fails; the payloads it changed before stay changed.
 - **THEN** each payload is the one of the record its reference names
 - **Verified by:**
   `crates/relhash/src/table/tests/records.rs::a_payload_cursor_holds_checked_references_to_open_later`
+
+#### Scenario: Pointers to the payload of one record
+- **WHEN** two rows of a batch name one record, the call gives their
+  pointers, and the payload is written through each of them in turn
+  after the call, under Miri, also through the C entry point
+- **THEN** Miri reports no undefined behavior, and the payload holds
+  the last write
+- **Verified by:** pending
 
 #### Scenario: Two payloads open at once
 - **WHEN** a program keeps one payload of a cursor open and opens
@@ -506,7 +524,8 @@ The merge SHALL stop, with the records merged so far and the byte to go
 on from, where a record of new keys finds no room in the chunk, or the
 table's records reach half its buckets. When the rule fails, the merge
 SHALL stop and return the rule's own error; the records merged before
-stay merged.
+stay merged, and the payload the rule was changing holds what the rule
+left in it.
 
 #### Scenario: Known keys and new keys
 - **WHEN** a chunk of records, some of keys the table has and some of
@@ -525,8 +544,8 @@ stay merged.
   `crates/relhash/src/table/tests.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
 
 #### Scenario: Half the buckets
-- **WHEN** a record of new keys would bring the table's records to
-  half its buckets
+- **WHEN** the table's records are half its buckets, and a record of
+  new keys comes
 - **THEN** the merge stops before it, and gives the byte where it
   begins
 - **Verified by:**

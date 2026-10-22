@@ -421,7 +421,7 @@ maintainer took all of them.
   links records not linked yet, a link of them afterwards makes a cycle
   of one record, and a merge's source leaves the list before a regrow;
   their documentation says so.
-- **The interface before it is published.** `OwnedTable` owns its
+- **The interface before it is frozen.** `OwnedTable` owns its
   blocks, and every handle to it borrows it, so it may pass to another
   thread: it becomes `Send`. The types the crate gives back, `Stats`,
   `Split`, `Record` and `MergeStop`, become `#[non_exhaustive]`, so
@@ -442,6 +442,72 @@ maintainer took all of them.
   end, by row, by word, down its matches and by a find or insert. The
   owning table's model gets sources that fail at a chosen word. The
   crate's tests that need no owning table run without `alloc`.
+
+### What a third review found
+
+A third review, by another vendor's model, confirmed the second
+review's findings and the decisions above, and found what both missed:
+two faults of soundness, both reproduced under Miri, a walk over
+matches that a cycle keeps going, and smaller faults. The maintainer
+took all of them.
+
+- **Pointers to the payloads of one group.** `tess_table_payloads`
+  gives C a pointer to the payload of each selected row's record, each
+  made from the `&mut [u8]` that `each_payload` lends a row. Two rows of
+  one group get two pointers to the same bytes, and under Rust's rules
+  of aliasing the second loan ends what the first pointer may do: a
+  write through it after the call is undefined behavior, which both of
+  Miri's models report. Grouping does this on every batch whose rows
+  repeat a key. **Will be:** the crate gives the pointers itself: a call
+  that checks each reference as `each_payload` does and writes a raw
+  pointer to its payload, made from the chunk's base without a loan of
+  the bytes, so that two rows of one record get the same pointer, each
+  usable until the chunk is reset. `each_payload` stays for a caller
+  that is done with one payload before the next. Refused: a promise
+  that the references of a batch are distinct, which grouping cannot
+  keep.
+- **The memory the contracts must name.** The contracts of
+  `Chunks::new`, `Table::attach` and `TableMut::create` ask for blocks
+  that are valid, aligned and reached only through tables, but not that
+  they are apart: two chunk numbers over the same bytes let a merge
+  borrow a record as its source and as its destination at once. And a
+  `TableMut` has its index to itself, but not its chunks: a `Table`
+  over another index and the same chunks may borrow a record that the
+  `TableMut` changes. **Will be:** the contracts say that the index,
+  the chunks and the arrays that name them do not overlap, and that a
+  table that has itself to itself has its chunks too, whatever other
+  index names them; the C contracts say the same. Refused: checking for
+  overlaps at run time, which an `unsafe` constructor leaves to its
+  caller.
+- **A walk over matches that does not end.** The stop at a cycle bounds
+  one search for the next match. It does not bound a walk over all the
+  matches of a key, which a join makes one call at a time: a record
+  whose next names itself, or a cycle of records of equal keys, gives
+  the same matches call after call, each call bounded. **Will be:**
+  `Matches` counts the steps to a next match or a next in a group that
+  its rows have taken; a lookup cannot have more of them than the table
+  has records, so a step past that count fails as a damaged chain. One
+  compare a call, not a row. In C the count is an argument of
+  `tess_table_next_match` and `tess_table_next_in_group`, which the
+  caller sets to 0 with its probe. Refused: leaving the bound to the
+  caller, which every join would have to write again.
+- **Smaller faults.** A count of rows by partition that the caller
+  gives at `u64::MAX` overflows after the row is written: a panic in a
+  debug build, a count of 0 in a release one; it fails with a wrong
+  call before the row, and the rows before it stay placed. The C gather
+  of more than 16 words checks each group of 16 as it reaches it, so a
+  word past the payload fails the call after the first groups were
+  written; it checks the whole range first. A walk into an empty output
+  returns 0, which means the end; it fails with a wrong call.
+- **The texts.** `Matches::rows_mut` lends the mask itself, so a
+  caller may put in its place one of another size: the calls check the
+  shape every time, and the documentation stops saying it is checked
+  once. A merge's rule that fails after it changed a payload leaves the
+  payload as it left it; the merge says so, and a table after an error
+  of the caller's rule or a caught panic is the caller's to judge, not
+  a damaged one. Six public fields get their documentation, a mask's
+  error no longer says it may allocate, and the documentation without
+  `alloc` builds, its example over the caller's blocks.
 
 ### The kinds of keys
 
@@ -888,8 +954,9 @@ approves them.
 - **A full formal proof** with Verus or Creusot. The code would have to
   be written again in their subset. The risk lies in the unsafe code
   and the protocol, which Kani and loom check.
-- **Publishing on crates.io.** The crate is packed by a dry run in CI;
-  publishing is decided later.
+- **Publishing on crates.io.** The crate is not published for now.
+  `publish = true` in its manifest only marks its API as a surface of a
+  spec, and CI packs it by a dry run; publishing is decided later.
 
 ## Risks / Trade-offs
 

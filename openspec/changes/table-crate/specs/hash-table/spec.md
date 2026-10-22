@@ -36,7 +36,10 @@ words, and SHALL then narrow it in place: it keeps the rows the call
 keeps, with the references a call with two masks gives. A mask of the
 same words with another row count SHALL be refused. A call refused
 SHALL leave the words as they were. Two masks of other words SHALL
-share no word.
+share no word. `tess_table_next_match` and `tess_table_next_in_group`
+SHALL take the count of steps the lookup has taken, which the caller
+sets to 0 with its probe and gives back at each step, and SHALL fail
+at a step past the table's count of records.
 
 #### Scenario: The lookups in place
 - **WHEN** a batch of 64 rows, of which 16 have keys of the table, is
@@ -47,6 +50,13 @@ share no word.
   call with two masks keeps and gives
 - **Verified by:**
   `crates/tessera-capi/tests/table.rs::the_lookups_narrow_a_mask_in_place`
+
+#### Scenario: A cycle of matches through C
+- **WHEN** a record's next names itself, and a caller steps to its next
+  match again and again, giving back the count of steps
+- **THEN** a step past the count of records fails with
+  `TESS_ERROR_INVALID_ARGUMENT`
+- **Verified by:** pending
 
 #### Scenario: A lookup in place refused
 - **WHEN** a probe in place is given two keys for a table of one, or a
@@ -210,6 +220,11 @@ anything, and a chunk before it reads or writes it.
   `crates/relhash/src/table/tests/lookup.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
   `crates/relhash/src/table/tests/lookup.rs::a_word_probed_at_once_detects_a_cycle`;
   `crates/relhash/src/table/tests.rs::a_damaged_count_is_bounded_by_the_places_of_the_chunks`
+
+#### Scenario: A gather of many words refused late
+- **WHEN** a gather of 17 words is asked of a payload of 16
+- **THEN** it fails, and every output is as it was, the first 16 too
+- **Verified by:** pending
 
 #### Scenario: Arguments are checked first
 - **WHEN** a call is given arrays of the wrong length, a missing output
