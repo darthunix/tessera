@@ -168,7 +168,8 @@ impl OwnedTable {
     /// The chunks, as a caller passes them without the index.
     pub(super) fn chunk_set(&self) -> Result<Chunks<'_>> {
         // SAFETY: the owned chunks are valid for their lengths while `self`
-        // lives, and only tables over this owner access them.
+        // lives, each a block of its own apart from the arrays and the
+        // index, and only tables over this owner access them.
         unsafe { Chunks::new(&self.bases, &self.lens) }
     }
 

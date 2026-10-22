@@ -105,8 +105,11 @@ impl<'a> Chunks<'a> {
     /// # Safety
     ///
     /// Every base is aligned to 8 and valid for reads and writes of its
-    /// length for `'a`, and during `'a` the chunks are accessed only
-    /// through tables, here or in other processes mapping the same memory.
+    /// length for `'a`. No two chunks overlap, and none overlaps `bases`,
+    /// `lens` or the index of a table over them. During `'a` the chunks
+    /// are accessed only through tables and chunk writers, here or in
+    /// other processes mapping the same memory, and a chunk has one
+    /// writer at a time across all of them.
     pub unsafe fn new(bases: &'a [*mut u8], lens: &'a [usize]) -> Result<Self> {
         ensure!(
             bases.len() == lens.len() && bases.len() <= MAX_CHUNKS,
@@ -247,8 +250,20 @@ pub struct Split {
 /// write records to them: the participants of a shared build append
 /// their share, and one of them sizes the index once all are counted; a
 /// spill copies a chunk's records to the chunks of their partitions. It
-/// checks the configuration once, when it is made. The caller must be the
-/// one writer of every chunk a call writes.
+/// checks the configuration once, when it is made.
+///
+/// Its calls write chunks that a table over the same chunks may read, so
+/// it is made by an `unsafe` call, whose contract makes it the one writer
+/// of the chunks it writes:
+///
+/// ```compile_fail,E0133
+/// use relhash::{ChunkWriter, Chunks, TableConfig};
+///
+/// let config = TableConfig { nkeys: 1, payload_size: 8 };
+/// // A chunk writer made in safe code: refused.
+/// let writer = ChunkWriter::new(&config, Chunks::none())?;
+/// # Ok::<(), relhash::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct ChunkWriter<'a> {
     region: RawRegion,
@@ -258,7 +273,14 @@ pub struct ChunkWriter<'a> {
 
 impl<'a> ChunkWriter<'a> {
     /// The writer of records of a table of `config` to `chunks`.
-    pub fn new(config: &TableConfig, chunks: Chunks<'a>) -> Result<Self> {
+    ///
+    /// # Safety
+    ///
+    /// While the writer lives, it is the one writer of each chunk its
+    /// calls write: no table or other chunk writer, here or in another
+    /// process, writes that chunk, and no record or payload of it is
+    /// borrowed while one of its calls runs.
+    pub unsafe fn new(config: &TableConfig, chunks: Chunks<'a>) -> Result<Self> {
         Ok(Self {
             layout: header::chunk_layout(config)?,
             region: chunk_region(&chunks),

@@ -130,10 +130,11 @@ impl<'a> Table<'a> {
     /// # Safety
     ///
     /// `index` is aligned to 8 and valid for reads and writes of `len`
-    /// bytes for `'a`, and during `'a` the index and the chunks are
-    /// accessed only through tables, here or in other processes mapping
-    /// the same memory; probes run only once the records they may find
-    /// are linked, and a chunk has one writer.
+    /// bytes for `'a`, and overlaps no chunk and neither array that names
+    /// them. During `'a` the index and the chunks are accessed only
+    /// through tables and chunk writers, here or in other processes
+    /// mapping the same memory; probes run only once the records they may
+    /// find are linked, and a chunk has one writer.
     pub unsafe fn attach(index: *mut u8, len: usize, chunks: Chunks<'a>) -> Result<Self> {
         check_region(index, len)?;
         // SAFETY: the caller's contract, and `Chunks::new`'s for the chunks.
@@ -477,8 +478,9 @@ impl<'a> TableMut<'a> {
     ///
     /// # Safety
     ///
-    /// As [`Table::attach`], and no other table is over the index while
-    /// this one exists.
+    /// As [`Table::attach`], and while this table exists nothing else
+    /// reads or writes its index or its chunks: no other table, over this
+    /// index or another, and no chunk writer.
     pub unsafe fn create(
         index: *mut u8,
         len: usize,
@@ -665,7 +667,7 @@ impl<'a> TableMut<'a> {
     /// # Safety
     ///
     /// As [`TableMut::create`] for the new index, which must live for
-    /// `'a`.
+    /// `'a` and overlap neither the old one nor the chunks.
     pub unsafe fn regrow(&mut self, index: *mut u8, len: usize, capacity: u64) -> Result<()> {
         check_region(index, len)?;
         // SAFETY: the caller's contract.

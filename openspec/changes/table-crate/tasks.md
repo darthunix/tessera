@@ -214,7 +214,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       model of `link_counting` beside a third participant's link; Miri
       over the doc tests in CI; the build without `alloc` free of
       warnings. Check: `cargo test -p relhash`; `make rust-loom`; CI
-- [ ] 3.18 Write the contracts of memory: `ChunkWriter::new` `unsafe`,
+- [x] 3.18 Write the contracts of memory: `ChunkWriter::new` `unsafe`,
       its writer the one writer of the chunks it writes, nothing
       borrowing their records or payloads while one of its calls runs;
       `Chunks::new`, `Table::attach` and `TableMut::create` asking that

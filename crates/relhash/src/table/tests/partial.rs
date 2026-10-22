@@ -144,7 +144,7 @@ fn place_by_partition(
         )
     } else {
         let mut nulls = 0;
-        ChunkWriter::new(&ONE_COLUMN, table.chunk_set()?)?.append_partitioned_columns(
+        super::writer(&ONE_COLUMN, table.chunk_set()?)?.append_partitioned_columns(
             partitions,
             &columns,
             &mut batch,

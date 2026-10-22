@@ -568,9 +568,10 @@ pub unsafe extern "C" fn tess_table_append(
                 Some(values(payload, bytes, "payload")?)
             };
             let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
+            // SAFETY, of both arms: `table.h` makes the caller the chunk's
+            // one writer, and the C side borrows no record of the chunk;
+            // the chunk writer lives for this call alone.
             match indexed {
-                // SAFETY: `table.h` makes the caller the chunk's one writer,
-                // and the C side borrows no record of the chunk.
                 Some(table) => table.append(chunk, payload, &mut batch)?,
                 None => ChunkWriter::new(&config, chunks)?.append(chunk, payload, &mut batch)?,
             };
@@ -624,8 +625,8 @@ pub unsafe extern "C" fn tess_table_append_columns(
             let columns = values(columns, ncolumns, "payload columns")?;
             let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
             let append = |payload: &PayloadColumns<'_>| -> Result<usize> {
+                // SAFETY, of both arms: as in `tess_table_append`.
                 Ok(match &indexed {
-                    // SAFETY: as in `tess_table_append`.
                     Some(table) => table.append_columns(chunk, payload, &mut batch)?,
                     None => ChunkWriter::new(&config, chunks)?
                         .append_columns(chunk, payload, &mut batch)?,
@@ -791,6 +792,9 @@ pub unsafe extern "C" fn tess_table_append_partitioned_columns(
             );
             let payload = PayloadColumns::new(words, flags, nrows)?;
             let mut batch = Batch::from_mask(hashes, &decoded, pending, offsets)?;
+            // SAFETY: `table.h` makes the caller the one writer of every
+            // partition's chunk, and the C side borrows no record of them;
+            // the chunk writer lives for this call alone.
             ChunkWriter::new(&config, chunks)?.append_partitioned_columns(
                 &partitions,
                 &payload,
@@ -844,6 +848,7 @@ pub unsafe extern "C" fn tess_table_split(
             let from = from.as_mut().context("a null from")?;
             let count = count.as_mut().context("a null count")?;
             let full = full.as_mut().context("a null full")?;
+            // SAFETY: as in `tess_table_append_partitioned_columns`.
             let split = ChunkWriter::new(&config, chunks)?.split(
                 &partitions,
                 source,
