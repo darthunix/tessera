@@ -479,6 +479,17 @@ impl<'r, R: Region> Access<'r, R> {
         Ok(0)
     }
 
+    /// Check every chunk as [`Self::room`] does, for a call over all of
+    /// them that must fail before it changes anything: a chunk that cannot
+    /// be one, or a used mark that ends no record, fails here and not half
+    /// way through.
+    pub(super) fn check_chunks(&self) -> Result<()> {
+        for chunk in 0..self.region.chunks() {
+            self.room(chunk)?;
+        }
+        Ok(())
+    }
+
     /// The used mark of a chunk this operation writes or walks, and how
     /// many more records fit it. The chunk is checked first, as every call
     /// checks a chunk it starts on; a mark that is not a record boundary

@@ -6,7 +6,7 @@ use anyhow::{Result, ensure};
 
 use super::*;
 use crate::ones;
-use crate::table::testing::{Column, Keys};
+use crate::table::testing::{Column, Keys, refusal};
 
 /// Marks a test keeps: a run of words per chunk.
 struct TestMarks(Vec<Vec<std::cell::Cell<u64>>>);
@@ -1014,5 +1014,63 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
         )),
         Some((Kind::WrongCall, Rule::PayloadColumns))
     );
+    Ok(())
+}
+
+/// A larger index, a cleared key and the filters, given chunks of which
+/// the last cannot be one, fail with the rule of a chunk before they
+/// change anything: the index, the chunks, the filter's words and the
+/// shared filter's state are as they were.
+#[test]
+fn a_wrong_last_chunk_fails_the_calls_over_every_chunk_before_a_change() -> Result<()> {
+    let values: Vec<i32> = (0..40).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 64)?;
+    insert_all(&mut table, &hashes, &Keys(&keys), None)?;
+    let index = table.index_words().to_vec();
+    let chunks: Vec<Vec<u64>> = (0..table.chunks())
+        .map(|chunk| table.chunk_words(chunk).to_vec())
+        .collect();
+    let (index_base, index_len) = {
+        let words = table.index_words();
+        (words.as_mut_ptr().cast::<u8>(), words.len() * 8)
+    };
+    let (mut bases, mut lens) = {
+        let set = table.chunk_set()?;
+        (set.bases.to_vec(), set.lens.to_vec())
+    };
+    // A last chunk whose length is no multiple of 8.
+    let mut odd = vec![0_u64; 8];
+    bases.push(odd.as_mut_ptr().cast());
+    lens.push(60);
+    let mut grown = vec![0_u64; index_size(&ONE_INT4, 256)? / 8];
+    let mut words = [u64::MAX; 8];
+    let mut shared = [0_u64; 9];
+    {
+        // SAFETY: the owner's blocks and the vectors lie apart and live
+        // through this block, and nothing else uses them meanwhile.
+        let set = unsafe { Chunks::new(&bases, &lens) }?;
+        // SAFETY: as above, for the owner's index.
+        let mut over = unsafe { TableMut::attach_mut(index_base, index_len, set) }?;
+        let wrong = Some((Kind::WrongCall, Rule::Chunk));
+        // SAFETY: the new index is a vector of its own, alive meanwhile.
+        let regrown = unsafe { over.regrow(grown.as_mut_ptr().cast(), grown.len() * 8, 256) };
+        assert_eq!(refusal(regrown), wrong, "a larger index");
+        assert_eq!(refusal(over.clear_key(0)), wrong, "a cleared key");
+        assert_eq!(refusal(over.bloom(&mut words)), wrong, "a filter");
+        let filter = bloom::SharedFilter::from_mut(&mut shared)?;
+        assert_eq!(
+            refusal(over.try_build_bloom(&filter)),
+            wrong,
+            "a shared one"
+        );
+    }
+    assert_eq!(words, [u64::MAX; 8], "the filter's words");
+    assert_eq!(shared[0], 0, "the shared filter, unclaimed");
+    assert_eq!(table.index_words(), &index[..], "the index");
+    for (chunk, words) in chunks.iter().enumerate() {
+        assert_eq!(table.chunk_words(chunk), &words[..], "chunk {chunk}");
+    }
     Ok(())
 }

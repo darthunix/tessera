@@ -255,7 +255,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       table's whole set of records. Check: `RUSTDOCFLAGS="-D warnings"
       cargo doc -p relhash --no-deps`; the maintainer's review of the
       texts
-- [ ] 3.23 Check every chunk before the first change in `regrow`,
+- [x] 3.23 Check every chunk before the first change in `regrow`,
       `clear_key`, `bloom` and `try_build_bloom`, and say in the
       documentation that a table a call found damaged is dropped or
       reset, unlike a table after an error of the caller's rule.

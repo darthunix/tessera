@@ -56,7 +56,9 @@ pub enum Kind {
     /// A value the caller passed breaks the rule: the call changed
     /// nothing when the value was a size, a count or a block.
     WrongCall,
-    /// A byte of the table's blocks breaks the rule.
+    /// A byte of the table's blocks breaks the rule. The table is to be
+    /// dropped or reset: the calls over it stay sound, but what they
+    /// answer is not promised.
     Damaged,
 }
 

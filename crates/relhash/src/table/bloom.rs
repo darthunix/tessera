@@ -282,20 +282,26 @@ pub(super) fn place(hash: u32, shift: u32) -> (usize, u64) {
 /// Clear the filter and set the bits of every record of the table.
 pub(super) fn fill<R: Region>(region: &R, layout: &Layout, words: &mut [u64]) -> Result<()> {
     let shift = shift_for(words.len())?;
+    let access = Access::new(region, layout);
+    access.check_chunks()?;
     words.fill(0);
-    each_hash(region, layout, |hash| {
+    each_hash(&access, region.chunks(), |hash| {
         let (word, mask) = place(hash, shift);
         words[word] |= mask;
     })
 }
 
-/// Call `f` with the hash of every record of the table, chunk by chunk.
+/// Call `f` with the hash of every record of the table's `chunks` chunks,
+/// chunk by chunk.
 #[inline(always)]
-fn each_hash<R: Region>(region: &R, layout: &Layout, mut f: impl FnMut(u32)) -> Result<()> {
-    let access = Access::new(region, layout);
-    for chunk in 0..region.chunks() {
-        for byte in unlinked(&access, chunk, CHUNK_HEADER)? {
-            f(check_record(&access, Place { chunk, byte })?);
+fn each_hash<R: Region>(
+    access: &Access<'_, R>,
+    chunks: usize,
+    mut f: impl FnMut(u32),
+) -> Result<()> {
+    for chunk in 0..chunks {
+        for byte in unlinked(access, chunk, CHUNK_HEADER)? {
+            f(check_record(access, Place { chunk, byte })?);
         }
     }
     Ok(())
@@ -310,10 +316,12 @@ pub(super) fn try_build<R: Region, F: FilterShared + ?Sized>(
     filter: &F,
 ) -> Result<bool> {
     let shift = shift_for(filter.nwords())?;
+    let access = Access::new(region, layout);
+    access.check_chunks()?;
     if !filter.claim() {
         return Ok(false);
     }
-    each_hash(region, layout, |hash| {
+    each_hash(&access, region.chunks(), |hash| {
         let (word, mask) = place(hash, shift);
         filter.or(word, mask);
     })?;

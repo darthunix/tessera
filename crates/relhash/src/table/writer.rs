@@ -425,6 +425,7 @@ pub(super) fn clear_key<R: Region>(region: &R, layout: &Layout, key: usize) -> R
         Error::wrong_call(Rule::Key).with(key).and(layout.nkeys)
     );
     let access = Access::new(region, layout);
+    access.check_chunks()?;
     let mut count = 0;
     for chunk in 0..region.chunks() {
         let (used, _) = access.room(chunk)?;
@@ -487,6 +488,8 @@ pub(super) fn regrow<R: Region>(
     layout: &Layout,
     capacity: u64,
 ) -> Result<Layout> {
+    // The chunks first: a link rewrites records' next fields as it goes.
+    Access::new(from, layout).check_chunks()?;
     let header = Header::load(from).with_capacity(capacity, to.len())?;
     let grown = header.validate(to.len())?;
     ensure!(
