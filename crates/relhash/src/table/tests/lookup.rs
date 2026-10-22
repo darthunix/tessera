@@ -780,6 +780,85 @@ fn a_cycle_of_matching_records_ends_a_walk_over_the_matches() -> Result<()> {
     Ok(())
 }
 
+/// A healthy chain longer than the 64 steps a walk takes in its loops
+/// goes on out of line to its end, and no walk takes it for a cycle: 300
+/// records of one hash found row by row and by whole words, an absent key
+/// walked past all of them, the 300 matches of one key followed down the
+/// chain, and a find or insert of a known key and of a new one.
+#[test]
+fn a_healthy_chain_longer_than_a_short_walk_is_walked_to_its_end() -> Result<()> {
+    let hashes = vec![7_u32; 300];
+    let values: Vec<i32> = (0..300).collect();
+    let mut table = local(&ONE_INT4, 1024)?;
+    let refs = insert_all(
+        &mut table,
+        &hashes,
+        &Keys(&[Column::new(&values, None)]),
+        None,
+    )?;
+    let shared = table.table()?;
+    // Row by row, the walk of a key alone: the first key inserted is
+    // last in the chain.
+    for key in [0_i32, 1, 100, 235, 299] {
+        let (found, got) = probe_rows(&shared, &[7], &[Column::new(&[key], None)], &[1])?;
+        assert_eq!((found, got[0]), (vec![1], refs[key as usize]), "key {key}");
+    }
+    let (found, _) = probe_rows(&shared, &[7], &[Column::new(&[1000], None)], &[1])?;
+    assert_eq!(found, [0], "an absent key, past 300 records");
+    // By whole words, the walk of a word's rows together.
+    let (found, got) = probe_rows(
+        &shared,
+        &hashes[..64],
+        &[Column::new(&values[..64], None)],
+        &[u64::MAX],
+    )?;
+    assert_eq!((found, &got[..]), (vec![u64::MAX], &refs[..64]));
+    let absent = [1000; 64];
+    let (found, _) = probe_rows(
+        &shared,
+        &hashes[..64],
+        &[Column::new(&absent, None)],
+        &[u64::MAX],
+    )?;
+    assert_eq!(found, [0], "a word of absent keys");
+
+    // One key's 300 records: its matches down the chain, as many steps
+    // as the table has records, then a find or insert of it and of a new
+    // key.
+    let same = [5; 300];
+    let mut table = local(&ONE_INT4, 1024)?;
+    insert_all(
+        &mut table,
+        &hashes,
+        &Keys(&[Column::new(&same, None)]),
+        None,
+    )?;
+    {
+        let shared = table.table()?;
+        let (mut rows, mut found) = ([1], [0]);
+        let mut matches = Matches::new(&mut rows, &mut found)?;
+        let mut left = shared.probe(&[7], &Keys(&[Column::new(&[5], None)]), &mut matches)?;
+        let mut seen = 0;
+        while left > 0 {
+            seen += 1;
+            left = shared.next_match(&mut matches)?;
+        }
+        assert_eq!(seen, 300, "the matches of one key");
+    }
+    for (key, made) in [(1000, 1), (5, 0)] {
+        let (mut inserted, mut got) = ([0], [0]);
+        let resolved = table.find_or_insert(
+            &[7],
+            &Keys(&[Column::new(&[key], None)]),
+            RowMaskView::try_new(1, &[1])?,
+            &mut got,
+            &mut RowMask::try_new(1, &mut inserted)?,
+        )?;
+        assert_eq!((resolved, inserted), (1, [made]), "key {key}");
+    }
+    Ok(())
+}
+
 #[test]
 fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
     let values: Vec<i32> = (0..64).collect();

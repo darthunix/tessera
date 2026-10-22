@@ -1,6 +1,10 @@
 //! What the table's own tests and its loom models share: keys of their
 //! own, which read no columns.
 
+// Without `alloc` the table's tests are left out, and with them most of
+// what this module gives them.
+#![cfg_attr(not(feature = "alloc"), allow(dead_code))]
+
 use super::keys::KeySource;
 #[cfg(test)]
 use crate::error::{Kind, Rule};

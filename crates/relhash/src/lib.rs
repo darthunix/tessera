@@ -99,6 +99,7 @@
 //! needs no `unsafe`: the tests and benchmarks build their tables with it.
 //!
 //! ```
+//! # #[cfg(feature = "alloc")] {
 //! use relhash::{KeySource, Matches, OwnedTable, RowMaskView, TableConfig, ones};
 //!
 //! // The caller hands keys over a word of 64 rows at a time: here one key
@@ -141,10 +142,58 @@
 //! assert_eq!(table.next_match(&mut matches)?, 1);
 //! assert_eq!(matches.rows().selected_rows().collect::<Vec<_>>(), [0]);
 //! assert_eq!(table.record(matches.refs()[0])?.payload, 1u64.to_ne_bytes());
+//! # }
+//! # Ok::<(), relhash::Error>(())
+//! ```
+//!
+//! Without the feature `alloc` the caller gives the blocks: an index of
+//! [`index_size`] bytes and chunks that [`Chunks::init`] made empty, and
+//! the calls stop when a chunk is full for the caller to add one.
+//!
+//! ```
+//! use relhash::{Batch, Chunks, KeySource, Matches, TableConfig, TableMut, index_size, ones};
+//!
+//! struct Keys<'a>(&'a [i32]);
+//! impl KeySource for Keys<'_> {
+//!     fn nkeys(&self) -> usize { 1 }
+//!     fn nrows(&self) -> usize { self.0.len() }
+//!     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
+//!         for bit in ones(selected) {
+//!             out[bit] = i64::from(self.0[index * 64 + bit]);
+//!         }
+//!         Some(selected)
+//!     }
+//! }
+//!
+//! let config = TableConfig { nkeys: 1, payload_size: 8 };
+//! let mut index = vec![0_u64; index_size(&config, 100)? / 8];
+//! let mut chunk = vec![0_u64; 4096 / 8];
+//! let bases = [chunk.as_mut_ptr().cast::<u8>()];
+//! let lens = [4096];
+//! // SAFETY: the index and the chunk are these vectors, apart, aligned to
+//! // 8 and alive while the table is, and nothing else uses them.
+//! let mut table = unsafe {
+//!     Chunks::init(bases[0], lens[0])?;
+//!     let chunks = Chunks::new(&bases, &lens)?;
+//!     TableMut::create(index.as_mut_ptr().cast(), index.len() * 8, &config, 100, chunks)?
+//! };
+//! let keys = Keys(&[7, 8]);
+//! let hashes = [7u32, 8].map(|key| key.wrapping_mul(0x9e37_79b1));
+//! let (mut pending, mut refs) = ([0b11], [0; 2]);
+//! table.append(0, None, &mut Batch::new(&hashes, &keys, &mut pending, &mut refs)?)?;
+//! let mut from = relhash::CHUNK_HEADER;
+//! table.link(0, &mut from)?;
+//! let (mut rows, mut found) = ([0b10], [0; 2]);
+//! let mut matches = Matches::new(&mut rows, &mut found)?;
+//! assert_eq!(table.probe(&hashes, &keys, &mut matches)?, 1);
+//! assert_eq!(matches.refs()[1], refs[1]);
 //! # Ok::<(), relhash::Error>(())
 //! ```
 
 #![deny(unsafe_code)]
+// Without `alloc` the owning table is not built, and the documentation's
+// links to it have nothing to point to.
+#![cfg_attr(not(feature = "alloc"), allow(rustdoc::broken_intra_doc_links))]
 
 mod bits;
 mod error;

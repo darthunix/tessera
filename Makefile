@@ -42,6 +42,8 @@ rust-check:
 	$(CARGO) clippy --workspace --all-targets --locked -- -D warnings
 	$(CARGO) test --workspace --locked
 	$(CARGO) test --workspace --locked --release
+	$(CARGO) test --locked -p relhash --no-default-features
+	RUSTDOCFLAGS="-D warnings" $(CARGO) doc --locked -p relhash --no-default-features --no-deps
 
 # Every mutant of the Rust crates (.cargo/mutants.toml): hours; CI runs
 # the mutants of a pull request's changed lines, and all of them on request.
