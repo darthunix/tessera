@@ -238,7 +238,8 @@ holds the most records a find or insert may make.
 - **THEN** the call fails with the rule of the source, the first word's
   keys are found, the count of records is theirs, and the rows given
   again with a source that gives every word are placed once more
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::an_insertion_that_fails_at_the_second_word_links_the_first`
 
 #### Scenario: An owning table at its most records
 - **WHEN** a find or insert of the owning table needs a record past the
