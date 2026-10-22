@@ -1,0 +1,296 @@
+pub mod relhash
+pub mod relhash::bloom
+pub struct relhash::bloom::SharedFilter<'a>
+impl<'a> relhash::bloom::SharedFilter<'a>
+pub unsafe fn relhash::bloom::SharedFilter<'a>::attach(words: *mut u64, nwords: usize) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::bloom::SharedFilter<'a>::from_mut(words: &'a mut [u64]) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::bloom::SharedFilter<'a>::init(&self)
+pub fn relhash::bloom::SharedFilter<'a>::ready(&self) -> bool
+pub fn relhash::bloom::add(words: &mut [u64], hashes: &[u32], rows: &relhash::RowMaskView<'_>) -> core::result::Result<(), relhash::Error>
+pub unsafe fn relhash::bloom::add_atomic(words: *mut u64, nwords: usize, hashes: &[u32], rows: &relhash::RowMaskView<'_>) -> core::result::Result<(), relhash::Error>
+pub fn relhash::bloom::probe(words: &[u64], hashes: &[u32], rows: &mut relhash::RowMask<'_>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::bloom::probe_shared(filter: &relhash::bloom::SharedFilter<'_>, hashes: &[u32], rows: &mut relhash::RowMask<'_>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::bloom::shared_words_for(records: u64) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::bloom::words_for(records: u64) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::bloom::words_within(records: u64, limit: usize) -> core::result::Result<usize, relhash::Error>
+pub enum relhash::Kind
+pub relhash::Kind::Damaged
+pub relhash::Kind::WrongCall
+#[non_exhaustive] pub enum relhash::MergeStop
+pub relhash::MergeStop::ChunkFull
+pub relhash::MergeStop::Done
+pub relhash::MergeStop::IndexFull
+#[non_exhaustive] #[repr(u8)] pub enum relhash::Rule
+pub relhash::Rule::BatchRows
+pub relhash::Rule::Block
+pub relhash::Rule::BlockUsedMark
+pub relhash::Rule::Boundary
+pub relhash::Rule::BucketCount
+pub relhash::Rule::BucketShift
+pub relhash::Rule::Buckets
+pub relhash::Rule::Chain
+pub relhash::Rule::Chunk
+pub relhash::Rule::ChunkLimit
+pub relhash::Rule::Chunks
+pub relhash::Rule::Config
+pub relhash::Rule::Cursor
+pub relhash::Rule::CursorPast
+pub relhash::Rule::EmptySlot
+pub relhash::Rule::EmptySplit
+pub relhash::Rule::EmptyWalk
+pub relhash::Rule::FilterAlign
+pub relhash::Rule::FilterFillAlign
+pub relhash::Rule::FilterNotBuilt
+pub relhash::Rule::FilterRecords
+pub relhash::Rule::FilterSize
+pub relhash::Rule::FilterState
+pub relhash::Rule::FilterWords
+pub relhash::Rule::Flags
+pub relhash::Rule::Grew
+pub relhash::Rule::HeaderSize
+pub relhash::Rule::IndexAlign
+pub relhash::Rule::IndexBuckets
+pub relhash::Rule::IndexLen
+pub relhash::Rule::IndexLength
+pub relhash::Rule::IndexShape
+pub relhash::Rule::IndexShort
+pub relhash::Rule::IndexShrinks
+pub relhash::Rule::IndexSmall
+pub relhash::Rule::Key
+pub relhash::Rule::KeyCount
+pub relhash::Rule::KeyRead
+pub relhash::Rule::Keys
+pub relhash::Rule::Magic
+pub relhash::Rule::MaskPadding
+pub relhash::Rule::MaskRows
+pub relhash::Rule::MaskWord
+pub relhash::Rule::MaskWords
+pub relhash::Rule::MergeIntoItself
+pub relhash::Rule::MergedFound
+pub relhash::Rule::Misplaced
+pub relhash::Rule::MostRecords
+pub relhash::Rule::NoChunk
+pub relhash::Rule::NoRecord
+pub relhash::Rule::Outside
+pub relhash::Rule::PartitionBits
+pub relhash::Rule::PartitionColumns
+pub relhash::Rule::PartitionCount
+pub relhash::Rule::PartitionRows
+pub relhash::Rule::Partitions
+pub relhash::Rule::PayloadBytes
+pub relhash::Rule::PayloadColumns
+pub relhash::Rule::PayloadRows
+pub relhash::Rule::PayloadShape
+pub relhash::Rule::PayloadWord
+pub relhash::Rule::PayloadWords
+pub relhash::Rule::RecordBytes
+pub relhash::Rule::RecordFit
+pub relhash::Rule::RecordRoom
+pub relhash::Rule::RecordSize
+pub relhash::Rule::Reference
+pub relhash::Rule::Reserved
+pub relhash::Rule::Row
+pub relhash::Rule::RowCounts
+pub relhash::Rule::Slot
+pub relhash::Rule::SplitIntoItself
+pub relhash::Rule::SplitLengths
+pub relhash::Rule::UsedMark
+pub relhash::Rule::Version
+pub relhash::Rule::WordPadding
+pub struct relhash::Appended<'a>
+pub relhash::Appended::nulls: &'a mut u64
+pub relhash::Appended::rows: &'a mut [u64]
+pub struct relhash::Batch<'b, K: ?core::marker::Sized>
+impl<'b, K: relhash::KeySource + ?core::marker::Sized> relhash::Batch<'b, K>
+pub fn relhash::Batch<'b, K>::from_mask(hashes: &'b [u32], keys: &'b K, pending: relhash::RowMask<'b>, refs: &'b mut [u32]) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::Batch<'b, K>::new(hashes: &'b [u32], keys: &'b K, pending: &'b mut [u64], refs: &'b mut [u32]) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::Batch<'b, K>::pending(&self) -> relhash::RowMaskView<'_>
+pub fn relhash::Batch<'b, K>::refs(&self) -> &[u32]
+pub struct relhash::ChunkWriter<'a>
+impl<'a> relhash::ChunkWriter<'a>
+pub fn relhash::ChunkWriter<'a>::append<K: relhash::KeySource + ?core::marker::Sized>(&self, chunk: usize, payload: core::option::Option<&[u8]>, batch: &mut relhash::Batch<'_, K>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::ChunkWriter<'a>::append_columns<K: relhash::KeySource + ?core::marker::Sized>(&self, chunk: usize, columns: &relhash::PayloadColumns<'_>, batch: &mut relhash::Batch<'_, K>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::ChunkWriter<'a>::append_partitioned_columns<K: relhash::KeySource + ?core::marker::Sized>(&self, partitions: &relhash::Partitions<'_>, columns: &relhash::PayloadColumns<'_>, batch: &mut relhash::Batch<'_, K>, appended: &mut relhash::Appended<'_>) -> core::result::Result<usize, relhash::Error>
+pub unsafe fn relhash::ChunkWriter<'a>::new(config: &relhash::TableConfig, chunks: relhash::Chunks<'a>) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::ChunkWriter<'a>::split(&self, partitions: &relhash::Partitions<'_>, source: usize, from: &mut usize, refs: &mut [u32], hashes: &mut [u32]) -> core::result::Result<relhash::Split, relhash::Error>
+pub struct relhash::Chunks<'a>
+impl<'a> relhash::Chunks<'a>
+pub fn relhash::Chunks<'a>::check_all(&self) -> core::result::Result<(), relhash::Error>
+pub unsafe fn relhash::Chunks<'a>::init(base: *mut u8, len: usize) -> core::result::Result<(), relhash::Error>
+pub fn relhash::Chunks<'a>::is_empty(&self) -> bool
+pub fn relhash::Chunks<'a>::len(&self) -> usize
+pub fn relhash::Chunks<'a>::lens(&self) -> &'a [usize]
+pub unsafe fn relhash::Chunks<'a>::new(bases: &'a [*mut u8], lens: &'a [usize]) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::Chunks<'a>::none() -> Self
+pub unsafe fn relhash::Chunks<'a>::used(base: *const u8, len: usize, record_size: usize) -> core::result::Result<usize, relhash::Error>
+pub struct relhash::Cursor(_)
+impl relhash::Cursor
+pub fn relhash::Cursor::from_raw(raw: u64) -> Self
+pub fn relhash::Cursor::raw(self) -> u64
+pub fn relhash::Cursor::start() -> Self
+pub struct relhash::Error(_)
+impl relhash::Error
+pub fn relhash::Error::kind(self) -> relhash::Kind
+pub fn relhash::Error::numbers(self) -> (u32, u32)
+pub fn relhash::Error::rule(self) -> relhash::Rule
+impl core::error::Error for relhash::Error
+impl core::fmt::Debug for relhash::Error
+pub fn relhash::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for relhash::Error
+pub fn relhash::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct relhash::Matches<'b>
+impl<'b> relhash::Matches<'b>
+pub fn relhash::Matches<'b>::from_mask(rows: relhash::RowMask<'b>, refs: &'b mut [u32]) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::Matches<'b>::new(rows: &'b mut [u64], refs: &'b mut [u32]) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::Matches<'b>::refs(&self) -> &[u32]
+pub fn relhash::Matches<'b>::rows(&self) -> relhash::RowMaskView<'_>
+pub fn relhash::Matches<'b>::rows_mut(&mut self) -> &mut relhash::RowMask<'b>
+pub fn relhash::Matches<'b>::steps(&self) -> u64
+pub fn relhash::Matches<'b>::with_steps(self, steps: u64) -> Self
+impl<'a> core::convert::From<&'a relhash::Matches<'_>> for relhash::MatchesView<'a>
+pub fn relhash::MatchesView<'a>::from(matches: &'a relhash::Matches<'_>) -> Self
+pub struct relhash::MatchesView<'a>
+impl<'a> relhash::MatchesView<'a>
+pub fn relhash::MatchesView<'a>::new(rows: relhash::RowMaskView<'a>, refs: &'a [u32]) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::MatchesView<'a>::refs(&self) -> &'a [u32]
+pub fn relhash::MatchesView<'a>::rows(&self) -> relhash::RowMaskView<'a>
+impl<'a> core::convert::From<&'a relhash::Matches<'_>> for relhash::MatchesView<'a>
+pub fn relhash::MatchesView<'a>::from(matches: &'a relhash::Matches<'_>) -> Self
+pub struct relhash::OwnedTable
+impl relhash::OwnedTable
+pub fn relhash::OwnedTable::add_chunk(&mut self) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::OwnedTable::chunks(&self) -> usize
+pub fn relhash::OwnedTable::find_or_insert<K: relhash::KeySource + ?core::marker::Sized>(&mut self, hashes: &[u32], keys: &K, rows: relhash::RowMaskView<'_>, refs: &mut [u32], inserted: &mut relhash::RowMask<'_>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::OwnedTable::insert<K: relhash::KeySource + ?core::marker::Sized>(&mut self, hashes: &[u32], keys: &K, rows: relhash::RowMaskView<'_>, payload: core::option::Option<&[u8]>, refs: &mut [u32]) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::OwnedTable::new(config: &relhash::TableConfig, capacity: u64, chunk_bytes: usize) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::OwnedTable::regrow(&mut self, capacity: u64) -> core::result::Result<(), relhash::Error>
+pub fn relhash::OwnedTable::reset(&mut self) -> core::result::Result<(), relhash::Error>
+pub fn relhash::OwnedTable::table(&self) -> core::result::Result<relhash::Table<'_>, relhash::Error>
+pub fn relhash::OwnedTable::table_mut(&mut self) -> core::result::Result<relhash::TableMut<'_>, relhash::Error>
+impl core::marker::Send for relhash::OwnedTable
+pub struct relhash::Partitions<'a>
+pub relhash::Partitions::chunks: &'a [u32]
+pub relhash::Partitions::shift: u32
+pub struct relhash::PayloadColumns<'a>
+impl<'a> relhash::PayloadColumns<'a>
+pub fn relhash::PayloadColumns<'a>::get(&self, column: usize, row: usize) -> (u64, bool)
+pub fn relhash::PayloadColumns<'a>::is_empty(&self) -> bool
+pub fn relhash::PayloadColumns<'a>::len(&self) -> usize
+pub fn relhash::PayloadColumns<'a>::new(values: &'a [&'a [u64]], nulls: &'a [&'a [bool]], nrows: usize) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::PayloadColumns<'a>::nrows(&self) -> usize
+pub fn relhash::PayloadColumns<'a>::null_words(&self) -> usize
+pub struct relhash::PayloadCursor<'t>
+impl<'t> relhash::PayloadCursor<'t>
+pub fn relhash::PayloadCursor<'t>::held(&mut self, slot: usize) -> core::result::Result<&mut [u8], relhash::Error>
+pub fn relhash::PayloadCursor<'t>::hold(&mut self, slot: usize, reference: u32) -> core::result::Result<(), relhash::Error>
+pub fn relhash::PayloadCursor<'t>::payload(&mut self, reference: u32) -> core::result::Result<&mut [u8], relhash::Error>
+#[non_exhaustive] pub struct relhash::Record<'a>
+pub relhash::Record::hash: u32
+pub relhash::Record::keys: &'a [i64]
+pub relhash::Record::null_bits: u32
+pub relhash::Record::payload: &'a [u8]
+pub struct relhash::RecordCursor<'t>
+impl<'t> relhash::RecordCursor<'t>
+pub fn relhash::RecordCursor<'t>::record(&mut self, reference: u32) -> core::result::Result<relhash::Record<'t>, relhash::Error>
+pub struct relhash::RowMask<'a>
+impl<'a> relhash::RowMask<'a>
+pub fn relhash::RowMask<'a>::as_view(&self) -> relhash::RowMaskView<'_>
+pub fn relhash::RowMask<'a>::intersect(&mut self, other: relhash::RowMaskView<'_>) -> core::result::Result<(), relhash::Error>
+pub fn relhash::RowMask<'a>::intersect_word(&mut self, index: usize, bits: u64) -> core::result::Result<(), relhash::Error>
+pub fn relhash::RowMask<'a>::remove(&mut self, row: usize)
+pub fn relhash::RowMask<'a>::set_word(&mut self, index: usize, bits: u64) -> core::result::Result<(), relhash::Error>
+pub fn relhash::RowMask<'a>::try_new(nrows: usize, words: &'a mut [u64]) -> core::result::Result<Self, relhash::Error>
+pub struct relhash::RowMaskView<'a>
+impl<'a> relhash::RowMaskView<'a>
+pub fn relhash::RowMaskView<'a>::contains(&self, row: usize) -> core::result::Result<bool, relhash::Error>
+pub fn relhash::RowMaskView<'a>::get_word(&self, word_index: usize) -> core::option::Option<u64>
+pub fn relhash::RowMaskView<'a>::nrows(&self) -> usize
+pub fn relhash::RowMaskView<'a>::selected_count(&self) -> usize
+pub fn relhash::RowMaskView<'a>::selected_rows(&self) -> impl core::iter::traits::iterator::Iterator<Item = usize> + '_
+pub fn relhash::RowMaskView<'a>::try_new(nrows: usize, words: &'a [u64]) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::RowMaskView<'a>::word(&self, word_index: usize) -> u64
+pub fn relhash::RowMaskView<'a>::words(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = u64> + 'a
+#[non_exhaustive] pub struct relhash::Split
+pub relhash::Split::count: usize
+pub relhash::Split::full: core::option::Option<u32>
+#[non_exhaustive] pub struct relhash::Stats
+pub relhash::Stats::buckets: u64
+pub relhash::Stats::bytes_used: u64
+pub relhash::Stats::records: u64
+pub relhash::Stats::region_len: u64
+pub struct relhash::Table<'a>
+impl<'a> relhash::Table<'a>
+pub unsafe fn relhash::Table<'a>::append<K: relhash::KeySource + ?core::marker::Sized>(&self, chunk: usize, payload: core::option::Option<&[u8]>, batch: &mut relhash::Batch<'_, K>) -> core::result::Result<usize, relhash::Error>
+pub unsafe fn relhash::Table<'a>::append_columns<K: relhash::KeySource + ?core::marker::Sized>(&self, chunk: usize, columns: &relhash::PayloadColumns<'_>, batch: &mut relhash::Batch<'_, K>) -> core::result::Result<usize, relhash::Error>
+pub unsafe fn relhash::Table<'a>::attach(index: *mut u8, len: usize, chunks: relhash::Chunks<'a>) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::Table<'a>::bloom(&self, words: &mut [u64]) -> core::result::Result<(), relhash::Error>
+pub fn relhash::Table<'a>::check_config(&self, config: &relhash::TableConfig) -> core::result::Result<(), relhash::Error>
+pub fn relhash::Table<'a>::config(&self) -> relhash::TableConfig
+pub fn relhash::Table<'a>::fingerprint(&self) -> u64
+pub fn relhash::Table<'a>::gather<'m>(&self, matches: impl core::convert::Into<relhash::MatchesView<'m>>, at: usize, out: &mut [u64]) -> core::result::Result<(), relhash::Error>
+pub fn relhash::Table<'a>::gather_key<'m>(&self, matches: impl core::convert::Into<relhash::MatchesView<'m>>, key: usize, values: &mut [u64], nulls: &mut [bool]) -> core::result::Result<(), relhash::Error>
+pub fn relhash::Table<'a>::gather_scattered<'m>(&self, matches: impl core::convert::Into<relhash::MatchesView<'m>>, at: usize, out: &mut [u64]) -> core::result::Result<(), relhash::Error>
+pub fn relhash::Table<'a>::gather_words<'m>(&self, matches: impl core::convert::Into<relhash::MatchesView<'m>>, first: usize, out: &mut [&mut [u64]]) -> core::result::Result<(), relhash::Error>
+pub unsafe fn relhash::Table<'a>::link(&self, chunk: usize, from: &mut usize) -> core::result::Result<usize, relhash::Error>
+pub unsafe fn relhash::Table<'a>::link_counting(&self, chunk: usize, from: &mut usize) -> core::result::Result<(usize, usize), relhash::Error>
+pub fn relhash::Table<'a>::mark(&self, refs: &[u32], rows: &relhash::RowMaskView<'_>, marks: &impl relhash::Marks) -> core::result::Result<(), relhash::Error>
+pub fn relhash::Table<'a>::next_in_group(&self, matches: &mut relhash::Matches<'_>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::Table<'a>::next_match(&self, matches: &mut relhash::Matches<'_>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::Table<'a>::payload_size(&self) -> usize
+pub fn relhash::Table<'a>::probe<K: relhash::KeySource + ?core::marker::Sized>(&self, hashes: &[u32], keys: &K, matches: &mut relhash::Matches<'_>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::Table<'a>::record(&self, reference: u32) -> core::result::Result<relhash::Record<'_>, relhash::Error>
+pub fn relhash::Table<'a>::record_size(&self) -> usize
+pub fn relhash::Table<'a>::records(&self) -> relhash::RecordCursor<'_>
+pub fn relhash::Table<'a>::scan_unmarked(&self, cursor: &mut relhash::Cursor, marks: core::option::Option<&impl relhash::Marks>, out: &mut [u32]) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::Table<'a>::stats(&self) -> relhash::Stats
+pub fn relhash::Table<'a>::try_build_bloom(&self, filter: &relhash::bloom::SharedFilter<'_>) -> core::result::Result<bool, relhash::Error>
+pub struct relhash::TableConfig
+pub relhash::TableConfig::nkeys: usize
+pub relhash::TableConfig::payload_size: usize
+pub struct relhash::TableMut<'a>(_)
+impl<'a> relhash::TableMut<'a>
+pub fn relhash::TableMut<'a>::append<K: relhash::KeySource + ?core::marker::Sized>(&mut self, chunk: usize, payload: core::option::Option<&[u8]>, batch: &mut relhash::Batch<'_, K>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::TableMut<'a>::append_columns<K: relhash::KeySource + ?core::marker::Sized>(&mut self, chunk: usize, columns: &relhash::PayloadColumns<'_>, batch: &mut relhash::Batch<'_, K>) -> core::result::Result<usize, relhash::Error>
+pub unsafe fn relhash::TableMut<'a>::attach_mut(index: *mut u8, len: usize, chunks: relhash::Chunks<'a>) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::TableMut<'a>::clear_key(&mut self, key: usize) -> core::result::Result<u64, relhash::Error>
+pub unsafe fn relhash::TableMut<'a>::create(index: *mut u8, len: usize, config: &relhash::TableConfig, capacity: u64, chunks: relhash::Chunks<'a>) -> core::result::Result<Self, relhash::Error>
+pub fn relhash::TableMut<'a>::each_payload(&mut self, refs: &[u32], rows: &relhash::RowMaskView<'_>, each: impl core::ops::function::FnMut(usize, &mut [u8])) -> core::result::Result<(), relhash::Error>
+pub fn relhash::TableMut<'a>::find_or_insert<K: relhash::KeySource + ?core::marker::Sized>(&mut self, chunk: usize, batch: &mut relhash::Batch<'_, K>, inserted: &mut relhash::RowMask<'_>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::TableMut<'a>::find_or_insert_partitioned<K: relhash::KeySource + ?core::marker::Sized>(&mut self, partitions: &relhash::Partitions<'_>, batch: &mut relhash::Batch<'_, K>, inserted: &mut relhash::RowMask<'_>) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::TableMut<'a>::link(&mut self, chunk: usize, from: &mut usize) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::TableMut<'a>::link_counting(&mut self, chunk: usize, from: &mut usize) -> core::result::Result<(usize, usize), relhash::Error>
+pub fn relhash::TableMut<'a>::link_grouped(&mut self, chunk: usize, from: &mut usize) -> core::result::Result<(usize, usize), relhash::Error>
+pub fn relhash::TableMut<'a>::merge<E: core::convert::From<relhash::Error>>(&mut self, source: usize, from: &mut usize, chunk: usize, rule: impl core::ops::function::FnMut(&[u8], &mut [u8]) -> core::result::Result<(), E>) -> core::result::Result<(usize, relhash::MergeStop), E>
+pub fn relhash::TableMut<'a>::payload_mut(&mut self, reference: u32) -> core::result::Result<&mut [u8], relhash::Error>
+pub fn relhash::TableMut<'a>::payload_ptrs(&mut self, refs: &[u32], rows: &relhash::RowMaskView<'_>, out: &mut [*mut u8]) -> core::result::Result<(), relhash::Error>
+pub fn relhash::TableMut<'a>::payloads(&mut self) -> relhash::PayloadCursor<'_>
+pub unsafe fn relhash::TableMut<'a>::regrow(&mut self, index: *mut u8, len: usize, capacity: u64) -> core::result::Result<(), relhash::Error>
+pub fn relhash::TableMut<'a>::scan(&self, cursor: &mut relhash::Cursor, out: &mut [u32]) -> core::result::Result<usize, relhash::Error>
+impl<'a> core::ops::deref::Deref for relhash::TableMut<'a>
+pub type relhash::TableMut<'a>::Target = relhash::Table<'a>
+pub fn relhash::TableMut<'a>::deref(&self) -> &relhash::Table<'a>
+pub const relhash::CHUNK_HEADER: usize
+pub const relhash::FORMAT_VERSION: u32
+pub const relhash::HEADER_SIZE: usize
+pub const relhash::HELD: usize
+pub const relhash::MAX_CHUNKS: usize
+pub const relhash::MAX_CHUNK_LEN: usize
+pub const relhash::MAX_KEYS: usize
+pub const relhash::MAX_PARTITIONS: usize
+pub const relhash::MAX_PAYLOAD_COLUMNS: usize
+pub const relhash::UNIT_BITS: u32
+pub const relhash::VERSION_OFFSET: usize
+pub trait relhash::KeySource
+pub fn relhash::KeySource::nkeys(&self) -> usize
+pub fn relhash::KeySource::nrows(&self) -> usize
+pub fn relhash::KeySource::word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> core::option::Option<u64>
+pub trait relhash::Marks
+pub fn relhash::Marks::set(&self, chunk: usize, word: usize, bit: u64)
+pub fn relhash::Marks::word(&self, chunk: usize, word: usize) -> u64
+pub fn relhash::index_size(config: &relhash::TableConfig, capacity: u64) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::mark(lens: &[usize], record_size: usize, refs: &[u32], rows: &relhash::RowMaskView<'_>, marks: &impl relhash::Marks) -> core::result::Result<(), relhash::Error>
+pub fn relhash::mark_words(chunk_len: usize, record_size: usize) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::ones(word: u64) -> impl core::iter::traits::iterator::Iterator<Item = usize>
+pub fn relhash::payload_null_words(columns: usize) -> usize
+pub fn relhash::record_bytes(config: &relhash::TableConfig) -> core::result::Result<usize, relhash::Error>
+pub fn relhash::scan_unmarked(chunks: &relhash::Chunks<'_>, record_size: usize, cursor: &mut relhash::Cursor, marks: core::option::Option<&impl relhash::Marks>, out: &mut [u32]) -> core::result::Result<usize, relhash::Error>

@@ -291,7 +291,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       --no-default-features`; `cargo doc -p relhash
       --no-default-features`; the mutants of `find_long` and
       `finish_alone`
-- [ ] 3.27 Make the crate one of its own, without publishing it on
+- [x] 3.27 Make the crate one of its own, without publishing it on
       crates.io: `publish = true` in its manifest, which marks its API
       as a surface of a spec; a target whose pointers are not 64 bits
       wide refused with `compile_error!`; in CI a build for a 32-bit
