@@ -87,6 +87,13 @@
 //! error: the rows without room stay in the mask, and the caller adds a
 //! chunk or a larger index and calls again.
 //!
+//! A table a call found damaged is to be dropped or reset. A call may meet
+//! the damage in the middle, with records written past a used mark or
+//! links half made; the calls over the table after it stay bounded and
+//! sound, as over any bytes, but what they answer is not promised. An
+//! error of the caller's own, a source of keys that cannot give a word or
+//! a merge's rule that fails, leaves the table whole, as each call says.
+//!
 //! This module may use `unsafe` for its blocks of raw memory, which it
 //! reaches only through `region.rs`. [`OwnedTable`] owns its blocks and
 //! needs no `unsafe`: the tests and benchmarks build their tables with it.

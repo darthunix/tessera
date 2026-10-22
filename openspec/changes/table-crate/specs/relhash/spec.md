@@ -404,7 +404,8 @@ damaged table. A mask is refused as "The masks of rows" says.
   last cannot be a chunk
 - **THEN** the call fails with a wrong call and the rule of a chunk,
   and the index, the chunks and the keys are as they were
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_wrong_last_chunk_fails_the_calls_over_every_chunk_before_a_change`
 
 ### Requirement: No memory taken
 A call over blocks the caller gives SHALL allocate no memory, also when
