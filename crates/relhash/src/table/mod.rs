@@ -651,6 +651,29 @@ impl<'a> TableMut<'a> {
         writer::each_payload(&self.0.region, &self.0.layout, refs, rows, each)
     }
 
+    /// Write into `out`, at each selected row, a raw pointer to the
+    /// payload of its record, for a caller that changes the payloads of a
+    /// batch after the call, as C does. `refs` and `out` have a slot per
+    /// row of the mask; each reference is checked as a lookup checks it,
+    /// and one that names no record fails the call, after the rows before
+    /// it. Two rows of one record get the same pointer.
+    ///
+    /// The pointers are made from the chunks' bases, not from loans of the
+    /// payloads, so each may read and write its payload beside the others
+    /// until the chunk is reset or the blocks' lifetime ends. Using them is
+    /// the caller's `unsafe`: while it does, no record or payload of those
+    /// bytes is borrowed through a table, and nothing else writes them.
+    /// [`Self::each_payload`] lends the payloads one at a time instead, for
+    /// a caller that is done with each before the next.
+    pub fn payload_ptrs(
+        &mut self,
+        refs: &[u32],
+        rows: &RowMaskView<'_>,
+        out: &mut [*mut u8],
+    ) -> Result<()> {
+        writer::payload_ptrs(&self.0.region, &self.0.layout, refs, rows, out)
+    }
+
     /// Write 0 into key `key` of every record, its NULL bit kept; the count
     /// of records is returned. The key then orders no two records that are
     /// not NULL, and a probe by it no longer finds them: for records nothing

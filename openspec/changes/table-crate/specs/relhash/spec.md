@@ -501,7 +501,9 @@ beside the others, within Rust's rules of aliasing.
   after the call, under Miri, also through the C entry point
 - **THEN** Miri reports no undefined behavior, and the payload holds
   the last write
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::pointers_to_the_payload_of_one_record_write_it_in_turn`;
+  `crates/tessera-capi/tests/table.rs::the_writer_entry_points_round_trip`
 
 #### Scenario: Two payloads open at once
 - **WHEN** a program keeps one payload of a cursor open and opens

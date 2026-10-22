@@ -231,7 +231,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       table's calls with sources that fail at a chosen word, in the
       first chunk and after growing into a second, and at the limit of
       chunks; `cargo test -p relhash`
-- [ ] 3.20 Give C pointers to payloads within Rust's rules of
+- [x] 3.20 Give C pointers to payloads within Rust's rules of
       aliasing: a call of the crate that checks each selected row's
       reference and writes a raw pointer to its record's payload, made
       from the chunk's base, two rows of one record the same pointer;

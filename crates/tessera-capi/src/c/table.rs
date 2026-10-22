@@ -1414,10 +1414,9 @@ pub unsafe extern "C" fn tess_table_payloads(
             let nrows = rows.nrows();
             let offsets = values(offsets, nrows, "offsets")?;
             let payloads = slots(payloads, nrows, "payload pointers")?;
-            table.each_payload(offsets, &rows, |row, payload| {
-                payloads[row] = payload.as_mut_ptr();
-            })?;
-            Ok(())
+            // Raw pointers from the chunks' bases: rows of one group get the
+            // same one, which C writes after the call, beside the others.
+            Ok(table.payload_ptrs(offsets, &rows, payloads)?)
         })
     }
 }
