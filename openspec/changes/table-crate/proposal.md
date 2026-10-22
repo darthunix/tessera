@@ -54,13 +54,14 @@ none of these:
 - An error of a call is of one of two kinds, a wrong call or a damaged
   table, and names the rule it broke, instead of a text. A call
   allocates no memory.
-- What an outside review of the crate found is fixed before the crate
-  is published: a batch that fails part way leaves the table whole; the
-  owning table stays whole under any order of its calls; the writes of
-  chunks and the index leave the shared handle, so that no safe call
-  can change a borrowed record; the table stores 0 for NULL keys; a
-  walk stops at a cycle when that costs nothing; and its advice on the
-  interface, the documentation and the tests is taken.
+- What outside reviews of the crate found is fixed before the crate
+  is called ready: a batch that fails part way leaves the table whole;
+  the owning table stays whole under any order of its calls; the writes
+  of chunks and the index leave the shared handle, so that no safe call
+  can change a borrowed record; a debug build checks the slots of NULL
+  keys; a walk stops at a cycle; C gets pointers to payloads that obey
+  Rust's rules of aliasing; and their advice on the interface, the
+  documentation and the tests is taken.
 - A batch to place is one value with one lifetime, as a lookup is, and
   its references are named references throughout. The owning table's
   calls take the rows to place as a mask they only read. The calls that
