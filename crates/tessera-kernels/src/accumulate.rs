@@ -755,6 +755,7 @@ mod tests {
                         let records = into.table()?.stats().records;
                         into.regrow(records * 2)?;
                     }
+                    stop => anyhow::bail!("a merge stop the test does not know: {stop:?}"),
                 }
             }
         }

@@ -19,7 +19,9 @@ use super::region::RawRegion;
 /// each partition, at its number in `rows`, and the NULL bits of every row
 /// appended, or-ed into `nulls`. The counts add up over calls.
 pub struct Appended<'a> {
+    /// The rows appended to each partition, at its number.
     pub rows: &'a mut [u64],
+    /// The NULL bits of every row appended, or-ed.
     pub nulls: &'a mut u64,
 }
 
@@ -237,15 +239,20 @@ pub const MAX_PARTITIONS: usize = 1 << 16;
 /// the next level of partitions by the bits above them.
 #[derive(Clone, Copy, Debug)]
 pub struct Partitions<'a> {
+    /// The bit of a hash where the partition's bits start.
     pub shift: u32,
+    /// The chunk each partition appends to, a power of two of them.
     pub chunks: &'a [u32],
 }
 
 /// What [`ChunkWriter::split`] did: the records copied, and the partition whose
 /// chunk was full, if it stopped at one.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Split {
+    /// The records copied.
     pub count: usize,
+    /// The partition whose chunk was full, if the split stopped at one.
     pub full: Option<u32>,
 }
 

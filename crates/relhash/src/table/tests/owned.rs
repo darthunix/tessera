@@ -261,3 +261,34 @@ fn the_owning_table_grows_up_to_the_most_records_and_then_fails() -> Result<()> 
     );
     Ok(())
 }
+
+/// An owning table filled on one thread moves to another, which finds
+/// every key; its handles stay with the thread that has it.
+#[test]
+fn an_owning_table_filled_on_one_thread_is_probed_on_another() -> Result<()> {
+    let values: Vec<i32> = (0..100).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = OwnedTable::new(&ONE_INT4, 256, CHUNK_HEADER + 32 * 64)?;
+    let words = all_rows(values.len());
+    let mut refs = vec![0; values.len()];
+    table.insert(
+        &hashes,
+        &Keys(&keys),
+        RowMaskView::try_new(values.len(), &words)?,
+        None,
+        &mut refs,
+    )?;
+    let found = std::thread::spawn(move || -> Result<usize> {
+        let shared = table.table()?;
+        let mut found = 0;
+        for key in 0..100 {
+            found += records_of(&shared, key)?;
+        }
+        Ok(found)
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("the other thread panicked"))??;
+    ensure!(found == 100, "{found} keys found, not 100");
+    Ok(())
+}

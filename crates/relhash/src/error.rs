@@ -58,7 +58,9 @@ pub enum Kind {
     WrongCall,
     /// A byte of the table's blocks breaks the rule. The table is to be
     /// dropped or reset: the calls over it stay sound, but what they
-    /// answer is not promised.
+    /// answer is not promised. A reference a caller passed that lands
+    /// inside a record reads as damage too, as the crate cannot tell the
+    /// two apart.
     Damaged,
 }
 

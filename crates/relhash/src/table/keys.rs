@@ -29,7 +29,9 @@ pub trait KeySource {
     /// `out` keep their contents. `None` when the source cannot give the key of a selected
     /// row: the call then fails with
     /// [`Rule::KeyRead`](crate::Rule::KeyRead), and the words of the batch
-    /// before stay placed, as [`Batch`](crate::Batch) says.
+    /// before stay placed, as [`Batch`](crate::Batch) says. The error names
+    /// the word and the key, not why: a source that must say why keeps its
+    /// own error, which its caller reads after this one.
     fn word(&self, key: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64>;
 }
 

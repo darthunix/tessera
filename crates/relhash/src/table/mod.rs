@@ -46,6 +46,7 @@ pub use writer::{Cursor, HELD, MergeStop, PayloadCursor};
 
 /// What a table holds, for planning and EXPLAIN.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub struct Stats {
     /// Records linked into the buckets.
     pub records: u64,
@@ -448,7 +449,11 @@ impl<'a> Table<'a> {
     /// reference is checked against its chunk's length, not its used mark,
     /// which a writer moves: in a shared build one past the mark reads
     /// bytes that the chunk's writer may be writing, so a caller reads
-    /// only the references the calls gave it.
+    /// only the references the calls gave it. A reference that lands
+    /// inside a record or on bytes no record starts at reads as a damaged
+    /// table, [`Kind::Damaged`](crate::Kind::Damaged), whoever gave it:
+    /// the crate cannot tell a caller's wrong reference from damage. The
+    /// gathers and the steps to a next record read references alike.
     pub fn record(&self, reference: u32) -> Result<Record<'_>> {
         Ok(Access::new(&self.region, &self.layout)
             .locate(reference, Kind::WrongCall)?
@@ -570,8 +575,10 @@ impl<'a> TableMut<'a> {
     /// `*from` moves past the records merged, and the call stops where a
     /// record of new keys needs another chunk or a larger index, at most
     /// 2^30 records as for [`TableMut::find_or_insert`]; the count merged
-    /// is returned. When the rule fails, the call returns
-    /// its error, the records before it merged.
+    /// is returned. When the rule fails, the call returns its error, the
+    /// records before it merged, and the payload it was changing as the
+    /// rule left it: a rule that must leave it whole changes it only once
+    /// it cannot fail.
     ///
     /// Chunk `source` is one of the table's chunks while it merges, so the
     /// calls over every chunk would take its records for the table's: it

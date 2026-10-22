@@ -41,6 +41,7 @@ pub(super) const LONG_CHAIN: u64 = 64;
 
 /// A record as the table exposes it.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct Record<'a> {
     /// The hash it was inserted with.
     pub hash: u32,

@@ -76,7 +76,9 @@ impl Drop for Block {
 /// Its calls may come in any order: an insertion links the records it
 /// appended and no others, a find or insert links each record it makes
 /// at once, and a larger index or a reset keeps the table whole. Chunks
-/// too small for a record are refused when the table is made.
+/// too small for a record are refused when the table is made. It owns its
+/// blocks, so it may move to another thread whole; its handles, which
+/// borrow it, stay with the thread that has it.
 ///
 /// A record read from the table borrows it, and the calls that write
 /// need it to themselves, so a record borrowed across an append does not
@@ -122,6 +124,11 @@ pub struct OwnedTable {
     /// The capacity the index was last sized for.
     capacity: u64,
 }
+
+// SAFETY: the table owns its blocks, and nothing outside it points into
+// them: every handle borrows the owner, so the thread that has the owner
+// is the blocks' only user.
+unsafe impl Send for OwnedTable {}
 
 impl OwnedTable {
     /// An empty table whose index is sized for `capacity` records and

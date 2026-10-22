@@ -73,7 +73,10 @@ impl PerRecord {
 ///
 /// The crate calls these for a chunk of the table and a `word` below
 /// [`mark_words`] of its length, never past them, so an implementation
-/// over raw words may trust the two numbers.
+/// over raw words may trust the two numbers. [`Marks::set`] takes `&self`,
+/// as participants that probe at once set marks of one table, so an
+/// implementation changes its words through interior mutability, such as
+/// atomics or cells.
 pub trait Marks {
     /// Set bit `bit` of word `word` of chunk `chunk`'s marks.
     fn set(&self, chunk: usize, word: usize, bit: u64);
