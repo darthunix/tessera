@@ -383,6 +383,7 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 	uint32		offsets[NROWS];
 	uint32		matches[NROWS];
 	uint32		chain[NROWS];
+	uint64		steps;
 	Datum		gathered[NROWS];
 	TessTableStats stats;
 	TessRowMask valid_rows = {NROWS, pending};
@@ -427,8 +428,9 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 	/* Every value is held by several rows: each has a next record. */
 	memcpy(chain, matches, sizeof(chain));
 	memcpy(pending, batch->valid, sizeof(pending));
+	steps = 0;
 	if (tess_table_next_match(&table->ref, chain, &valid_rows, &found_mask,
-							  &status) != TESS_OK)
+							  &steps, &status) != TESS_OK)
 		PG_RETURN_BOOL(false);
 	for (row = 0; row < NROWS; row++)
 	{
@@ -512,10 +514,11 @@ tessera_test_table_cycle(PG_FUNCTION_ARGS)
 			duplicates != NROWS - 10)
 			PG_RETURN_BOOL(false);
 		memcpy(chain, offsets, sizeof(chain));
+		steps = 0;
 		for (step = 0; step < 20; step++)
 		{
 			if (tess_table_next_in_group(&table->ref, chain, &rows, &found_mask,
-										 &status) != TESS_OK ||
+										 &steps, &status) != TESS_OK ||
 				count_bits(found) != (step < 19 ? 10 : 0))
 				PG_RETURN_BOOL(false);
 			memcpy(first_ten, found, sizeof(first_ten));

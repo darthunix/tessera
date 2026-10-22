@@ -729,6 +729,57 @@ fn a_word_probed_at_once_answers_as_rows_probed_alone() -> Result<()> {
     Ok(())
 }
 
+/// A cycle of matching records ends a walk over the matches: each step
+/// finds a next record, but a lookup counts its steps, and one past the
+/// table's count of records fails, by a next match and in a group.
+#[test]
+fn a_cycle_of_matching_records_ends_a_walk_over_the_matches() -> Result<()> {
+    // Key 5 once, key 7 twice: three records.
+    let values = [5, 7, 7];
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 8)?;
+    let refs = insert_all(&mut table, &hashes, &Keys(&keys), None)?;
+    // The record of 5 names itself, and the two of 7 name each other:
+    // every step finds a next record of the same keys.
+    for (from, to) in [(0, 0), (1, 2), (2, 1)] {
+        let (chunk, byte) = placement(refs[from]);
+        set_u32(table.chunk_words(chunk), byte + 4, refs[to]);
+    }
+    let shared = table.table()?;
+    let records = shared.stats().records;
+    for in_group in [false, true] {
+        for key in [5, 7] {
+            let (mut rows, mut found) = ([1], [0]);
+            let mut matches = Matches::new(&mut rows, &mut found)?;
+            let probe_keys = [Column::new(&[key], None)];
+            shared.probe(&[hash_i32(key)], &Keys(&probe_keys), &mut matches)?;
+            let mut taken = 0;
+            let ended = loop {
+                let step = if in_group {
+                    shared.next_in_group(&mut matches)
+                } else {
+                    shared.next_match(&mut matches)
+                };
+                match step {
+                    Ok(1) => taken += 1,
+                    other => break other,
+                }
+                assert!(taken <= records, "the walk ends");
+            };
+            assert_eq!(
+                (refusal(ended), taken),
+                (Some((Kind::Damaged, Rule::Chain)), records),
+                "key {key}, in a group: {in_group}"
+            );
+            // A probe starts the count again.
+            shared.probe(&[hash_i32(key)], &Keys(&probe_keys), &mut matches)?;
+            assert_eq!(matches.steps(), 0);
+        }
+    }
+    Ok(())
+}
+
 #[test]
 fn a_word_probed_at_once_detects_a_cycle() -> Result<()> {
     let values: Vec<i32> = (0..64).collect();

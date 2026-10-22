@@ -124,7 +124,8 @@ records ends a walk over the matches.
   a group, again and again
 - **THEN** within as many steps as the table has records, the step
   fails with a damaged table and the rule of a chain
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::a_cycle_of_matching_records_ends_a_walk_over_the_matches`
 
 #### Scenario: A chain longer than a short walk
 - **WHEN** 300 records of one hash are linked, and their keys and an

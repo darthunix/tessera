@@ -451,12 +451,16 @@ extern TessStatusCode tess_table_gather_words(const TessTableRef *table,
  * earlier call, by the offset of the next record in its chain with the
  * same hash, NULL bits and keys; found receives the rows that have one,
  * and the others keep their offset. found may be rows, as for
- * tess_table_probe.
+ * tess_table_probe. *steps counts the steps of the lookup: the caller
+ * sets it to 0 with its probe and gives it back at each step, and a step
+ * with rows to move past the table's count of records fails, since the
+ * matches of a key then go round a cycle.
  */
 extern TessStatusCode tess_table_next_match(const TessTableRef *table,
 											uint32 *offsets,
 											const TessRowMask *rows,
 											TessRowMask *found,
+											uint64 *steps,
 											TessStatus *status);
 
 /*
@@ -479,12 +483,13 @@ extern TessStatusCode tess_table_gather(const TessTableRef *table,
  * put the row in found; the others keep their offset. In a table linked
  * by tess_table_link_grouped this is the key's next record, in one step
  * instead of tess_table_next_match's walk down the chain. found may be
- * rows, as for tess_table_probe.
+ * rows, as for tess_table_probe, and *steps counts as for it.
  */
 extern TessStatusCode tess_table_next_in_group(const TessTableRef *table,
 											   uint32 *offsets,
 											   const TessRowMask *rows,
 											   TessRowMask *found,
+											   uint64 *steps,
 											   TessStatus *status);
 
 /* The record at an offset a call of this table returned. */

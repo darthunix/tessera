@@ -1052,20 +1052,22 @@ pub unsafe extern "C" fn tess_table_probe(
 }
 
 /// `tess_table_next_match`: replace each row's record offset by the next
-/// record with the same keys.
+/// record with the same keys, counting the lookup's steps in `*steps`.
 ///
 /// # Safety
 ///
 /// `table` as for [`attach`] during the call; `rows` and `found` as for
 /// [`LookupMasks::new`], with the batch's rows; `offsets` must hold an
 /// initialized, writable offset per row that nothing else accesses;
-/// `status` as for every entry point.
+/// `steps` must point to a writable count; `status` as for every entry
+/// point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_table_next_match(
     table: *const TableRef,
     offsets: *mut u32,
     rows: *const Mask,
     found: *mut Mask,
+    steps: *mut u64,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
@@ -1074,8 +1076,10 @@ pub unsafe extern "C" fn tess_table_next_match(
             let table = attach(table)?;
             let masks = LookupMasks::new(rows, found)?;
             let offsets = slots(offsets, masks.nrows(), "offsets")?;
-            let mut lookup = Matches::from_mask(masks.narrowed()?, offsets)?;
+            let steps = steps.as_mut().context("a null count of steps")?;
+            let mut lookup = Matches::from_mask(masks.narrowed()?, offsets)?.with_steps(*steps);
             table.next_match(&mut lookup)?;
+            *steps = lookup.steps();
             Ok(())
         })
     }
@@ -1199,6 +1203,7 @@ pub unsafe extern "C" fn tess_table_next_in_group(
     offsets: *mut u32,
     rows: *const Mask,
     found: *mut Mask,
+    steps: *mut u64,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
@@ -1207,8 +1212,10 @@ pub unsafe extern "C" fn tess_table_next_in_group(
             let table = attach(table)?;
             let masks = LookupMasks::new(rows, found)?;
             let offsets = slots(offsets, masks.nrows(), "offsets")?;
-            let mut lookup = Matches::from_mask(masks.narrowed()?, offsets)?;
+            let steps = steps.as_mut().context("a null count of steps")?;
+            let mut lookup = Matches::from_mask(masks.narrowed()?, offsets)?.with_steps(*steps);
             table.next_in_group(&mut lookup)?;
+            *steps = lookup.steps();
             Ok(())
         })
     }

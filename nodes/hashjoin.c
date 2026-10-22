@@ -1142,6 +1142,7 @@ join_probe_batch(TessHashJoinState *state, TessBatch *batch)
 		if (through == 0)
 			return false;
 	}
+	state->probe.steps = 0;
 	check(state, state->kernels->table_probe(&state->table,
 											 state->probe.hashes, state->keys.nkeys,
 											 state->keys.table_keys, &valid,

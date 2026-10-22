@@ -991,7 +991,7 @@ fn misplaced(offset: u32) -> Error {
 /// The error of a chain longer than the record count.
 #[cold]
 #[inline(never)]
-fn cycle() -> Error {
+pub(super) fn cycle() -> Error {
     Error::damaged(Rule::Chain)
 }
 

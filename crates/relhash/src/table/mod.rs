@@ -276,17 +276,19 @@ impl<'a> Table<'a> {
         keys: &K,
         matches: &mut Matches<'_>,
     ) -> Result<usize> {
-        let Matches { rows, refs } = matches;
+        let Matches { rows, refs, steps } = matches;
+        *steps = 0;
         batch::probe(&self.region, &self.layout, hashes, keys, rows, refs)
     }
 
     /// Move each row of `matches` to the next record of its chain with
     /// the same hash, null bits and keys; the rows without one leave
     /// `matches` and keep their reference. The count of rows left is
-    /// returned.
+    /// returned. A step past the table's count of records fails as a
+    /// damaged chain, as [`Matches`] says.
     pub fn next_match(&self, matches: &mut Matches<'_>) -> Result<usize> {
-        let Matches { rows, refs } = matches;
-        batch::next_match(&self.region, &self.layout, refs, rows)
+        let Matches { rows, refs, steps } = matches;
+        batch::next_match(&self.region, &self.layout, refs, rows, steps)
     }
 
     /// For each row of `matches`, the word at byte `at` of its record's
@@ -335,10 +337,12 @@ impl<'a> Table<'a> {
     /// that one has the same hash, null bits and keys; the rows without
     /// one leave `matches`, and the count of rows left is returned. In a
     /// table linked by [`TableMut::link_grouped`] this is the next record
-    /// of the key, found in one step instead of a walk down the chain.
+    /// of the key, found in one step instead of a walk down the chain. A
+    /// step past the table's count of records fails as for
+    /// [`Table::next_match`].
     pub fn next_in_group(&self, matches: &mut Matches<'_>) -> Result<usize> {
-        let Matches { rows, refs } = matches;
-        batch::next_in_group(&self.region, &self.layout, refs, rows)
+        let Matches { rows, refs, steps } = matches;
+        batch::next_in_group(&self.region, &self.layout, refs, rows, steps)
     }
 
     /// For each row of `matches`, key `key` of its record: its slot's bits

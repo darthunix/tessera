@@ -36,9 +36,11 @@ next_record(TessHashJoinState *state, TessRowMask *rows)
 {
 	if (state->parallel.chain_table)
 		return state->kernels->table_next_match(&state->table, state->probe.offsets,
-												rows, rows, &state->status);
+												rows, rows, &state->probe.steps,
+												&state->status);
 	return state->kernels->table_next_in_group(&state->table, state->probe.offsets,
-											   rows, rows, &state->status);
+											   rows, rows, &state->probe.steps,
+											   &state->status);
 }
 
 /* Make the round's rows the published batch's selection. */
