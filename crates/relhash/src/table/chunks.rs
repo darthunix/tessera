@@ -109,7 +109,10 @@ impl<'a> Chunks<'a> {
     /// `lens` or the index of a table over them. During `'a` the chunks
     /// are accessed only through tables and chunk writers, here or in
     /// other processes mapping the same memory, and a chunk has one
-    /// writer at a time across all of them.
+    /// writer at a time across all of them. [`scan_unmarked`](super::scan_unmarked),
+    /// and the calls of a table that read every chunk's used mark, run
+    /// only once every writer's appends are done and ordered before them,
+    /// as by a barrier.
     pub unsafe fn new(bases: &'a [*mut u8], lens: &'a [usize]) -> Result<Self> {
         ensure!(
             bases.len() == lens.len() && bases.len() <= MAX_CHUNKS,
