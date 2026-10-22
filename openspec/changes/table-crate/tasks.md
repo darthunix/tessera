@@ -271,7 +271,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       it; a shared filter whose build fails documented as never ready.
       Check: each case, in debug and release builds; `cargo test -p
       relhash`; `cargo test -p tessera-capi`; machine code
-- [ ] 3.25 Settle the interface before it is frozen: `OwnedTable`
+- [x] 3.25 Settle the interface before it is frozen: `OwnedTable`
       `Send`; `Stats`, `Split`, `Record` and `MergeStop`
       `#[non_exhaustive]`; the documentation of a caller's reference
       that reads as damage, of a source's own error behind the error of

@@ -1401,6 +1401,7 @@ pub unsafe extern "C" fn tess_table_combine(
                 MergeStop::Done => 0,
                 MergeStop::ChunkFull => 1,
                 MergeStop::IndexFull => 2,
+                stopped => bail!("a merge stop the C API has no code for: {stopped:?}"),
             };
             Ok(())
         })

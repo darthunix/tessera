@@ -151,9 +151,8 @@ impl<'a> RowMaskView<'a> {
 /// its last row, and its words keep the form of a mask.
 ///
 /// It borrows the caller's words exclusively, and construction checks them
-/// as [`RowMaskView::try_new`] does. Successful
-/// operations do not allocate; creating an error may allocate. No operation
-/// frees or resizes the backing storage. Dropping the mask ends the borrow;
+/// as [`RowMaskView::try_new`] does. No operation allocates, an error
+/// included, and none frees or resizes the backing storage. Dropping the mask ends the borrow;
 /// changes remain in the caller's words.
 ///
 /// Two mutable views cannot access the same storage simultaneously:

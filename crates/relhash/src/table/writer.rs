@@ -42,7 +42,11 @@ impl Cursor {
         (self.0 & u64::from(u32::MAX)) as usize
     }
 
-    /// The cursor a caller stored as an integer.
+    /// The cursor a caller stored as an integer. Any integer makes one: a
+    /// walk checks it before it reads, a chunk that exists, a record's
+    /// place in it and no further than its used mark, and refuses another
+    /// with [`Rule::Cursor`](crate::Rule::Cursor) or
+    /// [`Rule::CursorPast`](crate::Rule::CursorPast).
     pub fn from_raw(raw: u64) -> Self {
         Self(raw)
     }
@@ -598,6 +602,7 @@ impl<'t> PayloadCursor<'t> {
 
 /// Where [`TableMut::merge`](super::TableMut::merge) stopped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum MergeStop {
     /// Every record of the source was merged.
     Done,

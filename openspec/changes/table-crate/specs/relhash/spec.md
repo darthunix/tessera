@@ -455,7 +455,8 @@ filter, which holds only atomic words, may be shared.
 #### Scenario: An owning table sent to another thread
 - **WHEN** an owning table is filled on one thread and moved to another
 - **THEN** the other thread finds every key
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::an_owning_table_filled_on_one_thread_is_probed_on_another`
 
 #### Scenario: Threads with handles of their own
 - **WHEN** two threads, each with its own handle, append, link and

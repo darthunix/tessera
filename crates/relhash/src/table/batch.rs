@@ -192,8 +192,12 @@ impl<'b, K: KeySource + ?Sized> Batch<'b, K> {
 ///   next match    {}          [a3, b1, c2]   no row has another
 /// ```
 ///
-/// The mask and `refs` must have the same rows. That is checked once,
-/// when a lookup is made, and not again by each call.
+/// The mask and `refs` must have the same rows: a lookup checks it when it
+/// is made, and each call checks it again, since [`Self::rows_mut`] lends
+/// the mask itself. A probe that fails at a word of keys the source cannot
+/// give leaves the words before narrowed and the words after as they
+/// were, their references not written: the lookup probed again gives each
+/// row its first record.
 ///
 /// A lookup also counts its steps: the calls to a next match or a next in
 /// a group that had rows to move. A key has no more records than the
@@ -246,7 +250,8 @@ impl<'b> Matches<'b> {
     }
 
     /// The rows still in the lookup, to narrow before a call, as a
-    /// filter's probe does.
+    /// filter's probe does. It lends the mask itself: one of another size
+    /// put in its place fails the next call.
     #[inline]
     pub fn rows_mut(&mut self) -> &mut RowMask<'b> {
         &mut self.rows
