@@ -1175,6 +1175,18 @@ pub unsafe extern "C" fn tess_table_gather_words(
             let offsets = values(offsets, nrows, "offsets")?;
             ensure!(nwords > 0, "no payload words to gather");
             let pointers = values(out, nwords, "outputs")?;
+            // The whole range and every output first: the groups below
+            // write the outputs as they go.
+            let payload_words = table.config().payload_size / 8;
+            ensure!(
+                first
+                    .checked_add(nwords)
+                    .is_some_and(|end| end <= payload_words),
+                "payload words {first} and {nwords} after it pass the payload's {payload_words}"
+            );
+            for &pointer in pointers {
+                slots(pointer, nrows, "output words")?;
+            }
             let mut words: [&mut [u64]; GATHER_WORDS] = Default::default();
             for (group, pointers) in pointers.chunks(GATHER_WORDS).enumerate() {
                 for (slot, &pointer) in words.iter_mut().zip(pointers) {

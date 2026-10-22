@@ -261,7 +261,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       reset, unlike a table after an error of the caller's rule.
       Check: a larger index and a cleared key given a wrong last chunk
       leave the table as it was; machine code
-- [ ] 3.24 Mend the smaller faults: a walk from a cursor past its
+- [x] 3.24 Mend the smaller faults: a walk from a cursor past its
       chunk's used mark, or into an empty output, fails as a wrong
       call; a count of rows by partition that would overflow fails
       before its row; the C gather of many words checks its whole range

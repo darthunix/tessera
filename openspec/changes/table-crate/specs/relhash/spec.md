@@ -246,7 +246,8 @@ holds the most records a find or insert may make.
 - **WHEN** a find or insert of the owning table needs a record past the
   most records a table may hold
 - **THEN** it fails with a wrong call and the rule of that limit
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::the_owning_table_grows_up_to_the_most_records_and_then_fails`
 
 #### Scenario: A chunk too small for a record
 - **WHEN** an owning table is made with chunks shorter than a record

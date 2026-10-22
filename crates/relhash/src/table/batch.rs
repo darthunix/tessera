@@ -710,6 +710,12 @@ fn append_partitioned_column_rows<
             if room == 0 {
                 continue;
             }
+            // Checked before the row is written, as the chunk is.
+            if rows[partition] == u64::MAX {
+                pending.intersect_word(index, !done)?;
+                *nulls |= seen;
+                return Err(Error::wrong_call(Rule::PartitionCount).with(partition));
+            }
             // SAFETY: the place lies past the used mark and within the
             // chunk, as `room` counted; the buffer and the shape are this
             // table's; the payload is a word and one per column, and `row`
