@@ -391,6 +391,30 @@ pub(super) fn each_payload<R: Region>(
     Ok(())
 }
 
+/// Write into `out`, at each selected row, the address of the payload of
+/// its record, each reference checked as [`each_payload`] checks it. The
+/// address is made from the chunk's base, with no loan of the bytes, so
+/// two rows of one record get one address and each stays usable beside
+/// the others.
+pub(super) fn payload_ptrs(
+    region: &RawRegion,
+    layout: &Layout,
+    refs: &[u32],
+    rows: &RowMaskView<'_>,
+    out: &mut [*mut u8],
+) -> Result<()> {
+    let nrows = rows.nrows();
+    check_rows(nrows, &[refs.len(), out.len()])?;
+    let mut access = Access::new(region, layout);
+    for index in 0..nrows.div_ceil(64) {
+        for bit in ones(rows.word(index)) {
+            let row = index * 64 + bit;
+            out[row] = access.payload_spot(refs[row], Kind::WrongCall)?;
+        }
+    }
+    Ok(())
+}
+
 /// Write 0 into key slot `key` of every record, its NULL bit kept, and
 /// return the count of records: the key then orders no two records that
 /// are not NULL. For records nothing finds by their keys, such as a

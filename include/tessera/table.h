@@ -1006,7 +1006,8 @@ extern TessStatusCode tess_build_stopped(uint64 *stopped, bool *any,
 /*
  * The payload of the record of each row of rows, at offsets[row], into
  * payloads[row], to change in place: payload_size bytes each, valid as long
- * as the record's chunk.
+ * as the record's chunk. Rows of one record get the same pointer, and each
+ * may be written beside the others.
  */
 extern TessStatusCode tess_table_payloads(const TessTableRef *table,
 										  const uint32 *offsets,

@@ -1949,6 +1949,28 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
             let counter = payload.cast::<u64>();
             counter.write_unaligned(counter.read_unaligned() + row as u64);
         }
+        // The pointers of a whole batch: rows of one record get one
+        // pointer, and each adds to the payload after the call, beside
+        // the others, which Miri checks.
+        let mut every = all;
+        let rows = Mask {
+            nrows: 100,
+            bits: every.as_mut_ptr(),
+        };
+        let mut pointers = [ptr::null_mut::<u8>(); 100];
+        let code = tess_table_payloads(
+            table.ptr(),
+            offsets.as_ptr(),
+            &raw const rows,
+            pointers.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(pointers[3], pointers[13], "one record, one pointer");
+        for &pointer in &pointers {
+            let counter = pointer.cast::<u64>();
+            counter.write_unaligned(counter.read_unaligned() + 1);
+        }
         let mut record = TableRecord {
             struct_size: size_of::<TableRecord>(),
             hash: 0,
@@ -1963,7 +1985,8 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
             let sum = u64::from_ne_bytes(*record.payload.cast::<[u8; 8]>());
             assert_eq!(
                 sum,
-                (0..100).filter(|row| row % 10 == key).sum::<usize>() as u64
+                (0..100).filter(|row| row % 10 == key).sum::<usize>() as u64 + 10,
+                "the rows' sum and one from each of the key's ten pointers"
             );
         }
         let mut stats = TableStats {

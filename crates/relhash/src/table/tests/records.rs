@@ -346,6 +346,51 @@ fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
     Ok(())
 }
 
+/// The pointers to the payloads of a batch: rows of one record get one
+/// pointer, and each changes the payload after the call, beside the
+/// others, which Miri checks among the table's tests. A reference that
+/// names no record fails as for `each_payload`.
+#[test]
+fn pointers_to_the_payload_of_one_record_write_it_in_turn() -> Result<()> {
+    let values: Vec<i32> = (0..100).map(|row| row % 10).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 20)?;
+    let (mut refs, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    let words = all_rows(100);
+    let rows = RowMaskView::try_new(100, &words)?;
+    let mut pointers = vec![core::ptr::null_mut(); 100];
+    table
+        .table_mut()?
+        .payload_ptrs(&refs, &rows, &mut pointers)?;
+    assert_eq!(pointers[3], pointers[13], "one record, one pointer");
+    assert_ne!(pointers[3], pointers[4]);
+    for &pointer in &pointers {
+        // SAFETY: each pointer is a record's payload of 8 bytes, aligned to
+        // 8, which nothing borrows while the loop writes it.
+        unsafe {
+            let count = pointer.cast::<u64>().read();
+            pointer.cast::<u64>().write(count + 1);
+        }
+    }
+    for (key, &offset) in refs[..10].iter().enumerate() {
+        let payload = table.table()?.record(offset)?.payload.to_vec();
+        assert_eq!(payload, 10u64.to_ne_bytes(), "key {key}");
+    }
+
+    refs[40] += 1;
+    pointers.fill(core::ptr::null_mut());
+    let failed = table.table_mut()?.payload_ptrs(&refs, &rows, &mut pointers);
+    assert_eq!(refusal(failed), Some((Kind::Damaged, Rule::Misplaced)));
+    assert!(pointers[..40].iter().all(|pointer| !pointer.is_null()));
+    assert!(pointers[40..].iter().all(|pointer| pointer.is_null()));
+    let short = table
+        .table_mut()?
+        .payload_ptrs(&refs, &rows, &mut pointers[..99]);
+    assert_eq!(refusal(short), Some((Kind::WrongCall, Rule::RowCounts)));
+    Ok(())
+}
+
 /// The batch that `Batch`'s documentation draws: four rows, row 2 left
 /// out as a NULL key would be, into chunks of two records each.
 #[test]
