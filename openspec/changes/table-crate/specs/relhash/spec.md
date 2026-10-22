@@ -123,6 +123,15 @@ and SHALL return how many rows are left.
 - **Verified by:**
   `crates/relhash/src/table/tests/filter.rs::a_probe_narrows_its_rows_in_place`
 
+#### Scenario: A chain longer than a short walk
+- **WHEN** 300 records of one hash are linked, and their keys and an
+  absent key are probed row by row and by whole words, their matches
+  are followed, and a find or insert looks for a known and a new key
+- **THEN** every known key is found at the end of its walk, the absent
+  key finds nothing, the matches visit all 300 records, and no call
+  takes the chain for a cycle
+- **Verified by:** pending
+
 #### Scenario: A mask and references of other row counts
 - **WHEN** a lookup is made of a mask of 70 rows and 69 references
 - **THEN** it is refused
@@ -171,7 +180,10 @@ mask with the references of their records, those that made a record
 SHALL be in the mask of inserted rows, and the used mark of each chunk
 SHALL cover the records written in it. A link that fails SHALL count
 only the records it linked and SHALL move `*from` past them. The same
-batch, given again, SHALL place the rest once.
+batch, given again, SHALL place the rest once. A call that fails because
+it met damaged bytes keeps no such promise: what the table holds after
+it is not promised, the caller drops or resets the table, and the calls
+over it stay bounded, as "Any bytes, a bounded call" says.
 
 #### Scenario: A source fails at the second word
 - **WHEN** a batch of 128 rows is appended, or found or inserted, and
@@ -203,9 +215,11 @@ batch, given again, SHALL place the rest once.
 
 ### Requirement: The owning table
 Every order of the owning table's calls SHALL keep its table whole:
-each record linked once, and each key found where it was placed. The
-owning table SHALL refuse, when it is made, chunks too small for one
-record.
+each record linked once, and each key found where it was placed. An
+insertion that fails part way SHALL leave the rows it placed linked.
+The owning table SHALL refuse, when it is made, chunks too small for
+one record, and SHALL fail, not grow its index again and again, when it
+holds the most records a find or insert may make.
 
 #### Scenario: Calls in any order
 - **WHEN** random sequences of insertions, finds or insertions, larger
@@ -214,6 +228,20 @@ record.
   finds are those of a model of the sequence
 - **Verified by:**
   `crates/relhash/src/table/tests/owned.rs::the_owning_table_stays_whole_under_any_order_of_its_calls`
+
+#### Scenario: An insertion that fails part way
+- **WHEN** the source of an insertion into the owning table cannot give
+  its second word
+- **THEN** the call fails with the rule of the source, the first word's
+  keys are found, the count of records is theirs, and the rows given
+  again with a source that gives every word are placed once more
+- **Verified by:** pending
+
+#### Scenario: An owning table at its most records
+- **WHEN** a find or insert of the owning table needs a record past the
+  most records a table may hold
+- **THEN** it fails with a wrong call and the rule of that limit
+- **Verified by:** pending
 
 #### Scenario: A chunk too small for a record
 - **WHEN** an owning table is made with chunks shorter than a record
@@ -227,7 +255,9 @@ No sequence of the crate's safe calls SHALL let a record that a caller
 has borrowed change while it is borrowed. The calls that write a chunk
 or the index SHALL need the table to themselves; over a table that
 several writers share they SHALL be unsafe calls, whose contract names
-the chunks each writer writes.
+the chunks each writer writes. The writer of the chunks of a table that
+has no index yet SHALL be made by an unsafe call, whose contract makes
+it the one writer of the chunks it writes.
 
 #### Scenario: A record borrowed across an append
 - **WHEN** a caller borrows a record of the owning table and then
@@ -236,12 +266,32 @@ the chunks each writer writes.
 - **Verified by:**
   `crates/relhash/src/table/owned.rs::A record borrowed across an append`
 
+#### Scenario: A chunk writer made in safe code
+- **WHEN** a program makes a writer of chunks outside an unsafe block
+- **THEN** the code does not compile
+- **Verified by:** pending
+
 #### Scenario: An old reference after a reset
 - **WHEN** an owning table is reset, an old reference is read, and new
   rows are appended, under Miri
 - **THEN** Miri reports no undefined behavior
 - **Verified by:**
   `crates/relhash/src/table/tests/owned.rs::an_old_reference_after_a_reset_reads_what_its_place_holds`
+
+### Requirement: The calls over every chunk
+Building a Bloom filter of a table's records, alone or shared, and a
+walk of the unmarked records of a whole table read the used mark of
+every chunk. Over a table that several writers share they SHALL run
+only once every writer's appends are done and ordered before them, as
+by a barrier; the contracts of attaching a table and of making its
+chunks SHALL say so.
+
+#### Scenario: A filter built after the appends
+- **WHEN** a filter is built over a shared table
+- **THEN** the contracts of attaching the table and of making its
+  chunks name the call and the barrier before it
+- **Verified by:** review only — the contract forbids the race it
+  names, so no run can show it
 
 ### Requirement: Keys from a source
 A source of keys SHALL give 0 in the slot of every key it marks NULL:
@@ -316,7 +366,9 @@ damaged table. A mask is refused as "The masks of rows" says.
   or a shared one not built yet; a source of keys that cannot give a
   row's key; a slot of a payload cursor past its slots or holding no
   reference; a reference or a cursor the caller passed that names no
-  chunk or lies outside its chunk.
+  chunk or lies outside its chunk, or a cursor of a walk past its
+  chunk's used mark; an owning table that holds the most records a
+  find or insert may make.
 - **A damaged table**: a header with a field that breaks its rule, the
   field named; a reference read from the table that names no chunk or
   lies outside its chunk; a record, whoever named it, whose size is not
@@ -338,6 +390,13 @@ damaged table. A mask is refused as "The masks of rows" says.
   row, it fails before it changes anything
 - **Verified by:** pending
 
+#### Scenario: A wrong chunk given to a regrow or a cleared key
+- **WHEN** a larger index or a cleared key is given chunks of which the
+  last cannot be a chunk
+- **THEN** the call fails with a wrong call and the rule of a chunk,
+  and the index, the chunks and the keys are as they were
+- **Verified by:** pending
+
 ### Requirement: No memory taken
 A call over blocks the caller gives SHALL allocate no memory, also when
 it fails: the memory of the table, of the arguments and of the results
@@ -352,8 +411,9 @@ without the crate's feature `alloc` leaves it out.
 - **Verified by:** pending
 
 #### Scenario: A build without the owning table
-- **WHEN** the crate is built without its feature `alloc`
-- **THEN** it builds, and has no table that owns its memory
+- **WHEN** the crate is built and tested without its feature `alloc`
+- **THEN** it builds, its tests that need no owning table run, and it
+  has no table that owns its memory
 - **Verified by:** pending
 
 ### Requirement: The same calls, the same bytes
@@ -368,15 +428,22 @@ the same answers.
 - **Verified by:** pending
 
 ### Requirement: Threads
-A handle to a table SHALL NOT pass from one thread to another, nor be
-shared by them: each thread attaches its own handle to the table's
-blocks, and the threads then work as processes do under "Calls at the
-same time".
+A handle attached to a table's blocks SHALL NOT pass from one thread to
+another, nor be shared by them: each thread attaches its own handle to
+the table's blocks, and the threads then work as processes do under
+"Calls at the same time". The owning table, which owns its blocks and
+whose handles borrow it, SHALL pass to another thread whole. A shared
+filter, which holds only atomic words, may be shared.
 
 #### Scenario: A handle sent to another thread
-- **WHEN** a program sends a handle to a table to another thread, or
-  shares one between threads
+- **WHEN** a program sends a handle attached to a table to another
+  thread, or shares one between threads
 - **THEN** it does not compile
+- **Verified by:** pending
+
+#### Scenario: An owning table sent to another thread
+- **WHEN** an owning table is filled on one thread and moved to another
+- **THEN** the other thread finds every key
 - **Verified by:** pending
 
 #### Scenario: Threads with handles of their own
