@@ -70,7 +70,7 @@ jobs:
       - name: The public API against its snapshot
         run: |
           cargo +"$API_TOOLCHAIN" public-api -p relhash -sss > target/public-api.txt
-          diff -u crates/relhash/public-api.txt target/public-api.txt
+          diff -u openspec/changes/table-crate/public-api.txt target/public-api.txt
 
   # openspec/ against the repository (CONTRIBUTING.md, "Specs"): the
   # form of every spec and change, the test each scenario names, the
