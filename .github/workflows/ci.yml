@@ -33,7 +33,8 @@ jobs:
         run: make rust-check
 
   # The crate relhash alone, as its contract asks ("Free of Tessera", "A
-  # small surface"): its tests as the only package, a dry run of its
+  # small surface"): its tests as the only package, its documentation
+  # with every warning an error and its examples, a dry run of its
   # publishing, which builds it from its packed files, a 32-bit target
   # refused by its compile_error!, and its public API against the
   # snapshot beside it. It is not published.
@@ -51,6 +52,10 @@ jobs:
           key: relhash
       - name: The crate's tests alone
         run: cargo test --locked -p relhash
+      - name: The documentation, every warning an error
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked -p relhash --no-deps
+      - name: The examples of the documentation
+        run: cargo test --locked -p relhash --doc
       - name: A dry run of publishing, from the packed files
         run: cargo publish --dry-run --locked -p relhash
       - name: A 32-bit target refused
