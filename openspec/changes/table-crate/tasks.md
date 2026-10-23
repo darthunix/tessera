@@ -303,7 +303,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 
 ## 4. The spec of the crate
 
-- [ ] 4.1 Open, have approved and close the change `relhash-spec-table`:
+- [x] 4.1 Open, have approved and close the change `relhash-spec-table`:
       the index, chunks and references, a record, and the calls of
       `hash-table` move to the capability `relhash`, nine
       requirements, in the crate's terms and with the same tests; the

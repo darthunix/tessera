@@ -1,5 +1,6 @@
-## Purpose
+# relhash Specification
 
+## Purpose
 `relhash` is a hash table for the engines of relational databases: the
 place where a hash join or a grouping keeps its rows, kept in memory
 the caller gives, with no address inside, so that the same bytes serve
@@ -14,8 +15,9 @@ reference of the next record of its chain, its keys and its payload. A
 it. The **one writer** of a table is a caller that has it to itself
 while it works. A **call** is a call of the crate that takes the index
 or the chunks of a table.
+[design.md](design.md) explains the whole and the reasons.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: The index of a table
 A table SHALL have one index: a header of 96 bytes followed by the
