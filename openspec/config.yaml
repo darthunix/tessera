@@ -60,8 +60,9 @@ rules:
       it has one.
   specs:
     - >-
-      One promise in a requirement, one to three scenarios for it, at
-      most ten requirements in a change.
+      One topic in a requirement, the promises of one call or of one
+      part of a format, one to five scenarios for it, at most ten
+      requirements in a change.
     - >-
       End every scenario with one bullet
       "- **Verified by:** `<path>::<text>`", where the path is a file in
