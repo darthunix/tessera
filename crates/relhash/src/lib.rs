@@ -83,8 +83,8 @@
 //! chunk before it writes or walks it, and every reference before it
 //! follows it, and it walks a chain no further than the records the
 //! chunks can hold. Bytes that are not a table give an error, never a
-//! crash or an endless walk; the spec of `hash-table` lists the rules in
-//! its requirement "Errors of a call". An error is an [`Error`]: the
+//! crash or an endless walk; the crate's spec lists the rules in its
+//! requirement "A damaged table". An error is an [`Error`]: the
 //! [`Rule`] broken, its [`Kind`], a wrong call or a damaged table, and up
 //! to two numbers, in one word that allocates nothing. Wrong arguments
 //! fail before the call changes anything. A full chunk or index is not an

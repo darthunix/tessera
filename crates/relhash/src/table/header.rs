@@ -11,8 +11,8 @@
 //!
 //! The header is integers only, so any bytes read as some header, and a
 //! check of it is a comparison of numbers. Its fields lie in the order of
-//! [`Header`]; the spec of `hash-table` draws them with their offsets in
-//! its requirement "The index of a table". A call checks the header once
+//! [`Header`]; the crate's spec draws them with their offsets in its
+//! requirement "The index of a table". A call checks the header once
 //! and copies it into a [`Layout`], which its loops use. Only the count
 //! of records changes after the index is made; it is read and written
 //! atomically, through the region.

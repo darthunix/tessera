@@ -783,8 +783,8 @@ extern TessStatusCode tess_table_gather_key(const TessTableRef *table,
  * has no record with its hash. The filter is a buffer of words the caller
  * owns, a power of two of them, with no address inside, like the index.
  * Each hash sets four bits of one word; at 16 bits per record about one
- * absent key in 200 gets through. The capability hash-table states the
- * rule (openspec/specs/hash-table/).
+ * absent key in 200 gets through. The capability relhash states the
+ * rule (openspec/specs/relhash/).
  */
 
 /* The words of a filter for a table of records records. */
