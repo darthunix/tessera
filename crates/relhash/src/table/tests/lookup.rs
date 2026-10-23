@@ -1104,3 +1104,131 @@ fn a_scattered_gather_reads_what_a_gather_reads() -> Result<()> {
     );
     Ok(())
 }
+
+/// An append through the table's index refuses keys or a payload that are
+/// not the table's, from an array or from columns: it writes nothing and
+/// leaves every row pending, and the table's own rows then go in. A chunk
+/// writer, which has no index, writes the records of its configuration.
+#[test]
+fn an_append_checks_the_table_s_index() -> Result<()> {
+    let values: Vec<i32> = (1..=4).collect();
+    let one = [Column::new(&values, None)];
+    let two = [Column::new(&values, None), Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    // 16 bytes a row, where the table's records hold 8.
+    let wide = payload_for(8);
+    let column: Vec<u64> = (0..4).collect();
+    let nulls = [false; 4];
+    let column_values: [&[u64]; 1] = [&column];
+    let column_nulls: [&[bool]; 1] = [&nulls];
+    // A column takes its word and a word of NULL bits: 16 bytes too.
+    let columns = PayloadColumns::new(&column_values, &column_nulls, 4)?;
+    let mut table = local(&ONE_INT4, 16)?;
+    let chunk = table.add_chunk()?;
+    let (one, two) = (Keys(&one), Keys(&two));
+    let mut pending = all_rows(4);
+    let mut refs = vec![0; 4];
+    {
+        let mut writer = table.table_mut()?;
+        let mut batch = Batch::new(&hashes, &one, &mut pending, &mut refs)?;
+        assert_eq!(
+            refusal(writer.append(chunk, Some(&wide), &mut batch)),
+            Some((Kind::WrongCall, Rule::PayloadBytes))
+        );
+        assert_eq!(
+            refusal(writer.append_columns(chunk, &columns, &mut batch)),
+            Some((Kind::WrongCall, Rule::PayloadColumns))
+        );
+        let mut batch = Batch::new(&hashes, &two, &mut pending, &mut refs)?;
+        assert_eq!(
+            refusal(writer.append(chunk, None, &mut batch)),
+            Some((Kind::WrongCall, Rule::Keys))
+        );
+    }
+    assert_eq!(pending, all_rows(4), "a row left the batch");
+    assert_eq!(table.chunk_words(chunk)[0], CHUNK_HEADER as u64, "written");
+    let own = payload_for(4);
+    let placed = table.table_mut()?.append(
+        chunk,
+        Some(&own),
+        &mut Batch::new(&hashes, &one, &mut pending, &mut refs)?,
+    )?;
+    assert_eq!((placed, pending[0]), (4, 0));
+    let size = record_bytes(&ONE_INT4)?;
+    assert_eq!(
+        table.chunk_words(chunk)[0],
+        (CHUNK_HEADER + 4 * size) as u64
+    );
+
+    // Two keys and 16 bytes of payload, without an index.
+    let config = TableConfig {
+        nkeys: 2,
+        payload_size: 16,
+    };
+    let size = record_bytes(&config)?;
+    let mut blocks = Blocks::new();
+    let free = blocks.add(CHUNK_HEADER + 4 * size) as usize;
+    let mut pending = all_rows(4);
+    let placed = writer(&config, blocks.chunks())?.append(
+        free,
+        Some(&wide),
+        &mut Batch::new(&hashes, &two, &mut pending, &mut refs)?,
+    )?;
+    assert_eq!((placed, pending[0]), (4, 0));
+    for (row, &reference) in refs.iter().enumerate() {
+        assert_eq!(placement(reference), (free, CHUNK_HEADER + row * size));
+    }
+    Ok(())
+}
+
+/// `gather_key` gives each found row its record's word of a key and its
+/// NULL flag, an int4 and an int8 key alike; the rows outside the mask
+/// keep their values, and a key past the table's keys is refused before
+/// any change.
+#[test]
+fn gather_key_reads_the_key_of_each_found_row() -> Result<()> {
+    let config = TableConfig {
+        nkeys: 2,
+        payload_size: 8,
+    };
+    let small: Vec<i32> = (0..70).collect();
+    let large: Vec<i64> = (0..70).map(|row| (row << 40) - 3).collect();
+    // Every fifth row's first key is NULL.
+    let mut non_null = all_rows(70);
+    for row in (0..70).step_by(5) {
+        non_null[row / 64] &= !(1 << (row % 64));
+    }
+    let keys = [
+        Column::new(&small, Some(&non_null)),
+        Column::new(&large, None),
+    ];
+    let hashes: Vec<u32> = small.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&config, 70)?;
+    let refs = insert_all(&mut table, &hashes, &Keys(&keys), Some(&payload_for(70)))?;
+    // Every other row found.
+    let found = [0x5555_5555_5555_5555, 0b10_1010];
+    let rows = RowMaskView::try_new(70, &found)?;
+    let table = table.table()?;
+    let (mut values, mut nulls) = (vec![u64::MAX; 70], vec![true; 70]);
+    table.gather_key(MatchesView::new(rows, &refs)?, 0, &mut values, &mut nulls)?;
+    for row in 0..70 {
+        let null = !selected(&non_null, row);
+        let expected = match (selected(&found, row), null) {
+            (false, _) => (u64::MAX, true),
+            (true, true) => (0, true),
+            (true, false) => (row as u64, false),
+        };
+        assert_eq!((values[row], nulls[row]), expected, "row {row}");
+    }
+    table.gather_key(MatchesView::new(rows, &refs)?, 1, &mut values, &mut nulls)?;
+    for row in (0..70).filter(|&row| selected(&found, row)) {
+        assert_eq!((values[row], nulls[row]), (large[row] as u64, false));
+    }
+    let (before, before_nulls) = (values.clone(), nulls.clone());
+    assert_eq!(
+        refusal(table.gather_key(MatchesView::new(rows, &refs)?, 2, &mut values, &mut nulls)),
+        Some((Kind::WrongCall, Rule::Key))
+    );
+    assert_eq!((values, nulls), (before, before_nulls));
+    Ok(())
+}

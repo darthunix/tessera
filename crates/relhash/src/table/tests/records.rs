@@ -918,14 +918,21 @@ fn grouped_chains_span_chunks_and_survive_a_larger_index() -> Result<()> {
 /// Records appended from payload columns hold what records appended from
 /// the same payload laid out row by row hold: a word of the row's NULL
 /// bits per 64 columns, then a word per column, 0 for a NULL; the rows
-/// left out of the mask get none, and a column of the wrong length or a
-/// payload of the wrong size is refused.
+/// left out of the mask get none, the call allocates no memory, and a
+/// column of the wrong length or a payload of the wrong size is refused.
 #[test]
 fn payload_columns_append_the_records_a_payload_array_does() -> Result<()> {
-    payload_columns_of(3)?;
-    payload_columns_of(64)?;
-    // Three words of NULL bits; two under Miri, which would take minutes.
-    payload_columns_of(if cfg!(miri) { 65 } else { 130 })
+    // Up to two words of NULL bits under Miri, which would take minutes
+    // over more.
+    let counts: &[usize] = if cfg!(miri) {
+        &[3, 64, 65]
+    } else {
+        &[3, 64, 65, 130, MAX_PAYLOAD_COLUMNS]
+    };
+    for &ncolumns in counts {
+        payload_columns_of(ncolumns)?;
+    }
+    Ok(())
 }
 
 fn payload_columns_of(ncolumns: usize) -> Result<()> {
@@ -972,8 +979,10 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
     let null_slices: Vec<&[bool]> = nulls.iter().map(Vec::as_slice).collect();
     let columns = PayloadColumns::new(&value_slices, &null_slices, ROWS)?;
     let mut tables = Vec::new();
+    // Four records a chunk at least.
+    let chunk_bytes = CHUNK.max(CHUNK_HEADER + 4 * record_bytes(&config)?);
     for from_columns in [false, true] {
-        let mut table = OwnedTable::new(&config, 0, CHUNK)?;
+        let mut table = OwnedTable::new(&config, 0, chunk_bytes)?;
         let mut pending_words = selected.clone();
         let mut refs = vec![0u32; ROWS];
         loop {
@@ -985,7 +994,9 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
             let source = Keys(&keys);
             let mut batch = Batch::new(&hashes, &source, &mut pending_words, &mut refs)?;
             if from_columns {
+                let before = allocations();
                 shared.append_columns(chunk, &columns, &mut batch)?;
+                assert_eq!(allocations(), before, "{ncolumns} columns allocated");
             } else {
                 shared.append(chunk, Some(&payload_bytes), &mut batch)?;
             }
@@ -1014,7 +1025,7 @@ fn payload_columns_of(ncolumns: usize) -> Result<()> {
         Some((Kind::WrongCall, Rule::PayloadRows))
     );
     let two = PayloadColumns::new(&value_slices[..2], &null_slices[..2], ROWS)?;
-    let mut table = OwnedTable::new(&config, 0, CHUNK)?;
+    let mut table = OwnedTable::new(&config, 0, chunk_bytes)?;
     let chunk = table.add_chunk()?;
     let mut pending_words = selected.clone();
     let mut refs = vec![0u32; ROWS];
@@ -1083,6 +1094,157 @@ fn a_wrong_last_chunk_fails_the_calls_over_every_chunk_before_a_change() -> Resu
     assert_eq!(table.index_words(), &index[..], "the index");
     for (chunk, words) in chunks.iter().enumerate() {
         assert_eq!(table.chunk_words(chunk), &words[..], "chunk {chunk}");
+    }
+    Ok(())
+}
+
+/// Marks that participants share: each word changes by an atomic OR.
+struct SharedMarks(Vec<Vec<std::sync::atomic::AtomicU64>>);
+
+impl Marks for SharedMarks {
+    fn set(&self, chunk: usize, word: usize, bit: u64) {
+        self.0[chunk][word].fetch_or(bit, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn word(&self, chunk: usize, word: usize) -> u64 {
+        self.0[chunk][word].load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Four threads mark the records of their stripes of one batch at once,
+/// in marks they share, over records that cross words and chunks; once
+/// all are done, the walk gives exactly the records without a mark.
+#[test]
+fn records_marked_by_threads_at_once_are_left_out_of_the_walk() -> Result<()> {
+    let record = record_bytes(&ONE_INT4)?;
+    let chunk_bytes = CHUNK_HEADER + 100 * record;
+    let values: Vec<i32> = (0..300).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = OwnedTable::new(&ONE_INT4, 300, chunk_bytes)?;
+    let refs = insert_all(&mut table, &hashes, &Keys(&keys), None)?;
+    let chunks = table.chunk_set()?;
+    let marks = SharedMarks(
+        (0..chunks.len())
+            .map(|_| {
+                (0..mark_words(chunk_bytes, record).unwrap())
+                    .map(|_| std::sync::atomic::AtomicU64::new(0))
+                    .collect()
+            })
+            .collect(),
+    );
+    // Rows 0, 2, 4, ... find a pair; thread t marks those of rows t mod 4.
+    let lens = chunks.lens();
+    std::thread::scope(|scope| {
+        for thread in 0..4 {
+            let (refs, marks) = (&refs, &marks);
+            scope.spawn(move || {
+                let paired: Vec<bool> = (0..300)
+                    .map(|row| row % 4 == thread && row % 2 == 0)
+                    .collect();
+                let rows = words(&paired);
+                mark(
+                    lens,
+                    record,
+                    refs,
+                    &RowMaskView::try_new(300, &rows).unwrap(),
+                    marks,
+                )
+                .unwrap();
+            });
+        }
+    });
+    let mut cursor = Cursor::start();
+    let mut out = [0; 64];
+    let mut walked = Vec::new();
+    loop {
+        let count = scan_unmarked(&chunks, record, &mut cursor, Some(&marks), &mut out)?;
+        if count == 0 {
+            break;
+        }
+        walked.extend_from_slice(&out[..count]);
+    }
+    let unpaired: Vec<u32> = (0..300)
+        .filter(|row| row % 2 == 1)
+        .map(|row| refs[row])
+        .collect();
+    assert_eq!(walked, unpaired);
+    Ok(())
+}
+
+/// A mark of a reference that names no record of its size, a mark or a
+/// walk of a size no record has, a walk from a cursor off a record or
+/// past its chunk's used mark, and a walk with no room for a record are
+/// refused: no mark is set, and the cursor is as it was.
+#[test]
+fn a_mark_or_a_walk_that_cannot_be_done_changes_nothing() -> Result<()> {
+    let record = record_bytes(&ONE_INT4)?;
+    let chunk_bytes = CHUNK_HEADER + 40 * record;
+    let values: Vec<i32> = (0..50).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = OwnedTable::new(&ONE_INT4, 50, chunk_bytes)?;
+    let refs = insert_all(&mut table, &hashes, &Keys(&keys), None)?;
+    let chunks = table.chunk_set()?;
+    assert_eq!(chunks.len(), 2, "chunk 1 holds 10 records");
+    let marks = TestMarks(
+        (0..2)
+            .map(|_| vec![std::cell::Cell::new(0); mark_words(chunk_bytes, record).unwrap()])
+            .collect(),
+    );
+    let unmarked = |marks: &TestMarks| marks.0.iter().flatten().all(|word| word.get() == 0);
+    let one = all_rows(1);
+    let one = RowMaskView::try_new(1, &one)?;
+    // Before the records, between two, past the chunk's length, in no
+    // chunk.
+    for reference in [
+        reference(0, 0),
+        refs[0] + 1,
+        reference(0, chunk_bytes),
+        reference(5, CHUNK_HEADER),
+    ] {
+        assert_eq!(
+            refusal(mark(chunks.lens(), record, &[reference], &one, &marks)),
+            Some((Kind::WrongCall, Rule::Reference)),
+            "{reference:#x}"
+        );
+    }
+    for size in [0, 12, MAX_CHUNK_LEN] {
+        assert_eq!(
+            refusal(mark(chunks.lens(), size, &refs[..1], &one, &marks)),
+            Some((Kind::WrongCall, Rule::RecordBytes)),
+            "a mark of {size} bytes"
+        );
+    }
+    assert!(unmarked(&marks), "a refused mark set one");
+    let at = |chunk, byte| Cursor::at(chunk, byte);
+    for (size, cursor, room, rule) in [
+        (0, at(0, CHUNK_HEADER), 4, Rule::RecordBytes),
+        (12, at(0, CHUNK_HEADER), 4, Rule::RecordBytes),
+        (MAX_CHUNK_LEN, at(0, CHUNK_HEADER), 4, Rule::RecordBytes),
+        (record, at(0, CHUNK_HEADER + 12), 4, Rule::Cursor),
+        (
+            record,
+            at(1, CHUNK_HEADER + 11 * record),
+            4,
+            Rule::CursorPast,
+        ),
+        (record, at(0, CHUNK_HEADER), 0, Rule::EmptyWalk),
+    ] {
+        let mut moved = cursor;
+        let mut out = vec![0; room];
+        assert_eq!(
+            refusal(scan_unmarked(
+                &chunks,
+                size,
+                &mut moved,
+                Some(&marks),
+                &mut out
+            )),
+            Some((Kind::WrongCall, rule)),
+            "{rule:?}"
+        );
+        assert!(moved == cursor, "{rule:?}: the cursor moved");
     }
     Ok(())
 }
