@@ -345,34 +345,34 @@ over a table that is not damaged.
 An error of a call SHALL be of one of two kinds, and SHALL name the
 rule that was broken. What the call read decides the kind: a value the
 caller passed makes a wrong call, a byte of the table's blocks a
-damaged table. A mask is refused as "The masks of rows" says.
+damaged table, as "A damaged table" lists. A mask is refused as "The
+masks of rows" says. A wrong call is:
 
-- **A wrong call**: the arrays of a batch have different row counts;
-  keys or a payload that are not the table's; a key past the table's
-  keys; a table of fewer than 1 or more than 16 keys; payload columns
-  past their limit or that do not fill the payload, or a payload word
-  past the payload; a record that does not fit a chunk; a chunk that
-  does not exist, is not aligned to 8, or is not a multiple of 8 from
-  8 bytes to 1 MiB long; more than 32768 chunks; an index shorter than
-  its header or not aligned to 8; a new index that is not a multiple of
-  8, cannot hold its buckets, is smaller than its capacity needs, or
-  has fewer buckets than the old; a chunk split or merged into itself;
-  a split of no records; partitions that are not a power of two up to
-  the limit, or whose bits pass the 32 bits of a hash; a Bloom filter
-  of the wrong size or alignment, for more records than it may hold,
-  or a shared one not built yet; a source of keys that cannot give a
-  row's key; a slot of a payload cursor past its slots or holding no
-  reference; a reference or a cursor the caller passed that names no
-  chunk or lies outside its chunk, or a cursor of a walk past its
-  chunk's used mark, or an empty output of a walk; a count of rows of
-  a partition that one more row would carry past 2^64; an owning table
-  that holds the most records a find or insert may make.
-- **A damaged table**: a header with a field that breaks its rule, the
-  field named; a reference read from the table that names no chunk or
-  lies outside its chunk; a record, whoever named it, whose size is not
-  the table's; a used mark that ends no record; a chain longer than the
-  count of records; a header of a grown index that no longer matches
-  the table it grew from.
+- arrays of a batch of different row counts;
+- keys or a payload that are not the table's, a key past the table's
+  keys, or a table of fewer than 1 or more than 16 keys;
+- payload columns past their limit or that do not fill the payload, or
+  a payload word past the payload;
+- a record that does not fit a chunk;
+- a chunk that does not exist, is not aligned to 8, or is not a
+  multiple of 8 from 8 bytes to 1 MiB long, or more than 32768 chunks;
+- an index shorter than its header or not aligned to 8;
+- a new index that is not a multiple of 8, cannot hold its buckets, is
+  smaller than its capacity needs, or has fewer buckets than the old;
+- a chunk split or merged into itself, or a split of no records;
+- partitions that are not a power of two up to the limit, or whose
+  bits pass the 32 bits of a hash;
+- a Bloom filter of the wrong size or alignment, for more records than
+  it may hold, or a shared one not built yet;
+- a source of keys that cannot give a row's key;
+- a slot of a payload cursor past its slots or holding no reference;
+- a reference or a cursor the caller passed that names no chunk or lies
+  outside its chunk, a cursor of a walk past its chunk's used mark, or
+  an empty output of a walk;
+- a count of rows of a partition that one more row would carry past
+  2^64;
+- an owning table that holds the most records a find or insert may
+  make.
 
 #### Scenario: Each damage names its rule
 - **WHEN** one rule of the format is broken in a valid table, and every
@@ -554,3 +554,51 @@ left in it.
   merged
 - **Verified by:**
   `crates/relhash/src/table/tests.rs::a_failing_rule_stops_the_merge_with_its_own_error`
+
+## MODIFIED Requirements
+
+### Requirement: A damaged table
+A call SHALL return an error of a damaged table, and never panic or
+loop without end, when the bytes it reads are not a table:
+
+- a header with a field that breaks a rule of "The index of a table",
+  the field named, or an index length below the header's;
+- a reference read from the table that names no chunk, lies outside
+  its chunk or names a byte where no record starts;
+- a record, whoever named it, whose size is not the table's;
+- a used mark that ends no record;
+- a chain longer than the count of records;
+- a header of a grown index that no longer matches the table it grew
+  from.
+
+A walk down a chain SHALL take no more steps than the header's count of
+records, and no more than the places a reference can name in the chunks
+it is given, 2^17 a chunk. A call SHALL check its arguments, the header
+and the count of chunks before it changes anything, and a chunk before
+it reads or writes it.
+
+#### Scenario: A damaged header
+- **WHEN** one field of a valid header is changed: the magic, the
+  version, a length or offset, the buckets or their shift, the record
+  size, the keys, the flags or a byte of a reserved word
+- **THEN** every call over the table fails
+- **Verified by:**
+  `crates/relhash/src/table/tests/format.rs::a_corrupt_header_is_refused`
+
+#### Scenario: A damaged reference or chain
+- **WHEN** a bucket points into a missing chunk, past its chunk or into
+  a record, a record's next points to itself, or a used mark ends no
+  record, also with a count of records far past what the chunks hold
+- **THEN** the probe, the walk or the link fails
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
+  `crates/relhash/src/table/tests/lookup.rs::a_word_probed_at_once_detects_a_cycle`;
+  `crates/relhash/src/table/tests.rs::a_damaged_count_is_bounded_by_the_places_of_the_chunks`
+
+#### Scenario: Arguments are checked first
+- **WHEN** a call is given arrays of the wrong length or a wrong key
+  count
+- **THEN** it fails, and the table, the chunks, the masks and the cursor
+  are as they were
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`
