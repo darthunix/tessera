@@ -44,7 +44,11 @@
 //!
 //! A key is a word compared bit for bit: the table gives it no type. The
 //! caller computes the hash, so its hash decides which keys meet: the
-//! kernels of Tessera hash as PostgreSQL does.
+//! kernels of Tessera hash as PostgreSQL does. The high bits of the hash
+//! pick the bucket, so they must differ from key to key: integers taken
+//! as their own hashes would put close keys into one chain. A key that
+//! a word does not hold, such as a string, goes in as a number that
+//! stands for it, as the last example shows.
 //!
 //! # How rows go in and come out
 //!
@@ -121,7 +125,8 @@
 //! assert_eq!(table.table()?.stats().records, 0);
 //!
 //! // Three rows with keys 7, 8 and 7, and their hashes: the caller's hash,
-//! // the same for the same key.
+//! // the same for the same key. A product with a prime near 2^32 divided
+//! // by the golden ratio spreads close keys over the high bits.
 //! let keys = Keys(&[7, 8, 7]);
 //! let hashes: Vec<u32> = [7u32, 8, 7].map(|key| key.wrapping_mul(0x9e37_79b1)).into();
 //! let payload = [1u64, 2, 3].map(u64::to_ne_bytes).concat();
@@ -187,6 +192,89 @@
 //! let mut matches = Matches::new(&mut rows, &mut found)?;
 //! assert_eq!(table.probe(&hashes, &keys, &mut matches)?, 1);
 //! assert_eq!(matches.refs()[1], refs[1]);
+//! # Ok::<(), relhash::Error>(())
+//! ```
+//!
+//! # Keys that a word does not hold
+//!
+//! A string or a number of many digits goes in as a number of 64 bits
+//! that stands for it. A join can take the value's hash: the table finds
+//! the records of the same hash, and since two values may share one, the
+//! caller compares the values themselves and walks on to the next match
+//! where they differ. The record's payload says where its value lies.
+//! A grouping needs one record a value, and [`TableMut::find_or_insert`]
+//! takes equal words for equal keys, so a hash would merge the groups of
+//! two values that share it: a grouping numbers its values in a
+//! dictionary of its own and gives the table the numbers.
+//!
+//! ```
+//! # #[cfg(feature = "alloc")] {
+//! use std::hash::{DefaultHasher, Hash, Hasher};
+//! use relhash::{KeySource, Matches, OwnedTable, RowMaskView, TableConfig, ones};
+//!
+//! // Each string's key is its hash of 64 bits, which the table compares bit
+//! // for bit. The table's hash of 32 bits, which picks the bucket, is the
+//! // high half of the same hash.
+//! fn hash_texts(texts: &[&str]) -> (Vec<u64>, Vec<u32>) {
+//!     let words: Vec<u64> = texts
+//!         .iter()
+//!         .map(|text| {
+//!             let mut hasher = DefaultHasher::new();
+//!             text.hash(&mut hasher);
+//!             hasher.finish()
+//!         })
+//!         .collect();
+//!     let hashes = words.iter().map(|word| (word >> 32) as u32).collect();
+//!     (words, hashes)
+//! }
+//!
+//! struct Words<'a>(&'a [u64]);
+//! impl KeySource for Words<'_> {
+//!     fn nkeys(&self) -> usize { 1 }
+//!     fn nrows(&self) -> usize { self.0.len() }
+//!     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
+//!         for bit in ones(selected) {
+//!             out[bit] = self.0[index * 64 + bit] as i64;
+//!         }
+//!         Some(selected)
+//!     }
+//! }
+//!
+//! // The inner side. The table keeps no string, so each record's payload
+//! // says where its string lies: here its index in `inner`.
+//! let inner = ["apple", "pear", "plum"];
+//! let (words, hashes) = hash_texts(&inner);
+//! let payload: Vec<u8> = (0..inner.len() as u64).flat_map(u64::to_ne_bytes).collect();
+//! let config = TableConfig { nkeys: 1, payload_size: 8 };
+//! let mut table = OwnedTable::new(&config, 100, 4096)?;
+//! let all = RowMaskView::try_new(3, &[0b111])?;
+//! table.insert(&hashes, &Words(&words), all, Some(&payload), &mut [0; 3])?;
+//!
+//! // The outer side. The table finds the records whose 64-bit hash is the
+//! // row's own. Two strings may share a hash, so the row compares the
+//! // strings and keeps the equal ones.
+//! let outer = ["pear", "fig"];
+//! let (words, hashes) = hash_texts(&outer);
+//! let table = table.table()?;
+//! let (mut rows, mut refs) = ([0b11], [0; 2]);
+//! let mut matches = Matches::new(&mut rows, &mut refs)?;
+//! let mut found = [None; 2];
+//! // `left` counts the rows that have a record to look at; a row whose
+//! // hash no record has leaves the mask.
+//! let mut left = table.probe(&hashes, &Words(&words), &mut matches)?;
+//! while left > 0 {
+//!     for row in matches.rows().selected_rows() {
+//!         let payload = table.record(matches.refs()[row])?.payload;
+//!         let index = u64::from_ne_bytes(payload.try_into().unwrap()) as usize;
+//!         if inner[index] == outer[row] {
+//!             found[row] = Some(index);
+//!         }
+//!     }
+//!     // Each row goes to its next record of the same hash, if it has one.
+//!     left = table.next_match(&mut matches)?;
+//! }
+//! assert_eq!(found, [Some(1), None]);
+//! # }
 //! # Ok::<(), relhash::Error>(())
 //! ```
 
