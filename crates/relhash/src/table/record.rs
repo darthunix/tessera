@@ -3,26 +3,16 @@
 //!
 //! A record is a header of 16 bytes (its hash, the reference of the next
 //! record of its chain, the NULL bits of its keys and its length), a
-//! word per key, then the payload. The crate's spec draws it with its
-//! offsets in its requirement "A record".
+//! word per key, then the payload. The documentation of [`Record`] draws
+//! it with its offsets.
 //!
-//! The one writer of a chunk writes a record whole, then publishes it:
-//! it puts the record first in its bucket's chain by a compare-and-swap
-//! of the bucket.
-//!
-//! ```text
-//!   before                       after
-//!   bucket ──► A ──► B           bucket ──► R ──► A ──► B
-//!   R written, next = A, unseen
-//! ```
-//!
-//! The compare-and-swap puts R in only while the bucket still holds A;
-//! when another participant got there first, R takes the new head as its
-//! next and tries again. A reader that reads R from the bucket sees all
-//! of R: the swap releases R's bytes, and the read acquires them. A
-//! published record never moves, and while others may read it, never
-//! changes; the one writer of a table may change its next field, a key or
-//! its payload.
+//! The one writer of a chunk writes a record whole, then publishes it
+//! first in its bucket's chain by a compare-and-swap of the bucket, which
+//! releases the record's bytes to a reader that acquires the bucket. The
+//! design of `relhash`, in "Several processes at once", draws the steps
+//! and their memory orders. A published record never moves, and while
+//! others may read it, never changes; the one writer of a table may
+//! change its next field, a key or its payload.
 
 use crate::error::{Error, Kind, Result, Rule, ensure};
 

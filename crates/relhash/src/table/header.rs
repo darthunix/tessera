@@ -1,21 +1,13 @@
 //! The header at the start of a table's index, the sizes it fixes, and
-//! the limits of chunks and references.
-//!
-//! ```text
-//!   index: header (96 bytes), then the buckets, 4 bytes each
-//!   ┌──────────────────────────┬──────────┬──────────┬─────┬──────────┐
-//!   │ header: the format, the  │ bucket 0 │ bucket 1 │  …  │ bucket n │
-//!   │ sizes, the record count  │          │          │     │          │
-//!   └──────────────────────────┴──────────┴──────────┴─────┴──────────┘
-//! ```
+//! the limits of chunks and references. The documentation of
+//! `HEADER_SIZE` draws the index and its header with their offsets.
 //!
 //! The header is integers only, so any bytes read as some header, and a
 //! check of it is a comparison of numbers. Its fields lie in the order of
-//! [`Header`]; the crate's spec draws them with their offsets in its
-//! requirement "The index of a table". A call checks the header once
-//! and copies it into a [`Layout`], which its loops use. Only the count
-//! of records changes after the index is made; it is read and written
-//! atomically, through the region.
+//! [`Header`]. A call checks the header once and copies it into a
+//! [`Layout`], which its loops use. Only the count of records changes
+//! after the index is made; it is read and written atomically, through
+//! the region.
 //!
 //! A chunk is a block of at most [`MAX_CHUNK_LEN`] bytes: its used mark,
 //! then records one after another. A [`Place`] is where a record lies,

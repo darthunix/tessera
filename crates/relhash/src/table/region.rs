@@ -1,17 +1,9 @@
-//! The memory a table lives in: an index and chunks of records.
-//!
-//! A table never holds a process address. Its index is one block, handed
-//! to every operation as a base pointer and a length: a header, then the
-//! bucket array, addressed by offset from the start. Its records lie in
-//! chunks, blocks of their own that never move, which the caller hands
-//! over as arrays of their bases and lengths in this process; a record is
-//! addressed by the number of its chunk and its offset inside, so the same
-//! bytes mean the same to every process that maps them, wherever it maps
-//! them. Counters and bucket heads that several participants may change at
-//! once are read and written only through the atomic operations here;
-//! record bytes, including a record's next field and a chunk's used mark,
-//! are plain memory, written by one participant before the records are
-//! published and read by the others after. [`RawRegion`] is the one
+//! The memory a table lives in: an index and chunks of records, handed
+//! to every call as bases and lengths, never kept as addresses. The
+//! design of `relhash` says why, in "References", and which bytes
+//! several participants change at once, in "Several processes at once":
+//! the count of records and the buckets, which are read and written only
+//! through the atomic operations here. [`RawRegion`] is the one
 //! implementation, over raw pointers; the trait is the seam for a model
 //! region under loom.
 //!
