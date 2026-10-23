@@ -321,16 +321,15 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       probes, and the C calls over partitions, filters and marks in
       its requirement of the C API; the designs split. Check: the
       tasks of that change
-- [ ] 4.3 Set this change's spec on top of the moved requirements: an
-      entry removes "A damaged table" of `relhash`, the part of "Errors
-      of a call" that moved, which "Errors of two kinds" replaces. Split
-      each requirement of more than three scenarios, as
-      `openspec/config.yaml` asks: "The C API over the crate" into the
-      map of C calls to `relhash` and what only C does, which takes the
-      clauses about C that scenarios of `relhash` still hold; "The marks
-      of RIGHT and FULL joins" into marking and the walk; "Calls of one
-      writer" by its calls. Check:
-      `openspec validate table-crate --strict`;
+- [x] 4.3 Set this change's spec on top of the moved requirements: an
+      entry modifies "A damaged table" of `relhash` to list what makes
+      a table damaged, and "Errors of two kinds" points to it instead
+      of listing it again. Join the requirements of both specs by
+      topic, one to five scenarios each, as `openspec/config.yaml` now
+      asks: a requirement of `main` that takes in another is modified
+      and keeps its place, the one it takes in is removed; the clauses
+      about C still in scenarios of `relhash` move to "The C API over
+      the crate". Check: `openspec validate table-crate --strict`;
       `.github/scripts/check-specs.sh`
 
 ## 5. The documentation
@@ -399,7 +398,9 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [ ] 7.3 Archive the change, move its `contract.md` and its
       `public-api.txt` to `openspec/specs/relhash/`, the latter's path
       in CI with it, delete the folder the archive makes, and put what
-      is left into `openspec/roadmap.md`. Check:
+      is left into `openspec/roadmap.md`. In the same commit put each
+      added requirement beside those of its topic, and point the links
+      of both designs to the requirements as they then stand. Check:
       `openspec validate --all --strict`;
       `.github/scripts/check-specs.sh`
 - [ ] 7.4 Open the pull request that closes the change, into `main`.

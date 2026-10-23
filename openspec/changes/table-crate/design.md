@@ -807,10 +807,12 @@ the moved ones. "Errors of two kinds" and "A damaged table" both list
 what makes a table damaged; the list stays in "A damaged table", which
 this change's delta modifies, and "Errors of two kinds" points to it,
 so that the rules of a damaged table are written once and the links to
-the requirement stay. A requirement of more than three scenarios is
-split, as `openspec/config.yaml` asks, into requirements of one promise
-each, under names of their own: OpenSpec refuses a changed requirement
-that drops a scenario.
+the requirement stay. Then the requirements of both specs are joined by
+topic, a requirement for the promises of one call or of one part of a
+format with one to five scenarios, as the maintainer chose: a
+requirement of `main` that takes in another of its topic is modified,
+so it keeps its place in the spec, and the one it takes in is removed.
+The spec of `relhash` closes with 29 requirements, not 46.
 
 ### The branch and its pull requests
 
