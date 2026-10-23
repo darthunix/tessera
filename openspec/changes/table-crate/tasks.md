@@ -313,11 +313,18 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       that change
 - [ ] 4.2 Open, have approved and close the change
       `relhash-spec-partitions`: the partitions, the Bloom filter, the
-      marks and what makes a table damaged move the same way, nine
-      requirements; the designs split. Check: the tasks of that change
+      marks and what makes a table damaged move the same way, ten
+      requirements, the last as "A damaged table"; the three of
+      partitions and the errors that this change rewrites move as it
+      has them, and their entries leave its delta; `hash-table` keeps
+      the status of an error, a participant that stops while it
+      probes, and the C calls over partitions, filters and marks in
+      its requirement of the C API; the designs split. Check: the
+      tasks of that change
 - [ ] 4.3 Set this change's spec on top of the moved requirements: an
-      entry removes the part of "Errors of a call" that moved, which
-      "Errors of two kinds" replaces. Check:
+      entry removes "A damaged table" of `relhash`, the part of "Errors
+      of a call" that moved, which "Errors of two kinds" replaces.
+      Check:
       `openspec validate table-crate --strict`;
       `.github/scripts/check-specs.sh`
 

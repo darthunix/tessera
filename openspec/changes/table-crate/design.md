@@ -772,16 +772,17 @@ beside it, in the terms of the C calls.
 **Will be:** once the code is in the crate, two changes make the
 capability `relhash` and move into it the requirements that describe
 the table itself, written again in the terms of the crate, with the
-same tests. Each moves nine, under the limit of ten a change:
+same tests, within the limit of ten a change:
 
-- `relhash-spec-table`: the index of a table, chunks and references, a
-  record; appending rows, linking records, looking rows up, the records
-  of a key together, calls of one writer, calls at the same time;
-- `relhash-spec-partitions`: partitions of a table, appending rows by
-  partition, splitting a chunk by partition, groups by partition; a
+- `relhash-spec-table`, nine: the index of a table, chunks and
+  references, a record; appending rows, linking records, looking rows
+  up, the records of a key together, calls of one writer, calls at the
+  same time;
+- `relhash-spec-partitions`, ten: partitions of a table, appending rows
+  by partition, splitting a chunk by partition, groups by partition; a
   Bloom filter of the keys, its size, a shared filter, a filter filled
-  together; the marks of RIGHT and FULL joins. Of "Errors of a call",
-  what makes a table damaged moves with it.
+  together; the marks of RIGHT and FULL joins; and "A damaged table",
+  what of "Errors of a call" the crate keeps.
 
 `hash-table` keeps what Tessera builds around the table: the SQL types
 of a key; the status and SQLSTATE of an error; the kinds of state of a
@@ -792,18 +793,19 @@ It gets one new requirement: each call of `tessera/table.h` does what
 the crate's call does, pointing to the requirement of `relhash`, so
 that no rule is written twice. The designs split the same way.
 
-Neither change changes a test or adds a promise of its own. The first
-moves four requirements that this change rewrites, the index, a
-record, appending rows and the calls of one writer, as this change has
-them, not as `main` has them: in the crate's terms the old text would
-name a magic, a version and kinds of keys the crate no longer has.
-Their entries leave this change's delta, so these promises reach the
-main specs before it closes; the maintainer chose this on 2026-10-23.
-Both changes close before this one. Then this change's own
-requirements are set on top of the moved ones: "Errors of two kinds"
-takes the place of the part of "Errors of a call" that moved, by an
-entry that removes it, so that the rules of a damaged table are
-written once.
+Neither change changes a test or adds a promise of its own. They move
+the eight requirements that this change rewrites, as this change has
+them, not as `main` has them: the first the index, a record, appending
+rows and the calls of one writer; the second appending rows by
+partition, splitting a chunk by partition, groups by partition and the
+errors. In the crate's terms the old text would name a magic, a
+version and kinds of keys the crate no longer has. Their entries leave
+this change's delta, so these promises reach the main specs before it
+closes; the maintainer chose this on 2026-10-23. Both changes close
+before this one. Then this change's own requirements are set on top of
+the moved ones: "Errors of two kinds" takes the place of "A damaged
+table", by an entry that removes it, so that the rules of a damaged
+table are written once.
 
 ### The branch and its pull requests
 

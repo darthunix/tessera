@@ -85,9 +85,9 @@ none of these:
   needs a change; and a crate's documentation links to its spec.
 - The requirements of `hash-table` that describe the table itself move
   to the capability `relhash` in two changes of their own,
-  `relhash-spec-table` and `relhash-spec-partitions`, nine requirements
-  each, once the code is in the crate. This change adds the new
-  promises to that capability.
+  `relhash-spec-table` and `relhash-spec-partitions`, of nine and ten
+  requirements, once the code is in the crate. This change adds the
+  new promises to that capability.
 - The work goes as small pull requests into a branch `relhash`, one a
   task, each read by the maintainer; the branch goes into `main` whole
   at the end.
@@ -117,10 +117,13 @@ none of these:
   and keys from a source. The capability is made by the changes
   `relhash-spec-table` and `relhash-spec-partitions`, which close
   first; this change adds its requirements to it, and its errors of two
-  kinds take the place of the part of "Errors of a call" that moved.
+  kinds take the place of "A damaged table", the part of "Errors of a
+  call" that moved.
 - `hash-table`: a call of the C API that gives a chunk's used mark,
-  checked, so that no node reads it by itself; the masks of inserted
-  rows of the calls that find or insert add up over a batch.
+  checked, so that no node reads it by itself; the lookups of the C
+  API that narrow one mask in place. The masks of inserted rows that
+  add up over a batch reach the specs with the requirements that move
+  to `relhash`.
 
 ## Impact
 
