@@ -41,7 +41,49 @@ pub(super) const MAX_BUCKETS: u64 = 1 << 31;
 pub(super) const RECORD_HEADER: usize = 16;
 /// Bytes of one key slot.
 pub(super) const KEY_SLOT: usize = 8;
-/// Bytes of the header, where the buckets start.
+/// Bytes of the header of a table's index, 96, where its buckets start.
+///
+/// The index of a table is this header, then the buckets, 4 bytes each.
+/// Every field is an integer in the machine's byte order:
+///
+/// ```text
+///  byte    0           4           8           12          16
+///          ┌───────────────────────┬───────────┬───────────┐
+///        0 │ magic                 │ version   │ header    │
+///          │                       │           │ size      │
+///          ├───────────────────────┼───────────┴───────────┤
+///       16 │ index length          │ buckets offset        │
+///          ├───────────────────────┼───────────────────────┤
+///       32 │ reserved              │ records               │
+///          ├───────────┬───────────┼───────────┬───────────┤
+///       48 │ buckets   │ bucket    │ record    │ payload   │
+///          │           │ shift     │ size      │ size      │
+///          ├───────────┼───────────┼───────────┴───────────┤
+///       64 │ keys      │ flags     │ reserved              │
+///          ├───────────┴───────────┼───────────────────────┤
+///       80 │ reserved              │ reserved              │
+///          ├───────────────────────┴───────────────────────┤
+///       96 │ bucket 0, bucket 1, …  4 bytes each           │
+///          └───────────────────────────────────────────────┘
+/// ```
+///
+/// - magic: a number of 64 bits whose bytes are `RELHASH` and a zero on
+///   a little-endian machine;
+/// - version: the version of the format, [`FORMAT_VERSION`], at
+///   [`VERSION_OFFSET`];
+/// - header size: 96; buckets offset: 96, where the buckets start;
+/// - index length: the bytes the index was made in, a multiple of 8;
+/// - records: the records linked into the buckets;
+/// - buckets: a power of two from 1024 to 2^31, as [`index_size`]
+///   chooses them; bucket shift: 32 less the logarithm of the buckets,
+///   so that the bucket of a hash is its high bits, `hash >> shift`;
+/// - record size, payload size and keys: as [`Record`](crate::Record)
+///   draws them;
+/// - flags and every reserved word: 0.
+///
+/// A call checks the header before it uses the table: a header that
+/// breaks one of these rules, or an index length past the bytes the
+/// caller gives, is a damaged table.
 pub const HEADER_SIZE: usize = size_of::<Header>();
 /// Byte offset of the format version in the header.
 pub const VERSION_OFFSET: usize = offset_of!(Header, version);
@@ -173,13 +215,27 @@ impl Layout {
 }
 
 /// Bytes the index of a table for `capacity` records takes: the header
-/// and the buckets, a multiple of 8.
+/// and the buckets, `HEADER_SIZE + 4 * buckets`. The buckets are the
+/// least power of two that is at least 1024 and at least `2 * capacity`,
+/// and at most 2^31: a table finds or inserts records until they are
+/// half its buckets.
+///
+/// # Errors
+///
+/// A configuration of fewer than 1 or more than [`MAX_KEYS`] keys, or
+/// whose record does not fit a chunk.
 pub fn index_size(config: &TableConfig, capacity: u64) -> Result<usize> {
     check_config(config)?;
     Ok(HEADER_SIZE + bucket_count(capacity) as usize * 4)
 }
 
-/// Bytes of one record of a table of this configuration.
+/// Bytes of one record of a table of this configuration, as
+/// [`Record`](crate::Record) draws it.
+///
+/// # Errors
+///
+/// A configuration of fewer than 1 or more than [`MAX_KEYS`] keys, or
+/// whose record does not fit a chunk of [`MAX_CHUNK_LEN`] bytes.
 pub fn record_bytes(config: &TableConfig) -> Result<usize> {
     Ok(check_config(config)? as usize)
 }

@@ -86,20 +86,36 @@ fn main() -> Result<(), relhash::Error> {
 
 ## What the caller promises
 
-A table over the caller's own memory is made by `unsafe` calls. Their
-duties say what the caller promises: blocks that are valid, aligned to
-8 and apart, one writer for each block of records, and nobody else
-writing the table while a call runs. Under that promise any bytes give
-a result or an error, as [Any bytes, a bounded call][any-bytes] says.
+A table over the caller's own memory is made by `unsafe` calls, and
+their contracts say what the caller promises:
+
+- every block it gives, the index and each chunk, is memory of the
+  length it states, aligned to 8 bytes and initialized, and no two
+  blocks overlap;
+- no other process or thread writes the table while a call runs;
+- nothing else reads or writes the chunks of a table that one writer
+  has to itself, whatever index names them.
+
+Under that promise, whatever bytes the blocks hold, a call ends after
+a number of steps bounded by the lengths of its blocks and its
+arguments; it returns a result or an error and does not panic; and it
+reads and writes no memory but the blocks and the arguments it is
+given. This holds after a call that failed as well. Over bytes that
+are not a table a result may be wrong: the promise is only this.
+Calls in one process over the same bytes, with the same arguments and
+in the same order, leave the same bytes and give the same answers.
 
 ## Building
 
+relhash builds for targets whose pointers are 64 bits wide, and on any
+other target fails to build with an error that says so.
+
 Build a program that uses relhash with link-time optimization, with
-`lto = true` in its release profile. Without it the compiler inlines a small
-function of relhash into the program's loops only when the function is
-generic or marked `#[inline]`. relhash keeps its hot calls so, and is
-fast without LTO, as Tessera builds it; with LTO the rest can be
-inlined too.
+`lto = true` in its release profile. Without it the compiler inlines a
+small function of relhash into the program's loops only when the
+function is generic or marked `#[inline]`. relhash keeps its hot calls
+so, and is fast without LTO, as Tessera builds it; with LTO the rest
+can be inlined too.
 
 ## Keys from outside
 
@@ -110,13 +126,10 @@ share a hash, and each lookup of them then walks one long chain. Hash
 such keys with a secret seed, as Rust's `RandomState` does, so that
 nobody outside knows which keys collide.
 
-## More
+## How it is built
 
-- [The spec][spec]: what each call promises, the layouts of the index,
-  the chunks and the records, and the limits.
-- [The design][design]: how the table is built, and why.
+The [design] says how the table is built and why, for those who change
+it; a caller does not need it.
 
 [Tessera]: https://github.com/darthunix/tessera
-[spec]: https://github.com/darthunix/tessera/blob/main/openspec/specs/relhash/spec.md
 [design]: https://github.com/darthunix/tessera/blob/main/openspec/specs/relhash/design.md
-[any-bytes]: https://github.com/darthunix/tessera/blob/main/openspec/specs/relhash/spec.md#requirement-any-bytes-a-bounded-call

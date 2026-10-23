@@ -39,7 +39,31 @@ const LEN: usize = 12;
 /// it also stops at a cycle: a healthy table's chains are far shorter.
 pub(super) const LONG_CHAIN: u64 = 64;
 
-/// A record as the table exposes it.
+/// A record as the table exposes it: its hash, its NULL bits, its keys
+/// and its payload.
+///
+/// In its chunk a record is a header of 16 bytes, a slot of 8 bytes for
+/// each key, then the payload, padded with zeros to a multiple of 8.
+/// Every record of a table has the size in the index's header, which
+/// [`record_bytes`](crate::record_bytes) gives for a configuration. A
+/// table has 1 to [`MAX_KEYS`](crate::MAX_KEYS) keys, each a word of 8
+/// bytes that the table compares bit for bit and gives no type: a
+/// [`KeySource`](crate::KeySource) gives each row's words. A NULL key
+/// holds 0 in its slot and sets its bit of the NULL bits.
+///
+/// ```text
+///  byte 0       4       8            12      16       24
+///       ┌───────┬───────┬────────────┬───────┬────────┬───┬─────────┐
+///       │ hash  │ next  │ NULL bits  │ size  │ key 0  │ … │ payload │
+///       │       │       │ bit k: key │ / 8   │ 8 bytes│   │ padded  │
+///       │       │       │ k is NULL  │       │        │   │ to 8    │
+///       └───────┴───────┴────────────┴───────┴────────┴───┴─────────┘
+/// ```
+///
+/// - hash: the hash the row came with;
+/// - next: the reference of the next record of the chain, 0 at its end,
+///   as [`Chunks`](crate::Chunks) draws a reference;
+/// - size / 8: the record's size in units of 8 bytes.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Record<'a> {
@@ -602,10 +626,11 @@ pub fn payload_null_words(columns: usize) -> usize {
 }
 
 /// The payload of a batch's rows as its columns hold them: per column a
-/// word per row (a by-value Datum, or whatever word the caller stores for
-/// a value, such as a reference to its copy) and a NULL flag per row. A
-/// record's payload is its words of the row's NULL bits
-/// ([`payload_null_words`]), then a word per column, 0 for a NULL.
+/// word per row (a value of up to 8 bytes, or whatever word the caller
+/// stores for a value, such as a reference to its copy) and a NULL flag
+/// per row. A record's payload is its words of the row's NULL bits
+/// ([`payload_null_words`]), then a word per column, 0 for a NULL. A
+/// call takes the columns without allocating memory.
 #[derive(Clone, Copy, Debug)]
 pub struct PayloadColumns<'a> {
     values: &'a [&'a [u64]],

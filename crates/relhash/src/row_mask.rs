@@ -44,9 +44,18 @@ fn validate_row(row: usize, nrows: usize) -> Result<()> {
 /// a bit that is 1 then means the row has a value. The bits lie in 64-bit
 /// words, lowest bit first: word 0 holds rows 0 to 63, word 1 rows 64 to
 /// 127, and so on. A mask has exactly the words its rows need, and the bits
-/// of the last word past the last row are 0. The view borrows the caller's
-/// words, which the C API's `TessRowMask` holds too; it neither copies nor
-/// frees them.
+/// of the last word past the last row are 0; a mask of other words is
+/// refused, its words left as they were, and a mask a call writes keeps
+/// those bits 0:
+///
+/// ```text
+///  a mask of 70 rows made of words: two words
+///  word 0   bits 0..=63    rows 0..=63
+///  word 1   bits 0..=5     rows 64..=69
+///           bits 6..=63    0, always
+/// ```
+///
+/// The view borrows the caller's words; it neither copies nor frees them.
 ///
 /// ```
 /// use relhash::RowMaskView;
