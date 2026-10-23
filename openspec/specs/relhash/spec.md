@@ -140,6 +140,7 @@ record. A reference names the same record in every process.
   record, and splits back into them
 - **Verified by:**
   `crates/relhash/src/table/tests/lookup.rs::inserted_rows_are_found_and_absent_keys_are_not`;
+  `crates/relhash/src/table/tests/records.rs::a_batch_goes_through_two_chunks`;
   `test/sql/table.sql::tessera_test_table_cycle`
 
 #### Scenario: Reference 0 names no record
@@ -188,6 +189,7 @@ chunk.
   its bit set, and the row's payload
 - **Verified by:**
   `crates/relhash/src/table/tests/lookup.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`;
+  `crates/relhash/src/table/tests/lookup.rs::inserted_rows_are_found_and_absent_keys_are_not`;
   `crates/tessera-capi/tests/table.rs::the_entry_points_round_trip`
 
 #### Scenario: A record larger than a chunk
@@ -241,6 +243,7 @@ one word, then a word for each column, 0 for a NULL.
   every row pending, and the table's own go in; without an index the
   records that the arguments describe go in
 - **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::an_append_checks_the_table_s_index`;
   `crates/tessera-capi/tests/table.rs::an_append_refuses_records_that_are_not_its_table_s`
 
 ### Requirement: Linking records
@@ -309,6 +312,7 @@ their chunk.
 - **Verified by:**
   `crates/relhash/src/table/tests/lookup.rs::gather_reads_one_payload_word_of_each_selected_match`;
   `crates/relhash/src/table/tests/lookup.rs::a_scattered_gather_reads_what_a_gather_reads`;
+  `crates/relhash/src/table/tests/lookup.rs::gather_key_reads_the_key_of_each_found_row`;
   `crates/tessera-capi/tests/table.rs::the_words_entry_point_gathers_every_column`
 
 ### Requirement: The records of a key together
@@ -429,6 +433,7 @@ with acquire. A process that finds a record SHALL see it whole.
   probe one table, each of them starting at any of these steps
 - **THEN** every key is found
 - **Verified by:**
+  `crates/relhash/src/table/loom/table.rs::two_participants_build_a_table_and_find_every_key`;
   `crates/tessera-kernels/src/loom.rs::two_participants_append_size_link_and_probe`;
   `crates/tessera-kernels/src/loom.rs::three_participants_attach_at_any_phase`
 
@@ -497,6 +502,7 @@ call SHALL not need the index and SHALL not link the records.
   bits have the bit of the column with a NULL, and exactly the rows of
   partition 3 past the first 5 stay pending
 - **Verified by:**
+  `crates/relhash/src/table/tests.rs::rows_go_to_the_chunks_of_their_partitions`;
   `crates/tessera-capi/tests/table.rs::the_partitioned_columns_entry_point_counts_each_partition`
 
 #### Scenario: An append by partition checks its columns
@@ -504,6 +510,7 @@ call SHALL not need the index and SHALL not link the records.
   table whose payload is not a word of NULL bits and a word a column
 - **THEN** the call fails, writes nothing and leaves every row pending
 - **Verified by:**
+  `crates/relhash/src/table/tests.rs::an_append_by_partition_checks_its_columns`;
   `crates/tessera-capi/tests/table.rs::an_append_by_partition_checks_what_it_is_given`
 
 ### Requirement: Splitting a chunk by partition
@@ -679,6 +686,7 @@ of two, SHALL be refused as a shared filter.
 - **Verified by:**
   `crates/relhash/src/table/loom/filter.rs::two_participants_race_to_build_the_filter_and_one_does`;
   `crates/relhash/src/table/tests.rs::one_of_four_threads_builds_a_shared_filter_every_key_passes`;
+  `crates/relhash/src/table/tests/filter.rs::two_calls_of_one_process_build_a_shared_filter_once`;
   `test/sql/table.sql::tessera_test_table_groups`
 
 #### Scenario: A filter that reads ready is whole
@@ -696,6 +704,7 @@ of two, SHALL be refused as a shared filter.
 - **WHEN** a shared filter is not aligned to 8, or has 1 or 4 words
 - **THEN** every call over it fails, and its words are as they were
 - **Verified by:**
+  `crates/relhash/src/table/tests/filter.rs::a_shared_filter_of_the_wrong_shape_is_refused`;
   `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
 ### Requirement: A filter filled together
@@ -720,7 +729,9 @@ power of two.
 - **WHEN** one participant adds the valid rows of a batch and probes
   them back
 - **THEN** exactly the valid rows pass
-- **Verified by:** `test/sql/table.sql::tessera_test_table_shared_spill`
+- **Verified by:**
+  `crates/relhash/src/table/tests/filter.rs::a_filter_filled_by_one_participant_passes_its_rows`;
+  `test/sql/table.sql::tessera_test_table_shared_spill`
 
 ### Requirement: The marks of RIGHT and FULL joins
 A RIGHT or FULL join SHALL be able to mark each record of its table
@@ -781,6 +792,7 @@ nothing marks or appends during it.
   in the order appended, or every record without marks, and ends with 0
 - **Verified by:**
   `crates/relhash/src/table/tests/records.rs::marked_records_are_left_out_of_the_walk`;
+  `crates/relhash/src/table/tests/records.rs::records_marked_by_threads_at_once_are_left_out_of_the_walk`;
   `crates/tessera-capi/tests/table.rs::the_mark_entry_points_leave_marked_records_out`
 
 #### Scenario: Marks and walks that cannot be done are refused
@@ -790,8 +802,9 @@ nothing marks or appends during it.
   chunk's used mark; or a walk asks for no records
 - **THEN** the call fails and the cursor is as it was
 - **Verified by:**
-  `crates/tessera-capi/tests/table.rs::marks_and_walks_that_cannot_be_done_are_refused`;
-  `crates/relhash/src/table/marks.rs::a_walk_refuses_a_used_mark_or_a_cursor_off_the_records`
+  `crates/relhash/src/table/marks.rs::a_walk_refuses_a_used_mark_or_a_cursor_off_the_records`;
+  `crates/relhash/src/table/tests/records.rs::a_mark_or_a_walk_that_cannot_be_done_changes_nothing`;
+  `crates/tessera-capi/tests/table.rs::marks_and_walks_that_cannot_be_done_are_refused`
 
 #### Scenario: Participants mark at once
 - **WHEN** two participants mark records of one word at the same time,

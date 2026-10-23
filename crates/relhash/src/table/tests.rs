@@ -18,6 +18,48 @@ use super::testing::{IntKeys, refusal};
 use super::*;
 use crate::{Error, Kind, Rule};
 
+std::thread_local! {
+    /// The allocations this thread made.
+    static ALLOCATIONS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+/// The system's allocator, counting each thread's allocations, so that a
+/// test can see that a call allocates nothing.
+struct Counting;
+
+// SAFETY: every call is the system allocator's, with the caller's
+// arguments.
+unsafe impl std::alloc::GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        // A thread that is ending may no longer count; its allocations
+        // are no test's.
+        let _ = ALLOCATIONS.try_with(|count| count.set(count.get() + 1));
+        // SAFETY: the caller's contract.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: the caller's contract.
+        unsafe { std::alloc::System.dealloc(pointer, layout) }
+    }
+}
+
+#[global_allocator]
+static ALLOCATOR: Counting = Counting;
+
+/// The allocations this thread has made so far.
+fn allocations() -> usize {
+    ALLOCATIONS.with(core::cell::Cell::get)
+}
+
+#[test]
+fn the_allocations_of_a_thread_are_counted() {
+    let before = allocations();
+    let words = std::hint::black_box(vec![0_u64; 4]);
+    assert_eq!(allocations(), before + 1);
+    drop(words);
+}
+
 /// Bytes of the header, as the format fixes it.
 const HEADER: usize = 96;
 
@@ -407,6 +449,24 @@ impl Blocks {
         unsafe { Chunks::new(&self.bases, &self.lens) }.unwrap()
     }
 
+    /// The used mark of every block.
+    fn used(&self) -> Vec<u64> {
+        self.bases
+            .iter()
+            // SAFETY: each block holds its 8-byte used mark first.
+            .map(|&base| unsafe { base.cast::<u64>().read() })
+            .collect()
+    }
+
+    /// The `N` words of the record at `reference`, which lies whole in
+    /// its block.
+    fn words<const N: usize>(&self, reference: u32) -> [u64; N] {
+        let (chunk, byte) = placement(reference);
+        assert!(byte + 8 * N <= self.lens[chunk], "past the block");
+        // SAFETY: the words lie in the block, just checked, aligned to 8.
+        unsafe { self.bases[chunk].add(byte).cast::<[u64; N]>().read() }
+    }
+
     /// The (hash, next, key, payload) of every record of a chunk of
     /// records of one int4 key and one payload word.
     fn records(&self, chunk: u32) -> Vec<(u32, u32, i64, u64)> {
@@ -497,7 +557,7 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
     let mut current: Vec<u32> = (0..4).map(|_| blocks.add(len)).collect();
     let mut owner = vec![u32::MAX, 0, 1, 2, 3];
     let mut from = CHUNK_HEADER;
-    let mut copied = 0;
+    let mut copied = Vec::new();
     let mut new_refs = [0; 16];
     let mut split_hashes = [0; 16];
     loop {
@@ -518,7 +578,7 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
         for (&offset, &hash) in new_refs.iter().zip(&split_hashes).take(split.count) {
             assert_eq!(owner[(offset >> UNIT_BITS) as usize], (hash >> 9) & 3);
         }
-        copied += split.count;
+        copied.extend_from_slice(&new_refs[..split.count]);
         match split.full {
             Some(partition) => {
                 current[partition as usize] = blocks.add(len);
@@ -528,9 +588,15 @@ fn a_chunk_splits_into_the_chunks_of_its_partitions() {
             None => {}
         }
     }
-    assert_eq!(copied, 200);
+    assert_eq!(copied.len(), 200);
     assert_eq!(from, CHUNK_HEADER + 200 * 32);
     check_partitioned(&blocks, &owner, 9, &keys);
+    // Each copy is its source record whole: the source is not linked, so
+    // its next is 0 as a copy's is.
+    for &copy in &copied {
+        let words = blocks.words::<4>(copy);
+        assert_eq!(words, blocks.words::<4>(refs[words[2] as usize]));
+    }
 }
 
 #[test]
@@ -557,6 +623,19 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
     let keys = [1, 2, 3];
     let column = IntKeys(&keys);
     let (hashes, all) = key_batch(&keys);
+    // The source holds records, so that a copy would show.
+    let mut source = all.clone();
+    writer(&ONE_WORD, blocks.chunks())
+        .unwrap()
+        .append(
+            4,
+            Some(&[0; 24]),
+            &mut Batch::new(&hashes, &column, &mut source, &mut [0; 3]).unwrap(),
+        )
+        .unwrap();
+    let used = blocks.used();
+    // A payload of the NULL word alone, as of no column.
+    let no_columns = PayloadColumns::new(&[], &[], 3).unwrap();
     for (shift, chunks, rule) in cases {
         let mut from = CHUNK_HEADER;
         let split = writer(&ONE_WORD, blocks.chunks()).unwrap().split(
@@ -568,6 +647,22 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         );
         assert_eq!(refusal(split), Some((Kind::WrongCall, rule)));
         assert_eq!(from, CHUNK_HEADER);
+        let (mut pending_words, mut counts, mut nulls) = (all.clone(), vec![0; chunks.len()], 0);
+        let appended = writer(&ONE_WORD, blocks.chunks())
+            .unwrap()
+            .append_partitioned_columns(
+                &Partitions { shift, chunks },
+                &no_columns,
+                &mut Batch::new(&hashes, &column, &mut pending_words, &mut [0; 3]).unwrap(),
+                &mut Appended {
+                    rows: &mut counts,
+                    nulls: &mut nulls,
+                },
+            );
+        assert_eq!(refusal(appended), Some((Kind::WrongCall, rule)));
+        assert_eq!(pending_words, all, "{rule:?}: a row appended");
+        assert!(counts.iter().all(|&count| count == 0) && nulls == 0);
+        assert_eq!(blocks.used(), used, "{rule:?}: a chunk changed");
         let (mut pending_words, mut inserted_words) = (all.clone(), vec![0; 1]);
         let found = table.table_mut().unwrap().find_or_insert_partitioned(
             &Partitions { shift, chunks },
@@ -576,7 +671,11 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         );
         assert_eq!(refusal(found), Some((Kind::WrongCall, rule)));
         assert_eq!(pending_words, all, "{rule:?}: a row resolved");
+        assert_eq!(inserted_words, [0], "{rule:?}: a row inserted");
         assert_eq!(table.table().unwrap().stats().records, 0);
+        for chunk in 0..4 {
+            assert_eq!(table.chunk_words(chunk)[0], CHUNK_HEADER as u64);
+        }
     }
     let mut from = CHUNK_HEADER;
     let split = writer(&ONE_WORD, blocks.chunks()).unwrap().split(
@@ -593,6 +692,116 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         refusal(split),
         Some((Kind::WrongCall, Rule::SplitIntoItself))
     );
+}
+
+/// 70 rows go to 4 partitions at shift 3, the chunk of partition 3
+/// having room for 5 records: each row's record lies in its partition's
+/// chunk with its payload words, the counts add the rows appended to what
+/// they held, the NULL bits have the column with a NULL, and exactly the
+/// rows of partition 3 past its first 5 stay pending.
+#[test]
+fn rows_go_to_the_chunks_of_their_partitions() {
+    // A NULL word and two columns.
+    let config = TableConfig {
+        nkeys: 1,
+        payload_size: 24,
+    };
+    let keys: Vec<i32> = (0..70).collect();
+    let column = IntKeys(&keys);
+    let first: Vec<u64> = (0..70).map(|row| row * 3).collect();
+    let second: Vec<u64> = (0..70).map(|row| row << 40).collect();
+    let first_nulls: Vec<bool> = (0..70).map(|row| row % 4 == 1).collect();
+    let second_nulls = [false; 70];
+    let values: [&[u64]; 2] = [&first, &second];
+    let nulls: [&[bool]; 2] = [&first_nulls, &second_nulls];
+    let columns = PayloadColumns::new(&values, &nulls, 70).unwrap();
+    // The partition bits are bits 3 and 4 of the hash.
+    let hashes: Vec<u32> = (0..70).map(|row| (row % 4) << 3).collect();
+    let size = record_bytes(&config).unwrap();
+    let mut blocks = Blocks::new();
+    let chunks: Vec<u32> = (0..4)
+        .map(|partition| blocks.add(CHUNK_HEADER + if partition == 3 { 5 } else { 40 } * size))
+        .collect();
+    let mut counts = [7, 0, 0, 0];
+    let mut seen = 0;
+    let mut pending = all_rows(70);
+    let mut refs = vec![0; 70];
+    let appended = writer(&config, blocks.chunks())
+        .unwrap()
+        .append_partitioned_columns(
+            &Partitions {
+                shift: 3,
+                chunks: &chunks,
+            },
+            &columns,
+            &mut Batch::new(&hashes, &column, &mut pending, &mut refs).unwrap(),
+            &mut Appended {
+                rows: &mut counts,
+                nulls: &mut seen,
+            },
+        )
+        .unwrap();
+    assert_eq!(appended, 18 + 18 + 17 + 5);
+    // 18 rows of each of partitions 0 and 1, 17 of 2, 5 of 3.
+    assert_eq!(counts, [7 + 18, 18, 17, 5]);
+    assert_eq!(seen, 1, "the NULL bit of the first column");
+    let left: Vec<usize> = (0..70).filter(|&row| selected(&pending, row)).collect();
+    let expected: Vec<usize> = (0..70).filter(|row| row % 4 == 3).skip(5).collect();
+    assert_eq!(left, expected);
+    for row in (0..70).filter(|row| !expected.contains(row)) {
+        assert_eq!(placement(refs[row]).0, row % 4, "row {row}");
+        let words = blocks.words::<6>(refs[row]);
+        let null = first_nulls[row];
+        let value = if null { 0 } else { first[row] };
+        assert_eq!(words[2], row as u64, "the key of row {row}");
+        assert_eq!(words[3..], [u64::from(null), value, second[row]]);
+    }
+}
+
+/// An append by partition takes 64 columns at most, and only a payload
+/// of a NULL word and a word a column: 65 columns, and 2 columns for a
+/// payload of 16 bytes, are refused, and nothing changes.
+#[test]
+fn an_append_by_partition_checks_its_columns() {
+    let keys = [1, 2, 3];
+    let column = IntKeys(&keys);
+    let (hashes, all) = key_batch(&keys);
+    let (value, null) = ([0_u64; 3], [false; 3]);
+    let values = vec![&value[..]; 65];
+    let nulls = vec![&null[..]; 65];
+    let many = PayloadColumns::new(&values, &nulls, 3).unwrap();
+    let two = PayloadColumns::new(&values[..2], &nulls[..2], 3).unwrap();
+    let mut blocks = Blocks::new();
+    let chunks: Vec<u32> = (0..2).map(|_| blocks.add(CHUNK_HEADER + 4096)).collect();
+    for (payload_size, columns) in [(8 * 66, &many), (16, &two)] {
+        let config = TableConfig {
+            nkeys: 1,
+            payload_size,
+        };
+        let (mut pending, mut counts, mut seen) = (all.clone(), [0; 2], 0);
+        let appended = writer(&config, blocks.chunks())
+            .unwrap()
+            .append_partitioned_columns(
+                &Partitions {
+                    shift: 0,
+                    chunks: &chunks,
+                },
+                columns,
+                &mut Batch::new(&hashes, &column, &mut pending, &mut [0; 3]).unwrap(),
+                &mut Appended {
+                    rows: &mut counts,
+                    nulls: &mut seen,
+                },
+            );
+        assert_eq!(
+            refusal(appended),
+            Some((Kind::WrongCall, Rule::PartitionColumns)),
+            "{} columns",
+            columns.len()
+        );
+        assert_eq!((pending, counts, seen), (all.clone(), [0, 0], 0));
+        assert_eq!(blocks.used(), [CHUNK_HEADER as u64; 2]);
+    }
 }
 
 /// A split of no records would answer as the end of its chunk does;

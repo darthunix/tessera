@@ -2,11 +2,13 @@
 //! and probes that read what was published.
 
 use crate::error::{Kind, Result};
+use ::loom::sync::Arc;
+use ::loom::sync::atomic::{AtomicBool, AtomicUsize};
 use ::loom::thread;
 use core::sync::atomic::Ordering;
 
 use super::memory::{HEADS, Heads, LoomRegion};
-use super::model::{HASH, append, check_record, link, probe, table};
+use super::model::{HASH, ModelTable, append, check_record, link, probe, table};
 use crate::table::batch;
 use crate::table::header::{CHUNK_HEADER, Layout, NRECORDS};
 use crate::table::record::Access;
@@ -123,6 +125,72 @@ fn three_records_of_one_key_count_twice() {
 #[test]
 fn a_third_participant_links_while_two_count_one_key() {
     concurrent_links(&[&[5], &[5], &[6]], 1);
+}
+
+/// The table of a build and the counts by which its participants keep in
+/// step, as a barrier would.
+struct Build {
+    table: ModelTable,
+    appended: AtomicUsize,
+    sized: AtomicBool,
+    linked: AtomicUsize,
+}
+
+/// Participant `chunk` of a build of `shares`: it appends its share to its
+/// own chunk; the last to append makes the index, while the others wait;
+/// it links its chunk, waits for every link, and probes every key.
+fn participate(build: &Build, shares: &[&[i32]], chunk: usize) {
+    let keys = shares[chunk];
+    assert_eq!(build.table.append(chunk, keys).unwrap(), keys.len());
+    if build.appended.fetch_add(1, Ordering::AcqRel) + 1 == shares.len() {
+        let total = shares.iter().map(|keys| keys.len()).sum::<usize>();
+        // SAFETY: every participant has appended, and none uses the index
+        // before `sized`.
+        unsafe { build.table.size(total as u64) }.unwrap();
+        build.sized.store(true, Ordering::Release);
+    }
+    while !build.sized.load(Ordering::Acquire) {
+        thread::yield_now();
+    }
+    assert_eq!(build.table.link(chunk).unwrap(), keys.len());
+    build.linked.fetch_add(1, Ordering::AcqRel);
+    while build.linked.load(Ordering::Acquire) < shares.len() {
+        thread::yield_now();
+    }
+    for keys in shares {
+        let found = build.table.probe(keys).unwrap();
+        assert!(found.iter().all(|&found| found), "a key not found");
+    }
+}
+
+/// A build by participants: they append their shares at once, each to a
+/// chunk of its own, before the table has an index; the last to append
+/// makes the index; they link at once, then probe, and each finds every
+/// key, whole.
+fn a_shared_build(shares: &'static [&'static [i32]]) {
+    ::loom::model(move || {
+        let most = shares.iter().map(|keys| keys.len()).max().unwrap();
+        let build = Arc::new(Build {
+            table: ModelTable::new(most, shares.len()).unwrap(),
+            appended: AtomicUsize::new(0),
+            sized: AtomicBool::new(false),
+            linked: AtomicUsize::new(0),
+        });
+        let threads: Vec<_> = (0..shares.len())
+            .map(|chunk| {
+                let build = build.clone();
+                thread::spawn(move || participate(&build, shares, chunk))
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    });
+}
+
+#[test]
+fn two_participants_build_a_table_and_find_every_key() {
+    a_shared_build(&[&[1, 2], &[3]]);
 }
 
 /// One participant appends and links a key while another probes until it

@@ -285,3 +285,99 @@ fn a_null_group_key_and_int8_keys_pass_their_filter() -> Result<()> {
     assert_eq!(probe_filter(&filter, &hashes)?, 3);
     Ok(())
 }
+
+/// Two calls of one process build a shared filter once: a probe before
+/// it is refused; the first call builds it and says so, and the filter
+/// reads ready; the second finds it built and builds nothing; then every
+/// key passes.
+#[test]
+fn two_calls_of_one_process_build_a_shared_filter_once() -> Result<()> {
+    let (table, _) = filtered_table(100)?;
+    let hashes: Vec<u32> = (0..100).map(|key| hash_i32(key * 3)).collect();
+    let mut words = vec![0; bloom::shared_words_for(100)?];
+    let filter = bloom::SharedFilter::from_mut(&mut words)?;
+    filter.init();
+    let mut rows = all_rows(100);
+    assert_eq!(
+        refusal(bloom::probe_shared(
+            &filter,
+            &hashes,
+            &mut RowMask::try_new(100, &mut rows)?
+        )),
+        Some((Kind::WrongCall, Rule::FilterNotBuilt))
+    );
+    assert!(!filter.ready());
+    assert!(table.table()?.try_build_bloom(&filter)?, "the first builds");
+    assert!(filter.ready());
+    assert!(
+        !table.table()?.try_build_bloom(&filter)?,
+        "the second builds"
+    );
+    let left = bloom::probe_shared(&filter, &hashes, &mut RowMask::try_new(100, &mut rows)?)?;
+    assert_eq!((left, rows), (100, all_rows(100)));
+    Ok(())
+}
+
+/// Words that cannot be a shared filter, not aligned to 8 or of 1 or 4
+/// words, are refused as one, and so are words a filter filled together
+/// cannot have; the words are as they were.
+#[test]
+fn a_shared_filter_of_the_wrong_shape_is_refused() -> Result<()> {
+    let mut words = [7_u64; 5];
+    let base = words.as_mut_ptr();
+    // SAFETY: each pointer and count stays within `words`, which nothing
+    // else reads or writes during the calls; a refused call reads nothing.
+    unsafe {
+        let off = base.cast::<u8>().add(4).cast::<u64>();
+        for (pointer, count, rule) in [
+            (off, 3, Rule::FilterAlign),
+            (core::ptr::null_mut(), 3, Rule::FilterAlign),
+            (base, 1, Rule::FilterWords),
+            (base, 4, Rule::FilterWords),
+        ] {
+            assert_eq!(
+                refusal(bloom::SharedFilter::attach(pointer, count)),
+                Some((Kind::WrongCall, rule)),
+                "{count} words"
+            );
+        }
+        let all = all_rows(2);
+        let rows = RowMaskView::try_new(2, &all)?;
+        for (pointer, count, rule) in [(off, 2, Rule::FilterFillAlign), (base, 3, Rule::FilterSize)]
+        {
+            assert_eq!(
+                refusal(bloom::add_atomic(pointer, count, &[1, 2], &rows)),
+                Some((Kind::WrongCall, rule)),
+                "{count} words"
+            );
+        }
+    }
+    assert_eq!(words, [7; 5], "the words changed");
+    Ok(())
+}
+
+/// One participant fills a filter together with no other: the rows it
+/// adds, every third of a batch, pass when it probes them back.
+#[test]
+fn a_filter_filled_by_one_participant_passes_its_rows() -> Result<()> {
+    let hashes: Vec<u32> = (0..200).map(hash_i32).collect();
+    let mut thirds = vec![0_u64; 4];
+    for row in (0..200).step_by(3) {
+        thirds[row / 64] |= 1 << (row % 64);
+    }
+    let mut words = vec![0; bloom::words_for(200)?];
+    // SAFETY: the words are aligned, live through the call, and nothing
+    // else reads or writes them.
+    unsafe {
+        bloom::add_atomic(
+            words.as_mut_ptr(),
+            words.len(),
+            &hashes,
+            &RowMaskView::try_new(200, &thirds)?,
+        )?;
+    }
+    let mut rows = thirds.clone();
+    let left = bloom::probe(&words, &hashes, &mut RowMask::try_new(200, &mut rows)?)?;
+    assert_eq!((left, rows), (67, thirds));
+    Ok(())
+}
