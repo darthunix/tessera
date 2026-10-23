@@ -76,6 +76,32 @@ pub(super) fn used_mark(raw: u64, len: usize, record_size: usize) -> Option<usiz
 /// The chunks of a table as this process sees them: each one's base and
 /// length.
 ///
+/// A table's records lie in at most [`MAX_CHUNKS`] chunks, 32768,
+/// numbered from 0. A chunk is a block aligned to 8, a multiple of 8 from
+/// 8 bytes to [`MAX_CHUNK_LEN`], 1 MiB. Its first 8 bytes,
+/// [`CHUNK_HEADER`], are its used mark: the bytes its records take, with
+/// the mark's own 8. The records follow one after another from byte 8,
+/// and [`Chunks::init`] makes a block an empty chunk, its used mark 8.
+///
+/// A reference of 32 bits names a record: the number of its chunk, and
+/// its first byte there in units of 8 bytes, in the low
+/// [`UNIT_BITS`](crate::UNIT_BITS) bits. Reference 0, the used mark of
+/// chunk 0, names no record, and a reference names the same record in
+/// every process:
+///
+/// ```text
+///   31             17 16                     0
+///  ┌─────────────────┬────────────────────────┐
+///  │ chunk (15 bits) │ byte / 8 (17 bits)     │
+///  └─────────────────┴────────────────────────┘
+///    the record is at chunks[chunk] + 8 * (byte / 8)
+/// ```
+///
+/// A call refuses more than [`MAX_CHUNKS`] chunks, and refuses a chunk it
+/// writes or walks that is not such a block before it reads the chunk.
+/// Every other chunk the caller gives as such a block, valid for its
+/// length.
+///
 /// The bases are raw pointers, not slices. In shared memory other
 /// processes write a table's chunks while a call runs, which a
 /// `&mut [u64]` of them would forbid; only the caller can promise what
@@ -232,11 +258,27 @@ fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
 /// The most partitions one split makes.
 pub const MAX_PARTITIONS: usize = 1 << 16;
 
-/// Where the records of a table that spills go: the partition of a hash
-/// is `(hash >> shift) & (chunks.len() - 1)`, a power of two of
-/// partitions, and each partition appends to its chunk of `chunks`. The
-/// buckets take the hash's high bits, so a table spills by its low ones,
-/// the next level of partitions by the bits above them.
+/// Where the records of a table that spills go: `chunks` holds the
+/// number of a chunk for each partition, `n` of them, a power of two from
+/// 1 to [`MAX_PARTITIONS`], 65536, and the partition of a hash `h` is
+/// `(h >> shift) & (n - 1)`. The bits lie within the hash: `shift < 32`
+/// and `shift + log2(n) <= 32`. The buckets take the high bits of a hash,
+/// so a caller's first partitions take the low bits, and a partition
+/// split again takes the bits above those:
+///
+/// ```text
+///  bit 31                                     4   3   2   1   0
+///     ┌─────────────────────────────────────┬───────┬───────┐
+///     │ the buckets take the high bits  …   │ split │ first │
+///     └─────────────────────────────────────┴───────┴───────┘
+///  first partitions: 4 at shift 0, (h >> 0) & 3
+///  one of them split again: 4 at shift 2, (h >> 2) & 3
+/// ```
+///
+/// A call that takes partitions refuses, before it changes anything,
+/// another count or shift, and a chunk number not below the count of the
+/// chunks it is given. The caller is the one writer of those chunks, and
+/// two partitions share a chunk only when it has no room for a record.
 #[derive(Clone, Copy, Debug)]
 pub struct Partitions<'a> {
     /// The bit of a hash where the partition's bits start.
@@ -324,7 +366,16 @@ impl<'a> ChunkWriter<'a> {
     /// Append the rows of `batch` as records, each to the chunk of its
     /// hash's partition: as [`Self::append_columns`], except that a row
     /// whose partition's chunk is full stays pending while the rows after
-    /// it go on; every row appended counts in `appended`.
+    /// it go on, for the caller to give that partition a new chunk and
+    /// call again.
+    ///
+    /// The payload is a word of the row's NULL bits, bit `c` for column
+    /// `c`, then a word for each column, 0 for a NULL: so at most 64
+    /// columns, and a table whose payload is `8 * (1 + columns)` bytes.
+    /// Each row appended adds one to its partition's count in
+    /// [`Appended::rows`], which the call adds to and never clears, and
+    /// ORs its NULL bits into [`Appended::nulls`]. The call needs no
+    /// index and links nothing.
     pub fn append_partitioned_columns<K: KeySource + ?Sized>(
         &self,
         partitions: &Partitions<'_>,
@@ -346,8 +397,12 @@ impl<'a> ChunkWriter<'a> {
     /// in order, each to the chunk of its hash's partition, and move
     /// `*from` past them: at most `refs.len()`, their new references into
     /// `refs` and their hashes into `hashes`, stopping before a record
-    /// whose partition's chunk is full. The copies are not linked; `*from`
-    /// starts at [`CHUNK_HEADER`].
+    /// whose partition's chunk is full, which [`Split::full`] names. A
+    /// call copies at least one record, so a [`Split::count`] of 0 with no
+    /// full partition means that the source is done. The copies are not
+    /// linked: their next is 0. `*from` starts at [`CHUNK_HEADER`]; the
+    /// records have the size of the writer's configuration, and the
+    /// source is not the chunk of a partition.
     pub fn split(
         &self,
         partitions: &Partitions<'_>,

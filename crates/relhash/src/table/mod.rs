@@ -47,7 +47,7 @@ pub use record::{MAX_PAYLOAD_COLUMNS, PayloadColumns, Record, payload_null_words
 use region::{RawRegion, Region};
 pub use writer::{Cursor, HELD, MergeStop, PayloadCursor};
 
-/// What a table holds, for planning and EXPLAIN.
+/// What a table holds, for a caller that plans its memory or reports it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub struct Stats {
@@ -77,6 +77,25 @@ fn other_config(config: &TableConfig) -> Error {
 /// a shared build, each the one writer of its own chunks, and their
 /// contracts say what the type cannot. [`TableMut`], which one writer has
 /// to itself, makes the same calls safely.
+///
+/// Several participants, processes over shared memory or threads, may
+/// use one table at once, each through a `Table` of its own over the
+/// same blocks:
+///
+/// - append at once, each to chunks of its own: a chunk has one writer;
+/// - link at once, each its own chunks;
+/// - probe and read at once, once the records they may find are linked.
+///
+/// The calls of one writer, those of [`TableMut`], run alone. Of the
+/// index and the chunks, only the count of records and the buckets change
+/// while the table is shared, by atomic operations: a link adds to the
+/// count before it publishes a record, and publishes it by a
+/// compare-and-swap of its bucket with release; a probe reads a bucket
+/// with acquire. So a participant that finds a record sees it whole.
+/// [`Table::bloom`], [`Table::try_build_bloom`] and
+/// [`Table::scan_unmarked`] read the used mark of every chunk: over a
+/// table that several writers share, they run only once every writer's
+/// appends are done, as [`Table::attach`] says.
 ///
 /// It is neither `Send` nor `Sync`: each participant attaches its own.
 #[derive(Debug)]
@@ -212,7 +231,9 @@ impl<'a> Table<'a> {
     /// count appended is returned, and rows still pending need another
     /// chunk. The batch's keys are the table's keys; `payload` is the
     /// payload of every physical row one after another, or `None` for
-    /// zeros. The records are not in the buckets until linked.
+    /// zeros. The records are not counted or found until linked. The call
+    /// checks the table's index, and refuses keys or a payload size other
+    /// than the table's before it writes anything.
     ///
     /// # Safety
     ///
@@ -248,7 +269,9 @@ impl<'a> Table<'a> {
     /// mark into their buckets, first in their chains, and move `*from`
     /// past them; the count linked is returned. Several participants may
     /// link at once, each its own chunks; equal keys make separate
-    /// records. `*from` starts at [`CHUNK_HEADER`].
+    /// records. `*from` starts at [`CHUNK_HEADER`]. The count of records in
+    /// the header grows before any of them can be found. A link that fails
+    /// counts only the records it linked, and moves `*from` past them.
     ///
     /// # Safety
     ///
@@ -300,7 +323,7 @@ impl<'a> Table<'a> {
 
     /// For each row of `matches`, the word at byte `at` of its record's
     /// payload into `out[row]`, native-endian: one word of a batch's
-    /// matches per call, such as a Datum of the build row a join keeps
+    /// matches per call, such as a column of the row a join keeps
     /// there. `at` must be a multiple of 8 and `at + 8` within the
     /// payload; the other rows keep their values in `out`.
     pub fn gather<'m>(
@@ -353,8 +376,8 @@ impl<'a> Table<'a> {
     }
 
     /// For each row of `matches`, key `key` of its record: its slot's bits
-    /// into `values[row]` (an int4 sign-extended, as its Datum is, 0 for a
-    /// NULL) and whether it is NULL into `nulls[row]`. The other rows keep
+    /// into `values[row]` (the word the source of keys gave, 0 for a NULL)
+    /// and whether it is NULL into `nulls[row]`. The other rows keep
     /// their values.
     pub fn gather_key<'m>(
         &self,
@@ -717,7 +740,8 @@ impl<'a> TableMut<'a> {
     /// `capacity` records, over the same chunks: every record is linked
     /// there again, grouped chains stay grouped, and the old index is no
     /// longer the table's. Records and their references stay as they were.
-    /// An index has at most 2^31 buckets, however large the capacity.
+    /// An index has at most 2^31 buckets, however large the capacity, and
+    /// a new index with fewer buckets than the old is refused.
     ///
     /// The chunks are the table's whole set of records: a record appended
     /// but not linked yet is linked here too, and a link of it afterwards

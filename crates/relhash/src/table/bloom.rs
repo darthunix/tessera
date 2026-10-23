@@ -3,43 +3,35 @@
 //! the filter has no record with its hash, and leaves the batch without
 //! reading a bucket or a record.
 //!
-//! The filter is words of 64 bits. Each hash picks one word and four
-//! bits in it, so a check is one load and a compare:
+//! The filter is a power of two of 64-bit words, which the caller owns
+//! and which hold no address, so the same code serves a filter in a
+//! process's memory and one in shared memory next to a shared table. The
+//! hash of a row is the one the caller gives the table, every key folded
+//! in. It sets four bits of one word, taken from the hash multiplied by
+//! an odd constant: the word from the product's high bits, the four bits
+//! from its low 24 bits, six bits each. The four bits may coincide, and a
+//! check is one load and a compare:
 //!
 //! ```text
-//!   hash × SPREAD ──► a product of 64 bits
-//!                     ├─ its high bits ──────► the word
-//!                     └─ its low 24 bits ────► four bit numbers, 6 bits each
+//!  s = hash × 0x9E3779B97F4A7C15, modulo 2^64; k = log2(words)
 //!
-//!   word  …0 1 0 0 1 0 0 0 0 1 0 1 0 0…   the four bits of a hash
-//!            ▲     ▲         ▲   ▲        all 1: the row may have a record
+//!  bit 63                        24 23    18 17    12 11     6 5      0
+//!     ┌───────────────────────────┬────────┬────────┬────────┬────────┐
+//!     │ the word: the top k bits  │ bit 4  │ bit 3  │ bit 2  │ bit 1  │
+//!     │ (word 0 when k is 0)      │        │        │        │        │
+//!     └───────────────────────────┴────────┴────────┴────────┴────────┘
 //! ```
 //!
-//! The hash is the table's own, every key folded in. The multiplication
-//! spreads it, so that the word does not repeat the high bits that pick
-//! the bucket. A filter holds `BITS_PER_RECORD` bits per record of the
-//! table it was filled from, in a power of two of words, as
-//! [`words_for`] sizes it; with four bits per key that lets through about
-//! one absent key in 200, as a test measures at exactly
-//! `BITS_PER_RECORD` bits.
+//! The multiplication spreads the hash, so that the word does not repeat
+//! the high bits that pick the bucket. A row passes when every bit of its
+//! hash is set, so a row with the hash of a record always passes; at the
+//! 16 bits a record of [`words_for`], fewer than one in 100 absent keys
+//! pass too.
 //!
-//! Like the table, the filter is a block of words the caller owns, with
-//! no address inside, so the same code serves a filter in a process's
-//! memory and one in shared memory next to a shared table.
-//!
-//! A shared filter ([`SharedFilter`]) starts with a word of its state:
-//!
-//! ```text
-//!   NONE ──claim──► BUILDING ──fill, then publish──► READY
-//! ```
-//!
-//! Each participant decides by its own batches whether it wants the
-//! filter. The first that does claims it with a compare-and-swap, fills
-//! it alone, and publishes READY with release. Every participant checks a
-//! batch against the filter only once it reads READY with acquire, and
-//! probes the table without it until then. Nobody waits, and a
-//! participant that never wants the filter leaves nothing undone. The
-//! loom models in `loom/filter.rs` check this protocol.
+//! A [`SharedFilter`] is built once for all the participants of a shared
+//! table: the first that wants it builds it, the others probe the table
+//! without it until it is ready, and nobody waits. [`add_atomic`] lets
+//! several participants fill one filter at once instead.
 //!
 //! ```
 //! use relhash::{RowMask, RowMaskView};
@@ -114,7 +106,31 @@ pub(super) const BUILDING: u64 = 1;
 pub(super) const READY: u64 = 2;
 
 /// A filter in memory several participants map: a state word, then a
-/// power of two of words, [`shared_words_for`] in all.
+/// power of two of words, `1 + 2^k` words aligned to 8,
+/// [`shared_words_for`] in all.
+///
+/// ```text
+///  word   0         1         2                    2^k
+///        ┌─────────┬─────────┬─────────┬─────────┬─────────┐
+///        │ state   │ word 0  │ word 1  │    …    │ word    │
+///        │         │ of the filter     │         │ 2^k - 1 │
+///        └─────────┴─────────┴─────────┴─────────┴─────────┘
+///  state: 0 none, 1 building, 2 ready
+/// ```
+///
+/// One participant calls [`Self::init`] before any other uses the filter.
+/// Then [`Table::try_build_bloom`](crate::Table::try_build_bloom) lets
+/// one participant build it: the one whose compare-and-swap moves the
+/// state from none to building fills the filter from the table's records
+/// and stores ready with release, and its call returns true. The others
+/// return false at once, and nobody waits. [`Self::ready`] reads the
+/// state with acquire, so a participant that reads ready sees every bit
+/// of the filter, and [`probe_shared`] refuses a filter that is not ready.
+/// A build that fails, at a damaged record, leaves the state building: no
+/// participant ever reads ready, and each probes the table without the
+/// filter.
+///
+/// It holds only atomic words, so threads may share it.
 #[derive(Debug)]
 pub struct SharedFilter<'a> {
     state: &'a AtomicU64,
@@ -123,6 +139,8 @@ pub struct SharedFilter<'a> {
 
 impl<'a> SharedFilter<'a> {
     /// Attach to the `nwords` words at `words`, the state word first.
+    /// Words that are not aligned to 8, or whose count less the state
+    /// word is not a power of two, are refused.
     ///
     /// # Safety
     ///
@@ -234,8 +252,13 @@ pub fn shared_words_for(records: u64) -> Result<usize> {
         .ok_or(Error::wrong_call(Rule::FilterRecords).with(records))
 }
 
-/// The words of a filter for a table of `records` records: a power of
-/// two, at least one.
+/// The words of a filter for a table of `records` records: the least
+/// power of two that is at least `max(1, ceil(16 * records / 64))`, so
+/// 16 bits a record at least.
+///
+/// # Errors
+///
+/// A count of records whose filter cannot be sized.
 pub fn words_for(records: u64) -> Result<usize> {
     let words = records
         .checked_mul(BITS_PER_RECORD)
@@ -246,9 +269,10 @@ pub fn words_for(records: u64) -> Result<usize> {
 }
 
 /// The words of a filter for a table of `records` records within an
-/// eighth of `limit` bytes: [`words_for`] them, halved while larger, one
-/// at least. A smaller filter lets more rows through; a larger one would
-/// leave a small memory no room for the rows it guards.
+/// eighth of `limit` bytes: [`words_for`] them, halved while their bytes
+/// are more than an eighth of `limit`, one at least. A smaller filter
+/// lets more rows through; a larger one would leave a small memory no
+/// room for the rows it guards.
 pub fn words_within(records: u64, limit: usize) -> Result<usize> {
     let mut words = words_for(records)?;
     while words > 1 && words.saturating_mul(8) > limit / 8 {

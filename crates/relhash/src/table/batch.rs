@@ -86,7 +86,9 @@ pub(super) use shaped;
 /// keys or a partition's chunk is refused, keeps what it placed before:
 /// those rows have left `pending` with their references, the rows that
 /// made a record are in the mask of inserted rows, and each chunk's used
-/// mark covers their records. The batch given again places the rest.
+/// mark covers their records. The batch given again places the rest
+/// once. A call that fails because it met bytes that are not a table
+/// keeps no such promise: the caller drops or resets the table.
 ///
 /// [`ChunkWriter::append_partitioned_columns`]: crate::ChunkWriter::append_partitioned_columns
 /// [`TableMut::find_or_insert_partitioned`]: crate::TableMut::find_or_insert_partitioned
@@ -136,7 +138,7 @@ impl<'b, K: KeySource + ?Sized> Batch<'b, K> {
     }
 
     /// A batch of the rows of `pending`, whose row count the hashes, the
-    /// keys and the references must have.
+    /// keys and the references must have: other counts are refused here.
     #[inline]
     pub fn from_mask(
         hashes: &'b [u32],

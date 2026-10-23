@@ -29,26 +29,28 @@
 //!                               └────────────┘
 //! ```
 //!
-//! - The **index** is a header of fixed sizes (`header.rs`) and an array of
-//!   buckets. A row's hash picks its bucket by its high bits.
+//! - The **index** is a header and an array of buckets. A row's hash
+//!   picks its bucket by its high bits. [`HEADER_SIZE`] draws the
+//!   header, and [`index_size`] gives the buckets of an index.
 //! - A **chunk** starts with its **used mark**, the bytes in use, and
-//!   holds records one after another.
+//!   holds records one after another. [`Chunks`] draws a chunk.
 //! - A **record** is one row: its hash, the reference of the next record
 //!   of its chain, the NULL bits of its keys, a word of 8 bytes per key,
 //!   and a **payload**, bytes the table never reads. A join keeps the row
 //!   it returns there, a grouping the states of its aggregates.
-//! - A **reference** names a record: its chunk and its place in the
-//!   chunk, in 32 bits. A bucket holds the reference of the first record
-//!   of its **chain**, and each record that of the next one. 0 means
-//!   none, since no record starts where a chunk's used mark lies.
+//!   [`Record`] draws a record.
+//! - A **reference** names a record in 32 bits: its chunk and its place
+//!   in the chunk. A bucket holds the reference of the first record of
+//!   its **chain**, and each record that of the next one; 0 means none,
+//!   since no record starts where a chunk's used mark lies. [`Chunks`]
+//!   draws a reference too.
 //!
 //! A key is a word compared bit for bit: the table gives it no type. The
-//! caller computes the hash, so its hash decides which keys meet: the
-//! kernels of Tessera hash as PostgreSQL does. The high bits of the hash
-//! pick the bucket, so they must differ from key to key: integers taken
-//! as their own hashes would put close keys into one chain. A key that
-//! a word does not hold, such as a string, goes in as a number that
-//! stands for it, as the last example shows.
+//! caller computes the hash, so its hash decides which keys meet. The
+//! high bits of the hash pick the bucket, so they must differ from key to
+//! key: integers taken as their own hashes would put close keys into one
+//! chain. A key that a word does not hold, such as a string, goes in as a
+//! number that stands for it, as the last example shows.
 //!
 //! # How rows go in and come out
 //!
@@ -77,33 +79,72 @@
 //! as they were. So a call allocates nothing, a node can hand over the
 //! column it returns, and several calls can fill one array.
 //!
+//! # The items
+//!
+//! - **A table.** [`OwnedTable`] owns its blocks and needs no `unsafe`.
+//!   [`Table`] and [`TableMut`] work over blocks the caller gives: an
+//!   index of [`index_size`] bytes for a [`TableConfig`], and
+//!   [`Chunks`]; the contracts of the `unsafe` calls that make them say
+//!   what the caller promises. [`Table::stats`] counts what a table
+//!   holds, and constants such as [`MAX_KEYS`], [`MAX_CHUNKS`] and
+//!   [`MAX_CHUNK_LEN`] are the limits of its format.
+//! - **Rows in.** A [`Batch`] holds the rows to place over one call or
+//!   several. [`Table::append`] and [`Table::append_columns`] write
+//!   records, [`Table::link`] and [`TableMut::link_grouped`] link them;
+//!   [`TableMut::find_or_insert`] finds or makes the record of each
+//!   row's keys, [`TableMut::merge`] merges a chunk's records by the
+//!   caller's rule, and [`TableMut::regrow`] moves the table to a larger
+//!   index.
+//! - **Lookups.** A [`Matches`] holds the rows of a lookup and the
+//!   record each has reached: [`Table::probe`], [`Table::next_match`],
+//!   [`Table::next_in_group`] and the gathers move it on and read it.
+//! - **Records and payloads.** [`Table::record`] and [`RecordCursor`]
+//!   read a record by its reference, [`PayloadCursor`] changes its
+//!   payload; [`PayloadColumns`] gives the payloads of a batch from its
+//!   columns, and [`TableMut::each_payload`] and
+//!   [`TableMut::payload_ptrs`] change them; [`TableMut::scan`] visits
+//!   every record from a [`Cursor`].
+//! - **A table that spills.** [`Partitions`] say which chunk the record
+//!   of a hash goes to; [`ChunkWriter`] appends to them and splits a
+//!   chunk by them, and [`TableMut::find_or_insert_partitioned`] groups
+//!   by them.
+//! - **For joins.** The [`bloom`] filter of a table's keys, alone or
+//!   shared; the [`Marks`] of the records a RIGHT or FULL join matched,
+//!   with [`Table::mark`] and [`Table::scan_unmarked`].
+//! - **Masks and errors.** [`RowMask`] and [`RowMaskView`]; [`Error`],
+//!   [`Kind`] and [`Rule`].
+//!
 //! # What a call checks
 //!
-//! The table trusts no byte it reads. A call checks the header, every
-//! chunk before it writes or walks it, and every reference before it
-//! follows it, and it walks a chain no further than the records the
-//! chunks can hold. Bytes that are not a table give an error, never a
-//! crash or an endless walk; the crate's spec lists the rules in its
-//! requirement "A damaged table". An error is an [`Error`]: the
-//! [`Rule`] broken, its [`Kind`], a wrong call or a damaged table, and up
-//! to two numbers, in one word that allocates nothing. Wrong arguments
-//! fail before the call changes anything. A full chunk or index is not an
-//! error: the rows without room stay in the mask, and the caller adds a
-//! chunk or a larger index and calls again.
+//! The table trusts no byte it reads: under the caller's promise, which
+//! the crate's page above states, bytes that are not a table give an
+//! error, never a crash or a call that does not end. An error is an
+//! [`Error`]: the [`Rule`] broken, its [`Kind`], a wrong call or a
+//! damaged table, and up to two numbers, in one word. [`Kind`] says which
+//! values make a wrong call and which bytes a damaged table. A full chunk
+//! or index is not an error: the rows without room stay in the mask, and
+//! the caller adds a chunk or a larger index and calls again. A table a
+//! call found damaged is to be dropped or reset.
 //!
-//! A table a call found damaged is to be dropped or reset. A call may meet
-//! the damage in the middle, with records written past a used mark or
-//! links half made; the calls over the table after it stay bounded and
-//! sound, as over any bytes, but what they answer is not promised. An
-//! error of the caller's own, a source of keys that cannot give a word or
-//! a merge's rule that fails, leaves the table whole, as each call says.
+//! A call over blocks the caller gives allocates no memory, also when it
+//! fails: the memory of the table, of the arguments and of the results
+//! is the caller's. [`OwnedTable`], which allocates its blocks, is
+//! outside this promise.
 //!
-//! This module may use `unsafe` for its blocks of raw memory, which it
-//! reaches only through `region.rs`. [`OwnedTable`] owns its blocks and
-//! needs no `unsafe`, as the example at the top shows: the tests and
-//! benchmarks build their tables with it.
+//! # Processes and threads
 //!
-//! Without the feature `alloc` the caller gives the blocks: an index of
+//! Several processes may use one table in shared memory, each through a
+//! [`Table`] of its own, in the steps its documentation lists. A thread
+//! is a participant as a process is: a [`Table`] or a [`TableMut`] is
+//! neither `Send` nor `Sync`, so each thread attaches its own handle to
+//! the same blocks. [`OwnedTable`], which owns its blocks and whose
+//! handles borrow it, may move to another thread whole, and a
+//! [`bloom::SharedFilter`], which holds only atomic words, may be shared.
+//!
+//! # Without the feature `alloc`
+//!
+//! Without the feature `alloc` the crate has no [`OwnedTable`] and takes
+//! no memory at all. The caller gives the blocks: an index of
 //! [`index_size`] bytes and chunks that [`Chunks::init`] made empty, and
 //! the calls stop when a chunk is full for the caller to add one.
 //!

@@ -15,11 +15,14 @@ use super::header::{CHUNK_HEADER, MAX_CHUNK_LEN, Place, check_record_size};
 use super::writer::Cursor;
 
 /// The words of marks of a chunk of `chunk_len` bytes: a bit for every
-/// record of `record_size` bytes after the chunk's header.
+/// record of `record_size` bytes after the chunk's header,
+/// `ceil(floor((chunk_len - 8) / record_size) / 64)`.
 ///
 /// # Errors
 ///
-/// A size that no record of a table has.
+/// A size that no record of a table has: one that is not a multiple of
+/// 8, is below 24, a header and one key, or leaves no room for a record
+/// in the largest chunk.
 pub fn mark_words(chunk_len: usize, record_size: usize) -> Result<usize> {
     check_record_size(record_size)?;
     Ok((chunk_len.saturating_sub(CHUNK_HEADER) / record_size).div_ceil(64))
@@ -69,7 +72,23 @@ impl PerRecord {
 }
 
 /// The marks of a table's records, a run of words per chunk, each of at
-/// least [`mark_words`] of the chunk's length.
+/// least [`mark_words`] of the chunk's length: a RIGHT or FULL join marks
+/// each record a pair matched, and walks the others after the probes.
+/// Bit `i` of word `w` of chunk `c`'s run stands for the chunk's record
+/// `64 w + i`, the records counted from byte 8 in steps of the record
+/// size `s`:
+///
+/// ```text
+///  chunk c    ┌──────┬────────────┬────────────┬─────┬────────────┬─────┐
+///             │ used │ record 0   │ record 1   │  …  │ record 64  │  …  │
+///             └──────┴────────────┴────────────┴─────┴────────────┴─────┘
+///  byte        0      8            8 + s              8 + 64 s
+///
+///  marks[c]   ┌──────────────────────────────┬───────────────────────┐
+///             │ word 0: bit i for record i   │ word 1: bit i for     │
+///             │                              │ record 64 + i  …      │
+///             └──────────────────────────────┴───────────────────────┘
+/// ```
 ///
 /// The crate calls these for a chunk of the table and a `word` below
 /// [`mark_words`] of its length, never past them, so an implementation
