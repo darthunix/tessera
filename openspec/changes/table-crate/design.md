@@ -66,7 +66,8 @@ proposal:
 - The spec of the crate comes in changes of its own: two move the
   requirements of `hash-table` that describe the table itself into the
   capability `relhash`, nine each; this change adds the new promises.
-- The crate's documentation does not repeat its spec: it links to it.
+- The crate's documentation is complete by itself, its rules, layouts
+  and limits included; the spec of `relhash` links to it.
 - The table that owns its memory stays in the crate, behind a feature
   `alloc` on by default, outside the promise of no memory. Nothing of
   Tessera's product uses it, but it is the crate's way in without
@@ -925,6 +926,18 @@ promise what the crate's callers rely on. The same edit of
 the spec, that a crate's documentation links to its spec and does not
 repeat it. All of it lands with this proposal, since approving it
 approves them.
+
+**Decided by the maintainer, 2026-10-23, in the review of task 5.2:**
+the other way round. A caller of the crate reads its documentation, as
+on docs.rs, and a link from there to a spec on another site may leave
+it with nothing to read. So the documentation is complete by itself:
+it holds the rules, the layouts and the limits of the API. A
+requirement of the spec says what is promised in a sentence or two and
+links to the items whose documentation holds the rest, by the path of
+their source file, which `check-specs.sh` checks; its scenarios and
+their tests stay. Refused: a requirement of scenarios alone, which
+says nothing a reviewer can read at a glance; and links to docs.rs,
+which lead nowhere while the crate is not published.
 
 ## Measurement plan
 

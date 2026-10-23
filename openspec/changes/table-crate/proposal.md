@@ -82,7 +82,8 @@ none of these:
 - `CONTRIBUTING.md` and `openspec/config.yaml` add a fifth surface that
   a spec may name, the public API of a crate of the workspace meant for
   use outside Tessera, one with `publish = true`; such an API changing
-  needs a change; and a crate's documentation links to its spec.
+  needs a change; and a crate's documentation is complete by itself,
+  holding the rules of its API, while its spec links to it.
 - The requirements of `hash-table` that describe the table itself move
   to the capability `relhash` in two changes of their own,
   `relhash-spec-table` and `relhash-spec-partitions`, of nine and ten
