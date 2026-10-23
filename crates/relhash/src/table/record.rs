@@ -3,8 +3,8 @@
 //!
 //! A record is a header of 16 bytes (its hash, the reference of the next
 //! record of its chain, the NULL bits of its keys and its length), a
-//! word per key, then the payload. The spec of `hash-table` draws it with
-//! its offsets in its requirement "A record".
+//! word per key, then the payload. The crate's spec draws it with its
+//! offsets in its requirement "A record".
 //!
 //! The one writer of a chunk writes a record whole, then publishes it:
 //! it puts the record first in its bucket's chain by a compare-and-swap
