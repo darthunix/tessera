@@ -8,14 +8,15 @@ Tessera's C nodes call it through `tessera/table.h`.
 
 This page explains what the table is made of, how a batch of rows goes
 in and how it is looked up, how the table grows, and how several
-processes use one table at once. The exact bytes, limits and rules are
-written once, in the crate's spec, [spec.md](spec.md) next to this
-page. Where this page leans on a rule of the spec, it links to the
-requirement that states it. What Tessera keeps beside the table,
-partitions when it spills, a Bloom filter of its keys, the marks of a
-RIGHT or FULL join and the steps of a shared build, and what a call
-checks, are explained in the design of
-[hash-table](../hash-table/design.md).
+processes use one table at once. Then it explains what the crate gives
+a caller to keep beside the table: partitions when the table spills, a
+Bloom filter of its keys, and the marks of a RIGHT or FULL join. The
+exact bytes, limits and rules are written once, in the crate's spec,
+[spec.md](spec.md) next to this page. Where this page leans on a rule
+of the spec, it links to the requirement that states it. How Tessera's
+nodes use the table, the steps of a shared build, the words of a spill
+and the levels of partitions, and what a call checks, are explained in
+the design of [hash-table](../hash-table/design.md).
 
 ## Background: keys, hashes, buckets, chains
 
@@ -114,6 +115,16 @@ are the ones this table answers.
    and memory the table allocated would be memory PostgreSQL does not
    count. How does a call say "this chunk is full" or "the buckets are
    too few"?
+8. A table may not fit in the memory its caller is given. The caller
+   then writes some records to disk and reads them back later, a part
+   at a time, and a part read back may still be too large. How does
+   the table sort its records into such parts?
+9. In many joins most rows of the probe side find no pair, and each
+   still costs a read of its bucket, a wait for memory on a large table.
+   How can such a row be dropped without reading the table?
+10. A RIGHT or FULL join also returns the records that no row matched.
+    The records are shared and read by every process. Where does the
+    join keep which records found a pair?
 
 ## Goals and what they cost
 
@@ -181,6 +192,24 @@ x86-64, where they have not been measured yet.
   a larger index, and calls again. Every error is a value of one word
   that the call returns, and Tessera raises it as a PostgreSQL error
   after the call.
+- **Parts by the low bits of the hash** (question 8). A table that
+  spills keeps its records in partitions, chosen by the low bits of the
+  hash already in each record, each with chunks of its own. A part read
+  back that is still too large is read a chunk at a time and split by
+  the next bits, so it never has to fit in memory whole. The price is a
+  copy: the records appended before the table spilled are copied once
+  into their partitions, and once more at each split.
+- **A filter checked with one read** (question 9). A join may check its
+  rows against a Bloom filter of the table's keys first. Each key sets
+  four bits of the filter, and all four lie in the same word of 64
+  bits, so checking a row reads one word. The price is 16 bits a record
+  at least, and the rows that pass falsely, about one in 200 at 16 bits,
+  which then probe the table as before.
+- **Marks beside the records** (question 10). A RIGHT or FULL join keeps
+  a bit for each record in words of its own and sets the bits of the
+  records its pairs matched, by an atomic OR in a shared table. The
+  records stay as they were written. The price is a bit a record, and
+  in a shared table the words of a full chunk for every chunk.
 - **Short chains.** The table has at least twice as many buckets as the
   records it was made for, and at least 1024. A grouping stops making
   records when they reach half the buckets. The price is the buckets: 8
@@ -615,6 +644,15 @@ bucket, so that the table's code keeps one order only.
 
 ## Partitions: a table that spills
 
+A caller is given a limit of memory, and its table may pass it. The
+caller then keeps the records in **partitions**, writes whole chunks of
+some of them to disk, and reads them back once its input is done. When
+it spills, and how it writes a chunk, is the caller's: Tessera's nodes
+do it as [Partitions: a table that
+spills](../hash-table/design.md#partitions-a-table-that-spills) in the
+design of `hash-table` tells. The crate sorts the records into
+partitions.
+
 The partition of a record is taken from the low bits of its hash: with
 4 partitions, the two lowest bits. A partition read back that is still
 too large is split again by the next bits up. The rule, with its
@@ -639,22 +677,25 @@ the high bits, every record of a partition would share them, and all
 of them would fall into a few buckets.
 
 A split is not limited to two levels. Each split makes a **level**: its
-partitions take the bits just above those of the level it splits. A
-node makes 4 to 1024 partitions a level, so a level takes 2 to 10 bits.
-A partition of any level splits again when it is still too large, as
-long as two of the hash's 32 bits are left, so the levels can go on to
-the length of the hash. Each level divides a partition's records among
-its partitions, so a few levels are enough even for a table far larger
+partitions take the bits just above those of the level it splits, at a
+larger shift. A level has at most 65536 partitions, `MAX_PARTITIONS`;
+Tessera's nodes make 4 to 1024, so a level takes 2 to 10 bits. A
+partition of any level splits again when it is still too large, as long
+as bits of the hash are left, so the levels can go on to the length of
+the hash. Each level divides a partition's records among its
+partitions, so a few levels are enough even for a table far larger
 than the memory. What no split helps is many rows of one key: they
-share the whole hash, and every level puts them in one partition.
-"A partition too large for memory" below says what the nodes do then.
+share the whole hash, and every level puts them in one partition. [A
+partition too large for
+memory](../hash-table/design.md#a-partition-too-large-for-memory) in
+the design of `hash-table` says what Tessera's nodes do then.
 
-A partition is a list of chunks. Each call that works by partition gets
-one chunk number for each partition: the chunk that partition appends
-to now.
+A partition is a list of chunks. Each call that works by partition
+takes a `Partitions`: the shift of its level, and one chunk number for
+each partition, the chunk that partition appends to now.
 
 ```
- partition   its chunks                       partition_chunks
+ partition   its chunks                       Partitions::chunks
      0       chunk 4 (on disk), chunk 9          9
      1       chunk 5                             5
      2       none yet                            1  (the empty chunk)
@@ -670,13 +711,29 @@ ever written to the empty chunk, so any number of partitions may name
 the same one.
 
 When a row's chunk has no room, the call does not stop. It leaves that
-row in its mask of pending rows, the rows it did not place, and goes on
-with the next ones, so one full partition does not hold up the others.
-The node then gives each partition with a pending row a new chunk and
-calls again for the pending rows. The calls by partition need no index.
-When the table has one, as a grouping's has, they check that the
-records they write have its keys and its payload, as an append does,
-and refuse others.
+row in the batch's mask of pending rows, the rows it did not place, and
+goes on with the next ones, so one full partition does not hold up the
+others. The caller then gives each partition with a pending row a new
+chunk and calls again for the pending rows.
+
+Three calls work by partition.
+
+- `ChunkWriter::append_partitioned_columns` appends the rows of a batch,
+  each to its partition, with the payload taken from columns. It counts
+  in an `Appended` the rows of each partition and the columns that held
+  a NULL, so that the caller knows how much each partition holds. As
+  every call of a chunk writer, it needs no index and links nothing.
+- `ChunkWriter::split` copies the records of one chunk, from a byte on,
+  each to its partition, and gives the reference and the hash of each
+  copy. It stops at a partition whose chunk has no room and names it in
+  `Split::full`. A join moves its table into partitions so, a chunk at a
+  time, and a partition read back is split into a level below the same
+  way.
+- `TableMut::find_or_insert_partitioned` finds or makes the record of
+  each row's keys as `find_or_insert` does, over one index for the
+  chunks of every partition in memory, but writes a new record to the
+  chunk of its row's partition. A grouping that spills finds its groups
+  so.
 
 ## The Bloom filter of the keys
 
@@ -689,7 +746,7 @@ all set has no key in the table. A row whose bits are all set may still
 have none, a false pass, and then probes the table as it would anyway.
 
 A plain Bloom filter sets its bits anywhere in the array, so a check
-reads several places, each a possible wait. Tessera's filter is
+reads several places, each a possible wait. The crate's filter is
 *blocked*: the four bits of a key lie in one word of 64 bits, so a
 check is one read and one comparison. The rule is in [A Bloom filter of
 the keys](spec.md#requirement-a-bloom-filter-of-the-keys); here it is
@@ -738,16 +795,20 @@ to a power of two adds bits, and fewer pass. The size and the measured
 bound are in [The size of a Bloom
 filter](spec.md#requirement-the-size-of-a-bloom-filter).
 
-The join uses a filter in three ways. When it wants one, and whether it
-is worth its cost, the join decides by its own rows.
+A filter is filled in three ways, for three kinds of table. Whether a
+filter is worth its cost is the caller's to decide: Tessera's join
+decides by its own rows, as [The Bloom filter of the
+keys](../hash-table/design.md#the-bloom-filter-of-the-keys) in the
+design of `hash-table` tells.
 
-- **A table of one process.** After the build, `tess_table_bloom` fills
-  a filter from every record of the chunks, and `tess_bloom_probe`
-  checks each batch before the probe.
-- **A shared table.** The filter is shared too, behind a state word.
-  Each participant decides by its own rows whether it wants the filter,
-  and the first that does builds it alone; the others go on without it
-  until it is ready. Nobody waits.
+- **A table of one process.** Once the appends are done, `Table::bloom`
+  clears a filter and sets the bits of every record of the chunks,
+  linked or not, and `bloom::probe` narrows the rows of each batch
+  before the table's probe.
+- **A shared table.** The filter is shared too, a `SharedFilter` behind
+  a state word. Each participant decides whether it wants the filter,
+  and the first whose `Table::try_build_bloom` takes it builds it alone;
+  the others go on without it until it is ready. Nobody waits.
 
   ```
    none ──first participant's compare-and-swap──► building
@@ -760,21 +821,18 @@ is worth its cost, the join decides by its own rows.
   ```
 
   The acquire read of ready makes every bit the builder set visible, as
-  the read of a bucket makes a record visible. The participant that
-  makes the index allocates the filter's words with the table, 16 to 32
-  bits a record of the query's shared memory, but only when a
-  participant may want them: at the default rule, for a table of 4096
-  records at least, since a smaller one stays in the cache, where a miss
-  costs less than the check.
+  the read of a bucket makes a record visible. `bloom::probe_shared`
+  refuses a filter that is not ready.
 - **A table that spills.** A filter of every row of the build side is
   filled as the rows come, before some of them go to disk: by
-  `tess_bloom_add` in one process, or by every participant at once by
-  `tess_bloom_add_atomic`, which sets the bits of a word by an atomic
-  OR. Rows of the probe side that it rejects have no pair in any
-  partition, and are dropped before they are written to disk. A
-  barrier orders every addition before the first check. This filter is
-  sized within an eighth of the node's memory: it lets more rows through
-  when it is small, but leaves the memory to the rows.
+  `bloom::add` in one process, or by every participant at once by
+  `bloom::add_atomic`, which sets the bits of a word by an atomic OR.
+  Rows of the probe side that it rejects have no pair in any partition,
+  and are dropped before they are written to disk. The caller orders
+  every addition before the first check, by a barrier.
+  `bloom::words_within` sizes such a filter within an eighth of the
+  caller's memory: it lets more rows through when it is small, but
+  leaves the memory to the rows.
 
 The loom model checks the shared filter as it checks the buckets: two
 participants race to build it and one does, and a participant that
@@ -783,10 +841,10 @@ relaxed lets a reader see a filter not yet filled, and an addition by a
 plain read and write in place of the atomic OR loses bits.
 
 The calls check the count of a filter's words and of a batch's rows.
-The words of a filter in one process are an array of the C API like any
-other, whose alignment the C type already requires; the calls over a
-shared filter, or one filled together, check that the words are aligned
-to 8, since they read them as atomic words.
+The words of a filter in one process are a slice, aligned as its type
+requires; the calls over a shared filter, or one filled together, take
+a pointer and check that the words are aligned to 8, since they read
+them as atomic words.
 
 ## The marks of a RIGHT or FULL join
 
@@ -796,17 +854,22 @@ matched come out after the probe side, with NULL for its columns. The
 join must therefore know which records found a pair. It keeps a **mark**
 for each record, one bit, in words of its own beside the chunks: a run
 of words for each chunk, bit `i` of word `w` for the chunk's record
-`64 w + i`. The layout is drawn in [The marks of RIGHT and FULL
+`64 w + i`, `mark_words` words for a chunk. The layout is drawn in [The
+marks of RIGHT and FULL
 joins](spec.md#requirement-the-marks-of-right-and-full-joins).
 With records of 32 bytes, the reference 131353 names chunk 1, byte
 2248; that is the chunk's record (2248 - 8) / 32 = 70, so its mark is
 bit 6 of word 1 of chunk 1's run.
 
+The words are the caller's, and the crate reaches them through
+`Marks`, a trait the caller implements: `set` sets a bit of a word of
+a chunk's run, and `word` reads a word.
+
 ```
  probe:   a pair passes the join's conditions
-            └─► tess_table_mark: the bit of the pair's record is set
+            └─► Table::mark: the bit of the pair's record is set
  then:    the probe side is done
-            └─► tess_table_next_unmarked: the records whose bits are
+            └─► Table::scan_unmarked: the records whose bits are
                 clear, a batch at a time, from a cursor; a count of 0
                 ends the walk
 ```
@@ -814,18 +877,17 @@ bit 6 of word 1 of chunk 1's run.
 The marks are not kept in the records. The records are read by every
 participant while they probe, and stay as they were written. The walk
 reads the marks of 64 records in one word, and reads no record whose
-bit is set. The walk needs only the chunks, so the calls take the size
-of a record from the caller and check it against the index when the
-table has one.
+bit is set. The walk needs only the chunks, so `mark` and
+`scan_unmarked` take the size of a record from the caller, and
+`Table::mark` and `Table::scan_unmarked` take the table's.
 
-In a shared table the marks lie in shared memory, a run sized for the
-largest chunk for every chunk, and two participants may mark records of
-one word at the same time; each word is changed by an atomic OR, so no
-mark is lost. The last participant to leave the table walks the records
-without a mark. The barrier it leaves through orders the marks of every
-other participant before its walk. The loom model marks records of one
-word from two participants, and a negative test shows that a plain read
-and write loses marks.
+In a shared table the marks lie in shared memory, and two participants
+may mark records of one word at the same time. `Marks::set` takes
+`&self` for this: the caller's marks change each word by an atomic OR,
+so no mark is lost. The walk comes after every mark, which the caller
+orders, by a barrier. The loom model marks records of one word from two
+participants, and a negative test shows that a plain read and write
+loses marks.
 
 ## What we decided not to do
 
@@ -904,13 +966,16 @@ and write loses marks.
   every call, with damaged headers, chunks, references and chains, over
   keys of their own; they also run under Miri, at smaller sizes.
 - The unit tests in `crates/relhash/src/table/tests.rs`: blocks that
-  are not chunks or an index.
+  are not chunks or an index, partitions, merges, and a shared filter
+  that threads race to build.
 - The unit tests in `crates/relhash/src/table/marks.rs`: the
   words of the marks, and the records and cursors a walk refuses.
 - `crates/relhash/src/table/loom/`, run by `make rust-loom`: links into
-  one bucket by several participants, and a probe beside a link, with
-  the negative tests of the orders.
+  one bucket by several participants, a probe beside a link, a shared
+  filter built and read, and a filter and marks set by several
+  participants, with the negative tests of the orders.
 - `crates/tessera-capi/tests/table.rs` and `test/sql/table.sql`: the
   calls through Tessera's C API.
 - The benchmarks `table_int32` and `table_large` of `tessera-bench`
-  count the instructions and cycles of append, probe and find-or-insert.
+  count the instructions and cycles of append, probe and find-or-insert;
+  `table_large` also those of the Bloom filter's check.

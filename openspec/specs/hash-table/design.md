@@ -8,16 +8,18 @@ up, how it grows, and how several processes use one table at once, is
 explained in the design of [relhash](../relhash/design.md), and its
 rules are in the spec of [relhash](../relhash/spec.md). That design
 also explains the words used below: index, chunk, record, reference,
-append, link, probe, one writer and participant.
+append, link, probe, one writer and participant, and what the crate
+gives a caller to keep beside the table: partitions and their levels,
+a Bloom filter of the keys, and the marks of a RIGHT or FULL join.
 
 This page explains what Tessera builds around the table. First how the
 nodes use it: how they size it, how the keys of each SQL type and the
 values longer than a word go in, the limit of memory, and what a call
-checks. Then what a join and a grouping keep beside the table:
-partitions when the table spills to disk, a Bloom filter of its keys,
-and the marks of a RIGHT or FULL join. Last, it explains how the
-processes of a parallel join build one table together, step by step,
-and agree on which of its partitions go to disk. The exact bytes,
+checks. Then how a join and a grouping use partitions when the table
+spills to disk, a Bloom filter of its keys, and the marks of a RIGHT or
+FULL join. Last, it explains how the processes of a parallel join build
+one table together, step by step, and agree on which of its partitions
+go to disk. The exact bytes,
 limits and errors are written once, in the spec, [spec.md](spec.md)
 next to this page. Where this page leans on a rule of the spec, it
 links to the requirement that states it. What a join or a grouping
@@ -26,20 +28,17 @@ does with the table is described with those nodes.
 ## The problem
 
 The table answers the questions every table of a database engine
-meets, as the design of `relhash` shows. Tessera's nodes add four of
-their own.
+meets, as the design of `relhash` shows: among them how it sorts its
+records into partitions, how a row without a pair is dropped cheaply,
+and where a join keeps the records that found a pair. Tessera's nodes
+add two of their own.
 
-1. A table may not fit in the memory a node is given. The node then
-   writes some records to disk and reads them back later, a part at a
-   time, and a part read back may still be too large. How does the
-   table sort its records into such parts?
-2. In many joins most rows of the probe side find no pair, and each
-   still costs a read of its bucket, a wait for memory on a large table.
-   How can such a row be dropped without reading the table?
-3. A RIGHT or FULL join also returns the records that no row matched.
-   The records are shared and read by every process. Where does the
-   join keep which records found a pair?
-4. In a parallel join every process builds a share of one table, and
+1. A table may not fit in the memory a node is given. The table sorts
+   its records into partitions, but a node must choose how many a level
+   gets, which go to disk, and what to do with a part read back that is
+   still too large. How does each node choose, without a rule of its
+   own?
+2. In a parallel join every process builds a share of one table, and
    the table may spill. Between the steps of the build all of them
    must wait for each other, and a wait in PostgreSQL may raise an
    error, which must not pass through Rust code. How do the processes
@@ -53,25 +52,13 @@ price is written next to it. The numbers were measured on the
 developer's machine, an Apple M5 Pro; the target platform is Linux on
 x86-64, where they have not been measured yet.
 
-- **Parts by the low bits of the hash** (question 1). A table that
-  spills keeps its records in partitions, chosen by the low bits of the
-  hash already in each record, each with chunks of its own. A part read
-  back that is still too large is read a chunk at a time and split by
-  the next bits, so it never has to fit in memory whole. The price is a
-  copy: the records built before the table spilled are copied once into
-  their partitions, and once more at each split.
-- **A filter checked with one read** (question 2). A join may check its
-  rows against a Bloom filter of the table's keys first. Each key sets
-  four bits of the filter, and all four lie in the same word of 64
-  bits, so checking a row reads one word. The price is 16 bits a record
-  at least, and the rows that pass falsely, about one in 200 at 16 bits,
-  which then probe the table as before.
-- **Marks beside the records** (question 3). A RIGHT or FULL join keeps
-  a bit for each record in words of its own and sets the bits of the
-  records its pairs matched, by an atomic OR in a shared table. The
-  records stay as they were written. The price is a bit a record, and
-  in a shared table the words of a full chunk for every chunk.
-- **Steps that never wait** (question 4). A participant of a shared
+- **One rule for every node** (question 1). A node plans a level before
+  it fills it, by one rule with parameters of its own, and sends
+  partitions to disk by one rule with weights. A partition read back
+  that is still too large splits into a level below, or a join takes it
+  in pieces. The price is a copy at each split, and parameters that
+  each node must set.
+- **Steps that never wait** (question 2). A participant of a shared
   build is a small state machine of the table's C API. Each call
   returns the next action, such as build, wait, link or probe; the node
   does it, waits included, and passes what the wait returned to the
@@ -204,7 +191,8 @@ bytes last. Every call does four kinds of check.
   [The index of a
   table](../relhash/spec.md#requirement-the-index-of-a-table) lists
   them. The calls that append to chunks before an index exists
-  have no header to check.
+  have no header to check. What makes a table damaged is in [A damaged
+  table](../relhash/spec.md#requirement-a-damaged-table).
 - **A chunk, when the call starts on it.** A call that writes or walks
   a chunk first checks that it is aligned and of a length a chunk may
   have; a chunk longer than 1 MiB would hold places that no reference
@@ -242,7 +230,8 @@ and the query ends.
 These errors mean a bug in Tessera or in its caller, not bad data from
 a user or from a disk, so they are internal errors; the status and its
 SQLSTATE are in
-[Errors of a call](spec.md#requirement-errors-of-a-call). The C node
+[The status of an error](spec.md#requirement-the-status-of-an-error).
+The C node
 raises the error with `ereport` after the call returns, because a
 PostgreSQL error must not unwind through Rust code.
 
@@ -252,10 +241,13 @@ PostgreSQL error must not unwind through Rust code.
 A node is given a limit of memory. When its table would pass the limit,
 the node keeps the records in **partitions** and writes whole chunks of
 some partitions to disk, to read them back once its input is done. How
-a chunk is written to disk is in
-[spill-format](../spill-format/design.md); when a node spills is the
-node's. This section is about how the table sorts its records into
-partitions, and how many partitions a level gets.
+the table sorts its records into partitions, by the low bits of the
+hash and a level at a time, is in [Partitions: a table that
+spills](../relhash/design.md#partitions-a-table-that-spills) in the
+design of `relhash`. How a chunk is written to disk is in
+[spill-format](../spill-format/design.md). This section is about how a
+join and a grouping use partitions, and how many partitions a level
+gets.
 
 A join and a grouping use partitions in different ways.
 
@@ -419,7 +411,50 @@ A grouping needs no pieces. A group is one record however many rows it
 had, so a partition is as large as its groups, and its groups decide
 whether it splits.
 
+## The Bloom filter of the keys
+
+A join may check the rows of its probe side against a Bloom filter of
+the table's keys before it probes, so that a row without a pair costs
+the read of a word, not a wait for its bucket. How the filter is built
+and checked is in [The Bloom filter of the
+keys](../relhash/design.md#the-bloom-filter-of-the-keys) in the design
+of `relhash`. When it wants a filter, and whether it is worth its cost,
+the join decides by its own rows. It uses one in three ways.
+
+- **A table of one process.** After the build, `tess_table_bloom` fills
+  a filter from every record of the chunks, and `tess_bloom_probe`
+  checks each batch before the probe.
+- **A shared table.** The participant that makes the index allocates
+  the filter's words with the table, 16 to 32 bits a record of the
+  query's shared memory, but only when a participant may want them: at
+  the default rule, for a table of 4096 records at least, since a
+  smaller one stays in the cache, where a miss costs less than the
+  check. Each participant decides by its own rows whether it wants the
+  filter, and the first that does builds it with
+  `tess_table_try_build_bloom`; the others go on without it until it is
+  ready.
+- **A table that spills.** A filter of every row of the build side is
+  filled as the rows come, before some of them go to disk: by
+  `tess_bloom_add` in one process, or by every participant at once by
+  `tess_bloom_add_atomic`. Rows of the probe side that it rejects have
+  no pair in any partition, and are dropped before they are written to
+  disk. A barrier orders every addition before the first check. This
+  filter is sized within an eighth of the node's memory.
+
 ## The marks of a RIGHT or FULL join
+
+A RIGHT or FULL join marks each record of its table that a pair
+matched, with `tess_table_mark`, and after the probe side walks the
+records without a mark, with `tess_table_next_unmarked`. [The marks of
+a RIGHT or FULL
+join](../relhash/design.md#the-marks-of-a-right-or-full-join) in the
+design of `relhash` explains the marks. The C calls take the size of a
+record, and check it against the index when the table has one. In a
+shared table the marks lie in shared memory, a run sized for the
+largest chunk for every chunk, changed by an atomic OR. The last
+participant to leave the table walks the records without a mark. The
+barrier it leaves through orders the marks of every other participant
+before its walk.
 
 A participant may leave before its share of the outer side is done:
 under the core's `Gather` with a `LIMIT`, a worker stops once it has
