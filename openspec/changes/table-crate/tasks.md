@@ -323,8 +323,13 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       tasks of that change
 - [ ] 4.3 Set this change's spec on top of the moved requirements: an
       entry removes "A damaged table" of `relhash`, the part of "Errors
-      of a call" that moved, which "Errors of two kinds" replaces.
-      Check:
+      of a call" that moved, which "Errors of two kinds" replaces. Split
+      each requirement of more than three scenarios, as
+      `openspec/config.yaml` asks: "The C API over the crate" into the
+      map of C calls to `relhash` and what only C does, which takes the
+      clauses about C that scenarios of `relhash` still hold; "The marks
+      of RIGHT and FULL joins" into marking and the walk; "Calls of one
+      writer" by its calls. Check:
       `openspec validate table-crate --strict`;
       `.github/scripts/check-specs.sh`
 
