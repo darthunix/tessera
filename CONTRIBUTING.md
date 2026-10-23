@@ -148,12 +148,14 @@ the findings, and what is left.
   public API of a crate of the workspace meant for use outside Tessera,
   one with `publish = true` in its `Cargo.toml`. Internal names and
   steps go to `design.md`.
-- One promise in a requirement. The rules of a format (its fields,
-  codes, widths and limits), the drawings of its layouts, the lists of
-  what is supported and the error codes are written once, in the spec.
-  A design explains the idea, with a picture of the whole or an
-  example, and points to the spec for a rule or a layout; it does not
-  repeat them.
+- One topic in a requirement, the promises of one call or of one part
+  of a format, with one to five scenarios: a spec reads as a few dozen
+  requirements, not a list of every promise. The rules of a format
+  (its fields, codes, widths and limits), the drawings of its layouts,
+  the lists of what is supported and the error codes are written once,
+  in the spec. A design explains the idea, with a picture of the whole
+  or an example, and points to the spec for a rule or a layout; it
+  does not repeat them.
 - The documentation of a crate meant for use outside Tessera is a map
   of its API for a caller: what each item is for, what it takes and
   gives, who owns what and for how long, its safety duties and the kind
