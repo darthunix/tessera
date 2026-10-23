@@ -334,7 +334,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 
 ## 5. The documentation
 
-- [ ] 5.1 Write the crate's README as the page of its documentation:
+- [x] 5.1 Write the crate's README as the page of its documentation:
       what the table is for, an example without Tessera over the owning
       table, the caller's promises in a line with a link, the advice to
       build with LTO and to use a hash with a secret seed for keys from
