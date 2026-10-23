@@ -1,67 +1,50 @@
 # hash-table: how it is built
 
 A hash join and a grouping both need to find rows by a key fast.
-Tessera keeps such rows in a hash table of its own. The table is
-written in Rust, in the kernels, and the nodes in C call it through
-`tessera/table.h`.
+Tessera keeps such rows in the hash table of the crate `relhash`, and
+its nodes in C call it through `tessera/table.h`. The table itself,
+what it is made of, how a batch of rows goes in and how it is looked
+up, how it grows, and how several processes use one table at once, is
+explained in the design of [relhash](../relhash/design.md), and its
+rules are in the spec of [relhash](../relhash/spec.md). That design
+also explains the words used below: index, chunk, record, reference,
+append, link, probe, one writer and participant.
 
-This page explains what the table is made of, how a batch of rows goes
-in and how it is looked up, how the table grows, and how several
-processes use one table at once. It then explains what a join and a
-grouping keep beside the table: partitions when the table spills to
-disk, a Bloom filter of its keys, and the marks of a RIGHT or FULL
-join. Last, it explains how the processes of a parallel join build one
-table together, step by step, and agree on which of its partitions go
-to disk. The exact bytes, limits and errors are written once, in the
-table's spec, [spec.md](spec.md) next to this page. Where this page
-leans on a rule of the spec, it links to the requirement that states
-it. What a join or a grouping does with the table is described with
-those nodes.
+This page explains what Tessera builds around the table. First how the
+nodes use it: how they size it, how the keys of each SQL type and the
+values longer than a word go in, the limit of memory, and what a call
+checks. Then what a join and a grouping keep beside the table:
+partitions when the table spills to disk, a Bloom filter of its keys,
+and the marks of a RIGHT or FULL join. Last, it explains how the
+processes of a parallel join build one table together, step by step,
+and agree on which of its partitions go to disk. The exact bytes,
+limits and errors are written once, in the spec, [spec.md](spec.md)
+next to this page. Where this page leans on a rule of the spec, it
+links to the requirement that states it. What a join or a grouping
+does with the table is described with those nodes.
 
 ## The problem
 
-A table in a database engine has to answer some hard questions. These
-are the ones Tessera's table answers.
+The table answers the questions every table of a database engine
+meets, as the design of `relhash` shows. Tessera's nodes add four of
+their own.
 
-1. A plan that runs in one process keeps a node's memory in a
-   PostgreSQL memory context. A parallel hash join keeps the build side
-   in dynamic shared memory, which every process maps at an address of
-   its own. An address that one process stores means nothing to
-   another. How can one table, and one code, serve both?
-2. The planner guesses how many rows will come, and the guess can be
-   wrong by a hundred times. How does the table grow without copying its
-   records, and without holding an old and a new copy at once?
-3. In a parallel join several processes put rows into one table at the
-   same time. How do they do it without a lock? How does a process that
-   finds a record know that the record is whole?
-4. The table's memory is bytes that a node hands over. A wrong call or a
-   bug elsewhere may leave wrong bytes there. How does the table avoid a
-   crash of the server, or a loop that never ends?
-5. A join needs every record of a key. A grouping needs exactly one
-   record of a key, made the first time the key comes. How does one
-   table serve both?
-6. A table larger than the processor's caches makes almost every look
-   at a record a wait for memory. How can a batch of lookups hide these
-   waits?
-7. Rust code must not raise a PostgreSQL error, and memory it allocated
-   would be memory PostgreSQL does not count. How does a call say "this
-   chunk is full" or "the buckets are too few"?
-8. A table may not fit in the memory a node is given. The node then
+1. A table may not fit in the memory a node is given. The node then
    writes some records to disk and reads them back later, a part at a
    time, and a part read back may still be too large. How does the
    table sort its records into such parts?
-9. In many joins most rows of the probe side find no pair, and each
+2. In many joins most rows of the probe side find no pair, and each
    still costs a read of its bucket, a wait for memory on a large table.
    How can such a row be dropped without reading the table?
-10. A RIGHT or FULL join also returns the records that no row matched.
-    The records are shared and read by every process. Where does the
-    join keep which records found a pair?
-11. In a parallel join every process builds a share of one table, and
-    the table may spill. Between the steps of the build all of them
-    must wait for each other, and a wait in PostgreSQL may raise an
-    error, which must not pass through Rust code. How do the processes
-    keep in step, and agree on what goes to disk, when no one of them
-    leads?
+3. A RIGHT or FULL join also returns the records that no row matched.
+   The records are shared and read by every process. Where does the
+   join keep which records found a pair?
+4. In a parallel join every process builds a share of one table, and
+   the table may spill. Between the steps of the build all of them
+   must wait for each other, and a wait in PostgreSQL may raise an
+   error, which must not pass through Rust code. How do the processes
+   keep in step, and agree on what goes to disk, when no one of them
+   leads?
 
 ## Goals and what they cost
 
@@ -70,86 +53,25 @@ price is written next to it. The numbers were measured on the
 developer's machine, an Apple M5 Pro; the target platform is Linux on
 x86-64, where they have not been measured yet.
 
-- **No address inside the table** (question 1). The caller allocates
-  every block of the table and hands the blocks to each call. A record
-  is found by a *reference*: the number of its block and its place in
-  the block, 32 bits in all. A process turns a reference into an address
-  through its own list of the blocks. The same bytes then mean the same
-  in every process. The price is one more read per record, of the
-  block's address from that list, which is almost always in the
-  processor's fastest cache.
-- **Records never move** (question 2). Records lie in blocks called
-  chunks. When a chunk is full, the caller adds another. The buckets
-  are made for a number of records, the table's capacity. A grouping
-  that meets more groups than the planner expected fills its buckets:
-  when its records reach half the buckets, the chains would start to
-  grow long. Then only the array of buckets is made anew, larger, over
-  the same chunks (see "One writer"). A join never needs this, since it
-  makes its buckets once, when it knows how many rows it has. The
-  price, against an older form of the table that kept everything in one
-  block and copied it to grow: about 6 to 7 percent more instructions
-  for a lookup in cache, 22 to 30 percent more for an insertion, and 2
-  to 4 percent more time for a join in SQL. The gain: under an estimate
-  200 times too low, a join used 13 to 34 percent less memory, since
-  nothing is ever held twice.
-- **No lock** (question 3). A process writes records only into chunks
-  of its own. It then makes each record visible with one atomic
-  compare-and-swap on the record's bucket. A process that reads the
-  bucket with the matching memory order sees the whole record. The same
-  code runs in a plan of one process, where the compare-and-swap never
-  fails. Its price there was measured too, and it was not the main cost
-  of an insertion.
-- **Wrong bytes are an error, not a crash** (question 4). Every call
-  checks the whole header of the table. Every reference is checked
-  against its chunk before it is followed. A walk down a chain takes at
-  most as many steps as the table has records, so a chain that loops is
-  found. The price is a fixed part of every call, a few hundred
-  instructions, and one comparison per step.
-- **Two ways to put a row in** (question 5). A join *appends* rows,
-  and equal keys make separate records. A grouping asks to *find or
-  insert*: each row gets the one record of its key, which is made when
-  missing.
-- **Lookups by batch** (question 6). One call looks up all the rows of
-  a batch. When enough rows are selected, the call goes step by step
-  over all of them together: it reads every row's bucket, then every
-  row's first record, and so on, asking the processor to fetch the next
-  memory early. The waits of different rows then overlap. On a table far
-  larger than the caches a lookup that finds its key went from about 75
-  to about 38 processor cycles a row. On a table that fits in the
-  fastest cache it costs about half as much again as a lookup of one
-  row at a time. That price was accepted: the tables of real joins are
-  larger than the cache.
-- **Nothing kept, nothing raised** (question 7). Rust keeps nothing
-  between calls, and the table's memory is all the caller's. A call
-  allocates nothing but the text of an error; the list of the columns of
-  a payload, up to 2048 of them, is kept on the stack. A row that does
-  not fit stays in the call's mask of rows still to place; the caller
-  adds a chunk, or makes a larger index, and calls again. Every error is
-  a status that the call returns, and the caller raises it as a
-  PostgreSQL error after the call.
-- **Short chains.** The table has at least twice as many buckets as the
-  records it was made for, and at least 1024. A grouping stops making
-  records when they reach half the buckets. The price is the buckets: 8
-  bytes for each record the table was made for.
-- **Parts by the low bits of the hash** (question 8). A table that
+- **Parts by the low bits of the hash** (question 1). A table that
   spills keeps its records in partitions, chosen by the low bits of the
   hash already in each record, each with chunks of its own. A part read
   back that is still too large is read a chunk at a time and split by
   the next bits, so it never has to fit in memory whole. The price is a
   copy: the records built before the table spilled are copied once into
   their partitions, and once more at each split.
-- **A filter checked with one read** (question 9). A join may check its
+- **A filter checked with one read** (question 2). A join may check its
   rows against a Bloom filter of the table's keys first. Each key sets
   four bits of the filter, and all four lie in the same word of 64
   bits, so checking a row reads one word. The price is 16 bits a record
   at least, and the rows that pass falsely, about one in 200 at 16 bits,
   which then probe the table as before.
-- **Marks beside the records** (question 10). A RIGHT or FULL join keeps
+- **Marks beside the records** (question 3). A RIGHT or FULL join keeps
   a bit for each record in words of its own and sets the bits of the
   records its pairs matched, by an atomic OR in a shared table. The
   records stay as they were written. The price is a bit a record, and
   in a shared table the words of a full chunk for every chunk.
-- **Steps that never wait** (question 11). A participant of a shared
+- **Steps that never wait** (question 4). A participant of a shared
   build is a small state machine of the table's C API. Each call
   returns the next action, such as build, wait, link or probe; the node
   does it, waits included, and passes what the wait returned to the
@@ -159,17 +81,16 @@ x86-64, where they have not been measured yet.
   change a word decides for all. The price is a call for each step,
   and a loop in the node that must follow the actions in their order.
 
-## The index
+## How the nodes size a table
 
 The nodes size the index in different ways. A join in one process
 appends its whole inner side first and then makes the index for exactly
 the rows it got. A grouping makes its index for the planner's estimate
 of the groups, no larger than its memory allows, and moves to a larger
-one when its records reach half the buckets (see "One writer"). A
-parallel join makes the index once, after all processes have appended
-(see "Putting rows in").
-
-## Chunks and records
+one when its records reach half the buckets (see [One
+writer](../relhash/design.md#one-writer)). A parallel join makes the
+index once, after all processes have appended (see [Putting rows
+in](../relhash/design.md#putting-rows-in-append-then-link)).
 
 The nodes make the first chunk of a table small, 64 kB, so that a
 table of a few rows takes little memory. Later chunks are larger: an
@@ -177,35 +98,6 @@ eighth of the node's memory limit, but at most 1 MiB, the limit of a
 chunk. A node may also pass a chunk of 8 bytes, its used mark alone,
 where it has no chunk to give for a number: nothing fits in it, so
 nothing is ever written there.
-
-### Values longer than a word
-
-All records of a table have one size, so a record cannot hold a value
-whose length varies, such as a string. A key never needs to: a key of
-such a type goes in as a number of 64 bits (see "Keys of each SQL
-type"). A
-payload keeps such a value outside the table. The node copies the
-value's bytes into blocks of its own, its **chunks of values**, and the
-payload's word for that column holds a reference to the copy: the
-number of the chunk of values plus one, and the byte where the copy
-starts. To the table this word is 8 bytes like any other. The spill
-format writes the same words to disk and defines them, in [A reference
-to a by-reference
-value](../spill-format/spec.md#requirement-a-reference-to-a-by-reference-value).
-
-```
- a record of a join on id that keeps the columns amount and name
- ┌────────┬────────┬───────────┬────────┬──────────────────┐
- │ header │ key    │ NULL bits │ amount │ name             │
- │        │ id: 42 │ of amount │ 1500   │ chunk of values  │
- │        │        │ and name  │        │ 0, byte 64       │
- └────────┴────────┴───────────┴────────┴────────┬─────────┘
-                                                 │
- chunk of values 0, the node's own memory        ▼ byte 64
- ┌───────────────────────────────────────────┬─────────┬───────┐
- │ other values                              │ 'Smith' │ free  │
- └───────────────────────────────────────────┴─────────┴───────┘
-```
 
 ## Keys of each SQL type
 
@@ -255,13 +147,44 @@ numbers with one function. Some types whose values would fit in a
 word, such as `time`, still take the second form: only the types the
 spec lists go in as their value.
 
-## References
+## Values longer than a word
 
-A node keeps its tables far from that limit. A join or a grouping
-sends rows to disk when its memory reaches `hash_mem`, and a sort when
-it reaches `work_mem`; none of them counts its chunks. Each takes its
-limit through `tess_table_memory_limit`, which keeps it at most 16 GiB,
-half of what the chunks can hold, so that the node sends rows to disk
+All records of a table have one size, so a record cannot hold a value
+whose length varies, such as a string. A key never needs to: a key of
+such a type goes in as a number of 64 bits (see "Keys of each SQL
+type"). A payload keeps such a value outside the table. The node copies the
+value's bytes into blocks of its own, its **chunks of values**, and the
+payload's word for that column holds a reference to the copy: the
+number of the chunk of values plus one, and the byte where the copy
+starts. To the table this word is 8 bytes like any other. The spill
+format writes the same words to disk and defines them, in [A reference
+to a by-reference
+value](../spill-format/spec.md#requirement-a-reference-to-a-by-reference-value).
+
+```
+ a record of a join on id that keeps the columns amount and name
+ ┌────────┬────────┬───────────┬────────┬──────────────────┐
+ │ header │ key    │ NULL bits │ amount │ name             │
+ │        │ id: 42 │ of amount │ 1500   │ chunk of values  │
+ │        │        │ and name  │        │ 0, byte 64       │
+ └────────┴────────┴───────────┴────────┴────────┬─────────┘
+                                                 │
+ chunk of values 0, the node's own memory        ▼ byte 64
+ ┌───────────────────────────────────────────┬─────────┬───────┐
+ │ other values                              │ 'Smith' │ free  │
+ └───────────────────────────────────────────┴─────────┴───────┘
+```
+
+## The limit of memory
+
+A reference of 32 bits sets the limit of a table: at most 32768
+chunks of 1 MiB, 32 GiB of records (see
+[References](../relhash/design.md#references)). A node keeps its tables
+far from that limit. A join or a grouping sends rows to disk when its
+memory reaches `hash_mem`, and a sort when it reaches `work_mem`; none
+of them counts its chunks. Each takes its limit through
+`tess_table_memory_limit`, which keeps it at most 16 GiB, half of what
+the chunks can hold, so that the node sends rows to disk
 long before its table would need a 32769th chunk, every participant's
 short first chunk included. A parallel join keeps the chunks of every
 participant in one table, so the limit bounds their sum, not each
@@ -278,8 +201,9 @@ bytes last. Every call does four kinds of check.
 
 - **The header, once a call.** The header's fields must agree with
   each other and with the length of the index, as
-  [The index of a table](spec.md#requirement-the-index-of-a-table)
-  lists them. The calls that append to chunks before an index exists
+  [The index of a
+  table](../relhash/spec.md#requirement-the-index-of-a-table) lists
+  them. The calls that append to chunks before an index exists
   have no header to check.
 - **A chunk, when the call starts on it.** A call that writes or walks
   a chunk first checks that it is aligned and of a length a chunk may
@@ -955,8 +879,10 @@ atomic it does:
 ```
 
 The orders of the link and the probe are those of [Calls at the same
-time](spec.md#requirement-calls-at-the-same-time), and "Several
-processes at once" above explains them.
+time](../relhash/spec.md#requirement-calls-at-the-same-time) in the
+spec of `relhash`, and [Several processes at
+once](../relhash/design.md#several-processes-at-once) in its design
+explains them.
 
 ## The words of a spill
 
@@ -1242,6 +1168,8 @@ How a spilled chunk of records is written to disk is in
 
 ## Files
 
+- `crates/relhash/src/table/`: the table itself, whose files the
+  design of [relhash](../relhash/design.md) lists
 - `crates/tessera-kernels/src/column_keys.rs`: the keys read from
   Tessera's columns
 - `crates/relhash/src/table/bloom.rs`: the Bloom filter, alone,
