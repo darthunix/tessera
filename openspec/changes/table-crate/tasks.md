@@ -382,9 +382,10 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `.github/scripts/check-specs.sh`
 - [ ] 7.2 The long fuzz run of one to two hours, on request, with no
       finding. Check: the run's log
-- [ ] 7.3 Archive the change, move its `contract.md` to
-      `openspec/specs/relhash/`, delete the folder the archive makes,
-      and put what is left into `openspec/roadmap.md`. Check:
+- [ ] 7.3 Archive the change, move its `contract.md` and its
+      `public-api.txt` to `openspec/specs/relhash/`, the latter's path
+      in CI with it, delete the folder the archive makes, and put what
+      is left into `openspec/roadmap.md`. Check:
       `openspec validate --all --strict`;
       `.github/scripts/check-specs.sh`
 - [ ] 7.4 Open the pull request that closes the change, into `main`.
