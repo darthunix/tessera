@@ -14,7 +14,7 @@
 
 ## 2. The designs
 
-- [ ] 2.1 Move the sections of `hash-table/design.md` that explain the
+- [x] 2.1 Move the sections of `hash-table/design.md` that explain the
       table itself to `relhash/design.md`, word for word. Check:
       `.github/scripts/check-specs.sh`
 - [ ] 2.2 Write `relhash/design.md` in the crate's terms, with its
