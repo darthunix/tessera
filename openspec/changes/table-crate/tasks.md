@@ -351,7 +351,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       `#![deny(missing_docs)]`. Check:
       `RUSTDOCFLAGS="-D warnings" cargo doc -p relhash --no-deps`;
       `.github/scripts/check-specs.sh`
-- [ ] 5.3 Add the build of the documentation and its examples to CI.
+- [x] 5.3 Add the build of the documentation and its examples to CI.
       Check: CI
 
 ## 6. The checks of the box

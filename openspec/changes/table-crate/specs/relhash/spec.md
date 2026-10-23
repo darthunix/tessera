@@ -38,12 +38,16 @@ every example in it SHALL run as a test.
 - **WHEN** the documentation of the crate is built with every warning
   an error, and with a lint that refuses a public item without a text
 - **THEN** it builds
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::RUSTDOCFLAGS="-D warnings" cargo doc
+  --locked -p relhash --no-deps`;
+  `crates/relhash/src/lib.rs::#![deny(missing_docs)]`
 
 #### Scenario: The examples run
 - **WHEN** the tests of the documentation run
 - **THEN** every example passes
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo test --locked -p relhash --doc`
 
 ### Requirement: The masks of rows
 A mask of rows SHALL say which rows of a batch a call works on, a bit a
