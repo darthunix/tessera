@@ -1,5 +1,22 @@
 # relhash: how it is built
 
+A hash join and a grouping both need to find rows by a key fast. The
+crate `relhash` is the hash table they keep such rows in. It is
+written in Rust, takes all its memory from its caller, and works the
+same in one process and in memory that several processes share.
+Tessera's C nodes call it through `tessera/table.h`.
+
+This page explains what the table is made of, how a batch of rows goes
+in and how it is looked up, how the table grows, and how several
+processes use one table at once. The exact bytes, limits and rules are
+written once, in the crate's spec, [spec.md](spec.md) next to this
+page. Where this page leans on a rule of the spec, it links to the
+requirement that states it. What Tessera keeps beside the table,
+partitions when it spills, a Bloom filter of its keys, the marks of a
+RIGHT or FULL join and the steps of a shared build, and what a call
+checks, are explained in the design of
+[hash-table](../hash-table/design.md).
+
 ## Background: keys, hashes, buckets, chains
 
 A **key** is the value a row is found by: in a join, the column of the
@@ -8,14 +25,17 @@ several columns.
 
 A **hash** is a number of 32 bits made from the key. Equal keys always
 have equal hashes. Different keys usually have different hashes, but
-not always.
+not always. The caller computes the hash; the table only uses it.
 
 The table keeps each column of a key in a word of 8 bytes and compares
-keys bit for bit; it gives a word no type. Tessera's key columns fill
-the words in two forms: an `int4`, widened to 8 bytes with its sign,
-and an `int8`. A key of another SQL type goes in in one of these two
-forms, either as its value or as a number that stands for it; "Keys of
-each SQL type" below tells which type goes which way and why.
+keys bit for bit; it gives a word no type. The caller fills the words
+through a **source of keys**, `KeySource`, a word of 64 rows at a
+time. Tessera's key columns fill them in two forms: an `int4`, widened
+to 8 bytes with its sign, and an `int8`. A key of another SQL type
+goes in in one of these two forms, either as its value or as a number
+that stands for it, as [Keys of each SQL
+type](../hash-table/design.md#keys-of-each-sql-type) in the design of
+`hash-table` tells.
 
 A hash table keeps an array of **buckets**. A row goes to the bucket
 that its hash picks. Rows whose hashes pick the same bucket are linked
@@ -41,16 +61,18 @@ does not look into the payload. A join keeps there the other columns of
 the row it will return. A grouping keeps there the states of its
 aggregates, such as a running sum.
 
-Tessera does not pass rows between nodes one at a time. A node gets a
-**batch**: up to 64 rows at once, kept by column. The table works on
-batches too: one call puts in, or looks up, all the rows of a batch.
+The table works on **batches**: one call puts in, or looks up, all the
+rows of a batch, kept by column: a hash for every row, the source of
+its keys, and a mask of the rows to work on. Tessera passes rows
+between its nodes in batches of up to 64.
 
 A **mask** says which rows of a batch a call works on: one bit for each
 row, 1 for a row the call takes and 0 for a row it leaves alone. The
 bits are kept in words of 64 bits, row `r` in bit `r % 64` of word
-`r / 64`, so a batch of 64 rows has a mask of one word. In C a mask is
-a `TessRowMask` of `tessera/row_mask.h`: the number of rows and the
-address of the words.
+`r / 64`, so a batch of 64 rows has a mask of one word. In the crate a
+mask is a `RowMask`, whose words a call may change, or a
+`RowMaskView`, whose words it only reads: the number of rows and the
+words.
 
 ```
  row    0   1   2   3   4   5   …  63
@@ -59,29 +81,131 @@ address of the words.
 ```
 
 A filter clears the bits of the rows it drops. The calls of the table
-read such a mask and write masks of their own: the rows still to place,
-the rows found, the rows that got a new record.
+read such a mask and narrow masks of their own: the rows still to
+place, the rows found, the rows that got a new record.
+
+## The problem
+
+A table in a database engine has to answer some hard questions. These
+are the ones this table answers.
+
+1. A plan that runs in one process keeps a node's memory in the
+   engine's memory of that process. A parallel hash join keeps the
+   build side in shared memory, which every process maps at an address
+   of its own. An address that one process stores means nothing to
+   another. How can one table, and one code, serve both?
+2. The planner guesses how many rows will come, and the guess can be
+   wrong by a hundred times. How does the table grow without copying its
+   records, and without holding an old and a new copy at once?
+3. In a parallel join several processes put rows into one table at the
+   same time. How do they do it without a lock? How does a process that
+   finds a record know that the record is whole?
+4. The table's memory is bytes that its caller hands over. A wrong call
+   or a bug elsewhere may leave wrong bytes there. How does the table
+   avoid a crash of the server, or a loop that never ends?
+5. A join needs every record of a key. A grouping needs exactly one
+   record of a key, made the first time the key comes. How does one
+   table serve both?
+6. A table larger than the processor's caches makes almost every look
+   at a record a wait for memory. How can a batch of lookups hide these
+   waits?
+7. The engine counts the memory of a query and raises its errors in a
+   way of its own: PostgreSQL's error must not pass through Rust code,
+   and memory the table allocated would be memory PostgreSQL does not
+   count. How does a call say "this chunk is full" or "the buckets are
+   too few"?
+
+## Goals and what they cost
+
+Each goal answers one of the questions above. Each has a price, and the
+price is written next to it. The numbers were measured on the
+developer's machine, an Apple M5 Pro; the target platform is Linux on
+x86-64, where they have not been measured yet.
+
+- **No address inside the table** (question 1). The caller allocates
+  every block of the table and hands the blocks to each call. A record
+  is found by a *reference*: the number of its block and its place in
+  the block, 32 bits in all. A process turns a reference into an address
+  through its own list of the blocks. The same bytes then mean the same
+  in every process. The price is one more read per record, of the
+  block's address from that list, which is almost always in the
+  processor's fastest cache.
+- **Records never move** (question 2). Records lie in blocks called
+  chunks. When a chunk is full, the caller adds another. The buckets
+  are made for a number of records, the table's capacity. A grouping
+  that meets more groups than the planner expected fills its buckets:
+  when its records reach half the buckets, the chains would start to
+  grow long. Then only the array of buckets is made anew, larger, over
+  the same chunks (see "One writer"). A join never needs this, since it
+  makes its buckets once, when it knows how many rows it has. The
+  price, against an older form of the table that kept everything in one
+  block and copied it to grow: about 6 to 7 percent more instructions
+  for a lookup in cache, 22 to 30 percent more for an insertion, and 2
+  to 4 percent more time for a join in SQL. The gain: under an estimate
+  200 times too low, a join used 13 to 34 percent less memory, since
+  nothing is ever held twice.
+- **No lock** (question 3). A process writes records only into chunks
+  of its own. It then makes each record visible with one atomic
+  compare-and-swap on the record's bucket. A process that reads the
+  bucket with the matching memory order sees the whole record. The same
+  code runs in a plan of one process, where the compare-and-swap never
+  fails. Its price there was measured too, and it was not the main cost
+  of an insertion.
+- **Wrong bytes are an error, not a crash** (question 4). Every call
+  checks the whole header of the table. Every reference is checked
+  against its chunk before it is followed. A walk down a chain takes at
+  most as many steps as the table has records, so a chain that loops is
+  found. The price is a fixed part of every call, a few hundred
+  instructions, and one comparison per step. [Checks and
+  errors](../hash-table/design.md#checks-and-errors) in the design of
+  `hash-table` explains each check.
+- **Two ways to put a row in** (question 5). A join *appends* rows,
+  and equal keys make separate records. A grouping asks to *find or
+  insert*: each row gets the one record of its key, which is made when
+  missing.
+- **Lookups by batch** (question 6). One call looks up all the rows of
+  a batch. When enough rows are selected, the call goes step by step
+  over all of them together: it reads every row's bucket, then every
+  row's first record, and so on, asking the processor to fetch the next
+  memory early. The waits of different rows then overlap. On a table far
+  larger than the caches a lookup that finds its key went from about 75
+  to about 38 processor cycles a row. On a table that fits in the
+  fastest cache it costs about half as much again as a lookup of one
+  row at a time. That price was accepted: the tables of real joins are
+  larger than the cache.
+- **Nothing kept, nothing raised** (question 7). The crate keeps nothing
+  between calls, and the table's memory is all the caller's. A call
+  allocates nothing; the list of the columns of a payload, up to 2048
+  of them, is kept on the stack. A row that does not fit stays in the
+  call's mask of rows still to place; the caller adds a chunk, or makes
+  a larger index, and calls again. Every error is a value of one word
+  that the call returns, and Tessera raises it as a PostgreSQL error
+  after the call.
+- **Short chains.** The table has at least twice as many buckets as the
+  records it was made for, and at least 1024. A grouping stops making
+  records when they reach half the buckets. The price is the buckets: 8
+  bytes for each record the table was made for.
 
 ## The whole in one picture
 
 A table is one **index** and any number of **chunks**. The caller
-allocates all of them and passes them to every call as a
-`TessTableRef`: the address and length of the index, and the address
-and length of each chunk, by number.
+allocates all of them and passes them to every call: the address and
+length of the index, and a `Chunks`, the address and length of each
+chunk, by number.
 
 ```
- in each process: TessTableRef     in memory, the same for all
+ in each process: index, Chunks     in memory, the same for all
 
  index ──────────────────────────► ┌──────────┬────────────────────┐
  index_len                         │ header   │ buckets            │
                                    └──────────┴──────────┬─────────┘
                                                          │
- chunks[0] ──────────────────────► ┌──────┬────────┬─────▼──┬──────┐
- chunk_lens[0]                     │ used │ record │ record │ free │
+ bases[0] ───────────────────────► ┌──────┬────────┬─────▼──┬──────┐
+ lens[0]                           │ used │ record │ record │ free │
                                    └──────┴────────┴──┬─────┴──────┘
                                                       │ next
- chunks[1] ──────────────────────► ┌──────┬────────┬──▼─────┬──────┐
- chunk_lens[1]                     │ used │ record │ record │ free │
+ bases[1] ───────────────────────► ┌──────┬────────┬──▼─────┬──────┐
+ lens[1]                           │ used │ record │ record │ free │
                                    └──────┴────────┴────────┴──────┘
  …
 ```
@@ -92,6 +216,18 @@ The references are numbers, not addresses, so the right half of the
 picture is the same in every process; only the left half differs.
 "References" below shows how a reference is made and followed, with a
 chain as an example.
+
+The caller holds the table through one of three handles. A `Table` is
+a handle that other handles may share: its calls append to chunks of
+the caller's own, link, and look rows up; the calls that write are
+`unsafe`, since the caller promises that each chunk has one writer. A
+`TableMut` is the table's **one writer**, which has the table to
+itself: it may also find or insert, change payloads and move to a
+larger index. A `ChunkWriter` appends to chunks before there is an
+index. The handles over the caller's memory are made by `unsafe`
+calls, whose duties say what the caller promises of that memory. An
+`OwnedTable`, behind the feature `alloc`, owns its blocks and needs no
+`unsafe`.
 
 ## The words used below
 
@@ -118,28 +254,29 @@ chain as an example.
   found.
 - **Probe**: look up the rows of a batch by their hashes and keys.
 - **One writer**: a caller that has the table to itself while it works.
-- **Participant**: one process of a parallel plan that works on a
-  shared table.
+- **Participant**: one process of several that work on a shared table.
 
 ## The index
 
 The index is made once for a number of records, its capacity:
-`tess_table_size` says how many bytes it needs, the caller allocates
-them, and `tess_table_create` writes the header and clears the
-buckets. The spec draws the header field by field, in
-[The index of a table](spec.md#requirement-the-index-of-a-table).
+`index_size` says how many bytes it needs, the caller allocates them,
+and `TableMut::create` writes the header and clears the buckets. The
+spec draws the header field by field, in [The index of a
+table](spec.md#requirement-the-index-of-a-table).
 
 Most fields of the header are written once, when the index is made,
 and never change. One field changes while the table is used: the count
 of the records linked into the buckets. It is there for two reasons:
-`tess_table_stats` reports it to EXPLAIN and to the node's own rules,
-and a walk down a chain uses it as its bound (see "Checks and errors").
+`Table::stats` reports it to the caller, for its own rules and for
+EXPLAIN in Tessera, and a walk down a chain uses it as its bound.
 
 The bucket of a hash is its high bits. The low bits are left free on
-purpose. A node whose table does not fit in memory splits its rows
+purpose. A caller whose table does not fit in memory splits its rows
 into partitions by the low bits of the hash. Inside one partition the
 low bits are all the same, but the high bits still spread the rows over
-every bucket.
+every bucket. So a hash whose high bits do not vary from key to key,
+such as small integers taken as their own hashes, puts the rows into a
+few chains.
 
 The index has at least twice as many buckets as its capacity, and at
 least 1024. With at most one record for every two buckets, most chains
@@ -148,14 +285,15 @@ capacity; it stays correct, only slower.
 
 ## Chunks and records
 
-A chunk is a plain block of memory. `tess_table_chunk_init` makes a
-block an empty chunk by writing its used mark. Records follow the mark
-one after another, all of the same size, and the mark grows by a record
-each time one is written. Only the chunk's one writer appends to it.
-The links of the table never leave its chunks: a bucket and the field
-next of a record name only records of the same table. A payload may
-name memory outside the table, as "Values longer than a word" shows
-below.
+A chunk is a plain block of memory. `Chunks::init` makes a block an
+empty chunk by writing its used mark. Records follow the mark one after
+another, all of the same size, and the mark grows by a record each time
+one is written. Only the chunk's one writer appends to it. The links of
+the table never leave its chunks: a bucket and the field next of a
+record name only records of the same table. A payload may name memory
+outside the table: Tessera keeps a string in chunks of its own, as
+[Values longer than a
+word](../hash-table/design.md#values-longer-than-a-word) shows.
 
 A record has a fixed size for the whole table: a short header, a slot
 for each key, then the payload. The spec draws it byte by byte, in
@@ -164,14 +302,16 @@ for each key, then the payload. The spec draws it byte by byte, in
 - **The hash** is compared before the keys. Two different keys in one
   chain usually have different hashes, so most wrong records are
   skipped after one comparison of 32 bits.
-- **A slot of 8 bytes for every key**, also for an `int4`, which is
-  widened with its sign. An `int8` that fits in an `int4` hashes like
-  that `int4`, so a join of an `int4` column with an `int8` column puts
-  both into one table and compares them slot by slot.
+- **A slot of 8 bytes for every key.** A caller with narrower keys
+  widens them: Tessera widens an `int4` with its sign. An `int8` that
+  fits in an `int4` hashes like that `int4`, so a join of an `int4`
+  column with an `int8` column puts both into one table and compares
+  them slot by slot.
 - **The NULL bits.** A grouping puts NULL keys into a group of their
-  own. A NULL key's slot holds 0, and its bit in the record's header
-  says that it is NULL, not the number 0. Where the bits lie is drawn
-  in [A record](spec.md#requirement-a-record).
+  own. A NULL key's slot holds 0, which its source of keys gives, and
+  its bit in the record's header says that it is NULL, not the number
+  0. Where the bits lie is drawn in [A
+  record](spec.md#requirement-a-record).
 - **The record's own size** gives every call a cheap check that a
   reference points to a record of this table.
 - **The payload** is the caller's. The table writes it when a record is
@@ -181,22 +321,22 @@ for each key, then the payload. The spec draws it byte by byte, in
 ## References
 
 A reference names a record in 32 bits. The high 15 bits are the number
-of the record's chunk. The low 17 bits are the record's place in the
-chunk, in units of 8 bytes: every record starts at a multiple of 8, so
-its byte is the place times 8. The spec draws this split in
-[Chunks and references](spec.md#requirement-chunks-and-references).
-The split sets the limits. 2^17 places of 8 bytes make a chunk of at
-most 1 MiB, and 15 bits number at most 32768 chunks, so one table holds
-at most 32 GiB of records. `tessera/table.h` has three small functions
-that make a reference and split it.
+of the record's chunk. The low 17 bits, `UNIT_BITS`, are the record's
+place in the chunk, in units of 8 bytes: every record starts at a
+multiple of 8, so its byte is the place times 8. The spec draws this
+split in [Chunks and
+references](spec.md#requirement-chunks-and-references). The split sets
+the limits. 2^17 places of 8 bytes make a chunk of at most 1 MiB, and
+15 bits number at most 32768 chunks, so one table holds at most 32 GiB
+of records.
 
 References lie in two places: a bucket holds the reference of the first
 record of its chain, and the field next in the header of every record
 holds the reference of the record after it. To follow a reference, a
 process splits it, takes the address of the chunk from its own
-`TessTableRef`, and adds the byte. In the example below a record takes
-40 bytes, so the records of a chunk start at bytes 8, 48, 88 and so on.
-A chain of two records goes from chunk 1 to chunk 0:
+`Chunks`, and adds the byte. In the example below a record takes 40
+bytes, so the records of a chunk start at bytes 8, 48, 88 and so on. A
+chain of two records goes from chunk 1 to chunk 0:
 
 ```
                 ┌──────────────────┐
@@ -213,8 +353,8 @@ A chain of two records goes from chunk 1 to chunk 0:
                         next 0: the end of the chain
 ```
 
-Before a call reads a record, it checks the reference: see "Checks and
-errors".
+Before a call reads a record, it checks the reference against its
+chunk.
 
 Reference 0 would be the first byte of chunk 0, which is the chunk's
 used mark and never a record. So 0 can mean "no record": an empty
@@ -231,30 +371,32 @@ A join builds its table in two steps.
 
 ```
  a batch
-    │  tess_table_append: writes the chunk only
+    │  append: writes the chunk only
     ▼
  records in a chunk, which nobody finds yet
-    │  tess_table_link: writes the buckets
+    │  link: writes the buckets
     ▼
  records in their chains, which probes find
 ```
 
 **Append** writes the rows of a batch as records into one chunk, in row
-order, while whole records fit. A batch comes with three things: a hash
-for every row, the key columns, and a mask of the rows to place. Each
-row that is written leaves the mask and gets the reference of its
-record. The rows still in the mask need another chunk: the caller adds
-one and calls again. Append does not need the index, so it works
-before there is one. When the table has an index, append checks it as
-every call does and refuses keys or a payload size other than the
-table's. A node's mistake then fails where it is made, and is not
-found later as a damaged table.
+order, while whole records fit. A batch, `Batch`, comes with a hash
+for every row, the source of its keys, a mask of the rows to place, and
+a slot for each row's reference. Each row that is written leaves the
+mask and gets the reference of its record. The rows still in the mask
+need another chunk: the caller adds one and calls again. A
+`ChunkWriter` appends without an index, for the keys and payload size
+it is made with, so it works before there is one. An append through a
+`Table` or a `TableMut` checks the index as every call does and
+refuses keys or a payload size other than the table's. A caller's
+mistake then fails where it is made, and is not found later as a
+damaged table.
 
 The payload of a record comes either from an array that the caller
-filled, or, with `tess_table_append_columns`, straight from the
-batch's columns, in the form that
-[Appending rows](spec.md#requirement-appending-rows) gives. The second
-form saves the node a pass over the rows to build the array.
+filled, or, with `append_columns`, straight from the batch's columns,
+`PayloadColumns`, in the form that [Appending
+rows](spec.md#requirement-appending-rows) gives. The second form saves
+the caller a pass over the rows to build the array.
 
 **Link** walks the records of one chunk from a given place to its used
 mark and puts each of them into its bucket. First it adds their number
@@ -265,11 +407,11 @@ compare-and-swap, which fails when another process has just changed
 the bucket and is then tried again ("Several processes at once" shows
 the steps). Records of equal keys stay separate records in one chain.
 
-On request link also counts duplicates: after a record is in its
-chain, link walks the rest of the chain for a record with the same
-keys. Of two records of one key, only the one linked later finds the
-other, so the count is exact even when several processes link at once.
-The table does not keep this count; the call returns it. A join in one
+`link_counting` also counts duplicates: after a record is in its
+chain, it walks the rest of the chain for a record with the same keys.
+Of two records of one key, only the one linked later finds the other,
+so the count is exact even when several processes link at once. The
+table does not keep this count; the call returns it. A join in one
 process adds it up in its own state. In a parallel join every
 participant adds its part to a counter in shared memory that the join
 keeps beside the table. When the sum is 0, every key has one record,
@@ -284,10 +426,12 @@ has to grow. A join in one process takes the same two steps.
 
 ## Looking rows up
 
-**Probe** takes a batch: hashes, key columns and a mask of rows. For
+**Probe** takes a batch: hashes, a source of keys and a lookup,
+`Matches`: a mask of rows and a slot for each row's reference. For
 each row it finds the first record of the chain whose hash, NULL bits
 and keys are all equal to the row's. It writes the reference of that
-record for the row and sets the row in a mask of rows found.
+record for the row and keeps the row in the mask; a row without a
+record leaves it. The call returns the rows left.
 
 The keys are always compared, never the hash alone, because different
 keys can have equal hashes. Two cases make this certain, not only
@@ -296,19 +440,19 @@ share each hash. And under the rule of a grouping a NULL key hashes
 like one particular number, so a NULL and that number share a hash and
 differ in the slot and the NULL bit.
 
-A key may have many records in a join. **`tess_table_next_match`**
-moves each row of a batch from its record to the next record of its
-chain with the same keys, and leaves in the mask only the rows that
-have one. The node calls it again and again until the mask is empty. In
-this way a whole batch walks its chains together, and each step is one
-call, not one call per row.
+A key may have many records in a join. **`next_match`** moves each row
+of a lookup from its record to the next record of its chain with the
+same keys, and leaves in the mask only the rows that have one. The
+caller calls it again and again until the mask is empty. In this way a
+whole batch walks its chains together, and each step is one call, not
+one call per row.
 
-Then the node reads what it needs from the records it found.
-`tess_table_gather` copies one word of the payload of each found record
-into an array, one call for a column of the batch.
-`tess_table_gather_key` copies a key, with its NULL flag.
-`tess_table_record` and `tess_table_payloads` give pointers into a
-record, for the few cases that need more.
+Then the caller reads what it needs from the records it found.
+`gather` copies one word of the payload of each found record into an
+array, one call for a column of the batch. `gather_key` copies a key's
+word, with its NULL flag. `record` gives a record's fields, and the one
+writer's `payload_ptrs` gives pointers to payloads, for the few cases
+that need more.
 
 When a batch has enough rows selected (8 or more of a word of 64), the
 probe goes over them together, step by step: first every row's bucket,
@@ -317,28 +461,28 @@ it asks the processor to start fetching the memory of the step after
 it. This is the "lookups by batch" goal above. With fewer rows a probe
 goes row by row, which is cheaper for them.
 
-Two more ways to read are for records in no useful order. A sort keeps
-the rows it sorts as records of this format, in a table that is never
-linked (`runtime/rows.c`), and gives them out in sorted order, which
-jumps from record to record across its chunks. It reads them with
-`tess_table_gather_scattered` and `tess_table_gather_words`, which
-first find and prefetch the records of 64 rows, then read them. For a
-join they would cost more than they save, since a probe has just read
-its records and they are in the cache.
+Two more ways to read are for records in no useful order. Tessera's
+sort keeps the rows it sorts as records of this format, in a table
+that is never linked, and gives them out in sorted order, which jumps
+from record to record across its chunks. It reads them with
+`gather_scattered` and `gather_words`, which first find and prefetch
+the records of 64 rows, then read them. For a join they would cost
+more than they save, since a probe has just read its records and they
+are in the cache.
 
 ## A key's records together
 
 Link puts each record at the head of its chain, so the records of one
 key end up spread among the records of other keys of the same bucket.
-To find the next record of a key, `tess_table_next_match` must walk
-until it meets one, and then walk the rest of the chain to learn that
-there is no other.
+To find the next record of a key, `next_match` must walk until it meets
+one, and then walk the rest of the chain to learn that there is no
+other.
 
-`tess_table_link_grouped` links a chunk differently: it first looks the
-record's key up, and when the table holds that key already, it puts the
-new record right after the record it found. All records of a key then
-stand together in their chain, and `tess_table_next_in_group` reaches
-the next one in one step: it looks only at the record right after.
+`link_grouped` links a chunk differently: it first looks the record's
+key up, and when the table holds that key already, it puts the new
+record right after the record it found. All records of a key then
+stand together in their chain, and `next_in_group` reaches the next
+one in one step: it looks only at the record right after.
 
 ```
  link:          bucket → D(5) → B(7) → C(5) → A(5)
@@ -358,38 +502,42 @@ link.
 
 Some calls need the table to themselves, with no other call over it at
 the same time. A grouping, the output of a grouping and a new index are
-such cases. They are safe in one process, and in a parallel plan only
-over a table that no other process uses.
+such cases. They are calls of `TableMut`, the one writer, and take it
+by `&mut`, so that no other call goes through the same handle at once.
+That no other handle uses the table's memory meanwhile is what the
+caller promises when it makes the handle.
 
-- **`tess_table_find_or_insert`** gives each row of a batch the record
-  of its keys. When the table has no such record, the call makes one in
-  the chunk the caller names, with a payload of zeros, and links it at
-  once, so that a later row of the same batch finds it. A mask tells the
-  caller which rows got a new record, so that it can set up their
-  aggregate states. The call stops at the first row that needs a new
+- **`find_or_insert`** gives each row of a batch the record of its
+  keys. When the table has no such record, the call makes one in the
+  chunk the caller names, with a payload of zeros, and links it at
+  once, so that a later row of the same batch finds it. A mask tells
+  the caller which rows got a new record, so that it can set up their
+  aggregate states; the call adds to it, so the masks of the calls of
+  one batch add up. The call stops at the first row that needs a new
   record when the chunk is full, or when the records reach half the
   buckets. That row and the rows after it stay in the mask; the caller
   adds a chunk or makes a larger index and calls again.
 - **Payloads change in place.** The grouping finds a row's record and
-  adds the row's values to the states in its payload. One writer also
-  changes the links between records, when it links grouped or makes a
-  new index, and a key, when it clears one; in a shared table a
+  adds the row's values to the states in its payload, through
+  `payload_mut`, `each_payload` or the cursor of `payloads`. One writer
+  also changes the links between records, when it links grouped or
+  makes a new index, and a key, when it clears one; in a shared table a
   published record never changes.
-- **`tess_table_scan`** visits the records chunk by chunk, in the order
-  they were appended, from a cursor the caller keeps between calls. A
-  grouping returns its groups this way.
-- **`tess_table_regrow`** moves the table to a new, larger index over
-  the same chunks. It clears the new buckets and links every record of
-  every chunk it is given again, grouped. No record moves, so every
-  reference a node holds stays valid. For a moment both indexes exist,
-  4 bytes a bucket each; then the caller frees the old one. An index
-  with fewer buckets is refused. Since every chunk given is linked, a
-  node that holds a chunk of other records, such as groups read back
-  from disk, gives an empty chunk under that number for the call.
-- **`tess_table_clear_key`** writes 0 into one key of every record,
-  keeping its NULL bit. A sort keeps its rows as records but never
-  looks them up; when it gives up a key's short form, it clears it this
-  way.
+- **`scan`** visits the records chunk by chunk, in the order they were
+  appended, from a `Cursor` the caller keeps between calls. A grouping
+  returns its groups this way.
+- **`regrow`** moves the table to a new, larger index over the same
+  chunks. It clears the new buckets and links every record of every
+  chunk it is given again, grouped. No record moves, so every
+  reference a caller holds stays valid. For a moment both indexes
+  exist, 4 bytes a bucket each; then the caller frees the old one. An
+  index with fewer buckets is refused. Since every chunk given is
+  linked, a caller that holds a chunk of other records, such as groups
+  read back from disk, gives an empty chunk under that number for the
+  call.
+- **`clear_key`** writes 0 into one key of every record, keeping its
+  NULL bit. A sort keeps its rows as records but never looks them up;
+  when it gives up a key's short form, it clears it this way.
 
 A walk over the records reads every record below each chunk's used
 mark. An append in another process moves that mark while it writes, so
@@ -398,7 +546,8 @@ a walk is also a call for one writer.
 ## Several processes at once
 
 In a parallel join the table lies in shared memory and several
-processes, the participants, use it. What they may do at the same time:
+processes, the participants, use it, each through a `Table` of its
+own. What they may do at the same time:
 
 - **Append** at once, each into chunks of its own. A chunk has one
   writer, so its used mark and its records need no atomic operation.
@@ -408,10 +557,11 @@ processes, the participants, use it. What they may do at the same time:
 - **Probe** at once, once the linking is over.
 - Not the calls of one writer: they assume that nothing else happens.
 
-PostgreSQL's barrier keeps these apart: every participant appends, all
-wait, one makes the index, all wait, every participant links, all wait,
-and then all probe. Which phase comes next is the table's C API too,
-and "A shared build" below explains it.
+The caller keeps these apart. Tessera uses PostgreSQL's barrier: every
+participant appends, all wait, one makes the index, all wait, every
+participant links, all wait, and then all probe. [A shared
+build](../hash-table/design.md#a-shared-build) in the design of
+`hash-table` explains these steps.
 
 Only two places of the table are changed by several processes, and
 both are changed by atomic operations: the count of records in the
@@ -419,8 +569,8 @@ header, by an addition, and the buckets, by a compare-and-swap. The
 bytes of a record are plain memory. They are written by one process
 before the record is published, and read by the others only after. A
 link and a probe go in these steps; the memory order of each atomic
-operation is in
-[Calls at the same time](spec.md#requirement-calls-at-the-same-time).
+operation is in [Calls at the same
+time](spec.md#requirement-calls-at-the-same-time).
 
 ```
  link, for a chunk:
@@ -497,6 +647,9 @@ bucket, so that the table's code keeps one order only.
 
 ## Files
 
+- `crates/relhash/src/lib.rs`: the crate's root, its parts in a picture
+  and its examples
+- `crates/relhash/src/row_mask.rs`: the masks of rows
 - `crates/relhash/src/table/mod.rs`: the table, its calls and
   their rules
 - `crates/relhash/src/table/chunks.rs`: the chunks, their checks,
@@ -526,3 +679,18 @@ bucket, so that the table's code keeps one order only.
   participants
 - `crates/relhash/src/table/testing.rs`: the keys of the table's own
   tests and loom models
+
+## Tests
+
+- The unit tests in `crates/relhash/src/table/tests/`: the format and
+  every call, with damaged headers, chunks, references and chains, over
+  keys of their own; they also run under Miri, at smaller sizes.
+- The unit tests in `crates/relhash/src/table/tests.rs`: blocks that
+  are not chunks or an index.
+- `crates/relhash/src/table/loom/`, run by `make rust-loom`: links into
+  one bucket by several participants, and a probe beside a link, with
+  the negative tests of the orders.
+- `crates/tessera-capi/tests/table.rs` and `test/sql/table.sql`: the
+  calls through Tessera's C API.
+- The benchmarks `table_int32` and `table_large` of `tessera-bench`
+  count the instructions and cycles of append, probe and find-or-insert.
