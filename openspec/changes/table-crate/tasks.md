@@ -306,9 +306,11 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 - [ ] 4.1 Open, have approved and close the change `relhash-spec-table`:
       the index, chunks and references, a record, and the calls of
       `hash-table` move to the capability `relhash`, nine
-      requirements, in the crate's terms and with the same tests;
-      `hash-table` gets its requirement of the C API over the crate.
-      Check: the tasks of that change
+      requirements, in the crate's terms and with the same tests; the
+      four this change rewrites move as it has them, and their entries
+      and its purpose of `relhash` leave its deltas; `hash-table` gets
+      its requirement of the C API over the crate. Check: the tasks of
+      that change
 - [ ] 4.2 Open, have approved and close the change
       `relhash-spec-partitions`: the partitions, the Bloom filter, the
       marks and what makes a table damaged move the same way, nine
