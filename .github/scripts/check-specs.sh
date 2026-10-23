@@ -21,6 +21,14 @@
 #    of a pull request when SPECS_BASE names it.
 # 8. The checks of contracts' rules that are scripts of their own:
 #    check-masks.sh, no crate but relhash defines a mask of rows.
+# 9. Every link to a requirement, `spec.md#requirement-` and the
+#    requirement's anchor, in any file of the repository, names a
+#    requirement of that spec, in openspec/specs/ or in an open change.
+# 10. Every link of a Markdown file under openspec/ to a file under
+#    crates/ leads there from where the file stands once its change is
+#    closed, and a link whose text is an item in backticks, such as
+#    `Table::probe`, leads to the file that declares the item's last
+#    name, or to the module of that name.
 # Run from the root of the repository.
 set -eu
 
@@ -203,6 +211,79 @@ git ls-files -- AGENTS.md CONTRIBUTING.md 'openspec/*.md' |
 done > "$list"
 while read -r wide; do
     error "$wide"
+done < "$list"
+
+# The anchor of each requirement, as GitHub makes it from the heading,
+# beside its capability; then each link checked against them. A link
+# names its spec by a path that ends in openspec/specs/<capability>/,
+# by ../<capability>/ from a spec's folder, or by spec.md alone there.
+find openspec/specs openspec/changes -name spec.md \
+    -not -path 'openspec/changes/archive/*' | sort |
+    xargs perl -ne '
+        next unless /^### Requirement:\s*(.*?)\s*$/;
+        (my $anchor = lc $1) =~ s/[^a-z0-9 _-]//g;
+        $anchor =~ tr/ /-/;
+        print "$1\t$anchor\n" if $ARGV =~ m{/specs/([^/]+)/spec\.md$};
+    ' > "$list"
+git grep -n -o -E '[A-Za-z0-9_./-]*spec\.md#requirement-[a-z0-9_-]+' |
+    perl -e '
+        open(my $known, "<", shift) or die;
+        my %known = map { chomp; ($_ => 1) } <$known>;
+        while (<STDIN>) {
+            my ($file, $line, $path, $anchor) =
+                /^([^:]+):(\d+):(.*)#requirement-(.*)$/ or next;
+            my $capability =
+                $path =~ m{openspec/specs/([^/]+)/spec\.md$} ? $1
+                : $file =~ m{/specs/[^/]+/[^/]+$}
+                    && $path =~ m{^\.\./([^/]+)/spec\.md$} ? $1
+                : $path eq "spec.md" && $file =~ m{/specs/([^/]+)/[^/]+$}
+                    ? $1 : undef;
+            if (!defined $capability) {
+                print "$file:$line: a link to a requirement of no spec\n";
+            } elsif (!$known{"$capability\t$anchor"}) {
+                print "$file:$line: no requirement #requirement-$anchor"
+                    . " in $capability\n";
+            }
+        }
+    ' "$list" > "$list.links"
+while read -r broken; do
+    error "$broken"
+done < "$list.links"
+rm -f "$list.links"
+
+# A spec of a change is read where the close puts it, under
+# openspec/specs/<capability>/, so its links are counted from there.
+git ls-files -- 'openspec/*.md' | grep -v '^openspec/changes/archive/' |
+    xargs perl -0777 -ne '
+        BEGIN { %tracked = map { ($_ => 1) } split /\n/, `git ls-files -- crates` }
+        (my $home = $ARGV) =~ s{^openspec/changes/[^/]+/specs/}{openspec/specs/};
+        my $up = "../" x (($home =~ tr{/}{}));
+        while (/\[([^\]]*)\]\(((?:\.\.\/)*)(crates\/[^)#\s]+)\)/g) {
+            my ($text, $prefix, $path) = ($1, $2, $3);
+            my $line = 1 + (substr($_, 0, $-[0]) =~ tr/\n//);
+            my $where = "$ARGV:$line";
+            if ($prefix ne $up) {
+                print "$where: $path is not $up$path from here\n";
+                next;
+            }
+            if (!$tracked{$path}) {
+                print "$where: no $path in the repository\n";
+                next;
+            }
+            next unless $text =~ /^`([A-Za-z_][A-Za-z0-9_:]*)`$/;
+            (my $name = $1) =~ s/.*:://;
+            (my $stem = $path) =~ s{.*/|\.rs$}{}g;
+            next if $name eq $stem;
+            open(my $file, "<", $path) or die;
+            local $/;
+            my $source = <$file>;
+            print "$where: $path does not declare $name\n"
+                unless $source =~ /\b(?:fn|struct|enum|trait|const|type|mod|static)\s+\Q$name\E\b/
+                    || $source =~ /^\s*\Q$name\E\s*[,({=]/m;
+        }
+    ' > "$list"
+while read -r broken; do
+    error "$broken"
 done < "$list"
 
 .github/scripts/check-contracts.sh ${SPECS_BASE:+"$SPECS_BASE"} || fail=1
