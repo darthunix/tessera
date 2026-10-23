@@ -272,6 +272,7 @@
 //! ```
 
 #![deny(unsafe_code)]
+#![deny(missing_docs)]
 // Without `alloc` the owning table is not built, and the documentation's
 // links to it have nothing to point to.
 #![cfg_attr(not(feature = "alloc"), allow(rustdoc::broken_intra_doc_links))]

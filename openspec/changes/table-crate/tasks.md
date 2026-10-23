@@ -340,7 +340,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       build with LTO and to use a hash with a secret seed for keys from
       outside, and links to the spec and the design. Check:
       `cargo test --doc -p relhash`
-- [ ] 5.2 Make the documentation complete by itself, as a map of the
+- [x] 5.2 Make the documentation complete by itself, as a map of the
       API: each public item with what it is for, takes and gives, and
       the rules, layouts and limits that the spec of `relhash` holds
       now, moved into it, with examples where they help; the README
