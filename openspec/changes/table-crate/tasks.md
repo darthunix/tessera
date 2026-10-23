@@ -311,7 +311,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       and its purpose of `relhash` leave its deltas; `hash-table` gets
       its requirement of the C API over the crate. Check: the tasks of
       that change
-- [ ] 4.2 Open, have approved and close the change
+- [x] 4.2 Open, have approved and close the change
       `relhash-spec-partitions`: the partitions, the Bloom filter, the
       marks and what makes a table damaged move the same way, ten
       requirements, the last as "A damaged table"; the three of

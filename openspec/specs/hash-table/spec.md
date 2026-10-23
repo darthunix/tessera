@@ -3,21 +3,19 @@
 ## Purpose
 The C API over the hash table of the crate `relhash`, and what joins,
 groupings and sorts keep beside the table: the forms of their keys,
-partitions when it spills, a Bloom filter of its keys, the marks of
-RIGHT and FULL joins, and the steps and words of a build by several
-processes. When a node builds a table, how large it makes its chunks
-and when it spills belong to the node's own capability.
+the status of an error, the merge of groups read back, and the steps
+and words of a build by several processes. When a node builds a table,
+how large it makes its chunks and when it spills belong to the node's
+own capability.
 
-The table itself, its index, chunks and records and what each of its
-calls promises, is in the spec of [relhash](../relhash/spec.md). The
-requirements here start with the C calls over it, the SQL types of a
-key and the errors of a call. Then what a join and a grouping keep
-beside the table: partitions when it spills, and the calls that
-append, split, find and merge by them; the Bloom filter of its keys,
-alone, shared and filled together; the marks of RIGHT and FULL joins.
-Last, a build by several processes: its counters, its phases, its
-rounds over partitions on disk, and the words of its spill.
-[design.md](design.md) explains the whole and the reasons.
+The table itself, its index, chunks and records, its partitions, its
+Bloom filter and its marks, and what each of its calls promises, is in
+the spec of [relhash](../relhash/spec.md). The requirements here start
+with the C calls over it, the SQL types of a key and the status of an
+error. Then the merge of groups read back. Last, a build by several
+processes: its counters, its phases, its rounds over partitions on
+disk, a participant that stops while it probes, and the words of its
+spill. [design.md](design.md) explains the whole and the reasons.
 
 ## Requirements
 
@@ -25,7 +23,7 @@ rounds over partitions on disk, and the words of its spill.
 Each call of `tessera/table.h` over a table SHALL do what the calls of
 the crate `relhash` do, as the requirement of the spec of `relhash`
 named here says, and SHALL return the crate's error as a status, as
-"Errors of a call" says:
+"The status of an error" says:
 
 - `tess_table_format_version`, `tess_table_size`, `tess_table_create`
   and `tess_table_stats`: "The index of a table";
@@ -45,7 +43,25 @@ named here says, and SHALL return the crate's error as a status, as
 - `tess_table_link_grouped` and `tess_table_next_in_group`: "The
   records of a key together";
 - `tess_table_find_or_insert`, `tess_table_regrow`, `tess_table_scan`
-  and `tess_table_clear_key`: "Calls of one writer".
+  and `tess_table_clear_key`: "Calls of one writer";
+- `tess_table_partition`, which gives the partition of a hash:
+  "Partitions of a table";
+- `tess_table_append_partitioned_columns`, which takes the index or
+  none and appends as a chunk writer does: "Appending rows by
+  partition";
+- `tess_table_split`: "Splitting a chunk by partition";
+- `tess_table_find_or_insert_partitioned`: "Groups by partition";
+- `tess_table_bloom`, `tess_bloom_add` and `tess_bloom_probe`: "A Bloom
+  filter of the keys";
+- `tess_table_bloom_words` and `tess_table_bloom_words_within`: "The
+  size of a Bloom filter";
+- `tess_bloom_shared_words`, `tess_bloom_shared_init`,
+  `tess_table_try_build_bloom`, `tess_bloom_shared_ready` and
+  `tess_bloom_shared_probe`: "A shared Bloom filter";
+- `tess_bloom_add_atomic`: "A filter filled together";
+- `tess_table_mark_words`, `tess_table_mark` and
+  `tess_table_next_unmarked`, which take the index or none, and whose
+  cursor starts at 0: "The marks of RIGHT and FULL joins".
 
 Beside them the C API SHALL do what the crate leaves to its caller:
 
@@ -54,8 +70,13 @@ Beside them the C API SHALL do what the crate leaves to its caller:
   `int4` key and an `int8` key of the same value match;
   `tess_table_gather_key` SHALL give a key's word as a Datum with its
   NULL flag;
-- a lookup SHALL take a mask of rows and a mask of results, and SHALL
-  fill the mask of results whole with the rows the crate's call keeps;
+- a lookup and a check against a Bloom filter SHALL take a mask of rows
+  and a mask of results, and SHALL fill the mask of results whole with
+  the rows the crate's call keeps;
+- a call over chunks that is given the index SHALL check it before it
+  changes anything: an append by partition SHALL refuse keys or a
+  payload other than the index's, and a mark or a walk of marks a
+  record size other than the index's;
 - a debug build of the entry points SHALL check every chunk it is
   given;
 - `tess_table_memory_limit` SHALL return a limit of memory as it is up
@@ -75,6 +96,16 @@ Beside them the C API SHALL do what the crate leaves to its caller:
   `crates/tessera-capi/tests/table.rs::the_entry_points_round_trip`;
   `crates/tessera-capi/tests/table.rs::int4_keys_find_the_records_of_int8_keys`;
   `crates/tessera-capi/tests/table.rs::int8_keys_find_the_records_of_int4_keys`
+
+#### Scenario: The index a call over chunks checks
+- **WHEN** rows are appended by partition to a table with an index of
+  another count of keys, and then to that table with its own; and a
+  mark or a walk is given a record size other than the index's
+- **THEN** the wrong ones fail and change nothing, and the table's own
+  rows go in
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::an_append_by_partition_checks_what_it_is_given`;
+  `crates/tessera-capi/tests/table.rs::marks_and_walks_that_cannot_be_done_are_refused`
 
 #### Scenario: A debug build checks every chunk
 - **WHEN** a probe that reads no chunk is given a chunk longer than
@@ -139,185 +170,33 @@ with `float8`, SHALL leave the grouping or the join to the core's node.
 - **Verified by:**
   `test/sql/types.sql::Keys of other types of 8 bytes`
 
-### Requirement: Errors of a call
+### Requirement: The status of an error
 A call SHALL return an error status, and never crash or loop without
-end, when the bytes it is given are not a table: a header that breaks
-a rule of "The index of a table", an index length below the header's,
-a reference outside its chunk or to a byte where no record starts, a
-record whose size is not the table's, a used mark that ends no record,
-or a chain with a loop. A walk down a chain SHALL take no more steps
-than the header's count of records, and no more than the places a
-reference can name in the chunks it is given, 2^17 a chunk. Such an
-error, and a wrong argument, SHALL be status
-`TESS_ERROR_INVALID_ARGUMENT` with SQLSTATE `XX000`. A call SHALL check
-its arguments, the header and the count of chunks before it changes
-anything, and a chunk before it reads or writes it.
+end, when the bytes it is given are not a table, as "A damaged table"
+of the spec of `relhash` says. Such an error, and a wrong argument,
+SHALL be status `TESS_ERROR_INVALID_ARGUMENT` with SQLSTATE `XX000`. A
+call SHALL check its arguments and its outputs before it changes
+anything.
 
-#### Scenario: A damaged header
-- **WHEN** one field of a valid header is changed: the magic, the
-  version, a length or offset, the buckets or their shift, the record
-  size, the keys or a kind, the flags or a reserved word
-- **THEN** every call over the table fails, and the SQLSTATE is `XX000`
-- **Verified by:**
-  `crates/relhash/src/table/tests/format.rs::a_corrupt_header_is_refused`;
-  `test/sql/table.sql::tessera_test_table_errors`
+#### Scenario: A damaged table through C
+- **WHEN** a call is given an index of zeros, an index whose version is
+  changed, or one moved by 4 bytes or cut by 8
+- **THEN** it fails with status `TESS_ERROR_INVALID_ARGUMENT`, and the
+  SQLSTATE is `XX000`
+- **Verified by:** `test/sql/table.sql::tessera_test_table_errors`
 
-#### Scenario: A damaged reference or chain
-- **WHEN** a bucket points into a missing chunk, past its chunk or into
-  a record, a record's next points to itself, or a used mark ends no
-  record, also with a count of records far past what the chunks hold
-- **THEN** the probe, the walk or the link fails
+#### Scenario: A gather of many words refused late
+- **WHEN** a gather of 17 words is asked of a payload of 16
+- **THEN** it fails, and every output is as it was, the first 16 too
 - **Verified by:**
-  `crates/relhash/src/table/tests/lookup.rs::a_corrupt_reference_chain_or_used_mark_is_an_error`;
-  `crates/relhash/src/table/tests/lookup.rs::a_word_probed_at_once_detects_a_cycle`;
-  `crates/relhash/src/table/tests.rs::a_damaged_count_is_bounded_by_the_places_of_the_chunks`
+  `crates/tessera-capi/tests/table.rs::a_gather_of_many_words_past_the_payload_writes_nothing`
 
 #### Scenario: Arguments are checked first
-- **WHEN** a call is given arrays of the wrong length, a missing output
-  or a wrong key count
+- **WHEN** a call is given a missing output
 - **THEN** it fails, and the table, the chunks, the masks and the cursor
   are as they were
 - **Verified by:**
-  `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`;
   `crates/tessera-capi/tests/table.rs::outputs_are_checked_before_anything_changes`
-
-### Requirement: Partitions of a table
-A table that a node spills to disk SHALL keep its records in
-partitions, chosen by the bits of the hash. With `n` partitions at a
-shift `s`, the partition of a hash `h` is `(h >> s) & (n - 1)`. `n`
-SHALL be a power of two from 1 to 65536, and the bits SHALL lie within
-the hash: `s < 32` and `s + log2(n) <= 32`. The buckets take the high
-bits of a hash, so a node's first partitions take the low bits, and a
-partition split again takes the bits above those.
-`tess_table_partition(hash, shift, n)` SHALL give the same partition in
-C.
-
-```
- bit 31                                     4   3   2   1   0
-    ┌─────────────────────────────────────┬───────┬───────┐
-    │ the buckets take the high bits  …   │ split │ first │
-    └─────────────────────────────────────┴───────┴───────┘
- first partitions: 4 at shift 0, (h >> 0) & 3
- one of them split again: 4 at shift 2, (h >> 2) & 3
-```
-
-A call that takes partitions SHALL take a chunk number for each, below
-the table's count of chunks, and SHALL refuse another count, shift or
-chunk number before it changes anything. The caller SHALL be the one
-writer of those chunks, and two partitions SHALL share a chunk only when
-it has no room for a record.
-
-#### Scenario: The partition of a hash
-- **WHEN** a chunk of 200 records is split into 4 partitions at shift 9,
-  in Rust and through the C API
-- **THEN** every record goes to the chunk of partition
-  `(hash >> 9) & 3`, the one `tess_table_partition` gives
-- **Verified by:**
-  `crates/relhash/src/table/tests.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
-  `test/sql/table.sql::tessera_test_table_partitions`
-
-#### Scenario: Partitions past the limits are refused
-- **WHEN** 0, 3 or 131072 partitions are given, 4 partitions at shift
-  31, 1 partition at shift 32, or a chunk number past the table's
-  chunks, to a split, an append by partition or a lookup by partition
-- **THEN** the call fails, and the chunks and the masks are as they were
-- **Verified by:**
-  `crates/relhash/src/table/tests.rs::partitions_past_the_hash_or_the_chunks_are_refused`;
-  `crates/tessera-capi/tests/table.rs::an_append_by_partition_refuses_partitions_past_the_limits`
-
-### Requirement: Appending rows by partition
-`tess_table_append_partitioned_columns` SHALL append the rows of the
-pending mask, in row order, each as a record to the chunk of its
-partition, as `tess_table_append_columns` appends to one chunk. A row
-whose partition's chunk has no room SHALL stay pending while the rows
-after it go on; the caller gives that partition a new chunk and calls
-again. The payload SHALL be a word of NULL bits, bit `c` for column
-`c`, then a word for each column, 0 for a NULL, so the call SHALL take
-at most 64 columns and a table whose payload is `8 * (1 + columns)`
-bytes. Each row appended SHALL add one to its partition's count in
-`rows`, which the call adds to and never clears, and SHALL OR its NULL
-bits into `*nulls`. As an append does, the call SHALL not need the
-index and SHALL not link the records; when the table has an index, the
-call SHALL check it and refuse keys or a payload other than the table's
-before it writes anything.
-
-#### Scenario: Rows go to the chunks of their partitions
-- **WHEN** 70 rows go to 4 partitions at shift 3, the chunk of
-  partition 3 having room for 5 records
-- **THEN** each row's record lies in its partition's chunk with its
-  payload words, the counts are those of the rows appended, `*nulls`
-  has the bit of the column with a NULL, and exactly the rows of
-  partition 3 past the first 5 stay pending
-- **Verified by:**
-  `crates/tessera-capi/tests/table.rs::the_partitioned_columns_entry_point_counts_each_partition`
-
-#### Scenario: An append by partition checks what it is given
-- **WHEN** rows are appended by partition with 65 columns, with a table
-  whose payload is not a word of NULL bits and a word a column, or to a
-  table with an index of another kind of key, and then to that table
-  with its own
-- **THEN** the wrong ones fail, write nothing and leave every row
-  pending, and the table's own go in
-- **Verified by:**
-  `crates/tessera-capi/tests/table.rs::an_append_by_partition_checks_what_it_is_given`
-
-### Requirement: Splitting a chunk by partition
-`tess_table_split` SHALL copy the records of chunk `source` from byte
-`*from` on, whole and in the order appended, each to the chunk of its
-partition, and SHALL move `*from` past each record copied. It SHALL
-copy at most `capacity` records, at least one a call, and give the
-reference and the hash of each copy. It SHALL stop before a record
-whose partition's chunk has no room and name that partition in
-`*full`, -1 otherwise; a count of 0 with `*full` of -1 SHALL mean that
-the source is done. A copy's next SHALL be 0: the copies are not
-linked. The records SHALL have the size of the key kinds and the
-payload the caller gives, and the source SHALL not be the chunk of a
-partition.
-
-#### Scenario: A chunk splits into its partitions
-- **WHEN** a chunk of 200 records is split 16 at a time into partitions
-  whose chunks hold 8, and each partition named full gets a new chunk
-- **THEN** every record is copied once, whole, with a next of 0, to its
-  partition, and `*from` ends at the source's used mark
-- **Verified by:**
-  `crates/relhash/src/table/tests.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
-  `test/sql/table.sql::tessera_test_table_partitions`
-
-#### Scenario: A split that cannot be done is refused
-- **WHEN** a split is asked for no records, into one of its partitions'
-  chunks, or with a record size other than the source's records
-- **THEN** it fails, and `*from` and the chunks are as they were
-- **Verified by:**
-  `crates/relhash/src/table/tests.rs::a_split_that_cannot_be_done_is_refused`
-
-### Requirement: Groups by partition
-`tess_table_find_or_insert_partitioned` SHALL give each row of the
-pending mask the record of its keys as `tess_table_find_or_insert`
-does, but SHALL write a new record to the chunk of its partition. A row
-whose partition's chunk has no room SHALL stay pending while the rows
-after it go on. Once the linked records reach half the buckets, the call
-SHALL resolve no more rows: the rows not done stay pending, those of a
-known key too, until the caller moves the table to a larger index. The
-mask of inserted rows SHALL hold exactly the rows whose record the call
-made. The caller is the one writer of the table.
-
-#### Scenario: Groups go to the chunks of their partitions
-- **WHEN** three batches of keys go to 4 partitions whose chunks hold 8
-  records, each partition with pending rows getting a new chunk
-- **THEN** each row's record has its key and lies in its partition, a
-  key keeps one record across the batches, and the inserted rows are
-  the first row of each new key
-- **Verified by:**
-  `crates/relhash/src/table/tests.rs::groups_go_to_the_chunks_of_their_partitions`;
-  `test/sql/table.sql::tessera_test_table_combine`
-
-#### Scenario: Half the buckets stops every row
-- **WHEN** a batch brings more new keys than half the buckets can take
-- **THEN** the call stops at the first row that needs a new record past
-  that count, and that row and every row after it stay pending,
-  including rows of keys the table holds
-- **Verified by:**
-  `crates/relhash/src/table/tests.rs::half_the_buckets_stops_every_row_of_a_lookup_by_partition`
 
 ### Requirement: Merging groups read back
 `tess_table_combine` SHALL merge the records of chunk `source`, from
@@ -380,271 +259,6 @@ out of a regrow, which links every record of every chunk it is given.
 - **Verified by:**
   `crates/tessera-kernels/src/accumulate.rs::a_merged_count_past_the_int8_range_fails`;
   `crates/tessera-capi/tests/table.rs::a_merge_that_cannot_be_done_fails`
-
-### Requirement: A Bloom filter of the keys
-A Bloom filter SHALL be a power of two of 64-bit words, which the caller
-owns and which hold no address. A hash SHALL set four bits of one word,
-taken from the hash multiplied by an odd constant: the word from the
-product's high bits, the four bits from its low 24 bits, six bits each.
-The four bits may coincide.
-
-```
- s = hash × 0x9E3779B97F4A7C15, modulo 2^64; k = log2(words)
-
- bit 63                        24 23    18 17    12 11     6 5      0
-    ┌───────────────────────────┬────────┬────────┬────────┬────────┐
-    │ the word: the top k bits  │ bit 4  │ bit 3  │ bit 2  │ bit 1  │
-    │ (word 0 when k is 0)      │        │        │        │        │
-    └───────────────────────────┴────────┴────────┴────────┴────────┘
-```
-
-A row SHALL pass when every bit of its hash is set. The hash is the
-table's hash of the row, every key folded in under the table's rule for
-NULL, so every key of the table passes. `tess_table_bloom` SHALL clear
-the words and set the bits of every record below the used marks of the
-table's chunks, linked or not; no append may run meanwhile.
-`tess_bloom_add` SHALL set the bits of the hashes of the selected rows.
-`tess_bloom_probe` SHALL write the whole of `found`: the selected rows
-that pass, and no other row. Words that are not a power of two, and
-hashes, masks or results of different row counts, SHALL be refused
-before any change.
-
-#### Scenario: The bits of a hash
-- **WHEN** one hash is added to an empty filter of 1, 2 and 1024 words
-- **THEN** exactly the word and the bits the rule gives are set; the
-  hash passes, and a hash with any of those bits clear does not
-- **Verified by:**
-  `crates/relhash/src/table/tests/filter.rs::a_hash_sets_the_bits_the_rule_gives`
-
-#### Scenario: Every key of the table passes
-- **WHEN** a filter is filled from a table of 5000 keys over several
-  chunks, of int8 keys, or of a NULL key under the rule of a grouping,
-  or by adding rows, and its rows are probed with some rows not selected
-- **THEN** every key passes, and the rows not selected are clear in
-  `found`
-- **Verified by:**
-  `crates/relhash/src/table/tests/filter.rs::a_filter_lets_every_key_through_and_few_others`;
-  `crates/relhash/src/table/tests/filter.rs::a_null_group_key_and_int8_keys_pass_their_filter`;
-  `crates/relhash/src/table/tests/filter.rs::a_probe_narrows_its_rows_in_place`;
-  `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
-
-#### Scenario: A filter of the wrong size is refused
-- **WHEN** a filter of 0 or 3 words, or hashes of another row count than
-  the mask, are given to fill, add or probe
-- **THEN** the call fails, and the words and `found` are as they were
-- **Verified by:**
-  `crates/relhash/src/table/tests/filter.rs::a_filter_of_the_wrong_size_is_refused`;
-  `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
-
-### Requirement: The size of a Bloom filter
-`tess_table_bloom_words` SHALL give, for `r` records, the least power of
-two of words that is at least `max(1, ceil(16 r / 64))`, so 16 bits a
-record at least. `tess_table_bloom_words_within`
-SHALL give the same, halved while its bytes are more than an eighth of
-`limit`, one word at least. A count of records whose filter cannot be
-sized SHALL be refused. At 16 bits a record, a filter SHALL let fewer
-than one in 100 absent keys through.
-
-#### Scenario: The words for a count of records
-- **WHEN** filters are sized for 0, 4, 5 and 5000 records, within limits
-  from 0 to a gigabyte, and for 2^64 - 1 records
-- **THEN** they have 1, 1, 2 and 2048 words, halved within a limit while
-  more than an eighth of it, and the last is refused
-- **Verified by:**
-  `crates/relhash/src/table/tests/filter.rs::the_words_of_a_filter_for_its_records`;
-  `crates/relhash/src/table/tests/filter.rs::a_spill_filter_stays_within_an_eighth_of_its_memory`
-
-#### Scenario: Few absent keys pass
-- **WHEN** a filter of 1024 words holds 4096 keys, 16 bits a key, and
-  100000 other keys are probed
-- **THEN** fewer than 1000 of them pass
-- **Verified by:**
-  `crates/relhash/src/table/tests/filter.rs::few_absent_keys_pass_a_filter_of_16_bits_a_key`
-
-### Requirement: A shared Bloom filter
-A shared filter SHALL be a state word followed by the words of a filter,
-`1 + 2^k` words aligned to 8, which the participants of a shared table
-map. `tess_bloom_shared_words` SHALL give the state word and
-`tess_table_bloom_words` of the records.
-
-```
- word   0         1         2                    2^k
-       ┌─────────┬─────────┬─────────┬─────────┬─────────┐
-       │ state   │ word 0  │ word 1  │    …    │ word    │
-       │         │ of the filter     │         │ 2^k - 1 │
-       └─────────┴─────────┴─────────┴─────────┴─────────┘
- state: 0 none, 1 building, 2 ready
-```
-
-`tess_bloom_shared_init` SHALL clear the words and set the state to
-none; one participant calls it before any other uses the filter.
-`tess_table_try_build_bloom` SHALL let one participant build the
-filter: the one whose compare-and-swap moves the state from none to
-building fills the filter from the table's records and then stores
-ready with release, and `*built` is true for it alone. The others SHALL
-return at once with `*built` false, and nobody waits.
-`tess_bloom_shared_ready` SHALL read the state with acquire; a
-participant that reads ready SHALL see every bit of the filter.
-`tess_bloom_shared_probe` SHALL refuse a filter that is not ready, and
-otherwise probe as `tess_bloom_probe`. A shared filter that is not
-aligned to 8, or whose words less the state word are not a power of
-two, SHALL be refused.
-
-#### Scenario: One participant builds the filter
-- **WHEN** two participants in the model, four threads, or two calls of
-  one process try to build a shared filter
-- **THEN** exactly one builds it, a probe before it is ready fails, and
-  once it is ready every key passes
-- **Verified by:**
-  `crates/relhash/src/table/loom/filter.rs::two_participants_race_to_build_the_filter_and_one_does`;
-  `crates/relhash/src/table/tests.rs::one_of_four_threads_builds_a_shared_filter_every_key_passes`;
-  `test/sql/table.sql::tessera_test_table_groups`
-
-#### Scenario: A filter that reads ready is whole
-- **WHEN** one participant builds the filter while another reads its
-  state and probes, in every order of their steps, and when the model
-  stores the state relaxed
-- **THEN** the reader either finds the filter not ready or sees every
-  key pass, and with a relaxed state the model reports a reader that
-  sees an unfilled filter
-- **Verified by:**
-  `crates/relhash/src/table/loom/filter.rs::a_reader_sees_the_filter_whole_once_it_is_ready`;
-  `crates/relhash/src/table/loom/filter.rs::a_relaxed_state_lets_a_reader_see_an_unfilled_filter`
-
-#### Scenario: A shared filter of the wrong shape is refused
-- **WHEN** a shared filter is not aligned to 8, or has 1 or 4 words
-- **THEN** every call over it fails, and its words are as they were
-- **Verified by:**
-  `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
-
-### Requirement: A filter filled together
-`tess_bloom_add_atomic` SHALL set the bits of the hashes of the selected
-rows in a filter without a state word, each word changed by an atomic
-OR, so that several participants may add their rows at once. The caller
-SHALL order every addition before any probe, by a barrier, and SHALL
-then probe with `tess_bloom_probe`. Its words SHALL be aligned to 8 and
-a power of two.
-
-#### Scenario: Participants add at once
-- **WHEN** two participants add keys of one word at the same time, in
-  every order of their steps, and then probe after both are done; and
-  when the model adds by a plain read and write
-- **THEN** every key passes; with the plain read and write the model
-  reports a key whose bits were lost
-- **Verified by:**
-  `crates/relhash/src/table/loom/words.rs::participants_add_to_one_word_and_lose_no_bit`;
-  `crates/relhash/src/table/loom/words.rs::a_plain_read_and_write_loses_the_bits_of_a_filter`
-
-#### Scenario: A filter filled by one participant
-- **WHEN** one participant adds the valid rows of a batch and probes
-  them back
-- **THEN** exactly the valid rows pass
-- **Verified by:** `test/sql/table.sql::tessera_test_table_shared_spill`
-
-### Requirement: The marks of RIGHT and FULL joins
-A RIGHT or FULL join SHALL mark each record of its table that a pair
-matched, a bit a record, in words the caller keeps: a run of words for
-each chunk, where bit `i` of word `w` of chunk `c`'s run stands for the
-chunk's record `64 w + i`, records counted from byte 8 in steps of the
-record size `s`.
-
-```
- chunk c    ┌──────┬────────────┬────────────┬─────┬────────────┬─────┐
-            │ used │ record 0   │ record 1   │  …  │ record 64  │  …  │
-            └──────┴────────────┴────────────┴─────┴────────────┴─────┘
- byte        0      8            8 + s              8 + 64 s
-
- marks[c]   ┌──────────────────────────────┬───────────────────────┐
-            │ word 0: bit i for record i   │ word 1: bit i for     │
-            │                              │ record 64 + i  …      │
-            └──────────────────────────────┴───────────────────────┘
-```
-
-`tess_table_mark_words` SHALL give the words of a chunk of `len` bytes,
-`ceil(floor((len - 8) / s) / 64)`. The record size SHALL be a multiple
-of 8, at least 24, a header and one key, and room for a record in the
-largest chunk.
-`tess_table_mark` SHALL set the mark of the record each selected row's
-reference names: a record of the record size, on its boundary, within
-its chunk's length, in a chunk of the table. It SHALL not need the
-index; when the table has one, a record size other than its SHALL be
-refused. With `shared`, every participant may mark at once, and each
-word SHALL change by an atomic OR.
-
-`tess_table_next_unmarked` SHALL walk the records below the used marks
-as `tess_table_scan` does, from a cursor that starts at 0, and give the
-references of those without a mark, at most `capacity` and at least one
-a call; the cursor SHALL then name the first record not given, and a
-count of 0 SHALL mean the end. Without marks it SHALL give every record.
-A cursor off a record's boundary or past its chunk's used mark SHALL be
-refused. The caller SHALL order every participant's marks before the
-walk, and nothing marks or appends during it.
-
-Over a shared table, the last participant to leave walks the records
-without a mark. A participant that leaves while it probes, its share of
-the outer side not done, SHALL first mark a word that the participants
-of the table, or of the round over a partition, share, with
-`tess_build_stop`, which SHALL mark it only while the participant
-probes. The last participant to leave SHALL read the word with
-`tess_build_stopped` and, when it is marked, return no record without a
-mark: the pairs of the rows left unprobed were never marked, and a
-participant stops so only when its plan wants no more rows.
-
-#### Scenario: The marks of a chunk
-- **WHEN** the words of chunks of 8, 40, 2056 and 2088 bytes are asked
-  for records of 32 bytes, and the record 70 of chunk 1 is marked
-- **THEN** they are 0, 1, 1 and 2, and bit 6 of word 1 of chunk 1's
-  run is the only bit set
-- **Verified by:**
-  `crates/relhash/src/table/marks.rs::a_chunk_has_a_word_of_marks_per_64_records`;
-  `crates/relhash/src/table/tests/records.rs::a_record_s_mark_is_its_bit_of_its_chunk_s_run`
-
-#### Scenario: Marked records are left out of the walk
-- **WHEN** some records of several chunks are marked, alone or shared,
-  and the records without a mark are walked a few at a time, with and
-  without marks
-- **THEN** the walk gives exactly the records without a mark, each once
-  in the order appended, or every record without marks, and ends with 0
-- **Verified by:**
-  `crates/relhash/src/table/tests/records.rs::marked_records_are_left_out_of_the_walk`;
-  `crates/tessera-capi/tests/table.rs::the_mark_entry_points_leave_marked_records_out`
-
-#### Scenario: Marks and walks that cannot be done are refused
-- **WHEN** a mark names a byte before a chunk's records, off a record's
-  boundary, past its chunk's length or in no chunk; a record size is 0,
-  12, larger than a chunk or not the index's; a cursor is off a record
-  or past its chunk's used mark; or a walk asks for no records
-- **THEN** the call fails and the cursor and the count are as they were
-- **Verified by:**
-  `crates/tessera-capi/tests/table.rs::marks_and_walks_that_cannot_be_done_are_refused`;
-  `crates/relhash/src/table/marks.rs::a_walk_refuses_a_used_mark_or_a_cursor_off_the_records`
-
-#### Scenario: Participants mark at once
-- **WHEN** two participants mark records of one word at the same time,
-  in every order of their steps, and the records are walked after both
-  are done; and when the model marks by a plain read and write
-- **THEN** the walk gives no marked record; with the plain read and
-  write the model reports a mark that was lost
-- **Verified by:**
-  `crates/relhash/src/table/loom/words.rs::participants_mark_one_word_and_lose_no_mark`;
-  `crates/relhash/src/table/loom/words.rs::a_plain_read_and_write_loses_marks`
-
-#### Scenario: A participant that stops while it probes
-- **WHEN** one of two or three participants of a shared table stops
-  while it probes, in every order of their steps; when the model marks
-  the word only after that participant left; when a participant asks to
-  stop before it probes or after it left; and when a worker under the
-  core's `Gather` stops at the `LIMIT` of a RIGHT join
-- **THEN** the last participant to leave sees the mark, and with the
-  late mark the model reports a last one that missed it; out of the
-  probe nothing is marked; the join returns no row without a pair where
-  every inner row has one
-- **Verified by:**
-  `crates/tessera-kernels/src/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
-  `crates/tessera-kernels/src/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
-  `crates/tessera-kernels/src/phases.rs::a_participant_stops_only_while_it_probes`;
-  `crates/tessera-capi/tests/table.rs::a_participant_marks_its_stop_only_while_it_probes`;
-  `test/sql/join.sql::worker that has its share stops while it probes`
 
 ### Requirement: The counters of a shared build
 The participants of a shared build SHALL count it in four words of
@@ -780,6 +394,35 @@ outside these SHALL be refused.
 - **THEN** its actions follow the phases from the one it attached at
 - **Verified by:**
   `crates/tessera-kernels/src/phases.rs::a_round_elects_allocates_loads_probes_and_frees`
+
+### Requirement: A participant that stops while it probes
+Over a shared table, the last participant to leave walks the records
+without a mark, as "The marks of RIGHT and FULL joins" of the spec of
+`relhash` says. A participant that leaves while it probes, its share of
+the outer side not done, SHALL first mark a word that the participants
+of the table, or of the round over a partition, share, with
+`tess_build_stop`, which SHALL mark it only while the participant
+probes. The last participant to leave SHALL read the word with
+`tess_build_stopped` and, when it is marked, return no record without a
+mark: the pairs of the rows left unprobed were never marked, and a
+participant stops so only when its plan wants no more rows.
+
+#### Scenario: A participant that stops while it probes
+- **WHEN** one of two or three participants of a shared table stops
+  while it probes, in every order of their steps; when the model marks
+  the word only after that participant left; when a participant asks to
+  stop before it probes or after it left; and when a worker under the
+  core's `Gather` stops at the `LIMIT` of a RIGHT join
+- **THEN** the last participant to leave sees the mark, and with the
+  late mark the model reports a last one that missed it; out of the
+  probe nothing is marked; the join returns no row without a pair where
+  every inner row has one
+- **Verified by:**
+  `crates/tessera-kernels/src/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
+  `crates/tessera-kernels/src/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
+  `crates/tessera-kernels/src/phases.rs::a_participant_stops_only_while_it_probes`;
+  `crates/tessera-capi/tests/table.rs::a_participant_marks_its_stop_only_while_it_probes`;
+  `test/sql/join.sql::worker that has its share stops while it probes`
 
 ### Requirement: The words of a spill
 A table that spills SHALL keep its decisions in words: a process's own
