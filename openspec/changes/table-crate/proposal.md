@@ -118,7 +118,7 @@ none of these:
   `relhash-spec-table` and `relhash-spec-partitions`, which close
   first; this change adds its requirements to it, its errors of two
   kinds point to "A damaged table" for what makes a table damaged, and
-  the requirements of more than three scenarios are split.
+  the requirements of both specs are joined by topic.
 - `hash-table`: a call of the C API that gives a chunk's used mark,
   checked, so that no node reads it by itself; the lookups of the C
   API that narrow one mask in place. The masks of inserted rows that
