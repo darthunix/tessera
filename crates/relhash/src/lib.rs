@@ -1,6 +1,6 @@
-//! A hash table of records that never move, for the joins and the
-//! groupings of relational databases.
-//!
+// The crate's page is its README, which needs the owning table for its
+// example.
+#![cfg_attr(feature = "alloc", doc = include_str!("../README.md"))]
 //! # The parts
 //!
 //! A table lives in blocks of memory that the caller owns: one index and
@@ -100,56 +100,8 @@
 //!
 //! This module may use `unsafe` for its blocks of raw memory, which it
 //! reaches only through `region.rs`. [`OwnedTable`] owns its blocks and
-//! needs no `unsafe`: the tests and benchmarks build their tables with it.
-//!
-//! ```
-//! # #[cfg(feature = "alloc")] {
-//! use relhash::{KeySource, Matches, OwnedTable, RowMaskView, TableConfig, ones};
-//!
-//! // The caller hands keys over a word of 64 rows at a time: here one key
-//! // of int4 values with no NULL.
-//! struct Keys<'a>(&'a [i32]);
-//! impl KeySource for Keys<'_> {
-//!     fn nkeys(&self) -> usize { 1 }
-//!     fn nrows(&self) -> usize { self.0.len() }
-//!     fn word(&self, _: usize, index: usize, selected: u64, out: &mut [i64; 64]) -> Option<u64> {
-//!         for bit in ones(selected) {
-//!             out[bit] = i64::from(self.0[index * 64 + bit]);
-//!         }
-//!         Some(selected) // the bits of the rows that are not NULL
-//!     }
-//! }
-//!
-//! let config = TableConfig { nkeys: 1, payload_size: 8 };
-//! let mut table = OwnedTable::new(&config, 100, 4096)?;
-//! assert_eq!(table.table()?.stats().records, 0);
-//!
-//! // Three rows with keys 7, 8 and 7, and their hashes: the caller's hash,
-//! // the same for the same key. A product with a prime near 2^32 divided
-//! // by the golden ratio spreads close keys over the high bits.
-//! let keys = Keys(&[7, 8, 7]);
-//! let hashes: Vec<u32> = [7u32, 8, 7].map(|key| key.wrapping_mul(0x9e37_79b1)).into();
-//! let payload = [1u64, 2, 3].map(u64::to_ne_bytes).concat();
-//! let all = RowMaskView::try_new(3, &[1 << 0 | 1 << 1 | 1 << 2])?;
-//! let mut refs = [0; 3];
-//! assert_eq!(table.insert(&hashes, &keys, all, Some(&payload), &mut refs)?, 3);
-//! assert!(refs.iter().all(|&reference| reference != 0), "each row has its record");
-//!
-//! // Look up rows 0 and 1 of the three.
-//! let table = table.table()?;
-//! let mut rows = [1 << 0 | 1 << 1];
-//! let mut refs = [0; 3];
-//! let mut matches = Matches::new(&mut rows, &mut refs)?;
-//! // Both find a record: the key of row 0 has two, that of row 1 one.
-//! assert_eq!(table.probe(&hashes, &keys, &mut matches)?, 2);
-//! assert_eq!(table.record(matches.refs()[0])?.payload, 3u64.to_ne_bytes());
-//! // Only row 0 has a next record of its key.
-//! assert_eq!(table.next_match(&mut matches)?, 1);
-//! assert_eq!(matches.rows().selected_rows().collect::<Vec<_>>(), [0]);
-//! assert_eq!(table.record(matches.refs()[0])?.payload, 1u64.to_ne_bytes());
-//! # }
-//! # Ok::<(), relhash::Error>(())
-//! ```
+//! needs no `unsafe`, as the example at the top shows: the tests and
+//! benchmarks build their tables with it.
 //!
 //! Without the feature `alloc` the caller gives the blocks: an index of
 //! [`index_size`] bytes and chunks that [`Chunks::init`] made empty, and
