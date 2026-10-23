@@ -11,9 +11,10 @@ in and how it is looked up, how the table grows, and how several
 processes use one table at once. Then it explains what the crate gives
 a caller to keep beside the table: partitions when the table spills, a
 Bloom filter of its keys, and the marks of a RIGHT or FULL join. The
-exact bytes, limits and rules are written once, in the crate's spec,
-[spec.md](spec.md) next to this page. Where this page leans on a rule
-of the spec, it links to the requirement that states it. How Tessera's
+exact bytes, limits and rules are written once, in the documentation
+of the crate's items, which the crate's spec, [spec.md](spec.md) next
+to this page, links to. Where this page leans on a rule, it links to
+the source file whose documentation states it. How Tessera's
 nodes use the table, the steps of a shared build, the words of a spill
 and the levels of partitions, and what a call checks, are explained in
 the design of [hash-table](../hash-table/design.md).
@@ -290,8 +291,9 @@ calls, whose duties say what the caller promises of that memory. An
 The index is made once for a number of records, its capacity:
 `index_size` says how many bytes it needs, the caller allocates them,
 and `TableMut::create` writes the header and clears the buckets. The
-spec draws the header field by field, in [The index of a
-table](spec.md#requirement-the-index-of-a-table).
+documentation of
+[`HEADER_SIZE`](../../../crates/relhash/src/table/header.rs)
+draws the header field by field.
 
 Most fields of the header are written once, when the index is made,
 and never change. One field changes while the table is used: the count
@@ -325,8 +327,9 @@ outside the table: Tessera keeps a string in chunks of its own, as
 word](../hash-table/design.md#values-longer-than-a-word) shows.
 
 A record has a fixed size for the whole table: a short header, a slot
-for each key, then the payload. The spec draws it byte by byte, in
-[A record](spec.md#requirement-a-record). Why each piece is there:
+for each key, then the payload. The documentation of
+[`Record`](../../../crates/relhash/src/table/record.rs) draws it
+byte by byte. Why each piece is there:
 
 - **The hash** is compared before the keys. Two different keys in one
   chain usually have different hashes, so most wrong records are
@@ -339,8 +342,8 @@ for each key, then the payload. The spec draws it byte by byte, in
 - **The NULL bits.** A grouping puts NULL keys into a group of their
   own. A NULL key's slot holds 0, which its source of keys gives, and
   its bit in the record's header says that it is NULL, not the number
-  0. Where the bits lie is drawn in [A
-  record](spec.md#requirement-a-record).
+  0. Where the bits lie is drawn in the documentation of
+  [`Record`](../../../crates/relhash/src/table/record.rs).
 - **The record's own size** gives every call a cheap check that a
   reference points to a record of this table.
 - **The payload** is the caller's. The table writes it when a record is
@@ -352,9 +355,9 @@ for each key, then the payload. The spec draws it byte by byte, in
 A reference names a record in 32 bits. The high 15 bits are the number
 of the record's chunk. The low 17 bits, `UNIT_BITS`, are the record's
 place in the chunk, in units of 8 bytes: every record starts at a
-multiple of 8, so its byte is the place times 8. The spec draws this
-split in [Chunks and
-references](spec.md#requirement-chunks-and-references). The split sets
+multiple of 8, so its byte is the place times 8. The documentation of
+[`Chunks`](../../../crates/relhash/src/table/chunks.rs) draws
+this split. The split sets
 the limits. 2^17 places of 8 bytes make a chunk of at most 1 MiB, and
 15 bits number at most 32768 chunks, so one table holds at most 32 GiB
 of records.
@@ -423,8 +426,9 @@ damaged table.
 
 The payload of a record comes either from an array that the caller
 filled, or, with `append_columns`, straight from the batch's columns,
-`PayloadColumns`, in the form that [Appending
-rows](spec.md#requirement-appending-rows) gives. The second form saves
+`PayloadColumns`, in the form that its documentation,
+[`PayloadColumns`](../../../crates/relhash/src/table/record.rs),
+gives. The second form saves
 the caller a pass over the rows to build the array.
 
 **Link** walks the records of one chunk from a given place to its used
@@ -598,8 +602,8 @@ header, by an addition, and the buckets, by a compare-and-swap. The
 bytes of a record are plain memory. They are written by one process
 before the record is published, and read by the others only after. A
 link and a probe go in these steps; the memory order of each atomic
-operation is in [Calls at the same
-time](spec.md#requirement-calls-at-the-same-time).
+operation is in the documentation of
+[`Table`](../../../crates/relhash/src/table/mod.rs).
 
 ```
  link, for a chunk:
@@ -656,8 +660,8 @@ partitions.
 The partition of a record is taken from the low bits of its hash: with
 4 partitions, the two lowest bits. A partition read back that is still
 too large is split again by the next bits up. The rule, with its
-limits, is in
-[Partitions of a table](spec.md#requirement-partitions-of-a-table).
+limits, is in the documentation of
+[`Partitions`](../../../crates/relhash/src/table/chunks.rs).
 For the hash `0x3C27`:
 
 ```
@@ -748,8 +752,9 @@ have none, a false pass, and then probes the table as it would anyway.
 A plain Bloom filter sets its bits anywhere in the array, so a check
 reads several places, each a possible wait. The crate's filter is
 *blocked*: the four bits of a key lie in one word of 64 bits, so a
-check is one read and one comparison. The rule is in [A Bloom filter of
-the keys](spec.md#requirement-a-bloom-filter-of-the-keys); here it is
+check is one read and one comparison. The rule is in the
+documentation of the module
+[`bloom`](../../../crates/relhash/src/table/bloom.rs); here it is
 on an example.
 
 **The size.** A table of 1000 records wants 16 bits a record: 16 000
@@ -792,8 +797,8 @@ follow the bucket.
 **How many pass falsely.** At exactly 16 bits a record, 484 of 100 000
 absent keys passed a filter of 4096 keys, about one in 200. Rounding up
 to a power of two adds bits, and fewer pass. The size and the measured
-bound are in [The size of a Bloom
-filter](spec.md#requirement-the-size-of-a-bloom-filter).
+bound are in the documentation of
+[`bloom::words_for`](../../../crates/relhash/src/table/bloom.rs).
 
 A filter is filled in three ways, for three kinds of table. Whether a
 filter is worth its cost is the caller's to decide: Tessera's join
@@ -854,9 +859,8 @@ matched come out after the probe side, with NULL for its columns. The
 join must therefore know which records found a pair. It keeps a **mark**
 for each record, one bit, in words of its own beside the chunks: a run
 of words for each chunk, bit `i` of word `w` for the chunk's record
-`64 w + i`, `mark_words` words for a chunk. The layout is drawn in [The
-marks of RIGHT and FULL
-joins](spec.md#requirement-the-marks-of-right-and-full-joins).
+`64 w + i`, `mark_words` words for a chunk. The layout is drawn in the
+documentation of [`Marks`](../../../crates/relhash/src/table/marks.rs).
 With records of 32 bytes, the reference 131353 names chunk 1, byte
 2248; that is the chunk's record (2248 - 8) / 32 = 70, so its mark is
 bit 6 of word 1 of chunk 1's run.
