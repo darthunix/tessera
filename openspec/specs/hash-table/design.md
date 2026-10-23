@@ -257,69 +257,6 @@ a chunk is written to disk is in
 node's. This section is about how the table sorts its records into
 partitions, and how many partitions a level gets.
 
-The partition of a record is taken from the low bits of its hash: with
-4 partitions, the two lowest bits. A partition read back that is still
-too large is split again by the next bits up. The rule, with its
-limits, is in
-[Partitions of a table](spec.md#requirement-partitions-of-a-table).
-For the hash `0x3C27`:
-
-```
- bit           …  7 6 5 4   3 2   1 0
- hash 0x3C27   …  0 0 1 0   0 1   1 1
-                            └┬┘   └┬┘
-                             │     └─ first, 4 at shift 0: 0b11 = 3
-                             └─ split again, 4 at shift 2: 0b01 = 1
-```
-
-The record goes to partition 3; if partition 3 is split later, it goes
-to partition 1 of that split. The hash is in the record, so nothing is
-computed again. The low bits are taken because the buckets take the
-high ones: a partition read back gets an index of its own, and its
-records then spread over all of the buckets. Had the partitions taken
-the high bits, every record of a partition would share them, and all
-of them would fall into a few buckets.
-
-A split is not limited to two levels. Each split makes a **level**: its
-partitions take the bits just above those of the level it splits. A
-node makes 4 to 1024 partitions a level, so a level takes 2 to 10 bits.
-A partition of any level splits again when it is still too large, as
-long as two of the hash's 32 bits are left, so the levels can go on to
-the length of the hash. Each level divides a partition's records among
-its partitions, so a few levels are enough even for a table far larger
-than the memory. What no split helps is many rows of one key: they
-share the whole hash, and every level puts them in one partition.
-"A partition too large for memory" below says what the nodes do then.
-
-A partition is a list of chunks. Each call that works by partition gets
-one chunk number for each partition: the chunk that partition appends
-to now.
-
-```
- partition   its chunks                       partition_chunks
-     0       chunk 4 (on disk), chunk 9          9
-     1       chunk 5                             5
-     2       none yet                            1  (the empty chunk)
-     3       chunk 7 (full), chunk 8             8
-```
-
-A row can be written only where its partition's chunk has room. A
-partition that has no chunk yet, partition 2 above, names the **empty
-chunk**: a chunk of 8 bytes that holds its used mark alone and has no
-room for any record. To the call it is just a full chunk, so the call
-needs no case of its own for a partition without a chunk. Nothing is
-ever written to the empty chunk, so any number of partitions may name
-the same one.
-
-When a row's chunk has no room, the call does not stop. It leaves that
-row in its mask of pending rows, the rows it did not place, and goes on
-with the next ones, so one full partition does not hold up the others.
-The node then gives each partition with a pending row a new chunk and
-calls again for the pending rows. The calls by partition need no index.
-When the table has one, as a grouping's has, they check that the
-records they write have its keys and its payload, as an append does,
-and refuse others.
-
 A join and a grouping use partitions in different ways.
 
 ### A join
@@ -482,154 +419,7 @@ A grouping needs no pieces. A group is one record however many rows it
 had, so a partition is as large as its groups, and its groups decide
 whether it splits.
 
-## The Bloom filter of the keys
-
-In many joins most rows of the probe side find no pair. Such a row
-still costs a read of its bucket, and on a table far larger than the
-caches that read waits for memory. A **Bloom filter** answers "surely
-not here" from far less memory. It is an array of bits. Each key of the
-table sets a few of them, chosen by its hash; a row whose bits are not
-all set has no key in the table. A row whose bits are all set may still
-have none, a false pass, and then probes the table as it would anyway.
-
-A plain Bloom filter sets its bits anywhere in the array, so a check
-reads several places, each a possible wait. Tessera's filter is
-*blocked*: the four bits of a key lie in one word of 64 bits, so a
-check is one read and one comparison. The rule is in [A Bloom filter of
-the keys](spec.md#requirement-a-bloom-filter-of-the-keys); here it is
-on an example.
-
-**The size.** A table of 1000 records wants 16 bits a record: 16 000
-bits, or 250 words. The words are rounded up to a power of two, 256
-words or 2 KiB, so the filter has about 16.4 bits a record. The power of
-two lets the word be found by a shift: 256 is 2^8, so the number of a
-word is 8 bits long.
-
-**The word and the bits.** The hash of a key, here `0x3C27`, is
-multiplied by the odd constant `0x9E3779B97F4A7C15`, and the low 64
-bits of the product are kept. The top 8 bits of the product are the
-number of the word. The low 24 bits are four numbers of six bits each,
-and six bits name one of the 64 bits of a word.
-
-```
- hash 0x3C27 × 0x9E3779B97F4A7C15 = 0x1AFB0517D96DD333
-
- bits of the product  63 … 56   55 … 24    23…18   17…12   11…6    5…0
-                      00011010  not used   011011  011101  001100  110011
-                      word 26              27      29      12      51
-
- filter     word 0   word 1   …   word 26   …   word 255
-                                     ▲
-            the key sets bits 12, 27, 29 and 51 of word 26
-```
-
-A row of the probe side is checked the same way: its hash gives a word
-and four bits, and the row passes when all four are set in that word. A
-row with the hash `0x3C27` reads word 26 and finds the bits this key
-set. A row of another hash passes without a pair when other keys
-happened to set all of its bits: a false pass. Two of the four numbers
-may be equal, and a key then sets three bits.
-
-**Why the product.** The bucket of a key is taken from the high bits of
-the hash itself. Had the word been taken from those bits too, the keys
-of neighbouring buckets would share a word and crowd it. The product
-mixes every bit of the hash into its high bits, so the word does not
-follow the bucket.
-
-**How many pass falsely.** At exactly 16 bits a record, 484 of 100 000
-absent keys passed a filter of 4096 keys, about one in 200. Rounding up
-to a power of two adds bits, and fewer pass. The size and the measured
-bound are in [The size of a Bloom
-filter](spec.md#requirement-the-size-of-a-bloom-filter).
-
-The join uses a filter in three ways. When it wants one, and whether it
-is worth its cost, the join decides by its own rows.
-
-- **A table of one process.** After the build, `tess_table_bloom` fills
-  a filter from every record of the chunks, and `tess_bloom_probe`
-  checks each batch before the probe.
-- **A shared table.** The filter is shared too, behind a state word.
-  Each participant decides by its own rows whether it wants the filter,
-  and the first that does builds it alone; the others go on without it
-  until it is ready. Nobody waits.
-
-  ```
-   none ──first participant's compare-and-swap──► building
-                                                     │ fills the filter
-                                                     ▼
-   ready ◄──────────── a store with release ─────────┘
-     │
-     └─► a participant that reads ready, with acquire, checks its rows
-         against the filter; before that, it probes the table alone
-  ```
-
-  The acquire read of ready makes every bit the builder set visible, as
-  the read of a bucket makes a record visible. The participant that
-  makes the index allocates the filter's words with the table, 16 to 32
-  bits a record of the query's shared memory, but only when a
-  participant may want them: at the default rule, for a table of 4096
-  records at least, since a smaller one stays in the cache, where a miss
-  costs less than the check.
-- **A table that spills.** A filter of every row of the build side is
-  filled as the rows come, before some of them go to disk: by
-  `tess_bloom_add` in one process, or by every participant at once by
-  `tess_bloom_add_atomic`, which sets the bits of a word by an atomic
-  OR. Rows of the probe side that it rejects have no pair in any
-  partition, and are dropped before they are written to disk. A
-  barrier orders every addition before the first check. This filter is
-  sized within an eighth of the node's memory: it lets more rows through
-  when it is small, but leaves the memory to the rows.
-
-The loom model checks the shared filter as it checks the buckets: two
-participants race to build it and one does, and a participant that
-reads ready sees every key pass. In negative tests, a state stored
-relaxed lets a reader see a filter not yet filled, and an addition by a
-plain read and write in place of the atomic OR loses bits.
-
-The calls check the count of a filter's words and of a batch's rows.
-The words of a filter in one process are an array of the C API like any
-other, whose alignment the C type already requires; the calls over a
-shared filter, or one filled together, check that the words are aligned
-to 8, since they read them as atomic words.
-
 ## The marks of a RIGHT or FULL join
-
-A RIGHT join returns every row of its build side, the side the table
-holds, and so does a FULL join: the rows that no row of the probe side
-matched come out after the probe side, with NULL for its columns. The
-join must therefore know which records found a pair. It keeps a **mark**
-for each record, one bit, in words of its own beside the chunks: a run
-of words for each chunk, bit `i` of word `w` for the chunk's record
-`64 w + i`. The layout is drawn in [The marks of RIGHT and FULL
-joins](spec.md#requirement-the-marks-of-right-and-full-joins).
-With records of 32 bytes, the reference 131353 names chunk 1, byte
-2248; that is the chunk's record (2248 - 8) / 32 = 70, so its mark is
-bit 6 of word 1 of chunk 1's run.
-
-```
- probe:   a pair passes the join's conditions
-            └─► tess_table_mark: the bit of the pair's record is set
- then:    the probe side is done
-            └─► tess_table_next_unmarked: the records whose bits are
-                clear, a batch at a time, from a cursor; a count of 0
-                ends the walk
-```
-
-The marks are not kept in the records. The records are read by every
-participant while they probe, and stay as they were written. The walk
-reads the marks of 64 records in one word, and reads no record whose
-bit is set. The walk needs only the chunks, so the calls take the size
-of a record from the caller and check it against the index when the
-table has one.
-
-In a shared table the marks lie in shared memory, a run sized for the
-largest chunk for every chunk, and two participants may mark records of
-one word at the same time; each word is changed by an atomic OR, so no
-mark is lost. The last participant to leave the table walks the records
-without a mark. The barrier it leaves through orders the marks of every
-other participant before its walk. The loom model marks records of one
-word from two participants, and a negative test shows that a plain read
-and write loses marks.
 
 A participant may leave before its share of the outer side is done:
 under the core's `Gather` with a `LIMIT`, a worker stops once it has
@@ -1172,10 +962,6 @@ How a spilled chunk of records is written to disk is in
   design of [relhash](../relhash/design.md) lists
 - `crates/tessera-kernels/src/column_keys.rs`: the keys read from
   Tessera's columns
-- `crates/relhash/src/table/bloom.rs`: the Bloom filter, alone,
-  shared and filled together
-- `crates/relhash/src/table/marks.rs`: the marks of a RIGHT or
-  FULL join and their walk
 - `crates/tessera-kernels/src/phases.rs`: the participant of a
   shared build and of a round, the counters of a build and the stop
   word
@@ -1206,8 +992,6 @@ How a spilled chunk of records is written to disk is in
 - The unit tests in `crates/tessera-kernels/src/accumulate.rs`: the
   states of groups merged by their kinds, and a count past the int8
   range.
-- The unit tests in `crates/relhash/src/table/marks.rs`: the
-  words of the marks, and the records and cursors a walk refuses.
 - The unit tests in `crates/tessera-kernels/src/phases.rs`: the
   actions of a participant alone, attached at every phase of a build
   and of a round, and the counters of a build under threads.
