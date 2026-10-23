@@ -1,11 +1,11 @@
 //! The marks of a RIGHT or FULL join: a bit per record of the inner
-//! table, set for every record a published pair matched, and the walk over
-//! the records without one, which go out with NULL outer columns after the
-//! outer side. The marks are the caller's memory, a run of words per
-//! chunk ([`Marks`]): bit `i` of word `w` of chunk `c` stands for the
-//! chunk's record `64 * w + i`. Both need only the chunks, so the size of
-//! a record comes from the caller; the entry points check it against the
-//! index when the table has one.
+//! table, set for every record a published pair matched, and the walk
+//! over the records without one, which go out with NULL outer columns
+//! after the outer side. The marks are the caller's memory, a run of
+//! words per chunk, laid out as the documentation of [`Marks`] draws
+//! them. Both need only the chunks, so the size of a record comes from
+//! the caller; the entry points check it against the index when the table
+//! has one.
 
 use crate::error::{Error, Result, Rule, ensure};
 use crate::{RowMaskView, check_rows, ones};
