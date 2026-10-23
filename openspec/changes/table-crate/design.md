@@ -803,9 +803,14 @@ version and kinds of keys the crate no longer has. Their entries leave
 this change's delta, so these promises reach the main specs before it
 closes; the maintainer chose this on 2026-10-23. Both changes close
 before this one. Then this change's own requirements are set on top of
-the moved ones: "Errors of two kinds" takes the place of "A damaged
-table", by an entry that removes it, so that the rules of a damaged
-table are written once.
+the moved ones. "Errors of two kinds" and "A damaged table" both list
+what makes a table damaged; the list stays in "A damaged table", which
+this change's delta modifies, and "Errors of two kinds" points to it,
+so that the rules of a damaged table are written once and the links to
+the requirement stay. A requirement of more than three scenarios is
+split, as `openspec/config.yaml` asks, into requirements of one promise
+each, under names of their own: OpenSpec refuses a changed requirement
+that drops a scenario.
 
 ### The branch and its pull requests
 
