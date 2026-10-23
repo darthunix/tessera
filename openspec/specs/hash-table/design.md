@@ -187,12 +187,11 @@ The table trusts nothing it reads, because it cannot know who wrote the
 bytes last. Every call does four kinds of check.
 
 - **The header, once a call.** The header's fields must agree with
-  each other and with the length of the index, as
-  [The index of a
-  table](../relhash/spec.md#requirement-the-index-of-a-table) lists
-  them. The calls that append to chunks before an index exists
-  have no header to check. What makes a table damaged is in [A damaged
-  table](../relhash/spec.md#requirement-a-damaged-table).
+  each other and with the length of the index, as the documentation
+  of [`HEADER_SIZE`](../../../crates/relhash/src/table/header.rs)
+  lists them. The calls that append to chunks before an index exists
+  have no header to check. What makes a table damaged is listed by
+  [`Kind::Damaged`](../../../crates/relhash/src/error.rs).
 - **A chunk, when the call starts on it.** A call that writes or walks
   a chunk first checks that it is aligned and of a length a chunk may
   have; a chunk longer than 1 MiB would hold places that no reference
@@ -703,9 +702,9 @@ atomic it does:
                           the chunks and the values
 ```
 
-The orders of the link and the probe are those of [Calls at the same
-time](../relhash/spec.md#requirement-calls-at-the-same-time) in the
-spec of `relhash`, and [Several processes at
+The orders of the link and the probe are those that the documentation
+of [`Table`](../../../crates/relhash/src/table/mod.rs) gives,
+and [Several processes at
 once](../relhash/design.md#several-processes-at-once) in its design
 explains them.
 
