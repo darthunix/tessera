@@ -78,7 +78,12 @@ rules:
       Define formats, lists of what is and is not supported and error
       codes in the spec, and draw a layout of data in a code block, with
       its offsets and sizes. A rule or a layout is written once, here: a
-      design explains the idea and points to the spec for it.
+      design explains the idea and points to the spec for it. For the
+      public API of a crate meant for use outside Tessera the rules and
+      the layouts are written once in the crate's documentation instead,
+      and a requirement says what is promised in a sentence or two and
+      links to the item that holds the rest by the path of its source
+      file, "[`Item`](../../../crates/<crate>/src/<file>.rs)".
     - >-
       Leave out measurements, numbers of the old plan's items and names
       of internal functions.

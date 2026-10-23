@@ -340,11 +340,17 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       build with LTO and to use a hash with a secret seed for keys from
       outside, and links to the spec and the design. Check:
       `cargo test --doc -p relhash`
-- [ ] 5.2 Document every public item as a map of the API, with links to
-      the spec instead of its rules, and examples where they help; cut
-      the module texts that restate the spec or the design down to
-      links; set `#![deny(missing_docs)]`. Check:
-      `RUSTDOCFLAGS="-D warnings" cargo doc -p relhash --no-deps`
+- [ ] 5.2 Make the documentation complete by itself, as a map of the
+      API: each public item with what it is for, takes and gives, and
+      the rules, layouts and limits that the spec of `relhash` holds
+      now, moved into it, with examples where they help; the README
+      with the caller's whole promise. Cut each requirement of `relhash`
+      to its promise and links to the items that hold the rest, and
+      check those links in `check-specs.sh`. Cut the module texts that
+      restate the documentation or the design down to links; set
+      `#![deny(missing_docs)]`. Check:
+      `RUSTDOCFLAGS="-D warnings" cargo doc -p relhash --no-deps`;
+      `.github/scripts/check-specs.sh`
 - [ ] 5.3 Add the build of the documentation and its examples to CI.
       Check: CI
 

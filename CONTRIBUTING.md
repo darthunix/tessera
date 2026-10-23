@@ -152,16 +152,23 @@ the findings, and what is left.
   of a format, with one to five scenarios: a spec reads as a few dozen
   requirements, not a list of every promise. The rules of a format
   (its fields, codes, widths and limits), the drawings of its layouts,
-  the lists of what is supported and the error codes are written once,
-  in the spec. A design explains the idea, with a picture of the whole
-  or an example, and points to the spec for a rule or a layout; it
-  does not repeat them.
-- The documentation of a crate meant for use outside Tessera is a map
-  of its API for a caller: what each item is for, what it takes and
-  gives, who owns what and for how long, its safety duties and the kind
-  of error it returns, and examples where they help. For a rule, a
-  layout or a limit it links to the requirement of the crate's spec and
-  does not repeat it.
+  the lists of what is supported and the error codes are written once:
+  in the spec, or, for the API of a crate meant for use outside
+  Tessera, in the crate's documentation. A design explains the idea,
+  with a picture of the whole or an example, and points to where a rule
+  or a layout is written; it does not repeat them.
+- The documentation of a crate meant for use outside Tessera is
+  complete by itself: a caller who reads only it, as on docs.rs, can
+  use the crate. It is a map of the API: what each item is for, what it
+  takes and gives, who owns what and for how long, its safety duties,
+  the errors it returns, and examples where they help. It holds the
+  rules, the layouts and the limits of the API, and needs no spec to be
+  understood. The crate's spec does not repeat them: a requirement says
+  what is promised in a sentence or two and links to the items whose
+  documentation holds the rest, by the path of their source file,
+  ``[`Item`](../../../crates/<crate>/src/<file>.rs)``; the check fails
+  when the file does not declare the item. Its scenarios name the tests
+  as in any spec.
 - Every scenario ends with the test that shows it:
   ``- **Verified by:** `path::text` ``, where the text occurs in the
   file: a test's name, or a mark `-- spec: <capability>/<scenario>` in
