@@ -1,20 +1,3 @@
-## Purpose
-
-`relhash` is a hash table for the engines of relational databases: the
-place where a hash join or a grouping keeps its rows, kept in memory
-the caller gives, with no address inside, so that the same bytes serve
-one process, several processes over shared memory, and a file on disk.
-
-A table is an **index** and **chunks**, blocks of memory the caller
-gives. The index holds a header, which describes the table, and the
-buckets. A chunk holds **records** one after another, after its used
-mark, the count of its bytes taken. A record is one row: its hash, the
-reference of the next record of its chain, its keys and its payload. A
-**reference** is a number of 32 bits that names a chunk and a place in
-it. The **one writer** of a table is a caller that has it to itself
-while it works. A **call** is a call of the crate that takes the index
-or the chunks of a table.
-
 ## ADDED Requirements
 
 ### Requirement: A crate of its own

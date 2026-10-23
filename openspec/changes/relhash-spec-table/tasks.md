@@ -5,7 +5,7 @@
       `hash-table` the nine removed and "The C API over the crate"
       added. Check: `openspec validate relhash-spec-table --strict`;
       `.github/scripts/check-specs.sh`
-- [ ] 1.2 Take out of `table-crate` what this change now carries: the
+- [x] 1.2 Take out of `table-crate` what this change now carries: the
       entries of its `hash-table` delta for the index, a record,
       appending rows and the calls of one writer, and the purpose of
       its `relhash` delta; say so in its design and tasks. Check:
