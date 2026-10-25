@@ -17,7 +17,9 @@ so that it can be used, and checked, alone.
 Each of the four counts is the same event in every cell it counts in:
 retired, of the calling thread, in user space; a backend that cannot
 count one of them refuses to open rather than count another event in
-its place, so that a verdict in any cell rests on the same quantities.
+its place, so that a verdict in any cell rests on the same quantities,
+and where a cell sums kinds of cores in a count, as macOS does, the
+documentation says so.
 - **Checked by:** agent review — list every event each backend
   programs, with its meaning in the vendor's manual and whether it
   counts the kernel; an event that is speculative, that counts the
