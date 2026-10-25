@@ -16,18 +16,21 @@ not open the counters SHALL run as one.
 - **WHEN** the crate is packed, as for publishing
 - **THEN** it builds from the packed files and the crates it names,
   none of them Tessera's
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo publish --dry-run --locked -p pmu`
 
 #### Scenario: The crate's tests run alone
 - **WHEN** the tests of the crate run as the only package, on Linux
   for x86-64 and for AArch64, and on macOS
 - **THEN** they pass
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo test --locked -p pmu --all-features`
 
 #### Scenario: A target without counters
 - **WHEN** the crate is built for a target where it has no backend
 - **THEN** it builds, with the same public items
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::x86_64-unknown-freebsd`
 
 ### Requirement: What a reading holds
 A [`Reading`](../../../crates/pmu/src/lib.rs) SHALL hold four counts of
@@ -104,7 +107,8 @@ with `ErrorKind::Unsupported`.
 #### Scenario: Linux on AArch64
 - **WHEN** the tests run on Linux on an AArch64 machine with a PMU
 - **THEN** the hardware counters open and count
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::PMU_REQUIRE=hardware cargo test`
 
 #### Scenario: Linux on x86-64, without a PMU at hand
 - **WHEN** a group of software events opens through the code of the
@@ -123,7 +127,8 @@ with `ErrorKind::Unsupported`.
 - **WHEN** a build for x86-64 runs under Rosetta on Apple silicon
 - **THEN** `open` fails with `ErrorKind::Unsupported`, and the message
   names Rosetta
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::PMU_EXPECT_ERROR=unsupported`
 
 ### Requirement: Errors that say what to do
 When `Counters::open` fails, its
@@ -138,7 +143,8 @@ kinds and their fixes. A new kind MAY come in a minor version.
   virtual one
 - **THEN** `open` fails with `ErrorKind::NoCounters`
 - **Verified by:**
-  `crates/pmu/src/core_pmu.rs::a_tree_without_a_core_pmu_has_no_counters`
+  `crates/pmu/src/core_pmu.rs::a_tree_without_a_core_pmu_has_no_counters`;
+  `.github/workflows/ci.yml::PMU_EXPECT_ERROR=no-counters`
 
 #### Scenario: No permission
 - **WHEN** the setting `kernel.perf_event_paranoid` refuses the user
@@ -146,7 +152,8 @@ kinds and their fixes. A new kind MAY come in a minor version.
   macOS is not root
 - **THEN** `open` fails with `ErrorKind::Permission`, and the message
   names the setting and the capability, or root
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::PMU_EXPECT_ERROR=permission`
 
 #### Scenario: Counters in use
 - **WHEN** a process on macOS holds the counters, and a second process
