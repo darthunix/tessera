@@ -136,7 +136,8 @@ kinds and their fixes. A new kind MAY come in a minor version.
 - **WHEN** a Linux machine has no PMU, as a virtual machine without a
   virtual one
 - **THEN** `open` fails with `ErrorKind::NoCounters`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/core_pmu.rs::a_tree_without_a_core_pmu_has_no_counters`
 
 #### Scenario: No permission
 - **WHEN** the setting `kernel.perf_event_paranoid` refuses the user
@@ -158,7 +159,8 @@ kinds and their fixes. A new kind MAY come in a minor version.
   no `br_mis_pred_retired`
 - **THEN** `open` fails with `ErrorKind::MissingEvent` and names the
   event, before it opens anything
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/core_pmu.rs::an_arm_pmu_without_a_branch_event_is_refused`
 
 ### Requirement: Two kinds of cores
 When a Linux machine has more than one core PMU, `Counters::open`
@@ -177,13 +179,16 @@ kinds, while its instructions and branches do not depend on the kind.
 - **WHEN** a machine has two core PMUs, and the thread may run only on
   the CPUs of one
 - **THEN** the counters open on that PMU
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/core_pmu.rs::two_kinds_of_x86_cores_count_on_the_bound_one`;
+  `crates/pmu/src/core_pmu.rs::big_and_little_arm_cores_count_on_the_bound_one`
 
 #### Scenario: An unbound thread
 - **WHEN** the thread may run on CPUs of both
 - **THEN** `open` fails with `ErrorKind::MixedCores`, and names both
   kinds, their CPUs and `taskset`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/core_pmu.rs::an_unbound_thread_on_two_kinds_of_cores_is_refused`
 
 #### Scenario: A Mac with two kinds of cores
 - **WHEN** on a Mac whose cores are of two kinds, the same loop is

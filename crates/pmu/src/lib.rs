@@ -9,6 +9,12 @@ use std::{hint::black_box, marker::PhantomData};
 
 mod error;
 
+// The choice of the core PMU is plain code over files, so its tests run on
+// every host. Until the Linux backend calls it, it is used only by them.
+#[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(test), allow(dead_code))]
+mod core_pmu;
+
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod macos;

@@ -24,6 +24,7 @@ serde = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true
