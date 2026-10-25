@@ -5,12 +5,12 @@ The counters SHALL be the Rust crate `pmu`, which depends on no crate
 of Tessera, and SHALL build, pass its tests and pack alone. It SHALL
 build for every target, and give the same public API on each.
 
-Its documentation SHALL be complete by itself, as the crate's page
-maps it: every public item SHALL say what it is for, what it takes and
-gives, the errors it returns and what its caller must do. The
-documentation SHALL build without warnings. Every example in it SHALL
-build as a test, and every example that does not open the counters
-SHALL run as one.
+Its documentation SHALL be complete by itself, as [the crate's
+page](../../../crates/pmu/src/lib.rs) maps it: every public item SHALL
+say what it is for, what it takes and gives, the errors it returns and
+what its caller must do. The documentation SHALL build without warnings.
+Every example in it SHALL build as a test, and every example that does
+not open the counters SHALL run as one.
 
 #### Scenario: The crate packs alone
 - **WHEN** the crate is packed, as for publishing
@@ -30,14 +30,14 @@ SHALL run as one.
 - **Verified by:** pending
 
 ### Requirement: What a reading holds
-A `Reading` SHALL hold four counts of the thread that opened the
-`Counters`: retired instructions, core cycles, retired branches and
-retired mispredicted branches. Each SHALL count user space only: the
-work of the kernel for the thread, in system calls, interrupts and
-page faults, SHALL NOT be counted. `Reading::since` SHALL give the
-counts between two readings, and the sum of two readings SHALL add
-each count. With the feature `serde`, a reading SHALL serialize as its
-four named counts.
+A [`Reading`](../../../crates/pmu/src/lib.rs) SHALL hold four counts of
+the thread that opened the `Counters`: retired instructions, core
+cycles, retired branches and retired mispredicted branches. Each SHALL
+count user space only: the work of the kernel for the thread, in system
+calls, interrupts and page faults, SHALL NOT be counted.
+`Reading::since` SHALL give the counts between two readings, and the sum
+of two readings SHALL add each count. With the feature `serde`, a
+reading SHALL serialize as its four named counts.
 
 #### Scenario: Ten times the work
 - **WHEN** a loop of calls is measured once, then with ten times as
@@ -55,20 +55,22 @@ four named counts.
 #### Scenario: The difference of two readings
 - **WHEN** a reading is taken `since` a reading with a larger count
 - **THEN** that count is 0, and the others are their differences
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/lib.rs::since_subtracts_per_field_and_saturates`
 
 #### Scenario: A reading as data
 - **WHEN** a reading is serialized and read back, with the feature
   `serde`
 - **THEN** it is the same reading, and its counts are named
   `instructions`, `cycles`, `branches` and `branch_misses`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/lib.rs::a_reading_serializes_as_its_four_named_counts`
 
 ### Requirement: The thread that opened the counters
-`Counters` SHALL count the thread that called `Counters::open`, on
-whichever cores it runs, and SHALL be read on that thread. The type
-SHALL be neither `Send` nor `Sync`, so that the compiler refuses a
-read on another thread.
+[`Counters`](../../../crates/pmu/src/lib.rs) SHALL count the thread that
+called `Counters::open`, on whichever cores it runs, and SHALL be read
+on that thread. The type SHALL be neither `Send` nor `Sync`, so that the
+compiler refuses a read on another thread.
 
 #### Scenario: Counters sent to another thread
 - **WHEN** a program moves `Counters` into another thread
@@ -76,10 +78,11 @@ read on another thread.
 - **Verified by:** pending
 
 ### Requirement: Exact or an error
-`Counters::read` and `Counters::measure` SHALL give a reading only
-when every counter counted for the whole time since `open`; otherwise
-they SHALL fail with `ErrorKind::Lost`. A reading SHALL NOT be scaled,
-estimated, or made from time or from software events.
+[`Counters::read`](../../../crates/pmu/src/lib.rs) and
+[`Counters::measure`](../../../crates/pmu/src/lib.rs) SHALL give a
+reading only when every counter counted for the whole time since `open`;
+otherwise they SHALL fail with `ErrorKind::Lost`. A reading SHALL NOT be
+scaled, estimated, or made from time or from software events.
 
 #### Scenario: Counters lost
 - **WHEN** the counters of an open group stop counting before a read,
@@ -88,12 +91,12 @@ estimated, or made from time or from software events.
 - **Verified by:** pending
 
 ### Requirement: The four cells
-`Counters::open` SHALL count on macOS through kperf, on Apple silicon
-and on Intel, and on Linux through `perf_event_open`, on AArch64 and
-on x86-64. On Linux for AArch64 the branches SHALL be the Arm PMU's
-`BR_RETIRED` and `BR_MIS_PRED_RETIRED`. On any other system or
-processor, and under Rosetta, `open` SHALL fail with
-`ErrorKind::Unsupported`.
+[`Counters::open`](../../../crates/pmu/src/lib.rs) SHALL count on macOS
+through kperf, on Apple silicon and on Intel, and on Linux through
+`perf_event_open`, on AArch64 and on x86-64. On Linux for AArch64 the
+branches SHALL be the Arm PMU's `BR_RETIRED` and `BR_MIS_PRED_RETIRED`.
+On any other system or processor, and under Rosetta, `open` SHALL fail
+with `ErrorKind::Unsupported`.
 
 #### Scenario: Linux on AArch64
 - **WHEN** the tests run on Linux on an AArch64 machine with a PMU
@@ -187,8 +190,9 @@ kinds, while its instructions and branches do not depend on the kind.
 - **Verified by:** pending
 
 ### Requirement: The CPU of the thread
-`cpu_number` SHALL give the CPU the calling thread runs on, on macOS
-and on Linux, and `None` on any other system.
+[`cpu_number`](../../../crates/pmu/src/lib.rs) SHALL give the CPU the
+calling thread runs on, on macOS and on Linux, and `None` on any other
+system.
 
 #### Scenario: A CPU of the machine
 - **WHEN** a thread asks for its CPU on Linux

@@ -1,33 +1,23 @@
-//! Per-thread PMU counters for benchmarking arbitrary code.
-//!
-//! Instructions retired are deterministic for a fixed input: they depend
-//! neither on the core a thread happens to run on, nor on its frequency, nor
-//! on predictor state. That gives nanosecond-scale operations a metric with
-//! real resolution, which wall time lacks. Cycles are core clock periods
-//! spent on the thread in user space: the same work costs the same cycles at
-//! any core frequency as long as it stays in the core and L1 (memory latency
-//! is fixed in nanoseconds, not cycles), and they exclude time off the core
-//! and in the kernel. Branch misses explain most cycle-only effects. Counting
-//! is per thread and survives migration between cores.
-//!
-//! Only macOS through the private kperf frameworks is implemented, counting
-//! user space only, and it needs root: run `sudo -v`, then start the
-//! measuring process with `sudo -n`.
-//! [`Counters::open`] reports why counters are unavailable. There is no
-//! fallback to timing.
-//!
-//! This crate is tooling: it is never linked into the library. It may use
-//! `unsafe` for the kperf ABI; every block states its invariants.
+// The crate's page is its README.
+#![doc = include_str!("../README.md")]
+// Unsafe code lives only in the backends, which call the system; every
+// block there states its invariants.
+#![deny(unsafe_code)]
+#![deny(missing_docs)]
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use std::hint::black_box;
 
 #[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
 mod macos;
 
 /// Counter values of one thread at one instant, or a difference of two.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// With the feature `serde`, a reading serializes as its four named
+/// counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Reading {
     /// Retired instructions.
     pub instructions: u64,
@@ -170,5 +160,27 @@ mod tests {
                 branches: 13,
             }
         );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn a_reading_serializes_as_its_four_named_counts() {
+        let reading = Reading {
+            instructions: 1,
+            cycles: 2,
+            branch_misses: 3,
+            branches: 4,
+        };
+        let json = serde_json::to_value(reading).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "instructions": 1,
+                "cycles": 2,
+                "branch_misses": 3,
+                "branches": 4,
+            })
+        );
+        assert_eq!(serde_json::from_value::<Reading>(json).unwrap(), reading);
     }
 }
