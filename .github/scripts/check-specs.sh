@@ -27,10 +27,10 @@
 #    requirement's anchor, in any file of the repository, names a
 #    requirement of that spec, in openspec/specs/ or in an open change.
 # 10. Every link of a Markdown file under openspec/ to a file under
-#    crates/ leads there from where the file stands once its change is
-#    closed, and a link whose text is an item in backticks, such as
-#    `Table::probe`, leads to the file that declares the item's last
-#    name, or to the module of that name.
+#    crates/ or tools/ leads there from where the file stands once its
+#    change is closed, and a link whose text is an item in backticks,
+#    such as `Table::probe`, leads to the file that declares the item's
+#    last name, or to the module of that name.
 # Run from the root of the repository.
 set -eu
 
@@ -257,10 +257,10 @@ rm -f "$list.links"
 # openspec/specs/<capability>/, so its links are counted from there.
 git ls-files -- 'openspec/*.md' | grep -v '^openspec/changes/archive/' |
     xargs perl -0777 -ne '
-        BEGIN { %tracked = map { ($_ => 1) } split /\n/, `git ls-files -- crates` }
+        BEGIN { %tracked = map { ($_ => 1) } split /\n/, `git ls-files -- crates tools` }
         (my $home = $ARGV) =~ s{^openspec/changes/[^/]+/specs/}{openspec/specs/};
         my $up = "../" x (($home =~ tr{/}{}));
-        while (/\[([^\]]*)\]\(((?:\.\.\/)*)(crates\/[^)#\s]+)\)/g) {
+        while (/\[([^\]]*)\]\(((?:\.\.\/)*)((?:crates|tools)\/[^)#\s]+)\)/g) {
             my ($text, $prefix, $path) = ($1, $2, $3);
             my $line = 1 + (substr($_, 0, $-[0]) =~ tr/\n//);
             my $where = "$ARGV:$line";
