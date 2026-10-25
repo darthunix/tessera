@@ -44,13 +44,15 @@ reading SHALL serialize as its four named counts.
   many calls
 - **THEN** the second reading counts ten times the instructions of the
   first, within the small fixed cost of the reads
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/tests/open.rs::counters_count_a_known_loop_or_explain_why_not`
 
 #### Scenario: A system call is not counted
 - **WHEN** a thread calls `getppid` many times between two readings
 - **THEN** each call counts fewer instructions than the kernel's work
   for it would add
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/tests/open.rs::the_kernel_work_of_a_system_call_is_not_counted`
 
 #### Scenario: The difference of two readings
 - **WHEN** a reading is taken `since` a reading with a larger count

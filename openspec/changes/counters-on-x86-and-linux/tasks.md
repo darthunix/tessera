@@ -47,7 +47,7 @@ the maintainer types on the Mac named.
       a `compile_fail` doctest that sends `Counters` to another thread;
       `cargo clippy --locked -p pmu` for the four targets of the cells
       and for a target without a backend
-- [ ] 2.4 Read `PMU_REQUIRE` and `PMU_EXPECT_ERROR` in the crate's
+- [x] 2.4 Read `PMU_REQUIRE` and `PMU_EXPECT_ERROR` in the crate's
       tests, and add the test that the kernel's work in a system call
       is not counted. Check: the tests pass; with
       `PMU_REQUIRE=hardware` they fail without counters, and with an
