@@ -893,6 +893,96 @@ orders, by a barrier. The loom model marks records of one word from two
 participants, and a negative test shows that a plain read and write
 loses marks.
 
+## Where the table trusts its bytes
+
+A call reads the index and the chunks, and what it reads may be
+anything: the caller may hand over bytes that are not a table, or a
+table that a bug damaged. The crate promises an error for such bytes,
+never a crash and never a call that does not end. A **trust point** is
+a place where a call takes a value from the table's blocks: a value it
+did not compute itself, which it must check before the value decides
+anything.
+
+What a value decides says what a wrong one would do:
+
+- an **address**, where the call reads or writes next: a wrong one
+  would reach memory outside the blocks;
+- the **length of a loop**, how many steps a walk takes: a wrong one
+  would let the call go on and on;
+- only **data**, such as a hash, a key or a payload: a wrong one gives
+  a wrong answer, which no check can see, but no crash.
+
+Every read of the index or a chunk goes through the region, the one
+layer of memory, so the reads are few and can be listed. Each call of a
+read of the region carries a comment `// trust:` with the name of its
+point below. `.github/scripts/check-trust.sh` fails when a read has no
+mark, when a mark names no point of this list, and when a point is
+marked nowhere. It also knows every method of the region as a read or
+not, so that a new method has to be sorted. A borrow of a chunk's bytes
+for writing is not a read: the table only writes through it, and the
+payloads it hands to its caller are bytes the table never reads.
+
+- **`header`**: the fields of the header, read when a handle attaches
+  to the index, and when the index is moved to a larger one.
+  - Decides addresses and the length of loops: where the buckets start
+    and how many there are, the size of a record and of its parts.
+  - Check: `Header::validate` compares every field with the format and
+    with the length of the index the caller gave, as the documentation
+    of [`HEADER_SIZE`](../../../crates/relhash/src/table/header.rs)
+    lists them.
+  - Error: damaged, with the rule of the first wrong field, from
+    `Magic` to `Reserved`.
+- **`record-count`**: the count of records in the header.
+  - Decides the length of a loop: a walk down a chain takes at most as
+    many steps as there are records. A table's statistics hand it to
+    the caller as data, and the additions to it use none of the values
+    they return.
+  - Check: `Access::refresh` cuts it to the places that references can
+    name in the chunks the caller gave, 2^17 a chunk. A walk past the
+    count, or a long walk that comes back to a record it saved, has
+    gone round a loop.
+  - Error: damaged, `Chain`.
+- **`bucket-head`**: the reference a bucket holds, the first record of
+  its chain.
+  - Decides an address.
+  - Check: `Access::place`, before the reference is followed: its chunk
+    exists, and the record starts after the chunk's first word, its
+    used mark, and ends within the chunk. A head read to be put after
+    a new record is not followed then: it becomes the record's next
+    field, which a walk checks when it follows it.
+  - Error: damaged, `Outside`.
+- **`used-mark`**: the first word of a chunk, the bytes its records
+  take.
+  - Decides an address, where the chunk's writer appends, and the
+    length of a loop, how many records a link, a scan or a split
+    visits.
+  - Check: `used_mark`: at least the mark's own 8 bytes, at most the
+    chunk's length, and the end of a whole record. A link that stops on
+    an error reads the mark again, as the chunk's one linker, after it
+    checked it.
+  - Error: damaged, `UsedMark`, or `BlockUsedMark` for a block given
+    alone.
+- **`record`**: the bytes of a record, cut into its fields.
+  - Decides an address by its next field, which is checked as a
+    bucket's head is when a walk follows it. Its size field is checked.
+    Its hash, NULL bits, keys and payload are data.
+  - Check: `Access::open_at` and `check_record_at`: the size the record
+    claims is the table's record size.
+  - Error: damaged, `Misplaced` for a record a reference names,
+    `NoRecord` for one a walk over a chunk meets.
+- **`record-copy`**: the bytes of a record that a split or a merge
+  copies whole into another chunk.
+  - Data only: the copy's next field is written anew before the copy
+    is linked.
+  - Check: the record is checked as `record` checks it before the copy.
+  - Error: as `record`.
+- **`next`**: the next field of a record that the one writer of a table
+  reads to put a new record of the same key after it.
+  - Decides an address, which becomes the new record's next field and
+    is not followed then.
+  - Check: as `bucket-head`, when a walk follows it.
+  - Error: damaged, `Outside`.
+
 ## What we decided not to do
 
 - **One block that grows.** The first form of the table kept the header,

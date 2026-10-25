@@ -207,6 +207,7 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline]
     fn refresh(&mut self) {
         let places = (self.region.chunks() as u64) << UNIT_BITS;
+        // trust: record-count
         self.nrecords = self.region.load_u64(NRECORDS).min(places);
     }
 
@@ -366,6 +367,7 @@ impl<'r, R: Region> Access<'r, R> {
         let (nkeys, payload_size) = (self.nkeys, self.payload_size);
         // SAFETY: the caller's contract: a located record lies within its
         // chunk and is never written again once published.
+        // trust: record
         let bytes = unsafe { self.region.chunk_bytes(spot, self.record_size) };
         // SAFETY: the header checked that the record size is the 16 bytes
         // of the record header, 8 per key and the payload, rounded up, so
@@ -397,6 +399,7 @@ impl<'r, R: Region> Access<'r, R> {
         // SAFETY: `hash >> bucket_shift` is below the bucket count, since
         // the shift leaves as many bits as the count's logarithm, and the
         // bucket array was checked to lie within the region.
+        // trust: bucket-head
         unsafe { self.region.load_u32_in(self.bucket(hash)) }
     }
 
@@ -519,6 +522,7 @@ impl<'r, R: Region> Access<'r, R> {
             return Err(super::chunks::bad_chunk(chunk, len));
         }
         // SAFETY: the chunk exists, and the caller is its one writer.
+        // trust: used-mark
         let used = unsafe { self.region.chunk_used(chunk) };
         let used = super::chunks::used_mark(used, len, self.record_size)
             .ok_or_else(|| bad_used(chunk, used))?;
@@ -859,9 +863,11 @@ impl<'r, R: Region> Access<'r, R> {
         // SAFETY: the bucket lies in the bucket array, as in `head`, and
         // the next field in the record, the caller's alone until published.
         unsafe {
+            // trust: bucket-head
             let mut head = self.region.load_u32_in(bucket);
             loop {
                 self.region.store_next(next, head);
+                // trust: bucket-head
                 match self.region.cas_u32_in(bucket, head, offset) {
                     Ok(_) => return head,
                     Err(found) => head = found,
@@ -889,6 +895,7 @@ impl<'r, R: Region> Access<'r, R> {
         // nothing else reads or writes the table meanwhile.
         unsafe {
             let after = self.region.spot(after_chunk, after_byte + NEXT);
+            // trust: next
             let next = self.region.load_next(after);
             self.region
                 .store_next(self.region.spot(chunk, byte + NEXT), next);
@@ -899,6 +906,7 @@ impl<'r, R: Region> Access<'r, R> {
     /// Count records published.
     #[inline]
     pub(super) fn count(&mut self, added: usize) {
+        // trust: record-count
         self.region.fetch_add_u64(NRECORDS, added as u64);
         self.nrecords += added as u64;
     }

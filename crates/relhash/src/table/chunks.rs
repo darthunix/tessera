@@ -240,6 +240,7 @@ impl<'a> Chunks<'a> {
         let base = base.cast_mut();
         // SAFETY: the caller's contract makes the block a chunk whose used
         // mark no one writes meanwhile; the region only reads it.
+        // trust: used-mark
         let used = unsafe { chunk_region(&block(&base, &len)).chunk_used(0) };
         used_mark(used, len, record_size).ok_or(
             Error::damaged(Rule::BlockUsedMark)

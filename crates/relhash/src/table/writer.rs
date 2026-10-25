@@ -672,6 +672,7 @@ pub(super) fn merge<R: Region, E: From<Error>>(
             // the copy past the destination's, within it as `room`
             // counted, and the chunks differ; this is the table's writer.
             unsafe {
+                // trust: record-copy
                 let bytes = region.chunk_bytes(region.spot(source, byte), record_size);
                 let copy = region.chunk_bytes_mut(region.spot(chunk, used), record_size);
                 copy.copy_from_slice(bytes);

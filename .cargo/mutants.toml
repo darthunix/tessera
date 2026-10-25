@@ -57,6 +57,10 @@ exclude_globs = [
 # OwnedTable::chunk_is_empty matters only when an append placed no row
 # in an empty chunk, a record larger than a chunk, which OwnedTable::new
 # refuses: false skips an error that never comes.
+# Access::room replaced whole claims the same room in every chunk: the
+# owning table then adds a chunk at each call, to the limit of 2^15
+# chunks, gigabytes that kill the runner before a verdict. The checks
+# inside it keep their mutants.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -81,6 +85,7 @@ exclude_re = [
     "table/owned\\.rs:307:37: replace \\* with \\+ in OwnedTable::find_or_insert$",
     "decimal\\.rs:1503:41: replace \\| with \\^ in read_with$",
     "replace OwnedTable::chunk_is_empty -> Result<bool> with Ok\\(false\\)$",
+    "replace Access<'r, R>::room -> Result<\\(usize, usize\\)> with ",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the
