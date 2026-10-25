@@ -78,9 +78,10 @@ sudo -n target/release/examples/count
 
 The example sums 1024 `u32` values 100 000 times and prints the counts
 per call. On an M5 Pro it prints 796 instructions, about 200 cycles, 69
-branches and 0 branch misses per call. The instructions repeat exactly
-between runs; the cycles move by a fraction of a percent. This is the
-check that the setup works.
+branches and 0 branch misses per call; on an Intel Core i5-1038NG7,
+1819 instructions, about 558 cycles, 262 branches and 1 branch miss.
+The instructions repeat exactly between runs; the cycles move by a
+fraction of a percent. This is the check that the setup works.
 
 The event names come from the `kpep` database of the running processor,
 `/usr/share/kpep/<chip>.plist`: `INST_ALL`, `CORE_ACTIVE_CYCLE`,
