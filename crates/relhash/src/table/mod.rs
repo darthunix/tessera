@@ -13,6 +13,8 @@ pub mod loom;
 mod marks;
 #[cfg(feature = "alloc")]
 mod owned;
+#[cfg(kani)]
+mod proofs;
 mod record;
 mod region;
 #[cfg(any(test, loom))]

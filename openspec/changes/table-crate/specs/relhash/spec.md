@@ -407,12 +407,28 @@ order, SHALL leave the same bytes and give the same answers.
 - **Verified by:** pending
 
 #### Scenario: The checks hold for all values
-- **WHEN** a header passes its checks, a reference passes its check, or
-  a walk starts over a chain or a chunk, for all values of the fields,
-  references, used marks and counts the table may hold
+- **WHEN** a header passes its checks, a reference passes its check, a
+  walk starts over a chain, a chunk or its marks, or a hash picks a
+  partition or a word of a filter, for all values of the fields,
+  references, used marks, counts and sizes the table and the call may
+  hold
 - **THEN** every bucket lies inside the index, every record inside its
-  chunk, and every walk ends within the bound its blocks give
-- **Verified by:** pending
+  chunk, a partition, a word of a filter and a word of marks inside
+  their arrays, every walk ends within the bound its blocks give, and
+  nothing panics
+- **Verified by:**
+  `crates/relhash/src/table/proofs.rs::a_header_that_passes_puts_every_bucket_inside_the_index`;
+  `crates/relhash/src/table/proofs.rs::the_record_count_is_bounded_by_the_chunks`;
+  `crates/relhash/src/table/proofs.rs::a_reference_that_passes_names_a_record_inside_its_chunk`;
+  `crates/relhash/src/table/proofs.rs::a_used_mark_that_passes_ends_a_record`;
+  `crates/relhash/src/table/proofs.rs::a_walk_over_a_chunk_stays_inside_it`;
+  `crates/relhash/src/table/proofs.rs::a_walk_down_a_chain_ends_within_the_record_count`;
+  `crates/relhash/src/table/proofs.rs::a_partition_lies_within_the_partitions`;
+  `crates/relhash/src/table/proofs.rs::the_partitions_that_pass_name_chunks_of_the_table`;
+  `crates/relhash/src/table/proofs.rs::a_word_of_the_filter_lies_within_it`;
+  `crates/relhash/src/table/proofs.rs::the_words_of_a_filter_within_a_limit_are_a_filter`;
+  `crates/relhash/src/table/proofs.rs::a_mark_sets_the_bit_of_its_record`;
+  `crates/relhash/src/table/proofs.rs::a_walk_over_marks_reads_words_within_them`
 
 #### Scenario: One sequence, twice
 - **WHEN** the same sequence of calls runs twice, over two copies of the
