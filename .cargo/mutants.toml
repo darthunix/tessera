@@ -54,6 +54,9 @@ exclude_globs = [
 # one index.
 # decimal::read_with keeps the rows of a word outside its selection and
 # adds the rows it found in it: the two share no bit, so | is ^.
+# OwnedTable::chunk_is_empty matters only when an append placed no row
+# in an empty chunk, a record larger than a chunk, which OwnedTable::new
+# refuses: false skips an error that never comes.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -77,6 +80,7 @@ exclude_re = [
     "table/header\\.rs:81:44: replace \\| with \\^ in Place::reference$",
     "table/owned\\.rs:307:37: replace \\* with \\+ in OwnedTable::find_or_insert$",
     "decimal\\.rs:1503:41: replace \\| with \\^ in read_with$",
+    "replace OwnedTable::chunk_is_empty -> Result<bool> with Ok\\(false\\)$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the
