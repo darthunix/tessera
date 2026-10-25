@@ -30,7 +30,8 @@ runner does.
     x86-64:  Intel, to be checked                AArch64: Arm events
   needs root                                   one pinned group of
                                                the calling thread
-                                               no root if paranoid <= 2
+                                               no root if the setting
+                                               allows the user
 
   any other target: open fails with ErrorKind::Unsupported
 ```
@@ -213,13 +214,16 @@ the next section) as one group; the instruction counter leads it.
   `sched_getcpu`.
 - `open` maps each error to its kind. `ENOENT` or `EOPNOTSUPP` for a
   hardware event: no PMU, as in a virtual machine without a virtual
-  PMU. `EACCES` or `EPERM`: `kernel.perf_event_paranoid` above 2
-  without `CAP_PERFMON`. `ENOSYS`: no `perf_event_open`, as under
+  PMU. `EACCES` or `EPERM`: a setting of `kernel.perf_event_paranoid`
+  that refuses the user. `ENOSYS`: no `perf_event_open`, as under
   QEMU's emulation of another processor.
 - No root is needed while `kernel.perf_event_paranoid` is 2 or less,
   the kernel's default: any user may count its own threads in user
-  space. Debian sets 3 and Ubuntu 4; there the user needs
-  `CAP_PERFMON`, or root lowers the setting. The message says so.
+  space. Debian refuses at 3, its default. Ubuntu refuses at 4, its
+  default, and at 3 still lets a user count in user space, as GitHub's
+  Arm runner showed. Where the setting refuses, root lowers it to 2,
+  or gives the program `CAP_PERFMON` where the kernel accepts it. The
+  message says so.
 
 Refused:
 
@@ -373,10 +377,11 @@ Will be: a job like that of `relhash`, on three runners.
   run of publishing, the public API against its snapshot, and Clippy
   for the four targets of the cells and for a target without a
   backend.
-- `ubuntu-24.04-arm`: the crate's tests with `PMU_REQUIRE=hardware`,
-  the kernel test among them: perf on AArch64 with real counts. Then
-  once more with `kernel.perf_event_paranoid` at 3 and
-  `PMU_EXPECT_ERROR=permission`.
+- `ubuntu-24.04-arm`: first the crate's tests at the image's own
+  `kernel.perf_event_paranoid`, 4, with `PMU_EXPECT_ERROR=permission`.
+  Then the job lowers it to 2 and runs the tests with
+  `PMU_REQUIRE=hardware`, the kernel test among them: perf on AArch64
+  with real counts.
 - `macos-15`: the crate's tests. The virtual machine has no kpc, and
   the tests print why they skip. Then the tests for
   `x86_64-apple-darwin` under Rosetta, with
@@ -425,11 +430,18 @@ chosen kind, and none maps the number of a CPU to its kind, so the
 test shows that counting goes on wherever the thread runs, not which
 kind it ran on.
 
-Before the Linux backend is written, a probe on a branch that is never
-merged asks the Arm runner of CI which events its PMU offers: the
-files under `events/` of its core PMU, and `perf stat` of the four raw
-events. The guest's PMU shows only what the hypervisor allows, and so
-far only its cycles are known to count.
+Before the Linux backend was written, a probe on a branch that is
+never merged asked the Arm runner of CI what its PMU offers; a guest's
+PMU shows only what the hypervisor allows. On a Neoverse N2 with Linux
+6.17, the runner has one core PMU, `armv8_pmuv3_0`, with six
+programmable counters and the cycle counter, and no NMI watchdog. Its
+`events/` lists all four events. A pinned group of the four, opened as
+the backend will open it, reads with equal times enabled and running.
+A loop of ten times the work counts ten times the instructions, and
+its branch on random bits mispredicts half the time, as it should. A
+call of `getppid` counts 15 instructions in user space, loop included,
+and about 800 with the kernel, so the kernel test's bound can sit near
+100 on that runner.
 
 ## What we do not do
 
@@ -437,7 +449,8 @@ far only its cycles are known to count.
   cannot open.
 - No multiplexed or scaled counts.
 - No `rdpmc` until a measurement asks for it.
-- No sum over two kinds of cores, and no binding from inside `open`.
+- No sum over two kinds of cores on Linux, and no binding from inside
+  `open`.
 - No counting of other threads or of child processes.
 - No Linux under Asahi, and no counting under Rosetta.
 - No publishing on crates.io in this change.
@@ -455,9 +468,10 @@ far only its cycles are known to count.
 - GitHub may stop giving its Arm runner a PMU. → The job fails with
   `PMU_REQUIRE=hardware` instead of skipping, so the cell is seen to
   lose its check.
-- The Arm runner's PMU may hide `BR_RETIRED` or `BR_MIS_PRED_RETIRED`,
-  or give fewer counters than the group needs. → The probe before the
-  Linux backend shows it; if so, the work stops for the maintainer.
+- A new image of the Arm runner may hide an event, give fewer
+  counters, or change `kernel.perf_event_paranoid`. → The probe showed
+  all four events and six counters; the job with
+  `PMU_REQUIRE=hardware` shows any loss as a failure.
 - On a Mac with two kinds of cores, cycles and branch misses sum both
   kinds. → The documentation of `Reading` says so; `cpu_number` tells
   where a block began and ended.
