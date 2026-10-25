@@ -2,8 +2,8 @@
 //! prints the reason and passes, so that a broken root setup is still visible
 //! in the output while unprivileged test runs stay green.
 
+use pmu::{Counters, Reading};
 use std::hint::black_box;
-use tessera_pmu::{Counters, Reading};
 
 #[test]
 fn counters_count_a_known_loop_or_explain_why_not() {

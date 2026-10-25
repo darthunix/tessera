@@ -7,9 +7,9 @@
 
 use super::{self as filtering, Input};
 use anyhow::Result;
+use pmu::Reading;
 use std::hint::black_box;
 use tessera_core::{ColumnReader, RowMask};
-use tessera_pmu::Reading;
 
 pub const BLOCK_SIZE: usize = 4096;
 

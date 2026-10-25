@@ -11,6 +11,7 @@
 //! neither opens counters, so both work without root. `--output` needs root.
 
 use anyhow::{Context, Result, bail, ensure};
+use pmu::{Counters, Reading, cpu_number};
 use serde::Serialize;
 use std::{
     collections::BTreeSet,
@@ -18,7 +19,6 @@ use std::{
     io::Write,
     path::PathBuf,
 };
-use tessera_pmu::{Counters, Reading, cpu_number};
 
 /// Measured blocks per operation.
 pub const BLOCKS: usize = 10;

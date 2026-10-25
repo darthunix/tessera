@@ -1,11 +1,11 @@
 //! Count instructions, cycles and branch misses of an arbitrary closure.
 //!
-//! Needs root on macOS: `sudo -v && sudo -n cargo run -p tessera-pmu --example count`
+//! Needs root on macOS: `sudo -v && sudo -n cargo run -p pmu --example count`
 //! (or run the built example binary under `sudo -n`).
 
 use anyhow::Result;
+use pmu::Counters;
 use std::hint::black_box;
-use tessera_pmu::Counters;
 
 fn main() -> Result<()> {
     let counters = Counters::open()?;
@@ -18,7 +18,7 @@ fn main() -> Result<()> {
     });
     println!(
         "summing 1024 u32 values, {iters} calls on cpu {}:",
-        tessera_pmu::cpu_number()
+        pmu::cpu_number()
     );
     println!(
         "  per call: {:.2} instructions, {:.2} cycles, {:.3} branch misses, {:.2} branches",
