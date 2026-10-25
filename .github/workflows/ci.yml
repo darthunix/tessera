@@ -143,12 +143,12 @@ jobs:
         run: |
           mkdir -p target
           cargo +"$API_TOOLCHAIN" public-api -p pmu --all-features -ss > target/pmu-public-api.txt
-          diff -u openspec/changes/counters-on-x86-and-linux/public-api.txt target/pmu-public-api.txt
+          diff -u openspec/specs/pmu/public-api.txt target/pmu-public-api.txt
           targets="aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-freebsd"
           rustup target add --toolchain "$API_TOOLCHAIN" $targets
           for target in $targets; do
             cargo +"$API_TOOLCHAIN" public-api -p pmu --all-features -ss --target "$target" > "target/pmu-public-api-$target.txt"
-            diff -u openspec/changes/counters-on-x86-and-linux/public-api.txt "target/pmu-public-api-$target.txt"
+            diff -u openspec/specs/pmu/public-api.txt "target/pmu-public-api-$target.txt"
           done
 
   # openspec/ against the repository (CONTRIBUTING.md, "Specs"): the

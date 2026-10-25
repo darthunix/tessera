@@ -17,17 +17,19 @@ product: what Tessera does is in `openspec/specs/`.
 
 In this order. The maintainer placed `counters-on-x86-and-linux`,
 `simd-primitives-avx2`, `linux-x86-support` and `oltp-guard-bench` on
-2026-10-05, in the review of pull request 45, and
-`explain-rows-per-loop` first on 2026-10-08, after pull requests 49 and
-50, and `join-pruning-cost` after it the same day; the other entries
-keep the order of the decisions of 2026-09-30 to 2026-10-02 (plan lines
-2810–2836, 6596–6603, 7378–7390):
+2026-10-05, in the review of pull request 45; the first is closed, and
+its next stage, `bench-in-four-cells`, keeps its place. The maintainer
+placed `explain-rows-per-loop` first on 2026-10-08, after pull
+requests 49 and 50, and `join-pruning-cost` after it the same day; the
+other entries keep the order of the decisions of 2026-09-30 to
+2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390):
 
 1. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
 2. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-3. `counters-on-x86-and-linux`: Performance counters on x86 and on Linux
+3. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+   counters
 4. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
 5. `linux-x86-support`: Linux on x86-64 checked as the target platform
 6. `oltp-guard-bench`: OLTP guard family of benchmarks
@@ -107,6 +109,9 @@ is wanted; several wait for a measured case. `greengage-port` and
   types in the debug build
 - `sturdy-bulk-loops`: Loops over whole words that keep their values
   across the call of a vector kernel
+- `pmu-on-x86-linux`: The counters on x86-64 Linux and on two kinds of
+  cores, on hardware
+- `pmu-on-crates-io`: The crate `pmu` published on crates.io
 
 ## Entries
 
@@ -201,31 +206,31 @@ written; the maintainer decided on 2026-10-08 that it is to be fixed.
 - **Capabilities:** partition-pruning
 - **Size:** small: one pull request.
 
-### counters-on-x86-and-linux
+### bench-in-four-cells
 
-Performance counters on x86 and on Linux. From the review of pull
-request 44, 2026-10-04; the plan's accepted limits had refused Linux
-(line 7485).
+`tessera-bench` in the four cells of the counters. Left by the close of
+`counters-on-x86-and-linux`, 2026-10-25.
 
-- **What:** Count instructions and cycles of the kernels on x86 and on
-  Linux as `tessera-bench` does on macOS with Apple silicon, through a
-  backend of `tools/tessera-pmu` for each.
-- **Why:** The counters come from kperf and work only on macOS with
-  Apple silicon, while the target platform is Linux on x86-64
-  (`linux-x86-support`). AVX2 kernels cannot be accepted by counters
-  without x86 (`simd-primitives-avx2`, next in the queue), and what is
-  left of the page-fault item asks for a check on Linux
-  (`parallel-worker-page-faults`).
-- **Known:** The maintainer's decision 2026-10-05: in the queue before
-  `simd-primitives-avx2`, so that the tool to measure with is there
-  while the kernels are written. The decision of 2026-10-04: x86 and
-  Linux are planned, and a run will go differently there than on macOS,
-  where kperf needs root. On an Intel Mac `tools/tessera-pmu` needs a
-  table of Intel events and a fresh calibration (plan 3.9). The log
-  gives no design for Linux. CI checks correctness, not speed.
-- **Depends on:** nothing; `simd-primitives-avx2` waits for the x86 part.
+- **What:** Run `tessera-bench` in every cell the crate `pmu` counts
+  in: on Linux without `sudo` where `kernel.perf_event_paranoid`
+  allows the user, and with the cell (kperf or perf, NEON or AVX2) in
+  its report, so that a verdict is never compared across cells. Run it
+  once on the Intel Mac, which needs a calibration of its own. Then
+  correct the texts that say the counters work only on macOS: "Accepted
+  limits" in `CONTRIBUTING.md`, `docs/measuring.md` and
+  `crates/tessera-capi/benches/README.md`.
+- **Why:** `pmu` counts in the four cells, but `tessera-bench` still
+  runs its programs with `sudo` and reports no cell, and the kernels of
+  `simd-primitives-avx2` are accepted by its counts on an Intel Mac.
+- **Known:** The first stage changed only the crate, by the
+  maintainer's decision of 2026-10-24. `pmu` counts on an M5 Pro and on
+  an Intel Core i5-1038NG7 as root, and on GitHub's Arm runner at every
+  push; on Linux it needs no root at `kernel.perf_event_paranoid` 2.
+  The benchmark runner of `tessera-capi` repeats a block that reads
+  zero.
+- **Depends on:** nothing.
 - **Capabilities:** tools, bench
-- **Size:** the log does not say.
+- **Size:** not estimated.
 
 ### simd-primitives-avx2
 
@@ -255,8 +260,10 @@ SIMD primitives layer and AVX2 for x86-64. From plan 3.9, lines 210–278;
   Pro: `BULK_MIN_ROWS = 12`, the bounds of `SetValue::WORD_KEYS`, the
   counted full-word loop, the branchless select in `read_masked`). Tests
   run under Rosetta 2; counters under Rosetta are useless, so acceptance
-  by counters happens only on an Intel Mac, where `tools/tessera-pmu`
-  needs a table of Intel events and a fresh calibration. A test may not
+  by counters happens only on an Intel Mac. There `tools/pmu` counts
+  with the same names as on Apple silicon, with no table of Intel
+  events, and `tessera-bench` needs a fresh calibration
+  (`bench-in-four-cells`). A test may not
   skip silently: with `TESSERA_REQUIRE_SIMD=1` a missing feature is an
   error. The acceptance rule of 3.5 is unchanged: a vector path stays
   only with a reproducible gain in cycles. The 21 stub bodies of the
@@ -264,8 +271,9 @@ SIMD primitives layer and AVX2 for x86-64. From plan 3.9, lines 210–278;
   kernel: filter → arith (with the divisor) → aggregate → hash → table
   prefetch. Checked in the code: no `avx2` anywhere, `simd/` is not
   split into `neon/` and `avx2/`.
-- **Depends on:** `counters-on-x86-and-linux`, the tool to measure with
-  while the kernels are written; it goes first. The lane helpers both
+- **Depends on:** `bench-in-four-cells`, the run of `tessera-bench` on
+  an Intel Mac to measure with while the kernels are written; it goes
+  first. The lane helpers both
   widths share, the packing of lane masks into row bits among them, are
   in `simd/mod.rs`. The plan named an Intel Mac for the acceptance (line
   2789).
@@ -297,8 +305,9 @@ request 45, 2026-10-05.
   (`docs/costs.md`, "The reference machine"), as are the thresholds of
   the kernels that `simd-primitives-avx2` lists. The tools ask macOS
   only for the description of the machine and of its power (`sysctl`,
-  `pmset`) and choose the suffix of a module by platform. Counters on
-  Linux are `counters-on-x86-and-linux`; huge pages are
+  `pmset`) and choose the suffix of a module by platform. The counters,
+  `tools/pmu`, count on Linux, but on x86-64 no machine with a PMU has
+  checked them (`pmu-on-x86-linux`); huge pages are
   `parallel-worker-page-faults`.
 - **Depends on:** a Linux x86-64 machine; nothing in code.
 - **Capabilities:** ci, bench, tools, cost-model
@@ -1020,7 +1029,8 @@ lines 794–842; 6.4а step 8, line 5690; 6.4б, lines 5265–5269.
   `docs/costs.md` mentions huge pages in one line.
 - **Depends on:** a Linux stand (`linux-x86-support`). The plan's
   accepted limits said that measurements on Linux were not planned (line
-  7485); since 2026-10-04 they are (`counters-on-x86-and-linux`).
+  7485); since 2026-10-04 they are, and the counters, `tools/pmu`,
+  count on Linux.
 - **Capabilities:** scan-heap, parallel-gather, cost-model
 - **Size:** small.
 
@@ -1354,6 +1364,46 @@ build. From the comparison with pg_vexec on 2026-10-09.
 - **Capabilities:** batch-format, planner-coverage
 - **Size:** small to medium.
 
+### pmu-on-x86-linux
+
+The counters on x86-64 Linux and on two kinds of cores, on hardware.
+Left by the close of `counters-on-x86-and-linux`, 2026-10-25.
+
+- **What:** Run the tests of `tools/pmu` with `PMU_REQUIRE=hardware` on
+  an x86-64 Linux machine with a PMU, Intel and AMD, and on a processor
+  with two kinds of cores, an Intel of the 12th generation or later or
+  an Arm board with big and little cores, bound and not bound to one
+  kind. Correct what they show.
+- **Why:** The cell perf × AVX2 has never counted on hardware: GitHub's
+  x86-64 runners give no PMU. The choice of the core PMU on two kinds
+  of cores is tested only over written sysfs trees.
+- **Known:** CI runs the same code of the group on software events on
+  x86-64, and real counts on GitHub's Arm runner. A Google Cloud C4
+  machine gives a guest a PMU with `--performance-monitoring-unit`;
+  Hyper-V gives one only on Intel and only when asked. The README of
+  the crate asks the first user with such a machine to run the tests.
+- **Depends on:** such a machine; nothing in code.
+- **Capabilities:** tools
+- **Size:** small, unless the machine shows a fault.
+
+### pmu-on-crates-io
+
+The crate `pmu` published on crates.io. Left by the close of
+`counters-on-x86-and-linux`, 2026-10-25.
+
+- **What:** Publish `tools/pmu` at version 0.1.0, once the maintainer
+  decides it: its repository and documentation links, a tag, and the
+  first `cargo publish`.
+- **Why:** No crate on crates.io counts in the four cells with the same
+  meaning in each; the crate was made to stand alone for that.
+- **Known:** CI already packs the crate alone (`cargo publish
+  --dry-run`), watches its public API on five targets, and builds its
+  documentation without warnings. Its license is BSD-2-Clause, its
+  least Rust version the workspace's.
+- **Depends on:** the maintainer's decision.
+- **Capabilities:** tools
+- **Size:** small.
+
 ## Not placed: the maintainer decides
 
 Remarks of finished plan items that the plan neither closes nor
@@ -1438,6 +1488,21 @@ becomes an entry, joins one, or is dropped.
     `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
     page for each partition's file, though a set has one buffer. Whether
     the reserves themselves are still right is to be decided.
+
+- **`pmu`: findings without a decision** (the close of
+  `counters-on-x86-and-linux`, 2026-10-25).
+  - XNU's `cpc_task_set_owner` (xnu-12377.121.6) finds that another
+    task holds the counters, sets `EACCES` and returns 0, so kpc never
+    refuses a second process. Suggested: report it to Apple, or drop.
+  - OpenSpec 1.14.3 fails `check-specs.sh` on every spec, on its
+    warning that a requirement runs past 500 characters; CI pins
+    1.13.2. Suggested: shorten the requirements before CI moves on, or
+    stay on 1.13.2.
+  - The mutants workflow takes the diff of `crates/` and leaves `tools/`
+    out, so no mutant of `pmu` runs. Its hardware tests would skip on
+    the workflow's Arm runner anyway, at `kernel.perf_event_paranoid`
+    4. Suggested: mutants of `core_pmu.rs` and of the decoding of a
+    read, which need no PMU, or drop.
 
 ## Decided against
 
