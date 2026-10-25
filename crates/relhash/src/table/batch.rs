@@ -610,6 +610,13 @@ pub(super) fn check_partitions<R: Region>(region: &R, partitions: &Partitions<'_
     Ok((count - 1) as u32)
 }
 
+/// The partition of `hash`: its bits from `shift` on, under `mask`, the
+/// count of partitions less one, as [`check_partitions`] gives it.
+#[inline(always)]
+pub(super) fn partition_of(hash: u32, shift: u32, mask: u32) -> u32 {
+    (hash >> shift) & mask
+}
+
 /// Append the pending rows of `batch`, in row order, as records each to
 /// the chunk of its hash's partition, whose one writer the caller is, as
 /// long as whole records fit there, each row's payload taken from
@@ -703,7 +710,7 @@ fn append_partitioned_column_rows<
         let mut done = 0;
         for bit in ones(bits) {
             let row = index * 64 + bit;
-            let partition = ((hashes[row] >> shift) & mask) as usize;
+            let partition = partition_of(hashes[row], shift, mask) as usize;
             // Checked: every partition's chunk exists, and has a count.
             let chunk = partitions.chunks[partition] as usize;
             let (used, room) = match access.room(chunk) {
@@ -794,7 +801,7 @@ pub(super) fn split<R: Region>(
                 byte,
             },
         )?;
-        let partition = (hash >> partitions.shift) & mask;
+        let partition = partition_of(hash, partitions.shift, mask);
         let chunk = partitions.chunks[partition as usize] as usize;
         let (used, room) = access.room(chunk)?;
         if room == 0 {

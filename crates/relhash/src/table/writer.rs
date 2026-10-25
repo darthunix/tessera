@@ -10,7 +10,7 @@
 use crate::error::{Error, Kind, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView, check_rows, ones};
 
-use super::batch::{check_keys, check_partitions, shaped};
+use super::batch::{check_keys, check_partitions, partition_of, shaped};
 use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, Place, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
@@ -222,7 +222,7 @@ fn resolve_rows<
                             None => Place { chunk, byte: used },
                             Some((partitions, mask)) => {
                                 let target = partitions.chunks
-                                    [((hash >> partitions.shift) & mask) as usize]
+                                    [partition_of(hash, partitions.shift, mask) as usize]
                                     as usize;
                                 let (at, space) = match access.room(target) {
                                     Ok(room) => room,
