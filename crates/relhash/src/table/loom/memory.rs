@@ -265,13 +265,13 @@ impl Region for LoomRegion {
         (chunk, byte + bytes)
     }
 
-    unsafe fn record(&self, (chunk, byte): (usize, usize), len: usize) -> &[u8] {
+    unsafe fn chunk_bytes(&self, (chunk, byte): (usize, usize), len: usize) -> &[u8] {
         // SAFETY: within the chunk, the cells checked.
         unsafe { core::slice::from_raw_parts(self.read(chunk, byte, len), len) }
     }
 
-    unsafe fn record_mut(&self, (chunk, byte): (usize, usize), len: usize) -> &mut [u8] {
-        // SAFETY: as in `record`.
+    unsafe fn chunk_bytes_mut(&self, (chunk, byte): (usize, usize), len: usize) -> &mut [u8] {
+        // SAFETY: as in `chunk_bytes`.
         unsafe { core::slice::from_raw_parts_mut(self.write(chunk, byte, len), len) }
     }
 

@@ -310,7 +310,7 @@ impl<'r, R: Region> Access<'r, R> {
     #[allow(clippy::mut_from_ref)]
     pub(super) unsafe fn payload_mut(&self, spot: R::Spot) -> &'r mut [u8] {
         // SAFETY: the caller's contract.
-        unsafe { self.region.record_mut(spot, self.payload_size) }
+        unsafe { self.region.chunk_bytes_mut(spot, self.payload_size) }
     }
 
     /// Hint that the bucket of a hash will be read soon.
@@ -366,7 +366,7 @@ impl<'r, R: Region> Access<'r, R> {
         let (nkeys, payload_size) = (self.nkeys, self.payload_size);
         // SAFETY: the caller's contract: a located record lies within its
         // chunk and is never written again once published.
-        let bytes = unsafe { self.region.record(spot, self.record_size) };
+        let bytes = unsafe { self.region.chunk_bytes(spot, self.record_size) };
         // SAFETY: the header checked that the record size is the 16 bytes
         // of the record header, 8 per key and the payload, rounded up, so
         // the three parts lie within `bytes`; the record starts at a
@@ -567,7 +567,7 @@ impl<'r, R: Region> Access<'r, R> {
         // past its used mark, and nothing else reads or writes it yet.
         let bytes = unsafe {
             self.region
-                .record_mut(self.region.spot(chunk, byte), record_size)
+                .chunk_bytes_mut(self.region.spot(chunk, byte), record_size)
         };
         // SAFETY: the caller's contract on `keys`, `N` and `T`.
         unsafe { fill::<N, T>(bytes, self.nkeys, hash, keys, bit, payload) };
@@ -596,7 +596,7 @@ impl<'r, R: Region> Access<'r, R> {
         // past its used mark, and nothing else reads or writes it yet.
         let bytes = unsafe {
             self.region
-                .record_mut(self.region.spot(chunk, byte), record_size)
+                .chunk_bytes_mut(self.region.spot(chunk, byte), record_size)
         };
         // SAFETY: the caller's contract on `keys` and `N`.
         let tail = unsafe { fill_head::<N>(bytes, self.nkeys, hash, keys, bit) };

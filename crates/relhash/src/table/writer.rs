@@ -439,7 +439,7 @@ pub(super) fn clear_key<R: Region>(region: &R, layout: &Layout, key: usize) -> R
             let slot = byte + RECORD_HEADER + key * KEY_SLOT;
             // SAFETY: the caller has the table to itself, and the slot lies
             // within a record that `check_record` accepted.
-            unsafe { region.record_mut(region.spot(chunk, slot), KEY_SLOT) }.fill(0);
+            unsafe { region.chunk_bytes_mut(region.spot(chunk, slot), KEY_SLOT) }.fill(0);
             byte += layout.record_size;
             count += 1;
         }
@@ -672,8 +672,8 @@ pub(super) fn merge<R: Region, E: From<Error>>(
             // the copy past the destination's, within it as `room`
             // counted, and the chunks differ; this is the table's writer.
             unsafe {
-                let bytes = region.record(region.spot(source, byte), record_size);
-                let copy = region.record_mut(region.spot(chunk, used), record_size);
+                let bytes = region.chunk_bytes(region.spot(source, byte), record_size);
+                let copy = region.chunk_bytes_mut(region.spot(chunk, used), record_size);
                 copy.copy_from_slice(bytes);
             }
             let offset = place.reference();

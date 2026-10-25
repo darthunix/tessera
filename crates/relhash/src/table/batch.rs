@@ -805,8 +805,8 @@ pub(super) fn split<R: Region>(
         // copy past the destination's, within it as `room` counted, and
         // the chunks differ; the caller is the destination's one writer.
         unsafe {
-            let bytes = region.record(region.spot(source, byte), record_size);
-            let copy = region.record_mut(region.spot(chunk, used), record_size);
+            let bytes = region.chunk_bytes(region.spot(source, byte), record_size);
+            let copy = region.chunk_bytes_mut(region.spot(chunk, used), record_size);
             copy.copy_from_slice(bytes);
             // No next record: the copy is linked anew.
             copy[4..8].fill(0);
