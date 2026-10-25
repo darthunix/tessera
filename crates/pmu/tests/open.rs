@@ -66,8 +66,10 @@ fn counters_count_a_known_loop_or_explain_why_not() {
 }
 
 /// A call of `getppid` costs a few instructions in user space and hundreds
-/// in the kernel: on GitHub's Arm runner 15 in user space, loop included,
-/// and about 800 with the kernel. A bound between the two fails when the
+/// in the kernel: on GitHub's Arm runner, a C loop counted 15 in user space,
+/// loop included, and about 800 with the kernel. The loop of `measure` is
+/// counted alone and taken away, since in a debug build it costs about a
+/// hundred instructions itself. A bound between the two fails when the
 /// kernel's work is counted.
 #[cfg(unix)]
 #[test]
@@ -75,19 +77,27 @@ fn the_kernel_work_of_a_system_call_is_not_counted() {
     const CALLS: u64 = 100_000;
     const BOUND: u64 = 100;
     let Some(counters) = hardware() else { return };
-    let reading = counters
+    let empty = counters.measure(CALLS, || 0_u32).unwrap();
+    let calls = counters
         .measure(CALLS, std::os::unix::process::parent_id)
         .unwrap();
-    let per_call = reading.instructions / CALLS;
+    let per_call = calls.since(empty);
     eprintln!(
-        "getppid: {per_call} instructions, {} cycles, {} branches per call",
-        reading.cycles / CALLS,
-        reading.branches / CALLS
+        "getppid: {} instructions, {} cycles, {} branches per call beyond an \
+         empty loop of {} instructions",
+        per_call.instructions / CALLS,
+        per_call.cycles / CALLS,
+        per_call.branches / CALLS,
+        empty.instructions / CALLS
     );
-    assert!(per_call > 0, "no instructions counted: {reading:?}");
     assert!(
-        per_call < BOUND,
-        "{per_call} instructions per getppid: the kernel's work is counted"
+        calls.instructions > empty.instructions,
+        "the calls counted no more than an empty loop: {calls:?}, {empty:?}"
+    );
+    assert!(
+        per_call.instructions / CALLS < BOUND,
+        "{} instructions per getppid: the kernel's work is counted",
+        per_call.instructions / CALLS
     );
 }
 
@@ -119,4 +129,128 @@ fn open_fails_with_the_kind_the_run_expects() {
             assert_eq!(error.kind(), expected, "{error}");
         }
     }
+}
+
+/// A loop of known work, the same each call.
+fn work() -> u64 {
+    (0..10_000_u64).fold(0, |sum, i| black_box(sum ^ i))
+}
+
+/// Another thread opens counters again and again while this one
+/// measures: the counts of this thread do not change. On macOS a second
+/// setup would reprogram the counters under the block.
+#[test]
+fn a_second_thread_that_opens_leaves_the_first_ones_counts() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let Some(counters) = hardware() else { return };
+    let alone = counters.measure(100, work).unwrap();
+    let done = AtomicBool::new(false);
+    let beside = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(Ordering::Relaxed) {
+                drop(black_box(Counters::open()));
+            }
+        });
+        let beside = counters.measure(100, work);
+        done.store(true, Ordering::Relaxed);
+        beside
+    })
+    .unwrap();
+    let ratio = beside.instructions as f64 / alone.instructions as f64;
+    assert!(
+        (0.99..1.01).contains(&ratio),
+        "alone {alone:?}, beside an opening thread {beside:?}"
+    );
+}
+
+/// While this process holds the counters, a second process that opens
+/// them is refused, and this one keeps counting. The second process is
+/// this test binary again, running only the test below.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_second_process_is_refused_while_one_counts() {
+    if env::var_os("PMU_SECOND_PROCESS").is_some() {
+        return;
+    }
+    let Some(counters) = hardware() else { return };
+    let output = std::process::Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_second_process_opens",
+            "--include-ignored",
+            "--nocapture",
+        ])
+        .env("PMU_SECOND_PROCESS", "1")
+        .output()
+        .unwrap();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{text}");
+    assert!(
+        text.contains("the second process was refused (Busy)"),
+        "{text}"
+    );
+    assert!(counters.measure(100, work).unwrap().instructions > 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "the second process of a_second_process_is_refused_while_one_counts"]
+fn a_second_process_opens() {
+    if env::var_os("PMU_SECOND_PROCESS").is_none() {
+        return;
+    }
+    match Counters::open() {
+        Ok(_) => panic!("a second process opened the counters"),
+        Err(error) => {
+            eprintln!(
+                "the second process was refused ({:?}): {error}",
+                error.kind()
+            );
+            assert_eq!(error.kind(), ErrorKind::Busy, "{error}");
+        }
+    }
+}
+
+/// On a Mac with two kinds of cores, a thread of the user-interactive class
+/// and one of the background class tend to run on different kinds; the same
+/// loop counts the same instructions on both. macOS cannot put a thread on
+/// a chosen kind, so this shows that counting goes on wherever a thread runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_loop_counts_the_same_instructions_on_either_kind_of_core() {
+    #[allow(unsafe_code)]
+    unsafe extern "C" {
+        fn pthread_set_qos_class_self_np(class: u32, priority: i32) -> i32;
+    }
+    const QOS_CLASS_USER_INTERACTIVE: u32 = 0x21;
+    const QOS_CLASS_BACKGROUND: u32 = 0x09;
+    if hardware().is_none() {
+        return;
+    }
+    let on = |class: u32| {
+        std::thread::spawn(move || {
+            // SAFETY: sets the class of the calling thread; no pointers.
+            #[allow(unsafe_code)]
+            let set = unsafe { pthread_set_qos_class_self_np(class, 0) };
+            assert_eq!(set, 0, "pthread_set_qos_class_self_np");
+            let counters = Counters::open().unwrap();
+            let first = pmu::cpu_number();
+            let reading = counters.measure(1_000, work).unwrap();
+            (reading, first, pmu::cpu_number())
+        })
+        .join()
+        .unwrap()
+    };
+    let (fast, fast_first, fast_last) = on(QOS_CLASS_USER_INTERACTIVE);
+    let (slow, slow_first, slow_last) = on(QOS_CLASS_BACKGROUND);
+    eprintln!(
+        "user-interactive: {fast:?} on cpus {fast_first:?}..{fast_last:?}; \
+         background: {slow:?} on cpus {slow_first:?}..{slow_last:?}"
+    );
+    let ratio = slow.instructions as f64 / fast.instructions as f64;
+    assert!((0.99..1.01).contains(&ratio), "ratio {ratio}");
 }
