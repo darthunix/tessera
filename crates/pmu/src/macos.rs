@@ -99,22 +99,35 @@ fn last_dl_error() -> String {
     }
 }
 
-/// Whether this process is an x86-64 program translated by Rosetta.
-fn under_rosetta() -> bool {
-    let mut translated: c_int = 0;
+/// Whether the integer sysctl `name` reads 1. A sysctl the system lacks
+/// reads as 0.
+fn sysctl_is_one(name: &CStr) -> bool {
+    let mut value: c_int = 0;
     let mut size = size_of::<c_int>();
     // SAFETY: the name is NUL-terminated, and the output is an int of the
-    // size passed. The sysctl is missing on Intel Macs, which fails the call.
+    // size passed.
     let code = unsafe {
         sysctlbyname(
-            c"sysctl.proc_translated".as_ptr(),
-            (&raw mut translated).cast(),
+            name.as_ptr(),
+            (&raw mut value).cast(),
             &mut size,
             ptr::null_mut(),
             0,
         )
     };
-    code == 0 && translated == 1
+    code == 0 && value == 1
+}
+
+/// Whether this process is an x86-64 program translated by Rosetta. The
+/// sysctl is missing on Intel Macs.
+fn under_rosetta() -> bool {
+    sysctl_is_one(c"sysctl.proc_translated")
+}
+
+/// Whether macOS runs in a virtual machine, whose kernel has no kpc and
+/// whose virtual processor no kperf database names.
+fn in_virtual_machine() -> bool {
+    sysctl_is_one(c"kern.hv_vmm_present")
 }
 
 struct Library(*mut c_void);
@@ -347,12 +360,24 @@ fn program() -> Result<Setup> {
     // receives an owned handle, freed when dropped.
     let created = unsafe { db_create(ptr::null(), &mut db.handle) };
     if created != 0 {
-        return Err(Error::new(
-            ErrorKind::Unsupported,
-            format!(
-                "kperf has no event database for this processor (kpep_db_create code {created})"
-            ),
-        ));
+        return Err(if in_virtual_machine() {
+            Error::new(
+                ErrorKind::NoCounters,
+                format!(
+                    "a virtual Mac: its kernel has no kpc, and kperf has no event \
+                     database for its processor (kpep_db_create code {created}); \
+                     count on hardware"
+                ),
+            )
+        } else {
+            Error::new(
+                ErrorKind::Unsupported,
+                format!(
+                    "kperf has no event database for this processor \
+                     (kpep_db_create code {created})"
+                ),
+            )
+        });
     }
     let mut config = Owned::new(config_free);
     // SAFETY: valid database handle; `config` receives an owned handle.
