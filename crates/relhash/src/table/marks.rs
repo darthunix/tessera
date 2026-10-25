@@ -117,6 +117,7 @@ impl Chunks<'_> {
         }
         // SAFETY: the chunk exists and holds its used mark, just checked;
         // nothing appends to it during the walk.
+        // trust: used-mark
         let used = unsafe { chunk_region(self).chunk_used(chunk) };
         usize::try_from(used)
             .ok()

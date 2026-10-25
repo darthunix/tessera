@@ -218,6 +218,7 @@ impl<'a> Table<'a> {
     pub fn stats(&self) -> Stats {
         let buckets = u64::from(self.layout.nbuckets);
         Stats {
+            // trust: record-count
             records: self.region.load_u64(NRECORDS),
             buckets,
             bytes_used: (HEADER_SIZE as u64) + buckets * 4,

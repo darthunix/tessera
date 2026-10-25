@@ -363,6 +363,7 @@ impl OwnedTable {
         let chunks = self.chunk_set()?;
         // SAFETY: the chunk is this owner's, and the borrow keeps every
         // table that writes it away.
+        // trust: used-mark
         Ok(unsafe { chunk_region(&chunks).chunk_used(chunk) })
     }
 

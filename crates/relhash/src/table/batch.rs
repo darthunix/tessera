@@ -805,6 +805,7 @@ pub(super) fn split<R: Region>(
         // copy past the destination's, within it as `room` counted, and
         // the chunks differ; the caller is the destination's one writer.
         unsafe {
+            // trust: record-copy
             let bytes = region.chunk_bytes(region.spot(source, byte), record_size);
             let copy = region.chunk_bytes_mut(region.spot(chunk, used), record_size);
             copy.copy_from_slice(bytes);
@@ -835,8 +836,10 @@ fn unlinked_from<R: Region>(
     error: Error,
 ) -> Error {
     // SAFETY: the caller links this chunk alone, and checked its mark.
+    // trust: used-mark
     let used = unsafe { region.chunk_used(chunk) } as usize;
     let left = (used - stop) / layout.record_size;
+    // trust: record-count
     region.fetch_add_u64(NRECORDS, (left as u64).wrapping_neg());
     *from = stop;
     error

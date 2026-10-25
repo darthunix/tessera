@@ -380,27 +380,32 @@ impl Header {
     /// fields change only under one writer, before the table is shared,
     /// and are read without ordering.
     pub(super) fn load<R: Region>(region: &R) -> Self {
+        // trust: header
+        let word = |field| region.load_u32_relaxed(field);
+        // trust: header
+        let long = |field| region.load_u64_relaxed(field);
         let reserved = offset_of!(Header, reserved);
         // The count before the used mark: an insertion reserves room, then
         // counts, so a count read with acquire is covered by any used mark
         // read after it, and a header read while others insert still has
         // no more records than used bytes.
+        // trust: record-count
         let nrecords = region.load_u64(NRECORDS);
         Self {
-            magic: region.load_u64_relaxed(offset_of!(Header, magic)),
-            version: region.load_u32_relaxed(offset_of!(Header, version)),
-            header_size: region.load_u32_relaxed(offset_of!(Header, header_size)),
-            region_len: region.load_u64_relaxed(offset_of!(Header, region_len)),
-            buckets_offset: region.load_u64_relaxed(offset_of!(Header, buckets_offset)),
-            reserved_used: region.load_u64_relaxed(offset_of!(Header, reserved_used)),
+            magic: long(offset_of!(Header, magic)),
+            version: word(offset_of!(Header, version)),
+            header_size: word(offset_of!(Header, header_size)),
+            region_len: long(offset_of!(Header, region_len)),
+            buckets_offset: long(offset_of!(Header, buckets_offset)),
+            reserved_used: long(offset_of!(Header, reserved_used)),
             nrecords,
-            nbuckets: region.load_u32_relaxed(offset_of!(Header, nbuckets)),
-            bucket_shift: region.load_u32_relaxed(offset_of!(Header, bucket_shift)),
-            record_size: region.load_u32_relaxed(offset_of!(Header, record_size)),
-            payload_size: region.load_u32_relaxed(offset_of!(Header, payload_size)),
-            nkeys: region.load_u32_relaxed(offset_of!(Header, nkeys)),
-            flags: region.load_u32_relaxed(offset_of!(Header, flags)),
-            reserved: [0, 8, 16].map(|at| region.load_u64_relaxed(reserved + at)),
+            nbuckets: word(offset_of!(Header, nbuckets)),
+            bucket_shift: word(offset_of!(Header, bucket_shift)),
+            record_size: word(offset_of!(Header, record_size)),
+            payload_size: word(offset_of!(Header, payload_size)),
+            nkeys: word(offset_of!(Header, nkeys)),
+            flags: word(offset_of!(Header, flags)),
+            reserved: [0, 8, 16].map(|at| long(reserved + at)),
         }
     }
 

@@ -22,7 +22,12 @@ so that it can be used, and checked, alone.
 Every read and write of a table's blocks goes through one layer of
 memory, so that the list of the places where the table trusts its own
 bytes is complete, and one proof covers every access.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/scripts/check-trust.sh::a read of the region without a
+  trust mark`;
+  `.github/scripts/check-trust.sh::marked nowhere`;
+  `.github/scripts/check-trust.sh::is neither a read nor another
+  method`
 
 ### Unsafe code where it is proven
 Unsafe code lives only where a proof covers it, and every other module
