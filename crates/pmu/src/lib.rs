@@ -103,6 +103,12 @@ impl Reading {
 /// ```
 ///
 /// A program that measures several threads opens counters in each.
+///
+/// On macOS the first `open` that succeeds sets the counters of the whole
+/// system up, and every later `open` of the process, on any thread, counts
+/// with that setup. The process then holds the counters until it exits,
+/// also after its last `Counters` is dropped, and another process that
+/// opens them meanwhile fails with [`ErrorKind::Busy`].
 pub struct Counters {
     backend: backend::Counters,
     // Counting belongs to the thread that opened the counters.
