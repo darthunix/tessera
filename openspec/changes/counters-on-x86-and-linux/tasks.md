@@ -21,9 +21,10 @@ the maintainer types on the Mac named.
 - [ ] 2.0 A probe of the Arm runner, on a branch that is never merged:
       a workflow on `ubuntu-24.04-arm` lists the files under `events/`
       of its core PMU and counts the four raw events with
-      `perf stat -e '{r08,r11,r21,r22}'`. If an event is missing, or
-      the group does not fit, stop and ask. Check: the log of the run
-      in the pull request
+      `perf stat -e '{r08,r11,r21,r22}'`; a step on `macos-15` runs
+      `arch -x86_64 /usr/bin/true` to show that Rosetta is there. If
+      an event is missing, or the group does not fit, stop and ask.
+      Check: the log of the run in the pull request
 - [ ] 2.1 Move `tools/tessera-pmu` to `crates/pmu` and rename the
       package `pmu`; the workspace and `crates/tessera-capi` follow
       the rename, and nothing else changes. Check: `make rust-check`
@@ -81,10 +82,9 @@ the maintainer types on the Mac named.
 - [ ] 5.1 kperf on Apple silicon, as root on the M5: the example
       counts as the README says; the tests, built as the user and run
       as root through Cargo's runner, pass with
-      `PMU_REQUIRE=hardware`; a second process is refused with
-      `ErrorKind::Busy` while a first one counts; an x86-64 build
-      under Rosetta is refused by name. Check: the log in the pull
-      request
+      `PMU_REQUIRE=hardware`, the test of two kinds of cores among
+      them; a second process is refused with `ErrorKind::Busy` while
+      a first one counts. Check: the log in the pull request
 - [ ] 5.2 kperf on Intel, as root on the Intel Mac: the same, and the
       example's counts there go into the README. Set the bound of the
       kernel test from the three machines. If the kernel's work is

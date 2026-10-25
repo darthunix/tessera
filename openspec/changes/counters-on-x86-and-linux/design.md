@@ -153,10 +153,13 @@ counters: as XNU's source reads, `kpc_force_all_ctrs` refuses a second
 task while the first holds them. The check as root confirms it with
 two processes.
 
-The errors of kperf are told apart by their codes: `EPERM` from a
-process that is not root is `ErrorKind::Permission`; `EACCES` or
-`EBUSY` from a root process while another task holds the counters is
-`ErrorKind::Busy`.
+The errors of kperf are told apart by `errno`. Every `kpc_*` call on
+the path of `open` returns -1 when it fails and leaves its cause in
+`errno`, which the error keeps as its source,
+`io::Error::last_os_error()`: `EPERM` from a process that is not root
+is `ErrorKind::Permission`; `EACCES` or `EBUSY` from a root process
+while another task holds the counters is `ErrorKind::Busy`. The
+`kpep_*` calls return codes of their own, which the message names.
 
 Refused:
 
@@ -375,7 +378,10 @@ Will be: a job like that of `relhash`, on three runners.
   once more with `kernel.perf_event_paranoid` at 3 and
   `PMU_EXPECT_ERROR=permission`.
 - `macos-15`: the crate's tests. The virtual machine has no kpc, and
-  the tests print why they skip.
+  the tests print why they skip. Then the tests for
+  `x86_64-apple-darwin` under Rosetta, with
+  `PMU_EXPECT_ERROR=unsupported`: the refusal of Rosetta needs no
+  root, so CI checks it at every push.
 
 Refused: `macos-15-intel`. It is a virtual machine too, and the build
 for x86-64 macOS that it would add, Clippy for that target gives
@@ -403,11 +409,21 @@ counts what it should:
 
 The maintainer types each command as root on the Mac named. The tests
 are built as the maintainer's user, and only their binaries run as
-root, through Cargo's runner of the target, such as
-`CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER='sudo env PMU_REQUIRE=hardware'`,
-so that `target/` gets no files owned by root. Each Mac also checks
-that a second process is refused with `ErrorKind::Busy` while a first
-one counts.
+root, through Cargo's runner of the target, after `sudo -v`, such as
+`CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER='sudo -n env PMU_REQUIRE=hardware'`.
+So `target/` gets no files owned by root, and a binary run after
+sudo's time is out fails instead of asking for the password again.
+Each Mac also checks that a second process is refused with
+`ErrorKind::Busy` while a first one counts.
+
+The test of two kinds of cores on a Mac measures the same loop on a
+thread of the user-interactive class and on a thread of the background
+class, which macOS tends to run on different kinds of cores. Their
+instructions must be equal within the cost of the reads; the test logs
+`cpu_number` at both ends of each. No call of macOS puts a thread on a
+chosen kind, and none maps the number of a CPU to its kind, so the
+test shows that counting goes on wherever the thread runs, not which
+kind it ran on.
 
 Before the Linux backend is written, a probe on a branch that is never
 merged asks the Arm runner of CI which events its PMU offers: the
