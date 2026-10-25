@@ -22,6 +22,12 @@ serde = ["dep:serde"]
 [dependencies]
 serde = { workspace = true, optional = true }
 
+# The Linux backend: the ABI of perf_event_open, generated from the
+# kernel's headers, and the C library's read, ioctl and sched_getcpu.
+[target.'cfg(all(target_os = "linux", any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies]
+libc = "0.2"
+perf-event-open-sys = "7"
+
 [dev-dependencies]
 serde_json.workspace = true
 tempfile.workspace = true

@@ -61,7 +61,7 @@ the maintainer types on the Mac named.
       over written sysfs trees of one PMU, of two kinds of cores bound
       and unbound, of an Arm PMU with and without `br_retired`, and of
       a PMU of another kind
-- [ ] 3.2 The group on `perf_event_open`, through
+- [x] 3.2 The group on `perf_event_open`, through
       `perf-event-open-sys`: the group, the `ioctl`s, the read and its
       check, the errors, `cpu_number`, and the test of the plumbing on
       software events. Write the Linux part of the README: the cells,

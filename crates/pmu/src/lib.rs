@@ -10,9 +10,14 @@ use std::{hint::black_box, marker::PhantomData};
 mod error;
 
 // The choice of the core PMU is plain code over files, so its tests run on
-// every host. Until the Linux backend calls it, it is used only by them.
-#[cfg(any(target_os = "linux", test))]
-#[cfg_attr(not(test), allow(dead_code))]
+// every host.
+#[cfg(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    test
+))]
 mod core_pmu;
 
 #[cfg(target_os = "macos")]
@@ -21,9 +26,33 @@ mod macos;
 #[cfg(target_os = "macos")]
 use macos as backend;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[allow(unsafe_code)]
+mod linux;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+use linux as backend;
+
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
 mod unsupported;
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+)))]
 use unsupported as backend;
 
 pub use error::{Error, ErrorKind};
@@ -136,8 +165,10 @@ impl Counters {
     /// without the privileges the system asks for,
     /// [`Busy`](ErrorKind::Busy) while another task holds the counters,
     /// [`MissingEvent`](ErrorKind::MissingEvent) when the processor lacks
-    /// an event, and [`Other`](ErrorKind::Other) for any other failure of
-    /// the system. [`ErrorKind`] gives the fix of each.
+    /// an event, [`MixedCores`](ErrorKind::MixedCores) on Linux for a
+    /// thread that may run on CPUs of two kinds, and
+    /// [`Other`](ErrorKind::Other) for any other failure of the system.
+    /// [`ErrorKind`] gives the fix of each.
     pub fn open() -> Result<Self, Error> {
         Ok(Self {
             backend: backend::Counters::open()?,
@@ -145,7 +176,11 @@ impl Counters {
         })
     }
 
-    /// The counts of the calling thread since [`Counters::open`].
+    /// The counts of the calling thread from a moment no later than
+    /// [`Counters::open`]: only the difference of two readings measures
+    /// anything, as [`Counters::measure`] and [`Reading::since`] take it.
+    /// On macOS a `Counters` opened later in the process, or on another
+    /// thread, shares the first one's setup, and its counts run from then.
     ///
     /// A read makes one call into the kernel and allocates nothing, so
     /// its own cost inside a measured block is small and the same each

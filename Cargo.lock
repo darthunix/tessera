@@ -699,6 +699,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
+name = "perf-event-open-sys"
+version = "7.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "682e26a7efeaf98dc66fa2417b8bf1c56981baf1e7b446010dcb4e34ea07ab44"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "phf"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -727,6 +736,8 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "pmu"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "perf-event-open-sys",
  "serde",
  "serde_json",
  "tempfile",
