@@ -13,7 +13,7 @@ use super::header::{
 };
 use super::keys::KeySource;
 use super::record::PayloadColumns;
-use super::region::RawRegion;
+use super::region::{RawRegion, Region};
 
 /// What a call that appends to partitions counts: the rows appended to
 /// each partition, at its number in `rows`, and the NULL bits of every row
@@ -217,8 +217,9 @@ impl<'a> Chunks<'a> {
         if !chunk_fits(base, len) {
             return Err(bad_block(len));
         }
-        // SAFETY: the caller's contract; the used mark is the first word.
-        unsafe { base.cast::<u64>().write(CHUNK_HEADER as u64) };
+        // SAFETY: the caller's contract makes the block a chunk, as
+        // `Self::new` asks, that no one else uses.
+        unsafe { chunk_region(&block(&base, &len)).set_chunk_used(0, CHUNK_HEADER as u64) };
         Ok(())
     }
 
@@ -236,9 +237,10 @@ impl<'a> Chunks<'a> {
             return Err(bad_block(len));
         }
         check_record_size(record_size)?;
-        // SAFETY: the caller's contract; the used mark is the chunk's first
-        // word, aligned as the block is.
-        let used = unsafe { base.cast::<u64>().read() };
+        let base = base.cast_mut();
+        // SAFETY: the caller's contract makes the block a chunk whose used
+        // mark no one writes meanwhile; the region only reads it.
+        let used = unsafe { chunk_region(&block(&base, &len)).chunk_used(0) };
         used_mark(used, len, record_size).ok_or(
             Error::damaged(Rule::BlockUsedMark)
                 .with(used)
@@ -247,9 +249,21 @@ impl<'a> Chunks<'a> {
     }
 }
 
+/// One block as the only chunk, for the calls over a block alone.
+///
+/// # Safety
+///
+/// The block is a chunk as [`Chunks::new`] asks, for `'b`.
+unsafe fn block<'b>(base: &'b *mut u8, len: &'b usize) -> Chunks<'b> {
+    Chunks {
+        bases: core::slice::from_ref(base),
+        lens: core::slice::from_ref(len),
+    }
+}
+
 /// The chunks alone as a region, with an empty index, which the calls
 /// over chunks never read.
-fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
+pub(super) fn chunk_region(chunks: &Chunks<'_>) -> RawRegion {
     // SAFETY: an empty index, and chunks aligned and valid by the contract
     // of `Chunks::new`; a call checks each chunk it starts on.
     unsafe { chunks.region(core::ptr::NonNull::<u64>::dangling().as_ptr().cast(), 0) }

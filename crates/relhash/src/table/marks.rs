@@ -11,7 +11,9 @@ use crate::error::{Error, Result, Rule, ensure};
 use crate::{RowMaskView, check_rows, ones};
 
 use super::Chunks;
+use super::chunks::chunk_region;
 use super::header::{CHUNK_HEADER, MAX_CHUNK_LEN, Place, check_record_size};
+use super::region::Region;
 use super::writer::Cursor;
 
 /// The words of marks of a chunk of `chunk_len` bytes: a bit for every
@@ -113,9 +115,9 @@ impl Chunks<'_> {
         if !self.fits(chunk) {
             return Err(super::chunks::bad_chunk(chunk, len));
         }
-        // SAFETY: the chunk is aligned to 8 and holds at least its 8-byte
-        // header, just checked; nothing appends to it during the walk.
-        let used = unsafe { self.bases[chunk].cast::<u64>().read() };
+        // SAFETY: the chunk exists and holds its used mark, just checked;
+        // nothing appends to it during the walk.
+        let used = unsafe { chunk_region(self).chunk_used(chunk) };
         usize::try_from(used)
             .ok()
             .filter(|&used| used <= len)

@@ -10,7 +10,9 @@
 use crate::error::{Error, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView};
 
+use super::chunks::chunk_region;
 use super::header::MAX_BUCKETS;
+use super::region::Region;
 use super::{
     Batch, CHUNK_HEADER, Chunks, KeySource, MAX_CHUNKS, Table, TableConfig, TableMut, index_size,
 };
@@ -57,6 +59,7 @@ impl Block {
     }
 
     /// The words, for a test to read or damage.
+    #[cfg(test)]
     fn words_mut(&mut self) -> &mut [u64] {
         // SAFETY: the block owns `len` initialized words, and the exclusive
         // borrow keeps every table over it away meanwhile.
@@ -282,7 +285,7 @@ impl OwnedTable {
         payload: Option<&[u8]>,
         refs: &mut [u32],
     ) -> Result<usize> {
-        let (first, start) = self.append_start();
+        let (first, start) = self.append_start()?;
         // Linked also when the append fails part way: no later insertion
         // links the rows placed before the error.
         let appended = self.place(hashes, keys, rows, refs, |table, batch| {
@@ -309,7 +312,7 @@ impl OwnedTable {
         payload: Option<&[u8]>,
         refs: &mut [u32],
     ) -> Result<(usize, usize)> {
-        let (first, start) = self.append_start();
+        let (first, start) = self.append_start()?;
         // Linked also when the append fails part way, as by `insert`.
         let appended = self.place(hashes, keys, rows, refs, |table, batch| {
             table.append_all(payload, batch)
@@ -348,12 +351,19 @@ impl OwnedTable {
     /// start of the first chunk, which the append adds. The insertions
     /// link from there what they appended, and nothing else, whatever
     /// other calls appended, linked or found before.
-    fn append_start(&mut self) -> (usize, usize) {
-        let chunks = self.chunks.len();
-        match self.chunks.last_mut() {
-            Some(last) => (chunks - 1, last.words_mut()[0] as usize),
-            None => (0, CHUNK_HEADER),
-        }
+    fn append_start(&self) -> Result<(usize, usize)> {
+        Ok(match self.chunks.len() {
+            0 => (0, CHUNK_HEADER),
+            chunks => (chunks - 1, self.used(chunks - 1)? as usize),
+        })
+    }
+
+    /// The used mark of chunk `chunk`, as its first word holds it.
+    fn used(&self, chunk: usize) -> Result<u64> {
+        let chunks = self.chunk_set()?;
+        // SAFETY: the chunk is this owner's, and the borrow keeps every
+        // table that writes it away.
+        Ok(unsafe { chunk_region(&chunks).chunk_used(chunk) })
     }
 
     /// Append every pending row of `batch`, adding chunks as they fill.
@@ -374,15 +384,15 @@ impl OwnedTable {
                 return Ok(appended);
             }
             ensure!(
-                count > 0 || !self.chunk_is_empty(chunk),
+                count > 0 || !self.chunk_is_empty(chunk)?,
                 Error::wrong_call(Rule::RecordRoom).with(self.chunk_bytes)
             );
             self.add_chunk()?;
         }
     }
 
-    fn chunk_is_empty(&mut self, chunk: usize) -> bool {
-        self.chunks[chunk].words_mut()[0] == CHUNK_HEADER as u64
+    fn chunk_is_empty(&self, chunk: usize) -> Result<bool> {
+        Ok(self.used(chunk)? == CHUNK_HEADER as u64)
     }
 
     /// Give each row of `rows` the record of its keys, as
