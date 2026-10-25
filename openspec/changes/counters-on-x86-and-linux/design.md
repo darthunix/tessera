@@ -144,11 +144,19 @@ Will be:
   be reached without a `Counters`.
 
 Why `read` returns an error: on Linux a pinned group that loses the
-PMU, to another pinned user or to the NMI watchdog, reads nothing, and
-on macOS another tool can take the counters while a program runs.
-These are states of the machine, not mistakes of the caller, and a
-library does not panic on them. A read is two per block of calls; the
-cost of a `Result` is a branch.
+PMU, to another pinned user or to the NMI watchdog, reads nothing.
+That is a state of the machine, not a mistake of the caller, and a
+library does not panic on it. A read is two per block of calls; the
+cost of a `Result` is a branch. On macOS a read fails only when its
+system call fails. The kernel protects the task that holds the
+counters: as XNU's source reads, `kpc_force_all_ctrs` refuses a second
+task while the first holds them. The check as root confirms it with
+two processes.
+
+The errors of kperf are told apart by their codes: `EPERM` from a
+process that is not root is `ErrorKind::Permission`; `EACCES` or
+`EBUSY` from a root process while another task holds the counters is
+`ErrorKind::Busy`.
 
 Refused:
 
@@ -272,11 +280,22 @@ An event bound to one kind of core does not count while its thread
 runs on the other kind, and the kernel says nothing. This is why the
 binding is required, not advised.
 
+macOS differs. It has no call that binds a thread to one kind of
+core, and an M5 Pro has two kinds, six "Super" cores and twelve
+"Performance" ones. kperf programs the same events on every core, so a
+thread is counted on whichever kind it runs, and a reading sums both.
+The instructions and the branches do not depend on the kind of core;
+the cycles and the branch misses do. The documentation of `Reading`
+says so, and a caller that needs to know where a block ran asks
+`cpu_number` at both ends of it, as Tessera's benchmark programs do.
+
 Refused:
 
-- A group for each kind of core, the readings added up. Cycles of a
-  big core and of a little one are not the same unit, and the sum
-  would hide where a block ran.
+- A group for each kind of core on Linux, the readings added up, as
+  macOS does by itself. It would give Linux the meaning of the macOS
+  cells, at the cost of two groups read at two instants. The
+  maintainer chose the binding, which keeps cycles in one unit where
+  the system allows it.
 - Binding the thread from inside `open`. A library that changes the
   affinity of its caller surprises it; the caller binds.
 
@@ -292,9 +311,18 @@ honour the flag that leaves out the kernel. The test that the
 kernel's work is not counted decides it. If that test fails, the work
 stops for the maintainer, since another name gives the same counters.
 
-An x86-64 program under Rosetta asks the Apple database for these
-names and is refused: the counts under Rosetta would be those of the
-translated code. `open` fails there with `ErrorKind::Unsupported`.
+On the M5 the same four names resolve to the Arm architecture's
+common events `INST_RETIRED`, `CPU_CYCLES`, `BR_MIS_PRED_RETIRED` and
+`BR_RETIRED`, with the bit that counts user space only. These are the
+events the Linux backend programs on AArch64, so both NEON cells count
+the same events.
+
+Under Rosetta, an x86-64 program on Apple silicon reads an Intel
+family of processor, and `kpep_db_create` finds no database for it.
+That refusal is an accident; the counts under Rosetta would be those
+of the translated code. `open` checks `sysctl.proc_translated` before
+anything else, which needs no root, and fails with
+`ErrorKind::Unsupported`, naming Rosetta.
 
 Refused: a list of Intel names now. The database gives the same
 configuration words for them; a second list would add nothing but a
@@ -317,6 +345,12 @@ Will be: the same, unless `PMU_REQUIRE` is set.
 
 A test of the errors runs when `PMU_EXPECT_ERROR` names a kind: `open`
 must fail with that kind. CI sets it where it knows the machine.
+
+The examples of the documentation that open the counters are built but
+not run (`no_run`). A doctest cannot skip, so it would fail on every
+machine without counters; and as root, rustdoc's doctests run as
+processes at once and would race for the counters, which only one
+task holds.
 
 ### A test that the kernel's work is not counted
 
@@ -367,8 +401,19 @@ counts what it should:
 - perf on x86-64: no hardware at hand. The plumbing runs on software
   events in CI, and the choice of events is tested over written trees.
 
-A run as root happens in a window of `sudo` that the maintainer opens,
-for a command the maintainer allows.
+The maintainer types each command as root on the Mac named. The tests
+are built as the maintainer's user, and only their binaries run as
+root, through Cargo's runner of the target, such as
+`CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER='sudo env PMU_REQUIRE=hardware'`,
+so that `target/` gets no files owned by root. Each Mac also checks
+that a second process is refused with `ErrorKind::Busy` while a first
+one counts.
+
+Before the Linux backend is written, a probe on a branch that is never
+merged asks the Arm runner of CI which events its PMU offers: the
+files under `events/` of its core PMU, and `perf stat` of the four raw
+events. The guest's PMU shows only what the hypervisor allows, and so
+far only its cycles are known to count.
 
 ## What we do not do
 
@@ -394,6 +439,12 @@ for a command the maintainer allows.
 - GitHub may stop giving its Arm runner a PMU. → The job fails with
   `PMU_REQUIRE=hardware` instead of skipping, so the cell is seen to
   lose its check.
+- The Arm runner's PMU may hide `BR_RETIRED` or `BR_MIS_PRED_RETIRED`,
+  or give fewer counters than the group needs. → The probe before the
+  Linux backend shows it; if so, the work stops for the maintainer.
+- On a Mac with two kinds of cores, cycles and branch misses sum both
+  kinds. → The documentation of `Reading` says so; `cpu_number` tells
+  where a block began and ended.
 - The kernel test on Intel shows the kernel's work counted. → The work
   stops for the maintainer.
 - On Intel, kperf may give fewer than four programmable counters, or

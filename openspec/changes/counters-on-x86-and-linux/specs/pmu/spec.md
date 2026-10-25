@@ -8,8 +8,9 @@ build for every target, and give the same public API on each.
 Its documentation SHALL be complete by itself, as the crate's page
 maps it: every public item SHALL say what it is for, what it takes and
 gives, the errors it returns and what its caller must do. The
-documentation SHALL build without warnings, and every example in it
-SHALL run as a test.
+documentation SHALL build without warnings. Every example in it SHALL
+build as a test, and every example that does not open the counters
+SHALL run as one.
 
 #### Scenario: The crate packs alone
 - **WHEN** the crate is packed, as for publishing
@@ -111,6 +112,12 @@ processor, and under Rosetta, `open` SHALL fail with
 - **THEN** the hardware counters open and count on both
 - **Verified by:** pending
 
+#### Scenario: Under Rosetta
+- **WHEN** a build for x86-64 runs under Rosetta on Apple silicon
+- **THEN** `open` fails with `ErrorKind::Unsupported`, and the message
+  names Rosetta
+- **Verified by:** pending
+
 ### Requirement: Errors that say what to do
 When `Counters::open` fails, its `Error` SHALL give a kind,
 `ErrorKind`, that names the cause, and a message that names the fix,
@@ -131,6 +138,13 @@ new kind MAY come in a minor version.
   names the setting and the capability, or root
 - **Verified by:** pending
 
+#### Scenario: Counters in use
+- **WHEN** a process on macOS holds the counters, and a second process
+  opens them, as root
+- **THEN** the second `open` fails with `ErrorKind::Busy`, and the
+  first process keeps counting
+- **Verified by:** pending
+
 #### Scenario: An Arm PMU without an event
 - **WHEN** the core PMU of an AArch64 machine lists no `br_retired` or
   no `br_mis_pred_retired`
@@ -146,6 +160,11 @@ message SHALL name each kind with its CPUs, and a command that binds
 the process to one. `open` SHALL NOT change the CPUs the thread may
 run on.
 
+macOS cannot bind a thread to one kind of core. There a reading SHALL
+count on every kind of core the thread ran on, and the documentation
+of `Reading` SHALL say that its cycles and branch misses may then mix
+kinds, while its instructions and branches do not depend on the kind.
+
 #### Scenario: A bound thread
 - **WHEN** a machine has two core PMUs, and the thread may run only on
   the CPUs of one
@@ -156,6 +175,12 @@ run on.
 - **WHEN** the thread may run on CPUs of both
 - **THEN** `open` fails with `ErrorKind::MixedCores`, and names both
   kinds, their CPUs and `taskset`
+- **Verified by:** pending
+
+#### Scenario: A Mac with two kinds of cores
+- **WHEN** the tests run as root on a Mac whose cores are of two kinds
+- **THEN** the counters open, and count the thread on whichever kind
+  it runs
 - **Verified by:** pending
 
 ### Requirement: The CPU of the thread

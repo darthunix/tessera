@@ -42,6 +42,11 @@ What was found on 2026-10-24 and 2026-10-25:
   mispredicted branches. The Intel names and their `_P` twins give the
   same words. So the kperf backend most likely counts on Intel as it
   is; a run as root has to show it.
+- The M5 Pro, asked without root: the same four names resolve to the
+  Arm architecture's common events, the ones a Linux backend on
+  AArch64 would program, with the user-only bit. The M5 Pro has two
+  kinds of cores, and macOS cannot bind a thread to one of them. Under
+  Rosetta, `kpep_db_create` finds no database and nothing opens.
 - No virtual machine on a Mac has a PMU, the unit of the processor
   that counts: neither Docker Desktop's nor QEMU's on Apple's
   hypervisor. A Linux guest there checks the build and the errors, and
@@ -71,9 +76,12 @@ What was found on 2026-10-24 and 2026-10-25:
   branches are the architectural events of the Arm PMU, retired
   branches and retired mispredictions. No root is needed where
   `kernel.perf_event_paranoid` is 2 or less, or with `CAP_PERFMON`.
-- A processor with two kinds of cores is counted when the thread is
-  bound to one kind; the error of an unbound thread names the command
-  that binds it.
+- On Linux, a processor with two kinds of cores is counted when the
+  thread is bound to one kind; the error of an unbound thread names
+  the command that binds it. On macOS, which cannot bind, a reading
+  sums both kinds, and the documentation says what that changes.
+- On macOS, the errors tell a missing root from counters held by
+  another task, and Rosetta is refused by name.
 - On an Intel Mac the kperf backend is checked as root, with a test
   that the kernel's work is not counted. Its list of events changes
   only if that check fails.
