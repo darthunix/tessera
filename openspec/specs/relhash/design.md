@@ -983,6 +983,53 @@ payloads it hands to its caller are bytes the table never reads.
   - Check: as `bucket-head`, when a walk follows it.
   - Error: damaged, `Outside`.
 
+## Unsafe code
+
+Unsafe code is code whose soundness the compiler cannot check: a read
+through a raw pointer, an index without a bounds check, a promise of a
+caller. A mistake in it corrupts memory instead of giving an error. The
+crate keeps it in the modules below, each with what its unsafe code
+does and what it rests on. Every other module starts with
+`#![forbid(unsafe_code)]`, which nothing inside the module can lift,
+and the crate's root denies unsafe code. `.github/scripts/check-trust.sh`
+fails when a module off this list does not forbid unsafe code or allows
+it, and when a module of the list holds none. The paths are under
+`crates/relhash/src/`.
+
+- **`table/region.rs`**: the region, the one layer of memory: the
+  addresses in the index and the chunks, made from the caller's bases,
+  and their atomic words. It rests on the caller's promise that the
+  blocks are valid, on its own bounds checks in the index, and in the
+  chunks on the checks of the trust points.
+- **`table/record.rs`**: a record cut into its fields, the head of a
+  bucket read without a bounds check, and the unchecked forms of the
+  calls on a record that the loops use. They rest on `Access::place`,
+  which puts a record inside its chunk, and on `Header::validate`,
+  which puts every bucket inside the index.
+- **`table/batch.rs`**, **`table/writer.rs`** and **`table/lanes.rs`**:
+  the unchecked calls on a record at places that `Access::place` or
+  `Access::room` accepted, and a row's payload taken without a bounds
+  check from an array whose length was checked. `lanes.rs` also reads
+  the lanes of a word that its mask filled, and gives the prefetch hint
+  of AArch64, an instruction that reads nothing and never faults.
+- **`table/keys.rs`**: the key slots of a word of rows, indexed without
+  a bounds check below the key count that the header's check fixed.
+- **`table/chunks.rs`** and **`table/mod.rs`**: the calls of the API
+  that take the caller's memory or the caller's promise, such as
+  `Chunks::new`, `Chunks::init`, `ChunkWriter::new`, `Table::attach`,
+  `Table::link` and `TableMut::regrow`. Their documentation says, under
+  "Safety", what the caller promises.
+- **`table/bloom.rs`**: the words of a shared filter, the caller's
+  memory, taken as atomic words.
+- **`table/marks.rs`**: the used mark of a chunk, read through the
+  region for the walk over the records without a mark.
+- **`table/owned.rs`**: the blocks a table owns: their allocation and
+  release, the handles over them, and that the table may move to
+  another thread.
+- **`table/tests.rs`**, **`table/tests/`** and **`table/loom/`**: the
+  tests, which call the unsafe API as a caller does and count
+  allocations, and the memory of the loom models.
+
 ## What we decided not to do
 
 - **One block that grows.** The first form of the table kept the header,

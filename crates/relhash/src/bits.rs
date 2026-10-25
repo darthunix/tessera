@@ -25,6 +25,7 @@
 //! step that make the loop endless, a test timeout each; through [`ones`]
 //! the step has one place, which `.cargo/mutants.toml` leaves out and the
 //! tests below check.
+#![forbid(unsafe_code)]
 
 /// The ones of `word`, lowest first.
 #[inline(always)]

@@ -12,6 +12,7 @@
 //! A chunk is a block of at most [`MAX_CHUNK_LEN`] bytes: its used mark,
 //! then records one after another. A [`Place`] is where a record lies,
 //! and a reference is a place packed into 32 bits.
+#![forbid(unsafe_code)]
 
 use core::mem::{offset_of, size_of};
 

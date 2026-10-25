@@ -356,7 +356,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 
 ## 6. The checks of the box
 
-- [ ] 6.1 Mark every read of the index or a chunk as a trust point, add
+- [x] 6.1 Mark every read of the index or a chunk as a trust point, add
       the script that compares the marks with their list, and write the
       list into the design of `relhash`; forbid unsafe code in every
       other module; name these checks in the contract's rules "One way
@@ -364,10 +364,13 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       script; CI
 - [ ] 6.2 Write the Kani proofs of the checks and their arithmetic, add
       the Kani job to CI, and name the proofs in "Any bytes, a bounded
-      call". Check: `cargo kani -p relhash`
+      call" and, in the design of `relhash`, at each trust point and
+      each module of unsafe code they cover. Check:
+      `cargo kani -p relhash`
 - [ ] 6.3 Write the matrix of damage with guard words around the blocks
       and calls after the first error, run a few cases under Miri, and
-      name it in "Any bytes, a bounded call" and "Errors of two kinds";
+      name it in "Any bytes, a bounded call" and "Errors of two kinds",
+      and its rows at the trust points of the design of `relhash`;
       fix what it finds, each in a commit with its case. Check:
       `cargo test -p relhash`; `cargo miri test -p relhash`
 - [ ] 6.4 Add the fuzz targets, a minute each on every pull request and
