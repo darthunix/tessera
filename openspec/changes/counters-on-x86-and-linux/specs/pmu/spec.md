@@ -139,12 +139,13 @@ where there is one. The documentation of `ErrorKind` SHALL list the
 kinds and their fixes. A new kind MAY come in a minor version.
 
 #### Scenario: No PMU
-- **WHEN** a Linux machine has no PMU, as a virtual machine without a
-  virtual one
+- **WHEN** a machine has no PMU, as a Linux virtual machine without a
+  virtual one, or a virtual Mac
 - **THEN** `open` fails with `ErrorKind::NoCounters`
 - **Verified by:**
   `crates/pmu/src/core_pmu.rs::a_tree_without_a_core_pmu_has_no_counters`;
-  `.github/workflows/ci.yml::PMU_EXPECT_ERROR=no-counters`
+  `.github/workflows/ci.yml::PMU_REQUIRE=software PMU_EXPECT_ERROR=no-counters`;
+  `.github/workflows/ci.yml::PMU_EXPECT_ERROR=no-counters cargo test`
 
 #### Scenario: No permission
 - **WHEN** the setting `kernel.perf_event_paranoid` refuses the user

@@ -118,9 +118,10 @@ jobs:
           PMU_EXPECT_ERROR=permission cargo test --locked -p pmu --all-features -- --nocapture
           sudo sysctl -w kernel.perf_event_paranoid=2
           PMU_REQUIRE=hardware cargo test --locked -p pmu --all-features -- --nocapture
-      - name: Rosetta refused
+      - name: A virtual Mac without counters, and Rosetta refused
         if: matrix.runner == 'macos-15'
         run: |
+          PMU_EXPECT_ERROR=no-counters cargo test --locked -p pmu --all-features -- --nocapture
           rustup target add x86_64-apple-darwin
           PMU_EXPECT_ERROR=unsupported \
             cargo test --locked -p pmu --all-features --target x86_64-apple-darwin -- --nocapture
