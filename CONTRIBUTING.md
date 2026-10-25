@@ -166,9 +166,10 @@ the findings, and what is left.
   understood. The crate's spec does not repeat them: a requirement says
   what is promised in a sentence or two and links to the items whose
   documentation holds the rest, by the path of their source file,
-  ``[`Item`](../../../crates/<crate>/src/<file>.rs)``; the check fails
-  when the file does not declare the item. Its scenarios name the tests
-  as in any spec.
+  ``[`Item`](../../../crates/<crate>/src/<file>.rs)``, or `tools/` in
+  place of `crates/` for a crate there; the check fails when the file
+  does not declare the item. Its scenarios name the tests as in any
+  spec.
 - Every scenario ends with the test that shows it:
   ``- **Verified by:** `path::text` ``, where the text occurs in the
   file: a test's name, or a mark `-- spec: <capability>/<scenario>` in
