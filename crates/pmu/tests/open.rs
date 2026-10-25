@@ -69,8 +69,9 @@ fn counters_count_a_known_loop_or_explain_why_not() {
 /// in the kernel: on GitHub's Arm runner, a C loop counted 15 in user space,
 /// loop included, and about 800 with the kernel. The loop of `measure` is
 /// counted alone and taken away, since in a debug build it costs about a
-/// hundred instructions itself. A bound between the two fails when the
-/// kernel's work is counted.
+/// hundred instructions itself. Beyond that loop a call counts 12 on the
+/// Arm runner, on an M5 Pro and on an Intel Core i5-1038NG7. A bound
+/// between the two fails when the kernel's work is counted.
 #[cfg(unix)]
 #[test]
 fn the_kernel_work_of_a_system_call_is_not_counted() {

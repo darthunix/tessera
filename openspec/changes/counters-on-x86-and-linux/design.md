@@ -320,13 +320,13 @@ Refused:
 
 Was: one list of event names, the Apple ones, used on every Mac.
 
-Will be: the same list on Intel, if the check as root agrees. The
+Will be: the same list on Intel, as the check as root agreed. The
 kperf database of the Intel Mac at hand resolves the four names to
 programmable counters with the user-only bit set, as the proposal
 says, and gives no fixed counter for them. Programmable counters
-honour the flag that leaves out the kernel. The test that the
-kernel's work is not counted decides it. If that test fails, the work
-stops for the maintainer, since another name gives the same counters.
+honour the flag that leaves out the kernel, and the test that the
+kernel's work is not counted shows it: as root on the Intel Mac a call
+of `getppid` counts 12 instructions beyond the loop, as on the M5.
 
 On the M5 the same four names resolve to the Arm architecture's
 common events `INST_RETIRED`, `CPU_CYCLES`, `BR_MIS_PRED_RETIRED` and
@@ -403,10 +403,13 @@ task holds.
 
 Will be: a test calls a cheap system call, `getppid`, many times. In
 user space a call costs a few instructions; in the kernel it costs
-hundreds or more. The test fails if a call counts more than a bound
-set from the first runs with real counters. It runs on every backend
-wherever the hardware counters open: in CI on the Arm runner, and as
-root on both Macs.
+hundreds or more. The loop of the calls is measured alone and taken
+away, since in a debug build it costs about a hundred instructions
+itself. Beyond it a call counts 12 instructions on the Arm runner, on
+the M5 and on the Intel Mac, and about 800 with the kernel on the Arm
+runner; the test fails above 100, between the two. It runs on every
+backend wherever the hardware counters open: in CI on the Arm runner,
+and as root on both Macs.
 
 ### CI: the crate alone
 
