@@ -52,9 +52,13 @@ What was found on 2026-10-24 and 2026-10-25:
   hypervisor. A Linux guest there checks the build and the errors, and
   never counts.
 - GitHub's runners: `ubuntu-24.04` (x86-64) has no PMU.
-  `ubuntu-24.04-arm` counts cycles, with `kernel.perf_event_paranoid`
-  at 2. The macOS runners are virtual machines whose kernels have no
-  kpc. The repository is public, so the Arm runner costs nothing.
+  `ubuntu-24.04-arm` counts: a probe on 2026-10-25 found all four Arm
+  events, six programmable counters, and a pinned group of the four
+  that reads exactly, with the kernel left out. Its
+  `kernel.perf_event_paranoid` is 4, Ubuntu's default, which refuses
+  the user; root lowers it to count. The macOS runners are virtual
+  machines whose kernels have no kpc; Rosetta is installed there. The
+  repository is public, so the Arm runner costs nothing.
 - No Linux machine on x86-64 with a PMU is at hand.
 
 ## What Changes
@@ -75,7 +79,8 @@ What was found on 2026-10-24 and 2026-10-25:
   one group of the calling thread, in user space only. On AArch64 the
   branches are the architectural events of the Arm PMU, retired
   branches and retired mispredictions. No root is needed where
-  `kernel.perf_event_paranoid` is 2 or less, or with `CAP_PERFMON`.
+  `kernel.perf_event_paranoid` allows the user, as at 2, the kernel's
+  default.
 - On Linux, a processor with two kinds of cores is counted when the
   thread is bound to one kind; the error of an unbound thread names
   the command that binds it. On macOS, which cannot bind, a reading

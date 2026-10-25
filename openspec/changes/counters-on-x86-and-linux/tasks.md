@@ -18,14 +18,15 @@ the maintainer types on the Mac named.
 
 ## 2. A crate of its own
 
-- [ ] 2.0 A probe of the Arm runner, on a branch that is never merged:
+- [x] 2.0 A probe of the Arm runner, on a branch that is never merged:
       a workflow on `ubuntu-24.04-arm` lists the files under `events/`
       of its core PMU and counts the four raw events with
       `perf stat -e '{r08,r11,r21,r22}'`; a step on `macos-15` runs
       `arch -x86_64 /usr/bin/true` to show that Rosetta is there. If
       an event is missing, or the group does not fit, stop and ask.
-      Check: the log of the run in the pull request
-- [ ] 2.1 Move `tools/tessera-pmu` to `crates/pmu` and rename the
+      Check: the log of the run in the pull request (run
+      40173545191, all four events, the group fits)
+- [x] 2.1 Move `tools/tessera-pmu` to `crates/pmu` and rename the
       package `pmu`; the workspace and `crates/tessera-capi` follow
       the rename, and nothing else changes. Check: `make rust-check`
 - [ ] 2.2 The manifest and the page of a published crate:

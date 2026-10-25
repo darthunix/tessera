@@ -132,8 +132,9 @@ new kind MAY come in a minor version.
 - **Verified by:** pending
 
 #### Scenario: No permission
-- **WHEN** `kernel.perf_event_paranoid` is above 2 and the process has
-  no `CAP_PERFMON`, or a process on macOS is not root
+- **WHEN** the setting `kernel.perf_event_paranoid` refuses the user
+  its own counters, as Ubuntu's default of 4 does; or a process on
+  macOS is not root
 - **THEN** `open` fails with `ErrorKind::Permission`, and the message
   names the setting and the capability, or root
 - **Verified by:** pending
