@@ -55,7 +55,7 @@ the maintainer types on the Mac named.
 
 ## 3. The Linux backend
 
-- [ ] 3.1 The choice of the core PMU: the lists of CPUs, the core PMUs
+- [x] 3.1 The choice of the core PMU: the lists of CPUs, the core PMUs
       of sysfs, the CPUs of the thread, the four events of x86-64 and
       of AArch64, and the check of the Arm events. Check: unit tests
       over written sysfs trees of one PMU, of two kinds of cores bound
