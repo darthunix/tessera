@@ -260,12 +260,13 @@ The devices of the rest of the chip have no such file.
   are not used. It maps branch misses to `BR_MIS_PRED`, which counts
   speculative mispredictions, and branches to an event whose meaning
   has changed between kernels. The driver lists a PMU's events as
-  files under `events/`. `open` checks the two branch events before it
-  opens anything, and names the one missing
-  (`ErrorKind::MissingEvent`). Some Arm cores lack them, such as the
-  Cortex-A72 of a Raspberry Pi 4. A PMU of another kind, such as that
-  of Apple's cores under Asahi Linux, is refused with
-  `ErrorKind::Unsupported`.
+  files under `events/`. `open` checks all four before it opens
+  anything, and names the one missing (`ErrorKind::MissingEvent`): the
+  driver opens a raw event the core lacks, or that a hypervisor hides
+  from its guest, and it then counts nothing. Some Arm cores lack the
+  branch events, such as the Cortex-A72 of a Raspberry Pi 4. A PMU of
+  another kind, such as that of Apple's cores under Asahi Linux, is
+  refused with `ErrorKind::Unsupported`.
 - The choice takes the root of the sysfs tree, the thread's list of
   CPUs and the architecture as arguments; only `open` fills them from
   the running system. The tests of both architectures then run on any

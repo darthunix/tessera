@@ -156,12 +156,13 @@ kinds and their fixes. A new kind MAY come in a minor version.
 - **Verified by:** pending
 
 #### Scenario: An Arm PMU without an event
-- **WHEN** the core PMU of an AArch64 machine lists no `br_retired` or
-  no `br_mis_pred_retired`
+- **WHEN** the core PMU of an AArch64 machine lists no `inst_retired`,
+  `cpu_cycles`, `br_retired` or `br_mis_pred_retired`, as on a core
+  without the branch events or under a hypervisor that hides an event
 - **THEN** `open` fails with `ErrorKind::MissingEvent` and names the
   event, before it opens anything
 - **Verified by:**
-  `crates/pmu/src/core_pmu.rs::an_arm_pmu_without_a_branch_event_is_refused`
+  `crates/pmu/src/core_pmu.rs::an_arm_pmu_without_an_event_is_refused`
 
 ### Requirement: Two kinds of cores
 When a Linux machine has more than one core PMU, `Counters::open`

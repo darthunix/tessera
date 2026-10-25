@@ -31,7 +31,9 @@ clap = { version = "4", features = ["derive"] }
 comfy-table = "8"
 console = "0.16"
 indicatif = "0.18"
+libc = "0.2"
 memchr = "2.8"
+perf-event-open-sys = "7"
 postgres = "0.19"
 proptest = { version = "1.11", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
