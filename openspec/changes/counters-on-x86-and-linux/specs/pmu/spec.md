@@ -88,7 +88,10 @@ compiler refuses a read on another thread.
 [`Counters::measure`](../../../crates/pmu/src/lib.rs) SHALL give a
 reading only when every counter counted for the whole time since `open`;
 otherwise they SHALL fail with `ErrorKind::Lost`. A reading SHALL NOT be
-scaled, estimated, or made from time or from software events.
+scaled, estimated, or made from time or from software events. On macOS
+this holds only while no other program sets the counters up, which the
+kernel does not refuse and the crate cannot see, as the documentation
+of [`Counters`](../../../crates/pmu/src/lib.rs) says.
 
 #### Scenario: Counters lost
 - **WHEN** the counters of an open group stop counting before a read,
@@ -155,13 +158,6 @@ kinds and their fixes. A new kind MAY come in a minor version.
   names the setting and the capability, or root
 - **Verified by:**
   `.github/workflows/ci.yml::PMU_EXPECT_ERROR=permission`
-
-#### Scenario: Counters in use
-- **WHEN** a process on macOS holds the counters, and a second process
-  opens them, as root
-- **THEN** the second `open` fails with `ErrorKind::Busy`, and the
-  first process keeps counting
-- **Verified by:** pending
 
 #### Scenario: An Arm PMU without an event
 - **WHEN** the core PMU of an AArch64 machine lists no `inst_retired`,

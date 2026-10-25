@@ -163,58 +163,6 @@ fn a_second_thread_that_opens_leaves_the_first_ones_counts() {
     );
 }
 
-/// While this process holds the counters, a second process that opens
-/// them is refused, and this one keeps counting. The second process is
-/// this test binary again, running only the test below.
-#[cfg(target_os = "macos")]
-#[test]
-fn a_second_process_is_refused_while_one_counts() {
-    if env::var_os("PMU_SECOND_PROCESS").is_some() {
-        return;
-    }
-    let Some(counters) = hardware() else { return };
-    let output = std::process::Command::new(env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "a_second_process_opens",
-            "--include-ignored",
-            "--nocapture",
-        ])
-        .env("PMU_SECOND_PROCESS", "1")
-        .output()
-        .unwrap();
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(output.status.success(), "{text}");
-    assert!(
-        text.contains("the second process was refused (Busy)"),
-        "{text}"
-    );
-    assert!(counters.measure(100, work).unwrap().instructions > 0);
-}
-
-#[cfg(target_os = "macos")]
-#[test]
-#[ignore = "the second process of a_second_process_is_refused_while_one_counts"]
-fn a_second_process_opens() {
-    if env::var_os("PMU_SECOND_PROCESS").is_none() {
-        return;
-    }
-    match Counters::open() {
-        Ok(_) => panic!("a second process opened the counters"),
-        Err(error) => {
-            eprintln!(
-                "the second process was refused ({:?}): {error}",
-                error.kind()
-            );
-            assert_eq!(error.kind(), ErrorKind::Busy, "{error}");
-        }
-    }
-}
-
 /// On a Mac with two kinds of cores, a thread of the user-interactive class
 /// and one of the background class tend to run on different kinds; the same
 /// loop counts the same instructions on both. macOS cannot put a thread on
