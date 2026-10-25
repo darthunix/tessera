@@ -8,6 +8,17 @@ pub pmu::ErrorKind::NoCounters
 pub pmu::ErrorKind::Other
 pub pmu::ErrorKind::Permission
 pub pmu::ErrorKind::Unsupported
+impl core::clone::Clone for pmu::ErrorKind
+pub fn pmu::ErrorKind::clone(&self) -> pmu::ErrorKind
+impl core::cmp::Eq for pmu::ErrorKind
+impl core::cmp::PartialEq for pmu::ErrorKind
+pub fn pmu::ErrorKind::eq(&self, other: &pmu::ErrorKind) -> bool
+impl core::fmt::Debug for pmu::ErrorKind
+pub fn pmu::ErrorKind::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for pmu::ErrorKind
+pub fn pmu::ErrorKind::hash<__H: core::hash::Hasher>(&self, state: &mut __H)
+impl core::marker::Copy for pmu::ErrorKind
+impl core::marker::StructuralPartialEq for pmu::ErrorKind
 pub struct pmu::Counters
 impl pmu::Counters
 pub fn pmu::Counters::measure<R>(&self, iters: u64, f: impl core::ops::function::FnMut() -> R) -> core::result::Result<pmu::Reading, pmu::Error>
@@ -18,6 +29,8 @@ impl pmu::Error
 pub fn pmu::Error::kind(&self) -> pmu::ErrorKind
 impl core::error::Error for pmu::Error
 pub fn pmu::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for pmu::Error
+pub fn pmu::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::fmt::Display for pmu::Error
 pub fn pmu::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub struct pmu::Reading
@@ -27,9 +40,24 @@ pub pmu::Reading::cycles: u64
 pub pmu::Reading::instructions: u64
 impl pmu::Reading
 pub fn pmu::Reading::since(self, earlier: pmu::Reading) -> pmu::Reading
+impl core::clone::Clone for pmu::Reading
+pub fn pmu::Reading::clone(&self) -> pmu::Reading
+impl core::cmp::Eq for pmu::Reading
+impl core::cmp::PartialEq for pmu::Reading
+pub fn pmu::Reading::eq(&self, other: &pmu::Reading) -> bool
+impl core::default::Default for pmu::Reading
+pub fn pmu::Reading::default() -> pmu::Reading
+impl core::fmt::Debug for pmu::Reading
+pub fn pmu::Reading::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for pmu::Reading
+impl core::marker::StructuralPartialEq for pmu::Reading
 impl core::ops::arith::Add for pmu::Reading
 pub type pmu::Reading::Output = pmu::Reading
 pub fn pmu::Reading::add(self, other: pmu::Reading) -> pmu::Reading
 impl core::ops::arith::AddAssign for pmu::Reading
 pub fn pmu::Reading::add_assign(&mut self, other: pmu::Reading)
+impl serde_core::ser::Serialize for pmu::Reading
+pub fn pmu::Reading::serialize<__S>(&self, __serializer: __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for pmu::Reading
+pub fn pmu::Reading::deserialize<__D>(__deserializer: __D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
 pub fn pmu::cpu_number() -> core::option::Option<usize>

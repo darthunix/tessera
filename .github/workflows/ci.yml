@@ -78,8 +78,9 @@ jobs:
   # events and the error of a missing PMU; on AArch64 Linux the error of a
   # refused user, then real counts; on macOS, without kpc, the tests that
   # skip, and the refusal of Rosetta. On x86-64 Linux also a dry run of its
-  # publishing, its public API against the snapshot beside its change, and
-  # Clippy for the targets of its four cells and for one without a backend.
+  # publishing, its public API against the snapshot beside its change for
+  # every target, and Clippy for the targets of its four cells and for one
+  # without a backend.
   # It is not published.
   pmu:
     name: pmu alone (${{ matrix.runner }})
@@ -98,7 +99,7 @@ jobs:
         with:
           key: pmu
       - name: The crate's tests alone
-        run: cargo test --locked -p pmu --all-features
+        run: cargo test --locked -p pmu --all-features -- --nocapture
       - name: The plumbing on software events, and no PMU
         if: matrix.runner == 'ubuntu-24.04'
         run: |
@@ -136,12 +137,18 @@ jobs:
         if: matrix.runner == 'ubuntu-24.04'
         with:
           tool: cargo-public-api@0.51.0
-      - name: The public API against its snapshot
+      - name: The public API against its snapshot, the same for every target
         if: matrix.runner == 'ubuntu-24.04'
         run: |
           mkdir -p target
-          cargo +"$API_TOOLCHAIN" public-api -p pmu --all-features -sss > target/pmu-public-api.txt
+          cargo +"$API_TOOLCHAIN" public-api -p pmu --all-features -ss > target/pmu-public-api.txt
           diff -u openspec/changes/counters-on-x86-and-linux/public-api.txt target/pmu-public-api.txt
+          targets="aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-freebsd"
+          rustup target add --toolchain "$API_TOOLCHAIN" $targets
+          for target in $targets; do
+            cargo +"$API_TOOLCHAIN" public-api -p pmu --all-features -ss --target "$target" > "target/pmu-public-api-$target.txt"
+            diff -u openspec/changes/counters-on-x86-and-linux/public-api.txt "target/pmu-public-api-$target.txt"
+          done
 
   # openspec/ against the repository (CONTRIBUTING.md, "Specs"): the
   # form of every spec and change, the test each scenario names, the
