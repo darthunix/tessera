@@ -38,7 +38,7 @@ the maintainer types on the Mac named.
       `CONTRIBUTING.md`. Check:
       `cargo publish --dry-run --locked -p pmu`;
       `RUSTDOCFLAGS=-Dwarnings cargo doc --locked -p pmu --no-deps`
-- [ ] 2.3 One API on every target: `Error` and `ErrorKind` in place of
+- [x] 2.3 One API on every target: `Error` and `ErrorKind` in place of
       `anyhow`, `read` and `measure` that return them, a `cpu_number`
       that returns an `Option`, and `Counters` neither `Send` nor
       `Sync`; on macOS, `Permission` and `Busy` told apart by `errno`,

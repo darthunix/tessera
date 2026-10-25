@@ -45,56 +45,60 @@ impl Masks {
     /// Counters accumulated by `iterations` library filter calls on fresh masks.
     pub fn run_scalar<C: ColumnReader<Value = super::Value>>(
         &mut self,
-        read: &mut dyn FnMut() -> Reading,
+        read: &mut dyn FnMut() -> Result<Reading, pmu::Error>,
         input: &Input<'_, C>,
         iterations: u64,
-    ) -> Reading {
+    ) -> Result<Reading> {
         self.run(read, iterations, |this, read, count| {
             let nrows = this.nrows;
             let mut views: Vec<_> = this
                 .reset(count)
                 .map(|words| RowMask::try_new(nrows, words).unwrap())
                 .collect();
-            let start = read();
+            let start = read()?;
             for rows in &mut views {
                 black_box(filtering::scalar(black_box(input), black_box(rows))).unwrap();
             }
-            read().since(start)
+            Ok(read()?.since(start))
         })
     }
 
     /// Counters accumulated by `iterations` reference filter calls on fresh masks.
     pub fn run_reference<C>(
         &mut self,
-        read: &mut dyn FnMut() -> Reading,
+        read: &mut dyn FnMut() -> Result<Reading, pmu::Error>,
         input: &Input<'_, C>,
         run: impl Fn(&Input<'_, C>, &mut [u64]) -> Result<()>,
         iterations: u64,
-    ) -> Reading {
+    ) -> Result<Reading> {
         self.run(read, iterations, |this, read, count| {
             let mut views: Vec<_> = this.reset(count).collect();
-            let start = read();
+            let start = read()?;
             for rows in &mut views {
                 black_box(run(black_box(input), black_box(rows))).unwrap();
             }
-            read().since(start)
+            Ok(read()?.since(start))
         })
     }
 
     fn run(
         &mut self,
-        read: &mut dyn FnMut() -> Reading,
+        read: &mut dyn FnMut() -> Result<Reading, pmu::Error>,
         iterations: u64,
-        mut run: impl FnMut(&mut Self, &mut dyn FnMut() -> Reading, usize) -> Reading,
-    ) -> Reading {
+        mut run: impl FnMut(
+            &mut Self,
+            &mut dyn FnMut() -> Result<Reading, pmu::Error>,
+            usize,
+        ) -> Result<Reading>,
+    ) -> Result<Reading> {
         let mut total = Reading::default();
         let mut remaining = iterations;
         while remaining != 0 {
             let count = remaining.min(BLOCK_SIZE as u64) as usize;
-            total += run(self, read, count);
+            total += run(self, read, count)?;
             black_box(&self.storage);
             remaining -= count as u64;
         }
-        total
+        Ok(total)
     }
 }

@@ -176,11 +176,11 @@ impl Masks {
     /// built before the counters are read.
     fn run_kernel<L, R>(
         &mut self,
-        read: &mut dyn FnMut() -> Reading,
+        read: &mut dyn FnMut() -> Result<Reading, pmu::Error>,
         nrows: usize,
         input: &Input<'_, L, R>,
         iterations: u64,
-    ) -> Reading
+    ) -> Result<Reading>
     where
         L: ColumnReader<Value = i32>,
         R: ColumnReader<Value = i32>,
@@ -193,41 +193,41 @@ impl Masks {
                 .reset(count)
                 .map(|words| RowMask::try_new(nrows, words).unwrap())
                 .collect();
-            let start = read();
+            let start = read()?;
             for rows in &mut views {
                 black_box(kernel(black_box(input), black_box(rows))).unwrap();
             }
-            total += read().since(start);
+            total += read()?.since(start);
             drop(views);
             black_box(&self.storage);
             remaining -= count as u64;
         }
-        total
+        Ok(total)
     }
 
     /// Counters of `iterations` reference calls on fresh masks.
     fn run_reference<L, R>(
         &mut self,
-        read: &mut dyn FnMut() -> Reading,
+        read: &mut dyn FnMut() -> Result<Reading, pmu::Error>,
         input: &Input<'_, L, R>,
         direct: impl Fn(&Input<'_, L, R>, &mut [u64]),
         iterations: u64,
-    ) -> Reading {
+    ) -> Result<Reading> {
         let mut total = Reading::default();
         let mut remaining = iterations;
         while remaining != 0 {
             let count = remaining.min(BLOCK_SIZE as u64) as usize;
             let mut views: Vec<_> = self.reset(count).collect();
-            let start = read();
+            let start = read()?;
             for words in &mut views {
                 direct(black_box(input), black_box(words));
             }
-            total += read().since(start);
+            total += read()?.since(start);
             drop(views);
             black_box(&self.storage);
             remaining -= count as u64;
         }
-        total
+        Ok(total)
     }
 }
 

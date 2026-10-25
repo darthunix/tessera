@@ -114,7 +114,11 @@ impl Runner {
         }
     }
 
-    fn run(&mut self, id: &str, run: &mut dyn FnMut(&Counters, u64) -> Reading) -> Result<()> {
+    fn run(
+        &mut self,
+        id: &str,
+        run: &mut dyn FnMut(&Counters, u64) -> Result<Reading>,
+    ) -> Result<()> {
         ensure!(self.seen.insert(id.to_owned()), "duplicate operation {id}");
         if self.only.as_ref().is_some_and(|only| !only.contains(id)) {
             return Ok(());
@@ -126,10 +130,10 @@ impl Runner {
                 Ok(())
             }
             Mode::Measure { counters, output } => {
-                let calibration = run(counters, CALIBRATION_CALLS);
+                let calibration = run(counters, CALIBRATION_CALLS)?;
                 let per_call = calibration.cycles.div_ceil(CALIBRATION_CALLS).max(1);
                 let iters = (TARGET_CYCLES / per_call).clamp(1, MAX_CALLS);
-                run(counters, iters);
+                run(counters, iters)?;
                 let mut record = Record {
                     id,
                     iters,
@@ -142,9 +146,9 @@ impl Runner {
                 };
                 for _ in 0..BLOCKS {
                     let (reading, cpus) = loop {
-                        let cpu_start = cpu_number();
-                        let reading = run(counters, iters);
-                        let cpu_end = cpu_number();
+                        let cpu_start = cpu_number().unwrap_or(usize::MAX);
+                        let reading = run(counters, iters)?;
+                        let cpu_end = cpu_number().unwrap_or(usize::MAX);
                         let failed = reading.instructions == 0 || reading.cycles == 0;
                         if !failed || record.retries >= MAX_RETRIES {
                             break (reading, [cpu_start, cpu_end]);
@@ -169,8 +173,9 @@ impl Group<'_> {
     /// Measure `f` called repeatedly; its result is kept alive by `black_box`.
     pub fn op<R>(&mut self, name: &str, mut f: impl FnMut() -> R) -> Result<()> {
         let id = format!("{}/{name}", self.id);
-        self.runner
-            .run(&id, &mut |counters, iters| counters.measure(iters, &mut f))
+        self.runner.run(&id, &mut |counters, iters| {
+            Ok(counters.measure(iters, &mut f)?)
+        })
     }
 
     /// Measure an operation that runs `iters` calls itself and returns the
@@ -178,7 +183,7 @@ impl Group<'_> {
     pub fn op_blocks(
         &mut self,
         name: &str,
-        mut run: impl FnMut(&Counters, u64) -> Reading,
+        mut run: impl FnMut(&Counters, u64) -> Result<Reading>,
     ) -> Result<()> {
         let id = format!("{}/{name}", self.id);
         self.runner.run(&id, &mut run)
