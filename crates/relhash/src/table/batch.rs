@@ -598,7 +598,7 @@ pub(super) fn check_partitions<R: Region>(region: &R, partitions: &Partitions<'_
         partitions.shift < 32 && partitions.shift + bits <= 32,
         Error::wrong_call(Rule::PartitionBits)
             .with(partitions.shift)
-            .and(partitions.shift + bits)
+            .and(u64::from(partitions.shift) + u64::from(bits))
     );
     if let Some(&chunk) = partitions
         .chunks

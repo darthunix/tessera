@@ -607,13 +607,15 @@ fn partitions_past_the_hash_or_the_chunks_are_refused() {
         blocks.add(CHUNK_HEADER + 256 * 32);
     }
     let many = vec![0; 2 * MAX_PARTITIONS];
-    let cases: [(u32, &[u32], Rule); 6] = [
+    let cases: [(u32, &[u32], Rule); 7] = [
         (0, &[], Rule::Partitions),
         (0, &[0, 1, 2], Rule::Partitions),
         (0, &many, Rule::Partitions),
         (31, &[0, 1, 2, 3], Rule::PartitionBits),
         (0, &[0, 1, 2, 9], Rule::NoChunk),
         (32, &[0], Rule::PartitionBits),
+        // A shift whose sum with the bits of the count passes u32.
+        (u32::MAX, &[0, 1], Rule::PartitionBits),
     ];
     // A lookup by partition into a table over the same chunks.
     let mut table = OwnedTable::new(&ONE_WORD, 64, CHUNK_HEADER + 256 * 32).unwrap();
