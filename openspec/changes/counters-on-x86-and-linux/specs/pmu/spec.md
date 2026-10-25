@@ -110,7 +110,8 @@ with `ErrorKind::Unsupported`.
 - **WHEN** a group of software events opens through the code of the
   hardware group, on Linux for x86-64
 - **THEN** it resets, counts and reads as the hardware group would
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/linux.rs::a_group_of_software_events_counts_through_the_same_code`
 
 #### Scenario: macOS
 - **WHEN** the tests run as root on a Mac with Apple silicon and on a
@@ -181,14 +182,16 @@ kinds, while its instructions and branches do not depend on the kind.
 - **THEN** the counters open on that PMU
 - **Verified by:**
   `crates/pmu/src/core_pmu.rs::two_kinds_of_x86_cores_count_on_the_bound_one`;
-  `crates/pmu/src/core_pmu.rs::big_and_little_arm_cores_count_on_the_bound_one`
+  `crates/pmu/src/core_pmu.rs::big_and_little_arm_cores_count_on_the_bound_one`;
+  `crates/pmu/src/core_pmu.rs::offline_cpus_do_not_spread_a_thread_over_two_kinds`
 
 #### Scenario: An unbound thread
 - **WHEN** the thread may run on CPUs of both
 - **THEN** `open` fails with `ErrorKind::MixedCores`, and names both
   kinds, their CPUs and `taskset`
 - **Verified by:**
-  `crates/pmu/src/core_pmu.rs::an_unbound_thread_on_two_kinds_of_cores_is_refused`
+  `crates/pmu/src/core_pmu.rs::an_unbound_thread_on_two_kinds_of_cores_is_refused`;
+  `crates/pmu/src/core_pmu.rs::a_single_pmu_of_some_cpus_counts_only_a_thread_bound_to_them`
 
 #### Scenario: A Mac with two kinds of cores
 - **WHEN** on a Mac whose cores are of two kinds, the same loop is
@@ -206,4 +209,5 @@ system.
 #### Scenario: A CPU of the machine
 - **WHEN** a thread asks for its CPU on Linux
 - **THEN** the number is below the count of the machine's CPUs
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/linux.rs::the_cpu_of_the_thread_is_a_cpu_of_the_machine`

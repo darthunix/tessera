@@ -12,12 +12,12 @@ use crate::{Error, ErrorKind};
 use std::{collections::BTreeSet, fmt::Write as _, fs, io, path::Path};
 
 /// The `type` of the kernel's generic hardware events.
-const PERF_TYPE_HARDWARE: u32 = 0;
+pub(crate) const PERF_TYPE_HARDWARE: u32 = 0;
 // The generic ids of the kernel, `enum perf_hw_id` of its ABI.
-const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
-const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
-const PERF_COUNT_HW_BRANCH_INSTRUCTIONS: u64 = 4;
-const PERF_COUNT_HW_BRANCH_MISSES: u64 = 5;
+pub(crate) const PERF_COUNT_HW_CPU_CYCLES: u64 = 0;
+pub(crate) const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
+pub(crate) const PERF_COUNT_HW_BRANCH_INSTRUCTIONS: u64 = 4;
+pub(crate) const PERF_COUNT_HW_BRANCH_MISSES: u64 = 5;
 // The common events of the Arm PMU architecture (PMUv3), raw codes on the
 // type of the PMU. The kernel's generic ids are not used on AArch64: it
 // maps branch misses to the speculative BR_MIS_PRED, and branches to an
@@ -27,7 +27,9 @@ const ARM_CPU_CYCLES: u64 = 0x11;
 const ARM_BR_RETIRED: u64 = 0x21;
 const ARM_BR_MIS_PRED_RETIRED: u64 = 0x22;
 
-/// The architectures the Linux backend counts on.
+/// The architectures the Linux backend counts on. A build uses the
+/// variant of its target, and the tests both.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Arch {
     X86_64,
@@ -180,9 +182,24 @@ fn core_pmus(devices: &Path) -> Result<Vec<CorePmu>, Error> {
 pub(crate) fn choose(
     devices: &Path,
     allowed: &BTreeSet<usize>,
+    online: Option<&BTreeSet<usize>>,
     arch: Arch,
 ) -> Result<Choice, Error> {
     let pmus = core_pmus(devices)?;
+    // The affinity of a thread holds the possible CPUs, offline ones too,
+    // such as the siblings of SMT turned off, while a PMU lists only the
+    // CPUs that came online: only the online ones can run the thread.
+    let allowed: BTreeSet<usize> = match online {
+        Some(online) => allowed.intersection(online).copied().collect(),
+        None => allowed.clone(),
+    };
+    // A PMU with a list of CPUs counts only on them, also when it is the
+    // only one, as on a board that describes the PMU of one cluster.
+    let covers = |pmu: &&CorePmu| {
+        pmu.cpus
+            .as_ref()
+            .is_none_or(|cpus| !allowed.is_empty() && allowed.is_subset(cpus))
+    };
     let pmu = match pmus.as_slice() {
         [] => {
             return Err(Error::new(
@@ -195,14 +212,9 @@ pub(crate) fn choose(
                 ),
             ));
         }
-        [only] => only,
-        several => match several.iter().find(|pmu| {
-            pmu.cpus
-                .as_ref()
-                .is_none_or(|cpus| !allowed.is_empty() && allowed.is_subset(cpus))
-        }) {
+        listed => match listed.iter().find(covers) {
             Some(pmu) => pmu,
-            None => return Err(mixed_cores(several, allowed)),
+            None => return Err(mixed_cores(listed, &allowed)),
         },
     };
     let hybrid = pmus.len() > 1;
@@ -268,9 +280,9 @@ pub(crate) fn choose(
 
 fn mixed_cores(pmus: &[CorePmu], allowed: &BTreeSet<usize>) -> Error {
     let mut message = format!(
-        "this thread may run on CPUs {} of more than one kind of core, and an \
-         event of one kind does not count on the other; start the program \
-         bound to one kind:",
+        "this thread may run on CPUs {}, but a core PMU counts only on its own \
+         CPUs, and its events do not count while the thread runs elsewhere; \
+         start the program bound to the CPUs of one:",
         cpu_list(allowed)
     );
     for pmu in pmus {
@@ -345,7 +357,7 @@ mod tests {
             .pmu("cpu", 4, None, &[])
             .pmu("software", 1, None, &[])
             .pmu("uncore_imc", 12, None, &[]);
-        let choice = choose(&tree.path(), &cpus("0-7"), Arch::X86_64).unwrap();
+        let choice = choose(&tree.path(), &cpus("0-7"), None, Arch::X86_64).unwrap();
         assert_eq!(choice.pmu, "cpu");
         let configs = choice.events.map(|event| (event.kind, event.config));
         assert_eq!(configs, [(0, 1), (0, 0), (0, 5), (0, 4)]);
@@ -357,7 +369,7 @@ mod tests {
             Tree::new()
                 .pmu("cpu_core", 4, Some("0-7"), &[])
                 .pmu("cpu_atom", 10, Some("8-15"), &[]);
-        let choice = choose(&tree.path(), &cpus("8-11"), Arch::X86_64).unwrap();
+        let choice = choose(&tree.path(), &cpus("8-11"), None, Arch::X86_64).unwrap();
         assert_eq!(choice.pmu, "cpu_atom");
         assert_eq!(
             choice.events[0],
@@ -373,7 +385,7 @@ mod tests {
                 config: 10 << 32 | 4
             }
         );
-        let choice = choose(&tree.path(), &cpus("0-7"), Arch::X86_64).unwrap();
+        let choice = choose(&tree.path(), &cpus("0-7"), None, Arch::X86_64).unwrap();
         assert_eq!(choice.pmu, "cpu_core");
     }
 
@@ -383,7 +395,7 @@ mod tests {
             Tree::new()
                 .pmu("cpu_core", 4, Some("0-7"), &[])
                 .pmu("cpu_atom", 10, Some("8-15"), &[]);
-        let error = choose(&tree.path(), &cpus("0-15"), Arch::X86_64).unwrap_err();
+        let error = choose(&tree.path(), &cpus("0-15"), None, Arch::X86_64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::MixedCores);
         let message = error.to_string();
         assert!(message.contains("CPUs 0-15"), "{message}");
@@ -398,11 +410,40 @@ mod tests {
     }
 
     #[test]
+    fn offline_cpus_do_not_spread_a_thread_over_two_kinds() {
+        // SMT off: the siblings of the P-cores are offline, and only the
+        // online CPUs are listed by the PMU, while the thread's affinity
+        // still holds them all.
+        let tree = Tree::new()
+            .pmu("cpu_core", 4, Some("0,2,4,6,8,10"), &[])
+            .pmu("cpu_atom", 10, Some("12-15"), &[]);
+        let online = cpus("0,2,4,6,8,10,12-15");
+        let choice = choose(&tree.path(), &cpus("0-11"), Some(&online), Arch::X86_64).unwrap();
+        assert_eq!(choice.pmu, "cpu_core");
+        let error = choose(&tree.path(), &cpus("0-11"), None, Arch::X86_64).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MixedCores);
+    }
+
+    #[test]
+    fn a_single_pmu_of_some_cpus_counts_only_a_thread_bound_to_them() {
+        let tree = Tree::new().pmu("armv8_cortex_a76", 9, Some("4-7"), &ARM_EVENTS);
+        let error = choose(&tree.path(), &cpus("0-7"), None, Arch::Aarch64).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MixedCores);
+        let message = error.to_string();
+        assert!(
+            message.contains("armv8_cortex_a76: taskset -c 4-7 <program>"),
+            "{message}"
+        );
+        let choice = choose(&tree.path(), &cpus("4-5"), None, Arch::Aarch64).unwrap();
+        assert_eq!(choice.pmu, "armv8_cortex_a76");
+    }
+
+    #[test]
     fn an_arm_pmu_counts_the_architectural_events() {
         let tree = Tree::new()
             .pmu("armv8_pmuv3_0", 10, Some("0-3"), &ARM_EVENTS)
             .pmu("software", 1, None, &[]);
-        let choice = choose(&tree.path(), &cpus("0-3"), Arch::Aarch64).unwrap();
+        let choice = choose(&tree.path(), &cpus("0-3"), None, Arch::Aarch64).unwrap();
         assert_eq!(choice.pmu, "armv8_pmuv3_0");
         let configs = choice.events.map(|event| (event.kind, event.config));
         assert_eq!(configs, [(10, 0x08), (10, 0x11), (10, 0x22), (10, 0x21)]);
@@ -413,7 +454,7 @@ mod tests {
         let tree = Tree::new()
             .pmu("armv8_cortex_a55", 8, Some("0-3"), &ARM_EVENTS)
             .pmu("armv8_cortex_a76", 9, Some("4-7"), &ARM_EVENTS);
-        let choice = choose(&tree.path(), &cpus("4-7"), Arch::Aarch64).unwrap();
+        let choice = choose(&tree.path(), &cpus("4-7"), None, Arch::Aarch64).unwrap();
         assert_eq!(choice.pmu, "armv8_cortex_a76");
         assert_eq!(
             choice.events[1],
@@ -422,7 +463,7 @@ mod tests {
                 config: 0x11
             }
         );
-        let error = choose(&tree.path(), &cpus("3-4"), Arch::Aarch64).unwrap_err();
+        let error = choose(&tree.path(), &cpus("3-4"), None, Arch::Aarch64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::MixedCores);
     }
 
@@ -434,7 +475,7 @@ mod tests {
             Some("0-3"),
             &["inst_retired", "cpu_cycles", "br_mis_pred"],
         );
-        let error = choose(&tree.path(), &cpus("0-3"), Arch::Aarch64).unwrap_err();
+        let error = choose(&tree.path(), &cpus("0-3"), None, Arch::Aarch64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::MissingEvent);
         assert!(error.to_string().contains("br_retired"), "{error}");
         let tree = Tree::new().pmu(
@@ -443,7 +484,7 @@ mod tests {
             Some("0-3"),
             &["inst_retired", "cpu_cycles", "br_retired"],
         );
-        let error = choose(&tree.path(), &cpus("0-3"), Arch::Aarch64).unwrap_err();
+        let error = choose(&tree.path(), &cpus("0-3"), None, Arch::Aarch64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::MissingEvent);
         assert!(error.to_string().contains("br_mis_pred_retired"), "{error}");
     }
@@ -453,7 +494,7 @@ mod tests {
         let tree = Tree::new()
             .pmu("apple_icestorm_pmu", 8, Some("0-3"), &[])
             .pmu("apple_firestorm_pmu", 9, Some("4-7"), &[]);
-        let error = choose(&tree.path(), &cpus("4-7"), Arch::Aarch64).unwrap_err();
+        let error = choose(&tree.path(), &cpus("4-7"), None, Arch::Aarch64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::Unsupported);
     }
 
@@ -462,10 +503,10 @@ mod tests {
         let tree = Tree::new()
             .pmu("software", 1, None, &[])
             .pmu("tracepoint", 2, None, &[]);
-        let error = choose(&tree.path(), &cpus("0-3"), Arch::X86_64).unwrap_err();
+        let error = choose(&tree.path(), &cpus("0-3"), None, Arch::X86_64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::NoCounters);
         let missing = tree.path().join("missing");
-        let error = choose(&missing, &cpus("0-3"), Arch::Aarch64).unwrap_err();
+        let error = choose(&missing, &cpus("0-3"), None, Arch::Aarch64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::NoCounters);
     }
 }

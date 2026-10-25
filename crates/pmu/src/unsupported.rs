@@ -10,7 +10,7 @@ impl Counters {
     pub fn open() -> Result<Self, Error> {
         Err(Error::new(
             ErrorKind::Unsupported,
-            "pmu counts only on macOS and on Linux",
+            "pmu counts only on macOS, and on Linux for x86-64 and AArch64",
         ))
     }
 

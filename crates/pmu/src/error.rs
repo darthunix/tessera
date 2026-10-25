@@ -54,9 +54,10 @@ pub enum ErrorKind {
     /// event otherwise. The message names the event. Fix: none on this
     /// machine; the crate counts no other event in its place.
     MissingEvent,
-    /// The thread may run on two kinds of cores, and the system can bind
-    /// it to one, as Linux can. The message names each kind with its CPUs.
-    /// Fix: start the program bound to one kind, such as
+    /// The thread may run on CPUs that the core PMU does not count on, as
+    /// on a processor with two kinds of cores, each with its own PMU, and
+    /// the system can bind it, as Linux can. The message names the CPUs of
+    /// each PMU. Fix: start the program bound to the CPUs of one, such as
     /// `taskset -c <cpus> <program>`.
     MixedCores,
     /// The counters stopped counting since they were opened, so a reading
