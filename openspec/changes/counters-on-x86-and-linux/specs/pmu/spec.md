@@ -6,7 +6,7 @@ of Tessera, and SHALL build, pass its tests and pack alone. It SHALL
 build for every target, and give the same public API on each.
 
 Its documentation SHALL be complete by itself, as [the crate's
-page](../../../crates/pmu/src/lib.rs) maps it: every public item SHALL
+page](../../../tools/pmu/src/lib.rs) maps it: every public item SHALL
 say what it is for, what it takes and gives, the errors it returns and
 what its caller must do. The documentation SHALL build without warnings.
 Every example in it SHALL build as a test, and every example that does
@@ -33,7 +33,7 @@ not open the counters SHALL run as one.
   `.github/workflows/ci.yml::x86_64-unknown-freebsd`
 
 ### Requirement: What a reading holds
-A [`Reading`](../../../crates/pmu/src/lib.rs) SHALL hold four counts of
+A [`Reading`](../../../tools/pmu/src/lib.rs) SHALL hold four counts of
 the thread that opened the `Counters`: retired instructions, core
 cycles, retired branches and retired mispredicted branches. Each SHALL
 count user space only: the work of the kernel for the thread, in system
@@ -48,20 +48,20 @@ reading SHALL serialize as its four named counts.
 - **THEN** the second reading counts ten times the instructions of the
   first, within the small fixed cost of the reads
 - **Verified by:**
-  `crates/pmu/tests/open.rs::counters_count_a_known_loop_or_explain_why_not`
+  `tools/pmu/tests/open.rs::counters_count_a_known_loop_or_explain_why_not`
 
 #### Scenario: A system call is not counted
 - **WHEN** a thread calls `getppid` many times between two readings
 - **THEN** each call counts fewer instructions than the kernel's work
   for it would add
 - **Verified by:**
-  `crates/pmu/tests/open.rs::the_kernel_work_of_a_system_call_is_not_counted`
+  `tools/pmu/tests/open.rs::the_kernel_work_of_a_system_call_is_not_counted`
 
 #### Scenario: The difference of two readings
 - **WHEN** a reading is taken `since` a reading with a larger count
 - **THEN** that count is 0, and the others are their differences
 - **Verified by:**
-  `crates/pmu/src/lib.rs::since_subtracts_per_field_and_saturates`
+  `tools/pmu/src/lib.rs::since_subtracts_per_field_and_saturates`
 
 #### Scenario: A reading as data
 - **WHEN** a reading is serialized and read back, with the feature
@@ -69,10 +69,10 @@ reading SHALL serialize as its four named counts.
 - **THEN** it is the same reading, and its counts are named
   `instructions`, `cycles`, `branches` and `branch_misses`
 - **Verified by:**
-  `crates/pmu/src/lib.rs::a_reading_serializes_as_its_four_named_counts`
+  `tools/pmu/src/lib.rs::a_reading_serializes_as_its_four_named_counts`
 
 ### Requirement: The thread that opened the counters
-[`Counters`](../../../crates/pmu/src/lib.rs) SHALL count the thread that
+[`Counters`](../../../tools/pmu/src/lib.rs) SHALL count the thread that
 called `Counters::open`, on whichever cores it runs, and SHALL be read
 on that thread. The type SHALL be neither `Send` nor `Sync`, so that the
 compiler refuses a read on another thread.
@@ -81,20 +81,20 @@ compiler refuses a read on another thread.
 - **WHEN** a program moves `Counters` into another thread
 - **THEN** it does not compile
 - **Verified by:**
-  `crates/pmu/src/lib.rs::fn moves(counters: pmu::Counters)`
+  `tools/pmu/src/lib.rs::fn moves(counters: pmu::Counters)`
 
 ### Requirement: Exact or an error
-[`Counters::read`](../../../crates/pmu/src/lib.rs) and
-[`Counters::measure`](../../../crates/pmu/src/lib.rs) SHALL give a
+[`Counters::read`](../../../tools/pmu/src/lib.rs) and
+[`Counters::measure`](../../../tools/pmu/src/lib.rs) SHALL give a
 reading only when every counter counted for the whole time since `open`;
 otherwise they SHALL fail with `ErrorKind::Lost`. A reading SHALL NOT be
 scaled, estimated, or made from time or from software events. On macOS
 this holds only while no other program sets the counters up, which the
 kernel does not refuse and the crate cannot see, as the documentation
-of [`Counters`](../../../crates/pmu/src/lib.rs) says. And on Apple
+of [`Counters`](../../../tools/pmu/src/lib.rs) says. And on Apple
 silicon a block now and then reads zero instructions or cycles although
 its code ran, for a cause not known; the documentation of
-[`Counters::measure`](../../../crates/pmu/src/lib.rs) says to take such
+[`Counters::measure`](../../../tools/pmu/src/lib.rs) says to take such
 a reading as a failed block and repeat it.
 
 #### Scenario: Counters lost
@@ -102,10 +102,10 @@ a reading as a failed block and repeat it.
   as when a pinned group of the Linux kernel loses its PMU
 - **THEN** the read fails with `ErrorKind::Lost`
 - **Verified by:**
-  `crates/pmu/src/linux.rs::a_group_that_did_not_count_all_the_time_is_lost`
+  `tools/pmu/src/linux.rs::a_group_that_did_not_count_all_the_time_is_lost`
 
 ### Requirement: The four cells
-[`Counters::open`](../../../crates/pmu/src/lib.rs) SHALL count on macOS
+[`Counters::open`](../../../tools/pmu/src/lib.rs) SHALL count on macOS
 through kperf, on Apple silicon and on Intel, and on Linux through
 `perf_event_open`, on AArch64 and on x86-64. On Linux for AArch64 the
 branches SHALL be the Arm PMU's `BR_RETIRED` and `BR_MIS_PRED_RETIRED`.
@@ -123,15 +123,15 @@ with `ErrorKind::Unsupported`.
   hardware group, on Linux for x86-64
 - **THEN** it resets, counts and reads as the hardware group would
 - **Verified by:**
-  `crates/pmu/src/linux.rs::a_group_of_software_events_counts_through_the_same_code`
+  `tools/pmu/src/linux.rs::a_group_of_software_events_counts_through_the_same_code`
 
 #### Scenario: macOS
 - **WHEN** the tests run as root on a Mac with Apple silicon and on a
   Mac with Intel
 - **THEN** the hardware counters open and count on both
 - **Verified by:**
-  `crates/pmu/tests/open.rs::counters_count_a_known_loop_or_explain_why_not`;
-  `crates/pmu/tests/open.rs::the_kernel_work_of_a_system_call_is_not_counted`
+  `tools/pmu/tests/open.rs::counters_count_a_known_loop_or_explain_why_not`;
+  `tools/pmu/tests/open.rs::the_kernel_work_of_a_system_call_is_not_counted`
 
 #### Scenario: Under Rosetta
 - **WHEN** a build for x86-64 runs under Rosetta on Apple silicon
@@ -142,8 +142,8 @@ with `ErrorKind::Unsupported`.
 
 ### Requirement: Errors that say what to do
 When `Counters::open` fails, its
-[`Error`](../../../crates/pmu/src/error.rs) SHALL give a kind,
-[`ErrorKind`](../../../crates/pmu/src/error.rs), that names the cause,
+[`Error`](../../../tools/pmu/src/error.rs) SHALL give a kind,
+[`ErrorKind`](../../../tools/pmu/src/error.rs), that names the cause,
 and a message that names the fix, with the system's error as its source
 where there is one. The documentation of `ErrorKind` SHALL list the
 kinds and their fixes. A new kind MAY come in a minor version.
@@ -153,7 +153,7 @@ kinds and their fixes. A new kind MAY come in a minor version.
   virtual one, or a virtual Mac
 - **THEN** `open` fails with `ErrorKind::NoCounters`
 - **Verified by:**
-  `crates/pmu/src/core_pmu.rs::a_tree_without_a_core_pmu_has_no_counters`;
+  `tools/pmu/src/core_pmu.rs::a_tree_without_a_core_pmu_has_no_counters`;
   `.github/workflows/ci.yml::PMU_REQUIRE=software PMU_EXPECT_ERROR=no-counters`;
   `.github/workflows/ci.yml::PMU_EXPECT_ERROR=no-counters cargo test`
 
@@ -173,7 +173,7 @@ kinds and their fixes. A new kind MAY come in a minor version.
 - **THEN** `open` fails with `ErrorKind::MissingEvent` and names the
   event, before it opens anything
 - **Verified by:**
-  `crates/pmu/src/core_pmu.rs::an_arm_pmu_without_an_event_is_refused`
+  `tools/pmu/src/core_pmu.rs::an_arm_pmu_without_an_event_is_refused`
 
 ### Requirement: Two kinds of cores
 When a Linux machine has more than one core PMU, `Counters::open`
@@ -193,17 +193,17 @@ kinds, while its instructions and branches do not depend on the kind.
   the CPUs of one
 - **THEN** the counters open on that PMU
 - **Verified by:**
-  `crates/pmu/src/core_pmu.rs::two_kinds_of_x86_cores_count_on_the_bound_one`;
-  `crates/pmu/src/core_pmu.rs::big_and_little_arm_cores_count_on_the_bound_one`;
-  `crates/pmu/src/core_pmu.rs::offline_cpus_do_not_spread_a_thread_over_two_kinds`
+  `tools/pmu/src/core_pmu.rs::two_kinds_of_x86_cores_count_on_the_bound_one`;
+  `tools/pmu/src/core_pmu.rs::big_and_little_arm_cores_count_on_the_bound_one`;
+  `tools/pmu/src/core_pmu.rs::offline_cpus_do_not_spread_a_thread_over_two_kinds`
 
 #### Scenario: An unbound thread
 - **WHEN** the thread may run on CPUs of both
 - **THEN** `open` fails with `ErrorKind::MixedCores`, and names both
   kinds, their CPUs and `taskset`
 - **Verified by:**
-  `crates/pmu/src/core_pmu.rs::an_unbound_thread_on_two_kinds_of_cores_is_refused`;
-  `crates/pmu/src/core_pmu.rs::a_single_pmu_of_some_cpus_counts_only_a_thread_bound_to_them`
+  `tools/pmu/src/core_pmu.rs::an_unbound_thread_on_two_kinds_of_cores_is_refused`;
+  `tools/pmu/src/core_pmu.rs::a_single_pmu_of_some_cpus_counts_only_a_thread_bound_to_them`
 
 #### Scenario: A Mac with two kinds of cores
 - **WHEN** on a Mac whose cores are of two kinds, the same loop is
@@ -212,10 +212,10 @@ kinds, while its instructions and branches do not depend on the kind.
 - **THEN** both count the same instructions, within the cost of the
   reads
 - **Verified by:**
-  `crates/pmu/tests/open.rs::a_loop_counts_the_same_instructions_on_either_kind_of_core`
+  `tools/pmu/tests/open.rs::a_loop_counts_the_same_instructions_on_either_kind_of_core`
 
 ### Requirement: The CPU of the thread
-[`cpu_number`](../../../crates/pmu/src/lib.rs) SHALL give the CPU the
+[`cpu_number`](../../../tools/pmu/src/lib.rs) SHALL give the CPU the
 calling thread runs on, on macOS and on Linux, and `None` on any other
 system.
 
@@ -223,4 +223,4 @@ system.
 - **WHEN** a thread asks for its CPU on Linux
 - **THEN** the number is below the count of the machine's CPUs
 - **Verified by:**
-  `crates/pmu/src/linux.rs::the_cpu_of_the_thread_is_a_cpu_of_the_machine`
+  `tools/pmu/src/linux.rs::the_cpu_of_the_thread_is_a_cpu_of_the_machine`

@@ -1,12 +1,12 @@
 [workspace]
 members = [
-    "crates/pmu",
     "crates/relhash",
     "crates/tessera-core",
     "crates/tessera-capi",
     "crates/tessera-kernels",
     "crates/tessera-spill",
     "crates/tessera-testing",
+    "tools/pmu",
     "tools/tessera-ab",
     "tools/tessera-bench",
     "tools/tessera-crosscheck",
@@ -41,7 +41,7 @@ serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 tpchgen = "3.0"
-pmu = { path = "crates/pmu" }
+pmu = { path = "tools/pmu" }
 relhash = { path = "crates/relhash" }
 tessera-core = { path = "crates/tessera-core" }
 tessera-kernels = { path = "crates/tessera-kernels" }
