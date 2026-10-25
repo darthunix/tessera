@@ -75,7 +75,8 @@ compiler refuses a read on another thread.
 #### Scenario: Counters sent to another thread
 - **WHEN** a program moves `Counters` into another thread
 - **THEN** it does not compile
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/lib.rs::fn moves(counters: pmu::Counters)`
 
 ### Requirement: Exact or an error
 [`Counters::read`](../../../crates/pmu/src/lib.rs) and
@@ -122,11 +123,12 @@ with `ErrorKind::Unsupported`.
 - **Verified by:** pending
 
 ### Requirement: Errors that say what to do
-When `Counters::open` fails, its `Error` SHALL give a kind,
-`ErrorKind`, that names the cause, and a message that names the fix,
-with the system's error as its source where there is one. The
-documentation of `ErrorKind` SHALL list the kinds and their fixes. A
-new kind MAY come in a minor version.
+When `Counters::open` fails, its
+[`Error`](../../../crates/pmu/src/error.rs) SHALL give a kind,
+[`ErrorKind`](../../../crates/pmu/src/error.rs), that names the cause,
+and a message that names the fix, with the system's error as its source
+where there is one. The documentation of `ErrorKind` SHALL list the
+kinds and their fixes. A new kind MAY come in a minor version.
 
 #### Scenario: No PMU
 - **WHEN** a Linux machine has no PMU, as a virtual machine without a

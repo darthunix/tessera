@@ -531,29 +531,31 @@ fn counted_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
             let mut reads = 0;
             let mut read = || {
                 reads += 1;
-                Reading {
+                Ok(Reading {
                     instructions: reads,
                     ..Reading::default()
-                }
+                })
             };
             let calls = Cell::new(0);
-            let reading = masks.run_reference(
-                &mut read,
-                &input,
-                |_, words| {
-                    assert_eq!(words, case.selected.words());
-                    words.fill(0);
-                    calls.set(calls.get() + 1);
-                    Ok(())
-                },
-                count,
-            );
+            let reading = masks
+                .run_reference(
+                    &mut read,
+                    &input,
+                    |_, words| {
+                        assert_eq!(words, case.selected.words());
+                        words.fill(0);
+                        calls.set(calls.get() + 1);
+                        Ok(())
+                    },
+                    count,
+                )
+                .unwrap();
             assert_eq!(calls.get(), count);
             assert_eq!(
                 reading.instructions,
                 count.div_ceil(filter_blocks::BLOCK_SIZE as u64)
             );
-            masks.run_scalar(&mut read, &input, count);
+            masks.run_scalar(&mut read, &input, count).unwrap();
         }
     }
 }

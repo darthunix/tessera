@@ -320,9 +320,12 @@ stops for the maintainer, since another name gives the same counters.
 
 On the M5 the same four names resolve to the Arm architecture's
 common events `INST_RETIRED`, `CPU_CYCLES`, `BR_MIS_PRED_RETIRED` and
-`BR_RETIRED`, with the bit that counts user space only. These are the
-events the Linux backend programs on AArch64, so both NEON cells count
-the same events.
+`BR_RETIRED`, with the bit that counts user space only, and so do the
+databases of the M4. These are the events the Linux backend programs
+on AArch64, so both NEON cells count the same events. The databases of
+the M1 to the M3 resolve the names to Apple's own events, of the same
+meaning: retired instructions, cycles, retired branches and retired
+mispredictions.
 
 Under Rosetta, an x86-64 program on Apple silicon reads an Intel
 family of processor, and `kpep_db_create` finds no database for it.

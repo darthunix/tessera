@@ -10,16 +10,16 @@ fn counters_count_a_known_loop_or_explain_why_not() {
     let counters = match Counters::open() {
         Ok(counters) => counters,
         Err(error) => {
-            eprintln!("PMU counters unavailable: {error:#}");
+            eprintln!("PMU counters unavailable ({:?}): {error}", error.kind());
             return;
         }
     };
-    let short = counters.measure(1_000, || black_box(1_u64) + 1);
-    let long = counters.measure(10_000, || black_box(1_u64) + 1);
+    let short = counters.measure(1_000, || black_box(1_u64) + 1).unwrap();
+    let long = counters.measure(10_000, || black_box(1_u64) + 1).unwrap();
     assert!(short.instructions > 0 && short.cycles > 0);
     // Ten times the calls take roughly ten times the instructions.
     let ratio = long.instructions as f64 / short.instructions as f64;
     assert!((8.0..12.0).contains(&ratio), "ratio {ratio}");
     assert!(long.branches >= short.branches);
-    assert_ne!(counters.read(), Reading::default());
+    assert_ne!(counters.read().unwrap(), Reading::default());
 }

@@ -13,9 +13,9 @@ let values: Vec<u32> = (0..1024).collect();
 let calls = 100_000;
 let reading = counters.measure(calls, || {
     values.iter().map(|&v| u64::from(v)).sum::<u64>()
-});
+})?;
 println!("{} instructions per call", reading.instructions / calls);
-# Ok::<(), anyhow::Error>(())
+# Ok::<(), pmu::Error>(())
 ```
 
 ## What is counted
@@ -71,28 +71,37 @@ check that the setup works.
 
 The event names come from the `kpep` database of the running processor,
 `/usr/share/kpep/<chip>.plist`: `INST_ALL`, `CORE_ACTIVE_CYCLE`,
-`INST_BRANCH` and `BRANCH_MISPRED_NONSPEC`. On Apple silicon they are
-the Arm architecture's events `INST_RETIRED`, `CPU_CYCLES`, `BR_RETIRED`
-and `BR_MIS_PRED_RETIRED`. Each is added with the flag that restricts
+`INST_BRANCH` and `BRANCH_MISPRED_NONSPEC`. From the M4 on they are the
+Arm architecture's events `INST_RETIRED`, `CPU_CYCLES`, `BR_RETIRED` and
+`BR_MIS_PRED_RETIRED`; on the M1 to the M3 they are Apple's own events
+of the same meaning. Each is added with the flag that restricts
 it to user space. The fixed counters of instructions and cycles are not
 used, because they count the kernel too: they added a few thousand
 instructions to some blocks.
 
+## Errors
+
+[`Counters::open`] and the reads fail with an [`Error`]. Its
+[`kind`](Error::kind) names the cause for code, and its message names
+the cause and the fix for people; [`ErrorKind`] lists the kinds and
+their fixes. On macOS:
+
+- not root: [`ErrorKind::Permission`]. Cache the credentials with
+  `sudo -v` and start the program with `sudo -n`.
+- another task holds the counters, such as Instruments, `xctrace` or
+  another program that counts: [`ErrorKind::Busy`].
+- a virtual Mac, whose kernel has no kpc: [`ErrorKind::NoCounters`].
+- an x86-64 program under Rosetta, or a version of macOS whose private
+  frameworks changed: [`ErrorKind::Unsupported`].
+- a new chip whose database names an event otherwise:
+  [`ErrorKind::MissingEvent`]. Its plist under `/usr/share/kpep` lists
+  the names.
+
 ## Known failures
 
-- `kpc_force_all_ctrs_set failed with code ...`: the process is not
-  root. Cache the credentials with `sudo -v` and start the process with
-  `sudo -n`.
-- `PMU event ... is not in this CPU's kpep database`: a new chip whose
-  database names the events differently. Its plist under
-  `/usr/share/kpep` lists the names.
-- A missing symbol or framework: the frameworks are private and can
-  change between versions of macOS.
-- Instruments and `xctrace` take the counters while they record; a
-  measurement started meanwhile fails to open.
-- A block now and then reads zero instructions or cycles although its
-  code ran. The cause is not known. A caller should take a zero as a
-  failed block and repeat it.
+A block now and then reads zero instructions or cycles on Apple
+silicon although its code ran. The cause is not known. A caller should
+take a zero as a failed block and repeat it.
 
 ## License
 
