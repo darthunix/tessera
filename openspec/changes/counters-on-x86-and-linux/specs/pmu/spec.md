@@ -178,9 +178,11 @@ kinds, while its instructions and branches do not depend on the kind.
 - **Verified by:** pending
 
 #### Scenario: A Mac with two kinds of cores
-- **WHEN** the tests run as root on a Mac whose cores are of two kinds
-- **THEN** the counters open, and count the thread on whichever kind
-  it runs
+- **WHEN** on a Mac whose cores are of two kinds, the same loop is
+  measured, as root, on a thread of the user-interactive class and on
+  a thread of the background class
+- **THEN** both count the same instructions, within the cost of the
+  reads
 - **Verified by:** pending
 
 ### Requirement: The CPU of the thread
