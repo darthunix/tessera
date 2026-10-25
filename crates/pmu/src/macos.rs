@@ -15,6 +15,7 @@ use std::{
     io,
     mem::size_of,
     ptr,
+    sync::{Mutex, PoisonError},
 };
 
 type Result<T> = std::result::Result<T, Error>;
@@ -41,9 +42,10 @@ const EOPNOTSUPP: i32 = 102;
 /// always count every exception level, so timer interrupts and context
 /// switches inside a block would add kernel instructions. Configurable
 /// counters honour the user-space-only flag. `INST_ALL` is the fallback the
-/// kpep database itself names for the fixed instruction counter. On Apple
-/// silicon the four are the Arm events INST_RETIRED, CPU_CYCLES,
-/// BR_MIS_PRED_RETIRED and BR_RETIRED.
+/// kpep database itself names for the fixed instruction counter. From the
+/// M4 on the four are the Arm events INST_RETIRED, CPU_CYCLES,
+/// BR_MIS_PRED_RETIRED and BR_RETIRED; on the M1 to the M3, Apple's own
+/// events of the same meaning.
 const EVENTS: [&CStr; 4] = [
     c"INST_ALL",
     c"CORE_ACTIVE_CYCLE",
@@ -232,9 +234,24 @@ fn kpc(code: c_int, what: &str) -> Result<()> {
     ))
 }
 
-pub struct Counters {
+/// What the setup of kperf leaves for the reads.
+#[derive(Clone, Copy)]
+struct Setup {
     get_thread_counters: KpcGetThreadCounters,
     map: [usize; EVENTS.len()],
+}
+
+/// The setup of this process, once it succeeded.
+///
+/// kperf programs the counters of the whole system. A second setup while
+/// another thread counts would reprogram them under that thread's block,
+/// so the first setup that succeeds serves every later `open` of the
+/// process, on any thread. A setup that fails is not kept, so an `open`
+/// after Instruments has finished, say, tries again.
+static SETUP: Mutex<Option<Setup>> = Mutex::new(None);
+
+pub struct Counters {
+    setup: Setup,
 }
 
 impl Counters {
@@ -246,169 +263,23 @@ impl Counters {
                  of the translated code; build it for aarch64-apple-darwin",
             ));
         }
-        let kperf = Library::open(KPERF)?;
-        let kperfdata = Library::open(KPERFDATA)?;
-        // SAFETY: each type matches the documented kperf/kperfdata signature.
-        let (
-            force_all_ctrs_set,
-            set_counting,
-            set_thread_counting,
-            set_config,
-            get_thread_counters,
-        ) = unsafe {
-            (
-                kperf.function::<KpcForceAllCtrsSet>(c"kpc_force_all_ctrs_set")?,
-                kperf.function::<KpcSetClasses>(c"kpc_set_counting")?,
-                kperf.function::<KpcSetClasses>(c"kpc_set_thread_counting")?,
-                kperf.function::<KpcSetConfig>(c"kpc_set_config")?,
-                kperf.function::<KpcGetThreadCounters>(c"kpc_get_thread_counters")?,
-            )
+        // A thread that panicked while holding the lock left no setup, or
+        // a whole one: the value is never half written.
+        let mut kept = SETUP.lock().unwrap_or_else(PoisonError::into_inner);
+        let setup = match *kept {
+            Some(setup) => setup,
+            None => *kept.insert(program()?),
         };
-        // SAFETY: as above, for the kperfdata configuration functions.
-        let (
-            db_create,
-            db_event,
-            db_free,
-            config_create,
-            config_force_counters,
-            config_add_event,
-            config_kpc_classes,
-            config_kpc_count,
-            config_kpc_map,
-            config_kpc,
-            config_free,
-        ) = unsafe {
-            (
-                kperfdata.function::<KpepDbCreate>(c"kpep_db_create")?,
-                kperfdata.function::<KpepDbEvent>(c"kpep_db_event")?,
-                kperfdata.function::<KpepFree>(c"kpep_db_free")?,
-                kperfdata.function::<KpepConfigCreate>(c"kpep_config_create")?,
-                kperfdata.function::<KpepConfigForceCounters>(c"kpep_config_force_counters")?,
-                kperfdata.function::<KpepConfigAddEvent>(c"kpep_config_add_event")?,
-                kperfdata.function::<KpepConfigKpcClasses>(c"kpep_config_kpc_classes")?,
-                kperfdata.function::<KpepConfigKpcCount>(c"kpep_config_kpc_count")?,
-                kperfdata.function::<KpepConfigKpcMap>(c"kpep_config_kpc_map")?,
-                kperfdata.function::<KpepConfigKpc>(c"kpep_config_kpc")?,
-                kperfdata.function::<KpepFree>(c"kpep_config_free")?,
-            )
-        };
-
-        // Declared before the configuration, so that it is dropped after it.
-        let mut db = Owned::new(db_free);
-        // SAFETY: a null name selects the database of the running CPU; `db`
-        // receives an owned handle, freed when dropped.
-        let created = unsafe { db_create(ptr::null(), &mut db.handle) };
-        if created != 0 {
-            return Err(Error::new(
-                ErrorKind::Unsupported,
-                format!(
-                    "kperf has no event database for this processor (kpep_db_create code {created})"
-                ),
-            ));
-        }
-        let mut config = Owned::new(config_free);
-        // SAFETY: valid database handle; `config` receives an owned handle.
-        kpep(
-            unsafe { config_create(db.handle, &mut config.handle) },
-            "kpep_config_create",
-        )?;
-        // SAFETY: valid configuration handle.
-        kpep(
-            unsafe { config_force_counters(config.handle) },
-            "kpep_config_force_counters",
-        )?;
-        for name in EVENTS {
-            let mut event: Opaque = ptr::null_mut();
-            // SAFETY: valid database handle and NUL-terminated event name;
-            // `event` receives a pointer owned by the database.
-            let found = unsafe { db_event(db.handle, name.as_ptr(), &mut event) };
-            if found != 0 || event.is_null() {
-                return Err(Error::new(
-                    ErrorKind::MissingEvent,
-                    format!(
-                        "the event {} is not in this processor's kpep database (code {found})",
-                        name.to_string_lossy()
-                    ),
-                ));
-            }
-            // SAFETY: valid configuration and event; no error bitmap output.
-            kpep(
-                unsafe {
-                    config_add_event(config.handle, &mut event, USER_SPACE_ONLY, ptr::null_mut())
-                },
-                "kpep_config_add_event",
-            )?;
-        }
-        let mut classes = 0_u32;
-        let mut count = 0_usize;
-        let mut map = [0_usize; KPC_MAX_COUNTERS];
-        let mut registers = [0_u64; KPC_MAX_COUNTERS];
-        // SAFETY: valid configuration; output buffers are sized as passed.
-        unsafe {
-            kpep(
-                config_kpc_classes(config.handle, &mut classes),
-                "kpep_config_kpc_classes",
-            )?;
-            kpep(
-                config_kpc_count(config.handle, &mut count),
-                "kpep_config_kpc_count",
-            )?;
-            kpep(
-                config_kpc_map(
-                    config.handle,
-                    map.as_mut_ptr(),
-                    size_of::<[usize; KPC_MAX_COUNTERS]>(),
-                ),
-                "kpep_config_kpc_map",
-            )?;
-            kpep(
-                config_kpc(
-                    config.handle,
-                    registers.as_mut_ptr(),
-                    size_of::<[u64; KPC_MAX_COUNTERS]>(),
-                ),
-                "kpep_config_kpc",
-            )?;
-        }
-        drop(config);
-        drop(db);
-        if map
-            .iter()
-            .take(EVENTS.len())
-            .any(|&index| index >= KPC_MAX_COUNTERS)
-        {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "the kpep counter map is out of range",
-            ));
-        }
-
-        // SAFETY: plain kernel calls without pointers.
-        kpc(unsafe { force_all_ctrs_set(1) }, "kpc_force_all_ctrs_set")?;
-        if classes & KPC_CLASS_CONFIGURABLE_MASK != 0 && count > 0 {
-            // SAFETY: `registers` holds `count` valid configuration words for `classes`.
-            kpc(
-                unsafe { set_config(classes, registers.as_ptr()) },
-                "kpc_set_config",
-            )?;
-        }
-        // SAFETY: plain kernel calls.
-        unsafe {
-            kpc(set_counting(classes), "kpc_set_counting")?;
-            kpc(set_thread_counting(classes), "kpc_set_thread_counting")?;
-        }
-        Ok(Self {
-            get_thread_counters,
-            map: [map[0], map[1], map[2], map[3]],
-        })
+        Ok(Self { setup })
     }
 
     pub fn read(&self) -> Result<Reading> {
         let mut buffer = [0_u64; KPC_MAX_COUNTERS];
         // SAFETY: thread id 0 is the calling thread; the buffer holds
         // KPC_MAX_COUNTERS values as declared.
-        let code =
-            unsafe { (self.get_thread_counters)(0, KPC_MAX_COUNTERS as u32, buffer.as_mut_ptr()) };
+        let code = unsafe {
+            (self.setup.get_thread_counters)(0, KPC_MAX_COUNTERS as u32, buffer.as_mut_ptr())
+        };
         if code != 0 {
             return Err(Error::with_source(
                 ErrorKind::Lost,
@@ -416,13 +287,168 @@ impl Counters {
                 io::Error::last_os_error(),
             ));
         }
+        let map = self.setup.map;
         Ok(Reading {
-            instructions: buffer[self.map[0]],
-            cycles: buffer[self.map[1]],
-            branch_misses: buffer[self.map[2]],
-            branches: buffer[self.map[3]],
+            instructions: buffer[map[0]],
+            cycles: buffer[map[1]],
+            branch_misses: buffer[map[2]],
+            branches: buffer[map[3]],
         })
     }
+}
+
+/// Programs and starts the counters: the four events, user space only,
+/// counted per thread.
+fn program() -> Result<Setup> {
+    let kperf = Library::open(KPERF)?;
+    let kperfdata = Library::open(KPERFDATA)?;
+    // SAFETY: each type matches the documented kperf/kperfdata signature.
+    let (force_all_ctrs_set, set_counting, set_thread_counting, set_config, get_thread_counters) = unsafe {
+        (
+            kperf.function::<KpcForceAllCtrsSet>(c"kpc_force_all_ctrs_set")?,
+            kperf.function::<KpcSetClasses>(c"kpc_set_counting")?,
+            kperf.function::<KpcSetClasses>(c"kpc_set_thread_counting")?,
+            kperf.function::<KpcSetConfig>(c"kpc_set_config")?,
+            kperf.function::<KpcGetThreadCounters>(c"kpc_get_thread_counters")?,
+        )
+    };
+    // SAFETY: as above, for the kperfdata configuration functions.
+    let (
+        db_create,
+        db_event,
+        db_free,
+        config_create,
+        config_force_counters,
+        config_add_event,
+        config_kpc_classes,
+        config_kpc_count,
+        config_kpc_map,
+        config_kpc,
+        config_free,
+    ) = unsafe {
+        (
+            kperfdata.function::<KpepDbCreate>(c"kpep_db_create")?,
+            kperfdata.function::<KpepDbEvent>(c"kpep_db_event")?,
+            kperfdata.function::<KpepFree>(c"kpep_db_free")?,
+            kperfdata.function::<KpepConfigCreate>(c"kpep_config_create")?,
+            kperfdata.function::<KpepConfigForceCounters>(c"kpep_config_force_counters")?,
+            kperfdata.function::<KpepConfigAddEvent>(c"kpep_config_add_event")?,
+            kperfdata.function::<KpepConfigKpcClasses>(c"kpep_config_kpc_classes")?,
+            kperfdata.function::<KpepConfigKpcCount>(c"kpep_config_kpc_count")?,
+            kperfdata.function::<KpepConfigKpcMap>(c"kpep_config_kpc_map")?,
+            kperfdata.function::<KpepConfigKpc>(c"kpep_config_kpc")?,
+            kperfdata.function::<KpepFree>(c"kpep_config_free")?,
+        )
+    };
+
+    // Declared before the configuration, so that it is dropped after it.
+    let mut db = Owned::new(db_free);
+    // SAFETY: a null name selects the database of the running CPU; `db`
+    // receives an owned handle, freed when dropped.
+    let created = unsafe { db_create(ptr::null(), &mut db.handle) };
+    if created != 0 {
+        return Err(Error::new(
+            ErrorKind::Unsupported,
+            format!(
+                "kperf has no event database for this processor (kpep_db_create code {created})"
+            ),
+        ));
+    }
+    let mut config = Owned::new(config_free);
+    // SAFETY: valid database handle; `config` receives an owned handle.
+    kpep(
+        unsafe { config_create(db.handle, &mut config.handle) },
+        "kpep_config_create",
+    )?;
+    // SAFETY: valid configuration handle.
+    kpep(
+        unsafe { config_force_counters(config.handle) },
+        "kpep_config_force_counters",
+    )?;
+    for name in EVENTS {
+        let mut event: Opaque = ptr::null_mut();
+        // SAFETY: valid database handle and NUL-terminated event name;
+        // `event` receives a pointer owned by the database.
+        let found = unsafe { db_event(db.handle, name.as_ptr(), &mut event) };
+        if found != 0 || event.is_null() {
+            return Err(Error::new(
+                ErrorKind::MissingEvent,
+                format!(
+                    "the event {} is not in this processor's kpep database (code {found})",
+                    name.to_string_lossy()
+                ),
+            ));
+        }
+        // SAFETY: valid configuration and event; no error bitmap output.
+        kpep(
+            unsafe {
+                config_add_event(config.handle, &mut event, USER_SPACE_ONLY, ptr::null_mut())
+            },
+            "kpep_config_add_event",
+        )?;
+    }
+    let mut classes = 0_u32;
+    let mut count = 0_usize;
+    let mut map = [0_usize; KPC_MAX_COUNTERS];
+    let mut registers = [0_u64; KPC_MAX_COUNTERS];
+    // SAFETY: valid configuration; output buffers are sized as passed.
+    unsafe {
+        kpep(
+            config_kpc_classes(config.handle, &mut classes),
+            "kpep_config_kpc_classes",
+        )?;
+        kpep(
+            config_kpc_count(config.handle, &mut count),
+            "kpep_config_kpc_count",
+        )?;
+        kpep(
+            config_kpc_map(
+                config.handle,
+                map.as_mut_ptr(),
+                size_of::<[usize; KPC_MAX_COUNTERS]>(),
+            ),
+            "kpep_config_kpc_map",
+        )?;
+        kpep(
+            config_kpc(
+                config.handle,
+                registers.as_mut_ptr(),
+                size_of::<[u64; KPC_MAX_COUNTERS]>(),
+            ),
+            "kpep_config_kpc",
+        )?;
+    }
+    drop(config);
+    drop(db);
+    if map
+        .iter()
+        .take(EVENTS.len())
+        .any(|&index| index >= KPC_MAX_COUNTERS)
+    {
+        return Err(Error::new(
+            ErrorKind::Other,
+            "the kpep counter map is out of range",
+        ));
+    }
+
+    // SAFETY: plain kernel calls without pointers.
+    kpc(unsafe { force_all_ctrs_set(1) }, "kpc_force_all_ctrs_set")?;
+    if classes & KPC_CLASS_CONFIGURABLE_MASK != 0 && count > 0 {
+        // SAFETY: `registers` holds `count` valid configuration words for `classes`.
+        kpc(
+            unsafe { set_config(classes, registers.as_ptr()) },
+            "kpc_set_config",
+        )?;
+    }
+    // SAFETY: plain kernel calls.
+    unsafe {
+        kpc(set_counting(classes), "kpc_set_counting")?;
+        kpc(set_thread_counting(classes), "kpc_set_thread_counting")?;
+    }
+    Ok(Setup {
+        get_thread_counters,
+        map: [map[0], map[1], map[2], map[3]],
+    })
 }
 
 pub fn cpu_number() -> Option<usize> {

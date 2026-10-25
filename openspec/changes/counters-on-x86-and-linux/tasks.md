@@ -85,7 +85,9 @@ the maintainer types on the Mac named.
       as root through Cargo's runner, pass with
       `PMU_REQUIRE=hardware`, the test of two kinds of cores among
       them; a second process is refused with `ErrorKind::Busy` while
-      a first one counts. Check: the log in the pull request
+      a first one counts; a second thread opens while a first one
+      measures, and the first one's counts stay right. Check: the log
+      in the pull request
 - [ ] 5.2 kperf on Intel, as root on the Intel Mac: the same, and the
       example's counts there go into the README. Set the bound of the
       kernel test from the three machines. If the kernel's work is

@@ -334,6 +334,17 @@ of the translated code. `open` checks `sysctl.proc_translated` before
 anything else, which needs no root, and fails with
 `ErrorKind::Unsupported`, naming Rosetta.
 
+kperf programs the counters of the whole system, not of a thread. A
+second setup while another thread of the process counts would
+reprogram them under that thread's block. So the first `open` that
+succeeds sets kperf up once for the process, and every later `open`, on
+any thread, counts with that setup; a setup that fails is not kept, so
+a later `open` tries again. The process then holds the counters until
+it exits, and the documentation of `Counters` and of `ErrorKind::Busy`
+says so. A release when the last `Counters` is dropped is refused: it
+would need a count of the open ones across threads, and a release
+under a thread that opens again would race with it.
+
 Refused: a list of Intel names now. The database gives the same
 configuration words for them; a second list would add nothing but a
 list to keep.

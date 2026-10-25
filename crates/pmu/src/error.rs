@@ -45,7 +45,9 @@ pub enum ErrorKind {
     /// kernel accepts it.
     Permission,
     /// Another task holds the counters, such as Instruments, `xctrace` or
-    /// another process that counts. Fix: let it finish, then open again.
+    /// another process that counts. On macOS a process holds them from its
+    /// first successful `open` until it exits. Fix: let it finish, then
+    /// open again.
     Busy,
     /// The processor lacks an event the crate counts, such as an Arm core
     /// without `BR_RETIRED`, or a chip whose kperf database names the
