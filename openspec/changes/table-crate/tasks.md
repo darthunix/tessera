@@ -362,7 +362,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       other module; name these checks in the contract's rules "One way
       to memory" and "Unsafe code where it is proven". Check: the
       script; CI
-- [ ] 6.2 Write the Kani proofs of the checks and their arithmetic, add
+- [x] 6.2 Write the Kani proofs of the checks and their arithmetic, add
       the Kani job to CI, and name the proofs in "Any bytes, a bounded
       call" and, in the design of `relhash`, at each trust point and
       each module of unsafe code they cover. Check:

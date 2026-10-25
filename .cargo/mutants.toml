@@ -7,13 +7,15 @@
 # The tools, the test strategies, the benchmark programs and the loom
 # models are not the product. The table's loom models, their memory and
 # the model table (table/loom/) compile only with --cfg loom, which a
-# mutant's build lacks: each of their mutants would survive unseen.
+# mutant's build lacks: each of their mutants would survive unseen. So do
+# the table's proofs by Kani (table/proofs.rs), built only under Kani.
 exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
     "crates/tessera-capi/benches/**",
     "**/loom.rs",
     "crates/relhash/src/table/loom/**",
+    "crates/relhash/src/table/proofs.rs",
 ]
 
 # Debug output carries no logic; Display stays, it is the text of an error.

@@ -35,7 +35,8 @@ forbids it, so that no unsafe code goes unproven.
 - **Checked by:**
   `.github/scripts/check-trust.sh::does not forbid unsafe code`;
   `.github/scripts/check-trust.sh::allows unsafe code but is not in`;
-  `.github/scripts/check-trust.sh::holds no unsafe code`
+  `.github/scripts/check-trust.sh::holds no unsafe code`;
+  `.github/workflows/ci.yml::cargo kani -p relhash`
 
 ### References checked by the crate
 Every reference into a table, whether the caller passed it or the call

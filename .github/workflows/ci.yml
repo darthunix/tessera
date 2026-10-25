@@ -120,6 +120,28 @@ jobs:
           workspaces: ". -> target/loom"
       - name: make rust-loom
         run: make rust-loom
+  # The proofs by Kani of the hash table's checks (relhash's
+  # table/proofs.rs): for every value its blocks may hold, the checks keep
+  # each read inside its block and nothing panics. Kani brings its own
+  # nightly. A cover that no value reaches fails the job: the proof
+  # around it would hold for no value at all. It takes about six minutes,
+  # so it runs on pull requests only.
+  kani:
+    name: Kani proofs (ubuntu-24.04)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kani and its toolchain
+        run: |
+          cargo install --locked kani-verifier@0.68.0
+          cargo kani setup
+      - name: cargo kani -p relhash
+        run: |
+          cargo kani -p relhash 2>&1 | tee kani.log
+          grep 'cover properties satisfied' kani.log |
+            awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
   # Every suite against PostgreSQL and Tessera's C built with
   # AddressSanitizer and UndefinedBehaviorSanitizer (plan 9.7): reads and
   # writes past a buffer, use after free and undefined behaviour in C,

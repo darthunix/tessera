@@ -922,6 +922,17 @@ not, so that a new method has to be sorted. A borrow of a chunk's bytes
 for writing is not a read: the table only writes through it, and the
 payloads it hands to its caller are bytes the table never reads.
 
+A proof under a point is one of `crates/relhash/src/table/proofs.rs`,
+which `cargo kani -p relhash` runs. Kani, a model checker, runs the
+crate's own check over a region whose every read gives any value, and
+shows for each value that the check keeps the reads it guards inside
+the blocks and that nothing panics. The walks are proved over small
+chunks, for any record size: down a chain and over a chunk's records
+in chunks of up to 80 bytes, three of the smallest records, and over
+the marks in a chunk of up to two words of them. A longer walk repeats
+the same checks, and a solver of bits, which Kani is, proves the
+arithmetic of longer ones too slowly.
+
 - **`header`**: the fields of the header, read when a handle attaches
   to the index, and when the index is moved to a larger one.
   - Decides addresses and the length of loops: where the buckets start
@@ -932,6 +943,7 @@ payloads it hands to its caller are bytes the table never reads.
     lists them.
   - Error: damaged, with the rule of the first wrong field, from
     `Magic` to `Reserved`.
+  - Proof: `a_header_that_passes_puts_every_bucket_inside_the_index`.
 - **`record-count`**: the count of records in the header.
   - Decides the length of a loop: a walk down a chain takes at most as
     many steps as there are records. A table's statistics hand it to
@@ -942,6 +954,8 @@ payloads it hands to its caller are bytes the table never reads.
     count, or a long walk that comes back to a record it saved, has
     gone round a loop.
   - Error: damaged, `Chain`.
+  - Proof: `the_record_count_is_bounded_by_the_chunks`, and
+    `a_walk_down_a_chain_ends_within_the_record_count` for the walk.
 - **`bucket-head`**: the reference a bucket holds, the first record of
   its chain.
   - Decides an address.
@@ -951,6 +965,7 @@ payloads it hands to its caller are bytes the table never reads.
     a new record is not followed then: it becomes the record's next
     field, which a walk checks when it follows it.
   - Error: damaged, `Outside`.
+  - Proof: `a_reference_that_passes_names_a_record_inside_its_chunk`.
 - **`used-mark`**: the first word of a chunk, the bytes its records
   take.
   - Decides an address, where the chunk's writer appends, and the
@@ -962,6 +977,9 @@ payloads it hands to its caller are bytes the table never reads.
     checked it.
   - Error: damaged, `UsedMark`, or `BlockUsedMark` for a block given
     alone.
+  - Proof: `a_used_mark_that_passes_ends_a_record`, and for the walks
+    `a_walk_over_a_chunk_stays_inside_it` and
+    `a_walk_over_marks_reads_words_within_them`.
 - **`record`**: the bytes of a record, cut into its fields.
   - Decides an address by its next field, which is checked as a
     bucket's head is when a walk follows it. Its size field is checked.
@@ -970,6 +988,8 @@ payloads it hands to its caller are bytes the table never reads.
     claims is the table's record size.
   - Error: damaged, `Misplaced` for a record a reference names,
     `NoRecord` for one a walk over a chunk meets.
+  - Proof: `a_walk_down_a_chain_ends_within_the_record_count`, whose
+    walk opens every record it meets.
 - **`record-copy`**: the bytes of a record that a split or a merge
   copies whole into another chunk.
   - Data only: the copy's next field is written anew before the copy
@@ -982,6 +1002,7 @@ payloads it hands to its caller are bytes the table never reads.
     is not followed then.
   - Check: as `bucket-head`, when a walk follows it.
   - Error: damaged, `Outside`.
+  - Proof: as `bucket-head`.
 
 ## Unsafe code
 
@@ -1005,30 +1026,46 @@ it, and when a module of the list holds none. The paths are under
   bucket read without a bounds check, and the unchecked forms of the
   calls on a record that the loops use. They rest on `Access::place`,
   which puts a record inside its chunk, and on `Header::validate`,
-  which puts every bucket inside the index.
+  which puts every bucket inside the index. Proofs:
+  `a_header_that_passes_puts_every_bucket_inside_the_index`,
+  `a_reference_that_passes_names_a_record_inside_its_chunk` and
+  `a_walk_down_a_chain_ends_within_the_record_count`.
 - **`table/batch.rs`**, **`table/writer.rs`** and **`table/lanes.rs`**:
   the unchecked calls on a record at places that `Access::place` or
   `Access::room` accepted, and a row's payload taken without a bounds
   check from an array whose length was checked. `lanes.rs` also reads
   the lanes of a word that its mask filled, and gives the prefetch hint
   of AArch64, an instruction that reads nothing and never faults.
+  Proofs: `a_used_mark_that_passes_ends_a_record` and
+  `a_walk_over_a_chunk_stays_inside_it` for `Access::room` and the
+  walks over a chunk; `a_partition_lies_within_the_partitions` and
+  `the_partitions_that_pass_name_chunks_of_the_table` for the chunk of
+  a partition.
 - **`table/keys.rs`**: the key slots of a word of rows, indexed without
   a bounds check below the key count that the header's check fixed.
+  Proof: `a_header_that_passes_puts_every_bucket_inside_the_index`.
 - **`table/chunks.rs`** and **`table/mod.rs`**: the calls of the API
   that take the caller's memory or the caller's promise, such as
   `Chunks::new`, `Chunks::init`, `ChunkWriter::new`, `Table::attach`,
   `Table::link` and `TableMut::regrow`. Their documentation says, under
   "Safety", what the caller promises.
 - **`table/bloom.rs`**: the words of a shared filter, the caller's
-  memory, taken as atomic words.
+  memory, taken as atomic words. Proofs:
+  `a_word_of_the_filter_lies_within_it` and
+  `the_words_of_a_filter_within_a_limit_are_a_filter`.
 - **`table/marks.rs`**: the used mark of a chunk, read through the
-  region for the walk over the records without a mark.
+  region for the walk over the records without a mark. Proofs:
+  `a_mark_sets_the_bit_of_its_record` and
+  `a_walk_over_marks_reads_words_within_them`.
 - **`table/owned.rs`**: the blocks a table owns: their allocation and
   release, the handles over them, and that the table may move to
   another thread.
 - **`table/tests.rs`**, **`table/tests/`** and **`table/loom/`**: the
   tests, which call the unsafe API as a caller does and count
   allocations, and the memory of the loom models.
+- **`table/proofs.rs`**: the proofs by Kani, built only for Kani: the
+  model region, whose methods assert their safety sections, and a
+  chunk of the proof's own memory given to `Chunks::new`.
 
 ## What we decided not to do
 
@@ -1100,6 +1137,8 @@ it, and when a module of the list holds none. The paths are under
   participants
 - `crates/relhash/src/table/testing.rs`: the keys of the table's own
   tests and loom models
+- `crates/relhash/src/table/proofs.rs`: the proofs by Kani of the
+  checks of the trust points, the partitions, the filter and the marks
 
 ## Tests
 
@@ -1115,6 +1154,10 @@ it, and when a module of the list holds none. The paths are under
   one bucket by several participants, a probe beside a link, a shared
   filter built and read, and a filter and marks set by several
   participants, with the negative tests of the orders.
+- The proofs in `crates/relhash/src/table/proofs.rs`, run by
+  `cargo kani -p relhash`: the checks of the header, a reference, a
+  used mark, the record count, a partition, the filter and the marks
+  keep every read inside its block and cannot panic, for every value.
 - `crates/tessera-capi/tests/table.rs` and `test/sql/table.sql`: the
   calls through Tessera's C API.
 - The benchmarks `table_int32` and `table_large` of `tessera-bench`

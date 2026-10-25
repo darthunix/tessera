@@ -49,7 +49,7 @@ tessera-pmu = { path = "tools/tessera-pmu" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)", "cfg(kani)"] }
 
 # A panic in the library is caught at the C boundary and fails the query,
 # but a path to one is a bug to remove, not to rely on: production code
