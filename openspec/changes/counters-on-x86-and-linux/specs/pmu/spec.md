@@ -101,7 +101,8 @@ a reading as a failed block and repeat it.
 - **WHEN** the counters of an open group stop counting before a read,
   as when a pinned group of the Linux kernel loses its PMU
 - **THEN** the read fails with `ErrorKind::Lost`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/src/linux.rs::a_group_that_did_not_count_all_the_time_is_lost`
 
 ### Requirement: The four cells
 [`Counters::open`](../../../crates/pmu/src/lib.rs) SHALL count on macOS
@@ -128,7 +129,9 @@ with `ErrorKind::Unsupported`.
 - **WHEN** the tests run as root on a Mac with Apple silicon and on a
   Mac with Intel
 - **THEN** the hardware counters open and count on both
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/tests/open.rs::counters_count_a_known_loop_or_explain_why_not`;
+  `crates/pmu/tests/open.rs::the_kernel_work_of_a_system_call_is_not_counted`
 
 #### Scenario: Under Rosetta
 - **WHEN** a build for x86-64 runs under Rosetta on Apple silicon
@@ -208,7 +211,8 @@ kinds, while its instructions and branches do not depend on the kind.
   a thread of the background class
 - **THEN** both count the same instructions, within the cost of the
   reads
-- **Verified by:** pending
+- **Verified by:**
+  `crates/pmu/tests/open.rs::a_loop_counts_the_same_instructions_on_either_kind_of_core`
 
 ### Requirement: The CPU of the thread
 [`cpu_number`](../../../crates/pmu/src/lib.rs) SHALL give the CPU the
