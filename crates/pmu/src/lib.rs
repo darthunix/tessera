@@ -203,6 +203,10 @@ impl Counters {
     /// The counts include the loop and the [`black_box`] that keeps every
     /// result of `f` alive, and the small fixed cost of the reads.
     ///
+    /// On Apple silicon a block now and then reads zero instructions or
+    /// cycles although `f` ran, for a cause not known. Take such a reading
+    /// as a failed block and measure it again.
+    ///
     /// # Errors
     ///
     /// Fails as [`Counters::read`] does.
