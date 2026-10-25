@@ -248,14 +248,23 @@ pub(crate) fn choose(
                     ),
                 ));
             }
-            for event in ["br_retired", "br_mis_pred_retired"] {
+            // The driver does not check a raw event against the events the
+            // core offers: one it lacks, or that a hypervisor hides from its
+            // guest, opens and counts nothing, or something else. The files
+            // of events/ list what the core offers, so they are the guard.
+            for event in [
+                "inst_retired",
+                "cpu_cycles",
+                "br_retired",
+                "br_mis_pred_retired",
+            ] {
                 if !devices.join(&pmu.name).join("events").join(event).exists() {
                     return Err(Error::new(
                         ErrorKind::MissingEvent,
                         format!(
-                            "the core PMU {} has no event {event}: this core does \
-                             not count it, and the crate counts no other event in \
-                             its place",
+                            "the core PMU {} has no event {event}: this core, or \
+                             the hypervisor, does not offer it, and the crate \
+                             counts no other event in its place",
                             pmu.name
                         ),
                     ));
@@ -468,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn an_arm_pmu_without_a_branch_event_is_refused() {
+    fn an_arm_pmu_without_an_event_is_refused() {
         let tree = Tree::new().pmu(
             "armv8_cortex_a72",
             8,
@@ -487,6 +496,16 @@ mod tests {
         let error = choose(&tree.path(), &cpus("0-3"), None, Arch::Aarch64).unwrap_err();
         assert_eq!(error.kind(), ErrorKind::MissingEvent);
         assert!(error.to_string().contains("br_mis_pred_retired"), "{error}");
+        // A hypervisor may hide any event from its guest.
+        let tree = Tree::new().pmu(
+            "armv8_pmuv3_0",
+            8,
+            Some("0-3"),
+            &["cpu_cycles", "br_retired", "br_mis_pred_retired"],
+        );
+        let error = choose(&tree.path(), &cpus("0-3"), None, Arch::Aarch64).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::MissingEvent);
+        assert!(error.to_string().contains("inst_retired"), "{error}");
     }
 
     #[test]
