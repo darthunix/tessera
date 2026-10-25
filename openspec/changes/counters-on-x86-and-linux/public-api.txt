@@ -1,0 +1,35 @@
+pub mod pmu
+#[non_exhaustive] pub enum pmu::ErrorKind
+pub pmu::ErrorKind::Busy
+pub pmu::ErrorKind::Lost
+pub pmu::ErrorKind::MissingEvent
+pub pmu::ErrorKind::MixedCores
+pub pmu::ErrorKind::NoCounters
+pub pmu::ErrorKind::Other
+pub pmu::ErrorKind::Permission
+pub pmu::ErrorKind::Unsupported
+pub struct pmu::Counters
+impl pmu::Counters
+pub fn pmu::Counters::measure<R>(&self, iters: u64, f: impl core::ops::function::FnMut() -> R) -> core::result::Result<pmu::Reading, pmu::Error>
+pub fn pmu::Counters::open() -> core::result::Result<Self, pmu::Error>
+pub fn pmu::Counters::read(&self) -> core::result::Result<pmu::Reading, pmu::Error>
+pub struct pmu::Error
+impl pmu::Error
+pub fn pmu::Error::kind(&self) -> pmu::ErrorKind
+impl core::error::Error for pmu::Error
+pub fn pmu::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Display for pmu::Error
+pub fn pmu::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct pmu::Reading
+pub pmu::Reading::branch_misses: u64
+pub pmu::Reading::branches: u64
+pub pmu::Reading::cycles: u64
+pub pmu::Reading::instructions: u64
+impl pmu::Reading
+pub fn pmu::Reading::since(self, earlier: pmu::Reading) -> pmu::Reading
+impl core::ops::arith::Add for pmu::Reading
+pub type pmu::Reading::Output = pmu::Reading
+pub fn pmu::Reading::add(self, other: pmu::Reading) -> pmu::Reading
+impl core::ops::arith::AddAssign for pmu::Reading
+pub fn pmu::Reading::add_assign(&mut self, other: pmu::Reading)
+pub fn pmu::cpu_number() -> core::option::Option<usize>

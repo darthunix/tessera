@@ -11,7 +11,9 @@ not happen and why; how the code is laid out is left to the work.
 ### Free of Tessera
 The crate builds without any crate of Tessera and without PostgreSQL,
 so that it can be used, and checked, alone.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::cargo test --locked -p pmu --all-features`;
+  `.github/workflows/ci.yml::cargo publish --dry-run --locked -p pmu`
 
 ### One meaning in every cell
 Each of the four counts is the same event in every cell it counts in:
@@ -58,7 +60,10 @@ of the crate forbids it, so that what must be proven stays small.
 The public API grows only with a reason the change gives, so that what
 callers rely on stays small, and a published version breaks nothing by
 chance.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::diff -u
+  openspec/changes/counters-on-x86-and-linux/public-api.txt
+  target/pmu-public-api.txt`
 
 ## Forecast
 

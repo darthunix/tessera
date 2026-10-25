@@ -77,6 +77,77 @@ jobs:
           cargo +"$API_TOOLCHAIN" public-api -p relhash -sss > target/public-api.txt
           diff -u openspec/changes/table-crate/public-api.txt target/public-api.txt
 
+  # The crate pmu alone, as its contract asks ("Free of Tessera", "A small
+  # surface"), in the cells a runner can reach. Its tests as the only
+  # package: on x86-64 Linux, which has no PMU, the plumbing on software
+  # events and the error of a missing PMU; on AArch64 Linux the error of a
+  # refused user, then real counts; on macOS, without kpc, the tests that
+  # skip, and the refusal of Rosetta. On x86-64 Linux also a dry run of its
+  # publishing, its public API against the snapshot beside its change, and
+  # Clippy for the targets of its four cells and for one without a backend.
+  # It is not published.
+  pmu:
+    name: pmu alone (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
+    runs-on: ${{ matrix.runner }}
+    env:
+      API_TOOLCHAIN: nightly-2026-09-11
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pmu
+      - name: The crate's tests alone
+        run: cargo test --locked -p pmu --all-features
+      - name: The plumbing on software events, and no PMU
+        if: matrix.runner == 'ubuntu-24.04'
+        run: |
+          sudo sysctl -w kernel.perf_event_paranoid=2
+          PMU_REQUIRE=software PMU_EXPECT_ERROR=no-counters \
+            cargo test --locked -p pmu --all-features -- --nocapture
+      - name: A user the kernel refuses, then real counts
+        if: matrix.runner == 'ubuntu-24.04-arm'
+        run: |
+          sysctl kernel.perf_event_paranoid
+          PMU_EXPECT_ERROR=permission cargo test --locked -p pmu --all-features -- --nocapture
+          sudo sysctl -w kernel.perf_event_paranoid=2
+          PMU_REQUIRE=hardware cargo test --locked -p pmu --all-features -- --nocapture
+      - name: Rosetta refused
+        if: matrix.runner == 'macos-15'
+        run: |
+          rustup target add x86_64-apple-darwin
+          PMU_EXPECT_ERROR=unsupported \
+            cargo test --locked -p pmu --all-features --target x86_64-apple-darwin -- --nocapture
+      - name: A dry run of publishing, from the packed files
+        if: matrix.runner == 'ubuntu-24.04'
+        run: cargo publish --dry-run --locked -p pmu
+      - name: Clippy for the four cells and a target without a backend
+        if: matrix.runner == 'ubuntu-24.04'
+        run: |
+          targets="x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-freebsd"
+          rustup target add $targets
+          for target in $targets; do
+            cargo clippy --locked -p pmu --all-targets --all-features --target "$target" -- -D warnings
+          done
+      - name: The nightly of the public API's listing
+        if: matrix.runner == 'ubuntu-24.04'
+        run: rustup toolchain install "$API_TOOLCHAIN" --profile minimal
+      - uses: taiki-e/install-action@v2
+        if: matrix.runner == 'ubuntu-24.04'
+        with:
+          tool: cargo-public-api@0.51.0
+      - name: The public API against its snapshot
+        if: matrix.runner == 'ubuntu-24.04'
+        run: |
+          mkdir -p target
+          cargo +"$API_TOOLCHAIN" public-api -p pmu --all-features -sss > target/pmu-public-api.txt
+          diff -u openspec/changes/counters-on-x86-and-linux/public-api.txt target/pmu-public-api.txt
+
   # openspec/ against the repository (CONTRIBUTING.md, "Specs"): the
   # form of every spec and change, the test each scenario names, the
   # files each design names, no closed change kept in the tree.

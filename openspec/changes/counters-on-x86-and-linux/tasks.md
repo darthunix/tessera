@@ -71,7 +71,7 @@ the maintainer types on the Mac named.
 
 ## 4. CI
 
-- [ ] 4.1 The job of the crate alone, as the design says, and the
+- [x] 4.1 The job of the crate alone, as the design says, and the
       snapshot of the public API beside this change; the pending
       checks of the contract's "Free of Tessera" and "A small surface"
       name its steps. Check: the job passes in CI, on the Arm runner
