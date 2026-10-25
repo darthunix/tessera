@@ -149,18 +149,17 @@ PMU, to another pinned user or to the NMI watchdog, reads nothing.
 That is a state of the machine, not a mistake of the caller, and a
 library does not panic on it. A read is two per block of calls; the
 cost of a `Result` is a branch. On macOS a read fails only when its
-system call fails. The kernel protects the task that holds the
-counters: as XNU's source reads, `kpc_force_all_ctrs` refuses a second
-task while the first holds them. The check as root confirms it with
-two processes.
+system call fails, as when another process has set kperf up since
+`open`; the section "kperf on Intel" says why the kernel lets it.
 
 The errors of kperf are told apart by `errno`. Every `kpc_*` call on
 the path of `open` returns -1 when it fails and leaves its cause in
 `errno`, which the error keeps as its source,
 `io::Error::last_os_error()`: `EPERM` from a process that is not root
-is `ErrorKind::Permission`; `EACCES` or `EBUSY` from a root process
-while another task holds the counters is `ErrorKind::Busy`. The
-`kpep_*` calls return codes of their own, which the message names.
+is `ErrorKind::Permission`; `EACCES` or `EBUSY` from a root process is
+`ErrorKind::Busy`, the counters kept for another user, though XNU's
+source returns neither for a second process. The `kpep_*` calls return
+codes of their own, which the message names.
 
 Refused:
 
@@ -341,14 +340,30 @@ reprogram them under that thread's block. So the first `open` that
 succeeds sets kperf up once for the process, and every later `open`, on
 any thread, counts with that setup; a setup that fails is not kept, so
 a later `open` tries again. The process then holds the counters until
-it exits, and the documentation of `Counters` and of `ErrorKind::Busy`
-says so. A release when the last `Counters` is dropped is refused: it
-would need a count of the open ones across threads, and a release
-under a thread that opens again would race with it.
+it exits, and the documentation of `Counters` says so. A release when
+the last `Counters` is dropped is refused: it would need a count of
+the open ones across threads, and a release under a thread that opens
+again would race with it.
 
-Refused: a list of Intel names now. The database gives the same
-configuration words for them; a second list would add nothing but a
-list to keep.
+The kernel does not keep a second process off the counters. In XNU's
+source kpc is a layer over the kernel's CPC, whose
+`cpc_task_set_owner` finds that another task holds the counters and
+still returns success, and `kpc_set_config` reprograms them in any
+case. So a second process that sets kperf up spoils the counts of the
+first. As root on the Intel Mac, a read of the first then failed with
+`EINVAL`, which is `ErrorKind::Lost`, and one of two equal loops
+counted 1.45 times the instructions of the other. The documentation of
+`Counters` and the README say to count with one program at a time, and
+not beside Instruments or `xctrace`.
+
+Refused:
+
+- A list of Intel names now. The database gives the same configuration
+  words for them; a second list would add nothing but a list to keep.
+- A lock file that `open` holds for the life of the process, so that a
+  second program on `pmu` fails with `ErrorKind::Busy`. It would keep
+  off only programs on `pmu`, not Instruments or `xctrace`, and the
+  person who starts the programs knows what runs.
 
 ### Tests that say whether they may skip
 
@@ -433,8 +448,6 @@ root, through Cargo's runner of the target, after `sudo -v`, such as
 `CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER='sudo -n env PMU_REQUIRE=hardware'`.
 So `target/` gets no files owned by root, and a binary run after
 sudo's time is out fails instead of asking for the password again.
-Each Mac also checks that a second process is refused with
-`ErrorKind::Busy` while a first one counts.
 
 The test of two kinds of cores on a Mac measures the same loop on a
 thread of the user-interactive class and on a thread of the background

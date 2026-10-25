@@ -231,8 +231,7 @@ fn kpc(code: c_int, what: &str) -> Result<()> {
         ),
         Some(EACCES | EBUSY) => (
             ErrorKind::Busy,
-            "another task holds the counters, such as Instruments, xctrace or \
-             another program that counts; let it finish, then open again",
+            "kperf keeps the counters for another user; let it finish, then open again",
         ),
         Some(ENOENT | ENOTSUP | EOPNOTSUPP) => (
             ErrorKind::NoCounters,

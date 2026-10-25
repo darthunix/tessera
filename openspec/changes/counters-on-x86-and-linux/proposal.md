@@ -85,8 +85,9 @@ What was found on 2026-10-24 and 2026-10-25:
   thread is bound to one kind; the error of an unbound thread names
   the command that binds it. On macOS, which cannot bind, a reading
   sums both kinds, and the documentation says what that changes.
-- On macOS, the errors tell a missing root from counters held by
-  another task, and Rosetta is refused by name.
+- On macOS, the errors tell a missing root from counters refused to
+  root, and Rosetta is refused by name. The kernel refuses no second
+  process that counts, and the documentation says so.
 - On an Intel Mac the kperf backend is checked as root, with a test
   that the kernel's work is not counted. Its list of events changes
   only if that check fails.

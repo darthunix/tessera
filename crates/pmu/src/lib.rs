@@ -142,8 +142,11 @@ impl Reading {
 /// On macOS the first `open` that succeeds sets the counters of the whole
 /// system up, and every later `open` of the process, on any thread, counts
 /// with that setup. The process then holds the counters until it exits,
-/// also after its last `Counters` is dropped, and another process that
-/// opens them meanwhile fails with [`ErrorKind::Busy`].
+/// also after its last `Counters` is dropped. The kernel does not refuse
+/// another process that sets them up meanwhile, and that setup spoils the
+/// counts of this one: a read fails with [`ErrorKind::Lost`], or gives
+/// wrong counts without an error. Count with one program at a time, and
+/// not while Instruments or `xctrace` records counters.
 pub struct Counters {
     backend: backend::Counters,
     // Counting belongs to the thread that opened the counters.
@@ -163,7 +166,8 @@ impl Counters {
     /// backend or under Rosetta, [`NoCounters`](ErrorKind::NoCounters) on
     /// a machine without a PMU, [`Permission`](ErrorKind::Permission)
     /// without the privileges the system asks for,
-    /// [`Busy`](ErrorKind::Busy) while another task holds the counters,
+    /// [`Busy`](ErrorKind::Busy) when the system keeps the counters for
+    /// another user,
     /// [`MissingEvent`](ErrorKind::MissingEvent) when the processor lacks
     /// an event, [`MixedCores`](ErrorKind::MixedCores) on Linux for a
     /// thread that may run on CPUs of two kinds, and

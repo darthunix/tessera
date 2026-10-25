@@ -147,10 +147,9 @@ their fixes. The common ones:
   `kernel.perf_event_paranoid` refuses the user.
 - [`ErrorKind::NoCounters`]: a virtual machine without a PMU, or a
   virtual Mac, whose kernel has no kpc.
-- [`ErrorKind::Busy`]: another task holds the counters, such as
-  Instruments or another program that counts on macOS; on Linux, a
-  group that does not stay on the PMU, as when the NMI watchdog holds a
-  counter.
+- [`ErrorKind::Busy`]: on Linux, a group that does not stay on the
+  PMU, as when the NMI watchdog holds a counter; on macOS, kperf
+  refuses the counters to root.
 - [`ErrorKind::MixedCores`]: on Linux, a thread that may run on two
   kinds of cores.
 - [`ErrorKind::MissingEvent`]: a core without an event the crate
@@ -164,6 +163,13 @@ their fixes. The common ones:
 A block now and then reads zero instructions or cycles on Apple
 silicon although its code ran. The cause is not known. A caller should
 take a zero as a failed block and repeat it.
+
+Two programs that count at once on macOS spoil each other's counts.
+The kernel refuses no second process: its setup reprograms the
+counters under the first, whose reads then fail with
+[`ErrorKind::Lost`] or give wrong counts without an error. Count with
+one program at a time, and not while Instruments or `xctrace` records
+counters.
 
 ## License
 

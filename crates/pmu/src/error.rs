@@ -44,10 +44,13 @@ pub enum ErrorKind {
     /// root lowers it to 2, or gives the program `CAP_PERFMON` where the
     /// kernel accepts it.
     Permission,
-    /// Another task holds the counters, such as Instruments, `xctrace` or
-    /// another process that counts. On macOS a process holds them from its
-    /// first successful `open` until it exits. Fix: let it finish, then
-    /// open again.
+    /// The system keeps the counters for another user. On Linux the group
+    /// of four does not stay on the PMU: another program pins counters of
+    /// its own, or the NMI watchdog holds one. On macOS kperf refuses a
+    /// root process with `EACCES` or `EBUSY`; the kernel does not refuse a
+    /// second process that counts, as [`Counters`](crate::Counters) says.
+    /// Fix: let the other user finish; on Linux, root frees the counter of
+    /// the NMI watchdog with `sysctl kernel.nmi_watchdog=0`.
     Busy,
     /// The processor lacks an event the crate counts, such as an Arm core
     /// without `BR_RETIRED`, or a chip whose kperf database names the
