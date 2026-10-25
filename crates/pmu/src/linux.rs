@@ -128,32 +128,40 @@ impl Counters {
                 io::Error::last_os_error(),
             ));
         }
-        let [count, enabled, running, values @ ..] = buffer;
-        if read as usize != size_of::<Buffer>() || count != 4 {
-            return Err(Error::new(
-                ErrorKind::Lost,
-                format!(
-                    "the group lost the PMU: a read gave {read} bytes and {count} \
-                     counts; another program may pin its own counters"
-                ),
-            ));
-        }
-        if enabled != running {
-            return Err(Error::new(
-                ErrorKind::Lost,
-                format!(
-                    "the group ran {running} ns of the {enabled} ns it was enabled: \
-                     its counts are not whole"
-                ),
-            ));
-        }
-        Ok(Reading {
-            instructions: values[0],
-            cycles: values[1],
-            branch_misses: values[2],
-            branches: values[3],
-        })
+        reading_of(read as usize, buffer)
     }
+}
+
+/// The reading in `buffer`, of which a read gave `read` bytes, or `Lost`
+/// when the group did not count all four events for the whole time: a
+/// pinned group in its error state reads nothing, and a group that shared
+/// the PMU ran less than it was enabled.
+fn reading_of(read: usize, buffer: Buffer) -> Result<Reading> {
+    let [count, enabled, running, values @ ..] = buffer;
+    if read != size_of::<Buffer>() || count != 4 {
+        return Err(Error::new(
+            ErrorKind::Lost,
+            format!(
+                "the group lost the PMU: a read gave {read} bytes and {count} \
+                 counts; another program may pin its own counters"
+            ),
+        ));
+    }
+    if enabled != running {
+        return Err(Error::new(
+            ErrorKind::Lost,
+            format!(
+                "the group ran {running} ns of the {enabled} ns it was enabled: \
+                 its counts are not whole"
+            ),
+        ));
+    }
+    Ok(Reading {
+        instructions: values[0],
+        cycles: values[1],
+        branch_misses: values[2],
+        branches: values[3],
+    })
 }
 
 /// Opens one event of the calling thread, the leader of a group when
@@ -283,6 +291,33 @@ mod tests {
         // just touched fault.
         assert!(reading.instructions > 0, "{reading:?}");
         assert!(reading.cycles > 0, "{reading:?}");
+    }
+
+    /// A read gives a reading only when it holds the whole group and the
+    /// group ran for all the time it was enabled.
+    #[test]
+    fn a_group_that_did_not_count_all_the_time_is_lost() {
+        let size = size_of::<Buffer>();
+        let whole: Buffer = [4, 1_000, 1_000, 10, 20, 1, 3];
+        assert_eq!(
+            reading_of(size, whole).unwrap(),
+            Reading {
+                instructions: 10,
+                cycles: 20,
+                branch_misses: 1,
+                branches: 3,
+            }
+        );
+        let lost = |read, buffer| reading_of(read, buffer).unwrap_err().kind();
+        // A pinned group in its error state reads end of file.
+        assert_eq!(lost(0, [0; 7]), ErrorKind::Lost);
+        assert_eq!(lost(size - 8, whole), ErrorKind::Lost);
+        let mut three = whole;
+        three[0] = 3;
+        assert_eq!(lost(size, three), ErrorKind::Lost);
+        let mut shared = whole;
+        shared[2] = 600;
+        assert_eq!(lost(size, shared), ErrorKind::Lost);
     }
 
     /// The choice of the core PMU writes the kernel's generic ids itself, so
