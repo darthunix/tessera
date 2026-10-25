@@ -91,7 +91,11 @@ otherwise they SHALL fail with `ErrorKind::Lost`. A reading SHALL NOT be
 scaled, estimated, or made from time or from software events. On macOS
 this holds only while no other program sets the counters up, which the
 kernel does not refuse and the crate cannot see, as the documentation
-of [`Counters`](../../../crates/pmu/src/lib.rs) says.
+of [`Counters`](../../../crates/pmu/src/lib.rs) says. And on Apple
+silicon a block now and then reads zero instructions or cycles although
+its code ran, for a cause not known; the documentation of
+[`Counters::measure`](../../../crates/pmu/src/lib.rs) says to take such
+a reading as a failed block and repeat it.
 
 #### Scenario: Counters lost
 - **WHEN** the counters of an open group stop counting before a read,

@@ -152,6 +152,12 @@ cost of a `Result` is a branch. On macOS a read fails only when its
 system call fails, as when another process has set kperf up since
 `open`; the section "kperf on Intel" says why the kernel lets it.
 
+A block that reads zero instructions or cycles on Apple silicon,
+although its code ran, is not an error of the crate. Such reads are
+rare, their cause is not known, and the zero is their only sign. The
+documentation of `measure` and the README say to take a zero as a
+failed block and repeat it, as Tessera's benchmark runner does.
+
 The errors of kperf are told apart by `errno`. Every `kpc_*` call on
 the path of `open` returns -1 when it fails and leaves its cause in
 `errno`, which the error keeps as its source,
@@ -165,6 +171,10 @@ Refused:
 
 - `anyhow::Error`. A caller cannot match on its cause.
 - A `read` that panics. It ends a whole benchmark for one lost block.
+- A `measure` that fails with `ErrorKind::Lost` on a zero. It would
+  judge only `measure`, not the difference of two reads a caller takes
+  itself, so the documentation would still have to warn of zeros; and
+  every caller would handle as an error a block it repeats today.
 - An API behind `cfg`, present only where a backend is. Every caller
   would repeat the `cfg`.
 - A `#[non_exhaustive]` `Reading`. It forbids the literal and the
