@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use crate::error::{Error, Result, Rule, ensure};
 
 use crate::bits::ones;

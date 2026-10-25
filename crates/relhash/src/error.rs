@@ -5,6 +5,7 @@
 //! numbers that show how. The error is one word: it allocates nothing,
 //! and a call returns it in registers. Its text is written only when it
 //! is printed.
+#![forbid(unsafe_code)]
 
 use core::fmt;
 use core::num::NonZeroU64;
