@@ -512,9 +512,9 @@ fn mask_blocks_restore_every_invocation_and_handle_empty_rows() {
 
 #[test]
 fn counted_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
+    use pmu::Reading;
     use std::cell::Cell;
     use tessera_kernels::int32::CompareOp;
-    use tessera_pmu::Reading;
     for nrows in [0, 65] {
         let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", false);
         let column = case.dense_column().unwrap();

@@ -10,9 +10,9 @@ use std::hint::black_box;
 use std::mem::MaybeUninit;
 
 use anyhow::{Result, ensure};
+use pmu::Reading;
 use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::int32::{CompareOp, compare_columns};
-use tessera_pmu::Reading;
 
 use crate::support::{
     fixture::{Fixture, as_uninit},

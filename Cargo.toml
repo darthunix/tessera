@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/pmu",
     "crates/relhash",
     "crates/tessera-core",
     "crates/tessera-capi",
@@ -10,7 +11,6 @@ members = [
     "tools/tessera-bench",
     "tools/tessera-crosscheck",
     "tools/tessera-pgtool",
-    "tools/tessera-pmu",
     "tools/tessera-tpch",
 ]
 resolver = "3"
@@ -39,13 +39,13 @@ serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
 tpchgen = "3.0"
+pmu = { path = "crates/pmu" }
 relhash = { path = "crates/relhash" }
 tessera-core = { path = "crates/tessera-core" }
 tessera-kernels = { path = "crates/tessera-kernels" }
 tessera-spill = { path = "crates/tessera-spill" }
 tessera-testing = { path = "crates/tessera-testing" }
 tessera-pgtool = { path = "tools/tessera-pgtool" }
-tessera-pmu = { path = "tools/tessera-pmu" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -1,4 +1,4 @@
-# tessera-pmu
+# pmu
 
 Per-thread PMU counters for benchmarking arbitrary code: retired
 instructions, core cycles, mispredicted branches and retired branches.
@@ -14,7 +14,7 @@ misses explain most cycle-only differences. Counting is per thread and
 survives migration between cores.
 
 ```rust
-let counters = tessera_pmu::Counters::open()?;
+let counters = pmu::Counters::open()?;
 let reading = counters.measure(100_000, || work());
 println!("{} instructions per call", reading.instructions / 100_000);
 ```
@@ -33,7 +33,7 @@ timing: a measurement without counters is an error, not a degraded result.
 
 ```sh
 sudo -v
-cargo build --release -p tessera-pmu --example count --locked
+cargo build --release -p pmu --example count --locked
 sudo -n target/release/examples/count
 ```
 
