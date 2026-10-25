@@ -52,6 +52,10 @@ the maintainer types on the Mac named.
       is not counted. Check: the tests pass; with
       `PMU_REQUIRE=hardware` they fail without counters, and with an
       unknown value they fail everywhere
+- [x] 2.5 The crate stays among the tools, at the maintainer's word:
+      it moves from `crates/pmu` to `tools/pmu`, and the check of a
+      spec's links to a crate's items reads `tools/` too. Check:
+      `make rust-check`; `.github/scripts/check-specs.sh`
 
 ## 3. The Linux backend
 
@@ -96,7 +100,7 @@ the maintainer types on the Mac named.
 - [ ] 6.1 Close the change as `CONTRIBUTING.md` says: the spec and the
       contract go to `openspec/specs/pmu/`, and what the design decided
       to its `design.md`. The entry `simd-primitives-avx2` names
-      `crates/pmu` and drops the Intel table it no longer needs. The
+      `tools/pmu` and drops the Intel table it no longer needs. The
       roadmap loses this change's entry and gains three: the next stage
       (`tessera-bench` on Linux without `sudo` and with the cell in its
       report, a run of `tessera-bench` on the Intel Mac, the texts that

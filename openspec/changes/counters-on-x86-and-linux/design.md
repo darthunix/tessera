@@ -79,7 +79,8 @@ runner does.
   counts. The license is compatible with PostgreSQL's, so that the
   crate lives in Tessera's repository. The least Rust version is
   Tessera's, so that Tessera's toolchain does not change for the
-  crate. No counting on macOS without root.
+  crate. No counting on macOS without root. The crate stays among the
+  tools, in `tools/`.
 
 ## Decisions
 
@@ -88,7 +89,8 @@ runner does.
 Was: `tools/tessera-pmu`, `publish = false`, the workspace's version
 and license, `anyhow` and `serde` as dependencies.
 
-Will be: `crates/pmu`, the package and library `pmu`.
+Will be: `tools/pmu`, the package and library `pmu`, still among the
+measuring tools.
 
 - `publish = true`, which makes its public API a surface of a spec. It
   is not published by this change.
@@ -110,8 +112,11 @@ Will be: `crates/pmu`, the package and library `pmu`.
 
 Refused:
 
-- Keeping the crate in `tools/` with `publish = false`. Its API would
-  not be a surface of a spec, and nothing would keep it fit to publish.
+- `publish = false`. Its API would not be a surface of a spec, and
+  nothing would keep it fit to publish.
+- `crates/pmu`. `crates/` holds the parts of Tessera itself, and the
+  counters are a tool that measures them. Where a crate lies does not
+  decide whether it is published.
 - The license PostgreSQL, the workspace's. It allows the same, but the
   license checks of Rust users rarely list it.
 - `MIT OR Apache-2.0`, the habit of Rust crates. Apache-2.0 adds terms

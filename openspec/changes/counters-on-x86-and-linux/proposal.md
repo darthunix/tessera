@@ -64,7 +64,7 @@ What was found on 2026-10-24 and 2026-10-25:
 ## What Changes
 
 - **BREAKING** for Tessera's benchmark programs: `tools/tessera-pmu`
-  becomes `crates/pmu`, the package `pmu`, with `publish = true`, a
+  becomes `tools/pmu`, the package `pmu`, with `publish = true`, a
   version of its own, 0.1.0, and the license BSD-2-Clause. Its least
   Rust version is the workspace's. The programs follow the rename and
   the new API in commits of their own.
@@ -116,7 +116,7 @@ None.
 
 ## Impact
 
-- Code: the crate moves to `crates/pmu`. Outside it, the workspace's
+- Code: the crate moves to `tools/pmu`. Outside it, the workspace's
   `Cargo.toml` and `crates/tessera-capi` change: its benchmark
   programs and its test follow the rename, read with `?`, and turn a
   missing CPU number into the value they write today.
