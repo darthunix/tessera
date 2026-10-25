@@ -140,7 +140,7 @@ pub(super) trait Region {
     /// The `len` bytes lie within the spot's chunk, and nothing writes them
     /// while the slice lives: they hold a published record, or the caller
     /// is the chunk's one writer.
-    unsafe fn record(&self, spot: Self::Spot, len: usize) -> &[u8];
+    unsafe fn chunk_bytes(&self, spot: Self::Spot, len: usize) -> &[u8];
 
     /// Borrow `len` bytes at a spot for writing.
     ///
@@ -150,13 +150,13 @@ pub(super) trait Region {
     /// or writes them while the slice lives: the record is not published
     /// yet, or the caller has exclusive use of the table.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn record_mut(&self, spot: Self::Spot, len: usize) -> &mut [u8];
+    unsafe fn chunk_bytes_mut(&self, spot: Self::Spot, len: usize) -> &mut [u8];
 
     /// Read the 32-bit word at a spot: a record's next field.
     ///
     /// # Safety
     ///
-    /// As [`Self::record`] for 4 bytes aligned to 4.
+    /// As [`Self::chunk_bytes`] for 4 bytes aligned to 4.
     unsafe fn load_next(&self, spot: Self::Spot) -> u32;
 
     /// Write the 32-bit word at a spot: a record's next field, before the
@@ -164,7 +164,7 @@ pub(super) trait Region {
     ///
     /// # Safety
     ///
-    /// As [`Self::record_mut`] for 4 bytes aligned to 4.
+    /// As [`Self::chunk_bytes_mut`] for 4 bytes aligned to 4.
     unsafe fn store_next(&self, spot: Self::Spot, value: u32);
 
     /// Hint that the cache line at a spot will be read soon.
@@ -417,13 +417,13 @@ impl Region for RawRegion {
     }
 
     #[inline(always)]
-    unsafe fn record(&self, spot: *mut u8, len: usize) -> &[u8] {
+    unsafe fn chunk_bytes(&self, spot: *mut u8, len: usize) -> &[u8] {
         // SAFETY: the caller's contract.
         unsafe { core::slice::from_raw_parts(spot, len) }
     }
 
     #[inline(always)]
-    unsafe fn record_mut(&self, spot: *mut u8, len: usize) -> &mut [u8] {
+    unsafe fn chunk_bytes_mut(&self, spot: *mut u8, len: usize) -> &mut [u8] {
         // SAFETY: the caller's contract.
         unsafe { core::slice::from_raw_parts_mut(spot, len) }
     }
