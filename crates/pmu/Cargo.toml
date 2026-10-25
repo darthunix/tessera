@@ -1,15 +1,30 @@
 [package]
 name = "pmu"
-version.workspace = true
+# A version of its own: the crate may be published, and its version
+# follows its API, not Tessera's releases.
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
-publish.workspace = true
-description = "Per-thread PMU counters for benchmarking arbitrary code (kperf on macOS)"
+license = "BSD-2-Clause"
+description = "Four hardware counters of one thread, in user space, for benchmarks of short code"
+repository = "https://github.com/darthunix/tessera"
+readme = "README.md"
+keywords = ["pmu", "performance-counters", "benchmark", "kperf", "perf"]
+categories = ["development-tools::profiling", "hardware-support", "os::macos-apis", "os::linux-apis"]
+# A crate meant for use outside Tessera, whose API a spec may name
+# (CONTRIBUTING.md); it is not published on crates.io for now.
+publish = true
+
+[features]
+# Serialize and Deserialize for Reading.
+serde = ["dep:serde"]
 
 [dependencies]
 anyhow.workspace = true
-serde.workspace = true
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -68,8 +68,8 @@ ask".
 - `kernels/`: `tessera_kernels`, batch functions, linked with the Rust
   kernels.
 - `crates/`: the Rust kernels (`tessera-kernels`), their C entry points
-  (`tessera-capi`), the hash table (`relhash`), the spill format, the
-  shared core.
+  (`tessera-capi`), the hash table (`relhash`), the counters of the
+  processor (`pmu`), the spill format, the shared core.
 - `tools/`: measuring and checking tools: `tessera-ab`, `tessera-bench`,
   `tessera-crosscheck`, `tessera-tpch`.
 - `test/`: the SQL suites with their C test modules; `bench/`: the

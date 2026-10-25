@@ -29,22 +29,22 @@ the maintainer types on the Mac named.
 - [x] 2.1 Move `tools/tessera-pmu` to `crates/pmu` and rename the
       package `pmu`; the workspace and `crates/tessera-capi` follow
       the rename, and nothing else changes. Check: `make rust-check`
-- [ ] 2.2 The manifest and the page of a published crate:
+- [x] 2.2 The manifest and the page of a published crate:
       `publish = true`, version 0.1.0, BSD-2-Clause with its
       `LICENSE`, the README as the crate's page, a build that fails on
       a public item without a comment, examples that open the counters
-      built but not run, `serde` as a feature, no `anyhow`. Link the
-      spec's requirements to the crate's items.
-      Check: `cargo publish --dry-run --locked -p pmu`;
+      built but not run, `serde` as a feature. Link the spec's
+      requirements to the crate's items, and name the crate in
+      `CONTRIBUTING.md`. Check:
+      `cargo publish --dry-run --locked -p pmu`;
       `RUSTDOCFLAGS=-Dwarnings cargo doc --locked -p pmu --no-deps`
-- [ ] 2.3 One API on every target: `Error` and `ErrorKind`, `read` and
-      `measure` that return them, a `cpu_number` that returns an
-      `Option`, and `Counters` neither `Send` nor `Sync`; on macOS,
-      `Permission` and `Busy` told apart by their codes, Rosetta
-      refused by name, and the documentation of `Reading` on two kinds
-      of cores. The benchmark programs read with `?`. Check: a
-      `compile_fail`
-      doctest that sends `Counters` to another thread;
+- [ ] 2.3 One API on every target: `Error` and `ErrorKind` in place of
+      `anyhow`, `read` and `measure` that return them, a `cpu_number`
+      that returns an `Option`, and `Counters` neither `Send` nor
+      `Sync`; on macOS, `Permission` and `Busy` told apart by `errno`,
+      Rosetta refused by name, and the documentation of `Reading` on
+      two kinds of cores. The benchmark programs read with `?`. Check:
+      a `compile_fail` doctest that sends `Counters` to another thread;
       `cargo clippy --locked -p pmu` for the four targets of the cells
       and for a target without a backend
 - [ ] 2.4 Read `PMU_REQUIRE` and `PMU_EXPECT_ERROR` in the crate's
@@ -94,12 +94,13 @@ the maintainer types on the Mac named.
 ## 6. Closing
 
 - [ ] 6.1 Close the change as `CONTRIBUTING.md` says: the spec and the
-      contract go to `openspec/specs/pmu/`, and what the design
-      decided to its `design.md`. The roadmap loses this entry and
-      gains three: the next stage (`tessera-bench` on Linux without
-      `sudo` and with the cell in its report, a run of
-      `tessera-bench` on the Intel Mac, the texts that say the
-      counters work only on macOS); the check of x86-64 Linux and of
-      two kinds of cores on hardware; and publishing the crate. Check:
-      `.github/scripts/check-specs.sh`; the maintainer approves the
-      outcome
+      contract go to `openspec/specs/pmu/`, and what the design decided
+      to its `design.md`. The entry `simd-primitives-avx2` names
+      `crates/pmu` and drops the Intel table it no longer needs. The
+      roadmap loses this change's entry and gains three: the next stage
+      (`tessera-bench` on Linux without `sudo` and with the cell in its
+      report, a run of `tessera-bench` on the Intel Mac, the texts that
+      say the counters work only on macOS); the check of x86-64 Linux
+      and of two kinds of cores on hardware; and publishing the crate.
+      Check: `.github/scripts/check-specs.sh`; the maintainer approves
+      the outcome
