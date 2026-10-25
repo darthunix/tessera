@@ -61,8 +61,7 @@ The public API grows only with a reason the change gives, so that what
 callers rely on stays small, and a published version breaks nothing by
 chance.
 - **Checked by:**
-  `.github/workflows/ci.yml::diff -u
-  openspec/changes/counters-on-x86-and-linux/public-api.txt
+  `.github/workflows/ci.yml::diff -u openspec/specs/pmu/public-api.txt
   target/pmu-public-api.txt`
 
 ## Forecast

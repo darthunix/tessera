@@ -1,4 +1,25 @@
-## ADDED Requirements
+# pmu Specification
+
+## Purpose
+`pmu` counts four numbers of one thread, in user space, from the
+processor's performance counters: retired instructions, cycles,
+retired branches and mispredicted retired branches. It counts with
+kperf on macOS, on Apple silicon and on Intel, and with
+`perf_event_open` on Linux, on AArch64 and on x86-64: four cells, the
+vector set NEON or AVX2 by the system's way to the counters.
+
+```
+            NEON (AArch64)              AVX2 (x86-64)
+  kperf     macOS, Apple silicon        macOS, Intel
+  perf      Linux, AArch64              Linux, x86-64
+```
+
+A reading is exact or an error, and an error names its cause and its
+fix. Tessera's benchmark programs judge its kernels by these counts.
+The crate depends on nothing of Tessera, so that others can count in
+the same cells.
+
+## Requirements
 
 ### Requirement: A crate of its own
 The counters SHALL be the Rust crate `pmu`, which depends on no crate
