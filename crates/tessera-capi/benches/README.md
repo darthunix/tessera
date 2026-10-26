@@ -242,6 +242,18 @@ go to `disasm/<program>/` of the run directory. Exit 0 means the same code,
 1 different code: a difference in a hot loop is then measured on counters
 as above. A program takes about forty seconds.
 
+`--target TRIPLE` builds both sides for another target instead of this
+machine, so that the code of another architecture is compared where
+nothing built for it can run: on an Intel Mac, `--target
+aarch64-apple-darwin` compares the NEON code. The code made for a target
+does not depend on the machine that builds it. The option needs
+`--disasm`; a C module (`--module`, below) is built for this machine
+only.
+
+```sh
+cargo run --release --locked -p tessera-bench -- --base REF --disasm --target aarch64-apple-darwin
+```
+
 Pieces the compiler cuts out of functions, `OUTLINED_FUNCTION_12` and
 `f.cold.3`, lose their numbers (`OUTLINED_FUNCTION_N`, `f.cold.N`), which
 move whenever other code does; the bodies under such a name are compared as
