@@ -497,10 +497,11 @@ fn compare_code(
     let (a, b) = (parse(&listings[0]), parse(&listings[1]));
     let difference = disasm::compare(&a, &b);
     let line = format!(
-        "{name}: {} same, {} changed ({} in immediates only), {} only before, {} only after",
+        "{name}: {} same, {} changed ({} in immediates only, {} in registers only), {} only before, {} only after",
         difference.same,
         difference.changed.len(),
         difference.immediates.len(),
+        difference.registers.len(),
         difference.only_before.len(),
         difference.only_after.len()
     );
@@ -518,6 +519,8 @@ fn compare_code(
             for name in names {
                 let only = if difference.immediates.contains(name) {
                     " (immediates only)"
+                } else if difference.registers.contains(name) {
+                    " (registers only)"
                 } else {
                     ""
                 };
