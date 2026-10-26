@@ -15,7 +15,9 @@
 //! until it is written again, becomes `LO12`; on x86-64 a displacement
 //! from the instruction pointer and objdump's comment on it become `ADDR`.
 //! Registers, other immediates and the order of the instructions are
-//! kept: with one codegen unit the same source gives the same code.
+//! kept: with one codegen unit the same source gives the same code. A
+//! changed function is then told apart when only its immediates differ,
+//! or only the numbers of its registers ([`registers_only`]).
 
 use anyhow::{Context, Result, ensure};
 use std::{
@@ -483,6 +485,10 @@ pub struct Difference {
     /// their immediates: a field that moved within a struct, a constant
     /// that changed. The same work, at other offsets.
     pub immediates: BTreeSet<String>,
+    /// The changed functions whose instructions are the same once the
+    /// registers of one side are renamed to those of the other, one to
+    /// one ([`registers_only`]).
+    pub registers: BTreeSet<String>,
     pub same: usize,
 }
 
@@ -546,6 +552,215 @@ fn without_immediates(body: &str) -> String {
     out
 }
 
+/// A register that a renaming may give another number: its bank, whose
+/// registers can stand for one another, and its number in the bank. The
+/// width it is read at (`x3` or `w3`, `%rax` or `%eax`) stays in the
+/// instruction's text.
+type Renamable = (char, u32);
+
+/// A register named at some place of an operand: the text that stands for
+/// it once its number is taken out, the register when a renaming may
+/// change it (`None` for one with a fixed meaning, which stays as it is
+/// written), and where its name ends.
+type Named = (String, Option<Renamable>, usize);
+
+/// Whether two bodies of a function do the same with other registers: the
+/// instructions match one for one once each register a renaming may change
+/// is mapped, one to one and in the same bank, to the register in its
+/// place on the other side. A register and its narrower views count as
+/// one.
+///
+/// The registers with a fixed meaning are never renamed: the stack and
+/// frame pointers, the link and zero registers, the registers that carry
+/// arguments and results, and those a linker or the platform may take. On
+/// AArch64, where every instruction is four bytes, other numbers cost
+/// nothing; on x86-64 a register past the first eight lengthens an
+/// instruction, and so can move a loop within its line.
+///
+/// The bodies under one name (closures, instances) are paired in the order
+/// of their text without registers.
+pub fn registers_only(before: &[String], after: &[String]) -> bool {
+    if before.len() != after.len() {
+        return false;
+    }
+    let split = |bodies: &[String]| {
+        let mut split: Vec<_> = bodies.iter().map(|body| renamable(body)).collect();
+        split.sort();
+        split
+    };
+    let (before, after) = (split(before), split(after));
+    before
+        .iter()
+        .zip(&after)
+        .all(|((text, from), (other, to))| {
+            let mut forward = BTreeMap::new();
+            let mut backward = BTreeMap::new();
+            text == other
+                && from.len() == to.len()
+                && from.iter().zip(to).all(|(a, b)| {
+                    a.0 == b.0
+                        && *forward.entry(*a).or_insert(*b) == *b
+                        && *backward.entry(*b).or_insert(*a) == *a
+                })
+        })
+}
+
+/// A body with each register a renaming may change taken out of its
+/// operands: the text with the register's width and `@` in its place, and
+/// the registers in the order they occur. Mnemonics, symbols and the
+/// registers with a fixed meaning stay as they are.
+fn renamable(body: &str) -> (String, Vec<Renamable>) {
+    let mut text = String::with_capacity(body.len());
+    let mut registers = Vec::new();
+    for (index, line) in body.lines().enumerate() {
+        if index > 0 {
+            text.push('\n');
+        }
+        let Some((mnemonic, operands)) = line.split_once('\t') else {
+            text.push_str(line);
+            continue;
+        };
+        text.push_str(mnemonic);
+        text.push('\t');
+        let bytes = operands.as_bytes();
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] == b'<'
+                && let Some(end) = matching(bytes, at)
+            {
+                text.push_str(&operands[at..end]);
+                at = end;
+                continue;
+            }
+            let starts_word = at == 0
+                || !(bytes[at - 1].is_ascii_alphanumeric()
+                    || matches!(bytes[at - 1], b'.' | b'#' | b'$' | b'_'));
+            if starts_word
+                && let Some((width, register, end)) =
+                    arm_register(operands, at).or_else(|| x86_register(operands, at))
+            {
+                match register {
+                    Some(register) => {
+                        text.push_str(&width);
+                        text.push('@');
+                        registers.push(register);
+                    }
+                    None => text.push_str(&operands[at..end]),
+                }
+                at = end;
+                continue;
+            }
+            let length = operands[at..].chars().next().map_or(1, char::len_utf8);
+            text.push_str(&operands[at..at + length]);
+            at += length;
+        }
+    }
+    (text, registers)
+}
+
+/// An AArch64 register at `at`, numbered: `x` or `w` of the general bank,
+/// `v`, `q`, `d`, `s`, `h` or `b` of the vector bank. Fixed: x0 to x7,
+/// which carry arguments and results; x16 to x18, the linker's and the
+/// platform's; x29 and x30, the frame pointer and the link register; v0
+/// to v7, the vector arguments and results. `sp`, `wsp`, `xzr` and `wzr`
+/// have no number and are never renamed. x8, which carries the address of
+/// a large result into a call, is the compiler's first scratch register
+/// elsewhere, and is renamed like the others.
+fn arm_register(operands: &str, at: usize) -> Option<Named> {
+    let bytes = operands.as_bytes();
+    let (bank, last) = match bytes[at] {
+        b'x' | b'w' => ('x', 30),
+        b'v' | b'q' | b'd' | b's' | b'h' | b'b' => ('v', 31),
+        _ => return None,
+    };
+    let digits = bytes[at + 1..]
+        .iter()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    let end = at + 1 + digits;
+    let joined = bytes
+        .get(end)
+        .is_some_and(|b| b.is_ascii_alphanumeric() || *b == b'_');
+    if digits == 0 || joined {
+        return None;
+    }
+    let number: u32 = operands[at + 1..end].parse().ok().filter(|&n| n <= last)?;
+    let fixed = match bank {
+        'x' => number <= 7 || (16..=18).contains(&number) || number >= 29,
+        _ => number <= 7,
+    };
+    let width = operands[at..at + 1].to_owned();
+    Some((width, (!fixed).then_some((bank, number)), end))
+}
+
+/// An x86-64 register at `at`, `%` and its name, with the width it is read
+/// at: `q`, `d`, `w`, `b` or `h` (the high byte) for the general bank,
+/// `x`, `y` or `z` for the vector one. Fixed: the stack and frame
+/// pointers and the registers of arguments and results, rax, rcx, rdx,
+/// rsi, rdi, r8, r9 and the vectors 0 to 7. `%rip` and other names, such
+/// as segments, are not taken as registers and stay as text.
+fn x86_register(operands: &str, at: usize) -> Option<Named> {
+    let bytes = operands.as_bytes();
+    if bytes[at] != b'%' {
+        return None;
+    }
+    let length = bytes[at + 1..]
+        .iter()
+        .take_while(|b| b.is_ascii_alphanumeric())
+        .count();
+    let end = at + 1 + length;
+    let name = &operands[at + 1..end];
+    if name.is_empty() {
+        return None;
+    }
+    let (width, bank, number) = if let Some(vector) = ["xmm", "ymm", "zmm"]
+        .iter()
+        .find(|prefix| name.starts_with(**prefix))
+    {
+        let number: u32 = name[3..].parse().ok().filter(|&n| n < 32)?;
+        (&vector[..1], 'v', number)
+    } else if let Some(rest) = name.strip_prefix('r')
+        && rest.starts_with(|c: char| c.is_ascii_digit())
+    {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let number: u32 = rest[..digits]
+            .parse()
+            .ok()
+            .filter(|n| (8..16).contains(n))?;
+        let width = match &rest[digits..] {
+            "" => "q",
+            suffix @ ("d" | "w" | "b") => suffix,
+            _ => return None,
+        };
+        (width, 'g', number)
+    } else {
+        // The first eight general registers by width, in the order of
+        // their numbers.
+        const LEGACY: [[&str; 5]; 8] = [
+            ["rax", "eax", "ax", "al", "ah"],
+            ["rcx", "ecx", "cx", "cl", "ch"],
+            ["rdx", "edx", "dx", "dl", "dh"],
+            ["rbx", "ebx", "bx", "bl", "bh"],
+            ["rsp", "esp", "sp", "spl", ""],
+            ["rbp", "ebp", "bp", "bpl", ""],
+            ["rsi", "esi", "si", "sil", ""],
+            ["rdi", "edi", "di", "dil", ""],
+        ];
+        const WIDTHS: [&str; 5] = ["q", "d", "w", "b", "h"];
+        let (number, column) = LEGACY.iter().enumerate().find_map(|(number, names)| {
+            let column = names.iter().position(|legacy| *legacy == name)?;
+            Some((number, column))
+        })?;
+        (WIDTHS[column], 'g', u32::try_from(number).ok()?)
+    };
+    let fixed = match bank {
+        'g' => ![3, 10, 11, 12, 13, 14, 15].contains(&number),
+        _ => number <= 7,
+    };
+    let width = format!("%{width}");
+    Some((width, (!fixed).then_some((bank, number)), end))
+}
+
 /// Compare two programs' functions name by name.
 pub fn compare(before: &Functions, after: &Functions) -> Difference {
     let mut difference = Difference::default();
@@ -562,6 +777,9 @@ pub fn compare(before: &Functions, after: &Functions) -> Difference {
                 };
                 if shapes(other) == shapes(bodies) {
                     difference.immediates.insert(name.clone());
+                }
+                if registers_only(bodies, other) {
+                    difference.registers.insert(name.clone());
                 }
             }
         }
@@ -811,5 +1029,109 @@ Disassembly of section __TEXT,__text:
         );
         assert_eq!(strip_hashes("a::b::h0123456789abcdef"), "a::b");
         assert_eq!(strip_hashes("a::hello"), "a::hello");
+    }
+    #[test]
+    fn renamed_registers_on_aarch64_are_told_apart() {
+        let body = |text: &str| vec![text.replace(';', "\n")];
+        let before = body(
+            "ldr\tq16, [x0, x9, lsl #4];cmgt\tv16.4s, v16.4s, v17.4s;\
+             add\tx9, x9, #0x1;str\tw10, [x1];mov\tw9, w10",
+        );
+        let renamed = body(
+            "ldr\tq20, [x0, x11, lsl #4];cmgt\tv20.4s, v20.4s, v18.4s;\
+             add\tx11, x11, #0x1;str\tw12, [x1];mov\tw11, w12",
+        );
+        assert!(registers_only(&before, &renamed));
+        let two_to_one = body(
+            "ldr\tq20, [x0, x11, lsl #4];cmgt\tv20.4s, v20.4s, v20.4s;\
+             add\tx11, x11, #0x1;str\tw12, [x1];mov\tw11, w12",
+        );
+        assert!(!registers_only(&before, &two_to_one));
+        let one_to_two = body(
+            "ldr\tq20, [x0, x11, lsl #4];cmgt\tv21.4s, v20.4s, v18.4s;\
+             add\tx11, x11, #0x1;str\tw12, [x1];mov\tw11, w12",
+        );
+        assert!(!registers_only(&before, &one_to_two));
+        let argument = body(
+            "ldr\tq16, [x2, x9, lsl #4];cmgt\tv16.4s, v16.4s, v17.4s;\
+             add\tx9, x9, #0x1;str\tw10, [x1];mov\tw9, w10",
+        );
+        assert!(
+            !registers_only(&before, &argument),
+            "x0 carries an argument"
+        );
+        let stack = body(
+            "ldr\tq16, [sp, x9, lsl #4];cmgt\tv16.4s, v16.4s, v17.4s;\
+             add\tx9, x9, #0x1;str\tw10, [x1];mov\tw9, w10",
+        );
+        assert!(!registers_only(&before, &stack));
+        let lanes = body(
+            "ldr\tq16, [x0, x9, lsl #4];cmgt\tv16.2d, v16.2d, v17.2d;\
+             add\tx9, x9, #0x1;str\tw10, [x1];mov\tw9, w10",
+        );
+        assert!(!registers_only(&before, &lanes), "the arrangement is kept");
+        let other = body(
+            "ldr\tq16, [x0, x9, lsl #4];cmge\tv16.4s, v16.4s, v17.4s;\
+             add\tx9, x9, #0x1;str\tw10, [x1];mov\tw9, w10",
+        );
+        assert!(!registers_only(&before, &other));
+        let symbols = body("bl\t<tessera::x9::v16>;mov\tx9, x10");
+        assert!(registers_only(
+            &symbols,
+            &body("bl\t<tessera::x9::v16>;mov\tx11, x12")
+        ));
+        assert!(!registers_only(
+            &symbols,
+            &body("bl\t<tessera::x11::v16>;mov\tx11, x12")
+        ));
+    }
+
+    #[test]
+    fn renamed_registers_on_x86_64_are_told_apart() {
+        let body = |text: &str| vec![text.replace(';', "\n")];
+        let before = body(
+            "vmovdqu\t(%rdi,%r10), %ymm8;vpcmpgtd\t%ymm9, %ymm8, %ymm10;\
+             movl\t%r10d, %ebx;addq\t$0x20, %r10;movb\t%bl, 0x8(%rsp)",
+        );
+        let renamed = body(
+            "vmovdqu\t(%rdi,%r11), %ymm11;vpcmpgtd\t%ymm12, %ymm11, %ymm13;\
+             movl\t%r11d, %r12d;addq\t$0x20, %r11;movb\t%r12b, 0x8(%rsp)",
+        );
+        assert!(registers_only(&before, &renamed));
+        let argument = body(
+            "vmovdqu\t(%rsi,%r10), %ymm8;vpcmpgtd\t%ymm9, %ymm8, %ymm10;\
+             movl\t%r10d, %ebx;addq\t$0x20, %r10;movb\t%bl, 0x8(%rsp)",
+        );
+        assert!(
+            !registers_only(&before, &argument),
+            "rdi carries an argument"
+        );
+        let width = body(
+            "vmovdqu\t(%rdi,%r11), %ymm11;vpcmpgtd\t%ymm12, %ymm11, %ymm13;\
+             movl\t%r11d, %r12d;addq\t$0x20, %r11;movw\t%r12w, 0x8(%rsp)",
+        );
+        assert!(!registers_only(&before, &width));
+        let stack = body(
+            "vmovdqu\t(%rdi,%r11), %ymm11;vpcmpgtd\t%ymm12, %ymm11, %ymm13;\
+             movl\t%r11d, %r12d;addq\t$0x20, %r11;movb\t%r12b, 0x8(%rbp)",
+        );
+        assert!(!registers_only(&before, &stack));
+        let two_to_one = body(
+            "vmovdqu\t(%rdi,%r11), %ymm11;vpcmpgtd\t%ymm11, %ymm11, %ymm13;\
+             movl\t%r11d, %r12d;addq\t$0x20, %r11;movb\t%r12b, 0x8(%rsp)",
+        );
+        assert!(!registers_only(&before, &two_to_one));
+    }
+
+    #[test]
+    fn a_comparison_marks_registers_only() {
+        let before = parse(LISTING);
+        let renamed = LISTING.replace("x8, 0x100004000", "x9, 0x100004000");
+        let difference = compare(&before, &parse(&renamed));
+        let name = "tessera_kernels::int::filter::filter_bulk::<i32, x<i32>>";
+        assert_eq!(difference.changed, BTreeSet::from([name.to_owned()]));
+        assert_eq!(difference.registers, BTreeSet::from([name.to_owned()]));
+        let changed = LISTING.replace("#0x100", "#0x110");
+        assert!(compare(&before, &parse(&changed)).registers.is_empty());
     }
 }

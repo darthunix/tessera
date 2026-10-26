@@ -254,6 +254,19 @@ only.
 cargo run --release --locked -p tessera-bench -- --base REF --disasm --target aarch64-apple-darwin
 ```
 
+A changed function whose instructions match one for one once the
+registers of one side are renamed to those of the other, one to one, is
+marked `(registers only)`. A register and its narrower views count as one
+(`x3` and `w3`, `v1` and `q1`, `rax` and `eax`, `ymm1` and `xmm1`), and
+the registers with a fixed meaning are never renamed: the stack and frame
+pointers, the link and zero registers, the registers of arguments and
+results, and on AArch64 x16 to x18. A processor renames registers itself,
+so on AArch64, where every instruction is four bytes, such a function
+does the same work at the same cost. On x86-64 a register past the first
+eight lengthens an instruction and can move a loop within its line (see
+"Where the code lies"), so there the mark is no evidence of the same
+cost.
+
 Pieces the compiler cuts out of functions, `OUTLINED_FUNCTION_12` and
 `f.cold.3`, lose their numbers (`OUTLINED_FUNCTION_N`, `f.cold.N`), which
 move whenever other code does; the bodies under such a name are compared as

@@ -42,7 +42,7 @@ The words used below:
       the benchmarks. Check: `cargo test --locked -p tessera-bench`;
       `cargo run --release --locked -p tessera-bench -- --base HEAD
       --disasm --target aarch64-apple-darwin` exits 0
-- [ ] 2.2 `(registers only)` in `--disasm`: a one-to-one renaming of
+- [x] 2.2 `(registers only)` in `--disasm`: a one-to-one renaming of
       registers, where a register and its views count as one and the
       registers with a fixed meaning are never renamed; a line in the
       README that the mark is evidence on AArch64 only. Check:
