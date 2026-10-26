@@ -39,7 +39,7 @@ The benchmark programs:
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches
-and retired branches per call, through [pmu](../../pmu).
+and retired branches per call, through [pmu](../../../tools/pmu).
 The separate [tessera-bench utility](../../../tools/tessera-bench/src/main.rs)
 builds and runs them to compare revisions.
 

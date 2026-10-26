@@ -50,7 +50,7 @@ The words used below:
       and of x86-64 in which a consistent renaming is marked, while a
       renaming that maps two registers to one, or one to two, or that
       moves the stack pointer or an argument register, is a change
-- [ ] 2.3 The link to `pmu` in `crates/tessera-capi/benches/README.md`
+- [x] 2.3 The link to `pmu` in `crates/tessera-capi/benches/README.md`
       points to `tools/pmu`. Check: the path of the link exists from
       the README's folder
 - [ ] 2.4 Run `tessera-bench` on the Intel Mac and correct the texts:
