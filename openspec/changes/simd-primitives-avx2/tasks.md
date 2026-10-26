@@ -36,7 +36,7 @@ The words used below:
 
 ## 2. `tessera-bench` on the Intel Mac
 
-- [ ] 2.1 `--target <triple>` for `--disasm`: both sides built for the
+- [x] 2.1 `--target <triple>` for `--disasm`: both sides built for the
       triple, the target named in the report, and the option refused
       without `--disasm` and with `--module`; a line in the README of
       the benchmarks. Check: `cargo test --locked -p tessera-bench`;

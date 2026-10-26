@@ -52,7 +52,7 @@ const BENCHES: [&str; 13] = [
 #[derive(Parser, Debug)]
 #[command(
     about = "Compare compatible Rust revisions by PMU counters (before/after per case, repeated).",
-    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first, or allow the\nbenchmark executables without a password in sudoers (see benches/README.md).\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run.\n--disasm measures nothing and needs no root: it compares the machine code of Tessera's\nfunctions in the benchmark programs, both sides built with one codegen unit, or with\n--module that of a C module; --function adds a function's place in a 64-byte line;\nexit 0 the same, 1 different, 2 invalid run."
+    after_help = "REF is a Git revision or WORKTREE. Defaults to both full benchmarks.\nFilters are substrings of operation ids; any match keeps an operation, and every\nselected case must keep its reference and a library path.\nEach case runs before/after --repeats times, interleaved; instructions come from any\nprocess, cycles from the minimum over all of them.\nBenchmark processes run through `sudo -n`: run `sudo -v` first, or allow the\nbenchmark executables without a password in sudoers (see benches/README.md).\nExit: 0 PASS, 1 regression (instructions, or cycles on long single-mode operations),\n2 UNSTABLE or invalid/incomplete run.\n--disasm measures nothing and needs no root: it compares the machine code of Tessera's\nfunctions in the benchmark programs, both sides built with one codegen unit, or with\n--module that of a C module; --function adds a function's place in a 64-byte line;\n--target builds the programs for another target, such as aarch64-apple-darwin;\nexit 0 the same, 1 different, 2 invalid run."
 )]
 struct Options {
     #[arg(long, value_name = "REF")]
@@ -82,6 +82,16 @@ struct Options {
     /// gives besides the changed ones', even when their code is the same.
     #[arg(long, requires = "disasm", value_name = "SUBSTRING")]
     function: Vec<String>,
+    /// With --disasm: build both sides' benchmark programs for this target
+    /// triple instead of the machine's own, so that the machine code of
+    /// another architecture is compared; nothing built for it runs.
+    #[arg(
+        long,
+        requires = "disasm",
+        conflicts_with = "module",
+        value_name = "TRIPLE"
+    )]
+    target: Option<String>,
     /// With --module: a variable for both sides' make, such as
     /// COPT=-falign-functions=64.
     #[arg(long = "make-var", requires = "module", value_name = "NAME=VALUE")]
@@ -219,32 +229,10 @@ fn build(
     artifacts: &Path,
     side: &str,
     single_unit: bool,
+    target: Option<&str>,
 ) -> Result<PathBuf> {
     println!("Building {side}/{bench}");
-    let mut cargo = Command::new("cargo");
-    cargo.current_dir(&source.directory);
-    if single_unit {
-        cargo
-            .env(
-                "CARGO_TARGET_DIR",
-                source.directory.join("target-single-unit"),
-            )
-            .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1")
-            .env("CARGO_PROFILE_BENCH_CODEGEN_UNITS", "1");
-    } else {
-        cargo.env("CARGO_TARGET_DIR", source.directory.join("target"));
-    }
-    let result = cargo
-        .args([
-            "bench",
-            "-p",
-            "tessera-capi",
-            "--bench",
-            bench,
-            "--locked",
-            "--no-run",
-            "--message-format=json-render-diagnostics",
-        ])
+    let result = cargo_bench(&source.directory, bench, single_unit, target)
         .output()
         .context("cannot start cargo bench")?;
     create(&artifacts.join(format!("{side}-{bench}-build.jsonl")))?.write_all(&result.stdout)?;
@@ -269,6 +257,36 @@ fn build(
         }
     }
     executable.context("Cargo did not produce a benchmark executable")
+}
+
+/// The build of one benchmark program of the snapshot in `directory`,
+/// with one codegen unit in a target directory of its own for `--disasm`,
+/// and for `target` instead of this machine when it is given.
+fn cargo_bench(directory: &Path, bench: &str, single_unit: bool, target: Option<&str>) -> Command {
+    let mut cargo = Command::new("cargo");
+    cargo.current_dir(directory);
+    if single_unit {
+        cargo
+            .env("CARGO_TARGET_DIR", directory.join("target-single-unit"))
+            .env("CARGO_PROFILE_RELEASE_CODEGEN_UNITS", "1")
+            .env("CARGO_PROFILE_BENCH_CODEGEN_UNITS", "1");
+    } else {
+        cargo.env("CARGO_TARGET_DIR", directory.join("target"));
+    }
+    cargo.args([
+        "bench",
+        "-p",
+        "tessera-capi",
+        "--bench",
+        bench,
+        "--locked",
+        "--no-run",
+        "--message-format=json-render-diagnostics",
+    ]);
+    if let Some(target) = target {
+        cargo.args(["--target", target]);
+    }
+    cargo
 }
 
 /// A measuring command writing `output` and measuring only `ids`.
@@ -419,13 +437,15 @@ fn disassemble(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
         &root.join("sources.json"),
         &json!({"before":before,"after":after,"environment":env,"mode":"disasm",
             "bench":options.bench,"module":options.module,"make_vars":options.make_vars,
-            "codegen_units":1}),
+            "target":options.target,"codegen_units":1}),
     )?;
     let mut report = create(&root.join("report.txt"))?;
     writeln!(
         report,
-        "MACHINE CODE; baseline={}, candidate={}",
-        before.revision, after.revision
+        "MACHINE CODE; baseline={}, candidate={}, target={}",
+        before.revision,
+        after.revision,
+        options.target.as_deref().unwrap_or("this machine")
     )?;
     let mut differ = false;
     if let Some(module) = &options.module {
@@ -435,8 +455,9 @@ fn disassemble(repo: &Path, root: &Path, options: &Options) -> Result<u8> {
         differ |= compare_code(module, &a, &b, true, root, &mut report, options)?;
     } else {
         for bench in selected(options) {
-            let a = build(&before, bench, root, "before", true)?;
-            let b = build(&after, bench, root, "after", true)?;
+            let target = options.target.as_deref();
+            let a = build(&before, bench, root, "before", true, target)?;
+            let b = build(&after, bench, root, "after", true, target)?;
             differ |= compare_code(bench, &a, &b, false, root, &mut report, options)?;
         }
     }
@@ -628,8 +649,8 @@ fn compare(repo: &Path, root: &Path, options: &Options, timing: &mut Timing) -> 
     let mut cases = Vec::new();
     let mut identities = BTreeMap::new();
     for bench in benches {
-        let a = build(&before, bench, root, "before", false)?;
-        let b = build(&after, bench, root, "after", false)?;
+        let a = build(&before, bench, root, "before", false, None)?;
+        let b = build(&after, bench, root, "after", false, None)?;
         let listed = listing(&a, true)?;
         ensure!(listed == listing(&b, true)?, "benchmark case sets differ");
         let expected = report::listed(
@@ -818,6 +839,75 @@ mod tests {
                 "/dense/"
             ])
             .is_err()
+        );
+    }
+
+    #[test]
+    fn another_target_is_only_for_the_machine_code_of_the_programs() {
+        let options = Options::try_parse_from([
+            "tessera-bench",
+            "--base",
+            "HEAD",
+            "--disasm",
+            "--target",
+            "aarch64-apple-darwin",
+        ])
+        .unwrap();
+        assert_eq!(options.target.as_deref(), Some("aarch64-apple-darwin"));
+        assert!(
+            Options::try_parse_from([
+                "tessera-bench",
+                "--base",
+                "HEAD",
+                "--target",
+                "aarch64-apple-darwin"
+            ])
+            .is_err(),
+            "counters cannot run code built for another target"
+        );
+        assert!(
+            Options::try_parse_from([
+                "tessera-bench",
+                "--base",
+                "HEAD",
+                "--disasm",
+                "--module",
+                "nodes",
+                "--target",
+                "aarch64-apple-darwin"
+            ])
+            .is_err(),
+            "a C module is built by make for this machine"
+        );
+    }
+
+    #[test]
+    fn a_program_is_built_for_the_target_asked() {
+        let args = |command: &Command| {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        let native = cargo_bench(Path::new("/snapshot"), "filter_int32", true, None);
+        assert!(!args(&native).contains(&"--target".to_owned()));
+        let other = cargo_bench(
+            Path::new("/snapshot"),
+            "filter_int32",
+            true,
+            Some("aarch64-apple-darwin"),
+        );
+        assert_eq!(
+            args(&other)[args(&native).len()..],
+            ["--target", "aarch64-apple-darwin"]
+        );
+        let envs: BTreeMap<_, _> = other
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(ToOwned::to_owned)))
+            .collect();
+        assert_eq!(
+            envs[std::ffi::OsStr::new("CARGO_TARGET_DIR")].as_deref(),
+            Some(Path::new("/snapshot/target-single-unit").as_os_str())
         );
     }
 
