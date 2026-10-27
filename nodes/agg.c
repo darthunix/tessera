@@ -162,7 +162,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 
 		if (list_nth_int(eqops, position) != 0)
 		{
-			state->kinds[position] = TESS_TABLE_KEY_INT8;
+			state->kinds[position] = TESS_KEY_KIND_NUMBER;
 			state->dicts[position] = agg_key_dict_create(state, (Oid) list_nth_int(eqops, position),
 													exprType(key), exprCollation(key));
 			state->has_dicts = true;
@@ -287,7 +287,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 
 				if (!tess_word_key_kind(exprType(argument), &value->argument_kind))
 				{
-					value->argument_kind = TESS_TABLE_KEY_INT8;
+					value->argument_kind = TESS_KEY_KIND_NUMBER;
 					value->distinct_dict = agg_key_dict_create(state, clause->eqop,
 														   exprType(argument),
 														   exprCollation(argument));

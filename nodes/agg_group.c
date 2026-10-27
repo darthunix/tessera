@@ -12,6 +12,7 @@
 
 #include "agg.h"
 #include "agg_node.h"
+#include "key_kind.h"
 
 /*
  * The bytes of the table now, and the most so far; once it spills, the
@@ -241,7 +242,6 @@ group_batch(TessAggState *state, TessBatch *batch)
 	for (int key = 0; key < state->nkeys; key++)
 	{
 		TessDatumColumn *column = &state->key_columns[key];
-		bool		int8 = state->kinds[key] == TESS_TABLE_KEY_INT8;
 		KeyDict    *dict = state->dicts[key];
 
 		computed_column(state, batch, key, TESS_COLUMN_FOR_FILTER, false, column);
@@ -263,14 +263,12 @@ group_batch(TessAggState *state, TessBatch *batch)
 			column = &state->number_columns[key];
 		}
 		if (key == 0)
-			check(state, (int8 ? state->kernels->int8_hash :
-						  state->kernels->int4_hash) (column, NULL, &batch->rows,
+			check(state, tess_key_hash(state->kernels, state->kinds[key]) (column, NULL, &batch->rows,
 													  TESS_NULL_KEYS_GROUP,
 													  state->hashes, &valid,
 													  &state->status));
 		else
-			check(state, (int8 ? state->kernels->int8_hash_next :
-						  state->kernels->int4_hash_next) (column, NULL,
+			check(state, tess_key_hash_next(state->kernels, state->kinds[key]) (column, NULL,
 														   TESS_NULL_KEYS_GROUP,
 														   state->hashes, &valid,
 														   &state->status));

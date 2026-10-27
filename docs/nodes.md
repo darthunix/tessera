@@ -1194,7 +1194,8 @@ With `GROUP BY` the hook takes the grouping expressions of the query,
 1 to 16 values of a type the table keeps in a word, whole and compared
 bit for bit, as PostgreSQL's Datum of the type holds it: int2, int4,
 date and bool, sign-extended as int4 keys, int8, timestamp and
-timestamptz as int8 keys (`tess_word_key_kind`), or of any other type
+timestamptz as int8 keys (`tess_word_key_kind` of `nodes/key_kind.h`,
+which owns the kinds of the nodes' keys), or of any other type
 whose equality hashes (text, numeric, ...): such a key's values get
 numbers through a dictionary of the node's, a `simplehash` table that
 hashes and compares them by the type's own functions (the key's

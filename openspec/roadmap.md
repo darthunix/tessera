@@ -114,7 +114,6 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `pmu-on-crates-io`: The crate `pmu` published on crates.io
 - `relhash-one-chunk-walk`: One check of the places of a chunk for every
   walk of relhash
-- `table-key-kind-owner`: One owner of a key's kind in Tessera's nodes
 
 ## Entries
 
@@ -626,11 +625,10 @@ reach the table through a stand-in.
   `interval` cannot be a word key: '1 month' and '30 days' are equal
   with different bits. A join of two different types other than
   integers stays the core's.
-- **Depends on:** `table-key-kind-owner`, which a probe of relhash's
-  forecast showed: a new kind reaches 12 files and 5 headers of the
-  nodes. A new kind of key changes the table's format and its C API, so
-  the work is an OpenSpec change of `hash-table`, and of the join and
-  the grouping.
+- **Depends on:** nothing. A new kind of key changes the table's
+  format and its C API, so the work is an OpenSpec change of
+  `hash-table`, and of the join and the grouping; in the nodes it adds
+  its cases to `nodes/key_kind.h`, which owns the kinds of their keys.
 - **Capabilities:** hash-table, join-hash, aggregate, type-support
 - **Size:** several pull requests: the word kinds first, then keys of
   16 bytes, then strings.
@@ -1575,26 +1573,3 @@ removing records, 2026-10-27.
 - **Depends on:** nothing.
 - **Capabilities:** relhash
 - **Size:** one pull request, measured by `tessera-bench --disasm`.
-
-### table-key-kind-owner
-
-One owner of a key's kind in Tessera's nodes. A deviation from the
-forecast of relhash's contract, found by its probe of keys of more
-kinds, 2026-10-27.
-
-- **What:** The nodes read a key's kind in 47 places of 12 files and 5
-  headers: both planners choose it, and the hashing, the runtime
-  filter, the partition pruning, the key dictionary, the grouping and
-  the spill of the aggregation and the join each take a key by its kind
-  as an integer. Give the kind one owner, so that a new kind is added in
-  one place of the nodes besides the C API's keys.
-- **Why:** The forecast of the contract said that keys of more kinds
-  touch one interface on each side and no node; the probe touched none
-  of the crate, one interface of the C API, and would reach the nodes
-  through every one of these places, the boundary between the C API's
-  keys and the nodes.
-- **Known:** The crate keeps keys as slots of 64 bits: a key of 16
-  bytes is two slots to it, and needs no change of the crate.
-- **Depends on:** nothing.
-- **Capabilities:** hash-table, join-hash, aggregate
-- **Size:** one or two pull requests of C in the nodes.

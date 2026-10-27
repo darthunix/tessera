@@ -1102,8 +1102,9 @@ is never merged and counts the parts and the interfaces it touched.
   the C API's keys, and the C API's source of keys. The nodes read a
   key's kind in 47 places of 12 files and 5 headers, among them both
   planners and the hashing, filters, pruning and spill of the
-  aggregation and the join, which a new kind would reach. Past the
-  forecast, which names no node.
+  aggregation and the join, which a new kind would reach: past the
+  forecast, which named no node. The nodes now take a key's kind from
+  one header, `nodes/key_kind.h`, which a new kind reaches alone.
 - **Removing records**, a record taken out of its chain and its place
   freed. Six modules of the crate: the record, the calls of one writer
   and the API, where the removal lies, and the walks of a batch's

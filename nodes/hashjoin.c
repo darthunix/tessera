@@ -84,21 +84,18 @@ join_batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 	for (int key = 0; key < state->keys.nkeys; key++)
 	{
 		TessDatumColumn *keys = &state->keys.key_columns[key];
-		bool		int8 = kinds[key] == TESS_TABLE_KEY_INT8;
 		const TessRowMask *rows = key == 0 ? &batch->rows : valid;
 
 		join_child_column(batch, columns[key], rows, TESS_COLUMN_FOR_FILTER, keys);
 		if (OidIsValid(state->keys.hashers[key].fn_oid))
 			hash_key_column(state, key, rows, keys);
 		if (key == 0)
-			check(state, (int8 ? state->kernels->int8_hash :
-						  state->kernels->int4_hash) (keys, NULL, &batch->rows,
+			check(state, tess_key_hash(state->kernels, kinds[key]) (keys, NULL, &batch->rows,
 													  nulls,
 													  state->probe.hashes, valid,
 													  &state->status));
 		else
-			check(state, (int8 ? state->kernels->int8_hash_next :
-						  state->kernels->int4_hash_next) (keys, NULL,
+			check(state, tess_key_hash_next(state->kernels, kinds[key]) (keys, NULL,
 														   nulls,
 														   state->probe.hashes, valid,
 														   &state->status));

@@ -13,38 +13,10 @@
 
 #include "abbrev.h"
 #include "costs.h"
+#include "key_kind.h"
 #include "prune.h"
 #include "memory_limit.h"
 #include "registry.h"
-
-/*
- * The table's kind of a key of this type: a value its word holds whole and
- * compares bit for bit, sign-extended to eight bytes as the kernels hash,
- * order and give it back, as PostgreSQL's Datum of the type is: int2,
- * int4, date and bool as INT4, int8, timestamp and timestamptz as INT8.
- * False for any other type: its values go by reference, or compare other
- * than bit for bit, or come back unlike the core's Datum (oid).
- */
-static inline bool
-tess_word_key_kind(Oid type, TessTableKeyKind *kind)
-{
-	switch (type)
-	{
-		case INT2OID:
-		case INT4OID:
-		case DATEOID:
-		case BOOLOID:
-			*kind = TESS_TABLE_KEY_INT4;
-			return true;
-		case INT8OID:
-		case TIMESTAMPOID:
-		case TIMESTAMPTZOID:
-			*kind = TESS_TABLE_KEY_INT8;
-			return true;
-		default:
-			return false;
-	}
-}
 
 /*
  * Whether a sort key's B-tree family orders as the key's word does: the

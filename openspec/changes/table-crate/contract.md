@@ -94,10 +94,11 @@ copy of the hint, and nothing else: no interface, and no code of
 Tessera.
 
 ### Keys of more kinds
-The table keeps a key as words of 64 bits compared bit for bit. Keys of
-another kind, such as short text kept whole, touch the crate's source
-of keys and its record, and Tessera's reading of keys from its columns:
-one interface on each side, and no node.
+The table keeps a key as words of 64 bits compared bit for bit, so a
+key of another kind, such as short text kept whole, is slots of it and
+touches no module of the crate. On Tessera's side it touches the kinds
+of the C API's keys, their reading from a column, and the nodes'
+header of key kinds: one interface, and no other code of a node.
 
 ### Removing records
 Records are only appended. Removing them by one writer touches the

@@ -167,7 +167,6 @@ apply_key_filter(void *private_data, TessBatch *batch, int rows)
 	for (int key = 0; key < filter->nkeys; key++)
 	{
 		TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
-		bool		int8 = filter->kinds[key] == TESS_TABLE_KEY_INT8;
 
 		batch->ops->get_datum_column(batch, filter->columns[key],
 									 key == 0 ? &batch->rows : &valid,
@@ -175,11 +174,11 @@ apply_key_filter(void *private_data, TessBatch *batch, int rows)
 		if (column.values == NULL || column.isnull == NULL || column.nrows != nrows)
 			elog(ERROR, "Tessera batch returned an invalid column");
 		if (key == 0)
-			check(state, (int8 ? kernels->int8_hash : kernels->int4_hash)
+			check(state, tess_key_hash(kernels, filter->kinds[key])
 				  (&column, NULL, &batch->rows, TESS_NULL_KEYS_REJECT,
 				   state->hashes, &valid, &state->status));
 		else
-			check(state, (int8 ? kernels->int8_hash_next : kernels->int4_hash_next)
+			check(state, tess_key_hash_next(kernels, filter->kinds[key])
 				  (&column, NULL, TESS_NULL_KEYS_REJECT, state->hashes, &valid,
 				   &state->status));
 	}
@@ -225,8 +224,7 @@ filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
 		/* A computed column exists only after the clauses ran. */
 		if (filter->columns[key] < 0 ||
 			filter->columns[key] >= state->child_layout.ncolumns ||
-			(filter->kinds[key] != TESS_TABLE_KEY_INT4 &&
-			 filter->kinds[key] != TESS_TABLE_KEY_INT8))
+			!tess_key_kind_known(filter->kinds[key]))
 			return false;
 	}
 	if (state->kernels == NULL)
