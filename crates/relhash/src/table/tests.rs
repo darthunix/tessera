@@ -17,7 +17,7 @@ mod world;
 use proptest::strategy::Strategy;
 use proptest::test_runner::{TestCaseError, TestRunner};
 
-use super::testing::{IntKeys, refusal};
+use super::testing::{Failing, IntKeys, refusal};
 use super::*;
 use crate::{Error, Kind, Rule};
 
@@ -1479,4 +1479,206 @@ fn a_reset_table_is_empty_and_takes_its_rows_again() {
     let (again, inserted) = find_or_insert_keys(&mut table, &keys);
     assert_eq!(inserted, all_rows(3), "every key is new again");
     assert_eq!(again, refs, "at the same places");
+}
+
+/// A merge stops at the room its chunk has: a chunk with room for one
+/// record takes the first new key, and the second stops the merge with
+/// its chunk full, `*from` on that key.
+#[test]
+fn a_merge_takes_no_more_than_its_chunk_has_room_for() {
+    let record = record_bytes(&ONE_WORD).unwrap();
+    let mut from = OwnedTable::new(&ONE_WORD, 16, CHUNK_HEADER + 2 * record).unwrap();
+    find_or_insert_keys(&mut from, &[1, 2]);
+    let words = from.chunk_words(0).to_vec();
+    let mut into = OwnedTable::new(&ONE_WORD, 16, CHUNK_HEADER + record).unwrap();
+    let chunk = into.add_chunk().unwrap();
+    let source = into.add_chunk_copy(&words).unwrap();
+    let mut at = CHUNK_HEADER;
+    let (merged, stop) = into
+        .table_mut()
+        .unwrap()
+        .merge(source, &mut at, chunk, add_first)
+        .unwrap();
+    assert_eq!((merged, stop), (1, MergeStop::ChunkFull));
+    assert_eq!(at, CHUNK_HEADER + record, "on the key not merged");
+    assert_eq!(into.chunk_words(chunk)[0], (CHUNK_HEADER + record) as u64);
+}
+
+/// The links that count leave `*from` at the end of the records they
+/// linked, where the next link of the chunk starts.
+#[test]
+fn a_link_leaves_its_start_past_what_it_linked() {
+    let keys = [1, 2, 2, 3];
+    let column = IntKeys(&keys);
+    let (hashes, _) = key_batch(&keys);
+    let mut table = OwnedTable::new(&KEY_ONLY, 16, 4096).unwrap();
+    let chunk = table.add_chunk().unwrap();
+    let record = table.table().unwrap().record_size();
+    for grouped in [false, true] {
+        let (mut pending, mut refs) = (all_rows(4), [0; 4]);
+        let mut writer = table.table_mut().unwrap();
+        let mut from = table_used(&mut writer, chunk);
+        let start = from;
+        writer
+            .append(
+                chunk,
+                None,
+                &mut Batch::new(&hashes, &column, &mut pending, &mut refs).unwrap(),
+            )
+            .unwrap();
+        let (linked, _) = if grouped {
+            writer.link_grouped(chunk, &mut from).unwrap()
+        } else {
+            writer.link_counting(chunk, &mut from).unwrap()
+        };
+        assert_eq!(
+            (linked, from),
+            (4, start + 4 * record),
+            "grouped: {grouped}"
+        );
+    }
+}
+
+/// The used mark of chunk `chunk`, where the next append starts.
+fn table_used(table: &mut TableMut<'_>, chunk: usize) -> usize {
+    let (mut cursor, mut out) = (Cursor::start(), [0; 64]);
+    let mut last = CHUNK_HEADER;
+    loop {
+        let count = table.scan(&mut cursor, &mut out).unwrap();
+        if count == 0 {
+            return last;
+        }
+        for &reference in &out[..count] {
+            let (owner, byte) = placement(reference);
+            if owner == chunk {
+                last = last.max(byte + table.record_size());
+            }
+        }
+    }
+}
+
+/// A cursor stored as its integer and made again goes on where it was.
+#[test]
+fn a_cursor_stored_as_an_integer_goes_on_where_it_was() {
+    let mut table = OwnedTable::new(&KEY_ONLY, 64, 4096).unwrap();
+    let keys: Vec<i32> = (0..40).collect();
+    find_or_insert_keys(&mut table, &keys);
+    let all = scan_all(&mut table, 7).unwrap();
+    let table = table.table_mut().unwrap();
+    let (mut raw, mut out, mut walked) = (Cursor::start().raw(), [0; 7], Vec::new());
+    loop {
+        let mut cursor = Cursor::from_raw(raw);
+        let count = table.scan(&mut cursor, &mut out).unwrap();
+        if count == 0 {
+            break;
+        }
+        walked.extend_from_slice(&out[..count]);
+        raw = cursor.raw();
+    }
+    assert_eq!(walked, all);
+}
+
+/// A batch hands out the references it was given, and a lookup counts
+/// the steps it took down the chains.
+#[test]
+fn a_batch_shows_its_references_and_a_lookup_its_steps() {
+    let keys = [5, 5, 5];
+    let column = IntKeys(&keys);
+    let (hashes, mut pending) = key_batch(&keys);
+    let mut table = OwnedTable::new(&KEY_ONLY, 16, 4096).unwrap();
+    let chunk = table.add_chunk().unwrap();
+    let mut refs = [0; 3];
+    let mut batch = Batch::new(&hashes, &column, &mut pending, &mut refs).unwrap();
+    table
+        .table_mut()
+        .unwrap()
+        .append(chunk, None, &mut batch)
+        .unwrap();
+    let shown = batch.refs().to_vec();
+    assert!(shown.iter().all(|&reference| reference != 0));
+    let mut from = CHUNK_HEADER;
+    table.table_mut().unwrap().link(chunk, &mut from).unwrap();
+    let shared = table.table().unwrap();
+    let (mut rows, mut found) = ([1], [0]);
+    let mut matches = Matches::new(&mut rows, &mut found).unwrap();
+    shared
+        .probe(&hashes[..1], &IntKeys(&keys[..1]), &mut matches)
+        .unwrap();
+    assert_eq!(shared.next_match(&mut matches).unwrap(), 1);
+    assert!(matches.steps() > 0, "a step down the chain");
+    assert_eq!(shown.len(), 3);
+}
+
+/// An append by partition that fails part way gives the NULL columns of
+/// the rows it placed before the failure: a key that cannot be read, a
+/// partition's chunk that is no chunk, and a partition's count at its
+/// most.
+#[test]
+fn an_append_by_partition_that_fails_keeps_the_nulls_it_saw() {
+    let keys: Vec<i32> = (0..70).collect();
+    let column = IntKeys(&keys);
+    let (hashes, _) = key_batch(&keys);
+    let (value, null) = ([0_u64; 70], [true; 70]);
+    let (values, nulls) = ([&value[..]], [&null[..]]);
+    let columns = PayloadColumns::new(&values, &nulls, 70).unwrap();
+    let config = TableConfig {
+        nkeys: 1,
+        payload_size: 16,
+    };
+    // The partition of each row by the top bit of its hash; the rows of
+    // partition 0 first, so that one is placed before a failure in 1.
+    let first_of_one = (0..70).find(|&row| hashes[row] >> 31 == 1).unwrap();
+    let placed_before = (0..first_of_one).count() as u64;
+    for (failure, rule) in [
+        ("a key not read", Rule::KeyRead),
+        ("no chunk", Rule::UsedMark),
+        ("a count at its most", Rule::PartitionCount),
+    ] {
+        let mut blocks = Blocks::new();
+        let chunks: Vec<u32> = (0..2).map(|_| blocks.add(CHUNK_HEADER + 4096)).collect();
+        let mut counts = [0; 2];
+        match failure {
+            // A used mark that ends no record.
+            "no chunk" => {
+                // SAFETY: the first word of the block of partition 1.
+                unsafe { blocks.bases[1].cast::<u64>().write(12) };
+            }
+            "a count at its most" => counts[1] = u64::MAX,
+            _ => {}
+        }
+        let (mut pending, mut seen) = (all_rows(70), 0);
+        let failing = Failing(&column, 1);
+        let source: &dyn KeySource = if failure == "a key not read" {
+            &failing
+        } else {
+            &column
+        };
+        let failed = writer(&config, blocks.chunks())
+            .unwrap()
+            .append_partitioned_columns(
+                &Partitions {
+                    shift: 31,
+                    chunks: &chunks,
+                },
+                &columns,
+                &mut Batch::new(&hashes, source, &mut pending, &mut [0; 70]).unwrap(),
+                &mut Appended {
+                    rows: &mut counts,
+                    nulls: &mut seen,
+                },
+            );
+        let kind = if rule == Rule::UsedMark {
+            Kind::Damaged
+        } else {
+            Kind::WrongCall
+        };
+        assert_eq!(refusal(failed), Some((kind, rule)), "{failure}");
+        let placed = if failure == "a key not read" {
+            64
+        } else {
+            placed_before
+        };
+        assert!(placed > 0, "{failure}: rows placed before the failure");
+        assert_eq!(seen, 1, "{failure}: the NULL column of the rows placed");
+    }
 }

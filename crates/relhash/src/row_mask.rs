@@ -320,6 +320,33 @@ mod tests {
     use super::{RowMask, RowMaskView, word_count};
     use crate::{Kind, Rule};
 
+    /// A mask's words read back as they are, none past them; a row taken
+    /// out clears its bit alone; an intersection keeps the rows of both.
+    #[test]
+    fn a_mask_reads_its_words_and_takes_rows_out() {
+        let words = [0xf0f0_f0f0_0f0f_0f0f, 0b10_1101];
+        let view = RowMaskView::try_new(70, &words).unwrap();
+        assert_eq!(
+            (view.get_word(0), view.get_word(1), view.get_word(2)),
+            (Some(words[0]), Some(words[1]), None)
+        );
+        let mut written = words;
+        let mut mask = RowMask::try_new(70, &mut written).unwrap();
+        mask.remove(66);
+        mask.remove(1);
+        assert_eq!(
+            mask.as_view().words().collect::<Vec<_>>(),
+            [words[0] & !0b10, words[1] & !0b100]
+        );
+        let other = [0x00ff_00ff_00ff_00ff, 0b11_1000];
+        mask.intersect(RowMaskView::try_new(70, &other).unwrap())
+            .unwrap();
+        assert_eq!(
+            mask.as_view().words().collect::<Vec<_>>(),
+            [words[0] & !0b10 & other[0], words[1] & !0b100 & other[1]]
+        );
+    }
+
     /// A mask of 70 rows made of one word, of three, or of two with bit 6
     /// of the second set is refused, read or written, and its words are
     /// left as they were.

@@ -381,3 +381,31 @@ fn a_filter_filled_by_one_participant_passes_its_rows() -> Result<()> {
     assert_eq!((left, rows), (67, thirds));
     Ok(())
 }
+
+/// A shared filter of 16 bits a key lets few absent keys pass, as a plain
+/// one does: its build and its probe spread the keys over all its words.
+#[test]
+fn few_absent_keys_pass_a_shared_filter_of_16_bits_a_key() -> Result<()> {
+    let (count, nabsent) = if cfg!(miri) {
+        (1024, 10_000)
+    } else {
+        (4096, 100_000)
+    };
+    let (table, _) = filtered_table(count)?;
+    let mut words = vec![0; bloom::shared_words_for(count as u64)?];
+    let filter = bloom::SharedFilter::from_mut(&mut words)?;
+    filter.init();
+    assert!(table.table()?.try_build_bloom(&filter)?);
+    let absent: Vec<u32> = (0..nabsent).map(|key| hash_i32(key * 3 + 1)).collect();
+    let mut rows = all_rows(nabsent as usize);
+    let through = bloom::probe_shared(
+        &filter,
+        &absent,
+        &mut RowMask::try_new(nabsent as usize, &mut rows)?,
+    )?;
+    assert!(
+        through < nabsent as usize / 100,
+        "{through} of {nabsent} absent keys passed"
+    );
+    Ok(())
+}
