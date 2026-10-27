@@ -402,10 +402,12 @@ order, SHALL leave the same bytes and give the same answers.
 
 #### Scenario: Bytes a fuzzer chose
 - **WHEN** a fuzzer builds tables from its input, damages them in one
-  or more places and runs calls over them
+  or more places, or gives the calls any arguments, and runs calls over
+  them
 - **THEN** no call panics, runs without end, or reads or writes outside
   its blocks
-- **Verified by:** pending
+- **Verified by:** `crates/relhash/fuzz/fuzz_targets/damaged.rs::fuzz_target!`;
+  `crates/relhash/fuzz/fuzz_targets/arguments.rs::fuzz_target!`
 
 #### Scenario: The checks hold for all values
 - **WHEN** a header passes its checks, a reference passes its check, a

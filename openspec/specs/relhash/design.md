@@ -1160,6 +1160,8 @@ it, and when a module of the list holds none. The paths are under
   tests and loom models
 - `crates/relhash/src/table/proofs.rs`: the proofs by Kani of the
   checks of the trust points, the partitions, the filter and the marks
+- `crates/relhash/fuzz/`: the fuzz targets, a crate of their own outside
+  the workspace, with their builder of tables over the public API
 
 ## Tests
 
@@ -1183,6 +1185,12 @@ it, and when a module of the list holds none. The paths are under
   `cargo kani -p relhash`: the checks of the header, a reference, a
   used mark, the record count, a partition, the filter and the marks
   keep every read inside its block and cannot panic, for every value.
+- The fuzz targets in `crates/relhash/fuzz/`, run by cargo-fuzz under
+  AddressSanitizer: `damaged` builds a table from the fuzzer's bytes,
+  damages it where they choose and runs the calls they choose;
+  `arguments` gives the calls of a valid table any references, chunks,
+  places, partitions and steps. CI runs each for a minute
+  (`.github/workflows/fuzz.yml`), and for longer when started by hand.
 - `crates/tessera-capi/tests/table.rs` and `test/sql/table.sql`: the
   calls through Tessera's C API.
 - The benchmarks `table_int32` and `table_large` of `tessera-bench`

@@ -90,8 +90,9 @@ make installcheck EXTRA_REGRESS_OPTS="--temp-instance=$PWD/test/tmp_check"
 
 `make rust-loom` runs the model of the shared hash table, `make
 crosscheck` random queries with Tessera on and off. CI runs all of these
-and more ([ci.yml](.github/workflows/ci.yml)), and the mutants of a pull
-request's changed lines ([mutants.yml](.github/workflows/mutants.yml)):
+and more ([ci.yml](.github/workflows/ci.yml)), the fuzz targets of
+`relhash` ([fuzz.yml](.github/workflows/fuzz.yml)), and the mutants of a
+pull request's changed lines ([mutants.yml](.github/workflows/mutants.yml)):
 only Rust tests judge a mutant, so an entry point needs a Rust test of
 its own.
 
