@@ -105,16 +105,15 @@ where
 {
     let nrows = rows.as_view().nrows();
     let set = T::Compares::get();
-    let whole_words = nrows >= 64
-        && match set {
-            Some(set) => {
-                let selected = rows.as_view().word(0);
-                (selected == u64::MAX
-                    || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                    && blocks(set, left, right, 0).is_some()
-            }
-            None => false,
-        };
+    // Whether both readers expose the first word; its non-NULL rows are the
+    // loop's to find.
+    let whole_words = set.is_some() && nrows >= 64 && {
+        let selected = rows.as_view().word(0);
+        (selected == u64::MAX
+            || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+            && left.word_block(0).is_some()
+            && right.word_block(0).is_some()
+    };
     if let Some(set) = set
         && whole_words
     {
