@@ -1000,7 +1000,9 @@ const DAMAGES: &[Damage] = &[
     (
         "most records",
         |w| w.index.write(NRECORDS, u64::MAX),
-        Expect::Data,
+        // An append adds to the count, which wraps to a few records, and
+        // a walk past them fails as a cycle.
+        Expect::Maybe(&[Rule::Chain]),
     ),
     // The bucket of the victim's hash.
     (
