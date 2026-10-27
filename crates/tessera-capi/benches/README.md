@@ -34,8 +34,9 @@ The benchmark programs:
   work and the instruction counts are exact. The operations
   `bloom_probe` and `bloom_then_probe` check a batch against the Bloom
   filter of the table's keys, alone and followed by the probe of the rows
-  it passes; about 1 % of absent keys pass, so on misses the second one
-  varies a little from batch to batch.
+  it passes. About 0.5 % of absent keys pass, and every batch holds as
+  many of them, at the same rows, so the second one too does the same
+  work in every call.
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches

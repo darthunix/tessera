@@ -11,12 +11,15 @@
 //! The counters demand the same instructions from every call, so the
 //! work of a batch must not depend on its keys: the table's keys are
 //! chosen so that each has a bucket of its own (every chain is one
-//! record long), and the absent keys fall into empty buckets. `probe_hit`
-//! and `find_or_insert` look present keys up (the latter creates
-//! nothing), `probe_miss` absent ones, both into empty buckets and, in the
-//! `occupied` group, into buckets holding one record of another key, which
-//! the probe must read to reject; each against `reference`, a chained
-//! table of the same shape with plain stores built from the same keys.
+//! record long), and the absent keys fall into empty buckets. The
+//! table's Bloom filter passes some absent keys, which a probe after it
+//! looks up, so every batch of absent keys holds as many of them, at the
+//! same rows. `probe_hit` and `find_or_insert` look present keys up (the
+//! latter creates nothing), `probe_miss` absent ones, both into empty
+//! buckets and, in the `occupied` group, into buckets holding one record
+//! of another key, which the probe must read to reject; each against
+//! `reference`, a chained table of the same shape with plain stores built
+//! from the same keys.
 //! A debug build, which only checks the model, uses a small table.
 
 use anyhow::{Result, ensure};
@@ -48,6 +51,11 @@ const BUCKETS: usize = RECORDS * 2;
 /// Batches of the probe ring: every present key once.
 pub const BATCHES: usize = RECORDS / BATCH;
 
+/// Absent keys drawn of each kind: an eighth more than are probed, so
+/// that a kind has enough keys the filter passes, and enough it rejects,
+/// for [`place`] to lay every batch out alike.
+const DRAWN: usize = RECORDS + RECORDS / 8;
+
 /// The bucket of a hash in a table of `BUCKETS` buckets.
 fn bucket(hash: u32) -> usize {
     (hash >> (32 - BUCKETS.trailing_zeros())) as usize
@@ -66,7 +74,8 @@ fn random(state: &mut u64) -> u64 {
 /// do, not side by side as they were inserted; as many `absent` keys whose
 /// buckets are empty; and as many `occupied` absent keys whose buckets hold
 /// one record of another key, which a probe reads before it knows the key
-/// is not there.
+/// is not there. [`Keys::new`] draws [`DRAWN`] keys of each absent kind,
+/// and [`Setup::new`] keeps `RECORDS` of them, laid out by the filter.
 pub struct Keys {
     pub inserted: Vec<i32>,
     pub present: Vec<i32>,
@@ -87,15 +96,15 @@ impl Keys {
             }
             candidate += 1;
         }
-        let mut absent = Vec::with_capacity(RECORDS);
-        let mut occupied = Vec::with_capacity(RECORDS);
-        while absent.len() < RECORDS || occupied.len() < RECORDS {
+        let mut absent = Vec::with_capacity(DRAWN);
+        let mut occupied = Vec::with_capacity(DRAWN);
+        while absent.len() < DRAWN || occupied.len() < DRAWN {
             let into = if used[bucket(murmurhash32(candidate as u32))] {
                 &mut occupied
             } else {
                 &mut absent
             };
-            if into.len() < RECORDS {
+            if into.len() < DRAWN {
                 into.push(candidate);
             }
             candidate += 1;
@@ -114,6 +123,48 @@ impl Keys {
             occupied,
         }
     }
+}
+
+/// Lay absent keys out in `BATCHES` batches that the filter passes at the
+/// same rows: as many rows of every batch as it passes of all `keys` on
+/// average, rounded down, spread evenly over the batch. The other keys
+/// are dropped.
+fn place(filter: &[u64], keys: &[i32]) -> Result<Vec<i32>> {
+    ensure!(
+        keys.len().is_multiple_of(BATCH),
+        "absent keys must fill whole batches"
+    );
+    let mut passed = Vec::new();
+    let mut rejected = Vec::new();
+    for keys in keys.chunks(BATCH) {
+        let hashes: Vec<u32> = keys.iter().map(|&k| murmurhash32(k as u32)).collect();
+        let mut rows = [u64::MAX; BATCH / 64];
+        bloom::probe(filter, &hashes, &mut RowMask::try_new(BATCH, &mut rows)?)?;
+        for (row, &key) in keys.iter().enumerate() {
+            if (rows[row / 64] >> (row % 64)) & 1 == 1 {
+                passed.push(key);
+            } else {
+                rejected.push(key);
+            }
+        }
+    }
+    let share = passed.len() * BATCH / keys.len();
+    let mut passing = [false; BATCH];
+    for i in 0..share {
+        passing[i * BATCH / share] = true;
+    }
+    let (mut passed, mut rejected) = (passed.into_iter(), rejected.into_iter());
+    let mut placed = Vec::with_capacity(RECORDS);
+    for _ in 0..BATCHES {
+        for pass in passing {
+            placed.extend(if pass { passed.next() } else { rejected.next() });
+        }
+    }
+    ensure!(
+        placed.len() == RECORDS,
+        "too few absent keys to lay the batches out"
+    );
+    Ok(placed)
 }
 
 /// A record of the reference table.
@@ -192,13 +243,11 @@ pub struct Setup {
 
 impl Setup {
     pub fn new() -> Result<Self> {
-        let keys = Keys::new();
+        let mut keys = Keys::new();
         let hashes =
             |keys: &[i32]| -> Vec<u32> { keys.iter().map(|&k| murmurhash32(k as u32)).collect() };
         let present_hashes = hashes(&keys.present);
         let inserted_hashes = hashes(&keys.inserted);
-        let absent_hashes = hashes(&keys.absent);
-        let occupied_hashes = hashes(&keys.occupied);
         let mut table = OwnedTable::new(&CONFIG, RECORDS as u64, MAX_CHUNK_LEN)?;
         {
             ensure!(
@@ -221,6 +270,10 @@ impl Setup {
         }
         let mut filter = vec![0; bloom::words_for(RECORDS as u64)?];
         table.table()?.bloom(&mut filter)?;
+        keys.absent = place(&filter, &keys.absent)?;
+        keys.occupied = place(&filter, &keys.occupied)?;
+        let absent_hashes = hashes(&keys.absent);
+        let occupied_hashes = hashes(&keys.occupied);
         let reference = Reference::new(&keys.inserted);
         Ok(Self {
             table,
@@ -343,8 +396,11 @@ pub fn resolve(setup: &mut Setup, batch: usize) -> Result<()> {
 
 /// Check every operation over every batch against the model: present
 /// keys are found at a record with their key and nothing is created,
-/// absent keys are not found, and the reference agrees.
+/// absent keys are not found, the filter passes some absent keys of each
+/// kind, at the same rows of every batch, and the reference agrees.
 pub fn check(setup: &mut Setup) -> Result<()> {
+    // The rows the filter passes in the first batch of each absent kind.
+    let mut first = [None; 2];
     for batch in 0..BATCHES {
         probe(setup, batch, Kind::Present)?;
         ensure!(
@@ -376,6 +432,19 @@ pub fn check(setup: &mut Setup) -> Result<()> {
             setup.found == setup.all,
             "batch {batch}: a present key passed the filter and missed"
         );
+        for (kind, first) in [Kind::Absent, Kind::Occupied].into_iter().zip(&mut first) {
+            bloom_probe(setup, batch, kind, false)?;
+            let passed = *first.get_or_insert(setup.found);
+            ensure!(
+                setup.found == passed && passed != [0; BATCH / 64],
+                "batch {batch}: the filter passes no absent key, or other rows than at first"
+            );
+            bloom_probe(setup, batch, kind, true)?;
+            ensure!(
+                setup.found == [0; BATCH / 64],
+                "batch {batch}: an absent key passed the filter and hit"
+            );
+        }
         probe(setup, batch, Kind::Absent)?;
         ensure!(
             setup.found == [0; BATCH / 64],
