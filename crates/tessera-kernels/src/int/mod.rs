@@ -32,7 +32,7 @@ use std::mem::MaybeUninit;
 use anyhow::Result;
 
 use crate::ops::{ArithOp, ArithmeticError, CompareOp};
-use crate::simd::Neon;
+use crate::simd::{Neon, Vectors};
 
 /// A whole-word operand: the storage of a full prepared word, or a constant.
 /// Only the vector code builds one, so elsewhere it is dead.
@@ -60,11 +60,19 @@ impl<T: IntLane> Side<'_, T> {
 /// A lane type of the integer kernels, int4's `i32` or int8's `i64`: its
 /// Datum and its vector code of a whole word. The vector code takes the
 /// token of its vector set, which the driver asks for once a call: a hook
-/// of an operation open only on NEON takes [`Neon`], and where NEON does
-/// not run that token has no values, so the hook cannot be reached.
+/// of an operation open only on NEON takes [`Neon`], one open on every set
+/// takes [`Simd`](crate::simd::Simd), and where a set does not run its
+/// token has no values, so the hook cannot be reached.
 pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// A scalar divisor prepared for division by multiplication.
     type Divisor;
+
+    /// The vector set of the width's comparisons, [`IntLane::filter_block`]
+    /// and [`IntLane::compare_sides`], and of [`IntLane::side`]. A width's
+    /// comparisons open on a set before its other operations do, so a
+    /// token of NEON converts into it: where NEON does not run it has no
+    /// values.
+    type Compares: Vectors + From<Neon>;
 
     /// The least and the greatest value, the identities of `max` and `min`.
     const MIN: Self;
@@ -114,15 +122,24 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// Implemented for each width, not generically, so that it is one
     /// function the drivers of every column type call, as it was when each
     /// family had its own.
-    fn side(neon: Neon, block: WordBlock<'_, Self>) -> (Side<'_, Self>, u64);
+    fn side(set: Self::Compares, block: WordBlock<'_, Self>) -> (Side<'_, Self>, u64);
 
     /// The rows of a whole word where `left op right`, NULL rows
     /// included; the caller masks them.
-    fn compare_sides(neon: Neon, left: Side<'_, Self>, right: Side<'_, Self>, op: CompareOp)
-    -> u64;
+    fn compare_sides(
+        set: Self::Compares,
+        left: Side<'_, Self>,
+        right: Side<'_, Self>,
+        op: CompareOp,
+    ) -> u64;
 
     /// The non-NULL rows of a whole word where `value op scalar`.
-    fn filter_block(neon: Neon, block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64;
+    fn filter_block(
+        set: Self::Compares,
+        block: WordBlock<'_, Self>,
+        scalar: Self,
+        op: CompareOp,
+    ) -> u64;
 
     /// A key's 32 bits for its hash: int4's value, int8's folded as
     /// `hashint8` folds it.

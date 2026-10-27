@@ -50,10 +50,8 @@ impl Token for Neon {
     }
 }
 
-/// AVX2, which an x86-64 processor may lack. Only the test of the vector
-/// set asks for it until an operation is open on AVX2.
+/// AVX2, which an x86-64 processor may lack.
 #[cfg(all(target_arch = "x86_64", not(miri)))]
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy)]
 pub struct Avx2(());
 
@@ -76,14 +74,20 @@ impl Token for Avx2 {
     }
 }
 
+/// Where NEON does not run its token has no values, so it converts into
+/// any other: see [`crate::int::IntLane::Compares`].
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+impl From<Neon> for Avx2 {
+    fn from(neon: Neon) -> Self {
+        match neon {}
+    }
+}
+
 /// The vector set of the target: NEON on AArch64 and AVX2 on x86-64.
-/// Elsewhere it is NEON, which has no values there. Only the test of the
-/// vector set asks for it until an operation is open on AVX2.
+/// Elsewhere it is NEON, which has no values there.
 #[cfg(target_arch = "x86_64")]
-#[cfg_attr(not(test), allow(dead_code))]
 pub type Simd = Avx2;
 #[cfg(not(target_arch = "x86_64"))]
-#[cfg_attr(not(test), allow(dead_code))]
 pub type Simd = Neon;
 
 #[cfg(test)]

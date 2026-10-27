@@ -101,5 +101,6 @@ those it checks.
   older core. PostgreSQL 19 needs its own forms of three interfaces
   (working plan, item 8.8); Greengage 7 is a design in the plan's section
   7, with no code yet.
-- **Vector kernels on AArch64** (NEON); on other processors the scalar
-  kernels run, with the same results.
+- **Vector kernels on AArch64** (NEON), and on x86-64 with AVX2, where
+  the processor has it, for the filter of int4 and the comparison of two
+  int4 columns; elsewhere the scalar kernels run, with the same results.
