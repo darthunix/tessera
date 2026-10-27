@@ -16,21 +16,31 @@ use core::arch::aarch64::{
 };
 use std::mem::MaybeUninit;
 
-use super::{byte_weights, lane_masks, widen};
+use super::{Neon, byte_weights, lane_masks, widen};
 use crate::int64::Side;
 
 /// `lhs + rhs` into `out`; true when a masked lane overflowed.
 #[inline]
-pub fn add64(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i64>; 64]) -> bool {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn add64(
+    _: Neon,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i64>; 64],
+) -> bool {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { add_lanes(lhs, rhs, mask, out) }
 }
 
 /// `lhs - rhs` into `out`; true when a masked lane overflowed.
 #[inline]
-pub fn sub64(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i64>; 64]) -> bool {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn sub64(
+    _: Neon,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i64>; 64],
+) -> bool {
     // SAFETY: as in add64.
     unsafe { sub_lanes(lhs, rhs, mask, out) }
 }

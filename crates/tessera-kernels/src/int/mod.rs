@@ -32,6 +32,7 @@ use std::mem::MaybeUninit;
 use anyhow::Result;
 
 use crate::ops::{ArithOp, ArithmeticError, CompareOp};
+use crate::simd::Neon;
 
 /// A whole-word operand: the storage of a full prepared word, or a constant.
 /// Only the vector code builds one, so elsewhere it is dead.
@@ -57,9 +58,10 @@ impl<T: IntLane> Side<'_, T> {
 }
 
 /// A lane type of the integer kernels, int4's `i32` or int8's `i64`: its
-/// Datum and its vector code of a whole word. The vector code runs only
-/// where the drivers found whole words, on AArch64; elsewhere it is never
-/// called.
+/// Datum and its vector code of a whole word. The vector code takes the
+/// token of its vector set, which the driver asks for once a call: a hook
+/// of an operation open only on NEON takes [`Neon`], and where NEON does
+/// not run that token has no values, so the hook cannot be reached.
 pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// A scalar divisor prepared for division by multiplication.
     type Divisor;
@@ -90,7 +92,10 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// the prepared divisor of a division by a scalar: each width's own mix
     /// of vector code and lanes one by one. An overflow fails with
     /// `OUT_OF_RANGE`.
+    // The token and the seven parts of the call, each its own.
+    #[allow(clippy::too_many_arguments)]
     fn arith_block<E: Evaluate<Self>>(
+        neon: Neon,
         op: ArithOp,
         lhs: Side<'_, Self>,
         rhs: Side<'_, Self>,
@@ -109,16 +114,15 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// Implemented for each width, not generically, so that it is one
     /// function the drivers of every column type call, as it was when each
     /// family had its own.
-    #[cfg(all(target_arch = "aarch64", not(miri)))]
-    fn side(block: WordBlock<'_, Self>) -> (Side<'_, Self>, u64);
+    fn side(neon: Neon, block: WordBlock<'_, Self>) -> (Side<'_, Self>, u64);
 
     /// The rows of a whole word where `left op right`, NULL rows
     /// included; the caller masks them.
-    fn compare_sides(left: Side<'_, Self>, right: Side<'_, Self>, op: CompareOp) -> u64;
+    fn compare_sides(neon: Neon, left: Side<'_, Self>, right: Side<'_, Self>, op: CompareOp)
+    -> u64;
 
     /// The non-NULL rows of a whole word where `value op scalar`.
-    #[cfg_attr(not(all(target_arch = "aarch64", not(miri))), allow(dead_code))]
-    fn filter_block(block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64;
+    fn filter_block(neon: Neon, block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64;
 
     /// A key's 32 bits for its hash: int4's value, int8's folded as
     /// `hashint8` folds it.
@@ -127,16 +131,16 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// The hashes of a whole word's keys into `out`; with `_nulls`, a NULL
     /// row's hash is the group key's; with `combine`, each is folded into
     /// the hash already in `out`.
-    fn hash_block(keys: Side<'_, Self>, out: &mut [u32; 64]);
-    fn hash_nulls_block(keys: Side<'_, Self>, non_null: u64, out: &mut [u32; 64]);
-    fn combine_block(keys: Side<'_, Self>, out: &mut [u32; 64]);
-    fn combine_nulls_block(keys: Side<'_, Self>, non_null: u64, out: &mut [u32; 64]);
+    fn hash_block(neon: Neon, keys: Side<'_, Self>, out: &mut [u32; 64]);
+    fn hash_nulls_block(neon: Neon, keys: Side<'_, Self>, non_null: u64, out: &mut [u32; 64]);
+    fn combine_block(neon: Neon, keys: Side<'_, Self>, out: &mut [u32; 64]);
+    fn combine_nulls_block(neon: Neon, keys: Side<'_, Self>, non_null: u64, out: &mut [u32; 64]);
 
     /// The count of a whole word's selected non-NULL rows and the least of
     /// them, `MAX` without any.
-    fn min_block(block: WordBlock<'_, Self>, selected: u64) -> (usize, Self);
+    fn min_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, Self);
 
     /// The count of a whole word's selected non-NULL rows and the greatest
     /// of them, `MIN` without any.
-    fn max_block(block: WordBlock<'_, Self>, selected: u64) -> (usize, Self);
+    fn max_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, Self);
 }

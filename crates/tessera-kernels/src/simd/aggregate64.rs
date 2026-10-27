@@ -12,36 +12,32 @@ use core::arch::aarch64::{
     int64x2_t, vbslq_s64, vcgtq_s64, vdupq_n_s64, vgetq_lane_s64, vld1q_s64,
 };
 
-use super::{byte_weights, lane_masks, widen};
+use super::{Neon, byte_weights, lane_masks, widen};
 
 /// Least masked row of a dense block; `i64::MAX` for an empty mask.
 #[inline]
-pub fn min_dense64(values: &[i64; 64], mask: u64) -> i64 {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn min_dense64(_: Neon, values: &[i64; 64], mask: u64) -> i64 {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { min_dense_lanes(values, mask) }
 }
 
 /// Greatest masked row of a dense block; `i64::MIN` for an empty mask.
 #[inline]
-pub fn max_dense64(values: &[i64; 64], mask: u64) -> i64 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn max_dense64(_: Neon, values: &[i64; 64], mask: u64) -> i64 {
     // SAFETY: as in min_dense64.
     unsafe { max_dense_lanes(values, mask) }
 }
 
 /// Least masked row of a Datum block; `i64::MAX` for an empty mask.
 #[inline]
-pub fn min_datum64(values: &[u64; 64], mask: u64) -> i64 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn min_datum64(_: Neon, values: &[u64; 64], mask: u64) -> i64 {
     // SAFETY: as in min_dense64.
     unsafe { min_datum_lanes(values, mask) }
 }
 
 /// Greatest masked row of a Datum block; `i64::MIN` for an empty mask.
 #[inline]
-pub fn max_datum64(values: &[u64; 64], mask: u64) -> i64 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn max_datum64(_: Neon, values: &[u64; 64], mask: u64) -> i64 {
     // SAFETY: as in min_dense64.
     unsafe { max_datum_lanes(values, mask) }
 }

@@ -69,7 +69,7 @@ The words used below:
 
 ## 3. The pilot
 
-- [ ] 3.1 The tokens of the vector sets: `Neon`, `Avx2` and `Simd`,
+- [x] 3.1 The tokens of the vector sets: `Neon`, `Avx2` and `Simd`,
       each an empty type where its set cannot run. Every driver asks
       for `Neon` instead of testing `cfg!`, the hooks take it, the 21
       stubs become `match` on it, and the sets take it too; on x86-64

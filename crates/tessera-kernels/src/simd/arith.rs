@@ -20,45 +20,58 @@ use core::arch::aarch64::{
 };
 use std::mem::MaybeUninit;
 
-use super::{byte_weights, datum, dense, lane_masks};
+use super::{Neon, byte_weights, datum, dense, lane_masks};
 use crate::int32::{Divisor, Side};
 
 /// `lhs + rhs` into `out`; true when a masked lane overflowed.
 #[inline]
-pub fn add(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i32>; 64]) -> bool {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn add(
+    _: Neon,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { add_lanes(lhs, rhs, mask, out) }
 }
 
 /// `lhs - rhs` into `out`; true when a masked lane overflowed.
 #[inline]
-pub fn sub(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i32>; 64]) -> bool {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn sub(
+    _: Neon,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
     // SAFETY: as in add.
     unsafe { sub_lanes(lhs, rhs, mask, out) }
 }
 
 /// `lhs * rhs` into `out`; true when a masked lane overflowed.
 #[inline]
-pub fn mul(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i32>; 64]) -> bool {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn mul(
+    _: Neon,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
     // SAFETY: as in add.
     unsafe { mul_lanes(lhs, rhs, mask, out) }
 }
 
 /// `lhs / divisor` into every lane of `out`; no lane can fail.
 #[inline]
-pub fn div(lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn div(_: Neon, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
     // SAFETY: as in add.
     unsafe { div_lanes(lhs, divisor, out) }
 }
 
 /// `lhs % divisor` into every lane of `out`; no lane can fail.
 #[inline]
-pub fn rem(lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn rem(_: Neon, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
     // SAFETY: as in add.
     unsafe { rem_lanes(lhs, divisor, out) }
 }
@@ -248,6 +261,7 @@ mod tests {
     use super::{div, rem};
     use crate::int32::divisor::tests::{any_divisor, dividends, divisors};
     use crate::int32::{Divisor, Side};
+    use crate::simd::{Neon, Token};
 
     fn written(out: &[MaybeUninit<i32>; 64]) -> [i32; 64] {
         // SAFETY: the kernels write every lane.
@@ -278,6 +292,7 @@ mod tests {
     }
 
     fn lanes_match_the_scalar_formula(d: i32, dense: [i32; 64]) {
+        let neon = Neon::get().unwrap();
         let divisor = Divisor::new(d).unwrap();
         // PostgreSQL's Int32GetDatum sign-extends.
         let datums = dense.map(|n| i64::from(n) as u64);
@@ -285,9 +300,9 @@ mod tests {
         let remainders = dense.map(|n| divisor.remainder(n));
         for lhs in [Side::Dense(&dense), Side::Datum(&datums)] {
             let mut out = [MaybeUninit::uninit(); 64];
-            div(lhs, &divisor, &mut out);
+            div(neon, lhs, &divisor, &mut out);
             assert_eq!(written(&out), quotients, "{d}");
-            rem(lhs, &divisor, &mut out);
+            rem(neon, lhs, &divisor, &mut out);
             assert_eq!(written(&out), remainders, "{d}");
         }
     }

@@ -55,8 +55,8 @@ pub fn sum<C: ColumnReader<Value = i32>>(
                 total + value.map_or(0, i64::from),
             )
         },
-        |(count, total), block, selected| {
-            let (present, part) = bulk::sum(block, selected);
+        |(count, total), neon, block, selected| {
+            let (present, part) = bulk::sum(neon, block, selected);
             (count + present, total + part)
         },
     )?;
@@ -107,26 +107,28 @@ mod bulk {
     use tessera_core::WordBlock;
 
     use crate::int::present;
-    use crate::simd;
+    use crate::simd::{self, Neon};
 
     #[inline]
-    pub fn sum(block: WordBlock<'_, i32>, selected: u64) -> (usize, i64) {
-        let mask = present(&block, selected);
+    pub fn sum(neon: Neon, block: WordBlock<'_, i32>, selected: u64) -> (usize, i64) {
+        let mask = present(neon, &block, selected);
         let total = match block {
-            WordBlock::Dense { values, .. } => simd::sum_dense(values, mask),
-            WordBlock::Datum { values, .. } => simd::sum_datum(values, mask),
+            WordBlock::Dense { values, .. } => simd::sum_dense(neon, values, mask),
+            WordBlock::Datum { values, .. } => simd::sum_datum(neon, values, mask),
         };
         (mask.count_ones() as usize, total)
     }
 }
 
-/// Without vector code no call takes the whole-word path; this keeps the
-/// caller compiling and is never reached.
+/// Without NEON the token has no values, so no call takes the whole-word
+/// path; this keeps the caller compiling.
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
 mod bulk {
     use tessera_core::WordBlock;
 
-    pub fn sum(_: WordBlock<'_, i32>, _: u64) -> (usize, i64) {
-        unreachable!("no whole-word kernels on this target")
+    use crate::simd::Neon;
+
+    pub fn sum(neon: Neon, _: WordBlock<'_, i32>, _: u64) -> (usize, i64) {
+        match neon {}
     }
 }

@@ -12,23 +12,20 @@ use core::arch::aarch64::{
 };
 use core::array;
 
-use super::{LANE_WEIGHTS, datum, dense};
+use super::{LANE_WEIGHTS, Neon, datum, dense};
 
 /// Rows of a dense block whose value is one of `keys`, as bits in row
 /// order. NULL rows compare like any other and are masked by the caller.
 #[inline]
-pub fn set_dense(values: &[i32; 64], keys: &[i32]) -> u64 {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above), so the
-    // target-feature function can run on any CPU this code runs on.
+pub fn set_dense(_: Neon, values: &[i32; 64], keys: &[i32]) -> u64 {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { set32(dense(values), keys) }
 }
 
 /// Rows of a Datum block whose int4 value is one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_datum(values: &[u64; 64], keys: &[i32]) -> u64 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn set_datum(_: Neon, values: &[u64; 64], keys: &[i32]) -> u64 {
     // SAFETY: as in set_dense.
     unsafe { set32(datum(values), keys) }
 }
@@ -36,8 +33,7 @@ pub fn set_datum(values: &[u64; 64], keys: &[i32]) -> u64 {
 /// Rows of a dense block of int8 values that are one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_dense64(values: &[i64; 64], keys: &[i64]) -> u64 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn set_dense64(_: Neon, values: &[i64; 64], keys: &[i64]) -> u64 {
     // SAFETY: as in set_dense.
     unsafe { set64(values, keys) }
 }
@@ -45,8 +41,7 @@ pub fn set_dense64(values: &[i64; 64], keys: &[i64]) -> u64 {
 /// Rows of a Datum block whose int8 value is one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_datum64(values: &[u64; 64], keys: &[i64]) -> u64 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn set_datum64(_: Neon, values: &[u64; 64], keys: &[i64]) -> u64 {
     // SAFETY: `[u64; 64]` and `[i64; 64]` have the same size and alignment,
     // and every bit pattern is valid for both: a Datum holding an int8 is
     // its bits.
