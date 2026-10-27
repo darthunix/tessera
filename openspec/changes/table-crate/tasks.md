@@ -367,7 +367,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       call" and, in the design of `relhash`, at each trust point and
       each module of unsafe code they cover. Check:
       `cargo kani -p relhash`
-- [ ] 6.3 Write the matrix of damage with guard words around the blocks
+- [x] 6.3 Write the matrix of damage with guard words around the blocks
       and calls after the first error, run a few cases under Miri, and
       name it in "Any bytes, a bounded call" and "Errors of two kinds",
       and its rows at the trust points of the design of `relhash`;
