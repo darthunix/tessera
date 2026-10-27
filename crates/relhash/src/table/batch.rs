@@ -1014,10 +1014,11 @@ fn probe_rows<R: Region, K: KeySource + ?Sized, const N: usize, const T: usize, 
 #[inline(always)]
 fn step<R: Region>(access: &Access<'_, R>, rows: &RowMask<'_>, steps: &mut u64) -> Result<()> {
     if rows.as_view().words().any(|word| word != 0) {
-        *steps += 1;
-        if *steps > access.records() {
+        // Compared before the sum: a caller's count may be any.
+        if *steps >= access.records() {
             return Err(cycle());
         }
+        *steps += 1;
     }
     Ok(())
 }
