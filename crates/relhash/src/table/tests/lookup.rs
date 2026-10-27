@@ -780,6 +780,37 @@ fn a_cycle_of_matching_records_ends_a_walk_over_the_matches() -> Result<()> {
     Ok(())
 }
 
+/// A count of steps a caller gives at its most, as C may keep it between
+/// calls, ends a walk over the matches with a cycle, by a next match and
+/// in a group, rather than a panic of its sum.
+#[test]
+fn a_count_of_steps_at_its_most_ends_a_walk_over_the_matches() -> Result<()> {
+    let values = [7, 7];
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 8)?;
+    insert_all(&mut table, &hashes, &Keys(&keys), None)?;
+    let shared = table.table()?;
+    for in_group in [false, true] {
+        let (mut rows, mut found) = ([1], [0]);
+        let mut matches = Matches::new(&mut rows, &mut found)?;
+        let probe_keys = [Column::new(&[7], None)];
+        shared.probe(&[hash_i32(7)], &Keys(&probe_keys), &mut matches)?;
+        let mut matches = matches.with_steps(u64::MAX);
+        let step = if in_group {
+            shared.next_in_group(&mut matches)
+        } else {
+            shared.next_match(&mut matches)
+        };
+        assert_eq!(
+            refusal(step),
+            Some((Kind::Damaged, Rule::Chain)),
+            "in a group: {in_group}"
+        );
+    }
+    Ok(())
+}
+
 /// A healthy chain longer than the 64 steps a walk takes in its loops
 /// goes on out of line to its end, and no walk takes it for a cycle: 300
 /// records of one hash found row by row and by whole words, an absent key
