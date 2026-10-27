@@ -1168,6 +1168,9 @@ it, and when a module of the list holds none. The paths are under
 - The unit tests in `crates/relhash/src/table/tests/`: the format and
   every call, with damaged headers, chunks, references and chains, over
   keys of their own; they also run under Miri, at smaller sizes.
+- Every test of the crate and every example of its documentation run
+  under Miri in CI, with 16 cases of each property: an access outside a
+  block or a borrow that Rust's rules forbid fails them.
 - The unit tests in `crates/relhash/src/table/tests.rs`: blocks that
   are not chunks or an index, partitions, merges, and a shared filter
   that threads race to build.

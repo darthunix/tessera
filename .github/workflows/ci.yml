@@ -289,9 +289,10 @@ jobs:
             test/regression.diffs
           if-no-files-found: ignore
 
-  # Miri over the tests of the unsafe code (plan 9.6): the hash table's
-  # region in relhash (its table module; the rest of the crate denies
-  # unsafe code) and the C entry points' borrows in tessera-capi.
+  # Miri over the tests of the unsafe code (plan 9.6): every test of
+  # relhash, the crate of the hash table, whose promise is that no call
+  # touches memory outside its blocks, and the C entry points' borrows in
+  # tessera-capi.
   # tessera-core forbids unsafe code and tessera-spill has none. The
   # vector code of tessera-kernels is cut out under Miri, and the rest of
   # it denies unsafe code. A nightly pinned here, not in
@@ -316,8 +317,7 @@ jobs:
         run: cargo miri setup
       - name: The tests of the unsafe code
         run: |
-          cargo miri test --locked -p relhash --lib table::
-          cargo miri test --locked -p relhash --doc
+          cargo miri test --locked -p relhash
           cargo miri test --locked -p tessera-capi --test columns --test table
 
   postgres:

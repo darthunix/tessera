@@ -384,7 +384,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       (both must not compile), of the masks, of the cursors and of the
       merge, and name them in their requirements. Check:
       `cargo test -p relhash`; `.github/scripts/check-specs.sh`
-- [ ] 6.6 Run Miri over all the tests of the crate in CI. Check: CI
+- [x] 6.6 Run Miri over all the tests of the crate in CI. Check: CI
 - [ ] 6.7 Run every mutant of the crate in CI on request; give each
       survivor a test, and list the equivalent ones with their reasons
       in `.cargo/mutants.toml`. Check: the mutants workflow on request,
