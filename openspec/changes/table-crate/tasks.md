@@ -378,7 +378,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       call"; report the downloads, reverse dependencies, last release
       and stars of `libfuzzer-sys`. Check: `cargo fuzz run <target> --
       -max_total_time=60` for each target
-- [ ] 6.5 Add the tests of an allocator that counts (the check of the
+- [x] 6.5 Add the tests of an allocator that counts (the check of the
       contract's rule "No memory taken"), of one sequence run twice, of
       a handle sent to another thread and of two payloads open at once
       (both must not compile), of the masks, of the cursors and of the

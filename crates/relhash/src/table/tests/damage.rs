@@ -13,7 +13,7 @@ use super::*;
 
 /// What a damage leads the calls to.
 #[derive(Clone, Copy, Debug)]
-enum Expect {
+pub(super) enum Expect {
     /// Only data: every call succeeds.
     Data,
     /// A call that fails gives a damaged table and one of these rules,
@@ -25,7 +25,7 @@ enum Expect {
 }
 
 /// One place damaged in one way, by its name.
-type Damage = (&'static str, fn(&World), Expect);
+pub(super) type Damage = (&'static str, fn(&World), Expect);
 
 /// Add `delta` to the `u32` at `byte` of the index.
 fn bump32(world: &World, byte: usize, delta: i32) {
@@ -42,7 +42,7 @@ fn bump64(world: &World, byte: usize, delta: i64) {
 /// The closed list of damage: the fields of the header, the count of
 /// records, a bucket, the fields of a record and a used mark, each at and
 /// around its limits.
-const DAMAGES: &[Damage] = &[
+pub(super) const DAMAGES: &[Damage] = &[
     ("nothing", |_| {}, Expect::Data),
     // The header.
     (
@@ -556,4 +556,66 @@ fn every_damage_against_every_call() {
     if let Err(failure) = outcome {
         panic!("{failure}");
     }
+}
+
+/// One sequence of calls, twice: two tables of one case, damaged alike in
+/// copies of the same bytes, give the same outcome, answers and bytes of
+/// every block after each call, as the promise of "Any bytes, a bounded
+/// call" says.
+#[test]
+fn one_sequence_twice_gives_the_same_blocks_and_answers() {
+    let config = Config {
+        cases: if cfg!(miri) { 1 } else { 16 },
+        failure_persistence: None,
+        ..Config::default()
+    };
+    let outcome = TestRunner::new(config).run(&cases(), |case| {
+        for (index, &(damage, apply, _)) in DAMAGES.iter().enumerate() {
+            if cfg!(miri) && index % 12 != 0 {
+                continue;
+            }
+            let mut worlds = [World::build(&case), World::build(&case)];
+            for world in &worlds {
+                apply(world);
+            }
+            for round in ["first round", "second round"] {
+                let [one, two] = &mut worlds;
+                for &(call, run) in CALLS {
+                    let outcomes = (run(one), run(two));
+                    prop_assert_eq!(outcomes.0, outcomes.1, "{}: {} ({})", damage, call, round);
+                }
+                prop_assert!(one.answers == two.answers, "{damage}: answers ({round})");
+                prop_assert!(one.bytes() == two.bytes(), "{damage}: blocks ({round})");
+            }
+        }
+        Ok(())
+    });
+    if let Err(failure) = outcome {
+        panic!("{failure}");
+    }
+}
+
+/// A header changed under a handle, to keys and a record size that agree
+/// with each other but not with the handle's layout, fails a regrow with
+/// `Grew` before it writes the new index.
+#[test]
+fn a_header_changed_under_a_handle_fails_its_regrow() {
+    let case = Case {
+        shape: Shape::Appended,
+        nkeys: 1,
+        rows: vec![(1, 0, false), (2, 0, false)],
+    };
+    let world = World::build(&case);
+    let capacity = 2 * world.capacity;
+    let grown = Guarded::new(index_size(&world.config, capacity).unwrap());
+    let mut table = world.table_mut().unwrap();
+    bump32(&world, NKEYS, 1);
+    bump32(&world, RECORD_SIZE, 8);
+    // SAFETY: the new index is ours alone.
+    let regrown = unsafe { table.regrow(grown.base(), grown.len, capacity) };
+    assert_eq!(refusal(regrown), Some((Kind::Damaged, Rule::Grew)));
+    assert!(
+        (0..grown.len).all(|byte| grown.read::<u8>(byte) == 0),
+        "the new index was written"
+    );
 }

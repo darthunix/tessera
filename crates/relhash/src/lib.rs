@@ -141,6 +141,30 @@
 //! handles borrow it, may move to another thread whole, and a
 //! [`bloom::SharedFilter`], which holds only atomic words, may be shared.
 //!
+//! A handle sent to another thread does not compile, nor one shared
+//! between threads:
+//!
+//! ```compile_fail,E0277
+//! fn send<T: Send>(_: T) {}
+//! fn away(table: relhash::Table<'_>) {
+//!     send(table);
+//! }
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn send<T: Send>(_: T) {}
+//! fn away(table: relhash::TableMut<'_>) {
+//!     send(table);
+//! }
+//! ```
+//!
+//! ```compile_fail,E0277
+//! fn share<T: Sync>(_: &T) {}
+//! fn between(table: &relhash::Table<'_>) {
+//!     share(table);
+//! }
+//! ```
+//!
 //! # Without the feature `alloc`
 //!
 //! Without the feature `alloc` the crate has no [`OwnedTable`] and takes

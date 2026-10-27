@@ -60,7 +60,8 @@ of the crate.
 ### No memory taken
 A call over the blocks the caller gives allocates nothing, also when it
 fails, so that an engine keeps its memory in its own hands.
-- **Checked by:** pending
+- **Checked by:**
+  `crates/relhash/src/table/tests/world.rs::a call of the crate took memory`
 
 ### A small surface
 The public API grows only with a reason the change gives, so that what

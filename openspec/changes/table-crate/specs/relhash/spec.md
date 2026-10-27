@@ -60,13 +60,15 @@ mask that a call writes SHALL keep every bit past its last row 0.
 - **WHEN** a mask of 70 rows is made of one word or of three, or of two
   words with bit 6 of the second set
 - **THEN** it is refused, and its words are not changed
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/row_mask.rs::a_mask_of_wrong_words_is_refused_and_left_as_it_was`
 
 #### Scenario: The bits past the rows of a mask a call writes
-- **WHEN** a call writes a mask of 70 rows whose second word was all
-  ones before
-- **THEN** bits 6 to 63 of that word are 0
-- **Verified by:** pending
+- **WHEN** a probe, a find or insert, a filter or an append writes a
+  mask of 70 rows that held every row before the call
+- **THEN** bits 6 to 63 of its second word are 0
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::the_masks_a_call_writes_keep_the_bits_past_their_rows_clear`
 
 ### Requirement: A batch to place
 A batch to place, [`Batch`](../../../crates/relhash/src/table/batch.rs),
@@ -219,7 +221,9 @@ a reference checked first and its payload opened later.
 - **WHEN** a program keeps one payload of a cursor open and opens
   another
 - **THEN** it does not compile
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/writer.rs::A program that keeps one payload
+  open and opens another`
 
 ### Requirement: The payloads of a batch
 The one writer of a table SHALL change the payloads of the records of a
@@ -246,7 +250,8 @@ it changed.
   size that is not the table's
 - **THEN** the call fails with a damaged table, and the payloads of the
   first two rows hold their values
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_damaged_record_in_the_middle_fails_after_the_payloads_before_it`
 
 ### Requirement: A merge by the caller's rule
 The one writer of a table SHALL merge the records of a chunk into the
@@ -365,7 +370,8 @@ page](../../../crates/relhash/src/lib.rs) says.
 - **WHEN** a program sends a handle attached to a table to another
   thread, or shares one between threads
 - **THEN** it does not compile
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/lib.rs::A handle sent to another thread does not compile`
 
 #### Scenario: An owning table sent to another thread
 - **WHEN** an owning table is filled on one thread and moved to another
@@ -377,7 +383,8 @@ page](../../../crates/relhash/src/lib.rs) says.
 - **WHEN** two threads, each with its own handle, append, link and
   probe one table in every order of their steps
 - **THEN** every key is found
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/loom/table.rs::two_participants_build_a_table_and_find_every_key`
 
 ### Requirement: Any bytes, a bounded call
 Under the caller's promise, which [the crate's
@@ -437,7 +444,8 @@ order, SHALL leave the same bytes and give the same answers.
 - **WHEN** the same sequence of calls runs twice, over two copies of the
   same bytes
 - **THEN** the blocks and the answers of the two runs are equal
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/damage.rs::one_sequence_twice_gives_the_same_blocks_and_answers`
 
 ### Requirement: Errors of two kinds
 An error of a call SHALL name the rule that was broken and be of one of
@@ -457,7 +465,9 @@ decides, as [`Kind`](../../../crates/relhash/src/error.rs) lists them.
 - **THEN** it fails with a wrong call and that rule; when the argument
   is a size, a count or a block, which a call checks before its first
   row, it fails before it changes anything
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/arguments.rs::each_wrong_argument_names_its_rule`;
+  `crates/relhash/src/table/tests/arguments.rs::every_rule_has_its_case`
 
 #### Scenario: A wrong chunk given to a regrow or a cleared key
 - **WHEN** a larger index or a cleared key is given chunks of which the
@@ -477,7 +487,9 @@ the crate's feature `alloc` leaves it out.
 - **WHEN** every call of the crate runs over the caller's blocks, with
   success and with each kind of error, under an allocator that counts
 - **THEN** the count does not change
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/damage.rs::every_damage_against_every_call`;
+  `crates/relhash/src/table/tests/arguments.rs::each_wrong_argument_names_its_rule`
 
 #### Scenario: A build without the owning table
 - **WHEN** the crate is built and tested without its feature `alloc`

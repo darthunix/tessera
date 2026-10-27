@@ -301,6 +301,12 @@ rules! {
     MostRecords,
 }
 
+/// Every rule, for the tests that look for a case of each.
+#[cfg(test)]
+pub(crate) fn rules() -> &'static [Rule] {
+    RULES
+}
+
 impl Error {
     /// A wrong call: a value the caller passed breaks `rule`.
     #[inline]

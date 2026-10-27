@@ -1263,3 +1263,58 @@ fn gather_key_reads_the_key_of_each_found_row() -> Result<()> {
     assert_eq!((values, nulls), (before, before_nulls));
     Ok(())
 }
+
+/// The masks the calls write keep the bits past their last row 0: a probe
+/// narrows its rows, a find or insert adds the rows it inserted, a filter
+/// narrows the rows it may find, and an append clears the rows it placed,
+/// each over a mask of 70 rows that held every row before the call.
+#[test]
+fn the_masks_a_call_writes_keep_the_bits_past_their_rows_clear() -> Result<()> {
+    let values: Vec<i32> = (0..70).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 140)?;
+    // Half the keys first, so that a probe narrows its rows.
+    let half = [Column::new(&values[..35], None)];
+    insert_all(&mut table, &hashes[..35], &Keys(&half), None)?;
+    let every = all_rows(70);
+    assert_eq!(every[1], (1 << 6) - 1, "every row of the second word");
+    let clear = |words: &[u64], what: &str| {
+        assert_eq!(words[1] >> 6, 0, "{what}: a bit past the rows");
+    };
+
+    let (mut rows, mut refs) = (every.clone(), vec![0; 70]);
+    table.table()?.probe(
+        &hashes,
+        &Keys(&keys),
+        &mut Matches::new(&mut rows, &mut refs)?,
+    )?;
+    assert_ne!(rows, every, "the probe narrowed its rows");
+    clear(&rows, "a probe");
+
+    let mut inserted = every.clone();
+    table.find_or_insert(
+        &hashes,
+        &Keys(&keys),
+        RowMaskView::try_new(70, &every)?,
+        &mut refs,
+        &mut RowMask::try_new(70, &mut inserted)?,
+    )?;
+    clear(&inserted, "a find or insert");
+
+    let mut filter = vec![0; bloom::words_for(70)?];
+    table.table()?.bloom(&mut filter)?;
+    let mut rows = every.clone();
+    bloom::probe(&filter, &hashes, &mut RowMask::try_new(70, &mut rows)?)?;
+    clear(&rows, "a filter");
+
+    let mut pending = every.clone();
+    let source = Keys(&keys);
+    let mut batch = Batch::new(&hashes, &source, &mut pending, &mut refs)?;
+    let chunk = table.add_chunk()?;
+    table
+        .table_mut()?
+        .append(chunk, Some(&payload_for(70)), &mut batch)?;
+    clear(&pending, "an append");
+    Ok(())
+}
