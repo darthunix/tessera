@@ -1279,3 +1279,135 @@ fn a_mark_or_a_walk_that_cannot_be_done_changes_nothing() -> Result<()> {
     }
     Ok(())
 }
+
+/// The bytes of a record after its keys: its payload, then zeros to its
+/// end, read straight from its chunk.
+fn tail_of(table: &mut OwnedTable, reference: u32, nkeys: usize) -> Vec<u8> {
+    let record_size = table.table().unwrap().record_size();
+    let (chunk, byte) = placement(reference);
+    let words = table.chunk_words(chunk);
+    let start = (byte + super::header::RECORD_HEADER + nkeys * super::header::KEY_SLOT) / 8;
+    let end = (byte + record_size) / 8;
+    words[start..end]
+        .iter()
+        .flat_map(|word| word.to_ne_bytes())
+        .collect()
+}
+
+/// Every shape of a payload goes into its records whole, the rest of each
+/// record zeros: from none to six words and part of one, after one to
+/// three keys, by an insert of payload bytes and by an append of payload
+/// columns, from none to 66 columns with NULLs among them.
+#[test]
+fn every_shape_of_a_payload_goes_in_whole_and_the_rest_is_zero() -> Result<()> {
+    let values: Vec<i32> = (0..3).collect();
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    for nkeys in 1..=3 {
+        let columns: Vec<Column> = (0..nkeys).map(|_| Column::new(&values, None)).collect();
+        for payload_size in [
+            0, 1, 7, 8, 9, 15, 16, 17, 24, 31, 32, 33, 40, 41, 48, 49, 56,
+        ] {
+            let config = TableConfig {
+                nkeys,
+                payload_size,
+            };
+            let mut table = local(&config, 3)?;
+            let payload: Vec<u8> = (0..3 * payload_size)
+                .map(|byte| (byte % 251 + 1) as u8)
+                .collect();
+            let refs = insert_all(&mut table, &hashes, &Keys(&columns), Some(&payload))?;
+            for (row, &reference) in refs.iter().enumerate() {
+                let tail = tail_of(&mut table, reference, nkeys);
+                let ours = &payload[row * payload_size..(row + 1) * payload_size];
+                ensure!(
+                    &tail[..payload_size] == ours,
+                    "{nkeys} keys, {payload_size} bytes, row {row}"
+                );
+                ensure!(
+                    tail[payload_size..].iter().all(|&byte| byte == 0),
+                    "{nkeys} keys, {payload_size} bytes, row {row}: the rest"
+                );
+            }
+            // No payload, over bytes a chunk held before: the record's
+            // tail is zeros whole.
+            let mut table = local(&config, 3)?;
+            let chunk = table.add_chunk()?;
+            table.chunk_words(chunk)[1..].fill(0xabab_abab_abab_abab);
+            let refs = insert_all(&mut table, &hashes, &Keys(&columns), None)?;
+            for (row, &reference) in refs.iter().enumerate() {
+                let tail = tail_of(&mut table, reference, nkeys);
+                ensure!(
+                    tail.iter().all(|&byte| byte == 0),
+                    "{nkeys} keys, {payload_size} bytes, row {row}: no payload"
+                );
+            }
+        }
+        for ncolumns in [0, 1, 2, 3, 4, 5, 63, 64, 65, 66] {
+            let null_words = payload_null_words(ncolumns);
+            let config = TableConfig {
+                nkeys,
+                payload_size: 8 * (null_words + ncolumns),
+            };
+            let mut table = OwnedTable::new(&config, 3, MAX_CHUNK_LEN)?;
+            let chunk = table.add_chunk()?;
+            let data: Vec<Vec<u64>> = (0..ncolumns)
+                .map(|column| (0..3).map(|row| (column * 10 + row + 1) as u64).collect())
+                .collect();
+            let nulls: Vec<Vec<bool>> = (0..ncolumns)
+                .map(|column| (0..3).map(|row| (column + row) % 3 == 0).collect())
+                .collect();
+            let values: Vec<&[u64]> = data.iter().map(Vec::as_slice).collect();
+            let flags: Vec<&[bool]> = nulls.iter().map(Vec::as_slice).collect();
+            let payload = PayloadColumns::new(&values, &flags, 3)?;
+            let (mut pending, mut refs) = (all_rows(3), [0; 3]);
+            let source = Keys(&columns);
+            table.table_mut()?.append_columns(
+                chunk,
+                &payload,
+                &mut Batch::new(&hashes, &source, &mut pending, &mut refs)?,
+            )?;
+            for (row, &reference) in refs.iter().enumerate() {
+                let tail = tail_of(&mut table, reference, nkeys);
+                let word =
+                    |at: usize| u64::from_ne_bytes(tail[8 * at..8 * at + 8].try_into().unwrap());
+                for column in 0..ncolumns {
+                    let null = nulls[column][row];
+                    let bit = word(column / 64) >> (column % 64) & 1 == 1;
+                    ensure!(
+                        bit == null,
+                        "{ncolumns} columns, column {column}, row {row}: NULL bit"
+                    );
+                    let value = if null { 0 } else { data[column][row] };
+                    ensure!(
+                        word(null_words + column) == value,
+                        "{ncolumns} columns, column {column}, row {row}"
+                    );
+                }
+                for at in 0..null_words {
+                    let used = if at + 1 == null_words && ncolumns % 64 != 0 {
+                        (1 << (ncolumns % 64)) - 1
+                    } else if at < ncolumns / 64 {
+                        u64::MAX
+                    } else {
+                        0
+                    };
+                    ensure!(
+                        word(at) & !used == 0,
+                        "{ncolumns} columns: a NULL bit past the columns"
+                    );
+                }
+                ensure!(payload.is_empty() == (ncolumns == 0));
+                ensure!(payload.null_words() == null_words);
+                for column in 0..ncolumns {
+                    let null = nulls[column][row];
+                    let value = if null { 0 } else { data[column][row] };
+                    ensure!(
+                        payload.get(column, row) == (value, null),
+                        "column {column}, row {row}"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}

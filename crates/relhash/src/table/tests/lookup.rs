@@ -1318,3 +1318,122 @@ fn the_masks_a_call_writes_keep_the_bits_past_their_rows_clear() -> Result<()> {
     clear(&pending, "an append");
     Ok(())
 }
+
+/// A count of records damaged below a healthy chain longer than a short
+/// walk stops the walk at the count, not at the chain's end: row by row,
+/// in a find or insert, and by whole words, past their 64 steps.
+#[test]
+fn a_count_below_a_long_chain_stops_its_walk() -> Result<()> {
+    let values: Vec<i32> = (0..300).collect();
+    // Below and above the 64 steps a walk takes in its loops.
+    for count in [30, 100] {
+        let mut table = local(&ONE_INT4, 1024)?;
+        let refs = insert_all(
+            &mut table,
+            &[7; 300],
+            &Keys(&[Column::new(&values, None)]),
+            None,
+        )?;
+        set_u64(table.index_words(), NRECORDS, count);
+        for nrows in [1, 64] {
+            let absent = [Column::new(&vec![1000; nrows], None)];
+            let result = probe_rows(&table.table()?, &vec![7; nrows], &absent, &all_rows(nrows));
+            assert_eq!(
+                refusal(result),
+                Some((Kind::Damaged, Rule::Chain)),
+                "a count of {count}, {nrows} rows"
+            );
+        }
+        let (chunk, _) = placement(refs[0]);
+        let absent = [Column::new(&[1000], None)];
+        let found = table.table_mut()?.find_or_insert(
+            chunk,
+            &mut Batch::new(&[7], &Keys(&absent), &mut [1], &mut [0])?,
+            &mut RowMask::try_new(1, &mut [0])?,
+        );
+        assert_eq!(
+            refusal(found),
+            Some((Kind::Damaged, Rule::Chain)),
+            "a count of {count}"
+        );
+    }
+    Ok(())
+}
+
+/// A find or insert of two whole words of known keys finds every one, each
+/// word by its own rows' hashes.
+#[test]
+fn a_find_or_insert_of_two_whole_words_finds_every_known_key() -> Result<()> {
+    let values: Vec<i32> = (0..128).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 256)?;
+    let (refs, created) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    assert_eq!(created.len(), 128);
+    let (again, created) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    assert_eq!((again, created), (refs, vec![]), "every key known");
+    Ok(())
+}
+
+/// The walk of a group moves every row of a word at once: rows past the
+/// first bit keep their place in the mask while their group lasts, and
+/// a key's second slot reads its own NULL bit back.
+#[test]
+fn groups_and_keys_of_rows_past_the_first_bit() -> Result<()> {
+    // Keys 0 to 9, each three times; key 1 NULL every third row.
+    let firsts: Vec<i32> = (0..30).map(|row| row % 10).collect();
+    let seconds: Vec<i32> = (0..30).map(|row| row % 10 + 100).collect();
+    let non_null = words(&(0..30).map(|row| row % 3 != 0).collect::<Vec<_>>());
+    let keys = [
+        Column::new(&firsts, None),
+        Column::new(&seconds, Some(&non_null)),
+    ];
+    let hashes: Vec<u32> = firsts.iter().map(|&key| hash_i32(key)).collect();
+    let config = TableConfig {
+        nkeys: 2,
+        payload_size: 8,
+    };
+    let mut table = local(&config, 30)?;
+    insert_all(&mut table, &hashes, &Keys(&keys), None)?;
+    let table = table.table()?;
+    // Rows 10 to 29 probe: the keys of rows 0 to 19 come back.
+    let (mut rows, mut refs) = (all_rows(30), vec![0; 30]);
+    rows[0] &= !((1 << 10) - 1);
+    let mut matches = Matches::new(&mut rows, &mut refs)?;
+    let found = table.probe(&hashes, &Keys(&keys), &mut matches)?;
+    assert_eq!(found, 20);
+    let (mut values, mut nulls) = (vec![0; 30], vec![false; 30]);
+    table.gather_key(&matches, 1, &mut values, &mut nulls)?;
+    for row in 10..30 {
+        assert_eq!(nulls[row], row % 3 == 0, "row {row}: the NULL of key 1");
+        let value = if row % 3 == 0 {
+            0
+        } else {
+            (row % 10 + 100) as u64
+        };
+        assert_eq!(values[row], value, "row {row}");
+    }
+    // A step of the group of every row at once is the step of each row
+    // alone.
+    let (before_rows, before_refs) = (
+        matches.rows().words().collect::<Vec<_>>(),
+        matches.refs().to_vec(),
+    );
+    let left = table.next_in_group(&mut matches)?;
+    let after = matches.rows();
+    assert!(left > 0, "some rows have a second record of their keys");
+    for row in 10..30 {
+        let mut one = [0; 1];
+        one[0] = 1 << row;
+        let mut refs = before_refs.clone();
+        assert_eq!(before_rows[0] >> row & 1, 1, "row {row} was found");
+        let alone = table.next_in_group(&mut Matches::new(&mut one, &mut refs)?)?;
+        assert_eq!(
+            after.contains(row)?,
+            alone == 1,
+            "row {row}: still in its group"
+        );
+        assert_eq!(matches.refs()[row], refs[row], "row {row}: its record");
+    }
+    Ok(())
+}

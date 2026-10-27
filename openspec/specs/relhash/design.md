@@ -1171,6 +1171,10 @@ it, and when a module of the list holds none. The paths are under
 - Every test of the crate and every example of its documentation run
   under Miri in CI, with 16 cases of each property: an access outside a
   block or a borrow that Rust's rules forbid fails them.
+- Every mutant of the crate, run in CI on request
+  (`.github/workflows/mutants.yml`, package `relhash`) and judged by
+  the crate's own tests alone, is caught, or is listed as equivalent
+  with its reason in `.cargo/mutants.toml`.
 - The unit tests in `crates/relhash/src/table/tests.rs`: blocks that
   are not chunks or an index, partitions, merges, and a shared filter
   that threads race to build.

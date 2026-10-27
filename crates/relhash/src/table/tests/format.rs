@@ -310,3 +310,23 @@ fn the_largest_record_goes_in_and_comes_back_whole() -> Result<()> {
     assert_eq!((found, matches), (vec![0, 1], refs));
     Ok(())
 }
+
+/// The fingerprint of a record's layout is a fixed number: blocks of a
+/// spill written by another build of the crate carry it, and must be read
+/// back by this one.
+#[test]
+fn the_fingerprint_of_a_layout_is_a_fixed_number() -> Result<()> {
+    let fingerprint = |nkeys, payload_size| -> Result<u64> {
+        let table = local(
+            &TableConfig {
+                nkeys,
+                payload_size,
+            },
+            1,
+        )?;
+        Ok(table.table()?.fingerprint())
+    };
+    assert_eq!(fingerprint(1, 8)?, 0x0508_55b2_47af_c7de);
+    assert_eq!(fingerprint(2, 24)?, 0xab54_c370_8b89_5105);
+    Ok(())
+}

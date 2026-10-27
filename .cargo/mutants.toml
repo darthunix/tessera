@@ -46,14 +46,11 @@ exclude_globs = [
 # storage or its rows one by one: both give the same results, and only the
 # time tells them apart. The mutants of that choice are named by their
 # place, since the same operators elsewhere in these functions matter.
-# OwnedTable::find_or_insert adds the rows a call created to those of the
-# calls before; a row is created once, so the two share no bit and | is ^.
 # Place::reference puts a record's chunk above the bits of its unit, which
-# is below 2^17 and has none there: | and ^ give one reference.
-# OwnedTable::find_or_insert grows when its records reach half the
-# buckets, and asks for twice them: an index for that capacity has twice
-# the buckets, and so has one for two records more, so * 2 and + 2 make
-# one index.
+# is below 2^17 and has none there, and Cursor::at a chunk above a byte of
+# 32 bits: | and ^ give one value. resolve_rows adds the rows a call
+# created to the rows inserted before: a row is created once, so the two
+# share no bit and | is ^.
 # decimal::read_with keeps the rows of a word outside its selection and
 # adds the rows it found in it: the two share no bit, so | is ^.
 # OwnedTable::chunk_is_empty matters only when an append placed no row
@@ -63,6 +60,33 @@ exclude_globs = [
 # owning table then adds a chunk at each call, to the limit of 2^15
 # chunks, gigabytes that kill the runner before a verdict. The checks
 # inside it keep their mutants.
+# The rest are relhash's, judged by its own tests (task 6.7 of the change
+# table-crate):
+# - A prefetch hint reads nothing and never faults: a hint gone, or one at
+#   another address (the payload word of gather, the lines of
+#   gather_words), changes no answer.
+# - A choice between two ways that give one answer: gather with or without
+#   its prefetch pass; a word of rows probed or resolved whole or row by
+#   row (probe_rows, resolve_rows); a row the whole word did not find,
+#   also when the word was probed with another word's hashes, found by
+#   its own walk; a copy or a zeroing of four words inline or by
+#   a call (copy_words, zero_words); the shape of the loop of a record's
+#   tail words (Layout::tail_words), which the generic one writes alike.
+# - An append whose chunk is full goes on over words with no room left
+#   (append_rows, append_column_rows); a link finds no record of its keys
+#   in a chain with no rest (link_counting): the loop ends later, the
+#   answer the same.
+# - A walk of a chain past a long chain's steps saves its place at each
+#   doubling, Brent's method, to stop at a cycle soon; saved at other
+#   steps, or never, the walk stops at the count of the places of the
+#   chunks instead, later, with the same error. The bound of a short walk
+#   checked at every step rather than at its limit (Access::find,
+#   probe_word) stops it at the same count.
+# - The mask of a hash in the Bloom filter keeps fewer bits when two of its
+#   four coincide and | is ^: the filter is built and probed with the
+#   same mask, so it rejects no key added, and lets a few more absent ones
+#   through.
+# - The owning table's blocks not freed leak: no answer changes.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -82,12 +106,28 @@ exclude_re = [
     "int/aggregate\\.rs:7[12]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
     "int/arith\\.rs:21[01]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
     "int/compare\\.rs:51:69: replace && with \\|\\| in run$",
-    "table/owned\\.rs:298:61: replace \\| with \\^ in OwnedTable::find_or_insert$",
-    "table/header\\.rs:81:44: replace \\| with \\^ in Place::reference$",
-    "table/owned\\.rs:307:37: replace \\* with \\+ in OwnedTable::find_or_insert$",
+    "replace \\| with \\^ in (Place::reference|Cursor::at)$",
+    "table/writer\\.rs:(234|282):[0-9]+: replace \\| with \\^ in resolve_rows$",
     "decimal\\.rs:1503:41: replace \\| with \\^ in read_with$",
     "replace OwnedTable::chunk_is_empty -> Result<bool> with Ok\\(false\\)$",
     "replace Access<'r, R>::room -> Result<\\(usize, usize\\)> with ",
+    "replace (prefetch|<impl Region for RawRegion>::prefetch(_record)?|Access<'r, R>::prefetch_(bucket|record)) with \\(\\)$",
+    "table/batch\\.rs:1104:[0-9]+: replace .* in gather$",
+    "table/batch\\.rs:11(59|60|71|73):[0-9]+: replace .* in gather_words$",
+    "table/batch\\.rs:1088:8: delete ! in gather$",
+    "table/batch\\.rs:973:34: replace >= with < in probe_rows$",
+    "table/writer\\.rs:177:38: replace >= with < in resolve_rows$",
+    "table/writer\\.rs:196:26: replace >> with << in resolve_rows$",
+    "table/writer\\.rs:178:34: replace \\* with / in resolve_rows$",
+    "table/record\\.rs:(957|979):10: replace > with >= in (copy|zero)_words$",
+    "replace (Layout::tail_words -> usize with 0|/ with \\* in Layout::tail_words|- with \\+ in Layout::tail_words)$",
+    "table/batch\\.rs:(450|578):18: replace < with > in append_(column_)?rows$",
+    "table/batch\\.rs:903:23: replace && with \\|\\| in link_counting$",
+    "replace (\\* with [+/]|\\*= with [+/]=) in Access<'r, R>::find_long$",
+    "table/record\\.rs:438:22: replace == with != in Access<'r, R>::find$",
+    "table/lanes\\.rs:121:18: replace == with != in probe_word$",
+    "replace \\| with \\^ in place$",
+    "replace <impl Drop for Block>::drop with \\(\\)$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the
