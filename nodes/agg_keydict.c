@@ -15,6 +15,7 @@
 
 #include "agg.h"
 #include "agg_node.h"
+#include "key_kind.h"
 
 /* Ask memory for an address the loop reads soon, where the compiler can. */
 #if defined(__GNUC__) || defined(__clang__)
@@ -179,7 +180,6 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 	TessRowMask pending;
 	TessRowMask inserted;
 	TessDatumColumn numbers;
-	bool		int8 = value->argument_kind == TESS_TABLE_KEY_INT8;
 
 	/* A value a word does not hold: the pairs take its number in the dictionary. */
 	if (value->distinct_dict != NULL)
@@ -215,8 +215,7 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 	{
 		memcpy(set->hashes, group_hashes, sizeof(uint32) * nrows);
 		memcpy(set->pending_bits, valid->bits, sizeof(uint64) * nwords);
-		check(state, (int8 ? state->kernels->int8_hash_next :
-					  state->kernels->int4_hash_next) (argument, NULL,
+		check(state, tess_key_hash_next(state->kernels, value->argument_kind) (argument, NULL,
 													   TESS_NULL_KEYS_REJECT,
 													   set->hashes, &pending,
 													   &state->status));
@@ -224,8 +223,7 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 	else
 	{
 		memset(set->pending_bits, 0, sizeof(uint64) * nwords);
-		check(state, (int8 ? state->kernels->int8_hash :
-					  state->kernels->int4_hash) (argument, NULL, valid,
+		check(state, tess_key_hash(state->kernels, value->argument_kind) (argument, NULL, valid,
 												  TESS_NULL_KEYS_REJECT,
 												  set->hashes, &pending,
 												  &state->status));

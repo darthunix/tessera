@@ -512,8 +512,7 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 		/* A generic key's word is its abbreviated key, an int8. */
 		if (kind == TESS_SORT_KIND_GENERIC && state->generic < 0)
 			state->generic = index;
-		kinds[index] = kind == TESS_SORT_KIND_GENERIC ? TESS_TABLE_KEY_INT8 :
-			(TessTableKeyKind) kind;
+		kinds[index] = tess_key_kind_of_sort(kind);
 		state->keys[index].kind = kinds[index];
 		state->keys[index].flags = (uint32) list_nth_int(key_flags, index);
 	}

@@ -235,7 +235,7 @@ add_key(RestrictInfo *rinfo, RelOptInfo *outerrel, RelOptInfo *innerrel,
 		!OidIsValid(hasher = key_hasher(op, exprType(outer_arg), exprType(inner_arg))))
 		return false;
 	if (OidIsValid(hasher))
-		outer_kind = inner_kind = TESS_TABLE_KEY_INT8;
+		outer_kind = inner_kind = TESS_KEY_KIND_NUMBER;
 	else if (!tess_word_key_kind(exprType(outer_arg), &outer_kind) ||
 			 !tess_word_key_kind(exprType(inner_arg), &inner_kind))
 		return false;

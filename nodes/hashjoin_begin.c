@@ -112,17 +112,15 @@ read_node_data(TessHashJoinState *state, const List *data)
 		state->keys.inner_keys[key] = list_nth_int(inner_keys, key);
 		state->keys.outer_kinds[key] = list_nth_int(outer_kinds, key);
 		state->keys.inner_kinds[key] = list_nth_int(inner_kinds, key);
-		if ((state->keys.outer_kinds[key] != TESS_TABLE_KEY_INT4 &&
-			 state->keys.outer_kinds[key] != TESS_TABLE_KEY_INT8) ||
-			(state->keys.inner_kinds[key] != TESS_TABLE_KEY_INT4 &&
-			 state->keys.inner_kinds[key] != TESS_TABLE_KEY_INT8))
+		if (!tess_key_kind_known(state->keys.outer_kinds[key]) ||
+			!tess_key_kind_known(state->keys.inner_kinds[key]))
 			elog(ERROR, "TessHashJoin received foreign plan data");
 		state->keys.collations[key] = (Oid) list_nth_int(collations, key);
 		state->keys.hashers[key].fn_oid = InvalidOid;
 		if (OidIsValid((Oid) list_nth_int(hashers, key)))
 		{
-			if (state->keys.outer_kinds[key] != TESS_TABLE_KEY_INT8 ||
-				state->keys.inner_kinds[key] != TESS_TABLE_KEY_INT8)
+			if (state->keys.outer_kinds[key] != TESS_KEY_KIND_NUMBER ||
+				state->keys.inner_kinds[key] != TESS_KEY_KIND_NUMBER)
 				elog(ERROR, "TessHashJoin received foreign plan data");
 			fmgr_info((Oid) list_nth_int(hashers, key), &state->keys.hashers[key]);
 			state->keys.hashed_keys = true;
@@ -193,7 +191,7 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 									 state->prune.params))
 	{
 		state->prune.on = true;
-		state->prune.keys.int8 = state->keys.inner_kinds[state->prune.key] == TESS_TABLE_KEY_INT8;
+		state->prune.keys.int8 = tess_key_kind_wide(state->keys.inner_kinds[state->prune.key]);
 		state->prune.keys.values = palloc_array(int64, JOIN_PRUNE_VALUES);
 	}
 	state->outer_input = tess_input_create(estate->es_query_cxt, state->outer);

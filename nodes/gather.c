@@ -318,8 +318,7 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 		state->key_places[key] = list_nth_int(places, key);
 		if (kind == TESS_SORT_KIND_GENERIC && state->generic < 0)
 			state->generic = key;
-		state->keys[key].kind = kind == TESS_SORT_KIND_GENERIC ? TESS_TABLE_KEY_INT8 :
-			(TessTableKeyKind) kind;
+		state->keys[key].kind = tess_key_kind_of_sort(kind);
 		state->keys[key].flags = (uint32) list_nth_int(flags, key);
 		if (state->key_places[key] < 0 || state->key_places[key] >= state->ncolumns)
 			elog(ERROR, "TessSend received a foreign plan");
