@@ -151,16 +151,16 @@ where
     fn blocks(&self, neon: Neon, index: usize) -> Option<(Side<'_, T>, Side<'_, T>, u64)> {
         Some(match self {
             Self::ColumnScalar(left, scalar) => {
-                let (lhs, present) = T::side(neon, left.word_block(index)?);
+                let (lhs, present) = T::side(neon.into(), left.word_block(index)?);
                 (lhs, Side::Scalar(*scalar), present)
             }
             Self::ScalarColumn(scalar, right) => {
-                let (rhs, present) = T::side(neon, right.word_block(index)?);
+                let (rhs, present) = T::side(neon.into(), right.word_block(index)?);
                 (Side::Scalar(*scalar), rhs, present)
             }
             Self::Columns(left, right) => {
-                let (lhs, left_present) = T::side(neon, left.word_block(index)?);
-                let (rhs, right_present) = T::side(neon, right.word_block(index)?);
+                let (lhs, left_present) = T::side(neon.into(), left.word_block(index)?);
+                let (rhs, right_present) = T::side(neon.into(), right.word_block(index)?);
                 (lhs, rhs, left_present & right_present)
             }
         })

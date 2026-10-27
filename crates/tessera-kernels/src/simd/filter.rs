@@ -1,55 +1,85 @@
 //! Whole-word comparisons of int4 values with a scalar, and of two
 //! columns, written once over the primitives of [`Vectors`].
 
-use super::{Neon, Vectors};
+use super::{Simd, Vectors};
 use crate::int32::{CompareOp, Side};
 
 /// Rows of a dense block whose value satisfies `value op scalar`, as bits in
 /// row order. NULL rows compare like any other and are masked by the caller.
 #[inline]
-pub fn filter_dense(neon: Neon, values: &[i32; 64], scalar: i32, op: CompareOp) -> u64 {
-    // SAFETY: the token proves that this processor runs NEON.
-    unsafe { dense(neon, values, scalar, op) }
+pub fn filter_dense(simd: Simd, values: &[i32; 64], scalar: i32, op: CompareOp) -> u64 {
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `dense` is compiled for.
+    unsafe { dense(simd, values, scalar, op) }
 }
 
 /// Rows of a Datum block whose int4 value satisfies `value op scalar` and
 /// whose flag is not NULL, as bits in row order.
 #[inline]
 pub fn filter_datum(
-    neon: Neon,
+    simd: Simd,
     values: &[u64; 64],
     isnull: &[bool; 64],
     scalar: i32,
     op: CompareOp,
 ) -> u64 {
     // SAFETY: as in filter_dense.
-    unsafe { datum(neon, values, isnull, scalar, op) }
+    unsafe { datum(simd, values, isnull, scalar, op) }
 }
 
 /// The lanes where `left op right` over two whole-word sides of columns:
 /// dense or Datum storage, the two in any combination.
 #[inline]
-pub fn compare_sides(neon: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
-    // SAFETY: the token proves that this processor runs NEON.
-    unsafe { sides(neon, left, right, op) }
+pub fn compare_sides(simd: Simd, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+    // SAFETY: as in filter_dense, for `sides`.
+    unsafe { sides(simd, left, right, op) }
 }
 
-// The functions compiled for NEON, into which the kernels below are
-// inlined.
+// The functions compiled for the vector set of the target, into which the
+// kernels below are inlined. Each is `unsafe` to call, whether or not the
+// target has a set: where none runs it carries no feature, and its token
+// has no values.
 
-#[target_feature(enable = "neon")]
-fn dense(neon: Neon, values: &[i32; 64], scalar: i32, op: CompareOp) -> u64 {
-    dense_word(neon, values, scalar, op)
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn dense(simd: Simd, values: &[i32; 64], scalar: i32, op: CompareOp) -> u64 {
+    dense_word(simd, values, scalar, op)
 }
 
-#[target_feature(enable = "neon")]
-fn datum(neon: Neon, values: &[u64; 64], isnull: &[bool; 64], scalar: i32, op: CompareOp) -> u64 {
-    datum_word(neon, values, isnull, scalar, op)
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn datum(
+    simd: Simd,
+    values: &[u64; 64],
+    isnull: &[bool; 64],
+    scalar: i32,
+    op: CompareOp,
+) -> u64 {
+    datum_word(simd, values, isnull, scalar, op)
 }
 
-#[target_feature(enable = "neon")]
-fn sides(neon: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
-    sides_word(neon, left, right, op)
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn sides(simd: Simd, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+    sides_word(simd, left, right, op)
 }
 
 #[inline(always)]

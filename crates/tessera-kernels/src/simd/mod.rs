@@ -1,17 +1,18 @@
 //! Vector kernels over the storage of full prepared words.
 //!
 //! The vector sets are named by tokens (`token.rs`), defined on every
-//! target. Only AArch64 NEON is implemented, and only where it can be
-//! measured: its kernels are compiled only there, not on other targets and
-//! under Miri, where callers fall back to the row paths. Instructions
+//! target. NEON runs on AArch64, and AVX2 on x86-64 where the processor
+//! has it, for the filter of int4 and the comparison of two int4 columns;
+//! the other kernels are NEON's alone, compiled only on AArch64. Under
+//! Miri no set runs, and callers fall back to the row paths. Instructions
 //! always drop with vectors, so a kernel here is kept on its cycle gain
 //! (see the benchmark guide). This is the one module of the crate allowed
 //! to use `unsafe`, for vector loads from borrowed arrays and for the
 //! intrinsics; every load states why it stays in bounds.
 //!
 //! A kernel is written once over the primitives of [`Vectors`], which each
-//! vector set implements (`neon.rs`); the kernels not yet moved call the
-//! NEON intrinsics themselves. Intrinsics are callable without `unsafe`
+//! vector set implements (`neon.rs`, `avx2.rs`); the kernels not yet moved
+//! call the NEON intrinsics themselves. Intrinsics are callable without `unsafe`
 //! only from functions carrying the `neon` feature; closures inherit it
 //! from the function that defines them, and a primitive, which carries no
 //! feature, calls them in an `unsafe` block whose reason is its token.
@@ -22,8 +23,10 @@
 
 mod token;
 
-pub(crate) use token::{Neon, Token};
+pub(crate) use token::{Avx2, Neon, Simd, Token};
 
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+mod avx2;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod neon;
 
@@ -44,8 +47,7 @@ mod neon;
 /// rows. A set gives each operation its own best sequence: the comparisons
 /// that are not its own are made of [`Vectors::eq`] and [`Vectors::gt`] by
 /// swapping the operands and inverting.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
-pub(crate) trait Vectors: Copy + 'static {
+pub(crate) trait Vectors: Token + 'static {
     /// The int4 lanes of one group.
     type I32: Copy;
     /// The lane masks of a comparison of int4 lanes: all ones where it
@@ -109,6 +111,55 @@ pub(crate) trait Vectors: Copy + 'static {
     fn non_null_bits(self, isnull: &[bool; 64]) -> u64;
 }
 
+/// The primitives of a set this target does not run: its token is an
+/// empty `enum`, so none of them can be called.
+macro_rules! unreachable_vectors {
+    ($set:ty) => {
+        impl Vectors for $set {
+            type I32 = Self;
+            type M32 = Self;
+            const LANES: usize = 1;
+
+            unsafe fn load(self, _: &[i32; 64], _: usize) -> Self {
+                match self {}
+            }
+
+            unsafe fn load_datums(self, _: &[u64; 64], _: usize) -> Self {
+                match self {}
+            }
+
+            fn splat(self, _: i32) -> Self {
+                match self {}
+            }
+
+            fn eq(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn gt(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn not(self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn pack(self, _: impl Fn(usize) -> Self) -> u64 {
+                match self {}
+            }
+
+            fn non_null_bits(self, _: &[bool; 64]) -> u64 {
+                match self {}
+            }
+        }
+    };
+}
+
+#[cfg(not(all(target_arch = "aarch64", not(miri))))]
+unreachable_vectors!(Neon);
+#[cfg(not(all(target_arch = "x86_64", not(miri))))]
+unreachable_vectors!(Avx2);
+
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
@@ -119,7 +170,6 @@ mod arith;
 mod arith64;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod cast;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod filter;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod filter64;
@@ -151,7 +201,6 @@ pub use arith::{add, div, mul, rem, sub};
 pub use arith64::{add64, sub64};
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use cast::{widen_datum, widen_dense};
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use filter::{compare_sides, filter_datum, filter_dense};
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use filter64::{compare_sides64, filter_datum64, filter_dense64};

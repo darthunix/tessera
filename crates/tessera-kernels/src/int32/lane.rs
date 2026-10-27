@@ -10,10 +10,11 @@ use tessera_core::WordBlock;
 use super::{CompareOp, Divisor, Side};
 use crate::int::{Evaluate, IntLane};
 use crate::ops::{ArithOp, ArithmeticError};
-use crate::simd::Neon;
+use crate::simd::{Neon, Simd, Vectors};
 
 impl IntLane for i32 {
     type Divisor = Divisor;
+    type Compares = Simd;
 
     const ZERO: i32 = 0;
     const ONE: i32 = 1;
@@ -25,48 +26,27 @@ impl IntLane for i32 {
         word as i32
     }
 
-    fn side(neon: Neon, block: WordBlock<'_, Self>) -> (Side<'_>, u64) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        return match block {
+    fn side(set: Self::Compares, block: WordBlock<'_, Self>) -> (Side<'_>, u64) {
+        match block {
             WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
-            WordBlock::Datum { values, isnull } => (
-                Side::Datum(values),
-                crate::simd::non_null_bits(neon, isnull),
-            ),
-        };
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = block;
-            match neon {}
+            WordBlock::Datum { values, isnull } => (Side::Datum(values), set.non_null_bits(isnull)),
         }
     }
 
     #[inline(always)]
-    fn compare_sides(neon: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        return crate::simd::compare_sides(neon, left, right, op);
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (left, right, op);
-            match neon {}
-        }
+    fn compare_sides(simd: Simd, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+        crate::simd::compare_sides(simd, left, right, op)
     }
 
     #[inline(always)]
-    fn filter_block(neon: Neon, block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        return match block {
+    fn filter_block(simd: Simd, block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
+        match block {
             WordBlock::Dense { values, non_nulls } => {
-                crate::simd::filter_dense(neon, values, scalar, op) & non_nulls
+                crate::simd::filter_dense(simd, values, scalar, op) & non_nulls
             }
             WordBlock::Datum { values, isnull } => {
-                crate::simd::filter_datum(neon, values, isnull, scalar, op)
+                crate::simd::filter_datum(simd, values, isnull, scalar, op)
             }
-        };
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (block, scalar, op);
-            match neon {}
         }
     }
 
