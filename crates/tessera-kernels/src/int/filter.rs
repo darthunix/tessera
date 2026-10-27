@@ -52,23 +52,41 @@ fn filter_with<T: IntLane, C: ColumnReader<Value = T>>(
             continue;
         }
         if !selected.is_power_of_two() {
-            let set = T::Compares::get();
-            let bulk = set.is_some()
-                && index < nrows / 64
-                && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
-                && column.word_block(index).is_some();
-            return if let Some(set) = set
-                && bulk
-            {
-                filter_bulk(set, column, rows, index, op, scalar, &compare)
-            } else {
-                filter_rows(column, rows, index, scalar, &compare)
-            };
+            return filter_words(column, rows, index, selected, op, scalar, &compare);
         }
         let passing = single_passing(column, index, selected, scalar, &compare)?;
         rows.intersect_word(index, passing)?;
     }
     Ok(())
+}
+
+/// Every word from `first`, the first with several selected rows, on:
+/// whole when that word allows it, at their selected rows otherwise. Out
+/// of line: inlined into the loop of the leading words, the decision, which
+/// reads more of the reader than that loop does, left the loop too few
+/// registers on x86-64.
+#[inline(never)]
+fn filter_words<T: IntLane, C: ColumnReader<Value = T>>(
+    column: &C,
+    rows: &mut RowMask<'_>,
+    first: usize,
+    selected: u64,
+    op: CompareOp,
+    scalar: T,
+    compare: &impl Fn(T, T) -> bool,
+) -> Result<()> {
+    let set = T::Compares::get();
+    let bulk = set.is_some()
+        && first < rows.as_view().nrows() / 64
+        && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
+        && column.word_block(first).is_some();
+    if let Some(set) = set
+        && bulk
+    {
+        filter_bulk(set, column, rows, first, op, scalar, compare)
+    } else {
+        filter_rows(column, rows, first, scalar, compare)
+    }
 }
 
 /// Every word from `first` on at its selected rows; the loop hoists the
@@ -105,8 +123,8 @@ fn filter_rows<T: IntLane, C: ColumnReader<Value = T>>(
 /// Every multi-row word from `first` on compared whole; the tail word and
 /// any word the reader refuses take the row path out of line. Once a call
 /// is here, a word of even a few rows is cheaper whole than through that
-/// call. Out of line so that the row loop, inlined into the entry with the
-/// leading words, keeps the shape it had before the whole-word path existed.
+/// call. Out of line so that the row loop, inlined into [`filter_words`],
+/// keeps the shape it had before the whole-word path existed.
 #[inline(never)]
 fn filter_bulk<T: IntLane, C: ColumnReader<Value = T>>(
     set: T::Compares,
