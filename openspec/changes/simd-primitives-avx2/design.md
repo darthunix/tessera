@@ -120,6 +120,13 @@ The kernels of int4 and int8 are built in three layers:
     x86-64.
   - The bar of acceptance of an AVX2 operation is set above the
     tool's warning, at the agent's choice: 10 %.
+- 2026-10-27, after the run on the Intel Mac:
+  - The bar stays 10 %. On Intel a FAIL of cycles counts when a second
+    run of its program confirms it.
+  - The run's check is three runs: all programs, the program of the
+    FAIL again, and `table_large` after its fixture was fixed.
+  - Until the first pull request reaches `main`, the counters take
+    the commit of task 2.4 as their base, not `main`.
 
 ## Decisions
 
@@ -352,6 +359,39 @@ If it reports a FAIL or an UNSTABLE, the work stops and the maintainer
 is asked, with the data. The limits are constants of `report.rs`, and
 limits that differ by machine are a trade-off that no rule settles.
 
+It did report both, and the maintainer decided on 2026-10-27:
+
+- `compare-Q3YQPC`, all 13 programs, took 17 minutes, past the five
+  of `docs/measuring.md`, as a full baseline does. It reported 1203
+  PASS, 1 FAIL of cycles, 2 UNSTABLE, 3 warnings of cycles, 552
+  operations with MODES, and no block that read zero. Over the 690
+  operations of 500 cycles or more, the minimum cycles of the two
+  sides moved by 0.10 % at the median, 0.79 % at the 90th percentile
+  and 8.7 % at the 99th: by more than 3 % on 22 operations, by more
+  than 10 % on 2, and by 19.6 % at most.
+- The FAIL, `count_rows` of `table_int32` on `all/nulls-random`,
+  came from two costs of the operation, about 7750 and 8550 cycles. A
+  process settles at one of them when it starts and keeps it on every
+  core it moves to. All three processes of the base settled at the
+  lower cost and all three of the candidate at the higher one, a
+  chance of 1 in 64 when both costs are as likely. The control run
+  `compare-5NAGGP`, the same binaries on `count_rows` alone, passed
+  with both costs on both sides, and its processes kept their costs
+  as they moved between cores. So neither the path of the binary nor
+  the core decides the cost.
+- The two UNSTABLE, `bloom_then_probe` of `table_large` on absent and
+  on occupied keys, came from the fixture. The Bloom filter passed a
+  different number of absent keys in each batch, so the blocks did
+  different work. The fixture now lays the batches out alike, in a
+  commit of its own, and `compare-eNZB6g` on `table_large` passed,
+  its blocks within 0.0003 % in instructions.
+
+Since that commit the benchmarks of this branch differ from those of
+`main`, and `tessera-bench` compares only sides with the same
+benchmarks. Until the first pull request reaches `main`, the counters
+take the commit of task 2.4 as their base. On x86-64 it takes the row
+path, as `main` does.
+
 ### Tests and CI
 
 - `TESSERA_REQUIRE_SIMD=1` makes a test fail when `Simd::get()` gives
@@ -413,13 +453,16 @@ The tools: `tessera-bench` on the counters of this Mac,
 aarch64-apple-darwin`.
 
 - **The run on the Intel Mac.** `--base WORKTREE`, all programs. It
-  passes with no FAIL and no UNSTABLE.
+  passes with no FAIL and no UNSTABLE. A FAIL of cycles is run again
+  on its program, and counts when the second run confirms it.
 - **A move of NEON code.** `--disasm --target aarch64-apple-darwin
   --base <the commit before>`, over all programs. It passes with exit
   0, or with `(registers only)` alone. Any other difference stops the
   work for the maintainer.
 - **The AVX2 code of a family.** `--base main --bench <program>` on
   the family's programs. On the base, x86-64 takes the row path.
+  Until the first pull request reaches `main`, the base is the commit
+  of task 2.4.
   - The unit of acceptance is an operation of the program over one
     storage, dense or Datum: `add_scalar` over dense columns, say.
   - The hypothesis: on 1024 rows, in the cases where words are taken
