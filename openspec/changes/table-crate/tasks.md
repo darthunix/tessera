@@ -389,7 +389,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       survivor a test, and list the equivalent ones with their reasons
       in `.cargo/mutants.toml`. Check: the mutants workflow on request,
       no survivor left
-- [ ] 6.8 Run a probe of each change of the contract's forecast on a
+- [x] 6.8 Run a probe of each change of the contract's forecast on a
       branch that is never merged, count the parts and interfaces it
       touched, and write the counts into the design; a probe that
       touches more than forecast is a deviation, handled as
