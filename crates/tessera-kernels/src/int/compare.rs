@@ -48,10 +48,22 @@ where
     L: ColumnReader<Value = T>,
     R: ColumnReader<Value = T>,
 {
-    if let Some(done) = whole(left, right, rows, op, &compare) {
-        return done;
-    }
     let nrows = rows.as_view().nrows();
+    let set = T::Compares::get();
+    // Whether both readers expose the first word; its non-NULL rows are the
+    // loop's to find.
+    let whole_words = set.is_some() && nrows >= 64 && {
+        let selected = rows.as_view().word(0);
+        (selected == u64::MAX
+            || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+            && left.word_block(0).is_some()
+            && right.word_block(0).is_some()
+    };
+    if let Some(set) = set
+        && whole_words
+    {
+        return bulk(set, left, right, rows, op, &compare);
+    }
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.as_view().word(index);
         if selected != 0 {
@@ -84,43 +96,6 @@ where
         let passes = matches!((a, b), (Some(a), Some(b)) if compare(a, b));
         passing | (u64::from(passes) << (row % 64))
     }))
-}
-
-/// The call over whole words when the first word allows it, or `None` for
-/// the row loop. Out of line: inlined into the row loop's function, the
-/// decision, which reads more of the readers than that loop does, left the
-/// loop too few registers on x86-64.
-#[inline(never)]
-fn whole<T, L, R>(
-    left: &L,
-    right: &R,
-    rows: &mut RowMask<'_>,
-    op: CompareOp,
-    compare: &impl Fn(T, T) -> bool,
-) -> Option<Result<()>>
-where
-    T: IntLane,
-    L: ColumnReader<Value = T>,
-    R: ColumnReader<Value = T>,
-{
-    let nrows = rows.as_view().nrows();
-    let set = T::Compares::get();
-    // Whether both readers expose the first word; its non-NULL rows are the
-    // loop's to find.
-    let whole_words = set.is_some() && nrows >= 64 && {
-        let selected = rows.as_view().word(0);
-        (selected == u64::MAX
-            || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-            && left.word_block(0).is_some()
-            && right.word_block(0).is_some()
-    };
-    if let Some(set) = set
-        && whole_words
-    {
-        Some(bulk(set, left, right, rows, op, compare))
-    } else {
-        None
-    }
 }
 
 /// Whole words where both columns expose them, rows elsewhere.
