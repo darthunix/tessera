@@ -11,10 +11,11 @@ use super::fold;
 use super::{CompareOp, Divisor, Side};
 use crate::int::{Evaluate, IntLane};
 use crate::ops::{ArithOp, ArithmeticError};
-use crate::simd::Neon;
+use crate::simd::{Neon, Vectors};
 
 impl IntLane for i64 {
     type Divisor = Divisor;
+    type Compares = Neon;
 
     const ZERO: i64 = 0;
     const ONE: i64 = 1;
@@ -26,19 +27,10 @@ impl IntLane for i64 {
         word as i64
     }
 
-    fn side(neon: Neon, block: WordBlock<'_, Self>) -> (Side<'_>, u64) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        return match block {
+    fn side(set: Self::Compares, block: WordBlock<'_, Self>) -> (Side<'_>, u64) {
+        match block {
             WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
-            WordBlock::Datum { values, isnull } => (
-                Side::Datum(values),
-                crate::simd::non_null_bits(neon, isnull),
-            ),
-        };
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = block;
-            match neon {}
+            WordBlock::Datum { values, isnull } => (Side::Datum(values), set.non_null_bits(isnull)),
         }
     }
 

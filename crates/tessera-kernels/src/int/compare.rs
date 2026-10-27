@@ -6,7 +6,7 @@ use tessera_core::{ColumnReader, RowMask};
 use super::{IntLane, Side};
 use crate::BULK_MIN_ROWS;
 use crate::ops::CompareOp;
-use crate::simd::{Neon, Token};
+use crate::simd::Token;
 
 /// The driver of [`crate::int32::compare_columns`] and
 /// [`crate::int64::compare_columns`].
@@ -49,21 +49,21 @@ where
     R: ColumnReader<Value = T>,
 {
     let nrows = rows.as_view().nrows();
-    let neon = Neon::get();
+    let set = T::Compares::get();
     let whole_words = nrows >= 64
-        && match neon {
-            Some(neon) => {
+        && match set {
+            Some(set) => {
                 let selected = rows.as_view().word(0);
                 (selected == u64::MAX
                     || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                    && blocks(neon, left, right, 0).is_some()
+                    && blocks(set, left, right, 0).is_some()
             }
             None => false,
         };
-    if let Some(neon) = neon
+    if let Some(set) = set
         && whole_words
     {
-        return bulk(neon, left, right, rows, op, &compare);
+        return bulk(set, left, right, rows, op, &compare);
     }
     for index in 0..nrows.div_ceil(64) {
         let selected = rows.as_view().word(index);
@@ -102,7 +102,7 @@ where
 /// Whole words where both columns expose them, rows elsewhere.
 #[inline(never)]
 fn bulk<T, L, R>(
-    neon: Neon,
+    set: T::Compares,
     left: &L,
     right: &R,
     rows: &mut RowMask<'_>,
@@ -119,9 +119,9 @@ where
         if selected == 0 {
             continue;
         }
-        let passing = match blocks(neon, left, right, index) {
+        let passing = match blocks(set, left, right, index) {
             Some((lhs, rhs, present)) if !selected.is_power_of_two() => {
-                T::compare_sides(neon, lhs, rhs, op) & present
+                T::compare_sides(set, lhs, rhs, op) & present
             }
             _ => word(left, right, index, selected, compare)?,
         };
@@ -132,7 +132,7 @@ where
 
 /// The storage of a whole word of both columns with their non-NULL rows.
 fn blocks<'a, T, L, R>(
-    neon: Neon,
+    set: T::Compares,
     left: &'a L,
     right: &'a R,
     index: usize,
@@ -142,7 +142,7 @@ where
     L: ColumnReader<Value = T>,
     R: ColumnReader<Value = T>,
 {
-    let (lhs, left_present) = T::side(neon, left.word_block(index)?);
-    let (rhs, right_present) = T::side(neon, right.word_block(index)?);
+    let (lhs, left_present) = T::side(set, left.word_block(index)?);
+    let (rhs, right_present) = T::side(set, right.word_block(index)?);
     Some((lhs, rhs, left_present & right_present))
 }

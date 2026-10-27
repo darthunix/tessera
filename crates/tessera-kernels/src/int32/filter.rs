@@ -10,10 +10,11 @@ use super::CompareOp;
 /// Row indices remain physical; removed rows are never restored. Only nonempty
 /// words are read. When the first word with several selected rows is full,
 /// selects at least a dozen rows and the reader exposes its storage, every
-/// multi-row word of the call is compared whole (vector code on AArch64) and
-/// only the tail word or a word the reader refuses is read at its selected
-/// rows; otherwise every word is. Column values and their masks are borrowed without
-/// copying or mutation; `rows` is borrowed exclusively. There are no
+/// multi-row word of the call is compared whole (NEON on AArch64, AVX2 on
+/// x86-64 where the processor has it) and only the tail word or a word the
+/// reader refuses is read at its selected rows; otherwise every word is.
+/// Column values and their masks are borrowed without copying or mutation;
+/// `rows` is borrowed exclusively. There are no
 /// allocations on success and no alignment requirements beyond those of the
 /// supplied reader and row mask. The operation is chosen once per call.
 ///
