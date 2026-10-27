@@ -112,6 +112,9 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `pmu-on-x86-linux`: The counters on x86-64 Linux and on two kinds of
   cores, on hardware
 - `pmu-on-crates-io`: The crate `pmu` published on crates.io
+- `relhash-one-chunk-walk`: One check of the places of a chunk for every
+  walk of relhash
+- `table-key-kind-owner`: One owner of a key's kind in Tessera's nodes
 
 ## Entries
 
@@ -623,9 +626,11 @@ reach the table through a stand-in.
   `interval` cannot be a word key: '1 month' and '30 days' are equal
   with different bits. A join of two different types other than
   integers stays the core's.
-- **Depends on:** nothing. A new kind of key changes the table's
-  format and its C API, so the work is an OpenSpec change of
-  `hash-table`, and of the join and the grouping.
+- **Depends on:** `table-key-kind-owner`, which a probe of relhash's
+  forecast showed: a new kind reaches 12 files and 5 headers of the
+  nodes. A new kind of key changes the table's format and its C API, so
+  the work is an OpenSpec change of `hash-table`, and of the join and
+  the grouping.
 - **Capabilities:** hash-table, join-hash, aggregate, type-support
 - **Size:** several pull requests: the word kinds first, then keys of
   16 bytes, then strings.
@@ -1546,3 +1551,50 @@ fact.
   core does: a rare path no test reaches, or a move of the RIGHT and
   FULL joins' tail, for help a worker of a parallel append mostly gives
   to the next child anyway (pull request 52).
+
+### relhash-one-chunk-walk
+
+One check of the places of a chunk for every walk of relhash. A
+deviation from the forecast of relhash's contract, found by its probe of
+removing records, 2026-10-27.
+
+- **What:** The walks over a chunk's records each check a record
+  themselves: the filter's fill, a chunk writer's split, a link, a
+  grouped link and a regrow, the clearing of a key, the scan and the
+  merge; the walk over unmarked records of a join reads none. A change
+  of what a place of a chunk may hold, such as the free place a removal
+  leaves, has to reach every one of them. Give the places of a chunk one
+  check that every walk takes, so that such a change touches it alone.
+- **Why:** The forecast of the contract said that removing records
+  touches the calls of one writer and the chunks alone; the probe
+  touched six modules of the crate and the walks of other calls, the
+  boundary between the calls of one writer and the crate's other calls.
+- **Known:** The links and the probe compile their walks for speed, and
+  the scan of a chunk keeps the loop the counters accepted: one check
+  must keep their machine code, measured as a refactor is.
+- **Depends on:** nothing.
+- **Capabilities:** relhash
+- **Size:** one pull request, measured by `tessera-bench --disasm`.
+
+### table-key-kind-owner
+
+One owner of a key's kind in Tessera's nodes. A deviation from the
+forecast of relhash's contract, found by its probe of keys of more
+kinds, 2026-10-27.
+
+- **What:** The nodes read a key's kind in 47 places of 12 files and 5
+  headers: both planners choose it, and the hashing, the runtime
+  filter, the partition pruning, the key dictionary, the grouping and
+  the spill of the aggregation and the join each take a key by its kind
+  as an integer. Give the kind one owner, so that a new kind is added in
+  one place of the nodes besides the C API's keys.
+- **Why:** The forecast of the contract said that keys of more kinds
+  touch one interface on each side and no node; the probe touched none
+  of the crate, one interface of the C API, and would reach the nodes
+  through every one of these places, the boundary between the C API's
+  keys and the nodes.
+- **Known:** The crate keeps keys as slots of 64 bits: a key of 16
+  bytes is two slots to it, and needs no change of the crate.
+- **Depends on:** nothing.
+- **Capabilities:** hash-table, join-hash, aggregate
+- **Size:** one or two pull requests of C in the nodes.

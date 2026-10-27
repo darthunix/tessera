@@ -1088,6 +1088,31 @@ it, and when a module of the list holds none. The paths are under
   model region, whose methods assert their safety sections, and a
   chunk of the proof's own memory given to `Chunks::new`.
 
+## The forecast, probed
+
+The contract of `relhash` names the changes the crate is likely to see
+and what each would touch. A probe makes such a change on a branch that
+is never merged and counts the parts and the interfaces it touched.
+
+- **A prefetch hint for x86-64.** One module of the crate, the vertical
+  probe's; no interface; no code of Tessera. As the forecast says.
+- **Keys of more kinds**, a text of at most 16 bytes kept whole. No
+  module of the crate, which keeps keys as slots of 64 bits: a key of
+  two slots is two keys to it. One interface of Tessera, the kinds of
+  the C API's keys, and the C API's source of keys. The nodes read a
+  key's kind in 47 places of 12 files and 5 headers, among them both
+  planners and the hashing, filters, pruning and spill of the
+  aggregation and the join, which a new kind would reach. Past the
+  forecast, which names no node.
+- **Removing records**, a record taken out of its chain and its place
+  freed. Six modules of the crate: the record, the calls of one writer
+  and the API, where the removal lies, and the walks of a batch's
+  split, of the filter's fill and of the marks, which each check the
+  places of a chunk themselves. Three interfaces: the crate's API, the
+  format of a record, whose size field gains a flag, and the C API. No
+  node, as none removes yet. Past the forecast, which names the calls of
+  one writer and the chunks alone.
+
 ## What we decided not to do
 
 - **One block that grows.** The first form of the table kept the header,
