@@ -1,7 +1,8 @@
 # Mutation testing of the Rust crates (plans 9.9 and 9.21,
 # .cargo/mutants.toml). A pull request that changes the crates gets the
 # mutants of its changed lines in six shards; a run by hand
-# (workflow_dispatch) takes every mutant in eight. A missed mutant fails
+# (workflow_dispatch) takes every mutant in eight, or those of one
+# package, judged by its own tests alone. A missed mutant fails
 # the job: a change the tests do not notice. A timeout or a mutant that
 # does not build does not. The runners are arm64 Linux: the NEON kernels
 # compile on any aarch64, a runner has four cores and 16 GB to macOS's
@@ -14,6 +15,10 @@ on:
       - "crates/**"
       - ".cargo/mutants.toml"
   workflow_dispatch:
+    inputs:
+      package:
+        description: The package whose mutants run, judged by its own tests; every package when empty
+        default: ""
 
 concurrency:
   group: mutants-${{ github.ref }}
@@ -50,14 +55,20 @@ jobs:
           wc -l target/pr.diff
       - name: Mutants in the changed lines
         # cargo-mutants copies the tree for each of its jobs and builds
-        # there: in memory, half a gigabyte of the runner's sixteen.
+        # there: in memory, half a gigabyte of the runner's sixteen. Each
+        # test program may take 4 GB of address space: a mutant that makes
+        # a test take memory without end fails the test, and so is caught,
+        # rather than the runner.
         env:
           TMPDIR: /dev/shm
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
         run: |
-          # 2: a mutant was missed; 3: only timeouts; 0: none missed.
+          # 3, a timeout, outranks 2, a missed mutant, in cargo-mutants'
+          # code: the list of the missed decides.
           code=0
           cargo mutants --in-diff target/pr.diff --shard ${{ matrix.shard }}/6 --no-shuffle --jobs 2 || code=$?
           test "$code" -eq 0 || test "$code" -eq 3
+          test ! -s mutants.out/missed.txt
       - name: The mutants' outcomes
         if: always()
         uses: actions/upload-artifact@v4
@@ -88,12 +99,23 @@ jobs:
         with:
           tool: cargo-mutants
       - name: Every mutant of the shard
+        # As for the changed lines: in memory, each test program within 4
+        # GB, the list of the missed deciding. A crate meant for use
+        # outside Tessera, such as relhash, is judged by its own tests: they
+        # are all a caller of it has.
         env:
           TMPDIR: /dev/shm
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
+          PACKAGE: ${{ inputs.package }}
         run: |
+          package=()
+          if [ -n "$PACKAGE" ]; then
+            package=(--package "$PACKAGE" --test-package "$PACKAGE")
+          fi
           code=0
-          cargo mutants --shard ${{ matrix.shard }}/8 --no-shuffle --jobs 2 || code=$?
+          cargo mutants "${package[@]}" --shard ${{ matrix.shard }}/8 --no-shuffle --jobs 2 || code=$?
           test "$code" -eq 0 || test "$code" -eq 3
+          test ! -s mutants.out/missed.txt
       - name: The mutants' outcomes
         if: always()
         uses: actions/upload-artifact@v4
