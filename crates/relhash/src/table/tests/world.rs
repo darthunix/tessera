@@ -1,6 +1,7 @@
 //! The world of the table's matrices: valid tables of four shapes in
 //! blocks with guard words around them, built from a case of proptest,
-//! and every call of the crate over them.
+//! and every call of the crate over them, each run so that it may take
+//! no memory and noting its answers.
 
 use proptest::prelude::*;
 
@@ -67,13 +68,6 @@ impl Guarded {
         assert!(byte + size_of::<T>() <= self.len, "a write past the block");
         // SAFETY: inside the block, just checked.
         unsafe { self.base().add(byte).cast::<T>().write_unaligned(value) }
-    }
-
-    /// The block's words, for a call that takes them as a slice.
-    pub(super) fn words(&mut self) -> &mut [u64] {
-        // SAFETY: the block's words, borrowed as `self` is, and reached
-        // only through the slice while it lives.
-        unsafe { core::slice::from_raw_parts_mut(self.base().cast(), self.len / 8) }
     }
 
     /// Whether the words around the block are as they were made.
@@ -165,6 +159,8 @@ pub(super) struct World {
     pub(super) filter: Guarded,
     pub(super) shared: Guarded,
     pub(super) marks: Vec<Guarded>,
+    /// What the calls answered, in turn: references, counts, rows.
+    pub(super) answers: Vec<u64>,
 }
 
 /// The spare chunks after the table's: the one its appends link, the
@@ -259,6 +255,7 @@ impl World {
             filter: Guarded::new(8),
             shared: Guarded::new(8),
             marks: Vec::new(),
+            answers: Vec::new(),
         };
         world.fill(case.shape);
         world.refs = world.scan_refs();
@@ -439,6 +436,19 @@ impl World {
             && self.marks.iter().all(Guarded::guarded)
     }
 
+    /// The bytes of every block: the index, the chunks, the filters and
+    /// the marks.
+    pub(super) fn bytes(&self) -> Vec<u8> {
+        [&self.index, &self.filter, &self.shared]
+            .into_iter()
+            .chain(&self.blocks)
+            .chain(&self.marks)
+            // SAFETY: the block's bytes, which nothing writes meanwhile.
+            .flat_map(|block| unsafe { core::slice::from_raw_parts(block.base(), block.len) })
+            .copied()
+            .collect()
+    }
+
     /// Call `call` with the rows' column of payload.
     pub(super) fn with_columns<T>(&self, call: impl FnOnce(&PayloadColumns<'_>) -> T) -> T {
         let (values, nulls) = ([self.values.as_slice()], [self.nulls.as_slice()]);
@@ -470,58 +480,103 @@ pub(super) fn drain(mut step: impl FnMut() -> Result<usize, Error>) -> Result<()
     panic!("a loop over a call without end");
 }
 
+/// Run `calls`, calls of the crate alone, and check that they take no
+/// memory, as the promise "No memory taken" says, also when they fail.
+pub(super) fn quiet<T>(calls: impl FnOnce() -> T) -> T {
+    let before = allocations();
+    let out = calls();
+    assert_eq!(allocations(), before, "a call of the crate took memory");
+    out
+}
+
+/// An allocation under [`quiet`] fails the test.
+#[test]
+#[should_panic(expected = "took memory")]
+fn an_allocation_of_a_call_is_seen() {
+    quiet(|| std::hint::black_box(vec![0_u8; 8]));
+}
+
 /// Probe the rows of `rows`, then step each to its further matches with
-/// `next`.
+/// `next`; the answers are the rows left and the references after each.
 pub(super) fn probe(
-    world: &World,
+    world: &mut World,
     rows: impl Fn(usize) -> bool,
     next: fn(&Table<'_>, &mut Matches<'_>) -> Result<usize, Error>,
 ) -> Result<(), Error> {
     let nrows = world.nrows();
-    let table = world.table()?;
     let mut found = words(&(0..nrows).map(rows).collect::<Vec<_>>());
     let mut refs = vec![0; nrows];
-    let mut matches = Matches::new(&mut found, &mut refs)?;
-    if table.probe(&world.hashes, &world.keys(), &mut matches)? == 0 {
-        return Ok(());
-    }
-    drain(|| next(&table, &mut matches))
+    let mut answers = Vec::new();
+    let result = (|| {
+        let table = quiet(|| world.table())?;
+        let mut matches = Matches::new(&mut found, &mut refs)?;
+        let mut left = quiet(|| table.probe(&world.hashes, &world.keys(), &mut matches))?;
+        for _ in 0..MOST_STEPS {
+            answers.push(left as u64);
+            answers.extend(matches.refs().iter().map(|&reference| u64::from(reference)));
+            if left == 0 {
+                return Ok(());
+            }
+            left = quiet(|| next(&table, &mut matches))?;
+        }
+        panic!("a loop over a call without end");
+    })();
+    world.answers.extend(answers);
+    result
 }
 
 /// Append every row to the chunk the calls link, from where its records
-/// end, and link them with `link`.
+/// end, and link them with `link`; the answers are the references of the
+/// rows and the records linked.
 pub(super) fn append_and_link(
-    world: &World,
+    world: &mut World,
     columns: bool,
     link: fn(&mut TableMut<'_>, usize, &mut usize) -> Result<usize, Error>,
 ) -> Result<(), Error> {
     let chunk = world.spare(WORK);
-    let mut table = world.table_mut()?;
-    // SAFETY: the chunk's block, which the table only reads meanwhile.
-    let mut from =
-        unsafe { Chunks::used(world.bases[chunk], world.lens[chunk], world.record_size) }?;
     let (mut pending, mut refs) = (all_rows(world.nrows()), vec![0; world.nrows()]);
-    let keys = world.keys();
-    let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
-    if columns {
-        world.with_columns(|columns| table.append_columns(chunk, columns, &mut batch))?;
-    } else {
-        table.append(chunk, Some(&world.payload), &mut batch)?;
-    }
-    link(&mut table, chunk, &mut from).map(drop)
+    let result = (|| {
+        let mut table = quiet(|| world.table_mut())?;
+        // SAFETY: the chunk's block, which the table only reads meanwhile.
+        let mut from = quiet(|| unsafe {
+            Chunks::used(world.bases[chunk], world.lens[chunk], world.record_size)
+        })?;
+        let keys = world.keys();
+        let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
+        if columns {
+            world.with_columns(|columns| {
+                quiet(|| table.append_columns(chunk, columns, &mut batch))
+            })?;
+        } else {
+            quiet(|| table.append(chunk, Some(&world.payload), &mut batch))?;
+        }
+        quiet(|| link(&mut table, chunk, &mut from))
+    })();
+    world
+        .answers
+        .extend(refs.iter().map(|&reference| u64::from(reference)));
+    world
+        .answers
+        .push(result.map_or(u64::MAX, |linked| linked as u64));
+    result.map(drop)
 }
 
 /// A call of the crate over a world, by its name.
 pub(super) type Call = (&'static str, fn(&mut World) -> Result<(), Error>);
 
-/// Every call of the crate that reads a table's blocks.
+/// Every call of the crate that reads a table's blocks. Each runs the
+/// crate's calls under [`quiet`], and notes their answers in the world.
 pub(super) const CALLS: &[Call] = &[
     ("attach", |world| {
-        let table = world.table()?;
-        let _ = table.stats();
-        table.check_config(&world.config)
+        let table = quiet(|| world.table())?;
+        let stats = quiet(|| table.stats());
+        let checked = quiet(|| table.check_config(&world.config));
+        world
+            .answers
+            .extend([stats.records, stats.buckets, stats.bytes_used]);
+        checked
     }),
-    ("attach_mut", |world| world.table_mut().map(drop)),
+    ("attach_mut", |world| quiet(|| world.table_mut().map(drop))),
     ("probe by words", |world| {
         probe(world, |_| true, |table, matches| table.next_match(matches))
     }),
@@ -541,116 +596,188 @@ pub(super) const CALLS: &[Call] = &[
         )
     }),
     ("record", |world| {
-        let table = world.table()?;
-        let mut records = table.records();
-        for &reference in &world.refs {
-            table.record(reference)?;
-            records.record(reference)?;
-        }
-        Ok(())
-    }),
-    ("scan", |world| {
-        let table = world.table_mut()?;
-        let (mut cursor, mut out) = (Cursor::start(), [0; 7]);
-        drain(|| table.scan(&mut cursor, &mut out))
-    }),
-    ("scan unmarked", |world| {
-        let table = world.table()?;
-        let marks = MarkBlocks(&world.marks);
-        let (mut cursor, mut out) = (Cursor::start(), [0; 7]);
-        drain(|| table.scan_unmarked(&mut cursor, Some(&marks), &mut out))?;
-        let (mut cursor, chunks) = (Cursor::start(), world.chunks());
-        drain(|| {
-            scan_unmarked(
-                &chunks,
-                world.record_size,
-                &mut cursor,
-                Some(&marks),
-                &mut out,
-            )
-        })
-    }),
-    ("mark", |world| {
-        let table = world.table()?;
-        let rows = all_rows(world.refs.len());
-        let rows = RowMaskView::try_new(world.refs.len(), &rows)?;
-        let marks = MarkBlocks(&world.marks);
-        table.mark(&world.refs, &rows, &marks)?;
-        mark(&world.lens, world.record_size, &world.refs, &rows, &marks)
-    }),
-    ("used marks", |world| {
-        world.chunks().check_all()?;
-        for (&base, &len) in world.bases.iter().zip(&world.lens) {
-            // SAFETY: a chunk's block, which nothing writes meanwhile.
-            unsafe { Chunks::used(base, len, world.record_size) }?;
-        }
-        Ok(())
-    }),
-    ("bloom", |world| {
-        let mut filter = core::mem::replace(&mut world.filter, Guarded::new(8));
+        let mut answers = Vec::new();
         let result = (|| {
-            world.table()?.bloom(filter.words())?;
-            let mut rows = all_rows(world.nrows());
-            let mut rows = RowMask::try_new(world.nrows(), &mut rows)?;
-            bloom::probe(filter.words(), &world.hashes, &mut rows).map(drop)
+            let table = quiet(|| world.table())?;
+            let mut records = quiet(|| table.records());
+            for &reference in &world.refs {
+                let record = quiet(|| table.record(reference))?;
+                answers.push(u64::from(record.hash));
+                quiet(|| records.record(reference))?;
+            }
+            Ok(())
         })();
-        world.filter = filter;
+        world.answers.extend(answers);
         result
     }),
-    ("shared bloom", |world| {
-        let nwords = world.shared.len / 8;
-        // SAFETY: the block's words, reached only through this filter.
-        let filter = unsafe { bloom::SharedFilter::attach(world.shared.base().cast(), nwords) }?;
-        filter.init();
-        world.table()?.try_build_bloom(&filter)?;
+    ("scan", |world| {
+        let (mut cursor, mut out, mut answers) = (Cursor::start(), [0; 7], Vec::new());
+        let result = (|| {
+            let table = quiet(|| world.table_mut())?;
+            drain(|| {
+                let count = quiet(|| table.scan(&mut cursor, &mut out))?;
+                answers.extend(out[..count].iter().map(|&reference| u64::from(reference)));
+                Ok(count)
+            })
+        })();
+        world.answers.extend(answers);
+        result
+    }),
+    ("scan unmarked", |world| {
+        let (mut out, mut answers) = ([0; 7], Vec::new());
+        let result = (|| {
+            let table = quiet(|| world.table())?;
+            let marks = MarkBlocks(&world.marks);
+            let mut cursor = Cursor::start();
+            drain(|| {
+                let count = quiet(|| table.scan_unmarked(&mut cursor, Some(&marks), &mut out))?;
+                answers.extend(out[..count].iter().map(|&reference| u64::from(reference)));
+                Ok(count)
+            })?;
+            let (mut cursor, chunks) = (Cursor::start(), quiet(|| world.chunks()));
+            drain(|| {
+                quiet(|| {
+                    scan_unmarked(
+                        &chunks,
+                        world.record_size,
+                        &mut cursor,
+                        Some(&marks),
+                        &mut out,
+                    )
+                })
+            })
+        })();
+        world.answers.extend(answers);
+        result
+    }),
+    ("mark", |world| {
+        let rows = all_rows(world.refs.len());
+        let table = quiet(|| world.table())?;
+        let rows = RowMaskView::try_new(world.refs.len(), &rows)?;
+        let marks = MarkBlocks(&world.marks);
+        quiet(|| table.mark(&world.refs, &rows, &marks))?;
+        quiet(|| mark(&world.lens, world.record_size, &world.refs, &rows, &marks))
+    }),
+    ("used marks", |world| {
+        let mut answers = Vec::new();
+        let result = (|| {
+            quiet(|| world.chunks().check_all())?;
+            for (&base, &len) in world.bases.iter().zip(&world.lens) {
+                // SAFETY: a chunk's block, which nothing writes meanwhile.
+                answers
+                    .push(quiet(|| unsafe { Chunks::used(base, len, world.record_size) })? as u64);
+            }
+            Ok(())
+        })();
+        world.answers.extend(answers);
+        result
+    }),
+    ("bloom", |world| {
         let mut rows = all_rows(world.nrows());
-        let mut rows = RowMask::try_new(world.nrows(), &mut rows)?;
-        bloom::probe_shared(&filter, &world.hashes, &mut rows).map(drop)
+        // SAFETY: the filter's words, reached only through this slice
+        // while it lives.
+        let filter = unsafe {
+            core::slice::from_raw_parts_mut(world.filter.base().cast::<u64>(), world.filter.len / 8)
+        };
+        let result = (|| {
+            quiet(|| world.table()?.bloom(filter))?;
+            let mut rows = RowMask::try_new(world.nrows(), &mut rows)?;
+            quiet(|| bloom::probe(filter, &world.hashes, &mut rows))
+        })();
+        world.answers.extend(rows);
+        result.map(drop)
+    }),
+    ("shared bloom", |world| {
+        let mut rows = all_rows(world.nrows());
+        let result = (|| {
+            let nwords = world.shared.len / 8;
+            // SAFETY: the block's words, reached only through this filter.
+            let filter = quiet(|| unsafe {
+                bloom::SharedFilter::attach(world.shared.base().cast(), nwords)
+            })?;
+            quiet(|| filter.init());
+            quiet(|| world.table()?.try_build_bloom(&filter))?;
+            let mut rows = RowMask::try_new(world.nrows(), &mut rows)?;
+            quiet(|| bloom::probe_shared(&filter, &world.hashes, &mut rows))
+        })();
+        world.answers.extend(rows);
+        result.map(drop)
     }),
     ("payloads", |world| {
-        let mut table = world.table_mut()?;
-        let mut cursor = table.payloads();
-        for &reference in &world.refs {
-            cursor.payload(reference)?;
-            cursor.hold(0, reference)?;
-            cursor.held(0)?;
-        }
-        for &reference in &world.refs {
-            table.payload_mut(reference)?;
-        }
         let rows = all_rows(world.refs.len());
-        let rows = RowMaskView::try_new(world.refs.len(), &rows)?;
         let mut out = vec![core::ptr::null_mut(); world.refs.len()];
-        table.payload_ptrs(&world.refs, &rows, &mut out)
+        let mut table = quiet(|| world.table_mut())?;
+        let mut cursor = quiet(|| table.payloads());
+        for &reference in &world.refs {
+            quiet(|| cursor.payload(reference).map(drop))?;
+            quiet(|| cursor.hold(0, reference))?;
+            quiet(|| cursor.held(0).map(drop))?;
+        }
+        for &reference in &world.refs {
+            quiet(|| table.payload_mut(reference).map(drop))?;
+        }
+        let rows = RowMaskView::try_new(world.refs.len(), &rows)?;
+        quiet(|| table.payload_ptrs(&world.refs, &rows, &mut out))
     }),
-    ("find or insert", |world| {
+    ("gather", |world| {
         let nrows = world.nrows();
-        let mut table = world.table_mut()?;
-        let (mut pending, mut refs) = (all_rows(nrows), vec![0; nrows]);
-        let keys = world.keys();
-        let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
-        let mut inserted = vec![0; nrows.div_ceil(64)];
-        let mut inserted = RowMask::try_new(nrows, &mut inserted)?;
-        table
-            .find_or_insert(world.spare(WORK), &mut batch, &mut inserted)
-            .map(drop)
+        let (mut rows, mut refs) = (all_rows(nrows), vec![0; nrows]);
+        let (mut one, mut two, mut three) = (vec![0; nrows], vec![0; nrows], vec![0; nrows]);
+        let (mut values, mut nulls) = (vec![0; nrows], vec![false; nrows]);
+        let result = (|| {
+            let table = quiet(|| world.table())?;
+            let mut matches = Matches::new(&mut rows, &mut refs)?;
+            quiet(|| table.probe(&world.hashes, &world.keys(), &mut matches))?;
+            quiet(|| table.gather(&matches, 8, &mut one))?;
+            quiet(|| table.gather_scattered(&matches, 8, &mut two))?;
+            quiet(|| table.gather_key(&matches, 0, &mut values, &mut nulls))?;
+            quiet(|| table.gather_words(&matches, 0, &mut [&mut three[..]]))
+        })();
+        world
+            .answers
+            .extend(one.into_iter().chain(two).chain(three).chain(values));
+        world.answers.extend(nulls.into_iter().map(u64::from));
+        result
     }),
+    ("each payload", |world| {
+        let rows = all_rows(world.refs.len());
+        let mut table = quiet(|| world.table_mut())?;
+        let rows = RowMaskView::try_new(world.refs.len(), &rows)?;
+        quiet(|| {
+            table.each_payload(&world.refs, &rows, |row, payload| {
+                payload[..8].copy_from_slice(&(row as u64).to_ne_bytes());
+            })
+        })
+    }),
+    ("append and link through a shared handle", |world| {
+        let chunk = world.spare(WORK);
+        let (mut pending, mut refs) = (all_rows(world.nrows()), vec![0; world.nrows()]);
+        let result = (|| {
+            let table = quiet(|| world.table())?;
+            // SAFETY: the chunk's block, which the table only reads meanwhile.
+            let mut from = quiet(|| unsafe {
+                Chunks::used(world.bases[chunk], world.lens[chunk], world.record_size)
+            })?;
+            let keys = world.keys();
+            let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
+            // SAFETY: this handle is the chunk's one writer and linker, and
+            // no record of it is borrowed.
+            quiet(|| unsafe { table.append(chunk, Some(&world.payload), &mut batch) })?;
+            world.with_columns(|columns| {
+                // SAFETY: as above.
+                quiet(|| unsafe { table.append_columns(chunk, columns, &mut batch) })
+            })?;
+            // SAFETY: as above.
+            quiet(|| unsafe { table.link_counting(chunk, &mut from) })
+        })();
+        world
+            .answers
+            .extend(refs.iter().map(|&reference| u64::from(reference)));
+        result.map(drop)
+    }),
+    ("find or insert", |world| find_or_insert(world, false)),
     ("find or insert by partition", |world| {
-        let nrows = world.nrows();
-        let mut table = world.table_mut()?;
-        let (mut pending, mut refs) = (all_rows(nrows), vec![0; nrows]);
-        let keys = world.keys();
-        let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
-        let mut inserted = vec![0; nrows.div_ceil(64)];
-        let mut inserted = RowMask::try_new(nrows, &mut inserted)?;
-        let chunks = PARTS.map(|part| world.spare(part) as u32);
-        let partitions = Partitions {
-            shift: SHIFT,
-            chunks: &chunks,
-        };
-        table
-            .find_or_insert_partitioned(&partitions, &mut batch, &mut inserted)
-            .map(drop)
+        find_or_insert(world, true)
     }),
     ("append and link", |world| {
         append_and_link(world, false, |table, chunk, from| table.link(chunk, from))
@@ -673,8 +800,13 @@ pub(super) const CALLS: &[Call] = &[
         let (source, chunk) = (world.spare(SOURCE), world.spare(WORK));
         // A merge that fills the index goes on in a larger one.
         for _ in 0..MOST_STEPS {
-            let mut table = world.table_mut()?;
-            let (_, stop) = table.merge(source, &mut from, chunk, |_, _| Ok::<_, Error>(()))?;
+            let merged = quiet(|| {
+                world
+                    .table_mut()?
+                    .merge(source, &mut from, chunk, |_, _| Ok::<_, Error>(()))
+            });
+            let (count, stop) = merged?;
+            world.answers.extend([count as u64, from as u64]);
             if !matches!(stop, MergeStop::IndexFull) {
                 return Ok(());
             }
@@ -686,59 +818,78 @@ pub(super) const CALLS: &[Call] = &[
     }),
     ("writer", |world| {
         let nrows = world.nrows();
-        let writer = writer(&world.config, world.chunks())?;
-        let keys = world.keys();
-        let (mut pending, mut refs) = (all_rows(nrows), vec![0; nrows]);
-        let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
         let chunks = WRITER_PARTS.map(|part| world.spare(part) as u32);
-        let partitions = Partitions {
-            shift: SHIFT,
-            chunks: &chunks,
-        };
-        let (mut rows, mut nulls) = ([0; 2], 0);
-        world.with_columns(|columns| {
-            writer.append_partitioned_columns(
-                &partitions,
-                columns,
-                &mut batch,
-                &mut Appended {
-                    rows: &mut rows,
-                    nulls: &mut nulls,
-                },
-            )
-        })?;
-        let (mut pending, mut refs) = (all_rows(nrows), vec![0; nrows]);
-        let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
-        writer.append(chunks[0] as usize, Some(&world.payload), &mut batch)?;
-        let (mut pending, mut refs) = (all_rows(nrows), vec![0; nrows]);
-        let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
-        world
-            .with_columns(|columns| writer.append_columns(chunks[1] as usize, columns, &mut batch))
-            .map(drop)
+        let (mut counts, mut nulls) = ([0; 2], 0);
+        let mut batches: Vec<(Vec<u64>, Vec<u32>)> =
+            (0..3).map(|_| (all_rows(nrows), vec![0; nrows])).collect();
+        let result = (|| {
+            let writer = quiet(|| writer(&world.config, world.chunks()))?;
+            let keys = world.keys();
+            let partitions = Partitions {
+                shift: SHIFT,
+                chunks: &chunks,
+            };
+            let [first, second, third] = batches.as_mut_slice() else {
+                unreachable!()
+            };
+            let mut batch = Batch::new(&world.hashes, &keys, &mut first.0, &mut first.1)?;
+            world.with_columns(|columns| {
+                quiet(|| {
+                    writer.append_partitioned_columns(
+                        &partitions,
+                        columns,
+                        &mut batch,
+                        &mut Appended {
+                            rows: &mut counts,
+                            nulls: &mut nulls,
+                        },
+                    )
+                })
+            })?;
+            let mut batch = Batch::new(&world.hashes, &keys, &mut second.0, &mut second.1)?;
+            quiet(|| writer.append(chunks[0] as usize, Some(&world.payload), &mut batch))?;
+            let mut batch = Batch::new(&world.hashes, &keys, &mut third.0, &mut third.1)?;
+            world.with_columns(|columns| {
+                quiet(|| writer.append_columns(chunks[1] as usize, columns, &mut batch))
+            })
+        })();
+        world.answers.extend(counts);
+        for (_, refs) in &batches {
+            world
+                .answers
+                .extend(refs.iter().map(|&reference| u64::from(reference)));
+        }
+        result.map(drop)
     }),
     ("split", |world| {
-        let writer = writer(&world.config, world.chunks())?;
         let chunks = SPLIT_PARTS.map(|part| world.spare(part) as u32);
-        let partitions = Partitions {
-            shift: SHIFT,
-            chunks: &chunks,
-        };
-        for source in 0..world.table_chunks {
-            let (mut from, mut copies, mut hashes) = (CHUNK_HEADER, [0; 16], [0; 16]);
-            drain(|| {
-                let split =
-                    writer.split(&partitions, source, &mut from, &mut copies, &mut hashes)?;
-                // A full partition's chunk ends the walk as its end does.
-                Ok(if split.full.is_some() { 0 } else { split.count })
-            })?;
-        }
-        Ok(())
+        let mut answers = Vec::new();
+        let result = (|| {
+            let writer = quiet(|| writer(&world.config, world.chunks()))?;
+            let partitions = Partitions {
+                shift: SHIFT,
+                chunks: &chunks,
+            };
+            for source in 0..world.table_chunks {
+                let (mut from, mut copies, mut hashes) = (CHUNK_HEADER, [0; 16], [0; 16]);
+                drain(|| {
+                    let split = quiet(|| {
+                        writer.split(&partitions, source, &mut from, &mut copies, &mut hashes)
+                    })?;
+                    answers.extend(copies[..split.count].iter().map(|&copy| u64::from(copy)));
+                    // A full partition's chunk ends the walk as its end does.
+                    Ok(if split.full.is_some() { 0 } else { split.count })
+                })?;
+            }
+            Ok(())
+        })();
+        world.answers.extend(answers);
+        result
     }),
     ("clear key", |world| {
-        world
-            .table_mut()?
-            .clear_key(world.config.nkeys - 1)
-            .map(drop)
+        let cleared = quiet(|| world.table_mut()?.clear_key(world.config.nkeys - 1))?;
+        world.answers.push(cleared);
+        Ok(())
     }),
     ("regrow", |world| {
         let capacity = 2 * world.capacity;
@@ -747,6 +898,36 @@ pub(super) const CALLS: &[Call] = &[
     }),
 ];
 
+/// Find or insert every row, into the chunk the calls link or by
+/// partition; the answers are the references of the rows and the rows
+/// inserted.
+pub(super) fn find_or_insert(world: &mut World, partitioned: bool) -> Result<(), Error> {
+    let nrows = world.nrows();
+    let (mut pending, mut refs) = (all_rows(nrows), vec![0; nrows]);
+    let mut inserted = vec![0; nrows.div_ceil(64)];
+    let chunks = PARTS.map(|part| world.spare(part) as u32);
+    let result = (|| {
+        let mut table = quiet(|| world.table_mut())?;
+        let keys = world.keys();
+        let mut batch = Batch::new(&world.hashes, &keys, &mut pending, &mut refs)?;
+        let mut inserted = RowMask::try_new(nrows, &mut inserted)?;
+        if partitioned {
+            let partitions = Partitions {
+                shift: SHIFT,
+                chunks: &chunks,
+            };
+            quiet(|| table.find_or_insert_partitioned(&partitions, &mut batch, &mut inserted))
+        } else {
+            quiet(|| table.find_or_insert(world.spare(WORK), &mut batch, &mut inserted))
+        }
+    })();
+    world
+        .answers
+        .extend(refs.iter().map(|&reference| u64::from(reference)));
+    world.answers.extend(inserted);
+    result.map(drop)
+}
+
 /// Move the table to `grown`, an index of `capacity`, and keep it there
 /// once the move is done. A regrow links every record of its chunks, so
 /// the merge's source is hidden meanwhile, as a grouping hides it.
@@ -754,9 +935,11 @@ pub(super) fn regrow_into(world: &mut World, grown: Guarded, capacity: u64) -> R
     let source = &world.blocks[world.spare(SOURCE)];
     let used = source.read::<u64>(0);
     source.write(0, CHUNK_HEADER as u64);
-    let regrown = world.table_mut().and_then(|mut table| {
-        // SAFETY: the new index is ours alone.
-        unsafe { table.regrow(grown.base(), grown.len, capacity) }
+    let regrown = quiet(|| {
+        world.table_mut().and_then(|mut table| {
+            // SAFETY: the new index is ours alone.
+            unsafe { table.regrow(grown.base(), grown.len, capacity) }
+        })
     });
     world.blocks[world.spare(SOURCE)].write(0, used);
     regrown?;

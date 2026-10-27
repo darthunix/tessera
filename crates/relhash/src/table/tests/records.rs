@@ -345,6 +345,37 @@ fn each_payload_hands_the_selected_rows_payloads_in_turn() -> Result<()> {
     Ok(())
 }
 
+/// A record of another size in the middle of a batch fails its payloads'
+/// call with a damaged table, after the rows before it: of five rows, the
+/// record of the third claims a size that is not the table's, and the
+/// payloads of the first two hold the values the call wrote.
+#[test]
+fn a_damaged_record_in_the_middle_fails_after_the_payloads_before_it() -> Result<()> {
+    let values: Vec<i32> = (0..5).collect();
+    let keys = [Column::new(&values, None)];
+    let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
+    let mut table = local(&ONE_INT4, 5)?;
+    let (refs, _) = resolve_all(&mut table, &hashes, &Keys(&keys))?;
+    let (chunk, byte) = placement(refs[2]);
+    let size = table.chunk_words(chunk)[byte / 8 + 1] >> 32;
+    set_u32(table.chunk_words(chunk), byte + 12, size as u32 + 1);
+    let words = all_rows(5);
+    let rows = RowMaskView::try_new(5, &words)?;
+    let failed = table
+        .table_mut()?
+        .each_payload(&refs, &rows, |row, payload| {
+            payload.copy_from_slice(&(100 + row as u64).to_ne_bytes());
+        });
+    assert_eq!(refusal(failed), Some((Kind::Damaged, Rule::Misplaced)));
+    for (row, &reference) in refs.iter().enumerate() {
+        let (chunk, byte) = placement(reference);
+        let payload = table.chunk_words(chunk)[byte / 8 + 3];
+        let expected = if row < 2 { 100 + row as u64 } else { 0 };
+        assert_eq!(payload, expected, "row {row}");
+    }
+    Ok(())
+}
+
 /// The pointers to the payloads of a batch: rows of one record get one
 /// pointer, and each changes the payload after the call, beside the
 /// others, which Miri checks among the table's tests. A reference that

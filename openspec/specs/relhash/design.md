@@ -1174,7 +1174,16 @@ it, and when a module of the list holds none. The paths are under
 - The matrix of damage in `crates/relhash/src/table/tests/damage.rs`:
   every damage of its list against every call, alone and after
   failed calls, with guard words around every block; a few of its cases
-  also run under Miri.
+  also run under Miri. Its world, `tests/world.rs`, runs each call of
+  the crate under an allocator that counts and fails the test on any
+  memory taken, and the same sequence over two copies of the bytes
+  must give the same blocks and answers.
+- The matrix of wrong arguments in
+  `crates/relhash/src/table/tests/arguments.rs`: each rule of a wrong
+  call broken by one argument; the call names its rule, takes no
+  memory, and leaves the blocks as they were when it checks the
+  argument before its first row. A test there finds a case for every
+  rule of the crate.
 - The unit tests in `crates/relhash/src/table/marks.rs`: the
   words of the marks, and the records and cursors a walk refuses.
 - `crates/relhash/src/table/loom/`, run by `make rust-loom`: links into

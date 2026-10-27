@@ -317,7 +317,31 @@ pub(crate) fn check_rows(nrows: usize, counts: &[usize]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::word_count;
+    use super::{RowMask, RowMaskView, word_count};
+    use crate::{Kind, Rule};
+
+    /// A mask of 70 rows made of one word, of three, or of two with bit 6
+    /// of the second set is refused, read or written, and its words are
+    /// left as they were.
+    #[test]
+    fn a_mask_of_wrong_words_is_refused_and_left_as_it_was() {
+        for (words, rule) in [
+            (&[u64::MAX][..], Rule::MaskWords),
+            (&[u64::MAX; 3][..], Rule::MaskWords),
+            (&[u64::MAX, 1 << 6][..], Rule::MaskPadding),
+        ] {
+            let read = RowMaskView::try_new(70, words)
+                .err()
+                .map(|error| (error.kind(), error.rule()));
+            assert_eq!(read, Some((Kind::WrongCall, rule)), "{words:x?}");
+            let mut written = words.to_vec();
+            let refused = RowMask::try_new(70, &mut written)
+                .err()
+                .map(|error| (error.kind(), error.rule()));
+            assert_eq!(refused, Some((Kind::WrongCall, rule)), "{words:x?}");
+            assert_eq!(written, words, "the words are left as they were");
+        }
+    }
 
     #[test]
     fn word_count_does_not_overflow() {

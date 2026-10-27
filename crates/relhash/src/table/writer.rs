@@ -544,6 +544,18 @@ fn payload_at<'r, R: Region>(
 /// open at once, even of one record. It also holds up to [`HELD`]
 /// references it has checked, whose payloads open later without a second
 /// check ([`Self::hold`], [`Self::held`]); what it holds never leaves it.
+///
+/// A program that keeps one payload open and opens another does not
+/// compile:
+///
+/// ```compile_fail,E0499
+/// fn both(cursor: &mut relhash::PayloadCursor<'_>, one: u32, two: u32) -> Result<(), relhash::Error> {
+///     let first = cursor.payload(one)?;
+///     let second = cursor.payload(two)?;
+///     first[0] = second[0];
+///     Ok(())
+/// }
+/// ```
 pub struct PayloadCursor<'t> {
     access: Access<'t, RawRegion>,
     held: [*mut u8; HELD],
