@@ -373,7 +373,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
       and its rows at the trust points of the design of `relhash`;
       fix what it finds, each in a commit with its case. Check:
       `cargo test -p relhash`; `cargo miri test -p relhash`
-- [ ] 6.4 Add the fuzz targets, a minute each on every pull request and
+- [x] 6.4 Add the fuzz targets, a minute each on every pull request and
       a long run on request, and name them in "Any bytes, a bounded
       call"; report the downloads, reverse dependencies, last release
       and stars of `libfuzzer-sys`. Check: `cargo fuzz run <target> --

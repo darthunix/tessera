@@ -753,10 +753,13 @@ Seven means show the promise, each covering what the others cannot:
    the error. A test checks the kind and the rule of the error, and
    guard words around every block that must not change. A few cases
    also run under Miri.
-4. **Fuzzing.** cargo-fuzz over the same builder, with the input chosen
-   by the fuzzer, under ASan. A pull request runs each target for a
-   minute; a run of one to two hours goes before a release of the
-   crate, on request. A finding becomes a case of the matrix.
+4. **Fuzzing.** cargo-fuzz over a builder of the same shapes, with the
+   input chosen by the fuzzer, under ASan. The fuzz crate sees only the
+   public API, so the builder is its own. One target damages the table,
+   the other gives the calls any arguments. A pull request runs each
+   target for a minute; a run of one to two hours goes before a release
+   of the crate, on request. A finding becomes a case of the matrix, or
+   for an argument a test of its call.
 5. **Mutants.** Every mutant of the crate, not only those of changed
    lines, and none survives but the equivalent ones, each listed with
    its reason. Since the tests compare rules, a removed check is seen.

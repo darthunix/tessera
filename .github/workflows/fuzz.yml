@@ -1,0 +1,68 @@
+# The fuzz targets of relhash (crates/relhash/fuzz): tables built from
+# the fuzzer's bytes, damaged where they choose, and the crate's calls
+# over them, with any arguments, under AddressSanitizer. A pull request
+# that changes the crate runs each target for a minute; a run by hand
+# (workflow_dispatch) for as long as it is given, an hour by default,
+# before a release of the crate. An input that fails is kept as an
+# artifact, and becomes a case of the matrix of damage.
+name: Fuzz
+
+on:
+  pull_request:
+    paths:
+      - "crates/relhash/**"
+      - ".github/workflows/fuzz.yml"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds each target runs
+        default: "3600"
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    name: Fuzz relhash (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      # cargo-fuzz needs a nightly: the one Miri's job pins.
+      RUSTUP_TOOLCHAIN: nightly-2026-09-11
+      SECONDS_EACH: ${{ inputs.seconds || '60' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: The pinned nightly
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz@0.13.2
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fuzz
+          workspaces: "crates/relhash/fuzz -> target"
+      # The workspace's checks do not reach this crate.
+      - name: The format and lints of the targets
+        working-directory: crates/relhash/fuzz
+        run: |
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+      - name: Each target
+        working-directory: crates/relhash
+        # The cargo-fuzz installed is built for musl and builds for it
+        # unless told: AddressSanitizer needs the host's glibc. An input
+        # that runs ten seconds is taken for a call without end.
+        run: |
+          host=$(rustc -vV | sed -n 's/^host: //p')
+          for target in $(cargo fuzz list); do
+            cargo fuzz run --target "$host" "$target" -- \
+              -max_total_time="$SECONDS_EACH" -timeout=10 -rss_limit_mb=4096
+          done
+      - name: The inputs that failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: crates/relhash/fuzz/artifacts
+          if-no-files-found: ignore

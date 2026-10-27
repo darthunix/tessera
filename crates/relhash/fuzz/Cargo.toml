@@ -1,0 +1,38 @@
+# The fuzz targets of relhash, run by cargo-fuzz under AddressSanitizer
+# (.github/workflows/fuzz.yml). A crate of its own, out of the workspace:
+# it needs a nightly compiler and builds libFuzzer's C++.
+[package]
+name = "relhash-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Out of the repository's workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+
+[dependencies.relhash]
+path = ".."
+
+[lib]
+name = "relhash_fuzz"
+path = "src/lib.rs"
+
+[[bin]]
+name = "damaged"
+path = "fuzz_targets/damaged.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "arguments"
+path = "fuzz_targets/arguments.rs"
+test = false
+doc = false
+bench = false
