@@ -91,7 +91,7 @@ The words used below:
       `TESSERA_REQUIRE_SIMD=1 cargo test --locked -p tessera-kernels`
       on the Intel Mac; the x86 listing; the counters of
       `filter_int32` and `compare_int32`
-- [ ] 3.4 `TESSERA_REQUIRE_SIMD=1` in the Rust jobs of CI. Check: CI
+- [x] 3.4 `TESSERA_REQUIRE_SIMD=1` in the Rust jobs of CI. Check: CI
       green on `ubuntu-24.04` and `macos-15`, with the id of the run
 - [ ] 3.5 The mutants of the AVX2 code: `simd/avx2.rs` excluded from
       the job on arm64 with its reason, and a job of the changed lines
