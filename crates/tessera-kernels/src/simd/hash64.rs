@@ -14,37 +14,34 @@ use core::arch::aarch64::{
     vuzp1q_u32, vuzp2q_u32,
 };
 
+use super::Neon;
 use super::hash::groups;
 use crate::int64::Side;
 
 /// The hash of every lane's key into `out`.
 #[inline]
-pub fn hash64(keys: Side<'_>, out: &mut [u32; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn hash64(_: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { hash_lanes(keys, None, out) }
 }
 
 /// As [`hash64`], with NULL lanes hashing the group key.
 #[inline]
-pub fn hash_nulls64(keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn hash_nulls64(_: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash64.
     unsafe { hash_lanes(keys, Some(non_nulls), out) }
 }
 
 /// Every lane's key hash folded into its previous hash in `out`.
 #[inline]
-pub fn combine64(keys: Side<'_>, out: &mut [u32; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn combine64(_: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
     // SAFETY: as in hash64.
     unsafe { combine_lanes(keys, None, out) }
 }
 
 /// As [`combine64`], with NULL lanes folding in the group key's hash.
 #[inline]
-pub fn combine_nulls64(keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn combine_nulls64(_: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash64.
     unsafe { combine_lanes(keys, Some(non_nulls), out) }
 }
@@ -101,6 +98,7 @@ fn folded(words: &[u64; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
 mod tests {
     use super::{combine_nulls64, combine64, hash_nulls64, hash64};
     use crate::int64::{Side, fold, hash_combine, murmurhash32};
+    use crate::simd::{Neon, Token};
 
     fn keys() -> [i64; 64] {
         core::array::from_fn(|lane| {
@@ -119,16 +117,17 @@ mod tests {
         let keys = keys();
         let words = keys.map(|key| key as u64);
         let non_nulls = 0x5555_aaaa_0f0f_f0f0_u64;
+        let neon = Neon::get().unwrap();
         for side in [Side::Dense(&keys), Side::Datum(&words)] {
             let mut out = [0; 64];
-            hash64(side, &mut out);
+            hash64(neon, side, &mut out);
             assert_eq!(out, keys.map(|key| murmurhash32(fold(key))));
             let mut grouped = [0; 64];
-            hash_nulls64(side, non_nulls, &mut grouped);
+            hash_nulls64(neon, side, non_nulls, &mut grouped);
             let mut previous = [0x1234_5678; 64];
-            combine64(side, &mut previous);
+            combine64(neon, side, &mut previous);
             let mut previous_nulls = [0x1234_5678; 64];
-            combine_nulls64(side, non_nulls, &mut previous_nulls);
+            combine_nulls64(neon, side, non_nulls, &mut previous_nulls);
             for lane in 0..64 {
                 let present = non_nulls >> lane & 1 == 1;
                 let key = if present {

@@ -10,6 +10,7 @@ use super::{IntLane, Side};
 use crate::BULK_MIN_ROWS;
 use crate::int32::hash::NULL_KEY;
 use crate::int32::{NullKeys, hash_combine, murmurhash32};
+use crate::simd::{Neon, Token};
 
 /// The driver of [`crate::int32::hash`] and [`crate::int64::hash`].
 pub(crate) fn hash<T: IntLane, C: ColumnReader<Value = T>>(
@@ -109,14 +110,21 @@ where
     );
     let reject = nulls == NullKeys::Reject;
     // The first word decides, as for the arithmetic.
-    let whole_words = cfg!(all(target_arch = "aarch64", not(miri))) && nrows >= 64 && {
-        let selected = selection.word(valid, 0);
-        (selected == u64::MAX
-            || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-            && block(column, 0).is_some()
-    };
-    if whole_words {
-        return bulk(column, selection, reject, step, hashes, valid, &fold);
+    let neon = Neon::get();
+    let whole_words = nrows >= 64
+        && match neon {
+            Some(neon) => {
+                let selected = selection.word(valid, 0);
+                (selected == u64::MAX
+                    || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+                    && block(neon, column, 0).is_some()
+            }
+            None => false,
+        };
+    if let Some(neon) = neon
+        && whole_words
+    {
+        return bulk(neon, column, selection, reject, step, hashes, valid, &fold);
     }
     for index in 0..nrows.div_ceil(64) {
         let selected = selection.word(valid, index);
@@ -127,8 +135,11 @@ where
 }
 
 /// Whole words where the column exposes them, rows elsewhere.
+// The token and the seven parts of the call, each its own.
+#[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn bulk<T, C, F, S>(
+    neon: Neon,
     column: &C,
     selection: &S,
     reject: bool,
@@ -150,7 +161,7 @@ where
             valid.set_word(index, present)?;
             continue;
         }
-        let Some((keys, non_null)) = block(column, index) else {
+        let Some((keys, non_null)) = block(neon, column, index) else {
             let present = word(column, index, selected, reject, hashes, fold)?;
             valid.set_word(index, present)?;
             continue;
@@ -161,14 +172,14 @@ where
             .context("a whole-word block implies a full word")?;
         let present = if reject {
             match step {
-                Step::First => T::hash_block(keys, out),
-                Step::Next => T::combine_block(keys, out),
+                Step::First => T::hash_block(neon, keys, out),
+                Step::Next => T::combine_block(neon, keys, out),
             }
             selected & non_null
         } else {
             match step {
-                Step::First => T::hash_nulls_block(keys, non_null, out),
-                Step::Next => T::combine_nulls_block(keys, non_null, out),
+                Step::First => T::hash_nulls_block(neon, keys, non_null, out),
+                Step::Next => T::combine_nulls_block(neon, keys, non_null, out),
             }
             selected
         };
@@ -180,6 +191,7 @@ where
 /// The storage of a whole word with its non-NULL rows, when exposed.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 fn block<T: IntLane, C: ColumnReader<Value = T>>(
+    neon: Neon,
     column: &C,
     index: usize,
 ) -> Option<(Side<'_, T>, u64)> {
@@ -187,19 +199,22 @@ fn block<T: IntLane, C: ColumnReader<Value = T>>(
 
     Some(match column.word_block(index)? {
         WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
-        WordBlock::Datum { values, isnull } => {
-            (Side::Datum(values), crate::simd::non_null_bits(isnull))
-        }
+        WordBlock::Datum { values, isnull } => (
+            Side::Datum(values),
+            crate::simd::non_null_bits(neon, isnull),
+        ),
     })
 }
 
+/// Without NEON the token has no values, so no call asks for a block.
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
 fn block<T: IntLane, C: ColumnReader<Value = T>>(
+    neon: Neon,
     column: &C,
     index: usize,
 ) -> Option<(Side<'_, T>, u64)> {
     let _ = (column, index);
-    None
+    match neon {}
 }
 
 /// One word row by row, without a branch on nullness: a NULL row hashes

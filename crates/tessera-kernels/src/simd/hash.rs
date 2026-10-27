@@ -11,38 +11,34 @@ use core::arch::aarch64::{
     vreinterpretq_u32_s32, vshlq_n_u32, vshrq_n_u32, vst1q_u32,
 };
 
-use super::{byte_weights, datum, dense, lane_masks};
+use super::{Neon, byte_weights, datum, dense, lane_masks};
 use crate::int32::Side;
 use crate::int32::hash::NULL_KEY;
 
 /// The hash of every lane's key into `out`.
 #[inline]
-pub fn hash(keys: Side<'_>, out: &mut [u32; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn hash(_: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { hash_lanes(keys, None, out) }
 }
 
 /// As [`hash`], with NULL lanes hashing the group key.
 #[inline]
-pub fn hash_nulls(keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn hash_nulls(_: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash.
     unsafe { hash_lanes(keys, Some(non_nulls), out) }
 }
 
 /// Every lane's key hash folded into its previous hash in `out`.
 #[inline]
-pub fn combine(keys: Side<'_>, out: &mut [u32; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn combine(_: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
     // SAFETY: as in hash.
     unsafe { combine_lanes(keys, None, out) }
 }
 
 /// As [`combine`], with NULL lanes folding in the group key's hash.
 #[inline]
-pub fn combine_nulls(keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn combine_nulls(_: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash.
     unsafe { combine_lanes(keys, Some(non_nulls), out) }
 }
@@ -141,6 +137,7 @@ mod tests {
 
     use super::{combine, combine_nulls, hash, hash_nulls};
     use crate::int32::{Side, hash_combine, murmurhash32};
+    use crate::simd::{Neon, Token};
 
     /// Any word of keys leaning to the edges, any NULL lanes and any
     /// previous hashes.
@@ -162,6 +159,7 @@ mod tests {
     }
 
     fn lanes_match(dense: [i32; 64], non_nulls: u64, previous: [u32; 64]) {
+        let neon = Neon::get().unwrap();
         let datums = dense.map(|key| i64::from(key) as u64);
         let expected_hash = dense.map(|key| murmurhash32(key as u32));
         let expected_hash_nulls: [u32; 64] = std::array::from_fn(|lane| {
@@ -177,15 +175,15 @@ mod tests {
             std::array::from_fn(|lane| hash_combine(previous[lane], expected_hash_nulls[lane]));
         for keys in [Side::Dense(&dense), Side::Datum(&datums)] {
             let mut out = [0; 64];
-            hash(keys, &mut out);
+            hash(neon, keys, &mut out);
             assert_eq!(out, expected_hash);
-            hash_nulls(keys, non_nulls, &mut out);
+            hash_nulls(neon, keys, non_nulls, &mut out);
             assert_eq!(out, expected_hash_nulls);
             out = previous;
-            combine(keys, &mut out);
+            combine(neon, keys, &mut out);
             assert_eq!(out, expected_combine);
             out = previous;
-            combine_nulls(keys, non_nulls, &mut out);
+            combine_nulls(neon, keys, non_nulls, &mut out);
             assert_eq!(out, expected_combine_nulls);
         }
     }

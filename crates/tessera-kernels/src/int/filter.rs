@@ -7,6 +7,7 @@ use tessera_core::{ColumnReader, RowMask};
 use super::IntLane;
 use crate::BULK_MIN_ROWS;
 use crate::ops::CompareOp;
+use crate::simd::{Neon, Token};
 
 /// The driver of [`crate::int32::filter`] and [`crate::int64::filter`].
 pub(crate) fn filter<T: IntLane, C: ColumnReader<Value = T>>(
@@ -51,12 +52,15 @@ fn filter_with<T: IntLane, C: ColumnReader<Value = T>>(
             continue;
         }
         if !selected.is_power_of_two() {
-            let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
+            let neon = Neon::get();
+            let bulk = neon.is_some()
                 && index < nrows / 64
                 && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
                 && column.word_block(index).is_some();
-            return if bulk {
-                filter_bulk(column, rows, index, op, scalar, &compare)
+            return if let Some(neon) = neon
+                && bulk
+            {
+                filter_bulk(neon, column, rows, index, op, scalar, &compare)
             } else {
                 filter_rows(column, rows, index, scalar, &compare)
             };
@@ -105,6 +109,7 @@ fn filter_rows<T: IntLane, C: ColumnReader<Value = T>>(
 /// leading words, keeps the shape it had before the whole-word path existed.
 #[inline(never)]
 fn filter_bulk<T: IntLane, C: ColumnReader<Value = T>>(
+    neon: Neon,
     column: &C,
     rows: &mut RowMask<'_>,
     first: usize,
@@ -119,7 +124,7 @@ fn filter_bulk<T: IntLane, C: ColumnReader<Value = T>>(
         }
         let passing = if selected.is_power_of_two() {
             single_passing(column, index, selected, scalar, compare)?
-        } else if let Some(passing) = bulk_passing(column, index, op, scalar) {
+        } else if let Some(passing) = bulk_passing(neon, column, index, op, scalar) {
             // Intersecting keeps the selection.
             passing
         } else {
@@ -169,28 +174,16 @@ fn row_passing<T: IntLane, C: ColumnReader<Value = T>>(
 }
 
 /// The passing rows of a full prepared word compared with vector code, or
-/// `None` where the reader exposes no storage for it or no vector code
-/// exists (other targets, Miri): the word then takes the row path. Out of
-/// line: inlined, its vector call spilled the loop's registers around every
-/// word.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
+/// `None` where the reader exposes no storage for it: the word then takes
+/// the row path. Out of line: inlined, its vector call spilled the loop's
+/// registers around every word.
 #[inline(never)]
 fn bulk_passing<T: IntLane, C: ColumnReader<Value = T>>(
+    neon: Neon,
     column: &C,
     index: usize,
     op: CompareOp,
     scalar: T,
 ) -> Option<u64> {
-    Some(T::filter_block(column.word_block(index)?, scalar, op))
-}
-
-#[cfg(not(all(target_arch = "aarch64", not(miri))))]
-#[inline(never)]
-fn bulk_passing<T: IntLane, C: ColumnReader<Value = T>>(
-    _column: &C,
-    _index: usize,
-    _op: CompareOp,
-    _scalar: T,
-) -> Option<u64> {
-    None
+    Some(T::filter_block(neon, column.word_block(index)?, scalar, op))
 }

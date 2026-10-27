@@ -12,6 +12,7 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use super::{IntLane, Side};
 use crate::BULK_MIN_ROWS;
 use crate::ops::{ArithOp, ArithmeticError};
+use crate::simd::{Neon, Token};
 
 /// The driver of `arith_scalar`: `column op scalar`.
 pub(crate) fn arith_scalar<T: IntLane, C: ColumnReader<Value = T>>(
@@ -147,28 +148,22 @@ where
 
     /// The whole-word operands of `index` with the non-NULL rows of the
     /// column operands, when every column operand exposes the word.
-    #[cfg(all(target_arch = "aarch64", not(miri)))]
-    fn blocks(&self, index: usize) -> Option<(Side<'_, T>, Side<'_, T>, u64)> {
+    fn blocks(&self, neon: Neon, index: usize) -> Option<(Side<'_, T>, Side<'_, T>, u64)> {
         Some(match self {
             Self::ColumnScalar(left, scalar) => {
-                let (lhs, present) = T::side(left.word_block(index)?);
+                let (lhs, present) = T::side(neon, left.word_block(index)?);
                 (lhs, Side::Scalar(*scalar), present)
             }
             Self::ScalarColumn(scalar, right) => {
-                let (rhs, present) = T::side(right.word_block(index)?);
+                let (rhs, present) = T::side(neon, right.word_block(index)?);
                 (Side::Scalar(*scalar), rhs, present)
             }
             Self::Columns(left, right) => {
-                let (lhs, left_present) = T::side(left.word_block(index)?);
-                let (rhs, right_present) = T::side(right.word_block(index)?);
+                let (lhs, left_present) = T::side(neon, left.word_block(index)?);
+                let (rhs, right_present) = T::side(neon, right.word_block(index)?);
                 (lhs, rhs, left_present & right_present)
             }
         })
-    }
-
-    #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-    fn blocks(&self, _index: usize) -> Option<(Side<'_, T>, Side<'_, T>, u64)> {
-        None
     }
 }
 
@@ -206,22 +201,25 @@ where
     // The first word decides, as for the aggregates: selectivity is roughly
     // uniform within a batch, and a partly prepared batch refuses its first
     // word as it would the rest.
-    let whole_words = cfg!(all(target_arch = "aarch64", not(miri)))
-        && nrows >= 64
-        && rows.get_word(0).is_some_and(|selected| {
-            (selected == u64::MAX
-                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                && operands.blocks(0).is_some()
-        });
+    let neon = Neon::get();
+    let whole_words = nrows >= 64
+        && match neon {
+            Some(neon) => rows.get_word(0).is_some_and(|selected| {
+                (selected == u64::MAX
+                    || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
+                    && operands.blocks(neon, 0).is_some()
+            }),
+            None => false,
+        };
     // The operation is chosen once; each arm's function, the width's own,
     // is inlined into its own loops, unlike a trait object, which called per
     // row.
     match op {
-        ArithOp::Add => execute(op, &operands, output, whole_words, &T::add),
-        ArithOp::Sub => execute(op, &operands, output, whole_words, &T::sub),
-        ArithOp::Mul => execute(op, &operands, output, whole_words, &T::mul),
-        ArithOp::Div => execute(op, &operands, output, whole_words, &T::div),
-        ArithOp::Mod => execute(op, &operands, output, whole_words, &T::rem),
+        ArithOp::Add => execute(op, &operands, output, neon, whole_words, &T::add),
+        ArithOp::Sub => execute(op, &operands, output, neon, whole_words, &T::sub),
+        ArithOp::Mul => execute(op, &operands, output, neon, whole_words, &T::mul),
+        ArithOp::Div => execute(op, &operands, output, neon, whole_words, &T::div),
+        ArithOp::Mod => execute(op, &operands, output, neon, whole_words, &T::rem),
     }
 }
 
@@ -233,6 +231,7 @@ fn execute<T, L, R, E: Evaluate<T>>(
     op: ArithOp,
     operands: &Operands<'_, T, L, R>,
     output: Output<'_, '_, '_, '_, T>,
+    neon: Option<Neon>,
     whole_words: bool,
     evaluate: &E,
 ) -> Result<()>
@@ -241,8 +240,10 @@ where
     L: ColumnReader<Value = T>,
     R: ColumnReader<Value = T>,
 {
-    if whole_words {
-        bulk(op, operands, output, evaluate)
+    if let Some(neon) = neon
+        && whole_words
+    {
+        bulk(neon, op, operands, output, evaluate)
     } else {
         operands.rows(output, evaluate)
     }
@@ -252,6 +253,7 @@ where
 /// whole word is the width's own ([`IntLane::arith_block`]).
 #[inline(never)]
 fn bulk<T, L, R, E: Evaluate<T>>(
+    neon: Neon,
     op: ArithOp,
     operands: &Operands<'_, T, L, R>,
     output: Output<'_, '_, '_, '_, T>,
@@ -278,7 +280,7 @@ where
             operands.word(index, selected, &mut output, evaluate)?;
             continue;
         }
-        let Some((lhs, rhs, non_null)) = operands.blocks(index) else {
+        let Some((lhs, rhs, non_null)) = operands.blocks(neon, index) else {
             operands.word(index, selected, &mut output, evaluate)?;
             continue;
         };
@@ -287,7 +289,7 @@ where
         let out: &mut [MaybeUninit<T>; 64] = (&mut output.values[base..base + 64])
             .try_into()
             .context("a whole-word operand implies a full word")?;
-        T::arith_block(op, lhs, rhs, present, &divisor, out, evaluate)?;
+        T::arith_block(neon, op, lhs, rhs, present, &divisor, out, evaluate)?;
         output.non_nulls.set_word(index, present)?;
     }
     Ok(())

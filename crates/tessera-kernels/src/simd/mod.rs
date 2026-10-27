@@ -1,30 +1,47 @@
 //! Vector kernels over the storage of full prepared words.
 //!
-//! Only AArch64 NEON is implemented, and only where it can be measured: the
-//! module is empty on other targets and under Miri, and callers fall back to
-//! the row paths. Instructions always drop with vectors, so a kernel here is
-//! kept on its cycle gain (see the benchmark guide). This is the one module
-//! of the crate allowed to use `unsafe`, for vector loads from borrowed
-//! arrays; every load states why it stays in bounds.
+//! The vector sets are named by tokens (`token.rs`), defined on every
+//! target. Only AArch64 NEON is implemented, and only
+//! where it can be measured: its kernels are compiled only there, not on
+//! other targets and under Miri, where callers fall back to the row paths.
+//! Instructions always drop with vectors, so a kernel here is kept on its
+//! cycle gain (see the benchmark guide). This is the one module of the
+//! crate allowed to use `unsafe`, for vector loads from borrowed arrays;
+//! every load states why it stays in bounds.
 //!
 //! Intrinsics are callable without `unsafe` only from functions carrying the
 //! `neon` feature; closures inherit it from the function that defines them.
-//! Public entry points are plain functions that assert the feature at compile
-//! time and make the one `unsafe` call into the feature-carrying code.
-#![cfg(all(target_arch = "aarch64", not(miri)))]
+//! Public entry points are plain functions that take the token of NEON,
+//! whose value proves that the processor runs it, and make the one `unsafe`
+//! call into the feature-carrying code.
 #![allow(unsafe_code)]
 
+mod token;
+
+pub(crate) use token::{Neon, Token};
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate64;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod arith;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod arith64;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod cast;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod filter;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod filter64;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod hash;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod hash64;
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod set;
 
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 use core::arch::aarch64::{
     int32x4_t, uint8x8_t, uint32x4_t, uint64x2_t, vaddv_u8, vaddvq_u32, vandq_u8, vandq_u32,
     vceqzq_u8, vdup_n_u8, vdupq_n_u32, vget_high_s16, vget_high_u8, vget_low_s16, vget_low_s32,
@@ -33,20 +50,31 @@ use core::arch::aarch64::{
     vreinterpretq_s32_u64, vreinterpretq_u32_s32, vreinterpretq_u64_s64, vtst_u8, vuzp1q_s32,
 };
 
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use aggregate::{
     count_datum, max_datum, max_dense, min_datum, min_dense, sum_datum, sum_dense,
 };
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use aggregate64::{max_datum64, max_dense64, min_datum64, min_dense64};
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use arith::{add, div, mul, rem, sub};
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use arith64::{add64, sub64};
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use cast::{widen_datum, widen_dense};
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use filter::{compare_sides, filter_datum, filter_dense};
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use filter64::{compare_sides64, filter_datum64, filter_dense64};
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use hash64::{combine_nulls64, combine64, hash_nulls64, hash64};
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use set::{set_datum, set_datum64, set_dense, set_dense64};
 
 /// Bit weights of the four lanes of each group in a 16-row quarter.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 const LANE_WEIGHTS: [[u32; 4]; 4] = [
     [1, 1 << 1, 1 << 2, 1 << 3],
     [1 << 4, 1 << 5, 1 << 6, 1 << 7],
@@ -54,17 +82,18 @@ const LANE_WEIGHTS: [[u32; 4]; 4] = [
     [1 << 12, 1 << 13, 1 << 14, 1 << 15],
 ];
 /// Bit weights of the bytes of two 8-row halves.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 const BYTE_WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
 
 /// Rows of a Datum block whose flag is false, as bits in row order.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
-pub fn non_null_bits(isnull: &[bool; 64]) -> u64 {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above), so the
-    // target-feature function can run on any CPU this code runs on.
+pub fn non_null_bits(_: Neon, isnull: &[bool; 64]) -> u64 {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { non_null_lanes(isnull) }
 }
 
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 #[target_feature(enable = "neon")]
 fn non_null_lanes(isnull: &[bool; 64]) -> u64 {
@@ -87,6 +116,7 @@ fn non_null_lanes(isnull: &[bool; 64]) -> u64 {
 /// masks, `lanes(group)` for each. A passing lane is all ones. Weighting
 /// each lane by its bit and adding the four groups of a quarter gives the
 /// quarter's 16 bits without a per-row shift; four quarters make the word.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 #[target_feature(enable = "neon")]
 fn pack_lanes(lanes: impl Fn(usize) -> uint32x4_t) -> u64 {
@@ -104,6 +134,7 @@ fn pack_lanes(lanes: impl Fn(usize) -> uint32x4_t) -> u64 {
 }
 
 /// The bit weights of eight rows, one per byte lane.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 #[target_feature(enable = "neon")]
 fn byte_weights() -> uint8x8_t {
@@ -114,6 +145,7 @@ fn byte_weights() -> uint8x8_t {
 /// Eight mask bits as two groups of four lane masks: a set bit becomes an
 /// all-ones lane. The byte is broadcast, tested against each lane's weight
 /// and sign-extended twice.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 #[target_feature(enable = "neon")]
 fn lane_masks(bits: u8, weights: uint8x8_t) -> (uint32x4_t, uint32x4_t) {
@@ -126,6 +158,7 @@ fn lane_masks(bits: u8, weights: uint8x8_t) -> (uint32x4_t, uint32x4_t) {
 }
 
 /// A loader of the four int4 values of each group of a dense block.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 #[target_feature(enable = "neon")]
 fn dense(values: &[i32; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
@@ -134,6 +167,7 @@ fn dense(values: &[i32; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
 }
 
 /// A loader of the four int4 values of each group of a Datum block.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 #[target_feature(enable = "neon")]
 fn datum(values: &[u64; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
@@ -146,6 +180,7 @@ fn datum(values: &[u64; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
 /// # Safety
 ///
 /// `group` must be below 16 so that the four Datums read end within the array.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 #[target_feature(enable = "neon")]
 unsafe fn load_datums(values: &[u64; 64], group: usize) -> int32x4_t {
@@ -159,6 +194,7 @@ unsafe fn load_datums(values: &[u64; 64], group: usize) -> int32x4_t {
 
 /// Four rows of lane masks widened to two pairs: an all-ones 32-bit lane
 /// sign-extends to an all-ones 64-bit one.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 #[target_feature(enable = "neon")]
 fn widen(rows: uint32x4_t) -> (uint64x2_t, uint64x2_t) {

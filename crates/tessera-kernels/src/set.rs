@@ -18,6 +18,7 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
 use crate::BULK_MIN_ROWS;
+use crate::simd::{Neon, Token};
 
 /// At most this many keys are compared all at a row; more are searched.
 const LINEAR_KEYS: usize = 16;
@@ -74,33 +75,34 @@ pub trait SetValue: Copy + Ord {
     const WORD_KEYS: usize;
 
     /// The rows of a whole word whose value is one of `keys`, NULL rows
-    /// compared like any other, and the word's non-NULL rows; `None`
-    /// where no vector code is built.
-    fn block_hits(block: WordBlock<'_, Self>, keys: &[Self]) -> Option<(u64, u64)>;
+    /// compared like any other, and the word's non-NULL rows, with the
+    /// vector code of NEON.
+    fn block_hits(neon: Neon, block: WordBlock<'_, Self>, keys: &[Self]) -> (u64, u64);
 }
 
 impl SetValue for i32 {
     const WORD_KEYS: usize = 64;
 
     #[inline(always)]
-    fn block_hits(block: WordBlock<'_, Self>, keys: &[Self]) -> Option<(u64, u64)> {
+    fn block_hits(neon: Neon, block: WordBlock<'_, Self>, keys: &[Self]) -> (u64, u64) {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
         {
             use crate::simd;
 
-            Some(match block {
+            match block {
                 WordBlock::Dense { values, non_nulls } => {
-                    (simd::set_dense(values, keys), non_nulls)
+                    (simd::set_dense(neon, values, keys), non_nulls)
                 }
-                WordBlock::Datum { values, isnull } => {
-                    (simd::set_datum(values, keys), simd::non_null_bits(isnull))
-                }
-            })
+                WordBlock::Datum { values, isnull } => (
+                    simd::set_datum(neon, values, keys),
+                    simd::non_null_bits(neon, isnull),
+                ),
+            }
         }
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (block, keys);
-            None
+            match neon {}
         }
     }
 }
@@ -109,24 +111,25 @@ impl SetValue for i64 {
     const WORD_KEYS: usize = 16;
 
     #[inline(always)]
-    fn block_hits(block: WordBlock<'_, Self>, keys: &[Self]) -> Option<(u64, u64)> {
+    fn block_hits(neon: Neon, block: WordBlock<'_, Self>, keys: &[Self]) -> (u64, u64) {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
         {
             use crate::simd;
 
-            Some(match block {
+            match block {
                 WordBlock::Dense { values, non_nulls } => {
-                    (simd::set_dense64(values, keys), non_nulls)
+                    (simd::set_dense64(neon, values, keys), non_nulls)
                 }
-                WordBlock::Datum { values, isnull } => {
-                    (simd::set_datum64(values, keys), simd::non_null_bits(isnull))
-                }
-            })
+                WordBlock::Datum { values, isnull } => (
+                    simd::set_datum64(neon, values, keys),
+                    simd::non_null_bits(neon, isnull),
+                ),
+            }
         }
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (block, keys);
-            None
+            match neon {}
         }
     }
 }
@@ -163,14 +166,16 @@ where
             && present.as_view().nrows() == nrows,
         "the column and masks of a set call have different row counts"
     );
-    let whole_words = set.keys.len() <= T::WORD_KEYS;
+    let neon = Neon::get();
+    let whole_words = neon.is_some() && set.keys.len() <= T::WORD_KEYS;
     for word in 0..nrows.div_ceil(64) {
         let selected = rows.word(word);
-        let whole = if whole_words
+        let whole = if let Some(neon) = neon
+            && whole_words
             && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
             && let Some(block) = column.word_block(word)
         {
-            T::block_hits(block, set.keys)
+            Some(T::block_hits(neon, block, set.keys))
         } else {
             None
         };

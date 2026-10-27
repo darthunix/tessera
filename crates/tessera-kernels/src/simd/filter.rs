@@ -5,24 +5,27 @@ use core::arch::aarch64::{
     vld1q_s32, vmvnq_u32,
 };
 
-use super::{load_datums, non_null_lanes, pack_lanes};
+use super::{Neon, load_datums, non_null_lanes, pack_lanes};
 use crate::int32::{CompareOp, Side};
 
 /// Rows of a dense block whose value satisfies `value op scalar`, as bits in
 /// row order. NULL rows compare like any other and are masked by the caller.
 #[inline]
-pub fn filter_dense(values: &[i32; 64], scalar: i32, op: CompareOp) -> u64 {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above), so the
-    // target-feature function can run on any CPU this code runs on.
+pub fn filter_dense(_: Neon, values: &[i32; 64], scalar: i32, op: CompareOp) -> u64 {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { dense(values, scalar, op) }
 }
 
 /// Rows of a Datum block whose int4 value satisfies `value op scalar` and
 /// whose flag is not NULL, as bits in row order.
 #[inline]
-pub fn filter_datum(values: &[u64; 64], isnull: &[bool; 64], scalar: i32, op: CompareOp) -> u64 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn filter_datum(
+    _: Neon,
+    values: &[u64; 64],
+    isnull: &[bool; 64],
+    scalar: i32,
+    op: CompareOp,
+) -> u64 {
     // SAFETY: as in filter_dense.
     unsafe { datum(values, isnull, scalar, op) }
 }
@@ -49,9 +52,8 @@ fn datum(values: &[u64; 64], isnull: &[bool; 64], scalar: i32, op: CompareOp) ->
 /// The lanes where `left op right` over two whole-word sides of columns:
 /// dense or Datum storage, the two in any combination.
 #[inline]
-pub fn compare_sides(left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn compare_sides(_: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { sides(left, right, op) }
 }
 
