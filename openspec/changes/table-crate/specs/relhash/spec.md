@@ -397,7 +397,8 @@ order, SHALL leave the same bytes and give the same answers.
   crate runs over it, and more calls after the first error
 - **THEN** each call ends with a result or the error of the rule the
   damage breaks, and the bytes around every block are as they were
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/damage.rs::every_damage_against_every_call`
 
 #### Scenario: Bytes a fuzzer chose
 - **WHEN** a fuzzer builds tables from its input, damages them in one
@@ -445,7 +446,8 @@ decides, as [`Kind`](../../../crates/relhash/src/error.rs) lists them.
 - **WHEN** one rule of the format is broken in a valid table, and every
   call that reads the damaged bytes runs over it
 - **THEN** each of them fails with a damaged table and that rule
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relhash/src/table/tests/damage.rs::every_damage_against_every_call`
 
 #### Scenario: Each wrong argument names its rule
 - **WHEN** a call is given one argument that breaks one rule of a wrong

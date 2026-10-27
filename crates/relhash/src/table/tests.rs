@@ -4,6 +4,7 @@
 //! lookups, the records, the filter, the calls that fail part way and
 //! the owning table under any order of its calls.
 
+mod damage;
 mod filter;
 mod format;
 mod lookup;

@@ -933,6 +933,16 @@ the marks in a chunk of up to two words of them. A longer walk repeats
 the same checks, and a solver of bits, which Kani is, proves the
 arithmetic of longer ones too slowly.
 
+The rows of the matrix under a point are damages of
+`crates/relhash/src/table/tests/damage.rs`. Its test
+`every_damage_against_every_call` builds valid tables of four shapes,
+with repeated and NULL keys over several chunks, regrown or split,
+damages each in one place, at and around the limits of the field, and
+runs every call of the crate over it: each call alone, then all of
+them in turn, twice, so that calls follow the ones that failed. A call
+must end with a result or the error of the point, and the guard words
+around every block must stay as they were.
+
 - **`header`**: the fields of the header, read when a handle attaches
   to the index, and when the index is moved to a larger one.
   - Decides addresses and the length of loops: where the buckets start
@@ -944,6 +954,7 @@ arithmetic of longer ones too slowly.
   - Error: damaged, with the rule of the first wrong field, from
     `Magic` to `Reserved`.
   - Proof: `a_header_that_passes_puts_every_bucket_inside_the_index`.
+  - Matrix: the rows from `magic` to `last reserved word`.
 - **`record-count`**: the count of records in the header.
   - Decides the length of a loop: a walk down a chain takes at most as
     many steps as there are records. A table's statistics hand it to
@@ -956,6 +967,8 @@ arithmetic of longer ones too slowly.
   - Error: damaged, `Chain`.
   - Proof: `the_record_count_is_bounded_by_the_chunks`, and
     `a_walk_down_a_chain_ends_within_the_record_count` for the walk.
+  - Matrix: `no record`, `one record`, `a record less`, `a record more`
+    and `most records`.
 - **`bucket-head`**: the reference a bucket holds, the first record of
   its chain.
   - Decides an address.
@@ -966,6 +979,7 @@ arithmetic of longer ones too slowly.
     field, which a walk checks when it follows it.
   - Error: damaged, `Outside`.
   - Proof: `a_reference_that_passes_names_a_record_inside_its_chunk`.
+  - Matrix: the rows from `bucket emptied` to `bucket of most`.
 - **`used-mark`**: the first word of a chunk, the bytes its records
   take.
   - Decides an address, where the chunk's writer appends, and the
@@ -980,6 +994,8 @@ arithmetic of longer ones too slowly.
   - Proof: `a_used_mark_that_passes_ends_a_record`, and for the walks
     `a_walk_over_a_chunk_stays_inside_it` and
     `a_walk_over_marks_reads_words_within_them`.
+  - Matrix: the rows from `used mark zero` to `used mark at the
+    chunk's end`.
 - **`record`**: the bytes of a record, cut into its fields.
   - Decides an address by its next field, which is checked as a
     bucket's head is when a walk follows it. Its size field is checked.
@@ -990,12 +1006,16 @@ arithmetic of longer ones too slowly.
     `NoRecord` for one a walk over a chunk meets.
   - Proof: `a_walk_down_a_chain_ends_within_the_record_count`, whose
     walk opens every record it meets.
+  - Matrix: `hash`, `NULL bits`, `key`, `payload`, and the rows
+    `record size field` above, zero and most.
 - **`record-copy`**: the bytes of a record that a split or a merge
   copies whole into another chunk.
   - Data only: the copy's next field is written anew before the copy
     is linked.
   - Check: the record is checked as `record` checks it before the copy.
   - Error: as `record`.
+  - Matrix: the rows `record size field`, which a split of the damaged
+    chunk meets.
 - **`next`**: the next field of a record that the one writer of a table
   reads to put a new record of the same key after it.
   - Decides an address, which becomes the new record's next field and
@@ -1003,6 +1023,7 @@ arithmetic of longer ones too slowly.
   - Check: as `bucket-head`, when a walk follows it.
   - Error: damaged, `Outside`.
   - Proof: as `bucket-head`.
+  - Matrix: the rows from `next to itself` to `next of most`.
 
 ## Unsafe code
 
@@ -1148,6 +1169,10 @@ it, and when a module of the list holds none. The paths are under
 - The unit tests in `crates/relhash/src/table/tests.rs`: blocks that
   are not chunks or an index, partitions, merges, and a shared filter
   that threads race to build.
+- The matrix of damage in `crates/relhash/src/table/tests/damage.rs`:
+  every damage of its list against every call, alone and after
+  failed calls, with guard words around every block; a few of its cases
+  also run under Miri.
 - The unit tests in `crates/relhash/src/table/marks.rs`: the
   words of the marks, and the records and cursors a walk refuses.
 - `crates/relhash/src/table/loom/`, run by `make rust-loom`: links into
