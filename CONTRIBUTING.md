@@ -365,5 +365,6 @@ when:
 - PostgreSQL master is the supported core; Greengage 7 is planned.
 - The ABI does not tie a PostgreSQL type to one physical format of a
   column.
-- For now performance counters work only on macOS with Apple silicon;
-  x86 and Linux are planned. CI checks correctness, not speed.
+- For now `tessera-bench` counts on macOS, on Apple silicon and on
+  Intel; on Linux, where `pmu` already counts, it is planned. CI checks
+  correctness, not speed.

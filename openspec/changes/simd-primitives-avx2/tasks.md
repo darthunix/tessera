@@ -25,7 +25,9 @@ The words used below:
 - **"The counters"**: as root, `cargo run --locked -p tessera-bench --
   --base main --bench <program>`, twice, judged operation by operation
   by the measurement plan of the design, with the runs' directories in
-  the pull request.
+  the pull request. Until the first pull request reaches `main`, the
+  base is the commit of task 2.4, whose benchmarks are those of this
+  branch.
 
 ## 1. The proposal
 
@@ -53,15 +55,17 @@ The words used below:
 - [x] 2.3 The link to `pmu` in `crates/tessera-capi/benches/README.md`
       points to `tools/pmu`. Check: the path of the link exists from
       the README's folder
-- [ ] 2.4 Run `tessera-bench` on the Intel Mac and correct the texts:
+- [x] 2.4 Run `tessera-bench` on the Intel Mac and correct the texts:
       the README of the benchmarks, `docs/measuring.md` and "Accepted
       limits" in `CONTRIBUTING.md` say that `tessera-bench` counts on
       macOS, on Apple silicon and on Intel, and that on Linux, where
-      `pmu` already counts, it is planned. A fix of the tool that the
-      run calls for is a commit of its own before this one. Check: as
-      root, `cargo run --locked -p tessera-bench -- --base WORKTREE`
-      exits 0 with no FAIL and no UNSTABLE; its spread, MODES and zero
-      readings go into the pull request
+      `pmu` already counts, it is planned. A fix of the tool or of a
+      benchmark that the run calls for is a commit of its own before
+      this one. Check: as root, `cargo run --locked -p tessera-bench
+      -- --base WORKTREE` over all programs; a FAIL of cycles is run
+      again on its program, and a benchmark fixed is run again; the
+      runs end with no FAIL and no UNSTABLE; their spread, MODES and
+      zero readings go into the pull request
 
 ## 3. The pilot
 

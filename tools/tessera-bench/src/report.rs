@@ -33,7 +33,10 @@ pub const SHORT_CYCLE_WARNING: f64 = 4.;
 /// of at least [`CYCLE_FAIL_CYCLES`], when the median confirms the growth
 /// beyond [`CYCLE_WARNING`]. The minimum over all blocks of a side is the
 /// cost in the best core state seen; with three processes it stayed within
-/// 3% between identical binaries on long operations, bistable ones included.
+/// 3% between identical binaries on long operations, bistable ones included,
+/// on Apple's M5 Pro. On Intel a process can keep one of two costs for its
+/// whole life, so a failure there needs a second run: see the README of the
+/// benchmarks.
 pub const CYCLE_FAIL: f64 = 0.10;
 pub const CYCLE_FAIL_CYCLES: f64 = 500.;
 /// An operation is bistable when the medians of its processes, or the blocks
