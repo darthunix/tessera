@@ -112,8 +112,6 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `pmu-on-x86-linux`: The counters on x86-64 Linux and on two kinds of
   cores, on hardware
 - `pmu-on-crates-io`: The crate `pmu` published on crates.io
-- `relhash-one-chunk-walk`: One check of the places of a chunk for every
-  walk of relhash
 
 ## Entries
 
@@ -1550,26 +1548,3 @@ fact.
   FULL joins' tail, for help a worker of a parallel append mostly gives
   to the next child anyway (pull request 52).
 
-### relhash-one-chunk-walk
-
-One check of the places of a chunk for every walk of relhash. A
-deviation from the forecast of relhash's contract, found by its probe of
-removing records, 2026-10-27.
-
-- **What:** The walks over a chunk's records each check a record
-  themselves: the filter's fill, a chunk writer's split, a link, a
-  grouped link and a regrow, the clearing of a key, the scan and the
-  merge; the walk over unmarked records of a join reads none. A change
-  of what a place of a chunk may hold, such as the free place a removal
-  leaves, has to reach every one of them. Give the places of a chunk one
-  check that every walk takes, so that such a change touches it alone.
-- **Why:** The forecast of the contract said that removing records
-  touches the calls of one writer and the chunks alone; the probe
-  touched six modules of the crate and the walks of other calls, the
-  boundary between the calls of one writer and the crate's other calls.
-- **Known:** The links and the probe compile their walks for speed, and
-  the scan of a chunk keeps the loop the counters accepted: one check
-  must keep their machine code, measured as a refactor is.
-- **Depends on:** nothing.
-- **Capabilities:** relhash
-- **Size:** one pull request, measured by `tessera-bench --disasm`.

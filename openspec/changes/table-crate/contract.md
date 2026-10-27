@@ -102,6 +102,7 @@ header of key kinds: one interface, and no other code of a node.
 
 ### Removing records
 Records are only appended. Removing them by one writer touches the
-crate's calls of one writer and its chunks, which gain free places, and
-only the node of Tessera that removes: no other call, and no format of a
-spill.
+crate's calls of one writer, its chunks, which gain free places, the one
+check of a chunk's places that every walk takes, and the format of a
+record, which marks a free place; and only the node of Tessera that
+removes: no other call, and no format of a spill.

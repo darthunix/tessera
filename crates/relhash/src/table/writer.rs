@@ -14,7 +14,7 @@ use super::batch::{check_keys, check_partitions, partition_of, shaped};
 use super::header::{CHUNK_HEADER, Header, KEY_SLOT, Layout, Place, RECORD_HEADER};
 use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
-use super::record::{Access, check_record, unlinked};
+use super::record::{Access, records};
 use super::region::{RawRegion, Region};
 use super::{Batch, Partitions, Table};
 
@@ -317,30 +317,31 @@ pub(super) fn link_grouped<R: Region>(
     from: &mut usize,
 ) -> Result<(usize, usize)> {
     let mut access = Access::new(region, layout);
-    let bytes = unlinked(&access, chunk, *from)?;
-    let count = bytes.len();
-    let mut duplicates = 0;
-    for byte in bytes {
-        link_by_keys(&mut access, Place { chunk, byte }, &mut duplicates)?;
+    let (mut count, mut duplicates) = (0, 0);
+    for record in records(&access, chunk, *from)? {
+        let (byte, hash) = record?;
+        link_by_keys(&mut access, Place { chunk, byte }, hash, &mut duplicates)?;
         *from = byte + access.record_size();
+        count += 1;
     }
     Ok((count, duplicates))
 }
 
-/// Link the record at `place` right after a record with the same keys
-/// when the table holds one, counting it in `duplicates`, and first in
-/// its bucket's chain when not. The writer has the table to itself. The
-/// count is kept here: a flag returned to the caller cost the grouped
-/// link two instructions a record.
+/// Link the record of `hash` at `place`, which a walk over its chunk
+/// gave, right after a record with the same keys when the table holds
+/// one, counting it in `duplicates`, and first in its bucket's chain when
+/// not. The writer has the table to itself. The count is kept here: a
+/// flag returned to the caller cost the grouped link two instructions a
+/// record.
 #[inline(always)]
 fn link_by_keys<R: Region>(
     access: &mut Access<'_, R>,
     place: Place,
+    hash: u32,
     duplicates: &mut usize,
 ) -> Result<()> {
-    let hash = check_record(access, place)?;
-    // SAFETY: `check_record` accepted the record, which this writer
-    // appended or holds, and nothing else writes.
+    // SAFETY: the walk accepted the record, which this writer appended or
+    // holds, and nothing else writes.
     let record = unsafe { access.view(place) };
     let head = access.head(hash);
     let same = access.find_same(head, hash, record.null_bits(), record.keys())?;
@@ -432,15 +433,12 @@ pub(super) fn clear_key<R: Region>(region: &R, layout: &Layout, key: usize) -> R
     access.check_chunks()?;
     let mut count = 0;
     for chunk in 0..region.chunks() {
-        let (used, _) = access.room(chunk)?;
-        let mut byte = CHUNK_HEADER;
-        while byte < used {
-            check_record(&access, Place { chunk, byte })?;
+        for record in records(&access, chunk, CHUNK_HEADER)? {
+            let (byte, _) = record?;
             let slot = byte + RECORD_HEADER + key * KEY_SLOT;
             // SAFETY: the caller has the table to itself, and the slot lies
-            // within a record that `check_record` accepted.
+            // within a record that the walk accepted.
             unsafe { region.chunk_bytes_mut(region.spot(chunk, slot), KEY_SLOT) }.fill(0);
-            byte += layout.record_size;
             count += 1;
         }
     }
@@ -476,16 +474,21 @@ pub(super) fn scan<R: Region>(
     }
     let mut count = 0;
     while count < out.len() && chunk < region.chunks() {
-        let (used, _) = access.room(chunk)?;
-        if byte >= used {
+        let mut places = records(&access, chunk, byte)?;
+        // The room of the output first: no record past it is read.
+        while count < out.len() {
+            let Some(record) = places.next() else {
+                break;
+            };
+            let (at, _) = record?;
+            out[count] = Place { chunk, byte: at }.reference();
+            count += 1;
+            byte = at + layout.record_size;
+        }
+        if count < out.len() {
             chunk += 1;
             byte = CHUNK_HEADER;
-            continue;
         }
-        check_record(&access, Place { chunk, byte })?;
-        out[count] = Place { chunk, byte }.reference();
-        count += 1;
-        byte += layout.record_size;
     }
     *cursor = Cursor::at(chunk, byte);
     Ok(count)
@@ -515,8 +518,9 @@ pub(super) fn regrow<R: Region>(
     unsafe { to.zero_u32(grown.buckets_offset, grown.nbuckets as usize) };
     let mut access = Access::new(to, &grown);
     for chunk in 0..to.chunks() {
-        for byte in unlinked(&access, chunk, CHUNK_HEADER)? {
-            link_by_keys(&mut access, Place { chunk, byte }, &mut 0)?;
+        for record in records(&access, chunk, CHUNK_HEADER)? {
+            let (byte, hash) = record?;
+            link_by_keys(&mut access, Place { chunk, byte }, hash, &mut 0)?;
         }
     }
     Ok(grown)
@@ -650,18 +654,12 @@ pub(super) fn merge<R: Region, E: From<Error>>(
     let record_size = access.record_size();
     let limit = layout.most_records();
     let (mut used, mut room) = access.room(chunk)?;
-    let places = unlinked(&access, source, *from)?;
+    let places = records(&access, source, *from)?;
     let mut merged = 0;
     let mut stop = MergeStop::Done;
-    for byte in places {
-        let hash = check_record(
-            &access,
-            Place {
-                chunk: source,
-                byte,
-            },
-        )?;
-        // SAFETY: `check_record` accepted the record, which nothing writes.
+    for record in places {
+        let (byte, hash) = record?;
+        // SAFETY: the walk accepted the record, which nothing writes.
         let record = unsafe {
             access.view(Place {
                 chunk: source,

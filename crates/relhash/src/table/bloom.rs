@@ -56,8 +56,8 @@ use core::sync::atomic::AtomicU64;
 use crate::error::{Error, Result, Rule, ensure};
 use crate::{RowMask, RowMaskView, check_rows, ones};
 
-use super::header::{CHUNK_HEADER, Layout, Place};
-use super::record::{Access, check_record, unlinked};
+use super::header::{CHUNK_HEADER, Layout};
+use super::record::{Access, records};
 use super::region::{Region, order};
 
 /// The words of a filter as a check reads them.
@@ -324,8 +324,8 @@ fn each_hash<R: Region>(
     mut f: impl FnMut(u32),
 ) -> Result<()> {
     for chunk in 0..chunks {
-        for byte in unlinked(access, chunk, CHUNK_HEADER)? {
-            f(check_record(access, Place { chunk, byte })?);
+        for record in records(access, chunk, CHUNK_HEADER)? {
+            f(record?.1);
         }
     }
     Ok(())
