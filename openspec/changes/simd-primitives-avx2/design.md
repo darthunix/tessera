@@ -468,7 +468,14 @@ job on `ubuntu-24.04-arm` judges their mutants as it judges the NEON
 code today. The AVX2 primitives, `simd/avx2.rs`, compile only on
 x86-64. The job on arm64 excludes them in `.cargo/mutants.toml`, with
 that reason, and a second job of the lines a pull request changes runs
-on `ubuntu-24.04`, which has AVX2, for that file alone.
+on `ubuntu-24.04`, which has AVX2, for that file alone, from a
+configuration of its own, `.cargo/mutants-avx2.toml`. The token of
+AVX2 has no values off x86-64, so that job judges it too, and the
+jobs on arm64 the token of NEON.
+
+A mutant that turns a vector set off leaves the row paths, which give
+the same answers, and only the test of the set catches it: every
+mutants job runs with `TESSERA_REQUIRE_SIMD=1`.
 
 The alternative was to exclude the file with no job, which leaves
 every mutant of the AVX2 code unjudged. The second job costs a runner

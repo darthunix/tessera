@@ -7,6 +7,11 @@
 # does not build does not. The runners are arm64 Linux: the NEON kernels
 # compile on any aarch64, a runner has four cores and 16 GB to macOS's
 # three and 7, and an account runs twenty of them at once to macOS's five.
+# The AVX2 primitives compile on x86-64 alone: their mutants have a job of
+# their own on x86-64 Linux (.cargo/mutants-avx2.toml). Every job requires
+# the vector set of its runner (TESSERA_REQUIRE_SIMD): a mutant that turns
+# the set off leaves the row paths, which give the same answers, and only
+# the test of the set catches it.
 name: Mutants
 
 on:
@@ -14,6 +19,7 @@ on:
     paths:
       - "crates/**"
       - ".cargo/mutants.toml"
+      - ".cargo/mutants-avx2.toml"
   workflow_dispatch:
     inputs:
       package:
@@ -62,6 +68,7 @@ jobs:
         env:
           TMPDIR: /dev/shm
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
+          TESSERA_REQUIRE_SIMD: "1"
         run: |
           # 3, a timeout, outranks 2, a missed mutant, in cargo-mutants'
           # code: the list of the missed decides.
@@ -106,6 +113,7 @@ jobs:
         env:
           TMPDIR: /dev/shm
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
+          TESSERA_REQUIRE_SIMD: "1"
           PACKAGE: ${{ inputs.package }}
         run: |
           package=()
@@ -121,5 +129,57 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mutants-shard-${{ matrix.shard }}
+          path: mutants.out
+          if-no-files-found: ignore
+
+  # The mutants of the AVX2 primitives, in the lines a pull request changes
+  # or, by hand, every one: a few dozen, on one runner, which has AVX2. As
+  # in the jobs above, each test program within 4 GB and the list of the
+  # missed deciding; by hand with a package, only tessera-kernels has them.
+  avx2:
+    name: Mutants of the AVX2 primitives (ubuntu-24.04)
+    if: >-
+      github.event_name == 'pull_request' || inputs.package == '' ||
+      inputs.package == 'tessera-kernels'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants
+      - name: The pull request's diff of the crates
+        if: github.event_name == 'pull_request'
+        run: |
+          mkdir -p target
+          git diff "origin/${{ github.base_ref }}...HEAD" -- crates > target/pr.diff
+          wc -l target/pr.diff
+      - name: The mutants of the AVX2 primitives
+        env:
+          TMPDIR: /dev/shm
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: prlimit --as=4294967296 --
+          TESSERA_REQUIRE_SIMD: "1"
+          PACKAGE: ${{ inputs.package }}
+        run: |
+          args=()
+          if [ "${{ github.event_name }}" = pull_request ]; then
+            args=(--in-diff target/pr.diff)
+          elif [ -n "$PACKAGE" ]; then
+            args=(--test-package "$PACKAGE")
+          fi
+          code=0
+          cargo mutants --config .cargo/mutants-avx2.toml "${args[@]}" --no-shuffle --jobs 2 || code=$?
+          test "$code" -eq 0 || test "$code" -eq 3
+          test ! -s mutants.out/missed.txt
+      - name: The mutants' outcomes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutants-avx2
           path: mutants.out
           if-no-files-found: ignore

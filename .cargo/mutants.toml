@@ -3,6 +3,10 @@
 # those in the lines a pull request changes, and every one on request,
 # both on arm64 Linux: the NEON kernels compile on any aarch64 (on x86-64
 # they are cut out by cfg, and their mutants would survive unseen).
+# The AVX2 primitives (simd/avx2.rs) compile on x86-64 alone, so their
+# mutants would survive unseen here: .cargo/mutants-avx2.toml takes them,
+# in a job of their own on x86-64 Linux, and the token of AVX2 too, which
+# has no values off x86-64.
 
 # The tools, the test strategies, the benchmark programs and the loom
 # models are not the product. The table's loom models, their memory and
@@ -16,6 +20,7 @@ exclude_globs = [
     "**/loom.rs",
     "crates/relhash/src/table/loom/**",
     "crates/relhash/src/table/proofs.rs",
+    "crates/tessera-kernels/src/simd/avx2.rs",
 ]
 
 # Debug output carries no logic; Display stays, it is the text of an error.
@@ -101,11 +106,11 @@ exclude_re = [
     "replace <= with > in sum_terms$",
     "accumulate\\.rs:399:50: replace \\|\\| with && in sum_terms$",
     "accumulate\\.rs:[0-9]+:[0-9]+: replace \\* with \\+$",
-    "cast\\.rs:7[12]:[0-9]+: replace (&& with \\|\\||>= with <) in int4_to_int8$",
-    "count\\.rs:37:[0-9]+: replace >= with < in count$",
-    "int/aggregate\\.rs:7[12]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
-    "int/arith\\.rs:21[01]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
-    "int/compare\\.rs:51:69: replace && with \\|\\| in run$",
+    "cast\\.rs:7[34]:[0-9]+: replace (&& with \\|\\||>= with <) in int4_to_int8$",
+    "count\\.rs:39:[0-9]+: replace >= with < in count$",
+    "int/aggregate\\.rs:7[45]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
+    "int/arith\\.rs:20[56]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
+    "int/compare\\.rs:55:37: replace && with \\|\\| in run$",
     "replace \\| with \\^ in (Place::reference|Cursor::at)$",
     "table/writer\\.rs:(234|282):[0-9]+: replace \\| with \\^ in resolve_rows$",
     "decimal\\.rs:1503:41: replace \\| with \\^ in read_with$",
@@ -128,6 +133,7 @@ exclude_re = [
     "table/lanes\\.rs:121:18: replace == with != in probe_word$",
     "replace \\| with \\^ in place$",
     "replace <impl Drop for Block>::drop with \\(\\)$",
+    "replace <impl Token for Avx2>::get -> Option<Self> with None$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the
