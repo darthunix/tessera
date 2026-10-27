@@ -81,7 +81,7 @@ The words used below:
       --locked -p tessera-kernels` on the Intel Mac; no
       `unreachable!` left in the hooks; the Miri job of CI, which
       builds the kernels without a set
-- [ ] 3.2 The trait `Vectors` with its NEON implementation, and
+- [x] 3.2 The trait `Vectors` with its NEON implementation, and
       `simd/filter.rs`, the filter of int4 and the comparison of two
       columns, written over it. Check: the move check
 - [ ] 3.3 The AVX2 implementation of the filter's primitives. The
