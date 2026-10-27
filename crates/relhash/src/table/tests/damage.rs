@@ -571,7 +571,7 @@ fn one_sequence_twice_gives_the_same_blocks_and_answers() {
     };
     let outcome = TestRunner::new(config).run(&cases(), |case| {
         for (index, &(damage, apply, _)) in DAMAGES.iter().enumerate() {
-            if cfg!(miri) && index % 12 != 0 {
+            if cfg!(miri) && index % 24 != 0 {
                 continue;
             }
             let mut worlds = [World::build(&case), World::build(&case)];

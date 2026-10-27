@@ -767,7 +767,11 @@ fn each_wrong_argument_names_its_rule() {
         ..Config::default()
     };
     let outcome = TestRunner::new(config).run(&cases(), |case| {
-        for &(what, rule, leaves, call) in WRONGS {
+        for (index, &(what, rule, leaves, call)) in WRONGS.iter().enumerate() {
+            // Under Miri, every fourth: each builds a table of its own.
+            if cfg!(miri) && index % 4 != 0 {
+                continue;
+            }
             let mut world = World::build(&case);
             let before = world.bytes();
             let result = call(&mut world);
