@@ -13,7 +13,7 @@ use super::keys::{KeySource, WordKeys, slot_buffer};
 use super::lanes::{Lanes, VERTICAL_MIN_ROWS, probe_word};
 use super::record::no_chunk;
 use super::record::{Access, PayloadColumns, cycle, same_keys};
-use super::record::{check_record, check_record_at, unlinked};
+use super::record::{check_record_at, records, unlinked};
 use super::region::Region;
 use super::{Appended, MAX_PARTITIONS, Partitions, Split};
 
@@ -787,20 +787,15 @@ pub(super) fn split<R: Region>(
     );
     let access = Access::for_chunks(region, layout);
     let record_size = access.record_size();
-    let places = unlinked(&access, source, *from)?;
+    let mut places = records(&access, source, *from)?;
     let mut count = 0;
     let mut full = None;
-    for byte in places {
-        if count == refs.len() {
+    // The room of the outputs first: no record past them is read.
+    while count < refs.len() {
+        let Some(record) = places.next() else {
             break;
-        }
-        let hash = check_record(
-            &access,
-            Place {
-                chunk: source,
-                byte,
-            },
-        )?;
+        };
+        let (byte, hash) = record?;
         let partition = partition_of(hash, partitions.shift, mask);
         let chunk = partitions.chunks[partition as usize] as usize;
         let (used, room) = access.room(chunk)?;

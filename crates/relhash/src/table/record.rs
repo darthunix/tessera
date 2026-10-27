@@ -1047,16 +1047,85 @@ pub(super) fn unlinked<R: Region>(
     Ok((from..used).step_by(access.record_size()))
 }
 
-/// The hash of the record at a place of a chunk below its used mark,
-/// which must claim the table's record length.
-#[inline]
-pub(super) fn check_record<R: Region>(access: &Access<'_, R>, place: Place) -> Result<u32> {
-    // SAFETY: the place lies below the chunk's used mark, which `room`
-    // checked against its length; the caller wrote it or it is published.
-    unsafe { check_record_at(access, access.spot(place), place) }
+/// The record at a place of a chunk below its used mark: its hash, or
+/// `None` for a place that holds no record. Every walk over a chunk's
+/// places takes it, [`Records`] and the walk over unmarked records, so
+/// that what a place may hold is decided here alone; today every place
+/// holds a record, whose size field must be the table's record size. The
+/// link of the records just appended takes [`check_record_at`] instead,
+/// in its own loop for speed: it walks only places it saw written.
+#[inline(always)]
+pub(super) fn record_at<R: Region>(
+    region: &R,
+    record_size: usize,
+    place: Place,
+) -> Result<Option<u32>> {
+    // SAFETY: the place lies below its chunk's used mark, which the walk
+    // checked against the chunk's length: a record's header fits there.
+    // trust: record
+    let header = unsafe { region.chunk_bytes(region.spot(place.chunk, place.byte), RECORD_HEADER) };
+    let field = |at: usize| {
+        u32::from_ne_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+    };
+    ensure!(
+        field(LEN) as usize * 8 == record_size,
+        Error::damaged(Rule::NoRecord)
+            .with(place.chunk)
+            .and(place.byte)
+    );
+    Ok(Some(field(HASH)))
 }
 
-/// As [`check_record`], for the record at a spot the caller resolved.
+/// The records of a chunk from a byte on, in order: each place's first
+/// byte and its record's hash, by [`record_at`], which also decides the
+/// places it passes. It reads with the region it was made over, so that
+/// a caller may change the table as it walks.
+pub(super) struct Records<'r, R: Region> {
+    region: &'r R,
+    record_size: usize,
+    chunk: usize,
+    places: core::iter::StepBy<core::ops::Range<usize>>,
+}
+
+impl<R: Region> Iterator for Records<'_, R> {
+    type Item = Result<(usize, u32)>;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        for byte in self.places.by_ref() {
+            let place = Place {
+                chunk: self.chunk,
+                byte,
+            };
+            match record_at(self.region, self.record_size, place) {
+                Ok(Some(hash)) => return Some(Ok((byte, hash))),
+                Ok(None) => {}
+                Err(error) => return Some(Err(error)),
+            }
+        }
+        None
+    }
+}
+
+/// The walk over the records of chunk `chunk` from byte `from`, which must
+/// be a record boundary at most the chunk's used mark.
+#[inline]
+pub(super) fn records<'r, R: Region>(
+    access: &Access<'r, R>,
+    chunk: usize,
+    from: usize,
+) -> Result<Records<'r, R>> {
+    Ok(Records {
+        region: access.region,
+        record_size: access.record_size,
+        chunk,
+        places: unlinked(access, chunk, from)?,
+    })
+}
+
+/// The hash of the record at a spot of a chunk below its used mark, which
+/// must claim the table's record length: the link's own check, in its
+/// loop over the records it was just given.
 ///
 /// # Safety
 ///

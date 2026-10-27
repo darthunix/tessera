@@ -13,6 +13,7 @@ use crate::{RowMaskView, check_rows, ones};
 use super::Chunks;
 use super::chunks::chunk_region;
 use super::header::{CHUNK_HEADER, MAX_CHUNK_LEN, Place, check_record_size};
+use super::record::record_at;
 use super::region::Region;
 use super::writer::Cursor;
 
@@ -180,6 +181,9 @@ pub fn mark(
 /// not given; 0 means the walk is over. Without marks every record is one
 /// without a pair. A word of marks covers 64 records at once. A cursor
 /// must name a record's place, in a chunk at most up to its used mark.
+/// Each record it gives is checked as every walk over a chunk checks its
+/// records: one whose size is not `record_size` fails the walk with a
+/// damaged table, [`Rule::NoRecord`](crate::Rule::NoRecord).
 pub fn scan_unmarked(
     chunks: &Chunks<'_>,
     record_size: usize,
@@ -212,6 +216,7 @@ pub fn scan_unmarked(
         );
     }
     // Every loop is bounded: by the chunks, their words and a word's bits.
+    let region = chunk_region(chunks);
     let mut count = 0;
     for chunk in first_chunk..chunks.len() {
         let end = chunks.records(chunk, per_record)?;
@@ -228,16 +233,18 @@ pub fn scan_unmarked(
                 free &= (1 << high) - 1;
             }
             for bit in ones(free) {
-                let record = word * 64 + bit;
+                let byte = CHUNK_HEADER + (word * 64 + bit) * record_size;
                 if count == out.len() {
-                    *cursor = Cursor::at(chunk, CHUNK_HEADER + record * record_size);
+                    *cursor = Cursor::at(chunk, byte);
                     return Ok(count);
                 }
-                out[count] = Place {
-                    chunk,
-                    byte: CHUNK_HEADER + record * record_size,
+                // The one check of a chunk's places: a place that holds no
+                // record is passed.
+                let place = Place { chunk, byte };
+                if record_at(&region, record_size, place)?.is_none() {
+                    continue;
                 }
-                .reference();
+                out[count] = place.reference();
                 count += 1;
             }
         }
@@ -341,6 +348,11 @@ mod tests {
         let walk = |used: u64, cursor: Cursor| -> Result<usize> {
             let mut words = vec![0_u64; len / 8];
             words[0] = used;
+            // Records of SIZE bytes: the size field of each, its fourth
+            // word of 4 bytes, holds its size in units of 8.
+            for byte in (CHUNK_HEADER..len).step_by(SIZE) {
+                words[(byte + 8) / 8] = ((SIZE / 8) as u64) << 32;
+            }
             let bases = [words.as_mut_ptr().cast::<u8>()];
             let lens = [len];
             // SAFETY: the chunk is the vector's, used only here.

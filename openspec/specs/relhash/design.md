@@ -881,7 +881,8 @@ a chunk's run, and `word` reads a word.
 The marks are not kept in the records. The records are read by every
 participant while they probe, and stay as they were written. The walk
 reads the marks of 64 records in one word, and reads no record whose
-bit is set. The walk needs only the chunks, so `mark` and
+bit is set; it reads the header of each record it gives, which every
+walk over a chunk checks. The walk needs only the chunks, so `mark` and
 `scan_unmarked` take the size of a record from the caller, and
 `Table::mark` and `Table::scan_unmarked` take the table's.
 
@@ -1000,8 +1001,12 @@ around every block must stay as they were.
   - Decides an address by its next field, which is checked as a
     bucket's head is when a walk follows it. Its size field is checked.
     Its hash, NULL bits, keys and payload are data.
-  - Check: `Access::open_at` and `check_record_at`: the size the record
-    claims is the table's record size.
+  - Check: the size the record claims is the table's record size:
+    `Access::open_at` for a record a reference names; `record_at`, the
+    one check of a chunk's places, for every walk over a chunk, the
+    walk over unmarked records too; and `check_record_at` for the link
+    of the records just appended, in its own loop for speed, which
+    walks only places it saw written.
   - Error: damaged, `Misplaced` for a record a reference names,
     `NoRecord` for one a walk over a chunk meets.
   - Proof: `a_walk_down_a_chain_ends_within_the_record_count`, whose
@@ -1111,8 +1116,11 @@ is never merged and counts the parts and the interfaces it touched.
   split, of the filter's fill and of the marks, which each check the
   places of a chunk themselves. Three interfaces: the crate's API, the
   format of a record, whose size field gains a flag, and the C API. No
-  node, as none removes yet. Past the forecast, which names the calls of
-  one writer and the chunks alone.
+  node, as none removes yet: past the forecast, which named the calls of
+  one writer and the chunks alone. Every walk over a chunk now takes one
+  check of its places, `record_at`, which a free place would reach
+  alone; the link of the records just appended keeps its own, and meets
+  no free place, since a removal frees a linked record.
 
 ## What we decided not to do
 

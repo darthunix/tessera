@@ -148,9 +148,14 @@ fn participants_mark_one_word(plain: bool) {
         for thread in threads {
             thread.join().unwrap();
         }
-        // The walk reads the used mark of a chunk of three records.
+        // The walk reads the used mark of a chunk of three records, and the
+        // size field of each record it gives, the fourth word of 4 bytes,
+        // which holds the size in units of 8.
         let mut chunk = [0_u64; LEN / 8];
         chunk[0] = LEN as u64;
+        for byte in (CHUNK_HEADER..LEN).step_by(SIZE) {
+            chunk[(byte + 8) / 8] = ((SIZE / 8) as u64) << 32;
+        }
         let bases = [chunk.as_mut_ptr().cast::<u8>()];
         // SAFETY: the chunk is this array, read only by the walk below.
         let chunks = unsafe { Chunks::new(&bases, &[LEN]) }.unwrap();
