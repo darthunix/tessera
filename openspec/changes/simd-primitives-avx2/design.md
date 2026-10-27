@@ -127,6 +127,14 @@ The kernels of int4 and int8 are built in three layers:
     FAIL again, and `table_large` after its fixture was fixed.
   - Until the first pull request reaches `main`, the counters take
     the commit of task 2.4 as their base, not `main`.
+- 2026-10-27, after the counters of the pilot:
+  - The drivers keep their decision for whole words inline, in the
+    function of their row loops, with the cheaper decision of the
+    comparison. The losses of the row paths of x86-64 that this leaves
+    are accepted for the pilot and go to the roadmap, to be settled
+    once for every driver.
+  - The NEON code may change where the counters of the M5 Pro show no
+    loss: the M5 Pro is at hand for runs.
 
 ## Decisions
 
@@ -286,6 +294,50 @@ second fails, the search follows "Stop and ask" of `CONTRIBUTING.md`:
 each try is a hypothesis written first, and two tries in a row that
 neither remove a call nor rule out a cause, or about an hour, end it
 with a question to the maintainer.
+
+The pilot held, with these findings:
+
+1. The machine code of AArch64 stayed the same in every function of
+   the 13 programs through the tokens, the move of the filter onto
+   `Vectors` and its AVX2 code (`disasm-gXroZF`, `disasm-vw3ZKZ`,
+   `disasm-xpp1tS`). It took care: the NEON primitives are `#[inline]`,
+   as the intrinsics are, since `#[inline(always)]` inlined them sooner
+   and moved loads and spills; and each driver decides as before, a
+   `bool` with the token tested in it, since a closure or a let chain
+   in the decision changed the code.
+2. On x86-64 the functions of the filter and of the comparison
+   compiled for AVX2 have no call in the code of a word and keep their
+   lanes in registers. Two paths needed the first fix of "Risks":
+   AVX2's primitives of more than one intrinsic are functions compiled
+   for AVX2, so that a driver asking for the non-NULL rows, and the
+   loader of a column side, a closure the inliner left out, call one
+   function rather than each intrinsic.
+3. The tests pass with `TESSERA_REQUIRE_SIMD=1` on the Intel Mac; a
+   comparison broken on purpose made them fail.
+4. The counters, against the commit of task 2.4, two runs each:
+   - On the Intel Mac every operation of the filter and of the
+     comparison gains far past the bar: 79 to 87 % fewer cycles on
+     full words of 1024 rows, 62 to 85 % on random ones, 62 to 83 %
+     on 64 and 65 rows (`compare-SiywfG`, `compare-l8lFWP`,
+     `compare-JT9XJm`, `compare-RtBK51`).
+   - The row paths of x86-64 lose where no whole word is taken: the
+     filter 38 cycles on one dense row in 128, the comparison 224
+     (4.5 %) on a Datum batch partly prepared and 37 (4 %) on Datum
+     words of 8 rows, a few cycles elsewhere. Compiled out on x86-64
+     before, the decision for whole words now shares the function of
+     the row loops, which run short of registers there; a loop over
+     single rows rotated ten registers around one load.
+   - Moving the decision out of line traded these losses for others,
+     the row loop having moved with it: up to 25 cycles on 65 rows
+     with 8 selected, and 12.5 % on full dense words of the int8
+     filter, a failure of cycles (`compare-DZDYkn` to
+     `compare-ij099L`). It was reverted.
+   - Its one gain stayed: the comparison decides from `word_block`
+     alone instead of finding the non-NULL rows of the first word.
+     On the M5 Pro the NEON comparison is then 12 to 20 % cheaper on
+     64 and 65 rows and up to 2 % on 1024, the rest within a cycle
+     (`compare-XjGSAM`, `compare-4ZdTUH`); the filters' NEON code is
+     the same as before.
 
 ### One family at a time, in two commits
 
