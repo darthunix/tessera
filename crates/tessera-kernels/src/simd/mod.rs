@@ -1,16 +1,20 @@
 //! Vector kernels over the storage of full prepared words.
 //!
 //! The vector sets are named by tokens (`token.rs`), defined on every
-//! target. Only AArch64 NEON is implemented, and only
-//! where it can be measured: its kernels are compiled only there, not on
-//! other targets and under Miri, where callers fall back to the row paths.
-//! Instructions always drop with vectors, so a kernel here is kept on its
-//! cycle gain (see the benchmark guide). This is the one module of the
-//! crate allowed to use `unsafe`, for vector loads from borrowed arrays;
-//! every load states why it stays in bounds.
+//! target. Only AArch64 NEON is implemented, and only where it can be
+//! measured: its kernels are compiled only there, not on other targets and
+//! under Miri, where callers fall back to the row paths. Instructions
+//! always drop with vectors, so a kernel here is kept on its cycle gain
+//! (see the benchmark guide). This is the one module of the crate allowed
+//! to use `unsafe`, for vector loads from borrowed arrays and for the
+//! intrinsics; every load states why it stays in bounds.
 //!
-//! Intrinsics are callable without `unsafe` only from functions carrying the
-//! `neon` feature; closures inherit it from the function that defines them.
+//! A kernel is written once over the primitives of [`Vectors`], which each
+//! vector set implements (`neon.rs`); the kernels not yet moved call the
+//! NEON intrinsics themselves. Intrinsics are callable without `unsafe`
+//! only from functions carrying the `neon` feature; closures inherit it
+//! from the function that defines them, and a primitive, which carries no
+//! feature, calls them in an `unsafe` block whose reason is its token.
 //! Public entry points are plain functions that take the token of NEON,
 //! whose value proves that the processor runs it, and make the one `unsafe`
 //! call into the feature-carrying code.
@@ -19,6 +23,91 @@
 mod token;
 
 pub(crate) use token::{Neon, Token};
+
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+mod neon;
+
+/// The primitives of a vector set, over the lanes of int4 values, that the
+/// kernels of this module are written over once. A value of the type is
+/// the token of its set, so a primitive may use the set's instructions.
+///
+/// A kernel is a generic function, `#[inline(always)]`, called from one
+/// function for each set that carries the set's feature and is never
+/// inlined: code compiled without the feature gets it only by being
+/// inlined into a function that carries it, and otherwise passes its
+/// vectors through memory. A set whose feature the whole target carries,
+/// as AArch64 carries NEON, marks its primitives `#[inline]`, as the
+/// intrinsics they wrap are; one chosen at run time marks them
+/// `#[inline(always)]`.
+///
+/// A word of 64 rows is `64 / LANES` groups of lanes, in the order of its
+/// rows. A set gives each operation its own best sequence: the comparisons
+/// that are not its own are made of [`Vectors::eq`] and [`Vectors::gt`] by
+/// swapping the operands and inverting.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+pub(crate) trait Vectors: Copy + 'static {
+    /// The int4 lanes of one group.
+    type I32: Copy;
+    /// The lane masks of a comparison of int4 lanes: all ones where it
+    /// holds, zero elsewhere.
+    type M32: Copy;
+    /// The int4 lanes of a vector.
+    const LANES: usize;
+
+    /// The lanes of group `group` of a dense block.
+    ///
+    /// # Safety
+    ///
+    /// `group` must be below `64 / LANES`.
+    unsafe fn load(self, values: &[i32; 64], group: usize) -> Self::I32;
+
+    /// The lanes of group `group` of a Datum block: the low half of each
+    /// Datum, as `DatumGetInt32` reads it.
+    ///
+    /// # Safety
+    ///
+    /// `group` must be below `64 / LANES`.
+    unsafe fn load_datums(self, values: &[u64; 64], group: usize) -> Self::I32;
+
+    /// `value` in every lane.
+    fn splat(self, value: i32) -> Self::I32;
+
+    /// The lanes where `a == b`.
+    fn eq(self, a: Self::I32, b: Self::I32) -> Self::M32;
+
+    /// The lanes where `a > b`.
+    fn gt(self, a: Self::I32, b: Self::I32) -> Self::M32;
+
+    /// The lanes where `a >= b`.
+    #[inline(always)]
+    fn ge(self, a: Self::I32, b: Self::I32) -> Self::M32 {
+        self.not(self.gt(b, a))
+    }
+
+    /// The lanes where `a < b`.
+    #[inline(always)]
+    fn lt(self, a: Self::I32, b: Self::I32) -> Self::M32 {
+        self.gt(b, a)
+    }
+
+    /// The lanes where `a <= b`.
+    #[inline(always)]
+    fn le(self, a: Self::I32, b: Self::I32) -> Self::M32 {
+        self.ge(b, a)
+    }
+
+    /// The lanes where `mask` does not hold.
+    fn not(self, mask: Self::M32) -> Self::M32;
+
+    /// The bits of a word in the order of its rows, from the lane masks of
+    /// its groups: `lanes(group)` for every group below `64 / LANES`, and
+    /// for no other.
+    fn pack(self, lanes: impl Fn(usize) -> Self::M32) -> u64;
+
+    /// The rows of a Datum block whose flag is false, as bits in the order
+    /// of its rows.
+    fn non_null_bits(self, isnull: &[bool; 64]) -> u64;
+}
 
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate;
