@@ -1304,9 +1304,14 @@ fn every_shape_of_a_payload_goes_in_whole_and_the_rest_is_zero() -> Result<()> {
     let hashes: Vec<u32> = values.iter().map(|&value| hash_i32(value)).collect();
     for nkeys in 1..=3 {
         let columns: Vec<Column> = (0..nkeys).map(|_| Column::new(&values, None)).collect();
-        for payload_size in [
-            0, 1, 7, 8, 9, 15, 16, 17, 24, 31, 32, 33, 40, 41, 48, 49, 56,
-        ] {
+        let sizes: &[usize] = if cfg!(miri) {
+            &[0, 9, 24, 41]
+        } else {
+            &[
+                0, 1, 7, 8, 9, 15, 16, 17, 24, 31, 32, 33, 40, 41, 48, 49, 56,
+            ]
+        };
+        for &payload_size in sizes {
             let config = TableConfig {
                 nkeys,
                 payload_size,
@@ -1342,7 +1347,12 @@ fn every_shape_of_a_payload_goes_in_whole_and_the_rest_is_zero() -> Result<()> {
                 );
             }
         }
-        for ncolumns in [0, 1, 2, 3, 4, 5, 63, 64, 65, 66] {
+        let counts: &[usize] = if cfg!(miri) {
+            &[0, 3, 65]
+        } else {
+            &[0, 1, 2, 3, 4, 5, 63, 64, 65, 66]
+        };
+        for &ncolumns in counts {
             let null_words = payload_null_words(ncolumns);
             let config = TableConfig {
                 nkeys,
