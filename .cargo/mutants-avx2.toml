@@ -1,0 +1,32 @@
+# cargo-mutants for the AVX2 primitives (simd/avx2.rs) and the token of
+# AVX2 (simd/token.rs) alone, which mean something on x86-64 only and
+# which .cargo/mutants.toml leaves out for its arm64 runners. The job
+# "avx2" of mutants.yml reads this file on x86-64 Linux, whose runners
+# have AVX2; the rest is as in .cargo/mutants.toml, whose reasons hold
+# here too.
+examine_globs = [
+    "crates/tessera-kernels/src/simd/avx2.rs",
+    "crates/tessera-kernels/src/simd/token.rs",
+]
+
+# non_null_lanes puts the 32 bits of the low flags below the 32 of the
+# high ones: the two share no bit, so | is ^. The token of NEON has no
+# values on x86-64: the arm64 jobs judge it.
+exclude_re = [
+    "replace \\| with \\^ in non_null_lanes$",
+    "replace <impl Token for Neon>::get -> Option<Self> with None$",
+]
+
+timeout_multiplier = 3.0
+
+test_package = [
+    "relhash",
+    "tessera-core",
+    "tessera-kernels",
+    "tessera-capi",
+    "tessera-spill",
+]
+
+profile = "mutants"
+
+additional_cargo_test_args = ["--locked"]

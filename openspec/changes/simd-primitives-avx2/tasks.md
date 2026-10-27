@@ -93,13 +93,15 @@ The words used below:
       `filter_int32` and `compare_int32`
 - [x] 3.4 `TESSERA_REQUIRE_SIMD=1` in the Rust jobs of CI. Check: CI
       green on `ubuntu-24.04` and `macos-15`, with the id of the run
-- [ ] 3.5 The mutants of the AVX2 code: `simd/avx2.rs` excluded from
+- [x] 3.5 The mutants of the AVX2 code: `simd/avx2.rs` excluded from
       the job on arm64 with its reason, and a job of the changed lines
-      of that file on `ubuntu-24.04`. Check: on the Intel Mac,
-      `cargo mutants -f crates/tessera-kernels/src/simd/avx2.rs
-      --test-package tessera-kernels` misses no mutant, with
-      cargo-mutants installed as `mutants.yml` installs it; the job
-      green on the pull request
+      of that file on `ubuntu-24.04`, reading
+      `.cargo/mutants-avx2.toml`; every mutants job requires the vector
+      set of its runner. Check: on the Intel Mac,
+      `TESSERA_REQUIRE_SIMD=1 cargo mutants --config
+      .cargo/mutants-avx2.toml` misses no mutant, with cargo-mutants
+      installed as `mutants.yml` installs it; the job green on the pull
+      request
 - [ ] 3.6 Open the first pull request, into `main`, with the pilot's
       result. The maintainer's merge decides between the primitives
       and the fallback of the design. Check: every item of its
