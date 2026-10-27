@@ -84,7 +84,7 @@ The words used below:
 - [x] 3.2 The trait `Vectors` with its NEON implementation, and
       `simd/filter.rs`, the filter of int4 and the comparison of two
       columns, written over it. Check: the move check
-- [ ] 3.3 The AVX2 implementation of the filter's primitives. The
+- [x] 3.3 The AVX2 implementation of the filter's primitives. The
       filter of int4 and the comparison of two columns take `Simd`;
       the documentation of the crate and of `simd`, and
       `docs/limitations.md`, name AVX2 for what is open. Check:
@@ -192,6 +192,8 @@ reason saying that both machines were measured.
         ordered after this entry, are ordered anew;
       - `avx-512` gets what AVX2 showed;
       - a new entry takes the prefetch of `relhash` on x86-64;
+      - a new entry takes the losses of the row paths of x86-64 to the
+        drivers' decision for whole words, which the pilot measured;
       - each finding the maintainer has not decided on goes to "Not
         placed".
 
