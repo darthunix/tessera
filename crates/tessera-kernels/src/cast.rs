@@ -23,6 +23,7 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use crate::BULK_MIN_ROWS;
 use crate::ops::ArithmeticError;
+use crate::simd::{Neon, Token};
 
 /// Widen the selected int4 values into `values` and `non_nulls`.
 ///
@@ -67,15 +68,18 @@ pub fn int4_to_int8<C: ColumnReader<Value = i32>>(
         "column and selection row counts differ"
     );
     // The first word decides, as for the other kernels.
-    let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
+    let neon = Neon::get();
+    let bulk = neon.is_some()
         && nrows >= 64
         && rows.get_word(0).is_some_and(|selected| {
             (selected == u64::MAX
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
                 && column.word_block(0).is_some()
         });
-    if bulk {
-        widen_bulk(column, rows, values, non_nulls)
+    if let Some(neon) = neon
+        && bulk
+    {
+        widen_bulk(neon, column, rows, values, non_nulls)
     } else {
         widen_rows(column, rows, values, non_nulls)
     }
@@ -186,6 +190,7 @@ pub fn int8_to_int4<C: ColumnReader<Value = i64>>(
 /// Whole words where the reader exposes them, rows elsewhere.
 #[inline(never)]
 fn widen_bulk<C: ColumnReader<Value = i32>>(
+    neon: Neon,
     column: &C,
     rows: &RowMaskView<'_>,
     values: &mut [MaybeUninit<i64>],
@@ -200,7 +205,7 @@ fn widen_bulk<C: ColumnReader<Value = i32>>(
             let out: &mut [MaybeUninit<i64>; 64] = (&mut values[base..base + 64])
                 .try_into()
                 .context("a whole-word operand implies a full word")?;
-            bulk::widen(block, selected, out)
+            bulk::widen(neon, block, selected, out)
         } else {
             word_rows(column, index, selected, values)?
         };
@@ -217,36 +222,39 @@ mod bulk {
 
     use tessera_core::WordBlock;
 
-    use crate::simd;
+    use crate::simd::{self, Neon};
 
     #[inline]
     pub fn widen(
+        neon: Neon,
         block: WordBlock<'_, i32>,
         selected: u64,
         out: &mut [MaybeUninit<i64>; 64],
     ) -> u64 {
         match block {
             WordBlock::Dense { values, non_nulls } => {
-                simd::widen_dense(values, out);
+                simd::widen_dense(neon, values, out);
                 selected & non_nulls
             }
             WordBlock::Datum { values, isnull } => {
-                simd::widen_datum(values, out);
-                selected & simd::non_null_bits(isnull)
+                simd::widen_datum(neon, values, out);
+                selected & simd::non_null_bits(neon, isnull)
             }
         }
     }
 }
 
-/// Without vector code no call takes the whole-word path; this keeps the
-/// callers compiling and is never reached.
+/// Without NEON the token has no values, so no call takes the whole-word
+/// path; this keeps the callers compiling.
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
 mod bulk {
     use std::mem::MaybeUninit;
 
     use tessera_core::WordBlock;
 
-    pub fn widen(_: WordBlock<'_, i32>, _: u64, _: &mut [MaybeUninit<i64>; 64]) -> u64 {
-        unreachable!("no whole-word kernels on this target")
+    use crate::simd::Neon;
+
+    pub fn widen(neon: Neon, _: WordBlock<'_, i32>, _: u64, _: &mut [MaybeUninit<i64>; 64]) -> u64 {
+        match neon {}
     }
 }

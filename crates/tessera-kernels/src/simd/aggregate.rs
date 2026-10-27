@@ -12,7 +12,7 @@ use core::arch::aarch64::{
     vtst_u8,
 };
 
-use super::{byte_weights, lane_masks, load_datums};
+use super::{Neon, byte_weights, lane_masks, load_datums};
 
 // The public entry points are inlined into the generic loops of other
 // crates, so that a block reaches them in registers; the feature-carrying
@@ -21,56 +21,49 @@ use super::{byte_weights, lane_masks, load_datums};
 /// Selected non-NULL rows of a Datum block: the flags are compared with
 /// zero and counted as bytes, so that no `addv` per eight rows is needed.
 #[inline]
-pub fn count_datum(isnull: &[bool; 64], selected: u64) -> usize {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn count_datum(_: Neon, isnull: &[bool; 64], selected: u64) -> usize {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { count_datum_lanes(isnull, selected) }
 }
 
 /// Sum of the masked rows of a dense block.
 #[inline]
-pub fn sum_dense(values: &[i32; 64], mask: u64) -> i64 {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn sum_dense(_: Neon, values: &[i32; 64], mask: u64) -> i64 {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { sum_dense_lanes(values, mask) }
 }
 
 /// Sum of the masked rows of a Datum block, as int4 values.
 #[inline]
-pub fn sum_datum(values: &[u64; 64], mask: u64) -> i64 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn sum_datum(_: Neon, values: &[u64; 64], mask: u64) -> i64 {
     // SAFETY: as in sum_dense.
     unsafe { sum_datum_lanes(values, mask) }
 }
 
 /// Least masked row of a dense block; `i32::MAX` for an empty mask.
 #[inline]
-pub fn min_dense(values: &[i32; 64], mask: u64) -> i32 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn min_dense(_: Neon, values: &[i32; 64], mask: u64) -> i32 {
     // SAFETY: as in sum_dense.
     unsafe { min_dense_lanes(values, mask) }
 }
 
 /// Greatest masked row of a dense block; `i32::MIN` for an empty mask.
 #[inline]
-pub fn max_dense(values: &[i32; 64], mask: u64) -> i32 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn max_dense(_: Neon, values: &[i32; 64], mask: u64) -> i32 {
     // SAFETY: as in sum_dense.
     unsafe { max_dense_lanes(values, mask) }
 }
 
 /// Least masked row of a Datum block; `i32::MAX` for an empty mask.
 #[inline]
-pub fn min_datum(values: &[u64; 64], mask: u64) -> i32 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn min_datum(_: Neon, values: &[u64; 64], mask: u64) -> i32 {
     // SAFETY: as in sum_dense.
     unsafe { min_datum_lanes(values, mask) }
 }
 
 /// Greatest masked row of a Datum block; `i32::MIN` for an empty mask.
 #[inline]
-pub fn max_datum(values: &[u64; 64], mask: u64) -> i32 {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn max_datum(_: Neon, values: &[u64; 64], mask: u64) -> i32 {
     // SAFETY: as in sum_dense.
     unsafe { max_datum_lanes(values, mask) }
 }

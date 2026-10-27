@@ -13,6 +13,7 @@ use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use crate::BULK_MIN_ROWS;
+use crate::simd::{Neon, Token};
 
 /// Count the selected non-NULL rows.
 ///
@@ -33,15 +34,18 @@ use crate::BULK_MIN_ROWS;
 /// # Ok::<(), anyhow::Error>(())
 /// ```
 pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
-    let bulk = cfg!(all(target_arch = "aarch64", not(miri)))
+    let neon = Neon::get();
+    let bulk = neon.is_some()
         && rows.nrows() >= 64
         && rows.get_word(0).is_some_and(|selected| {
             (selected == u64::MAX
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
                 && column.word_block(0).is_some()
         });
-    if bulk {
-        count_bulk(column, rows)
+    if let Some(neon) = neon
+        && bulk
+    {
+        count_bulk(neon, column, rows)
     } else {
         column.try_fold_selected(rows, 0, |count, _, value| {
             Ok(count + usize::from(value.is_some()))
@@ -52,7 +56,7 @@ pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usiz
 /// Whole words where the reader exposes them; single rows through `get`,
 /// the tail and refused words through the word iterator's bulk fold.
 #[inline(never)]
-fn count_bulk<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
+fn count_bulk<C: ColumnReader>(neon: Neon, column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
     let mut count = 0;
     for index in 0..rows.nrows().div_ceil(64) {
         let selected = rows.word(index);
@@ -63,7 +67,7 @@ fn count_bulk<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usi
             let row = index * 64 + selected.trailing_zeros() as usize;
             count += usize::from(column.get(row)?.is_some());
         } else if let Some(block) = column.word_block(index) {
-            count += block_count(block, selected);
+            count += block_count(neon, block, selected);
         } else {
             count += column
                 .word_values(index, selected)?
@@ -76,15 +80,16 @@ fn count_bulk<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usi
 /// The selected non-NULL rows of a block, from its flags alone.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
-fn block_count<T>(block: WordBlock<'_, T>, selected: u64) -> usize {
+fn block_count<T>(neon: Neon, block: WordBlock<'_, T>, selected: u64) -> usize {
     match block {
         WordBlock::Dense { non_nulls, .. } => (selected & non_nulls).count_ones() as usize,
-        WordBlock::Datum { isnull, .. } => crate::simd::count_datum(isnull, selected),
+        WordBlock::Datum { isnull, .. } => crate::simd::count_datum(neon, isnull, selected),
     }
 }
 
-/// Without vector code no call takes the whole-word path.
+/// Without NEON the token has no values, so no call takes the whole-word
+/// path.
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-fn block_count<T>(_: WordBlock<'_, T>, _: u64) -> usize {
-    unreachable!("no whole-word kernels on this target")
+fn block_count<T>(neon: Neon, _: WordBlock<'_, T>, _: u64) -> usize {
+    match neon {}
 }

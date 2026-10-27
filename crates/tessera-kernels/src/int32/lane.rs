@@ -10,6 +10,7 @@ use tessera_core::WordBlock;
 use super::{CompareOp, Divisor, Side};
 use crate::int::{Evaluate, IntLane};
 use crate::ops::{ArithOp, ArithmeticError};
+use crate::simd::Neon;
 
 impl IntLane for i32 {
     type Divisor = Divisor;
@@ -24,78 +25,84 @@ impl IntLane for i32 {
         word as i32
     }
 
-    #[cfg(all(target_arch = "aarch64", not(miri)))]
-    fn side(block: WordBlock<'_, Self>) -> (Side<'_>, u64) {
-        match block {
+    fn side(neon: Neon, block: WordBlock<'_, Self>) -> (Side<'_>, u64) {
+        #[cfg(all(target_arch = "aarch64", not(miri)))]
+        return match block {
             WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
-            WordBlock::Datum { values, isnull } => {
-                (Side::Datum(values), crate::simd::non_null_bits(isnull))
-            }
+            WordBlock::Datum { values, isnull } => (
+                Side::Datum(values),
+                crate::simd::non_null_bits(neon, isnull),
+            ),
+        };
+        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+        {
+            let _ = block;
+            match neon {}
         }
     }
 
     #[inline(always)]
-    fn compare_sides(left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+    fn compare_sides(neon: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
-        return crate::simd::compare_sides(left, right, op);
+        return crate::simd::compare_sides(neon, left, right, op);
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (left, right, op);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 
     #[inline(always)]
-    fn filter_block(block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
+    fn filter_block(neon: Neon, block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
         return match block {
             WordBlock::Dense { values, non_nulls } => {
-                crate::simd::filter_dense(values, scalar, op) & non_nulls
+                crate::simd::filter_dense(neon, values, scalar, op) & non_nulls
             }
             WordBlock::Datum { values, isnull } => {
-                crate::simd::filter_datum(values, isnull, scalar, op)
+                crate::simd::filter_datum(neon, values, isnull, scalar, op)
             }
         };
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (block, scalar, op);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 
     #[inline]
-    fn min_block(block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
+    fn min_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
         {
-            let mask = crate::int::present(&block, selected);
+            let mask = crate::int::present(neon, &block, selected);
             let least = match block {
-                WordBlock::Dense { values, .. } => crate::simd::min_dense(values, mask),
-                WordBlock::Datum { values, .. } => crate::simd::min_datum(values, mask),
+                WordBlock::Dense { values, .. } => crate::simd::min_dense(neon, values, mask),
+                WordBlock::Datum { values, .. } => crate::simd::min_datum(neon, values, mask),
             };
             (mask.count_ones() as usize, least)
         }
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (block, selected);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 
     #[inline]
-    fn max_block(block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
+    fn max_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
         {
-            let mask = crate::int::present(&block, selected);
+            let mask = crate::int::present(neon, &block, selected);
             let greatest = match block {
-                WordBlock::Dense { values, .. } => crate::simd::max_dense(values, mask),
-                WordBlock::Datum { values, .. } => crate::simd::max_datum(values, mask),
+                WordBlock::Dense { values, .. } => crate::simd::max_dense(neon, values, mask),
+                WordBlock::Datum { values, .. } => crate::simd::max_datum(neon, values, mask),
             };
             (mask.count_ones() as usize, greatest)
         }
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (block, selected);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 
@@ -105,46 +112,46 @@ impl IntLane for i32 {
     }
 
     #[inline(always)]
-    fn hash_block(keys: Side<'_>, out: &mut [u32; 64]) {
+    fn hash_block(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
-        crate::simd::hash(keys, out);
+        crate::simd::hash(neon, keys, out);
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (keys, out);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 
     #[inline(always)]
-    fn hash_nulls_block(keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+    fn hash_nulls_block(neon: Neon, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
-        crate::simd::hash_nulls(keys, non_null, out);
+        crate::simd::hash_nulls(neon, keys, non_null, out);
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (keys, non_null, out);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 
     #[inline(always)]
-    fn combine_block(keys: Side<'_>, out: &mut [u32; 64]) {
+    fn combine_block(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
-        crate::simd::combine(keys, out);
+        crate::simd::combine(neon, keys, out);
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (keys, out);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 
     #[inline(always)]
-    fn combine_nulls_block(keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+    fn combine_nulls_block(neon: Neon, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
         #[cfg(all(target_arch = "aarch64", not(miri)))]
-        crate::simd::combine_nulls(keys, non_null, out);
+        crate::simd::combine_nulls(neon, keys, non_null, out);
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (keys, non_null, out);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 
@@ -188,6 +195,7 @@ impl IntLane for i32 {
 
     #[inline(always)]
     fn arith_block<E: Evaluate<i32>>(
+        neon: Neon,
         op: ArithOp,
         lhs: Side<'_>,
         rhs: Side<'_>,
@@ -205,18 +213,18 @@ impl IntLane for i32 {
             // too dear to spend on absent lanes, and a whole word of them is
             // a NULL column.
             let overflow = match (op, divisor) {
-                (ArithOp::Add, _) => simd::add(lhs, rhs, present, out),
-                (ArithOp::Sub, _) => simd::sub(lhs, rhs, present, out),
-                (ArithOp::Mul, _) => simd::mul(lhs, rhs, present, out),
+                (ArithOp::Add, _) => simd::add(neon, lhs, rhs, present, out),
+                (ArithOp::Sub, _) => simd::sub(neon, lhs, rhs, present, out),
+                (ArithOp::Mul, _) => simd::mul(neon, lhs, rhs, present, out),
                 (ArithOp::Div, Some(divisor)) => {
                     if present != 0 {
-                        simd::div(lhs, divisor, out);
+                        simd::div(neon, lhs, divisor, out);
                     }
                     false
                 }
                 (ArithOp::Mod, Some(divisor)) => {
                     if present != 0 {
-                        simd::rem(lhs, divisor, out);
+                        simd::rem(neon, lhs, divisor, out);
                     }
                     false
                 }
@@ -236,7 +244,7 @@ impl IntLane for i32 {
         #[cfg(not(all(target_arch = "aarch64", not(miri))))]
         {
             let _ = (op, lhs, rhs, present, divisor, out, evaluate);
-            unreachable!("no whole-word kernels on this target")
+            match neon {}
         }
     }
 }

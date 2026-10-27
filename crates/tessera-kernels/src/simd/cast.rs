@@ -9,20 +9,18 @@ use core::arch::aarch64::{
 };
 use std::mem::MaybeUninit;
 
-use super::load_datums;
+use super::{Neon, load_datums};
 
 /// The int4 values of a dense block widened into `out`.
 #[inline]
-pub fn widen_dense(values: &[i32; 64], out: &mut [MaybeUninit<i64>; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
-    // SAFETY: NEON is enabled for this compilation (asserted above).
+pub fn widen_dense(_: Neon, values: &[i32; 64], out: &mut [MaybeUninit<i64>; 64]) {
+    // SAFETY: the token proves that this processor runs NEON.
     unsafe { widen_dense_lanes(values, out) }
 }
 
 /// The int4 values of a Datum block widened into `out`.
 #[inline]
-pub fn widen_datum(values: &[u64; 64], out: &mut [MaybeUninit<i64>; 64]) {
-    const { assert!(cfg!(target_feature = "neon")) }
+pub fn widen_datum(_: Neon, values: &[u64; 64], out: &mut [MaybeUninit<i64>; 64]) {
     // SAFETY: as in widen_dense.
     unsafe { widen_datum_lanes(values, out) }
 }
