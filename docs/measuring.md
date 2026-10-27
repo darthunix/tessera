@@ -62,9 +62,10 @@ test and a line in its README.
 The bench cluster is made once by `bench/pg/run.sh setup`. `run.sh stop`
 deletes it: restart it with `pg_ctl restart` instead.
 
-For now the counters work only on macOS with Apple silicon: they come
-from kperf and need root, so an agent leaves such a run to the person it
-works for. x86 and Linux are planned, and a run will go differently
+For now `tessera-bench` counts on macOS, on Apple silicon and on Intel:
+the counters come from kperf and need root, so an agent leaves such a
+run to the person it works for. On Linux `pmu` already counts, and the
+runs of `tessera-bench` there are planned; a run will go differently
 there. CI checks correctness, not speed.
 
 ## Machine code before counters
