@@ -11,6 +11,7 @@ mod lookup;
 mod owned;
 mod partial;
 mod records;
+mod world;
 
 use proptest::strategy::Strategy;
 use proptest::test_runner::{TestCaseError, TestRunner};
