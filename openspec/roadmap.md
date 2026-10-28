@@ -134,12 +134,12 @@ on 2026-10-28, after the close of `table-crate`; it is the change
   output and no memory taken; the spill validated by outside reviews
   first; the checks `relhash` has.
 - **Why:** About 7,200 lines of C decide a spill, with rules written
-  several times and two copies already apart; the format of a file is
-  half in C; the checks are thin.
+  several times; the format of a file is half in C; damaged bytes
+  reach C that trusts them; the checks are thin.
 - **Known:** The survey and the decisions are in the change's design.
 - **Depends on:** nothing.
 - **Capabilities:** relspill, spill-format, hash-table
-- **Size:** large: about forty pull requests.
+- **Size:** large: about fifty pull requests.
 
 ### explain-rows-per-loop
 
@@ -1174,19 +1174,17 @@ line 214; the review of pull request 45, 2026-10-05.
 Small C leftovers of section 9. From plan 9.12, 9.17 and the survey;
 lines 6936–6937, 6943, 6661–6662, 7220–7221, 1535–1536.
 
-- **What:** Three small things: the three copies of `store_value` are
-  to be merged in C; `nodes/internal.h` is still an umbrella that every
-  `.c` includes, kept "for one release"; the comment of `join_many` in
-  the join suite says memory goes over `hash_mem` while the output
-  stays within it. The row spill of aggregation and its `RowWriter`
-  went to the change `spill-crate`.
+- **What:** Two small things: `nodes/internal.h` is still an umbrella
+  that every `.c` includes, kept "for one release"; the comment of
+  `join_many` in the join suite says memory goes over `hash_mem` while
+  the output stays within it. The row spill of aggregation, its
+  `RowWriter` and the merge of the three copies of `store_value` went
+  to the change `spill-crate`, whose fix of an expanded value needs one
+  copy.
 - **Why:** One place per pattern; the survey counted these among the
   duplicates (lines 6661–6662).
-- **Known:** Decision 2026-09-29: `store_value` is merged in C, not
-  moved to Rust (lines 1535–1536, 6661, 7372). Checked in the code:
-  three stores exist (`join_store_value`, `side_store`, `store_value` in
-  `runtime/rows.c`); 21 files of `nodes/` include `internal.h`; the
-  comment still says "the memory goes over it".
+- **Known:** Checked in the code: 21 files of `nodes/` include
+  `internal.h`; the comment still says "the memory goes over it".
 - **Also carries:** `generic_fits` has an unreachable INTERNALOID branch
   and counts an internal state as 8 bytes, "a separate trifle, not
   fixed" (plan 4.23, lines 1665–1667).
