@@ -112,6 +112,8 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `pmu-on-x86-linux`: The counters on x86-64 Linux and on two kinds of
   cores, on hardware
 - `pmu-on-crates-io`: The crate `pmu` published on crates.io
+- `mutants-of-other-crates`: The mutants that survive in the crates
+  beside `relhash`
 
 ## Entries
 
@@ -1404,6 +1406,34 @@ The crate `pmu` published on crates.io. Left by the close of
 - **Depends on:** the maintainer's decision.
 - **Capabilities:** tools
 - **Size:** small.
+
+### mutants-of-other-crates
+
+The mutants that survive in the crates beside `relhash`. Found by a
+run of every mutant of the workspace, at the maintainer's request,
+2026-10-27.
+
+- **What:** Run 40518206966 of `.github/workflows/mutants.yml` made
+  5389 mutants of every line of the workspace. The 1201 of `relhash`
+  were all caught. Elsewhere 353 survived: 297 in `tessera-kernels`
+  (the calendar 64, the comparisons and arithmetic of integers 86,
+  decimals 23, hashing 19, the sort 19, filters 16), 34 in
+  `tessera-capi` (decimals 18, the calendar 14), 21 in `tessera-spill`
+  (the packing of a record 15) and 1 in `tessera-core`. Give each a
+  Rust test that catches it, or list it in `.cargo/mutants.toml` with
+  the reason it is equivalent.
+- **Why:** Only Rust tests judge a mutant. Code that only the SQL
+  suites reach has no judge, so a fault there shows only through
+  PostgreSQL, if at all. A pull request's mutants of its changed lines
+  find new gaps, not these old ones.
+- **Known:** The run's shards took two and a half to three and a half
+  hours. A run by hand for one crate takes the workflow's input
+  `package`. Many survivors are likely entry points that only C calls,
+  and some will be equivalent.
+- **Depends on:** nothing.
+- **Capabilities:** none; tests only.
+- **Size:** about four pull requests: `tessera-spill`, `tessera-core`
+  and `tessera-capi` in one, `tessera-kernels` by its parts.
 
 ## Not placed: the maintainer decides
 
