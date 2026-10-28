@@ -87,13 +87,16 @@ The change takes up the roadmap's entry `simd-primitives-avx2`. On
   - the branch-free read of a NULL slot.
 
   A value that Intel wants otherwise becomes a value per architecture.
+- The prefetch hint of `relhash` on x86-64, last. The probe of a batch
+  asks the processor to fetch memory early on AArch64 alone; on x86-64
+  the same hint is an SSE instruction, which every x86-64 has, so it
+  needs no token. It goes into the crate's own copy of the hint, as
+  the forecast of the crate's contract says, and is kept on its
+  counters on this Mac.
 
 Not in this change:
 
 - AVX-512.
-- The prefetch hint of `relhash` on x86-64. It is an SSE instruction,
-  not AVX2, and `relhash` has its own spec, design and contract, the
-  last in the open change `table-crate`.
 - Linux without `sudo` and the cell in a report, which stay in
   `bench-in-four-cells`.
 - The loops that save their values around a kernel's call
@@ -110,8 +113,9 @@ None.
 None. The change makes no promise on any surface a spec names. The
 kernels' entry points, their results and errors stay as they are, and
 so do the behavior seen from SQL and every format. No public API of a
-crate with `publish = true` changes: `relhash` and `pmu` are not
-touched. The change declares `skip_specs: true`.
+crate with `publish = true` changes: `relhash` gains its hint on
+x86-64 inside, and `pmu` is not touched. The change declares
+`skip_specs: true`.
 
 ## Impact
 
@@ -120,6 +124,7 @@ touched. The change declares `skip_specs: true`.
     `int32` and `int64`, `count`, `cast`, `set`, the crate's
     documentation;
   - `tools/tessera-bench`;
+  - `crates/relhash`: `table/lanes.rs`, the prefetch hint;
   - perhaps `crates/tessera-capi`, if a re-measured decision changes.
 - `unsafe` stays in `simd/` only. The AVX2 code calls functions
   compiled for AVX2, and only once the processor is known to have it.
@@ -135,10 +140,11 @@ touched. The change declares `skip_specs: true`.
   - `crates/tessera-capi/benches/README.md`, whose link to `pmu`
     points to `crates/pmu`, a folder that is gone;
   - `docs/measuring.md` and "Accepted limits" in `CONTRIBUTING.md`,
-    for the Intel Mac.
+    for the Intel Mac;
+  - the design of `relhash` and the forecast of its contract, in
+    `table-crate`, for the hint on x86-64.
 - No public header, setting, SQL suite, format or dependency changes.
 - The roadmap at the close:
   - this entry leaves;
   - `bench-in-four-cells` loses the run on the Intel Mac and its texts;
-  - `linux-x86-support` no longer waits for vector kernels;
-  - a new entry for the prefetch of `relhash` on x86-64.
+  - `linux-x86-support` no longer waits for vector kernels.
