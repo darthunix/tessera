@@ -11,11 +11,11 @@ use super::fold;
 use super::{CompareOp, Divisor, Side};
 use crate::int::{Evaluate, IntLane};
 use crate::ops::{ArithOp, ArithmeticError};
-use crate::simd::{Neon, Vectors};
+use crate::simd::{Neon, Simd, Vectors};
 
 impl IntLane for i64 {
     type Divisor = Divisor;
-    type Compares = Neon;
+    type Compares = Simd;
 
     const ZERO: i64 = 0;
     const ONE: i64 = 1;
@@ -35,18 +35,18 @@ impl IntLane for i64 {
     }
 
     #[inline(always)]
-    fn compare_sides(neon: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
-        crate::simd::compare_sides64(neon, left, right, op)
+    fn compare_sides(simd: Simd, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+        crate::simd::compare_sides64(simd, left, right, op)
     }
 
     #[inline(always)]
-    fn filter_block(neon: Neon, block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
+    fn filter_block(simd: Simd, block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
         match block {
             WordBlock::Dense { values, non_nulls } => {
-                crate::simd::filter_dense64(neon, values, scalar, op) & non_nulls
+                crate::simd::filter_dense64(simd, values, scalar, op) & non_nulls
             }
             WordBlock::Datum { values, isnull } => {
-                crate::simd::filter_datum64(neon, values, isnull, scalar, op)
+                crate::simd::filter_datum64(simd, values, isnull, scalar, op)
             }
         }
     }

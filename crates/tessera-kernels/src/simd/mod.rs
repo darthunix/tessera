@@ -2,8 +2,9 @@
 //!
 //! The vector sets are named by tokens (`token.rs`), defined on every
 //! target. NEON runs on AArch64, and AVX2 on x86-64 where the processor
-//! has it, for the filter of int4 and the comparison of two int4 columns;
-//! the other kernels are NEON's alone, compiled only on AArch64. Under
+//! has it, for the filters of int4 and int8 and the comparisons of two
+//! such columns; the other kernels are NEON's alone, compiled only on
+//! AArch64. Under
 //! Miri no set runs, and callers fall back to the row paths. Instructions
 //! always drop with vectors, so a kernel here is kept on its cycle gain
 //! (see the benchmark guide). This is the one module of the crate allowed
