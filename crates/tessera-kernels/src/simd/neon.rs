@@ -10,14 +10,16 @@
 //! moved here changed its loads and spills.
 
 use core::arch::aarch64::{
-    int32x4_t, int64x2_t, uint32x4_t, uint64x2_t, vaddq_s32, vaddq_s64, vandq_s32, vandq_u32,
-    vandq_u64, vbicq_u64, vceqq_s32, vceqq_s64, vcgeq_s32, vcgeq_s64, vcgtq_s32, vcgtq_s64,
-    vcleq_s32, vcleq_s64, vcltq_s32, vcltq_s64, vcombine_u32, vdupq_n_s32, vdupq_n_s64,
-    vdupq_n_u32, vdupq_n_u64, veorq_s32, vget_low_s32, vld1q_s32, vld1q_s64, vmaxvq_u32,
-    vminvq_u32, vmovl_high_s32, vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32,
-    vmull_n_s32, vmull_s32, vmulq_s32, vmvnq_u32, vorrq_u32, vorrq_u64, vqaddq_s32, vqaddq_s64,
-    vqsubq_s32, vqsubq_s64, vreinterpretq_s32_s64, vreinterpretq_u32_u64, vreinterpretq_u64_u32,
-    vshlq_s32, vshrq_n_s32, vst1q_s32, vst1q_s64, vsubq_s32, vsubq_s64, vuzp2q_s32,
+    int32x4_t, int64x2_t, uint32x4_t, uint64x2_t, vaddlvq_u8, vaddq_s32, vaddq_s64, vaddq_u8,
+    vaddvq_s64, vandq_s32, vandq_u8, vandq_u32, vandq_u64, vbicq_u64, vbslq_s32, vceqq_s32,
+    vceqq_s64, vceqzq_u8, vcgeq_s32, vcgeq_s64, vcgtq_s32, vcgtq_s64, vcleq_s32, vcleq_s64,
+    vcltq_s32, vcltq_s64, vcombine_u8, vcombine_u32, vdup_n_u8, vdupq_n_s32, vdupq_n_s64,
+    vdupq_n_u8, vdupq_n_u32, vdupq_n_u64, veorq_s32, vget_low_s32, vld1q_s32, vld1q_s64, vld1q_u8,
+    vmaxq_s32, vmaxvq_s32, vmaxvq_u32, vminq_s32, vminvq_s32, vminvq_u32, vmovl_high_s32,
+    vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32, vmull_n_s32, vmull_s32, vmulq_s32,
+    vmvnq_u32, vorrq_u32, vorrq_u64, vpadalq_s32, vqaddq_s32, vqaddq_s64, vqsubq_s32, vqsubq_s64,
+    vreinterpretq_s32_s64, vreinterpretq_s32_u32, vreinterpretq_u32_u64, vreinterpretq_u64_u32,
+    vshlq_s32, vshrq_n_s32, vst1q_s32, vst1q_s64, vsubq_s32, vsubq_s64, vtst_u8, vuzp2q_s32,
 };
 
 use super::{
@@ -204,6 +206,67 @@ impl Vectors for Neon {
         unsafe { multiplier.quotient(n) }
     }
 
+    /// Two bytes of the bits make the masks of the four groups, two each.
+    #[inline]
+    fn lane_masks4(self, bits: u64, quad: usize) -> [uint32x4_t; 4] {
+        // SAFETY: as in `splat`.
+        unsafe {
+            let weights = byte_weights();
+            let (m0, m1) = lane_masks((bits >> (quad * 16)) as u8, weights);
+            let (m2, m3) = lane_masks((bits >> (quad * 16 + 8)) as u8, weights);
+            [m0, m1, m2, m3]
+        }
+    }
+
+    #[inline]
+    fn keep(self, lanes: int32x4_t, mask: uint32x4_t) -> int32x4_t {
+        // SAFETY: as in `splat`.
+        unsafe { vandq_s32(lanes, vreinterpretq_s32_u32(mask)) }
+    }
+
+    #[inline]
+    fn select(self, mask: uint32x4_t, a: int32x4_t, b: int32x4_t) -> int32x4_t {
+        // SAFETY: as in `splat`.
+        unsafe { vbslq_s32(mask, a, b) }
+    }
+
+    #[inline]
+    fn min(self, a: int32x4_t, b: int32x4_t) -> int32x4_t {
+        // SAFETY: as in `splat`.
+        unsafe { vminq_s32(a, b) }
+    }
+
+    #[inline]
+    fn max(self, a: int32x4_t, b: int32x4_t) -> int32x4_t {
+        // SAFETY: as in `splat`.
+        unsafe { vmaxq_s32(a, b) }
+    }
+
+    #[inline]
+    fn min_across(self, lanes: int32x4_t) -> i32 {
+        // SAFETY: as in `splat`.
+        unsafe { vminvq_s32(lanes) }
+    }
+
+    #[inline]
+    fn max_across(self, lanes: int32x4_t) -> i32 {
+        // SAFETY: as in `splat`.
+        unsafe { vmaxvq_s32(lanes) }
+    }
+
+    /// `sadalp`: the pairwise sums of the four lanes, widened, added in.
+    #[inline]
+    fn widen_add(self, acc: int64x2_t, lanes: int32x4_t) -> int64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vpadalq_s32(acc, lanes) }
+    }
+
+    #[inline]
+    fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize {
+        // SAFETY: as in `splat`.
+        unsafe { count_non_null_lanes(isnull, selected) }
+    }
+
     type I64 = int64x2_t;
     type M64 = uint64x2_t;
     const LANES64: usize = 2;
@@ -370,6 +433,37 @@ impl Vectors for Neon {
         // SAFETY: as in `splat`.
         unsafe { vceqq_s64(difference, vqsubq_s64(a, b)) }
     }
+
+    #[inline]
+    fn sum_across64(self, lanes: int64x2_t) -> i64 {
+        // SAFETY: as in `splat`.
+        unsafe { vaddvq_s64(lanes) }
+    }
+}
+
+/// Selected non-NULL rows of a Datum block: the flags are compared with
+/// zero and counted as bytes, so that no `addv` per eight rows is needed.
+#[inline]
+#[target_feature(enable = "neon")]
+fn count_non_null_lanes(isnull: &[bool; 64], selected: u64) -> usize {
+    let weights = byte_weights();
+    let one = vdupq_n_u8(1);
+    // Per-lane counts stay at most four.
+    let mut counts = vdupq_n_u8(0);
+    for quarter in 0..4 {
+        // SAFETY: a bool is one byte holding 0 or 1, and the sixteen bytes
+        // read end within the array.
+        let flags = unsafe { vld1q_u8(isnull.as_ptr().cast::<u8>().add(quarter * 16)) };
+        let mut present = vceqzq_u8(flags);
+        if selected != u64::MAX {
+            let bits = (selected >> (quarter * 16)) as u16;
+            let low = vtst_u8(vdup_n_u8(bits as u8), weights);
+            let high = vtst_u8(vdup_n_u8((bits >> 8) as u8), weights);
+            present = vandq_u8(present, vcombine_u8(low, high));
+        }
+        counts = vaddq_u8(counts, vandq_u8(present, one));
+    }
+    usize::from(vaddlvq_u8(counts))
 }
 
 /// A prepared divisor's constants as lanes, made once per word.

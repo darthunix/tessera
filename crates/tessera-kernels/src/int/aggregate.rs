@@ -6,7 +6,7 @@ use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use super::IntLane;
 use crate::BULK_MIN_ROWS;
-use crate::simd::{Neon, Token};
+use crate::simd::{Neon, Token, Vectors};
 
 /// The driver of [`crate::int32::min`] and [`crate::int64::min`].
 pub(crate) fn min<T: IntLane, C: ColumnReader<Value = T>>(
@@ -120,11 +120,10 @@ fn aggregate_bulk<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
 /// The present rows of a whole word, its selected non-NULL rows, for the
 /// widths' whole-word kernels. Inlined into them so that the block stays in
 /// registers.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline(always)]
-pub(crate) fn present<T>(neon: Neon, block: &WordBlock<'_, T>, selected: u64) -> u64 {
+pub(crate) fn present<S: Vectors, T>(set: S, block: &WordBlock<'_, T>, selected: u64) -> u64 {
     match block {
         WordBlock::Dense { non_nulls, .. } => selected & non_nulls,
-        WordBlock::Datum { isnull, .. } => selected & crate::simd::non_null_bits(neon, isnull),
+        WordBlock::Datum { isnull, .. } => selected & set.non_null_bits(isnull),
     }
 }

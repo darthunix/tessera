@@ -14,15 +14,18 @@
 //! cannot be inlined there and made a loader too dear to inline.
 
 use core::arch::x86_64::{
-    __m256i, _mm256_add_epi32, _mm256_add_epi64, _mm256_and_si256, _mm256_andnot_si256,
-    _mm256_blend_epi32, _mm256_castps_si256, _mm256_castsi256_pd, _mm256_castsi256_ps,
-    _mm256_cmpeq_epi8, _mm256_cmpeq_epi32, _mm256_cmpeq_epi64, _mm256_cmpgt_epi32,
-    _mm256_cmpgt_epi64, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_movemask_pd,
-    _mm256_movemask_ps, _mm256_mul_epi32, _mm256_mullo_epi32, _mm256_or_si256,
-    _mm256_permute4x64_epi64, _mm256_set1_epi32, _mm256_set1_epi64x, _mm256_setr_epi32,
-    _mm256_setr_epi64x, _mm256_setzero_si256, _mm256_shuffle_epi32, _mm256_shuffle_ps,
-    _mm256_srai_epi32, _mm256_srav_epi32, _mm256_srli_epi64, _mm256_storeu_si256, _mm256_sub_epi32,
-    _mm256_sub_epi64, _mm256_testz_si256, _mm256_xor_si256,
+    __m256i, _mm_add_epi64, _mm_cvtsi128_si32, _mm_cvtsi128_si64, _mm_max_epi32, _mm_min_epi32,
+    _mm_shuffle_epi32, _mm_unpackhi_epi64, _mm256_add_epi32, _mm256_add_epi64, _mm256_and_si256,
+    _mm256_andnot_si256, _mm256_blend_epi32, _mm256_blendv_epi8, _mm256_castps_si256,
+    _mm256_castsi256_pd, _mm256_castsi256_ps, _mm256_castsi256_si128, _mm256_cmpeq_epi8,
+    _mm256_cmpeq_epi32, _mm256_cmpeq_epi64, _mm256_cmpgt_epi32, _mm256_cmpgt_epi64,
+    _mm256_cvtepi32_epi64, _mm256_extracti128_si256, _mm256_loadu_si256, _mm256_max_epi32,
+    _mm256_min_epi32, _mm256_movemask_epi8, _mm256_movemask_pd, _mm256_movemask_ps,
+    _mm256_mul_epi32, _mm256_mullo_epi32, _mm256_or_si256, _mm256_permute4x64_epi64,
+    _mm256_set1_epi32, _mm256_set1_epi64x, _mm256_setr_epi32, _mm256_setr_epi64x,
+    _mm256_setzero_si256, _mm256_shuffle_epi32, _mm256_shuffle_ps, _mm256_srai_epi32,
+    _mm256_srav_epi32, _mm256_srli_epi64, _mm256_storeu_si256, _mm256_sub_epi32, _mm256_sub_epi64,
+    _mm256_testz_si256, _mm256_xor_si256,
 };
 
 use super::{Avx2, Vectors};
@@ -175,6 +178,73 @@ impl Vectors for Avx2 {
         unsafe { multiplier.quotient(n) }
     }
 
+    /// A byte of the bits makes the masks of a group.
+    #[inline(always)]
+    fn lane_masks4(self, bits: u64, quad: usize) -> [__m256i; 4] {
+        let byte = |group: usize| (bits >> ((quad * 4 + group) * 8)) as u8;
+        // SAFETY: as in `splat`.
+        unsafe {
+            [
+                lane_masks(byte(0)),
+                lane_masks(byte(1)),
+                lane_masks(byte(2)),
+                lane_masks(byte(3)),
+            ]
+        }
+    }
+
+    #[inline(always)]
+    fn keep(self, lanes: __m256i, mask: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_and_si256(lanes, mask) }
+    }
+
+    /// `vpblendvb` takes the second operand where the mask's bytes have
+    /// their sign bit set.
+    #[inline(always)]
+    fn select(self, mask: __m256i, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_blendv_epi8(b, a, mask) }
+    }
+
+    #[inline(always)]
+    fn min(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_min_epi32(a, b) }
+    }
+
+    #[inline(always)]
+    fn max(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_max_epi32(a, b) }
+    }
+
+    #[inline(always)]
+    fn min_across(self, lanes: __m256i) -> i32 {
+        // SAFETY: as in `splat`.
+        unsafe { min_across(lanes) }
+    }
+
+    #[inline(always)]
+    fn max_across(self, lanes: __m256i) -> i32 {
+        // SAFETY: as in `splat`.
+        unsafe { max_across(lanes) }
+    }
+
+    #[inline(always)]
+    fn widen_add(self, acc: __m256i, lanes: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { widen_add(acc, lanes) }
+    }
+
+    /// The bits of the non-NULL rows, counted: two compares and two masks
+    /// of bytes, which NEON lacks.
+    #[inline(always)]
+    fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize {
+        // SAFETY: as in `splat`.
+        (unsafe { non_null_lanes(isnull) } & selected).count_ones() as usize
+    }
+
     type I64 = __m256i;
     type M64 = __m256i;
     const LANES64: usize = 4;
@@ -306,6 +376,12 @@ impl Vectors for Avx2 {
     fn sub_fits64(self, a: __m256i, b: __m256i, difference: __m256i) -> __m256i {
         // SAFETY: as in `splat`.
         unsafe { sub_fits64(a, b, difference) }
+    }
+
+    #[inline(always)]
+    fn sum_across64(self, lanes: __m256i) -> i64 {
+        // SAFETY: as in `splat`.
+        unsafe { sum_across64(lanes) }
     }
 }
 
@@ -479,6 +555,58 @@ fn add_fits64(a: __m256i, b: __m256i, sum: __m256i) -> __m256i {
 fn sub_fits64(a: __m256i, b: __m256i, difference: __m256i) -> __m256i {
     let negative = _mm256_cmpgt_epi64(_mm256_setzero_si256(), b);
     _mm256_cmpeq_epi64(_mm256_cmpgt_epi64(difference, a), negative)
+}
+
+/// The least of eight lanes: the two halves, then the pairs of what is
+/// left, then the two that remain.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn min_across(lanes: __m256i) -> i32 {
+    let half = _mm_min_epi32(
+        _mm256_castsi256_si128(lanes),
+        _mm256_extracti128_si256::<1>(lanes),
+    );
+    let pair = _mm_min_epi32(half, _mm_shuffle_epi32::<0b01_00_11_10>(half));
+    _mm_cvtsi128_si32(_mm_min_epi32(
+        pair,
+        _mm_shuffle_epi32::<0b10_11_00_01>(pair),
+    ))
+}
+
+/// The greatest of eight lanes, as in `min_across`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn max_across(lanes: __m256i) -> i32 {
+    let half = _mm_max_epi32(
+        _mm256_castsi256_si128(lanes),
+        _mm256_extracti128_si256::<1>(lanes),
+    );
+    let pair = _mm_max_epi32(half, _mm_shuffle_epi32::<0b01_00_11_10>(half));
+    _mm_cvtsi128_si32(_mm_max_epi32(
+        pair,
+        _mm_shuffle_epi32::<0b10_11_00_01>(pair),
+    ))
+}
+
+/// The eight int4 lanes widened by halves, `vpmovsxdq`, and added into
+/// the four int8 lanes of `acc`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn widen_add(acc: __m256i, lanes: __m256i) -> __m256i {
+    let low = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(lanes));
+    let high = _mm256_cvtepi32_epi64(_mm256_extracti128_si256::<1>(lanes));
+    _mm256_add_epi64(acc, _mm256_add_epi64(low, high))
+}
+
+/// The sum of four int8 lanes: the two halves, then the two that remain.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn sum_across64(lanes: __m256i) -> i64 {
+    let half = _mm_add_epi64(
+        _mm256_castsi256_si128(lanes),
+        _mm256_extracti128_si256::<1>(lanes),
+    );
+    _mm_cvtsi128_si64(_mm_add_epi64(half, _mm_unpackhi_epi64(half, half)))
 }
 
 /// A prepared divisor's constants as lanes, made once per word.

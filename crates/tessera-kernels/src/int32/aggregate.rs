@@ -102,7 +102,6 @@ pub fn max<C: ColumnReader<Value = i32>>(
 
 /// The whole-word sum: the present rows of a word are its selected
 /// non-NULL rows, and the kernel returns their count with its result.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod bulk {
     use tessera_core::WordBlock;
 
@@ -117,18 +116,5 @@ mod bulk {
             WordBlock::Datum { values, .. } => simd::sum_datum(neon, values, mask),
         };
         (mask.count_ones() as usize, total)
-    }
-}
-
-/// Without NEON the token has no values, so no call takes the whole-word
-/// path; this keeps the caller compiling.
-#[cfg(not(all(target_arch = "aarch64", not(miri))))]
-mod bulk {
-    use tessera_core::WordBlock;
-
-    use crate::simd::Neon;
-
-    pub fn sum(neon: Neon, _: WordBlock<'_, i32>, _: u64) -> (usize, i64) {
-        match neon {}
     }
 }

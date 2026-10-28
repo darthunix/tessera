@@ -78,18 +78,10 @@ fn count_bulk<C: ColumnReader>(neon: Neon, column: &C, rows: &RowMaskView<'_>) -
 }
 
 /// The selected non-NULL rows of a block, from its flags alone.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
 fn block_count<T>(neon: Neon, block: WordBlock<'_, T>, selected: u64) -> usize {
     match block {
         WordBlock::Dense { non_nulls, .. } => (selected & non_nulls).count_ones() as usize,
         WordBlock::Datum { isnull, .. } => crate::simd::count_datum(neon, isnull, selected),
     }
-}
-
-/// Without NEON the token has no values, so no call takes the whole-word
-/// path.
-#[cfg(not(all(target_arch = "aarch64", not(miri))))]
-fn block_count<T>(neon: Neon, _: WordBlock<'_, T>, _: u64) -> usize {
-    match neon {}
 }
