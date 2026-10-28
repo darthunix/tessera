@@ -122,7 +122,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
       counters of `filter_int64`
 - [x] 4.3 The arithmetic of int4 with its divisor, `simd/arith.rs`,
       over the primitives. Check: the move check
-- [ ] 4.4 The arithmetic of int4 on AVX2, the division by a magic
+- [x] 4.4 The arithmetic of int4 on AVX2, the division by a magic
       number included. Check: as in 4.2, on `arith_int32`
 - [ ] 4.5 The arithmetic of int8, `simd/arith64.rs`, over the
       primitives. Check: the move check
