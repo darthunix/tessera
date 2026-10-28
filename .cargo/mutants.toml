@@ -75,8 +75,7 @@ exclude_globs = [
 # owning table then adds a chunk at each call, to the limit of 2^15
 # chunks, gigabytes that kill the runner before a verdict. The checks
 # inside it keep their mutants.
-# The rest are relhash's, judged by its own tests (task 6.7 of the change
-# table-crate):
+# The rest are relhash's, judged by its own tests:
 # - A prefetch hint reads nothing and never faults: a hint gone, or one at
 #   another address (the payload word of gather, the lines of
 #   gather_words), changes no answer.

@@ -114,6 +114,7 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `pmu-on-crates-io`: The crate `pmu` published on crates.io
 - `mutants-of-other-crates`: The mutants that survive in the crates
   beside `relhash`
+- `relhash-on-crates-io`: The crate `relhash` published on crates.io
 
 ## Entries
 
@@ -1435,6 +1436,26 @@ run of every mutant of the workspace, at the maintainer's request,
 - **Size:** about four pull requests: `tessera-spill`, `tessera-core`
   and `tessera-capi` in one, `tessera-kernels` by its parts.
 
+### relhash-on-crates-io
+
+The crate `relhash` published on crates.io. Left by the close of
+`table-crate`, 2026-10-28.
+
+- **What:** Publish `crates/relhash` at version 0.1.0, once the
+  maintainer decides it: a public repository for the links of its
+  documentation, a tag, and the first `cargo publish`.
+- **Why:** The crate was made to stand alone, free of Tessera, so that
+  another engine can take its hash table as it is.
+- **Known:** CI packs the crate alone (`cargo publish --dry-run`),
+  checks its public API against a snapshot, builds its documentation
+  without warnings, and refuses a 32-bit target. Its README is the
+  crate's page; its links to the design need the repository public.
+  Fuzzing of one to two hours goes before each release
+  (`.github/workflows/fuzz.yml`, by hand).
+- **Depends on:** the maintainer's decision.
+- **Capabilities:** relhash
+- **Size:** small.
+
 ## Not placed: the maintainer decides
 
 Remarks of finished plan items that the plan neither closes nor
@@ -1577,4 +1598,9 @@ fact.
   core does: a rare path no test reaches, or a move of the RIGHT and
   FULL joins' tail, for help a worker of a parallel append mostly gives
   to the next child anyway (pull request 52).
-
+- **A crate for spilling** (the close of `table-crate`): the words and
+  files of a spill stay in `tessera-spill` and the C nodes, since
+  `tessera-spill` writes Tessera's columns and the files are written by
+  C. The change left it to be taken up once the table lived apart, as
+  it now does. Suggested: an entry when a second user of the spill
+  appears, or drop.

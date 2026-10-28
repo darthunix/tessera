@@ -1121,17 +1121,18 @@ broke it, and up to two numbers that show how. Who broke it is the
 error's kind. A **wrong call** is a value the caller passed that breaks
 a rule: arrays of different lengths, a chunk that does not exist, keys
 that are not the table's. A **damaged table** is a byte read from the
-table's blocks that cannot be: a field of the header out of its range,
-a reference outside its chunk, a chain that loops. What the call read
-decides the kind, not the check. One function checks a reference
-whether the caller passed it or the call read it from a bucket, and
-the call, which knows where it came from, chooses the kind. A
-reference that the caller passed but that lands inside a record reads
-as damage, since the crate cannot tell the two apart. The
-documentation of [`Kind`](../../../crates/relhash/src/error.rs) lists
-what each kind covers, and each `Rule` says what it refuses. Tests
-compare the kind and the rule, never the words of the message, so a
-test sees which check refused.
+table's blocks that cannot be: a field of the header out of its range, a
+reference outside its chunk, a chain that loops. What the call read
+decides the kind, not the check. One function checks a reference whether
+the caller passed it or the call read it from a bucket, and the call,
+which knows where it came from, chooses the kind. A reference that the
+caller passed but that lands inside a record reads as damage, since the
+crate cannot tell the two apart. The documentation of
+[`Kind`](../../../crates/relhash/src/error.rs) lists what each kind
+covers, [Errors of two kinds](spec.md#requirement-errors-of-two-kinds)
+says what is promised, and each `Rule` says what it refuses. Tests
+compare the kind and the rule, never the words of the message, so a test
+sees which check refused.
 
 The error is one integer of 8 bytes, drawn bit by bit in the
 documentation of [`Error`](../../../crates/relhash/src/error.rs). A
@@ -1162,7 +1163,9 @@ What a call leaves after an error depends on where it stopped.
   chunks it wrote. The rows placed before the error have left the mask
   of pending rows with their references, those that made a record are
   in the mask of inserted rows, and a link counts what it linked and
-  moves its start past it. The caller can go on from the masks.
+  moves its start past it. The caller can go on from the masks, as [A
+  batch that fails part way](spec.md#requirement-a-batch-that-fails-part-way)
+  says.
 - A damaged table is to be dropped or reset. Later calls over it stay
   bounded and sound, as over any bytes, but what they answer is not
   promised. `regrow`, `clear_key`, `bloom` and `try_build_bloom` check
@@ -1176,11 +1179,12 @@ What a call leaves after an error depends on where it stopped.
 A call reads the index and the chunks, and what it reads may be
 anything: the caller may hand over bytes that are not a table, or a
 table that a bug damaged. The crate promises an error for such bytes,
-never a crash and never a call that does not end. The README states
-the promise whole, with what the caller promises in turn when it makes
-a handle over its memory: blocks of the lengths given, aligned to 8
-and initialized; no two of them overlapping; and no other process or
-thread writing the table while the call runs.
+never a crash and never a call that does not end, as [Any bytes, a
+bounded call](spec.md#requirement-any-bytes-a-bounded-call) says. The
+README states the promise whole, with what the caller promises in turn
+when it makes a handle over its memory: blocks of the lengths given,
+aligned to 8 and initialized; no two of them overlapping; and no other
+process or thread writing the table while the call runs.
 
 The `unsafe` calls that make the handles say more of what the caller
 promises. A chunk has one writer across every table and chunk writer
@@ -1406,9 +1410,10 @@ it, and when a module of the list holds none. The paths are under
 
 ## The forecast, probed
 
-The contract of `relhash` names the changes the crate is likely to see
-and what each would touch. A probe makes such a change on a branch that
-is never merged and counts the parts and the interfaces it touched.
+The contract of `relhash`, [contract.md](contract.md), names the changes
+the crate is likely to see and what each would touch. A probe makes such
+a change on a branch that is never merged and counts the parts and the
+interfaces it touched.
 
 - **A prefetch hint for x86-64.** One module of the crate, the vertical
   probe's; no interface; no code of Tessera. As the forecast says.
@@ -1550,7 +1555,8 @@ is never merged and counts the parts and the interfaces it touched.
 - The job "relhash alone" of `.github/workflows/ci.yml`: the crate's
   tests as the only package, its documentation with every warning an
   error, a dry run of publishing, a 32-bit target refused, and its
-  public API against a snapshot. `make rust-check` also runs its tests
+  public API against its snapshot,
+  `openspec/specs/relhash/public-api.txt`. `make rust-check` also runs its tests
   without the feature `alloc`.
 - Every test of the crate and every example of its documentation run
   under Miri in CI, with 16 cases of each property: an access outside a
