@@ -19,7 +19,11 @@
 #    CI keeps its items or gains items. Anything else loosens the rule, as does a rule or a
 #    contract that is gone. A pull request that changes nothing but
 #    contracts and designs may loosen a rule: it is how a rule is
-#    changed, and the maintainer decides by merging it.
+#    changed, and the maintainer decides by merging it. A contract that
+#    moves from its change to its part, as the close of the change
+#    moves it, takes along the files of the change's folder that its
+#    checks name: in the base's checks a path into that folder stands
+#    for the same path beside the part's spec.
 # A line that starts with "#" inside a fenced code block is text, not a
 # heading. Lines may end in CR.
 # Run from the root of the repository.
@@ -145,6 +149,19 @@ show_at() {
     git show "$1:$2"
 }
 
+# The text on stdin with every $1 replaced by $2, both taken as they are.
+moved() {
+    from=$1 to=$2 awk '
+        {
+            out = ""
+            while ((at = index($0, ENVIRON["from"])) > 0) {
+                out = out substr($0, 1, at - 1) ENVIRON["to"]
+                $0 = substr($0, at + length(ENVIRON["from"]))
+            }
+            print out $0
+        }'
+}
+
 # The rank of a check: 3 in CI, 2 a probe, a review or the maintainer,
 # 1 pending, 0 none.
 rank() {
@@ -248,7 +265,7 @@ if test $# -gt 0; then
         case "$name" in "NO PART" | "NO RULE") continue ;; esac
         mine=$(part="$part" name="$name" awk -F "$us" '
             $2 == ENVIRON["part"] && $4 == ENVIRON["name"] {
-                print $5 "\037" $6; found = 1; exit
+                print $1 "\037" $5 "\037" $6; found = 1; exit
             }
             END { if (!found) print "\001" }' "$head_list")
         if test "$mine" = "$(printf '\001')"; then
@@ -262,8 +279,18 @@ $part"
             loosened=1
             continue
         fi
+        here=${mine%%"$us"*}
+        mine=${mine#*"$us"}
         check=${mine%%"$us"*}
         said=${mine#*"$us"}
+        # The close of a change moves its contract beside the part's
+        # spec, with the files of its folder that the checks name.
+        case "$file:$here" in
+        openspec/changes/*/contract.md:openspec/specs/*/contract.md)
+            value=$(printf '%s\n' "$value" |
+                moved "${file%contract.md}" "${here%contract.md}")
+            ;;
+        esac
         if test "$said" != "$words"; then
             echo "check-contracts: the words of the rule \"$name\" of $part changed" >&2
             loosened=1
