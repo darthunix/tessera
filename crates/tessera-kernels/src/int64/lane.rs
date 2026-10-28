@@ -4,8 +4,8 @@
 
 use std::mem::MaybeUninit;
 
-use anyhow::Result;
-use tessera_core::WordBlock;
+use anyhow::{Result, ensure};
+use tessera_core::{WordBlock, ones};
 
 use super::fold;
 use super::{CompareOp, Divisor, Side};
@@ -188,43 +188,32 @@ impl IntLane for i64 {
         out: &mut [MaybeUninit<i64>; 64],
         evaluate: &E,
     ) -> Result<()> {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        {
-            use crate::simd;
-            use anyhow::ensure;
-            use tessera_core::ones;
-            let lanes = present;
-            match (op, divisor) {
-                (ArithOp::Add, _) => {
-                    let overflow = simd::add64(neon, lhs, rhs, present, out);
-                    ensure!(!overflow, ArithmeticError::BigintOutOfRange);
-                }
-                (ArithOp::Sub, _) => {
-                    let overflow = simd::sub64(neon, lhs, rhs, present, out);
-                    ensure!(!overflow, ArithmeticError::BigintOutOfRange);
-                }
-                (ArithOp::Div, Some(divisor)) => {
-                    for lane in ones(lanes) {
-                        out[lane].write(divisor.quotient(lhs.lane(lane)));
-                    }
-                }
-                (ArithOp::Mod, Some(divisor)) => {
-                    for lane in ones(lanes) {
-                        out[lane].write(divisor.remainder(lhs.lane(lane)));
-                    }
-                }
-                _ => {
-                    for lane in ones(lanes) {
-                        out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
-                    }
+        let lanes = present;
+        match (op, divisor) {
+            (ArithOp::Add, _) => {
+                let overflow = crate::simd::add64(neon, lhs, rhs, present, out);
+                ensure!(!overflow, ArithmeticError::BigintOutOfRange);
+            }
+            (ArithOp::Sub, _) => {
+                let overflow = crate::simd::sub64(neon, lhs, rhs, present, out);
+                ensure!(!overflow, ArithmeticError::BigintOutOfRange);
+            }
+            (ArithOp::Div, Some(divisor)) => {
+                for lane in ones(lanes) {
+                    out[lane].write(divisor.quotient(lhs.lane(lane)));
                 }
             }
-            Ok(())
+            (ArithOp::Mod, Some(divisor)) => {
+                for lane in ones(lanes) {
+                    out[lane].write(divisor.remainder(lhs.lane(lane)));
+                }
+            }
+            _ => {
+                for lane in ones(lanes) {
+                    out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
+                }
+            }
         }
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (op, lhs, rhs, present, divisor, out, evaluate);
-            match neon {}
-        }
+        Ok(())
     }
 }
