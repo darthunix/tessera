@@ -397,7 +397,7 @@ commit of sections 2 and 3 is checked by `make rust-check` and by
 
 ## 7. The close
 
-- [ ] 7.1 Bring the design of `relhash` up to date for a caller of the
+- [x] 7.1 Bring the design of `relhash` up to date for a caller of the
       crate, with nothing of how the table moved: the crate's boundary,
       its errors, its calls for a caller, its owning table, its checks,
       Files and Tests. Check:
