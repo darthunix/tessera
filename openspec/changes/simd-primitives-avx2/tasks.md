@@ -176,6 +176,12 @@ reason saying that both machines were measured.
 - [ ] 5.4 The branch-free read of a NULL slot, `read_masked`, against
       a branch. Check: as root, twice, the candidate against `HEAD`
       on `column_reader`
+- [ ] 5.5 The prefetch hint of `relhash` on x86-64, `prefetcht0`, in
+      `table/lanes.rs`, with the design of `relhash` and the forecast
+      of its contract. Check: `cargo test --locked -p relhash`; the
+      x86 listing of every program against `HEAD`, for the rule "No
+      cost to Tessera"; as root, twice, the candidate against `HEAD`
+      on `table_int32` and `table_large`
 
 ## 6. The close
 
@@ -193,7 +199,6 @@ reason saying that both machines were measured.
       - `oltp-guard-bench` and `prosupport-batch-functions`, which are
         ordered after this entry, are ordered anew;
       - `avx-512` gets what AVX2 showed;
-      - a new entry takes the prefetch of `relhash` on x86-64;
       - a new entry takes the losses of the row paths of x86-64 to the
         drivers' decision for whole words, which the pilot measured;
       - each finding the maintainer has not decided on goes to "Not
