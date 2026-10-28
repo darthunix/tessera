@@ -20,60 +20,72 @@ A caller whose table spills keeps the records in **partitions**, chosen
 by the bits of the hash; a join may check its rows against a **Bloom
 filter** of the keys before it probes; and a RIGHT or FULL join keeps
 a **mark** for each record a pair matched. The requirements start with
-the table: its index, chunks and records, and its calls. Then
-partitions and the calls by partition, the Bloom filter, alone, shared
-and filled together, and the marks. Last, what makes a table damaged.
-[design.md](design.md) explains the whole and the reasons.
+the crate as a whole. Then the table: its index, chunks and records,
+the masks and the batches its calls take, its calls of a batch and of
+one writer, a caller's records and payloads, the owning table, and
+calls at the same time. Then partitions and the calls by partition,
+the Bloom filter, alone and shared, and the marks. Last, a damaged
+table, the promise over any bytes, the errors and the memory a call
+takes. [design.md](design.md) explains the whole and the reasons.
 
 ## Requirements
 
+### Requirement: A crate of its own
+The table SHALL be the Rust crate `relhash`, which depends on no crate
+of Tessera, and SHALL build, pass its tests and pack alone on targets
+whose pointers are 64 bits wide; on any other target it SHALL fail to
+build, with an error that says why.
+
+Its documentation SHALL be complete by itself, as [the crate's
+page](../../../crates/relhash/src/lib.rs) maps it: every public item
+SHALL say what it is for, what it takes and gives, who owns what and for
+how long, the errors it returns, and the rules, the layouts and the
+limits of the API. The documentation SHALL build without warnings, and
+every example in it SHALL run as a test.
+
+#### Scenario: The crate packs alone
+- **WHEN** the crate is packed, as for publishing
+- **THEN** it builds from the packed files and the crates it names,
+  none of them Tessera's
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo publish --dry-run --locked -p relhash`
+
+#### Scenario: The crate's tests run alone
+- **WHEN** the tests of the crate run as the only package
+- **THEN** they pass
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo test --locked -p relhash`
+
+#### Scenario: A target of 32 bits
+- **WHEN** the crate is built for a target whose pointers are 32 bits
+  wide
+- **THEN** the build fails with an error that names 64-bit targets
+- **Verified by:**
+  `.github/workflows/ci.yml::relhash needs a target whose pointers
+  are 64 bits wide`
+
+#### Scenario: Documentation built with warnings as errors
+- **WHEN** the documentation of the crate is built with every warning
+  an error, and with a lint that refuses a public item without a text
+- **THEN** it builds
+- **Verified by:**
+  `.github/workflows/ci.yml::RUSTDOCFLAGS="-D warnings" cargo doc
+  --locked -p relhash --no-deps`;
+  `crates/relhash/src/lib.rs::#![deny(missing_docs)]`
+
+#### Scenario: The examples run
+- **WHEN** the tests of the documentation run
+- **THEN** every example passes
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo test --locked -p relhash --doc`
+
 ### Requirement: The index of a table
-A table SHALL have one index: a header of 96 bytes followed by the
-buckets, 4 bytes each. Every field is an integer in the machine's byte
-order.
-
-```
- byte    0           4           8           12          16
-         ┌───────────────────────┬───────────┬───────────┐
-       0 │ magic                 │ version   │ header    │
-         │                       │           │ size      │
-         ├───────────────────────┼───────────┴───────────┤
-      16 │ index length          │ buckets offset        │
-         ├───────────────────────┼───────────────────────┤
-      32 │ reserved              │ records               │
-         ├───────────┬───────────┼───────────┬───────────┤
-      48 │ buckets   │ bucket    │ record    │ payload   │
-         │           │ shift     │ size      │ size      │
-         ├───────────┼───────────┼───────────┴───────────┤
-      64 │ keys      │ flags     │ reserved              │
-         ├───────────┴───────────┼───────────────────────┤
-      80 │ reserved              │ reserved              │
-         ├───────────────────────┴───────────────────────┤
-      96 │ bucket 0, bucket 1, …  4 bytes each           │
-         └───────────────────────────────────────────────┘
-```
-
-- magic: a number of 64 bits whose bytes are `RELHASH` and a zero on
-  a little-endian machine;
-- version: the version of the format, 2, `FORMAT_VERSION`;
-- header size: 96, `HEADER_SIZE`; buckets offset: 96, where the
-  buckets start;
-- index length: the bytes the index was made in, a multiple of 8;
-- records: the records linked into the buckets;
-- buckets: a power of two, at least 1024; bucket shift: 32 less the
-  logarithm of the buckets, so that the bucket of a hash is its high
-  bits, `hash >> shift`;
-- record size, payload size and keys: see "A record";
-- flags and every reserved word: 0.
-
-For a capacity of `n` records, `index_size` SHALL return
-`96 + 4 * buckets`, where buckets is the least power of two that is at
-least 1024 and at least `2 * n`, and at most 2^31.
-`TableMut::create` SHALL make the index of an empty table in a block
-aligned to 8 whose length is a multiple of 8 and at least that size:
-the header as above, no record, every bucket 0. `Table::stats` SHALL
-report the records, the buckets, the bytes of the header and the
-buckets, and the index length.
+A table SHALL have one index, a header and its buckets, laid out as
+[`HEADER_SIZE`](../../../crates/relhash/src/table/header.rs) draws them.
+[`index_size`](../../../crates/relhash/src/table/header.rs) SHALL give
+the bytes of an index for a capacity, `TableMut::create` SHALL make an
+empty table in them, and `Table::stats` SHALL report what the index
+holds.
 
 #### Scenario: The size of an index
 - **WHEN** an index is sized for capacities from 0 to 100000
@@ -99,29 +111,11 @@ buckets, and the index length.
   `crates/relhash/src/table/tests.rs::misaligned_or_odd_blocks_are_refused`
 
 ### Requirement: Chunks and references
-The records of a table SHALL lie in chunks, at most 32768 of them,
-`MAX_CHUNKS`, numbered from 0. A chunk is a block aligned to 8 of 8
-bytes to 1 MiB, `MAX_CHUNK_LEN`, a multiple of 8. Its first 8 bytes,
-`CHUNK_HEADER`, are its used mark, the bytes its records take with the
-mark's own 8; the records follow one after another from byte 8.
-`Chunks::init` SHALL make a block an empty chunk, its used mark 8. A
-call SHALL refuse more than 32768 chunks, and SHALL refuse a chunk it
-writes or walks that is not such a block before it reads the chunk;
-every other chunk the caller SHALL give as such a block, valid for its
-length.
-
-A record SHALL be named by a reference of 32 bits: the number of its
-chunk and its first byte there, in units of 8 bytes, in the low 17
-bits, `UNIT_BITS`. Reference 0, the used mark of chunk 0, names no
-record. A reference names the same record in every process.
-
-```
-  31             17 16                     0
- ┌─────────────────┬────────────────────────┐
- │ chunk (15 bits) │ byte / 8 (17 bits)     │
- └─────────────────┴────────────────────────┘
-   the record is at chunks[chunk] + 8 * (byte / 8)
-```
+The records of a table SHALL lie in chunks, and a reference of 32 bits
+SHALL name a record by its chunk and its place there, the same in every
+process, as [`Chunks`](../../../crates/relhash/src/table/chunks.rs)
+draws them. A call SHALL refuse more chunks than the limit, and a chunk
+it writes or walks that is not one before it reads it.
 
 #### Scenario: Chunks past the limits are refused
 - **WHEN** a call appends to or walks a chunk that is null, not aligned
@@ -151,37 +145,20 @@ record. A reference names the same record in every process.
   `crates/relhash/src/table/tests/lookup.rs::reference_zero_names_no_record`
 
 ### Requirement: A record
-Every record of a table SHALL have the size in the header: a header of
-16 bytes, a slot of 8 bytes for each key, then the payload, padded with
-zeros to a multiple of 8. A table SHALL have 1 to 16 keys, `MAX_KEYS`,
-each a word of 8 bytes that the table compares bit for bit and gives
-no type: a source of keys, `KeySource`, gives each row's words. A NULL
-key SHALL hold 0 in its slot and set its bit of the NULL bits.
-`record_bytes` SHALL return the size of a record of a configuration's
-keys and payload, and SHALL refuse a record that does not fit in a
-chunk.
-
-```
- byte 0       4       8            12      16       24
-      ┌───────┬───────┬────────────┬───────┬────────┬───┬─────────┐
-      │ hash  │ next  │ NULL bits  │ size  │ key 0  │ … │ payload │
-      │       │       │ bit k: key │ / 8   │ 8 bytes│   │ padded  │
-      │       │       │ k is NULL  │       │        │   │ to 8    │
-      └───────┴───────┴────────────┴───────┴────────┴───┴─────────┘
-```
-
-- hash: the hash the row came with;
-- next: the reference of the next record of the chain, 0 at its end;
-- size / 8: the record's size in units of 8 bytes.
+Every record of a table SHALL have the layout that
+[`Record`](../../../crates/relhash/src/table/record.rs) draws and the
+size that [`record_bytes`](../../../crates/relhash/src/table/header.rs)
+gives: 1 to 16 keys of a word each, which the table compares bit for
+bit, and a NULL key 0 in its slot with its NULL bit set. A build with
+debug assertions SHALL check that a source of keys gives 0 for a NULL.
 
 #### Scenario: The size of a record
 - **WHEN** the size of a record is asked for 1 to 16 keys and payloads
   of 0 to 1024 bytes
-- **THEN** it is 16 bytes, 8 a key and the payload, rounded up to 8,
-  the same through the C API; 0 and 17 keys are refused
+- **THEN** it is 16 bytes, 8 a key and the payload, rounded up to 8;
+  0 and 17 keys are refused
 - **Verified by:**
-  `crates/relhash/src/table/tests/format.rs::a_record_takes_its_header_its_key_slots_and_its_payload`;
-  `test/sql/table.sql::tessera_test_table_record_size`
+  `crates/relhash/src/table/tests/format.rs::a_record_takes_its_header_its_key_slots_and_its_payload`
 
 #### Scenario: A record as a call reads it
 - **WHEN** a record is read through `Table::record`
@@ -199,21 +176,74 @@ chunk.
 - **Verified by:**
   `crates/relhash/src/table/tests/lookup.rs::a_record_larger_than_a_chunk_is_refused`
 
+#### Scenario: A value left in a NULL slot
+- **WHEN** a source marks keys NULL but leaves values in their slots,
+  in a build with debug assertions
+- **THEN** the call stops on the assertion
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_value_a_source_leaves_in_a_null_slot_is_caught`
+
+### Requirement: The masks of rows
+A mask of rows SHALL say which rows of a batch a call works on, a bit a
+row, in exactly the words its rows need, as
+[`RowMaskView`](../../../crates/relhash/src/row_mask.rs) draws it. A
+mask of other words SHALL be refused, its words left as they were, and a
+mask that a call writes SHALL keep every bit past its last row 0.
+
+#### Scenario: Words of the wrong size or with a bit past the rows
+- **WHEN** a mask of 70 rows is made of one word or of three, or of two
+  words with bit 6 of the second set
+- **THEN** it is refused, and its words are not changed
+- **Verified by:**
+  `crates/relhash/src/row_mask.rs::a_mask_of_wrong_words_is_refused_and_left_as_it_was`
+
+#### Scenario: The bits past the rows of a mask a call writes
+- **WHEN** a probe, a find or insert, a filter or an append writes a
+  mask of 70 rows that held every row before the call
+- **THEN** bits 6 to 63 of its second word are 0
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::the_masks_a_call_writes_keep_the_bits_past_their_rows_clear`
+
+### Requirement: A batch to place
+A batch to place, [`Batch`](../../../crates/relhash/src/table/batch.rs),
+SHALL hold the hashes and the keys of its rows, a mask of the rows still
+to place and a slot for each row's reference, and SHALL be refused when
+their row counts differ. A call that places rows SHALL take each row it
+places out of the mask and write the reference of its record, and no
+other slot; the calls of the owning table SHALL place every row of a
+mask they do not change.
+
+#### Scenario: A batch over two chunks
+- **WHEN** a batch of four rows, one of them left out of its mask, is
+  appended to chunks with room for two records each
+- **THEN** the first call places two rows and leaves one pending, the
+  second places it, each placed row has the reference of its record,
+  and the row left out keeps what its place held
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_batch_goes_through_two_chunks`
+
+#### Scenario: The owning table places every row
+- **WHEN** the owning table inserts, and finds or inserts, the rows of
+  a mask over more records than its first chunk holds
+- **THEN** every row of the mask gets the reference of its record, and
+  the mask is as it was
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::the_owning_table_places_every_row_of_its_mask`
+
+#### Scenario: A batch of other row counts
+- **WHEN** a batch is made of a mask of 70 rows and 69 references
+- **THEN** it is refused
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`
+
 ### Requirement: Appending rows
-An append SHALL write the rows of a batch's pending mask, in row order,
-as records into the chunk it names, while a whole record fits. Each row
-written SHALL leave the mask and get the reference of its record; the
-others stay. A record SHALL take the row's hash, keys and payload, or a
-payload of zeros when none is given. A chunk writer, `ChunkWriter`,
-SHALL append without an index, for the keys and the payload of the
-configuration it is made with. `Table::append` and `TableMut::append`
-SHALL check the table's index as every call does, and SHALL refuse keys
-or a payload size other than the table's before they write anything.
-An append SHALL not link the records: they are not counted or found
-until linked. `append_columns` SHALL take the payload from up to 2048
-columns, `MAX_PAYLOAD_COLUMNS`, without allocating memory: words of
-NULL bits, bit `c % 64` of word `c / 64` for column `c` and at least
-one word, then a word for each column, 0 for a NULL.
+An append, [`Table::append`](../../../crates/relhash/src/table/mod.rs),
+SHALL write the pending rows of a batch in row order as records into one
+chunk while whole records fit, leave the others pending, and link none
+of them; it SHALL refuse keys or a payload size other than the table's
+before it writes. `append_columns` SHALL take the payload from columns,
+[`PayloadColumns`](../../../crates/relhash/src/table/record.rs), without
+allocating memory.
 
 #### Scenario: A full chunk leaves rows pending
 - **WHEN** a batch of 100 rows is appended to a chunk with room for 16
@@ -246,15 +276,50 @@ one word, then a word for each column, 0 for a NULL.
   `crates/relhash/src/table/tests/lookup.rs::an_append_checks_the_table_s_index`;
   `crates/tessera-capi/tests/table.rs::an_append_refuses_records_that_are_not_its_table_s`
 
+### Requirement: A batch that fails part way
+When a call that places rows fails at a row, because the source of keys
+cannot give a word's keys or a partition's chunk is refused, the rows it
+placed before SHALL stay placed, and the same batch given again SHALL
+place the rest once, as
+[`Batch`](../../../crates/relhash/src/table/batch.rs) says. A call that
+fails at damaged bytes keeps no such promise.
+
+#### Scenario: A source fails at the second word
+- **WHEN** a batch of 128 rows is appended, or found or inserted, and
+  the source of keys cannot give its second word
+- **THEN** the call fails with a wrong call and the rule of the source,
+  the first word's rows have left the pending mask with their
+  references, a walk of the chunk sees their records, and the batch
+  given again with a source that gives every word places the second
+  word after them
+- **Verified by:**
+  `crates/relhash/src/table/tests/partial.rs::a_source_that_fails_at_the_second_word_leaves_the_first_placed`
+
+#### Scenario: A partition's chunk is refused
+- **WHEN** a call by partition meets, in the middle of a word, a
+  partition whose chunk's used mark is damaged
+- **THEN** it fails with a damaged table; the rows placed before it
+  have left the pending mask and, for a find, are in the mask of
+  inserted rows; and once the mark is repaired, the batch given again
+  places the rest, each row once
+- **Verified by:**
+  `crates/relhash/src/table/tests/partial.rs::a_partition_with_a_damaged_mark_leaves_the_rows_before_placed`
+
+#### Scenario: A link fails part way
+- **WHEN** a link meets a damaged record after it has linked others
+- **THEN** the count of records grows by the records linked, and
+  `*from` lies past them
+- **Verified by:**
+  `crates/relhash/src/table/tests/partial.rs::a_link_that_meets_a_damaged_record_counts_what_it_linked`
+
 ### Requirement: Linking records
-`Table::link` and `TableMut::link` SHALL link the records of a chunk
-from a byte at a record's start up to the used mark, each first in its
-bucket's chain, and SHALL move the byte past them. Records of equal
-keys SHALL stay separate records. The count of records in the header
-SHALL grow before any of them can be found. `link_counting` SHALL link
-as `link` does and SHALL also count the records whose hash, NULL bits
-and keys a record linked earlier already has; the sum of these counts
-over the processes that link at once SHALL be exact.
+[`Table::link`](../../../crates/relhash/src/table/mod.rs) SHALL link the
+records of a chunk, each first in its bucket's chain and counted before
+any can be found; `link_counting` SHALL also count the records whose
+keys were linked before, exactly over processes that link at once.
+[`TableMut::link_grouped`](../../../crates/relhash/src/table/mod.rs)
+SHALL put the records of a key together, and `Table::next_in_group`
+SHALL step through them.
 
 #### Scenario: Linking counts what was there
 - **WHEN** a chunk is linked in two parts, and then again from its end
@@ -273,19 +338,29 @@ over the processes that link at once SHALL be exact.
   `crates/relhash/src/table/loom/table.rs::a_key_shared_by_two_participants_counts_once`;
   `crates/relhash/src/table/loom/table.rs::three_records_of_one_key_count_twice`
 
+#### Scenario: A key's records in a row
+- **WHEN** records of ten keys, ten each, are linked grouped
+- **THEN** next_in_group steps through exactly the records of each key,
+  and the count of duplicates is the records less the keys
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::grouped_records_of_a_key_lie_together`;
+  `test/sql/table.sql::tessera_test_table_cycle`
+
+#### Scenario: Grouped chains across chunks and a larger index
+- **WHEN** grouped records span several chunks and the table moves to a
+  larger index
+- **THEN** next_in_group still takes as many steps as next_match
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::grouped_chains_span_chunks_and_survive_a_larger_index`
+
 ### Requirement: Looking rows up
-`Table::probe` SHALL find for each row of a lookup's mask, `Matches`,
-the first record of its chain whose hash, NULL bits and every key word
-equal the row's, SHALL write its reference for the row, and SHALL keep
-in the mask the rows that found one. `Table::next_match` SHALL move
-each row to the next record of its chain with the same hash, NULL bits
-and keys, and keep in its mask only the rows that have one. The calls
-that read found records SHALL change only the rows of their mask:
-`gather`, `gather_scattered` and `gather_words` read words of the
-payload, each at a multiple of 8 bytes within it, and `gather_key` a
-key's word and its NULL flag; `Table::record` gives a record's fields
-and `TableMut::payload_ptrs` pointers to payloads, valid as long as
-their chunk.
+[`Table::probe`](../../../crates/relhash/src/table/mod.rs) SHALL find
+for each row of a lookup,
+[`Matches`](../../../crates/relhash/src/table/batch.rs), the first
+record with its hash, NULL bits and keys, and `Table::next_match` the
+next one, keeping in the mask the rows that found one; the calls that
+read found records SHALL change only the rows of their mask. A lookup
+whose mask and references differ in rows SHALL be refused.
 
 #### Scenario: Rows find their records
 - **WHEN** rows are probed with their keys, with absent keys, and with
@@ -315,51 +390,69 @@ their chunk.
   `crates/relhash/src/table/tests/lookup.rs::gather_key_reads_the_key_of_each_found_row`;
   `crates/tessera-capi/tests/table.rs::the_words_entry_point_gathers_every_column`
 
-### Requirement: The records of a key together
-`TableMut::link_grouped` SHALL link a chunk as `link` does, except that
-a record whose hash, NULL bits and keys the table already holds SHALL
-go right after the first such record of its chain, so that the records
-of a key stand together. `Table::next_in_group` SHALL move each row to
-the record right after its own when that record has the same hash,
-NULL bits and keys.
-
-#### Scenario: A key's records in a row
-- **WHEN** records of ten keys, ten each, are linked grouped
-- **THEN** next_in_group steps through exactly the records of each key,
-  and the count of duplicates is the records less the keys
+#### Scenario: A mask and references of other row counts
+- **WHEN** a lookup is made of a mask of 70 rows and 69 references
+- **THEN** it is refused
 - **Verified by:**
-  `crates/relhash/src/table/tests/records.rs::grouped_records_of_a_key_lie_together`;
-  `test/sql/table.sql::tessera_test_table_cycle`
+  `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`
 
-#### Scenario: Grouped chains across chunks and a larger index
-- **WHEN** grouped records span several chunks and the table moves to a
-  larger index
-- **THEN** next_in_group still takes as many steps as next_match
+### Requirement: A lookup narrows one mask
+A probe, a step to the next match or to the next in a group, and a Bloom
+filter's probe SHALL keep in the mask only the rows that find what they
+look for, leave the reference of a row that leaves as it was, and return
+how many rows are left. A lookup SHALL count its steps and fail as a
+damaged table at a cycle of matching records, as
+[`Matches`](../../../crates/relhash/src/table/batch.rs) says.
+
+#### Scenario: A walk down the matches of a key
+- **WHEN** ten rows, one for each of ten keys of ten records, step with
+  the next match until no row is left
+- **THEN** each step returns the rows left, and each key's walk reads
+  its ten records
 - **Verified by:**
-  `crates/relhash/src/table/tests/records.rs::grouped_chains_span_chunks_and_survive_a_larger_index`
+  `crates/relhash/src/table/tests/lookup.rs::equal_keys_chain_through_next_match`
+
+#### Scenario: A row without a next record
+- **WHEN** two rows whose keys have one record each step with the next
+  match
+- **THEN** the call returns 0, both rows leave, and their references
+  stay
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::a_null_key_groups_apart_from_the_value_it_hashes_like`
+
+#### Scenario: A filter narrows the rows of a lookup
+- **WHEN** a filter of the hashes of 100 rows probes every other row
+- **THEN** the same 50 rows stay, and the call returns 50
+- **Verified by:**
+  `crates/relhash/src/table/tests/filter.rs::a_probe_narrows_its_rows_in_place`
+
+#### Scenario: A cycle of matching records
+- **WHEN** a record's next names itself, or two records of equal keys
+  name each other, and a lookup steps to its next match, or its next in
+  a group, again and again
+- **THEN** within as many steps as the table has records, the step
+  fails with a damaged table and the rule of a chain
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::a_cycle_of_matching_records_ends_a_walk_over_the_matches`
+
+#### Scenario: A chain longer than a short walk
+- **WHEN** 300 records of one hash are linked, and their keys and an
+  absent key are probed row by row and by whole words, their matches
+  are followed, and a find or insert looks for a known and a new key
+- **THEN** every known key is found at the end of its walk, the absent
+  key finds nothing, the matches visit all 300 records, and no call
+  takes the chain for a cycle
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::a_healthy_chain_longer_than_a_short_walk_is_walked_to_its_end`
 
 ### Requirement: Calls of one writer
-These calls of a table's one writer, `TableMut`, SHALL run only when no
-other call uses the table: `link_grouped`, `find_or_insert`, `regrow`,
-`scan`, `clear_key`, and a change of a payload in place.
-
-- `find_or_insert` SHALL give each row of the batch's pending mask, in
-  row order, the record of its keys, and SHALL make one with a payload
-  of zeros, linked at once, when the table has none. It SHALL stop at
-  the first row that needs a new record when the chunk is full or the
-  records are half the buckets; the rows not done stay pending. The
-  call SHALL add to the mask of inserted rows exactly the rows whose
-  record it made, and SHALL leave the mask's other bits as they were,
-  so that the masks of the calls of one batch add up.
-- `regrow` SHALL move the table to a new index for a capacity, with at
-  least the buckets of the old one, and link every record of every
-  chunk it is given again, grouped. No record moves, and every
-  reference stays valid.
-- `scan` SHALL visit every record below the used marks, chunk by chunk
-  in the order appended, at least one a call, from a cursor that starts
-  at `Cursor::start`; a count of 0 SHALL mean the end.
-- `clear_key` SHALL write 0 into one key of every record and keep its
-  NULL bit.
+The calls of a table's one writer,
+[`TableMut`](../../../crates/relhash/src/table/mod.rs), SHALL run only
+when no other call uses the table. `find_or_insert` SHALL give each row
+the record of its keys, made when the table has none, until the chunk is
+full or the records are half the buckets; `regrow` SHALL move the table
+to a larger index and move no record; `scan` SHALL visit every record;
+and `clear_key` SHALL clear one key of every record.
 
 #### Scenario: Rows find or make their record
 - **WHEN** a batch with repeated keys is resolved, a chunk fills, and
@@ -401,16 +494,159 @@ other call uses the table: `link_grouped`, `find_or_insert`, `regrow`,
   `crates/tessera-capi/tests/table.rs::the_writer_entry_points_round_trip`;
   `crates/relhash/src/table/tests/lookup.rs::a_cleared_key_is_zero_in_every_record`
 
+### Requirement: Records by reference
+A caller SHALL read the record that a reference names through
+[`RecordCursor`](../../../crates/relhash/src/table/mod.rs), and the one
+writer of a table SHALL change its payload through
+[`PayloadCursor`](../../../crates/relhash/src/table/writer.rs): each
+reference checked as a lookup checks it, one payload open at a time, and
+a reference checked first and its payload opened later.
+
+#### Scenario: Records read by reference
+- **WHEN** a cursor reads the record of each row's reference, and of a
+  reference inside a record
+- **THEN** each record holds its row's keys and hash, and the reference
+  inside a record fails
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_record_cursor_reads_records_by_reference`
+
+#### Scenario: Payloads changed by reference
+- **WHEN** a writer adds a value to the payload of the record of each
+  row a probe found
+- **THEN** each record's payload holds the sum of the values of its rows
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_payload_cursor_changes_payloads_by_reference`
+
+#### Scenario: Checked now, opened later
+- **WHEN** a writer checks the references of a batch, then opens their
+  payloads one by one
+- **THEN** each payload is the one of the record its reference names
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_payload_cursor_holds_checked_references_to_open_later`
+
+#### Scenario: Two payloads open at once
+- **WHEN** a program keeps one payload of a cursor open and opens
+  another
+- **THEN** it does not compile
+- **Verified by:**
+  `crates/relhash/src/table/writer.rs::A program that keeps one payload
+  open and opens another`
+
+### Requirement: The payloads of a batch
+The one writer of a table SHALL change the payloads of the records of a
+batch's rows in one call,
+[`TableMut::each_payload`](../../../crates/relhash/src/table/mod.rs), or
+get a raw pointer to each,
+[`TableMut::payload_ptrs`](../../../crates/relhash/src/table/mod.rs),
+usable within Rust's rules of aliasing until the chunk is reset. A
+reference that fails its check SHALL fail the call, the payloads before
+it changed.
+
+#### Scenario: Pointers to the payload of one record
+- **WHEN** two rows of a batch name one record, the call gives their
+  pointers, and the payload is written through each of them in turn
+  after the call, under Miri, also through the C entry point
+- **THEN** Miri reports no undefined behavior, and the payload holds
+  the last write
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::pointers_to_the_payload_of_one_record_write_it_in_turn`;
+  `crates/tessera-capi/tests/table.rs::the_writer_entry_points_round_trip`
+
+#### Scenario: A damaged record in the middle
+- **WHEN** the record that the third of five references names has a
+  size that is not the table's
+- **THEN** the call fails with a damaged table, and the payloads of the
+  first two rows hold their values
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_damaged_record_in_the_middle_fails_after_the_payloads_before_it`
+
+### Requirement: A merge by the caller's rule
+The one writer of a table SHALL merge the records of a chunk into the
+table by a rule it gives,
+[`TableMut::merge`](../../../crates/relhash/src/table/mod.rs): a record
+of keys the table has goes to the rule with the table's record, and one
+of new keys is copied and linked. The merge SHALL stop where a new
+record finds no room or the rule fails, with the records merged so far
+kept and the byte to go on from.
+
+#### Scenario: Known keys and new keys
+- **WHEN** a chunk of records, some of keys the table has and some of
+  new keys, is merged by a rule that adds the payloads
+- **THEN** the records of known keys hold the sums, and the new keys
+  have records equal to the ones merged
+- **Verified by:**
+  `crates/relhash/src/table/tests.rs::a_merge_by_a_rule_changes_known_keys_and_copies_new_ones`
+
+#### Scenario: A full chunk
+- **WHEN** the chunk for new records has room for one, and two records
+  of new keys come
+- **THEN** the merge stops before the second, and gives the byte where
+  it begins
+- **Verified by:**
+  `crates/relhash/src/table/tests.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
+
+#### Scenario: Half the buckets
+- **WHEN** the table's records are half its buckets, and a record of
+  new keys comes
+- **THEN** the merge stops before it, and gives the byte where it
+  begins
+- **Verified by:**
+  `crates/relhash/src/table/tests.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
+
+#### Scenario: The rule fails
+- **WHEN** the rule fails on the second of three records of known keys
+- **THEN** the merge returns the rule's error, and the first record is
+  merged
+- **Verified by:**
+  `crates/relhash/src/table/tests.rs::a_failing_rule_stops_the_merge_with_its_own_error`
+
+### Requirement: The owning table
+Every order of the calls of
+[`OwnedTable`](../../../crates/relhash/src/table/owned.rs) SHALL keep
+its table whole, and an insertion that fails part way SHALL leave the
+rows it placed linked. The owning table SHALL refuse chunks too small
+for one record, and SHALL fail, not grow its index again and again, at
+the most records a find or insert may make.
+
+#### Scenario: Calls in any order
+- **WHEN** random sequences of insertions, finds or insertions, larger
+  indexes and resets run over an owning table
+- **THEN** after each call its records, their count and the keys it
+  finds are those of a model of the sequence
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::the_owning_table_stays_whole_under_any_order_of_its_calls`
+
+#### Scenario: An insertion that fails part way
+- **WHEN** the source of an insertion into the owning table cannot give
+  its second word
+- **THEN** the call fails with the rule of the source, the first word's
+  keys are found, the count of records is theirs, and the rows given
+  again with a source that gives every word are placed once more
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::an_insertion_that_fails_at_the_second_word_links_the_first`
+
+#### Scenario: An owning table at its most records
+- **WHEN** a find or insert of the owning table needs a record past the
+  most records a table may hold
+- **THEN** it fails with a wrong call and the rule of that limit
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::the_owning_table_grows_up_to_the_most_records_and_then_fails`
+
+#### Scenario: A chunk too small for a record
+- **WHEN** an owning table is made with chunks shorter than a record
+- **THEN** it is refused with a wrong call and the rule of a record's
+  room
+- **Verified by:**
+  `crates/relhash/src/table/tests/lookup.rs::a_record_larger_than_a_chunk_is_refused`
+
 ### Requirement: Calls at the same time
-Over shared memory several processes SHALL be able to append at once,
-each to chunks of its own, to link at once, each its own chunks, and to
-probe and read at once, each through a `Table` of its own over the same
-blocks. A chunk SHALL have one writer, and the calls of one writer run
-alone. Of the index and the chunks, only the count of records and the
-buckets change while the table is shared, by atomic operations: a link
-adds to the count before it publishes a record, and publishes it by a
-compare-and-swap of its bucket with release; a probe reads a bucket
-with acquire. A process that finds a record SHALL see it whole.
+Over shared memory several processes SHALL be able to append, link, and
+probe and read at once, each through a
+[`Table`](../../../crates/relhash/src/table/mod.rs) of its own, in the
+steps its documentation lists, and a process that finds a record SHALL
+see it whole. The calls that read the used mark of every chunk SHALL run
+only once every writer's appends are done, as the contracts of
+`Table::attach` and `Chunks::new` say.
 
 #### Scenario: A probe beside a link
 - **WHEN** one process probes for a key while another links its record
@@ -437,39 +673,82 @@ with acquire. A process that finds a record SHALL see it whole.
   `crates/tessera-kernels/src/loom.rs::two_participants_append_size_link_and_probe`;
   `crates/tessera-kernels/src/loom.rs::three_participants_attach_at_any_phase`
 
+#### Scenario: A filter built after the appends
+- **WHEN** a filter is built over a shared table
+- **THEN** the contracts of attaching the table and of making its
+  chunks name the call and the barrier before it
+- **Verified by:** review only — the contract forbids the race it
+  names, so no run can show it
+
+### Requirement: Safe calls are sound
+No sequence of the crate's safe calls SHALL let a record that a caller
+has borrowed change while it is borrowed. A call that writes a chunk or
+the index SHALL need the table to itself, or be an `unsafe` call whose
+contract names the chunks each writer writes, as those of
+[`Table`](../../../crates/relhash/src/table/mod.rs) and
+[`ChunkWriter`](../../../crates/relhash/src/table/chunks.rs) do.
+
+#### Scenario: A record borrowed across an append
+- **WHEN** a caller borrows a record of the owning table and then
+  appends to its chunk
+- **THEN** the code does not compile
+- **Verified by:**
+  `crates/relhash/src/table/owned.rs::A record borrowed across an append`
+
+#### Scenario: A chunk writer made in safe code
+- **WHEN** a program makes a writer of chunks outside an unsafe block
+- **THEN** the code does not compile
+- **Verified by:**
+  `crates/relhash/src/table/chunks.rs::A chunk writer made in safe code`
+
+#### Scenario: An old reference after a reset
+- **WHEN** an owning table is reset, an old reference is read, and new
+  rows are appended, under Miri
+- **THEN** Miri reports no undefined behavior
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::an_old_reference_after_a_reset_reads_what_its_place_holds`
+
+### Requirement: Threads
+A handle attached to a table's blocks SHALL NOT pass from one thread to
+another, nor be shared by them; the owning table SHALL pass to another
+thread whole; and a shared filter may be shared, as [the crate's
+page](../../../crates/relhash/src/lib.rs) says.
+
+#### Scenario: A handle sent to another thread
+- **WHEN** a program sends a handle attached to a table to another
+  thread, or shares one between threads
+- **THEN** it does not compile
+- **Verified by:**
+  `crates/relhash/src/lib.rs::A handle sent to another thread does not compile`
+
+#### Scenario: An owning table sent to another thread
+- **WHEN** an owning table is filled on one thread and moved to another
+- **THEN** the other thread finds every key
+- **Verified by:**
+  `crates/relhash/src/table/tests/owned.rs::an_owning_table_filled_on_one_thread_is_probed_on_another`
+
+#### Scenario: Threads with handles of their own
+- **WHEN** two threads, each with its own handle, append, link and
+  probe one table in every order of their steps
+- **THEN** every key is found
+- **Verified by:**
+  `crates/relhash/src/table/loom/table.rs::two_participants_build_a_table_and_find_every_key`
+
 ### Requirement: Partitions of a table
-A table that a caller spills to disk SHALL keep its records in
-partitions, chosen by the bits of the hash. A `Partitions` names them:
-with `n` partitions, the length of its `chunks`, at its `shift` `s`,
-the partition of a hash `h` is `(h >> s) & (n - 1)`. `n` SHALL be a
-power of two from 1 to 65536, `MAX_PARTITIONS`, and the bits SHALL lie
-within the hash: `s < 32` and `s + log2(n) <= 32`. The buckets take the
-high bits of a hash, so a caller's first partitions take the low bits,
-and a partition split again takes the bits above those.
-
-```
- bit 31                                     4   3   2   1   0
-    ┌─────────────────────────────────────┬───────┬───────┐
-    │ the buckets take the high bits  …   │ split │ first │
-    └─────────────────────────────────────┴───────┴───────┘
- first partitions: 4 at shift 0, (h >> 0) & 3
- one of them split again: 4 at shift 2, (h >> 2) & 3
-```
-
-A call that takes partitions SHALL take in `chunks` a chunk number for
-each, below the count of chunks it is given, and SHALL refuse another
-count, shift or chunk number before it changes anything. The caller
-SHALL be the one writer of those chunks, and two partitions SHALL share
-a chunk only when it has no room for a record.
+A table that a caller spills SHALL keep its records in the partitions
+that [`Partitions`](../../../crates/relhash/src/table/chunks.rs) chooses
+by the bits of a hash, and a call SHALL refuse partitions that break
+their rules before it changes anything.
+[`ChunkWriter::split`](../../../crates/relhash/src/table/chunks.rs)
+SHALL copy the records of a chunk to the chunks of their partitions,
+whole, in order and unlinked.
 
 #### Scenario: The partition of a hash
-- **WHEN** a chunk of 200 records is split into 4 partitions at shift 9,
-  by the crate and through Tessera's C API
+- **WHEN** a chunk of 200 records is split into 4 partitions at shift 9
 - **THEN** every record goes to the chunk of partition
-  `(hash >> 9) & 3`, the one `tess_table_partition` gives
+  `(hash >> 9) & 3`
 - **Verified by:**
-  `crates/relhash/src/table/tests.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
-  `test/sql/table.sql::tessera_test_table_partitions`
+  `crates/relhash/src/table/tests.rs::a_chunk_splits_into_the_chunks_of_its_partitions`
 
 #### Scenario: Partitions past the limits are refused
 - **WHEN** 0, 3 or 131072 partitions are given, 4 partitions at shift
@@ -480,19 +759,27 @@ a chunk only when it has no room for a record.
   `crates/relhash/src/table/tests.rs::partitions_past_the_hash_or_the_chunks_are_refused`;
   `crates/tessera-capi/tests/table.rs::an_append_by_partition_refuses_partitions_past_the_limits`
 
+#### Scenario: A chunk splits into its partitions
+- **WHEN** a chunk of 200 records is split 16 at a time into partitions
+  whose chunks hold 8, and each partition named full gets a new chunk
+- **THEN** every record is copied once, whole, with a next of 0, to its
+  partition, and `*from` ends at the source's used mark
+- **Verified by:**
+  `crates/relhash/src/table/tests.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
+  `test/sql/table.sql::tessera_test_table_partitions`
+
+#### Scenario: A split that cannot be done is refused
+- **WHEN** a split is asked for no records, into one of its partitions'
+  chunks, or with a record size other than the source's records
+- **THEN** it fails, and `*from` and the chunks are as they were
+- **Verified by:**
+  `crates/relhash/src/table/tests.rs::a_split_that_cannot_be_done_is_refused`
+
 ### Requirement: Appending rows by partition
-`ChunkWriter::append_partitioned_columns` SHALL append the rows of the
-batch's pending mask, in row order, each as a record to the chunk of
-its partition, as `append_columns` appends to one chunk. A row whose
-partition's chunk has no room SHALL stay pending while the rows after
-it go on; the caller gives that partition a new chunk and calls again.
-The payload SHALL be a word of NULL bits, bit `c` for column `c`, then
-a word for each column, 0 for a NULL, so the call SHALL take at most 64
-columns and a table whose payload is `8 * (1 + columns)` bytes. Each
-row appended SHALL add one to its partition's count in
-`Appended::rows`, which the call adds to and never clears, and SHALL
-OR its NULL bits into `Appended::nulls`. As a chunk writer does, the
-call SHALL not need the index and SHALL not link the records.
+[`ChunkWriter::append_partitioned_columns`](../../../crates/relhash/src/table/chunks.rs)
+SHALL append each pending row to the chunk of its partition, leave
+pending a row whose chunk is full while the rows after it go on, and
+count each row appended in its partition, with no index and no link.
 
 #### Scenario: Rows go to the chunks of their partitions
 - **WHEN** 70 rows go to 4 partitions at shift 3, the chunk of
@@ -513,45 +800,12 @@ call SHALL not need the index and SHALL not link the records.
   `crates/relhash/src/table/tests.rs::an_append_by_partition_checks_its_columns`;
   `crates/tessera-capi/tests/table.rs::an_append_by_partition_checks_what_it_is_given`
 
-### Requirement: Splitting a chunk by partition
-`ChunkWriter::split` SHALL copy the records of chunk `source` from byte
-`*from` on, whole and in the order appended, each to the chunk of its
-partition, and SHALL move `*from` past each record copied. It SHALL
-copy at most as many records as `refs` has slots, at least one a call,
-and give the reference and the hash of each copy in `refs` and
-`hashes`. It SHALL stop before a record whose partition's chunk has no
-room and name that partition in `Split::full`; a `Split::count` of 0
-with no full partition SHALL mean that the source is done. A copy's
-next SHALL be 0: the copies are not linked. The records SHALL have the
-size of the keys and the payload of the writer's configuration, and the
-source SHALL not be the chunk of a partition.
-
-#### Scenario: A chunk splits into its partitions
-- **WHEN** a chunk of 200 records is split 16 at a time into partitions
-  whose chunks hold 8, and each partition named full gets a new chunk
-- **THEN** every record is copied once, whole, with a next of 0, to its
-  partition, and `*from` ends at the source's used mark
-- **Verified by:**
-  `crates/relhash/src/table/tests.rs::a_chunk_splits_into_the_chunks_of_its_partitions`;
-  `test/sql/table.sql::tessera_test_table_partitions`
-
-#### Scenario: A split that cannot be done is refused
-- **WHEN** a split is asked for no records, into one of its partitions'
-  chunks, or with a record size other than the source's records
-- **THEN** it fails, and `*from` and the chunks are as they were
-- **Verified by:**
-  `crates/relhash/src/table/tests.rs::a_split_that_cannot_be_done_is_refused`
-
 ### Requirement: Groups by partition
-`TableMut::find_or_insert_partitioned` SHALL give each row of the
-batch's pending mask the record of its keys as `find_or_insert` does,
-but SHALL write a new record to the chunk of its partition. A row whose
-partition's chunk has no room SHALL stay pending while the rows after
-it go on. Once the linked records reach half the buckets, the call
-SHALL resolve no more rows: the rows not done stay pending, those of a
-known key too, until the caller moves the table to a larger index. The
-call SHALL add to the mask of inserted rows the rows whose record it
-made, as `find_or_insert` does. It is a call of the one writer.
+[`TableMut::find_or_insert_partitioned`](../../../crates/relhash/src/table/mod.rs)
+SHALL give each pending row the record of its keys as `find_or_insert`
+does, write a new record to the chunk of its partition, leave pending a
+row whose chunk is full, and resolve no more rows once the records reach
+half the buckets.
 
 #### Scenario: Groups go to the chunks of their partitions
 - **WHEN** three batches of keys go to 4 partitions whose chunks hold 8
@@ -572,31 +826,12 @@ made, as `find_or_insert` does. It is a call of the one writer.
   `crates/relhash/src/table/tests.rs::half_the_buckets_stops_every_row_of_a_lookup_by_partition`
 
 ### Requirement: A Bloom filter of the keys
-A Bloom filter SHALL be a power of two of 64-bit words, which the caller
-owns and which hold no address. A hash SHALL set four bits of one word,
-taken from the hash multiplied by an odd constant: the word from the
-product's high bits, the four bits from its low 24 bits, six bits each.
-The four bits may coincide.
-
-```
- s = hash × 0x9E3779B97F4A7C15, modulo 2^64; k = log2(words)
-
- bit 63                        24 23    18 17    12 11     6 5      0
-    ┌───────────────────────────┬────────┬────────┬────────┬────────┐
-    │ the word: the top k bits  │ bit 4  │ bit 3  │ bit 2  │ bit 1  │
-    │ (word 0 when k is 0)      │        │        │        │        │
-    └───────────────────────────┴────────┴────────┴────────┴────────┘
-```
-
-A row SHALL pass when every bit of its hash is set. A filter is filled
-with the hashes of the table's records, so a row with the hash of a
-record passes. `Table::bloom` SHALL clear the words and set the bits of
-every record below the used marks of the table's chunks, linked or
-not; no append may run meanwhile. `bloom::add` SHALL set the bits of
-the hashes of the selected rows. `bloom::probe` SHALL keep in its mask
-the selected rows that pass, and no other row. Words that are not a
-power of two, and hashes of another row count than the mask, SHALL be
-refused before any change.
+A Bloom filter SHALL be a power of two of words the caller owns, where a
+hash sets the bits that [the module
+`bloom`](../../../crates/relhash/src/table/bloom.rs) draws, so that a
+row with the hash of a record always passes; at the size
+[`bloom::words_for`](../../../crates/relhash/src/table/bloom.rs) gives,
+fewer than one in 100 absent keys SHALL pass.
 
 #### Scenario: The bits of a hash
 - **WHEN** one hash is added to an empty filter of 1, 2 and 1024 words
@@ -625,15 +860,6 @@ refused before any change.
   `crates/relhash/src/table/tests/filter.rs::a_filter_of_the_wrong_size_is_refused`;
   `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
-### Requirement: The size of a Bloom filter
-`bloom::words_for` SHALL give, for `r` records, the least power of two
-of words that is at least `max(1, ceil(16 r / 64))`, so 16 bits a
-record at least. `bloom::words_within` SHALL give the same, halved
-while its bytes are more than an eighth of `limit`, one word at least.
-A count of records whose filter cannot be sized SHALL be refused. At 16
-bits a record, a filter SHALL let fewer than one in 100 absent keys
-through.
-
 #### Scenario: The words for a count of records
 - **WHEN** filters are sized for 0, 4, 5 and 5000 records, within limits
   from 0 to a gigabyte, and for 2^64 - 1 records
@@ -651,32 +877,12 @@ through.
   `crates/relhash/src/table/tests/filter.rs::few_absent_keys_pass_a_filter_of_16_bits_a_key`
 
 ### Requirement: A shared Bloom filter
-A shared filter, `SharedFilter`, SHALL be a state word followed by the
-words of a filter, `1 + 2^k` words aligned to 8, which the participants
-of a shared table map. `bloom::shared_words_for` SHALL give the state
-word and `bloom::words_for` of the records.
-
-```
- word   0         1         2                    2^k
-       ┌─────────┬─────────┬─────────┬─────────┬─────────┐
-       │ state   │ word 0  │ word 1  │    …    │ word    │
-       │         │ of the filter     │         │ 2^k - 1 │
-       └─────────┴─────────┴─────────┴─────────┴─────────┘
- state: 0 none, 1 building, 2 ready
-```
-
-`SharedFilter::init` SHALL clear the words and set the state to none;
-one participant calls it before any other uses the filter.
-`Table::try_build_bloom` SHALL let one participant build the filter:
-the one whose compare-and-swap moves the state from none to building
-fills the filter from the table's records and then stores ready with
-release, and the call returns true for it alone. The others SHALL
-return false at once, and nobody waits. `SharedFilter::ready` SHALL
-read the state with acquire; a participant that reads ready SHALL see
-every bit of the filter. `bloom::probe_shared` SHALL refuse a filter
-that is not ready, and otherwise probe as `bloom::probe`. Words that
-are not aligned to 8, or whose count less the state word is not a power
-of two, SHALL be refused as a shared filter.
+A shared filter,
+[`SharedFilter`](../../../crates/relhash/src/table/bloom.rs), SHALL be a
+state word and the words of a filter, built by one participant while the
+others go on without it and nobody waits, and SHALL be probed only once
+ready. `bloom::add_atomic` SHALL let several participants fill one
+filter at once.
 
 #### Scenario: One participant builds the filter
 - **WHEN** two participants in the model, four threads, or two calls of
@@ -707,14 +913,6 @@ of two, SHALL be refused as a shared filter.
   `crates/relhash/src/table/tests/filter.rs::a_shared_filter_of_the_wrong_shape_is_refused`;
   `crates/tessera-capi/tests/table.rs::the_filter_entry_points_size_fill_and_probe`
 
-### Requirement: A filter filled together
-`bloom::add_atomic` SHALL set the bits of the hashes of the selected
-rows in a filter without a state word, each word changed by an atomic
-OR, so that several participants may add their rows at once. The caller
-SHALL order every addition before any probe, by a barrier, and SHALL
-then probe with `bloom::probe`. Its words SHALL be aligned to 8 and a
-power of two.
-
 #### Scenario: Participants add at once
 - **WHEN** two participants add keys of one word at the same time, in
   every order of their steps, and then probe after both are done; and
@@ -734,46 +932,12 @@ power of two.
   `test/sql/table.sql::tessera_test_table_shared_spill`
 
 ### Requirement: The marks of RIGHT and FULL joins
-A RIGHT or FULL join SHALL be able to mark each record of its table
-that a pair matched, a bit a record, in words the caller keeps and the
-crate reaches through `Marks`: a run of words for each chunk, where bit
-`i` of word `w` of chunk `c`'s run stands for the chunk's record
-`64 w + i`, records counted from byte 8 in steps of the record size
-`s`.
-
-```
- chunk c    ┌──────┬────────────┬────────────┬─────┬────────────┬─────┐
-            │ used │ record 0   │ record 1   │  …  │ record 64  │  …  │
-            └──────┴────────────┴────────────┴─────┴────────────┴─────┘
- byte        0      8            8 + s              8 + 64 s
-
- marks[c]   ┌──────────────────────────────┬───────────────────────┐
-            │ word 0: bit i for record i   │ word 1: bit i for     │
-            │                              │ record 64 + i  …      │
-            └──────────────────────────────┴───────────────────────┘
-```
-
-`mark_words` SHALL give the words of a chunk of `len` bytes,
-`ceil(floor((len - 8) / s) / 64)`. The record size SHALL be a multiple
-of 8, at least 24, a header and one key, and room for a record in the
-largest chunk. `mark` SHALL set the mark of the record each selected
-row's reference names: a record of the record size, on its boundary,
-within its chunk's length, in a chunk it is given. It SHALL need only
-the lengths of the chunks and the record size, not the index;
-`Table::mark` marks with the table's. `Marks::set` takes `&self`, so
-that participants may mark at once, through marks that change each word
-by an atomic OR.
-
-`scan_unmarked` SHALL walk the records below the used marks as
-`TableMut::scan` does, from a `Cursor` that starts at `Cursor::start`,
-and give the references of those without a mark, at most as many as
-its output has slots and at least one a call; the cursor SHALL then
-name the first record not given, and a count of 0 SHALL mean the end.
-Without marks it SHALL give every record. A cursor off a record's
-boundary or past its chunk's used mark SHALL be refused.
-`Table::scan_unmarked` walks the table's chunks with its record size.
-The caller SHALL order every participant's marks before the walk, and
-nothing marks or appends during it.
+A RIGHT or FULL join SHALL be able to mark each record a pair matched,
+in words the caller keeps and the crate reaches through
+[`Marks`](../../../crates/relhash/src/table/marks.rs), laid out as its
+documentation draws them, and to walk the records without a mark,
+[`scan_unmarked`](../../../crates/relhash/src/table/marks.rs), once
+every participant's marks are done and while nothing marks or appends.
 
 #### Scenario: The marks of a chunk
 - **WHEN** the words of chunks of 8, 40, 2056 and 2088 bytes are asked
@@ -817,16 +981,13 @@ nothing marks or appends during it.
   `crates/relhash/src/table/loom/words.rs::a_plain_read_and_write_loses_marks`
 
 ### Requirement: A damaged table
-A call SHALL return an error, and never panic or loop without end, when
-the bytes it is given are not a table: a header that breaks a rule of
-"The index of a table", an index length below the header's, a
-reference outside its chunk or to a byte where no record starts, a
-record whose size is not the table's, a used mark that ends no record,
-or a chain with a loop. A walk down a chain SHALL take no more steps
-than the header's count of records, and no more than the places a
-reference can name in the chunks it is given, 2^17 a chunk. A call
-SHALL check its arguments, the header and the count of chunks before
-it changes anything, and a chunk before it reads or writes it.
+A call SHALL return an error of a damaged table, and never panic or loop
+without end, when the bytes it reads are not a table, as
+[`Kind::Damaged`](../../../crates/relhash/src/error.rs) lists. A walk
+down a chain SHALL take no more steps than the count of records and the
+places of its chunks, and a call SHALL check its arguments, the header
+and the count of chunks before it changes anything, and a chunk before
+it reads or writes it.
 
 #### Scenario: A damaged header
 - **WHEN** one field of a valid header is changed: the magic, the
@@ -853,3 +1014,115 @@ it changes anything, and a chunk before it reads or writes it.
   are as they were
 - **Verified by:**
   `crates/relhash/src/table/tests/lookup.rs::dimension_errors_come_before_any_change`
+
+### Requirement: Any bytes, a bounded call
+Under the caller's promise, which [the crate's
+README](../../../crates/relhash/README.md) states, a call SHALL end
+after a number of steps bounded by the lengths of its blocks and its
+arguments, whatever bytes the blocks hold and after a call that failed
+as well: it SHALL return a result or an error, SHALL NOT panic, and
+SHALL read and write no memory but its blocks and arguments. Calls in
+one process over the same bytes, with the same arguments and in the same
+order, SHALL leave the same bytes and give the same answers.
+
+#### Scenario: Every damage against every call
+- **WHEN** a valid table is damaged in one place, from a list that
+  covers every field of the header, a bucket, the next, hash, NULL bits
+  and length of a record, a used mark and the count of records, each
+  with the values at and around its limits; then every call of the
+  crate runs over it, and more calls after the first error
+- **THEN** each call ends with a result or the error of the rule the
+  damage breaks, and the bytes around every block are as they were
+- **Verified by:**
+  `crates/relhash/src/table/tests/damage.rs::every_damage_against_every_call`
+
+#### Scenario: Bytes a fuzzer chose
+- **WHEN** a fuzzer builds tables from its input, damages them in one
+  or more places, or gives the calls any arguments, and runs calls over
+  them
+- **THEN** no call panics, runs without end, or reads or writes outside
+  its blocks
+- **Verified by:** `crates/relhash/fuzz/fuzz_targets/damaged.rs::fuzz_target!`;
+  `crates/relhash/fuzz/fuzz_targets/arguments.rs::fuzz_target!`
+
+#### Scenario: The checks hold for all values
+- **WHEN** a header passes its checks, a reference passes its check, a
+  walk starts over a chain, a chunk or its marks, or a hash picks a
+  partition or a word of a filter, for all values of the fields,
+  references, used marks, counts and sizes the table and the call may
+  hold
+- **THEN** every bucket lies inside the index, every record inside its
+  chunk, a partition, a word of a filter and a word of marks inside
+  their arrays, every walk ends within the bound its blocks give, and
+  nothing panics
+- **Verified by:**
+  `crates/relhash/src/table/proofs.rs::a_header_that_passes_puts_every_bucket_inside_the_index`;
+  `crates/relhash/src/table/proofs.rs::the_record_count_is_bounded_by_the_chunks`;
+  `crates/relhash/src/table/proofs.rs::a_reference_that_passes_names_a_record_inside_its_chunk`;
+  `crates/relhash/src/table/proofs.rs::a_used_mark_that_passes_ends_a_record`;
+  `crates/relhash/src/table/proofs.rs::a_walk_over_a_chunk_stays_inside_it`;
+  `crates/relhash/src/table/proofs.rs::a_walk_down_a_chain_ends_within_the_record_count`;
+  `crates/relhash/src/table/proofs.rs::a_partition_lies_within_the_partitions`;
+  `crates/relhash/src/table/proofs.rs::the_partitions_that_pass_name_chunks_of_the_table`;
+  `crates/relhash/src/table/proofs.rs::a_word_of_the_filter_lies_within_it`;
+  `crates/relhash/src/table/proofs.rs::the_words_of_a_filter_within_a_limit_are_a_filter`;
+  `crates/relhash/src/table/proofs.rs::a_mark_sets_the_bit_of_its_record`;
+  `crates/relhash/src/table/proofs.rs::a_walk_over_marks_reads_words_within_them`
+
+#### Scenario: One sequence, twice
+- **WHEN** the same sequence of calls runs twice, over two copies of the
+  same bytes
+- **THEN** the blocks and the answers of the two runs are equal
+- **Verified by:**
+  `crates/relhash/src/table/tests/damage.rs::one_sequence_twice_gives_the_same_blocks_and_answers`
+
+### Requirement: Errors of two kinds
+An error of a call SHALL name the rule that was broken and be of one of
+two kinds, a wrong call or a damaged table, which what the call read
+decides, as [`Kind`](../../../crates/relhash/src/error.rs) lists them.
+
+#### Scenario: Each damage names its rule
+- **WHEN** one rule of the format is broken in a valid table, and every
+  call that reads the damaged bytes runs over it
+- **THEN** each of them fails with a damaged table and that rule
+- **Verified by:**
+  `crates/relhash/src/table/tests/damage.rs::every_damage_against_every_call`
+
+#### Scenario: Each wrong argument names its rule
+- **WHEN** a call is given one argument that breaks one rule of a wrong
+  call
+- **THEN** it fails with a wrong call and that rule; when the argument
+  is a size, a count or a block, which a call checks before its first
+  row, it fails before it changes anything
+- **Verified by:**
+  `crates/relhash/src/table/tests/arguments.rs::each_wrong_argument_names_its_rule`;
+  `crates/relhash/src/table/tests/arguments.rs::every_rule_has_its_case`
+
+#### Scenario: A wrong chunk given to a regrow or a cleared key
+- **WHEN** a larger index or a cleared key is given chunks of which the
+  last cannot be a chunk
+- **THEN** the call fails with a wrong call and the rule of a chunk,
+  and the index, the chunks and the keys are as they were
+- **Verified by:**
+  `crates/relhash/src/table/tests/records.rs::a_wrong_last_chunk_fails_the_calls_over_every_chunk_before_a_change`
+
+### Requirement: No memory taken
+A call over blocks the caller gives SHALL allocate no memory, also when
+it fails. [`OwnedTable`](../../../crates/relhash/src/table/owned.rs),
+which allocates its blocks, is outside this promise, and a build without
+the crate's feature `alloc` leaves it out.
+
+#### Scenario: Calls under a counting allocator
+- **WHEN** every call of the crate runs over the caller's blocks, with
+  success and with each kind of error, under an allocator that counts
+- **THEN** the count does not change
+- **Verified by:**
+  `crates/relhash/src/table/tests/damage.rs::every_damage_against_every_call`;
+  `crates/relhash/src/table/tests/arguments.rs::each_wrong_argument_names_its_rule`
+
+#### Scenario: A build without the owning table
+- **WHEN** the crate is built and tested without its feature `alloc`
+- **THEN** it builds, its tests that need no owning table run, and it
+  has no table that owns its memory
+- **Verified by:**
+  `Makefile::test --locked -p relhash --no-default-features`

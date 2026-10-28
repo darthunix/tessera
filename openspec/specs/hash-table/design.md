@@ -375,8 +375,7 @@ Before a node fills a level, it plans it: how many partitions the level
 gets, and how long their chunks are. One rule does it for every node,
 `tess_spill_partitions` and `tess_spill_chunk_len`, and each node gives
 it its own parameters. The exact rule is in [The partitions of a
-level](spec.md#requirement-the-partitions-of-a-level) and [The chunks
-of a level](spec.md#requirement-the-chunks-of-a-level).
+level](spec.md#requirement-the-partitions-of-a-level).
 
 The number of partitions starts at the node's least, 4, and doubles
 while four things hold:
@@ -940,8 +939,8 @@ it stays so.
 A partition read back that is still too large splits into a level
 below, as "A partition too large for memory" says. Whether it does is
 one rule, `tess_table_spill_splits`, with two weights a node gives,
-`room` and `key`; its exact form is in [A partition read back that
-splits](spec.md#requirement-a-partition-read-back-that-splits). For
+`room` and `key`; its exact form is in [Sending partitions to
+disk](spec.md#requirement-sending-partitions-to-disk). For
 example, a join with a limit of 900 kB, 300 kB in use and a `room` of
 two thirds splits a partition of 500 kB, since 500 passes two thirds of
 the 600 left. It does so only if its level leaves two bits of the hash

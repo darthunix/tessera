@@ -11,11 +11,12 @@ own capability.
 The table itself, its index, chunks and records, its partitions, its
 Bloom filter and its marks, and what each of its calls promises, is in
 the spec of [relhash](../relhash/spec.md). The requirements here start
-with the C calls over it, the SQL types of a key and the status of an
-error. Then the merge of groups read back. Last, a build by several
-processes: its counters, its phases, its rounds over partitions on
-disk, a participant that stops while it probes, and the words of its
-spill. [design.md](design.md) explains the whole and the reasons.
+with the C calls over it, the used mark of a chunk and a lookup in
+place, then the SQL types of a key and the status of an error. Then the
+merge of groups read back. Last, a build by several processes: its
+counters, its phases, its rounds over partitions on disk, the words of
+its spill, the partitions it sends to disk, and the partitions of a
+level. [design.md](design.md) explains the whole and the reasons.
 
 ## Requirements
 
@@ -40,8 +41,8 @@ named here says, and SHALL return the crate's error as a status, as
 - `tess_table_probe`, `tess_table_next_match`, `tess_table_gather`,
   `tess_table_gather_scattered`, `tess_table_gather_words`,
   `tess_table_gather_key` and `tess_table_payloads`: "Looking rows up";
-- `tess_table_link_grouped` and `tess_table_next_in_group`: "The
-  records of a key together";
+- `tess_table_link_grouped` and `tess_table_next_in_group`: "Linking
+  records";
 - `tess_table_find_or_insert`, `tess_table_regrow`, `tess_table_scan`
   and `tess_table_clear_key`: "Calls of one writer";
 - `tess_table_partition`, which gives the partition of a hash:
@@ -49,16 +50,16 @@ named here says, and SHALL return the crate's error as a status, as
 - `tess_table_append_partitioned_columns`, which takes the index or
   none and appends as a chunk writer does: "Appending rows by
   partition";
-- `tess_table_split`: "Splitting a chunk by partition";
+- `tess_table_split`: "Partitions of a table";
 - `tess_table_find_or_insert_partitioned`: "Groups by partition";
 - `tess_table_bloom`, `tess_bloom_add` and `tess_bloom_probe`: "A Bloom
   filter of the keys";
-- `tess_table_bloom_words` and `tess_table_bloom_words_within`: "The
-  size of a Bloom filter";
+- `tess_table_bloom_words` and `tess_table_bloom_words_within`: "A
+  Bloom filter of the keys";
 - `tess_bloom_shared_words`, `tess_bloom_shared_init`,
   `tess_table_try_build_bloom`, `tess_bloom_shared_ready` and
   `tess_bloom_shared_probe`: "A shared Bloom filter";
-- `tess_bloom_add_atomic`: "A filter filled together";
+- `tess_bloom_add_atomic`: "A shared Bloom filter";
 - `tess_table_mark_words`, `tess_table_mark` and
   `tess_table_next_unmarked`, which take the index or none, and whose
   cursor starts at 0: "The marks of RIGHT and FULL joins".
@@ -121,6 +122,83 @@ Beside them the C API SHALL do what the crate leaves to its caller:
 - **THEN** the first three come back as they are and the others as
   16 GiB, which fills half of the 32768 chunks of 1 MiB
 - **Verified by:** `test/sql/table.sql::tessera_test_table_memory_limit`
+
+#### Scenario: Sizes and partitions through C
+- **WHEN** the size of a record is asked through the C API for 1 to 16
+  keys and payloads of 0 to 1024 bytes, and for 0 and 17 keys; and a
+  chunk of records is split into partitions through the C API
+- **THEN** each size is the one `tess_table_record_bytes` gives, 0 and
+  17 keys are refused, and every record goes to the chunk of the
+  partition `tess_table_partition` gives for its hash
+- **Verified by:**
+  `test/sql/table.sql::tessera_test_table_record_size`;
+  `test/sql/table.sql::tessera_test_table_partitions`
+
+### Requirement: The used mark of a chunk
+`tess_table_chunk_used` SHALL give the used mark of a chunk the caller
+holds, from its base, its length and the size of the table's records.
+It SHALL check the mark first: the block can be a chunk, the record
+size is one a table's records have, a multiple of 8 of 24 bytes, a
+record's header and one key, to 8 bytes less than the longest chunk,
+and the mark is at least 8, at most the chunk's length, and 8 more
+than a whole number of records. A mark that fails is refused, and
+`used` is left as it was. The call reads the first 8 bytes of the
+chunk and nothing else.
+
+#### Scenario: The mark of a chunk
+- **WHEN** an empty chunk of 64 bytes is asked for its mark, and then
+  a chunk of 128 bytes for records of 32 bytes that holds three of them
+- **THEN** the first mark is 8 and the second 104
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::the_mark_of_a_chunk`
+
+#### Scenario: A mark that ends no record
+- **WHEN** a chunk of 64 bytes for records of 32 bytes holds a mark of
+  0, 20 or 72; or an empty chunk is given a record size of 0, 12, 16
+  or the longest chunk's length; or a block that is not aligned to 8
+- **THEN** the call fails, and `used` keeps its value; record sizes of
+  24 and of 8 bytes less than the longest chunk give the empty chunk's
+  mark
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::a_mark_that_ends_no_record`
+
+### Requirement: A lookup in place
+`tess_table_probe`, `tess_table_next_match`, `tess_table_next_in_group`,
+`tess_bloom_probe` and `tess_bloom_shared_probe` SHALL take as their
+mask of results the mask of rows itself, or another mask of the same
+words, and SHALL then narrow it in place: it keeps the rows the call
+keeps, with the references a call with two masks gives. A mask of the
+same words with another row count SHALL be refused. A call refused
+SHALL leave the words as they were. Two masks of other words SHALL
+share no word. `tess_table_next_match` and `tess_table_next_in_group`
+SHALL take the count of steps the lookup has taken, which the caller
+sets to 0 with its probe and gives back at each step, and SHALL fail
+at a step past the table's count of records.
+
+#### Scenario: The lookups in place
+- **WHEN** a batch of 64 rows, of which 16 have keys of the table, is
+  probed, stepped through its keys' records by group and by chain, and
+  checked against a filter and a shared filter, each call given one
+  mask as its rows and results, or two masks of the same words
+- **THEN** each call keeps the rows, and gives the references, that a
+  call with two masks keeps and gives
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::the_lookups_narrow_a_mask_in_place`
+
+#### Scenario: A cycle of matches through C
+- **WHEN** a record's next names itself, and a caller steps to its next
+  match again and again, giving back the count of steps
+- **THEN** a step past the count of records fails with
+  `TESS_ERROR_INVALID_ARGUMENT`
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::the_lookups_narrow_a_mask_in_place`
+
+#### Scenario: A lookup in place refused
+- **WHEN** a probe in place is given two keys for a table of one, or a
+  mask of 63 rows over the words of its mask of 64
+- **THEN** the call fails, and the words are as they were
+- **Verified by:**
+  `crates/tessera-capi/tests/table.rs::the_lookups_narrow_a_mask_in_place`
 
 ### Requirement: The SQL types of a key
 A join and a grouping SHALL put each column of a key into the table in
@@ -336,6 +414,17 @@ share, at SIZE it waits, at LINK it links its own chunks, none, at PROBE
 it probes, and at FREE it leaves at once. A participant in no known
 state, or a phase past FREE after an attach, SHALL be refused.
 
+Over a shared table, the last participant to leave walks the records
+without a mark, as "The marks of RIGHT and FULL joins" of the spec of
+`relhash` says. A participant that leaves while it probes, its share of
+the outer side not done, SHALL first mark a word that the participants
+of the table, or of the round over a partition, share, with
+`tess_build_stop`, which SHALL mark it only while the participant
+probes. The last participant to leave SHALL read the word with
+`tess_build_stopped` and, when it is marked, return no record without a
+mark: the pairs of the rows left unprobed were never marked, and a
+participant stops so only when its plan wants no more rows.
+
 #### Scenario: A participant alone
 - **WHEN** one participant attaches at BUILD and is elected at SIZE and
   last at its leave
@@ -361,6 +450,23 @@ state, or a phase past FREE after an attach, SHALL be refused.
   `crates/tessera-kernels/src/phases.rs::an_attach_past_the_last_phase_is_an_error`;
   `crates/tessera-capi/tests/table.rs::a_step_refuses_a_phase_or_a_state_it_does_not_know`
 
+#### Scenario: A participant that stops while it probes
+- **WHEN** one of two or three participants of a shared table stops
+  while it probes, in every order of their steps; when the model marks
+  the word only after that participant left; when a participant asks to
+  stop before it probes or after it left; and when a worker under the
+  core's `Gather` stops at the `LIMIT` of a RIGHT join
+- **THEN** the last participant to leave sees the mark, and with the
+  late mark the model reports a last one that missed it; out of the
+  probe nothing is marked; the join returns no row without a pair where
+  every inner row has one
+- **Verified by:**
+  `crates/tessera-kernels/src/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
+  `crates/tessera-kernels/src/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
+  `crates/tessera-kernels/src/phases.rs::a_participant_stops_only_while_it_probes`;
+  `crates/tessera-capi/tests/table.rs::a_participant_marks_its_stop_only_while_it_probes`;
+  `test/sql/join.sql::worker that has its share stops while it probes`
+
 ### Requirement: The rounds over a partition on disk
 After a shared build that spilled, each partition on disk SHALL be a
 round of its own, with a barrier of its own and these phases, stepped
@@ -379,6 +485,17 @@ LOAD, probe at PROBE, and leave at once at FREE. Each file of a
 partition SHALL be taken by one participant. A round's state or phase
 outside these SHALL be refused.
 
+`tess_table_spill_records` SHALL add to a partition's records and read
+them. `tess_table_spill_start` SHALL give each participant the
+partition to start its rounds at, spread over the partitions.
+`tess_table_spill_take_file` SHALL give each number of a partition's
+inner or outer files to one call, and `tess_table_spill_take_alone`
+SHALL take a partition whole for one participant only.
+`tess_table_spill_flags` SHALL read whether a partition is on disk and
+whether one took it whole. A partition past the partitions in force
+SHALL be refused, and so SHALL records past 2^64 - 1 and a file number
+past 2^32 - 1.
+
 #### Scenario: Rounds of several participants
 - **WHEN** two or three participants join a round at any phase, load
   its files and probe it
@@ -395,34 +512,16 @@ outside these SHALL be refused.
 - **Verified by:**
   `crates/tessera-kernels/src/phases.rs::a_round_elects_allocates_loads_probes_and_frees`
 
-### Requirement: A participant that stops while it probes
-Over a shared table, the last participant to leave walks the records
-without a mark, as "The marks of RIGHT and FULL joins" of the spec of
-`relhash` says. A participant that leaves while it probes, its share of
-the outer side not done, SHALL first mark a word that the participants
-of the table, or of the round over a partition, share, with
-`tess_build_stop`, which SHALL mark it only while the participant
-probes. The last participant to leave SHALL read the word with
-`tess_build_stopped` and, when it is marked, return no record without a
-mark: the pairs of the rows left unprobed were never marked, and a
-participant stops so only when its plan wants no more rows.
-
-#### Scenario: A participant that stops while it probes
-- **WHEN** one of two or three participants of a shared table stops
-  while it probes, in every order of their steps; when the model marks
-  the word only after that participant left; when a participant asks to
-  stop before it probes or after it left; and when a worker under the
-  core's `Gather` stops at the `LIMIT` of a RIGHT join
-- **THEN** the last participant to leave sees the mark, and with the
-  late mark the model reports a last one that missed it; out of the
-  probe nothing is marked; the join returns no row without a pair where
-  every inner row has one
+#### Scenario: Taken once
+- **WHEN** two participants take the files of a partition, and take it
+  whole, at once, and participants ask where to start their rounds
+- **THEN** each file goes to one of them, the partition to one, and the
+  starts go round the partitions; a partition past those in force, or a
+  file number past 2^32 - 1, is refused
 - **Verified by:**
-  `crates/tessera-kernels/src/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
-  `crates/tessera-kernels/src/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
-  `crates/tessera-kernels/src/phases.rs::a_participant_stops_only_while_it_probes`;
-  `crates/tessera-capi/tests/table.rs::a_participant_marks_its_stop_only_while_it_probes`;
-  `test/sql/join.sql::worker that has its share stops while it probes`
+  `crates/tessera-kernels/src/loom.rs::files_and_a_whole_partition_go_to_one_participant_each`;
+  `crates/tessera-kernels/src/shared_spill.rs::files_and_partitions_are_taken_once`;
+  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`
 
 ### Requirement: The words of a spill
 A table that spills SHALL keep its decisions in words: a process's own
@@ -450,6 +549,15 @@ by atomic operations.
  files of the partitions kept in memory
 ```
 
+`tess_table_spill_split` SHALL split the table into a power of two of
+partitions, up to the words' capacity, unless a participant split it
+before: the first split holds, and every call SHALL return the
+partitions in force. `tess_table_spill_add_bytes` SHALL add the bytes
+of a partition's chunks, or of none for a negative partition before the
+split, to that partition and to the total, and answer whether the
+total passes the budget; a total equal to it does not. A count of
+bytes SHALL never go below zero, nor past 2^64 - 1: such a call fails.
+
 #### Scenario: The count of words
 - **WHEN** the words are sized for 1, 4 and 65536 partitions, and for 0
   and 65537, and words of another count or misaligned are given
@@ -467,16 +575,6 @@ by atomic operations.
 - **Verified by:**
   `crates/tessera-kernels/src/shared_spill.rs::local_words_choose_as_shared_ones_do`;
   `crates/tessera-capi/tests/spill.rs::the_spill_entry_points_choose_by_the_weights`
-
-### Requirement: Splitting a table once
-`tess_table_spill_split` SHALL split the table into a power of two of
-partitions, up to the words' capacity, unless a participant split it
-before: the first split holds, and every call SHALL return the
-partitions in force. `tess_table_spill_add_bytes` SHALL add the bytes
-of a partition's chunks, or of none for a negative partition before the
-split, to that partition and to the total, and answer whether the
-total passes the budget; a total equal to it does not. A count of
-bytes SHALL never go below zero, nor past 2^64 - 1: such a call fails.
 
 #### Scenario: The first split holds
 - **WHEN** two participants past the budget split the table at once,
@@ -516,6 +614,14 @@ chosen again when it holds the most, and its holder SHALL then free
 what it holds of it. Weights that are negative or not finite SHALL be
 refused.
 
+`tess_table_spill_splits` SHALL answer whether a partition read back
+splits into a level below by the next bits of the hash: when its size
+passes `room` of what the limit leaves beside the bytes in use, two
+bits are left past those its level's partitions take, and, with a
+`key` share above 0, it holds fewer than that share of its level's
+rows; more is one key, which no split parts. `room` and `key` that are
+negative or not finite, and bits past 32, SHALL be refused.
+
 #### Scenario: The weights
 - **WHEN** a grouping's weights and a join's choose partitions while
   their memory goes down, with a reserve, a share of records, and a
@@ -546,38 +652,6 @@ refused.
   `test/sql/join.sql::A partition on disk chosen again`;
   `test/sql/join.sql::A shared table's partition on disk chosen again`
 
-### Requirement: Records, starts and files of the rounds
-`tess_table_spill_records` SHALL add to a partition's records and read
-them. `tess_table_spill_start` SHALL give each participant the
-partition to start its rounds at, spread over the partitions.
-`tess_table_spill_take_file` SHALL give each number of a partition's
-inner or outer files to one call, and `tess_table_spill_take_alone`
-SHALL take a partition whole for one participant only.
-`tess_table_spill_flags` SHALL read whether a partition is on disk and
-whether one took it whole. A partition past the partitions in force
-SHALL be refused, and so SHALL records past 2^64 - 1 and a file number
-past 2^32 - 1.
-
-#### Scenario: Taken once
-- **WHEN** two participants take the files of a partition, and take it
-  whole, at once, and participants ask where to start their rounds
-- **THEN** each file goes to one of them, the partition to one, and the
-  starts go round the partitions; a partition past those in force, or a
-  file number past 2^32 - 1, is refused
-- **Verified by:**
-  `crates/tessera-kernels/src/loom.rs::files_and_a_whole_partition_go_to_one_participant_each`;
-  `crates/tessera-kernels/src/shared_spill.rs::files_and_partitions_are_taken_once`;
-  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`
-
-### Requirement: A partition read back that splits
-`tess_table_spill_splits` SHALL answer whether a partition read back
-splits into a level below by the next bits of the hash: when its size
-passes `room` of what the limit leaves beside the bytes in use, two
-bits are left past those its level's partitions take, and, with a
-`key` share above 0, it holds fewer than that share of its level's
-rows; more is one key, which no split parts. `room` and `key` that are
-negative or not finite, and bits past 32, SHALL be refused.
-
 #### Scenario: Room, bits and keys
 - **WHEN** partitions of sizes on both sides of the room, with two
   bits left and one, and with a share of rows on both sides of `key`,
@@ -607,6 +681,13 @@ no larger. Expected bytes below zero or not a number SHALL be refused,
 and so SHALL a `shift` past which `min_partitions` do not fit in the 32
 bits of the hash.
 
+`tess_spill_chunk_len` SHALL give the length of a level's chunks:
+`limit` divided by `share` times the partitions, no more than
+`max_chunk`, then no less than `min_chunk`, which wins over
+`max_chunk`, rounded down to a multiple of 8. A `share` or a number of
+partitions of 0, and a `min_chunk` below 8 or not a multiple of 8,
+SHALL be refused.
+
 #### Scenario: By the bytes, the participants and the reserve
 - **WHEN** a level of 4 to 1024 partitions with a reserve of 48 KiB
   expects 10 MiB in a limit of 4 MiB, then wants 16 partitions at
@@ -631,14 +712,6 @@ bits of the hash.
 - **Verified by:**
   `crates/tessera-spill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
   `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
-
-### Requirement: The chunks of a level
-`tess_spill_chunk_len` SHALL give the length of a level's chunks:
-`limit` divided by `share` times the partitions, no more than
-`max_chunk`, then no less than `min_chunk`, which wins over
-`max_chunk`, rounded down to a multiple of 8. A `share` or a number of
-partitions of 0, and a `min_chunk` below 8 or not a multiple of 8,
-SHALL be refused.
 
 #### Scenario: A share of the limit
 - **WHEN** at a share of 16, with chunks of 8 KiB to 1 MiB, 4 MiB is
