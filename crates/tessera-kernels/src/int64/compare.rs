@@ -12,8 +12,9 @@ use super::CompareOp;
 /// word with several selected rows decides the strategy, as for
 /// [`super::filter`]: when it is full or selects at least a dozen rows and
 /// both readers expose its storage, every multi-row word both expose is
-/// compared whole (vector code on AArch64); every other word is read at its
-/// selected rows, the two columns in lockstep. Nothing is allocated.
+/// compared whole (NEON on AArch64, AVX2 on x86-64 where the processor has
+/// it); every other word is read at its selected rows, the two columns in
+/// lockstep. Nothing is allocated.
 ///
 /// # Errors
 ///
