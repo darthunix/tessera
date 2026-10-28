@@ -47,10 +47,20 @@ exclude_globs = [
 # was. Two of these read as mutants the tests catch, so their place
 # names them.
 # The first word of a batch decides whether cast, count, the int
-# aggregates, arithmetic and comparison read whole words of a column's
-# storage or its rows one by one: both give the same results, and only the
-# time tells them apart. The mutants of that choice are named by their
-# place, since the same operators elsewhere in these functions matter.
+# aggregates, arithmetic, comparison, the hashes, the filter and the sets
+# read whole words of a column's storage or its rows one by one: both give
+# the same results, and only the time tells them apart. So do a word the
+# whole-word loop refuses (blocks, bulk_passing and the hash's block giving
+# None), a single row it sends to the rows (the comparison's guard), and
+# the int8 arithmetic's arms of + and - gone, whose lanes then go one by
+# one through the width's own function. The mutants of that choice are
+# named by their place, since the same operators elsewhere in these
+# functions matter.
+# Off AArch64 the whole-word path ends in stubs on the empty token of NEON
+# (cast's and the int4 sum's bulk, count's block_count, the hash's block),
+# and the token converts into AVX2's: those are not built on the arm64
+# runners, so their mutants change nothing there, and on x86-64 no call
+# reaches them.
 # Place::reference puts a record's chunk above the bits of its unit, which
 # is below 2^17 and has none there, and Cursor::at a chunk above a byte of
 # 32 bits: | and ^ give one value. resolve_rows adds the rows a call
@@ -110,7 +120,23 @@ exclude_re = [
     "count\\.rs:39:[0-9]+: replace >= with < in count$",
     "int/aggregate\\.rs:7[45]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
     "int/arith\\.rs:20[56]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
+    "int/arith\\.rs:(20[89]|210):[0-9]+: (replace|delete) .* in run$",
+    "replace Operands<'_, T, L, R>::blocks -> Option<.*> with None$",
     "int/compare\\.rs:55:37: replace && with \\|\\| in run$",
+    "int/compare\\.rs:(5[89]|60):[0-9]+: (replace|delete) .* in run$",
+    "int/compare\\.rs:122:42: (delete ! in bulk|replace match guard .* in bulk)$",
+    "int/compare\\.rs:144:5: replace blocks -> Option<.*> with None$",
+    "int/hash\\.rs:(11[89]|120):[0-9]+: (replace|delete) .* in run$",
+    "int/hash\\.rs:198:5: replace block -> Option<.*> with None$",
+    "int/filter\\.rs:59:17: replace && with \\|\\| in filter_with$",
+    "replace bulk_passing -> Option<u64> with None$",
+    "set\\.rs:170:[0-9]+: replace (&& with \\|\\||<= with >) in in_set$",
+    "int64/lane\\.rs:(209|213):17: delete match arm \\(ArithOp::(Add|Sub), _\\) in <impl IntLane for i64>::arith_block$",
+    "cast\\.rs:258:9: replace bulk::widen -> u64 with [01]$",
+    "count\\.rs:94:5: replace block_count -> usize with [01]$",
+    "int32/aggregate\\.rs:132:9: replace bulk::sum -> \\(usize, i64\\) with ",
+    "int/hash\\.rs:216:5: replace block -> Option<.*> with ",
+    "replace <impl From<Neon> for Avx2>::from -> Self with ",
     "replace \\| with \\^ in (Place::reference|Cursor::at)$",
     "table/writer\\.rs:(234|282):[0-9]+: replace \\| with \\^ in resolve_rows$",
     "decimal\\.rs:1503:41: replace \\| with \\^ in read_with$",

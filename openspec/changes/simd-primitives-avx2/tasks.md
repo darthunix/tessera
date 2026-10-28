@@ -102,7 +102,7 @@ The words used below:
       .cargo/mutants-avx2.toml` misses no mutant, with cargo-mutants
       installed as `mutants.yml` installs it; the job green on the pull
       request
-- [ ] 3.6 Open the first pull request, into `main`, with the pilot's
+- [x] 3.6 Open the first pull request, into `main`, with the pilot's
       result. The maintainer's merge decides between the primitives
       and the fallback of the design. Check: every item of its
       description points to a test, a command or the id of a run
