@@ -393,6 +393,14 @@ What the moves found:
   quotient, come from `vpmuldq` on the even lanes and on the odd ones
   moved down by `vpshufd`: moved down by a 64-bit shift, the odd lanes
   of a product with a value in every lane became three `vpmuludq`.
+- The aggregates of int4 and `count` took the same form. One function
+  of NEON changed, the sum of a Datum block (`disasm-0cqSpm`): the same
+  instructions, but the `and` and the `sadalp` of a group come next to
+  its loads instead of after the loads of the next group. Neither the
+  loader of a Datum group `#[inline(always)]` nor a direct call of the
+  helper of `neon.rs` put them back. The counters of the M5 Pro show no
+  loss: every case of that sum is within 0.4 % of its cycles in two
+  runs (`compare-btLQ9j`, `compare-VoUFV1`), so the order is kept.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
