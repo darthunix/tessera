@@ -3,12 +3,13 @@
 //! A divisor of magnitude at least two is turned once into a multiplier and
 //! a shift (Granlund and Montgomery's method in libdivide's branch-free
 //! form) so that every quotient is one high multiplication, two additions
-//! and two shifts, which vector code performs on four lanes at once where
-//! NEON has no integer division. The formula neither traps nor overflows:
-//! `i32::MIN` divided by a divisor of magnitude at least two fits, and the
-//! remainder `n - q * d` is exact modulo 2^32. Zero and ±1 are not prepared:
-//! zero is an error and `i32::MIN / -1` overflows, so both stay on the
-//! per-lane path with its checks.
+//! and two shifts, which vector code performs on a vector of lanes at once
+//! where neither NEON nor AVX2 has an integer division. The formula
+//! neither traps nor overflows: `i32::MIN` divided by a divisor of
+//! magnitude at least two fits, and the remainder `n - q * d` is exact
+//! modulo 2^32. Zero and ±1 are not prepared: zero is an error and
+//! `i32::MIN / -1` overflows, so both stay on the per-lane path with its
+//! checks.
 
 /// A divisor of magnitude at least two, prepared for division by
 /// multiplication.

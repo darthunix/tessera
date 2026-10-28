@@ -376,6 +376,14 @@ What the moves found:
   - The lane masks of a masked word come eight rows at a time, two
     groups on NEON and one on AVX2: one group at a time, the loop no
     longer unrolled.
+- On AVX2 the int4 arithmetic has no call in the code of a word and
+  keeps its lanes in registers (`disasm-xtH7X2`). A sum overflows where
+  comparing it with an operand disagrees with the other operand's sign,
+  since AVX2 has no saturating addition of 32-bit lanes. The high halves
+  of the products, for the overflow of a multiplication and for the
+  quotient, come from `vpmuldq` on the even lanes and on the odd ones
+  moved down by `vpshufd`: moved down by a 64-bit shift, the odd lanes
+  of a product with a value in every lane became three `vpmuludq`.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.

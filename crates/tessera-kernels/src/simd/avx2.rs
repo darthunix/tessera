@@ -19,9 +19,9 @@ use core::arch::x86_64::{
     _mm256_cmpeq_epi64, _mm256_cmpgt_epi32, _mm256_cmpgt_epi64, _mm256_loadu_si256,
     _mm256_movemask_epi8, _mm256_movemask_pd, _mm256_movemask_ps, _mm256_mul_epi32,
     _mm256_mullo_epi32, _mm256_or_si256, _mm256_permute4x64_epi64, _mm256_set1_epi32,
-    _mm256_set1_epi64x, _mm256_setr_epi32, _mm256_setzero_si256, _mm256_shuffle_ps,
-    _mm256_srai_epi32, _mm256_srav_epi32, _mm256_srli_epi64, _mm256_storeu_si256, _mm256_sub_epi32,
-    _mm256_testz_si256, _mm256_xor_si256,
+    _mm256_set1_epi64x, _mm256_setr_epi32, _mm256_setzero_si256, _mm256_shuffle_epi32,
+    _mm256_shuffle_ps, _mm256_srai_epi32, _mm256_srav_epi32, _mm256_srli_epi64,
+    _mm256_storeu_si256, _mm256_sub_epi32, _mm256_testz_si256, _mm256_xor_si256,
 };
 
 use super::{Avx2, Vectors};
@@ -313,13 +313,19 @@ fn mul_overflows(a: __m256i, b: __m256i, product: __m256i) -> __m256i {
 
 /// The high halves of the 64-bit products of the lanes of `a` and `b`:
 /// `vpmuldq` multiplies the even lanes, and again with the odd lanes
-/// shifted down; the high halves of the even products are shifted down
-/// into their lanes, and those of the odd ones are in theirs.
+/// moved down by `vpshufd`; the high halves of the even products are
+/// shifted down into their lanes, and those of the odd ones are in
+/// theirs. Moved down by a 64-bit shift instead, the odd lanes of a
+/// product with a value in every lane became three `vpmuludq`.
 #[inline]
 #[target_feature(enable = "avx2")]
 fn mul_high(a: __m256i, b: __m256i) -> __m256i {
+    const ODD: i32 = 0b11_11_01_01;
     let even = _mm256_mul_epi32(a, b);
-    let odd = _mm256_mul_epi32(_mm256_srli_epi64::<32>(a), _mm256_srli_epi64::<32>(b));
+    let odd = _mm256_mul_epi32(
+        _mm256_shuffle_epi32::<ODD>(a),
+        _mm256_shuffle_epi32::<ODD>(b),
+    );
     _mm256_blend_epi32::<0b1010_1010>(_mm256_srli_epi64::<32>(even), odd)
 }
 
