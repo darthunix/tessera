@@ -17,7 +17,6 @@ mod compare;
 mod filter;
 mod hash;
 
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub(crate) use aggregate::present;
 pub(crate) use aggregate::{aggregate, max, min};
 pub(crate) use arith::{Evaluate, arith_columns, arith_scalar, arith_scalar_left};

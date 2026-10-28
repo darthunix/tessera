@@ -185,6 +185,40 @@ pub(crate) trait Vectors: Token + 'static {
     /// products are where the sets differ most.
     fn quotient(self, multiplier: &Self::Multiplier, n: Self::I32) -> Self::I32;
 
+    /// The lane masks of the four groups from group `4 * quad`, from the
+    /// bits of a word in the order of its rows: all ones in the lanes
+    /// whose bit is set. The kernels that keep four accumulators take
+    /// their groups four at a time.
+    fn lane_masks4(self, bits: u64, quad: usize) -> [Self::M32; 4];
+
+    /// The lanes of `lanes` where `mask` holds, zero elsewhere.
+    fn keep(self, lanes: Self::I32, mask: Self::M32) -> Self::I32;
+
+    /// The lanes of `a` where `mask` holds, those of `b` elsewhere.
+    fn select(self, mask: Self::M32, a: Self::I32, b: Self::I32) -> Self::I32;
+
+    /// The lesser of `a` and `b` in every lane.
+    fn min(self, a: Self::I32, b: Self::I32) -> Self::I32;
+
+    /// The greater of `a` and `b` in every lane.
+    fn max(self, a: Self::I32, b: Self::I32) -> Self::I32;
+
+    /// The least of the lanes of `lanes`.
+    fn min_across(self, lanes: Self::I32) -> i32;
+
+    /// The greatest of the lanes of `lanes`.
+    fn max_across(self, lanes: Self::I32) -> i32;
+
+    /// `acc` with the int4 lanes of `lanes`, widened, added into its int8
+    /// lanes, in pairs on NEON: a sum over every lane of a word takes the
+    /// sum across the lanes of the accumulators.
+    fn widen_add(self, acc: Self::I64, lanes: Self::I32) -> Self::I64;
+
+    /// The selected rows of a Datum block whose flag is false, counted:
+    /// `(non_null_bits(isnull) & selected).count_ones()`, each set by its
+    /// cheapest way.
+    fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize;
+
     /// The int8 lanes of one vector.
     type I64: Copy;
     /// The lane masks of a comparison of int8 lanes.
@@ -295,6 +329,9 @@ pub(crate) trait Vectors: Token + 'static {
     /// The int8 lanes where `a - b` fits, given `difference`, its wrapped
     /// lanes.
     fn sub_fits64(self, a: Self::I64, b: Self::I64, difference: Self::I64) -> Self::M64;
+
+    /// The sum of the int8 lanes of `lanes`, modulo 2^64.
+    fn sum_across64(self, lanes: Self::I64) -> i64;
 }
 
 /// The primitives of a set this target does not run: its token is an
@@ -398,6 +435,42 @@ macro_rules! unreachable_vectors {
                 match self {}
             }
 
+            fn lane_masks4(self, _: u64, _: usize) -> [Self; 4] {
+                match self {}
+            }
+
+            fn keep(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn select(self, _: Self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn min(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn max(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn min_across(self, _: Self) -> i32 {
+                match self {}
+            }
+
+            fn max_across(self, _: Self) -> i32 {
+                match self {}
+            }
+
+            fn widen_add(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn count_non_null(self, _: &[bool; 64], _: u64) -> usize {
+                match self {}
+            }
+
             type I64 = Self;
             type M64 = Self;
             const LANES64: usize = 1;
@@ -483,6 +556,10 @@ macro_rules! unreachable_vectors {
             fn sub_fits64(self, _: Self, _: Self, _: Self) -> Self {
                 match self {}
             }
+
+            fn sum_across64(self, _: Self) -> i64 {
+                match self {}
+            }
         }
     };
 }
@@ -492,7 +569,6 @@ unreachable_vectors!(Neon);
 #[cfg(not(all(target_arch = "x86_64", not(miri))))]
 unreachable_vectors!(Avx2);
 
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate64;
@@ -518,7 +594,6 @@ use core::arch::aarch64::{
     vreinterpretq_s32_u64, vreinterpretq_u32_s32, vreinterpretq_u64_s64, vtst_u8, vuzp1q_s32,
 };
 
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use aggregate::{
     count_datum, max_datum, max_dense, min_datum, min_dense, sum_datum, sum_dense,
 };
