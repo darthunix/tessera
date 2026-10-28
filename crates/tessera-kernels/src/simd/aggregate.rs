@@ -11,7 +11,7 @@
 // the functions compiled for a set run on theirs cannot be reached.
 #![cfg_attr(miri, allow(unreachable_code, unused_variables))]
 
-use super::{Neon, Simd, Vectors};
+use super::{Simd, Vectors};
 
 // The public entry points are inlined into the generic loops of other
 // crates, so that a block reaches them in registers; the feature-carrying
@@ -19,53 +19,52 @@ use super::{Neon, Simd, Vectors};
 
 /// Selected non-NULL rows of a Datum block.
 #[inline]
-pub fn count_datum(neon: Neon, isnull: &[bool; 64], selected: u64) -> usize {
-    // SAFETY: the token proves that this processor runs NEON, the vector
-    // set of the target where it has values, which `count_datum_lanes` is
-    // compiled for.
-    unsafe { count_datum_lanes(neon.simd(), isnull, selected) }
+pub fn count_datum(simd: Simd, isnull: &[bool; 64], selected: u64) -> usize {
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `count_datum_lanes` is compiled for.
+    unsafe { count_datum_lanes(simd, isnull, selected) }
 }
 
 /// Sum of the masked rows of a dense block.
 #[inline]
-pub fn sum_dense(neon: Neon, values: &[i32; 64], mask: u64) -> i64 {
+pub fn sum_dense(simd: Simd, values: &[i32; 64], mask: u64) -> i64 {
     // SAFETY: as in count_datum, for `sum_dense_lanes`.
-    unsafe { sum_dense_lanes(neon.simd(), values, mask) }
+    unsafe { sum_dense_lanes(simd, values, mask) }
 }
 
 /// Sum of the masked rows of a Datum block, as int4 values.
 #[inline]
-pub fn sum_datum(neon: Neon, values: &[u64; 64], mask: u64) -> i64 {
+pub fn sum_datum(simd: Simd, values: &[u64; 64], mask: u64) -> i64 {
     // SAFETY: as in count_datum, for `sum_datum_lanes`.
-    unsafe { sum_datum_lanes(neon.simd(), values, mask) }
+    unsafe { sum_datum_lanes(simd, values, mask) }
 }
 
 /// Least masked row of a dense block; `i32::MAX` for an empty mask.
 #[inline]
-pub fn min_dense(neon: Neon, values: &[i32; 64], mask: u64) -> i32 {
+pub fn min_dense(simd: Simd, values: &[i32; 64], mask: u64) -> i32 {
     // SAFETY: as in count_datum, for `min_dense_lanes`.
-    unsafe { min_dense_lanes(neon.simd(), values, mask) }
+    unsafe { min_dense_lanes(simd, values, mask) }
 }
 
 /// Greatest masked row of a dense block; `i32::MIN` for an empty mask.
 #[inline]
-pub fn max_dense(neon: Neon, values: &[i32; 64], mask: u64) -> i32 {
+pub fn max_dense(simd: Simd, values: &[i32; 64], mask: u64) -> i32 {
     // SAFETY: as in count_datum, for `max_dense_lanes`.
-    unsafe { max_dense_lanes(neon.simd(), values, mask) }
+    unsafe { max_dense_lanes(simd, values, mask) }
 }
 
 /// Least masked row of a Datum block; `i32::MAX` for an empty mask.
 #[inline]
-pub fn min_datum(neon: Neon, values: &[u64; 64], mask: u64) -> i32 {
+pub fn min_datum(simd: Simd, values: &[u64; 64], mask: u64) -> i32 {
     // SAFETY: as in count_datum, for `min_datum_lanes`.
-    unsafe { min_datum_lanes(neon.simd(), values, mask) }
+    unsafe { min_datum_lanes(simd, values, mask) }
 }
 
 /// Greatest masked row of a Datum block; `i32::MIN` for an empty mask.
 #[inline]
-pub fn max_datum(neon: Neon, values: &[u64; 64], mask: u64) -> i32 {
+pub fn max_datum(simd: Simd, values: &[u64; 64], mask: u64) -> i32 {
     // SAFETY: as in count_datum, for `max_datum_lanes`.
-    unsafe { max_datum_lanes(neon.simd(), values, mask) }
+    unsafe { max_datum_lanes(simd, values, mask) }
 }
 
 // The functions compiled for the vector set of the target, into which the

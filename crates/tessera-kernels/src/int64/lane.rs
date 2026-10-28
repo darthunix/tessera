@@ -17,6 +17,7 @@ impl IntLane for i64 {
     type Divisor = Divisor;
     type Compares = Simd;
     type Arith = Simd;
+    type Aggregates = Neon;
 
     const ZERO: i64 = 0;
     const ONE: i64 = 1;

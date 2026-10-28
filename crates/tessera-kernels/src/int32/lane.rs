@@ -16,6 +16,7 @@ impl IntLane for i32 {
     type Divisor = Divisor;
     type Compares = Simd;
     type Arith = Simd;
+    type Aggregates = Simd;
 
     const ZERO: i32 = 0;
     const ONE: i32 = 1;
@@ -52,21 +53,21 @@ impl IntLane for i32 {
     }
 
     #[inline]
-    fn min_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
-        let mask = crate::int::present(neon, &block, selected);
+    fn min_block(simd: Simd, block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
+        let mask = crate::int::present(simd, &block, selected);
         let least = match block {
-            WordBlock::Dense { values, .. } => crate::simd::min_dense(neon, values, mask),
-            WordBlock::Datum { values, .. } => crate::simd::min_datum(neon, values, mask),
+            WordBlock::Dense { values, .. } => crate::simd::min_dense(simd, values, mask),
+            WordBlock::Datum { values, .. } => crate::simd::min_datum(simd, values, mask),
         };
         (mask.count_ones() as usize, least)
     }
 
     #[inline]
-    fn max_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
-        let mask = crate::int::present(neon, &block, selected);
+    fn max_block(simd: Simd, block: WordBlock<'_, Self>, selected: u64) -> (usize, i32) {
+        let mask = crate::int::present(simd, &block, selected);
         let greatest = match block {
-            WordBlock::Dense { values, .. } => crate::simd::max_dense(neon, values, mask),
-            WordBlock::Datum { values, .. } => crate::simd::max_datum(neon, values, mask),
+            WordBlock::Dense { values, .. } => crate::simd::max_dense(simd, values, mask),
+            WordBlock::Datum { values, .. } => crate::simd::max_datum(simd, values, mask),
         };
         (mask.count_ones() as usize, greatest)
     }
