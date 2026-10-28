@@ -14,16 +14,16 @@ a Bloom filter of the keys, and the marks of a RIGHT or FULL join.
 
 This page explains what Tessera builds around the table. First how the
 nodes use it: how they size it, how the keys of each SQL type and the
-values longer than a word go in, the limit of memory, and what a call
-checks. Then how a join and a grouping use partitions when the table
-spills to disk, a Bloom filter of its keys, and the marks of a RIGHT or
-FULL join. Last, it explains how the processes of a parallel join build
-one table together, step by step, and agree on which of its partitions
-go to disk. The exact bytes,
-limits and errors are written once, in the spec, [spec.md](spec.md)
-next to this page. Where this page leans on a rule of the spec, it
-links to the requirement that states it. What a join or a grouping
-does with the table is described with those nodes.
+values longer than a word go in, the limit of memory, what a call
+checks, and how a lookup goes through C. Then how a join and a grouping
+use partitions when the table spills to disk, a Bloom filter of its
+keys, and the marks of a RIGHT or FULL join. Last, it explains how the
+processes of a parallel join build one table together, step by step, and
+agree on which of its partitions go to disk. The exact bytes, limits and
+errors are written once, in the spec, [spec.md](spec.md) next to this
+page. Where this page leans on a rule of the spec, it links to the
+requirement that states it. What a join or a grouping does with the
+table is described with those nodes.
 
 ## The problem
 
@@ -233,6 +233,44 @@ SQLSTATE are in
 The C node
 raises the error with `ereport` after the call returns, because a
 PostgreSQL error must not unwind through Rust code.
+
+The nodes check no record themselves: every reference and every used
+mark they follow goes through a call of the crate, which checks it.
+A grouping by a generic aggregate, such as `max` of a text, keeps its
+states in the payloads of its groups. It takes a pointer to each
+payload from `tess_table_payloads`, one call for the rows of a batch,
+and not by adding an offset of its own to a record the crate checked
+once. The check of each reference makes such a grouping about 25
+instructions a row longer, and about 5 percent slower; that cost was
+taken. The call that finds or inserts a row's record could hand out
+its payload as well, which the crate has just checked, but that would
+change the C API for one loop. The spills of the grouping and of the
+join read a chunk's used mark through `tess_table_chunk_used`, which
+checks the mark against the chunk's length and the size of its
+records, as `tess_table_chunk_init` makes an empty chunk.
+
+## A lookup through C
+
+The crate's lookup is one value: a mask of the rows still looking and
+the reference of each row's record, which every call narrows in place.
+C passes the mask and the references to each call instead, so the C
+calls of a lookup take two masks, the rows and the results. Given two,
+an entry point copies the rows into the results, a word for 64 rows,
+after its checks, so that a call refused leaves the results as they
+were. That copy cost a join with four records a key about 2 percent:
+its node calls a lookup four times a batch of 64 rows, and each call
+copied, checked and counted for about 13 cycles more. So an entry
+point also takes one mask as both, or two masks over the same words,
+and then narrows it in place and copies nothing. The join and the
+grouping call so wherever they kept a copy of the rows only to give it
+to the call.
+
+A walk over the matches of a key goes one call a step, and the crate's
+lookup counts the steps its rows took, so that a loop of matches across
+calls fails as a damaged chain. In C the count is an argument of
+`tess_table_next_match` and `tess_table_next_in_group`: the join keeps
+it in its state, sets it to 0 with its probe, and gives it back at
+each step.
 
 
 ## Partitions: a table that spills
