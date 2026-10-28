@@ -72,7 +72,12 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// comparisons open on a set before its other operations do, so a
     /// token of NEON converts into it: where NEON does not run it has no
     /// values.
-    type Compares: Vectors + From<Neon>;
+    type Compares: Vectors + From<Neon> + From<Self::Arith>;
+
+    /// The vector set of the width's arithmetic, [`IntLane::arith_block`].
+    /// A token of NEON converts into it, and it into the set of the
+    /// comparisons, whose [`IntLane::side`] gives its operands.
+    type Arith: Vectors + From<Neon>;
 
     /// The least and the greatest value, the identities of `max` and `min`.
     const MIN: Self;
@@ -103,7 +108,7 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     // The token and the seven parts of the call, each its own.
     #[allow(clippy::too_many_arguments)]
     fn arith_block<E: Evaluate<Self>>(
-        neon: Neon,
+        set: Self::Arith,
         op: ArithOp,
         lhs: Side<'_, Self>,
         rhs: Side<'_, Self>,

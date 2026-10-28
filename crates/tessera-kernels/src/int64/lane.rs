@@ -16,6 +16,7 @@ use crate::simd::{Neon, Simd, Vectors};
 impl IntLane for i64 {
     type Divisor = Divisor;
     type Compares = Simd;
+    type Arith = Neon;
 
     const ZERO: i64 = 0;
     const ONE: i64 = 1;
