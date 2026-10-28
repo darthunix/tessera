@@ -1,5 +1,6 @@
 //! The primitives of NEON: [`Vectors`] for [`Neon`], four int4 lanes to a
-//! vector and 16 groups to a word. Each is an intrinsic, or a helper of
+//! vector and 16 groups to a word, two int8 lanes to a vector and 32
+//! vectors to a word. Each is an intrinsic, or a helper of
 //! this module made of them, called in an `unsafe` block whose reason is
 //! the token: a value of `Neon` exists only where the processor runs NEON.
 //!
@@ -9,8 +10,10 @@
 //! moved here changed its loads and spills.
 
 use core::arch::aarch64::{
-    int32x4_t, uint32x4_t, vceqq_s32, vcgeq_s32, vcgtq_s32, vcleq_s32, vcltq_s32, vdupq_n_s32,
-    vld1q_s32, vmvnq_u32,
+    int32x4_t, int64x2_t, uint32x4_t, uint64x2_t, vceqq_s32, vceqq_s64, vcgeq_s32, vcgeq_s64,
+    vcgtq_s32, vcgtq_s64, vcleq_s32, vcleq_s64, vcltq_s32, vcltq_s64, vcombine_u32, vdupq_n_s32,
+    vdupq_n_s64, vld1q_s32, vld1q_s64, vmovn_u64, vmvnq_u32, vreinterpretq_u32_u64,
+    vreinterpretq_u64_u32,
 };
 
 use super::{Neon, Vectors, load_datums, non_null_lanes, pack_lanes};
@@ -91,5 +94,83 @@ impl Vectors for Neon {
     fn non_null_bits(self, isnull: &[bool; 64]) -> u64 {
         // SAFETY: as in `splat`.
         unsafe { non_null_lanes(isnull) }
+    }
+
+    type I64 = int64x2_t;
+    type M64 = uint64x2_t;
+    const LANES64: usize = 2;
+
+    #[inline]
+    unsafe fn load64(self, values: &[i64; 64], index: usize) -> int64x2_t {
+        debug_assert!(index < 64 / Self::LANES64);
+        // SAFETY: as in `load`: the caller keeps `index` below 32, so the
+        // two lanes read end within the array.
+        unsafe { vld1q_s64(values.as_ptr().add(index * 2)) }
+    }
+
+    #[inline]
+    unsafe fn load_datums64(self, values: &[u64; 64], index: usize) -> int64x2_t {
+        debug_assert!(index < 64 / Self::LANES64);
+        // SAFETY: as in `load64`; a Datum holding an int8 is its bits.
+        unsafe { vld1q_s64(values.as_ptr().cast::<i64>().add(index * 2)) }
+    }
+
+    #[inline]
+    fn splat64(self, value: i64) -> int64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vdupq_n_s64(value) }
+    }
+
+    #[inline]
+    fn eq64(self, a: int64x2_t, b: int64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vceqq_s64(a, b) }
+    }
+
+    #[inline]
+    fn gt64(self, a: int64x2_t, b: int64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vcgtq_s64(a, b) }
+    }
+
+    #[inline]
+    fn ge64(self, a: int64x2_t, b: int64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vcgeq_s64(a, b) }
+    }
+
+    #[inline]
+    fn lt64(self, a: int64x2_t, b: int64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vcltq_s64(a, b) }
+    }
+
+    #[inline]
+    fn le64(self, a: int64x2_t, b: int64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vcleq_s64(a, b) }
+    }
+
+    #[inline]
+    fn not64(self, mask: uint64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vreinterpretq_u64_u32(vmvnq_u32(vreinterpretq_u32_u64(mask))) }
+    }
+
+    /// Two vectors narrow into the four 32-bit lanes of a group of four
+    /// rows, which the int4 packing weighs and adds; an inversion is one of
+    /// the narrowed group rather than one of each vector.
+    #[inline]
+    fn pack64(self, invert: bool, lanes: impl Fn(usize) -> uint64x2_t) -> u64 {
+        let group = |group: usize| {
+            // SAFETY: as in `splat`.
+            unsafe {
+                let rows =
+                    vcombine_u32(vmovn_u64(lanes(group * 2)), vmovn_u64(lanes(group * 2 + 1)));
+                if invert { vmvnq_u32(rows) } else { rows }
+            }
+        };
+        // SAFETY: as in `splat`.
+        unsafe { pack_lanes(group) }
     }
 }

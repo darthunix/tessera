@@ -115,7 +115,7 @@ adds its AVX2 primitives, its hooks take `Simd`, and it corrects the
 texts that count its lanes. An operation whose AVX2 code does not gain
 keeps a hook that takes `Neon`, with the reason in its comment.
 
-- [ ] 4.1 The filter of int8, `simd/filter64.rs`, over the primitives.
+- [x] 4.1 The filter of int8, `simd/filter64.rs`, over the primitives.
       Check: the move check
 - [ ] 4.2 The filter of int8 on AVX2. Check: `TESSERA_REQUIRE_SIMD=1
       cargo test --locked -p tessera-kernels`; the x86 listing; the
