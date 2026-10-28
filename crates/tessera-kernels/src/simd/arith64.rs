@@ -15,35 +15,34 @@
 
 use std::mem::MaybeUninit;
 
-use super::{Neon, Simd, Vectors};
+use super::{Simd, Vectors};
 use crate::int64::Side;
 
 /// `lhs + rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn add64(
-    neon: Neon,
+    simd: Simd,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i64>; 64],
 ) -> bool {
-    // SAFETY: the token proves that this processor runs NEON, the vector
-    // set of the target where it has values, which `add_lanes` is compiled
-    // for.
-    unsafe { add_lanes(neon.simd(), lhs, rhs, mask, out) }
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `add_lanes` is compiled for.
+    unsafe { add_lanes(simd, lhs, rhs, mask, out) }
 }
 
 /// `lhs - rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn sub64(
-    neon: Neon,
+    simd: Simd,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i64>; 64],
 ) -> bool {
     // SAFETY: as in add64, for `sub_lanes`.
-    unsafe { sub_lanes(neon.simd(), lhs, rhs, mask, out) }
+    unsafe { sub_lanes(simd, lhs, rhs, mask, out) }
 }
 
 // The functions compiled for the vector set of the target, into which the

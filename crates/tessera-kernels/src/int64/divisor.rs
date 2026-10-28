@@ -3,12 +3,12 @@
 //! The int32 divisor's construction with every width doubled: a divisor of
 //! magnitude at least two becomes a multiplier and a shift (Granlund and
 //! Montgomery, in libdivide's branch-free form), so that every quotient is
-//! one high multiplication, two additions and two shifts. NEON has no
-//! 64-bit high multiply, so the lanes of a word are divided one by one
-//! with the scalar formula, whose high multiplication is one `smulh`
-//! instruction; that still beats a hardware division per lane. Zero and ±1
-//! are not prepared: zero is an error and `i64::MIN / -1` overflows, so
-//! both stay on the per-lane path with its checks.
+//! one high multiplication, two additions and two shifts. Neither NEON nor
+//! AVX2 has a 64-bit high multiply, so the lanes of a word are divided one
+//! by one with the scalar formula, whose high multiplication is one
+//! instruction (`smulh`, `imul`); that still beats a hardware division per
+//! lane. Zero and ±1 are not prepared: zero is an error and `i64::MIN /
+//! -1` overflows, so both stay on the per-lane path with its checks.
 
 /// A divisor of magnitude at least two, prepared for division by
 /// multiplication.

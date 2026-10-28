@@ -32,7 +32,7 @@
 //! Full prepared words of representations that expose their storage
 //! ([`tessera_core::WordBlock`]) are compared, aggregated, computed and
 //! hashed with NEON on AArch64, division by a scalar included; the filters
-//! of int4 and int8, the comparisons of two such columns and the int4
+//! of int4 and int8, the comparisons of two such columns and their
 //! arithmetic run with AVX2 on x86-64 too, where the processor has it;
 //! everything else takes the row paths. [`table`] is a hash table in a
 //! region of memory the caller owns, for joins and grouping, addressed by

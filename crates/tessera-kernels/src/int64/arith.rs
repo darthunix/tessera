@@ -22,12 +22,13 @@
 //!
 //! When the first word of the selection is full, selects at least a dozen
 //! rows and every column operand exposes its storage, the call computes
-//! whole words from the blocks: `+` and `-` with vector code on AArch64
-//! (overflow detected per lane and reported once per word); `/` and `%` by
-//! a scalar divisor of magnitude at least two through a multiplier
-//! prepared once per call (`Divisor`), unable to fail; `*` and the other
-//! divisions lane by lane over the present lanes, with their checks, since
-//! NEON has no 64-bit multiply. Single-row words, the tail and refused
+//! whole words from the blocks: `+` and `-` with vector code (NEON on
+//! AArch64, AVX2 on x86-64 where the processor has it), overflow detected
+//! per lane and reported once per word; `/` and `%` by a scalar divisor of
+//! magnitude at least two through a multiplier prepared once per call
+//! (`Divisor`), unable to fail; `*` and the other divisions lane by lane
+//! over the present lanes, with their checks, since neither set has a
+//! 64-bit multiply. Single-row words, the tail and refused
 //! words are read row by row; every other call reads every word row by row
 //! through the word iterators.
 
