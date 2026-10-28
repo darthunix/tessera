@@ -4,8 +4,8 @@
 
 use std::mem::MaybeUninit;
 
-use anyhow::Result;
-use tessera_core::WordBlock;
+use anyhow::{Result, ensure};
+use tessera_core::{WordBlock, ones};
 
 use super::{CompareOp, Divisor, Side};
 use crate::int::{Evaluate, IntLane};
@@ -184,47 +184,36 @@ impl IntLane for i32 {
         out: &mut [MaybeUninit<i32>; 64],
         evaluate: &E,
     ) -> Result<()> {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        {
-            use crate::simd;
-            use anyhow::ensure;
-            use tessera_core::ones;
-            // A word without rows to divide divides nothing: a division is
-            // too dear to spend on absent lanes, and a whole word of them is
-            // a NULL column.
-            let overflow = match (op, divisor) {
-                (ArithOp::Add, _) => simd::add(neon, lhs, rhs, present, out),
-                (ArithOp::Sub, _) => simd::sub(neon, lhs, rhs, present, out),
-                (ArithOp::Mul, _) => simd::mul(neon, lhs, rhs, present, out),
-                (ArithOp::Div, Some(divisor)) => {
-                    if present != 0 {
-                        simd::div(neon, lhs, divisor, out);
-                    }
-                    false
+        // A word without rows to divide divides nothing: a division is
+        // too dear to spend on absent lanes, and a whole word of them is
+        // a NULL column.
+        let overflow = match (op, divisor) {
+            (ArithOp::Add, _) => crate::simd::add(neon, lhs, rhs, present, out),
+            (ArithOp::Sub, _) => crate::simd::sub(neon, lhs, rhs, present, out),
+            (ArithOp::Mul, _) => crate::simd::mul(neon, lhs, rhs, present, out),
+            (ArithOp::Div, Some(divisor)) => {
+                if present != 0 {
+                    crate::simd::div(neon, lhs, divisor, out);
                 }
-                (ArithOp::Mod, Some(divisor)) => {
-                    if present != 0 {
-                        simd::rem(neon, lhs, divisor, out);
-                    }
-                    false
+                false
+            }
+            (ArithOp::Mod, Some(divisor)) => {
+                if present != 0 {
+                    crate::simd::rem(neon, lhs, divisor, out);
                 }
-                (ArithOp::Div | ArithOp::Mod, None) => {
-                    // No vector division by a column, zero or ±1: the present
-                    // lanes one by one from the blocks.
-                    let lanes = present;
-                    for lane in ones(lanes) {
-                        out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
-                    }
-                    false
+                false
+            }
+            (ArithOp::Div | ArithOp::Mod, None) => {
+                // No vector division by a column, zero or ±1: the present
+                // lanes one by one from the blocks.
+                let lanes = present;
+                for lane in ones(lanes) {
+                    out[lane].write(evaluate(lhs.lane(lane), rhs.lane(lane))?);
                 }
-            };
-            ensure!(!overflow, ArithmeticError::IntegerOutOfRange);
-            Ok(())
-        }
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (op, lhs, rhs, present, divisor, out, evaluate);
-            match neon {}
-        }
+                false
+            }
+        };
+        ensure!(!overflow, ArithmeticError::IntegerOutOfRange);
+        Ok(())
     }
 }
