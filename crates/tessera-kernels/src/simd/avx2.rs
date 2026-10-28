@@ -14,14 +14,15 @@
 //! cannot be inlined there and made a loader too dear to inline.
 
 use core::arch::x86_64::{
-    __m256i, _mm256_add_epi32, _mm256_and_si256, _mm256_blend_epi32, _mm256_castps_si256,
-    _mm256_castsi256_pd, _mm256_castsi256_ps, _mm256_cmpeq_epi8, _mm256_cmpeq_epi32,
-    _mm256_cmpeq_epi64, _mm256_cmpgt_epi32, _mm256_cmpgt_epi64, _mm256_loadu_si256,
-    _mm256_movemask_epi8, _mm256_movemask_pd, _mm256_movemask_ps, _mm256_mul_epi32,
-    _mm256_mullo_epi32, _mm256_or_si256, _mm256_permute4x64_epi64, _mm256_set1_epi32,
-    _mm256_set1_epi64x, _mm256_setr_epi32, _mm256_setzero_si256, _mm256_shuffle_epi32,
-    _mm256_shuffle_ps, _mm256_srai_epi32, _mm256_srav_epi32, _mm256_srli_epi64,
-    _mm256_storeu_si256, _mm256_sub_epi32, _mm256_testz_si256, _mm256_xor_si256,
+    __m256i, _mm256_add_epi32, _mm256_add_epi64, _mm256_and_si256, _mm256_andnot_si256,
+    _mm256_blend_epi32, _mm256_castps_si256, _mm256_castsi256_pd, _mm256_castsi256_ps,
+    _mm256_cmpeq_epi8, _mm256_cmpeq_epi32, _mm256_cmpeq_epi64, _mm256_cmpgt_epi32,
+    _mm256_cmpgt_epi64, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_movemask_pd,
+    _mm256_movemask_ps, _mm256_mul_epi32, _mm256_mullo_epi32, _mm256_or_si256,
+    _mm256_permute4x64_epi64, _mm256_set1_epi32, _mm256_set1_epi64x, _mm256_setr_epi32,
+    _mm256_setr_epi64x, _mm256_setzero_si256, _mm256_shuffle_epi32, _mm256_shuffle_ps,
+    _mm256_srai_epi32, _mm256_srav_epi32, _mm256_srli_epi64, _mm256_storeu_si256, _mm256_sub_epi32,
+    _mm256_sub_epi64, _mm256_testz_si256, _mm256_xor_si256,
 };
 
 use super::{Avx2, Vectors};
@@ -223,6 +224,89 @@ impl Vectors for Avx2 {
         // SAFETY: as in `splat`.
         unsafe { pack64_lanes(invert, lanes) }
     }
+
+    #[inline(always)]
+    unsafe fn store64(self, at: *mut i64, lanes: __m256i) {
+        // SAFETY: the token proves that this processor runs AVX2, and the
+        // caller keeps `at` valid for the four values written, which take
+        // any alignment.
+        unsafe { _mm256_storeu_si256(at.cast(), lanes) }
+    }
+
+    type Masks64 = [__m256i; 2];
+
+    #[inline(always)]
+    fn lane_masks64(self, bits: u8) -> [__m256i; 2] {
+        // SAFETY: as in `splat`.
+        unsafe { lane_masks64(bits) }
+    }
+
+    #[inline(always)]
+    fn none64(self) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_setzero_si256() }
+    }
+
+    #[inline(always)]
+    fn every64(self) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_set1_epi64x(-1) }
+    }
+
+    #[inline(always)]
+    fn and64(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_and_si256(a, b) }
+    }
+
+    #[inline(always)]
+    fn or64(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_or_si256(a, b) }
+    }
+
+    /// `vpandn` inverts its first operand.
+    #[inline(always)]
+    fn and_not64(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_andnot_si256(b, a) }
+    }
+
+    #[inline(always)]
+    fn any64(self, mask: __m256i) -> bool {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_testz_si256(mask, mask) == 0 }
+    }
+
+    #[inline(always)]
+    fn all64(self, mask: __m256i) -> bool {
+        // SAFETY: as in `splat`.
+        unsafe { all64(mask) }
+    }
+
+    #[inline(always)]
+    fn wrapping_add64(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_add_epi64(a, b) }
+    }
+
+    #[inline(always)]
+    fn wrapping_sub64(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_sub_epi64(a, b) }
+    }
+
+    #[inline(always)]
+    fn add_fits64(self, a: __m256i, b: __m256i, sum: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { add_fits64(a, b, sum) }
+    }
+
+    #[inline(always)]
+    fn sub_fits64(self, a: __m256i, b: __m256i, difference: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { sub_fits64(a, b, difference) }
+    }
 }
 
 /// The rows of a Datum block whose flag is false: the flags compared with
@@ -355,6 +439,46 @@ fn pack64_lanes(invert: bool, lanes: impl Fn(usize) -> __m256i) -> u64 {
         bits |= u64::from(mask as u8) << (index * 4);
     }
     if invert { !bits } else { bits }
+}
+
+/// The lane masks of the two int8 vectors of eight rows from their byte
+/// of bits: each lane keeps the bit of its row and compares equal to it
+/// where it is set.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn lane_masks64(bits: u8) -> [__m256i; 2] {
+    let bits = _mm256_set1_epi64x(i64::from(bits));
+    let low = _mm256_setr_epi64x(1, 1 << 1, 1 << 2, 1 << 3);
+    let high = _mm256_setr_epi64x(1 << 4, 1 << 5, 1 << 6, 1 << 7);
+    [
+        _mm256_cmpeq_epi64(_mm256_and_si256(bits, low), low),
+        _mm256_cmpeq_epi64(_mm256_and_si256(bits, high), high),
+    ]
+}
+
+/// Every int8 lane holds where the sign bits of all four are set.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn all64(mask: __m256i) -> bool {
+    _mm256_movemask_pd(_mm256_castsi256_pd(mask)) == 0b1111
+}
+
+/// A sum fits where comparing it with `a` agrees with the sign of `b`, as
+/// in `add_overflows`: AVX2 has no saturating addition of 64-bit lanes.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn add_fits64(a: __m256i, b: __m256i, sum: __m256i) -> __m256i {
+    let negative = _mm256_cmpgt_epi64(_mm256_setzero_si256(), b);
+    _mm256_cmpeq_epi64(_mm256_cmpgt_epi64(a, sum), negative)
+}
+
+/// A difference fits where comparing it with `a` agrees with the sign of
+/// `b`, as in `sub_overflows`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn sub_fits64(a: __m256i, b: __m256i, difference: __m256i) -> __m256i {
+    let negative = _mm256_cmpgt_epi64(_mm256_setzero_si256(), b);
+    _mm256_cmpeq_epi64(_mm256_cmpgt_epi64(difference, a), negative)
 }
 
 /// A prepared divisor's constants as lanes, made once per word.

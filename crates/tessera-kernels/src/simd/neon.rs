@@ -10,16 +10,19 @@
 //! moved here changed its loads and spills.
 
 use core::arch::aarch64::{
-    int32x4_t, int64x2_t, uint32x4_t, uint64x2_t, vaddq_s32, vandq_s32, vandq_u32, vceqq_s32,
-    vceqq_s64, vcgeq_s32, vcgeq_s64, vcgtq_s32, vcgtq_s64, vcleq_s32, vcleq_s64, vcltq_s32,
-    vcltq_s64, vcombine_u32, vdupq_n_s32, vdupq_n_s64, vdupq_n_u32, veorq_s32, vget_low_s32,
-    vld1q_s32, vld1q_s64, vmaxvq_u32, vmovl_high_s32, vmovl_s32, vmovn_u64, vmull_high_n_s32,
-    vmull_high_s32, vmull_n_s32, vmull_s32, vmulq_s32, vmvnq_u32, vorrq_u32, vqaddq_s32,
-    vqsubq_s32, vreinterpretq_s32_s64, vreinterpretq_u32_u64, vreinterpretq_u64_u32, vshlq_s32,
-    vshrq_n_s32, vst1q_s32, vsubq_s32, vuzp2q_s32,
+    int32x4_t, int64x2_t, uint32x4_t, uint64x2_t, vaddq_s32, vaddq_s64, vandq_s32, vandq_u32,
+    vandq_u64, vbicq_u64, vceqq_s32, vceqq_s64, vcgeq_s32, vcgeq_s64, vcgtq_s32, vcgtq_s64,
+    vcleq_s32, vcleq_s64, vcltq_s32, vcltq_s64, vcombine_u32, vdupq_n_s32, vdupq_n_s64,
+    vdupq_n_u32, vdupq_n_u64, veorq_s32, vget_low_s32, vld1q_s32, vld1q_s64, vmaxvq_u32,
+    vminvq_u32, vmovl_high_s32, vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32,
+    vmull_n_s32, vmull_s32, vmulq_s32, vmvnq_u32, vorrq_u32, vorrq_u64, vqaddq_s32, vqaddq_s64,
+    vqsubq_s32, vqsubq_s64, vreinterpretq_s32_s64, vreinterpretq_u32_u64, vreinterpretq_u64_u32,
+    vshlq_s32, vshrq_n_s32, vst1q_s32, vst1q_s64, vsubq_s32, vsubq_s64, vuzp2q_s32,
 };
 
-use super::{Neon, Vectors, byte_weights, lane_masks, load_datums, non_null_lanes, pack_lanes};
+use super::{
+    Neon, Vectors, byte_weights, lane_masks, load_datums, non_null_lanes, pack_lanes, widen,
+};
 use crate::int32::Divisor;
 
 impl Vectors for Neon {
@@ -277,6 +280,95 @@ impl Vectors for Neon {
         };
         // SAFETY: as in `splat`.
         unsafe { pack_lanes(group) }
+    }
+
+    #[inline]
+    unsafe fn store64(self, at: *mut i64, lanes: int64x2_t) {
+        // SAFETY: the token proves that this processor runs NEON, and the
+        // caller keeps `at` valid for the two values written.
+        unsafe { vst1q_s64(at, lanes) }
+    }
+
+    type Masks64 = [uint64x2_t; 4];
+
+    /// The masks of the two groups of four rows, each widened to two pairs.
+    #[inline]
+    fn lane_masks64(self, bits: u8) -> [uint64x2_t; 4] {
+        // SAFETY: as in `splat`.
+        unsafe {
+            let (first, second) = lane_masks(bits, byte_weights());
+            let (m0, m1) = widen(first);
+            let (m2, m3) = widen(second);
+            [m0, m1, m2, m3]
+        }
+    }
+
+    #[inline]
+    fn none64(self) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vdupq_n_u64(0) }
+    }
+
+    #[inline]
+    fn every64(self) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vdupq_n_u64(u64::MAX) }
+    }
+
+    #[inline]
+    fn and64(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vandq_u64(a, b) }
+    }
+
+    #[inline]
+    fn or64(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vorrq_u64(a, b) }
+    }
+
+    #[inline]
+    fn and_not64(self, a: uint64x2_t, b: uint64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vbicq_u64(a, b) }
+    }
+
+    #[inline]
+    fn any64(self, mask: uint64x2_t) -> bool {
+        // SAFETY: as in `splat`.
+        unsafe { vmaxvq_u32(vreinterpretq_u32_u64(mask)) != 0 }
+    }
+
+    #[inline]
+    fn all64(self, mask: uint64x2_t) -> bool {
+        // SAFETY: as in `splat`.
+        unsafe { vminvq_u32(vreinterpretq_u32_u64(mask)) != 0 }
+    }
+
+    #[inline]
+    fn wrapping_add64(self, a: int64x2_t, b: int64x2_t) -> int64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vaddq_s64(a, b) }
+    }
+
+    #[inline]
+    fn wrapping_sub64(self, a: int64x2_t, b: int64x2_t) -> int64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vsubq_s64(a, b) }
+    }
+
+    /// The saturating sum equals the wrapped one where it fits.
+    #[inline]
+    fn add_fits64(self, a: int64x2_t, b: int64x2_t, sum: int64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vceqq_s64(sum, vqaddq_s64(a, b)) }
+    }
+
+    /// As in `add_fits64`, with the saturating difference.
+    #[inline]
+    fn sub_fits64(self, a: int64x2_t, b: int64x2_t, difference: int64x2_t) -> uint64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vceqq_s64(difference, vqsubq_s64(a, b)) }
     }
 }
 
