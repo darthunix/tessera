@@ -3,8 +3,8 @@
 //! The vector sets are named by tokens (`token.rs`), defined on every
 //! target. NEON runs on AArch64, and AVX2 on x86-64 where the processor
 //! has it, for the filters of int4 and int8 and the comparisons of two
-//! such columns; the other kernels are NEON's alone, compiled only on
-//! AArch64. Under
+//! such columns; the other kernels are NEON's alone, and those not yet
+//! written over the primitives are compiled only on AArch64. Under
 //! Miri no set runs, and callers fall back to the row paths. Instructions
 //! always drop with vectors, so a kernel here is kept on its cycle gain
 //! (see the benchmark guide). This is the one module of the crate allowed
@@ -22,6 +22,8 @@
 //! call into the feature-carrying code.
 #![allow(unsafe_code)]
 
+use crate::int32::Divisor;
+
 mod token;
 
 pub(crate) use token::{Avx2, Neon, Simd, Token};
@@ -36,14 +38,18 @@ mod neon;
 /// of the type is the token of its set, so a primitive may use the set's
 /// instructions.
 ///
-/// A kernel is a generic function, `#[inline(always)]`, called from one
-/// function for each set that carries the set's feature and is never
-/// inlined: code compiled without the feature gets it only by being
-/// inlined into a function that carries it, and otherwise passes its
-/// vectors through memory. A set whose feature the whole target carries,
-/// as AArch64 carries NEON, marks its primitives `#[inline]`, as the
-/// intrinsics they wrap are; one chosen at run time marks them
-/// `#[inline(always)]`.
+/// A kernel is a generic function called from one function for each set
+/// that carries the set's feature and is never inlined: code compiled
+/// without the feature gets it only by being inlined into a function that
+/// carries it, and otherwise passes its vectors through memory. A kernel
+/// is `#[inline(always)]`, or, where that changes the NEON code it
+/// replaces, `#[inline]` and carrying the feature of the target's set
+/// itself, as the arithmetic's do: compiled for the set, it keeps its
+/// vectors in registers even where it is not inlined, and the compiler
+/// inlines it from the innermost out, in the order that shaped the NEON
+/// code. A set whose feature the whole target carries, as AArch64
+/// carries NEON, marks its primitives `#[inline]`, as the intrinsics they
+/// wrap are; one chosen at run time marks them `#[inline(always)]`.
 ///
 /// A word of 64 rows is `64 / LANES` groups of int4 lanes, or `64 /
 /// LANES64` vectors of int8 lanes, in the order of its rows. A set gives
@@ -112,6 +118,71 @@ pub(crate) trait Vectors: Token + 'static {
     /// The rows of a Datum block whose flag is false, as bits in the order
     /// of its rows.
     fn non_null_bits(self, isnull: &[bool; 64]) -> u64;
+
+    /// Write `lanes` to the `LANES` values at `at`, which need no alignment.
+    ///
+    /// A kernel takes the pointer of its word once and offsets it by group,
+    /// as NEON's code did: an address made inside the store, after the
+    /// lanes, let the compiler merge the last groups of two loaders into
+    /// one block, where NEON's widening multiplication was lost.
+    ///
+    /// # Safety
+    ///
+    /// `at` must be valid for writes of `LANES` values.
+    unsafe fn store(self, at: *mut i32, lanes: Self::I32);
+
+    /// The lane masks of the groups of eight rows, `8 / LANES` of them.
+    type Masks8: IntoIterator<Item = Self::M32>;
+
+    /// The lane masks of the groups of eight rows from their byte of bits,
+    /// in the order of the rows: all ones in the lanes whose bit is set.
+    fn lane_masks(self, bits: u8) -> Self::Masks8;
+
+    /// No lane.
+    fn none(self) -> Self::M32;
+
+    /// The lanes where both masks hold.
+    fn and(self, a: Self::M32, b: Self::M32) -> Self::M32;
+
+    /// The lanes where either mask holds.
+    fn or(self, a: Self::M32, b: Self::M32) -> Self::M32;
+
+    /// Whether any lane of `mask` holds.
+    fn any(self, mask: Self::M32) -> bool;
+
+    /// `a + b` in every lane, modulo 2^32.
+    fn wrapping_add(self, a: Self::I32, b: Self::I32) -> Self::I32;
+
+    /// `a - b` in every lane, modulo 2^32.
+    fn wrapping_sub(self, a: Self::I32, b: Self::I32) -> Self::I32;
+
+    /// `a * b` in every lane, modulo 2^32.
+    fn wrapping_mul(self, a: Self::I32, b: Self::I32) -> Self::I32;
+
+    /// The lanes where `a + b` overflows, given `sum`, its wrapped lanes.
+    fn add_overflows(self, a: Self::I32, b: Self::I32, sum: Self::I32) -> Self::M32;
+
+    /// The lanes where `a - b` overflows, given `difference`, its wrapped
+    /// lanes.
+    fn sub_overflows(self, a: Self::I32, b: Self::I32, difference: Self::I32) -> Self::M32;
+
+    /// The lanes where `a * b` overflows, given `product`, its wrapped
+    /// lanes.
+    fn mul_overflows(self, a: Self::I32, b: Self::I32, product: Self::I32) -> Self::M32;
+
+    /// A scalar divisor of magnitude at least two prepared for
+    /// [`Vectors::quotient`], made once a word.
+    type Multiplier;
+
+    /// `divisor` prepared for [`Vectors::quotient`].
+    fn multiplier(self, divisor: &Divisor) -> Self::Multiplier;
+
+    /// `n / d` in every lane, truncating toward zero, by the divisor
+    /// `multiplier` was prepared from: [`Divisor::quotient`] on the lanes
+    /// of a group, one high multiplication, two additions and two shifts.
+    /// Each set has its own, since the shifts and the high halves of the
+    /// products are where the sets differ most.
+    fn quotient(self, multiplier: &Self::Multiplier, n: Self::I32) -> Self::I32;
 
     /// The int8 lanes of one vector.
     type I64: Copy;
@@ -213,6 +284,66 @@ macro_rules! unreachable_vectors {
                 match self {}
             }
 
+            unsafe fn store(self, _: *mut i32, _: Self) {
+                match self {}
+            }
+
+            type Masks8 = [Self; 0];
+
+            fn lane_masks(self, _: u8) -> [Self; 0] {
+                match self {}
+            }
+
+            fn none(self) -> Self {
+                match self {}
+            }
+
+            fn and(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn or(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn any(self, _: Self) -> bool {
+                match self {}
+            }
+
+            fn wrapping_add(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn wrapping_sub(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn wrapping_mul(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn add_overflows(self, _: Self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn sub_overflows(self, _: Self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn mul_overflows(self, _: Self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            type Multiplier = Self;
+
+            fn multiplier(self, _: &Divisor) -> Self {
+                match self {}
+            }
+
+            fn quotient(self, _: &Self, _: Self) -> Self {
+                match self {}
+            }
+
             type I64 = Self;
             type M64 = Self;
             const LANES64: usize = 1;
@@ -257,7 +388,6 @@ unreachable_vectors!(Avx2);
 mod aggregate;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate64;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod arith;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod arith64;
@@ -287,7 +417,6 @@ pub use aggregate::{
 };
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use aggregate64::{max_datum64, max_dense64, min_datum64, min_dense64};
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use arith::{add, div, mul, rem, sub};
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use arith64::{add64, sub64};

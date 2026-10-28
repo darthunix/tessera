@@ -1,256 +1,356 @@
 //! Whole-word int4 addition, subtraction and multiplication with overflow
-//! detection, and division by a prepared scalar divisor.
+//! detection, and division by a prepared scalar divisor, written once over
+//! the primitives of [`Vectors`].
 //!
 //! Every lane is computed modulo 2^32 and stored; overflow is detected per
-//! lane (saturating against wrapping results for `+` and `-`, the widening
-//! product against the sign-extended narrow one for `*`), kept only for the
-//! lanes of `mask`, and reported once per word. NULL and unselected lanes
-//! thus get initialized placeholders and never raise. Division by a scalar
-//! is a multiplication by the divisor's prepared reciprocal
-//! ([`Divisor`]), which no lane can fail, so it takes no mask; division by
-//! a column stays in the caller's lane loop, since NEON has no integer
-//! division.
+//! lane, kept only for the lanes of `mask`, and reported once per word.
+//! NULL and unselected lanes thus get initialized placeholders and never
+//! raise. Division by a scalar is a multiplication by the divisor's
+//! prepared reciprocal ([`Divisor`]), which no lane can fail, so it takes
+//! no mask; division by a column stays in the caller's lane loop, since
+//! neither set has an integer division.
 
-use core::arch::aarch64::{
-    int32x4_t, uint32x4_t, vaddq_s32, vandq_s32, vandq_u32, vceqq_s32, vceqq_s64, vcombine_u32,
-    vdupq_n_s32, vdupq_n_u32, veorq_s32, vget_low_s32, vmaxvq_u32, vmlsq_n_s32, vmovl_high_s32,
-    vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32, vmull_n_s32, vmull_s32, vmulq_s32,
-    vmvnq_u32, vorrq_u32, vqaddq_s32, vqsubq_s32, vreinterpretq_s32_s64, vshlq_s32, vshrq_n_s32,
-    vst1q_s32, vsubq_s32, vuzp2q_s32,
-};
+// Under Miri no set runs, so the tokens have no values, and the code that
+// the functions compiled for a set run on theirs cannot be reached.
+#![cfg_attr(miri, allow(unreachable_code, unused_variables))]
+
 use std::mem::MaybeUninit;
 
-use super::{Neon, byte_weights, datum, dense, lane_masks};
+use super::{Neon, Simd, Vectors};
 use crate::int32::{Divisor, Side};
 
 /// `lhs + rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn add(
-    _: Neon,
+    neon: Neon,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i32>; 64],
 ) -> bool {
-    // SAFETY: the token proves that this processor runs NEON.
-    unsafe { add_lanes(lhs, rhs, mask, out) }
+    // SAFETY: the token proves that this processor runs NEON, the vector
+    // set of the target where it has values, which `add_lanes` is compiled
+    // for.
+    unsafe { add_lanes(neon.simd(), lhs, rhs, mask, out) }
 }
 
 /// `lhs - rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn sub(
-    _: Neon,
+    neon: Neon,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i32>; 64],
 ) -> bool {
-    // SAFETY: as in add.
-    unsafe { sub_lanes(lhs, rhs, mask, out) }
+    // SAFETY: as in add, for `sub_lanes`.
+    unsafe { sub_lanes(neon.simd(), lhs, rhs, mask, out) }
 }
 
 /// `lhs * rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn mul(
-    _: Neon,
+    neon: Neon,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i32>; 64],
 ) -> bool {
-    // SAFETY: as in add.
-    unsafe { mul_lanes(lhs, rhs, mask, out) }
+    // SAFETY: as in add, for `mul_lanes`.
+    unsafe { mul_lanes(neon.simd(), lhs, rhs, mask, out) }
 }
 
 /// `lhs / divisor` into every lane of `out`; no lane can fail.
 #[inline]
-pub fn div(_: Neon, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
-    // SAFETY: as in add.
-    unsafe { div_lanes(lhs, divisor, out) }
+pub fn div(neon: Neon, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
+    // SAFETY: as in add, for `div_lanes`.
+    unsafe { div_lanes(neon.simd(), lhs, divisor, out) }
 }
 
 /// `lhs % divisor` into every lane of `out`; no lane can fail.
 #[inline]
-pub fn rem(_: Neon, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
-    // SAFETY: as in add.
-    unsafe { rem_lanes(lhs, divisor, out) }
+pub fn rem(neon: Neon, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
+    // SAFETY: as in add, for `rem_lanes`.
+    unsafe { rem_lanes(neon.simd(), lhs, divisor, out) }
 }
 
-#[target_feature(enable = "neon")]
-fn add_lanes(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i32>; 64]) -> bool {
-    dispatch(lhs, rhs, mask, out, |a, b| {
-        let wrapped = vaddq_s32(a, b);
-        (wrapped, vmvnq_u32(vceqq_s32(wrapped, vqaddq_s32(a, b))))
+// The functions compiled for the vector set of the target, into which the
+// kernels below are inlined, as in `filter.rs`. The kernels carry the
+// feature of the target's set and are `#[inline]`, as NEON's helpers of
+// this code were: `#[inline(always)]` merged them into one body before
+// the compiler had simplified each, and the NEON code changed, a word's
+// stores no longer paired and its masked loop no longer unrolled.
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn add_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    dispatch(simd, lhs, rhs, mask, out, |a, b| {
+        let sum = simd.wrapping_add(a, b);
+        (sum, simd.add_overflows(a, b, sum))
     })
 }
 
-#[target_feature(enable = "neon")]
-fn sub_lanes(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i32>; 64]) -> bool {
-    dispatch(lhs, rhs, mask, out, |a, b| {
-        let wrapped = vsubq_s32(a, b);
-        (wrapped, vmvnq_u32(vceqq_s32(wrapped, vqsubq_s32(a, b))))
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn sub_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    dispatch(simd, lhs, rhs, mask, out, |a, b| {
+        let difference = simd.wrapping_sub(a, b);
+        (difference, simd.sub_overflows(a, b, difference))
     })
 }
 
-#[target_feature(enable = "neon")]
-fn mul_lanes(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i32>; 64]) -> bool {
-    dispatch(lhs, rhs, mask, out, |a, b| {
-        let wrapped = vmulq_s32(a, b);
-        // The product fits when its 64-bit form equals the sign-extended
-        // 32-bit form.
-        let low = vceqq_s64(
-            vmull_s32(vget_low_s32(a), vget_low_s32(b)),
-            vmovl_s32(vget_low_s32(wrapped)),
-        );
-        let high = vceqq_s64(vmull_high_s32(a, b), vmovl_high_s32(wrapped));
-        let fits = vcombine_u32(vmovn_u64(low), vmovn_u64(high));
-        (wrapped, vmvnq_u32(fits))
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn mul_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    dispatch(simd, lhs, rhs, mask, out, |a, b| {
+        let product = simd.wrapping_mul(a, b);
+        (product, simd.mul_overflows(a, b, product))
     })
 }
 
-#[target_feature(enable = "neon")]
-fn div_lanes(lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
-    let multiplier = Multiplier::new(divisor);
-    map(lhs, out, |n| multiplier.quotient(n))
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn div_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    divisor: &Divisor,
+    out: &mut [MaybeUninit<i32>; 64],
+) {
+    let multiplier = simd.multiplier(divisor);
+    map(simd, lhs, out, |n| simd.quotient(&multiplier, n))
 }
 
-#[target_feature(enable = "neon")]
-fn rem_lanes(lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
-    let multiplier = Multiplier::new(divisor);
-    map(lhs, out, |n| {
-        vmlsq_n_s32(n, multiplier.quotient(n), divisor.value)
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn rem_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    divisor: &Divisor,
+    out: &mut [MaybeUninit<i32>; 64],
+) {
+    let multiplier = simd.multiplier(divisor);
+    map(simd, lhs, out, |n| {
+        let product = simd.wrapping_mul(simd.quotient(&multiplier, n), simd.splat(divisor.value));
+        simd.wrapping_sub(n, product)
     })
 }
 
-/// A prepared divisor's constants as lanes, made once per word.
-struct Multiplier {
-    magic: i32,
-    bias: int32x4_t,
-    /// Negated, so that the signed shift left shifts right arithmetically.
-    shift: int32x4_t,
-    sign: int32x4_t,
-}
-
-impl Multiplier {
-    #[inline]
-    #[target_feature(enable = "neon")]
-    fn new(divisor: &Divisor) -> Self {
-        Self {
-            magic: divisor.magic,
-            bias: vdupq_n_s32(divisor.bias),
-            shift: vdupq_n_s32(-(divisor.shift as i32)),
-            sign: vdupq_n_s32(divisor.sign),
-        }
-    }
-
-    /// `Divisor::quotient` on four lanes: uzp2 gathers the high halves of
-    /// the widening products.
-    #[inline]
-    #[target_feature(enable = "neon")]
-    fn quotient(&self, n: int32x4_t) -> int32x4_t {
-        let low = vmull_n_s32(vget_low_s32(n), self.magic);
-        let high = vmull_high_n_s32(n, self.magic);
-        let mut q = vuzp2q_s32(vreinterpretq_s32_s64(low), vreinterpretq_s32_s64(high));
-        q = vaddq_s32(q, n);
-        q = vaddq_s32(q, vandq_s32(vshrq_n_s32::<31>(q), self.bias));
-        q = vshlq_s32(q, self.shift);
-        vsubq_s32(veorq_s32(q, self.sign), self.sign)
-    }
-}
-
-/// Every group of four lanes of the column operand through `f`, stored.
+/// Every group of the column operand through `f`, stored.
 #[inline]
-#[target_feature(enable = "neon")]
-fn map(lhs: Side<'_>, out: &mut [MaybeUninit<i32>; 64], f: impl Fn(int32x4_t) -> int32x4_t) {
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn map<V: Vectors>(
+    v: V,
+    lhs: Side<'_>,
+    out: &mut [MaybeUninit<i32>; 64],
+    f: impl Fn(V::I32) -> V::I32,
+) {
     match lhs {
-        Side::Dense(a) => store(out, dense(a), f),
-        Side::Datum(a) => store(out, datum(a), f),
+        Side::Dense(a) => store(v, out, dense(v, a), f),
+        Side::Datum(a) => store(v, out, datum(v, a), f),
         Side::Scalar(_) => unreachable!("a scalar dividend"),
     }
 }
 
 #[inline]
-#[target_feature(enable = "neon")]
-fn store(
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn store<V: Vectors>(
+    v: V,
     out: &mut [MaybeUninit<i32>; 64],
-    load: impl Fn(usize) -> int32x4_t,
-    f: impl Fn(int32x4_t) -> int32x4_t,
+    load: impl Fn(usize) -> V::I32,
+    f: impl Fn(V::I32) -> V::I32,
 ) {
     let base = out.as_mut_ptr().cast::<i32>();
-    for group in 0..16 {
-        // SAFETY: `group` is below 16, so the four lanes written end within
-        // the array; MaybeUninit<i32> has i32's layout.
-        unsafe { vst1q_s32(base.add(group * 4), f(load(group))) };
+    for group in 0..64 / V::LANES {
+        // SAFETY: `group` is below `64 / LANES`, so the values written end
+        // within the word; MaybeUninit<i32> has i32's layout.
+        unsafe { v.store(base.add(group * V::LANES), f(load(group))) };
     }
 }
 
 /// Choose the loaders for the operand kinds once per word.
 #[inline]
-#[target_feature(enable = "neon")]
-fn dispatch(
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn dispatch<V: Vectors>(
+    v: V,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i32>; 64],
-    op: impl Fn(int32x4_t, int32x4_t) -> (int32x4_t, uint32x4_t),
+    op: impl Fn(V::I32, V::I32) -> (V::I32, V::M32),
 ) -> bool {
     match (lhs, rhs) {
-        (Side::Dense(a), Side::Dense(b)) => apply(mask, out, &op, dense(a), dense(b)),
-        (Side::Dense(a), Side::Datum(b)) => apply(mask, out, &op, dense(a), datum(b)),
-        (Side::Dense(a), Side::Scalar(b)) => apply(mask, out, &op, dense(a), scalar(b)),
-        (Side::Datum(a), Side::Dense(b)) => apply(mask, out, &op, datum(a), dense(b)),
-        (Side::Datum(a), Side::Datum(b)) => apply(mask, out, &op, datum(a), datum(b)),
-        (Side::Datum(a), Side::Scalar(b)) => apply(mask, out, &op, datum(a), scalar(b)),
-        (Side::Scalar(a), Side::Dense(b)) => apply(mask, out, &op, scalar(a), dense(b)),
-        (Side::Scalar(a), Side::Datum(b)) => apply(mask, out, &op, scalar(a), datum(b)),
+        (Side::Dense(a), Side::Dense(b)) => apply(v, mask, out, &op, dense(v, a), dense(v, b)),
+        (Side::Dense(a), Side::Datum(b)) => apply(v, mask, out, &op, dense(v, a), datum(v, b)),
+        (Side::Dense(a), Side::Scalar(b)) => apply(v, mask, out, &op, dense(v, a), scalar(v, b)),
+        (Side::Datum(a), Side::Dense(b)) => apply(v, mask, out, &op, datum(v, a), dense(v, b)),
+        (Side::Datum(a), Side::Datum(b)) => apply(v, mask, out, &op, datum(v, a), datum(v, b)),
+        (Side::Datum(a), Side::Scalar(b)) => apply(v, mask, out, &op, datum(v, a), scalar(v, b)),
+        (Side::Scalar(a), Side::Dense(b)) => apply(v, mask, out, &op, scalar(v, a), dense(v, b)),
+        (Side::Scalar(a), Side::Datum(b)) => apply(v, mask, out, &op, scalar(v, a), datum(v, b)),
         (Side::Scalar(_), Side::Scalar(_)) => unreachable!("two scalar operands"),
     }
 }
 
+/// A loader of the groups of a dense block.
 #[inline]
-#[target_feature(enable = "neon")]
-fn scalar(value: i32) -> impl Fn(usize) -> int32x4_t {
-    let lanes = vdupq_n_s32(value);
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn dense<V: Vectors>(v: V, values: &[i32; 64]) -> impl Fn(usize) -> V::I32 + '_ {
+    // SAFETY: `apply` and `store` ask for the groups of a word only.
+    move |group| unsafe { v.load(values, group) }
+}
+
+/// A loader of the groups of a Datum block.
+#[inline]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn datum<V: Vectors>(v: V, values: &[u64; 64]) -> impl Fn(usize) -> V::I32 + '_ {
+    // SAFETY: as in `dense`.
+    move |group| unsafe { v.load_datums(values, group) }
+}
+
+#[inline]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn scalar<V: Vectors>(v: V, value: i32) -> impl Fn(usize) -> V::I32 {
+    let lanes = v.splat(value);
     move |_| lanes
 }
 
-/// Every group of four lanes: operate, store, and keep the overflow lanes
-/// that the mask selects.
+/// Every group: operate, store, and keep the overflow lanes that the mask
+/// selects.
 #[inline]
-#[target_feature(enable = "neon")]
-fn apply(
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn apply<V: Vectors>(
+    v: V,
     mask: u64,
     out: &mut [MaybeUninit<i32>; 64],
-    op: &impl Fn(int32x4_t, int32x4_t) -> (int32x4_t, uint32x4_t),
-    left: impl Fn(usize) -> int32x4_t,
-    right: impl Fn(usize) -> int32x4_t,
+    op: &impl Fn(V::I32, V::I32) -> (V::I32, V::M32),
+    left: impl Fn(usize) -> V::I32,
+    right: impl Fn(usize) -> V::I32,
 ) -> bool {
-    let mut overflow = vdupq_n_u32(0);
+    let mut overflow = v.none();
     let base = out.as_mut_ptr().cast::<i32>();
     if mask == u64::MAX {
-        for group in 0..16 {
+        for group in 0..64 / V::LANES {
             let (result, over) = op(left(group), right(group));
-            overflow = vorrq_u32(overflow, over);
-            // SAFETY: `group` is below 16, so the four lanes written end
-            // within the array; MaybeUninit<i32> has i32's layout.
-            unsafe { vst1q_s32(base.add(group * 4), result) };
+            overflow = v.or(overflow, over);
+            // SAFETY: `group` is below `64 / LANES`, so the values written
+            // end within the word; MaybeUninit<i32> has i32's layout.
+            unsafe { v.store(base.add(group * V::LANES), result) };
         }
     } else {
-        let weights = byte_weights();
         for byte in 0..8 {
-            let (first, second) = lane_masks((mask >> (byte * 8)) as u8, weights);
-            for (group, lanes) in [(byte * 2, first), (byte * 2 + 1, second)] {
+            let masks = v.lane_masks((mask >> (byte * 8)) as u8);
+            for (group, lanes) in (byte * (8 / V::LANES)..).zip(masks) {
                 let (result, over) = op(left(group), right(group));
-                overflow = vorrq_u32(overflow, vandq_u32(over, lanes));
+                overflow = v.or(overflow, v.and(over, lanes));
                 // SAFETY: as above.
-                unsafe { vst1q_s32(base.add(group * 4), result) };
+                unsafe { v.store(base.add(group * V::LANES), result) };
             }
         }
     }
-    vmaxvq_u32(overflow) != 0
+    v.any(overflow)
 }
 
+// The vector code runs only on NEON until its hooks take the set of the
+// target.
 #[cfg(test)]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod tests {
     use std::mem::MaybeUninit;
 
