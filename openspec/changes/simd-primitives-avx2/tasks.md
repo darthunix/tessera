@@ -124,7 +124,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
       over the primitives. Check: the move check
 - [x] 4.4 The arithmetic of int4 on AVX2, the division by a magic
       number included. Check: as in 4.2, on `arith_int32`
-- [ ] 4.5 The arithmetic of int8, `simd/arith64.rs`, over the
+- [x] 4.5 The arithmetic of int8, `simd/arith64.rs`, over the
       primitives. Check: the move check
 - [ ] 4.6 The arithmetic of int8 on AVX2. Check: as in 4.2, on
       `arith_int64`

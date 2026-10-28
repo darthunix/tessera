@@ -379,6 +379,12 @@ What the moves found:
   - The lane masks of a masked word come eight rows at a time, two
     groups on NEON and one on AVX2: one group at a time, the loop no
     longer unrolled.
+- The arithmetic of int8 took the same form and kept its NEON code
+  (`disasm-DpjNcE`). Its kernels keep the lanes that fit, as NEON
+  compares the wrapped and the saturated results, rather than those
+  that overflow. The move check names its `dispatch` anew, since the
+  set is now among its parameters; compared by its instructions, with
+  the targets of its branches as offsets, its body is the same.
 - On AVX2 the int4 arithmetic has no call in the code of a word and
   keeps its lanes in registers (`disasm-xtH7X2`). A sum overflows where
   comparing it with an operand disagrees with the other operand's sign,

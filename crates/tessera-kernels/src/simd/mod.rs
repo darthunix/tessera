@@ -242,6 +242,59 @@ pub(crate) trait Vectors: Token + 'static {
     /// LANES64` and for no other, inverted when `invert` is: a set inverts
     /// where it is cheapest, as NEON on the narrowed masks of four rows.
     fn pack64(self, invert: bool, lanes: impl Fn(usize) -> Self::M64) -> u64;
+
+    /// Write `lanes` to the `LANES64` values at `at`, which need no
+    /// alignment, as [`Vectors::store`] does for int4 lanes.
+    ///
+    /// # Safety
+    ///
+    /// `at` must be valid for writes of `LANES64` values.
+    unsafe fn store64(self, at: *mut i64, lanes: Self::I64);
+
+    /// The lane masks of the int8 vectors of eight rows, `8 / LANES64` of
+    /// them.
+    type Masks64: IntoIterator<Item = Self::M64>;
+
+    /// The lane masks of the int8 vectors of eight rows from their byte of
+    /// bits, in the order of the rows: all ones in the lanes whose bit is
+    /// set.
+    fn lane_masks64(self, bits: u8) -> Self::Masks64;
+
+    /// No int8 lane.
+    fn none64(self) -> Self::M64;
+
+    /// Every int8 lane.
+    fn every64(self) -> Self::M64;
+
+    /// The int8 lanes where both masks hold.
+    fn and64(self, a: Self::M64, b: Self::M64) -> Self::M64;
+
+    /// The int8 lanes where either mask holds.
+    fn or64(self, a: Self::M64, b: Self::M64) -> Self::M64;
+
+    /// The int8 lanes where `a` holds and `b` does not.
+    fn and_not64(self, a: Self::M64, b: Self::M64) -> Self::M64;
+
+    /// Whether any int8 lane of `mask` holds.
+    fn any64(self, mask: Self::M64) -> bool;
+
+    /// Whether every int8 lane of `mask` holds.
+    fn all64(self, mask: Self::M64) -> bool;
+
+    /// `a + b` in every int8 lane, modulo 2^64.
+    fn wrapping_add64(self, a: Self::I64, b: Self::I64) -> Self::I64;
+
+    /// `a - b` in every int8 lane, modulo 2^64.
+    fn wrapping_sub64(self, a: Self::I64, b: Self::I64) -> Self::I64;
+
+    /// The int8 lanes where `a + b` fits, given `sum`, its wrapped lanes.
+    /// The int8 arithmetic keeps the lanes that fit, as NEON's compare of
+    /// the wrapped and saturated results gives them.
+    fn add_fits64(self, a: Self::I64, b: Self::I64, sum: Self::I64) -> Self::M64;
+
+    /// The int8 lanes where `a - b` fits, given `difference`, its wrapped
+    /// lanes.
+    fn sub_fits64(self, a: Self::I64, b: Self::I64, difference: Self::I64) -> Self::M64;
 }
 
 /// The primitives of a set this target does not run: its token is an
@@ -376,6 +429,60 @@ macro_rules! unreachable_vectors {
             fn pack64(self, _: bool, _: impl Fn(usize) -> Self) -> u64 {
                 match self {}
             }
+
+            unsafe fn store64(self, _: *mut i64, _: Self) {
+                match self {}
+            }
+
+            type Masks64 = [Self; 0];
+
+            fn lane_masks64(self, _: u8) -> [Self; 0] {
+                match self {}
+            }
+
+            fn none64(self) -> Self {
+                match self {}
+            }
+
+            fn every64(self) -> Self {
+                match self {}
+            }
+
+            fn and64(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn or64(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn and_not64(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn any64(self, _: Self) -> bool {
+                match self {}
+            }
+
+            fn all64(self, _: Self) -> bool {
+                match self {}
+            }
+
+            fn wrapping_add64(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn wrapping_sub64(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn add_fits64(self, _: Self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn sub_fits64(self, _: Self, _: Self, _: Self) -> Self {
+                match self {}
+            }
         }
     };
 }
@@ -390,7 +497,6 @@ mod aggregate;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate64;
 mod arith;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod arith64;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod cast;
@@ -419,7 +525,6 @@ pub use aggregate::{
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use aggregate64::{max_datum64, max_dense64, min_datum64, min_dense64};
 pub use arith::{add, div, mul, rem, sub};
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use arith64::{add64, sub64};
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use cast::{widen_datum, widen_dense};

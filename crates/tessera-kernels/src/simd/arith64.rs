@@ -1,152 +1,215 @@
-//! Whole-word int8 addition and subtraction with overflow detection.
+//! Whole-word int8 addition and subtraction with overflow detection,
+//! written once over the primitives of [`Vectors`].
 //!
 //! Every lane is computed modulo 2^64 and stored; overflow is detected per
-//! lane by comparing the wrapping result with the saturating one, kept
-//! only for the lanes of `mask`, and reported once per word. NULL and
-//! unselected lanes thus get initialized placeholders and never raise.
-//! NEON has no 64-bit multiply or high multiply, so the multiplications
-//! and divisions of a word stay in the caller's lane loop. A word is 32
-//! pairs of lanes, loaded alike from dense storage and from Datums, which
-//! hold an int8 whole.
+//! lane, kept only for the lanes of `mask`, and reported once per word.
+//! NULL and unselected lanes thus get initialized placeholders and never
+//! raise. Neither set multiplies 64-bit lanes, so the multiplications and
+//! divisions of a word stay in the caller's lane loop. A word is `64 /
+//! LANES64` vectors, loaded alike from dense storage and from Datums,
+//! which hold an int8 whole.
 
-use core::arch::aarch64::{
-    int64x2_t, uint64x2_t, vaddq_s64, vandq_u64, vbicq_u64, vceqq_s64, vdupq_n_s64, vdupq_n_u64,
-    vld1q_s64, vmaxvq_u32, vminvq_u32, vorrq_u64, vqaddq_s64, vqsubq_s64, vreinterpretq_u32_u64,
-    vst1q_s64, vsubq_s64,
-};
+// Under Miri no set runs, so the tokens have no values, and the code that
+// the functions compiled for a set run on theirs cannot be reached.
+#![cfg_attr(miri, allow(unreachable_code, unused_variables))]
+
 use std::mem::MaybeUninit;
 
-use super::{Neon, byte_weights, lane_masks, widen};
+use super::{Neon, Simd, Vectors};
 use crate::int64::Side;
 
 /// `lhs + rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn add64(
-    _: Neon,
+    neon: Neon,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i64>; 64],
 ) -> bool {
-    // SAFETY: the token proves that this processor runs NEON.
-    unsafe { add_lanes(lhs, rhs, mask, out) }
+    // SAFETY: the token proves that this processor runs NEON, the vector
+    // set of the target where it has values, which `add_lanes` is compiled
+    // for.
+    unsafe { add_lanes(neon.simd(), lhs, rhs, mask, out) }
 }
 
 /// `lhs - rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn sub64(
-    _: Neon,
+    neon: Neon,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i64>; 64],
 ) -> bool {
-    // SAFETY: as in add64.
-    unsafe { sub_lanes(lhs, rhs, mask, out) }
+    // SAFETY: as in add64, for `sub_lanes`.
+    unsafe { sub_lanes(neon.simd(), lhs, rhs, mask, out) }
 }
 
-// The operation returns the wrapped result and the lanes that fit, all
-// ones where no overflow occurred.
+// The functions compiled for the vector set of the target, into which the
+// kernels below are inlined; the kernels carry its feature and are
+// `#[inline]`, as in `arith.rs`. The operation returns the wrapped result
+// and the lanes that fit, all ones where no overflow occurred.
 
-#[target_feature(enable = "neon")]
-fn add_lanes(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i64>; 64]) -> bool {
-    dispatch(lhs, rhs, mask, out, |a, b| {
-        let wrapped = vaddq_s64(a, b);
-        (wrapped, vceqq_s64(wrapped, vqaddq_s64(a, b)))
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn add_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i64>; 64],
+) -> bool {
+    dispatch(simd, lhs, rhs, mask, out, |a, b| {
+        let sum = simd.wrapping_add64(a, b);
+        (sum, simd.add_fits64(a, b, sum))
     })
 }
 
-#[target_feature(enable = "neon")]
-fn sub_lanes(lhs: Side<'_>, rhs: Side<'_>, mask: u64, out: &mut [MaybeUninit<i64>; 64]) -> bool {
-    dispatch(lhs, rhs, mask, out, |a, b| {
-        let wrapped = vsubq_s64(a, b);
-        (wrapped, vceqq_s64(wrapped, vqsubq_s64(a, b)))
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn sub_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i64>; 64],
+) -> bool {
+    dispatch(simd, lhs, rhs, mask, out, |a, b| {
+        let difference = simd.wrapping_sub64(a, b);
+        (difference, simd.sub_fits64(a, b, difference))
     })
 }
 
-/// A loader of the two int8 values of each pair of a dense block.
+/// A loader of the vectors of a dense block.
 #[inline]
-#[target_feature(enable = "neon")]
-fn dense(values: &[i64; 64]) -> impl Fn(usize) -> int64x2_t + '_ {
-    // SAFETY: `pair` is below 32, so the two lanes read end within the array.
-    move |pair| unsafe { vld1q_s64(values.as_ptr().add(pair * 2)) }
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn dense<V: Vectors>(v: V, values: &[i64; 64]) -> impl Fn(usize) -> V::I64 + '_ {
+    // SAFETY: `apply` asks for the vectors of a word only.
+    move |index| unsafe { v.load64(values, index) }
 }
 
-/// A loader of the two int8 values of each pair of a Datum block: a Datum
-/// holding an int8 is its bits.
+/// A loader of the vectors of a Datum block: a Datum holding an int8 is
+/// its bits.
 #[inline]
-#[target_feature(enable = "neon")]
-fn datum(values: &[u64; 64]) -> impl Fn(usize) -> int64x2_t + '_ {
-    // SAFETY: `pair` is below 32.
-    move |pair| unsafe { vld1q_s64(values.as_ptr().cast::<i64>().add(pair * 2)) }
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn datum<V: Vectors>(v: V, values: &[u64; 64]) -> impl Fn(usize) -> V::I64 + '_ {
+    // SAFETY: as in `dense`.
+    move |index| unsafe { v.load_datums64(values, index) }
 }
 
 #[inline]
-#[target_feature(enable = "neon")]
-fn scalar(value: i64) -> impl Fn(usize) -> int64x2_t {
-    let lanes = vdupq_n_s64(value);
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn scalar<V: Vectors>(v: V, value: i64) -> impl Fn(usize) -> V::I64 {
+    let lanes = v.splat64(value);
     move |_| lanes
 }
 
 /// Choose the loaders for the operand kinds once per word.
 #[inline]
-#[target_feature(enable = "neon")]
-fn dispatch(
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn dispatch<V: Vectors>(
+    v: V,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i64>; 64],
-    op: impl Fn(int64x2_t, int64x2_t) -> (int64x2_t, uint64x2_t),
+    op: impl Fn(V::I64, V::I64) -> (V::I64, V::M64),
 ) -> bool {
     match (lhs, rhs) {
-        (Side::Dense(a), Side::Dense(b)) => apply(mask, out, &op, dense(a), dense(b)),
-        (Side::Dense(a), Side::Datum(b)) => apply(mask, out, &op, dense(a), datum(b)),
-        (Side::Dense(a), Side::Scalar(b)) => apply(mask, out, &op, dense(a), scalar(b)),
-        (Side::Datum(a), Side::Dense(b)) => apply(mask, out, &op, datum(a), dense(b)),
-        (Side::Datum(a), Side::Datum(b)) => apply(mask, out, &op, datum(a), datum(b)),
-        (Side::Datum(a), Side::Scalar(b)) => apply(mask, out, &op, datum(a), scalar(b)),
-        (Side::Scalar(a), Side::Dense(b)) => apply(mask, out, &op, scalar(a), dense(b)),
-        (Side::Scalar(a), Side::Datum(b)) => apply(mask, out, &op, scalar(a), datum(b)),
+        (Side::Dense(a), Side::Dense(b)) => apply(v, mask, out, &op, dense(v, a), dense(v, b)),
+        (Side::Dense(a), Side::Datum(b)) => apply(v, mask, out, &op, dense(v, a), datum(v, b)),
+        (Side::Dense(a), Side::Scalar(b)) => apply(v, mask, out, &op, dense(v, a), scalar(v, b)),
+        (Side::Datum(a), Side::Dense(b)) => apply(v, mask, out, &op, datum(v, a), dense(v, b)),
+        (Side::Datum(a), Side::Datum(b)) => apply(v, mask, out, &op, datum(v, a), datum(v, b)),
+        (Side::Datum(a), Side::Scalar(b)) => apply(v, mask, out, &op, datum(v, a), scalar(v, b)),
+        (Side::Scalar(a), Side::Dense(b)) => apply(v, mask, out, &op, scalar(v, a), dense(v, b)),
+        (Side::Scalar(a), Side::Datum(b)) => apply(v, mask, out, &op, scalar(v, a), datum(v, b)),
         (Side::Scalar(_), Side::Scalar(_)) => unreachable!("two scalar operands"),
     }
 }
 
-/// Every pair of lanes: operate, store, and keep the overflow of the lanes
-/// that the mask selects.
+/// Every vector: operate, store, and keep the overflow of the lanes that
+/// the mask selects. A full word keeps the lanes that fit, and overflows
+/// unless all of them do.
 #[inline]
-#[target_feature(enable = "neon")]
-fn apply(
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn apply<V: Vectors>(
+    v: V,
     mask: u64,
     out: &mut [MaybeUninit<i64>; 64],
-    op: &impl Fn(int64x2_t, int64x2_t) -> (int64x2_t, uint64x2_t),
-    left: impl Fn(usize) -> int64x2_t,
-    right: impl Fn(usize) -> int64x2_t,
+    op: &impl Fn(V::I64, V::I64) -> (V::I64, V::M64),
+    left: impl Fn(usize) -> V::I64,
+    right: impl Fn(usize) -> V::I64,
 ) -> bool {
     let base = out.as_mut_ptr().cast::<i64>();
     if mask == u64::MAX {
-        let mut fits_all = vdupq_n_u64(u64::MAX);
-        for pair in 0..32 {
-            let (result, fits) = op(left(pair), right(pair));
-            fits_all = vandq_u64(fits_all, fits);
-            // SAFETY: `pair` is below 32, so the two lanes written end
-            // within the array; MaybeUninit<i64> has i64's layout.
-            unsafe { vst1q_s64(base.add(pair * 2), result) };
+        let mut fits_all = v.every64();
+        for index in 0..64 / V::LANES64 {
+            let (result, fits) = op(left(index), right(index));
+            fits_all = v.and64(fits_all, fits);
+            // SAFETY: `index` is below `64 / LANES64`, so the values written
+            // end within the word; MaybeUninit<i64> has i64's layout.
+            unsafe { v.store64(base.add(index * V::LANES64), result) };
         }
-        return vminvq_u32(vreinterpretq_u32_u64(fits_all)) == 0;
+        return !v.all64(fits_all);
     }
-    let weights = byte_weights();
-    let mut overflow = vdupq_n_u64(0);
+    let mut overflow = v.none64();
     for byte in 0..8 {
-        let (first, second) = lane_masks((mask >> (byte * 8)) as u8, weights);
-        let (m0, m1) = widen(first);
-        let (m2, m3) = widen(second);
-        for (offset, lanes) in [m0, m1, m2, m3].into_iter().enumerate() {
-            let pair = byte * 4 + offset;
-            let (result, fits) = op(left(pair), right(pair));
-            overflow = vorrq_u64(overflow, vbicq_u64(lanes, fits));
+        let masks = v.lane_masks64((mask >> (byte * 8)) as u8);
+        for (index, lanes) in (byte * (8 / V::LANES64)..).zip(masks) {
+            let (result, fits) = op(left(index), right(index));
+            overflow = v.or64(overflow, v.and_not64(lanes, fits));
             // SAFETY: as above.
-            unsafe { vst1q_s64(base.add(pair * 2), result) };
+            unsafe { v.store64(base.add(index * V::LANES64), result) };
         }
     }
-    vmaxvq_u32(vreinterpretq_u32_u64(overflow)) != 0
+    v.any64(overflow)
 }
