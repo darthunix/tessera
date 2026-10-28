@@ -16,7 +16,7 @@ use crate::simd::{Neon, Simd, Vectors};
 impl IntLane for i64 {
     type Divisor = Divisor;
     type Compares = Simd;
-    type Arith = Neon;
+    type Arith = Simd;
 
     const ZERO: i64 = 0;
     const ONE: i64 = 1;
@@ -179,7 +179,7 @@ impl IntLane for i64 {
     /// division by a column go lane by lane from the blocks.
     #[inline(always)]
     fn arith_block<E: Evaluate<i64>>(
-        neon: Neon,
+        simd: Simd,
         op: ArithOp,
         lhs: Side<'_>,
         rhs: Side<'_>,
@@ -191,11 +191,11 @@ impl IntLane for i64 {
         let lanes = present;
         match (op, divisor) {
             (ArithOp::Add, _) => {
-                let overflow = crate::simd::add64(neon, lhs, rhs, present, out);
+                let overflow = crate::simd::add64(simd, lhs, rhs, present, out);
                 ensure!(!overflow, ArithmeticError::BigintOutOfRange);
             }
             (ArithOp::Sub, _) => {
-                let overflow = crate::simd::sub64(neon, lhs, rhs, present, out);
+                let overflow = crate::simd::sub64(simd, lhs, rhs, present, out);
                 ensure!(!overflow, ArithmeticError::BigintOutOfRange);
             }
             (ArithOp::Div, Some(divisor)) => {
