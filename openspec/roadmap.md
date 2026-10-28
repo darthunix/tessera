@@ -22,27 +22,30 @@ its next stage, `bench-in-four-cells`, keeps its place. The maintainer
 placed `explain-rows-per-loop` first on 2026-10-08, after pull
 requests 49 and 50, and `join-pruning-cost` after it the same day; the
 other entries keep the order of the decisions of 2026-09-30 to
-2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390):
+2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390). The
+maintainer placed `spill-crate` first on 2026-10-28, after the close of
+`table-crate`:
 
-1. `explain-rows-per-loop`: The rows a node removed, per loop as the
+1. `spill-crate`: The spill as a crate of its own, relspill
+2. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-2. `join-pruning-cost`: The cost of a pruning join over the partitions
+3. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-3. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+4. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-4. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
-5. `linux-x86-support`: Linux on x86-64 checked as the target platform
-6. `oltp-guard-bench`: OLTP guard family of benchmarks
-7. `runs-left-from-section-9`: Runs left to the maintainer from section 9
-8. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-9. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
-   `jit = on` control run
-10. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+5. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
+6. `linux-x86-support`: Linux on x86-64 checked as the target platform
+7. `oltp-guard-bench`: OLTP guard family of benchmarks
+8. `runs-left-from-section-9`: Runs left to the maintainer from section 9
+9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+    `jit = on` control run
+11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-11. `tpch-sf10`: TPC-H step 10: SF10
-12. `backward-scan-mark-restore`: Backward scan and mark/restore
-13. `postgresql-19`: PostgreSQL 19 support
-14. `pg-duckdb-comparison`: Comparison with pg_duckdb
+12. `tpch-sf10`: TPC-H step 10: SF10
+13. `backward-scan-mark-restore`: Backward scan and mark/restore
+14. `postgresql-19`: PostgreSQL 19 support
+15. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -117,6 +120,26 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `relhash-on-crates-io`: The crate `relhash` published on crates.io
 
 ## Entries
+
+### spill-crate
+
+The spill as a crate of its own, `relspill`. The maintainer decided it
+on 2026-10-28, after the close of `table-crate`; it is the change
+`spill-crate`.
+
+- **What:** The format of a block and of a file, the plan of a level,
+  the words of a spill and the protocol of the join's, the grouping's
+  and the sort's spills and of a shared build's rounds, as state
+  machines, in a crate free of Tessera but `relhash`, with no input or
+  output and no memory taken; the spill validated by outside reviews
+  first; the checks `relhash` has.
+- **Why:** About 7,200 lines of C decide a spill, with rules written
+  several times and two copies already apart; the format of a file is
+  half in C; the checks are thin.
+- **Known:** The survey and the decisions are in the change's design.
+- **Depends on:** nothing.
+- **Capabilities:** relspill, spill-format, hash-table
+- **Size:** large: about forty pull requests.
 
 ### explain-rows-per-loop
 
@@ -1151,21 +1174,17 @@ line 214; the review of pull request 45, 2026-10-05.
 Small C leftovers of section 9. From plan 9.12, 9.17 and the survey;
 lines 6936–6937, 6943, 6661–6662, 7220–7221, 1535–1536.
 
-- **What:** Four small things: the row spill of aggregation
-  (`rows_write`) still lays rows out by partitions in C and is to move
-  to `tess_spill_columns_append` "later, as decided"; `RowWriter` in
-  `agg_spill.c` duplicates `RunWriter` of the external sort; the three
-  copies of `store_value` are to be merged in C; `nodes/internal.h` is
-  still an umbrella that every `.c` includes, kept "for one release";
-  the comment of `join_many` in the join suite says memory goes over
-  `hash_mem` while the output stays within it.
+- **What:** Three small things: the three copies of `store_value` are
+  to be merged in C; `nodes/internal.h` is still an umbrella that every
+  `.c` includes, kept "for one release"; the comment of `join_many` in
+  the join suite says memory goes over `hash_mem` while the output
+  stays within it. The row spill of aggregation and its `RowWriter`
+  went to the change `spill-crate`.
 - **Why:** One place per pattern; the survey counted these among the
   duplicates (lines 6661–6662).
 - **Known:** Decision 2026-09-29: `store_value` is merged in C, not
   moved to Rust (lines 1535–1536, 6661, 7372). Checked in the code:
-  `rows_write` and `RowWriter` are in `agg_spill.c`, the external sort
-  and TessGather already write through `spill_columns_append`; three
-  stores exist (`join_store_value`, `side_store`, `store_value` in
+  three stores exist (`join_store_value`, `side_store`, `store_value` in
   `runtime/rows.c`); 21 files of `nodes/` include `internal.h`; the
   comment still says "the memory goes over it".
 - **Also carries:** `generic_fits` has an unreachable INTERNALOID branch
@@ -1480,67 +1499,6 @@ becomes an entry, joins one, or is dropped.
 - **The first VACUUM after COPY on master** (plan 8.1, lines 6334–6337)
   freezes rows but marks no page all-visible: possibly a bug of the
   core, not analysed. Suggested: report upstream, or drop.
-- **`spill-format`: the code against its own intent** (found when the
-  capability was described and reviewed, pull request 46).
-  - The lists of blocks are memory that nobody counts: 16 bytes a block
-    in arrays that start at 16 places and double, and a copy for every
-    reader of another participant's file. `tess_spill_memory` leaves
-    them out. Counting them is not a correction of a check: only the
-    serial join asks a set for its memory, and a list of 16 places for
-    each partition that has a block is 256 bytes, about 512 kB at 1024
-    partitions on two sides, more than the whole `hash_mem` of a small
-    `work_mem`. It would change when the join sends partitions to disk,
-    so it needs a change of its own with a measurement
-    (`docs/measuring.md`). It was tried in pull request 46 and taken
-    back: with the lists counted, a join of the suite `join` that
-    spills at a small `work_mem` showed "Memory Usage: over hash_mem"
-    where it had been within it, and the counts of chunks and of bytes
-    on disk moved in five plans. The join's rule has no room for the
-    lists: counting them needs a reserve in that rule first.
-  - Every node passes `MaxAllocHugeSize` as the longest body of its
-    sets, so the bound on the size of a block holds nothing for them: a
-    damaged entry of a shared file's list can ask a reader for a buffer
-    as large as the file's blocks. The join, the grouping and the sort
-    know their longest chunks and could say them.
-  - A reader that opens a participant's file before the participant's
-    first write to disk gets "no blocks" without an error. The format
-    cannot tell this from a participant without blocks or from a worker
-    that never started, so a mark of a finished file would not cure it:
-    the guard is the nodes' barriers, and the spec states it as what the
-    caller ensures. The suite shows what an open of a file that is on
-    disk but not finished gives: damaged data.
-- **`spill-format`: what no test shows yet** (the same source).
-  - The one form of a reference to a value (pull request 46) adds an
-    operation for each by-reference value appended to a chunk of
-    columns, and a check for each one a sort or a grouping reads back.
-    Its cost is below what the A/B tool flags, and its cause is not
-    found. The cases `runs_text` and `rows_text` of the exec family (a
-    sort whose runs carry text, a grouping by a text key, both at a
-    work_mem of 4 MB) came out 1.0 to 2.6 % slower beyond the control
-    in a run of 51 repetitions and two rounds a side. The tool flags a
-    case past 2 % by both its least time and its median; neither case
-    reached that by its median. The run was on battery power with one
-    core busy by a system service, against `docs/measuring.md`: a run
-    on mains power is owed. The disk written is the same. The machine
-    code differs by the check, about five instructions a value, and by
-    the sort's function that takes a row from a run, no longer inlined,
-    about ten instructions a row. A variant that inlined it again and
-    reported a damaged reference once a row took the same time as this
-    code (0.4 to 1.7 % beyond the control in two runs, one of them with
-    functions aligned to 64 bytes), so it was not kept. No counter
-    benchmark of `tessera-bench` runs the kernels of a spill, so their
-    instructions are not counted.
-  - A join checks the chunk a reference names and not the byte in it,
-    and no node checks that a value's own length ends inside its chunk.
-  - The order of blocks in a partition (values before the blocks that
-    refer to them; pairs of values and columns in a sort and in a
-    grouping's rows) is in the design only: a rule of the join, of the
-    grouping and of the sort, for their capabilities.
-  - `docs/spill.md` and the comments of the reserves in
-    `nodes/hashjoin.h` and `nodes/agg_spill.c` still count a buffer of a
-    page for each partition's file, though a set has one buffer. Whether
-    the reserves themselves are still right is to be decided.
-
 - **`pmu`: findings without a decision** (the close of
   `counters-on-x86-and-linux`, 2026-10-25).
   - XNU's `cpc_task_set_owner` (xnu-12377.121.6) finds that another
@@ -1598,9 +1556,3 @@ fact.
   core does: a rare path no test reaches, or a move of the RIGHT and
   FULL joins' tail, for help a worker of a parallel append mostly gives
   to the next child anyway (pull request 52).
-- **A crate for spilling** (the close of `table-crate`): the words and
-  files of a spill stay in `tessera-spill` and the C nodes, since
-  `tessera-spill` writes Tessera's columns and the files are written by
-  C. The change left it to be taken up once the table lived apart, as
-  it now does. Suggested: an entry when a second user of the spill
-  appears, or drop.
