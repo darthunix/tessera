@@ -15,6 +15,7 @@ use crate::simd::{Neon, Simd, Vectors};
 impl IntLane for i32 {
     type Divisor = Divisor;
     type Compares = Simd;
+    type Arith = Simd;
 
     const ZERO: i32 = 0;
     const ONE: i32 = 1;
@@ -175,7 +176,7 @@ impl IntLane for i32 {
 
     #[inline(always)]
     fn arith_block<E: Evaluate<i32>>(
-        neon: Neon,
+        simd: Simd,
         op: ArithOp,
         lhs: Side<'_>,
         rhs: Side<'_>,
@@ -188,18 +189,18 @@ impl IntLane for i32 {
         // too dear to spend on absent lanes, and a whole word of them is
         // a NULL column.
         let overflow = match (op, divisor) {
-            (ArithOp::Add, _) => crate::simd::add(neon, lhs, rhs, present, out),
-            (ArithOp::Sub, _) => crate::simd::sub(neon, lhs, rhs, present, out),
-            (ArithOp::Mul, _) => crate::simd::mul(neon, lhs, rhs, present, out),
+            (ArithOp::Add, _) => crate::simd::add(simd, lhs, rhs, present, out),
+            (ArithOp::Sub, _) => crate::simd::sub(simd, lhs, rhs, present, out),
+            (ArithOp::Mul, _) => crate::simd::mul(simd, lhs, rhs, present, out),
             (ArithOp::Div, Some(divisor)) => {
                 if present != 0 {
-                    crate::simd::div(neon, lhs, divisor, out);
+                    crate::simd::div(simd, lhs, divisor, out);
                 }
                 false
             }
             (ArithOp::Mod, Some(divisor)) => {
                 if present != 0 {
-                    crate::simd::rem(neon, lhs, divisor, out);
+                    crate::simd::rem(simd, lhs, divisor, out);
                 }
                 false
             }

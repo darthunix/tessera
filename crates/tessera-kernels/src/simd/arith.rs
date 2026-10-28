@@ -16,62 +16,61 @@
 
 use std::mem::MaybeUninit;
 
-use super::{Neon, Simd, Vectors};
+use super::{Simd, Vectors};
 use crate::int32::{Divisor, Side};
 
 /// `lhs + rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn add(
-    neon: Neon,
+    simd: Simd,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i32>; 64],
 ) -> bool {
-    // SAFETY: the token proves that this processor runs NEON, the vector
-    // set of the target where it has values, which `add_lanes` is compiled
-    // for.
-    unsafe { add_lanes(neon.simd(), lhs, rhs, mask, out) }
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `add_lanes` is compiled for.
+    unsafe { add_lanes(simd, lhs, rhs, mask, out) }
 }
 
 /// `lhs - rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn sub(
-    neon: Neon,
+    simd: Simd,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i32>; 64],
 ) -> bool {
     // SAFETY: as in add, for `sub_lanes`.
-    unsafe { sub_lanes(neon.simd(), lhs, rhs, mask, out) }
+    unsafe { sub_lanes(simd, lhs, rhs, mask, out) }
 }
 
 /// `lhs * rhs` into `out`; true when a masked lane overflowed.
 #[inline]
 pub fn mul(
-    neon: Neon,
+    simd: Simd,
     lhs: Side<'_>,
     rhs: Side<'_>,
     mask: u64,
     out: &mut [MaybeUninit<i32>; 64],
 ) -> bool {
     // SAFETY: as in add, for `mul_lanes`.
-    unsafe { mul_lanes(neon.simd(), lhs, rhs, mask, out) }
+    unsafe { mul_lanes(simd, lhs, rhs, mask, out) }
 }
 
 /// `lhs / divisor` into every lane of `out`; no lane can fail.
 #[inline]
-pub fn div(neon: Neon, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
+pub fn div(simd: Simd, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
     // SAFETY: as in add, for `div_lanes`.
-    unsafe { div_lanes(neon.simd(), lhs, divisor, out) }
+    unsafe { div_lanes(simd, lhs, divisor, out) }
 }
 
 /// `lhs % divisor` into every lane of `out`; no lane can fail.
 #[inline]
-pub fn rem(neon: Neon, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
+pub fn rem(simd: Simd, lhs: Side<'_>, divisor: &Divisor, out: &mut [MaybeUninit<i32>; 64]) {
     // SAFETY: as in add, for `rem_lanes`.
-    unsafe { rem_lanes(neon.simd(), lhs, divisor, out) }
+    unsafe { rem_lanes(simd, lhs, divisor, out) }
 }
 
 // The functions compiled for the vector set of the target, into which the
@@ -347,10 +346,8 @@ fn apply<V: Vectors>(
     v.any(overflow)
 }
 
-// The vector code runs only on NEON until its hooks take the set of the
-// target.
 #[cfg(test)]
-#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[cfg(not(miri))]
 mod tests {
     use std::mem::MaybeUninit;
 
@@ -361,7 +358,7 @@ mod tests {
     use super::{div, rem};
     use crate::int32::divisor::tests::{any_divisor, dividends, divisors};
     use crate::int32::{Divisor, Side};
-    use crate::simd::{Neon, Token};
+    use crate::simd::{Simd, Token};
 
     fn written(out: &[MaybeUninit<i32>; 64]) -> [i32; 64] {
         // SAFETY: the kernels write every lane.
@@ -392,7 +389,9 @@ mod tests {
     }
 
     fn lanes_match_the_scalar_formula(d: i32, dense: [i32; 64]) {
-        let neon = Neon::get().unwrap();
+        let Some(simd) = Simd::get() else {
+            return;
+        };
         let divisor = Divisor::new(d).unwrap();
         // PostgreSQL's Int32GetDatum sign-extends.
         let datums = dense.map(|n| i64::from(n) as u64);
@@ -400,9 +399,9 @@ mod tests {
         let remainders = dense.map(|n| divisor.remainder(n));
         for lhs in [Side::Dense(&dense), Side::Datum(&datums)] {
             let mut out = [MaybeUninit::uninit(); 64];
-            div(neon, lhs, &divisor, &mut out);
+            div(simd, lhs, &divisor, &mut out);
             assert_eq!(written(&out), quotients, "{d}");
-            rem(neon, lhs, &divisor, &mut out);
+            rem(simd, lhs, &divisor, &mut out);
             assert_eq!(written(&out), remainders, "{d}");
         }
     }
