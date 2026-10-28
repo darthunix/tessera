@@ -219,7 +219,7 @@ operations over int4 and int8 lanes:
 - the bits of the non-NULL rows from 64 NULL flags;
 - the lane masks of a group from bits, and a select by mask;
 - add, subtract and multiply with the lanes that overflow, and the
-  high half of a product for the division by a magic number;
+  quotient by a divisor prepared as a magic number, each set's own;
 - minimum and maximum, the widening of int4 to int8 and the check of a
   narrowing;
 - xor and shifts for the hashes;
@@ -236,7 +236,8 @@ The shape of the code, within the rules of Rust above:
   safe entry point, takes the token
     --> one function per set, compiled for it, never inlined:
         #[target_feature(enable = "avx2")] (or "neon")
-      --> the generic kernel, #[inline(always)]
+      --> the generic kernel, #[inline(always)], or #[inline]
+          and compiled for the set itself
         --> the primitives, #[inline(always)], with the intrinsics
             in `unsafe` blocks whose reason is the token
 ```
@@ -354,6 +355,27 @@ After the pilot, every family moves in two commits:
 The order: the filter of int8; the arithmetic of int4 with its
 divisor; that of int8; the aggregates of int4 with `count`; those of
 int8; the widening cast; the hash of int4; that of int8; the sets.
+
+What the moves found:
+
+- The arithmetic of int4 kept its NEON code (`disasm-UuGqn0`) in a
+  form of its own, each part found by the machine code:
+  - Its kernels are `#[inline]` and compiled for the target's set, as
+    NEON's helpers of this code were. With `#[inline(always)]` they
+    were merged into one body before each was simplified: the stores
+    of a word lost what told them apart from the loads and no longer
+    paired, and the loop of a masked word no longer unrolled.
+  - A store takes a pointer that the kernel offsets by group, as the
+    NEON code did. An address made inside the store, after the lanes,
+    let the compiler merge the last groups of the two loaders of the
+    division into one block, where the widening multiplication became
+    four scalar ones.
+  - The quotient by a prepared divisor is each set's own primitive,
+    with the divisor's lanes prepared by the set. Prepared by generic
+    code, they were inlined earlier and moved the division's code.
+  - The lane masks of a masked word come eight rows at a time, two
+    groups on NEON and one on AVX2: one group at a time, the loop no
+    longer unrolled.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
