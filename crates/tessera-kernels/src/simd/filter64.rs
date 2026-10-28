@@ -1,67 +1,42 @@
-//! Whole-word comparisons of int8 values with a scalar.
+//! Whole-word comparisons of int8 values with a scalar, and of two int8
+//! columns, written once over the primitives of [`Vectors`].
 //!
-//! A word is 32 pairs of lanes; the compare of each pair narrows to two
-//! 32-bit lanes, so that four rows form the same four-lane group the int4
-//! packing weighs and adds, and the rest of the packing is that of
-//! `filter.rs`. A Datum holds an int8 whole, so the Datum block loads like
-//! the dense one, without deinterleaving.
+//! A Datum holds an int8 whole, so the Datum block loads like the dense
+//! one, without deinterleaving.
 
-use core::arch::aarch64::{
-    int64x2_t, vceqq_s64, vcgeq_s64, vcgtq_s64, vcleq_s64, vcltq_s64, vcombine_u32, vdupq_n_s64,
-    vld1q_s64, vmovn_u64, vmvnq_u32,
-};
-
-use super::{Neon, non_null_lanes, pack_lanes};
+use super::{Neon, Vectors};
 use crate::int64::Side;
 use crate::ops::CompareOp;
 
 /// Rows of a dense block whose value satisfies `value op scalar`, as bits in
 /// row order. NULL rows compare like any other and are masked by the caller.
 #[inline]
-pub fn filter_dense64(_: Neon, values: &[i64; 64], scalar: i64, op: CompareOp) -> u64 {
+pub fn filter_dense64(neon: Neon, values: &[i64; 64], scalar: i64, op: CompareOp) -> u64 {
     // SAFETY: the token proves that this processor runs NEON.
-    unsafe { dense(values, scalar, op) }
+    unsafe { dense(neon, values, scalar, op) }
 }
 
 /// Rows of a Datum block whose int8 value satisfies `value op scalar` and
 /// whose flag is not NULL, as bits in row order.
 #[inline]
 pub fn filter_datum64(
-    _: Neon,
+    neon: Neon,
     values: &[u64; 64],
     isnull: &[bool; 64],
     scalar: i64,
     op: CompareOp,
 ) -> u64 {
     // SAFETY: as in filter_dense64.
-    unsafe { datum(values, isnull, scalar, op) }
+    unsafe { datum(neon, values, isnull, scalar, op) }
 }
 
-#[target_feature(enable = "neon")]
-fn dense(values: &[i64; 64], scalar: i64, op: CompareOp) -> u64 {
-    // SAFETY: `pair` is below 32, so the two lanes read end within the array.
-    let load = |pair: usize| unsafe { vld1q_s64(values.as_ptr().add(pair * 2)) };
-    pack(op, scalar, load)
-}
-
-#[target_feature(enable = "neon")]
-fn datum(values: &[u64; 64], isnull: &[bool; 64], scalar: i64, op: CompareOp) -> u64 {
-    // SAFETY: `pair` is below 32; a Datum holding an int8 is its bits.
-    let load = |pair: usize| unsafe { vld1q_s64(values.as_ptr().cast::<i64>().add(pair * 2)) };
-    pack(op, scalar, load) & non_null_lanes(isnull)
-}
-
-/// Compare 32 pairs of lanes and pack the results into 64 bits, with the
-/// comparison chosen once per word. Each group of four rows is two pairs
-/// narrowed into four 32-bit lanes; `Ne` inverts the narrowed group once
-/// instead of each pair.
 /// The lanes where `left op right` over two whole-word sides of int8
 /// columns: dense or Datum storage, the two in any combination; a Datum
 /// is the whole word, so both load alike.
 #[inline]
-pub fn compare_sides64(_: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
+pub fn compare_sides64(neon: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
     // SAFETY: the token proves that this processor runs NEON.
-    unsafe { sides(side_words(left), side_words(right), op) }
+    unsafe { sides(neon, side_words(left), side_words(right), op) }
 }
 
 /// The 64 eight-byte words of a side, dense or Datum alike.
@@ -76,45 +51,101 @@ fn side_words(side: Side<'_>) -> &[i64; 64] {
     }
 }
 
-#[target_feature(enable = "neon")]
-fn sides(left: &[i64; 64], right: &[i64; 64], op: CompareOp) -> u64 {
-    // SAFETY: `pair` is below 32, so the two words read lie within 64.
-    let l = |pair: usize| unsafe { vld1q_s64(left.as_ptr().add(pair * 2)) };
-    // SAFETY: as above.
-    let r = |pair: usize| unsafe { vld1q_s64(right.as_ptr().add(pair * 2)) };
-    let group = |compare: &dyn Fn(int64x2_t, int64x2_t) -> core::arch::aarch64::uint64x2_t,
-                 group: usize| {
-        vcombine_u32(
-            vmovn_u64(compare(l(group * 2), r(group * 2))),
-            vmovn_u64(compare(l(group * 2 + 1), r(group * 2 + 1))),
-        )
-    };
+// The functions compiled for the vector set of the target, into which the
+// kernels below are inlined, as in `filter.rs`. They take the token of
+// NEON while only NEON has this family open: elsewhere it has no values,
+// so they cannot be called.
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn dense(neon: Neon, values: &[i64; 64], scalar: i64, op: CompareOp) -> u64 {
+    dense_word(neon, values, scalar, op)
+}
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn datum(
+    neon: Neon,
+    values: &[u64; 64],
+    isnull: &[bool; 64],
+    scalar: i64,
+    op: CompareOp,
+) -> u64 {
+    datum_word(neon, values, isnull, scalar, op)
+}
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn sides(neon: Neon, left: &[i64; 64], right: &[i64; 64], op: CompareOp) -> u64 {
+    sides_word(neon, left, right, op)
+}
+
+#[inline(always)]
+fn dense_word<V: Vectors>(v: V, values: &[i64; 64], scalar: i64, op: CompareOp) -> u64 {
+    // SAFETY: `pack64` asks for the vectors of a word only.
+    pack(v, op, scalar, |index| unsafe { v.load64(values, index) })
+}
+
+#[inline(always)]
+fn datum_word<V: Vectors>(
+    v: V,
+    values: &[u64; 64],
+    isnull: &[bool; 64],
+    scalar: i64,
+    op: CompareOp,
+) -> u64 {
+    // SAFETY: as in dense_word.
+    pack(v, op, scalar, |index| unsafe {
+        v.load_datums64(values, index)
+    }) & v.non_null_bits(isnull)
+}
+
+#[inline(always)]
+fn sides_word<V: Vectors>(v: V, left: &[i64; 64], right: &[i64; 64], op: CompareOp) -> u64 {
+    // SAFETY, for both loaders: `pack64` asks for the vectors of a word
+    // only, which lie within the 64 words of each side.
+    let l = |index: usize| unsafe { v.load64(left, index) };
+    let r = |index: usize| unsafe { v.load64(right, index) };
     match op {
-        CompareOp::Eq => pack_lanes(|g| group(&|a, b| vceqq_s64(a, b), g)),
-        CompareOp::Ne => pack_lanes(|g| vmvnq_u32(group(&|a, b| vceqq_s64(a, b), g))),
-        CompareOp::Lt => pack_lanes(|g| group(&|a, b| vcltq_s64(a, b), g)),
-        CompareOp::Le => pack_lanes(|g| group(&|a, b| vcleq_s64(a, b), g)),
-        CompareOp::Gt => pack_lanes(|g| group(&|a, b| vcgtq_s64(a, b), g)),
-        CompareOp::Ge => pack_lanes(|g| group(&|a, b| vcgeq_s64(a, b), g)),
+        CompareOp::Eq => v.pack64(false, |i| v.eq64(l(i), r(i))),
+        CompareOp::Ne => v.pack64(true, |i| v.eq64(l(i), r(i))),
+        CompareOp::Lt => v.pack64(false, |i| v.lt64(l(i), r(i))),
+        CompareOp::Le => v.pack64(false, |i| v.le64(l(i), r(i))),
+        CompareOp::Gt => v.pack64(false, |i| v.gt64(l(i), r(i))),
+        CompareOp::Ge => v.pack64(false, |i| v.ge64(l(i), r(i))),
     }
 }
 
-#[inline]
-#[target_feature(enable = "neon")]
-fn pack(op: CompareOp, scalar: i64, load: impl Fn(usize) -> int64x2_t) -> u64 {
-    let scalar = vdupq_n_s64(scalar);
-    let group = |compare: &dyn Fn(int64x2_t) -> core::arch::aarch64::uint64x2_t, group: usize| {
-        vcombine_u32(
-            vmovn_u64(compare(load(group * 2))),
-            vmovn_u64(compare(load(group * 2 + 1))),
-        )
-    };
+/// Compare the vectors of a word with a scalar and pack the results into
+/// 64 bits, with the comparison chosen once per word; `Ne` packs the
+/// inverse of `Eq`.
+#[inline(always)]
+fn pack<V: Vectors>(v: V, op: CompareOp, scalar: i64, load: impl Fn(usize) -> V::I64) -> u64 {
+    let scalar = v.splat64(scalar);
     match op {
-        CompareOp::Eq => pack_lanes(|g| group(&|v| vceqq_s64(v, scalar), g)),
-        CompareOp::Ne => pack_lanes(|g| vmvnq_u32(group(&|v| vceqq_s64(v, scalar), g))),
-        CompareOp::Lt => pack_lanes(|g| group(&|v| vcltq_s64(v, scalar), g)),
-        CompareOp::Le => pack_lanes(|g| group(&|v| vcleq_s64(v, scalar), g)),
-        CompareOp::Gt => pack_lanes(|g| group(&|v| vcgtq_s64(v, scalar), g)),
-        CompareOp::Ge => pack_lanes(|g| group(&|v| vcgeq_s64(v, scalar), g)),
+        CompareOp::Eq => v.pack64(false, |i| v.eq64(load(i), scalar)),
+        CompareOp::Ne => v.pack64(true, |i| v.eq64(load(i), scalar)),
+        CompareOp::Lt => v.pack64(false, |i| v.lt64(load(i), scalar)),
+        CompareOp::Le => v.pack64(false, |i| v.le64(load(i), scalar)),
+        CompareOp::Gt => v.pack64(false, |i| v.gt64(load(i), scalar)),
+        CompareOp::Ge => v.pack64(false, |i| v.ge64(load(i), scalar)),
     }
 }

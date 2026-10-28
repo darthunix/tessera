@@ -30,9 +30,10 @@ mod avx2;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod neon;
 
-/// The primitives of a vector set, over the lanes of int4 values, that the
-/// kernels of this module are written over once. A value of the type is
-/// the token of its set, so a primitive may use the set's instructions.
+/// The primitives of a vector set, over the lanes of int4 and of int8
+/// values, that the kernels of this module are written over once. A value
+/// of the type is the token of its set, so a primitive may use the set's
+/// instructions.
 ///
 /// A kernel is a generic function, `#[inline(always)]`, called from one
 /// function for each set that carries the set's feature and is never
@@ -43,10 +44,11 @@ mod neon;
 /// intrinsics they wrap are; one chosen at run time marks them
 /// `#[inline(always)]`.
 ///
-/// A word of 64 rows is `64 / LANES` groups of lanes, in the order of its
-/// rows. A set gives each operation its own best sequence: the comparisons
-/// that are not its own are made of [`Vectors::eq`] and [`Vectors::gt`] by
-/// swapping the operands and inverting.
+/// A word of 64 rows is `64 / LANES` groups of int4 lanes, or `64 /
+/// LANES64` vectors of int8 lanes, in the order of its rows. A set gives
+/// each operation its own best sequence: the comparisons that are not its
+/// own are made of [`Vectors::eq`] and [`Vectors::gt`], or of their int8
+/// forms, by swapping the operands and inverting.
 pub(crate) trait Vectors: Token + 'static {
     /// The int4 lanes of one group.
     type I32: Copy;
@@ -109,6 +111,64 @@ pub(crate) trait Vectors: Token + 'static {
     /// The rows of a Datum block whose flag is false, as bits in the order
     /// of its rows.
     fn non_null_bits(self, isnull: &[bool; 64]) -> u64;
+
+    /// The int8 lanes of one vector.
+    type I64: Copy;
+    /// The lane masks of a comparison of int8 lanes.
+    type M64: Copy;
+    /// The int8 lanes of a vector.
+    const LANES64: usize;
+
+    /// The lanes of vector `index` of a dense int8 block.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be below `64 / LANES64`.
+    unsafe fn load64(self, values: &[i64; 64], index: usize) -> Self::I64;
+
+    /// The lanes of vector `index` of a Datum block of int8 values: a
+    /// Datum holds an int8 whole, as `DatumGetInt64` reads it.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be below `64 / LANES64`.
+    unsafe fn load_datums64(self, values: &[u64; 64], index: usize) -> Self::I64;
+
+    /// `value` in every int8 lane.
+    fn splat64(self, value: i64) -> Self::I64;
+
+    /// The int8 lanes where `a == b`.
+    fn eq64(self, a: Self::I64, b: Self::I64) -> Self::M64;
+
+    /// The int8 lanes where `a > b`.
+    fn gt64(self, a: Self::I64, b: Self::I64) -> Self::M64;
+
+    /// The int8 lanes where `a >= b`.
+    #[inline(always)]
+    fn ge64(self, a: Self::I64, b: Self::I64) -> Self::M64 {
+        self.not64(self.gt64(b, a))
+    }
+
+    /// The int8 lanes where `a < b`.
+    #[inline(always)]
+    fn lt64(self, a: Self::I64, b: Self::I64) -> Self::M64 {
+        self.gt64(b, a)
+    }
+
+    /// The int8 lanes where `a <= b`.
+    #[inline(always)]
+    fn le64(self, a: Self::I64, b: Self::I64) -> Self::M64 {
+        self.ge64(b, a)
+    }
+
+    /// The int8 lanes where `mask` does not hold.
+    fn not64(self, mask: Self::M64) -> Self::M64;
+
+    /// The bits of a word in the order of its rows, from the lane masks of
+    /// its int8 vectors, `lanes(index)` for every index below `64 /
+    /// LANES64` and for no other, inverted when `invert` is: a set inverts
+    /// where it is cheapest, as NEON on the narrowed masks of four rows.
+    fn pack64(self, invert: bool, lanes: impl Fn(usize) -> Self::M64) -> u64;
 }
 
 /// The primitives of a set this target does not run: its token is an
@@ -151,6 +211,38 @@ macro_rules! unreachable_vectors {
             fn non_null_bits(self, _: &[bool; 64]) -> u64 {
                 match self {}
             }
+
+            type I64 = Self;
+            type M64 = Self;
+            const LANES64: usize = 1;
+
+            unsafe fn load64(self, _: &[i64; 64], _: usize) -> Self {
+                match self {}
+            }
+
+            unsafe fn load_datums64(self, _: &[u64; 64], _: usize) -> Self {
+                match self {}
+            }
+
+            fn splat64(self, _: i64) -> Self {
+                match self {}
+            }
+
+            fn eq64(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn gt64(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn not64(self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn pack64(self, _: bool, _: impl Fn(usize) -> Self) -> u64 {
+                match self {}
+            }
         }
     };
 }
@@ -171,7 +263,6 @@ mod arith64;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod cast;
 mod filter;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod filter64;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod hash;
@@ -202,7 +293,6 @@ pub use arith64::{add64, sub64};
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use cast::{widen_datum, widen_dense};
 pub use filter::{compare_sides, filter_datum, filter_dense};
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use filter64::{compare_sides64, filter_datum64, filter_dense64};
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
