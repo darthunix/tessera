@@ -6,11 +6,14 @@ written in Rust, takes all its memory from its caller, and works the
 same in one process and in memory that several processes share.
 Tessera's C nodes call it through `tessera/table.h`.
 
-This page explains what the table is made of, how a batch of rows goes
-in and how it is looked up, how the table grows, and how several
-processes use one table at once. Then it explains what the crate gives
-a caller to keep beside the table: partitions when the table spills, a
-Bloom filter of its keys, and the marks of a RIGHT or FULL join. The
+This page explains where the crate ends and its caller begins, what
+the table is made of, how a batch of rows goes in and how it is looked
+up, how a caller reaches its payloads, how the table grows, and how
+several processes use one table at once. Then it explains what the
+crate gives a caller to keep beside the table: partitions when the
+table spills, a Bloom filter of its keys, and the marks of a RIGHT or
+FULL join. Last, it explains how a call fails, and what shows that
+bytes which are not a table give an error and never a crash. The
 exact bytes, limits and rules are written once, in the documentation
 of the crate's items, which the crate's spec, [spec.md](spec.md) next
 to this page, links to. Where this page leans on a rule, it links to
@@ -286,6 +289,65 @@ calls, whose duties say what the caller promises of that memory. An
 - **One writer**: a caller that has the table to itself while it works.
 - **Participant**: one process of several that work on a shared table.
 
+## The crate and its caller
+
+The crate holds what the hash join and the grouping of any engine
+need, and nothing that knows SQL or the executor of an engine. That
+line decides what lies on each side.
+
+- **In the crate**: the index, the chunks and the records; the calls of
+  a batch and of one writer; the partitions of a table that spills; the
+  Bloom filter of the keys; the marks of a RIGHT or FULL join; and the
+  masks of rows, the crate's own types for its batches.
+- **With its caller**: what a payload means and how it changes, such as
+  the states of aggregates and their sums; the items of a sort; reading
+  keys from the caller's columns; the steps of a build by several
+  processes; and the files of a spill. Tessera's kernels keep all of
+  these, over the calls this page describes.
+
+The crate depends on no crate of Tessera. The masks of rows belong to
+the crate, since its calls take them. Tessera's kernels use them too,
+through `tessera-core`, which exports them again. So `tessera-core`
+depends on the crate, which may look upside down. A third crate for
+the masks alone was refused: about 450 lines, and one more crate to
+keep.
+
+A view of a mask is its count of rows and its words. Arrow's bitmaps
+can also start at a bit inside a byte. No source of Tessera gives such
+a mask, so the crate has no such form; it can come with a source that
+needs it. A read of a word past a mask's words panics. A check there
+would cost 4 to 9 instructions a word in the loops of Tessera's
+kernels. A mask is the caller's argument, not the table's bytes, so
+the promise over any bytes does not cover it.
+
+The table gives a key no type. A table is made for a count of keys and
+a payload size, a `TableConfig`. Each key is a word of 8 bytes
+compared bit for bit, and the source of keys puts a value into that
+word. The caller keeps the kinds of its keys: Tessera's nodes keep
+them to read key columns and to make the items of a sort. A byte for
+each key, kept in the header but never read by the table, was refused:
+a field of the format that the table itself does not use. So the crate
+holds no name of a PostgreSQL type.
+
+The crate builds for 64-bit targets only. Its arithmetic of offsets
+takes a `usize` of 64 bits: the bytes of the buckets, 4 for each of up
+to 2^31 buckets, would wrap on a 32-bit target and pass the check of
+the index. Rather than check every such product, the crate refuses to
+build on another target, with an error that says why.
+
+A caller's loops call the crate's hot calls many times a batch.
+Tessera builds without link-time optimization, and then the compiler
+inlines a function of another crate only when it is generic or marked
+`#[inline]`. The hot calls are generic or marked so, and a loop of the
+caller compiles as if the table were its own code. With link-time
+optimization, which the README advises, the rest can be inlined too.
+
+The API is small and plain. Its items lie at the crate's root. A
+reference stays a `u32`: a type of its own would be converted by every
+array that crosses into C. The calls over the caller's memory take raw
+pointers and lengths, not slices: in shared memory other processes
+write while a call runs, which a slice forbids.
+
 ## The index
 
 The index is made once for a number of records, its capacity:
@@ -424,6 +486,19 @@ refuses keys or a payload size other than the table's. A caller's
 mistake then fails where it is made, and is not found later as a
 damaged table.
 
+A batch is one value that the caller makes once and gives to call
+after call. It holds the mask of the rows still to place by value,
+beside the hashes, the keys and the references, and is made from the
+caller's words or from a mask. The mask is where the next call goes
+on. A call into one chunk places a run of rows from the start, and a
+call by partition leaves rows here and there, wherever a partition's
+chunk was full: a mask says both in one way. A row number to go on
+from was refused: it would do for one chunk but not for partitions,
+and two ways to go on are more to learn than one. So was a call that
+asks its caller for a new chunk and never stops: it would have to make
+a larger index under itself, and spill a partition from inside the
+call, far more to pass across the boundary into C than a mask.
+
 The payload of a record comes either from an array that the caller
 filled, or, with `append_columns`, straight from the batch's columns,
 `PayloadColumns`, in the form that its documentation,
@@ -487,12 +562,35 @@ word, with its NULL flag. `record` gives a record's fields, and the one
 writer's `payload_ptrs` gives pointers to payloads, for the few cases
 that need more.
 
+A lookup is one value, as in the batch hash tables of other engines,
+such as DuckDB's `ScanStructure` and Velox's `HashLookup`. It holds one
+mask of the rows still looking and, at each row, the reference of its
+record. Every call narrows that one mask in place: a probe keeps the
+rows that find a record, `next_match` those that find one more, and
+`bloom::probe` those that the filter lets through, before the table's
+probe. Each call returns how many rows are left, so a walk over the
+records of a key is `while table.next_match(&mut matches)? > 0`. The
+reads of found records take the lookup too, so the references and the
+rows they read never disagree; a caller whose references come from
+elsewhere, such as the items of a sort, makes a lookup of them. The
+hashes and the keys stay arguments of the probe, since no read needs
+them.
+
+Two other forms were refused. Velox, Arrow, DataFusion and Polars give
+their joins a list of pairs of a row and a record, with a limit and a
+place to go on from. Here a lookup moves each row one record a call,
+and its references are the place it goes on from. And a lookup of two
+masks, the rows asked and the rows found, would only make each caller
+copy the result of one call into the rows of the next.
+
 When a batch has enough rows selected (8 or more of a word of 64), the
 probe goes over them together, step by step: first every row's bucket,
 then every row's first record, then the next records. Before each step
 it asks the processor to start fetching the memory of the step after
 it. This is the "lookups by batch" goal above. With fewer rows a probe
-goes row by row, which is cheaper for them.
+goes row by row, which is cheaper for them. The hint to fetch is one
+instruction on AArch64, which reads nothing and never faults; on other
+processors, x86-64 among them, the crate gives no hint yet.
 
 Two more ways to read are for records in no useful order. Tessera's
 sort keeps the rows it sorts as records of this format, in a table
@@ -502,6 +600,35 @@ from record to record across its chunks. It reads them with
 the records of 64 rows, then read them. For a join they would cost
 more than they save, since a probe has just read its records and they
 are in the cache.
+
+Every walk down a chain ends, even over damaged bytes. A walk takes at
+most as many steps as the table has records, so a chain that loops is
+found. Over a table of many chunks that bound can be very large: under
+a damaged count of records a loop would take hours a batch. So a walk
+past 64 steps also looks for a loop by Brent's method: it saves the
+place it reached at each doubling of its steps, and compares each step
+with that place. A function out of line runs the method, and a word's
+probe hands it only the rows still walking, so the short chains of a
+sound table keep their loop of one comparison a step. Against a walk
+bounded by the count alone it costs a sound table little, and the cost
+was taken: a found row 0.6 to 0.9 instructions fewer, a probe 5 to
+8 instructions more a call, and a find or insert that finds few rows 36
+to 56 more a call, out of 430 to 730. The access could keep the bound
+of 64 steps as it reads the count, which saved 19 instructions a call,
+but it took a register from the walk, which then read a pointer from
+the stack at each step: 1.2 instructions more a found row. It was
+refused.
+
+That bounds one search, but not a walk over all the matches of a key,
+which a join makes one call at a time: a record whose next field names
+itself would give the same match call after call, each call bounded. So
+a lookup counts the steps its rows took to a next match or a next in a
+group. A lookup can take no more of them than the table has records,
+so a step past that count fails as a damaged chain: one comparison a
+call, not a row. A caller that keeps a lookup's references between
+calls, as C does, keeps the count with them, `Matches::with_steps`.
+Leaving the bound to the caller was refused: every join would have to
+write it again.
 
 ## A key's records together
 
@@ -576,6 +703,88 @@ A walk over the records reads every record below each chunk's used
 mark. An append in another process moves that mark while it writes, so
 a walk is also a call for one writer.
 
+## A caller's payloads
+
+The table never reads a payload, but its caller does: a grouping adds
+each row's values to the states in its group's payload, and a sort
+reads the records it keeps. The crate gives such a caller three ways to
+a payload. Each is generic and inlined into the caller's loop, and each
+keeps the crate's access to the bytes inside the crate.
+
+- **Cursors by reference.** A cursor is made once a call and keeps
+  what the table's access keeps: the chunks and the layout of a record.
+  `Table::records` gives a `RecordCursor`, which reads the record that
+  a reference names. `TableMut::payloads` gives a `PayloadCursor`,
+  which opens the payload that a reference names, to change. It takes
+  itself by `&mut`, so two payloads are never open at once, even for
+  two rows of one record. A sum that keeps the payloads of a few groups
+  at hand checks a reference first, `hold`, and opens its payload later,
+  `held`.
+- **Pointers to payloads.** `TableMut::payload_ptrs` checks the
+  reference of each selected row, as a cursor does, and writes a raw
+  pointer to its payload, made from the chunk's base without borrowing
+  the bytes. Two rows of one record get the same pointer, and each
+  stays valid until the chunk is reset. A grouping whose rows repeat a
+  key needs this. Had the crate lent each row's payload as a borrow,
+  the second borrow of one record would end the first, and a write
+  through the first pointer would break Rust's rules of aliasing. A
+  promise that the
+  references of a batch differ was refused, since a grouping cannot
+  keep it. `each_payload` lends the payloads one at a time, for a
+  caller that is done with one before the next.
+- **A merge by a rule.** `TableMut::merge` puts the records of a chunk
+  into the table by their keys. For a record whose keys the table has,
+  the caller's rule, a closure, takes its payload into the payload of
+  the table's record; a record of new keys is copied and linked. A
+  grouping merges the groups it read back from disk so. The rule's
+  error is of the caller's own type, into which the crate's errors
+  convert. A rule that fails after it changed a payload leaves the
+  payload as it left it, and the table is then the caller's to judge,
+  not a damaged one.
+
+The crate has no walk over records of its own: a caller walks a table
+with `scan` and reads each record with a cursor. The items of a sort pay
+for this. They take their references from `scan` and their keys through
+the reading cursor. So each record is checked twice: by the scan, and by
+the cursor, which takes the reference apart and checks the chunk again.
+That is about ten instructions more a record, and a full sort in Tessera
+is about 5 percent slower. A top-N sort, which reads its records by
+reference anyway, pays nothing. The scan could hand out each record with
+its reference, checked once, but then it would be the walk over records
+that the crate does not keep. A grouping by a generic aggregate, such as
+`max` of a text, pays the same way: the pointers to its payloads check
+each reference again, about 25 instructions a row and 5 percent of its
+time. The call that finds or inserts a row's record could hand out the
+payload too, but that would change the C API for one loop. Making the
+crate's inner access public and `unsafe` was refused: all of it would
+then be part of what must be proven.
+
+## The owning table
+
+An `OwnedTable` allocates its own index and chunks. It adds a chunk
+when the last one is full, and makes a larger index when its records
+reach half the buckets. It is the one way to use the crate without
+`unsafe` code, so the README's example uses it, and the crate's tests
+and benchmarks build their tables with it. Allocating is its job, so
+it stands outside the promise that a call takes no memory, behind the
+feature `alloc`, on by default. A build without the feature has
+nothing that allocates. Tessera's nodes never use it: their memory is
+PostgreSQL's. Moving it into the tests was refused, since a caller
+from outside would then have only the `unsafe` way in; so was dropping
+it, which would make every test and benchmark manage raw memory.
+
+It keeps nothing between its calls that another call could leave
+wrong. An insertion links what it appended, from the used mark of the
+last chunk before it, and nothing else, whatever other calls appended,
+linked or found before. It links what it appended even when it returns
+an error, so the rows placed before the error are found. A place up to
+which the table had linked, kept between calls, was refused: every
+call would have to move it. The table refuses chunks too small for one
+record: with them it would add chunks up to the limit. At the most
+records an index can take, it fails as a wrong call, instead of making
+the same index again and again. Every handle to it borrows it, so it
+may pass to another thread.
+
 ## Several processes at once
 
 In a parallel join the table lies in shared memory and several
@@ -645,6 +854,14 @@ raised only after a record is published, the order once found wrong, a
 probe takes a sound chain for a loop. The model makes that mistake
 itself, holding the link's addition back until the record is in its
 bucket, so that the table's code keeps one order only.
+
+A caller models its own steps with loom too: Tessera models the steps
+of its shared build and of its spill over the table's own code. For
+such models the crate gives a model table, only when it is built with
+`--cfg loom`: append, size, link and probe over loom's atomics. A
+normal build has no such API. A stand-in table in the caller's models
+was refused: they would lose the negative test in which linking before
+the index exists breaks the table.
 
 ## Partitions: a table that spills
 
@@ -827,7 +1044,10 @@ design of `hash-table` tells.
 
   The acquire read of ready makes every bit the builder set visible, as
   the read of a bucket makes a record visible. `bloom::probe_shared`
-  refuses a filter that is not ready.
+  refuses a filter that is not ready. A filter whose build fails stays
+  building: it never reads ready, the probes go on without it, and
+  nobody waits. Setting it back to none was refused: the next
+  participant would take it and fail the same way.
 - **A table that spills.** A filter of every row of the build side is
   filled as the rows come, before some of them go to disk: by
   `bloom::add` in one process, or by every participant at once by
@@ -894,15 +1114,106 @@ orders, by a barrier. The loom model marks records of one word from two
 participants, and a negative test shows that a plain read and write
 loses marks.
 
-## Where the table trusts its bytes
+## Errors of two kinds
+
+A call that refuses returns an `Error`: the rule it found broken, who
+broke it, and up to two numbers that show how. Who broke it is the
+error's kind. A **wrong call** is a value the caller passed that breaks
+a rule: arrays of different lengths, a chunk that does not exist, keys
+that are not the table's. A **damaged table** is a byte read from the
+table's blocks that cannot be: a field of the header out of its range,
+a reference outside its chunk, a chain that loops. What the call read
+decides the kind, not the check. One function checks a reference
+whether the caller passed it or the call read it from a bucket, and
+the call, which knows where it came from, chooses the kind. A
+reference that the caller passed but that lands inside a record reads
+as damage, since the crate cannot tell the two apart. The
+documentation of [`Kind`](../../../crates/relhash/src/error.rs) lists
+what each kind covers, and each `Rule` says what it refuses. Tests
+compare the kind and the rule, never the words of the message, so a
+test sees which check refused.
+
+The error is one integer of 8 bytes, drawn bit by bit in the
+documentation of [`Error`](../../../crates/relhash/src/error.rs). A
+result of a count or a reference is then 16 bytes, which a call returns
+in two registers. Rust returns a struct through memory, even one of 8
+bytes. With the rule in a byte of its own beside seven bytes of numbers,
+the walk down a key's records spent a load a row on the address of the
+result, so that form was refused. A compile-time assertion keeps the
+error at 8 bytes. It allocates nothing and holds no text: it writes its
+message only when it is printed, and Tessera passes that message on to
+PostgreSQL. The rules are listed once, in a macro that writes both the
+enum and the table that turns a number back into its rule, so no
+`unsafe` is needed.
+
+Two more forms were refused. A text, as `anyhow` gives, allocates, and
+a test could only look for words in it. And an error type of the source
+of keys would make every call with keys generic in its error. A source
+that cannot give a word answers `None`; the call then names the rule
+with the word of rows and the key, and a source that must say why keeps
+its own error for its caller to read.
+
+What a call leaves after an error depends on where it stopped.
+
+- A wrong size, count or block that the caller passed is found before
+  the call changes anything.
+- A call that fails part way, at a source of keys that cannot give a
+  word, leaves the table whole. Every exit stores the used marks of the
+  chunks it wrote. The rows placed before the error have left the mask
+  of pending rows with their references, those that made a record are
+  in the mask of inserted rows, and a link counts what it linked and
+  moves its start past it. The caller can go on from the masks.
+- A damaged table is to be dropped or reset. Later calls over it stay
+  bounded and sound, as over any bytes, but what they answer is not
+  promised. `regrow`, `clear_key`, `bloom` and `try_build_bloom` check
+  every chunk before their first change, so that a block that cannot
+  be a chunk fails them before they change anything. The used marks are
+  not stored on the exits of damage: the chains are damaged whatever
+  the marks say, and a stop there would cost the hot loops.
+
+## The promise over any bytes
 
 A call reads the index and the chunks, and what it reads may be
 anything: the caller may hand over bytes that are not a table, or a
 table that a bug damaged. The crate promises an error for such bytes,
-never a crash and never a call that does not end. A **trust point** is
-a place where a call takes a value from the table's blocks: a value it
-did not compute itself, which it must check before the value decides
-anything.
+never a crash and never a call that does not end. The README states
+the promise whole, with what the caller promises in turn when it makes
+a handle over its memory: blocks of the lengths given, aligned to 8
+and initialized; no two of them overlapping; and no other process or
+thread writing the table while the call runs.
+
+The `unsafe` calls that make the handles say more of what the caller
+promises. A chunk has one writer across every table and chunk writer
+over it, and a table that one writer has to itself has its chunks to
+itself too, whatever other index names them. The calls that read the
+used mark of every chunk, `bloom`, `try_build_bloom` and
+`Table::scan_unmarked`, run only once every writer's appends are done
+and ordered before them, as by a barrier. A used mark read and written
+atomically was refused: it makes the read defined but not the answer,
+and the barrier that makes the answer right orders plain reads already.
+
+A shared table that is being built breaks the last condition on
+purpose. A call there checks a reference against the length of its
+chunk, not against its used mark, so as never to race with the chunk's
+writer. A damaged reference can then point at bytes another process is
+writing: a race that no check can turn into an error. For such a table
+the crate promises only what "Several processes at once" says, over a
+table that is not damaged, which loom checks. Promising more would
+need an atomic read of every byte of a record, a cost on every probe.
+
+Seven means show the promise, each covering what the others cannot:
+the trust points below, each with its check; Kani's proofs of the
+checks, for every value; the matrix of damage, which runs every call
+over every damage; fuzzing of the same shapes with the bytes and
+arguments the fuzzer chooses; every mutant of the crate caught by its
+own tests; Miri over every test; and tests of the rest of the promise,
+under an allocator that counts. "Tests" says where each lives.
+
+## Where the table trusts its bytes
+
+A **trust point** is a place where a call takes a value from the
+table's blocks: a value it did not compute itself, which it must check
+before the value decides anything.
 
 What a value decides says what a wrong one would do:
 
@@ -1153,12 +1464,37 @@ is never merged and counts the parts and the interfaces it touched.
   measured in a plan of one process and was not the main cost of an
   insertion, so one code serves both.
 - **The hash as the key.** See "Looking rows up".
+- **A call for one key, and typed keys and values.** For one key at a
+  time a general hash map, such as hashbrown, is faster and smaller. A
+  layer of typed keys and values may come later, over the calls of
+  batches.
+- **Removing records.** Records are only appended. A removal by one
+  writer is possible later, and "The forecast, probed" counts what it
+  would touch; a removal by several processes at once is a hard problem
+  of freeing memory.
+- **Checksums of records.** Damaged bytes that still look like a table
+  give a wrong answer without an error. Only a checksum read with every
+  record would catch them, at a cost on every probe.
+- **A defense against chosen collisions.** The caller gives the hash.
+  The README says to hash keys from outside with a secret seed.
+- **A full formal proof**, with Verus or Creusot. The code would have to
+  be written again in their subset. The risk lies in the unsafe code
+  and in the protocol of several processes, which Kani and loom check.
+- **`no_std`.** A call allocates nothing, so the crate could do without
+  Rust's standard library, but nobody needs that now. The feature
+  `alloc` only leaves the owning table out.
 
 ## Files
 
+- `crates/relhash/README.md`: the crate's page, with an example over
+  the owning table and the promise over any bytes
+- `crates/relhash/Cargo.toml`: the crate alone, and its features
 - `crates/relhash/src/lib.rs`: the crate's root, its parts in a picture
-  and its examples
+  and its examples, and its refusal of a target that is not 64-bit
+- `crates/relhash/src/error.rs`: the error, its kinds and its rules
 - `crates/relhash/src/row_mask.rs`: the masks of rows
+- `crates/relhash/src/bits.rs`: the ones of a word, the rows a word of
+  a mask selects
 - `crates/relhash/src/table/mod.rs`: the table, its calls and
   their rules
 - `crates/relhash/src/table/chunks.rs`: the chunks, their checks,
@@ -1176,12 +1512,12 @@ is never merged and counts the parts and the interfaces it touched.
 - `crates/relhash/src/table/lanes.rs`: the probe of a word of rows,
   step by step for all its rows at once, and its prefetch hint
 - `crates/relhash/src/table/writer.rs`: the calls of one
-  writer, the lookup by partition, the cursor over payloads and the
-  merge by a rule
+  writer, the lookup by partition, the cursors by reference, the
+  pointers to payloads and the merge by a rule
 - `crates/relhash/src/table/keys.rs`: the keys of a batch, a
   word of rows at a time
-- `crates/relhash/src/table/owned.rs`: a table that owns its
-  memory, for tests and benchmarks
+- `crates/relhash/src/table/owned.rs`: the table that owns its
+  memory
 - `crates/relhash/src/table/bloom.rs`: the Bloom filter, alone,
   shared and filled together
 - `crates/relhash/src/table/marks.rs`: the marks of a RIGHT or
@@ -1194,6 +1530,8 @@ is never merged and counts the parts and the interfaces it touched.
   tests and loom models
 - `crates/relhash/src/table/proofs.rs`: the proofs by Kani of the
   checks of the trust points, the partitions, the filter and the marks
+- `crates/relhash/src/table/tests/`: the crate's tests by topic, the
+  matrices of damage and of wrong arguments, and their shared world
 - `crates/relhash/fuzz/`: the fuzz targets, a crate of their own outside
   the workspace, with their builder of tables over the public API
 
@@ -1202,6 +1540,18 @@ is never merged and counts the parts and the interfaces it touched.
 - The unit tests in `crates/relhash/src/table/tests/`: the format and
   every call, with damaged headers, chunks, references and chains, over
   keys of their own; they also run under Miri, at smaller sizes.
+  `partial.rs` makes sources and chunks that fail part way, and checks
+  that the rows placed stay placed and the masks say so; `owned.rs`
+  runs random sequences of the owning table's calls against a model of
+  the records of each key.
+- The examples of the documentation that must not compile: two
+  payloads open at once, a handle sent to another thread, and an
+  `unsafe` call made without `unsafe`.
+- The job "relhash alone" of `.github/workflows/ci.yml`: the crate's
+  tests as the only package, its documentation with every warning an
+  error, a dry run of publishing, a 32-bit target refused, and its
+  public API against a snapshot. `make rust-check` also runs its tests
+  without the feature `alloc`.
 - Every test of the crate and every example of its documentation run
   under Miri in CI, with 16 cases of each property: an access outside a
   block or a borrow that Rust's rules forbid fails them.
