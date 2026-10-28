@@ -6,7 +6,7 @@ use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use super::IntLane;
 use crate::BULK_MIN_ROWS;
-use crate::simd::{Neon, Token, Vectors};
+use crate::simd::{Token, Vectors};
 
 /// The driver of [`crate::int32::min`] and [`crate::int64::min`].
 pub(crate) fn min<T: IntLane, C: ColumnReader<Value = T>>(
@@ -24,8 +24,8 @@ pub(crate) fn min<T: IntLane, C: ColumnReader<Value = T>>(
                 least.min(value.unwrap_or(T::MAX)),
             )
         },
-        |(count, least), neon, block, selected| {
-            let (present, part) = T::min_block(neon, block, selected);
+        |(count, least), set, block, selected| {
+            let (present, part) = T::min_block(set, block, selected);
             (count + present, least.min(part))
         },
     )?;
@@ -47,8 +47,8 @@ pub(crate) fn max<T: IntLane, C: ColumnReader<Value = T>>(
                 greatest.max(value.unwrap_or(T::MIN)),
             )
         },
-        |(count, greatest), neon, block, selected| {
-            let (present, part) = T::max_block(neon, block, selected);
+        |(count, greatest), set, block, selected| {
+            let (present, part) = T::max_block(set, block, selected);
             (count + present, greatest.max(part))
         },
     )?;
@@ -56,31 +56,31 @@ pub(crate) fn max<T: IntLane, C: ColumnReader<Value = T>>(
 }
 
 /// Run one aggregate: `fold` takes a row's value, `block` a whole word with
-/// its selection and the token of NEON. The first word decides the strategy
-/// for the call; deciding
-/// once keeps the loops free of per-word bookkeeping. Inlined into its
-/// caller, as it was when each family had its own: called, it returned the
-/// count and the result through memory, 13 more instructions a call.
+/// its selection and the token of the width's aggregates. The first word
+/// decides the strategy for the call; deciding once keeps the loops free
+/// of per-word bookkeeping. Inlined into its caller, as it was when each
+/// family had its own: called, it returned the count and the result
+/// through memory, 13 more instructions a call.
 #[inline(always)]
 pub(crate) fn aggregate<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     column: &C,
     rows: &RowMaskView<'_>,
     init: B,
     mut fold: impl FnMut(B, Option<T>) -> B,
-    block: impl for<'a> FnMut(B, Neon, WordBlock<'a, T>, u64) -> B,
+    block: impl for<'a> FnMut(B, T::Aggregates, WordBlock<'a, T>, u64) -> B,
 ) -> Result<B> {
-    let neon = Neon::get();
-    let bulk = neon.is_some()
+    let set = T::Aggregates::get();
+    let bulk = set.is_some()
         && rows.nrows() >= 64
         && rows.get_word(0).is_some_and(|selected| {
             (selected == u64::MAX
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
                 && column.word_block(0).is_some()
         });
-    if let Some(neon) = neon
+    if let Some(set) = set
         && bulk
     {
-        aggregate_bulk(neon, column, rows, init, fold, block)
+        aggregate_bulk(set, column, rows, init, fold, block)
     } else {
         column.try_fold_selected(rows, init, |acc, _, value| Ok(fold(acc, value)))
     }
@@ -90,12 +90,12 @@ pub(crate) fn aggregate<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
 /// the tail and refused words through the word iterator's bulk fold.
 #[inline(never)]
 fn aggregate_bulk<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
-    neon: Neon,
+    set: T::Aggregates,
     column: &C,
     rows: &RowMaskView<'_>,
     init: B,
     mut fold: impl FnMut(B, Option<T>) -> B,
-    mut block: impl for<'a> FnMut(B, Neon, WordBlock<'a, T>, u64) -> B,
+    mut block: impl for<'a> FnMut(B, T::Aggregates, WordBlock<'a, T>, u64) -> B,
 ) -> Result<B> {
     let mut acc = init;
     for index in 0..rows.nrows().div_ceil(64) {
@@ -107,7 +107,7 @@ fn aggregate_bulk<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
             let row = index * 64 + selected.trailing_zeros() as usize;
             acc = fold(acc, column.get(row)?);
         } else if let Some(word) = column.word_block(index) {
-            acc = block(acc, neon, word, selected);
+            acc = block(acc, set, word, selected);
         } else {
             acc = column
                 .word_values(index, selected)?

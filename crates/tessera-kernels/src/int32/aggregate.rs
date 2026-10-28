@@ -11,14 +11,15 @@
 //!
 //! When the first word of the selection is full, selects at least a dozen
 //! rows and the reader exposes its storage, the call aggregates whole words
-//! (vector code on AArch64) and reads only single-row words, the tail and
-//! refused words row by row. Otherwise it reads through
-//! [`ColumnReader::try_fold_selected`]: the representation chooses its NULL
-//! mode once and walks full words with a counted loop. Only the first word is
-//! consulted: selectivity is roughly uniform within a batch, and scanning for
-//! a first nonempty word cost an empty selection almost as much as reading
-//! it. Either way a NULL row contributes an identity value rather than a
-//! branch, so the accumulator's dependency chain stays short.
+//! (vector code: NEON on AArch64, AVX2 on x86-64 where the processor has
+//! it) and reads only single-row words, the tail and refused words row by
+//! row. Otherwise it reads through [`ColumnReader::try_fold_selected`]: the
+//! representation chooses its NULL mode once and walks full words with a
+//! counted loop. Only the first word is consulted: selectivity is roughly
+//! uniform within a batch, and scanning for a first nonempty word cost an
+//! empty selection almost as much as reading it. Either way a NULL row
+//! contributes an identity value rather than a branch, so the
+//! accumulator's dependency chain stays short.
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView};
@@ -55,8 +56,8 @@ pub fn sum<C: ColumnReader<Value = i32>>(
                 total + value.map_or(0, i64::from),
             )
         },
-        |(count, total), neon, block, selected| {
-            let (present, part) = bulk::sum(neon, block, selected);
+        |(count, total), simd, block, selected| {
+            let (present, part) = bulk::sum(simd, block, selected);
             (count + present, total + part)
         },
     )?;
@@ -106,14 +107,14 @@ mod bulk {
     use tessera_core::WordBlock;
 
     use crate::int::present;
-    use crate::simd::{self, Neon};
+    use crate::simd::{self, Simd};
 
     #[inline]
-    pub fn sum(neon: Neon, block: WordBlock<'_, i32>, selected: u64) -> (usize, i64) {
-        let mask = present(neon, &block, selected);
+    pub fn sum(set: Simd, block: WordBlock<'_, i32>, selected: u64) -> (usize, i64) {
+        let mask = present(set, &block, selected);
         let total = match block {
-            WordBlock::Dense { values, .. } => simd::sum_dense(neon, values, mask),
-            WordBlock::Datum { values, .. } => simd::sum_datum(neon, values, mask),
+            WordBlock::Dense { values, .. } => simd::sum_dense(set, values, mask),
+            WordBlock::Datum { values, .. } => simd::sum_datum(set, values, mask),
         };
         (mask.count_ones() as usize, total)
     }

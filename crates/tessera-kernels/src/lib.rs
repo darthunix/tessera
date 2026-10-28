@@ -32,15 +32,15 @@
 //! Full prepared words of representations that expose their storage
 //! ([`tessera_core::WordBlock`]) are compared, aggregated, computed and
 //! hashed with NEON on AArch64, division by a scalar included; the filters
-//! of int4 and int8, the comparisons of two such columns and their
-//! arithmetic run with AVX2 on x86-64 too, where the processor has it;
-//! everything else takes the row paths. [`table`] is a hash table in a
-//! region of memory the caller owns, for joins and grouping, addressed by
-//! offsets so that the same bytes serve local and shared memory, and
-//! [`sort`] orders a table's records by their integer keys. `unsafe`
-//! is denied crate-wide and allowed only in two isolated modules: [`simd`],
-//! for vector loads and intrinsics, and [`table`], for the region over raw
-//! pointers.
+//! of int4 and int8, the comparisons of two such columns, their
+//! arithmetic, the int4 aggregates and the count run with AVX2 on x86-64
+//! too, where the processor has it; everything else takes the row paths.
+//! [`table`] is a hash table in a region of memory the caller owns, for
+//! joins and grouping, addressed by offsets so that the same bytes serve
+//! local and shared memory, and [`sort`] orders a table's records by their
+//! integer keys. `unsafe` is denied crate-wide and allowed only in two
+//! isolated modules: [`simd`], for vector loads and intrinsics, and
+//! [`table`], for the region over raw pointers.
 //!
 //! Code shape. `#[inline(always)]` and `#[inline(never)]` on a hot path
 //! record a decision checked in the disassembly of the bench binaries or by

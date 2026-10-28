@@ -116,7 +116,7 @@ exclude_re = [
     "accumulate\\.rs:399:50: replace \\|\\| with && in sum_terms$",
     "accumulate\\.rs:[0-9]+:[0-9]+: replace \\* with \\+$",
     "cast\\.rs:7[34]:[0-9]+: replace (&& with \\|\\||>= with <) in int4_to_int8$",
-    "count\\.rs:39:[0-9]+: replace >= with < in count$",
+    "count\\.rs:40:[0-9]+: replace >= with < in count$",
     "int/aggregate\\.rs:7[45]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
     "int/arith\\.rs:20[56]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
     "int/arith\\.rs:(20[89]|210):[0-9]+: (replace|delete) .* in run$",

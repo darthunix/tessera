@@ -78,6 +78,11 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// comparisons, whose [`IntLane::side`] gives its operands.
     type Arith: Vectors + From<Neon>;
 
+    /// The vector set of the width's aggregates, [`IntLane::min_block`]
+    /// and [`IntLane::max_block`], and of the int4 sum, which the driver
+    /// of both widths runs.
+    type Aggregates: Vectors;
+
     /// The least and the greatest value, the identities of `max` and `min`.
     const MIN: Self;
     const MAX: Self;
@@ -159,9 +164,11 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
 
     /// The count of a whole word's selected non-NULL rows and the least of
     /// them, `MAX` without any.
-    fn min_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, Self);
+    fn min_block(set: Self::Aggregates, block: WordBlock<'_, Self>, selected: u64)
+    -> (usize, Self);
 
     /// The count of a whole word's selected non-NULL rows and the greatest
     /// of them, `MIN` without any.
-    fn max_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, Self);
+    fn max_block(set: Self::Aggregates, block: WordBlock<'_, Self>, selected: u64)
+    -> (usize, Self);
 }
