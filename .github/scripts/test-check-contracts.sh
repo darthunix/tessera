@@ -376,6 +376,51 @@ code
 commit
 expect 0 "2 rules"
 
+# A change's contract checked by a file of the change's folder, on main,
+# and a branch that closes the change: the contract and the file move
+# beside the part's spec.
+in_change() {
+    base
+    mkdir -p openspec/changes/new
+    git mv openspec/specs/box/contract.md openspec/changes/new/contract.md
+    echo 'the api' > openspec/changes/new/api.txt
+    sed -i.bak 's|`tests/alone.sh::alone check`|`tests/alone.sh::alone check`; `openspec/changes/new/api.txt::the api`|' \
+        openspec/changes/new/contract.md
+    rm openspec/changes/new/contract.md.bak
+    git add -A
+    git commit -q -m "into the change"
+    git checkout -q main
+    git merge -q --ff-only change
+    git checkout -q -b close
+    mkdir -p openspec/specs/box
+    git mv openspec/changes/new/contract.md openspec/specs/box/contract.md
+    git mv openspec/changes/new/api.txt openspec/specs/box/api.txt
+}
+
+next "the contract moves to its part with a file its check names"
+in_change
+swap 's|openspec/changes/new/api.txt|openspec/specs/box/api.txt|'
+code
+commit
+expect 0 "2 rules"
+
+next "the contract moves to its part and drops the file's check"
+in_change
+swap 's|; `openspec/specs/box/api.txt::the api`||; s|; `openspec/changes/new/api.txt::the api`||'
+code
+commit
+expect 1 "no longer checked by"
+
+next "a path into another change's folder is not moved"
+in_change
+swap 's|openspec/changes/new/api.txt|openspec/specs/box/api.txt|'
+mkdir -p openspec/changes/other
+git mv openspec/specs/box/api.txt openspec/changes/other/api.txt
+swap 's|openspec/specs/box/api.txt|openspec/changes/other/api.txt|'
+code
+commit
+expect 1 "no longer checked by"
+
 if test "$failures" -gt 0; then
     echo "test-check-contracts: $failures failed"
     exit 1
