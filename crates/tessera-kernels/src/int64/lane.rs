@@ -36,30 +36,18 @@ impl IntLane for i64 {
 
     #[inline(always)]
     fn compare_sides(neon: Neon, left: Side<'_>, right: Side<'_>, op: CompareOp) -> u64 {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        return crate::simd::compare_sides64(neon, left, right, op);
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (left, right, op);
-            match neon {}
-        }
+        crate::simd::compare_sides64(neon, left, right, op)
     }
 
     #[inline(always)]
     fn filter_block(neon: Neon, block: WordBlock<'_, Self>, scalar: Self, op: CompareOp) -> u64 {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        return match block {
+        match block {
             WordBlock::Dense { values, non_nulls } => {
                 crate::simd::filter_dense64(neon, values, scalar, op) & non_nulls
             }
             WordBlock::Datum { values, isnull } => {
                 crate::simd::filter_datum64(neon, values, isnull, scalar, op)
             }
-        };
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (block, scalar, op);
-            match neon {}
         }
     }
 

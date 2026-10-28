@@ -1,5 +1,6 @@
 //! The primitives of AVX2: [`Vectors`] for [`Avx2`], eight int4 lanes to
-//! a vector and eight groups to a word. Each is an intrinsic, or a short
+//! a vector and eight groups to a word, four int8 lanes to a vector and 16
+//! vectors to a word. Each is an intrinsic, or a short
 //! sequence of them, called in an `unsafe` block whose reason is the
 //! token: a value of `Avx2` exists only where the processor runs AVX2.
 //!
@@ -13,10 +14,11 @@
 //! cannot be inlined there and made a loader too dear to inline.
 
 use core::arch::x86_64::{
-    __m256i, _mm256_castps_si256, _mm256_castsi256_ps, _mm256_cmpeq_epi8, _mm256_cmpeq_epi32,
-    _mm256_cmpgt_epi32, _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_movemask_ps,
-    _mm256_permute4x64_epi64, _mm256_set1_epi32, _mm256_setzero_si256, _mm256_shuffle_ps,
-    _mm256_xor_si256,
+    __m256i, _mm256_castps_si256, _mm256_castsi256_pd, _mm256_castsi256_ps, _mm256_cmpeq_epi8,
+    _mm256_cmpeq_epi32, _mm256_cmpeq_epi64, _mm256_cmpgt_epi32, _mm256_cmpgt_epi64,
+    _mm256_loadu_si256, _mm256_movemask_epi8, _mm256_movemask_pd, _mm256_movemask_ps,
+    _mm256_permute4x64_epi64, _mm256_set1_epi32, _mm256_set1_epi64x, _mm256_setzero_si256,
+    _mm256_shuffle_ps, _mm256_xor_si256,
 };
 
 use super::{Avx2, Vectors};
@@ -76,6 +78,56 @@ impl Vectors for Avx2 {
     fn non_null_bits(self, isnull: &[bool; 64]) -> u64 {
         // SAFETY: as in `splat`.
         unsafe { non_null_lanes(isnull) }
+    }
+
+    type I64 = __m256i;
+    type M64 = __m256i;
+    const LANES64: usize = 4;
+
+    #[inline(always)]
+    unsafe fn load64(self, values: &[i64; 64], index: usize) -> __m256i {
+        debug_assert!(index < 64 / Self::LANES64);
+        // SAFETY: the token proves that this processor runs AVX2, and the
+        // caller keeps `index` below 16, so the four lanes read end within
+        // the array; the load takes any alignment.
+        unsafe { _mm256_loadu_si256(values.as_ptr().add(index * 4).cast()) }
+    }
+
+    #[inline(always)]
+    unsafe fn load_datums64(self, values: &[u64; 64], index: usize) -> __m256i {
+        debug_assert!(index < 64 / Self::LANES64);
+        // SAFETY: as in `load64`; a Datum holding an int8 is its bits.
+        unsafe { _mm256_loadu_si256(values.as_ptr().add(index * 4).cast()) }
+    }
+
+    #[inline(always)]
+    fn splat64(self, value: i64) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_set1_epi64x(value) }
+    }
+
+    #[inline(always)]
+    fn eq64(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_cmpeq_epi64(a, b) }
+    }
+
+    #[inline(always)]
+    fn gt64(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_cmpgt_epi64(a, b) }
+    }
+
+    #[inline(always)]
+    fn not64(self, mask: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { not(mask) }
+    }
+
+    #[inline(always)]
+    fn pack64(self, invert: bool, lanes: impl Fn(usize) -> __m256i) -> u64 {
+        // SAFETY: as in `splat`.
+        unsafe { pack64_lanes(invert, lanes) }
     }
 }
 
@@ -139,4 +191,18 @@ fn pack_lanes(lanes: impl Fn(usize) -> __m256i) -> u64 {
         bits |= u64::from(mask as u8) << (group * 8);
     }
     bits
+}
+
+/// The bits of a word from the lane masks of its 16 vectors of int8
+/// lanes: `vmovmskpd` gives the four bits of a vector at once, and an
+/// inversion is one of the word.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn pack64_lanes(invert: bool, lanes: impl Fn(usize) -> __m256i) -> u64 {
+    let mut bits = 0;
+    for index in 0..16 {
+        let mask = _mm256_movemask_pd(_mm256_castsi256_pd(lanes(index)));
+        bits |= u64::from(mask as u8) << (index * 4);
+    }
+    if invert { !bits } else { bits }
 }

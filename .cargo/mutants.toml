@@ -131,7 +131,7 @@ exclude_re = [
     "int/filter\\.rs:59:17: replace && with \\|\\| in filter_with$",
     "replace bulk_passing -> Option<u64> with None$",
     "set\\.rs:170:[0-9]+: replace (&& with \\|\\||<= with >) in in_set$",
-    "int64/lane\\.rs:(209|213):17: delete match arm \\(ArithOp::(Add|Sub), _\\) in <impl IntLane for i64>::arith_block$",
+    "delete match arm \\(ArithOp::(Add|Sub), _\\) in <impl IntLane for i64>::arith_block$",
     "cast\\.rs:258:9: replace bulk::widen -> u64 with [01]$",
     "count\\.rs:94:5: replace block_count -> usize with [01]$",
     "int32/aggregate\\.rs:132:9: replace bulk::sum -> \\(usize, i64\\) with ",
