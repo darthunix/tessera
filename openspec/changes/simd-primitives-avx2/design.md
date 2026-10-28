@@ -135,6 +135,9 @@ The kernels of int4 and int8 are built in three layers:
     once for every driver.
   - The NEON code may change where the counters of the M5 Pro show no
     loss: the M5 Pro is at hand for runs.
+- 2026-10-28: the prefetch hint of `relhash` on x86-64 comes into this
+  change, as the last of the decisions measured again on Intel, rather
+  than into an entry of the roadmap.
 
 ## Decisions
 
@@ -528,6 +531,17 @@ A value or a form that Intel wants otherwise becomes one per
 architecture, and the M5 Pro keeps its own. Where Intel agrees, the
 comment that gives the reason says that both machines were measured.
 
+Last comes the prefetch hint of `relhash`. The probe of a batch asks
+the processor to fetch the next bucket and record early, and the
+gather of a sort the records of a word, through the crate's own copy of
+the hint: `prfm pldl1keep` on AArch64, nothing elsewhere. On x86-64
+the hint is `prefetcht0`, `_mm_prefetch` with `_MM_HINT_T0`. It is
+SSE, part of every x86-64, so it needs no token and no check of the
+processor, and it lives beside the AArch64 hint, as the forecast of
+the crate's contract says: one module, no interface, no code of
+Tessera. Refused: the hint in `simd/`, which would make `relhash`
+depend on the kernels.
+
 ## Measurement plan
 
 The rules of `docs/measuring.md` hold:
@@ -608,6 +622,15 @@ aarch64-apple-darwin`.
   against the base on `column_reader`, in the cases with NULLs
   (`nulls-mixed`, `nulls-random`), expected to show MODES or more
   cycles. The same rule decides.
+- **The prefetch hint of `relhash`.** The hypothesis: the hint pays
+  where the table is larger than the caches, so a candidate with
+  `prefetcht0` against the base gains on `table_large` and costs no
+  more than a few cycles a call on `table_int32`, whose table fits
+  them. The same rule decides: x86-64 keeps the hint if it
+  gains by more than 3 % in two runs with no loss elsewhere, and
+  otherwise keeps none, with the reason in the comment. The contract's
+  rule "No cost to Tessera" is checked by `--disasm` over every
+  program.
 
 ## What we do not do
 
@@ -615,10 +638,6 @@ aarch64-apple-darwin`.
   if AVX2 proves not enough (`avx-512`).
 - Runs under Rosetta. Real Intel is at hand, and counters under Rosetta
   count Apple's instructions.
-- The prefetch hint of `relhash` on x86-64, `_mm_prefetch`. It is
-  SSE, which every x86-64 has, not AVX2, and `relhash` has its own
-  spec, design and contract, the last in the open change
-  `table-crate`. A roadmap entry takes it.
 - Linux without `sudo`, and the cell in a report: they stay in
   `bench-in-four-cells`.
 - The loops that save their values around the call of a kernel
