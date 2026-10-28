@@ -117,7 +117,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
 
 - [x] 4.1 The filter of int8, `simd/filter64.rs`, over the primitives.
       Check: the move check
-- [ ] 4.2 The filter of int8 on AVX2. Check: `TESSERA_REQUIRE_SIMD=1
+- [x] 4.2 The filter of int8 on AVX2. Check: `TESSERA_REQUIRE_SIMD=1
       cargo test --locked -p tessera-kernels`; the x86 listing; the
       counters of `filter_int64`
 - [ ] 4.3 The arithmetic of int4 with its divisor, `simd/arith.rs`,
