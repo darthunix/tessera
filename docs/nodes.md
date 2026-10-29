@@ -1875,15 +1875,16 @@ Once the inner side is read, the resident partitions make the table the
 outer batches probe. An outer row whose partition is on disk leaves the
 probe: without an inner row in its partition, or rejected by the filter
 of every inner row, it has no pair and is answered at once (a left or
-anti join returns it); otherwise it is appended as a record of its
-partition to a table of the outer keys, whose payload is the NULL bits
-and the outer columns the node reads, a by-reference value copied into
-the partition's value chunks right after its row, and the rows the
-batch answers now leave out those written. When the outer child is
-done, each partition with outer rows written is joined in turn: its
-chunks and values are read back, with its tail, and indexed as a table
-of their own, and its outer rows come back in batches of up to 64 rows
-gathered from their records, which take the same way as the outer
+anti join returns it); otherwise it is appended to a chunk of columns
+of its partition (`tessera/spill.h`): a word for each outer column the
+node reads and each key, a lane of NULL bits for every 64 of them, a
+by-reference value copied into the partition's value chunks right
+after its row, and the rows the batch answers now leave out those
+written. When the outer child is done, each partition with outer rows
+written is joined in turn: its inner chunks and values are read back,
+with its tail, and indexed as a table of their own, and its outer rows
+come back in batches of up to 64 rows read from their chunks of
+columns, which take the same way as the outer
 child's batches, rounds, compact batches, clauses, and the rows of left
 and anti joins without a pair. A compact batch holding pairs of one
 table keeps the next from being loaded until it goes out, and a table

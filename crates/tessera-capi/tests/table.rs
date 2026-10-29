@@ -3341,6 +3341,156 @@ fn chunks_of_columns_round_trip_through_the_entry_points() -> Result<()> {
     Ok(())
 }
 
+/// Rows of 70 words through the entry point that appends by partition:
+/// two lanes of NULL bits, with NULLs past word 64, and a by-reference
+/// value's word past it kept as given.
+#[test]
+fn rows_of_70_words_append_by_partition() -> Result<()> {
+    use tessera_capi::c::{tess_spill_columns_append_partitioned, tess_spill_columns_init};
+    let (nrows, width) = (6, 70);
+    let text = b"\x0bby reference";
+    let values: Vec<Vec<u64>> = (0..width as u64)
+        .map(|column| {
+            (0..nrows as u64)
+                .map(|row| match column {
+                    69 => text.as_ptr() as u64 + row,
+                    _ => row << 8 | column,
+                })
+                .collect()
+        })
+        .collect();
+    let nulls: Vec<Vec<bool>> = (0..width)
+        .map(|column| (0..nrows).map(|row| column == 66 && row % 2 == 1).collect())
+        .collect();
+    let columns: Vec<DatumColumn> = (0..width)
+        .map(|column| DatumColumn {
+            struct_size: size_of::<DatumColumn>(),
+            values: values[column].as_ptr(),
+            isnull: nulls[column].as_ptr(),
+            nrows: nrows as i32,
+            ..DatumColumn::EMPTY
+        })
+        .collect();
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let len = 16 + 8 * (2 + width) * 8;
+        let mut chunk = vec![0_u64; len / 8];
+        let mut capacity = 0;
+        let code = tess_spill_columns_init(
+            chunk.as_mut_ptr().cast(),
+            len,
+            width as i32,
+            &raw mut capacity,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(capacity, 8);
+        let bases = [chunk.as_mut_ptr().cast::<u8>()];
+        let mut pending_words = [(1_u64 << nrows) - 1];
+        let mut pending = Mask {
+            nrows: nrows as i32,
+            bits: pending_words.as_mut_ptr(),
+        };
+        let mut offsets = vec![0_u32; nrows];
+        let mut rows = [0_u64];
+        let code = tess_spill_columns_append_partitioned(
+            bases.as_ptr(),
+            [len].as_ptr(),
+            1,
+            [0_u32].as_ptr(),
+            1,
+            0,
+            [0_u32; 6].as_ptr(),
+            width as i32,
+            columns.as_ptr(),
+            &raw mut pending,
+            offsets.as_mut_ptr(),
+            rows.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(rows, [nrows as u64]);
+        assert_eq!(pending_words, [0]);
+        let lane = |lane: usize, place: usize| chunk[2 + 8 * lane + place];
+        for place in 0..nrows {
+            assert_eq!(offsets[place], place as u32);
+            assert_eq!(lane(0, place), 0, "row {place}");
+            assert_eq!(lane(1, place), u64::from(place % 2 == 1) << 2);
+            for column in 0..width {
+                let null = nulls[column][place];
+                assert_eq!(
+                    lane(2 + column, place),
+                    if null { 0 } else { values[column][place] },
+                    "word {column} of row {place}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The entry point that appends by partition takes rows of up to 2048
+/// columns, as `tessera/spill.h` says and the join counts on.
+#[test]
+fn rows_append_by_partition_up_to_2048_columns() {
+    use tessera_capi::c::{tess_spill_columns_append_partitioned, tess_spill_columns_init};
+    let values = [7_u64];
+    let isnull = [false];
+    for (width, expected) in [(2048_usize, Code::Ok), (2049, Code::InvalidArgument)] {
+        let columns: Vec<DatumColumn> = (0..width)
+            .map(|_| DatumColumn {
+                struct_size: size_of::<DatumColumn>(),
+                values: values.as_ptr(),
+                isnull: isnull.as_ptr(),
+                nrows: 1,
+                ..DatumColumn::EMPTY
+            })
+            .collect();
+        let mut status = Status::new();
+        // SAFETY: local buffers of the declared sizes, aliased by nothing
+        // else, throughout this test.
+        unsafe {
+            let len = 16 + 8 * (width.div_ceil(64) + width);
+            let mut chunk = vec![0_u64; len / 8];
+            let mut capacity = 0;
+            let code = tess_spill_columns_init(
+                chunk.as_mut_ptr().cast(),
+                len,
+                width as i32,
+                &raw mut capacity,
+                &raw mut status,
+            );
+            assert_eq!((code, capacity), (Code::Ok, 1), "{}", status.message());
+            let bases = [chunk.as_mut_ptr().cast::<u8>()];
+            let mut pending_words = [1_u64];
+            let mut pending = Mask {
+                nrows: 1,
+                bits: pending_words.as_mut_ptr(),
+            };
+            let (mut offsets, mut rows) = ([0_u32], [0_u64]);
+            let code = tess_spill_columns_append_partitioned(
+                bases.as_ptr(),
+                [len].as_ptr(),
+                1,
+                [0_u32].as_ptr(),
+                1,
+                0,
+                [0_u32].as_ptr(),
+                width as i32,
+                columns.as_ptr(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                rows.as_mut_ptr(),
+                &raw mut status,
+            );
+            assert_eq!(code, expected, "{width} columns: {}", status.message());
+            assert_eq!(rows[0], u64::from(expected == Code::Ok));
+        }
+    }
+}
+
 #[test]
 fn outputs_are_checked_before_anything_changes() -> Result<()> {
     let values: Vec<u64> = (1..=4).collect();

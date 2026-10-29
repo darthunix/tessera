@@ -259,6 +259,18 @@ kernels MUST agree on this layout.
 - **Verified by:**
   `crates/tessera-kernels/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`
 
+#### Scenario: Rows of more than 64 words appended by partition
+- **WHEN** rows of 64, 65, 70 and 130 words, with NULLs past word 64,
+  are appended by partition, and joins that keep 70 and 1100 outer
+  columns on disk run
+- **THEN** the NULL bit of word `w` lies in lane `w / 64`, the words lie
+  in their lanes, and the joins return the core's rows
+- **Verified by:**
+  `crates/tessera-kernels/src/spill_columns.rs::rows_wider_than_64_words_keep_a_lane_of_null_bits_per_64`;
+  `crates/tessera-capi/tests/table.rs::rows_of_70_words_append_by_partition`;
+  `test/sql/join.sql::70 outer columns kept on disk`;
+  `test/sql/join.sql::1100 outer columns kept on disk`
+
 ### Requirement: A reference to a by-reference value
 A word of a record or of a row that refers to a by-reference value SHALL
 hold the number of the value's chunk plus one in its upper 32 bits and

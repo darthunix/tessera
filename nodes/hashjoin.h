@@ -335,7 +335,10 @@ typedef struct SpillSide
 	bool		columnar;
 	int			nkeys;
 	TessTableKeyKind kinds[TESS_TABLE_MAX_KEYS];
-	/* The payload: a word of NULL bits, then nwords words. */
+	/*
+	 * The payload: the NULL bits, a word (a lane for every 64 words in
+	 * chunks of columns), then nwords words.
+	 */
 	int			nwords;
 	int16	   *typlens;
 	bool	   *byvals;
