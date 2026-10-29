@@ -262,6 +262,12 @@ impl Vectors for Avx2 {
         unsafe { widen64(lanes) }
     }
 
+    #[inline(always)]
+    fn halves(self, lower: __m256i, upper: __m256i) -> (__m256i, __m256i) {
+        // SAFETY: as in `splat`.
+        unsafe { halves(lower, upper) }
+    }
+
     /// The bits of the non-NULL rows, counted: two compares and two masks
     /// of bytes, which NEON lacks.
     #[inline(always)]
@@ -286,6 +292,12 @@ impl Vectors for Avx2 {
     fn shr<const N: i32>(self, lanes: __m256i) -> __m256i {
         // SAFETY: as in `splat`.
         unsafe { _mm256_srli_epi32::<N>(lanes) }
+    }
+
+    #[inline(always)]
+    fn sar<const N: i32>(self, lanes: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_srai_epi32::<N>(lanes) }
     }
 
     type I64 = __m256i;
@@ -676,6 +688,21 @@ fn widen64(lanes: __m256i) -> (__m256i, __m256i) {
     (
         _mm256_cvtepi32_epi64(_mm256_castsi256_si128(lanes)),
         _mm256_cvtepi32_epi64(_mm256_extracti128_si256::<1>(lanes)),
+    )
+}
+
+/// The low and the high halves of eight int8 lanes. `vshufps` takes them
+/// from both vectors within each 128-bit half, so a vector holds lanes 0,
+/// 1, 4, 5, 2, 3, 6 and 7, and `vpermq` puts its 64-bit pairs in order.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn halves(lower: __m256i, upper: __m256i) -> (__m256i, __m256i) {
+    let (lower, upper) = (_mm256_castsi256_ps(lower), _mm256_castsi256_ps(upper));
+    let low = _mm256_castps_si256(_mm256_shuffle_ps::<0b10_00_10_00>(lower, upper));
+    let high = _mm256_castps_si256(_mm256_shuffle_ps::<0b11_01_11_01>(lower, upper));
+    (
+        _mm256_permute4x64_epi64::<0b11_01_10_00>(low),
+        _mm256_permute4x64_epi64::<0b11_01_10_00>(high),
     )
 }
 
