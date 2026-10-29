@@ -6,11 +6,12 @@
 //!
 //! When the first word of the selection is full, selects at least a dozen
 //! rows and the reader exposes its storage, the call aggregates whole words
-//! (vector code on AArch64) and reads only single-row words, the tail and
-//! refused words row by row. Otherwise it reads through
-//! [`ColumnReader::try_fold_selected`]: the representation chooses its NULL
-//! mode once and walks full words with a counted loop. Either way a NULL
-//! row contributes the identity of the operation rather than a branch.
+//! (vector code: NEON on AArch64, AVX2 on x86-64 where the processor has
+//! it) and reads only single-row words, the tail and refused words row by
+//! row. Otherwise it reads through [`ColumnReader::try_fold_selected`]: the
+//! representation chooses its NULL mode once and walks full words with a
+//! counted loop. Either way a NULL row contributes the identity of the
+//! operation rather than a branch.
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView};
