@@ -224,6 +224,11 @@ pub(crate) trait Vectors: Token + 'static {
     /// lanes: the lower half of the lanes, then the upper.
     fn widen64(self, lanes: Self::I32) -> (Self::I64, Self::I64);
 
+    /// The int8 lanes of `lower`, then of `upper`, split into their low 32
+    /// bits and their high 32 bits: two vectors of int4 lanes, each in the
+    /// order of the int8 lanes.
+    fn halves(self, lower: Self::I64, upper: Self::I64) -> (Self::I32, Self::I32);
+
     /// The selected rows of a Datum block whose flag is false, counted:
     /// `(non_null_bits(isnull) & selected).count_ones()`, each set by its
     /// cheapest way.
@@ -238,6 +243,10 @@ pub(crate) trait Vectors: Token + 'static {
     /// Every lane shifted right by `N` bits with zeros shifted in, as the
     /// unsigned 32 bits of a hash shift, `N` from 1 to 31.
     fn shr<const N: i32>(self, lanes: Self::I32) -> Self::I32;
+
+    /// Every lane shifted right by `N` bits with its sign shifted in, `N`
+    /// from 1 to 31.
+    fn sar<const N: i32>(self, lanes: Self::I32) -> Self::I32;
 
     /// The int8 lanes of one vector.
     type I64: Copy;
@@ -509,6 +518,10 @@ macro_rules! unreachable_vectors {
                 match self {}
             }
 
+            fn halves(self, _: Self, _: Self) -> (Self, Self) {
+                match self {}
+            }
+
             fn count_non_null(self, _: &[bool; 64], _: u64) -> usize {
                 match self {}
             }
@@ -522,6 +535,10 @@ macro_rules! unreachable_vectors {
             }
 
             fn shr<const N: i32>(self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn sar<const N: i32>(self, _: Self) -> Self {
                 match self {}
             }
 
@@ -647,7 +664,6 @@ mod cast;
 mod filter;
 mod filter64;
 mod hash;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod hash64;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod set;
@@ -671,7 +687,6 @@ pub use cast::{widen_datum, widen_dense};
 pub use filter::{compare_sides, filter_datum, filter_dense};
 pub use filter64::{compare_sides64, filter_datum64, filter_dense64};
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use hash64::{combine_nulls64, combine64, hash_nulls64, hash64};
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use set::{set_datum, set_datum64, set_dense, set_dense64};

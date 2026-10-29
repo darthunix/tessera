@@ -81,46 +81,22 @@ impl IntLane for i64 {
 
     #[inline(always)]
     fn hash_block(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
         crate::simd::hash64(neon, keys, out);
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (keys, out);
-            match neon {}
-        }
     }
 
     #[inline(always)]
     fn hash_nulls_block(neon: Neon, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
         crate::simd::hash_nulls64(neon, keys, non_null, out);
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (keys, non_null, out);
-            match neon {}
-        }
     }
 
     #[inline(always)]
     fn combine_block(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
         crate::simd::combine64(neon, keys, out);
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (keys, out);
-            match neon {}
-        }
     }
 
     #[inline(always)]
     fn combine_nulls_block(neon: Neon, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
         crate::simd::combine_nulls64(neon, keys, non_null, out);
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (keys, non_null, out);
-            match neon {}
-        }
     }
 
     #[inline]

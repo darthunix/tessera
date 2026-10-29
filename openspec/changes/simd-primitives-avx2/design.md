@@ -490,6 +490,13 @@ What the moves found:
   at other places in their lines of 64 bytes (`disasm-LGmYjY`). Calls
   under 500 cycles are not judged by their cycles, so these stay
   warnings. Unprepared rows and 63 rows keep their cycles within 2 %.
+- The hash of int8 took the same form and kept its NEON code
+  (`disasm-uyQMIH`). A group's keys are two vectors of int8 lanes,
+  loaded as Datums are, since dense and Datum blocks hold the same
+  eight bytes a row. Two primitives fold them: the split of int8 lanes
+  into their low and high 32 bits, which is `uzp1` and `uzp2` on NEON
+  and on AVX2 two `vshufps` and two `vpermq`, and a shift right that
+  shifts the sign in.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
