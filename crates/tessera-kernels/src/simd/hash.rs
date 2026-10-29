@@ -13,38 +13,37 @@
 // the functions compiled for a set run on theirs cannot be reached.
 #![cfg_attr(miri, allow(unreachable_code, unused_variables))]
 
-use super::{Neon, Simd, Vectors};
+use super::{Simd, Vectors};
 use crate::int32::Side;
 use crate::int32::hash::NULL_KEY;
 
 /// The hash of every lane's key into `out`.
 #[inline]
-pub fn hash(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-    // SAFETY: the token proves that this processor runs NEON, the vector
-    // set of the target where it has values, which `hash_lanes` is
-    // compiled for.
-    unsafe { hash_lanes(neon.simd(), keys, None, out) }
+pub fn hash(simd: Simd, keys: Side<'_>, out: &mut [u32; 64]) {
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `hash_lanes` is compiled for.
+    unsafe { hash_lanes(simd, keys, None, out) }
 }
 
 /// As [`hash`], with NULL lanes hashing the group key.
 #[inline]
-pub fn hash_nulls(neon: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
+pub fn hash_nulls(simd: Simd, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash.
-    unsafe { hash_lanes(neon.simd(), keys, Some(non_nulls), out) }
+    unsafe { hash_lanes(simd, keys, Some(non_nulls), out) }
 }
 
 /// Every lane's key hash folded into its previous hash in `out`.
 #[inline]
-pub fn combine(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
+pub fn combine(simd: Simd, keys: Side<'_>, out: &mut [u32; 64]) {
     // SAFETY: as in hash, for `combine_lanes`.
-    unsafe { combine_lanes(neon.simd(), keys, None, out) }
+    unsafe { combine_lanes(simd, keys, None, out) }
 }
 
 /// As [`combine`], with NULL lanes folding in the group key's hash.
 #[inline]
-pub fn combine_nulls(neon: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
+pub fn combine_nulls(simd: Simd, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash, for `combine_lanes`.
-    unsafe { combine_lanes(neon.simd(), keys, Some(non_nulls), out) }
+    unsafe { combine_lanes(simd, keys, Some(non_nulls), out) }
 }
 
 // The functions compiled for the vector set of the target, into which the
@@ -203,10 +202,8 @@ pub(super) fn groups<V: Vectors>(
     }
 }
 
-// The vector code runs only on NEON until its hooks take the set of the
-// target.
 #[cfg(test)]
-#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[cfg(not(miri))]
 mod tests {
     use anyhow::Result;
     use proptest::collection::vec;
@@ -215,7 +212,7 @@ mod tests {
 
     use super::{combine, combine_nulls, hash, hash_nulls};
     use crate::int32::{Side, hash_combine, murmurhash32};
-    use crate::simd::{Neon, Token};
+    use crate::simd::{Simd, Token};
 
     /// Any word of keys leaning to the edges, any NULL lanes and any
     /// previous hashes.
@@ -237,7 +234,9 @@ mod tests {
     }
 
     fn lanes_match(dense: [i32; 64], non_nulls: u64, previous: [u32; 64]) {
-        let neon = Neon::get().unwrap();
+        let Some(simd) = Simd::get() else {
+            return;
+        };
         let datums = dense.map(|key| i64::from(key) as u64);
         let expected_hash = dense.map(|key| murmurhash32(key as u32));
         let expected_hash_nulls: [u32; 64] = std::array::from_fn(|lane| {
@@ -253,15 +252,15 @@ mod tests {
             std::array::from_fn(|lane| hash_combine(previous[lane], expected_hash_nulls[lane]));
         for keys in [Side::Dense(&dense), Side::Datum(&datums)] {
             let mut out = [0; 64];
-            hash(neon, keys, &mut out);
+            hash(simd, keys, &mut out);
             assert_eq!(out, expected_hash);
-            hash_nulls(neon, keys, non_nulls, &mut out);
+            hash_nulls(simd, keys, non_nulls, &mut out);
             assert_eq!(out, expected_hash_nulls);
             out = previous;
-            combine(neon, keys, &mut out);
+            combine(simd, keys, &mut out);
             assert_eq!(out, expected_combine);
             out = previous;
-            combine_nulls(neon, keys, non_nulls, &mut out);
+            combine_nulls(simd, keys, non_nulls, &mut out);
             assert_eq!(out, expected_combine_nulls);
         }
     }

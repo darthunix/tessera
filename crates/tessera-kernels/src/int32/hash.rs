@@ -26,10 +26,11 @@
 //!
 //! When the first word of the selection is full or selects at least a dozen
 //! rows and the column exposes its storage, the call hashes whole words with
-//! vector code on AArch64: every lane of the word, NULL lanes included (they
-//! get the group key under the group policy and meaningless values, outside
-//! the valid mask, under rejection). Single-row words, the tail and refused
-//! words go row by row; every other call reads every word row by row.
+//! vector code (NEON on AArch64, AVX2 on x86-64 where the processor has
+//! it): every lane of the word, NULL lanes included (they get the group key
+//! under the group policy and meaningless values, outside the valid mask,
+//! under rejection). Single-row words, the tail and refused words go row by
+//! row; every other call reads every word row by row.
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMask, RowMaskView};

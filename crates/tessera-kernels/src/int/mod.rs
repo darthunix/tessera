@@ -83,6 +83,10 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// of both widths runs.
     type Aggregates: Vectors;
 
+    /// The vector set of the width's key hashes, [`IntLane::hash_block`]
+    /// and the others of its family, which the driver of both widths runs.
+    type Hashes: Vectors;
+
     /// The least and the greatest value, the identities of `max` and `min`.
     const MIN: Self;
     const MAX: Self;
@@ -157,10 +161,20 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// The hashes of a whole word's keys into `out`; with `_nulls`, a NULL
     /// row's hash is the group key's; with `combine`, each is folded into
     /// the hash already in `out`.
-    fn hash_block(neon: Neon, keys: Side<'_, Self>, out: &mut [u32; 64]);
-    fn hash_nulls_block(neon: Neon, keys: Side<'_, Self>, non_null: u64, out: &mut [u32; 64]);
-    fn combine_block(neon: Neon, keys: Side<'_, Self>, out: &mut [u32; 64]);
-    fn combine_nulls_block(neon: Neon, keys: Side<'_, Self>, non_null: u64, out: &mut [u32; 64]);
+    fn hash_block(set: Self::Hashes, keys: Side<'_, Self>, out: &mut [u32; 64]);
+    fn hash_nulls_block(
+        set: Self::Hashes,
+        keys: Side<'_, Self>,
+        non_null: u64,
+        out: &mut [u32; 64],
+    );
+    fn combine_block(set: Self::Hashes, keys: Side<'_, Self>, out: &mut [u32; 64]);
+    fn combine_nulls_block(
+        set: Self::Hashes,
+        keys: Side<'_, Self>,
+        non_null: u64,
+        out: &mut [u32; 64],
+    );
 
     /// The count of a whole word's selected non-NULL rows and the least of
     /// them, `MAX` without any.
