@@ -132,7 +132,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
       over the primitives. Check: the move check
 - [x] 4.8 The aggregates of int4 and `count` on AVX2. Check: as in
       4.2, on `aggregate_int32`
-- [ ] 4.9 The aggregates of int8, `simd/aggregate64.rs`, over the
+- [x] 4.9 The aggregates of int8, `simd/aggregate64.rs`, over the
       primitives. Check: the move check
 - [ ] 4.10 The aggregates of int8 on AVX2. Check: as in 4.2, on
        `aggregate_int64`
