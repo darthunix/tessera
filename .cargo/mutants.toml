@@ -57,10 +57,9 @@ exclude_globs = [
 # one through the width's own function. The mutants of that choice are
 # named by their place, since the same operators elsewhere in these
 # functions matter.
-# Off AArch64 the whole-word path ends in stubs on the empty token of NEON
-# (the hash's block), and the token converts into AVX2's: those are not
-# built on the arm64 runners, so their mutants change nothing there, and
-# on x86-64 no call reaches them.
+# Off AArch64 the empty token of NEON converts into AVX2's: that is not
+# built on the arm64 runners, so its mutants change nothing there, and on
+# x86-64 no call reaches it.
 # Place::reference puts a record's chunk above the bits of its unit, which
 # is below 2^17 and has none there, and Cursor::at a chunk above a byte of
 # 32 bits: | and ^ give one value. resolve_rows adds the rows a call
@@ -129,12 +128,11 @@ exclude_re = [
     "int/compare\\.rs:122:42: (delete ! in bulk|replace match guard .* in bulk)$",
     "int/compare\\.rs:144:5: replace blocks -> Option<.*> with None$",
     "int/hash\\.rs:(11[89]|120):[0-9]+: (replace|delete) .* in run$",
-    "int/hash\\.rs:198:5: replace block -> Option<.*> with None$",
+    "int/hash\\.rs:197:5: replace block -> Option<.*> with None$",
     "int/filter\\.rs:59:17: replace && with \\|\\| in filter_with$",
     "replace bulk_passing -> Option<u64> with None$",
     "set\\.rs:170:[0-9]+: replace (&& with \\|\\||<= with >) in in_set$",
     "delete match arm \\(ArithOp::(Add|Sub), _\\) in <impl IntLane for i64>::arith_block$",
-    "int/hash\\.rs:216:5: replace block -> Option<.*> with ",
     "replace <impl From<Neon> for Avx2>::from -> Self with ",
     "replace \\| with \\^ in (Place::reference|Cursor::at)$",
     "table/writer\\.rs:(234|282):[0-9]+: replace \\| with \\^ in resolve_rows$",

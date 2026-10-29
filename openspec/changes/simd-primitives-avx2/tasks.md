@@ -140,7 +140,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
        Check: the move check
 - [x] 4.12 The widening cast on AVX2. Check: as in 4.2, on
        `cast_int32`
-- [ ] 4.13 The hash of int4, `simd/hash.rs`, over the primitives.
+- [x] 4.13 The hash of int4, `simd/hash.rs`, over the primitives.
        Check: the move check
 - [ ] 4.14 The hash of int4 on AVX2. Check: as in 4.2, on `hash_int32`
 - [ ] 4.15 The hash of int8, `simd/hash64.rs`, over the primitives.

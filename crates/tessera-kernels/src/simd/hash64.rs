@@ -9,58 +9,59 @@
 //! inverted for negative keys.
 
 use core::arch::aarch64::{
-    int32x4_t, uint32x4_t, vaddq_u32, vdupq_n_u32, veorq_u32, vld1q_u64, vreinterpretq_s32_u32,
-    vreinterpretq_u32_s32, vreinterpretq_u32_u64, vshlq_n_u32, vshrq_n_s32, vshrq_n_u32,
-    vuzp1q_u32, vuzp2q_u32,
+    int32x4_t, uint32x4_t, veorq_u32, vld1q_u64, vreinterpretq_s32_u32, vreinterpretq_u32_s32,
+    vreinterpretq_u32_u64, vshrq_n_s32, vuzp1q_u32, vuzp2q_u32,
 };
 
-use super::Neon;
-use super::hash::groups;
+use super::hash::{combined, groups};
+use super::{Neon, Vectors};
 use crate::int64::Side;
 
 /// The hash of every lane's key into `out`.
 #[inline]
-pub fn hash64(_: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
+pub fn hash64(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
     // SAFETY: the token proves that this processor runs NEON.
-    unsafe { hash_lanes(keys, None, out) }
+    unsafe { hash_lanes(neon, keys, None, out) }
 }
 
 /// As [`hash64`], with NULL lanes hashing the group key.
 #[inline]
-pub fn hash_nulls64(_: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
+pub fn hash_nulls64(neon: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash64.
-    unsafe { hash_lanes(keys, Some(non_nulls), out) }
+    unsafe { hash_lanes(neon, keys, Some(non_nulls), out) }
 }
 
 /// Every lane's key hash folded into its previous hash in `out`.
 #[inline]
-pub fn combine64(_: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
+pub fn combine64(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
     // SAFETY: as in hash64.
-    unsafe { combine_lanes(keys, None, out) }
+    unsafe { combine_lanes(neon, keys, None, out) }
 }
 
 /// As [`combine64`], with NULL lanes folding in the group key's hash.
 #[inline]
-pub fn combine_nulls64(_: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
+pub fn combine_nulls64(neon: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash64.
-    unsafe { combine_lanes(keys, Some(non_nulls), out) }
+    unsafe { combine_lanes(neon, keys, Some(non_nulls), out) }
 }
 
 #[target_feature(enable = "neon")]
-fn hash_lanes(keys: Side<'_>, non_nulls: Option<u64>, out: &mut [u32; 64]) {
-    groups(folded(words(keys)), non_nulls, out, |key_hash, _| key_hash)
-}
-
-#[target_feature(enable = "neon")]
-fn combine_lanes(keys: Side<'_>, non_nulls: Option<u64>, out: &mut [u32; 64]) {
-    let golden = vdupq_n_u32(0x9e37_79b9);
-    groups(folded(words(keys)), non_nulls, out, |key_hash, previous| {
-        // a ^ (b + 0x9e3779b9 + (a << 6) + (a >> 2)), as hash_combine.
-        let mut t = vaddq_u32(key_hash, golden);
-        t = vaddq_u32(t, vshlq_n_u32::<6>(previous));
-        t = vaddq_u32(t, vshrq_n_u32::<2>(previous));
-        veorq_u32(previous, t)
+fn hash_lanes(neon: Neon, keys: Side<'_>, non_nulls: Option<u64>, out: &mut [u32; 64]) {
+    groups(neon, folded(words(keys)), non_nulls, out, |key_hash, _| {
+        key_hash
     })
+}
+
+#[target_feature(enable = "neon")]
+fn combine_lanes(neon: Neon, keys: Side<'_>, non_nulls: Option<u64>, out: &mut [u32; 64]) {
+    let golden = neon.splat(0x9e37_79b9_u32 as i32);
+    groups(
+        neon,
+        folded(words(keys)),
+        non_nulls,
+        out,
+        |key_hash, previous| combined(neon, golden, key_hash, previous),
+    )
 }
 
 /// The 64 eight-byte words of a block, dense or Datum alike.

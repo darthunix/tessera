@@ -24,8 +24,8 @@ use core::arch::x86_64::{
     _mm256_movemask_pd, _mm256_movemask_ps, _mm256_mul_epi32, _mm256_mullo_epi32, _mm256_or_si256,
     _mm256_permute4x64_epi64, _mm256_set1_epi32, _mm256_set1_epi64x, _mm256_setr_epi32,
     _mm256_setr_epi64x, _mm256_setzero_si256, _mm256_shuffle_epi32, _mm256_shuffle_ps,
-    _mm256_srai_epi32, _mm256_srav_epi32, _mm256_srli_epi64, _mm256_storeu_si256, _mm256_sub_epi32,
-    _mm256_sub_epi64, _mm256_testz_si256, _mm256_xor_si256,
+    _mm256_slli_epi32, _mm256_srai_epi32, _mm256_srav_epi32, _mm256_srli_epi32, _mm256_srli_epi64,
+    _mm256_storeu_si256, _mm256_sub_epi32, _mm256_sub_epi64, _mm256_testz_si256, _mm256_xor_si256,
 };
 
 use super::{Avx2, Vectors};
@@ -268,6 +268,24 @@ impl Vectors for Avx2 {
     fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize {
         // SAFETY: as in `splat`.
         self.count_bits(unsafe { non_null_lanes(isnull) } & selected)
+    }
+
+    #[inline(always)]
+    fn xor(self, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_xor_si256(a, b) }
+    }
+
+    #[inline(always)]
+    fn shl<const N: i32>(self, lanes: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_slli_epi32::<N>(lanes) }
+    }
+
+    #[inline(always)]
+    fn shr<const N: i32>(self, lanes: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_srli_epi32::<N>(lanes) }
     }
 
     type I64 = __m256i;

@@ -19,8 +19,8 @@ use core::arch::aarch64::{
     vminvq_u32, vmovl_high_s32, vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32,
     vmull_n_s32, vmull_s32, vmulq_s32, vmvnq_u32, vorrq_u32, vorrq_u64, vpadalq_s32, vqaddq_s32,
     vqaddq_s64, vqsubq_s32, vqsubq_s64, vreinterpretq_s32_s64, vreinterpretq_s32_u32,
-    vreinterpretq_u32_u64, vreinterpretq_u64_u32, vshlq_s32, vshrq_n_s32, vst1q_s32, vst1q_s64,
-    vsubq_s32, vsubq_s64, vtst_u8, vuzp2q_s32,
+    vreinterpretq_u32_s32, vreinterpretq_u32_u64, vreinterpretq_u64_u32, vshlq_n_s32, vshlq_s32,
+    vshrq_n_s32, vshrq_n_u32, vst1q_s32, vst1q_s64, vsubq_s32, vsubq_s64, vtst_u8, vuzp2q_s32,
 };
 
 use super::{
@@ -277,6 +277,25 @@ impl Vectors for Neon {
     fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize {
         // SAFETY: as in `splat`.
         unsafe { count_non_null_lanes(isnull, selected) }
+    }
+
+    #[inline]
+    fn xor(self, a: int32x4_t, b: int32x4_t) -> int32x4_t {
+        // SAFETY: as in `splat`.
+        unsafe { veorq_s32(a, b) }
+    }
+
+    #[inline]
+    fn shl<const N: i32>(self, lanes: int32x4_t) -> int32x4_t {
+        // SAFETY: as in `splat`.
+        unsafe { vshlq_n_s32::<N>(lanes) }
+    }
+
+    /// The lanes shifted as unsigned ones.
+    #[inline]
+    fn shr<const N: i32>(self, lanes: int32x4_t) -> int32x4_t {
+        // SAFETY: as in `splat`.
+        unsafe { vreinterpretq_s32_u32(vshrq_n_u32::<N>(vreinterpretq_u32_s32(lanes))) }
     }
 
     type I64 = int64x2_t;
