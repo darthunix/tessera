@@ -7,7 +7,6 @@
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "utils/datum.h"
-#include "utils/expandeddatum.h"
 #include "utils/lsyscache.h"
 #include "storage/barrier.h"
 #include "utils/dsa.h"
@@ -535,26 +534,18 @@ new_value_chunk(TessHashJoinState *state, Size len)
 }
 
 /*
- * Copy a by-reference inner value into the table's value chunks and
- * return its reference: the bytes datumCopy would copy, an expanded
- * object flattened.
+ * Copy a by-reference inner value into the table's value chunks
+ * (tess_value_copy) and return its reference.
  */
 uint64
 join_store_value(TessHashJoinState *state, Datum value, int16 typlen)
 {
-	ExpandedObjectHeader *expanded = NULL;
-	Size		size;
+	ExpandedObjectHeader *expanded;
+	Size		size = tess_value_size(value, typlen, &expanded);
 	Size		aligned;
 	int			number;
 	Size		byte;
 
-	if (typlen == -1 && VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
-	{
-		expanded = DatumGetEOHP(value);
-		size = EOH_get_flat_size(expanded);
-	}
-	else
-		size = datumGetSize(value, false, typlen);
 	aligned = MAXALIGN(size);
 	if (aligned > JOIN_VALUE_CHUNK / 4)
 	{
@@ -577,10 +568,7 @@ join_store_value(TessHashJoinState *state, Datum value, int16 typlen)
 		byte = state->values.used;
 		state->values.used += aligned;
 	}
-	if (expanded != NULL)
-		EOH_flatten_into(expanded, state->values.bases[number] + byte, size);
-	else
-		memcpy(state->values.bases[number] + byte, DatumGetPointer(value), size);
+	tess_value_copy(value, expanded, state->values.bases[number] + byte, size);
 	return JOIN_VALUE_REF(number, byte);
 }
 

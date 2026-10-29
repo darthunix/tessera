@@ -7,6 +7,9 @@
 
 #include "postgres.h"
 
+#include "utils/datum.h"
+#include "utils/expandeddatum.h"
+
 #include "tessera/abi.h"
 #include "tessera/row_mask.h"
 #include "tessera/table_key.h"
@@ -144,5 +147,46 @@ extern void tess_rows_reset(TessRows *rows);
 
 /* Release the rows and their memory. */
 extern void tess_rows_free(TessRows *rows);
+
+/*
+ * The one copy of a by-reference value that every writer of rows makes,
+ * into memory that outlives the value: its bytes as datumCopy copies
+ * them, an expanded object flattened, so that no copy keeps a pointer
+ * into the memory of the value's owner, which may be freed, or be
+ * another process's. tess_value_size is the bytes the copy takes, and
+ * sets *expanded to the value's expanded object, or NULL; with it,
+ * tess_value_copy writes the bytes, size of them, at to. Inline, and the
+ * object found once: they run for every value a node keeps.
+ */
+static inline Size
+tess_value_size(Datum value, int16 typlen, ExpandedObjectHeader **expanded)
+{
+	if (typlen == -1 && VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
+	{
+		*expanded = DatumGetEOHP(value);
+		return EOH_get_flat_size(*expanded);
+	}
+	*expanded = NULL;
+	return datumGetSize(value, false, typlen);
+}
+
+static inline void
+tess_value_copy(Datum value, ExpandedObjectHeader *expanded, void *to, Size size)
+{
+	if (expanded != NULL)
+		EOH_flatten_into(expanded, to, size);
+	else
+		memcpy(to, DatumGetPointer(value), size);
+}
+
+/*
+ * For a writer that copies a batch's values by their bytes
+ * (tess_spill_columns_append): when a value of the rows of mask in
+ * column, of type length typlen, is an expanded object, point column at
+ * a copy of its values in context, each such value flattened there by
+ * tess_value_copy; else leave column as it is.
+ */
+extern void tess_value_flatten_column(TessDatumColumn *column, int16 typlen,
+									  const TessRowMask *mask, MemoryContext context);
 
 #endif							/* TESSERA_RUNTIME_ROWS_H */

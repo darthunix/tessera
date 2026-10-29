@@ -15,6 +15,10 @@ CREATE FUNCTION tessera_test_rows_error(integer)
 RETURNS void
 AS :'rows_test', 'tessera_test_rows_error'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_rows_value()
+RETURNS boolean
+AS :'rows_test', 'tessera_test_rows_value'
+LANGUAGE C STRICT;
 
 -- Rows read back by reference in another order than appended: one batch,
 -- a batch and a bit, then enough for several chunks of records and of
@@ -29,6 +33,10 @@ SELECT tessera_test_rows_sort(1) AS one,
        tessera_test_rows_sort(65) AS past_batch,
        tessera_test_rows_sort(100000) AS many;
 
+-- A by-reference value is copied by its bytes, an expanded object
+-- flattened, so that the copy outlives the object.
+SELECT tessera_test_rows_value() AS value;
+
 -- Misuse is an ERROR.
 SELECT tessera_test_rows_error(1);
 SELECT tessera_test_rows_error(2);
@@ -36,3 +44,4 @@ SELECT tessera_test_rows_error(2);
 DROP FUNCTION tessera_test_rows_cycle(integer);
 DROP FUNCTION tessera_test_rows_sort(integer);
 DROP FUNCTION tessera_test_rows_error(integer);
+DROP FUNCTION tessera_test_rows_value();
