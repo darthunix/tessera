@@ -11,22 +11,21 @@
 
 use std::mem::MaybeUninit;
 
-use super::{Neon, Simd, Vectors};
+use super::{Simd, Vectors};
 
 /// The int4 values of a dense block widened into `out`.
 #[inline]
-pub fn widen_dense(neon: Neon, values: &[i32; 64], out: &mut [MaybeUninit<i64>; 64]) {
-    // SAFETY: the token proves that this processor runs NEON, the vector
-    // set of the target where it has values, which `widen_dense_lanes` is
-    // compiled for.
-    unsafe { widen_dense_lanes(neon.simd(), values, out) }
+pub fn widen_dense(simd: Simd, values: &[i32; 64], out: &mut [MaybeUninit<i64>; 64]) {
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `widen_dense_lanes` is compiled for.
+    unsafe { widen_dense_lanes(simd, values, out) }
 }
 
 /// The int4 values of a Datum block widened into `out`.
 #[inline]
-pub fn widen_datum(neon: Neon, values: &[u64; 64], out: &mut [MaybeUninit<i64>; 64]) {
+pub fn widen_datum(simd: Simd, values: &[u64; 64], out: &mut [MaybeUninit<i64>; 64]) {
     // SAFETY: as in widen_dense, for `widen_datum_lanes`.
-    unsafe { widen_datum_lanes(neon.simd(), values, out) }
+    unsafe { widen_datum_lanes(simd, values, out) }
 }
 
 // The functions compiled for the vector set of the target, into which the

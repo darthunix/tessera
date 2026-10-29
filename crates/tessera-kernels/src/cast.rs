@@ -12,9 +12,9 @@
 //!
 //! When the first word of the selection is full, selects at least a dozen
 //! rows and the reader exposes its storage, the call widens whole words
-//! (vector code on AArch64) and reads only single-row words, the tail and
-//! refused words row by row; otherwise every word is read through the
-//! word iterators.
+//! (vector code: NEON on AArch64, AVX2 on x86-64 where the processor has
+//! it) and reads only single-row words, the tail and refused words row by
+//! row; otherwise every word is read through the word iterators.
 
 use std::mem::MaybeUninit;
 
@@ -23,7 +23,7 @@ use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use crate::BULK_MIN_ROWS;
 use crate::ops::ArithmeticError;
-use crate::simd::{Neon, Token};
+use crate::simd::{Simd, Token};
 
 /// Widen the selected int4 values into `values` and `non_nulls`.
 ///
@@ -68,18 +68,18 @@ pub fn int4_to_int8<C: ColumnReader<Value = i32>>(
         "column and selection row counts differ"
     );
     // The first word decides, as for the other kernels.
-    let neon = Neon::get();
-    let bulk = neon.is_some()
+    let simd = Simd::get();
+    let bulk = simd.is_some()
         && nrows >= 64
         && rows.get_word(0).is_some_and(|selected| {
             (selected == u64::MAX
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
                 && column.word_block(0).is_some()
         });
-    if let Some(neon) = neon
+    if let Some(simd) = simd
         && bulk
     {
-        widen_bulk(neon, column, rows, values, non_nulls)
+        widen_bulk(simd, column, rows, values, non_nulls)
     } else {
         widen_rows(column, rows, values, non_nulls)
     }
@@ -190,7 +190,7 @@ pub fn int8_to_int4<C: ColumnReader<Value = i64>>(
 /// Whole words where the reader exposes them, rows elsewhere.
 #[inline(never)]
 fn widen_bulk<C: ColumnReader<Value = i32>>(
-    neon: Neon,
+    simd: Simd,
     column: &C,
     rows: &RowMaskView<'_>,
     values: &mut [MaybeUninit<i64>],
@@ -205,7 +205,7 @@ fn widen_bulk<C: ColumnReader<Value = i32>>(
             let out: &mut [MaybeUninit<i64>; 64] = (&mut values[base..base + 64])
                 .try_into()
                 .context("a whole-word operand implies a full word")?;
-            bulk::widen(neon, block, selected, out)
+            bulk::widen(simd, block, selected, out)
         } else {
             word_rows(column, index, selected, values)?
         };
@@ -221,23 +221,23 @@ mod bulk {
 
     use tessera_core::WordBlock;
 
-    use crate::simd::{self, Neon, Vectors};
+    use crate::simd::{self, Simd, Vectors};
 
     #[inline]
     pub fn widen(
-        neon: Neon,
+        set: Simd,
         block: WordBlock<'_, i32>,
         selected: u64,
         out: &mut [MaybeUninit<i64>; 64],
     ) -> u64 {
         match block {
             WordBlock::Dense { values, non_nulls } => {
-                simd::widen_dense(neon, values, out);
+                simd::widen_dense(set, values, out);
                 selected & non_nulls
             }
             WordBlock::Datum { values, isnull } => {
-                simd::widen_datum(neon, values, out);
-                selected & neon.non_null_bits(isnull)
+                simd::widen_datum(set, values, out);
+                selected & set.non_null_bits(isnull)
             }
         }
     }
