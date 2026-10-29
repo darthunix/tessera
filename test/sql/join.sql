@@ -943,6 +943,26 @@ SELECT join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON js
        join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$, 'Spilled Chunks')::int > 0 AS spilled;
 SELECT join_same($$SELECT count(*), sum(jsskew.w), sum(jsp.k) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$);
 SELECT join_same($$SELECT jsp.s, jsskew.w FROM jsp JOIN jsskew ON jsp.k = jsskew.k WHERE jsp.s LIKE '%07'$$);
+-- One key held by 2000 inner rows of 1 kB of text, among 2000 rows of
+-- other keys: its partition has few records but some 2 MB of values,
+-- past the room of a participant. The one that takes it alone splits
+-- it, as a serial join splits a partition that large, until the key
+-- holds most of a partition's rows, and reads that one in pieces; it
+-- does not load the partition whole.
+CREATE TABLE jslong (k int, t text);
+INSERT INTO jslong
+SELECT CASE WHEN g <= 2000 THEN 7 ELSE g END,
+       CASE WHEN g <= 2000
+            THEN (SELECT string_agg(md5(g || ':' || i), '') FROM generate_series(1, 32) AS i)
+            ELSE 'o' || g END
+FROM generate_series(1, 4000) AS g;
+ANALYZE jslong;
+SELECT join_property($$SELECT count(*), sum(length(jslong.t)) FROM jsp JOIN jslong ON jsp.k = jslong.k$$, 'Partitions Joined Alone')::int > 0 AS alone,
+       coalesce(join_property($$SELECT count(*), sum(length(jslong.t)) FROM jsp JOIN jslong ON jsp.k = jslong.k$$, 'Split Partitions')::int, 0) > 0 AS split,
+       coalesce(join_property($$SELECT count(*), sum(length(jslong.t)) FROM jsp JOIN jslong ON jsp.k = jslong.k$$, 'Extra Passes')::int, 0) > 0 AS in_pieces;
+SELECT join_same($$SELECT count(*), sum(length(jslong.t)), sum(jsp.k) FROM jsp JOIN jslong ON jsp.k = jslong.k$$);
+SELECT coalesce(join_property($$SELECT count(*), count(jslong.t), sum(length(jslong.t)) FROM jsp LEFT JOIN jslong ON jsp.k = jslong.k$$, 'Extra Passes')::int, 0) > 0 AS left_in_pieces;
+SELECT join_same($$SELECT count(*), count(jslong.t), sum(length(jslong.t)) FROM jsp LEFT JOIN jslong ON jsp.k = jslong.k$$);
 -- RIGHT and FULL: the shared table's tail by the last one to leave it,
 -- a partition's on disk by the participant that joins it, after each
 -- piece.
@@ -1149,7 +1169,7 @@ SELECT join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$) 
        join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$) AS residual;
 DROP FUNCTION join_costs_carried(text);
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jsouter, jsheavy;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jslong, jsouter, jsheavy;
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();

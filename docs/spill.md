@@ -118,7 +118,8 @@ left, and one that comes once the round is freed goes on to the next
 partition.
 A larger partition, a skewed key's, is taken whole by one participant
 (`tess_table_spill_take_alone`) and joined from every participant's
-files as a serial table joins its partitions, splitting or in pieces;
+files as a serial table joins its partitions, splitting or in pieces
+by what every participant's blocks of it take read back, values too;
 the others meanwhile take the rounds and the other partitions, so a skew
 holds up one participant, not all. A participant that releases its set leaves its files for
 the others (`tess_spill_release`); the set deletes them when the last
