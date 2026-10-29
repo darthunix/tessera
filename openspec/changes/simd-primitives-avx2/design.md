@@ -138,6 +138,14 @@ The kernels of int4 and int8 are built in three layers:
 - 2026-10-28: the prefetch hint of `relhash` on x86-64 comes into this
   change, as the last of the decisions measured again on Intel, rather
   than into an entry of the roadmap.
+- 2026-10-29, after the counters of the aggregates of int4 on AVX2:
+  - The token of AVX2 asks for POPCNT as well as AVX2. Its cost is
+    accepted: 4 to 6 instructions a call in the drivers of the families
+    already open, and a FAIL of cycles on the int8 division whose code
+    did not change, only its place.
+  - The loops of `count` and the aggregates take a shape of their own
+    on x86-64. AArch64 keeps the one it had, which costs the M5 Pro
+    less.
 
 ## Decisions
 
@@ -402,6 +410,36 @@ What the moves found:
   helper of `neon.rs` put them back. The counters of the M5 Pro show no
   loss: every case of that sum is within 0.4 % of its cycles in two
   runs (`compare-btLQ9j`, `compare-VoUFV1`), so the order is kept.
+- On AVX2 the aggregates of int4 and `count` first lost on dense full
+  words: `count` took 121 % more cycles than the row path, the least
+  19 % more (`compare-qMySfQ`, `compare-tWi0yf`). Two changes made
+  them gain:
+  - POPCNT counts a word's present rows, through a primitive of its
+    own, `count_bits` (see the run-time choice below).
+  - On x86-64 the loops of `count` and the aggregates walk the
+    selection's words and test empty and single-row words at once. A
+    `continue` for empty words became a loop of its own, and every
+    other word came back through its head. A whole word of `count`
+    then takes 23 instructions in place of 39 (`disasm-Eu1lg3`).
+  - On the M5 Pro that shape cost the words read row by row. A least
+    of int4 over partly prepared words took 14 % more cycles, with ten
+    more mispredicted branches, and the count of single rows up to
+    13.5 % more instructions (`compare-PEurk2`, `compare-d11p3Q`). So
+    AArch64 keeps its loops, and its machine code is what it was
+    (`disasm-lxbEgF`).
+  - Against the row path, on dense full words without NULLs, the count
+    of int4 takes 13 % fewer instructions but 15 to 24 % more cycles:
+    one more mispredicted branch a call, under the bar of 500 cycles.
+    The least takes 16 % fewer cycles, the sum 46 % fewer
+    (`compare-EZsj5g`, `compare-zraZkH`).
+  - The test of POPCNT costs the drivers of the filters, the
+    comparisons and the arithmetic 4 to 6 instructions a call. It also
+    moved the code after the driver of the int8 arithmetic by 96
+    bytes. The division's code is the same, but on random words it then
+    mispredicts 17 branches a call where it had 1 or 2: 12 to 14 % more
+    cycles (`compare-OmhwZ0`, `compare-4xzRdr`). The benchmark gives
+    the same random words every call, so the predictor had learned
+    them.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.

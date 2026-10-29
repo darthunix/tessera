@@ -1,23 +1,33 @@
-# cargo-mutants for the AVX2 primitives (simd/avx2.rs) and the token of
-# AVX2 (simd/token.rs) alone, which mean something on x86-64 only and
-# which .cargo/mutants.toml leaves out for its arm64 runners. The job
-# "avx2" of mutants.yml reads this file on x86-64 Linux, whose runners
-# have AVX2; the rest is as in .cargo/mutants.toml, whose reasons hold
-# here too.
+# cargo-mutants for the AVX2 primitives (simd/avx2.rs), the token of
+# AVX2 (simd/token.rs) and the loops of count and of the int aggregates
+# written for x86-64 alone, which mean something on x86-64 only and which
+# .cargo/mutants.toml leaves out for its arm64 runners. The job "avx2" of
+# mutants.yml reads this file on x86-64 Linux, whose runners have AVX2;
+# the rest is as in .cargo/mutants.toml, whose reasons hold here too.
 examine_globs = [
     "crates/tessera-kernels/src/simd/avx2.rs",
     "crates/tessera-kernels/src/simd/token.rs",
+    "crates/tessera-kernels/src/count.rs",
+    "crates/tessera-kernels/src/int/aggregate.rs",
+]
+examine_re = [
+    "simd/(avx2|token)\\.rs:",
+    "count\\.rs:(6[4-9]|7[0-7]):[0-9]+: .* in count_bulk$",
+    "int/aggregate\\.rs:(10[7-9]|11[0-9]|120):[0-9]+: .* in aggregate_bulk$",
 ]
 
 # non_null_lanes puts the 32 bits of the low flags below the 32 of the
 # high ones: the two share no bit, so | is ^. The token of NEON has no
 # values on x86-64: the arm64 jobs judge it. The token of AVX2 asks for
 # AVX2 and POPCNT, which every processor with AVX2 has, so || answers as
-# && on every runner.
+# && on every runner. The test of the loops of count and the aggregates
+# with | or ^ sends empty and single-row words to the whole-word path,
+# which gives the same results: only the time tells them apart.
 exclude_re = [
     "replace \\| with \\^ in non_null_lanes$",
     "replace <impl Token for Neon>::get -> Option<Self> with None$",
     "replace && with \\|\\| in <impl Token for Avx2>::get$",
+    "replace & with [|^] in (count_bulk|aggregate_bulk)$",
 ]
 
 timeout_multiplier = 3.0
