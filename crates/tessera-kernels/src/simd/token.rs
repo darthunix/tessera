@@ -50,7 +50,9 @@ impl Token for Neon {
     }
 }
 
-/// AVX2, which an x86-64 processor may lack.
+/// AVX2 with POPCNT, which an x86-64 processor may lack. Every processor
+/// with AVX2 has POPCNT, but the compiler does not assume it, so the token
+/// asks for both.
 #[cfg(all(target_arch = "x86_64", not(miri)))]
 #[derive(Clone, Copy)]
 pub struct Avx2(());
@@ -65,10 +67,11 @@ pub enum Avx2 {}
 impl Token for Avx2 {
     #[inline(always)]
     fn get() -> Option<Self> {
-        // The standard library keeps the answer, so asking costs a load; a
-        // build with AVX2 enabled gets a constant.
+        // The standard library keeps the answers, so asking costs a load for
+        // each; a build with both features enabled gets a constant.
         #[cfg(all(target_arch = "x86_64", not(miri)))]
-        return std::is_x86_feature_detected!("avx2").then_some(Self(()));
+        return (std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("popcnt"))
+            .then_some(Self(()));
         #[cfg(not(all(target_arch = "x86_64", not(miri))))]
         None
     }

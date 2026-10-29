@@ -107,7 +107,7 @@ mod bulk {
     use tessera_core::WordBlock;
 
     use crate::int::present;
-    use crate::simd::{self, Simd};
+    use crate::simd::{self, Simd, Vectors};
 
     #[inline]
     pub fn sum(set: Simd, block: WordBlock<'_, i32>, selected: u64) -> (usize, i64) {
@@ -116,6 +116,6 @@ mod bulk {
             WordBlock::Dense { values, .. } => simd::sum_dense(set, values, mask),
             WordBlock::Datum { values, .. } => simd::sum_datum(set, values, mask),
         };
-        (mask.count_ones() as usize, total)
+        (set.count_bits(mask), total)
     }
 }
