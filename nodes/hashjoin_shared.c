@@ -1098,11 +1098,9 @@ static void
 shared_probe_start(TessHashJoinState *state, uint64 records)
 {
 	JoinSpill  *spill;
-	Size		record;
 
 	Assert(state->spill != NULL);
 	spill = state->spill;
-	record = spill->build.record_size;
 	tess_spill_finish(spill->build.file);
 	tess_spill_finish(spill->probe.file);
 	tess_spill_finish(spill->resident.file);
@@ -1128,7 +1126,8 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 														 partition, 0, &rows,
 														 &state->status));
 		spill->build.rows[partition] = rows;
-		spill->build.parts[partition].disk_bytes = rows * record;
+		/* Every participant's blocks, values too, as read back: one that joins it alone splits or takes pieces by them. */
+		spill->build.parts[partition].disk_bytes = pg_atomic_read_u64(&join_part_stats(state, partition)[0]);
 	}
 	state->build_rows = state->parallel.shared->resident_rows;
 }

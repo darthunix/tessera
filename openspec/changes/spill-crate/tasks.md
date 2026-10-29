@@ -131,7 +131,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       with 70 outer columns kept, compared with the core;
       `make installcheck`; the machine code and the counters of the
       kernel's loop, as section 0 asks
-- [ ] 2.10 Size a partition of a shared build that one participant
+- [x] 2.10 Size a partition of a shared build that one participant
       joins alone by the bytes every participant wrote, which the
       shared counters of a partition already hold, and not by its
       records alone, so that a partition of long values is split or
