@@ -104,5 +104,5 @@ those it checks.
 - **Vector kernels on AArch64** (NEON), and on x86-64 with AVX2, where
   the processor has it, for the filters of int4 and int8, the
   comparisons of two such columns, their arithmetic and aggregates, the
-  count, the widening cast and the hashes of int4 keys; elsewhere the
+  count, the widening cast and the hashes of their keys; elsewhere the
   scalar kernels run, with the same results.
