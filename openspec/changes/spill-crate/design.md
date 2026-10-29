@@ -564,6 +564,36 @@ already found some faults. Each is to be shown by a test first.
   refuses it.
 - **Memory that nobody counts,** above.
 
+The outside reviews of the spill as it is found more. Each is a task
+of its own, shown by a test first:
+
+- **An expression key written as an address.** A join keeps a key
+  that is an expression, such as `lower(t)`, as a word on disk. For a
+  key of text that word is the address of the value, which is freed
+  by the time the partition is read back: the server crashes.
+- **A queue that runs over.** A partition whose values outgrew a
+  chunk is queued again each time it fills before the queue is
+  emptied, and a split never empties it: the queue writes past its
+  array.
+- **No more than 64 outer columns.** A join that spills cannot keep
+  more outer columns, though the format can, and fails the query.
+- **A shared partition sized by its records.** A partition that one
+  participant joins alone is sized without its values, so a partition
+  of long values is loaded whole, far past `hash_mem`.
+- **Empty buckets.** The grouping's spilled rows take their partition
+  from the high bits of the hash, which the buckets of a partition's
+  table take too, so most buckets stay empty and chains grow long.
+- **A piece that never ends.** A join ends a piece of a partition at
+  a block of values; a partition whose values are all NULL has none,
+  and is loaded whole.
+- **Long loops without a check for a cancel,** in the shared build,
+  its rounds, the first split of a table and the demotion of a
+  partition.
+- **More reads that trust a file,** in the join, the sort and the
+  grouping, which join the damaged bytes above, one task a node.
+- **Spill words that break their promise** after an update they
+  refuse.
+
 Two suspicions turned out not to be faults. One is the join's two
 thresholds, above. The other is a block of columns that flushes the
 buffer before its header is checked: it flushes only blocks that were
@@ -688,6 +718,13 @@ stop; the hand-over from a build to its rounds; both spills of a
 grouping; keys numbered by a dictionary; aggregates of computed values;
 and a sort read again, read backward, and of text, with its output kept
 across calls.
+
+Some cases are states that today's code leaves wrong but that no path
+reaches yet; a machine must refuse them or handle them: a grouping
+asked for rows after its last partition, whose table still names
+freed chunks; a participant stepped again after it finished, which
+the build itself does not reset; and a build that follows a round on
+the same state, whose count of value slots the round leaves behind.
 
 The machine of several processes runs under loom with two and three
 participants: its phases, its words, its files in memory, its catch-up,

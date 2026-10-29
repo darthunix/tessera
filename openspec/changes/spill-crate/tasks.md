@@ -23,26 +23,29 @@ a merge.
 
 ## 1. The proposal
 
-- [ ] 1.1 Write the proposal, the spec, the design and the tasks of
+- [x] 1.1 Write the proposal, the spec, the design and the tasks of
       this change. Check: `openspec validate spill-crate --strict`;
       `.github/scripts/check-specs.sh`
-- [ ] 1.2 Write the crate's contract, `contract.md` in this change's
+- [x] 1.2 Write the crate's contract, `contract.md` in this change's
       folder: the rules of "The crate's contract" in the design, each
       with its check, or `pending` until its task, and the forecast.
       Check: `.github/scripts/check-specs.sh`
-- [ ] 1.3 Take up the items of the roadmap: the entry `spill-crate` in
+- [x] 1.3 Take up the items of the roadmap: the entry `spill-crate` in
       the queue; "A crate for spilling" out of "Decided against"; the
       two findings of `spill-format` out of "Not placed"; and, out of
       `small-c-leftovers`, the row spill, its writer, and the merge of
       the copies of `store_value`. Check:
       `.github/scripts/check-specs.sh`
-- [ ] 1.4 Fold in the findings of two outside reviews of the proposal,
+- [x] 1.4 Fold in the findings of two outside reviews of the proposal,
       and the choices made on them. Check: the review of the pull
       request
 
 ## 2. The spill as it is, checked
 
-- [ ] 2.1 Have outside reviews read the spill: the C of the nodes and
+The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
+2.16, 2.3, 2.14, 2.15, 2.11, 2.12 and 2.13, then 2.4 to 2.6.
+
+- [x] 2.1 Have outside reviews read the spill: the C of the nodes and
       of `runtime/spill.c`; the Rust of `tessera-spill`, of the spill
       words, of the phases, of the appending of columns, and of their
       entry points; and the specs and designs of `spill-format` and
@@ -61,18 +64,23 @@ a merge.
       spill, which checks that the spill ran; a test of `parallel` over
       such a value; a C test that frees the expanded value before its
       rows are read back; `make installcheck`
-- [ ] 2.3 Show by tests, then fix, damaged bytes that reach the C of a
-      node. The sort reads a chunk of columns with its own count of
-      columns. The join reads any outer block that is not a block of
-      values as columns. The join grows its table of value chunks by a
-      number read from the file, which overflows at 2^30. A reference
-      to a value is checked against its chunk, not against its last
-      byte, and no node checks that the length of a value ends inside
-      its chunk. After the fix, the reads of a node take the kind and
-      the shape they expect, and the number of a chunk is bounded by
-      the chunks written. Check: tests in `test/tessera_spill_test.c`
-      over damaged files through the reads of the nodes, under the
-      sanitizers of CI; `make installcheck`
+- [ ] 2.3 Show by tests, then fix, damaged bytes that reach the C of the
+      join. It reads any outer block that is not a block of values as
+      columns, and a chunk of columns by the side's count of words, not
+      the chunk's. It grows its table of value chunks by a number read
+      from the file, which overflows a signed `int` at 2^30 and may
+      then loop without end and without a check for a cancel. When it
+      splits a partition read back, and when it gathers the values of
+      a table read back in pieces or in a round, it takes the chunk
+      number of a reference without a bound; the gather has only an
+      `Assert`. It checks the chunk a reference names but not the byte
+      in it, and no check makes sure that a value's length ends inside
+      its chunk. After the fix, the join's reads take the kind and the
+      shape they expect, a chunk's number is bounded by the chunks
+      written, and a value ends inside its chunk. Check: tests of
+      `test/tessera_spill_test.c` over damaged files through the
+      join's reads, each refused with `XX001`, under the sanitizers of
+      CI; `make installcheck`
 - [ ] 2.4 Refuse a partition of a shared set that is dropped before the
       set is finished; correct the comment that says a block of columns
       is checked before anything is written. Check: a case of
@@ -85,6 +93,103 @@ a merge.
       Check: the program runs under `tessera-bench`; a first run of the
       counters, and a run of `runs_text` and `rows_text` on mains
       power, as the base for later comparisons
+- [ ] 2.7 Show by a test, then fix: a join keeps on disk every key no
+      column already holds as a word of 8 bytes, which for a hashed
+      key of text, such as an expression `lower(a.t)` its child
+      computes, is the address of a value its batch frees; a join that
+      spills then reads other bytes, and the server crashes. Such a
+      key is kept by its type, and a by-reference one is copied like
+      any other column. Check: a test of `join` with an expression key
+      over text that spills, in one process, in each participant's
+      table and in a shared table, compared with the core;
+      `make installcheck`
+- [ ] 2.8 Show by a test, then fix: the queue of partitions whose
+      values outgrew a chunk has one entry a partition, but a partition
+      leaves it only when the queue is emptied, though a flush clears
+      its mark. So a partition flushed and filled again before the
+      queue is emptied is queued again, and the queue runs past its
+      array and writes over the memory after it: when a partition read
+      back is split, which never empties the queue, and within one
+      batch whose long values fill a partition several times, on both
+      sides and on a shared join's side of resident outer rows. A join
+      of long text values at a small `work_mem` fails with an internal
+      error. A partition is queued at most once until the queue is
+      emptied, and a split empties it as it writes. Check: tests of
+      `join` that split a level with long values and that fill one
+      partition several times in a batch, compared with the core;
+      `make installcheck` under the sanitizers of CI
+- [ ] 2.9 Lift the join's limit of 64 outer columns kept on disk,
+      which fails a query that spills with SQLSTATE `54000` though the
+      format holds 4096 words a row. The C of the join reads one lane
+      of NULL bits and reaches lanes by `1 + word`; the entry point
+      `tess_spill_columns_append_partitioned` refuses more than 64
+      columns and keeps them in arrays of 64; its kernel writes one
+      lane of NULL bits. All of them take the lanes of NULL bits and
+      the words of a chunk as `tessera/spill.h` lays them out. Check:
+      a Rust test of the entry point with 70 columns, NULLs and a
+      by-reference value past column 64; a test of `join` that spills
+      with 70 outer columns kept, compared with the core;
+      `make installcheck`; the machine code and the counters of the
+      kernel's loop, as section 0 asks
+- [ ] 2.10 Size a partition of a shared build that one participant
+      joins alone by the bytes every participant wrote, which the
+      shared counters of a partition already hold, and not by its
+      records alone, so that a partition of long values is split or
+      read in pieces like a serial join's, not loaded whole. How far a
+      piece may pass its room by a block or a group is the rule of
+      3.23, not of this task. Check: a parallel test of `join` with a
+      skewed key of long values, compared with the core, that shows
+      the partition taken alone and read in pieces; `make installcheck`
+- [ ] 2.11 Check for a cancel in every loop that can run long: the
+      linking of a shared table's chunks, a round's load block by
+      block (today once a file), the first split of a table, and the
+      demotion of a resident partition. Check: a C test of
+      `test/tessera_interrupt_test.c` that marks a cancel pending
+      before each loop it can reach and shows that the loop stops
+      before its end; `make installcheck`
+- [ ] 2.12 Take the partitions of the grouping's spilled rows from the
+      low bits of the hash, as its spilled records do, and not from
+      the high bits, which the buckets of a partition's table take
+      too: today most buckets of such a table stay empty and its
+      chains grow long. The design's three rules of the bits of a
+      level become two. Check: a test of a level's bits that the rows
+      of a partition spread over the buckets of its table;
+      `cargo ab measure` of a grouping of a generic aggregate over many
+      groups at a small `work_mem`, before and after;
+      `make installcheck`
+- [ ] 2.13 Make the spill words keep their promises: an update they
+      refuse leaves them as they were, and
+      `tess_table_spill_records` refuses a partition past the level's
+      count also when it adds nothing and asks for no count. Correct
+      the spec of `hash-table` where it says that a negative partition
+      is taken only before the split. Check: Rust tests of both;
+      `make rust-check`; `.github/scripts/check-specs.sh`
+- [ ] 2.14 Show by tests, then fix, damaged bytes that reach the C of
+      the sort: it reads a chunk of columns by its own count of
+      columns, not the chunk's; its reader of a single run, which a
+      scrollable cursor uses, does not compare a block's rows with the
+      run's record of them, and reads past the block when they differ;
+      and it checks where a value starts but not that its length ends
+      inside its chunk. Check: tests of `test/tessera_spill_test.c`
+      over damaged runs, each refused with `XX001`, under the
+      sanitizers of CI; `make installcheck`
+- [ ] 2.15 Show by tests, then fix, damaged bytes that reach the C of
+      the grouping: its reader of spilled rows reads a chunk by its
+      own count of words, not the chunk's; its readers of records do
+      not check a block's kind; and it checks where a value starts but
+      not that its length ends inside its chunk. Check: tests of
+      `test/tessera_spill_test.c` over damaged partitions, each
+      refused with `XX001`, under the sanitizers of CI;
+      `make installcheck`
+- [ ] 2.16 Show by a test, then fix: a join reads a partition in pieces
+      by its groups of records, and a group ends only at a block of
+      values when the side has a by-reference column. A partition
+      whose by-reference values are all NULL writes no block of
+      values, so its piece never ends and the partition that did not
+      fit is loaded whole. A piece also ends before a group that has
+      no block of values. Check: a test of `join` with a skewed key
+      whose text payload is NULL, compared with the core, that shows
+      extra passes; `make installcheck`
 
 ## 3. The crate
 
@@ -154,9 +259,9 @@ a merge.
       whole or split into a level below. Check: the property test; the
       cases of nested levels; `make installcheck`; `make crosscheck`
 - [ ] 3.15 Add the pieces and their passes, with the marks of matched
-      rows. Check: the property test; the cases of pieces and of skew;
-      `make installcheck`; `cargo ab measure` of a join read in
-      pieces
+      rows. Check: the property test; the cases of pieces, of skew and
+      of a partition without values (2.16); `make installcheck`;
+      `cargo ab measure` of a join read in pieces
 - [ ] 3.16 Add the tails of RIGHT and FULL joins and the output held
       across calls; the decisions of C go. Check: the property test;
       the cases of tails and of early stops; `make installcheck`;
@@ -188,11 +293,12 @@ a merge.
       hand-overs; `make rust-loom`; `make crosscheck` with workers;
       `cargo ab measure` of the rounds of a parallel join
 - [ ] 3.23 Make the measure of memory count the block lists, the marks
-      of matched rows of a join read in pieces, and the block it reads
-      ahead, each by its capacity and once, with a rule of what may go
-      past the limit and of what a node does when memory runs out; the
-      specs that show a changed plan change with it. Check:
-      `make installcheck`, with every changed plan read;
+      of matched rows of a join read in pieces, the block it reads
+      ahead, and the writers and buffers of the grouping's spill of
+      rows, which only grow, each by its capacity and once, with a
+      rule of what may go past the limit and of what a node does when
+      memory runs out; the specs that show a changed plan change with
+      it. Check: `make installcheck`, with every changed plan read;
       `cargo ab measure` of the family `spill`
 - [ ] 3.24 Make one rule for the limit of a level below, for the join
       and the grouping, if a measurement shows no loss. Check:
