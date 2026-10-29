@@ -269,8 +269,9 @@ number 0. A reader of such a chunk of columns from a file MUST refuse,
 as damaged data, a word of a by-reference column that is no reference
 into that chunk of values. The bytes a reference names SHALL be the
 value's own, as `datumCopy` copies them: an expanded object, which is a
-pointer into its owner's memory, SHALL be flattened, and the kernels
-SHALL refuse one they are given to append.
+pointer into its owner's memory, SHALL be flattened, and
+`tess_spill_columns_append`, which copies a batch's values by their
+bytes, SHALL refuse one.
 
 ```
  bit 63                        32 31                             0
@@ -300,16 +301,20 @@ SHALL refuse one they are given to append.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(28)`
 
 #### Scenario: An expanded value copied flat
-- **WHEN** an expanded array is copied and its object is then freed; a
-  grouping spills the rows of an aggregate whose argument is such an
-  array; a parallel worker sends one to the leader; and the kernels are
-  given one to append to a chunk of columns
-- **THEN** each copy reads back as the array's flat bytes, both queries
-  give the results they give without Tessera, and the kernels refuse
-  the value
+- **WHEN** an expanded array is copied, kept as a row's value, spilled
+  in the rows of a grouping, or sent by a parallel worker, and its
+  object is then freed
+- **THEN** each copy reads back as the array's flat bytes, and both
+  queries give the results they give without Tessera
 - **Verified by:** `test/sql/rows.sql::tessera_test_rows_value`;
   `test/sql/agg.sql::An expanded array as a generic aggregate's argument`;
-  `test/sql/parallel.sql::An expanded array computed in the workers`;
+  `test/sql/parallel.sql::An expanded array computed in the workers`
+
+#### Scenario: An expanded value refused by the append of columns
+- **WHEN** `tess_spill_columns_append` is given an expanded value,
+  read-only or read-write, after a plain one in the same row
+- **THEN** it refuses the call and copies nothing
+- **Verified by:**
   `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
 
 ### Requirement: The limits of a chunk of columns

@@ -365,14 +365,27 @@ tessera_test_rows_sort(PG_FUNCTION_ARGS)
 
 /*
  * The one copy of a by-reference value: an expanded array, copied and
- * flattened, reads back as the array's bytes after its object is freed;
- * a column of it, flattened for the rows of a mask, gets a copy of its
- * values with the selected expanded one flattened, and the rest, the
- * batch's own array and a column of a fixed length, are left as they are.
+ * flattened, and appended to rows, reads back as the array's bytes after
+ * its object is freed; a column of it, flattened for the rows of a mask,
+ * gets a copy of its values with the selected expanded one flattened, and
+ * the rest, the batch's own array and a column of a fixed length, are
+ * left as they are.
  */
 Datum
 tessera_test_rows_value(PG_FUNCTION_ARGS)
 {
+	TessRows   *rows = make_rows();
+	Datum		row_key = Int32GetDatum(1);
+	Datum		row_values[NCOLUMNS];
+	bool		row_nulls[NCOLUMNS] = {false, false, false};
+	TessDatumColumn key_column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	TessDatumColumn row_columns[NCOLUMNS];
+	TessTableKey key = {TESS_TABLE_KEY_INT4, &key_column, NULL};
+	uint64		one[1] = {0x1};
+	TessRowMask row = {1, one};
+	uint32		ref;
+	Datum		stored;
+	bool		stored_null;
 	Datum		elements[3] = {Int32GetDatum(1), Int32GetDatum(2), Int32GetDatum(3)};
 	ArrayType  *flat = construct_array_builtin(elements, 3, INT4OID);
 	MemoryContext owner = AllocSetContextCreate(CurrentMemoryContext, "expanded owner",
@@ -405,10 +418,28 @@ tessera_test_rows_value(PG_FUNCTION_ARGS)
 	ok = ok && column.values != values && fixed.values == values &&
 		column.values[0] == values[0] && column.values[2] == expanded &&
 		values[1] == expanded && column.values[1] != expanded;
+	/* A row whose varlena column is the object, kept by TessRows. */
+	key_column.values = &row_key;
+	key_column.isnull = &row_nulls[0];
+	key_column.nrows = 1;
+	row_values[0] = Int32GetDatum(1);
+	row_values[1] = expanded;
+	row_values[2] = Int64GetDatum(2);
+	for (int at = 0; at < NCOLUMNS; at++)
+	{
+		row_columns[at] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		row_columns[at].values = &row_values[at];
+		row_columns[at].isnull = &row_nulls[at];
+		row_columns[at].nrows = 1;
+	}
+	tess_rows_append(rows, &key, row_columns, &row, &ref);
 	/* The object gone, the copies stand. */
 	MemoryContextDelete(owner);
+	tess_rows_gather(rows, 1, &ref, &row, &stored, &stored_null);
 	ok = ok && memcmp(copy, flat, size) == 0 &&
-		memcmp(DatumGetPointer(column.values[1]), flat, size) == 0;
+		memcmp(DatumGetPointer(column.values[1]), flat, size) == 0 &&
+		!stored_null && memcmp(DatumGetPointer(stored), flat, size) == 0;
+	tess_rows_free(rows);
 	/* No expanded value among the rows: the column is left as it is. */
 	column.values = values;
 	bits[0] = 0x1;

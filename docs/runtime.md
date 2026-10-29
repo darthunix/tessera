@@ -497,8 +497,9 @@ memory, freed with the batch and never seen by another process; the copy
 flattens it into plain bytes. A writer that hands a batch's columns to
 the kernels, which copy values by their bytes, first calls
 `tess_value_flatten_column`, which flattens the column's expanded
-values into a context of the writer's; the kernels refuse an expanded
-value they are given.
+values into a context of the writer's; `tess_spill_columns_append`
+refuses an expanded value it is given. The grouping's dictionary of
+keys copies its values the same way.
 
 ## Named plan data
 

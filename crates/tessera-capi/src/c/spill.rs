@@ -453,7 +453,7 @@ pub unsafe extern "C" fn tess_spill_columns_append_partitioned(
 
 /// A batch's Datum columns as a chunk of columns stores them: a by-value
 /// column's Datum, a by-reference one's bytes as `datumGetSize` counts
-/// them.
+/// them; an expanded object is refused, its caller flattens it first.
 struct DatumRows<'a> {
     columns: &'a [DatumColumn],
     nrows: usize,
@@ -495,8 +495,9 @@ impl RowValues for DatumRows<'_> {
 }
 
 /// The bytes of a by-reference Datum, as `datumGetSize` counts them: a
-/// fixed length's, a varlena's whole size (an external pointer's own), a C
-/// string's with its terminator.
+/// fixed length's, a varlena's whole size (an external pointer's own, but
+/// for an expanded object's, which is refused), a C string's with its
+/// terminator.
 ///
 /// # Safety
 ///

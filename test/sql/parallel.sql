@@ -89,9 +89,15 @@ SELECT parallel_same($$SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t W
 -- in the workers.
 SET parallel_leader_participation = off;
 EXPLAIN (COSTS OFF) CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(ARRAY[a, b], 0) AS arr FROM parallel_t WHERE a > 4900;
-CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(ARRAY[a, b], 0) AS arr FROM parallel_t WHERE a > 4900;
+SELECT plan_property($$CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(ARRAY[a, b], 0) AS arr FROM parallel_t WHERE a > 4900$$, 'TessGather', 'Workers Launched')::int > 0 AS workers;
 RESET parallel_leader_participation;
 SELECT count(*), bool_and(arr = ARRAY[a, a % 10, 0]) AS whole FROM parallel_arrays;
+DROP TABLE parallel_arrays;
+-- Arrays of 20 kB each: a batch's values take several messages.
+SET parallel_leader_participation = off;
+SELECT plan_property($$CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(array_fill(a, ARRAY[5000]), 0) AS arr FROM parallel_t WHERE a > 4900$$, 'TessGather', 'Workers Launched')::int > 0 AS workers;
+RESET parallel_leader_participation;
+SELECT count(*), bool_and(arr = array_append(array_fill(a, ARRAY[5000]), 0)) AS whole FROM parallel_arrays;
 DROP TABLE parallel_arrays;
 -- Every page is read once across the participants: the leader sums their pages.
 SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Pages')::int = :pages AS all_pages;

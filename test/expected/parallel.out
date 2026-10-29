@@ -127,9 +127,30 @@ EXPLAIN (COSTS OFF) CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(
                ->  Parallel Custom Scan (TessHeapScan) on parallel_t
 (6 rows)
 
-CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(ARRAY[a, b], 0) AS arr FROM parallel_t WHERE a > 4900;
+SELECT plan_property($$CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(ARRAY[a, b], 0) AS arr FROM parallel_t WHERE a > 4900$$, 'TessGather', 'Workers Launched')::int > 0 AS workers;
+ workers 
+---------
+ t
+(1 row)
+
 RESET parallel_leader_participation;
 SELECT count(*), bool_and(arr = ARRAY[a, a % 10, 0]) AS whole FROM parallel_arrays;
+ count | whole 
+-------+-------
+    86 | t
+(1 row)
+
+DROP TABLE parallel_arrays;
+-- Arrays of 20 kB each: a batch's values take several messages.
+SET parallel_leader_participation = off;
+SELECT plan_property($$CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(array_fill(a, ARRAY[5000]), 0) AS arr FROM parallel_t WHERE a > 4900$$, 'TessGather', 'Workers Launched')::int > 0 AS workers;
+ workers 
+---------
+ t
+(1 row)
+
+RESET parallel_leader_participation;
+SELECT count(*), bool_and(arr = array_append(array_fill(a, ARRAY[5000]), 0)) AS whole FROM parallel_arrays;
  count | whole 
 -------+-------
     86 | t
