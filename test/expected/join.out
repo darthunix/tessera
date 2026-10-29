@@ -2612,6 +2612,38 @@ SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k
  17107 rows, hash a15b33f6ce1da529228e12fecd74b017
 (1 row)
 
+-- A hashed key that is an expression its child computes, such as
+-- lower(t), goes to disk by its own type: the bytes of the text, not the
+-- address of a value its batch frees; it is hashed again when read back.
+SELECT join_explain($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, false);
+                                 join_explain                                  
+-------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   ->  Custom Scan (TessHashJoin) (actual rows=40000.00 loops=1)
+         Hash Cond: (lower(jsp.s) = lower(('p'::text || (jsb.n)::text)))
+         Join Filter: (lower(jsp.s) = lower(('p'::text || (jsb.n)::text)))
+         Buckets: 1024
+         Memory Usage: within hash_mem
+         Batches: 4
+         Disk Usage: 1652 kB
+         Rows Removed by Join Filter: 0
+         Rows Removed by Bloom Filter: 59926
+         ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on jsb (actual rows=40000.00 loops=1)
+(12 rows)
+
+SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 0fa68d92a7b824d6ed20cbbebd3fb4a3
+(1 row)
+
+SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash d31cdd3be39e8ab1bbf798844021d5d7
+(1 row)
+
 -- A function's plans freed, the allocator recycles their contexts (aset.c)
 -- with the largest chunk a block shares, 8 kB: the RIGHT join below got
 -- one for a partition read back and took 1579 kB of a hash_mem of 1024.
@@ -3417,6 +3449,19 @@ SELECT join_same($$SELECT count(*), count(jsb.n), count(jsb.t) FROM jsp LEFT JOI
  1 rows, hash ec0b24d7908313be9d76a70abe802a1a
 (1 row)
 
+SELECT join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Parallel Aware') AS parallel,
+       join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Spilled Chunks')::int > 0 AS spilled;
+ parallel | spilled 
+----------+---------
+ true     | t
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 0fa68d92a7b824d6ed20cbbebd3fb4a3
+(1 row)
+
 RESET work_mem;
 -- Each participant decides on a filter of its own table by its own rows.
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
@@ -3908,6 +3953,19 @@ SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LE
                    join_same                   
 -----------------------------------------------
  1 rows, hash 1de6f4929b68a1b5c29c381ba953baa4
+(1 row)
+
+SELECT join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Spilled Chunks')::int > 0 AS spilled;
+ shared | spilled 
+--------+---------
+ true   | t
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 0fa68d92a7b824d6ed20cbbebd3fb4a3
 (1 row)
 
 -- One key held by 60000 inner rows the planner does not expect: the

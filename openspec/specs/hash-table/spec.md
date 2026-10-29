@@ -241,6 +241,15 @@ with `float8`, SHALL leave the grouping or the join to the core's node.
   `test/sql/types.sql::Equal values of other forms`;
   `test/sql/types.sql::Keys of other types of 8 bytes`
 
+#### Scenario: A key through a number, on disk
+- **WHEN** a join by a key of `text` that is an expression its child
+  computes, such as `lower(t)`, spills: in one process, in each
+  participant's table, and in a shared table
+- **THEN** Tessera's node runs it, its plan shows the spill, and the
+  rows are the core's
+- **Verified by:**
+  `test/sql/join.sql::A hashed key that is an expression its child computes`
+
 #### Scenario: Keys left to the core
 - **WHEN** a grouping or a join is by a key of `money`, or a join by
   `float4` equal to `float8`

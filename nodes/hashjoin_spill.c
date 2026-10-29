@@ -1,6 +1,8 @@
 #include "postgres.h"
 
 #include "miscadmin.h"
+#include "nodes/nodeFuncs.h"
+#include "utils/lsyscache.h"
 #include "utils/datum.h"
 #include "utils/memutils.h"
 #include "storage/barrier.h"
@@ -758,6 +760,26 @@ make_room(TessHashJoinState *state, bool building)
 	join_note_memory(state);
 }
 
+/* The type of column column of the outer child's batches: its target's. */
+static void
+outer_column_type(TessHashJoinState *state, int column, int16 *typlen, bool *byval)
+{
+	const TessLayout *layout = tess_input_layout(state->outer_input);
+	List	   *targets = state->outer->plan->targetlist;
+
+	for (int target = 0; target < layout->ntargets && target < list_length(targets); target++)
+	{
+		if (tess_layout_column(layout, target) == column)
+		{
+			TargetEntry *entry = list_nth_node(TargetEntry, targets, target);
+
+			get_typlenbyval(exprType((Node *) entry->expr), typlen, byval);
+			return;
+		}
+	}
+	elog(ERROR, "TessHashJoin found no target of outer column %d", column);
+}
+
 /*
  * A level of partitions by the hash bits from shift, for an inner side
  * of expected bytes, as the current one: the power of two of them that
@@ -875,6 +897,11 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 		byvals[nstored] = state->typbyvals[scan];
 		spill->word_of[child] = ++nstored;
 	}
+	/*
+	 * A key no column asked for, such as an expression the child computes,
+	 * by its own type: a hashed key of text is a pointer into the child's
+	 * batch, its value copied like any column's and hashed again when read.
+	 */
 	for (int key = 0; key < state->keys.nkeys; key++)
 	{
 		int			child = state->keys.outer_keys[key];
@@ -882,8 +909,7 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 		if (spill->word_of[child] != 0)
 			continue;
 		spill->stored[nstored] = child;
-		typlens[nstored] = sizeof(Datum);
-		byvals[nstored] = true;
+		outer_column_type(state, child, &typlens[nstored], &byvals[nstored]);
 		spill->word_of[child] = ++nstored;
 	}
 	if (nstored > 64)

@@ -605,6 +605,12 @@ SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) F
 RESET tessera.join_spill_tail_weight;
 RESET tessera.join_spill_resident_share;
 SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%7'$$);
+-- A hashed key that is an expression its child computes, such as
+-- lower(t), goes to disk by its own type: the bytes of the text, not the
+-- address of a value its batch frees; it is hashed again when read back.
+SELECT join_explain($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, false);
+SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
+SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
 -- A function's plans freed, the allocator recycles their contexts (aset.c)
 -- with the largest chunk a block shares, 8 kB: the RIGHT join below got
 -- one for a partition read back and took 1579 kB of a hash_mem of 1024.
@@ -748,6 +754,9 @@ SET work_mem = '512kB';
 SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k) FROM jsp JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), count(jsb.n), count(jsb.t) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsb.k IS NULL$$);
+SELECT join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Parallel Aware') AS parallel,
+       join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Spilled Chunks')::int > 0 AS spilled;
+SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
 RESET work_mem;
 -- Each participant decides on a filter of its own table by its own rows.
 SELECT join_same($$SELECT count(*), sum(jbuild.w), sum(jprobe.v) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
@@ -875,6 +884,9 @@ SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)), sum(length
 SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%3'$$);
 SELECT join_same($$SELECT count(*), sum(jsb.n), sum(length(jsb.t)) FROM jsp JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
 SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LEFT JOIN jsb ON jsp.k = jsb.k AND jsb.n > jsp.k * 2$$);
+SELECT join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Spilled Chunks')::int > 0 AS spilled;
+SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
 -- One key held by 60000 inner rows the planner does not expect: the
 -- table splits late, and the key's partition, larger than hash_mem, is
 -- joined in pieces by the participant that takes it.
