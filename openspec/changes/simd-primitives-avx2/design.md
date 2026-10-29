@@ -468,6 +468,12 @@ What the moves found:
   blocks with unprepared rows read every word row by row, as before,
   with the same instructions, in a loop that got other registers: 4 to
   5 % more cycles, under the bar of 10 %.
+- The hash of int4 took the same form and kept its NEON code
+  (`disasm-HAf1ds`). A key's 32 bits are held in int4 lanes, whose
+  products, sums and xors are those of unsigned lanes; the shift right
+  of the primitives shifts zeros in, as the hash's shifts do. The hash
+  of int8 shares its loop of groups and now its fold of a key's hash
+  into the previous one, so its NEON code is checked with it.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.

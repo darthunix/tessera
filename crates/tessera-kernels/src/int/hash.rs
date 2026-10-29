@@ -4,13 +4,13 @@
 //! code.
 
 use anyhow::{Context, Result, ensure};
-use tessera_core::{ColumnReader, RowMask, RowMaskView};
+use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
 use super::{IntLane, Side};
 use crate::BULK_MIN_ROWS;
 use crate::int32::hash::NULL_KEY;
 use crate::int32::{NullKeys, hash_combine, murmurhash32};
-use crate::simd::{Neon, Token};
+use crate::simd::{Neon, Token, Vectors};
 
 /// The driver of [`crate::int32::hash`] and [`crate::int64::hash`].
 pub(crate) fn hash<T: IntLane, C: ColumnReader<Value = T>>(
@@ -189,32 +189,15 @@ where
 }
 
 /// The storage of a whole word with its non-NULL rows, when exposed.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 fn block<T: IntLane, C: ColumnReader<Value = T>>(
     neon: Neon,
     column: &C,
     index: usize,
 ) -> Option<(Side<'_, T>, u64)> {
-    use tessera_core::WordBlock;
-
     Some(match column.word_block(index)? {
         WordBlock::Dense { values, non_nulls } => (Side::Dense(values), non_nulls),
-        WordBlock::Datum { values, isnull } => (
-            Side::Datum(values),
-            crate::simd::non_null_bits(neon, isnull),
-        ),
+        WordBlock::Datum { values, isnull } => (Side::Datum(values), neon.non_null_bits(isnull)),
     })
-}
-
-/// Without NEON the token has no values, so no call asks for a block.
-#[cfg(not(all(target_arch = "aarch64", not(miri))))]
-fn block<T: IntLane, C: ColumnReader<Value = T>>(
-    neon: Neon,
-    column: &C,
-    index: usize,
-) -> Option<(Side<'_, T>, u64)> {
-    let _ = (column, index);
-    match neon {}
 }
 
 /// One word row by row, without a branch on nullness: a NULL row hashes
