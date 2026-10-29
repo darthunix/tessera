@@ -11,15 +11,16 @@
 
 use core::arch::aarch64::{
     int32x4_t, int64x2_t, uint32x4_t, uint64x2_t, vaddlvq_u8, vaddq_s32, vaddq_s64, vaddq_u8,
-    vaddvq_s64, vandq_s32, vandq_u8, vandq_u32, vandq_u64, vbicq_u64, vbslq_s32, vceqq_s32,
-    vceqq_s64, vceqzq_u8, vcgeq_s32, vcgeq_s64, vcgtq_s32, vcgtq_s64, vcleq_s32, vcleq_s64,
-    vcltq_s32, vcltq_s64, vcombine_u8, vcombine_u32, vdup_n_u8, vdupq_n_s32, vdupq_n_s64,
-    vdupq_n_u8, vdupq_n_u32, vdupq_n_u64, veorq_s32, vget_low_s32, vld1q_s32, vld1q_s64, vld1q_u8,
-    vmaxq_s32, vmaxvq_s32, vmaxvq_u32, vminq_s32, vminvq_s32, vminvq_u32, vmovl_high_s32,
-    vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32, vmull_n_s32, vmull_s32, vmulq_s32,
-    vmvnq_u32, vorrq_u32, vorrq_u64, vpadalq_s32, vqaddq_s32, vqaddq_s64, vqsubq_s32, vqsubq_s64,
-    vreinterpretq_s32_s64, vreinterpretq_s32_u32, vreinterpretq_u32_u64, vreinterpretq_u64_u32,
-    vshlq_s32, vshrq_n_s32, vst1q_s32, vst1q_s64, vsubq_s32, vsubq_s64, vtst_u8, vuzp2q_s32,
+    vaddvq_s64, vandq_s32, vandq_u8, vandq_u32, vandq_u64, vbicq_u64, vbslq_s32, vbslq_s64,
+    vceqq_s32, vceqq_s64, vceqzq_u8, vcgeq_s32, vcgeq_s64, vcgtq_s32, vcgtq_s64, vcleq_s32,
+    vcleq_s64, vcltq_s32, vcltq_s64, vcombine_u8, vcombine_u32, vdup_n_u8, vdupq_n_s32,
+    vdupq_n_s64, vdupq_n_u8, vdupq_n_u32, vdupq_n_u64, veorq_s32, vget_low_s32, vgetq_lane_s64,
+    vld1q_s32, vld1q_s64, vld1q_u8, vmaxq_s32, vmaxvq_s32, vmaxvq_u32, vminq_s32, vminvq_s32,
+    vminvq_u32, vmovl_high_s32, vmovl_s32, vmovn_u64, vmull_high_n_s32, vmull_high_s32,
+    vmull_n_s32, vmull_s32, vmulq_s32, vmvnq_u32, vorrq_u32, vorrq_u64, vpadalq_s32, vqaddq_s32,
+    vqaddq_s64, vqsubq_s32, vqsubq_s64, vreinterpretq_s32_s64, vreinterpretq_s32_u32,
+    vreinterpretq_u32_u64, vreinterpretq_u64_u32, vshlq_s32, vshrq_n_s32, vst1q_s32, vst1q_s64,
+    vsubq_s32, vsubq_s64, vtst_u8, vuzp2q_s32,
 };
 
 use super::{
@@ -371,6 +372,18 @@ impl Vectors for Neon {
         }
     }
 
+    /// Four vectors of two lanes are the eight rows of a byte.
+    #[inline]
+    fn lane_masks4_64(self, bits: u64, quad: usize) -> [uint64x2_t; 4] {
+        self.lane_masks64((bits >> (quad * 8)) as u8)
+    }
+
+    #[inline]
+    fn select64(self, mask: uint64x2_t, a: int64x2_t, b: int64x2_t) -> int64x2_t {
+        // SAFETY: as in `splat`.
+        unsafe { vbslq_s64(mask, a, b) }
+    }
+
     #[inline]
     fn none64(self) -> uint64x2_t {
         // SAFETY: as in `splat`.
@@ -443,6 +456,21 @@ impl Vectors for Neon {
     fn sum_across64(self, lanes: int64x2_t) -> i64 {
         // SAFETY: as in `splat`.
         unsafe { vaddvq_s64(lanes) }
+    }
+
+    /// NEON has no least of int8 lanes: the two are compared in scalar
+    /// code.
+    #[inline]
+    fn min_across64(self, lanes: int64x2_t) -> i64 {
+        // SAFETY: as in `splat`.
+        unsafe { vgetq_lane_s64::<0>(lanes).min(vgetq_lane_s64::<1>(lanes)) }
+    }
+
+    /// As in `min_across64`.
+    #[inline]
+    fn max_across64(self, lanes: int64x2_t) -> i64 {
+        // SAFETY: as in `splat`.
+        unsafe { vgetq_lane_s64::<0>(lanes).max(vgetq_lane_s64::<1>(lanes)) }
     }
 }
 

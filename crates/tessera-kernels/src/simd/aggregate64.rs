@@ -1,131 +1,181 @@
-//! Whole-word extremes of int8 values under a row mask.
+//! Whole-word extremes of int8 values under a row mask, written once over
+//! the primitives of [`Vectors`].
 //!
 //! `mask` names the rows to aggregate: selected and non-NULL, computed by
-//! the caller (for Datum blocks from [`super::non_null_bits`]). A NULL
+//! the caller (for Datum blocks from [`Vectors::non_null_bits`]). A NULL
 //! row's placeholder value is loaded but masked away. A full mask skips
-//! the masking; the extremes are meaningful only for a nonzero mask. NEON
-//! has no 64-bit lane minimum or maximum, so a lane-wise extreme is a
-//! compare and a select, and the two lanes of the result reduce in
-//! scalar code; four accumulators keep the chain short, as for int4.
+//! the masking; the extremes are meaningful only for a nonzero mask.
+//! Neither set has a minimum or a maximum of int8 lanes, so a lane-wise
+//! extreme is a compare and a select; four accumulators keep the chain
+//! short, as for int4.
 
-use core::arch::aarch64::{
-    int64x2_t, vbslq_s64, vcgtq_s64, vdupq_n_s64, vgetq_lane_s64, vld1q_s64,
-};
+// Under Miri no set runs, so the tokens have no values, and the code that
+// the functions compiled for a set run on theirs cannot be reached.
+#![cfg_attr(miri, allow(unreachable_code, unused_variables))]
 
-use super::{Neon, byte_weights, lane_masks, widen};
+use super::{Neon, Simd, Vectors};
 
 /// Least masked row of a dense block; `i64::MAX` for an empty mask.
 #[inline]
-pub fn min_dense64(_: Neon, values: &[i64; 64], mask: u64) -> i64 {
-    // SAFETY: the token proves that this processor runs NEON.
-    unsafe { min_dense_lanes(values, mask) }
+pub fn min_dense64(neon: Neon, values: &[i64; 64], mask: u64) -> i64 {
+    // SAFETY: the token proves that this processor runs NEON, the vector
+    // set of the target where it has values, which `min_dense_lanes` is
+    // compiled for.
+    unsafe { min_dense_lanes(neon.simd(), values, mask) }
 }
 
 /// Greatest masked row of a dense block; `i64::MIN` for an empty mask.
 #[inline]
-pub fn max_dense64(_: Neon, values: &[i64; 64], mask: u64) -> i64 {
-    // SAFETY: as in min_dense64.
-    unsafe { max_dense_lanes(values, mask) }
+pub fn max_dense64(neon: Neon, values: &[i64; 64], mask: u64) -> i64 {
+    // SAFETY: as in min_dense64, for `max_dense_lanes`.
+    unsafe { max_dense_lanes(neon.simd(), values, mask) }
 }
 
 /// Least masked row of a Datum block; `i64::MAX` for an empty mask.
 #[inline]
-pub fn min_datum64(_: Neon, values: &[u64; 64], mask: u64) -> i64 {
-    // SAFETY: as in min_dense64.
-    unsafe { min_datum_lanes(values, mask) }
+pub fn min_datum64(neon: Neon, values: &[u64; 64], mask: u64) -> i64 {
+    // SAFETY: as in min_dense64, for `min_datum_lanes`.
+    unsafe { min_datum_lanes(neon.simd(), values, mask) }
 }
 
 /// Greatest masked row of a Datum block; `i64::MIN` for an empty mask.
 #[inline]
-pub fn max_datum64(_: Neon, values: &[u64; 64], mask: u64) -> i64 {
-    // SAFETY: as in min_dense64.
-    unsafe { max_datum_lanes(values, mask) }
+pub fn max_datum64(neon: Neon, values: &[u64; 64], mask: u64) -> i64 {
+    // SAFETY: as in min_dense64, for `max_datum_lanes`.
+    unsafe { max_datum_lanes(neon.simd(), values, mask) }
 }
 
-#[target_feature(enable = "neon")]
-fn min_dense_lanes(values: &[i64; 64], mask: u64) -> i64 {
-    // SAFETY: `pair` is below 32, so the two lanes read end within the array.
-    let load = |pair: usize| unsafe { vld1q_s64(values.as_ptr().add(pair * 2)) };
-    reduce_min(extreme_lanes(load, mask, i64::MAX, |a, b| least(a, b)))
+// The functions compiled for the vector set of the target, into which the
+// kernels below are inlined; the kernels carry its feature and are
+// `#[inline]`, as in `arith.rs`.
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn min_dense_lanes(simd: Simd, values: &[i64; 64], mask: u64) -> i64 {
+    // SAFETY: `extreme_word` asks for the vectors of a word only.
+    let load = |index: usize| unsafe { simd.load64(values, index) };
+    simd.min_across64(extreme_word(simd, load, mask, i64::MAX, |a, b| {
+        least(simd, a, b)
+    }))
 }
 
-#[target_feature(enable = "neon")]
-fn max_dense_lanes(values: &[i64; 64], mask: u64) -> i64 {
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn max_dense_lanes(simd: Simd, values: &[i64; 64], mask: u64) -> i64 {
     // SAFETY: as in min_dense_lanes.
-    let load = |pair: usize| unsafe { vld1q_s64(values.as_ptr().add(pair * 2)) };
-    reduce_max(extreme_lanes(load, mask, i64::MIN, |a, b| greatest(a, b)))
+    let load = |index: usize| unsafe { simd.load64(values, index) };
+    simd.max_across64(extreme_word(simd, load, mask, i64::MIN, |a, b| {
+        greatest(simd, a, b)
+    }))
 }
 
-#[target_feature(enable = "neon")]
-fn min_datum_lanes(values: &[u64; 64], mask: u64) -> i64 {
-    // SAFETY: `pair` is below 32; a Datum holding an int8 is its bits.
-    let load = |pair: usize| unsafe { vld1q_s64(values.as_ptr().cast::<i64>().add(pair * 2)) };
-    reduce_min(extreme_lanes(load, mask, i64::MAX, |a, b| least(a, b)))
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn min_datum_lanes(simd: Simd, values: &[u64; 64], mask: u64) -> i64 {
+    // SAFETY: as in min_dense_lanes.
+    let load = |index: usize| unsafe { simd.load_datums64(values, index) };
+    simd.min_across64(extreme_word(simd, load, mask, i64::MAX, |a, b| {
+        least(simd, a, b)
+    }))
 }
 
-#[target_feature(enable = "neon")]
-fn max_datum_lanes(values: &[u64; 64], mask: u64) -> i64 {
-    // SAFETY: as in min_datum_lanes.
-    let load = |pair: usize| unsafe { vld1q_s64(values.as_ptr().cast::<i64>().add(pair * 2)) };
-    reduce_max(extreme_lanes(load, mask, i64::MIN, |a, b| greatest(a, b)))
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn max_datum_lanes(simd: Simd, values: &[u64; 64], mask: u64) -> i64 {
+    // SAFETY: as in min_dense_lanes.
+    let load = |index: usize| unsafe { simd.load_datums64(values, index) };
+    simd.max_across64(extreme_word(simd, load, mask, i64::MIN, |a, b| {
+        greatest(simd, a, b)
+    }))
 }
 
 /// Lane-wise minimum: where `a > b` take `b`.
 #[inline]
-#[target_feature(enable = "neon")]
-fn least(a: int64x2_t, b: int64x2_t) -> int64x2_t {
-    vbslq_s64(vcgtq_s64(a, b), b, a)
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn least<V: Vectors>(v: V, a: V::I64, b: V::I64) -> V::I64 {
+    v.select64(v.gt64(a, b), b, a)
 }
 
 /// Lane-wise maximum: where `a > b` take `a`.
 #[inline]
-#[target_feature(enable = "neon")]
-fn greatest(a: int64x2_t, b: int64x2_t) -> int64x2_t {
-    vbslq_s64(vcgtq_s64(a, b), a, b)
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn greatest<V: Vectors>(v: V, a: V::I64, b: V::I64) -> V::I64 {
+    v.select64(v.gt64(a, b), a, b)
 }
 
-#[inline]
-#[target_feature(enable = "neon")]
-fn reduce_min(lanes: int64x2_t) -> i64 {
-    vgetq_lane_s64::<0>(lanes).min(vgetq_lane_s64::<1>(lanes))
-}
-
-#[inline]
-#[target_feature(enable = "neon")]
-fn reduce_max(lanes: int64x2_t) -> i64 {
-    vgetq_lane_s64::<0>(lanes).max(vgetq_lane_s64::<1>(lanes))
-}
-
-/// Lane-wise `combine` over the pairs in four accumulators, with masked
-/// lanes replaced by the operation's identity; the caller reduces the two
+/// Lane-wise `combine` over the vectors in four accumulators, with masked
+/// lanes replaced by the operation's identity; the caller reduces the
 /// lanes of the result.
 #[inline]
-#[target_feature(enable = "neon")]
-fn extreme_lanes(
-    load: impl Fn(usize) -> int64x2_t,
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn extreme_word<V: Vectors>(
+    v: V,
+    load: impl Fn(usize) -> V::I64,
     mask: u64,
     identity: i64,
-    combine: impl Fn(int64x2_t, int64x2_t) -> int64x2_t,
-) -> int64x2_t {
-    let identity = vdupq_n_s64(identity);
+    combine: impl Fn(V::I64, V::I64) -> V::I64,
+) -> V::I64 {
+    let identity = v.splat64(identity);
     let (mut a, mut b, mut c, mut d) = (identity, identity, identity, identity);
     if mask == u64::MAX {
-        for step in 0..8 {
+        for step in 0..64 / (4 * V::LANES64) {
             a = combine(a, load(step * 4));
             b = combine(b, load(step * 4 + 1));
             c = combine(c, load(step * 4 + 2));
             d = combine(d, load(step * 4 + 3));
         }
     } else {
-        let weights = byte_weights();
-        for step in 0..8 {
-            let (first, second) = lane_masks((mask >> (step * 8)) as u8, weights);
-            let (m0, m1) = widen(first);
-            let (m2, m3) = widen(second);
-            a = combine(a, vbslq_s64(m0, load(step * 4), identity));
-            b = combine(b, vbslq_s64(m1, load(step * 4 + 1), identity));
-            c = combine(c, vbslq_s64(m2, load(step * 4 + 2), identity));
-            d = combine(d, vbslq_s64(m3, load(step * 4 + 3), identity));
+        for step in 0..64 / (4 * V::LANES64) {
+            let [m0, m1, m2, m3] = v.lane_masks4_64(mask, step);
+            a = combine(a, v.select64(m0, load(step * 4), identity));
+            b = combine(b, v.select64(m1, load(step * 4 + 1), identity));
+            c = combine(c, v.select64(m2, load(step * 4 + 2), identity));
+            d = combine(d, v.select64(m3, load(step * 4 + 3), identity));
         }
     }
     combine(combine(a, b), combine(c, d))

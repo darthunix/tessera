@@ -299,6 +299,14 @@ pub(crate) trait Vectors: Token + 'static {
     /// set.
     fn lane_masks64(self, bits: u8) -> Self::Masks64;
 
+    /// The lane masks of the four int8 vectors from vector `4 * quad`, from
+    /// the bits of a word in the order of its rows, as
+    /// [`Vectors::lane_masks4`] gives those of four int4 groups.
+    fn lane_masks4_64(self, bits: u64, quad: usize) -> [Self::M64; 4];
+
+    /// The int8 lanes of `a` where `mask` holds, those of `b` elsewhere.
+    fn select64(self, mask: Self::M64, a: Self::I64, b: Self::I64) -> Self::I64;
+
     /// No int8 lane.
     fn none64(self) -> Self::M64;
 
@@ -337,6 +345,12 @@ pub(crate) trait Vectors: Token + 'static {
 
     /// The sum of the int8 lanes of `lanes`, modulo 2^64.
     fn sum_across64(self, lanes: Self::I64) -> i64;
+
+    /// The least of the int8 lanes of `lanes`.
+    fn min_across64(self, lanes: Self::I64) -> i64;
+
+    /// The greatest of the int8 lanes of `lanes`.
+    fn max_across64(self, lanes: Self::I64) -> i64;
 }
 
 /// The primitives of a set this target does not run: its token is an
@@ -522,6 +536,14 @@ macro_rules! unreachable_vectors {
                 match self {}
             }
 
+            fn lane_masks4_64(self, _: u64, _: usize) -> [Self; 4] {
+                match self {}
+            }
+
+            fn select64(self, _: Self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
             fn none64(self) -> Self {
                 match self {}
             }
@@ -569,6 +591,14 @@ macro_rules! unreachable_vectors {
             fn sum_across64(self, _: Self) -> i64 {
                 match self {}
             }
+
+            fn min_across64(self, _: Self) -> i64 {
+                match self {}
+            }
+
+            fn max_across64(self, _: Self) -> i64 {
+                match self {}
+            }
         }
     };
 }
@@ -579,7 +609,6 @@ unreachable_vectors!(Neon);
 unreachable_vectors!(Avx2);
 
 mod aggregate;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod aggregate64;
 mod arith;
 mod arith64;
@@ -606,7 +635,6 @@ use core::arch::aarch64::{
 pub use aggregate::{
     count_datum, max_datum, max_dense, min_datum, min_dense, sum_datum, sum_dense,
 };
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use aggregate64::{max_datum64, max_dense64, min_datum64, min_dense64};
 pub use arith::{add, div, mul, rem, sub};
 pub use arith64::{add64, sub64};

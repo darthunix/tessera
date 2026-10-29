@@ -55,38 +55,22 @@ impl IntLane for i64 {
 
     #[inline]
     fn min_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, i64) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        {
-            let mask = crate::int::present(neon, &block, selected);
-            let least = match block {
-                WordBlock::Dense { values, .. } => crate::simd::min_dense64(neon, values, mask),
-                WordBlock::Datum { values, .. } => crate::simd::min_datum64(neon, values, mask),
-            };
-            (mask.count_ones() as usize, least)
-        }
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (block, selected);
-            match neon {}
-        }
+        let mask = crate::int::present(neon, &block, selected);
+        let least = match block {
+            WordBlock::Dense { values, .. } => crate::simd::min_dense64(neon, values, mask),
+            WordBlock::Datum { values, .. } => crate::simd::min_datum64(neon, values, mask),
+        };
+        (mask.count_ones() as usize, least)
     }
 
     #[inline]
     fn max_block(neon: Neon, block: WordBlock<'_, Self>, selected: u64) -> (usize, i64) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        {
-            let mask = crate::int::present(neon, &block, selected);
-            let greatest = match block {
-                WordBlock::Dense { values, .. } => crate::simd::max_dense64(neon, values, mask),
-                WordBlock::Datum { values, .. } => crate::simd::max_datum64(neon, values, mask),
-            };
-            (mask.count_ones() as usize, greatest)
-        }
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (block, selected);
-            match neon {}
-        }
+        let mask = crate::int::present(neon, &block, selected);
+        let greatest = match block {
+            WordBlock::Dense { values, .. } => crate::simd::max_dense64(neon, values, mask),
+            WordBlock::Datum { values, .. } => crate::simd::max_datum64(neon, values, mask),
+        };
+        (mask.count_ones() as usize, greatest)
     }
 
     #[inline(always)]

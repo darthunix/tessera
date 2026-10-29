@@ -440,6 +440,10 @@ What the moves found:
     cycles (`compare-OmhwZ0`, `compare-4xzRdr`). The benchmark gives
     the same random words every call, so the predictor had learned
     them.
+- The aggregates of int8 took the same form and kept their NEON code
+  (`disasm-HQMnaw`). Neither set has a least or a greatest of int8
+  lanes, so the kernels write them as a compare and a select, as the
+  NEON code did, over a select of int8 lanes that each set gives.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
