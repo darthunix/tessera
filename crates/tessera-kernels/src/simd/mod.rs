@@ -228,6 +228,16 @@ pub(crate) trait Vectors: Token + 'static {
     /// cheapest way.
     fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize;
 
+    /// `a ^ b` in every lane.
+    fn xor(self, a: Self::I32, b: Self::I32) -> Self::I32;
+
+    /// Every lane shifted left by `N` bits, `N` below 32.
+    fn shl<const N: i32>(self, lanes: Self::I32) -> Self::I32;
+
+    /// Every lane shifted right by `N` bits with zeros shifted in, as the
+    /// unsigned 32 bits of a hash shift, `N` from 1 to 31.
+    fn shr<const N: i32>(self, lanes: Self::I32) -> Self::I32;
+
     /// The int8 lanes of one vector.
     type I64: Copy;
     /// The lane masks of a comparison of int8 lanes.
@@ -502,6 +512,18 @@ macro_rules! unreachable_vectors {
                 match self {}
             }
 
+            fn xor(self, _: Self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn shl<const N: i32>(self, _: Self) -> Self {
+                match self {}
+            }
+
+            fn shr<const N: i32>(self, _: Self) -> Self {
+                match self {}
+            }
+
             type I64 = Self;
             type M64 = Self;
             const LANES64: usize = 1;
@@ -623,7 +645,6 @@ mod arith64;
 mod cast;
 mod filter;
 mod filter64;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod hash;
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 mod hash64;
@@ -648,7 +669,6 @@ pub use arith64::{add64, sub64};
 pub use cast::{widen_datum, widen_dense};
 pub use filter::{compare_sides, filter_datum, filter_dense};
 pub use filter64::{compare_sides64, filter_datum64, filter_dense64};
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use hash64::{combine_nulls64, combine64, hash_nulls64, hash64};
