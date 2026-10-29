@@ -11,10 +11,13 @@ examine_globs = [
 
 # non_null_lanes puts the 32 bits of the low flags below the 32 of the
 # high ones: the two share no bit, so | is ^. The token of NEON has no
-# values on x86-64: the arm64 jobs judge it.
+# values on x86-64: the arm64 jobs judge it. The token of AVX2 asks for
+# AVX2 and POPCNT, which every processor with AVX2 has, so || answers as
+# && on every runner.
 exclude_re = [
     "replace \\| with \\^ in non_null_lanes$",
     "replace <impl Token for Neon>::get -> Option<Self> with None$",
+    "replace && with \\|\\| in <impl Token for Avx2>::get$",
 ]
 
 timeout_multiplier = 3.0

@@ -105,6 +105,11 @@ impl Vectors for Neon {
         unsafe { non_null_lanes(isnull) }
     }
 
+    #[inline(always)]
+    fn count_bits(self, bits: u64) -> usize {
+        bits.count_ones() as usize
+    }
+
     #[inline]
     unsafe fn store(self, at: *mut i32, lanes: int32x4_t) {
         // SAFETY: the token proves that this processor runs NEON, and the

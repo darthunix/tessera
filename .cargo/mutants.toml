@@ -51,9 +51,11 @@ exclude_globs = [
 # read whole words of a column's storage or its rows one by one: both give
 # the same results, and only the time tells them apart. So do a word the
 # whole-word loop refuses (blocks, bulk_passing and the hash's block giving
-# None), a single row it sends to the rows (the comparison's guard), and
-# the int8 arithmetic's arms of + and - gone, whose lanes then go one by
-# one through the width's own function. The mutants of that choice are
+# None), a single row it sends to the rows (the comparison's guard, and
+# the test of count's and the aggregates' loops, which with | or ^ sends
+# empty and single-row words to the whole-word path instead), and the
+# int8 arithmetic's arms of + and - gone, whose lanes then go one by one
+# through the width's own function. The mutants of that choice are
 # named by their place, since the same operators elsewhere in these
 # functions matter.
 # Off AArch64 the whole-word path ends in stubs on the empty token of NEON
@@ -117,7 +119,9 @@ exclude_re = [
     "accumulate\\.rs:[0-9]+:[0-9]+: replace \\* with \\+$",
     "cast\\.rs:7[34]:[0-9]+: replace (&& with \\|\\||>= with <) in int4_to_int8$",
     "count\\.rs:40:[0-9]+: replace >= with < in count$",
+    "count\\.rs:65:[0-9]+: replace & with [|^] in count_bulk$",
     "int/aggregate\\.rs:7[45]:[0-9]+: replace (&& with \\|\\||>= with <) in aggregate$",
+    "int/aggregate\\.rs:106:[0-9]+: replace & with [|^] in aggregate_bulk$",
     "int/arith\\.rs:20[56]:[0-9]+: replace (&& with \\|\\||>= with <) in run$",
     "int/arith\\.rs:(20[89]|210):[0-9]+: (replace|delete) .* in run$",
     "replace Operands<'_, T, L, R>::blocks -> Option<.*> with None$",

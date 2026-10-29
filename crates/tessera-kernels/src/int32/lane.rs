@@ -59,7 +59,7 @@ impl IntLane for i32 {
             WordBlock::Dense { values, .. } => crate::simd::min_dense(simd, values, mask),
             WordBlock::Datum { values, .. } => crate::simd::min_datum(simd, values, mask),
         };
-        (mask.count_ones() as usize, least)
+        (simd.count_bits(mask), least)
     }
 
     #[inline]
@@ -69,7 +69,7 @@ impl IntLane for i32 {
             WordBlock::Dense { values, .. } => crate::simd::max_dense(simd, values, mask),
             WordBlock::Datum { values, .. } => crate::simd::max_datum(simd, values, mask),
         };
-        (mask.count_ones() as usize, greatest)
+        (simd.count_bits(mask), greatest)
     }
 
     #[inline(always)]
