@@ -130,7 +130,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
       `arith_int64`
 - [x] 4.7 The aggregates of int4 and `count`, `simd/aggregate.rs`,
       over the primitives. Check: the move check
-- [ ] 4.8 The aggregates of int4 and `count` on AVX2. Check: as in
+- [x] 4.8 The aggregates of int4 and `count` on AVX2. Check: as in
       4.2, on `aggregate_int32`
 - [ ] 4.9 The aggregates of int8, `simd/aggregate64.rs`, over the
       primitives. Check: the move check
@@ -200,7 +200,12 @@ reason saying that both machines were measured.
         ordered after this entry, are ordered anew;
       - `avx-512` gets what AVX2 showed;
       - a new entry takes the losses of the row paths of x86-64 to the
-        drivers' decision for whole words, which the pilot measured;
+        drivers' decision for whole words, which the pilot measured,
+        with the two shapes of the loops of `count` and the aggregates
+        and `as_chunks` for the bounds of `word_slots`, which 4.8 left;
+      - "Not placed" gets the random cases of the benchmarks, which
+        give the same words every call, so that the predictor learns
+        them and a verdict depends on where the code lies;
       - each finding the maintainer has not decided on goes to "Not
         placed".
 

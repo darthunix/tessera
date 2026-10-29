@@ -98,16 +98,35 @@ fn aggregate_bulk<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     mut block: impl for<'a> FnMut(B, T::Aggregates, WordBlock<'a, T>, u64) -> B,
 ) -> Result<B> {
     let mut acc = init;
+    // On x86-64 one test for empty and single-row words, told apart inside:
+    // a `continue` for empty words became a loop of its own, and every
+    // other word came back through its head, 8 instructions a word. On
+    // AArch64 the one test lost on the words read row by row, so there each
+    // has its own.
+    #[cfg(target_arch = "x86_64")]
     for (index, selected) in rows.words().enumerate() {
-        // One test for empty and single-row words, told apart inside: a
-        // `continue` for empty words became a loop of its own, and every
-        // other word came back through its head, 8 instructions a word on
-        // x86-64.
         if selected & selected.wrapping_sub(1) == 0 {
             if selected != 0 {
                 let row = index * 64 + selected.trailing_zeros() as usize;
                 acc = fold(acc, column.get(row)?);
             }
+        } else if let Some(word) = column.word_block(index) {
+            acc = block(acc, set, word, selected);
+        } else {
+            acc = column
+                .word_values(index, selected)?
+                .fold(acc, |acc, (_, value)| fold(acc, value));
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    for index in 0..rows.nrows().div_ceil(64) {
+        let selected = rows.word(index);
+        if selected == 0 {
+            continue;
+        }
+        if selected.is_power_of_two() {
+            let row = index * 64 + selected.trailing_zeros() as usize;
+            acc = fold(acc, column.get(row)?);
         } else if let Some(word) = column.word_block(index) {
             acc = block(acc, set, word, selected);
         } else {
