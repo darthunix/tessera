@@ -122,9 +122,11 @@ A grouping and a join make that number in different ways.
   value. The price is that two different values may have the same hash.
   So the join keeps the type's equality as a join filter, which EXPLAIN
   shows, and checks it for every pair the table finds; the inner row's
-  value lies in the payload for it. The join's cost model, measured on
-  the developer's machine, counts 18.6 ns a row for a hashed key, where
-  a probe by a word costs 1.9 ns a row.
+  value lies in the payload for it. An outer row kept on disk keeps the
+  key's value, copied like any by-reference column, and its hash is
+  made again when the row is read back. The join's cost model,
+  measured on the developer's machine, counts 18.6 ns a row for a
+  hashed key, where a probe by a word costs 1.9 ns a row.
 
 A type without a hash function, such as `money`, cannot take the
 second form, so a grouping or a join by it stays the core's. Nor does
