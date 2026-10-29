@@ -452,6 +452,10 @@ What the moves found:
   selections, up to 26 on sparse ones and up to 21 on 63 rows. The
   count, whose code did not change, kept its instructions; on empty
   selections it took 7 to 9 cycles more, by where its code lies.
+- The widening cast took the same form and kept its NEON code
+  (`disasm-NOb8kM`). A group of int4 lanes widens into two vectors of
+  int8 lanes, which the kernel stores at the group's offset, as the NEON
+  code did.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.

@@ -136,7 +136,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
       primitives. Check: the move check
 - [x] 4.10 The aggregates of int8 on AVX2. Check: as in 4.2, on
        `aggregate_int64`
-- [ ] 4.11 The widening cast, `simd/cast.rs`, over the primitives.
+- [x] 4.11 The widening cast, `simd/cast.rs`, over the primitives.
        Check: the move check
 - [ ] 4.12 The widening cast on AVX2. Check: as in 4.2, on
        `cast_int32`

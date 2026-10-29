@@ -77,6 +77,19 @@ impl Token for Avx2 {
     }
 }
 
+impl Neon {
+    /// The token of the vector set of the target, for the code of a family
+    /// that is compiled for it while the family's hooks still take NEON:
+    /// on AArch64 the same token, and elsewhere NEON has no values.
+    #[inline(always)]
+    pub(crate) fn simd(self) -> Simd {
+        #[cfg(not(target_arch = "x86_64"))]
+        return self;
+        #[cfg(target_arch = "x86_64")]
+        self.into()
+    }
+}
+
 /// Where NEON does not run its token has no values, so it converts into
 /// any other: see [`crate::int::IntLane::Compares`].
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]

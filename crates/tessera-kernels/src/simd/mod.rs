@@ -219,6 +219,10 @@ pub(crate) trait Vectors: Token + 'static {
     /// sum across the lanes of the accumulators.
     fn widen_add(self, acc: Self::I64, lanes: Self::I32) -> Self::I64;
 
+    /// The int4 lanes of `lanes` sign-extended into two vectors of int8
+    /// lanes: the lower half of the lanes, then the upper.
+    fn widen64(self, lanes: Self::I32) -> (Self::I64, Self::I64);
+
     /// The selected rows of a Datum block whose flag is false, counted:
     /// `(non_null_bits(isnull) & selected).count_ones()`, each set by its
     /// cheapest way.
@@ -490,6 +494,10 @@ macro_rules! unreachable_vectors {
                 match self {}
             }
 
+            fn widen64(self, _: Self) -> (Self, Self) {
+                match self {}
+            }
+
             fn count_non_null(self, _: &[bool; 64], _: u64) -> usize {
                 match self {}
             }
@@ -612,7 +620,6 @@ mod aggregate;
 mod aggregate64;
 mod arith;
 mod arith64;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod cast;
 mod filter;
 mod filter64;
@@ -638,7 +645,6 @@ pub use aggregate::{
 pub use aggregate64::{max_datum64, max_dense64, min_datum64, min_dense64};
 pub use arith::{add, div, mul, rem, sub};
 pub use arith64::{add64, sub64};
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use cast::{widen_datum, widen_dense};
 pub use filter::{compare_sides, filter_datum, filter_dense};
 pub use filter64::{compare_sides64, filter_datum64, filter_dense64};

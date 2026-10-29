@@ -58,9 +58,9 @@ exclude_globs = [
 # named by their place, since the same operators elsewhere in these
 # functions matter.
 # Off AArch64 the whole-word path ends in stubs on the empty token of NEON
-# (cast's bulk, the hash's block), and the token converts into AVX2's:
-# those are not built on the arm64 runners, so their mutants change
-# nothing there, and on x86-64 no call reaches them.
+# (the hash's block), and the token converts into AVX2's: those are not
+# built on the arm64 runners, so their mutants change nothing there, and
+# on x86-64 no call reaches them.
 # Place::reference puts a record's chunk above the bits of its unit, which
 # is below 2^17 and has none there, and Cursor::at a chunk above a byte of
 # 32 bits: | and ^ give one value. resolve_rows adds the rows a call
@@ -133,7 +133,6 @@ exclude_re = [
     "replace bulk_passing -> Option<u64> with None$",
     "set\\.rs:170:[0-9]+: replace (&& with \\|\\||<= with >) in in_set$",
     "delete match arm \\(ArithOp::(Add|Sub), _\\) in <impl IntLane for i64>::arith_block$",
-    "cast\\.rs:258:9: replace bulk::widen -> u64 with [01]$",
     "int/hash\\.rs:216:5: replace block -> Option<.*> with ",
     "replace <impl From<Neon> for Avx2>::from -> Self with ",
     "replace \\| with \\^ in (Place::reference|Cursor::at)$",
