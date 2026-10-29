@@ -267,7 +267,10 @@ is 0, and a chunk of values is at most 4 GiB. A chunk of columns that is
 written with one chunk of values before it SHALL refer to that chunk as
 number 0. A reader of such a chunk of columns from a file MUST refuse,
 as damaged data, a word of a by-reference column that is no reference
-into that chunk of values.
+into that chunk of values. The bytes a reference names SHALL be the
+value's own, as `datumCopy` copies them: an expanded object, which is a
+pointer into its owner's memory, SHALL be flattened, and the kernels
+SHALL refuse one they are given to append.
 
 ```
  bit 63                        32 31                             0
@@ -295,6 +298,19 @@ into that chunk of values.
   data, SQLSTATE `XX001`
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_value`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(28)`
+
+#### Scenario: An expanded value copied flat
+- **WHEN** an expanded array is copied and its object is then freed; a
+  grouping spills the rows of an aggregate whose argument is such an
+  array; a parallel worker sends one to the leader; and the kernels are
+  given one to append to a chunk of columns
+- **THEN** each copy reads back as the array's flat bytes, both queries
+  give the results they give without Tessera, and the kernels refuse
+  the value
+- **Verified by:** `test/sql/rows.sql::tessera_test_rows_value`;
+  `test/sql/agg.sql::An expanded array as a generic aggregate's argument`;
+  `test/sql/parallel.sql::An expanded array computed in the workers`;
+  `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
 
 ### Requirement: The limits of a chunk of columns
 A chunk of columns SHALL hold at most 4096 words a row and at most

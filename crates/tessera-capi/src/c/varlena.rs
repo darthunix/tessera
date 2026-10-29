@@ -48,7 +48,9 @@ pub(super) unsafe fn varlena_data<'a>(datum: u64) -> Option<&'a [u8]> {
 /// The bytes of a varlena with its header, as `VARSIZE_ANY` counts them: a
 /// 1-byte header's, a 4-byte header's (a compressed value's too), or an
 /// external pointer's own, its 2-byte header and the pointer its tag
-/// names.
+/// names. An expanded object is refused: its bytes are a pointer into its
+/// process's memory, which a copy would outlive, and its caller flattens
+/// it first.
 ///
 /// # Safety
 ///
@@ -60,11 +62,13 @@ pub(super) unsafe fn varlena_size(pointer: *const u8) -> anyhow::Result<usize> {
     unsafe {
         let first = *pointer;
         if first == 0x01 {
-            // VARTAG_INDIRECT and the expanded tags hold a pointer,
-            // VARTAG_ONDISK a varatt_external of 16 bytes.
+            // VARTAG_INDIRECT holds a pointer, VARTAG_ONDISK a
+            // varatt_external of 16 bytes; VARTAG_EXPANDED_RO and _RW
+            // are 2 and 3.
             let body = match *pointer.add(1) {
-                1..=3 => 8,
+                1 => 8,
                 18 => 16,
+                2 | 3 => anyhow::bail!("an expanded object, not flattened"),
                 tag => anyhow::bail!("an external varlena of tag {tag}"),
             };
             Ok(2 + body)

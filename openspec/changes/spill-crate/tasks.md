@@ -51,7 +51,7 @@ a merge.
       accepted findings and their fixes as tasks of this section; each
       is fixed before its code moves. Check: the review of the list in
       the pull request
-- [ ] 2.2 Show by tests, then fix, an expanded value copied as a
+- [x] 2.2 Show by tests, then fix, an expanded value copied as a
       pointer: in the rows of a grouping that spills, and in the rows
       that the gather of workers sends. One copy of a value by
       reference, in C, which flattens an expanded value, serves every

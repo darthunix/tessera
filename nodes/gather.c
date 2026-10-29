@@ -139,6 +139,8 @@ typedef struct TessSendState
 	TessSortAbbrev abbrev;
 	MemoryContext abbrev_context;
 	SortSupportData *ssup;
+	/* A batch's expanded objects flattened, reset per batch; NULL without varlena columns. */
+	MemoryContext flat_context;
 	/* The lanes of a message: NULL bits, the columns, the keys' words. */
 	int			nlanes;
 	/* The rows the parent above needs, -1 for all. */
@@ -304,6 +306,10 @@ send_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		state->typlens[column] = TupleDescAttr(desc, column)->attlen;
 		state->typbyvals[column] = TupleDescAttr(desc, column)->attbyval;
+		if (state->typlens[column] == -1 && state->flat_context == NULL)
+			state->flat_context = AllocSetContextCreate(CurrentMemoryContext,
+														"TessSend flattened values",
+														ALLOCSET_DEFAULT_SIZES);
 	}
 	state->nkeys = list_length(places);
 	if (state->nkeys > TESS_TABLE_MAX_KEYS || list_length(kinds) != state->nkeys ||
@@ -439,6 +445,8 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 				builder->exhausted = true;
 				return false;
 			}
+			if (send->flat_context != NULL)
+				MemoryContextReset(send->flat_context);
 			for (int column = 0; column < send->ncolumns; column++)
 			{
 				columns[column] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
@@ -449,6 +457,9 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 				if (columns[column].values == NULL || columns[column].isnull == NULL ||
 					columns[column].nrows != batch->rows.nrows)
 					elog(ERROR, "Tessera batch returned an invalid column");
+				/* A message carries bytes: an expanded object is a pointer of this process. */
+				tess_value_flatten_column(&columns[column], send->typlens[column], &batch->rows,
+										  send->flat_context);
 			}
 			/* The selected rows' key words, in order, for a merge above. */
 			if (send->nkeys > 0)

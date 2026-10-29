@@ -82,6 +82,17 @@ SELECT parallel_same($$SELECT a, b FROM parallel_t WHERE a > 4990$$);
 SELECT parallel_same($$SELECT a, c FROM parallel_t WHERE a > 4990 AND c <> 'r4995'$$);
 EXPLAIN (COSTS OFF) SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHERE a > 4990;
 SELECT parallel_same($$SELECT a + 1 AS next, c || '!' AS shout FROM parallel_t WHERE a > 4990$$);
+-- An expanded array computed in the workers: a message carries its
+-- bytes, flattened, never a pointer into a worker's memory. Without the
+-- leader every row comes in a message; the rows are kept as they come,
+-- since a comparison above the gather would turn the arrays into text
+-- in the workers.
+SET parallel_leader_participation = off;
+EXPLAIN (COSTS OFF) CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(ARRAY[a, b], 0) AS arr FROM parallel_t WHERE a > 4900;
+CREATE TEMP TABLE parallel_arrays AS SELECT a, array_append(ARRAY[a, b], 0) AS arr FROM parallel_t WHERE a > 4900;
+RESET parallel_leader_participation;
+SELECT count(*), bool_and(arr = ARRAY[a, a % 10, 0]) AS whole FROM parallel_arrays;
+DROP TABLE parallel_arrays;
 -- Every page is read once across the participants: the leader sums their pages.
 SELECT plan_property($$SELECT a FROM parallel_t WHERE a > 0$$, 'TessHeapScan', 'Pages')::int = :pages AS all_pages;
 SELECT parallel_explain($$SELECT a FROM parallel_t WHERE a > 4990$$);
