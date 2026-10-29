@@ -256,6 +256,12 @@ impl Vectors for Avx2 {
         unsafe { widen_add(acc, lanes) }
     }
 
+    #[inline(always)]
+    fn widen64(self, lanes: __m256i) -> (__m256i, __m256i) {
+        // SAFETY: as in `splat`.
+        unsafe { widen64(lanes) }
+    }
+
     /// The bits of the non-NULL rows, counted: two compares and two masks
     /// of bytes, which NEON lacks.
     #[inline(always)]
@@ -643,6 +649,16 @@ fn widen_add(acc: __m256i, lanes: __m256i) -> __m256i {
     let low = _mm256_cvtepi32_epi64(_mm256_castsi256_si128(lanes));
     let high = _mm256_cvtepi32_epi64(_mm256_extracti128_si256::<1>(lanes));
     _mm256_add_epi64(acc, _mm256_add_epi64(low, high))
+}
+
+/// The eight int4 lanes widened by halves, `vpmovsxdq`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn widen64(lanes: __m256i) -> (__m256i, __m256i) {
+    (
+        _mm256_cvtepi32_epi64(_mm256_castsi256_si128(lanes)),
+        _mm256_cvtepi32_epi64(_mm256_extracti128_si256::<1>(lanes)),
+    )
 }
 
 /// The sum of four int8 lanes: the two halves, then the two that remain.

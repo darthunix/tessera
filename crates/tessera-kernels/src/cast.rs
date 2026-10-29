@@ -216,13 +216,12 @@ fn widen_bulk<C: ColumnReader<Value = i32>>(
 
 /// The whole-word kernel: every lane widened, and the present bits of the
 /// selected non-NULL rows returned.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod bulk {
     use std::mem::MaybeUninit;
 
     use tessera_core::WordBlock;
 
-    use crate::simd::{self, Neon};
+    use crate::simd::{self, Neon, Vectors};
 
     #[inline]
     pub fn widen(
@@ -238,23 +237,8 @@ mod bulk {
             }
             WordBlock::Datum { values, isnull } => {
                 simd::widen_datum(neon, values, out);
-                selected & simd::non_null_bits(neon, isnull)
+                selected & neon.non_null_bits(isnull)
             }
         }
-    }
-}
-
-/// Without NEON the token has no values, so no call takes the whole-word
-/// path; this keeps the callers compiling.
-#[cfg(not(all(target_arch = "aarch64", not(miri))))]
-mod bulk {
-    use std::mem::MaybeUninit;
-
-    use tessera_core::WordBlock;
-
-    use crate::simd::Neon;
-
-    pub fn widen(neon: Neon, _: WordBlock<'_, i32>, _: u64, _: &mut [MaybeUninit<i64>; 64]) -> u64 {
-        match neon {}
     }
 }
