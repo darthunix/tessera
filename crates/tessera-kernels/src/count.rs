@@ -59,14 +59,31 @@ pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usiz
 #[inline(never)]
 fn count_bulk<C: ColumnReader>(simd: Simd, column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
     let mut count = 0;
+    // The two shapes of the loop of the aggregates, which says why.
+    #[cfg(target_arch = "x86_64")]
     for (index, selected) in rows.words().enumerate() {
-        // Empty and single-row words share one test, as in the loop of the
-        // aggregates, which says why.
         if selected & selected.wrapping_sub(1) == 0 {
             if selected != 0 {
                 let row = index * 64 + selected.trailing_zeros() as usize;
                 count += usize::from(column.get(row)?.is_some());
             }
+        } else if let Some(block) = column.word_block(index) {
+            count += block_count(simd, block, selected);
+        } else {
+            count += column
+                .word_values(index, selected)?
+                .fold(0, |count, (_, value)| count + usize::from(value.is_some()));
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    for index in 0..rows.nrows().div_ceil(64) {
+        let selected = rows.word(index);
+        if selected == 0 {
+            continue;
+        }
+        if selected.is_power_of_two() {
+            let row = index * 64 + selected.trailing_zeros() as usize;
+            count += usize::from(column.get(row)?.is_some());
         } else if let Some(block) = column.word_block(index) {
             count += block_count(simd, block, selected);
         } else {
