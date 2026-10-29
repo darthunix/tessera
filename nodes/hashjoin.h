@@ -302,8 +302,16 @@ typedef struct SpillPart
 	bool		resident;
 	/* A block of the partition went to disk. */
 	bool		written;
-	/* The partition's values outgrew a chunk: it is written after the batch. */
+	/*
+	 * The partition's values outgrew a chunk: it is written when the queue
+	 * is emptied, after the batch or after a round of a split.
+	 */
 	bool		queued;
+	/*
+	 * The partition is in the side's queue, which holds it once until the
+	 * queue is emptied, though a flush before then clears queued.
+	 */
+	bool		in_queue;
 	/* The last batch that saw a row of it pending, to visit it once. */
 	uint64		stamp;
 } SpillPart;
