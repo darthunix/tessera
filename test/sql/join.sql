@@ -634,6 +634,15 @@ SELECT join_same($$SELECT jsp.s, w.t FROM jsp JOIN jwide() AS w ON jsp.k = w.k W
 SELECT join_same($$SELECT count(*), count(w.t), sum(length(w.t)) FROM jsp LEFT JOIN jwide() AS w ON jsp.k = w.k$$);
 SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
 SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
+-- The same with values of 100 bytes, which outgrow a partition's chunk
+-- of values between two of its chunks of records: the split writes them
+-- as it goes, and queues each partition once until it does.
+CREATE FUNCTION jlong() RETURNS TABLE (k int, t text) LANGUAGE sql ROWS 10
+AS 'SELECT g % 50000, repeat(''x'', 100) || g FROM generate_series(1, 200000) AS g';
+SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jlong() AS w ON jsp.k = w.k$$, false);
+SELECT bool_or(line ~ 'Split Partitions: [1-9]') AS split
+FROM join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jlong() AS w ON jsp.k = w.k$$) AS line;
+SELECT join_same($$SELECT count(*), sum(length(w.t)), sum(jsp.k) FROM jsp JOIN jlong() AS w ON jsp.k = w.k$$);
 -- A rescan with a parameter of the outer side reads the inner side again.
 SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.k < v.x) FROM (VALUES (100), (15000)) AS v(x)$$);
 -- RIGHT and FULL over a table that spills: each table in memory, the
@@ -987,6 +996,18 @@ RESET statement_timeout;
 RESET tessera.join_shared_spill_evictions;
 RESET tessera.join_spill_spilled_weight;
 RESET hash_mem_multiplier;
+-- Outer rows of 17 texts of about 100 bytes: a batch fills a
+-- partition's chunk of columns several times before the queue of
+-- partitions to write is emptied, and the queue holds each partition
+-- once.
+SET work_mem = '256kB';
+CREATE TABLE jqs_inner AS SELECT g % 1000 AS k, repeat('i', 40) || g AS pad FROM generate_series(1, 120000) AS g;
+CREATE TABLE jqs_outer AS SELECT g % 1000 AS k, repeat(md5((g * 1)::text), 3) || 1 AS t1, repeat(md5((g * 2)::text), 3) || 2 AS t2, repeat(md5((g * 3)::text), 3) || 3 AS t3, repeat(md5((g * 4)::text), 3) || 4 AS t4, repeat(md5((g * 5)::text), 3) || 5 AS t5, repeat(md5((g * 6)::text), 3) || 6 AS t6, repeat(md5((g * 7)::text), 3) || 7 AS t7, repeat(md5((g * 8)::text), 3) || 8 AS t8, repeat(md5((g * 9)::text), 3) || 9 AS t9, repeat(md5((g * 10)::text), 3) || 10 AS t10, repeat(md5((g * 11)::text), 3) || 11 AS t11, repeat(md5((g * 12)::text), 3) || 12 AS t12, repeat(md5((g * 13)::text), 3) || 13 AS t13, repeat(md5((g * 14)::text), 3) || 14 AS t14, repeat(md5((g * 15)::text), 3) || 15 AS t15, repeat(md5((g * 16)::text), 3) || 16 AS t16, repeat(md5((g * 17)::text), 3) || 17 AS t17 FROM generate_series(1, 1000) AS g;
+ANALYZE jqs_inner, jqs_outer;
+SELECT join_property($$SELECT count(*), sum(length(o.t1) + length(o.t2) + length(o.t3) + length(o.t4) + length(o.t5) + length(o.t6) + length(o.t7) + length(o.t8) + length(o.t9) + length(o.t10) + length(o.t11) + length(o.t12) + length(o.t13) + length(o.t14) + length(o.t15) + length(o.t16) + length(o.t17) + length(i.pad)) FROM jqs_outer o JOIN jqs_inner i ON o.k = i.k$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(length(o.t1) + length(o.t2) + length(o.t3) + length(o.t4) + length(o.t5) + length(o.t6) + length(o.t7) + length(o.t8) + length(o.t9) + length(o.t10) + length(o.t11) + length(o.t12) + length(o.t13) + length(o.t14) + length(o.t15) + length(o.t16) + length(o.t17) + length(i.pad)) FROM jqs_outer o JOIN jqs_inner i ON o.k = i.k$$, 'Spilled Chunks')::int > 0 AS spilled;
+SELECT join_same($$SELECT count(*), sum(length(o.t1) + length(o.t2) + length(o.t3) + length(o.t4) + length(o.t5) + length(o.t6) + length(o.t7) + length(o.t8) + length(o.t9) + length(o.t10) + length(o.t11) + length(o.t12) + length(o.t13) + length(o.t14) + length(o.t15) + length(o.t16) + length(o.t17) + length(i.pad)) FROM jqs_outer o JOIN jqs_inner i ON o.k = i.k$$);
+DROP TABLE jqs_inner, jqs_outer;
 RESET work_mem;
 SET enable_parallel_hash = off;
 SELECT join_pruned($$SELECT count(*), sum(jpr.v) FROM jpr JOIN jkm ON jpr.k = jkm.k$$) AS own_range;
@@ -1084,6 +1105,7 @@ DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhi
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();
+DROP FUNCTION jlong();
 DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text, boolean);
 DROP FUNCTION join_many();

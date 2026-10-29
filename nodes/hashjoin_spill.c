@@ -644,18 +644,28 @@ side_store(SpillSide *side, int partition, Datum value, int16 typlen)
 	if (!part->resident && !part->queued && part->value_bytes > side->chunk_len)
 	{
 		part->queued = true;
-		side->queue[side->nqueue++] = partition;
+		if (!part->in_queue)
+		{
+			Assert(side->nqueue < side->npartitions);
+			part->in_queue = true;
+			side->queue[side->nqueue++] = partition;
+		}
 	}
 	return JOIN_VALUE_REF(number, byte);
 }
 
-/* Write the partitions whose values outgrew a chunk. */
+/* Write the partitions whose values outgrew a chunk, and empty the queue. */
 static void
 side_flush_queue(TessHashJoinState *state, SpillSide *side)
 {
 	for (int index = 0; index < side->nqueue; index++)
-		if (side->parts[side->queue[index]].queued)
+	{
+		SpillPart  *part = &side->parts[side->queue[index]];
+
+		part->in_queue = false;
+		if (part->queued)
 			join_side_flush(state, side, side->queue[index]);
+	}
 	side->nqueue = 0;
 }
 
@@ -1082,6 +1092,8 @@ join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *va
 		}
 		else if (count == 0)
 			break;
+		/* The records split so far refer to their copies: values may go. */
+		side_flush_queue(state, side);
 	}
 	/* The chunk leaves the side; its memory is the caller's. */
 	side->bases[source] = NULL;
