@@ -85,15 +85,20 @@ pub struct Snapshot {
 
 /// Whether a file decides how the benchmarks build, so that two sides
 /// that differ in it are not comparable: the manifests, the toolchain,
-/// Cargo's configuration (but cargo-mutants', which no build reads) and
-/// the benchmark programs.
+/// Cargo's configuration and the benchmark programs. Of the files in a
+/// `.cargo` directory Cargo reads only `config.toml`, or `config` by its
+/// older name; the others, such as cargo-mutants' configurations, no
+/// build reads.
 fn shapes_build(name: &str) -> bool {
+    let cargo_config = ["config.toml", "config"].iter().any(|file| {
+        name.strip_suffix(file)
+            .is_some_and(|directory| directory == ".cargo/" || directory.ends_with("/.cargo/"))
+    });
     name.ends_with("Cargo.toml")
         || name.ends_with("Cargo.lock")
         || name == "rust-toolchain"
         || name == "rust-toolchain.toml"
-        || ((name.starts_with(".cargo/") || name.contains("/.cargo/"))
-            && !name.ends_with("/mutants.toml"))
+        || cargo_config
         || (name.starts_with("crates/tessera-capi/benches/") && name.ends_with(".rs"))
 }
 
@@ -259,12 +264,15 @@ mod tests {
             "Cargo.lock",
             "rust-toolchain.toml",
             ".cargo/config.toml",
+            "tools/pmu/.cargo/config",
             "crates/tessera-capi/benches/support/mod.rs",
         ] {
             assert!(shapes_build(name), "{name}");
         }
         for name in [
             ".cargo/mutants.toml",
+            ".cargo/mutants-avx2.toml",
+            "crates/tessera-capi/.cargo/credentials.toml",
             "crates/tessera-kernels/src/table/batch.rs",
             "crates/tessera-capi/benches/README.md",
         ] {
