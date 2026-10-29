@@ -456,6 +456,18 @@ What the moves found:
   (`disasm-NOb8kM`). A group of int4 lanes widens into two vectors of
   int8 lanes, which the kernel stores at the group's offset, as the NEON
   code did.
+- On AVX2 the cast takes 88 to 91 % fewer instructions and 91 to 93 %
+  fewer cycles than the row path on 1024 rows of full words, 76 to 82 %
+  and 84 to 88 % fewer on half and random words, and 81 to 84 % fewer
+  cycles on 64 and 65 rows (`compare-1IoygZ`, `compare-uI3wR2`). The
+  row paths lose instructions: the test of the set and the choice of
+  whole words, now compiled on x86-64, cost 16 a call, and on dense
+  blocks the row count comes back from the stack once a word. Empty
+  selections and sparse ones of Datum blocks take 16 instructions more
+  and empty ones of dense blocks 32, up to 10 cycles a call. Dense
+  blocks with unprepared rows read every word row by row, as before,
+  with the same instructions, in a loop that got other registers: 4 to
+  5 % more cycles, under the bar of 10 %.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
