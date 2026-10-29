@@ -3,7 +3,7 @@
 //! The vector sets are named by tokens (`token.rs`), defined on every
 //! target. NEON runs on AArch64, and AVX2 on x86-64 where the processor
 //! has it, for the filters of int4 and int8, the comparisons of two such
-//! columns, their arithmetic, the int4 aggregates and the count; the other
+//! columns, their arithmetic and aggregates, and the count; the other
 //! kernels are NEON's alone, and those not yet written over the primitives
 //! are compiled only on AArch64. Under Miri no set runs, and callers fall
 //! back to the row paths. Instructions always drop with vectors, so a

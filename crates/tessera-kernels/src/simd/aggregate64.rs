@@ -13,36 +13,35 @@
 // the functions compiled for a set run on theirs cannot be reached.
 #![cfg_attr(miri, allow(unreachable_code, unused_variables))]
 
-use super::{Neon, Simd, Vectors};
+use super::{Simd, Vectors};
 
 /// Least masked row of a dense block; `i64::MAX` for an empty mask.
 #[inline]
-pub fn min_dense64(neon: Neon, values: &[i64; 64], mask: u64) -> i64 {
-    // SAFETY: the token proves that this processor runs NEON, the vector
-    // set of the target where it has values, which `min_dense_lanes` is
-    // compiled for.
-    unsafe { min_dense_lanes(neon.simd(), values, mask) }
+pub fn min_dense64(simd: Simd, values: &[i64; 64], mask: u64) -> i64 {
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `min_dense_lanes` is compiled for.
+    unsafe { min_dense_lanes(simd, values, mask) }
 }
 
 /// Greatest masked row of a dense block; `i64::MIN` for an empty mask.
 #[inline]
-pub fn max_dense64(neon: Neon, values: &[i64; 64], mask: u64) -> i64 {
+pub fn max_dense64(simd: Simd, values: &[i64; 64], mask: u64) -> i64 {
     // SAFETY: as in min_dense64, for `max_dense_lanes`.
-    unsafe { max_dense_lanes(neon.simd(), values, mask) }
+    unsafe { max_dense_lanes(simd, values, mask) }
 }
 
 /// Least masked row of a Datum block; `i64::MAX` for an empty mask.
 #[inline]
-pub fn min_datum64(neon: Neon, values: &[u64; 64], mask: u64) -> i64 {
+pub fn min_datum64(simd: Simd, values: &[u64; 64], mask: u64) -> i64 {
     // SAFETY: as in min_dense64, for `min_datum_lanes`.
-    unsafe { min_datum_lanes(neon.simd(), values, mask) }
+    unsafe { min_datum_lanes(simd, values, mask) }
 }
 
 /// Greatest masked row of a Datum block; `i64::MIN` for an empty mask.
 #[inline]
-pub fn max_datum64(neon: Neon, values: &[u64; 64], mask: u64) -> i64 {
+pub fn max_datum64(simd: Simd, values: &[u64; 64], mask: u64) -> i64 {
     // SAFETY: as in min_dense64, for `max_datum_lanes`.
-    unsafe { max_datum_lanes(neon.simd(), values, mask) }
+    unsafe { max_datum_lanes(simd, values, mask) }
 }
 
 // The functions compiled for the vector set of the target, into which the
