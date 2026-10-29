@@ -4,7 +4,7 @@
 //! target. NEON runs on AArch64, and AVX2 on x86-64 where the processor
 //! has it, for the filters of int4 and int8, the comparisons of two such
 //! columns, their arithmetic and aggregates, the count, the widening cast
-//! and the hashes of int4 keys; the other kernels are NEON's alone, and
+//! and the hashes of their keys; the other kernels are NEON's alone, and
 //! those not yet written over the primitives are compiled only on
 //! AArch64. Under Miri no set runs, and callers fall back to the row
 //! paths. Instructions always drop with vectors, so a kernel here is kept

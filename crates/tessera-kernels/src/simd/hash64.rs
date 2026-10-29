@@ -13,37 +13,36 @@
 #![cfg_attr(miri, allow(unreachable_code, unused_variables))]
 
 use super::hash::{combined, groups};
-use super::{Neon, Simd, Vectors};
+use super::{Simd, Vectors};
 use crate::int64::Side;
 
 /// The hash of every lane's key into `out`.
 #[inline]
-pub fn hash64(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-    // SAFETY: the token proves that this processor runs NEON, the vector
-    // set of the target where it has values, which `hash_lanes` is
-    // compiled for.
-    unsafe { hash_lanes(neon.simd(), keys, None, out) }
+pub fn hash64(simd: Simd, keys: Side<'_>, out: &mut [u32; 64]) {
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `hash_lanes` is compiled for.
+    unsafe { hash_lanes(simd, keys, None, out) }
 }
 
 /// As [`hash64`], with NULL lanes hashing the group key.
 #[inline]
-pub fn hash_nulls64(neon: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
+pub fn hash_nulls64(simd: Simd, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash64.
-    unsafe { hash_lanes(neon.simd(), keys, Some(non_nulls), out) }
+    unsafe { hash_lanes(simd, keys, Some(non_nulls), out) }
 }
 
 /// Every lane's key hash folded into its previous hash in `out`.
 #[inline]
-pub fn combine64(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
+pub fn combine64(simd: Simd, keys: Side<'_>, out: &mut [u32; 64]) {
     // SAFETY: as in hash64, for `combine_lanes`.
-    unsafe { combine_lanes(neon.simd(), keys, None, out) }
+    unsafe { combine_lanes(simd, keys, None, out) }
 }
 
 /// As [`combine64`], with NULL lanes folding in the group key's hash.
 #[inline]
-pub fn combine_nulls64(neon: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
+pub fn combine_nulls64(simd: Simd, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash64, for `combine_lanes`.
-    unsafe { combine_lanes(neon.simd(), keys, Some(non_nulls), out) }
+    unsafe { combine_lanes(simd, keys, Some(non_nulls), out) }
 }
 
 // The functions compiled for the vector set of the target, into which the
@@ -123,14 +122,12 @@ fn folded<V: Vectors>(v: V, words: &[u64; 64]) -> impl Fn(usize) -> V::I32 + '_ 
     }
 }
 
-// The vector code runs only on NEON until its hooks take the set of the
-// target.
 #[cfg(test)]
-#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[cfg(not(miri))]
 mod tests {
     use super::{combine_nulls64, combine64, hash_nulls64, hash64};
     use crate::int64::{Side, fold, hash_combine, murmurhash32};
-    use crate::simd::{Neon, Token};
+    use crate::simd::{Simd, Token};
 
     fn keys() -> [i64; 64] {
         core::array::from_fn(|lane| {
@@ -149,17 +146,19 @@ mod tests {
         let keys = keys();
         let words = keys.map(|key| key as u64);
         let non_nulls = 0x5555_aaaa_0f0f_f0f0_u64;
-        let neon = Neon::get().unwrap();
+        let Some(simd) = Simd::get() else {
+            return;
+        };
         for side in [Side::Dense(&keys), Side::Datum(&words)] {
             let mut out = [0; 64];
-            hash64(neon, side, &mut out);
+            hash64(simd, side, &mut out);
             assert_eq!(out, keys.map(|key| murmurhash32(fold(key))));
             let mut grouped = [0; 64];
-            hash_nulls64(neon, side, non_nulls, &mut grouped);
+            hash_nulls64(simd, side, non_nulls, &mut grouped);
             let mut previous = [0x1234_5678; 64];
-            combine64(neon, side, &mut previous);
+            combine64(simd, side, &mut previous);
             let mut previous_nulls = [0x1234_5678; 64];
-            combine_nulls64(neon, side, non_nulls, &mut previous_nulls);
+            combine_nulls64(simd, side, non_nulls, &mut previous_nulls);
             for lane in 0..64 {
                 let present = non_nulls >> lane & 1 == 1;
                 let key = if present {
