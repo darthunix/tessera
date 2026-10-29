@@ -474,6 +474,22 @@ What the moves found:
   of the primitives shifts zeros in, as the hash's shifts do. The hash
   of int8 shares its loop of groups and now its fold of a key's hash
   into the previous one, so its NEON code is checked with it.
+- On AVX2 the hashes of int4 take 86 to 91 % fewer instructions and 85
+  to 92 % fewer cycles than the row path on 1024 rows of full words, 74
+  to 83 % and 70 to 85 % fewer on half and random words, and 77 to 86 %
+  fewer cycles on 64 and 65 rows (`compare-uuLIy1`, `compare-3APE3b`).
+  The row paths lose instructions, as the cast's do. The test of the
+  set costs 12 to 15 a key on calls of no row or of one, 1 to 4 cycles.
+  On 1024 rows the choice of whole words adds the count of the first
+  word's rows, which the driver, compiled without POPCNT, makes of
+  shifts and masks: empty and sparse selections take 13 to 52
+  instructions more a key, and sparse ones keep their cycles within
+  4 %. Empty selections of Datum blocks mispredict one branch a key
+  more, 14 to 35 cycles on a call of 92, while those of dense blocks
+  lost the misprediction they had on two keys: the loops of words sit
+  at other places in their lines of 64 bytes (`disasm-LGmYjY`). Calls
+  under 500 cycles are not judged by their cycles, so these stay
+  warnings. Unprepared rows and 63 rows keep their cycles within 2 %.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
