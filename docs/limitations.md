@@ -103,5 +103,6 @@ those it checks.
   7, with no code yet.
 - **Vector kernels on AArch64** (NEON), and on x86-64 with AVX2, where
   the processor has it, for the filters of int4 and int8, the
-  comparisons of two such columns, their arithmetic and aggregates, and
-  the count; elsewhere the scalar kernels run, with the same results.
+  comparisons of two such columns, their arithmetic and aggregates, the
+  count and the widening cast; elsewhere the scalar kernels run, with the
+  same results.
