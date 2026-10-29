@@ -311,7 +311,9 @@ extern TessStatusCode tess_spill_columns_init(void *chunk, Size len, int words,
  * which moves past them to a multiple of 8; values_len is at most 4 GiB. It stops when the chunk is full or the next row's values
  * would pass values_len: the rows appended leave rows, *appended gets
  * their count and *need the bytes of values the next row takes (0 when
- * every row went), for the caller to make room.
+ * every row went), for the caller to make room. An expanded object is
+ * refused, as its bytes are a pointer of this process: the caller
+ * flattens it first (tess_value_flatten_column).
  */
 extern TessStatusCode tess_spill_columns_append(void *chunk, Size len, int ncolumns,
 												const TessDatumColumn *columns,

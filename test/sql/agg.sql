@@ -523,6 +523,11 @@ SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l), sum(c) FROM (SELECT g
 SET work_mem = '64kB';
 SELECT agg_same($$SELECT count(*), max(m), sum(s), max(l), sum(c) FROM (SELECT g, max(t) AS m, sum(n) AS s, length(string_agg(t, ',')) AS l, count(*) AS c FROM agg_groups GROUP BY g) AS q$$);
 SELECT agg_same($$SELECT g, string_agg(t, ','), array_agg(n) FROM agg_groups WHERE g % 997 = 0 GROUP BY g$$);
+-- An expanded array as a generic aggregate's argument: the rows on disk
+-- hold its bytes, flattened, never the pointer of an object freed before
+-- they are read back.
+SELECT split_part(agg_spill($$SELECT g, max(array_append(ARRAY[n], 0)) FROM agg_groups GROUP BY g$$), ',', 1) AS spill;
+SELECT agg_same($$SELECT count(*), md5(string_agg(m::text, ',' ORDER BY g)) FROM (SELECT g, max(array_append(ARRAY[n], 0)) AS m FROM agg_groups GROUP BY g) AS q$$);
 -- A NULL key, and the node's own aggregates alongside.
 SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT CASE WHEN g % 100 = 0 THEN NULL ELSE g END AS k, count(*) AS c, max(t) AS m, sum(g) AS x FROM agg_groups GROUP BY 1) AS q$$);
 -- Rescan: the partitions of the last scan go.

@@ -1116,11 +1116,12 @@ rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
 		Size		need = 0;
 		uint64	   *nulls;
 		uint64	   *words;
+		ExpandedObjectHeader *expanded;
 
 		for (int column = 0; column < state->ncomputed; column++)
 			if (!state->computed_byvals[column] && !state->computed_columns[column].isnull[row])
-				need += MAXALIGN(datumGetSize(state->computed_columns[column].values[row], false,
-											  state->computed_lens[column]));
+				need += MAXALIGN(tess_value_size(state->computed_columns[column].values[row],
+												 state->computed_lens[column], &expanded));
 		if (writer->rows == writer->capacity ||
 			(writer->rows > 0 && writer->values_used + need > writer->values_len))
 			rows_flush(state, spill, part);
@@ -1147,11 +1148,11 @@ rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
 				lane[0] = (uint64) from->values[row];
 			else
 			{
-				Size		size = datumGetSize(from->values[row], false,
-												state->computed_lens[column]);
+				Size		size = tess_value_size(from->values[row],
+												   state->computed_lens[column], &expanded);
 
-				memcpy(writer->values + writer->values_used,
-					   DatumGetPointer(from->values[row]), size);
+				tess_value_copy(from->values[row], expanded,
+								writer->values + writer->values_used, size);
 				lane[0] = TESS_SPILL_VALUE_REF(0, writer->values_used);
 				writer->values_used += MAXALIGN(size);
 			}

@@ -489,6 +489,17 @@ call of the kernels, each record located once. The index holds only the layout: 
 its rows in the same format with code of its own, which also shares them
 between processes and partitions.
 
+Every node that keeps, spills or sends a by-reference value copies it
+the same way: `tess_value_size` counts the bytes of its copy and
+`tess_value_copy` writes them. An expanded object, such as the array
+`array_append` returns, is a pointer to a structure in its owner's
+memory, freed with the batch and never seen by another process; the copy
+flattens it into plain bytes. A writer that hands a batch's columns to
+the kernels, which copy values by their bytes, first calls
+`tess_value_flatten_column`, which flattens the column's expanded
+values into a context of the writer's; the kernels refuse an expanded
+value they are given.
+
 ## Named plan data
 
 A `CustomPath` and a `CustomScan` carry a node's private data in
