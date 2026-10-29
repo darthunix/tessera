@@ -268,6 +268,12 @@ impl Vectors for Neon {
     }
 
     #[inline]
+    fn widen64(self, lanes: int32x4_t) -> (int64x2_t, int64x2_t) {
+        // SAFETY: as in `splat`.
+        unsafe { (vmovl_s32(vget_low_s32(lanes)), vmovl_high_s32(lanes)) }
+    }
+
+    #[inline]
     fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize {
         // SAFETY: as in `splat`.
         unsafe { count_non_null_lanes(isnull, selected) }
