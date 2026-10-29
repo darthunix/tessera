@@ -10,13 +10,14 @@ use tessera_core::{WordBlock, ones};
 use super::{CompareOp, Divisor, Side};
 use crate::int::{Evaluate, IntLane};
 use crate::ops::{ArithOp, ArithmeticError};
-use crate::simd::{Neon, Simd, Vectors};
+use crate::simd::{Simd, Vectors};
 
 impl IntLane for i32 {
     type Divisor = Divisor;
     type Compares = Simd;
     type Arith = Simd;
     type Aggregates = Simd;
+    type Hashes = Simd;
 
     const ZERO: i32 = 0;
     const ONE: i32 = 1;
@@ -78,23 +79,23 @@ impl IntLane for i32 {
     }
 
     #[inline(always)]
-    fn hash_block(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-        crate::simd::hash(neon, keys, out);
+    fn hash_block(simd: Simd, keys: Side<'_>, out: &mut [u32; 64]) {
+        crate::simd::hash(simd, keys, out);
     }
 
     #[inline(always)]
-    fn hash_nulls_block(neon: Neon, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
-        crate::simd::hash_nulls(neon, keys, non_null, out);
+    fn hash_nulls_block(simd: Simd, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+        crate::simd::hash_nulls(simd, keys, non_null, out);
     }
 
     #[inline(always)]
-    fn combine_block(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-        crate::simd::combine(neon, keys, out);
+    fn combine_block(simd: Simd, keys: Side<'_>, out: &mut [u32; 64]) {
+        crate::simd::combine(simd, keys, out);
     }
 
     #[inline(always)]
-    fn combine_nulls_block(neon: Neon, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
-        crate::simd::combine_nulls(neon, keys, non_null, out);
+    fn combine_nulls_block(simd: Simd, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+        crate::simd::combine_nulls(simd, keys, non_null, out);
     }
 
     #[inline]
