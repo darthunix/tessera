@@ -33,8 +33,9 @@
 //! ([`tessera_core::WordBlock`]) are compared, aggregated, computed and
 //! hashed with NEON on AArch64, division by a scalar included; the filters
 //! of int4 and int8, the comparisons of two such columns, their
-//! arithmetic and aggregates, and the count run with AVX2 on x86-64 too,
-//! where the processor has it; everything else takes the row paths.
+//! arithmetic and aggregates, the count and the widening cast run with
+//! AVX2 on x86-64 too, where the processor has it; everything else takes
+//! the row paths.
 //! [`table`] is a hash table in a region of memory the caller owns, for
 //! joins and grouping, addressed by offsets so that the same bytes serve
 //! local and shared memory, and [`sort`] orders a table's records by their
