@@ -350,33 +350,34 @@ agg_key_dict_reset(KeyDict *dict, uint64 values)
 #define KEYDICT_PREFETCH_BYTES (1024 * 1024)
 
 /*
- * A copy of a by-reference value in the dictionary's blocks, one after
- * another, each at a MAXALIGN'd place; a value past a quarter of a block,
- * or an expanded object to flatten, is a copy of its own.
+ * A copy of a by-reference value (tess_value_copy) in the dictionary's
+ * blocks, one after another, each at a MAXALIGN'd place; a value past a
+ * quarter of a block is a copy of its own.
  */
 static Datum
 keydict_copy(KeyDict *dict, Datum value)
 {
+	ExpandedObjectHeader *expanded;
 	Size		size;
 	char	   *copy;
 
 	if (dict->typbyval)
 		return value;
-	if (dict->typlen == -1 &&
-		VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
-		return datumCopy(value, false, -1);
-	size = datumGetSize(value, false, dict->typlen);
+	size = tess_value_size(value, dict->typlen, &expanded);
 	if (size > KEYDICT_BLOCK_LEN / 4)
-		return datumCopy(value, false, dict->typlen);
-	if (dict->block == NULL || dict->block_used + size > dict->block_len)
+		copy = palloc(size);
+	else
 	{
-		dict->block = MemoryContextAlloc(dict->context, KEYDICT_BLOCK_LEN);
-		dict->block_len = KEYDICT_BLOCK_LEN;
-		dict->block_used = 0;
+		if (dict->block == NULL || dict->block_used + size > dict->block_len)
+		{
+			dict->block = MemoryContextAlloc(dict->context, KEYDICT_BLOCK_LEN);
+			dict->block_len = KEYDICT_BLOCK_LEN;
+			dict->block_used = 0;
+		}
+		copy = dict->block + dict->block_used;
+		dict->block_used += MAXALIGN(size);
 	}
-	copy = dict->block + dict->block_used;
-	memcpy(copy, DatumGetPointer(value), size);
-	dict->block_used += MAXALIGN(size);
+	tess_value_copy(value, expanded, copy, size);
 	return PointerGetDatum(copy);
 }
 

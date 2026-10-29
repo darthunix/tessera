@@ -307,7 +307,7 @@ extern TessStatusCode tess_spill_columns_init(void *chunk, Size len, int words,
  * string) is the chunk's word c, the words past them the caller's. A NULL
  * value's word is 0 with its NULL bit; a by-value one's its Datum; a
  * by-reference one's a reference (TESS_SPILL_VALUE_REF of chunk 0) to its
- * bytes, as datumGetSize counts them, copied into values at *values_used,
+ * bytes, as datumCopy copies them, copied into values at *values_used,
  * which moves past them to a multiple of 8; values_len is at most 4 GiB. It stops when the chunk is full or the next row's values
  * would pass values_len: the rows appended leave rows, *appended gets
  * their count and *need the bytes of values the next row takes (0 when

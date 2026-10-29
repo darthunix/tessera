@@ -1219,8 +1219,9 @@ planner's estimate may have many more of) is looked up a batch at a
 time: a pass of its own asks memory for each row's bucket before the
 lookups, so that the batch's misses overlap. The values' copies go one
 after another into blocks of 64 kB of the dictionary's, without a
-chunk's header each (a value past 16 kB, or an expanded object, is a
-copy of its own), and an entry is 24 bytes, its number 32 bits. Grouping
+chunk's header each (a value past 16 kB is a copy of its own, and an
+expanded object is flattened), and an entry is 24 bytes, its number 32
+bits. Grouping
 by 450 000 values of text took 13 % less, `INTERSECT` of texts 8 % less,
 small dictionaries 1 to 3 % less (pg-anykey-OqakjS, pg-setop-UmZbY2
 against the build before). Both parts matter: the pass alone took 2 to

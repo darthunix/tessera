@@ -68,8 +68,7 @@ pub(super) unsafe fn varlena_size(pointer: *const u8) -> anyhow::Result<usize> {
             let body = match *pointer.add(1) {
                 1 => 8,
                 18 => 16,
-                2 | 3 => anyhow::bail!("an expanded object, not flattened"),
-                tag => anyhow::bail!("an external varlena of tag {tag}"),
+                tag => return Err(external_refused(tag)),
             };
             Ok(2 + body)
         } else if first & 0x01 == 0x01 {
@@ -77,5 +76,19 @@ pub(super) unsafe fn varlena_size(pointer: *const u8) -> anyhow::Result<usize> {
         } else {
             Ok((pointer.cast::<u32>().read_unaligned() >> 2) as usize)
         }
+    }
+}
+
+/// The error of an external varlena a copy cannot take: an expanded
+/// object, tag 2 or 3, or a tag none of PostgreSQL's. Cold, so that the
+/// size of a varlena stays small enough to inline into the loops that
+/// copy values.
+#[cold]
+#[inline(never)]
+fn external_refused(tag: u8) -> anyhow::Error {
+    if matches!(tag, 2 | 3) {
+        anyhow::anyhow!("an expanded object, not flattened")
+    } else {
+        anyhow::anyhow!("an external varlena of tag {tag}")
     }
 }

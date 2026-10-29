@@ -558,9 +558,12 @@ fn rows_of_datums_append_to_a_chunk_of_columns() {
         // copied: it means nothing outside its process.
         let expanded_ro: Vec<u8> = [&[0x01, 2][..], &[7; 8]].concat();
         let expanded_rw: Vec<u8> = [&[0x01, 3][..], &[7; 8]].concat();
+        // A plain value comes first in the row, so nothing of it may stay
+        // either.
         for refused in [&unknown, &expanded_ro, &expanded_rw] {
+            let plain = [short.as_ptr() as u64; 4];
             let varlenas = [refused.as_ptr() as u64; 4];
-            let columns = [column(&varlenas, &no_nulls)];
+            let columns = [column(&plain, &no_nulls), column(&varlenas, &no_nulls)];
             let mut first = 1_u64;
             let mut one = Mask {
                 nrows: 4,
@@ -570,10 +573,10 @@ fn rows_of_datums_append_to_a_chunk_of_columns() {
             let code = tess_spill_columns_append(
                 chunk.as_mut_ptr().cast(),
                 len,
-                1,
+                2,
                 columns.as_ptr(),
-                [false].as_ptr(),
-                [-1_i16].as_ptr(),
+                [false, false].as_ptr(),
+                [-1_i16, -1].as_ptr(),
                 &raw mut one,
                 values.as_mut_ptr(),
                 256,
