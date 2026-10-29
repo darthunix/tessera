@@ -14,18 +14,18 @@
 //! cannot be inlined there and made a loader too dear to inline.
 
 use core::arch::x86_64::{
-    __m256i, _mm_add_epi64, _mm_cvtsi128_si32, _mm_cvtsi128_si64, _mm_max_epi32, _mm_min_epi32,
-    _mm_shuffle_epi32, _mm_unpackhi_epi64, _mm256_add_epi32, _mm256_add_epi64, _mm256_and_si256,
-    _mm256_andnot_si256, _mm256_blend_epi32, _mm256_blendv_epi8, _mm256_castps_si256,
-    _mm256_castsi256_pd, _mm256_castsi256_ps, _mm256_castsi256_si128, _mm256_cmpeq_epi8,
-    _mm256_cmpeq_epi32, _mm256_cmpeq_epi64, _mm256_cmpgt_epi32, _mm256_cmpgt_epi64,
-    _mm256_cvtepi32_epi64, _mm256_extracti128_si256, _mm256_loadu_si256, _mm256_max_epi32,
-    _mm256_min_epi32, _mm256_movemask_epi8, _mm256_movemask_pd, _mm256_movemask_ps,
-    _mm256_mul_epi32, _mm256_mullo_epi32, _mm256_or_si256, _mm256_permute4x64_epi64,
-    _mm256_set1_epi32, _mm256_set1_epi64x, _mm256_setr_epi32, _mm256_setr_epi64x,
-    _mm256_setzero_si256, _mm256_shuffle_epi32, _mm256_shuffle_ps, _mm256_srai_epi32,
-    _mm256_srav_epi32, _mm256_srli_epi64, _mm256_storeu_si256, _mm256_sub_epi32, _mm256_sub_epi64,
-    _mm256_testz_si256, _mm256_xor_si256,
+    __m256i, _mm_add_epi64, _mm_blendv_epi8, _mm_cmpgt_epi64, _mm_cvtsi128_si32, _mm_cvtsi128_si64,
+    _mm_extract_epi64, _mm_max_epi32, _mm_min_epi32, _mm_shuffle_epi32, _mm_unpackhi_epi64,
+    _mm256_add_epi32, _mm256_add_epi64, _mm256_and_si256, _mm256_andnot_si256, _mm256_blend_epi32,
+    _mm256_blendv_epi8, _mm256_castps_si256, _mm256_castsi256_pd, _mm256_castsi256_ps,
+    _mm256_castsi256_si128, _mm256_cmpeq_epi8, _mm256_cmpeq_epi32, _mm256_cmpeq_epi64,
+    _mm256_cmpgt_epi32, _mm256_cmpgt_epi64, _mm256_cvtepi32_epi64, _mm256_extracti128_si256,
+    _mm256_loadu_si256, _mm256_max_epi32, _mm256_min_epi32, _mm256_movemask_epi8,
+    _mm256_movemask_pd, _mm256_movemask_ps, _mm256_mul_epi32, _mm256_mullo_epi32, _mm256_or_si256,
+    _mm256_permute4x64_epi64, _mm256_set1_epi32, _mm256_set1_epi64x, _mm256_setr_epi32,
+    _mm256_setr_epi64x, _mm256_setzero_si256, _mm256_shuffle_epi32, _mm256_shuffle_ps,
+    _mm256_srai_epi32, _mm256_srav_epi32, _mm256_srli_epi64, _mm256_storeu_si256, _mm256_sub_epi32,
+    _mm256_sub_epi64, _mm256_testz_si256, _mm256_xor_si256,
 };
 
 use super::{Avx2, Vectors};
@@ -330,6 +330,22 @@ impl Vectors for Avx2 {
         unsafe { lane_masks64(bits) }
     }
 
+    /// Four vectors of four lanes are the sixteen rows of two bytes.
+    #[inline(always)]
+    fn lane_masks4_64(self, bits: u64, quad: usize) -> [__m256i; 4] {
+        let byte = |half: usize| (bits >> ((quad * 2 + half) * 8)) as u8;
+        // SAFETY: as in `splat`.
+        let ([m0, m1], [m2, m3]) = unsafe { (lane_masks64(byte(0)), lane_masks64(byte(1))) };
+        [m0, m1, m2, m3]
+    }
+
+    /// As in `select`: a mask of int8 lanes sets every byte of a lane.
+    #[inline(always)]
+    fn select64(self, mask: __m256i, a: __m256i, b: __m256i) -> __m256i {
+        // SAFETY: as in `splat`.
+        unsafe { _mm256_blendv_epi8(b, a, mask) }
+    }
+
     #[inline(always)]
     fn none64(self) -> __m256i {
         // SAFETY: as in `splat`.
@@ -401,6 +417,18 @@ impl Vectors for Avx2 {
     fn sum_across64(self, lanes: __m256i) -> i64 {
         // SAFETY: as in `splat`.
         unsafe { sum_across64(lanes) }
+    }
+
+    #[inline(always)]
+    fn min_across64(self, lanes: __m256i) -> i64 {
+        // SAFETY: as in `splat`.
+        unsafe { min_across64(lanes) }
+    }
+
+    #[inline(always)]
+    fn max_across64(self, lanes: __m256i) -> i64 {
+        // SAFETY: as in `splat`.
+        unsafe { max_across64(lanes) }
     }
 }
 
@@ -626,6 +654,28 @@ fn sum_across64(lanes: __m256i) -> i64 {
         _mm256_extracti128_si256::<1>(lanes),
     );
     _mm_cvtsi128_si64(_mm_add_epi64(half, _mm_unpackhi_epi64(half, half)))
+}
+
+/// The least of four int8 lanes, which AVX2 has no instruction for: the
+/// two halves compared and the lesser lanes kept, then the two that
+/// remain in scalar code.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn min_across64(lanes: __m256i) -> i64 {
+    let low = _mm256_castsi256_si128(lanes);
+    let high = _mm256_extracti128_si256::<1>(lanes);
+    let half = _mm_blendv_epi8(low, high, _mm_cmpgt_epi64(low, high));
+    _mm_cvtsi128_si64(half).min(_mm_extract_epi64::<1>(half))
+}
+
+/// The greatest of four int8 lanes, as in `min_across64`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn max_across64(lanes: __m256i) -> i64 {
+    let low = _mm256_castsi256_si128(lanes);
+    let high = _mm256_extracti128_si256::<1>(lanes);
+    let half = _mm_blendv_epi8(high, low, _mm_cmpgt_epi64(low, high));
+    _mm_cvtsi128_si64(half).max(_mm_extract_epi64::<1>(half))
 }
 
 /// A prepared divisor's constants as lanes, made once per word.
