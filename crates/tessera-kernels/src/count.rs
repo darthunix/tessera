@@ -14,7 +14,7 @@ use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use crate::BULK_MIN_ROWS;
-use crate::simd::{Simd, Token};
+use crate::simd::{Simd, Token, Vectors};
 
 /// Count the selected non-NULL rows.
 ///
@@ -59,14 +59,14 @@ pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usiz
 #[inline(never)]
 fn count_bulk<C: ColumnReader>(simd: Simd, column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
     let mut count = 0;
-    for index in 0..rows.nrows().div_ceil(64) {
-        let selected = rows.word(index);
-        if selected == 0 {
-            continue;
-        }
-        if selected.is_power_of_two() {
-            let row = index * 64 + selected.trailing_zeros() as usize;
-            count += usize::from(column.get(row)?.is_some());
+    for (index, selected) in rows.words().enumerate() {
+        // Empty and single-row words share one test, as in the loop of the
+        // aggregates, which says why.
+        if selected & selected.wrapping_sub(1) == 0 {
+            if selected != 0 {
+                let row = index * 64 + selected.trailing_zeros() as usize;
+                count += usize::from(column.get(row)?.is_some());
+            }
         } else if let Some(block) = column.word_block(index) {
             count += block_count(simd, block, selected);
         } else {
@@ -82,7 +82,7 @@ fn count_bulk<C: ColumnReader>(simd: Simd, column: &C, rows: &RowMaskView<'_>) -
 #[inline]
 fn block_count<T>(simd: Simd, block: WordBlock<'_, T>, selected: u64) -> usize {
     match block {
-        WordBlock::Dense { non_nulls, .. } => (selected & non_nulls).count_ones() as usize,
+        WordBlock::Dense { non_nulls, .. } => simd.count_bits(selected & non_nulls),
         WordBlock::Datum { isnull, .. } => crate::simd::count_datum(simd, isnull, selected),
     }
 }

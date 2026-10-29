@@ -88,6 +88,25 @@ impl Vectors for Avx2 {
         unsafe { non_null_lanes(isnull) }
     }
 
+    /// POPCNT written out, since its intrinsic, compiled for the feature,
+    /// cannot be inlined into a driver compiled for no set. The count
+    /// takes the register of `bits`, so it waits for nothing but `bits`.
+    #[inline(always)]
+    fn count_bits(self, bits: u64) -> usize {
+        let mut count = bits;
+        // SAFETY: the token proves that this processor has POPCNT; the
+        // instruction reads and writes one register, and nothing else but
+        // the flags.
+        unsafe {
+            core::arch::asm!(
+                "popcnt {count}, {count}",
+                count = inout(reg) count,
+                options(pure, nomem, nostack),
+            );
+        }
+        count as usize
+    }
+
     #[inline(always)]
     unsafe fn store(self, at: *mut i32, lanes: __m256i) {
         // SAFETY: the token proves that this processor runs AVX2, and the
@@ -242,7 +261,7 @@ impl Vectors for Avx2 {
     #[inline(always)]
     fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize {
         // SAFETY: as in `splat`.
-        (unsafe { non_null_lanes(isnull) } & selected).count_ones() as usize
+        self.count_bits(unsafe { non_null_lanes(isnull) } & selected)
     }
 
     type I64 = __m256i;

@@ -120,6 +120,11 @@ pub(crate) trait Vectors: Token + 'static {
     /// of its rows.
     fn non_null_bits(self, isnull: &[bool; 64]) -> u64;
 
+    /// The number of bits set in `bits`, one instruction on each set: a
+    /// driver compiled for no set counts the present rows of each word
+    /// with it, since x86-64 without POPCNT spends about seventeen.
+    fn count_bits(self, bits: u64) -> usize;
+
     /// Write `lanes` to the `LANES` values at `at`, which need no alignment.
     ///
     /// A kernel takes the pointer of its word once and offsets it by group,
@@ -372,6 +377,10 @@ macro_rules! unreachable_vectors {
             }
 
             fn non_null_bits(self, _: &[bool; 64]) -> u64 {
+                match self {}
+            }
+
+            fn count_bits(self, _: u64) -> usize {
                 match self {}
             }
 

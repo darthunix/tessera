@@ -176,8 +176,9 @@ Will be:
   - `Neon::get()` gives a value on AArch64, and nothing elsewhere or
     under Miri;
   - `Avx2::get()` gives a value on x86-64 only after
-    `is_x86_feature_detected!("avx2")`. The standard library keeps the
-    answer, so asking costs a load.
+    `is_x86_feature_detected!` finds both AVX2 and POPCNT. The
+    standard library keeps the answers, so asking costs a load for
+    each.
   - Where a type has no values it is an empty `enum`, so code that
     holds one cannot be reached, and the compiler knows it.
 - `Simd` names the set of the target: `Neon` on AArch64, `Avx2` on
@@ -407,8 +408,12 @@ need a benchmark program of their own, which is added first.
 
 ### The run-time choice on x86-64
 
-The vector path needs AVX2 only: BMI and FMA are not used. A build
-with AVX2 enabled at compile time, such as with `-C target-cpu=native`,
+The vector path needs AVX2 and POPCNT: BMI and FMA are not used.
+POPCNT counts the present rows of a word in the drivers, which are
+compiled for no set: x86-64 without it counts the bits of a word with
+about seventeen instructions. Every processor with AVX2 has POPCNT, but
+the compiler does not assume it, so the token asks for both. A build
+with both enabled at compile time, such as with `-C target-cpu=native`,
 gets a constant answer from `is_x86_feature_detected!`. The choice
 then costs nothing.
 
