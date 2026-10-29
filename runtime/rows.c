@@ -224,26 +224,50 @@ new_value_chunk(TessRows *rows, Size len)
 	return number;
 }
 
+void
+tess_value_flatten_column(TessDatumColumn *column, int16 typlen,
+						  const TessRowMask *mask, MemoryContext context)
+{
+	Datum	   *values = NULL;
+
+	if (typlen != -1)
+		return;
+	for (int row = -1; (row = tess_row_mask_next(mask, row)) >= 0;)
+	{
+		Datum		value = column->values[row];
+		ExpandedObjectHeader *expanded;
+		Size		size;
+		void	   *copy;
+
+		if (column->isnull[row] || !VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
+			continue;
+		if (values == NULL)
+		{
+			values = MemoryContextAlloc(context, sizeof(Datum) * column->nrows);
+			memcpy(values, column->values, sizeof(Datum) * column->nrows);
+		}
+		size = tess_value_size(value, typlen, &expanded);
+		copy = MemoryContextAllocHuge(context, size);
+		tess_value_copy(value, expanded, copy, size);
+		values[row] = PointerGetDatum(copy);
+	}
+	if (values != NULL)
+		column->values = values;
+}
+
 /*
- * Copy a by-reference value into the value chunks and return its
- * reference: the bytes datumCopy would copy, an expanded object flattened.
+ * Copy a by-reference value into the value chunks (tess_value_copy) and
+ * return its reference.
  */
 static uint64
 store_value(TessRows *rows, Datum value, int16 typlen)
 {
-	ExpandedObjectHeader *expanded = NULL;
-	Size		size;
+	ExpandedObjectHeader *expanded;
+	Size		size = tess_value_size(value, typlen, &expanded);
 	Size		aligned;
 	int			number;
 	Size		byte;
 
-	if (typlen == -1 && VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
-	{
-		expanded = DatumGetEOHP(value);
-		size = EOH_get_flat_size(expanded);
-	}
-	else
-		size = datumGetSize(value, false, typlen);
 	aligned = MAXALIGN(size);
 	if (aligned > rows->value_chunk / 4)
 	{
@@ -269,10 +293,7 @@ store_value(TessRows *rows, Datum value, int16 typlen)
 		byte = rows->value_used;
 		rows->value_used += aligned;
 	}
-	if (expanded != NULL)
-		EOH_flatten_into(expanded, rows->values[number] + byte, size);
-	else
-		memcpy(rows->values[number] + byte, DatumGetPointer(value), size);
+	tess_value_copy(value, expanded, rows->values[number] + byte, size);
 	return ROWS_VALUE_REF(number, byte);
 }
 

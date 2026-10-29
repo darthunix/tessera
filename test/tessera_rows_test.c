@@ -1,6 +1,8 @@
 #include "postgres.h"
 
+#include "catalog/pg_type.h"
 #include "fmgr.h"
+#include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "varatt.h"
@@ -13,6 +15,7 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(tessera_test_rows_cycle);
 PG_FUNCTION_INFO_V1(tessera_test_rows_error);
 PG_FUNCTION_INFO_V1(tessera_test_rows_sort);
+PG_FUNCTION_INFO_V1(tessera_test_rows_value);
 
 /* The kernels of the table, which this module links. */
 static const TessKernelOps kernels = {
@@ -358,4 +361,59 @@ tessera_test_rows_sort(PG_FUNCTION_ARGS)
 	}
 	tess_rows_free(rows);
 	PG_RETURN_BOOL(ok && count > 0);
+}
+
+/*
+ * The one copy of a by-reference value: an expanded array, copied and
+ * flattened, reads back as the array's bytes after its object is freed;
+ * a column of it, flattened for the rows of a mask, gets a copy of its
+ * values with the selected expanded one flattened, and the rest, the
+ * batch's own array and a column of a fixed length, are left as they are.
+ */
+Datum
+tessera_test_rows_value(PG_FUNCTION_ARGS)
+{
+	Datum		elements[3] = {Int32GetDatum(1), Int32GetDatum(2), Int32GetDatum(3)};
+	ArrayType  *flat = construct_array_builtin(elements, 3, INT4OID);
+	MemoryContext owner = AllocSetContextCreate(CurrentMemoryContext, "expanded owner",
+												ALLOCSET_DEFAULT_SIZES);
+	MemoryContext copies = AllocSetContextCreate(CurrentMemoryContext, "flattened",
+												 ALLOCSET_DEFAULT_SIZES);
+	Datum		expanded = expand_array(PointerGetDatum(flat), owner, NULL);
+	ExpandedObjectHeader *object;
+	ExpandedObjectHeader *none;
+	Size		size = tess_value_size(expanded, -1, &object);
+	char	   *copy = palloc(size);
+	Datum		values[3] = {PointerGetDatum(flat), expanded, expanded};
+	bool		isnull[3] = {false, false, false};
+	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	TessDatumColumn fixed;
+	uint64		bits[1] = {0x3};
+	TessRowMask mask = {3, bits};
+	bool		ok;
+
+	ok = VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(expanded)) && object != NULL &&
+		size == VARSIZE(flat) &&
+		tess_value_size(PointerGetDatum(flat), -1, &none) == size && none == NULL;
+	tess_value_copy(expanded, object, copy, size);
+	column.values = values;
+	column.isnull = isnull;
+	column.nrows = 3;
+	fixed = column;
+	tess_value_flatten_column(&column, -1, &mask, copies);
+	tess_value_flatten_column(&fixed, 4, &mask, copies);
+	ok = ok && column.values != values && fixed.values == values &&
+		column.values[0] == values[0] && column.values[2] == expanded &&
+		values[1] == expanded && column.values[1] != expanded;
+	/* The object gone, the copies stand. */
+	MemoryContextDelete(owner);
+	ok = ok && memcmp(copy, flat, size) == 0 &&
+		memcmp(DatumGetPointer(column.values[1]), flat, size) == 0;
+	/* No expanded value among the rows: the column is left as it is. */
+	column.values = values;
+	bits[0] = 0x1;
+	tess_value_flatten_column(&column, -1, &mask, copies);
+	ok = ok && column.values == values;
+	MemoryContextDelete(copies);
+	PG_RETURN_BOOL(ok);
 }

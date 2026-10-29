@@ -14,6 +14,10 @@ CREATE FUNCTION tessera_test_rows_error(integer)
 RETURNS void
 AS :'rows_test', 'tessera_test_rows_error'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_rows_value()
+RETURNS boolean
+AS :'rows_test', 'tessera_test_rows_value'
+LANGUAGE C STRICT;
 -- Rows read back by reference in another order than appended: one batch,
 -- a batch and a bit, then enough for several chunks of records and of
 -- values and two values of a chunk of their own; each also after a reset.
@@ -35,6 +39,14 @@ SELECT tessera_test_rows_sort(1) AS one,
  t   | t          | t
 (1 row)
 
+-- A by-reference value is copied by its bytes, an expanded object
+-- flattened, so that the copy outlives the object.
+SELECT tessera_test_rows_value() AS value;
+ value 
+-------
+ t
+(1 row)
+
 -- Misuse is an ERROR.
 SELECT tessera_test_rows_error(1);
 ERROR:  Tessera rows have no column 3
@@ -43,3 +55,4 @@ ERROR:  Tessera rows require the kernels of the table
 DROP FUNCTION tessera_test_rows_cycle(integer);
 DROP FUNCTION tessera_test_rows_sort(integer);
 DROP FUNCTION tessera_test_rows_error(integer);
+DROP FUNCTION tessera_test_rows_value();

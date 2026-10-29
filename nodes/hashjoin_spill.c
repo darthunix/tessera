@@ -2,7 +2,6 @@
 
 #include "miscadmin.h"
 #include "utils/datum.h"
-#include "utils/expandeddatum.h"
 #include "utils/memutils.h"
 #include "storage/barrier.h"
 #include "utils/dsa.h"
@@ -603,19 +602,12 @@ static uint64
 side_store(SpillSide *side, int partition, Datum value, int16 typlen)
 {
 	SpillPart  *part = &side->parts[partition];
-	ExpandedObjectHeader *expanded = NULL;
-	Size		size;
+	ExpandedObjectHeader *expanded;
+	Size		size = tess_value_size(value, typlen, &expanded);
 	Size		aligned;
 	int			number;
 	Size		byte;
 
-	if (typlen == -1 && VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(value)))
-	{
-		expanded = DatumGetEOHP(value);
-		size = EOH_get_flat_size(expanded);
-	}
-	else
-		size = datumGetSize(value, false, typlen);
 	aligned = MAXALIGN(size);
 	if (aligned > side->chunk_len / 4)
 	{
@@ -637,10 +629,7 @@ side_store(SpillSide *side, int partition, Datum value, int16 typlen)
 		part->value_used += aligned;
 		side->value_lens[number] = part->value_used;
 	}
-	if (expanded != NULL)
-		EOH_flatten_into(expanded, side->value_bases[number] + byte, size);
-	else
-		memcpy(side->value_bases[number] + byte, DatumGetPointer(value), size);
+	tess_value_copy(value, expanded, side->value_bases[number] + byte, size);
 	if (!part->resident && !part->queued && part->value_bytes > side->chunk_len)
 	{
 		part->queued = true;
