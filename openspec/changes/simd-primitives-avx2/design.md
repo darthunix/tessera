@@ -444,6 +444,14 @@ What the moves found:
   (`disasm-HQMnaw`). Neither set has a least or a greatest of int8
   lanes, so the kernels write them as a compare and a select, as the
   NEON code did, over a select of int8 lanes that each set gives.
+- On AVX2 the least and the greatest of int8 take 62 to 83 % fewer
+  cycles than the row path on 1024 rows of full, half and random words,
+  and 53 to 57 % fewer on 64 and 65 rows (`compare-8TTVIK`,
+  `compare-FDxDDE`). The row paths lose as in the other families: up
+  to 5 cycles a call on batches of 0 and 1 rows, 4 to 18 on empty
+  selections, up to 26 on sparse ones and up to 21 on 63 rows. The
+  count, whose code did not change, kept its instructions; on empty
+  selections it took 7 to 9 cycles more, by where its code lies.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
