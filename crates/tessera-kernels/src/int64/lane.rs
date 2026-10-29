@@ -11,14 +11,14 @@ use super::fold;
 use super::{CompareOp, Divisor, Side};
 use crate::int::{Evaluate, IntLane};
 use crate::ops::{ArithOp, ArithmeticError};
-use crate::simd::{Neon, Simd, Vectors};
+use crate::simd::{Simd, Vectors};
 
 impl IntLane for i64 {
     type Divisor = Divisor;
     type Compares = Simd;
     type Arith = Simd;
     type Aggregates = Simd;
-    type Hashes = Neon;
+    type Hashes = Simd;
 
     const ZERO: i64 = 0;
     const ONE: i64 = 1;
@@ -80,23 +80,23 @@ impl IntLane for i64 {
     }
 
     #[inline(always)]
-    fn hash_block(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-        crate::simd::hash64(neon, keys, out);
+    fn hash_block(simd: Simd, keys: Side<'_>, out: &mut [u32; 64]) {
+        crate::simd::hash64(simd, keys, out);
     }
 
     #[inline(always)]
-    fn hash_nulls_block(neon: Neon, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
-        crate::simd::hash_nulls64(neon, keys, non_null, out);
+    fn hash_nulls_block(simd: Simd, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+        crate::simd::hash_nulls64(simd, keys, non_null, out);
     }
 
     #[inline(always)]
-    fn combine_block(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-        crate::simd::combine64(neon, keys, out);
+    fn combine_block(simd: Simd, keys: Side<'_>, out: &mut [u32; 64]) {
+        crate::simd::combine64(simd, keys, out);
     }
 
     #[inline(always)]
-    fn combine_nulls_block(neon: Neon, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
-        crate::simd::combine_nulls64(neon, keys, non_null, out);
+    fn combine_nulls_block(simd: Simd, keys: Side<'_>, non_null: u64, out: &mut [u32; 64]) {
+        crate::simd::combine_nulls64(simd, keys, non_null, out);
     }
 
     #[inline]

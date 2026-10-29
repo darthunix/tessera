@@ -14,8 +14,8 @@
 //! under the group policy hashing like the int4 group key.
 //!
 //! Whole words of storage the column exposes are hashed with vector code
-//! on AArch64, chosen by the first word as for the int4 kernels; other
-//! words go row by row. The contract of [`hash`] and [`hash_next`] is that
+//! (NEON on AArch64, AVX2 on x86-64 where the processor has it), chosen by
+//! the first word as for the int4 kernels; other words go row by row. The contract of [`hash`] and [`hash_next`] is that
 //! of the int4 kernels:
 //! `hashes` has the batch's row count and rows outside the valid mask hold
 //! unspecified values; dimension errors come before any change, and a
