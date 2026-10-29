@@ -329,7 +329,8 @@ extern TessStatusCode tess_spill_columns_append(void *chunk, Size len, int ncolu
  * a hash is (hash >> shift) & (npartitions - 1) and appends to chunk
  * partition_chunks[p] of the nchunks at bases, of lens bytes; a row whose
  * chunk is full stays pending. Appended rows get their places in offsets
- * and add one to rows[partition].
+ * and add one to rows[partition]. A row's words are its ncolumns columns,
+ * ncolumns at most 2048, with their NULL bits in the chunk's lanes.
  */
 extern TessStatusCode tess_spill_columns_append_partitioned(void *const *bases,
 															const Size *lens,

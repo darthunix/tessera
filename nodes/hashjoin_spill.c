@@ -129,6 +129,13 @@ side_chunk_rows(TessHashJoinState *state, const SpillSide *side, int index)
 		side_chunk_used(state, side, index) > TESS_TABLE_CHUNK_HEADER;
 }
 
+/* A chunk of len bytes holds no row of nwords words. */
+pg_noreturn static pg_noinline void
+chunk_too_short(Size len, int nwords)
+{
+	elog(ERROR, "TessHashJoin made a chunk of %zu bytes for rows of %d words", len, nwords);
+}
+
 /* Make the len bytes at base an empty chunk of the side: of records, or of columns. */
 static void
 side_chunk_init(TessHashJoinState *state, SpillSide *side, void *base, Size len)
@@ -136,8 +143,13 @@ side_chunk_init(TessHashJoinState *state, SpillSide *side, void *base, Size len)
 	Size		capacity;
 
 	if (side->columnar)
+	{
 		check(state, state->kernels->spill_columns_init(base, len, side->nwords,
 														&capacity, &state->status));
+		/* A chunk for rows that holds none would be retried without end. */
+		if (unlikely(capacity == 0 && len > TESS_SPILL_COLUMNS_HEADER))
+			chunk_too_short(len, side->nwords);
+	}
 	else
 		check(state, state->kernels->table_chunk_init(base, len, &state->status));
 }
@@ -151,9 +163,10 @@ side_sync(SpillSide *side)
 }
 
 /*
- * A side of nkeys keys of the kinds and a payload of a word of NULL bits
- * and nwords words of the types, with no chunk yet but the empty one and
- * an index for the layout only.
+ * A side of nkeys keys of the kinds and a payload of NULL bits (a word,
+ * or for chunks of columns a lane for every 64 words) and nwords words of
+ * the types, with no chunk yet but the empty one and an index for the
+ * layout only.
  */
 static void
 side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableKeyKind *kinds, int nwords,
@@ -184,7 +197,8 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 		memcpy(side->typlens, typlens, sizeof(int16) * nwords);
 		memcpy(side->byvals, byvals, sizeof(bool) * nwords);
 	}
-	side->payload_size = sizeof(uint64) * (1 + nwords);
+	side->payload_size = sizeof(uint64) *
+		((side->columnar ? tess_spill_columns_null_lanes(nwords) : 1) + nwords);
 	check(state, state->kernels->table_record_size(nkeys, side->payload_size,
 												   &side->record_size, &state->status));
 	side->chunk_len = chunk_len;
@@ -804,6 +818,7 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 	Size		limit = tess_hash_memory_limit();
 	Size		record = state->record_size;
 	Size		chunk_len;
+	Size		outer_len;
 	uint32		count;
 	int			npartitions;
 	JoinSpill  *spill;
@@ -922,16 +937,20 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 		outer_column_type(state, child, &typlens[nstored], &byvals[nstored]);
 		spill->word_of[child] = ++nstored;
 	}
-	if (nstored > 64)
+	/* What tess_spill_columns_append_partitioned takes; no plan reaches it. */
+	if (nstored > 2048)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessHashJoin cannot spill more than 64 outer columns")));
+				 errmsg("TessHashJoin cannot spill more than 2048 outer columns")));
+	/* A chunk of outer rows holds four at least, however wide they are. */
+	outer_len = Max(chunk_len, TESS_SPILL_COLUMNS_HEADER +
+					sizeof(uint64) * 4 * ((Size) tess_spill_columns_null_lanes(nstored) + nstored));
 	side_init(state, &spill->probe, state->keys.nkeys, state->keys.outer_kinds, nstored, typlens, byvals,
-			  chunk_len, false, npartitions);
+			  outer_len, false, npartitions);
 	/* The outer rows a shared table answers: one partition of their own. */
 	if (state->parallel.shared != NULL && parent == NULL)
 		side_init(state, &spill->resident, state->keys.nkeys, state->keys.outer_kinds, nstored,
-				  typlens, byvals, chunk_len, false, 1);
+				  typlens, byvals, outer_len, false, 1);
 	spill->rows = &spill->probe;
 	pfree(typlens);
 	pfree(byvals);
@@ -1219,7 +1238,7 @@ column_append(TessHashJoinState *state, SpillSide *side, TessRowMask *pending,
 				{
 					if (side->byvals[word] || columns[word].isnull[row])
 						continue;
-					tess_spill_columns_lane(base, 1 + word)[place] =
+					tess_spill_columns_word(base, word)[place] =
 						side_store(side, partition, columns[word].values[row],
 								   side->typlens[word]);
 				}
@@ -1945,8 +1964,8 @@ next_partition(TessHashJoinState *state)
 /*
  * The next batch of the joined partition's outer rows (or of a shared
  * table's outer rows it answers itself, spill->rows): up to
- * JOIN_COMPACT_ROWS records of the chunk being read, each stored column
- * gathered from their payload; the chunks come from the file, each after
+ * JOIN_COMPACT_ROWS rows of the chunk of columns being read, each stored
+ * column read from its lane; the chunks come from the file, each after
  * its values, and then the tail. False when none is left.
  */
 bool
@@ -1965,11 +1984,9 @@ join_next_spilled(TessHashJoinState *state, JoinSpill *spill)
 			if (spill->cursor < total)
 			{
 				int			count = (int) Min(total - spill->cursor, JOIN_COMPACT_ROWS);
-				const uint64 *nulls = tess_spill_columns_lane(spill->block, 0) + spill->cursor;
+				const uint64 *nulls = NULL;
 				uint64		any = 0;
 
-				for (int row = 0; row < count; row++)
-					any |= nulls[row];
 				spill->bits[0] = count == 64 ? ~UINT64CONST(0) :
 					(UINT64CONST(1) << count) - 1;
 				spill->batch.rows.nrows = count;
@@ -1978,13 +1995,23 @@ join_next_spilled(TessHashJoinState *state, JoinSpill *spill)
 				/* A by-value word is read where it lies; a reference becomes a pointer. */
 				for (int word = 0; word < side->nwords; word++)
 				{
-					uint64	   *lane = tess_spill_columns_lane(spill->block, 1 + word) +
+					uint64	   *lane = tess_spill_columns_word(spill->block, word) +
 						spill->cursor;
 					bool	   *isnull = spill->isnull[word];
 
-					if ((any >> word) & 1)
+					/* Each 64 words have a lane of NULL bits of their own. */
+					if (word % 64 == 0)
+					{
+						nulls = tess_spill_columns_lane(spill->block,
+														tess_spill_columns_null_lane(word)) +
+							spill->cursor;
+						any = 0;
 						for (int row = 0; row < count; row++)
-							isnull[row] = (nulls[row] >> word) & 1;
+							any |= nulls[row];
+					}
+					if (tess_spill_columns_is_null(any, word))
+						for (int row = 0; row < count; row++)
+							isnull[row] = tess_spill_columns_is_null(nulls[row], word);
 					else
 						memset(isnull, 0, sizeof(bool) * count);
 					if (side->byvals[word])

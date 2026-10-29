@@ -8,6 +8,8 @@
 //! table refers to a record, by the chunk's number above
 //! [`PLACE_BITS`] bits of its place in the chunk.
 
+use std::ops::Range;
+
 use anyhow::{Result, bail, ensure};
 use tessera_core::{RowMask, ones};
 use tessera_spill::columns;
@@ -83,10 +85,6 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     );
     let mask = (count - 1) as u32;
     let width = columns.len();
-    ensure!(
-        width <= 64,
-        "a partitioned chunk of columns takes rows of up to 64 words, not {width}"
-    );
     let mut appended = 0;
     for index in 0..nrows.div_ceil(64) {
         let selected = pending.as_view().word(index);
@@ -107,15 +105,14 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
                 continue;
             }
             let place = shape.rows;
-            let mut nulls = 0_u64;
-            for column in 0..width {
-                let (value, null) = columns.get(column, row);
-                nulls |= u64::from(null) << column;
-                let at = shape.lane_at(1 + column) + 8 * place;
-                chunk[at..at + 8].copy_from_slice(&value.to_ne_bytes());
+            let lanes = shape.word_lane(0);
+            // Up to 64 words, one lane without a loop over lanes, which
+            // would cost every row some 20 instructions.
+            if lanes == 1 {
+                write_lane(chunk, &shape, columns, row, 0, 0..width);
+            } else {
+                write_lanes(chunk, &shape, columns, row);
             }
-            let at = shape.lane_at(0) + 8 * place;
-            chunk[at..at + 8].copy_from_slice(&nulls.to_ne_bytes());
             columns::set_rows(chunk, place + 1);
             offsets[row] = (number << PLACE_BITS) | place as u32;
             rows[partition] += 1;
@@ -127,6 +124,43 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
         }
     }
     Ok(appended)
+}
+
+/// Row `row`'s words of `words` into their lanes at the chunk's next
+/// place, and their NULL bits into lane `lane`. Always inlined: as a call
+/// of its own, its loop over the words keeps bounds checks the caller's
+/// would hoist.
+#[inline(always)]
+fn write_lane(
+    chunk: &mut [u8],
+    shape: &columns::Shape,
+    columns: &PayloadColumns<'_>,
+    row: usize,
+    lane: usize,
+    words: Range<usize>,
+) {
+    let (place, first) = (shape.rows, shape.word_lane(0));
+    let mut nulls = 0_u64;
+    for column in words {
+        let (value, null) = columns.get(column, row);
+        nulls |= u64::from(null) << (column % 64);
+        let at = shape.lane_at(first + column) + 8 * place;
+        chunk[at..at + 8].copy_from_slice(&value.to_ne_bytes());
+    }
+    let at = shape.lane_at(lane) + 8 * place;
+    chunk[at..at + 8].copy_from_slice(&nulls.to_ne_bytes());
+}
+
+/// Row `row`'s words and NULL bits when they take more than one lane:
+/// rare, and kept out of the loop of the rows, whose registers it would
+/// take.
+#[cold]
+#[inline(never)]
+fn write_lanes(chunk: &mut [u8], shape: &columns::Shape, columns: &PayloadColumns<'_>, row: usize) {
+    for lane in 0..shape.word_lane(0) {
+        let words = 64 * lane..shape.words.min(64 * lane + 64);
+        write_lane(chunk, shape, columns, row, lane, words);
+    }
 }
 
 /// A row's value of a column, as a chunk of columns stores it.
@@ -558,6 +592,65 @@ mod tests {
                 if null { 0 } else { first[row] }
             );
             assert_eq!(lane_word(chunk, 2, place), second[row]);
+        }
+    }
+
+    #[test]
+    fn rows_wider_than_64_words_keep_a_lane_of_null_bits_per_64() {
+        // One lane to its last bit, a second lane of one word, and three
+        // lanes, the last for words 128 and 129 alone.
+        for width in [64, 65, 130] {
+            let nrows = 5;
+            let lanes = columns::null_lanes(width);
+            let mut chunks = vec![vec![0_u8; columns::size(8, width)]];
+            columns::init(&mut chunks[0], width).unwrap();
+            let values: Vec<Vec<u64>> = (0..width as u64)
+                .map(|column| (0..nrows as u64).map(|row| row * 1000 + column).collect())
+                .collect();
+            let nulls: Vec<Vec<bool>> = (0..width)
+                .map(|column| (0..nrows).map(|row| (row + column) % 5 == 0).collect())
+                .collect();
+            let value_slices: Vec<&[u64]> = values.iter().map(Vec::as_slice).collect();
+            let null_slices: Vec<&[bool]> = nulls.iter().map(Vec::as_slice).collect();
+            let payload = PayloadColumns::new(&value_slices, &null_slices, nrows).unwrap();
+            let mut words = vec![(1 << nrows) - 1];
+            let mut pending = RowMask::try_new(nrows, &mut words).unwrap();
+            let mut offsets = vec![0_u32; nrows];
+            let mut rows = [0_u64];
+            let appended = append_partitioned(
+                chunks.as_mut_slice(),
+                &Partitions {
+                    shift: 0,
+                    chunks: &[0],
+                },
+                &[0; 5],
+                &payload,
+                &mut pending,
+                &mut offsets,
+                &mut rows,
+            )
+            .unwrap();
+            assert_eq!(appended, nrows);
+            for place in 0..nrows {
+                for lane in 0..lanes {
+                    let expected = (64 * lane..width.min(64 * lane + 64))
+                        .filter(|&column| nulls[column][place])
+                        .fold(0_u64, |bits, column| bits | 1 << (column % 64));
+                    assert_eq!(
+                        lane_word(&chunks[0], lane, place),
+                        expected,
+                        "lane {lane} of row {place}, {width} words"
+                    );
+                }
+                for column in 0..width {
+                    let null = nulls[column][place];
+                    assert_eq!(
+                        lane_word(&chunks[0], lanes + column, place),
+                        if null { 0 } else { values[column][place] },
+                        "word {column} of row {place}, {width} words"
+                    );
+                }
+            }
         }
     }
 

@@ -611,6 +611,27 @@ SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k
 SELECT join_explain($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, false);
 SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
 SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
+-- 70 outer columns kept on disk, past the 64 that one lane of NULL bits
+-- holds: each 64 have a lane of their own, and NULLs, numbers and text
+-- past column 64 come back. No partition stays in memory (Resident
+-- Partitions: 0), so every match is of outer rows read back from disk.
+DO $$
+BEGIN
+    EXECUTE (SELECT format('CREATE TABLE jw70 AS SELECT NULLIF(g %% 20000, 7) AS k, %s FROM generate_series(1, 20000) AS g',
+                           string_agg(format(CASE WHEN c % 10 = 0
+                                                  THEN 'CASE WHEN g %% %1$s = 1 THEN NULL ELSE ''w'' || g * %1$s END AS c%1$s'
+                                                  ELSE 'CASE WHEN g %% %1$s = 1 THEN NULL ELSE g + %1$s END AS c%1$s' END, c),
+                                      ', ' ORDER BY c))
+             FROM generate_series(1, 70) AS c);
+END $$;
+ANALYZE jw70;
+SELECT format('SELECT count(*), sum(hashtext(concat_ws('','', %s, jsb.n))) FROM jw70 %%s JOIN jsb ON jw70.k = jsb.k',
+              string_agg('jw70.c' || c, ', ' ORDER BY c)) AS jw70_query
+FROM generate_series(1, 70) AS c \gset
+SELECT line FROM join_explain(format(:'jw70_query', '')) AS line
+WHERE line ~ 'TessHashJoin|Resident Partitions|Matches';
+SELECT join_same(format(:'jw70_query', ''));
+SELECT join_same(format(:'jw70_query', 'LEFT'));
 -- A function's plans freed, the allocator recycles their contexts (aset.c)
 -- with the largest chunk a block shares, 8 kB: the RIGHT join below got
 -- one for a partition read back and took 1579 kB of a hash_mem of 1024.
@@ -640,6 +661,21 @@ SELECT join_same($$SELECT jsp.s, w.t FROM jsp JOIN jwide() AS w ON jsp.k = w.k W
 SELECT join_same($$SELECT count(*), count(w.t), sum(length(w.t)) FROM jsp LEFT JOIN jwide() AS w ON jsp.k = w.k$$);
 SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
 SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jwide() AS w WHERE w.k = jsp.k)$$);
+-- 1100 outer columns kept on disk: a chunk of a partition's outer rows
+-- holds four of them at least, where a chunk of the inner records' size,
+-- 8 kB here, would hold none, and the join would try it again without
+-- end. No partition stays in memory.
+DO $$
+BEGIN
+    EXECUTE (SELECT format('CREATE TABLE jw1100 AS SELECT g AS k, %s FROM generate_series(1, 50) AS g',
+                           string_agg(format('CASE WHEN g %% %1$s = 1 THEN NULL ELSE g + %1$s END AS c%1$s', c),
+                                      ', ' ORDER BY c))
+             FROM generate_series(1, 1100) AS c);
+END $$;
+ANALYZE jw1100;
+SELECT line FROM join_explain($$SELECT jw1100.*, w.t FROM jw1100 JOIN jwide() AS w ON jw1100.k = w.k$$) AS line
+WHERE line ~ 'TessHashJoin|Resident Partitions|Matches';
+SELECT join_same($$SELECT jw1100.*, w.t FROM jw1100 JOIN jwide() AS w ON jw1100.k = w.k$$);
 -- The same with values of 100 bytes, which outgrow a partition's chunk
 -- of values between two of its chunks of records: the split writes them
 -- as it goes, and queues each partition once until it does.
@@ -1113,7 +1149,7 @@ SELECT join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$) 
        join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$) AS residual;
 DROP FUNCTION join_costs_carried(text);
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jsskew, jsouter, jsheavy;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jsouter, jsheavy;
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();
 DROP FUNCTION jwide();

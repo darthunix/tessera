@@ -93,7 +93,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       Check: the program runs under `tessera-bench`; a first run of the
       counters, and a run of `runs_text` and `rows_text` on mains
       power, as the base for later comparisons
-- [ ] 2.7 Show by a test, then fix: a join keeps on disk every key no
+- [x] 2.7 Show by a test, then fix: a join keeps on disk every key no
       column already holds as a word of 8 bytes, which for a hashed
       key of text, such as an expression `lower(a.t)` its child
       computes, is the address of a value its batch frees; a join that
@@ -103,7 +103,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       over text that spills, in one process, in each participant's
       table and in a shared table, compared with the core;
       `make installcheck`
-- [ ] 2.8 Show by a test, then fix: the queue of partitions whose
+- [x] 2.8 Show by a test, then fix: the queue of partitions whose
       values outgrew a chunk has one entry a partition, but a partition
       leaves it only when the queue is emptied, though a flush clears
       its mark. So a partition flushed and filled again before the

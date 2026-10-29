@@ -409,30 +409,44 @@ pub unsafe extern "C" fn tess_spill_columns_append_partitioned(
             let offsets = slots(offsets, nrows, "offsets")?;
             let rows = slots(rows, npartitions, "partition row counts")?;
             let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
-            ensure!(
-                ncolumns <= 64,
-                "a partitioned chunk of columns keeps up to 64 words, not {ncolumns}"
-            );
             let given = values(columns_in, ncolumns, "columns")?;
-            // Only the columns given are set: a batch of a few rows would
-            // otherwise pay for clearing 64 slices of each kind.
-            let mut words = [const { MaybeUninit::<&[u64]>::uninit() }; 64];
-            let mut flags = [const { MaybeUninit::<&[bool]>::uninit() }; 64];
-            for (index, column) in given.iter().enumerate() {
+            let slices = |index: usize, column: &DatumColumn| -> Result<(&[u64], &[bool])> {
                 ensure!(
                     usize::try_from(column.nrows).ok() == Some(nrows),
                     "column {index} has {} rows, not {nrows}",
                     column.nrows
                 );
-                words[index].write(values(column.values, nrows, "column values")?);
-                flags[index].write(values(column.isnull, nrows, "column NULL flags")?);
-            }
-            // SAFETY: the loop above initialized the first `ncolumns`
-            // slots of each array, and `ncolumns` is at most 64.
-            let (words, flags) = (
-                &*(&raw const words[..ncolumns] as *const [&[u64]]),
-                &*(&raw const flags[..ncolumns] as *const [&[bool]]),
-            );
+                Ok((
+                    values(column.values, nrows, "column values")?,
+                    values(column.isnull, nrows, "column NULL flags")?,
+                ))
+            };
+            // Up to 64 columns, only the columns given are set: a batch of
+            // a few rows would otherwise pay for clearing 64 slices of each
+            // kind. A wider row, which is rare, has its slices on the heap.
+            let mut words = [const { MaybeUninit::<&[u64]>::uninit() }; 64];
+            let mut flags = [const { MaybeUninit::<&[bool]>::uninit() }; 64];
+            let (mut wide_words, mut wide_flags) = (Vec::new(), Vec::new());
+            let (words, flags): (&[&[u64]], &[&[bool]]) = if ncolumns <= 64 {
+                for (index, column) in given.iter().enumerate() {
+                    let (column_words, column_flags) = slices(index, column)?;
+                    words[index].write(column_words);
+                    flags[index].write(column_flags);
+                }
+                // SAFETY: the loop above initialized the first `ncolumns`
+                // slots of each array, and `ncolumns` is at most 64.
+                (
+                    &*(&raw const words[..ncolumns] as *const [&[u64]]),
+                    &*(&raw const flags[..ncolumns] as *const [&[bool]]),
+                )
+            } else {
+                for (index, column) in given.iter().enumerate() {
+                    let (column_words, column_flags) = slices(index, column)?;
+                    wide_words.push(column_words);
+                    wide_flags.push(column_flags);
+                }
+                (&wide_words, &wide_flags)
+            };
             let payload = PayloadColumns::new(words, flags, nrows)?;
             spill_columns::append_partitioned(
                 &mut chunks,
