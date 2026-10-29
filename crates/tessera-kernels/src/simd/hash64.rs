@@ -3,64 +3,86 @@
 //! lanes of [`super::hash`].
 //!
 //! Dense int8 storage and Datum storage are the same eight bytes per row,
-//! so one loader serves both: four keys are two 128-bit loads, `uzp1` and
-//! `uzp2` gather their low and high halves, and the fold is
+//! so one loader serves both: a group's keys are two vectors of int8
+//! lanes, split into their low and high halves, and the fold is
 //! `low ^ high ^ (high >> 31)` with an arithmetic shift, the high half
 //! inverted for negative keys.
 
-use core::arch::aarch64::{
-    int32x4_t, uint32x4_t, veorq_u32, vld1q_u64, vreinterpretq_s32_u32, vreinterpretq_u32_s32,
-    vreinterpretq_u32_u64, vshrq_n_s32, vuzp1q_u32, vuzp2q_u32,
-};
+// Under Miri no set runs, so the tokens have no values, and the code that
+// the functions compiled for a set run on theirs cannot be reached.
+#![cfg_attr(miri, allow(unreachable_code, unused_variables))]
 
 use super::hash::{combined, groups};
-use super::{Neon, Vectors};
+use super::{Neon, Simd, Vectors};
 use crate::int64::Side;
 
 /// The hash of every lane's key into `out`.
 #[inline]
 pub fn hash64(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-    // SAFETY: the token proves that this processor runs NEON.
-    unsafe { hash_lanes(neon, keys, None, out) }
+    // SAFETY: the token proves that this processor runs NEON, the vector
+    // set of the target where it has values, which `hash_lanes` is
+    // compiled for.
+    unsafe { hash_lanes(neon.simd(), keys, None, out) }
 }
 
 /// As [`hash64`], with NULL lanes hashing the group key.
 #[inline]
 pub fn hash_nulls64(neon: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
     // SAFETY: as in hash64.
-    unsafe { hash_lanes(neon, keys, Some(non_nulls), out) }
+    unsafe { hash_lanes(neon.simd(), keys, Some(non_nulls), out) }
 }
 
 /// Every lane's key hash folded into its previous hash in `out`.
 #[inline]
 pub fn combine64(neon: Neon, keys: Side<'_>, out: &mut [u32; 64]) {
-    // SAFETY: as in hash64.
-    unsafe { combine_lanes(neon, keys, None, out) }
+    // SAFETY: as in hash64, for `combine_lanes`.
+    unsafe { combine_lanes(neon.simd(), keys, None, out) }
 }
 
 /// As [`combine64`], with NULL lanes folding in the group key's hash.
 #[inline]
 pub fn combine_nulls64(neon: Neon, keys: Side<'_>, non_nulls: u64, out: &mut [u32; 64]) {
-    // SAFETY: as in hash64.
-    unsafe { combine_lanes(neon, keys, Some(non_nulls), out) }
+    // SAFETY: as in hash64, for `combine_lanes`.
+    unsafe { combine_lanes(neon.simd(), keys, Some(non_nulls), out) }
 }
 
-#[target_feature(enable = "neon")]
-fn hash_lanes(neon: Neon, keys: Side<'_>, non_nulls: Option<u64>, out: &mut [u32; 64]) {
-    groups(neon, folded(words(keys)), non_nulls, out, |key_hash, _| {
-        key_hash
-    })
-}
+// The functions compiled for the vector set of the target, into which the
+// kernels are inlined, as in `hash.rs`.
 
-#[target_feature(enable = "neon")]
-fn combine_lanes(neon: Neon, keys: Side<'_>, non_nulls: Option<u64>, out: &mut [u32; 64]) {
-    let golden = neon.splat(0x9e37_79b9_u32 as i32);
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn hash_lanes(simd: Simd, keys: Side<'_>, non_nulls: Option<u64>, out: &mut [u32; 64]) {
     groups(
-        neon,
-        folded(words(keys)),
+        simd,
+        folded(simd, words(keys)),
         non_nulls,
         out,
-        |key_hash, previous| combined(neon, golden, key_hash, previous),
+        |key_hash, _| key_hash,
+    )
+}
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn combine_lanes(simd: Simd, keys: Side<'_>, non_nulls: Option<u64>, out: &mut [u32; 64]) {
+    let golden = simd.splat(0x9e37_79b9_u32 as i32);
+    groups(
+        simd,
+        folded(simd, words(keys)),
+        non_nulls,
+        out,
+        |key_hash, previous| combined(simd, golden, key_hash, previous),
     )
 }
 
@@ -76,26 +98,35 @@ fn words(keys: Side<'_>) -> &[u64; 64] {
     }
 }
 
-/// A loader of the folded keys of each group of four lanes.
+/// A loader of the folded keys of each group of lanes.
 #[inline]
-#[target_feature(enable = "neon")]
-fn folded(words: &[u64; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn folded<V: Vectors>(v: V, words: &[u64; 64]) -> impl Fn(usize) -> V::I32 + '_ {
+    const { assert!(V::LANES == 2 * V::LANES64) }
     move |group| {
-        // SAFETY: `group` is below 16, so the four words read end within
-        // the array.
-        let (first, second) = unsafe {
-            let start = words.as_ptr().add(group * 4);
-            (vld1q_u64(start), vld1q_u64(start.add(2)))
+        // SAFETY: `group` is below `64 / LANES`, so both vectors are below
+        // `64 / LANES64`.
+        let (low, high) = unsafe {
+            v.halves(
+                v.load_datums64(words, group * 2),
+                v.load_datums64(words, group * 2 + 1),
+            )
         };
-        let (first, second) = (vreinterpretq_u32_u64(first), vreinterpretq_u32_u64(second));
-        let low: uint32x4_t = vuzp1q_u32(first, second);
-        let high: uint32x4_t = vuzp2q_u32(first, second);
-        let sign = vreinterpretq_u32_s32(vshrq_n_s32::<31>(vreinterpretq_s32_u32(high)));
-        vreinterpretq_s32_u32(veorq_u32(low, veorq_u32(high, sign)))
+        v.xor(low, v.xor(high, v.sar::<31>(high)))
     }
 }
 
+// The vector code runs only on NEON until its hooks take the set of the
+// target.
 #[cfg(test)]
+#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod tests {
     use super::{combine_nulls64, combine64, hash_nulls64, hash64};
     use crate::int64::{Side, fold, hash_combine, murmurhash32};

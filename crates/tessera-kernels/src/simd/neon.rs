@@ -20,7 +20,8 @@ use core::arch::aarch64::{
     vmull_n_s32, vmull_s32, vmulq_s32, vmvnq_u32, vorrq_u32, vorrq_u64, vpadalq_s32, vqaddq_s32,
     vqaddq_s64, vqsubq_s32, vqsubq_s64, vreinterpretq_s32_s64, vreinterpretq_s32_u32,
     vreinterpretq_u32_s32, vreinterpretq_u32_u64, vreinterpretq_u64_u32, vshlq_n_s32, vshlq_s32,
-    vshrq_n_s32, vshrq_n_u32, vst1q_s32, vst1q_s64, vsubq_s32, vsubq_s64, vtst_u8, vuzp2q_s32,
+    vshrq_n_s32, vshrq_n_u32, vst1q_s32, vst1q_s64, vsubq_s32, vsubq_s64, vtst_u8, vuzp1q_s32,
+    vuzp2q_s32,
 };
 
 use super::{
@@ -273,6 +274,16 @@ impl Vectors for Neon {
         unsafe { (vmovl_s32(vget_low_s32(lanes)), vmovl_high_s32(lanes)) }
     }
 
+    /// `uzp1` and `uzp2`: the even 32-bit lanes of the pair, then the odd.
+    #[inline]
+    fn halves(self, lower: int64x2_t, upper: int64x2_t) -> (int32x4_t, int32x4_t) {
+        // SAFETY: as in `splat`.
+        unsafe {
+            let (lower, upper) = (vreinterpretq_s32_s64(lower), vreinterpretq_s32_s64(upper));
+            (vuzp1q_s32(lower, upper), vuzp2q_s32(lower, upper))
+        }
+    }
+
     #[inline]
     fn count_non_null(self, isnull: &[bool; 64], selected: u64) -> usize {
         // SAFETY: as in `splat`.
@@ -296,6 +307,12 @@ impl Vectors for Neon {
     fn shr<const N: i32>(self, lanes: int32x4_t) -> int32x4_t {
         // SAFETY: as in `splat`.
         unsafe { vreinterpretq_s32_u32(vshrq_n_u32::<N>(vreinterpretq_u32_s32(lanes))) }
+    }
+
+    #[inline]
+    fn sar<const N: i32>(self, lanes: int32x4_t) -> int32x4_t {
+        // SAFETY: as in `splat`.
+        unsafe { vshrq_n_s32::<N>(lanes) }
     }
 
     type I64 = int64x2_t;
