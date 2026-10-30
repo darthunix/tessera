@@ -675,5 +675,12 @@ table that spills, in [hash-table](../hash-table/design.md).
   points.
 - `test/sql/spill.sql` with `test/tessera_spill_test.c`: the sets of
   files; `test/sql/table.sql`: the header through the C API.
+- `test/sql/spill_damage.sql` with `test/tessera_spill_test.c`: blocks
+  damaged as a join, a sort and a grouping read them back. The reader
+  has two injection points of PostgreSQL, `tessera-spill-header` and
+  `tessera-spill-body`, after its own checks; the test's callbacks
+  change the header or the body there. Only a build of PostgreSQL with
+  injection points has them, as CI's does; on another the suite ends
+  at its start.
 - End to end, at a small `work_mem`: the suites `join`, `agg`, `sort`,
   `union`, `parallel` and `types`.

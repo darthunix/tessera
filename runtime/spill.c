@@ -22,6 +22,7 @@
 #include "commands/tablespace.h"
 #include "storage/fd.h"
 #include "storage/fileset.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
@@ -828,6 +829,8 @@ tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 	reader->pending_kind = header->kind;
 	reader->pending_len = header->len;
 	reader->pending_packed = header->packed;
+	/* A test damages here a header a node reads, past the reader's checks. */
+	INJECTION_POINT("tessera-spill-header", header);
 	return true;
 }
 
@@ -863,6 +866,14 @@ tess_spill_read_body(TessSpillReader *reader, void *body, Size len)
 		}
 		else
 			memcpy(body, stored, len);
+#ifdef USE_INJECTION_POINTS
+		{
+			TessSpillBodyRead read = {(TessSpillKind) reader->pending_kind, body, len};
+
+			/* A test damages here a body a node reads, past the reader's checks. */
+			INJECTION_POINT("tessera-spill-body", &read);
+		}
+#endif
 	}
 	reader->pending = false;
 }

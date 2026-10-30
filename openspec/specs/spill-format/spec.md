@@ -164,6 +164,17 @@ own, against the number of the block of values before it.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(31)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(32)`
 
+#### Scenario: Damage under a node
+- **WHEN** a join, a sort or a grouping that spills reads back a block
+  damaged past the reader's own checks: one of another kind, a block of
+  values numbered past those written, a chunk of columns of a word or a
+  row fewer than was written, a value longer than the bytes left in its
+  chunk, or a word that refers past every chunk or is 0 in a row it
+  does not mark NULL
+- **THEN** the query fails as damaged data, SQLSTATE `XX001`
+- **Verified by:**
+  `test/sql/spill_damage.sql::spec: spill-format/Damage under a node`
+
 ### Requirement: A packed chunk of records
 A chunk of records SHALL be stored packed only when the packed form is
 shorter than the chunk; otherwise it is stored as it is, with a packed

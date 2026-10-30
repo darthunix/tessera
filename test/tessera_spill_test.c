@@ -3,9 +3,12 @@
 #include <fcntl.h>
 
 #include "fmgr.h"
+#include "miscadmin.h"
 #include "storage/dsm.h"
 #include "storage/fd.h"
 #include "storage/fileset.h"
+#include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
@@ -26,6 +29,9 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_shared_bytes);
 PG_FUNCTION_INFO_V1(tessera_test_spill_tablespace);
 PG_FUNCTION_INFO_V1(tessera_test_spill_value);
 PG_FUNCTION_INFO_V1(tessera_test_spill_reset);
+PG_FUNCTION_INFO_V1(tessera_test_spill_injection);
+PG_FUNCTION_INFO_V1(tessera_test_spill_damage);
+PG_FUNCTION_INFO_V1(tessera_test_spill_damage_seen);
 
 #define FINGERPRINT UINT64CONST(0x5445535354455354)
 #define MAX_LEN (2 * 1024 * 1024)
@@ -1132,4 +1138,192 @@ tessera_test_spill_lanes(PG_FUNCTION_ARGS)
 	if (tess_spill_columns_shape(1, 99) != 0)
 		elog(ERROR, "an unknown shape is not 0");
 	PG_RETURN_BOOL(true);
+}
+
+/*
+ * The damage tessera_test_spill_damage sets: of the nth block of its kind,
+ * from 1, that backend pid reads back. A query that reads such a block
+ * must fail as damaged data, by the check of the node that reads it.
+ */
+typedef enum DamageKind
+{
+	DAMAGE_KIND,				/* a block of records told as columns, or the reverse */
+	DAMAGE_NUMBER,				/* a block of values numbered 2^30 */
+	DAMAGE_WORDS,				/* a chunk of columns of a stored word fewer */
+	DAMAGE_ROWS,				/* a chunk of columns of a row fewer */
+	DAMAGE_VALUE,				/* a chunk of values whose first value is 1 GB long */
+	DAMAGE_REF,					/* a chunk of columns whose first row refers past every chunk */
+	DAMAGE_ZERO,				/* a chunk of columns whose first row is 0 and not NULL */
+} DamageKind;
+
+typedef struct Damage
+{
+	int			pid;
+	DamageKind	what;
+	int			nth;
+} Damage;
+
+/* The blocks of the damage's kind this backend read since it was set. */
+static int	damage_seen;
+
+PGDLLEXPORT void tessera_test_spill_damage_header(const char *name, const void *private_data,
+												  void *arg);
+PGDLLEXPORT void tessera_test_spill_damage_body(const char *name, const void *private_data,
+												void *arg);
+
+/* Whether a block, of the damage's kind or not, is the one to damage. */
+static bool
+damage_now(const Damage *damage, bool of_kind)
+{
+	return damage->pid == MyProcPid && of_kind && ++damage_seen == damage->nth;
+}
+
+/* The callback of the injection point "tessera-spill-header". */
+void
+tessera_test_spill_damage_header(const char *name, const void *private_data, void *arg)
+{
+	const Damage *damage = private_data;
+	TessSpillHeader *header = arg;
+
+	if (damage->what == DAMAGE_KIND &&
+		damage_now(damage, header->kind != TESS_SPILL_VALUES))
+		header->kind = header->kind == TESS_SPILL_RECORDS ? TESS_SPILL_COLUMNS : TESS_SPILL_RECORDS;
+	else if (damage->what == DAMAGE_NUMBER &&
+			 damage_now(damage, header->kind == TESS_SPILL_VALUES))
+		header->number = (uint32) 1 << 30;
+}
+
+/* The callback of the injection point "tessera-spill-body". */
+void
+tessera_test_spill_damage_body(const char *name, const void *private_data, void *arg)
+{
+	const Damage *damage = private_data;
+	TessSpillBodyRead *read = arg;
+	bool		columns = read->kind == TESS_SPILL_COLUMNS && read->len >= TESS_SPILL_COLUMNS_HEADER;
+
+	switch (damage->what)
+	{
+		case DAMAGE_WORDS:
+			if (damage_now(damage, columns))
+				((uint32 *) read->body)[2]--;
+			break;
+		case DAMAGE_ROWS:
+			if (damage_now(damage, columns) && tess_spill_columns_rows(read->body) > 0)
+				tess_spill_columns_set_rows(read->body, tess_spill_columns_rows(read->body) - 1);
+			break;
+		case DAMAGE_VALUE:
+			if (damage_now(damage, read->kind == TESS_SPILL_VALUES && read->len >= VARHDRSZ))
+				SET_VARSIZE(read->body, 0x3FFFFFFF);
+			break;
+		case DAMAGE_REF:
+		case DAMAGE_ZERO:
+			if (damage_now(damage, columns) && tess_spill_columns_rows(read->body) > 0)
+			{
+				int			words = tess_spill_columns_words(read->body);
+
+				/* The first row: no NULL, and every word the damaged one. */
+				for (int lane = 0; lane < tess_spill_columns_null_lanes(words); lane++)
+					tess_spill_columns_lane(read->body, lane)[0] = 0;
+				for (int word = 0; word < words; word++)
+					tess_spill_columns_word(read->body, word)[0] =
+						damage->what == DAMAGE_REF ? TESS_SPILL_VALUE_REF(1 << 20, 0) : 0;
+			}
+			break;
+		default:
+			break;
+	}
+}
+
+/* Whether this build of PostgreSQL has injection points, which the tests of damage need. */
+Datum
+tessera_test_spill_injection(PG_FUNCTION_ARGS)
+{
+#ifdef USE_INJECTION_POINTS
+	PG_RETURN_BOOL(true);
+#else
+	PG_RETURN_BOOL(false);
+#endif
+}
+
+/*
+ * The path of module, a file's path without its suffix, from pkglib_path:
+ * an injection point loads its library from there, by a name of 127 bytes
+ * at most, and this module is not installed.
+ */
+/* The longest name of a library an injection point takes: INJ_LIB_MAXLEN, less its end. */
+#define INJECTION_LIBRARY_MAX 127
+
+static char *
+module_from_pkglib(const char *module)
+{
+	StringInfoData path;
+	int			common = 0;
+	int			skip = 0;
+	int			at;
+
+	/* The directories the two paths share. */
+	for (at = 0; pkglib_path[at] != '\0' && pkglib_path[at] == module[at]; at++)
+		if (pkglib_path[at] == '/')
+			common = at + 1;
+	if (pkglib_path[at] == '\0' && module[at] == '/')
+	{
+		common = at;
+		skip = 1;
+	}
+	initStringInfo(&path);
+	if (pkglib_path[common] != '\0')
+	{
+		appendStringInfoString(&path, "../");
+		for (at = common; pkglib_path[at] != '\0'; at++)
+			if (pkglib_path[at] == '/')
+				appendStringInfoString(&path, "../");
+	}
+	appendStringInfoString(&path, module + common + skip);
+	if (path.len > INJECTION_LIBRARY_MAX)
+		ereport(ERROR,
+				errmsg("the path of %s from %s is longer than an injection point takes, %d bytes",
+					   module, pkglib_path, INJECTION_LIBRARY_MAX),
+				errhint("Build PostgreSQL nearer the checkout of Tessera."));
+	return path.data;
+}
+
+/*
+ * Damage what this backend reads back from now on: the nth block (from 1)
+ * of the kind that `what` names (kind, number, words, rows, value, ref or
+ * zero); with `what` NULL, no longer. The callbacks are loaded from
+ * `module`, this module's file without its suffix.
+ */
+Datum
+tessera_test_spill_damage(PG_FUNCTION_ARGS)
+{
+	static const char *const names[] = {"kind", "number", "words", "rows", "value", "ref", "zero"};
+	char	   *library = module_from_pkglib(text_to_cstring(PG_GETARG_TEXT_PP(0)));
+	Damage		damage = {MyProcPid, DAMAGE_KIND, PG_GETARG_INT32(2)};
+	bool		found = false;
+
+	InjectionPointDetach("tessera-spill-header");
+	InjectionPointDetach("tessera-spill-body");
+	if (PG_ARGISNULL(1))
+		PG_RETURN_VOID();
+	for (int what = 0; what < lengthof(names); what++)
+		if (strcmp(text_to_cstring(PG_GETARG_TEXT_PP(1)), names[what]) == 0)
+		{
+			damage.what = (DamageKind) what;
+			found = true;
+		}
+	if (!found)
+		elog(ERROR, "no damage named %s", text_to_cstring(PG_GETARG_TEXT_PP(1)));
+	damage_seen = 0;
+	InjectionPointAttach("tessera-spill-header", library, "tessera_test_spill_damage_header",
+						 &damage, sizeof(damage));
+	InjectionPointAttach("tessera-spill-body", library, "tessera_test_spill_damage_body",
+						 &damage, sizeof(damage));
+	PG_RETURN_VOID();
+}
+
+/* The blocks of the last damage's kind this backend read since it was set. */
+Datum
+tessera_test_spill_damage_seen(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(damage_seen);
 }
