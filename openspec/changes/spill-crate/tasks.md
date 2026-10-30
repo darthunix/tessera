@@ -64,7 +64,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       spill, which checks that the spill ran; a test of `parallel` over
       such a value; a C test that frees the expanded value before its
       rows are read back; `make installcheck`
-- [ ] 2.3 Show by tests, then fix, damaged bytes that reach the C of the
+- [x] 2.3 Show by tests, then fix, damaged bytes that reach the C of the
       join. It reads any outer block that is not a block of values as
       columns, and a chunk of columns by the side's count of words, not
       the chunk's. It grows its table of value chunks by a number read

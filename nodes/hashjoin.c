@@ -479,6 +479,7 @@ void
 join_reset_values(TessHashJoinState *state)
 {
 	state->values.nchunks = 0;
+	state->values.lens = NULL;
 	state->values.current = -1;
 	state->values.len = 0;
 	state->values.used = 0;
@@ -880,16 +881,34 @@ gather_inner(TessHashJoinState *state, int word)
 	{
 		Datum	   *values = state->probe.inner_values[word];
 
-		while ((row = tess_row_mask_next(&round, row)) >= 0)
-		{
-			uint64		ref = DatumGetUInt64(values[row]);
+		/*
+		 * A table read back from a file: each reference of a value its
+		 * record does not mark NULL is checked.
+		 */
+		if (state->values.lens != NULL)
+			while ((row = tess_row_mask_next(&round, row)) >= 0)
+			{
+				uint64		ref = DatumGetUInt64(values[row]);
 
-			if (ref == 0)
-				continue;
-			Assert((ref >> 32) - 1 < (uint64) state->values.nchunks);
-			values[row] = PointerGetDatum(state->values.bases[(ref >> 32) - 1] +
-										  (ref & 0xFFFFFFFF));
-		}
+				if (nullable && (DatumGetUInt64(state->probe.null_words[row]) >> word) & 1)
+					continue;
+				values[row] = PointerGetDatum(tess_spill_value_at(state->values.bases,
+																  state->values.lens,
+																  (uint64) state->values.nchunks,
+																  ref,
+																  state->typlens[state->payload_columns[word]]));
+			}
+		else
+			while ((row = tess_row_mask_next(&round, row)) >= 0)
+			{
+				uint64		ref = DatumGetUInt64(values[row]);
+
+				if (ref == 0)
+					continue;
+				Assert((ref >> 32) - 1 < (uint64) state->values.nchunks);
+				values[row] = PointerGetDatum(state->values.bases[(ref >> 32) - 1] +
+											  (ref & 0xFFFFFFFF));
+			}
 		row = -1;
 	}
 	if (nullable)
