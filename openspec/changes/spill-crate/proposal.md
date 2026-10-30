@@ -156,7 +156,8 @@ will be no slower. Today the spill is far from that.
   SQL; no file input or output; no memory allocated; bytes from disk
   checked in one place; no unsafe code; one owner for each rule of a
   spill; a small public API; and no cost to Tessera.
-- **About fifty tasks,** each one pull request into `main`.
+- **About fifty tasks,** a few related ones in each pull request
+  into `main`.
 
 ## Capabilities
 
