@@ -700,6 +700,27 @@ A value or a form that Intel wants otherwise becomes one per
 architecture, and the M5 Pro keeps its own. Where Intel agrees, the
 comment that gives the reason says that both machines were measured.
 
+`BULK_MIN_ROWS` stays 12 on x86-64. Only the filters and the compares
+had cases of 8 rows a word, so the cases of reading, which the other
+families share, gained them, `eighth`, first. With 8 in place of 12,
+the machine code changes in its immediates only, and words of 8 rows
+taken whole gain on some families and lose on others, the same in both
+runs of every program (`compare-KyEXSY` to `compare-tw1q3k`):
+
+- they take fewer cycles on the filters, 15 to 42 %; on the hashes, up
+  to 44 %, but for `hash_group` of int4 Datum blocks, 2 to 7 % more;
+  on the cast, 31 to 48 %; on `count`, 45 to 62 %; and on the products
+  of int8, 8 to 31 %;
+- they take more on the sums of int4, 25 to 85 %; on `min` and `max` of
+  int8, 37 to 138 %; on `+` by a constant, up to 34 %, but on dense
+  int4 blocks; on `*` of int4, 25 to 35 %; on the compare of two Datum
+  columns, 42 to 44 %; on the sets of 16 keys, 12 to 101 %, and of 64
+  int4 keys, 101 to 152 %.
+
+No one bound fits every family on Intel, and the rule of the plan,
+gains on `eighth` and no loss elsewhere, keeps 12. A bound for each
+family is a finding the maintainer has not decided on.
+
 Last comes the prefetch hint of `relhash`. The probe of a batch asks
 the processor to fetch the next bucket and record early, and the
 gather of a sort the records of a word, through the crate's own copy of

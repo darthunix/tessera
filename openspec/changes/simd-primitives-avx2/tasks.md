@@ -167,7 +167,7 @@ plan of the design. It is a commit only when a value, a form or a
 reason changes: one per architecture, or the comment that gives the
 reason saying that both machines were measured.
 
-- [ ] 5.1 `BULK_MIN_ROWS`: 8 against 12 on the `eighth` cases. Check:
+- [x] 5.1 `BULK_MIN_ROWS`: 8 against 12 on the `eighth` cases. Check:
       as root, twice, the candidate in the working tree against
       `HEAD` on `filter_int32`, `arith_int32` and `aggregate_int32`
 - [ ] 5.2 `SetValue::WORD_KEYS` and the compares of the sets without
