@@ -111,6 +111,7 @@ attach_shared_table(TessHashJoinState *state)
 	bases = dsa_get_address(area, state->parallel.shared->value_directory);
 	for (int chunk = 0; chunk < state->parallel.shared->nvalue_chunks; chunk++)
 		state->values.bases[chunk] = dsa_get_address(area, bases[chunk]);
+	state->values.lens = NULL;
 	state->values.nchunks = state->parallel.shared->nvalue_chunks;
 }
 
@@ -842,7 +843,7 @@ shared_switch(TessHashJoinState *state)
 		dsa_pointer next = header->next;
 
 		join_split_chunk(state, (char *) header + JOIN_CHUNK_HEADER, header->len,
-					state->values.bases);
+					state->values.bases, NULL, 0);
 		join_shared_count(state, -record_chunk_cost(header->len, state->record_size));
 		dsa_free(area, block);
 		block = next;
@@ -1106,6 +1107,7 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 	tess_spill_finish(spill->resident.file);
 	spill->joining = true;
 	spill->partition = -1;
+	spill->build.values_written = state->parallel.shared->next_value_chunk;
 	spill->total_rows = records;
 	spill->input_rows = records;
 	check(state, state->kernels->table_spill_start(join_shared_words(state),
@@ -1177,8 +1179,6 @@ join_shared_resident_end(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
 
-	for (int index = 0; index < spill->nblock_values; index++)
-		spill->resident.value_bases[spill->block_values[index]] = NULL;
 	spill->nblock_values = 0;
 	MemoryContextReset(spill->block_context);
 	spill->block = NULL;
@@ -1353,8 +1353,10 @@ round_allocate(TessHashJoinState *state, JoinRound *round)
 											 mul_size(Max(round->nchunks, 1),
 													  sizeof(dsa_pointer) + sizeof(Size)),
 											 DSA_ALLOC_ZERO | DSA_ALLOC_HUGE);
+	/* The value chunks' places, then their lengths, which a gather checks. */
 	round->values = dsa_allocate_extended(area,
-										  mul_size(Max(round->nvalues, 1), sizeof(dsa_pointer)),
+										  mul_size(Max(round->nvalues, 1),
+												   sizeof(dsa_pointer) + sizeof(Size)),
 										  DSA_ALLOC_ZERO | DSA_ALLOC_HUGE);
 	round->marks = allocate_marks(state, round->nchunks);
 	state->counters[JOIN_ROUNDS]++;
@@ -1373,6 +1375,7 @@ round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound 
 	dsa_pointer *chunks = dsa_get_address(area, round->directory);
 	Size	   *lens = (Size *) (chunks + Max(round->nchunks, 1));
 	dsa_pointer *values = dsa_get_address(area, round->values);
+	Size	   *value_lens = (Size *) (values + Max(round->nvalues, 1));
 	int			nchunks = Max(round->nchunks, 1);
 	void	   *empty = MemoryContextAlloc(spill->part_context, TESS_TABLE_CHUNK_HEADER);
 	TessTableRef ref;
@@ -1424,8 +1427,10 @@ round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound 
 							errmsg("TessHashJoin read value chunk %u of a round twice or past its values",
 								header.number));
 				values[header.number] = block;
+				value_lens[header.number] = header.len;
 				continue;
 			}
+			tess_spill_expect_kind(&header, TESS_SPILL_RECORDS);
 			slot = pg_atomic_fetch_add_u32(&round->next_chunk, 1);
 			if (slot >= (uint32) round->nchunks)
 				ereport(ERROR,
@@ -1469,6 +1474,7 @@ round_attach(TessHashJoinState *state, JoinSpill *spill, JoinRound *round)
 		if (DsaPointerIsValid(values[number]))
 			spill->round_values[number] = dsa_get_address(area, values[number]);
 	state->values.bases = spill->round_values;
+	state->values.lens = (Size *) (values + Max(round->nvalues, 1));
 	state->values.nchunks = round->nvalues;
 	state->build_rows = round->records;
 	/* The links counted none: the chains are walked for more. */
@@ -1624,6 +1630,7 @@ join_round_leave(TessHashJoinState *state)
 	state->table.index = NULL;
 	state->table.nchunks = 0;
 	state->values.bases = NULL;
+	state->values.lens = NULL;
 	state->values.nchunks = 0;
 }
 

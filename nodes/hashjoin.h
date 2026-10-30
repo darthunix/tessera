@@ -381,6 +381,12 @@ typedef struct SpillSide
 	 */
 	dsa_area   *area;
 	struct JoinShared *shared;
+	/*
+	 * The value chunks every participant numbered, kept at the probe: the
+	 * table's count goes once the table is freed, and the partitions on
+	 * disk are read after.
+	 */
+	uint64		values_written;
 	uint64	   *spill_words;
 	Size		spill_nwords;
 	const TessKernelOps *kernels;
@@ -492,8 +498,13 @@ typedef struct JoinSpill
 	int		   *loaded_values;
 	int			nloaded;
 	int			loaded_slots;
-	/* The value chunks read back before the outer chunk being read. */
-	int		   *block_values;
+	/*
+	 * The value chunks read back before the outer chunk being read, the
+	 * only ones its words refer to: their numbers, bases and lengths.
+	 */
+	uint32	   *block_numbers;
+	char	  **block_bases;
+	Size	   *block_lens;
 	int			nblock_values;
 	int			block_slots;
 	/*
@@ -691,6 +702,11 @@ typedef struct JoinValues
 	Size		used;
 	int			own;
 	Size		bytes;
+	/*
+	 * The chunks' lengths when they were read back from a file, against
+	 * which a gather checks every value; NULL for chunks this join made.
+	 */
+	Size	   *lens;
 } JoinValues;
 
 /* A shared build, its spill and its rounds, in a parallel plan. */
@@ -969,7 +985,8 @@ extern JoinSpill *join_spill_create(TessHashJoinState *state, JoinSpill *parent,
 extern void join_spill_free(TessHashJoinState *state);
 extern Size join_spill_memory(JoinSpill *spill, uint64 *resident);
 extern void join_spill_outer(TessHashJoinState *state, TessBatch *batch, TessRowMask *valid);
-extern void join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values);
+extern void join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values,
+							 const Size *lens, int nvalues);
 extern void join_start_spill(TessHashJoinState *state);
 extern bool join_tail_turn(TessHashJoinState *state);
 

@@ -124,6 +124,30 @@ SELECT tessera_test_spill_sqlstate(25);
 SELECT tessera_test_spill_sqlstate(26);
 -- A row read back that refers to a value outside its chunk of values.
 SELECT tessera_test_spill_sqlstate(28);
+-- What a node reads back is checked against what it wrote there, as the
+-- join, the sort and the grouping read: a block of another kind, a
+-- chunk of columns of other words or of other rows, a block of values
+-- numbered past those written.
+SELECT tessera_test_spill_sqlstate(29);
+SELECT tessera_test_spill_sqlstate(30);
+SELECT tessera_test_spill_sqlstate(31);
+SELECT tessera_test_spill_sqlstate(32);
+-- A value a row read back refers to is there whole: no chunk past those
+-- read, none not read, no byte past its chunk; no varlena longer than
+-- the bytes left, none whose header the chunk cuts, no TOAST pointer
+-- into a process's memory, no C string without its end, no value of a
+-- fixed length past the chunk, no word that names another chunk than
+-- its own, no compressed varlena whose header of 8 bytes the chunk cuts.
+SELECT tessera_test_spill_sqlstate(33);
+SELECT tessera_test_spill_sqlstate(34);
+SELECT tessera_test_spill_sqlstate(35);
+SELECT tessera_test_spill_sqlstate(36);
+SELECT tessera_test_spill_sqlstate(37);
+SELECT tessera_test_spill_sqlstate(38);
+SELECT tessera_test_spill_sqlstate(39);
+SELECT tessera_test_spill_sqlstate(40);
+SELECT tessera_test_spill_sqlstate(41);
+SELECT tessera_test_spill_sqlstate(42);
 -- A file opened before its writer finished cannot be told from a
 -- damaged one.
 SELECT tessera_test_spill_sqlstate(27);
