@@ -789,6 +789,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 		void	   *body;
 
 		CHECK_FOR_INTERRUPTS();
+		tess_spill_expect_kind(&header, TESS_SPILL_RECORDS);
 		body = MemoryContextAllocExtended(spill->block_context, Max(header.len, 8),
 										  MCXT_ALLOC_HUGE);
 		tess_spill_read_body(reader, body, header.len);
@@ -846,6 +847,7 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 		void	   *body;
 
 		CHECK_FOR_INTERRUPTS();
+		tess_spill_expect_kind(&header, TESS_SPILL_RECORDS);
 		body = MemoryContextAllocExtended(level->block_context, Max(header.len, 8),
 										  MCXT_ALLOC_HUGE);
 		tess_spill_read_body(reader, body, header.len);
@@ -1254,6 +1256,8 @@ reader_next(TessAggState *state)
 			ereport(ERROR,
 					errcode(ERRCODE_DATA_CORRUPTED),
 					errmsg("TessAgg read a damaged partition of rows"));
+		/* Every block of values of rows is numbered 0. */
+		tess_spill_expect_number(&header, 1);
 		if (header.len > reader->values_len)
 		{
 			reader->values_len = Max(header.len, reader->values_len * 2);
@@ -1267,6 +1271,11 @@ reader_next(TessAggState *state)
 					errcode(ERRCODE_DATA_CORRUPTED),
 					errmsg("TessAgg read a damaged partition of rows"));
 		tess_spill_read_body(reader->file, reader->chunk, header.len);
+		tess_spill_expect_columns(reader->chunk, rows_words(state), -1);
+		/* Once a chunk, so that its rows are read as they were written. */
+		tess_spill_columns_check_values(reader->chunk, state->ncomputed,
+										state->computed_byvals, state->computed_lens,
+										reader->values, reader->values_used);
 		reader->rows = tess_spill_columns_rows(reader->chunk);
 		reader->next = 0;
 	}
@@ -1290,12 +1299,11 @@ reader_next(TessAggState *state)
 				reader->column_values[column][row] = (Datum) lane[row];
 			else
 			{
-				const char *value = tess_spill_value_in(reader->values, reader->values_used,
-														lane[row]);
-
-				if (value == NULL)
-					tess_spill_value_damaged();
-				reader->column_values[column][row] = PointerGetDatum(value);
+				/* Checked whole when the chunk was loaded. */
+				Assert(tess_spill_value_in(reader->values, reader->values_used,
+										   lane[row]) != NULL);
+				reader->column_values[column][row] =
+					PointerGetDatum(reader->values + tess_spill_value_byte(lane[row]));
 			}
 		}
 	}
