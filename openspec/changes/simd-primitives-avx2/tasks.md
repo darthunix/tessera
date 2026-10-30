@@ -156,7 +156,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
        move check
 - [x] 4.19 The sets on AVX2, and the lanes of a vector in
        `docs/kernels.md`, "Sets". Check: as in 4.2, on `set_int32`
-- [ ] 4.20 Open the second pull request, into `main`, with the families
+- [x] 4.20 Open the second pull request, into `main`, with the families
        of this section. Check: every item of its description points to
        a test, a command or the id of a run
 
