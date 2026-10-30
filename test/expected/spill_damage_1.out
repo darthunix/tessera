@@ -1,0 +1,17 @@
+-- What a join, a sort and a grouping read back from their files is
+-- checked against what they wrote: a block damaged past the reader's own
+-- checks, as a node reads it, fails the query as damaged data, SQLSTATE
+-- XX001. The damage comes through injection points of PostgreSQL, so
+-- this suite runs only on a build with them; on another it ends here.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set spill_test :libdir '/tessera_spill_test' :dlsuffix
+\set damage_module :libdir '/tessera_spill_test'
+CREATE FUNCTION tessera_test_spill_injection()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_injection'
+LANGUAGE C STRICT;
+SELECT NOT tessera_test_spill_injection() AS skip \gset
+\if :skip
+DROP FUNCTION tessera_test_spill_injection();
+\quit

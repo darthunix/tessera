@@ -79,7 +79,10 @@ ask".
 ## Building and checking
 
 Before pushing, run what CI runs. `PG_CONFIG` names a PostgreSQL master
-build with assertions and a UTF-8 locale (CI uses `C.UTF-8`).
+build with assertions and a UTF-8 locale (CI uses `C.UTF-8`). CI builds
+it with `--enable-injection-points` too: the suite `spill_damage`
+damages through them what a node reads back from its files, and on a
+build without them it passes having checked nothing.
 
 ```sh
 make rust-check                  # format, Clippy, debug and release tests

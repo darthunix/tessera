@@ -1,10 +1,12 @@
 #!/bin/sh
 # Build PostgreSQL at a revision and install it into a prefix, for CI:
 #   build-postgres.sh <revision> <prefix> [asan]
-# With assertions, as in development, and with ICU, which the default
-# configuration takes. With asan, also with AddressSanitizer and
-# UndefinedBehaviorSanitizer, which then stop at the first error; the
-# extensions built against it take the flags from its pg_config.
+# With assertions, as in development, with ICU, which the default
+# configuration takes, and with injection points, by which the suite
+# spill_damage damages what a node reads back. With asan, also with
+# AddressSanitizer and UndefinedBehaviorSanitizer, which then stop at the
+# first error; the extensions built against it take the flags from its
+# pg_config.
 set -eu
 REVISION=$1
 PREFIX=$2
@@ -16,10 +18,12 @@ git -C "$SOURCE" checkout -q FETCH_HEAD
 cd "$SOURCE"
 case "$FLAVOUR" in
 assert)
-	./configure -q --prefix="$PREFIX" --enable-cassert --enable-debug
+	./configure -q --prefix="$PREFIX" --enable-cassert --enable-debug \
+		--enable-injection-points
 	;;
 asan)
 	./configure -q --prefix="$PREFIX" --enable-cassert --enable-debug \
+		--enable-injection-points \
 		CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all" \
 		LDFLAGS="-fsanitize=address,undefined"
 	;;
