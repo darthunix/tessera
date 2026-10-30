@@ -8,11 +8,9 @@
 //! compared with vector code, every lane against every key, while the keys
 //! are few enough for that to pay ([`SetValue::WORD_KEYS`]). Every other
 //! word is read at its selected rows: a few keys compared all, by an or of
-//! equalities without a branch a key; more searched by halving with the
-//! comparison picking the half as data, not as a jump, so that a row costs
-//! the same whatever its value and the branch predictor has nothing to
-//! miss. The batch function ([`in_set`]) runs over the selected rows of a
-//! column.
+//! equalities without a branch a key; more searched by halving
+//! ([`KeySet::contains`]). The batch function ([`in_set`]) runs over the
+//! selected rows of a column.
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
@@ -52,6 +50,14 @@ impl<'a, T: SetValue> KeySet<'a, T> {
                 .fold(false, |found, &key| found | (key == value));
         }
         // The last key at most value: each step keeps the half that holds it.
+        // On AArch64 LLVM makes the step a select, so that a row costs the
+        // same whatever its value. On x86-64 it makes a branch, and on an
+        // Intel Core i5 with AVX2 a select there (`select_unpredictable`, a
+        // `cmov`) cost a search up to 21 % more cycles, each step waiting
+        // for the load of its key (compare-jrOJVK, compare-HvMjlC). The
+        // benchmark repeats its rows every call, so the predictor learns
+        // even values in random order: a branch over values it cannot learn
+        // was not measured.
         let mut base = 0;
         let mut size = keys.len();
         while size > 1 {
@@ -71,7 +77,11 @@ pub trait SetValue: Copy + Ord {
     /// on halving costs a row less. Four int4 lanes go to a vector against
     /// two int8 lanes, so the int4 bound is higher (measured on an M5 Pro:
     /// 60 int4 keys compared all 0.93 of halving, 24 int8 keys 1.01, 60
-    /// int8 keys 1.21).
+    /// int8 keys 1.21). On an Intel Core i5-1038NG7 with AVX2 the bounds
+    /// hold at 16 selected rows a word: there 65 int4 keys compared all
+    /// cost 0.96 to 1.03 of halving and 64 int8 keys 2.2 to 2.3 times,
+    /// though on full words they cost 0.23 to 0.27 and 0.51 to 0.57
+    /// (compare-5cYfxV, compare-VGt7XK).
     const WORD_KEYS: usize;
 
     /// The rows of a whole word whose value is one of `keys`, NULL rows
