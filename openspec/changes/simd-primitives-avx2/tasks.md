@@ -173,7 +173,7 @@ reason saying that both machines were measured.
 - [x] 5.2 `SetValue::WORD_KEYS` and the compares of the sets without
       branches. Check: as root, twice, the candidates against `HEAD`
       on `set_int32`
-- [ ] 5.3 The counted loop of a full word, `try_fold_full_word`: the
+- [x] 5.3 The counted loop of a full word, `try_fold_full_word`: the
       loop inlined, and the bit scan on full words. Check: as root,
       twice, each candidate against `HEAD` on `column_reader`
 - [ ] 5.4 The branch-free read of a NULL slot, `read_masked`, against
