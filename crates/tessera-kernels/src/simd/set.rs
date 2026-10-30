@@ -14,7 +14,7 @@
 
 use core::array;
 
-use super::{Neon, Simd, Vectors};
+use super::{Simd, Vectors};
 
 /// Rows of a pass of int4 values.
 const PASS: usize = 32;
@@ -25,39 +25,38 @@ const PASS_VECTORS: usize = 8;
 /// Rows of a dense block whose value is one of `keys`, as bits in row
 /// order. NULL rows compare like any other and are masked by the caller.
 #[inline]
-pub fn set_dense(neon: Neon, values: &[i32; 64], keys: &[i32]) -> u64 {
-    // SAFETY: the token proves that this processor runs NEON, the vector
-    // set of the target where it has values, which `dense_lanes` is
-    // compiled for.
-    unsafe { dense_lanes(neon.simd(), values, keys) }
+pub fn set_dense(simd: Simd, values: &[i32; 64], keys: &[i32]) -> u64 {
+    // SAFETY: the token proves that this processor runs the vector set of
+    // the target, which `dense_lanes` is compiled for.
+    unsafe { dense_lanes(simd, values, keys) }
 }
 
 /// Rows of a Datum block whose int4 value is one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_datum(neon: Neon, values: &[u64; 64], keys: &[i32]) -> u64 {
+pub fn set_datum(simd: Simd, values: &[u64; 64], keys: &[i32]) -> u64 {
     // SAFETY: as in set_dense, for `datum_lanes`.
-    unsafe { datum_lanes(neon.simd(), values, keys) }
+    unsafe { datum_lanes(simd, values, keys) }
 }
 
 /// Rows of a dense block of int8 values that are one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_dense64(neon: Neon, values: &[i64; 64], keys: &[i64]) -> u64 {
+pub fn set_dense64(simd: Simd, values: &[i64; 64], keys: &[i64]) -> u64 {
     // SAFETY: as in set_dense, for `lanes64`.
-    unsafe { lanes64(neon.simd(), values, keys) }
+    unsafe { lanes64(simd, values, keys) }
 }
 
 /// Rows of a Datum block whose int8 value is one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_datum64(neon: Neon, values: &[u64; 64], keys: &[i64]) -> u64 {
+pub fn set_datum64(simd: Simd, values: &[u64; 64], keys: &[i64]) -> u64 {
     // SAFETY: `[u64; 64]` and `[i64; 64]` have the same size and alignment,
     // and every bit pattern is valid for both: a Datum holding an int8 is
     // its bits.
     let values = unsafe { &*values.as_ptr().cast::<[i64; 64]>() };
     // SAFETY: as in set_dense, for `lanes64`.
-    unsafe { lanes64(neon.simd(), values, keys) }
+    unsafe { lanes64(simd, values, keys) }
 }
 
 // The functions compiled for the vector set of the target, into which the

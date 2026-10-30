@@ -1,15 +1,13 @@
 //! Vector kernels over the storage of full prepared words.
 //!
 //! The vector sets are named by tokens (`token.rs`), defined on every
-//! target. NEON runs on AArch64, and AVX2 on x86-64 where the processor
-//! has it, for the filters of int4 and int8, the comparisons of two such
-//! columns, their arithmetic and aggregates, the count, the widening cast
-//! and the hashes of their keys; the sets are NEON's alone. Under Miri no
-//! set runs, and callers fall back to the row paths. Instructions always
-//! drop with vectors, so a kernel here is kept on its cycle gain (see the
-//! benchmark guide). This is the one module of the crate allowed to use
-//! `unsafe`, for vector loads from borrowed arrays and for the
-//! intrinsics; every load states why it stays in bounds.
+//! target: NEON runs on AArch64, and AVX2 on x86-64 where the processor
+//! has it. Under Miri no set runs, and callers fall back to the row
+//! paths. Instructions always drop with vectors, so a kernel here is kept
+//! on its cycle gain (see the benchmark guide). This is the one module of
+//! the crate allowed to use `unsafe`, for vector loads from borrowed
+//! arrays and for the intrinsics; every load states why it stays in
+//! bounds.
 //!
 //! A kernel is written once over the primitives of [`Vectors`], which each
 //! vector set implements (`neon.rs`, `avx2.rs`). Intrinsics are callable
