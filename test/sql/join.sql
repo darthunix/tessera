@@ -650,6 +650,15 @@ SELECT join_same($$SELECT jsp.s, jskew.w FROM jsp LEFT JOIN jskew() AS jskew ON 
 SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE EXISTS (SELECT 1 FROM jskew() AS jskew WHERE jskew.k = jsp.k)$$);
 SELECT join_same($$SELECT count(*), sum(length(jsp.s)) FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jskew() AS jskew WHERE jskew.k = jsp.k)$$);
 SELECT join_same($$SELECT count(*) FROM jsp JOIN jskew() AS jskew ON jsp.k = jskew.k AND jskew.w % 3 = jsp.k % 3$$);
+-- The same key with a text column NULL in every row: its partition
+-- writes no block of values, whose start would end a piece, and is
+-- still joined in pieces, since its records refer to no value.
+CREATE FUNCTION jskewnull() RETURNS TABLE (k int, w int, t text) LANGUAGE sql ROWS 10
+AS 'SELECT CASE WHEN g <= 60000 THEN 7 ELSE g END, g, CASE WHEN g < 0 THEN g::text END FROM generate_series(1, 62000) AS g';
+SELECT line FROM join_explain($$SELECT count(*), count(n.t), sum(n.w) FROM jsp JOIN jskewnull() AS n ON jsp.k = n.k$$) AS line
+WHERE line ~ 'Memory Usage|Extra Passes';
+SELECT join_same($$SELECT count(*), count(n.t), sum(n.w), sum(jsp.k) FROM jsp JOIN jskewnull() AS n ON jsp.k = n.k$$);
+SELECT join_same($$SELECT count(*), count(n.t), sum(n.w) FROM jsp LEFT JOIN jskewnull() AS n ON jsp.k = n.k$$);
 -- 200000 inner rows with text the planner expects 10 of: the first
 -- level's partitions are still larger than hash_mem, and split by the
 -- next bits of the hash into a level of their own.
@@ -1172,6 +1181,7 @@ DROP FUNCTION join_costs_carried(text);
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jslong, jsouter, jsheavy;
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();
+DROP FUNCTION jskewnull();
 DROP FUNCTION jwide();
 DROP FUNCTION jlong();
 DROP FUNCTION join_property(text, text);

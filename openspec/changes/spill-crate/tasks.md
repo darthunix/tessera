@@ -181,7 +181,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       `test/tessera_spill_test.c` over damaged partitions, each
       refused with `XX001`, under the sanitizers of CI;
       `make installcheck`
-- [ ] 2.16 Show by a test, then fix: a join reads a partition in pieces
+- [x] 2.16 Show by a test, then fix: a join reads a partition in pieces
       by its groups of records, and a group ends only at a block of
       values when the side has a by-reference column. A partition
       whose by-reference values are all NULL writes no block of

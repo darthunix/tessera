@@ -1632,10 +1632,8 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 	bool		records = false;
 	uint64		rows = 0;
 	Size		room;
-	bool		byref = false;
+	bool		values = false;
 
-	for (int word = 0; word < side->nwords; word++)
-		byref |= !side->byvals[word];
 	drop_piece(state);
 	room = whole ? SIZE_MAX : spill_room(state);
 	if (spill->carried != NULL)
@@ -1649,7 +1647,10 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 		spill->carried = NULL;
 		loaded += spill->carried_header.len;
 		if (spill->carried_header.kind == TESS_SPILL_VALUES)
+		{
 			add_loaded_values(spill, spill->carried_header.number, body);
+			values = true;
+		}
 		else
 		{
 			add_loaded_chunk(state, body, spill->carried_header.len);
@@ -1662,11 +1663,16 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 		void	   *body;
 
 		/*
-		 * A group ends where values follow records, or, without values, at
-		 * every chunk: the piece may end there.
+		 * A group ends where values follow records: the piece may end
+		 * there. Records refer only to the values written before them with
+		 * them, so while the piece has no values, records refer to none,
+		 * and it may end at any chunk, as for a partition whose values are
+		 * all NULL. Records after values may be the rest of their group: a
+		 * partition in memory goes to disk with all its chunks after its
+		 * values.
 		 */
 		if (records && loaded >= room &&
-			(header.kind == TESS_SPILL_VALUES || !byref))
+			(header.kind == TESS_SPILL_VALUES || !values))
 		{
 			spill->carried = MemoryContextAllocExtended(spill->context,
 														Max(header.len, 8),
@@ -1683,6 +1689,7 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 		{
 			add_loaded_values(spill, header.number, body);
 			records = false;
+			values = true;
 			continue;
 		}
 		add_loaded_chunk(state, body, header.len);
