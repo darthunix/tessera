@@ -209,9 +209,11 @@ a plan, in the value's width, sorted in increasing order without repeats:
 
 The caller makes IN and NOT IN, and their NULLs, of the two masks. A full
 word of at least a dozen selected rows is compared with vector code while
-the keys are few: its 64 lanes stay in registers while each key goes by,
-up to 64 int4 or 16 int8 keys (four int4 lanes to a vector against two
-int8 ones; beyond these bounds halving costs a row less). Every other word
+the keys are few: a pass of 32 int4 or 16 int8 lanes stays in registers
+while each key goes by, up to 64 int4 or 16 int8 keys. A vector holds
+four int4 lanes or two int8 ones on NEON, and eight or four on AVX2; a
+pass is eight vectors on NEON and four on AVX2, which has half as many
+registers. Beyond these bounds halving costs a row less. Every other word
 is read at its selected rows: up to 16 keys compared all, without a branch
 a key; more searched by halving, the comparison picking the half as data,
 so that a row costs the same whatever its value. Over 2 M rows an int4 `IN`
