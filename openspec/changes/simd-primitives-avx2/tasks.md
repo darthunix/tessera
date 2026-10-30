@@ -176,7 +176,7 @@ reason saying that both machines were measured.
 - [x] 5.3 The counted loop of a full word, `try_fold_full_word`: the
       loop inlined, and the bit scan on full words. Check: as root,
       twice, each candidate against `HEAD` on `column_reader`
-- [ ] 5.4 The branch-free read of a NULL slot, `read_masked`, against
+- [x] 5.4 The branch-free read of a NULL slot, `read_masked`, against
       a branch. Check: as root, twice, the candidate against `HEAD`
       on `column_reader`
 - [ ] 5.5 The prefetch hint of `relhash` on x86-64, `prefetcht0`, in

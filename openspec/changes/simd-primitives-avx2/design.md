@@ -777,6 +777,23 @@ Both lose, so the rule keeps the form. What the call of the full word
 costs the loop over the other words is a finding the maintainer has
 not decided on.
 
+The read of a NULL slot stays without a branch on x86-64. A candidate
+that branches on the NULL flag was run against the base on
+`column_reader`, twice (`compare-F6x7L1`, `compare-ldltge`). It
+changes the machine code of 13 programs on x86-64 and none on
+AArch64; a loss on `column_reader` decides, so the others were not
+run. The hypothesis does not hold: the branch shows no more modes
+than the two candidates of the counted loop, whose new modes come and
+go on code they did not change. The branch takes 4 to 25 % fewer
+cycles on dense blocks with NULL flags read row by row, and loses in
+two ways: full words take up to 6 % more instructions, and half the
+rows of a dense block without NULL flags take 31 % more cycles on the
+same instructions, as with the inlined counted loop. What it gains is
+what a learned branch gains: over 30 % NULL rows at random places it
+misses 0.004 times a call, since the benchmark repeats the flags every
+call. A branch over flags the predictor cannot learn is the finding of
+the sets again.
+
 Last comes the prefetch hint of `relhash`. The probe of a batch asks
 the processor to fetch the next bucket and record early, and the
 gather of a sort the records of a word, through the crate's own copy of

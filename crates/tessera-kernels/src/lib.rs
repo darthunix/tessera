@@ -49,10 +49,9 @@
 //! makes and hold on any target; a few were taken by timing. The bound of
 //! whole words, `BULK_MIN_ROWS`, the bounds of the sets,
 //! [`set::SetValue::WORD_KEYS`], the step of their search by halving, and
-//! in `tessera-capi` the counted loop of a full word were timed on an Apple
-//! M5 Pro and on an Intel Core i5 with AVX2. The branch-free read of a NULL
-//! slot in `tessera-capi` was timed on the M5 Pro and is to be measured
-//! again on x86 with the AVX2 kernels.
+//! in `tessera-capi` the counted loop of a full word and the branch-free
+//! read of a NULL slot were timed on an Apple M5 Pro and on an Intel Core i5
+//! with AVX2.
 
 #![deny(unsafe_code)]
 
