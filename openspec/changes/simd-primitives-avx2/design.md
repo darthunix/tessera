@@ -753,6 +753,30 @@ full words pay to far more keys than words of 16 rows; and a benchmark
 whose values the predictor cannot learn, without which the branch of
 halving cannot be judged against a choice made as data.
 
+The counted loop of a full word stays out of line on x86-64. Two
+candidates were run against the base on `column_reader`, twice each.
+Each changes the machine code of `column_reader`, `aggregate_int32`
+and `aggregate_int64` on x86-64 and none on AArch64, and each loses
+on `column_reader`, so the aggregates were not run:
+
+- the counted loop inlined into its caller (`compare-NUZTP5`,
+  `compare-5YmvqE`). As the hypothesis said, empty and sparse calls
+  pay for it, up to 22 % more cycles and 7 to 18 % more instructions.
+  Full words of dense blocks take 18 % more with NULL flags and 14 %
+  fewer without them;
+- full words read by the bit scan, like every other word
+  (`compare-6OWqws`, `compare-RxRTzU`). As the hypothesis said, full
+  words take 2 to 7 times the cycles, 7 times where the counted loop is
+  vector code, on dense blocks without NULL flags. Sparse selections,
+  words of 8 rows and calls of a row or none take 5 to 27 % fewer
+  cycles and 4 to 18 % fewer instructions: without the call of the full
+  word, the loop over the words of a Datum block is 10 instructions
+  shorter (`disasm-kfWEDs`).
+
+Both lose, so the rule keeps the form. What the call of the full word
+costs the loop over the other words is a finding the maintainer has
+not decided on.
+
 Last comes the prefetch hint of `relhash`. The probe of a batch asks
 the processor to fetch the next bucket and record early, and the
 gather of a sort the records of a word, through the crate's own copy of
