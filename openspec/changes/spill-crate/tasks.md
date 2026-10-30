@@ -173,7 +173,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       inside its chunk. Check: tests of `test/tessera_spill_test.c`
       over damaged runs, each refused with `XX001`, under the
       sanitizers of CI; `make installcheck`
-- [ ] 2.15 Show by tests, then fix, damaged bytes that reach the C of
+- [x] 2.15 Show by tests, then fix, damaged bytes that reach the C of
       the grouping: its reader of spilled rows reads a chunk by its
       own count of words, not the chunk's; its readers of records do
       not check a block's kind; and it checks where a value starts but
