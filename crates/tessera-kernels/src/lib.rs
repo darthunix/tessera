@@ -30,12 +30,10 @@
 //! point or catch panics: the C boundary, `tessera-capi`, does.
 //!
 //! Full prepared words of representations that expose their storage
-//! ([`tessera_core::WordBlock`]) are compared, aggregated, computed and
-//! hashed with NEON on AArch64, division by a scalar included; the filters
-//! of int4 and int8, the comparisons of two such columns, their
-//! arithmetic and aggregates, the count, the widening cast and the hashes
-//! of their keys run with AVX2 on x86-64 too, where the processor has it;
-//! everything else takes the row paths.
+//! ([`tessera_core::WordBlock`]) are compared, aggregated, computed,
+//! hashed and looked up in sets of constants with vector code, division
+//! by a scalar included: NEON on AArch64, and AVX2 on x86-64 where the
+//! processor has it. Everything else takes the row paths.
 //! [`table`] is a hash table in a region of memory the caller owns, for
 //! joins and grouping, addressed by offsets so that the same bytes serve
 //! local and shared memory, and [`sort`] orders a table's records by their

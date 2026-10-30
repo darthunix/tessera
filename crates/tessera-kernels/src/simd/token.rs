@@ -30,8 +30,10 @@ pub(crate) trait Token: Copy {
 #[derive(Clone, Copy)]
 pub struct Neon(());
 
-/// NEON, which this target does not run.
+/// NEON, which this target does not run. Only [`Simd`] names it, off
+/// x86-64.
 #[cfg(not(all(target_arch = "aarch64", not(miri))))]
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub enum Neon {}
 
@@ -74,28 +76,6 @@ impl Token for Avx2 {
             .then_some(Self(()));
         #[cfg(not(all(target_arch = "x86_64", not(miri))))]
         None
-    }
-}
-
-impl Neon {
-    /// The token of the vector set of the target, for the code of a family
-    /// that is compiled for it while the family's hooks still take NEON:
-    /// on AArch64 the same token, and elsewhere NEON has no values.
-    #[inline(always)]
-    pub(crate) fn simd(self) -> Simd {
-        #[cfg(not(target_arch = "x86_64"))]
-        return self;
-        #[cfg(target_arch = "x86_64")]
-        self.into()
-    }
-}
-
-/// Where NEON does not run its token has no values, so it converts into
-/// any other: see [`crate::int::IntLane::Compares`].
-#[cfg(not(all(target_arch = "aarch64", not(miri))))]
-impl From<Neon> for Avx2 {
-    fn from(neon: Neon) -> Self {
-        match neon {}
     }
 }
 

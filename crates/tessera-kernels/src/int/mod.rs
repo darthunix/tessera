@@ -31,7 +31,7 @@ use std::mem::MaybeUninit;
 use anyhow::Result;
 
 use crate::ops::{ArithOp, ArithmeticError, CompareOp};
-use crate::simd::{Neon, Vectors};
+use crate::simd::Vectors;
 
 /// A whole-word operand: the storage of a full prepared word, or a constant.
 /// Only the vector code builds one, so elsewhere it is dead.
@@ -58,25 +58,21 @@ impl<T: IntLane> Side<'_, T> {
 
 /// A lane type of the integer kernels, int4's `i32` or int8's `i64`: its
 /// Datum and its vector code of a whole word. The vector code takes the
-/// token of its vector set, which the driver asks for once a call: a hook
-/// of an operation open only on NEON takes [`Neon`], one open on every set
-/// takes [`Simd`](crate::simd::Simd), and where a set does not run its
-/// token has no values, so the hook cannot be reached.
+/// token of the target's vector set, [`Simd`](crate::simd::Simd), which
+/// the driver asks for once a call; where the set does not run its token
+/// has no values, so the hook cannot be reached.
 pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// A scalar divisor prepared for division by multiplication.
     type Divisor;
 
     /// The vector set of the width's comparisons, [`IntLane::filter_block`]
-    /// and [`IntLane::compare_sides`], and of [`IntLane::side`]. A width's
-    /// comparisons open on a set before its other operations do, so a
-    /// token of NEON converts into it: where NEON does not run it has no
-    /// values.
-    type Compares: Vectors + From<Neon> + From<Self::Arith>;
+    /// and [`IntLane::compare_sides`], and of [`IntLane::side`].
+    type Compares: Vectors + From<Self::Arith>;
 
     /// The vector set of the width's arithmetic, [`IntLane::arith_block`].
-    /// A token of NEON converts into it, and it into the set of the
-    /// comparisons, whose [`IntLane::side`] gives its operands.
-    type Arith: Vectors + From<Neon>;
+    /// It converts into the set of the comparisons, whose
+    /// [`IntLane::side`] gives its operands.
+    type Arith: Vectors;
 
     /// The vector set of the width's aggregates, [`IntLane::min_block`]
     /// and [`IntLane::max_block`], and of the int4 sum, which the driver
