@@ -6,6 +6,7 @@
 
 #include "storage/dsm.h"
 #include "storage/sharedfileset.h"
+#include "varatt.h"
 
 #include "tessera/abi.h"
 #include "tessera/spill.h"
@@ -98,6 +99,109 @@ extern void tess_spill_shared_reset(SharedFileSet *shared);
 
 /* A row read back refers to a value outside its chunk of values: damaged data. */
 pg_noreturn extern void tess_spill_value_damaged(void);
+
+/*
+ * What a node expects of a block it read back, checked before it uses the
+ * bytes: a block it did not write so is damaged data (XX001). The reader
+ * checks a block against itself (tess_spill_read_header and _body); these
+ * check it against the node.
+ */
+
+/* The block whose header was read is of kind. */
+extern void tess_spill_expect_kind(const TessSpillHeader *header, TessSpillKind kind);
+
+/*
+ * The chunk of columns read back holds rows of words stored words, and,
+ * unless rows is negative, rows rows.
+ */
+extern void tess_spill_expect_columns(const void *chunk, int words, int64 rows);
+
+/* The block's number is below count, the chunks of its kind written. */
+extern void tess_spill_expect_number(const TessSpillHeader *header, uint64 count);
+
+/*
+ * Every value that a word of the first ncolumns of a chunk of columns
+ * read back with its one chunk of values, of len bytes at values, refers
+ * to, unless the row is NULL or the column by value (byvals), lies whole
+ * in that chunk (tess_spill_value_read, by typlens); once a chunk, so
+ * that a reader that reads a value many times reads it unchecked.
+ */
+extern void tess_spill_columns_check_values(void *chunk, int ncolumns, const bool *byvals,
+											const int16 *typlens, const char *values,
+											Size len);
+
+/* tess_spill_value_fits of a C string and of a TOAST pointer, out of line. */
+extern bool tess_spill_value_fits_other(const char *value, Size room, int16 typlen);
+
+/*
+ * Whether a value of typlen (-1 a varlena, -2 a C string) that starts at
+ * value, room bytes before the end of its chunk, ends within them. A
+ * varlena's header is read by bytes, as a damaged one may lie at any
+ * byte; a compressed one holds its header of 8 bytes.
+ */
+static inline bool
+tess_spill_value_fits(const char *value, Size room, int16 typlen)
+{
+	uint32		header;
+
+	if (typlen > 0)
+		return (Size) typlen <= room;
+	if (typlen == -1 && room >= VARHDRSZ && !VARATT_IS_1B(value))
+	{
+		memcpy(&header, value, VARHDRSZ);
+		return VARSIZE_4B(&header) >=
+			(VARATT_IS_4B_C(&header) ? VARHDRSZ_COMPRESSED : VARHDRSZ) &&
+			VARSIZE_4B(&header) <= room;
+	}
+	if (typlen == -1 && room > 0 && VARATT_IS_1B(value) && !VARATT_IS_1B_E(value))
+		return VARSIZE_1B(value) <= room;
+	return tess_spill_value_fits_other(value, room, typlen);
+}
+
+/*
+ * The value of typlen at byte of a chunk of values of len bytes read back,
+ * which must be there (not NULL) and hold the value from its start to its
+ * end; anything else is damaged data.
+ */
+static inline const char *
+tess_spill_value_of(const char *chunk, Size len, uint64 byte, int16 typlen)
+{
+	if (chunk == NULL || byte >= len ||
+		!tess_spill_value_fits(chunk + byte, len - byte, typlen))
+		tess_spill_value_damaged();
+	return chunk + byte;
+}
+
+/*
+ * The value of typlen that ref, a word of a chunk of columns read back
+ * with its one chunk of values, number 0, refers to in the len bytes at
+ * values (tess_spill_value_of); a reference to another chunk is damaged
+ * data.
+ */
+static inline const char *
+tess_spill_value_read(const char *values, Size len, uint64 ref, int16 typlen)
+{
+	if ((ref >> TESS_SPILL_VALUE_BYTE_BITS) != 1)
+		tess_spill_value_damaged();
+	return tess_spill_value_of(values, len, tess_spill_value_byte(ref), typlen);
+}
+
+/*
+ * The value of typlen that ref, a word read back, refers to in chunk
+ * (ref >> TESS_SPILL_VALUE_BYTE_BITS) - 1 of the nchunks at bases, of lens
+ * bytes (tess_spill_value_of); a chunk past them is damaged data.
+ */
+static inline const char *
+tess_spill_value_at(char *const *bases, const Size *lens, uint64 nchunks,
+					uint64 ref, int16 typlen)
+{
+	uint64		number = (ref >> TESS_SPILL_VALUE_BYTE_BITS) - 1;
+
+	if (number >= nchunks)
+		tess_spill_value_damaged();
+	return tess_spill_value_of(bases[number], lens[number],
+							   tess_spill_value_byte(ref), typlen);
+}
 
 /* A set of no files yet. */
 extern TessSpill *tess_spill_create(const TessSpillConfig *config);

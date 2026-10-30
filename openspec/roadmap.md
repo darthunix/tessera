@@ -1512,6 +1512,15 @@ becomes an entry, joins one, or is dropped.
     4. Suggested: mutants of `core_pmu.rs` and of the decoding of a
     read, which need no PMU, or drop.
 
+- **A damaged table read back from a file is `XX000`** (the change
+  `spill-crate`, tasks 2.3 and 2.15). The spec of `hash-table` makes a
+  damaged table a wrong argument, SQLSTATE `XX000`, and `relhash`
+  refuses a chunk of records damaged on disk only when a join or a
+  grouping links or merges it: such a chunk is reported as an internal
+  error, while every other block damaged on disk is damaged data,
+  `XX001`. Suggested: report a table that a node read from a file as
+  damaged data, or keep `XX000`.
+
 ## Decided against
 
 Not future work: each was weighed and refused, or left to the core, with

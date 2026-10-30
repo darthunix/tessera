@@ -501,6 +501,18 @@ values into a context of the writer's; `tess_spill_columns_append`
 refuses an expanded value it is given. The grouping's dictionary of
 keys copies its values the same way.
 
+A node that reads its spilled blocks back checks each one against what
+it wrote before it uses it: `tess_spill_expect_kind`,
+`tess_spill_expect_columns` and `tess_spill_expect_number` check a
+block's kind, a chunk of columns' words and rows, and a block of
+values' number. `tess_spill_value_read` and `tess_spill_value_at` give
+the value a reference names only when it lies whole inside a chunk of
+values that was read, by the length its type gives
+(`tess_spill_value_of`, `tess_spill_value_fits`); a reader that reads a
+value many times checks every value of a chunk once, when it loads it,
+with `tess_spill_columns_check_values`. Each failure is damaged data,
+SQLSTATE `XX001`.
+
 ## Named plan data
 
 A `CustomPath` and a `CustomScan` carry a node's private data in
