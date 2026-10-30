@@ -152,9 +152,9 @@ keeps a hook that takes `Neon`, with the reason in its comment.
        of the benchmarks. Check: `cargo test --locked -p tessera-capi
        --benches`; `cargo bench --locked -p tessera-capi --bench
        set_int32 -- --list`
-- [ ] 4.18 The sets, `simd/set.rs`, over the primitives. Check: the
+- [x] 4.18 The sets, `simd/set.rs`, over the primitives. Check: the
        move check
-- [ ] 4.19 The sets on AVX2, and the lanes of a vector in
+- [x] 4.19 The sets on AVX2, and the lanes of a vector in
        `docs/kernels.md`, "Sets". Check: as in 4.2, on `set_int32`
 
 ## 5. Decisions measured again on Intel
