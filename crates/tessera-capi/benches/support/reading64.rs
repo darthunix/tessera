@@ -51,7 +51,7 @@ fn case(nrows: usize, pattern: &str, nulls: &str, partial: bool) -> Fixture<i64>
 pub fn cases() -> Vec<Fixture<i64>> {
     let mut cases = Vec::new();
     for nulls in ["none", "mixed"] {
-        for pattern in ["all", "half", "sparse", "empty"] {
+        for pattern in ["all", "half", "eighth", "sparse", "empty"] {
             cases.push(case(1024, pattern, nulls, false));
         }
     }

@@ -109,7 +109,9 @@ fn case(nrows: usize, pattern: &str, nulls: &str, partial: bool) -> Fixture {
 pub fn cases() -> Vec<Fixture> {
     let mut cases = Vec::new();
     for nulls in ["none", "mixed"] {
-        for pattern in ["all", "half", "sparse", "empty"] {
+        // `eighth` selects 8 rows a word, near the selected rows from which
+        // the kernels take a word whole.
+        for pattern in ["all", "half", "eighth", "sparse", "empty"] {
             cases.push(case(1024, pattern, nulls, false));
         }
     }
