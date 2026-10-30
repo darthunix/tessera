@@ -391,7 +391,9 @@ macro_rules! unreachable_vectors {
         impl Vectors for $set {
             type I32 = Self;
             type M32 = Self;
-            const LANES: usize = 1;
+            // Twice the int8 lanes, as on every set: the int8 hash asserts
+            // it of every set it is compiled for.
+            const LANES: usize = 2;
 
             unsafe fn load(self, _: &[i32; 64], _: usize) -> Self {
                 match self {}

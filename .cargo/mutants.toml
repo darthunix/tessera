@@ -48,16 +48,16 @@ exclude_globs = [
 # was. Two of these read as mutants the tests catch, so their place
 # names them.
 # The first word of a batch decides whether cast, count, the int
-# aggregates, arithmetic, comparison, the hashes and the filter read whole
-# words of a column's storage or its rows one by one, and each word
-# decides so for the sets: both give the same results, and only the time
-# tells them apart. So do a word the
-# whole-word loop refuses (blocks, bulk_passing and the hash's block giving
-# None), a single row it sends to the rows (the comparison's guard), and
-# the int8 arithmetic's arms of + and - gone, whose lanes then go one by
-# one through the width's own function. The mutants of that choice are
-# named by their place, since the same operators elsewhere in these
-# functions matter.
+# aggregates, arithmetic, comparison, the hashes and the filter read
+# whole words of a column's storage or its rows one by one, and each
+# word decides so for the sets: both give the same results, and only the
+# time tells them apart. So do a word the whole-word loop refuses
+# (blocks, bulk_passing and the hash's block giving None), a single row
+# it sends to the rows (the comparison's guard), and the int8
+# arithmetic's arms of +, of - and of the division and the remainder by
+# a prepared divisor gone, whose lanes then go one by one through the
+# width's own function. The mutants of that choice are named by their
+# place, since the same operators elsewhere in these functions matter.
 # Place::reference puts a record's chunk above the bits of its unit, which
 # is below 2^17 and has none there, and Cursor::at a chunk above a byte of
 # 32 bits: | and ^ give one value. resolve_rows adds the rows a call
@@ -130,7 +130,7 @@ exclude_re = [
     "replace bulk_passing -> Option<u64> with None$",
     "src/set\\.rs:150:[0-9]+: replace (&& with \\|\\||<= with >) in in_set$",
     "src/set\\.rs:157:[0-9]+: replace (\\|\\| with &&|== with !=|>= with <) in in_set$",
-    "delete match arm \\(ArithOp::(Add|Sub), _\\) in <impl IntLane for i64>::arith_block$",
+    "delete match arm \\(ArithOp::((Add|Sub), _|(Div|Mod), Some\\(divisor\\))\\) in <impl IntLane for i64>::arith_block$",
     "replace \\| with \\^ in (Place::reference|Cursor::at)$",
     "table/writer\\.rs:(234|282):[0-9]+: replace \\| with \\^ in resolve_rows$",
     "decimal\\.rs:1503:41: replace \\| with \\^ in read_with$",
@@ -153,7 +153,7 @@ exclude_re = [
     "table/lanes\\.rs:121:18: replace == with != in probe_word$",
     "replace \\| with \\^ in place$",
     "replace <impl Drop for Block>::drop with \\(\\)$",
-    "replace <impl Token for Avx2>::get -> Option<Self> with None$",
+    "<impl Token for Avx2>::get( -> Option<Self> with None)?$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the
