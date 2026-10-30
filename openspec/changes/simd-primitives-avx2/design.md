@@ -497,6 +497,19 @@ What the moves found:
   into their low and high 32 bits, which is `uzp1` and `uzp2` on NEON
   and on AVX2 two `vshufps` and two `vpermq`, and a shift right that
   shifts the sign in.
+- On AVX2 the hashes of int8 take 87 to 91 % fewer instructions and 88
+  to 91 % fewer cycles than the row path on 1024 rows of full words,
+  about 1.1 cycles a row against 0.9 for int4. They take 74 to 81 % and
+  76 to 83 % fewer on half and random words, and 82 to 87 % fewer
+  cycles on 64 and 65 rows (`compare-7B4d50`, `compare-PCQrdG`). The
+  row paths lose what those of int4 lose. Calls of no row or of one
+  take 13 to 16 instructions more a key, 1 to 3 cycles. Empty and
+  sparse selections of 1024 rows take 6 to 53 more a key. Sparse ones
+  take up to 2 % more cycles on Datum blocks and up to 4 % fewer on
+  dense ones. Empty ones mispredict about one branch a key, before as
+  after, and took from 26 cycles fewer to 50 more in the two runs, on
+  calls of 100 to 220 cycles that are not judged by their cycles.
+  Unprepared rows and 63 rows keep their cycles within 2 %.
 
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
