@@ -85,17 +85,20 @@ $function$;
  * - dim_left and dim_anti: the same as a left join and NOT EXISTS;
  * - mixed_text: the dimension's keys against bench_mixed (5 M rows), whose
  *   text column the inner side carries;
+ * - outer_text: bench_mixed joined to itself by its unique key, its text
+ *   column carried by the outer side;
  * - group_fk: the fact table grouped by its foreign key, 1 M groups;
  * - group_mixed: bench_mixed grouped by its unique key, 5 M groups.
  */
 SELECT pg_temp.measure_pair(format('%s_%s', name, lower(memory)), sql, memory,
                             :warmups, :repetitions)
 FROM unnest(ARRAY['4MB', '16MB', '64MB']) WITH ORDINALITY AS m(memory, m_order),
-     unnest(ARRAY['dim', 'dim_left', 'dim_anti', 'mixed_text', 'group_fk', 'group_mixed'],
+     unnest(ARRAY['dim', 'dim_left', 'dim_anti', 'mixed_text', 'outer_text', 'group_fk', 'group_mixed'],
             ARRAY['SELECT sum(d.d1) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id',
                   'SELECT count(*), count(d.d1) FROM bench_fact f LEFT JOIN bench_dim d ON f.fk = d.id',
                   'SELECT count(*) FROM bench_fact f WHERE NOT EXISTS (SELECT 1 FROM bench_dim d WHERE d.id = f.fk)',
                   'SELECT count(m.e) FROM bench_fact f JOIN bench_mixed m ON f.fk = m.a',
+                  'SELECT count(m.e) FROM bench_mixed m JOIN bench_mixed n ON m.a = n.a',
                   'SELECT count(*), sum(s) FROM (SELECT fk, sum(f1) AS s FROM bench_fact GROUP BY fk) AS g',
                   'SELECT count(*), sum(s) FROM (SELECT a, sum(d) AS s FROM bench_mixed GROUP BY a) AS g'])
          WITH ORDINALITY AS c(name, sql, c_order)

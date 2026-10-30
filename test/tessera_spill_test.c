@@ -3,9 +3,12 @@
 #include <fcntl.h>
 
 #include "fmgr.h"
+#include "miscadmin.h"
 #include "storage/dsm.h"
 #include "storage/fd.h"
 #include "storage/fileset.h"
+#include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
@@ -26,6 +29,9 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_shared_bytes);
 PG_FUNCTION_INFO_V1(tessera_test_spill_tablespace);
 PG_FUNCTION_INFO_V1(tessera_test_spill_value);
 PG_FUNCTION_INFO_V1(tessera_test_spill_reset);
+PG_FUNCTION_INFO_V1(tessera_test_spill_injection);
+PG_FUNCTION_INFO_V1(tessera_test_spill_damage);
+PG_FUNCTION_INFO_V1(tessera_test_spill_damage_seen);
 
 #define FINGERPRINT UINT64CONST(0x5445535354455354)
 #define MAX_LEN (2 * 1024 * 1024)
@@ -106,6 +112,56 @@ write_blocks(TessSpill *spill, Block *blocks, int nblocks)
 						 &blocks[i].position);
 	}
 	pfree(body);
+}
+
+/*
+ * A block of kind and number with the len bytes at body, written to a
+ * serial set and read back as a node reads it: its header into header,
+ * its body returned.
+ */
+static void *
+written_and_read(TessSpillKind kind, uint32 number, const void *body, Size len,
+				 TessSpillHeader *header)
+{
+	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
+	TessSpillReader *reader;
+	void	   *read;
+
+	tess_spill_write(spill, 0, kind, number, body, len, NULL);
+	tess_spill_finish(spill);
+	reader = tess_spill_open(spill, 0, 0);
+	if (reader == NULL || !tess_spill_read_header(reader, header))
+		elog(ERROR, "a block written was not read back");
+	read = palloc(Max(header->len, 8));
+	tess_spill_read_body(reader, read, header->len);
+	return read;
+}
+
+/* A chunk of columns of rows rows of words stored words, its bytes into len. */
+static void *
+columns_chunk(int words, uint32 rows, Size *len)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	Size		capacity;
+	void	   *chunk;
+
+	*len = TESS_SPILL_COLUMNS_HEADER +
+		sizeof(uint64) * rows * (tess_spill_columns_null_lanes(words) + words);
+	chunk = palloc0(*len);
+	if (tess_spill_columns_init(chunk, *len, words, &capacity, &status) != TESS_OK ||
+		capacity != rows)
+		elog(ERROR, "a chunk of columns of %u rows was not made", rows);
+	tess_spill_columns_set_rows(chunk, rows);
+	return chunk;
+}
+
+/* A chunk of 64 bytes of values read back, its bytes those at raw. */
+static char *
+values_read(const char *raw)
+{
+	TessSpillHeader header;
+
+	return written_and_read(TESS_SPILL_VALUES, 0, raw, 64, &header);
 }
 
 /* The partition's blocks read in order are the ones written to it. */
@@ -736,6 +792,110 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			/* A row read back that refers outside its chunk of values. */
 			tess_spill_value_damaged();
 			break;
+		case 29:
+			/* A block of records where a node wrote a chunk of columns. */
+			(void) written_and_read(TESS_SPILL_RECORDS, 0, body, sizeof(body), &header);
+			tess_spill_expect_kind(&header, TESS_SPILL_COLUMNS);
+			break;
+		case 30:
+		case 31:
+			{
+				/*
+				 * A chunk of columns of 3 words and 4 rows, where the node
+				 * wrote 4 words, or 5 rows.
+				 */
+				void	   *columns = columns_chunk(3, 4, &len);
+				void	   *read = written_and_read(TESS_SPILL_COLUMNS, 0, columns, len,
+													&header);
+
+				if (which == 30)
+					tess_spill_expect_columns(read, 4, -1);
+				else
+					tess_spill_expect_columns(read, 3, 5);
+			}
+			break;
+		case 32:
+			/* A block of values numbered 2^30, of 3 written. */
+			(void) written_and_read(TESS_SPILL_VALUES, (uint32) 1 << 30, body,
+									sizeof(body), &header);
+			tess_spill_expect_number(&header, 3);
+			break;
+		case 33:
+		case 34:
+		case 35:
+			{
+				/*
+				 * A reference to a chunk past those read, to one that was
+				 * not read, and to the byte past a chunk.
+				 */
+				char		raw[64] = {0};
+				char	   *bases[2] = {values_read(raw), NULL};
+				Size		lens[2] = {64, 64};
+
+				if (which == 33)
+					tess_spill_value_at(bases, lens, 2, TESS_SPILL_VALUE_REF(2, 0), 8);
+				else if (which == 34)
+					tess_spill_value_at(bases, lens, 2, TESS_SPILL_VALUE_REF(1, 0), 8);
+				else
+					tess_spill_value_at(bases, lens, 2, TESS_SPILL_VALUE_REF(0, 64), 1);
+			}
+			break;
+		case 36:
+		case 37:
+		case 38:
+		case 39:
+		case 40:
+			{
+				/*
+				 * A value that does not end inside its chunk: a varlena
+				 * longer than the bytes left, one whose header of 4 bytes
+				 * the chunk cuts, a TOAST pointer into a process's memory,
+				 * a C string without its end, and a value of a fixed
+				 * length past the chunk.
+				 */
+				char		raw[64];
+				char	   *values;
+
+				memset(raw, 'x', sizeof(raw));
+				SET_VARSIZE(raw + 32, 40);
+				raw[62] = 0x10;
+				SET_VARTAG_EXTERNAL(raw + 8, VARTAG_EXPANDED_RW);
+				values = values_read(raw);
+				if (which == 36)
+					tess_spill_value_read(values, 64, TESS_SPILL_VALUE_REF(0, 32), -1);
+				else if (which == 37)
+					tess_spill_value_read(values, 64, TESS_SPILL_VALUE_REF(0, 62), -1);
+				else if (which == 38)
+					tess_spill_value_read(values, 64, TESS_SPILL_VALUE_REF(0, 8), -1);
+				else if (which == 39)
+					tess_spill_value_read(values, 64, TESS_SPILL_VALUE_REF(0, 40), -2);
+				else
+					tess_spill_value_read(values, 64, TESS_SPILL_VALUE_REF(0, 56), 16);
+			}
+			break;
+		case 42:
+			{
+				/*
+				 * A compressed varlena that says it is 4 bytes, its header
+				 * of 8 cut by the chunk's end.
+				 */
+				char		raw[64] = {0};
+				uint64		head = 0;
+
+				/* Its 4 bytes alone fit: set as a whole header, then cut. */
+				SET_VARSIZE_COMPRESSED(&head, 4);
+				memcpy(raw + 60, &head, VARHDRSZ);
+				tess_spill_value_read(values_read(raw), 64, TESS_SPILL_VALUE_REF(0, 60), -1);
+			}
+			break;
+		case 41:
+			{
+				/* A word of a chunk of columns that refers to another chunk than its own. */
+				char		raw[64] = {0};
+
+				tess_spill_value_read(values_read(raw), 64, TESS_SPILL_VALUE_REF(1, 0), 8);
+			}
+			break;
 		case 20:
 			/* A partition dropped while a reader of it is open. */
 			write_blocks(spill, &block, 1);
@@ -857,6 +1017,35 @@ tessera_test_spill_value(PG_FUNCTION_ARGS)
 		tess_spill_value_in(values, len, TESS_SPILL_VALUE_REF(1, 40)) != NULL ||
 		tess_spill_value_in(values, len, TESS_SPILL_VALUE_REF(0, 64)) != NULL)
 		elog(ERROR, "a word that is no reference into the chunk of values is taken for one");
+
+	/*
+	 * Values that end at the chunk's last byte are read: a varlena with a
+	 * header of 4 bytes and one of 1, a C string, a value of a fixed
+	 * length, a compressed varlena of its header of 8 bytes alone, and a
+	 * TOAST pointer to data on disk.
+	 */
+	memset(values, 'x', sizeof(values));
+	SET_VARSIZE(values + 48, 16);
+	SET_VARSIZE_SHORT(values + 45, 3);
+	values[44] = '\0';
+	SET_VARTAG_EXTERNAL(values + 8, VARTAG_ONDISK_OID);
+	SET_VARSIZE_COMPRESSED(values + 56, 8);
+	if (tess_spill_value_read(values, len, TESS_SPILL_VALUE_REF(0, 48), -1) != values + 48 ||
+		tess_spill_value_read(values, 48, TESS_SPILL_VALUE_REF(0, 45), -1) != values + 45 ||
+		tess_spill_value_read(values, 45, TESS_SPILL_VALUE_REF(0, 40), -2) != values + 40 ||
+		tess_spill_value_read(values, len, TESS_SPILL_VALUE_REF(0, 56), 8) != values + 56 ||
+		tess_spill_value_read(values, 64, TESS_SPILL_VALUE_REF(0, 56), -1) != values + 56 ||
+		tess_spill_value_read(values, 8 + VARHDRSZ_EXTERNAL + VARTAG_SIZE(VARTAG_ONDISK_OID),
+							  TESS_SPILL_VALUE_REF(0, 8), -1) != values + 8)
+		elog(ERROR, "a value that ends inside its chunk is refused");
+	/* The chunk a reference names among several. */
+	{
+		char	   *bases[2] = {values, values + 32};
+		Size		lens[2] = {32, 32};
+
+		if (tess_spill_value_at(bases, lens, 2, TESS_SPILL_VALUE_REF(1, 16), -1) != values + 48)
+			elog(ERROR, "a reference into the second chunk does not name its value");
+	}
 	PG_RETURN_BOOL(true);
 }
 
@@ -949,4 +1138,192 @@ tessera_test_spill_lanes(PG_FUNCTION_ARGS)
 	if (tess_spill_columns_shape(1, 99) != 0)
 		elog(ERROR, "an unknown shape is not 0");
 	PG_RETURN_BOOL(true);
+}
+
+/*
+ * The damage tessera_test_spill_damage sets: of the nth block of its kind,
+ * from 1, that backend pid reads back. A query that reads such a block
+ * must fail as damaged data, by the check of the node that reads it.
+ */
+typedef enum DamageKind
+{
+	DAMAGE_KIND,				/* a block of records told as columns, or the reverse */
+	DAMAGE_NUMBER,				/* a block of values numbered 2^30 */
+	DAMAGE_WORDS,				/* a chunk of columns of a stored word fewer */
+	DAMAGE_ROWS,				/* a chunk of columns of a row fewer */
+	DAMAGE_VALUE,				/* a chunk of values whose first value is 1 GB long */
+	DAMAGE_REF,					/* a chunk of columns whose first row refers past every chunk */
+	DAMAGE_ZERO,				/* a chunk of columns whose first row is 0 and not NULL */
+} DamageKind;
+
+typedef struct Damage
+{
+	int			pid;
+	DamageKind	what;
+	int			nth;
+} Damage;
+
+/* The blocks of the damage's kind this backend read since it was set. */
+static int	damage_seen;
+
+PGDLLEXPORT void tessera_test_spill_damage_header(const char *name, const void *private_data,
+												  void *arg);
+PGDLLEXPORT void tessera_test_spill_damage_body(const char *name, const void *private_data,
+												void *arg);
+
+/* Whether a block, of the damage's kind or not, is the one to damage. */
+static bool
+damage_now(const Damage *damage, bool of_kind)
+{
+	return damage->pid == MyProcPid && of_kind && ++damage_seen == damage->nth;
+}
+
+/* The callback of the injection point "tessera-spill-header". */
+void
+tessera_test_spill_damage_header(const char *name, const void *private_data, void *arg)
+{
+	const Damage *damage = private_data;
+	TessSpillHeader *header = arg;
+
+	if (damage->what == DAMAGE_KIND &&
+		damage_now(damage, header->kind != TESS_SPILL_VALUES))
+		header->kind = header->kind == TESS_SPILL_RECORDS ? TESS_SPILL_COLUMNS : TESS_SPILL_RECORDS;
+	else if (damage->what == DAMAGE_NUMBER &&
+			 damage_now(damage, header->kind == TESS_SPILL_VALUES))
+		header->number = (uint32) 1 << 30;
+}
+
+/* The callback of the injection point "tessera-spill-body". */
+void
+tessera_test_spill_damage_body(const char *name, const void *private_data, void *arg)
+{
+	const Damage *damage = private_data;
+	TessSpillBodyRead *read = arg;
+	bool		columns = read->kind == TESS_SPILL_COLUMNS && read->len >= TESS_SPILL_COLUMNS_HEADER;
+
+	switch (damage->what)
+	{
+		case DAMAGE_WORDS:
+			if (damage_now(damage, columns))
+				((uint32 *) read->body)[2]--;
+			break;
+		case DAMAGE_ROWS:
+			if (damage_now(damage, columns) && tess_spill_columns_rows(read->body) > 0)
+				tess_spill_columns_set_rows(read->body, tess_spill_columns_rows(read->body) - 1);
+			break;
+		case DAMAGE_VALUE:
+			if (damage_now(damage, read->kind == TESS_SPILL_VALUES && read->len >= VARHDRSZ))
+				SET_VARSIZE(read->body, 0x3FFFFFFF);
+			break;
+		case DAMAGE_REF:
+		case DAMAGE_ZERO:
+			if (damage_now(damage, columns) && tess_spill_columns_rows(read->body) > 0)
+			{
+				int			words = tess_spill_columns_words(read->body);
+
+				/* The first row: no NULL, and every word the damaged one. */
+				for (int lane = 0; lane < tess_spill_columns_null_lanes(words); lane++)
+					tess_spill_columns_lane(read->body, lane)[0] = 0;
+				for (int word = 0; word < words; word++)
+					tess_spill_columns_word(read->body, word)[0] =
+						damage->what == DAMAGE_REF ? TESS_SPILL_VALUE_REF(1 << 20, 0) : 0;
+			}
+			break;
+		default:
+			break;
+	}
+}
+
+/* Whether this build of PostgreSQL has injection points, which the tests of damage need. */
+Datum
+tessera_test_spill_injection(PG_FUNCTION_ARGS)
+{
+#ifdef USE_INJECTION_POINTS
+	PG_RETURN_BOOL(true);
+#else
+	PG_RETURN_BOOL(false);
+#endif
+}
+
+/*
+ * The path of module, a file's path without its suffix, from pkglib_path:
+ * an injection point loads its library from there, by a name of 127 bytes
+ * at most, and this module is not installed.
+ */
+/* The longest name of a library an injection point takes: INJ_LIB_MAXLEN, less its end. */
+#define INJECTION_LIBRARY_MAX 127
+
+static char *
+module_from_pkglib(const char *module)
+{
+	StringInfoData path;
+	int			common = 0;
+	int			skip = 0;
+	int			at;
+
+	/* The directories the two paths share. */
+	for (at = 0; pkglib_path[at] != '\0' && pkglib_path[at] == module[at]; at++)
+		if (pkglib_path[at] == '/')
+			common = at + 1;
+	if (pkglib_path[at] == '\0' && module[at] == '/')
+	{
+		common = at;
+		skip = 1;
+	}
+	initStringInfo(&path);
+	if (pkglib_path[common] != '\0')
+	{
+		appendStringInfoString(&path, "../");
+		for (at = common; pkglib_path[at] != '\0'; at++)
+			if (pkglib_path[at] == '/')
+				appendStringInfoString(&path, "../");
+	}
+	appendStringInfoString(&path, module + common + skip);
+	if (path.len > INJECTION_LIBRARY_MAX)
+		ereport(ERROR,
+				errmsg("the path of %s from %s is longer than an injection point takes, %d bytes",
+					   module, pkglib_path, INJECTION_LIBRARY_MAX),
+				errhint("Build PostgreSQL nearer the checkout of Tessera."));
+	return path.data;
+}
+
+/*
+ * Damage what this backend reads back from now on: the nth block (from 1)
+ * of the kind that `what` names (kind, number, words, rows, value, ref or
+ * zero); with `what` NULL, no longer. The callbacks are loaded from
+ * `module`, this module's file without its suffix.
+ */
+Datum
+tessera_test_spill_damage(PG_FUNCTION_ARGS)
+{
+	static const char *const names[] = {"kind", "number", "words", "rows", "value", "ref", "zero"};
+	char	   *library = module_from_pkglib(text_to_cstring(PG_GETARG_TEXT_PP(0)));
+	Damage		damage = {MyProcPid, DAMAGE_KIND, PG_GETARG_INT32(2)};
+	bool		found = false;
+
+	InjectionPointDetach("tessera-spill-header");
+	InjectionPointDetach("tessera-spill-body");
+	if (PG_ARGISNULL(1))
+		PG_RETURN_VOID();
+	for (int what = 0; what < lengthof(names); what++)
+		if (strcmp(text_to_cstring(PG_GETARG_TEXT_PP(1)), names[what]) == 0)
+		{
+			damage.what = (DamageKind) what;
+			found = true;
+		}
+	if (!found)
+		elog(ERROR, "no damage named %s", text_to_cstring(PG_GETARG_TEXT_PP(1)));
+	damage_seen = 0;
+	InjectionPointAttach("tessera-spill-header", library, "tessera_test_spill_damage_header",
+						 &damage, sizeof(damage));
+	InjectionPointAttach("tessera-spill-body", library, "tessera_test_spill_damage_body",
+						 &damage, sizeof(damage));
+	PG_RETURN_VOID();
+}
+
+/* The blocks of the last damage's kind this backend read since it was set. */
+Datum
+tessera_test_spill_damage_seen(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(damage_seen);
 }

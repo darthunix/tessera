@@ -1,0 +1,314 @@
+-- What a join, a sort and a grouping read back from their files is
+-- checked against what they wrote: a block damaged past the reader's own
+-- checks, as a node reads it, fails the query as damaged data, SQLSTATE
+-- XX001. The damage comes through injection points of PostgreSQL, so
+-- this suite runs only on a build with them; on another it ends here.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set spill_test :libdir '/tessera_spill_test' :dlsuffix
+\set damage_module :libdir '/tessera_spill_test'
+CREATE FUNCTION tessera_test_spill_injection()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_injection'
+LANGUAGE C STRICT;
+SELECT NOT tessera_test_spill_injection() AS skip \gset
+\if :skip
+DROP FUNCTION tessera_test_spill_injection();
+\quit
+\endif
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
+CREATE FUNCTION tessera_test_spill_damage(text, text, integer)
+RETURNS void
+AS :'spill_test', 'tessera_test_spill_damage'
+LANGUAGE C;
+CREATE FUNCTION tessera_test_spill_damage_seen()
+RETURNS integer
+AS :'spill_test', 'tessera_test_spill_damage_seen'
+LANGUAGE C STRICT;
+-- The query's error, with the nth block of a kind damaged as the node
+-- reads it; 'no error' when the query ends. The blocks a node wrote, and
+-- the one it read before, are counts of the build: N.
+CREATE FUNCTION damaged(library text, what text, nth integer, query text)
+RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM tessera_test_spill_damage(library, what, nth);
+    BEGIN
+        EXECUTE query;
+    EXCEPTION WHEN OTHERS THEN
+        PERFORM tessera_test_spill_damage(library, NULL, 0);
+        RETURN SQLSTATE || ': ' ||
+            regexp_replace(SQLERRM, '(of|chunk) \d+ (written|after)', '\1 N \2', 'g');
+    END;
+    PERFORM tessera_test_spill_damage(library, NULL, 0);
+    RETURN 'no error';
+END
+$$;
+-- spec: spill-format/Damage under a node
+-- 20000 keys, each once on the inner side and twice on the outer, with
+-- text on both.
+CREATE TABLE damage_inner (k int, t text) WITH (autovacuum_enabled = off);
+INSERT INTO damage_inner SELECT i, repeat('i', 30) || i FROM generate_series(1, 20000) AS i;
+CREATE TABLE damage_outer (k int, t text) WITH (autovacuum_enabled = off);
+INSERT INTO damage_outer SELECT i % 20000 + 1, repeat('o', 30) || i FROM generate_series(1, 40000) AS i;
+ANALYZE damage_inner, damage_outer;
+SET max_parallel_workers_per_gather = 0;
+SET work_mem = '64kB';
+-- Every partition of the join on disk, its inner records and its outer
+-- rows read back.
+SET tessera.join_spill_resident_share = 0;
+-- The join, text on both sides: the first block read back is the inner
+-- side's; the first chunk of columns is outer rows.
+EXPLAIN (COSTS OFF) SELECT count(*), sum(length(i.t)), sum(length(o.t))
+FROM damage_outer o JOIN damage_inner i ON o.k = i.k;
+                        QUERY PLAN                        
+----------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (o.k = i.k)
+         ->  Custom Scan (TessHeapScan) on damage_outer o
+         ->  Custom Scan (TessHeapScan) on damage_inner i
+(5 rows)
+
+SELECT damaged(:'damage_module', NULL, 0, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+ damaged  
+----------
+ no error
+(1 row)
+
+-- A block of records read as columns; an inner block of values numbered
+-- past those written; an inner value past its chunk.
+SELECT damaged(:'damage_module', 'kind', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                                 damaged                                  
+--------------------------------------------------------------------------
+ XX001: Tessera read back a spilled block of kind 3 where it wrote kind 1
+(1 row)
+
+SELECT damaged(:'damage_module', 'number', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                            damaged                             
+----------------------------------------------------------------
+ XX001: Tessera read back spilled block 1073741824 of N written
+(1 row)
+
+SELECT damaged(:'damage_module', 'value', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+-- Outer rows: a chunk of a word fewer; a word that refers past every
+-- chunk; a word of 0 its row does not mark NULL.
+SELECT damaged(:'damage_module', 'words', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                            damaged                             
+----------------------------------------------------------------
+ XX001: Tessera read back a chunk of 1 columns where it wrote 2
+(1 row)
+
+SELECT damaged(:'damage_module', 'ref', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+SELECT damaged(:'damage_module', 'zero', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+-- The last block the join reads is a chunk of outer rows of its last
+-- partition: read as records. A run of the query counts the blocks.
+SELECT damaged(:'damage_module', 'kind', 1000000, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+ damaged  
+----------
+ no error
+(1 row)
+
+SELECT tessera_test_spill_damage_seen() AS last_block \gset
+SELECT damaged(:'damage_module', 'kind', :last_block, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                                 damaged                                  
+--------------------------------------------------------------------------
+ XX001: Tessera read back a spilled block of kind 1 where it wrote kind 3
+(1 row)
+
+-- An inner side of keys alone: every block of values is outer rows', a
+-- value past its chunk, and a block numbered past the one read with it.
+SELECT damaged(:'damage_module', 'value', 1, $$SELECT count(*), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+SELECT damaged(:'damage_module', 'number', 1, $$SELECT count(*), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+                              damaged                               
+--------------------------------------------------------------------
+ XX001: TessHashJoin read back value chunk N after chunk 1073741824
+(1 row)
+
+RESET tessera.join_spill_resident_share;
+-- The sort: runs on disk, merged.
+EXPLAIN (COSTS OFF) SELECT k, t FROM damage_outer ORDER BY k;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Custom Scan (TessSort)
+   Sort Key: k
+   ->  Custom Scan (TessHeapScan) on damage_outer
+(3 rows)
+
+SELECT damaged(:'damage_module', NULL, 0, $$SELECT k, t FROM damage_outer ORDER BY k$$);
+ damaged  
+----------
+ no error
+(1 row)
+
+SELECT damaged(:'damage_module', 'kind', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
+                   damaged                    
+----------------------------------------------
+ XX001: TessSort run lost its block of rows 0
+(1 row)
+
+SELECT damaged(:'damage_module', 'number', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
+                    damaged                     
+------------------------------------------------
+ XX001: TessSort run lost its block of values 0
+(1 row)
+
+SELECT damaged(:'damage_module', 'words', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
+                            damaged                             
+----------------------------------------------------------------
+ XX001: Tessera read back a chunk of 2 columns where it wrote 3
+(1 row)
+
+SELECT damaged(:'damage_module', 'rows', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
+                            damaged                            
+---------------------------------------------------------------
+ XX001: Tessera read back a chunk of 63 rows where it wrote 64
+(1 row)
+
+SELECT damaged(:'damage_module', 'value', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+SELECT damaged(:'damage_module', 'ref', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+SELECT damaged(:'damage_module', 'zero', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+-- A scrollable cursor reads the one run the last merge wrote by blocks,
+-- the last of them its first block, for FETCH ABSOLUTE 1: that block of
+-- a row fewer than the run's record of it. A run of the query counts the
+-- chunks of columns it reads.
+SELECT damaged(:'damage_module', 'rows', 1000000, $q$DO $do$DECLARE c SCROLL CURSOR FOR SELECT k, t FROM damage_outer ORDER BY k; r record; BEGIN OPEN c; FETCH LAST FROM c INTO r; FETCH ABSOLUTE 1 FROM c INTO r; END $do$$q$);
+ damaged  
+----------
+ no error
+(1 row)
+
+SELECT tessera_test_spill_damage_seen() AS last_block \gset
+SELECT damaged(:'damage_module', 'rows', :last_block, $q$DO $do$DECLARE c SCROLL CURSOR FOR SELECT k, t FROM damage_outer ORDER BY k; r record; BEGIN OPEN c; FETCH LAST FROM c INTO r; FETCH ABSOLUTE 1 FROM c INTO r; END $do$$q$);
+                            damaged                            
+---------------------------------------------------------------
+ XX001: Tessera read back a chunk of 63 rows where it wrote 64
+(1 row)
+
+-- The grouping, by hash: rows on disk, for an aggregate it has no
+-- states of its own for.
+SET enable_sort = off;
+EXPLAIN (COSTS OFF) SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Subquery Scan on q
+               ->  Custom Scan (TessAgg)
+                     Group Key: damage_outer.k
+                     ->  Custom Scan (TessHeapScan) on damage_outer
+(6 rows)
+
+SELECT damaged(:'damage_module', NULL, 0, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
+ damaged  
+----------
+ no error
+(1 row)
+
+SELECT damaged(:'damage_module', 'kind', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
+                     damaged                     
+-------------------------------------------------
+ XX001: TessAgg read a damaged partition of rows
+(1 row)
+
+SELECT damaged(:'damage_module', 'number', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
+                            damaged                             
+----------------------------------------------------------------
+ XX001: Tessera read back spilled block 1073741824 of N written
+(1 row)
+
+SELECT damaged(:'damage_module', 'words', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
+                            damaged                             
+----------------------------------------------------------------
+ XX001: Tessera read back a chunk of 1 columns where it wrote 2
+(1 row)
+
+SELECT damaged(:'damage_module', 'value', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+SELECT damaged(:'damage_module', 'ref', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+SELECT damaged(:'damage_module', 'zero', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
+                                  damaged                                   
+----------------------------------------------------------------------------
+ XX001: Tessera row read back refers to a value outside its chunk of values
+(1 row)
+
+-- Records on disk, merged: a block of records read as columns.
+EXPLAIN (COSTS OFF) SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q;
+                             QUERY PLAN                             
+--------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessPack)
+         ->  Subquery Scan on q
+               ->  Custom Scan (TessAgg)
+                     Group Key: damage_outer.k
+                     ->  Custom Scan (TessHeapScan) on damage_outer
+(6 rows)
+
+SELECT damaged(:'damage_module', NULL, 0, $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$);
+ damaged  
+----------
+ no error
+(1 row)
+
+SELECT damaged(:'damage_module', 'kind', 1, $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$);
+                                 damaged                                  
+--------------------------------------------------------------------------
+ XX001: Tessera read back a spilled block of kind 3 where it wrote kind 1
+(1 row)
+
+RESET enable_sort;
+RESET work_mem;
+RESET max_parallel_workers_per_gather;
+DROP TABLE damage_outer;
+DROP TABLE damage_inner;
+DROP FUNCTION damaged(text, text, integer, text);
+DROP FUNCTION tessera_test_spill_damage(text, text, integer);
+DROP FUNCTION tessera_test_spill_damage_seen();
+DROP FUNCTION tessera_test_spill_injection();
+DROP EXTENSION tessera;

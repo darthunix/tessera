@@ -804,11 +804,11 @@ row. Its cost is counted by the benchmark, not assumed.
 
 ### How the work goes
 
-Each task is one pull request into `main`. A task brings its evidence
-with it: the model, the property test, the cases of damage and the
-documentation of what it adds come in the same task as the code, not
-later. A task that moves a file named by a spec or a design edits those
-paths in the same commit.
+The tasks reach `main` by pull requests, each of a few related tasks.
+A task brings its evidence with it: the model, the property test, the
+cases of damage and the documentation of what it adds come in the same
+task as the code, not later. A task that moves a file named by a spec
+or a design edits those paths in the same commit.
 
 ## Measurement plan
 
@@ -890,8 +890,8 @@ paths in the same commit.
 - [Making one rule of two copies changes plans] → the copies move as
   parameters first; one rule is made only in a task of its own, with a
   measurement.
-- [The change is long, and `main` moves on] → each task is a pull
-  request into `main`; nothing waits on a branch.
+- [The change is long, and `main` moves on] → the tasks go into
+  `main` a few at a time; nothing waits on a branch.
 
 ## Migration Plan
 

@@ -337,12 +337,14 @@ side_free_values(SpillSide *side, int partition, int number)
 static void
 side_value_slot(SpillSide *side, int number)
 {
-	int			slots = Max(side->value_slots, 16);
+	Size		slots = Max(side->value_slots, 16);
 
 	if (number < side->value_slots)
 		return;
-	while (slots <= number)
+	while (slots <= (Size) number)
 		slots *= 2;
+	if (slots > INT_MAX)
+		slots = INT_MAX;
 	side->value_bases = side->value_bases == NULL ?
 		MemoryContextAllocZero(side->context, sizeof(char *) * slots) :
 		repalloc0(side->value_bases, sizeof(char *) * side->value_slots,
@@ -1046,7 +1048,8 @@ spill_reserve(TessHashJoinState *state)
  * partition's value chunks, and its hash into the level's Bloom filter.
  */
 void
-join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values)
+join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values,
+				 const Size *lens, int nvalues)
 {
 	JoinSpill  *spill = state->spill;
 	SpillSide  *side = &spill->build;
@@ -1106,13 +1109,26 @@ join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *va
 			for (int word = 0; word < side->nwords; word++)
 			{
 				uint64	   *slot = (uint64 *) payloads[index] + 1 + word;
-				char	   *value;
+				const char *value;
 
-				if (side->byvals[word] || *slot == 0)
+				if (side->byvals[word])
 					continue;
-				if (values[(*slot >> 32) - 1] == NULL)
-					elog(ERROR, "TessHashJoin split a record whose values it does not have");
-				value = values[(*slot >> 32) - 1] + (*slot & 0xFFFFFFFF);
+				/* Read back, a value is NULL by its record's bit, not its word. */
+				if (lens != NULL)
+				{
+					if ((((uint64 *) payloads[index])[0] >> word) & 1)
+						continue;
+					value = tess_spill_value_at(values, lens, (uint64) nvalues, *slot,
+												side->typlens[word]);
+				}
+				else if (*slot == 0)
+					continue;
+				else
+				{
+					if (values[(*slot >> 32) - 1] == NULL)
+						elog(ERROR, "TessHashJoin split a record whose values it does not have");
+					value = values[(*slot >> 32) - 1] + (*slot & 0xFFFFFFFF);
+				}
 				*slot = side_store(side, partition, PointerGetDatum(value),
 								   side->typlens[word]);
 			}
@@ -1146,7 +1162,7 @@ split_table(TessHashJoinState *state)
 	for (int chunk = 0; chunk < state->table.nchunks; chunk++)
 	{
 		join_split_chunk(state, state->chunk_bases[chunk], state->chunk_lens[chunk],
-					state->values.bases);
+					state->values.bases, NULL, 0);
 		pfree(state->chunk_bases[chunk]);
 	}
 	spill->total_rows = state->build_rows;
@@ -1412,6 +1428,7 @@ join_finish_spill_build(TessHashJoinState *state)
 	state->table_bytes = 0;
 	state->build_rows = rows;
 	state->values.bases = side->value_bases;
+	state->values.lens = NULL;
 	state->values.nchunks = side->nvalues;
 	spill->indexed = true;
 	if (spill->parent == NULL)
@@ -1526,8 +1543,6 @@ end_partition(TessHashJoinState *state)
 	for (int index = 0; index < spill->nloaded; index++)
 		spill->build.value_bases[spill->loaded_values[index]] = NULL;
 	spill->nloaded = 0;
-	for (int index = 0; index < spill->nblock_values; index++)
-		spill->probe.value_bases[spill->block_values[index]] = NULL;
 	spill->nblock_values = 0;
 	side_release(&spill->build, partition);
 	side_release(&spill->probe, partition);
@@ -1596,21 +1611,95 @@ drop_piece(TessHashJoinState *state)
 	join_forget_marks(state);
 }
 
-/* A value chunk read back into the piece's table. */
-static void
-add_loaded_values(JoinSpill *spill, uint32 number, void *body)
+/* The value chunks a side's writers made: every participant's for a shared table. */
+static uint64
+side_values_written(SpillSide *side)
 {
-	/* Another participant's number may be past this one's. */
-	if (number >= INT_MAX - 1)
+	return side->area != NULL ? side->values_written : (uint64) side->nvalues;
+}
+
+/* A value chunk of the inner side read back, for a piece's table or a split. */
+static void
+add_loaded_values(JoinSpill *spill, const TessSpillHeader *header, void *body)
+{
+	SpillSide  *side = &spill->build;
+	uint32		number = header->number;
+
+	/* Another participant's number may be past this one's, not past them all. */
+	tess_spill_expect_number(header, side_values_written(side));
+	side_value_slot(side, (int) number);
+	/* A chunk is written once and forgotten after its piece: twice is damage. */
+	if (side->value_bases[number] != NULL)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("TessHashJoin read back a value chunk it never wrote"));
-	side_value_slot(&spill->build, (int) number);
-	spill->build.nvalues = Max(spill->build.nvalues, (int) number + 1);
-	spill->build.value_bases[number] = body;
+				errmsg("TessHashJoin read back value chunk %u twice", number));
+	side->nvalues = Max(side->nvalues, (int) number + 1);
+	side->value_bases[number] = body;
+	side->value_lens[number] = header->len;
 	grow_ints(spill->context, &spill->loaded_values, &spill->loaded_slots,
 			  spill->nloaded + 1);
 	spill->loaded_values[spill->nloaded++] = number;
+}
+
+/*
+ * A value chunk read back before the outer chunk it serves, or one in
+ * memory of the chunk of the tail. A writer numbers its value chunks as it
+ * makes them, so those of a chunk ascend.
+ */
+static void
+add_block_values(JoinSpill *spill, uint32 number, char *body, Size len)
+{
+	if (spill->nblock_values > 0 && number <= spill->block_numbers[spill->nblock_values - 1])
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("TessHashJoin read back value chunk %u after chunk %u", number,
+					   spill->block_numbers[spill->nblock_values - 1]));
+	if (spill->nblock_values == spill->block_slots)
+	{
+		int			slots = Max(spill->block_slots * 2, 4);
+
+		spill->block_numbers = spill->block_numbers == NULL ?
+			MemoryContextAlloc(spill->context, sizeof(uint32) * slots) :
+			repalloc(spill->block_numbers, sizeof(uint32) * slots);
+		spill->block_bases = spill->block_bases == NULL ?
+			MemoryContextAlloc(spill->context, sizeof(char *) * slots) :
+			repalloc(spill->block_bases, sizeof(char *) * slots);
+		spill->block_lens = spill->block_lens == NULL ?
+			MemoryContextAlloc(spill->context, sizeof(Size) * slots) :
+			repalloc(spill->block_lens, sizeof(Size) * slots);
+		spill->block_slots = slots;
+	}
+	spill->block_numbers[spill->nblock_values] = number;
+	spill->block_bases[spill->nblock_values] = body;
+	spill->block_lens[spill->nblock_values] = len;
+	spill->nblock_values++;
+}
+
+/*
+ * The value of typlen an outer chunk's word refers to: in one of the value
+ * chunks read back before the chunk, as the writer wrote them together,
+ * found among their ascending numbers by halves.
+ */
+static inline const char *
+block_value(JoinSpill *spill, uint64 ref, int16 typlen)
+{
+	uint64		number = (ref >> TESS_SPILL_VALUE_BYTE_BITS) - 1;
+	int			low = 0;
+	int			high = spill->nblock_values;
+
+	while (low < high)
+	{
+		int			middle = low + (high - low) / 2;
+
+		if (spill->block_numbers[middle] < number)
+			low = middle + 1;
+		else
+			high = middle;
+	}
+	if (low == spill->nblock_values || spill->block_numbers[low] != number)
+		tess_spill_value_damaged();
+	return tess_spill_value_of(spill->block_bases[low], spill->block_lens[low],
+							   tess_spill_value_byte(ref), typlen);
 }
 
 /*
@@ -1632,10 +1721,8 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 	bool		records = false;
 	uint64		rows = 0;
 	Size		room;
-	bool		byref = false;
+	bool		values = false;
 
-	for (int word = 0; word < side->nwords; word++)
-		byref |= !side->byvals[word];
 	drop_piece(state);
 	room = whole ? SIZE_MAX : spill_room(state);
 	if (spill->carried != NULL)
@@ -1649,7 +1736,10 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 		spill->carried = NULL;
 		loaded += spill->carried_header.len;
 		if (spill->carried_header.kind == TESS_SPILL_VALUES)
-			add_loaded_values(spill, spill->carried_header.number, body);
+		{
+			add_loaded_values(spill, &spill->carried_header, body);
+			values = true;
+		}
 		else
 		{
 			add_loaded_chunk(state, body, spill->carried_header.len);
@@ -1661,12 +1751,20 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 	{
 		void	   *body;
 
+		if (header.kind != TESS_SPILL_VALUES)
+			tess_spill_expect_kind(&header, TESS_SPILL_RECORDS);
+
 		/*
-		 * A group ends where values follow records, or, without values, at
-		 * every chunk: the piece may end there.
+		 * A group ends where values follow records: the piece may end
+		 * there. Records refer only to the values written before them with
+		 * them, so while the piece has no values, records refer to none,
+		 * and it may end at any chunk, as for a partition whose values are
+		 * all NULL. Records after values may be the rest of their group: a
+		 * partition in memory goes to disk with all its chunks after its
+		 * values.
 		 */
 		if (records && loaded >= room &&
-			(header.kind == TESS_SPILL_VALUES || !byref))
+			(header.kind == TESS_SPILL_VALUES || !values))
 		{
 			spill->carried = MemoryContextAllocExtended(spill->context,
 														Max(header.len, 8),
@@ -1681,8 +1779,9 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 		loaded += header.len;
 		if (header.kind == TESS_SPILL_VALUES)
 		{
-			add_loaded_values(spill, header.number, body);
+			add_loaded_values(spill, &header, body);
 			records = false;
+			values = true;
 			continue;
 		}
 		add_loaded_chunk(state, body, header.len);
@@ -1713,7 +1812,10 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 	state->bloom.nwords = 0;
 	/* The rows written passed the Bloom filter: no other one pays. */
 	state->bloom.decided = true;
+	/* Lengths even with no value chunk, so that every reference is checked. */
+	side_value_slot(side, 0);
 	state->values.bases = side->value_bases;
+	state->values.lens = side->value_lens;
 	state->values.nchunks = side->nvalues;
 	join_index_table(state);
 	/* The buckets count for the build, not for each partition. */
@@ -1792,6 +1894,8 @@ start_level(TessHashJoinState *state, int partition)
 	state->counters[JOIN_SPLITS]++;
 	state->counters[JOIN_BATCHES] = Max(state->counters[JOIN_BATCHES],
 										(uint64) spill->npartitions);
+	/* Lengths even with no value chunk, so that every reference is checked. */
+	side_value_slot(from, 0);
 	while (part_header(&parent->build_reader, &header))
 	{
 		void	   *body;
@@ -1810,13 +1914,15 @@ start_level(TessHashJoinState *state, int partition)
 			body = MemoryContextAllocExtended(spill->part_context, Max(header.len, 8),
 											  MCXT_ALLOC_HUGE);
 			part_body(&parent->build_reader, body, header.len);
-			add_loaded_values(parent, header.number, body);
+			add_loaded_values(parent, &header, body);
 			continue;
 		}
+		tess_spill_expect_kind(&header, TESS_SPILL_RECORDS);
 		body = MemoryContextAllocExtended(spill->block_context, Max(header.len, 8),
 										  MCXT_ALLOC_HUGE);
 		part_body(&parent->build_reader, body, header.len);
-		join_split_chunk(state, body, header.len, from->value_bases);
+		join_split_chunk(state, body, header.len, from->value_bases, from->value_lens,
+						 from->nvalues);
 		MemoryContextReset(spill->block_context);
 		records = true;
 		make_room(state, true);
@@ -1827,7 +1933,8 @@ start_level(TessHashJoinState *state, int partition)
 		int			index = part->chunks[chunk];
 
 		if (side_chunk_used(state, from, index) > TESS_TABLE_CHUNK_HEADER)
-			join_split_chunk(state, from->bases[index], from->lens[index], from->value_bases);
+			join_split_chunk(state, from->bases[index], from->lens[index], from->value_bases,
+							 NULL, 0);
 	}
 	for (int index = 0; index < parent->nloaded; index++)
 		from->value_bases[parent->loaded_values[index]] = NULL;
@@ -2029,14 +2136,8 @@ join_next_spilled(TessHashJoinState *state, JoinSpill *spill)
 							spill->values[word][row] = (Datum) 0;
 							continue;
 						}
-						if ((ref >> 32) - 1 >= (uint64) side->nvalues ||
-							side->value_bases[(ref >> 32) - 1] == NULL)
-							ereport(ERROR,
-									errcode(ERRCODE_DATA_CORRUPTED),
-									errmsg("TessHashJoin read back a value it did not keep"));
 						spill->values[word][row] =
-							PointerGetDatum(side->value_bases[(ref >> 32) - 1] +
-											(ref & 0xFFFFFFFF));
+							PointerGetDatum(block_value(spill, ref, side->typlens[word]));
 					}
 				}
 				spill->cursor += count;
@@ -2045,8 +2146,6 @@ join_next_spilled(TessHashJoinState *state, JoinSpill *spill)
 			spill->block = NULL;
 		}
 		/* The next chunk: the previous one and its values go. */
-		for (int index = 0; index < spill->nblock_values; index++)
-			side->value_bases[spill->block_values[index]] = NULL;
 		spill->nblock_values = 0;
 		MemoryContextReset(spill->block_context);
 		if (spill->reader.open)
@@ -2060,19 +2159,11 @@ join_next_spilled(TessHashJoinState *state, JoinSpill *spill)
 				part_body(&spill->reader, body, header.len);
 				if (header.kind == TESS_SPILL_VALUES)
 				{
-					/* Another writer's number may be past this one's. */
-					if (header.number >= INT_MAX - 1)
-						ereport(ERROR,
-								errcode(ERRCODE_DATA_CORRUPTED),
-								errmsg("TessHashJoin read back a value chunk it never wrote"));
-					side_value_slot(side, (int) header.number);
-					side->nvalues = Max(side->nvalues, (int) header.number + 1);
-					side->value_bases[header.number] = body;
-					grow_ints(spill->context, &spill->block_values,
-							  &spill->block_slots, spill->nblock_values + 1);
-					spill->block_values[spill->nblock_values++] = header.number;
+					add_block_values(spill, header.number, body, header.len);
 					continue;
 				}
+				tess_spill_expect_kind(&header, TESS_SPILL_COLUMNS);
+				tess_spill_expect_columns(body, side->nwords, -1);
 				spill->block = body;
 				break;
 			}
@@ -2086,7 +2177,14 @@ join_next_spilled(TessHashJoinState *state, JoinSpill *spill)
 			spill->tail_read = true;
 			if (index != 0 && side_chunk_rows(state, side, index))
 			{
+				SpillPart  *part = &side->parts[spill->partition];
+
 				spill->block = side->bases[index];
+				/* The tail's values are the partition's value chunks in memory. */
+				for (int chunk = 0; chunk < part->nvalues; chunk++)
+					add_block_values(spill, (uint32) part->values[chunk],
+									 side->value_bases[part->values[chunk]],
+									 side->value_lens[part->values[chunk]]);
 				state->counters[JOIN_TAILS]++;
 			}
 		}
@@ -2386,6 +2484,7 @@ join_spill_free(TessHashJoinState *state)
 	state->spill = NULL;
 	state->holding = false;
 	state->values.bases = NULL;
+	state->values.lens = NULL;
 	state->values.slots = 0;
 	state->values.nchunks = 0;
 	MemoryContextReset(state->table_context);

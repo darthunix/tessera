@@ -22,6 +22,7 @@
 #include "commands/tablespace.h"
 #include "storage/fd.h"
 #include "storage/fileset.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
 
@@ -164,6 +165,74 @@ tess_spill_value_damaged(void)
 	ereport(ERROR,
 			errcode(ERRCODE_DATA_CORRUPTED),
 			errmsg("Tessera row read back refers to a value outside its chunk of values"));
+}
+
+/* Of the TOAST pointers only one to data on disk means the same in another process. */
+bool
+tess_spill_value_fits_other(const char *value, Size room, int16 typlen)
+{
+	if (typlen == -2)
+		return memchr(value, '\0', room) != NULL;
+	if (typlen != -1 || room == 0 || !VARATT_IS_1B_E(value))
+		return false;
+	return room >= VARHDRSZ_EXTERNAL && VARATT_IS_EXTERNAL_ONDISK(value) &&
+		VARSIZE_EXTERNAL(value) <= room;
+}
+
+void
+tess_spill_expect_kind(const TessSpillHeader *header, TessSpillKind kind)
+{
+	if (header->kind != (uint32) kind)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("Tessera read back a spilled block of kind %u where it wrote kind %u",
+					   header->kind, (uint32) kind));
+}
+
+void
+tess_spill_expect_columns(const void *chunk, int words, int64 rows)
+{
+	if (tess_spill_columns_words(chunk) != (uint32) words)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("Tessera read back a chunk of %u columns where it wrote %d",
+					   tess_spill_columns_words(chunk), words));
+	if (rows >= 0 && tess_spill_columns_rows(chunk) != (uint64) rows)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("Tessera read back a chunk of %u rows where it wrote %lld",
+					   tess_spill_columns_rows(chunk), (long long) rows));
+}
+
+void
+tess_spill_expect_number(const TessSpillHeader *header, uint64 count)
+{
+	if (header->number >= count)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("Tessera read back spilled block %u of %llu written",
+					   header->number, (unsigned long long) count));
+}
+
+void
+tess_spill_columns_check_values(void *chunk, int ncolumns, const bool *byvals,
+								const int16 *typlens, const char *values, Size len)
+{
+	Size		capacity = tess_spill_columns_capacity(chunk);
+	uint32		rows = tess_spill_columns_rows(chunk);
+
+	for (int column = 0; column < ncolumns; column++)
+	{
+		const uint64 *nulls = tess_spill_columns_lane(chunk, 0) +
+			capacity * tess_spill_columns_null_lane(column);
+		const uint64 *words = tess_spill_columns_word(chunk, 0) + capacity * column;
+
+		if (byvals[column])
+			continue;
+		for (uint32 row = 0; row < rows; row++)
+			if (!tess_spill_columns_is_null(nulls[row], column))
+				(void) tess_spill_value_read(values, len, words[row], typlens[column]);
+	}
 }
 
 TessSpill *
@@ -760,6 +829,8 @@ tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 	reader->pending_kind = header->kind;
 	reader->pending_len = header->len;
 	reader->pending_packed = header->packed;
+	/* A test damages here a header a node reads, past the reader's checks. */
+	INJECTION_POINT("tessera-spill-header", header);
 	return true;
 }
 
@@ -795,6 +866,14 @@ tess_spill_read_body(TessSpillReader *reader, void *body, Size len)
 		}
 		else
 			memcpy(body, stored, len);
+#ifdef USE_INJECTION_POINTS
+		{
+			TessSpillBodyRead read = {(TessSpillKind) reader->pending_kind, body, len};
+
+			/* A test damages here a body a node reads, past the reader's checks. */
+			INJECTION_POINT("tessera-spill-body", &read);
+		}
+#endif
 	}
 	reader->pending = false;
 }

@@ -380,11 +380,15 @@ the upper half of every reference is 1.
 ```
 
 A sort and a grouping read these blocks from a file. Before they use a
-reference, they check it: the upper half must be 1, and the byte must
-lie inside the chunk of values. If not, the query stops with the error
-"damaged data". Without this check a damaged word would make the node
-read memory outside the chunk. The gather node gets its chunks from
-another process's memory, not from a file, and does not check them.
+reference, they check it: the upper half must be 1, and the value must
+lie whole inside the chunk of values, from its byte to its end, as its
+type gives its length. If not, the query stops with the error "damaged
+data". Without this check a damaged word would make the node read memory
+outside the chunk. A sort and a grouping check every value of a block
+once, when they load the block, so that a sort's merge, which reads a
+key at every comparison, reads it unchecked. The gather node gets its
+chunks from another process's memory, not from a file, and does not
+check them.
 
 **Many chunks of values.** A join keeps many chunks of values and
 numbers them 0, 1, 2, and so on. To find a value, it keeps an array
@@ -402,13 +406,21 @@ with the addresses of its chunks of values:
  address of the value = array[2] + 40
 ```
 
-When a join reads a block of values back, it puts the address of the
-new chunk into this array, at the index from the header's `number`. The
+When a join reads a block of values of its table back, it puts the
+address of the new chunk into this array, at the index from the
+header's `number`, which must be below the count of chunks written. The
 address may be different from the old one. The references do not
 change, and they work again. A join writes a chunk of values before the
 chunks that refer to it, so a reader has the values in memory when it
-meets a reference to them. A join checks that a reference names a chunk
-it has read; it does not check the byte.
+meets a reference to them.
+
+A join keeps its outer rows in chunks of columns, and in a parallel
+join each process numbers its own chunks of values, so the reader of
+another process's file has no array to use. It keeps the chunks of
+values read just before a chunk of columns, whose numbers ascend as
+their writer gave them, and finds a reference's number among them.
+Either way, the chunk must be one that was read, and the value must lie
+whole inside it.
 
 Before this, a sort and a grouping stored a bare position without a
 chunk number, where 0 was a normal position. There were two forms of
@@ -663,5 +675,12 @@ table that spills, in [hash-table](../hash-table/design.md).
   points.
 - `test/sql/spill.sql` with `test/tessera_spill_test.c`: the sets of
   files; `test/sql/table.sql`: the header through the C API.
+- `test/sql/spill_damage.sql` with `test/tessera_spill_test.c`: blocks
+  damaged as a join, a sort and a grouping read them back. The reader
+  has two injection points of PostgreSQL, `tessera-spill-header` and
+  `tessera-spill-body`, after its own checks; the test's callbacks
+  change the header or the body there. Only a build of PostgreSQL with
+  injection points has them, as CI's does; on another the suite ends
+  at its start.
 - End to end, at a small `work_mem`: the suites `join`, `agg`, `sort`,
   `union`, `parallel` and `types`.

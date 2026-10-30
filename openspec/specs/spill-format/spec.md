@@ -116,7 +116,11 @@ body MUST be checked as it is unpacked. A failed check SHALL be reported
 as damaged data: status `TESS_ERROR_DATA_CORRUPTED` with SQLSTATE
 `XX001`. A misuse of a call, such as a buffer shorter than a header,
 SHALL be reported as an internal error, SQLSTATE `XX000`, not as damaged
-data.
+data. A node MUST also check a block it reads back against what it wrote
+there: its kind, a chunk of columns' stored words and, where the node
+counted them, its rows, and a block of values' number against the
+chunks of values written, or, where each writer of a file numbers its
+own, against the number of the block of values before it.
 
 #### Scenario: A damaged field of a header, or another table's block
 - **WHEN** one field of a valid header is overwritten with an invalid
@@ -148,6 +152,28 @@ data.
   `crates/tessera-capi/tests/spill.rs::damaged_blocks_report_data_corrupted`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(5)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(7)`
+
+#### Scenario: A block a node did not write so
+- **WHEN** a node reads back a block of records where it wrote a chunk
+  of columns, a chunk of columns of 3 words where it wrote 4, one of 4
+  rows where it counted 5, and a block of values numbered 2^30 of 3
+  written
+- **THEN** each is damaged data, SQLSTATE `XX001`
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_sqlstate(29)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(30)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(31)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(32)`
+
+#### Scenario: Damage under a node
+- **WHEN** a join, a sort or a grouping that spills reads back a block
+  damaged past the reader's own checks: one of another kind, a block of
+  values numbered past those written, a chunk of columns of a word or a
+  row fewer than was written, a value longer than the bytes left in its
+  chunk, or a word that refers past every chunk or is 0 in a row it
+  does not mark NULL
+- **THEN** the query fails as damaged data, SQLSTATE `XX001`
+- **Verified by:**
+  `test/sql/spill_damage.sql::spec: spill-format/Damage under a node`
 
 ### Requirement: A packed chunk of records
 A chunk of records SHALL be stored packed only when the packed form is
@@ -279,10 +305,12 @@ is 0, and a chunk of values is at most 4 GiB. A chunk of columns that is
 written with one chunk of values before it SHALL refer to that chunk as
 number 0. A reader of such a chunk of columns from a file MUST refuse,
 as damaged data, a word of a by-reference column that is no reference
-into that chunk of values. The bytes a reference names SHALL be the
-value's own, as `datumCopy` copies them: an expanded object, which is a
-pointer into its owner's memory, SHALL be flattened, and
-`tess_spill_columns_append`, which copies a batch's values by their
+into that chunk of values. A reader of any value through a reference
+from a file MUST refuse, as damaged data, a chunk it did not read and a
+value that does not end inside its chunk. The bytes a reference names
+SHALL be the value's own, as `datumCopy` copies them: an expanded
+object, which is a pointer into its owner's memory, SHALL be flattened,
+and `tess_spill_columns_append`, which copies a batch's values by their
 bytes, SHALL refuse one.
 
 ```
@@ -311,6 +339,28 @@ bytes, SHALL refuse one.
   data, SQLSTATE `XX001`
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_value`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(28)`
+
+#### Scenario: A value read back whole
+- **WHEN** a reference read back names a chunk past those read, one not
+  read, one other than the chunk read with it, or the byte past its
+  chunk; or a varlena longer than the bytes left, one whose header of 4
+  bytes the chunk cuts, a compressed one whose header of 8 bytes the
+  chunk cuts, a TOAST pointer into a process's memory, a C string
+  without its end, a value of a fixed length past the chunk; and when
+  values of each kind end at the chunk's last byte
+- **THEN** the first are damaged data, SQLSTATE `XX001`, and the last
+  are read
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_sqlstate(33)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(34)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(41)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(35)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(36)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(37)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(42)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(38)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(39)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(40)`;
+  `test/sql/spill.sql::tessera_test_spill_value`
 
 #### Scenario: An expanded value copied flat
 - **WHEN** an expanded array is copied, kept as a row's value, spilled
