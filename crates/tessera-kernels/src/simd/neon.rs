@@ -25,7 +25,8 @@ use core::arch::aarch64::{
 };
 
 use super::{
-    Neon, Vectors, byte_weights, lane_masks, load_datums, non_null_lanes, pack_lanes, widen,
+    Neon, Vectors, byte_weights, lane_masks, load_datums, non_null_lanes, pack_lanes,
+    quarter_lanes, widen,
 };
 use crate::int32::Divisor;
 
@@ -99,6 +100,12 @@ impl Vectors for Neon {
     fn pack(self, lanes: impl Fn(usize) -> uint32x4_t) -> u64 {
         // SAFETY: as in `splat`.
         unsafe { pack_lanes(lanes) }
+    }
+
+    #[inline]
+    fn pack_quarter(self, lanes: impl Fn(usize) -> uint32x4_t) -> u64 {
+        // SAFETY: as in `splat`.
+        unsafe { quarter_lanes(lanes) }
     }
 
     #[inline]
@@ -391,6 +398,18 @@ impl Vectors for Neon {
         };
         // SAFETY: as in `splat`.
         unsafe { pack_lanes(group) }
+    }
+
+    /// The masks of the four groups of four rows, each narrowed from two
+    /// pairs, as in `pack64`.
+    #[inline]
+    fn pack_quarter64(self, lanes: impl Fn(usize) -> uint64x2_t) -> u64 {
+        let group = |group: usize| {
+            // SAFETY: as in `splat`.
+            unsafe { vcombine_u32(vmovn_u64(lanes(group * 2)), vmovn_u64(lanes(group * 2 + 1))) }
+        };
+        // SAFETY: as in `splat`.
+        unsafe { quarter_lanes(group) }
     }
 
     #[inline]

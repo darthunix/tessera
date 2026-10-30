@@ -2,110 +2,176 @@
 //! compared with every key and the equalities or-ed, so that a word costs
 //! the same whatever its values. The lanes of a pass stay in registers
 //! while the keys go by, each key broadcast once a pass; a pass is packed
-//! into bits as in `filter.rs`, each group of four lanes weighted by its
-//! bits and a quarter's groups added.
+//! into bits a quarter of the word at a time.
+//!
+//! A pass is 32 rows of int4 values or 16 of int8 ones on every set: eight
+//! vectors on NEON and four on AVX2, whose vectors are twice as wide and
+//! whose registers half as many.
 
-use core::arch::aarch64::{
-    int32x4_t, int64x2_t, uint32x4_t, vaddvq_u32, vandq_u32, vceqq_s32, vceqq_s64, vcombine_u32,
-    vdupq_n_s32, vdupq_n_s64, vdupq_n_u32, vdupq_n_u64, vld1q_s64, vld1q_u32, vmovn_u64, vorrq_u32,
-    vorrq_u64,
-};
+// Under Miri no set runs, so the tokens have no values, and the code that
+// the functions compiled for a set run on theirs cannot be reached.
+#![cfg_attr(miri, allow(unreachable_code, unused_variables))]
+
 use core::array;
 
-use super::{LANE_WEIGHTS, Neon, datum, dense};
+use super::{Neon, Simd, Vectors};
+
+/// Rows of a pass of int4 values.
+const PASS: usize = 32;
+
+/// The most vectors a pass holds, on the set with the narrowest ones.
+const PASS_VECTORS: usize = 8;
 
 /// Rows of a dense block whose value is one of `keys`, as bits in row
 /// order. NULL rows compare like any other and are masked by the caller.
 #[inline]
-pub fn set_dense(_: Neon, values: &[i32; 64], keys: &[i32]) -> u64 {
-    // SAFETY: the token proves that this processor runs NEON.
-    unsafe { set32(dense(values), keys) }
+pub fn set_dense(neon: Neon, values: &[i32; 64], keys: &[i32]) -> u64 {
+    // SAFETY: the token proves that this processor runs NEON, the vector
+    // set of the target where it has values, which `dense_lanes` is
+    // compiled for.
+    unsafe { dense_lanes(neon.simd(), values, keys) }
 }
 
 /// Rows of a Datum block whose int4 value is one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_datum(_: Neon, values: &[u64; 64], keys: &[i32]) -> u64 {
-    // SAFETY: as in set_dense.
-    unsafe { set32(datum(values), keys) }
+pub fn set_datum(neon: Neon, values: &[u64; 64], keys: &[i32]) -> u64 {
+    // SAFETY: as in set_dense, for `datum_lanes`.
+    unsafe { datum_lanes(neon.simd(), values, keys) }
 }
 
 /// Rows of a dense block of int8 values that are one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_dense64(_: Neon, values: &[i64; 64], keys: &[i64]) -> u64 {
-    // SAFETY: as in set_dense.
-    unsafe { set64(values, keys) }
+pub fn set_dense64(neon: Neon, values: &[i64; 64], keys: &[i64]) -> u64 {
+    // SAFETY: as in set_dense, for `lanes64`.
+    unsafe { lanes64(neon.simd(), values, keys) }
 }
 
 /// Rows of a Datum block whose int8 value is one of `keys`, NULL rows
 /// included as above.
 #[inline]
-pub fn set_datum64(_: Neon, values: &[u64; 64], keys: &[i64]) -> u64 {
+pub fn set_datum64(neon: Neon, values: &[u64; 64], keys: &[i64]) -> u64 {
     // SAFETY: `[u64; 64]` and `[i64; 64]` have the same size and alignment,
     // and every bit pattern is valid for both: a Datum holding an int8 is
     // its bits.
     let values = unsafe { &*values.as_ptr().cast::<[i64; 64]>() };
-    // SAFETY: as in set_dense.
-    unsafe { set64(values, keys) }
+    // SAFETY: as in set_dense, for `lanes64`.
+    unsafe { lanes64(neon.simd(), values, keys) }
 }
 
-/// Two passes of eight groups of four int4 lanes.
+// The functions compiled for the vector set of the target, into which the
+// kernels below are inlined; the kernels carry its feature and are
+// `#[inline]`, as in `arith.rs`. The functions are `#[inline]` too, as the
+// NEON code of the sets was: on AArch64, whose target carries NEON, they
+// are inlined into the driver, and on x86-64 they stay its calls, since
+// the driver is compiled for no set.
+
 #[inline]
-#[target_feature(enable = "neon")]
-fn set32(load: impl Fn(usize) -> int32x4_t, keys: &[i32]) -> u64 {
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn dense_lanes(simd: Simd, values: &[i32; 64], keys: &[i32]) -> u64 {
+    // SAFETY: `set32` asks for the groups of a word only.
+    set32(simd, |group| unsafe { simd.load(values, group) }, keys)
+}
+
+#[inline]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn datum_lanes(simd: Simd, values: &[u64; 64], keys: &[i32]) -> u64 {
+    // SAFETY: as in `dense_lanes`.
+    set32(
+        simd,
+        |group| unsafe { simd.load_datums(values, group) },
+        keys,
+    )
+}
+
+#[inline]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn lanes64(simd: Simd, values: &[i64; 64], keys: &[i64]) -> u64 {
+    set64(simd, values, keys)
+}
+
+/// Two passes of int4 lanes, each packed as two quarters.
+#[inline]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn set32<V: Vectors>(v: V, load: impl Fn(usize) -> V::I32, keys: &[i32]) -> u64 {
+    let groups = PASS / V::LANES;
+    let quarter = groups / 2;
     let mut bits = 0;
-    for half in 0..2 {
-        let values: [int32x4_t; 8] = array::from_fn(|group| load(half * 8 + group));
-        let mut equal = [vdupq_n_u32(0); 8];
+    for pass in 0..64 / PASS {
+        // A set with fewer groups to a pass fills the rest with copies,
+        // which no key is compared with.
+        let values: [V::I32; PASS_VECTORS] =
+            array::from_fn(|group| load(pass * groups + group % groups));
+        let mut equal = [v.none(); PASS_VECTORS];
         for &key in keys {
-            let key = vdupq_n_s32(key);
-            for (equal, values) in equal.iter_mut().zip(values) {
-                *equal = vorrq_u32(*equal, vceqq_s32(values, key));
+            let key = v.splat(key);
+            for (equal, values) in equal.iter_mut().zip(values).take(groups) {
+                *equal = v.or(*equal, v.eq(values, key));
             }
         }
-        bits |= quarter_bits(&equal[..4]) << (half * 32);
-        bits |= quarter_bits(&equal[4..]) << (half * 32 + 16);
+        bits |= v.pack_quarter(|group| equal[group]) << (pass * PASS);
+        bits |= v.pack_quarter(|group| equal[quarter + group]) << (pass * PASS + 16);
     }
     bits
 }
 
-/// Four passes of four groups, each two pairs of int8 lanes narrowed into
-/// four 32-bit lanes after the keys.
+/// Four passes of int8 lanes, each a quarter of the word.
 #[inline]
-#[target_feature(enable = "neon")]
-fn set64(values: &[i64; 64], keys: &[i64]) -> u64 {
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn set64<V: Vectors>(v: V, values: &[i64; 64], keys: &[i64]) -> u64 {
+    let vectors = 16 / V::LANES64;
     let mut bits = 0;
     for quarter in 0..4 {
-        // SAFETY: `quarter` is below 4, so the sixteen lanes read end within
-        // the array.
-        let pairs: [int64x2_t; 8] = array::from_fn(|pair| unsafe {
-            vld1q_s64(values.as_ptr().add(quarter * 16 + pair * 2))
+        // SAFETY: `quarter` is below 4 and `index % vectors` below
+        // `vectors`, so every vector read is one of the word's; the copies
+        // are as in `set32`.
+        let pairs: [V::I64; PASS_VECTORS] = array::from_fn(|index| unsafe {
+            v.load64(values, quarter * vectors + index % vectors)
         });
-        let mut equal = [vdupq_n_u64(0); 8];
+        let mut equal = [v.none64(); PASS_VECTORS];
         for &key in keys {
-            let key = vdupq_n_s64(key);
-            for (equal, pairs) in equal.iter_mut().zip(pairs) {
-                *equal = vorrq_u64(*equal, vceqq_s64(pairs, key));
+            let key = v.splat64(key);
+            for (equal, pairs) in equal.iter_mut().zip(pairs).take(vectors) {
+                *equal = v.or64(*equal, v.eq64(pairs, key));
             }
         }
-        let groups: [uint32x4_t; 4] = array::from_fn(|group| {
-            vcombine_u32(vmovn_u64(equal[group * 2]), vmovn_u64(equal[group * 2 + 1]))
-        });
-        bits |= quarter_bits(&groups) << (quarter * 16);
+        bits |= v.pack_quarter64(|index| equal[index]) << (quarter * 16);
     }
     bits
-}
-
-/// The 16 bits of four groups of lane masks, in row order.
-#[inline]
-#[target_feature(enable = "neon")]
-fn quarter_bits(groups: &[uint32x4_t]) -> u64 {
-    let mut passing = vdupq_n_u32(0);
-    for (group, weights) in groups.iter().zip(LANE_WEIGHTS) {
-        // SAFETY: every weight row has exactly four lanes.
-        let weights = unsafe { vld1q_u32(weights.as_ptr()) };
-        passing = vorrq_u32(passing, vandq_u32(*group, weights));
-    }
-    u64::from(vaddvq_u32(passing))
 }

@@ -18,7 +18,7 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
 use crate::BULK_MIN_ROWS;
-use crate::simd::{Neon, Token};
+use crate::simd::{self, Neon, Token, Vectors};
 
 /// At most this many keys are compared all at a row; more are searched.
 const LINEAR_KEYS: usize = 16;
@@ -85,24 +85,14 @@ impl SetValue for i32 {
 
     #[inline(always)]
     fn block_hits(neon: Neon, block: WordBlock<'_, Self>, keys: &[Self]) -> (u64, u64) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        {
-            use crate::simd;
-
-            match block {
-                WordBlock::Dense { values, non_nulls } => {
-                    (simd::set_dense(neon, values, keys), non_nulls)
-                }
-                WordBlock::Datum { values, isnull } => (
-                    simd::set_datum(neon, values, keys),
-                    simd::non_null_bits(neon, isnull),
-                ),
+        match block {
+            WordBlock::Dense { values, non_nulls } => {
+                (simd::set_dense(neon, values, keys), non_nulls)
             }
-        }
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (block, keys);
-            match neon {}
+            WordBlock::Datum { values, isnull } => (
+                simd::set_datum(neon, values, keys),
+                neon.non_null_bits(isnull),
+            ),
         }
     }
 }
@@ -112,24 +102,14 @@ impl SetValue for i64 {
 
     #[inline(always)]
     fn block_hits(neon: Neon, block: WordBlock<'_, Self>, keys: &[Self]) -> (u64, u64) {
-        #[cfg(all(target_arch = "aarch64", not(miri)))]
-        {
-            use crate::simd;
-
-            match block {
-                WordBlock::Dense { values, non_nulls } => {
-                    (simd::set_dense64(neon, values, keys), non_nulls)
-                }
-                WordBlock::Datum { values, isnull } => (
-                    simd::set_datum64(neon, values, keys),
-                    simd::non_null_bits(neon, isnull),
-                ),
+        match block {
+            WordBlock::Dense { values, non_nulls } => {
+                (simd::set_dense64(neon, values, keys), non_nulls)
             }
-        }
-        #[cfg(not(all(target_arch = "aarch64", not(miri))))]
-        {
-            let _ = (block, keys);
-            match neon {}
+            WordBlock::Datum { values, isnull } => (
+                simd::set_datum64(neon, values, keys),
+                neon.non_null_bits(isnull),
+            ),
         }
     }
 }
