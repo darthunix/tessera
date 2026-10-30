@@ -379,25 +379,30 @@ input_load(TessSortState *state, MergeInput *input)
 	input->place = 0;
 	if (input->block >= input->run->nblocks)
 		return false;
-	if (!tess_spill_read_header(input->reader, &header) || header.kind != TESS_SPILL_VALUES)
+	/* Both blocks of a pair are numbered as the run's block they make. */
+	if (!tess_spill_read_header(input->reader, &header) || header.kind != TESS_SPILL_VALUES ||
+		header.number != (uint32) input->block)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),
 				errmsg("TessSort run lost its block of values %d", input->block));
 	input->values = MemoryContextAllocExtended(context, Max(header.len, 8), MCXT_ALLOC_HUGE);
 	tess_spill_read_body(input->reader, input->values, header.len);
 	input->values_len = header.len;
-	if (!tess_spill_read_header(input->reader, &header) || header.kind != TESS_SPILL_COLUMNS)
+	if (!tess_spill_read_header(input->reader, &header) || header.kind != TESS_SPILL_COLUMNS ||
+		header.number != (uint32) input->block)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),
 				errmsg("TessSort run lost its block of rows %d", input->block));
 	input->chunk = MemoryContextAllocExtended(context, Max(header.len, 8), MCXT_ALLOC_HUGE);
 	tess_spill_read_body(input->reader, input->chunk, header.len);
+	tess_spill_expect_columns(input->chunk, sort_run_words(state),
+							  input->run->block_rows[input->block]);
+	/* Once a block: a merge reads a key at every comparison, unchecked. */
+	tess_spill_columns_check_values(input->chunk, state->ncolumns,
+									state->rows_config.typbyvals,
+									state->rows_config.typlens,
+									input->values, input->values_len);
 	input->rows = tess_spill_columns_rows(input->chunk);
-	if (input->rows != input->run->block_rows[input->block])
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("TessSort run block %d has %u rows, not %u", input->block,
-					input->rows, input->run->block_rows[input->block]));
 	input->block++;
 	return true;
 }
@@ -449,11 +454,9 @@ input_take(TessSortState *state, MergeInput *input, uint32 place, int out,
 			values[column][out] = (Datum) word;
 		else
 		{
-			const char *value = tess_spill_value_in(input->values, input->values_len, word);
-
-			if (value == NULL)
-				tess_spill_value_damaged();
-			values[column][out] = PointerGetDatum(value);
+			/* Checked whole when the block was loaded. */
+			Assert(tess_spill_value_in(input->values, input->values_len, word) != NULL);
+			values[column][out] = PointerGetDatum(input->values + tess_spill_value_byte(word));
 		}
 	}
 	if (keys != NULL)
@@ -475,14 +478,8 @@ input_value(TessSortState *state, MergeInput *input, int column, bool *isnull)
 		return (Datum) 0;
 	if (state->rows_config.typbyvals[column])
 		return (Datum) word;
-	else
-	{
-		const char *value = tess_spill_value_in(input->values, input->values_len, word);
-
-		if (value == NULL)
-			tess_spill_value_damaged();
-		return PointerGetDatum(value);
-	}
+	Assert(tess_spill_value_in(input->values, input->values_len, word) != NULL);
+	return PointerGetDatum(input->values + tess_spill_value_byte(word));
 }
 
 /*
@@ -821,19 +818,27 @@ sort_show_block_of(TessSortState *state, uint64 place)
 		MemoryContextSwitchTo(old);
 	}
 	tess_spill_seek(state->shown.reader, run->positions[low]);
-	if (!tess_spill_read_header(state->shown.reader, &header) || header.kind != TESS_SPILL_VALUES)
+	if (!tess_spill_read_header(state->shown.reader, &header) || header.kind != TESS_SPILL_VALUES ||
+		header.number != (uint32) low)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),
 				errmsg("TessSort run lost its block of values %d", low));
 	state->shown.values = MemoryContextAllocExtended(context, Max(header.len, 8), MCXT_ALLOC_HUGE);
 	tess_spill_read_body(state->shown.reader, state->shown.values, header.len);
 	state->shown.values_len = header.len;
-	if (!tess_spill_read_header(state->shown.reader, &header) || header.kind != TESS_SPILL_COLUMNS)
+	if (!tess_spill_read_header(state->shown.reader, &header) || header.kind != TESS_SPILL_COLUMNS ||
+		header.number != (uint32) low)
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),
 				errmsg("TessSort run lost its block of rows %d", low));
 	state->shown.chunk = MemoryContextAllocExtended(context, Max(header.len, 8), MCXT_ALLOC_HUGE);
 	tess_spill_read_body(state->shown.reader, state->shown.chunk, header.len);
+	/* The rows a window takes from the block are counted by the run's record. */
+	tess_spill_expect_columns(state->shown.chunk, sort_run_words(state), run->block_rows[low]);
+	tess_spill_columns_check_values(state->shown.chunk, state->ncolumns,
+									state->rows_config.typbyvals,
+									state->rows_config.typlens,
+									state->shown.values, state->shown.values_len);
 	state->shown.rows = tess_spill_columns_rows(state->shown.chunk);
 	state->shown.block = low;
 }
