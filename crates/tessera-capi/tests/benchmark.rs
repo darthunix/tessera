@@ -102,7 +102,7 @@ fn assert_sums<C: ColumnReader<Value = i32>>(
 #[test]
 fn reference_matches_scalar_model_and_bitmap_views() {
     let cases = reading::cases();
-    assert_eq!(cases.len() * 2, 34);
+    assert_eq!(cases.len() * 2, 38);
     for case in cases {
         let rows = case.selected.reference();
         let prepared = case.prepared.as_ref().map(fixture::Bitmap::reference);
@@ -308,10 +308,12 @@ fn reader_cases_are_fixed() {
         [
             "words/1024/all/nulls-none/ready",
             "words/1024/half/nulls-none/ready",
+            "words/1024/eighth/nulls-none/ready",
             "words/1024/sparse/nulls-none/ready",
             "words/1024/empty/nulls-none/ready",
             "words/1024/all/nulls-mixed/ready",
             "words/1024/half/nulls-mixed/ready",
+            "words/1024/eighth/nulls-mixed/ready",
             "words/1024/sparse/nulls-mixed/ready",
             "words/1024/empty/nulls-mixed/ready",
             "words/0/all/nulls-mixed/ready",
