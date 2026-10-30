@@ -22,6 +22,10 @@ The benchmark programs:
   `hashint8` fold.
 - [cast_int32](cast_int32.rs) widens int4 values into int8 Datums over the
   reading cases.
+- [set_int32](set_int32.rs) answers `x IN (…)` of int4 and of int8 values
+  over the reading cases, against sets of 4, 16, 17, 64 and 65 keys, on
+  either side of the bounds of the sets: a row compares up to 16 keys
+  all, and a whole word up to 64 int4 keys or 16 int8 ones.
 - [table_int32](table_int32.rs) builds the hash table of section 5 over
   the reading cases as one int4 key per row: insertion into a fresh
   region, probes that hit and probes that miss, and grouping's
@@ -150,9 +154,11 @@ filter and a `reference` filter. Aggregating measures the `sum`, `min` and
 writing a result column, and a `reference` scalar loop computing `x + 7` with
 checked arithmetic. Hashing measures `hash` (one key, NULL rows rejected),
 `hash_group` (NULL as a group key), `two_keys` (`hash` then `hash_next` with
-the same column) and a `reference` scalar loop hashing one key. The
-reference is a simple separate implementation of the same task, not another
-source revision.
+the same column) and a `reference` scalar loop hashing one key. Sets
+measure `keys4`, `keys16`, `keys17`, `keys64` and `keys65`, membership in
+a set of that many keys, and a `reference` scalar loop that searches 16
+keys by binary search. The reference is a simple separate implementation
+of the same task, not another source revision.
 
 The `cases()` functions and measured operations are in
 [reading.rs](support/reading.rs) and [filtering.rs](support/filtering.rs).
