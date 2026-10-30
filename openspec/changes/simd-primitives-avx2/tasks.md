@@ -2,12 +2,12 @@
 
 Every task is one commit on the branch `simd-primitives-avx2`, in the
 worktree of that name. Sections 1 to 3 are the first step and reach
-`main` in a first pull request; sections 4 to 6 are the second step,
-in a second. Each commit passes `make rust-check` and
-`.github/scripts/check-specs.sh`, run with the version of OpenSpec
-that `ci.yml` names; the check named in a task comes on top. A commit
-of more than about 500 lines of production code says in its message
-why it is not split.
+`main` in a first pull request; section 4 is the second step, in a
+second; sections 5 and 6 are the third, in a third. Each commit passes
+`make rust-check` and `.github/scripts/check-specs.sh`, run with the
+version of OpenSpec that `ci.yml` names; the check named in a task
+comes on top. A commit of more than about 500 lines of production
+code says in its message why it is not split.
 
 The words used below:
 
@@ -156,6 +156,9 @@ keeps a hook that takes `Neon`, with the reason in its comment.
        move check
 - [x] 4.19 The sets on AVX2, and the lanes of a vector in
        `docs/kernels.md`, "Sets". Check: as in 4.2, on `set_int32`
+- [ ] 4.20 Open the second pull request, into `main`, with the families
+       of this section. Check: every item of its description points to
+       a test, a command or the id of a run
 
 ## 5. Decisions measured again on Intel
 
@@ -211,7 +214,7 @@ reason saying that both machines were measured.
 
       Check: `.github/scripts/check-specs.sh`; no line of the roadmap
       names `simd-primitives-avx2`
-- [ ] 6.3 Open the second pull request, which closes the change, with
+- [ ] 6.3 Open the third pull request, which closes the change, with
       the outcome under Decision as `CONTRIBUTING.md`, "Closing a
       change", asks. Check: every item of its description points to a
       test, a command or the id of a run

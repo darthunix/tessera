@@ -839,10 +839,13 @@ aarch64-apple-darwin`.
 - [One Intel machine decides for every x86-64] → The AMD Zen servers
   of the target platform are left to `linux-x86-support`.
 
-## Two steps, two pull requests
+## Three steps, three pull requests
 
 - Step 1, sections 1 to 3 of the tasks: the tools, the run on the
   Intel Mac and the pilot. Its pull request reports the pilot, and the
   maintainer's merge decides between the primitives and the fallback.
-- Step 2, sections 4 to 6: the other families, the decisions measured
-  again, and the close.
+- Step 2, section 4: the other families, each moved and opened on
+  AVX2. The maintainer chose to merge them before the decisions are
+  measured again, so that the third step starts from `main`.
+- Step 3, sections 5 and 6: the decisions measured again, and the
+  close.
