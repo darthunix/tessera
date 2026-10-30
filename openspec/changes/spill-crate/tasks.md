@@ -164,7 +164,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       the spec of `hash-table` where it says that a negative partition
       is taken only before the split. Check: Rust tests of both;
       `make rust-check`; `.github/scripts/check-specs.sh`
-- [ ] 2.14 Show by tests, then fix, damaged bytes that reach the C of
+- [x] 2.14 Show by tests, then fix, damaged bytes that reach the C of
       the sort: it reads a chunk of columns by its own count of
       columns, not the chunk's; its reader of a single run, which a
       scrollable cursor uses, does not compare a block's rows with the
