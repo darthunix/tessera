@@ -46,6 +46,9 @@ mod reading;
 #[path = "../benches/support/reading64.rs"]
 #[allow(dead_code)]
 mod reading64;
+#[path = "../benches/support/sets.rs"]
+#[allow(dead_code)]
+mod sets;
 #[path = "../benches/support/mod.rs"]
 mod support;
 #[path = "../benches/support/tabling.rs"]
@@ -263,6 +266,34 @@ fn hash64_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
             &reading64::Input::new(&datum, &case),
             &case,
             hashing64::datum_reference,
+        )?;
+    }
+    Ok(())
+}
+
+#[test]
+fn set_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
+    check_sets::<i32>()?;
+    check_sets::<i64>()
+}
+
+fn check_sets<T: sets::Width>() -> Result<()> {
+    let cases = T::cases();
+    let keys = sets::keys(&cases)?;
+    for case in &cases {
+        let dense = case.dense_column()?;
+        sets::check(
+            &sets::Input::new(&dense, case),
+            case,
+            &keys,
+            sets::dense_reference,
+        )?;
+        let datum = case.datum_column()?;
+        sets::check(
+            &sets::Input::new(&datum, case),
+            case,
+            &keys,
+            sets::datum_reference,
         )?;
     }
     Ok(())
