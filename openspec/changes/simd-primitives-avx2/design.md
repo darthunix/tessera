@@ -721,6 +721,38 @@ No one bound fits every family on Intel, and the rule of the plan,
 gains on `eighth` and no loss elsewhere, keeps 12. A bound for each
 family is a finding the maintainer has not decided on.
 
+The bounds of the sets stay 64 int4 and 16 int8 keys on x86-64, and
+the step of halving stays a branch there. `set_int32` first gained two
+cases of its own: 16 selected rows a word, `quarter`, and every row
+selected with its values in random order, `shuffled`. Two candidates
+were run against the base, twice each:
+
+- the bounds at 65 int4 and 65 int8 keys, whose machine code changes in
+  its immediates only (`compare-5cYfxV`, `compare-VGt7XK`). Sets of 65
+  int4 keys compared whole take 29 to 77 % fewer cycles on words of 32
+  to 64 selected rows and about as many on words of 16, but 95 to
+  146 % more on words of NULL rows only, `nulls-all`, and a word of one
+  row takes 2 % more instructions. Sets of 64 and 65 int8 keys take 23
+  to 55 % fewer cycles on full words, but up to 39 % more on words of
+  32 rows, up to 62 % on rows chosen at random and 91 to 131 % on words
+  of 16;
+- the step of halving as a choice made as data, `select_unpredictable`,
+  which is a `cmov` in place of the branch on x86-64 and changes no
+  instruction on AArch64 (`compare-jrOJVK`, `compare-HvMjlC`). A search
+  by halving takes up to 21 % more cycles, with 4 to 11 % fewer
+  instructions, and none gains 3 % in both runs: each step waits for the
+  load of its key, where the branch goes on by its prediction. Values
+  in random order do not help the choice: the benchmark repeats its
+  rows every call, and the predictor learns them, 12 to 15 misses of
+  about 19 750 branches a call whether the values are in order or not.
+
+Both candidates lose somewhere, so the rule of the plan keeps the
+bounds and the branch. Two findings the maintainer has not decided on:
+a bound of the sets that grows with the selected rows of a word, since
+full words pay to far more keys than words of 16 rows; and a benchmark
+whose values the predictor cannot learn, without which the branch of
+halving cannot be judged against a choice made as data.
+
 Last comes the prefetch hint of `relhash`. The probe of a batch asks
 the processor to fetch the next bucket and record early, and the
 gather of a sort the records of a word, through the crate's own copy of

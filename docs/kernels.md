@@ -215,8 +215,10 @@ four int4 lanes or two int8 ones on NEON, and eight or four on AVX2; a
 pass is eight vectors on NEON and four on AVX2, which has half as many
 registers. Beyond these bounds halving costs a row less. Every other word
 is read at its selected rows: up to 16 keys compared all, without a branch
-a key; more searched by halving, the comparison picking the half as data,
-so that a row costs the same whatever its value. Over 2 M rows an int4 `IN`
+a key; more searched by halving. A step of halving picks the half as data
+on AArch64, so that a row costs the same whatever its value, and is a
+branch on x86-64, where a choice made as data cost more cycles in the
+benchmark, whose values the predictor learns. Over 2 M rows an int4 `IN`
 of 2 to 100 constants costs 1.02 to 1.35 times a single comparison, and
 runs 0.20 to 0.28 of the core's time.
 
