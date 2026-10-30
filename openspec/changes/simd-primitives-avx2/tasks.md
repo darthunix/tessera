@@ -145,7 +145,7 @@ keeps a hook that takes `Neon`, with the reason in its comment.
 - [x] 4.14 The hash of int4 on AVX2. Check: as in 4.2, on `hash_int32`
 - [x] 4.15 The hash of int8, `simd/hash64.rs`, over the primitives.
        Check: the move check
-- [ ] 4.16 The hash of int8 on AVX2. Check: as in 4.2, on `hash_int64`
+- [x] 4.16 The hash of int8 on AVX2. Check: as in 4.2, on `hash_int64`
 - [ ] 4.17 A benchmark program of the sets, `set_int32`: `IN` of int4
        and of int8 keys over the reading cases, with 4, 16, 17, 64
        and 65 keys, known to `tessera-bench` and listed in the README
