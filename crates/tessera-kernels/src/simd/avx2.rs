@@ -83,6 +83,12 @@ impl Vectors for Avx2 {
     }
 
     #[inline(always)]
+    fn pack_quarter(self, lanes: impl Fn(usize) -> __m256i) -> u64 {
+        // SAFETY: as in `splat`.
+        unsafe { quarter_lanes(lanes) }
+    }
+
+    #[inline(always)]
     fn non_null_bits(self, isnull: &[bool; 64]) -> u64 {
         // SAFETY: as in `splat`.
         unsafe { non_null_lanes(isnull) }
@@ -351,6 +357,12 @@ impl Vectors for Avx2 {
     }
 
     #[inline(always)]
+    fn pack_quarter64(self, lanes: impl Fn(usize) -> __m256i) -> u64 {
+        // SAFETY: as in `splat`.
+        unsafe { quarter64_lanes(lanes) }
+    }
+
+    #[inline(always)]
     unsafe fn store64(self, at: *mut i64, lanes: __m256i) {
         // SAFETY: the token proves that this processor runs AVX2, and the
         // caller keeps `at` valid for the four values written, which take
@@ -582,6 +594,32 @@ fn pack_lanes(lanes: impl Fn(usize) -> __m256i) -> u64 {
     for group in 0..8 {
         let mask = _mm256_movemask_ps(_mm256_castsi256_ps(lanes(group)));
         bits |= u64::from(mask as u8) << (group * 8);
+    }
+    bits
+}
+
+/// The 16 bits of a quarter from the lane masks of its two groups, as in
+/// `pack_lanes`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn quarter_lanes(lanes: impl Fn(usize) -> __m256i) -> u64 {
+    let mut bits = 0;
+    for group in 0..2 {
+        let mask = _mm256_movemask_ps(_mm256_castsi256_ps(lanes(group)));
+        bits |= u64::from(mask as u8) << (group * 8);
+    }
+    bits
+}
+
+/// The 16 bits of a quarter from the lane masks of its four vectors of
+/// int8 lanes, as in `pack64_lanes`.
+#[inline]
+#[target_feature(enable = "avx2")]
+fn quarter64_lanes(lanes: impl Fn(usize) -> __m256i) -> u64 {
+    let mut bits = 0;
+    for index in 0..4 {
+        let mask = _mm256_movemask_pd(_mm256_castsi256_pd(lanes(index)));
+        bits |= u64::from(mask as u8) << (index * 4);
     }
     bits
 }

@@ -4,21 +4,19 @@
 //! target. NEON runs on AArch64, and AVX2 on x86-64 where the processor
 //! has it, for the filters of int4 and int8, the comparisons of two such
 //! columns, their arithmetic and aggregates, the count, the widening cast
-//! and the hashes of their keys; the other kernels are NEON's alone, and
-//! those not yet written over the primitives are compiled only on
-//! AArch64. Under Miri no set runs, and callers fall back to the row
-//! paths. Instructions always drop with vectors, so a kernel here is kept
-//! on its cycle gain (see the benchmark guide). This is the one module of
-//! the crate allowed to use `unsafe`, for vector loads from borrowed
-//! arrays and for the intrinsics; every load states why it stays in
-//! bounds.
+//! and the hashes of their keys; the sets are NEON's alone. Under Miri no
+//! set runs, and callers fall back to the row paths. Instructions always
+//! drop with vectors, so a kernel here is kept on its cycle gain (see the
+//! benchmark guide). This is the one module of the crate allowed to use
+//! `unsafe`, for vector loads from borrowed arrays and for the
+//! intrinsics; every load states why it stays in bounds.
 //!
 //! A kernel is written once over the primitives of [`Vectors`], which each
-//! vector set implements (`neon.rs`, `avx2.rs`); the kernels not yet moved
-//! call the NEON intrinsics themselves. Intrinsics are callable without `unsafe`
-//! only from functions carrying the `neon` feature; closures inherit it
-//! from the function that defines them, and a primitive, which carries no
-//! feature, calls them in an `unsafe` block whose reason is its token.
+//! vector set implements (`neon.rs`, `avx2.rs`). Intrinsics are callable
+//! without `unsafe` only from functions carrying the `neon` feature;
+//! closures inherit it from the function that defines them, and a
+//! primitive, which carries no feature, calls them in an `unsafe` block
+//! whose reason is its token.
 //! Public entry points are plain functions that take the token of NEON,
 //! whose value proves that the processor runs it, and make the one `unsafe`
 //! call into the feature-carrying code.
@@ -116,6 +114,11 @@ pub(crate) trait Vectors: Token + 'static {
     /// its groups: `lanes(group)` for every group below `64 / LANES`, and
     /// for no other.
     fn pack(self, lanes: impl Fn(usize) -> Self::M32) -> u64;
+
+    /// The 16 bits of a quarter of a word in the order of its rows, from
+    /// the lane masks of its groups: `lanes(group)` for every group below
+    /// `16 / LANES`, counted from the quarter's first, and for no other.
+    fn pack_quarter(self, lanes: impl Fn(usize) -> Self::M32) -> u64;
 
     /// The rows of a Datum block whose flag is false, as bits in the order
     /// of its rows.
@@ -306,6 +309,12 @@ pub(crate) trait Vectors: Token + 'static {
     /// where it is cheapest, as NEON on the narrowed masks of four rows.
     fn pack64(self, invert: bool, lanes: impl Fn(usize) -> Self::M64) -> u64;
 
+    /// The 16 bits of a quarter of a word in the order of its rows, from
+    /// the lane masks of its int8 vectors: `lanes(index)` for every index
+    /// below `16 / LANES64`, counted from the quarter's first, and for no
+    /// other.
+    fn pack_quarter64(self, lanes: impl Fn(usize) -> Self::M64) -> u64;
+
     /// Write `lanes` to the `LANES64` values at `at`, which need no
     /// alignment, as [`Vectors::store`] does for int4 lanes.
     ///
@@ -411,6 +420,10 @@ macro_rules! unreachable_vectors {
             }
 
             fn pack(self, _: impl Fn(usize) -> Self) -> u64 {
+                match self {}
+            }
+
+            fn pack_quarter(self, _: impl Fn(usize) -> Self) -> u64 {
                 match self {}
             }
 
@@ -574,6 +587,10 @@ macro_rules! unreachable_vectors {
                 match self {}
             }
 
+            fn pack_quarter64(self, _: impl Fn(usize) -> Self) -> u64 {
+                match self {}
+            }
+
             unsafe fn store64(self, _: *mut i64, _: Self) {
                 match self {}
             }
@@ -665,16 +682,15 @@ mod filter;
 mod filter64;
 mod hash;
 mod hash64;
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 mod set;
 
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 use core::arch::aarch64::{
     int32x4_t, uint8x8_t, uint32x4_t, uint64x2_t, vaddv_u8, vaddvq_u32, vandq_u8, vandq_u32,
     vceqzq_u8, vdup_n_u8, vdupq_n_u32, vget_high_s16, vget_high_u8, vget_low_s16, vget_low_s32,
-    vget_low_u8, vld1_u8, vld1q_s32, vld1q_u8, vld1q_u32, vld1q_u64, vmovl_high_s32, vmovl_s8,
-    vmovl_s16, vmovl_s32, vorrq_u32, vreinterpret_s8_u8, vreinterpretq_s32_u32,
-    vreinterpretq_s32_u64, vreinterpretq_u32_s32, vreinterpretq_u64_s64, vtst_u8, vuzp1q_s32,
+    vget_low_u8, vld1_u8, vld1q_u8, vld1q_u32, vld1q_u64, vmovl_high_s32, vmovl_s8, vmovl_s16,
+    vmovl_s32, vorrq_u32, vreinterpret_s8_u8, vreinterpretq_s32_u32, vreinterpretq_s32_u64,
+    vreinterpretq_u32_s32, vreinterpretq_u64_s64, vtst_u8, vuzp1q_s32,
 };
 
 pub use aggregate::{
@@ -688,7 +704,6 @@ pub use filter::{compare_sides, filter_datum, filter_dense};
 pub use filter64::{compare_sides64, filter_datum64, filter_dense64};
 pub use hash::{combine, combine_nulls, hash, hash_nulls};
 pub use hash64::{combine_nulls64, combine64, hash_nulls64, hash64};
-#[cfg(all(target_arch = "aarch64", not(miri)))]
 pub use set::{set_datum, set_datum64, set_dense, set_dense64};
 
 /// Bit weights of the four lanes of each group in a 16-row quarter.
@@ -702,14 +717,6 @@ const LANE_WEIGHTS: [[u32; 4]; 4] = [
 /// Bit weights of the bytes of two 8-row halves.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 const BYTE_WEIGHTS: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
-
-/// Rows of a Datum block whose flag is false, as bits in row order.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
-#[inline]
-pub fn non_null_bits(_: Neon, isnull: &[bool; 64]) -> u64 {
-    // SAFETY: the token proves that this processor runs NEON.
-    unsafe { non_null_lanes(isnull) }
-}
 
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
@@ -751,6 +758,21 @@ fn pack_lanes(lanes: impl Fn(usize) -> uint32x4_t) -> u64 {
     bits
 }
 
+/// The 16 bits of a quarter from the lane masks of its four groups: each
+/// group weighted by the bits of its rows, and the four added.
+#[cfg(all(target_arch = "aarch64", not(miri)))]
+#[inline]
+#[target_feature(enable = "neon")]
+fn quarter_lanes(lanes: impl Fn(usize) -> uint32x4_t) -> u64 {
+    let mut passing = vdupq_n_u32(0);
+    for (group, weights) in LANE_WEIGHTS.into_iter().enumerate() {
+        // SAFETY: every weight row has exactly four lanes.
+        let weights = unsafe { vld1q_u32(weights.as_ptr()) };
+        passing = vorrq_u32(passing, vandq_u32(lanes(group), weights));
+    }
+    u64::from(vaddvq_u32(passing))
+}
+
 /// The bit weights of eight rows, one per byte lane.
 #[cfg(all(target_arch = "aarch64", not(miri)))]
 #[inline]
@@ -773,24 +795,6 @@ fn lane_masks(bits: u8, weights: uint8x8_t) -> (uint32x4_t, uint32x4_t) {
         vreinterpretq_u32_s32(vmovl_s16(vget_low_s16(halves))),
         vreinterpretq_u32_s32(vmovl_s16(vget_high_s16(halves))),
     )
-}
-
-/// A loader of the four int4 values of each group of a dense block.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
-#[inline]
-#[target_feature(enable = "neon")]
-fn dense(values: &[i32; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
-    // SAFETY: `group` is below 16, so the four lanes read end within the array.
-    move |group| unsafe { vld1q_s32(values.as_ptr().add(group * 4)) }
-}
-
-/// A loader of the four int4 values of each group of a Datum block.
-#[cfg(all(target_arch = "aarch64", not(miri)))]
-#[inline]
-#[target_feature(enable = "neon")]
-fn datum(values: &[u64; 64]) -> impl Fn(usize) -> int32x4_t + '_ {
-    // SAFETY: `group` is below 16.
-    move |group| unsafe { load_datums(values, group) }
 }
 
 /// Four int4 values from four Datums: the low half of each, kept by uzp1.
