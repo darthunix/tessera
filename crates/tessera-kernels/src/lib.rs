@@ -47,12 +47,12 @@
 //! of the function or of its group gives the reason, and the attribute goes
 //! only after the same check. Most such decisions concern the code LLVM
 //! makes and hold on any target; a few were taken by timing. The bound of
-//! whole words, `BULK_MIN_ROWS`, was timed on an Apple M5 Pro and on an
-//! Intel Core i5 with AVX2. The others were timed on the M5 Pro and are to
-//! be measured again on x86 with the AVX2 kernels: the bounds of
-//! [`set::SetValue::WORD_KEYS`] and the branch-free compares of [`set`],
-//! and in `tessera-capi` the counted loop of a full word and the
-//! branch-free read of a NULL slot.
+//! whole words, `BULK_MIN_ROWS`, the bounds of the sets,
+//! [`set::SetValue::WORD_KEYS`], and the step of their search by halving
+//! were timed on an Apple M5 Pro and on an Intel Core i5 with AVX2. The
+//! others were timed on the M5 Pro and are to be measured again on x86
+//! with the AVX2 kernels: in `tessera-capi`, the counted loop of a full
+//! word and the branch-free read of a NULL slot.
 
 #![deny(unsafe_code)]
 

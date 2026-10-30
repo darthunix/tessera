@@ -170,7 +170,7 @@ reason saying that both machines were measured.
 - [x] 5.1 `BULK_MIN_ROWS`: 8 against 12 on the `eighth` cases. Check:
       as root, twice, the candidate in the working tree against
       `HEAD` on `filter_int32`, `arith_int32` and `aggregate_int32`
-- [ ] 5.2 `SetValue::WORD_KEYS` and the compares of the sets without
+- [x] 5.2 `SetValue::WORD_KEYS` and the compares of the sets without
       branches. Check: as root, twice, the candidates against `HEAD`
       on `set_int32`
 - [ ] 5.3 The counted loop of a full word, `try_fold_full_word`: the
