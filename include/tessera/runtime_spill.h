@@ -97,6 +97,21 @@ extern void tess_spill_shared_attach(SharedFileSet *shared,
  */
 extern void tess_spill_shared_reset(SharedFileSet *shared);
 
+/*
+ * In a build of PostgreSQL with injection points, a test may damage what a
+ * node reads back, past the reader's own checks, to show that the node's
+ * checks refuse it. The point "tessera-spill-header" is given the
+ * TessSpillHeader that tess_spill_read_header read; "tessera-spill-body"
+ * the body that tess_spill_read_body read, as below. Other builds have no
+ * such points.
+ */
+typedef struct TessSpillBodyRead
+{
+	TessSpillKind kind;
+	void	   *body;
+	Size		len;
+} TessSpillBodyRead;
+
 /* A row read back refers to a value outside its chunk of values: damaged data. */
 pg_noreturn extern void tess_spill_value_damaged(void);
 
