@@ -1,14 +1,14 @@
 ## 0. How the work goes
 
-Each task below is one pull request into `main`, of one to three
-commits. A task brings its evidence with it: the model, the property
-test, the cases of damage and the documentation of what it adds come
-in the same task as the code, not later. A task that moves a file named
-by a spec or a design edits those paths in the same commit. A task that
-replaces a call promised by `hash-table` or `spill-format` edits that
-spec in the same commit: it writes the requirement again for the new
-call, or moves it, with its tests, into this change's spec of
-`relspill`.
+The tasks reach `main` by pull requests, each of a few related tasks, a
+task of one to three commits. A task brings its evidence with it: the
+model, the property test, the cases of damage and the documentation of
+what it adds come in the same task as the code, not later. A task that
+moves a file named by a spec or a design edits those paths in the same
+commit. A task that replaces a call promised by `hash-table` or
+`spill-format` edits that spec in the same commit: it writes the
+requirement again for the new call, or moves it, with its tests, into
+this change's spec of `relspill`.
 
 Each commit that moves or changes Rust is checked by `make rust-check`,
 and by `tessera-bench --base <previous> --disasm` on every program and
@@ -252,9 +252,13 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       cases of `join` that spill
 - [ ] 3.13 Write the machine of the join's spill, its build: the spill
       at level 0 and the partitions sent to disk; the node still
-      decides the rest. Check: the machine's property test against a
-      join in memory; `make installcheck`; `make crosscheck`;
-      `cargo ab measure` of the family `spill`
+      decides the rest. An outer row keeps a hashed key on disk as the
+      64-bit hash the table keys by, a word of 8 bytes, not as its
+      value: no copy of the value, and no second hashing of a batch
+      read back, which the join tells from its child's. Check: the
+      machine's property test against a join in memory; the tests of
+      2.7; `make installcheck`; `make crosscheck`; `cargo ab measure`
+      of the family `spill`
 - [ ] 3.14 Add to the join's machine the partitions on disk, joined
       whole or split into a level below. Check: the property test; the
       cases of nested levels; `make installcheck`; `make crosscheck`
