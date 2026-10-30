@@ -73,7 +73,12 @@ unsafe fn assume_word<T>(slots: &[MaybeUninit<T>; 64]) -> &[T; 64] {
 // (a prepared row is initialized even when NULL) and the NULL bit selects
 // the result. A conditional branch or a selected load address here
 // alternated between a fast and a slower mode depending on per-core
-// predictor state in the `next()`-based paths.
+// predictor state in the `next()`-based paths. That was on an Apple M5 Pro.
+// On an Intel Core i5 with AVX2 a branch brought no such modes and took up to
+// 25% fewer cycles on rows read one by one, but up to 6% more instructions on
+// full words (compare-F6x7L1, compare-ldltge). The benchmark repeats its NULL
+// flags every call, so the predictor learned even those set at random: a
+// branch over flags it cannot learn was not measured.
 #[inline(always)]
 fn read_masked<T: Copy>(values: &[MaybeUninit<T>], row: usize, bits: u64) -> Option<T> {
     let present = bits & (1 << (row % 64)) != 0;
