@@ -66,6 +66,15 @@ impl Random {
     }
 }
 
+/// `values` in an order drawn from a fixed-seed generator.
+pub fn shuffled<T>(mut values: Vec<T>) -> Vec<T> {
+    let mut random = Random::seeded(values.len());
+    for row in (1..values.len()).rev() {
+        values.swap(row, (random.next() % (row as u64 + 1)) as usize);
+    }
+    values
+}
+
 pub struct Bitmap {
     nrows: usize,
     words: Vec<u64>,
@@ -153,6 +162,7 @@ impl<T: FixtureValue> Fixture<T> {
                     && match pattern {
                         "all" => true,
                         "half" => row % 2 == 0,
+                        "quarter" => row % 4 == 0,
                         "sparse" => row % 64 == 0,
                         "eighth" => row % 8 == 0,
                         "one-per128" => row % 128 == 0,
