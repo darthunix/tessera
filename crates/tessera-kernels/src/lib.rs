@@ -46,18 +46,25 @@
 //! their PMU counters (`crates/tessera-capi/benches/README.md`): the comment
 //! of the function or of its group gives the reason, and the attribute goes
 //! only after the same check. Most such decisions concern the code LLVM
-//! makes and hold on any target; a few were taken by timing on an Apple M5
-//! Pro and are to be measured again on x86 with the AVX2 kernels:
-//! `BULK_MIN_ROWS`, the bounds of [`set::SetValue::WORD_KEYS`] and the
-//! branch-free compares of [`set`], and in `tessera-capi` the counted loop
-//! of a full word and the branch-free read of a NULL slot.
+//! makes and hold on any target; a few were taken by timing. The bound of
+//! whole words, `BULK_MIN_ROWS`, was timed on an Apple M5 Pro and on an
+//! Intel Core i5 with AVX2. The others were timed on the M5 Pro and are to
+//! be measured again on x86 with the AVX2 kernels: the bounds of
+//! [`set::SetValue::WORD_KEYS`] and the branch-free compares of [`set`],
+//! and in `tessera-capi` the counted loop of a full word and the
+//! branch-free read of a NULL slot.
 
 #![deny(unsafe_code)]
 
 /// Selected rows in the first multi-row word from which whole-word kernels
 /// pay for the call, for every width: on an M5 Pro an int4 word costs 19
 /// cycles dense and 27 cycles Datum, an int8 word 24 and 29 (compare-ZxCFic),
-/// against about 2.4 to 2.5 cycles per selected row on the row path.
+/// against about 2.4 to 2.5 cycles per selected row on the row path. On an
+/// Intel Core i5-1038NG7 with AVX2, words of 8 rows taken whole gain on the
+/// filters, the hashes, the cast and `count`, and lose on the sums, `min`
+/// and `max`, the arithmetic by a constant, the compare of Datum columns
+/// and the sets of 16 and 64 keys, by up to 2.5 times the cycles (the
+/// `eighth` cases, compare-KyEXSY to compare-tw1q3k), so x86-64 keeps 12.
 pub(crate) const BULK_MIN_ROWS: u32 = 12;
 
 pub mod accumulate;
