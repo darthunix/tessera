@@ -514,6 +514,48 @@ What the moves found:
 The sets come last, because their bounds are measured again and they
 need a benchmark program of their own, which is added first.
 
+- A pass is 32 rows of int4 values or 16 of int8 ones on both sets:
+  eight vectors on NEON, as before, and four on AVX2, which has half as
+  many registers. Their move did not keep the NEON code of the four
+  drivers of `set_int32` (`disasm-mj1UwF`). The instructions are the
+  same in kind and number, in other registers and orders, and which
+  pass keeps its packs to the end of the word differs. Five forms were
+  tried, each against the old listing; none gave the old code for all
+  four drivers. So the move was measured on the M5 Pro
+  (`compare-3h7z3U`, `compare-wYIMAz`): no case fails on cycles. Calls
+  of no row on Datum blocks take 2.3 % more instructions, and dense
+  full words with four keys 1.4 % more, in the same cycles.
+- On AVX2 the sets gain most where few keys meet full words
+  (`compare-SSeR2c`, `compare-8gElBE`). Against the row path, full
+  words take 68 to 94 % fewer cycles with four int4 keys and 52 to 87 %
+  with four int8 keys. Where some rows are not NULL, sixteen keys take
+  73 to 84 % fewer for int4 and 64 to 76 % for int8, and 64 int4 keys
+  59 to 74 % fewer. On half and random words the gains are smaller,
+  down to 13 % for 64 int4 keys on random words.
+  Both bounds of whole words, 64 int4 keys and 16 int8 keys, still
+  gain on Intel; section 5 measures them again.
+- Words whose rows are all NULL lose: the row path skips their rows, at
+  2.7 cycles a row, while a whole word compares every lane. 64 int4
+  keys take 90 to 151 % more cycles there, and 16 int8 keys on Datum
+  blocks 22 to 23 % more. The driver does not look at how many rows
+  are NULL, on either set.
+- The int8 kernel spills two masks a quarter of a word, outside the
+  loop of the keys. LLVM packs each quarter after the loop of the next
+  one, and on x86-64 it unrolls that loop by two keys into 14 of the 16
+  registers. The int4 kernels keep their lanes in registers.
+- The driver decides on every word, so the row paths lose more than
+  those of the families that decide on the first word. Empty selections
+  of 1024 rows take 19 % more instructions, 143 a call, and sparse ones
+  7 %, on calls under 500 cycles. Three cases on the row path fail on
+  cycles in both runs: 17 keys on dense blocks of 63 int4 rows, 28 %
+  more, and of 64 and 65 int8 rows, 23 % more. Their loop of halving is
+  the same before and after, register for register, and only its place
+  in the code moved.
+- On x86-64 the halving of a row's search is a branch, `jg`, before as
+  after, not a choice made as data. The benchmark repeats the same
+  values every call, so the predictor learns them and misses almost
+  never there.
+
 ### The run-time choice on x86-64
 
 The vector path needs AVX2 and POPCNT: BMI and FMA are not used.
