@@ -48,6 +48,10 @@ fn mask_word(mask: Option<RowMaskView<'_>>, word_index: usize) -> u64 {
 // compiler materializes for the counted loop are then paid per full word,
 // not at the entry of every call, where empty, sparse and partial selections
 // would carry them for nothing.
+// Both were measured again on an Intel Core i5 with AVX2: there full words
+// read by the bit scan took 2 to 7 times the cycles of the counted loop, and
+// the loop inlined cost empty and sparse calls up to 22% more
+// (compare-NUZTP5, compare-5YmvqE; compare-6OWqws, compare-RxRTzU).
 #[inline(never)]
 fn try_fold_full_word<B, V>(
     base: usize,
