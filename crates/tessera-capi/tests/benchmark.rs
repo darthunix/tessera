@@ -278,7 +278,15 @@ fn set_kernels_match_the_fixture_model_on_every_case() -> Result<()> {
 }
 
 fn check_sets<T: sets::Width>() -> Result<()> {
-    let cases = T::cases();
+    let cases = sets::cases::<T>()?;
+    let names: Vec<_> = cases.iter().map(|case| case.name.as_str()).collect();
+    assert_eq!(
+        names[names.len() - 2..],
+        [
+            "words/1024/quarter/nulls-none/ready",
+            "words/1024/shuffled/nulls-none/ready"
+        ]
+    );
     let keys = sets::keys(&cases)?;
     for case in &cases {
         let dense = case.dense_column()?;

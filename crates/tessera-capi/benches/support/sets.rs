@@ -5,18 +5,22 @@
 //! up to 16 keys all and searches more by halving, and a whole word is
 //! compared with vector code up to 64 int4 keys or 16 int8 ones. The keys
 //! are the values of every seventh row of the cases of 1024 rows, so every
-//! set holds some of a case's values. The kernel writes the rows found
-//! and the rows present into masks allocated once per case; the reference
-//! is an independent scalar loop over the fixture's buffers that searches
-//! the 16 keys with the standard library's binary search. Results are
-//! checked against a model before counting.
+//! set holds some of a case's values. Besides the reading cases, two of
+//! the sets' own: 16 selected rows a word, near the rows from which a word
+//! is compared whole, and every row selected with its values in random
+//! order, so that the steps of a search by halving do not follow the rows.
+//! The kernel writes the rows found and the rows present into masks
+//! allocated once per case; the reference is an independent scalar loop
+//! over the fixture's buffers that searches the 16 keys with the standard
+//! library's binary search. Results are checked against a model before
+//! counting.
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use tessera_kernels::set::{self, KeySet, SetValue};
 
 use crate::support::{
-    fixture::{Bitmap, Fixture, FixtureValue},
+    fixture::{self, Bitmap, Fixture, FixtureValue},
     reference::Mask,
     runner::Runner,
 };
@@ -59,15 +63,36 @@ impl Width for i64 {
     }
 }
 
+/// The first case of 1024 rows, whose values grow with the row.
+fn first_long<T: Width>(cases: &[Fixture<T>]) -> Result<&Fixture<T>> {
+    cases
+        .iter()
+        .find(|case| case.values.len() == 1024)
+        .ok_or_else(|| anyhow::anyhow!("no case of 1024 rows"))
+}
+
+/// The reading cases of the width, then the sets' own two, of the values
+/// of the first case of 1024 rows.
+pub fn cases<T: Width>() -> Result<Vec<Fixture<T>>> {
+    let mut cases = T::cases();
+    let values = first_long(&cases)?.values.clone();
+    cases.push(Fixture::from_values(
+        values.clone(),
+        "quarter",
+        "none",
+        false,
+    ));
+    let mut case = Fixture::from_values(fixture::shuffled(values), "all", "none", false);
+    case.name = "words/1024/shuffled/nulls-none/ready".to_owned();
+    cases.push(case);
+    Ok(cases)
+}
+
 /// The largest set, of the values of every seventh row of the first case
 /// of 1024 rows; a smaller set is its first keys. The values grow with the
 /// row, so the keys are sorted without repeats.
 pub fn keys<T: Width>(cases: &[Fixture<T>]) -> Result<Vec<T>> {
-    let values = &cases
-        .iter()
-        .find(|case| case.values.len() == 1024)
-        .ok_or_else(|| anyhow::anyhow!("no case of 1024 rows"))?
-        .values;
+    let values = &first_long(cases)?.values;
     let count = KEY_COUNTS[KEY_COUNTS.len() - 1];
     let keys: Vec<_> = (0..count).map(|key| values[key * KEY_STRIDE]).collect();
     ensure!(
@@ -250,7 +275,7 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 }
 
 fn measure_width<T: Width>(runner: &mut Runner) -> Result<()> {
-    let cases = T::cases();
+    let cases = cases::<T>()?;
     let keys = keys(&cases)?;
     for case in &cases {
         measure_column(
