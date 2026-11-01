@@ -72,7 +72,10 @@ callers rely on, and what must be proven, stays small.
 
 ### No cost to Tessera
 A hot loop of Tessera compiles no longer through the crate's API than
-before the change, so that the box costs its first user nothing.
+before the change, but for the instructions of a prefetch hint given
+only to a table larger than the bound from which the counters show
+that the hint pays, so that the box costs its first user nothing it
+does not earn back.
 - **Checked by:** agent review — run `tessera-bench --base <base>
   --disasm` on every benchmark program and with `--module`, and list
   every loop longer than the base's, each with its reason
