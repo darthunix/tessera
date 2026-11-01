@@ -25,8 +25,9 @@ PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
-# Every module is rebuilt when a public header changes.
-$(MODULES:%=%.o): $(wildcard $(srcdir)/../include/tessera/*.h)
+# Every module is rebuilt when a public header or a header of the tests
+# changes.
+$(MODULES:%=%.o): $(wildcard $(srcdir)/../include/tessera/*.h) $(wildcard $(srcdir)/*.h)
 
 # The tests below link the Rust static library of the kernels or the
 # runtime library: the module rule of PGXS for the platform takes
