@@ -28,6 +28,10 @@
 #include "utils/selfuncs.h"
 #include "utils/typcache.h"
 
+#if TESS_MPP
+#include "cdb/cdbvars.h"
+#endif
+
 #include "tessera/expr.h"
 #include "tessera/kernel_ops.h"
 #include "tessera/plan.h"
@@ -1875,6 +1879,123 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
  * reads only the partitions expected to be left (leaves, expected_leaves),
  * and the outer child's cost is scaled down by as much.
  */
+#if TESS_MPP
+/* Whether a clause of the join reads a partition key of rel. */
+static bool
+join_reads_partition_key(RelOptInfo *rel, List *restrictlist)
+{
+	if (rel == NULL || rel->part_scheme == NULL || rel->partexprs == NULL)
+		return false;
+	foreach_node(RestrictInfo, rinfo, restrictlist)
+	{
+		foreach_node(Var, var, pull_var_clause((Node *) rinfo->clause, PVC_RECURSE_PLACEHOLDERS))
+		{
+			for (int key = 0; key < rel->part_scheme->partnatts; key++)
+			{
+				foreach_ptr(Node, expr, rel->partexprs[key])
+				{
+					if (same_column(expr, var))
+						return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
+/*
+ * Whether the family's planner may put a Partition Selector for this join
+ * on an Append in the outer side's slice (joinpartprune.c): an Append of a
+ * partitioned table, not parameterized, whose partition key a clause of
+ * the join reads, and no Motion above it. The walk follows the path kinds
+ * whose children plan in the same planner; a kind it does not know counts
+ * as such an Append, a subquery as none (planned by its own planner).
+ */
+static bool
+selector_append(Path *path, List *restrictlist)
+{
+	if (path == NULL)
+		return false;
+	switch (nodeTag(path))
+	{
+		case T_CdbMotionPath:
+			return false;
+		case T_AppendPath:
+		case T_MergeAppendPath:
+			{
+				List	   *subpaths = IsA(path, AppendPath) ?
+					((AppendPath *) path)->subpaths : ((MergeAppendPath *) path)->subpaths;
+				List	   *partitioned = IsA(path, AppendPath) ?
+					((AppendPath *) path)->partitioned_rels :
+					((MergeAppendPath *) path)->partitioned_rels;
+
+				if (path->param_info == NULL && partitioned != NIL &&
+					join_reads_partition_key(path->parent, restrictlist))
+					return true;
+				foreach_ptr(Path, subpath, subpaths)
+				{
+					if (selector_append(subpath, restrictlist))
+						return true;
+				}
+				return false;
+			}
+		case T_NestPath:
+		case T_MergePath:
+		case T_HashPath:
+			return selector_append(((JoinPath *) path)->outerjoinpath, restrictlist) ||
+				selector_append(((JoinPath *) path)->innerjoinpath, restrictlist);
+		case T_CustomPath:
+			foreach_ptr(Path, child, ((CustomPath *) path)->custom_paths)
+			{
+				if (selector_append(child, restrictlist))
+					return true;
+			}
+			return false;
+		case T_ProjectionPath:
+			return selector_append(((ProjectionPath *) path)->subpath, restrictlist);
+		case T_SortPath:
+			return selector_append(((SortPath *) path)->subpath, restrictlist);
+		case T_MaterialPath:
+			return selector_append(((MaterialPath *) path)->subpath, restrictlist);
+		case T_UniquePath:
+			return selector_append(((UniquePath *) path)->subpath, restrictlist);
+		case T_SubqueryScanPath:
+			return false;
+		case T_Path:
+		case T_IndexPath:
+		case T_BitmapHeapPath:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/*
+ * Whether a core's hash join of these sides could prune a side's
+ * partitions by a Partition Selector: it adds the selector after the plan
+ * is chosen and prices the join without its saving, so the node, which
+ * would read every partition, must not win the join from it. The core
+ * prunes its outer side, for a join that keeps no outer row without a
+ * pair (INNER, SEMI, RIGHT); with the sides the other way round, the
+ * node's inner side is the core's outer one, its join INNER, SEMI or, for
+ * the node's LEFT, RIGHT.
+ * shortcut: the node then stays out; with its own pruning by the build's
+ * keys over TessAppend, take the joins that pruning covers.
+ */
+static bool
+core_selects_partitions(JoinType jointype, Path *outer, Path *inner, List *restrictlist)
+{
+	if (Gp_role != GP_ROLE_DISPATCH || !gp_dynamic_partition_pruning ||
+		!enable_partition_pruning)
+		return false;
+	if ((jointype == JOIN_INNER || jointype == JOIN_SEMI || jointype == JOIN_RIGHT) &&
+		selector_append(outer, restrictlist))
+		return true;
+	return (jointype == JOIN_INNER || jointype == JOIN_SEMI || jointype == JOIN_LEFT) &&
+		selector_append(inner, restrictlist);
+}
+#endif
+
 static CustomPath *
 make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 			   JoinPathExtraData *extra, const JoinKeys *keys,
@@ -1895,6 +2016,38 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	double		inner_rows = shared ?
 		inner_path->rows * tess_parallel_divisor(inner_path) : inner_path->rows;
 
+#if TESS_MPP
+	{
+		/*
+		 * The family's constructor first: it places the Motions that bring
+		 * a key's rows together (cdbpath_motion_for_join), may shield a side
+		 * with a Material, and declines a join it cannot place. The node's
+		 * children are the sides it chose, with their Motions, and its path
+		 * the constructor's distribution; the inner rows those a segment
+		 * builds after its Motion.
+		 */
+		Path	   *made;
+
+		initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
+							  outer_path, inner_path, extra, shared);
+		foreach_node(RestrictInfo, rinfo, keys->rinfos)
+			rinfo->outer_is_left = bms_is_subset(rinfo->left_relids,
+												 outer_path->parent->relids);
+		made = create_hashjoin_path(root, joinrel, jointype, jointype, &workspace,
+									extra, outer_path, inner_path, shared,
+									extra->restrictlist, NULL,
+									extra->redistribution_clauses, hashclauses);
+		if (made == NULL || !IsA(made, HashPath) ||
+			core_selects_partitions(jointype, ((HashPath *) made)->jpath.outerjoinpath,
+									((HashPath *) made)->jpath.innerjoinpath,
+									extra->restrictlist))
+			return NULL;
+		template = (HashPath *) made;
+		outer_path = template->jpath.outerjoinpath;
+		inner_path = template->jpath.innerjoinpath;
+		inner_rows = inner_path->rows;
+	}
+#endif
 	outer = tess_batch_input_path(root, outer_path);
 	inner = lookup != NULL ? lookup->inner : tess_batch_input_path(root, inner_path);
 	/* A key that is an expression: its side's child computes it. */
@@ -1906,6 +2059,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		return NULL;
 	priced = tess_path_node(outer) == &tess_append_node ?
 		pruned_append(root, outer_path, leaves) : outer_path;
+#if !TESS_MPP
 	initial_cost_hashjoin(root, &workspace, jointype, hashclauses,
 						  priced, inner_path, extra, shared);
 	/*
@@ -1916,22 +2070,6 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	foreach_node(RestrictInfo, rinfo, keys->rinfos)
 		rinfo->outer_is_left = bms_is_subset(rinfo->left_relids,
 											 outer_path->parent->relids);
-#if TESS_MPP
-	{
-		/*
-		 * The family's constructor places the Motions that bring a key's
-		 * rows together, and declines a join it cannot place.
-		 */
-		Path	   *made = create_hashjoin_path(root, joinrel, jointype, jointype, &workspace,
-												extra, priced, inner_path, shared,
-												extra->restrictlist, NULL,
-												extra->redistribution_clauses, hashclauses);
-
-		if (made == NULL || !IsA(made, HashPath))
-			return NULL;
-		template = (HashPath *) made;
-	}
-#else
 	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
 									extra, priced, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
@@ -2530,14 +2668,6 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 void
 tess_hash_join_planner_init(void)
 {
-	/*
-	 * shortcut: on a core of the Greenplum family the planner offers the
-	 * node nowhere yet: its children must be the ones the family's join
-	 * path chose, with their Motions, and the executor must squelch the
-	 * sides it leaves unread first.
-	 */
-	if (TESS_MPP)
-		return;
 	previous_set_join_pathlist_hook = set_join_pathlist_hook;
 	set_join_pathlist_hook = join_pathlist;
 }
