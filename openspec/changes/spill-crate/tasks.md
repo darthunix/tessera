@@ -216,7 +216,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 - [x] 3.3 Make the packing of records take the layout from `relhash`;
       the bare numbers go. Check: tests that pack and unpack records
       that a table of `relhash` wrote; the same machine code
-- [ ] 3.4 Move `shared_spill.rs`, `phases.rs`, their loom models and
+- [x] 3.4 Move `shared_spill.rs`, `phases.rs`, their loom models and
       `spill_columns.rs` from the kernels to the crate. It is a plain
       move, except for the words in shared memory: the crate takes them
       as a slice of atomic words that `tessera-capi` makes. The kernels

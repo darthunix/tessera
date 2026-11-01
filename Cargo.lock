@@ -944,7 +944,6 @@ dependencies = [
  "loom",
  "proptest",
  "relhash",
- "tessera-testing",
 ]
 
 [[package]]
