@@ -1020,7 +1020,7 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 	spills = table_rows *
 		(double) (tess_table_record_bytes(keys->nkeys,
 										  sizeof(uint64) * (1 + ints + texts)) + 8) >
-		Min((double) tess_hash_memory_limit() * participants,
+		Min((double) tess_planned_memory_limit() * participants,
 			(double) TESS_TABLE_MEMORY_MAX);
 
 	/*
@@ -1960,6 +1960,10 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	 * Input Scan its producer, visit it so.
 	 */
 	config.flags |= CUSTOMPATH_GP_LAST_CHILD_FIRST;
+#endif
+#ifdef CUSTOMPATH_GP_MEMORY_INTENSIVE
+	/* Its table takes a share of the query's memory, as a Hash does (a fork's patch). */
+	config.flags |= CUSTOMPATH_GP_MEMORY_INTENSIVE;
 #endif
 	config.expressions = list_make5(keys->clauses, keys->outer, keys->inner,
 									keys->residual, keys->filters);

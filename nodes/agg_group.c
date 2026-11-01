@@ -133,7 +133,7 @@ add_chunk(TessAggState *state)
 {
 	int			chunk = state->table.nchunks;
 	Size		len = chunk == 0 ? TABLE_FIRST_CHUNK :
-		table_chunk_len(state->kernels, &state->status);
+		table_chunk_len(state->kernels, tess_hash_memory_limit(), &state->status);
 	void	   *base;
 
 	agg_reserve_chunks(state, chunk + 1);

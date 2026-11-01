@@ -11,7 +11,7 @@
 #include "table_chunks.h"
 
 Size
-table_chunk_len(const TessKernelOps *kernels, TessStatus *status)
+table_chunk_len(const TessKernelOps *kernels, Size memory, TessStatus *status)
 {
 	TessSpillShape shape = {
 		.share = 8,
@@ -20,7 +20,7 @@ table_chunk_len(const TessKernelOps *kernels, TessStatus *status)
 		.min_partitions = 1,
 		.max_partitions = 1,
 	};
-	TessSpillLevel level = {.limit = tess_hash_memory_limit()};
+	TessSpillLevel level = {.limit = memory};
 	TessSpillPlan plan;
 
 	tess_status_check(kernels->spill_plan(&shape, &level, &plan, status), status);

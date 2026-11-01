@@ -222,10 +222,10 @@ void
 join_note_memory(TessHashJoinState *state)
 {
 	Size		memory = join_memory(state);
-	Size		limit = tess_hash_memory_limit();
+	Size		limit = state->memory_limit;
 
 	state->peak_memory = Max(state->peak_memory, memory);
-	/* A batch's table: its excess over the hash_mem in force as it grows. */
+	/* A batch's table: its excess over the node's memory as it grows. */
 	if (state->lookup_key >= 0 && memory > limit)
 		state->counters[JOIN_OVERRUN] = Max(state->counters[JOIN_OVERRUN], memory - limit);
 }
@@ -353,7 +353,8 @@ Size
 join_table_chunk_len(TessHashJoinState *state)
 {
 	if (state->chunk_len == 0)
-		state->chunk_len = table_chunk_len(state->kernels, &state->status);
+		state->chunk_len = table_chunk_len(state->kernels, state->memory_limit,
+										   &state->status);
 	return state->chunk_len;
 }
 
@@ -745,7 +746,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 		2 * join_table_chunk_len(state) +
 		join_index_bytes(state, state->build_rows +
 						 (uint64) tess_row_mask_count(&batch->rows)) >
-		tess_hash_memory_limit())
+		state->memory_limit)
 		join_start_spill(state);
 	if (state->spill != NULL)
 	{

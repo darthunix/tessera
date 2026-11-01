@@ -194,6 +194,7 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->payload_columns = palloc0_array(int, JOIN_MAX_PAYLOAD);
 
 	state->expect_rescan = (eflags & EXEC_FLAG_REWIND) != 0;
+	state->memory_limit = tess_node_memory_limit(&css->ss.ps);
 #if TESS_MPP
 	/*
 	 * As the family's hash join: the children start in the order they run,
@@ -400,7 +401,7 @@ join_rescan(CustomScanState *css)
 static void
 join_counters(TessHashJoinState *state, uint64 *values)
 {
-	Size		limit = tess_hash_memory_limit();
+	Size		limit = state->memory_limit;
 
 	memcpy(values, state->counters, sizeof(state->counters));
 	if (state->qual != NULL)
@@ -583,7 +584,7 @@ static void
 init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 {
 	dsa_area   *area = join_query_dsa(state);
-	Size		budget = tess_hash_memory_limit();
+	Size		budget = state->memory_limit;
 
 	BarrierInit(&state->parallel.shared->build, 0);
 	state->parallel.shared->index = InvalidDsaPointer;
@@ -721,7 +722,7 @@ join_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
 
 		state->parallel.shared = coordinate;
 		state->parallel.shared_budget =
-			tess_table_memory_limit(Min(tess_hash_memory_limit(),
+			tess_table_memory_limit(Min(state->memory_limit,
 										SIZE_MAX / Max(state->parallel.shared->participants, 1)) *
 									state->parallel.shared->participants);
 		/* The files, through the segment the worker already maps. */

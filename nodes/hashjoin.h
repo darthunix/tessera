@@ -946,6 +946,11 @@ typedef struct TessHashJoinState
 	bool		done;
 	/* A parent may scan the join again (EXEC_FLAG_REWIND): no squelch at its end. */
 	bool		expect_rescan;
+	/*
+	 * The memory the node fills before it sends rows to disk, every one of
+	 * its decisions of memory taken by it (tess_node_memory_limit).
+	 */
+	Size		memory_limit;
 	bool		compact_decided;
 
 	/* Written by a kernel on failure only. */

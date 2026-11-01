@@ -731,7 +731,7 @@ side_share(TessHashJoinState *state, SpillSide *side, const char *prefix, bool m
 	config.shared = &state->parallel.shared->fileset;
 	config.participant = state->parallel.spill_participant;
 	config.name = psprintf("%s%d", prefix, state->css.ss.ps.plan->plan_node_id);
-	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(state->memory_limit);
 	side->file = tess_spill_create(&config);
 	side->shared_files = true;
 	if (!memory)
@@ -764,7 +764,7 @@ shared_split(TessHashJoinState *state)
 	TessSpillLevel level = {
 		.expected = state->kernels->spill_expected(held, (double) state->build_rows,
 												   state->inner_rows, (uint32) participants),
-		.limit = tess_hash_memory_limit(),
+		.limit = state->memory_limit,
 		.at_least = 2 * (uint32) participants,
 	};
 	TessSpillPlan plan;
@@ -1306,7 +1306,7 @@ static void
 make_rounds(TessHashJoinState *state)
 {
 	dsa_area   *area = join_query_dsa(state);
-	Size		limit = tess_hash_memory_limit();
+	Size		limit = state->memory_limit;
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
 	int			npartitions = (int) join_shared_partitions(state);
 	JoinRound  *rounds;
