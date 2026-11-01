@@ -27,9 +27,10 @@
 use core::cell::Cell;
 use core::sync::atomic::AtomicU64;
 
-use anyhow::{Result, ensure};
-
 use relhash::MAX_PARTITIONS;
+
+use crate::error::ensure;
+use crate::{Error, Result, Rule};
 
 /// The orderings of the words of a shared spill, by operation, which the
 /// loom model shares, so that it checks the orderings this code runs with.
@@ -89,7 +90,7 @@ const PART_WORDS: usize = 5;
 pub fn words_for(partitions: usize) -> Result<usize> {
     ensure!(
         (1..=MAX_PARTITIONS).contains(&partitions),
-        "a shared spill of {partitions} partitions is not 1 to {MAX_PARTITIONS}"
+        Error::wrong_call(Rule::SpillPartitions).with(partitions)
     );
     Ok(HEAD_WORDS + PART_WORDS * (partitions + 1))
 }
@@ -190,7 +191,7 @@ pub fn check_words(nwords: usize) -> Result<()> {
         nwords > HEAD_WORDS + PART_WORDS
             && nwords <= HEAD_WORDS + PART_WORDS * (MAX_PARTITIONS + 1)
             && (nwords - HEAD_WORDS).is_multiple_of(PART_WORDS),
-        "{nwords} words are no spill's state"
+        Error::wrong_call(Rule::SpillWords).with(nwords)
     );
     Ok(())
 }
@@ -282,8 +283,7 @@ pub struct Partition {
 pub fn splits(weights: &SplitWeights, partition: &Partition) -> Result<bool> {
     ensure!(
         partition.bits <= 32,
-        "a level of {} bits is past the 32 of the hash",
-        partition.bits
+        Error::wrong_call(Rule::SplitLevel).with(partition.bits)
     );
     let left = partition.limit.saturating_sub(partition.used) as f64;
     Ok(partition.size as f64 > weights.room * left
@@ -328,8 +328,9 @@ impl<W: Words> Spill<W> {
     pub fn split(&self, partitions: u32) -> Result<u32> {
         ensure!(
             partitions.is_power_of_two() && partitions as usize <= self.words.capacity(),
-            "{partitions} partitions are not a power of two up to {}",
-            self.words.capacity()
+            Error::wrong_call(Rule::Partitions)
+                .with(partitions)
+                .and(self.words.capacity())
         );
         Ok(
             match self
@@ -414,8 +415,9 @@ impl<W: Words> Spill<W> {
         if let Some(records) = records {
             ensure!(
                 records.each.len() == partitions as usize,
-                "{} counts of records for {partitions} partitions",
-                records.each.len()
+                Error::wrong_call(Rule::RecordCounts)
+                    .with(records.each.len())
+                    .and(partitions)
             );
         }
         if weights.per_check > 0 && evicted >= weights.per_check {
@@ -502,10 +504,10 @@ impl<W: Words> Spill<W> {
         self.update(self.part(partition, Field::Records), |before| {
             before.checked_add(records)
         })
-        .map_err(|before| {
-            anyhow::anyhow!(
-                "the records of partition {partition}, {before}, cannot take {records} more"
-            )
+        .map_err(|_| {
+            Error::wrong_call(Rule::PartitionRecords)
+                .with(partition)
+                .and(records)
         })?;
         Ok(())
     }
@@ -525,11 +527,18 @@ impl<W: Words> Spill<W> {
     /// Take the next file of a partition's inner rows, or of its outer
     /// rows: each number goes to one participant; `partition` may be the
     /// partitions' count, for the outer rows of those kept in memory.
+    ///
+    /// # Errors
+    ///
+    /// A partition past the partitions' count, before anything changes;
+    /// or a file number past a `u32`, after the count of files moved past
+    /// it: the spill words are then to be dropped.
     pub fn take_file(&self, partition: u32, outer: bool) -> Result<u32> {
         ensure!(
             partition <= self.partitions(),
-            "partition {partition} is past the {} of the table",
-            self.partitions()
+            Error::wrong_call(Rule::Partition)
+                .with(partition)
+                .and(self.partitions())
         );
         let field = if outer {
             Field::NextOuter
@@ -537,8 +546,7 @@ impl<W: Words> Spill<W> {
             Field::NextInner
         };
         let file = self.words.fetch_add(self.part(partition, field), 1);
-        u32::try_from(file)
-            .map_err(|_| anyhow::anyhow!("file {file} of partition {partition} is past 2^32 - 1"))
+        u32::try_from(file).map_err(|_| Error::wrong_call(Rule::FileNumber).with(partition))
     }
 
     /// Take a partition whole: true for the one participant that did.
@@ -572,12 +580,16 @@ impl<W: Words> Spill<W> {
             return self
                 .update(index, |before| before.checked_add(amount))
                 .map_err(|before| {
-                    anyhow::anyhow!("a spill counter passed 2^64 - 1: {before} bytes and {amount}")
+                    Error::wrong_call(Rule::CounterPast)
+                        .with(before)
+                        .and(amount)
                 });
         }
         self.update(index, |before| before.checked_sub(amount))
             .map_err(|before| {
-                anyhow::anyhow!("a spill counter went below zero: {before} bytes less {amount}")
+                Error::wrong_call(Rule::CounterBelow)
+                    .with(before)
+                    .and(amount)
             })
     }
 
@@ -597,8 +609,9 @@ impl<W: Words> Spill<W> {
     fn check_partition(&self, partition: u32) -> Result<()> {
         ensure!(
             partition < self.partitions(),
-            "partition {partition} is past the {} of the table",
-            self.partitions()
+            Error::wrong_call(Rule::Partition)
+                .with(partition)
+                .and(self.partitions())
         );
         Ok(())
     }
@@ -609,6 +622,12 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    /// The rule of a wrong call, which every refusal here is.
+    fn wrong(error: Error) -> Rule {
+        assert_eq!(error.kind(), crate::Kind::WrongCall, "{error}");
+        error.rule()
+    }
 
     /// A shared table's weights: past its budget, one partition a check.
     const SHARED: Weights = Weights {
@@ -641,6 +660,11 @@ mod tests {
         resident: 0.25,
         per_check: 0,
     };
+
+    /// The rule a call broke.
+    fn refused<T: core::fmt::Debug>(result: Result<T>) -> Rule {
+        wrong(result.expect_err("accepted"))
+    }
 
     /// `count` shared words, zero.
     fn atomics(count: usize) -> Vec<AtomicU64> {
@@ -687,7 +711,11 @@ mod tests {
         assert_eq!(spill.partitions(), 0);
         assert!(!spill.add_bytes(80, None).unwrap());
         assert!(spill.add_bytes(40, None).unwrap());
-        assert!(spill.split(3).is_err(), "not a power of two");
+        assert_eq!(
+            refused(spill.split(3)),
+            Rule::Partitions,
+            "not a power of two"
+        );
         assert_eq!(spill.split(4).unwrap(), 4);
         assert_eq!(spill.split(8).unwrap(), 4, "the first split holds");
         spill.add_bytes(10, Some(1)).unwrap();
@@ -705,7 +733,11 @@ mod tests {
         assert_eq!(evict(0), None, "no bytes left in memory");
         assert!(spill.add_bytes(-30, Some(2)).is_ok());
         assert_eq!(spill.bytes(), 80 + 40 + 10);
-        assert!(spill.on_disk(4).is_err(), "past the partitions");
+        assert_eq!(
+            refused(spill.on_disk(4)),
+            Rule::Partition,
+            "past the partitions"
+        );
     }
 
     #[test]
@@ -763,10 +795,9 @@ mod tests {
             each: &each[..3],
             ..records
         };
-        assert!(
-            spill
-                .evict(&JOIN, measured(0, 100), Some(short), 0)
-                .is_err(),
+        assert_eq!(
+            refused(spill.evict(&JOIN, measured(0, 100), Some(short), 0)),
+            Rule::RecordCounts,
             "a count for each partition"
         );
     }
@@ -838,8 +869,8 @@ mod tests {
         assert_eq!(words_for(1).unwrap(), 15);
         assert_eq!(words_for(4).unwrap(), 30);
         assert_eq!(words_for(65536).unwrap(), 327_690);
-        assert!(words_for(0).is_err());
-        assert!(words_for(65537).is_err());
+        assert_eq!(refused(words_for(0)), Rule::SpillPartitions);
+        assert_eq!(refused(words_for(65537)), Rule::SpillPartitions);
     }
 
     /// A total equal to the budget does not pass it; one byte more does.
@@ -858,9 +889,14 @@ mod tests {
         let local = vec![Cell::new(0); len + 1];
         assert!(SharedSpill::new(&shared[..len]).is_ok());
         assert!(LocalSpill::new(&local[..len]).is_ok());
-        assert!(LocalSpill::new(&local).is_err(), "not a whole partition");
-        assert!(
-            SharedSpill::new(&shared[..HEAD_WORDS + PART_WORDS]).is_err(),
+        assert_eq!(
+            refused(LocalSpill::new(&local)),
+            Rule::SpillWords,
+            "not a whole partition"
+        );
+        assert_eq!(
+            refused(SharedSpill::new(&shared[..HEAD_WORDS + PART_WORDS])),
+            Rule::SpillWords,
             "no partition"
         );
     }
@@ -999,8 +1035,11 @@ mod tests {
         };
         assert!(split(&weights, &partition(30)));
         assert!(!split(&weights, &partition(32)), "no bits left");
-        assert!(splits(&weights, &partition(33)).is_err());
-        assert!(splits(&weights, &partition(u32::MAX - 1)).is_err());
+        assert_eq!(refused(splits(&weights, &partition(33))), Rule::SplitLevel);
+        assert_eq!(
+            refused(splits(&weights, &partition(u32::MAX - 1))),
+            Rule::SplitLevel
+        );
     }
 
     /// Counts past their words are refused: the bytes and the records past
@@ -1014,18 +1053,25 @@ mod tests {
         spill.add_bytes(i64::MAX, Some(0)).unwrap();
         spill.add_bytes(i64::MAX, Some(1)).unwrap();
         spill.add_bytes(1, Some(2)).unwrap();
-        assert!(spill.add_bytes(1, Some(2)).is_err(), "the total");
+        assert_eq!(
+            refused(spill.add_bytes(1, Some(2))),
+            Rule::CounterPast,
+            "the total"
+        );
         spill.add_records(0, u64::MAX).unwrap();
-        assert!(spill.add_records(0, 1).is_err());
+        assert_eq!(refused(spill.add_records(0, 1)), Rule::PartitionRecords);
         spill
             .words
             .store(spill.part(1, Field::NextInner), u64::from(u32::MAX));
         assert_eq!(spill.take_file(1, false).unwrap(), u32::MAX);
-        assert!(spill.take_file(1, false).is_err());
+        assert_eq!(refused(spill.take_file(1, false)), Rule::FileNumber);
 
         let many = words_for(MAX_PARTITIONS).unwrap() + PART_WORDS;
-        assert!(SharedSpill::new(&atomics(many)).is_err());
-        assert!(LocalSpill::new(&vec![Cell::new(0); many]).is_err());
+        assert_eq!(refused(SharedSpill::new(&atomics(many))), Rule::SpillWords);
+        assert_eq!(
+            refused(LocalSpill::new(&vec![Cell::new(0); many])),
+            Rule::SpillWords
+        );
     }
 
     #[test]
@@ -1037,7 +1083,7 @@ mod tests {
         assert_eq!(spill.take_file(1, false).unwrap(), 1);
         assert_eq!(spill.take_file(1, true).unwrap(), 0);
         assert_eq!(spill.take_file(4, true).unwrap(), 0, "the resident rows");
-        assert!(spill.take_file(5, true).is_err());
+        assert_eq!(refused(spill.take_file(5, true)), Rule::Partition);
         assert!(spill.take_alone(3).unwrap());
         assert!(!spill.take_alone(3).unwrap());
         assert!(spill.alone(3).unwrap());
@@ -1055,14 +1101,14 @@ mod tests {
         assert!(spill.add_bytes(-10, None).is_ok(), "down to zero");
         assert_eq!(spill.bytes(), 0);
         spill.add_bytes(10, None).unwrap();
-        let error = spill.add_bytes(-20, None).unwrap_err();
-        assert!(error.to_string().contains("below zero"), "{error}");
+        assert_eq!(refused(spill.add_bytes(-20, None)), Rule::CounterBelow);
         let spill = self::spill(&mut words, 4, 100);
         spill.split(4).unwrap();
         spill.add_bytes(50, Some(0)).unwrap();
         spill.add_bytes(10, Some(1)).unwrap();
-        assert!(
-            spill.add_bytes(-20, Some(1)).is_err(),
+        assert_eq!(
+            refused(spill.add_bytes(-20, Some(1))),
+            Rule::CounterBelow,
             "a partition's bytes, while the table's total still covers them"
         );
     }
@@ -1085,14 +1131,14 @@ mod tests {
         assert!(!spill.add_bytes(-1, Some(0)).unwrap(), "equal again");
         // A wrong call: the total's bytes taken away as of no partition.
         spill.add_bytes(-100, None).unwrap();
-        assert!(spill.add_bytes(-10, Some(0)).is_err());
+        assert_eq!(refused(spill.add_bytes(-10, Some(0))), Rule::CounterBelow);
         assert_eq!((held(0), spill.bytes()), (100, 0), "partition 0 given back");
         // An addition the partition refuses gives the total back.
         spill.add_bytes(i64::MAX, Some(1)).unwrap();
         spill.add_bytes(i64::MAX - 5, Some(1)).unwrap();
         spill.add_bytes(-i64::MAX, None).unwrap();
         let (part, total) = (held(1), spill.bytes());
-        assert!(spill.add_bytes(10, Some(1)).is_err());
+        assert_eq!(refused(spill.add_bytes(10, Some(1))), Rule::CounterPast);
         assert_eq!(
             (held(1), spill.bytes()),
             (part, total),
@@ -1115,10 +1161,17 @@ mod tests {
             let before: Vec<u64> = (0..words_for(4).unwrap())
                 .map(|index| spill.words.load(index))
                 .collect();
-            assert!(spill.add_bytes(-11, Some(1)).is_err(), "below zero");
-            assert!(spill.add_bytes(2, Some(3)).is_err(), "the total");
-            assert!(spill.add_bytes(-1, Some(5)).is_err(), "past the split");
-            assert!(spill.add_records(2, 2).is_err(), "the records");
+            let refused = |result: Result<bool>| result.map_err(wrong);
+            assert_eq!(
+                refused(spill.add_bytes(-11, Some(1))),
+                Err(Rule::CounterBelow)
+            );
+            assert_eq!(refused(spill.add_bytes(2, Some(3))), Err(Rule::CounterPast));
+            assert_eq!(refused(spill.add_bytes(-1, Some(5))), Err(Rule::Partition));
+            assert_eq!(
+                spill.add_records(2, 2).map_err(wrong),
+                Err(Rule::PartitionRecords)
+            );
             let after: Vec<u64> = (0..words_for(4).unwrap())
                 .map(|index| spill.words.load(index))
                 .collect();

@@ -36,7 +36,7 @@ pub(super) fn check_aligned(words: *mut u64, what: &str) -> anyhow::Result<()> {
 /// no spill's, before a slice is made of them.
 fn check_spill_words(words: *mut u64, nwords: usize) -> anyhow::Result<()> {
     check_aligned(words, "a spill's words")?;
-    check_words(nwords)
+    Ok(check_words(nwords)?)
 }
 
 /// The shared state at `words`, of `nwords` words; null or misaligned
@@ -51,7 +51,8 @@ unsafe fn spill<'a>(words: *mut u64, nwords: usize) -> anyhow::Result<SharedSpil
     check_spill_words(words, nwords)?;
     // SAFETY: the caller's contract; an `AtomicU64` has the size and
     // alignment of a `u64`.
-    SharedSpill::new(unsafe { std::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) })
+    let words = unsafe { std::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
+    Ok(SharedSpill::new(words)?)
 }
 
 /// A process's own state at `words`, of `nwords` words; null or
@@ -67,7 +68,8 @@ unsafe fn local<'a>(words: *mut u64, nwords: usize) -> anyhow::Result<LocalSpill
     check_spill_words(words, nwords)?;
     // SAFETY: the caller's contract; a `Cell<u64>` has the size and
     // alignment of a `u64`.
-    LocalSpill::new(unsafe { std::slice::from_raw_parts(words.cast::<Cell<u64>>(), nwords) })
+    let words = unsafe { std::slice::from_raw_parts(words.cast::<Cell<u64>>(), nwords) };
+    Ok(LocalSpill::new(words)?)
 }
 
 /// `TessSpillWeights`: the weights of the rule that sends partitions to
