@@ -24,30 +24,29 @@ pull requests 49 and 50, and `join-pruning-cost` after it the same day;
 the other entries keep the order of the decisions of 2026-09-30 to
 2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390). The maintainer
 placed `spill-crate` first on 2026-10-28, after the close of
-`table-crate`, and `float-kernels-in-rust` second on 2026-11-01, after
-the review of what more can move from C to Rust:
+`table-crate`, and the float kernels second on 2026-11-01, after the
+review of what more can move from C to Rust; they are closed:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
-2. `float-kernels-in-rust`: The float kernels in Rust
-3. `explain-rows-per-loop`: The rows a node removed, per loop as the
+2. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-4. `join-pruning-cost`: The cost of a pruning join over the partitions
+3. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+4. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-6. `linux-x86-support`: Linux on x86-64 checked as the target platform
-7. `oltp-guard-bench`: OLTP guard family of benchmarks
-8. `runs-left-from-section-9`: Runs left to the maintainer from
+5. `linux-x86-support`: Linux on x86-64 checked as the target platform
+6. `oltp-guard-bench`: OLTP guard family of benchmarks
+7. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
-    `jit = on` control run
-11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+8. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+9. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+   `jit = on` control run
+10. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-12. `tpch-sf10`: TPC-H step 10: SF10
-13. `backward-scan-mark-restore`: Backward scan and mark/restore
-14. `postgresql-19`: PostgreSQL 19 support
-15. `pg-duckdb-comparison`: Comparison with pg_duckdb
+11. `tpch-sf10`: TPC-H step 10: SF10
+12. `backward-scan-mark-restore`: Backward scan and mark/restore
+13. `postgresql-19`: PostgreSQL 19 support
+14. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -148,6 +147,8 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   coverage of the C
 - `linux-arm64-ci`: PostgreSQL on Linux AArch64 in CI
 - `grouping-phases-machine`: The grouping's phases as a Rust machine
+- `float-aggregate-transitions`: The float transitions of the generic
+  aggregates in Rust
 
 ## Entries
 
@@ -170,36 +171,6 @@ on 2026-10-28, after the close of `table-crate`; it is the change
 - **Depends on:** nothing.
 - **Capabilities:** relspill, spill-format, hash-table
 - **Size:** large: about fifty pull requests.
-
-### float-kernels-in-rust
-
-The float kernels in Rust. From the review of 2026-11-01; the
-maintainer placed it second in the queue the same day.
-
-- **What:** The comparisons, arithmetic and casts of `float4` and
-  `float8` in `kernels/float.c` (`float_compare_evaluate`,
-  `float_value_evaluate`, `float4_value`, `float8_value`,
-  `float_to_integer`, `float_cast`) move to `tessera-kernels`, behind
-  entry points of `tessera-capi` called once a batch, as the integer
-  kernels are. C keeps the registration of the functions and raises
-  the status the call returns.
-- **Why:** They are the last kernels that only the SQL suites judge:
-  no Rust test, no mutant and no proof reaches them. They go a row at
-  a time over Datums through the core's inline functions of
-  `utils/float.h`, which raise with `ereport` inside the loop. In Rust
-  their rules (NaN equal to itself and above every number, -0,
-  overflow and underflow, the rounding of a cast to an integer) have
-  one place and a test against the core's answers.
-- **Known:** `kernels/float.c` has 385 lines and no fixed fault in its
-  history. Rust's `as` from a float to an integer saturates; the casts
-  must keep `rint`'s rounding, half to even, and the core's range
-  checks and errors. The float transitions of the generic aggregates
-  (`fast_float_advance` in `nodes/agg_generic.c`) are a later step over
-  the same rules, keeping the core's order of additions (see "Decided
-  against").
-- **Depends on:** nothing.
-- **Capabilities:** batch-functions, kernel-abi
-- **Size:** small to medium: one or two pull requests.
 
 ### explain-rows-per-loop
 
@@ -1897,12 +1868,43 @@ The grouping's phases as a Rust machine. From the review of
 - **Capabilities:** aggregate
 - **Size:** medium: two or three pull requests.
 
+### float-aggregate-transitions
+
+The float transitions of the generic aggregates in Rust. Left by the
+close of `float-kernels-in-rust`, 2026-11-01.
+
+- **What:** `fast_float_advance` in `nodes/agg_generic.c` computes the
+  states of the float aggregates (sums, averages, extremes and the
+  Youngs-Cramer variances of float4 and float8) a row at a time, in C,
+  with the core's checks. It moves to Rust over the rules of
+  `tessera_kernels::float`, a call over a batch of rows and of states
+  rather than a call a row.
+- **Why:** It is the last float arithmetic in C; only the SQL suites
+  judge it, as they judged the float kernels before they moved.
+- **Known:** The core's order of additions stays (see "Decided
+  against"), and so do its rounding of a float4 sum after each step and
+  the checks inside the variance's steps. The state is allocated in C;
+  a grouped aggregate needs the states of a batch's groups by
+  reference.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate, batch-functions
+- **Size:** medium: two or three pull requests.
+
 ## Not placed: the maintainer decides
 
 Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **The integer entry points borrow a whole column struct** (the close
+  of `float-kernels-in-rust`, 2026-11-01). `DatumColumn::ints`, behind
+  every int4 and int8 entry point of `tessera-capi`, makes a reference
+  to the whole `TessDatumColumn` before it checks `struct_size`. A
+  caller that allocates only the required fields
+  (`TESS_DATUM_COLUMN_MIN_SIZE`) gets undefined behavior, as the reader
+  of the calendar and float entry points did until that change read
+  the fields one by one. Suggested: the same, with a Miri test, in
+  `capi-miri-and-fuzz` or alone.
 - **A grouping inside a subquery** (plan 5.11 and 5.13, lines 4328–4330,
   4913–4914): no partial (parallel) stack for it, and GROUP BY without
   aggregates in a subquery stays the core's. Suggested: check the

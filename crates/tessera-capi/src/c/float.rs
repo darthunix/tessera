@@ -10,7 +10,10 @@
 //! hold that many elements, unchanged for the call; a selected row's flag
 //! must be initialized and, when not NULL, its value. A float8 is read as
 //! its Datum's bits, a float4 as the low 32 bits, an int4 (or int2) as the
-//! low 32 bits and an int8 as the Datum.
+//! low 32 bits and an int8 as the Datum. A float is read through the
+//! reader's own trait of a Datum's value, as an interval is, and the
+//! public [`crate::FromDatum`] stays the integers' that the column
+//! readers of the integer kernels take.
 
 use std::ffi::{c_uint, c_void};
 
