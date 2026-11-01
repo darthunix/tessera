@@ -37,7 +37,7 @@ as it goes.
       whole. Check: the scenarios "A regrow is counted with both
       indexes" and "DISTINCT over no rows" in `agg`, and the peak of
       one set of 3000 values, 1205 kB (before: 73 kB)
-- [ ] 3.2 The chunks of a DISTINCT set past the first take an eighth of
+- [x] 3.2 The chunks of a DISTINCT set past the first take an eighth of
       `hash_mem`, at most 1 MiB. Check: the scenario "A DISTINCT set
       under a small limit" in `agg`, 245 kB (before: 1205 kB);
       `cargo ab measure` of the DISTINCT case against the parent
@@ -48,12 +48,12 @@ as it goes.
       it owns, the two reserved slots left out, and the index. Check:
       the scenario "Groups read back and merged" in `agg`, whose check
       fails before the fix; the rebuild's note by review
-- [ ] 3.4 The serial join checks, before a batch, the exact size of the
+- [x] 3.4 The serial join checks, before a batch, the exact size of the
       index its records will need, without counting it as memory.
       Check: the scenarios of "A serial build keeps its index within
       the limit" in `join`; the plans of `join` read; `cargo ab
       measure` of the three joins against the parent
-- [ ] 3.5 A grouping's first index is capped by its buckets. Check: the
+- [x] 3.5 A grouping's first index is capped by its buckets. Check: the
       scenario "A limit that is not a power of two" in `agg`; `cargo
       ab measure` of the grouping at 3 MiB against the parent
 
@@ -83,10 +83,14 @@ as it goes.
 
 ## 5. The checks of the whole
 
-- [ ] 5.1 Measure as the design's plan says, on an idle machine the
+- [x] 5.1 Measure as the design's plan says, on an idle machine the
       person confirms. Check: `cargo ab measure` flags no case but the
       joins of 300 000 and 420 000 rows, given with their plans and
-      memory; the runs' ids in the pull request
+      memory; the runs' ids in the pull request. Done: the runs are in
+      `docs/benchmarks/2026-11-01-table-growth/`; a third case was
+      flagged, `mixed_text_16mb`, 1.33 slower by the median, which now
+      spills for the margin of decision 4, and is for the maintainer to
+      decide
 
 ## 6. The close
 
