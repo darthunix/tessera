@@ -9,6 +9,10 @@ publish.workspace = true
 [lib]
 crate-type = ["staticlib", "rlib"]
 
+[features]
+# Greengage's varlena headers (tessera-kernels' feature).
+network-varlena = ["tessera-kernels/network-varlena"]
+
 [dependencies]
 anyhow.workspace = true
 tessera-core.workspace = true

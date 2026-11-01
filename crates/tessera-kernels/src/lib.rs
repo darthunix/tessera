@@ -89,3 +89,4 @@ pub mod source;
 pub use relhash as table;
 pub use relspill::{phases, shared_spill, spill_columns};
 pub mod text;
+pub mod varlena;

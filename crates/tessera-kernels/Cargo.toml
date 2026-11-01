@@ -6,6 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Greengage's varlena headers, in network byte order on every machine
+# (see src/varlena.rs).
+network-varlena = []
+
 [dependencies]
 anyhow.workspace = true
 # OwnedTable, the table that takes its own memory.
