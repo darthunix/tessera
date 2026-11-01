@@ -232,6 +232,7 @@ get_hash_memory_limit(void)
 }
 
 /* Names of PostgreSQL 13 to 18. */
+#define VARHDRSZ_COMPRESSED offsetof(varattrib_4b, va_compressed.va_data)
 #define TYPALIGN_DOUBLE 'd'
 typedef Datum bh_node_type;
 #define COMPARE_LT BTLessStrategyNumber
