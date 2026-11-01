@@ -412,6 +412,12 @@ byte by byte. Why each piece is there:
   appended (zeros when the caller gives none), and only the one writer
   changes it later.
 
+The offsets of the header's fields, the size of the header and the size
+of a key's slot are public constants. A caller that keeps chunks of its
+own, as the spill to disk does when it packs a chunk, reads records by
+these names. It keeps no numbers of its own that a change of the layout
+would leave wrong.
+
 ## References
 
 A reference names a record in 32 bits. The high 15 bits are the number

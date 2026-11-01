@@ -209,7 +209,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       and a build that refuses 32-bit targets. Check:
       `make rust-check`; the same machine code;
       `cargo package -p relhash -p relspill`
-- [ ] 3.2 Make the layout of a record in `relhash` a small public API,
+- [x] 3.2 Make the layout of a record in `relhash` a small public API,
       documented, with its requirement in the spec of `relhash` and in
       its snapshot of the public API. Check: the diff of the snapshot;
       `make rust-check`; the review of the new API in the pull request

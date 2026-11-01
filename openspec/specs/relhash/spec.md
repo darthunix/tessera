@@ -151,6 +151,14 @@ size that [`record_bytes`](../../../crates/relhash/src/table/header.rs)
 gives: 1 to 16 keys of a word each, which the table compares bit for
 bit, and a NULL key 0 in its slot with its NULL bit set. A build with
 debug assertions SHALL check that a source of keys gives 0 for a NULL.
+The crate SHALL name the offsets of the header's fields, the bytes of
+the header and a key's slot by public constants:
+[`RECORD_HASH_OFFSET`](../../../crates/relhash/src/table/record.rs),
+[`RECORD_NEXT_OFFSET`](../../../crates/relhash/src/table/record.rs),
+[`RECORD_NULL_BITS_OFFSET`](../../../crates/relhash/src/table/record.rs),
+[`RECORD_SIZE_OFFSET`](../../../crates/relhash/src/table/record.rs),
+[`RECORD_HEADER`](../../../crates/relhash/src/table/header.rs) and
+[`KEY_SLOT`](../../../crates/relhash/src/table/header.rs).
 
 #### Scenario: The size of a record
 - **WHEN** the size of a record is asked for 1 to 16 keys and payloads
@@ -159,6 +167,15 @@ debug assertions SHALL check that a source of keys gives 0 for a NULL.
   0 and 17 keys are refused
 - **Verified by:**
   `crates/relhash/src/table/tests/format.rs::a_record_takes_its_header_its_key_slots_and_its_payload`
+
+#### Scenario: A record in the bytes of its chunk
+- **WHEN** the bytes of a chunk a table wrote are read at the offsets
+  of the public constants
+- **THEN** each record has there its row's hash, the reference of the
+  next record of its chain, its NULL bits, its size, its keys and its
+  payload, and the constants hold the offsets `Record` draws
+- **Verified by:**
+  `crates/relhash/src/table/tests/format.rs::a_record_lies_where_the_layout_constants_say`
 
 #### Scenario: A record as a call reads it
 - **WHEN** a record is read through `Table::record`

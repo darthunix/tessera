@@ -71,6 +71,68 @@ fn a_record_takes_its_header_its_key_slots_and_its_payload() -> Result<()> {
 }
 
 #[test]
+fn a_record_lies_where_the_layout_constants_say() -> Result<()> {
+    let config = TableConfig {
+        nkeys: 2,
+        payload_size: 8,
+    };
+    let nrows = 20;
+    let first: Vec<i32> = (0..nrows as i32).map(|row| row - 7).collect();
+    let second: Vec<i64> = (0..nrows as i64).map(|row| row << 40).collect();
+    let non_null = words(&(0..nrows).map(|row| row % 3 != 1).collect::<Vec<_>>());
+    let keys = [
+        Column::new(&first, None),
+        Column::new(&second, Some(&non_null)),
+    ];
+    // Two chains, as a bucket takes the high bits of a hash.
+    let hashes: Vec<u32> = (0..nrows as u32).map(|row| (row % 2) << 31 | row).collect();
+    let payload = payload_for(nrows);
+    let mut table = local(&config, nrows as u64)?;
+    let refs = insert_all(&mut table, &hashes, &Keys(&keys), Some(&payload))?;
+    let size = table.table()?.record_size();
+    let bytes: Vec<u8> = table
+        .chunk_words(0)
+        .iter()
+        .flat_map(|word| word.to_ne_bytes())
+        .collect();
+    let field = |at: usize| u32::from_ne_bytes(bytes[at..at + 4].try_into().unwrap());
+    let slot = |at: usize| i64::from_ne_bytes(bytes[at..at + 8].try_into().unwrap());
+    let view = table.table()?;
+    for (row, &reference) in refs.iter().enumerate() {
+        let (chunk, at) = placement(reference);
+        assert_eq!((chunk, at), (0, CHUNK_HEADER + row * size));
+        assert_eq!(field(at + RECORD_HASH_OFFSET), hashes[row]);
+        // A row goes first in its chain, before the row two above it.
+        let next = row.checked_sub(2).map_or(0, |above| refs[above]);
+        assert_eq!(field(at + RECORD_NEXT_OFFSET), next);
+        let null = row % 3 == 1;
+        assert_eq!(field(at + RECORD_NULL_BITS_OFFSET), u32::from(null) << 1);
+        assert_eq!(field(at + RECORD_SIZE_OFFSET) as usize * 8, size);
+        let keys = at + RECORD_HEADER;
+        assert_eq!(slot(keys), i64::from(first[row]));
+        assert_eq!(slot(keys + KEY_SLOT), if null { 0 } else { second[row] });
+        let at = keys + config.nkeys * KEY_SLOT;
+        assert_eq!(&bytes[at..at + 8], &payload[row * 8..row * 8 + 8]);
+        let record = view.record(reference)?;
+        assert_eq!(record.keys, [slot(keys), slot(keys + KEY_SLOT)]);
+        assert_eq!(record.payload, &bytes[at..at + 8]);
+    }
+    // The offsets the documentation of `Record` draws.
+    assert_eq!(
+        [
+            RECORD_HASH_OFFSET,
+            RECORD_NEXT_OFFSET,
+            RECORD_NULL_BITS_OFFSET,
+            RECORD_SIZE_OFFSET,
+            RECORD_HEADER,
+            KEY_SLOT,
+        ],
+        [0, 4, 8, 12, 16, 8]
+    );
+    Ok(())
+}
+
+#[test]
 fn index_size_covers_header_and_buckets() -> Result<()> {
     for payload_size in [0, 1, 8, 13] {
         let config = TableConfig {
