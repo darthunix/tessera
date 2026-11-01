@@ -143,7 +143,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
 - `kani-beyond-relhash`: Kani proofs of the kernels' arithmetic
 - `int2-and-date-bounds-in-rust`: The range of a smallint result and
   the bound of a date against a timestamp, in Rust
-- `table-growth-one-owner`: One owner of how a table in memory grows
 - `contracts-of-the-c-path`: Contracts of `tessera-capi` and
   `tessera-kernels`, with no memory taken
 - `bounded-rust-calls`: Rust calls bounded in time
@@ -1705,30 +1704,6 @@ timestamp, in Rust. From the review of 2026-11-01.
 - **Capabilities:** batch-functions, kernel-abi
 - **Size:** small: one or two pull requests.
 
-### table-growth-one-owner
-
-One owner of how a table in memory grows. From the review of
-2026-11-01.
-
-- **What:** One rule for how a hash table in a memory context grows:
-  the length of its next chunk from the chunk's number, the memory
-  limit and the record's size; the next capacity of its index; the
-  memory a regrow counts. Three nodes write it today: the join
-  (`join_chunk_len_for`), the grouping (`add_chunk`) and the DISTINCT
-  set of an aggregate (`distinct_add_chunk`).
-- **Why:** The copies already differ. Past the first chunk the join and
-  the grouping take an eighth of `hash_mem`, at least 64 kB and at most
-  1 MB; the DISTINCT set always takes 1 MB, so under a small
-  `hash_mem` it grows past its share. The grouping's regrow updates the
-  peak of memory, the DISTINCT set's does not. A fault of the same rule
-  took 22 files to fix (efe1e15d).
-- **Known:** The overshoot is read from the formulas, not measured. The
-  rule fits the plan of a level of `relspill`; the allocation and the
-  error at the most chunks go into one C helper the three nodes share.
-- **Depends on:** `spill-crate`, best inside its task 3.9.
-- **Capabilities:** hash-table, relspill, join-hash, aggregate
-- **Size:** small.
-
 ### contracts-of-the-c-path
 
 Contracts of `tessera-capi` and `tessera-kernels`, with no memory
@@ -1990,6 +1965,41 @@ becomes an entry, joins one, or is dropped.
   instructions against 170 of a plain loop of the same lanes, and some
   140 of them do not depend on the words. Suggested: keep the shape of
   each partition's chunk for a batch, or drop.
+
+- **A grouping's split notes no moment of its copies** (the close of
+  `table-growth-one-owner`, 2026-11-01). When a grouping starts to
+  spill, it copies each chunk of its table into the partitions' chunks
+  and frees the original without a note of memory; a split of a
+  partition read back resets its source and flushes the chunks of the
+  level below before it notes. The copies live beside the originals and
+  the index, so Memory Usage misses that moment: an underestimated
+  `count(*)` by one key at a `hash_mem` of 256 kB holds three chunks of
+  64 kB when it spills. Suggested: a note before each free, which needs
+  the old chunks counted outside the spill's contexts, in
+  `grouping-phases-machine` or alone.
+- **A grouping that spills passes `hash_mem` far** (the same close).
+  The bench case `regrow_128kb`, 300 000 groups at a `hash_mem` of
+  256 kB, shows a Memory Usage of 2403 kB with 8 partitions, 129
+  regrows and 71 partitions split. Not analysed: this case spills
+  records, and Memory Usage of such a spill counts its memory contexts,
+  the allocator's share and its files' buffers included. Suggested:
+  find where the bytes go, then decide.
+- **A serial build near its limit spills for the room of two chunks**
+  (the same close). Before each batch the serial join counts its chunks
+  and values, room for two more chunks and its index; a build whose
+  table and index fit but leave less than that room spills. The bench
+  case `mixed_text_16mb`, 500 000 rows with a text column at a
+  `hash_mem` of 32 MiB, fitted in 31881 kB and now spills, 1.33 times
+  as slow by the median; `build_300k`, 300 000 keys at 16 MiB, 1.64.
+  Suggested: count what the next batch can allocate in place of the
+  room, with task 3.23 of `spill-crate`, or accept.
+- **The planner's gate of DISTINCT leaves out the set's index** (the
+  same close). A grouping with a DISTINCT aggregate never spills; the
+  planner takes it when its estimate of the pairs of group and value
+  fits `hash_mem`. The estimate counts the pairs' records and leaves
+  out each set's index and the room left in its last chunk, so a set
+  may pass the estimate by its index. Suggested: count the index in the
+  gate, with a case near the limit, or drop.
 
 ## Decided against
 

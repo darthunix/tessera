@@ -1,12 +1,13 @@
-## Purpose
+# table-memory Specification
 
+## Purpose
 The memory a join's or a grouping's hash table in memory takes, as
 seen from SQL: the length of its chunks, what EXPLAIN's Memory Usage
 of the node counts, how a serial build keeps its index within
 `hash_mem`, how large a grouping's first index is, and the error at
 the most chunks.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: The chunks of a table in memory
 A `TessHashJoin` building a table in memory, a `TessAgg` grouping in
