@@ -25,7 +25,8 @@ of 1 MiB SHALL take a chunk of its own size.
 - **THEN** its set takes two chunks of 64 kB, and its Memory Usage is
   245 kB: the group's table, those chunks, and the set's old and new
   index at its last regrow
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/A DISTINCT set under a small limit`
 
 ### Requirement: What Memory Usage counts
 The Memory Usage that EXPLAIN ANALYZE shows for a `TessHashJoin` or a
