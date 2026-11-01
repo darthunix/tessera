@@ -42,16 +42,6 @@ tess_registry_add(List **entries, const void *entry, TessRegistryMatch match,
 void
 tess_registry_remove(List **entries, const void *entry)
 {
-	ListCell   *cell;
-
-	if (entry == NULL)
-		return;
-	foreach(cell, *entries)
-	{
-		if (lfirst(cell) == entry)
-		{
-			*entries = foreach_delete_current(*entries, cell);
-			return;
-		}
-	}
+	if (entry != NULL)
+		*entries = list_delete_ptr(*entries, (void *) entry);
 }

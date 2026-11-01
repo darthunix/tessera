@@ -7,14 +7,17 @@
 
 #include "postgres.h"
 
+#include "tessera/compat.h"
+
 /*
  * Tessera follows PostgreSQL master (20devel) and builds against no older
- * core: PostgreSQL 19 differs in the table statistics' layout, the names
- * of the sort comparators and the interface of index-only scans. Every
- * module includes this header, so the headers of an older server stop
- * the build here rather than at the first declaration they lack.
+ * core but Greengage 7, through compat.h: PostgreSQL 19 differs in the
+ * table statistics' layout, the names of the sort comparators and the
+ * interface of index-only scans. Every module includes this header, so
+ * the headers of an older server stop the build here rather than at the
+ * first declaration they lack.
  */
-#if PG_VERSION_NUM < 200000
+#if PG_VERSION_NUM < 200000 && !TESS_GREENGAGE
 #error "Tessera needs PostgreSQL master (20devel)"
 #endif
 

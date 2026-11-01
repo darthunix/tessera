@@ -1,8 +1,9 @@
 MODULE_big = tessera_kernels
 OBJS = int.o table.o text.o date.o numeric.o float.o
-PG_CPPFLAGS = -I$(srcdir)/../include
+PG_CPPFLAGS = -I$(srcdir)/../include $(TESS_HOST_CPPFLAGS)
 
 PG_CONFIG ?= pg_config
+include ../host.mk
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
