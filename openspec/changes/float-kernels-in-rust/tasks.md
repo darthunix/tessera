@@ -65,10 +65,10 @@ named in a task comes on top.
 
 ## 5. The entry points and the C side
 
-- [ ] 5.1 Write `include/tessera/float.h` (`TessFloatArg`,
+- [x] 5.1 Write `include/tessera/float.h` (`TessFloatArg`,
       `TessFloatOp`, `TessFloatType`, the three calls) and
-      `crates/tessera-capi/src/c/float.rs`, with `FromDatum` for `f32`
-      and `f64`. A test of every entry point through its raw structs:
+      `crates/tessera-capi/src/c/float.rs`, reading `f32` and `f64`
+      from Datums. A test of every entry point through its raw structs:
       every operation, type pair and shape, NULLs and errors; the Miri
       job of `ci.yml` runs it. Check: `cargo test --locked -p
       tessera-capi --test float`; `cargo +nightly miri test --locked -p

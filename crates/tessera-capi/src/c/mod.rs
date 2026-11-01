@@ -16,6 +16,7 @@ mod cast;
 mod column;
 mod count;
 mod decimal;
+mod float;
 mod int;
 mod mask;
 mod set;
@@ -41,6 +42,7 @@ pub use decimal::{
     tess_decimal_filter, tess_decimal_read, tess_decimal_read_datum, tess_decimal_sum,
     tess_decimal_to_int4, tess_decimal_to_int8, tess_decimal_write, tess_decimal_write_datum,
 };
+pub use float::{FloatArg, tess_float_arith, tess_float_cast, tess_float_compare};
 pub use int::{
     tess_int4_arith_columns, tess_int4_arith_scalar, tess_int4_arith_scalar_left,
     tess_int4_compare_columns, tess_int4_filter, tess_int4_hash, tess_int4_hash_next,
