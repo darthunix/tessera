@@ -25,28 +25,36 @@ the other entries keep the order of the decisions of 2026-09-30 to
 2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390). The maintainer
 placed `spill-crate` first on 2026-10-28, after the close of
 `table-crate`, and the float kernels second on 2026-11-01, after the
-review of what more can move from C to Rust; they are closed:
+review of what more can move from C to Rust; they are closed. The
+maintainer took the six findings of the AVX2 kernels on 2026-11-01, in
+three changes, which come after `spill-crate` in this order:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
-2. `explain-rows-per-loop`: The rows a node removed, per loop as the
+2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
+   cannot learn
+3. `whole-word-decisions`: When and where a driver takes a word whole,
+   on both machines
+4. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+   size of the table
+5. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-3. `join-pruning-cost`: The cost of a pruning join over the partitions
+6. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-4. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+7. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-5. `linux-x86-support`: Linux on x86-64 checked as the target platform
-6. `oltp-guard-bench`: OLTP guard family of benchmarks
-7. `runs-left-from-section-9`: Runs left to the maintainer from
-   section 9
-8. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-9. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
-   `jit = on` control run
-10. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+8. `linux-x86-support`: Linux on x86-64 checked as the target platform
+9. `oltp-guard-bench`: OLTP guard family of benchmarks
+10. `runs-left-from-section-9`: Runs left to the maintainer from
+    section 9
+11. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+12. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+    `jit = on` control run
+13. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-11. `tpch-sf10`: TPC-H step 10: SF10
-12. `backward-scan-mark-restore`: Backward scan and mark/restore
-13. `postgresql-19`: PostgreSQL 19 support
-14. `pg-duckdb-comparison`: Comparison with pg_duckdb
+14. `tpch-sf10`: TPC-H step 10: SF10
+15. `backward-scan-mark-restore`: Backward scan and mark/restore
+16. `postgresql-19`: PostgreSQL 19 support
+17. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -114,8 +122,6 @@ is wanted; several wait for a measured case. `greengage-port` and
   types in the debug build
 - `sturdy-bulk-loops`: Loops over whole words that keep their values
   across the call of a vector kernel
-- `x86-row-paths`: The row paths of x86-64 without the cost of the
-  decision for whole words
 - `pmu-on-x86-linux`: The counters on x86-64 Linux and on two kinds of
   cores, on hardware
 - `pmu-on-crates-io`: The crate `pmu` published on crates.io
@@ -171,6 +177,77 @@ on 2026-10-28, after the close of `table-crate`; it is the change
 - **Depends on:** nothing.
 - **Capabilities:** relspill, spill-format, hash-table
 - **Size:** large: about fifty pull requests.
+
+### bench-unlearned-inputs
+
+Benchmarks whose inputs the predictor cannot learn. A finding of the
+close of the AVX2 kernels, taken by the maintainer on 2026-11-01; it is
+the change `bench-unlearned-inputs`.
+
+- **What:** The cases drawn at random get inputs that the branch
+  predictor has not met within its reach: a ring of inputs, one long
+  input or a fresh input before every call, chosen by a pilot on both
+  machines against the misses a model expects.
+- **Why:** Every call meets the same inputs, so the predictor learns
+  even random selections, NULL flags set at random and values in random
+  order: a branch of a set's search by halving misses 12 to 15 times in
+  about 19 750 a call, a branch on the NULL flag of a slot 0.004 times.
+  A branch cannot be judged against a choice made as data, the row
+  paths look cheaper than they are, and a verdict of cycles follows
+  where the code lies.
+- **Known:** The design of the change.
+- **Depends on:** nothing.
+- **Capabilities:** bench
+- **Size:** medium: one pull request.
+
+### whole-word-decisions
+
+When and where a driver takes a word whole, on both machines. Four
+findings of the close of the AVX2 kernels and the entry
+`x86-row-paths`, taken by the maintainer on 2026-11-01; it is the
+change `whole-word-decisions`.
+
+- **What:** A model of the cost of a word, whole and by rows, for each
+  family on both machines, and from it a bound of rows for each family
+  and a bound of keys of the sets that grows with the rows; the sets
+  counting present rows; the place of the decision on x86-64, so that
+  the row paths lose what AVX2 cost them; one shape of the loops of
+  `count` and the aggregates if one serves both machines; `as_chunks`
+  in `word_slots`; a form of the reader's fold of a full word on
+  x86-64.
+- **Why:** One bound of 12 rows fits no family on Intel: words of 8
+  rows gain 15 to 62 % on some and lose up to 2.5 times on others. The
+  sets compare whole words of NULL rows, 90 to 151 % dearer than their
+  rows, and use one bound of keys for every word. The row paths of
+  x86-64 lost up to 224 cycles a call when AVX2 came. The call of a
+  full word in the reader's fold costs its other words 5 to 27 %.
+- **Known:** The design of the change. The maintainer accepted the
+  losses of the row paths for the pilot of the AVX2 kernels on
+  2026-10-27, to be settled here once for every driver.
+- **Depends on:** `bench-unlearned-inputs`, whose cases it measures
+  with.
+- **Capabilities:** kernel-abi
+- **Size:** large: three pull requests.
+
+### relhash-prefetch-by-size
+
+The prefetch hint of `relhash` by the size of the table. A finding of
+the close of the AVX2 kernels, taken by the maintainer on 2026-11-01;
+it is the change `relhash-prefetch-by-size`.
+
+- **What:** The probe and the insert of a batch give the hint only on
+  a table larger than a bound of bytes for each architecture, chosen
+  once a call; x86-64 gets `prefetcht0` under that bound.
+- **Why:** On x86-64 the hint gains 10 to 26 % of cycles on a table of
+  160 MiB and costs up to 14 % on one in L1, so x86-64 gives none
+  today. On AArch64 it is given to every table, and its cost on a
+  table in the cache was never measured.
+- **Known:** The design of the change. The forecast of the contract of
+  `relhash` names `table/lanes.rs` alone for the hint of x86-64; a
+  choice by size touches the probe and the insert too.
+- **Depends on:** nothing.
+- **Capabilities:** hash-table
+- **Size:** small to medium: one pull request.
 
 ### explain-rows-per-loop
 
@@ -851,43 +928,6 @@ vector kernel. From the review of pull request 68 on 2026-10-14.
 - **Depends on:** nothing.
 - **Capabilities:** kernel-abi
 - **Size:** small to medium.
-
-### x86-row-paths
-
-The row paths of x86-64 without the cost of the decision for whole
-words. Left by the close of the AVX2 kernels, 2026-11-01.
-
-- **What:** Settle once, for every driver of the int4 and int8
-  families, where the decision for whole words lies, so that a call
-  that reads its rows one by one costs on x86-64 what it did before the
-  AVX2 kernels. With it, two leftovers of the loops over whole words:
-  the loops of `count` and of the aggregates, which take a shape of
-  their own on x86-64 and keep the old one on AArch64, made one where a
-  shape serves both machines; and `as_chunks` for the bounds of
-  `word_slots` in `tessera-capi`, which would take six more
-  instructions from a whole word of `count` on x86-64 but changes the
-  `word_block` of every family.
-- **Why:** On x86-64 the decision for whole words was compiled out
-  before AVX2; now it shares the function of the row loops, which run
-  short of registers there. The filter of int4 takes 38 cycles more on
-  one dense row in 128, the comparison of two columns 224 (4.5 %) on a
-  Datum batch partly prepared and 37 (4 %) on Datum words of 8 rows;
-  the cast and the hashes take 12 to 16 instructions more a call or a
-  key; the sets, which decide at every word, 19 % more instructions on
-  empty selections of 1024 rows. Moving the decision out of line traded
-  these for other losses: up to 25 cycles on 65 rows with 8 selected,
-  and 12.5 % on full dense words of the int8 filter.
-- **Known:** The maintainer's decision of 2026-10-27: the losses are
-  accepted for the pilot of the AVX2 kernels and settled here, once for
-  every driver. The shape of x86-64's loops of `count` and the
-  aggregates cost the M5 Pro 14 % more cycles in a least of int4 over
-  partly prepared words, so AArch64 kept its own. A change of a driver
-  is checked by the machine code of both targets (`tessera-bench
-  --disasm`, and with `--target aarch64-apple-darwin`) and by the
-  counters of both machines.
-- **Depends on:** nothing.
-- **Capabilities:** kernel-abi
-- **Size:** medium.
 
 ### direct-arrow-batches
 
@@ -1935,42 +1975,6 @@ becomes an entry, joins one, or is dropped.
     the workflow's Arm runner anyway, at `kernel.perf_event_paranoid`
     4. Suggested: mutants of `core_pmu.rs` and of the decoding of a
     read, which need no PMU, or drop.
-- **AVX2: findings without a decision** (the close of the AVX2
-  kernels, 2026-11-01).
-  - The benchmarks repeat their inputs every call, random selections,
-    NULL flags set at random and values in random order among them, so
-    the predictor learns even those: the branch of a set's search by
-    halving misses 12 to 15 times in about 19 750 a call, and a branch
-    on the NULL flag of a slot 0.004 times. A branch then cannot be
-    judged against a choice made as data, and a verdict of cycles
-    follows where the code lies: the int8 division took 12 to 14 % more
-    cycles on random words with its code unchanged, and three cases of
-    the sets' row paths failed on cycles in both runs, their loops the
-    same register for register. Suggested: cases whose inputs change
-    from call to call, or drop.
-  - The sets compare every lane of a whole word, also where its rows are
-    all NULL, which the row path skips: on AVX2 64 int4 keys take 90 to
-    151 % more cycles there. Suggested: the driver counts the non-NULL
-    rows of the word, or drop.
-  - No one bound of whole words fits every family on Intel: words of 8
-    rows taken whole gain on the filters, the hashes, the cast and
-    `count`, and lose on the sums, `min` and `max`, the arithmetic by a
-    constant, the compare of Datum columns and the sets, by up to 2.5
-    times the cycles. Suggested: a bound for each family, measured on
-    both machines, or drop.
-  - The bounds of the sets hold at 16 selected rows a word, but on
-    Intel full words pay to far more keys: there 65 int4 keys compared
-    whole cost a quarter of halving, and 64 int8 keys half. Suggested: a
-    bound that grows with the selected rows of a word, or drop.
-  - On x86-64 the call of a full word's counted loop costs the loop
-    over the other words: without it, sparse selections, words of 8
-    rows and calls of a row or none read 5 to 27 % faster. Suggested: a
-    form that keeps the full word inline without making empty and
-    sparse calls pay for its constants, or drop.
-  - The prefetch hint of `relhash` on x86-64 makes probes of a table
-    larger than the caches 10 to 26 % faster, and those of a table that
-    fits them up to 14 % slower. Suggested: a hint chosen by the size
-    of the table, or drop.
 
 ## Decided against
 
