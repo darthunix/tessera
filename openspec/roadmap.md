@@ -28,7 +28,8 @@ placed `spill-crate` first on 2026-10-28, after the close of
 review of what more can move from C to Rust; the float kernels are
 closed. The maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
-order:
+order. The maintainer took `partial-dictionary-keys` out of turn on
+2026-11-01, after the TPC-H run on Greengage 7.
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
@@ -157,6 +158,23 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
+
+### partial-dictionary-keys
+
+The partial grouping by keys through a dictionary. The maintainer took
+it on 2026-11-01, after TPC-H on Greengage 7 showed Q1 no faster with
+Tessera; it is the change `partial-dictionary-keys`.
+
+- **What:** The planner offers the node's partial grouping for keys of
+  any type the serial node takes, not only for keys a word holds.
+- **Why:** The rule guards against a fault the executor no longer
+  meets, and keeps the core's partial stage under every two-stage
+  grouping by text or numeric: Q1 on Greengage 7 takes 0.98 of the
+  core's time with it, 0.41 without.
+- **Known:** The design of the change.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate
+- **Size:** small: one pull request.
 
 ### spill-crate
 
