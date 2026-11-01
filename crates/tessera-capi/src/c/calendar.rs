@@ -13,41 +13,19 @@
 //! an interval.
 
 use std::ffi::c_int;
-use std::marker::PhantomData;
 
-use anyhow::{Context, Result, bail, ensure};
-use tessera_kernels::calendar::{self, DateOp, Field, Fields, Interval, Source, Unit};
+use anyhow::{Result, bail};
+use tessera_kernels::calendar::{self, DateOp, Field, Fields, Interval, Unit};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
-use super::source::{self, Constant, output, selection, slots, with_source, with_sources};
+use super::source::{
+    DatumArg, ReadDatum, column, input, output, selection, slots, with_source, with_sources,
+};
 use super::status::{Code, Status, guard};
-use crate::FromDatum;
 
 /// `TessCalendarArg`: a column, or a scalar Datum when it is null.
-#[repr(C)]
-#[derive(Debug)]
-pub struct CalendarArg {
-    /// The column, or null.
-    pub column: *const DatumColumn,
-    /// The scalar when `column` is null.
-    pub scalar: u64,
-}
-
-/// A value read from its Datum: an integer as [`FromDatum`] reads it, an
-/// interval through the pointer the Datum holds. The pointer read is safe
-/// only under the module's contract, so it stays in this trait, private,
-/// rather than in the public [`FromDatum`].
-trait ReadDatum: Copy {
-    fn read_datum(datum: u64) -> Self;
-}
-
-impl<T: FromDatum> ReadDatum for T {
-    #[inline(always)]
-    fn read_datum(datum: u64) -> Self {
-        T::from_datum(datum)
-    }
-}
+pub type CalendarArg = DatumArg;
 
 impl ReadDatum for Interval {
     /// The interval the Datum points to.
@@ -56,88 +34,6 @@ impl ReadDatum for Interval {
         // SAFETY: the constructor's caller guarantees a pointer to an
         // interval for every value read as one.
         unsafe { (datum as usize as *const Interval).read_unaligned() }
-    }
-}
-
-/// A column's values and flags, read through raw pointers behind one check
-/// of the row against the row count.
-struct Values<'a, T> {
-    values: *const u64,
-    isnull: *const u8,
-    nrows: usize,
-    borrow: PhantomData<(&'a (), T)>,
-}
-
-impl<T: ReadDatum> Source<T> for Values<'_, T> {
-    #[inline(always)]
-    fn get(&self, row: usize) -> Option<T> {
-        assert!(row < self.nrows, "a calendar row past its column");
-        // SAFETY: the row is within the arrays, and the calls read selected
-        // rows only, whose flags and non-NULL values the constructor's
-        // caller guarantees; a flag is read as its byte.
-        unsafe {
-            if *self.isnull.add(row) != 0 {
-                return None;
-            }
-            Some(T::read_datum(*self.values.add(row)))
-        }
-    }
-}
-
-impl<T: Copy> Source<T> for Constant<T> {
-    #[inline(always)]
-    fn get(&self, _row: usize) -> Option<T> {
-        Some(self.0)
-    }
-}
-
-/// A call's argument: a column or a scalar, a loop for each.
-type Input<'a, T> = source::Input<Values<'a, T>, T>;
-
-/// Borrow a column of `nrows` rows.
-///
-/// # Safety
-///
-/// As the module documentation says of a column.
-#[inline]
-unsafe fn column<'a, T>(column: *const DatumColumn, nrows: usize) -> Result<Values<'a, T>> {
-    // SAFETY: the caller's contract.
-    let column = unsafe { column.as_ref() }.context("a null column")?;
-    ensure!(
-        column.struct_size >= DatumColumn::MIN_SIZE,
-        "a Datum column is smaller than its required fields"
-    );
-    ensure!(
-        usize::try_from(column.nrows).ok() == Some(nrows),
-        "a calendar column has another row count than its rows"
-    );
-    ensure!(
-        nrows == 0 || (!column.values.is_null() && !column.isnull.is_null()),
-        "a column has null buffers"
-    );
-    Ok(Values {
-        values: column.values,
-        isnull: column.isnull.cast(),
-        nrows,
-        borrow: PhantomData,
-    })
-}
-
-/// The argument of a call with `nrows` rows.
-///
-/// # Safety
-///
-/// As the module documentation says of an argument.
-#[inline]
-unsafe fn input<'a, T: ReadDatum>(arg: *const CalendarArg, nrows: usize) -> Result<Input<'a, T>> {
-    // SAFETY: the caller's contract.
-    unsafe {
-        let arg = arg.as_ref().context("a null calendar argument")?;
-        Ok(if arg.column.is_null() {
-            Input::Scalar(T::read_datum(arg.scalar))
-        } else {
-            Input::Column(column(arg.column, nrows)?)
-        })
     }
 }
 
