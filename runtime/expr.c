@@ -245,6 +245,16 @@ not_scalar(Node *node, void *context)
 		IsA(node, AlternativeSubPlan) || IsA(node, SubLink) || IsA(node, Aggref) ||
 		IsA(node, WindowFunc) || IsA(node, GroupingFunc) || IsA(node, CurrentOfExpr))
 		return true;
+#if TESS_MPP
+	/*
+	 * The family's own nodes without a column that still differ by row: a
+	 * number unique to each evaluation, and the ids of the group or the
+	 * aggregate an Agg or a TupleSplit is at.
+	 */
+	if (IsA(node, RowIdExpr) || IsA(node, GroupId) || IsA(node, GroupingSetId) ||
+		IsA(node, AggExprId))
+		return true;
+#endif
 	if (IsA(node, Param))
 		return !scalar_param(node);
 	return expression_tree_walker(node, not_scalar, context);
