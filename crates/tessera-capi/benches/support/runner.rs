@@ -119,6 +119,7 @@ impl Runner {
     fn run(
         &mut self,
         id: &str,
+        period: u64,
         run: &mut dyn FnMut(&Counters, u64) -> Result<Reading>,
     ) -> Result<()> {
         ensure!(self.seen.insert(id.to_owned()), "duplicate operation {id}");
@@ -134,19 +135,20 @@ impl Runner {
             Mode::Measure { counters, output } => {
                 // A calibration that read zero is a failed read as well: taken
                 // for a call of one cycle, it would choose the most calls.
-                let mut calibration = run(counters, CALIBRATION_CALLS)?;
+                let calibration_calls = whole_turns(CALIBRATION_CALLS, period);
+                let mut calibration = run(counters, calibration_calls)?;
                 for _ in 0..MAX_RETRIES {
                     if calibration.cycles != 0 {
                         break;
                     }
-                    calibration = run(counters, CALIBRATION_CALLS)?;
+                    calibration = run(counters, calibration_calls)?;
                 }
                 ensure!(
                     calibration.cycles != 0,
-                    "{id}: the counters read zero cycles for {CALIBRATION_CALLS} calls"
+                    "{id}: the counters read zero cycles for {calibration_calls} calls"
                 );
-                let per_call = calibration.cycles.div_ceil(CALIBRATION_CALLS).max(1);
-                let iters = (TARGET_CYCLES / per_call).clamp(1, MAX_CALLS);
+                let per_call = calibration.cycles.div_ceil(calibration_calls).max(1);
+                let iters = whole_turns((TARGET_CYCLES / per_call).clamp(1, MAX_CALLS), period);
                 run(counters, iters)?;
                 let mut record = Record {
                     id,
@@ -183,11 +185,30 @@ impl Runner {
     }
 }
 
+/// `calls` rounded up to whole turns of a ring of `period` inputs, so that
+/// every input is taken as often.
+pub fn whole_turns(calls: u64, period: u64) -> u64 {
+    calls.div_ceil(period.max(1)) * period.max(1)
+}
+
 impl Group<'_> {
     /// Measure `f` called repeatedly; its result is kept alive by `black_box`.
-    pub fn op<R>(&mut self, name: &str, mut f: impl FnMut() -> R) -> Result<()> {
+    pub fn op<R>(&mut self, name: &str, f: impl FnMut() -> R) -> Result<()> {
+        self.op_ring(name, 1, f)
+    }
+
+    /// Measure `f` called repeatedly over a ring of `period` inputs, which
+    /// `f` takes in turn: the calibration and every block are whole turns of
+    /// the ring, so that every block takes every input as often and the
+    /// counters divide by a true count of calls.
+    pub fn op_ring<R>(
+        &mut self,
+        name: &str,
+        period: usize,
+        mut f: impl FnMut() -> R,
+    ) -> Result<()> {
         let id = format!("{}/{name}", self.id);
-        self.runner.run(&id, &mut |counters, iters| {
+        self.runner.run(&id, period as u64, &mut |counters, iters| {
             Ok(counters.measure(iters, &mut f)?)
         })
     }
@@ -200,7 +221,7 @@ impl Group<'_> {
         mut run: impl FnMut(&Counters, u64) -> Result<Reading>,
     ) -> Result<()> {
         let id = format!("{}/{name}", self.id);
-        self.runner.run(&id, &mut run)
+        self.runner.run(&id, 1, &mut run)
     }
 }
 

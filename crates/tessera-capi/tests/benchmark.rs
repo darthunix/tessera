@@ -63,6 +63,105 @@ use filtering::blocks as filter_blocks;
 use support::{fixture, reference};
 use tessera_core::ColumnReader;
 
+/// Each word of a fixture by its content: its rows' value, NULL flag and
+/// selection, in the order of the values, so that two orders of the same
+/// rows give the same word.
+fn words_by_content(case: &fixture::Fixture) -> Vec<Vec<(i32, bool, bool)>> {
+    let selected = case.selected.words();
+    let mut words: Vec<Vec<_>> = case
+        .values
+        .chunks(64)
+        .enumerate()
+        .map(|(index, values)| {
+            let mut rows: Vec<_> = values
+                .iter()
+                .enumerate()
+                .map(|(bit, &value)| {
+                    let row = index * 64 + bit;
+                    (value, case.nulls[row], selected[index] & (1 << bit) != 0)
+                })
+                .collect();
+            rows.sort_unstable();
+            rows
+        })
+        .collect();
+    words.sort_unstable();
+    words
+}
+
+#[test]
+fn every_input_of_a_ring_holds_the_same_words_in_another_order() {
+    let values = (0..1000).map(|row| row * 3).collect();
+    let case = fixture::Fixture::from_values(values, "random", "random", false);
+    let words = words_by_content(&case);
+    let counts = |input: &fixture::Fixture| -> Vec<u32> {
+        input
+            .selected
+            .words()
+            .iter()
+            .map(|word| word.count_ones())
+            .collect()
+    };
+    let first_counts = counts(&case);
+    let ring = case.ring(8);
+    assert_eq!(ring.len(), 8);
+    for input in &ring[1..] {
+        assert_eq!(input.name, ring[0].name);
+        assert_eq!(input.expected, ring[0].expected);
+        assert_eq!(words_by_content(input), words, "the same words");
+        assert_ne!(input.values, ring[0].values, "in another order");
+        assert_ne!(
+            counts(input),
+            first_counts,
+            "the n-th word holds another count"
+        );
+        assert_eq!(
+            counts(input).last(),
+            first_counts.last(),
+            "the short last word stays last"
+        );
+    }
+}
+
+#[test]
+fn the_misses_of_a_loop_exit_are_the_words_off_the_commonest_count() {
+    let case = fixture::Fixture::from_values(vec![0; 1024], "eighth", "none", false);
+    assert_eq!(
+        fixture::exit_misses(&case.selected),
+        0,
+        "every word holds 8"
+    );
+    let case = fixture::Fixture::from_values(vec![0; 1024], "all", "none", false);
+    assert_eq!(
+        fixture::exit_misses(&case.selected),
+        0,
+        "no loop over full words"
+    );
+    let case = fixture::Fixture::from_values(vec![0; 1024], "random", "none", false);
+    let counts: Vec<_> = case
+        .selected
+        .words()
+        .iter()
+        .map(|word| word.count_ones())
+        .collect();
+    let commonest = counts
+        .iter()
+        .map(|count| counts.iter().filter(|&other| other == count).count())
+        .max()
+        .unwrap() as u64;
+    assert_eq!(fixture::exit_misses(&case.selected), 16 - commonest);
+}
+
+#[test]
+fn a_ring_is_measured_in_whole_turns() {
+    use support::runner::whole_turns;
+    assert_eq!(whole_turns(1000, 1), 1000);
+    assert_eq!(whole_turns(1000, 32), 1024);
+    assert_eq!(whole_turns(1024, 32), 1024);
+    assert_eq!(whole_turns(1, 128), 128);
+    assert_eq!(whole_turns(5, 0), 5, "a period of none counts as one");
+}
+
 #[test]
 fn initialized_views_borrow_the_original_values_without_copying() {
     fn check<T: Copy + PartialEq + std::fmt::Debug>(values: &[T]) {

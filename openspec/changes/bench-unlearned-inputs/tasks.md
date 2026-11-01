@@ -18,7 +18,7 @@ and relays.
 
 ## 2. The pilot
 
-- [ ] 2.1 The permuted inputs of the fixture, the model of the misses
+- [x] 2.1 The permuted inputs of the fixture, the model of the misses
       of a case, and the period of a ring in the runner. Check: `cargo
       test --locked -p tessera-capi --benches`; a test that every input
       of a case holds the same words, in another order

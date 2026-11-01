@@ -9,10 +9,15 @@
 //! Regular patterns (`half`, `sparse`, `nulls-mixed`) are what a branch
 //! predictor learns perfectly, so they hide the cost of data-dependent
 //! branches; the `random` selection and `nulls-random` flags come from a
-//! fixed-seed generator and show it.
+//! fixed-seed generator and show it, as long as the predictor does not learn
+//! the one input of the case. A case of several inputs ([`Fixture::ring`])
+//! takes, call after call, the same words in other orders, so that it does
+//! the same work but repeats neither where its rows lie nor how many the n-th
+//! word holds.
 
 use super::reference::Mask;
 use anyhow::Result;
+use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
 use tessera_capi::{DatumIntColumn, DenseIntColumn, FromDatum};
 use tessera_core::RowMaskView;
@@ -50,7 +55,10 @@ struct Random(u64);
 
 impl Random {
     fn seeded(nrows: usize) -> Self {
-        Self(0x9E37_79B9_7F4A_7C15 ^ (nrows as u64).wrapping_mul(0xD1B5_4A32_D192_ED03) | 1)
+        Self::with_seed(nrows as u64)
+    }
+    fn with_seed(seed: u64) -> Self {
+        Self(0x9E37_79B9_7F4A_7C15 ^ seed.wrapping_mul(0xD1B5_4A32_D192_ED03) | 1)
     }
     fn next(&mut self) -> u64 {
         let mut x = self.0;
@@ -69,10 +77,34 @@ impl Random {
 /// `values` in an order drawn from a fixed-seed generator.
 pub fn shuffled<T>(mut values: Vec<T>) -> Vec<T> {
     let mut random = Random::seeded(values.len());
-    for row in (1..values.len()).rev() {
-        values.swap(row, (random.next() % (row as u64 + 1)) as usize);
-    }
+    shuffle(&mut values, &mut random);
     values
+}
+
+/// `items` in an order drawn from `random` (Fisher and Yates).
+fn shuffle<T>(items: &mut [T], random: &mut Random) {
+    for at in (1..items.len()).rev() {
+        items.swap(at, (random.next() % (at as u64 + 1)) as usize);
+    }
+}
+
+/// The misses a call of a loop over the selected rows of each word: a
+/// predictor that knows how the loop's trip counts spread over the words,
+/// but not the input, foretells the commonest count and misses the exit of
+/// every word that holds another. Words with no selected row, or with all
+/// of them, take no such loop.
+pub fn exit_misses(selected: &Bitmap) -> u64 {
+    let mut counts = BTreeMap::new();
+    let mut words = 0;
+    for (index, &word) in selected.words.iter().enumerate() {
+        let len = (selected.nrows - index * 64).min(64) as u32;
+        let count = word.count_ones();
+        if count != 0 && count != len {
+            *counts.entry(count).or_insert(0) += 1;
+            words += 1;
+        }
+    }
+    words - counts.values().max().copied().unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -226,6 +258,54 @@ impl<T: FixtureValue> Fixture<T> {
             values,
             datums,
             expected,
+        }
+    }
+
+    /// The inputs of a case that the branch predictor cannot learn: `self`,
+    /// then `count - 1` inputs made by [`Self::permuted`], each with a seed
+    /// of its own.
+    pub fn ring(self, count: usize) -> Vec<Self> {
+        let mut ring = Vec::with_capacity(count);
+        for seed in 1..count as u64 {
+            ring.push(self.permuted(seed));
+        }
+        ring.insert(0, self);
+        ring
+    }
+
+    /// The same words of 64 rows in an order drawn from `seed`, then the
+    /// rows of each word in an order drawn from it too, every buffer and
+    /// mask moved together: the same words, so the same work, but neither
+    /// where the rows lie nor how many the n-th word holds is the same. A
+    /// last word of fewer rows stays last, its rows permuted.
+    pub fn permuted(&self, seed: u64) -> Self {
+        let nrows = self.values.len();
+        let full = nrows / 64;
+        let mut random = Random::with_seed(seed);
+        let mut words: Vec<_> = (0..full).collect();
+        shuffle(&mut words, &mut random);
+        let mut order = Vec::with_capacity(nrows);
+        for word in words.into_iter().chain((full * 64 < nrows).then_some(full)) {
+            let mut rows: Vec<_> = (word * 64..(word * 64 + 64).min(nrows)).collect();
+            shuffle(&mut rows, &mut random);
+            order.extend(rows);
+        }
+        let moved = |bitmap: &Bitmap| {
+            let flags: Vec<_> = order
+                .iter()
+                .map(|&row| bitmap.words[row / 64] & (1 << (row % 64)) != 0)
+                .collect();
+            Bitmap::new(&flags)
+        };
+        Self {
+            name: self.name.clone(),
+            values: order.iter().map(|&row| self.values[row]).collect(),
+            datums: order.iter().map(|&row| self.datums[row]).collect(),
+            nulls: order.iter().map(|&row| self.nulls[row]).collect(),
+            selected: moved(&self.selected),
+            prepared: self.prepared.as_ref().map(moved),
+            non_nulls: self.non_nulls.as_ref().map(moved),
+            expected: self.expected,
         }
     }
 }
