@@ -383,9 +383,6 @@ impl Words for LoomWords {
     fn fetch_add(&self, index: usize, delta: u64) -> u64 {
         self.words[index].fetch_add(delta, shared_spill::order::ADD)
     }
-    fn fetch_sub(&self, index: usize, delta: u64) -> u64 {
-        self.words[index].fetch_sub(delta, shared_spill::order::ADD)
-    }
     fn fetch_or(&self, index: usize, bits: u64) -> u64 {
         self.words[index].fetch_or(bits, shared_spill::order::CAS)
     }
@@ -428,6 +425,59 @@ fn participants_past_the_budget_agree_on_one_split() {
             seen.iter().all(|&p| p == partitions),
             "{seen:?} split apart"
         );
+    });
+}
+
+/// A call the words refuse wraps no count while another participant's
+/// call runs: a total at 2^64 - 1 refuses a byte of partition 0 at once,
+/// and another participant's taking away of a byte partition 0 never had
+/// is refused, not served by the first call's.
+#[test]
+fn a_refused_addition_lends_no_bytes_to_another_call() {
+    ::loom::model(|| {
+        let spill = Arc::new(loom_spill(4, u64::MAX));
+        spill.split(4).unwrap();
+        spill.add_bytes(i64::MAX, None).unwrap();
+        spill.add_bytes(i64::MAX, None).unwrap();
+        spill.add_bytes(1, None).unwrap();
+        let threads: Vec<_> = [1_i64, -1]
+            .into_iter()
+            .map(|delta| {
+                let spill = spill.clone();
+                thread::spawn(move || spill.add_bytes(delta, Some(0)).is_ok())
+            })
+            .collect();
+        let passed: Vec<bool> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(passed, [false, false]);
+        assert_eq!(spill.bytes(), u64::MAX);
+        assert!(
+            spill.add_bytes(-1, Some(0)).is_err(),
+            "partition 0 holds none"
+        );
+    });
+}
+
+/// A taking away from a partition whose total another participant took
+/// away wrongly: one of the two is refused, and neither count wraps.
+#[test]
+fn a_refused_taking_away_gives_the_partition_back() {
+    ::loom::model(|| {
+        let spill = Arc::new(loom_spill(4, u64::MAX));
+        spill.split(4).unwrap();
+        spill.add_bytes(10, Some(0)).unwrap();
+        let threads: Vec<_> = [Some(0_u32), None]
+            .into_iter()
+            .map(|partition| {
+                let spill = spill.clone();
+                thread::spawn(move || spill.add_bytes(-10, partition).is_ok())
+            })
+            .collect();
+        let passed: Vec<bool> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert_eq!(passed.iter().filter(|&&ok| ok).count(), 1, "{passed:?}");
+        assert_eq!(spill.bytes(), 0);
+        // The partition's call took its 10 bytes, or gave them back.
+        let held = if passed[0] { 0 } else { 10 };
+        assert_eq!(spill.bytes_of(0), held, "{passed:?}");
     });
 }
 

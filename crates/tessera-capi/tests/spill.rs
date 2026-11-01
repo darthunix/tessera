@@ -11,7 +11,8 @@ use tessera_capi::c::{
     Code, SpillHeader, SpillWeights, Status, tess_spill_chunk_len, tess_spill_header_read,
     tess_spill_header_size, tess_spill_header_write, tess_spill_partitions, tess_spill_unpack,
     tess_table_spill_add_bytes, tess_table_spill_evict, tess_table_spill_flags,
-    tess_table_spill_init, tess_table_spill_split, tess_table_spill_splits, tess_table_spill_words,
+    tess_table_spill_init, tess_table_spill_records, tess_table_spill_split,
+    tess_table_spill_splits, tess_table_spill_words,
 };
 
 /// The rule of a split through its entry point: past two thirds of what
@@ -196,6 +197,45 @@ fn the_flags_check_both_outputs_first() {
         );
         assert_eq!(code, Code::InvalidArgument);
         assert!(on_disk, "the flag on disk was written");
+    }
+}
+
+/// The records of a partition past the partitions in force are refused
+/// also by a call that adds none and asks for no count.
+#[test]
+fn the_records_refuse_a_partition_past_the_split() {
+    let mut status = Status::new();
+    let mut nwords = 0;
+    let mut in_force = 0;
+    let mut records = 0;
+    // SAFETY: local buffers of the declared sizes throughout this test.
+    unsafe {
+        let code = tess_table_spill_words(4, &raw mut nwords, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut words = vec![0_u64; nwords];
+        let at = words.as_mut_ptr();
+        let code = tess_table_spill_init(at, nwords, true, 100, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_table_spill_split(at, nwords, true, 4, &raw mut in_force, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_table_spill_records(at, nwords, 3, 7, &raw mut records, &raw mut status);
+        assert_eq!((code, records), (Code::Ok, 7), "{}", status.message());
+        let code =
+            tess_table_spill_records(at, nwords, 3, 0, std::ptr::null_mut(), &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        for (added, counted) in [(0, false), (0, true), (1, false)] {
+            let into = if counted {
+                &raw mut records
+            } else {
+                std::ptr::null_mut()
+            };
+            let code = tess_table_spill_records(at, nwords, 4, added, into, &raw mut status);
+            assert_eq!(
+                code,
+                Code::InvalidArgument,
+                "{added} added, counted {counted}"
+            );
+        }
     }
 }
 

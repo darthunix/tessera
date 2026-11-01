@@ -100,7 +100,6 @@ mod sealed {
         fn load(&self, index: usize) -> u64;
         fn store(&self, index: usize, value: u64);
         fn fetch_add(&self, index: usize, delta: u64) -> u64;
-        fn fetch_sub(&self, index: usize, delta: u64) -> u64;
         fn fetch_or(&self, index: usize, bits: u64) -> u64;
         /// Replace `current` by `new`: `Ok` with the value replaced, `Err`
         /// with the value found.
@@ -121,10 +120,6 @@ impl Words for &[AtomicU64] {
 
     fn fetch_add(&self, index: usize, delta: u64) -> u64 {
         self[index].fetch_add(delta, order::ADD)
-    }
-
-    fn fetch_sub(&self, index: usize, delta: u64) -> u64 {
-        self[index].fetch_sub(delta, order::ADD)
     }
 
     fn fetch_or(&self, index: usize, bits: u64) -> u64 {
@@ -152,10 +147,6 @@ impl Words for &[Cell<u64>] {
 
     fn fetch_add(&self, index: usize, delta: u64) -> u64 {
         self[index].replace(self[index].get().wrapping_add(delta))
-    }
-
-    fn fetch_sub(&self, index: usize, delta: u64) -> u64 {
-        self[index].replace(self[index].get().wrapping_sub(delta))
     }
 
     fn fetch_or(&self, index: usize, bits: u64) -> u64 {
@@ -367,19 +358,53 @@ impl<W: Words> Spill<W> {
     }
 
     /// Add `delta` bytes of chunks in memory, of `partition` once the
-    /// table is split; true when the chunks take more than the budget.
+    /// table is split, or of none, which the total alone counts; true when
+    /// the chunks take more than the budget. A call refused leaves the
+    /// counts as they were, while the other calls take away only what they
+    /// added.
     pub fn add_bytes(&self, delta: i64, partition: Option<u32>) -> Result<bool> {
-        if let Some(partition) = partition {
-            self.check_partition(partition)?;
-            self.add_signed(self.part(partition, Field::Bytes), delta)?;
+        let Some(partition) = partition else {
+            return Ok(self.add_signed(BYTES, delta)? > self.words.load(BUDGET));
+        };
+        self.check_partition(partition)?;
+        let part = self.part(partition, Field::Bytes);
+        // The total takes bytes before the partition and gives them back
+        // after it, so it holds every partition's at every moment, and the
+        // second count cannot refuse what the first one passed.
+        let (first, second) = if delta >= 0 {
+            (BYTES, part)
+        } else {
+            (part, BYTES)
+        };
+        let after = self.add_signed(first, delta)?;
+        match self.add_signed(second, delta) {
+            Ok(total) => Ok(if delta >= 0 { after } else { total } > self.words.load(BUDGET)),
+            Err(error) => {
+                // Only past a call that took away what it did not add: the
+                // first count gives its part back, checked, never wrapped.
+                let amount = delta.unsigned_abs();
+                let _ = self.update(first, |value| {
+                    if delta >= 0 {
+                        value.checked_sub(amount)
+                    } else {
+                        value.checked_add(amount)
+                    }
+                });
+                Err(error)
+            }
         }
-        let total = self.add_signed(BYTES, delta)?;
-        Ok(total > self.words.load(BUDGET))
     }
 
     /// The bytes of chunks in memory, of every participant.
     pub fn bytes(&self) -> u64 {
         self.words.load(BYTES)
+    }
+
+    /// The bytes of a partition's chunks in memory, for the tests and the
+    /// loom model.
+    #[cfg(test)]
+    pub(super) fn bytes_of(&self, partition: u32) -> u64 {
+        self.words.load(self.part(partition, Field::Bytes))
     }
 
     /// The next partition to send to disk, marked so, or `None`; `evicted`
@@ -485,16 +510,18 @@ impl<W: Words> Spill<W> {
         Ok(self.words.load(self.part(partition, Field::Flags)) & ON_DISK != 0)
     }
 
-    /// Count records of a partition, in memory or on disk.
+    /// Count records of a partition, in memory or on disk; a count past
+    /// 2^64 - 1 is refused, and left as it was.
     pub fn add_records(&self, partition: u32, records: u64) -> Result<()> {
         self.check_partition(partition)?;
-        let before = self
-            .words
-            .fetch_add(self.part(partition, Field::Records), records);
-        ensure!(
-            before.checked_add(records).is_some(),
-            "the records of partition {partition}, {before}, cannot take {records} more"
-        );
+        self.update(self.part(partition, Field::Records), |before| {
+            before.checked_add(records)
+        })
+        .map_err(|before| {
+            anyhow::anyhow!(
+                "the records of partition {partition}, {before}, cannot take {records} more"
+            )
+        })?;
         Ok(())
     }
 
@@ -552,22 +579,34 @@ impl<W: Words> Spill<W> {
 
     /// Add a signed delta to a counter; the new value. Callers take away
     /// only what they added, so a counter below zero, or past its word, is
-    /// an error of the accounting, reported rather than wrapped; the
-    /// counter is then left wrapped, and the query fails with it.
+    /// an error of the accounting, reported rather than wrapped, and the
+    /// counter is left as it was.
     fn add_signed(&self, index: usize, delta: i64) -> Result<u64> {
         let amount = delta.unsigned_abs();
         if delta >= 0 {
-            let before = self.words.fetch_add(index, amount);
-            return before.checked_add(amount).ok_or_else(|| {
-                anyhow::anyhow!("a spill counter passed 2^64 - 1: {before} bytes and {amount}")
-            });
+            return self
+                .update(index, |before| before.checked_add(amount))
+                .map_err(|before| {
+                    anyhow::anyhow!("a spill counter passed 2^64 - 1: {before} bytes and {amount}")
+                });
         }
-        let before = self.words.fetch_sub(index, amount);
-        ensure!(
-            before >= amount,
-            "a spill counter went below zero: {before} bytes less {amount}"
-        );
-        Ok(before - amount)
+        self.update(index, |before| before.checked_sub(amount))
+            .map_err(|before| {
+                anyhow::anyhow!("a spill counter went below zero: {before} bytes less {amount}")
+            })
+    }
+
+    /// Replace a word by what `next` makes of it, unless `next` refuses
+    /// it: the new value, or the value found, left as it was.
+    fn update(&self, index: usize, next: impl Fn(u64) -> Option<u64>) -> Result<u64, u64> {
+        let mut current = self.words.load(index);
+        loop {
+            let new = next(current).ok_or(current)?;
+            match self.words.compare_exchange(index, current, new) {
+                Ok(_) => return Ok(new),
+                Err(found) => current = found,
+            }
+        }
     }
 
     fn check_partition(&self, partition: u32) -> Result<()> {
@@ -1051,5 +1090,71 @@ mod tests {
             spill.add_bytes(-20, Some(1)).is_err(),
             "a partition's bytes, while the table's total still covers them"
         );
+    }
+
+    /// A call through a partition answers as one of no partition does, and
+    /// a second count refused, past another call that took away what it
+    /// did not add, gives the first count its part back exactly, in both
+    /// directions.
+    #[test]
+    fn a_refused_second_count_gives_the_first_its_part_back() {
+        let mut words = Vec::new();
+        let spill = spill(&mut words, 4, 100);
+        spill.split(4).unwrap();
+        let held = |partition| spill.bytes_of(partition);
+        assert!(
+            !spill.add_bytes(100, Some(0)).unwrap(),
+            "equal to the budget"
+        );
+        assert!(spill.add_bytes(1, Some(0)).unwrap());
+        assert!(!spill.add_bytes(-1, Some(0)).unwrap(), "equal again");
+        // A wrong call: the total's bytes taken away as of no partition.
+        spill.add_bytes(-100, None).unwrap();
+        assert!(spill.add_bytes(-10, Some(0)).is_err());
+        assert_eq!((held(0), spill.bytes()), (100, 0), "partition 0 given back");
+        // An addition the partition refuses gives the total back.
+        spill.add_bytes(i64::MAX, Some(1)).unwrap();
+        spill.add_bytes(i64::MAX - 5, Some(1)).unwrap();
+        spill.add_bytes(-i64::MAX, None).unwrap();
+        let (part, total) = (held(1), spill.bytes());
+        assert!(spill.add_bytes(10, Some(1)).is_err());
+        assert_eq!(
+            (held(1), spill.bytes()),
+            (part, total),
+            "the total given back"
+        );
+    }
+
+    /// An update the words refuse leaves them as they were, over a
+    /// process's own words and over shared ones: a partition's bytes
+    /// below zero, the total past 2^64 - 1 after the partition took its
+    /// part, and records past 2^64 - 1.
+    #[test]
+    fn a_refused_update_leaves_the_words_as_they_were() {
+        fn check<W: Words>(spill: &Spill<W>) {
+            spill.split(4).unwrap();
+            spill.add_bytes(10, Some(1)).unwrap();
+            spill.add_bytes(i64::MAX, Some(0)).unwrap();
+            spill.add_bytes(i64::MAX - 10, None).unwrap();
+            spill.add_records(2, u64::MAX - 1).unwrap();
+            let before: Vec<u64> = (0..words_for(4).unwrap())
+                .map(|index| spill.words.load(index))
+                .collect();
+            assert!(spill.add_bytes(-11, Some(1)).is_err(), "below zero");
+            assert!(spill.add_bytes(2, Some(3)).is_err(), "the total");
+            assert!(spill.add_bytes(-1, Some(5)).is_err(), "past the split");
+            assert!(spill.add_records(2, 2).is_err(), "the records");
+            let after: Vec<u64> = (0..words_for(4).unwrap())
+                .map(|index| spill.words.load(index))
+                .collect();
+            assert_eq!(after, before);
+        }
+        let mut words = Vec::new();
+        check(&spill(&mut words, 4, u64::MAX));
+        let mut own = vec![0; words_for(4).unwrap()];
+        // SAFETY: the vector is aligned to 8 and used only here.
+        let spill = unsafe { LocalSpill::attach(own.as_mut_ptr(), own.len()) }.unwrap();
+        spill.init(u64::MAX);
+        check(&spill);
     }
 }

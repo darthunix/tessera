@@ -786,11 +786,18 @@ partitions the words were sized for.
 ### The bytes and the budget
 
 A participant adds the bytes of every chunk it allocates to the word of
-its partition and to the total, and takes them away when it frees the
-chunk, `tess_table_spill_add_bytes`. The call answers whether the total
-passes the budget; a total equal to the budget does not. A count that
-would go below zero, or past 2^64 - 1, means that the node counted
-wrong, and the call fails.
+its partition and to the total, or to the total alone for a chunk of no
+partition, and takes them away when it frees the chunk,
+`tess_table_spill_add_bytes`. The call answers whether the total passes
+the budget; a total equal to the budget does not. A count that would go
+below zero, or past 2^64 - 1, means that the node counted wrong, and the
+call fails. It changes nothing then: each word moves by a
+compare-and-swap from the count it read to the new one, which is never
+past its limits. The total takes bytes before the partition and gives
+them back after it, so it holds every partition's at every moment, and
+the second word of a call cannot refuse what the first passed. Only
+another call that took away what it did not add can make it refuse;
+the first word then gives its part back, checked, so no count wraps.
 
 ### The rule that sends partitions to disk
 

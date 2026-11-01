@@ -157,7 +157,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       `cargo ab measure` of a grouping of a generic aggregate over many
       groups at a small `work_mem`, before and after;
       `make installcheck`
-- [ ] 2.13 Make the spill words keep their promises: an update they
+- [x] 2.13 Make the spill words keep their promises: an update they
       refuse leaves them as they were, and
       `tess_table_spill_records` refuses a partition past the level's
       count also when it adds nothing and asks for no count. Correct
