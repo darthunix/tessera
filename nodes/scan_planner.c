@@ -624,7 +624,7 @@ filter_time(PlannerInfo *root, RelOptInfo *rel, double rows, bool deform, List *
 							tess_filter_row_operator_cost * cost.per_tuple / cpu_operator_cost);
 		}
 		if (!list_member_ptr(conditions, rinfo))
-			rows *= clause_selectivity(root, (Node *) rinfo, 0, JOIN_INNER, NULL);
+			rows *= tess_clause_selectivity(root, (Node *) rinfo, 0, JOIN_INNER, NULL);
 		first = false;
 	}
 	return time;

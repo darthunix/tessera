@@ -17,8 +17,11 @@
 
 #if TESS_GREENGAGE
 
+#include "access/stratnum.h"
 #include "fmgr.h"
+#include "miscadmin.h"
 #include "nodes/memnodes.h"
+#include "nodes/pathnodes.h"
 #include "nodes/nodes.h"
 #include "nodes/pg_list.h"
 #include "utils/numeric.h"
@@ -171,6 +174,84 @@ repalloc0(void *pointer, Size oldsize, Size size)
 /* Greengage's magic block names no module. */
 #define PG_MODULE_MAGIC_EXT(...) PG_MODULE_MAGIC
 
+/* The extension's prefix: PostgreSQL 12 warns of placeholders only. */
+#define MarkGUCPrefixReserved(prefix) EmitWarningsOnPlaceholders(prefix)
+
+/* Attributes the copied lib/sort_template.h uses. */
+#define pg_attribute_no_sanitize_function()
+
+/*
+ * hash_mem: PostgreSQL 12 has no hash_mem_multiplier, so work_mem.
+ * shortcut: Greengage gives a node its own budget, operatorMemKB; take it
+ * when the nodes read their memory through the plan state.
+ */
+static inline size_t
+get_hash_memory_limit(void)
+{
+	return (size_t) work_mem * 1024;
+}
+
+/* Names of PostgreSQL 13 to 18. */
+#define TYPALIGN_DOUBLE 'd'
+typedef Datum bh_node_type;
+#define COMPARE_LT BTLessStrategyNumber
+#define COMPARE_GT BTGreaterStrategyNumber
+#define pk_cmptype pk_strategy
+#define get_opfamily_member_for_cmptype(family, left, right, cmp) \
+	get_opfamily_member((family), (left), (right), (cmp))
+#define TupleDescCompactAttr(desc, i) TupleDescAttr((desc), (i))
+/* No incremental sort before PostgreSQL 13: no path has this tag. */
+#define T_IncrementalSortPath T_Invalid
+
+/* Flags of the Greengage patches, for headers installed before them. */
+#ifndef CUSTOMPATH_SUPPORT_PROJECTION
+#define CUSTOMPATH_SUPPORT_PROJECTION 0x0004
+#endif
+#ifndef CUSTOMPATH_GP_LAST_CHILD_FIRST
+#define CUSTOMPATH_GP_LAST_CHILD_FIRST 0x00010000
+#endif
+
+/* The 64-bit finalizer of MurmurHash3 (PostgreSQL 13), as master's. */
+static inline uint64
+murmurhash64(uint64 data)
+{
+	uint64		h = data;
+
+	h ^= h >> 33;
+	h *= UINT64CONST(0xff51afd7ed558ccd);
+	h ^= h >> 33;
+	h *= UINT64CONST(0xc4ceb9fe1a85ec53);
+	h ^= h >> 33;
+	return h;
+}
+
+/*
+ * The member of an equivalence class that is expr, binary relabeling
+ * aside (PostgreSQL 13): no constant, and a child only of relids.
+ */
+static inline EquivalenceMember *
+find_ec_member_matching_expr(EquivalenceClass *ec, Expr *expr, Relids relids)
+{
+	ListCell   *cell;
+
+	while (expr != NULL && IsA(expr, RelabelType))
+		expr = ((RelabelType *) expr)->arg;
+	foreach(cell, ec->ec_members)
+	{
+		EquivalenceMember *member = (EquivalenceMember *) lfirst(cell);
+		Expr	   *member_expr = member->em_expr;
+
+		if (member->em_is_const ||
+			(member->em_is_child && !bms_is_subset(member->em_relids, relids)))
+			continue;
+		while (member_expr != NULL && IsA(member_expr, RelabelType))
+			member_expr = ((RelabelType *) member_expr)->arg;
+		if (equal(member_expr, expr))
+			return member;
+	}
+	return NULL;
+}
+
 #endif							/* TESS_GREENGAGE */
 
 /*
@@ -184,6 +265,43 @@ repalloc0(void *pointer, Size oldsize, Size size)
 #else
 #define tess_slot_first_nonguaranteed(slot) ((slot)->tts_first_nonguaranteed)
 #define tess_desc_first_nonguaranteed(desc) ((desc)->firstNonGuaranteedAttr)
+#endif
+
+/*
+ * Calls whose arguments differ between the cores. PostgreSQL 12 costs
+ * the aggregates of the clauses it is given, the target list and HAVING
+ * as its grouping does; master costs every aggregate of the query. Its
+ * grouping clause is the query's, not the processed one of PostgreSQL 16.
+ */
+#if TESS_GREENGAGE
+#define tess_deparse_context(es, ps, ancestors) \
+	set_deparse_context_planstate((es)->deparse_cxt, (Node *) (ps), (ancestors))
+#define tess_explain_rtable_size(es) list_length((es)->rtable)
+#define tess_agg_clause_costs(root, split, costs) \
+	do { \
+		get_agg_clause_costs((root), (Node *) (root)->processed_tlist, (split), (costs)); \
+		get_agg_clause_costs((root), (root)->parse->havingQual, (split), (costs)); \
+	} while (0)
+#define tess_estimate_num_groups(root, exprs, rows) \
+	estimate_num_groups((root), (exprs), (rows), NULL)
+#define tess_clause_selectivity(root, clause, relid, jointype, sjinfo) \
+	clause_selectivity((root), (clause), (relid), (jointype), (sjinfo), false)
+#define tess_group_clause(root) ((root)->parse->groupClause)
+#define tess_distinct_clause(root) ((root)->parse->distinctClause)
+#define tess_limit_with_ties(parse) ((void) (parse), false)
+#else
+#define tess_deparse_context(es, ps, ancestors) \
+	set_deparse_context_plan((es)->deparse_cxt, (ps)->plan, (ancestors))
+#define tess_explain_rtable_size(es) ((es)->rtable_size)
+#define tess_agg_clause_costs(root, split, costs) \
+	get_agg_clause_costs((root), (split), (costs))
+#define tess_estimate_num_groups(root, exprs, rows) \
+	estimate_num_groups((root), (exprs), (rows), NULL, NULL)
+#define tess_clause_selectivity(root, clause, relid, jointype, sjinfo) \
+	clause_selectivity((root), (clause), (relid), (jointype), (sjinfo))
+#define tess_group_clause(root) ((root)->processed_groupClause)
+#define tess_distinct_clause(root) ((root)->processed_distinctClause)
+#define tess_limit_with_ties(parse) ((parse)->limitOption == LIMIT_OPTION_WITH_TIES)
 #endif
 
 #endif							/* TESSERA_COMPAT_H */

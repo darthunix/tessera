@@ -1048,9 +1048,8 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (state->nkeys > 0)
 	{
 		CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
-		List	   *context = set_deparse_context_plan(es->deparse_cxt,
-													   css->ss.ps.plan, ancestors);
-		bool		useprefix = es->rtable_size > 1 || es->verbose;
+		List	   *context = tess_deparse_context(es, &css->ss.ps, ancestors);
+		bool		useprefix = tess_explain_rtable_size(es) > 1 || es->verbose;
 		List	   *keys = NIL;
 
 		foreach_node(TargetEntry, entry, cscan->custom_scan_tlist)

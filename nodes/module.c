@@ -95,8 +95,11 @@ _PG_init(void)
 
 	RegisterCustomScanMethods(&tess_pack_scan_methods);
 	api->nodes->add(&tess_pack_node);
+#if !TESS_GREENGAGE
+	/* Greengage reads every table by the core's scan under TessPack. */
 	RegisterCustomScanMethods(&tess_heap_scan_scan_methods);
 	api->nodes->add(&tess_heap_scan_node);
+#endif
 	RegisterCustomScanMethods(&tess_filter_scan_methods);
 	api->nodes->add(&tess_filter_node);
 	tess_filter_planner_init();
@@ -109,6 +112,8 @@ _PG_init(void)
 	RegisterCustomScanMethods(&tess_sort_scan_methods);
 	api->nodes->add(&tess_sort_node);
 	tess_sort_planner_init();
+#if !TESS_GREENGAGE
+	/* Greengage runs no parallel query, and its appends stay the core's. */
 	RegisterCustomScanMethods(&tess_gather_scan_methods);
 	api->nodes->add(&tess_gather_node);
 	RegisterCustomScanMethods(&tess_send_scan_methods);
@@ -118,6 +123,7 @@ _PG_init(void)
 	tess_gather_planner_init();
 	RegisterCustomScanMethods(&tess_append_scan_methods);
 	api->nodes->add(&tess_append_node);
+#endif
 	/*
 	 * The limit last: its hook runs after the others' and takes the final
 	 * relation's limits over the paths they made (the scan methods it

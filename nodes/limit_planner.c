@@ -92,9 +92,11 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		if (!IsA(lfirst(lc), LimitPath))
 			continue;
 		limit = lfirst(lc);
-		/* WITH TIES stays with the core node. */
+#if !TESS_GREENGAGE
+		/* WITH TIES stays with the core node; PostgreSQL 12 has none. */
 		if (limit->limitOption != LIMIT_OPTION_COUNT)
 			continue;
+#endif
 		path = make_limit_path(root, limit);
 		/*
 		 * Replace the path in place rather than through add_path: nothing

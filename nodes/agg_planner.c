@@ -63,7 +63,9 @@ static const CustomPathMethods agg_path_methods = {
 
 static Node *aggregate_argument(const Aggref *agg);
 static bool key_eqop(Node *key, List *clauses, int *eqop);
+#if !TESS_GREENGAGE
 static void create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel);
+#endif
 
 /* The kind of a supported aggregate, or -1: the node knows how to combine these. */
 int
@@ -238,6 +240,7 @@ own_partial_aggregate(const Aggref *agg)
 	return agg->aggtranstype == INTERNALOID && sum_state_aggregate(agg);
 }
 
+#if !TESS_GREENGAGE
 /* The aggregates of the target list whose partial values are the node's own format. */
 static int
 own_partials(List *tlist)
@@ -249,6 +252,7 @@ own_partials(List *tlist)
 			count++;
 	return count;
 }
+#endif
 
 /*
  * Whether the groups of a grouping with generic aggregates fit hash_mem,
@@ -542,7 +546,7 @@ clause_keys(PlannerInfo *root, List *clauses)
 static List *
 group_keys(PlannerInfo *root)
 {
-	return clause_keys(root, root->processed_groupClause);
+	return clause_keys(root, tess_group_clause(root));
 }
 
 /* The core's aggregate paths of the list with this strategy and split. */
@@ -624,7 +628,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 
 	MemSet(&costs, 0, sizeof(costs));
 	if (root->parse->hasAggs)
-		get_agg_clause_costs(root, split, &costs);
+		tess_agg_clause_costs(root, split, &costs);
 	foreach_node(TargetEntry, entry_node, tlist)
 	{
 		List	   *exprs = IsA(entry_node->expr, Aggref) ?
@@ -714,7 +718,7 @@ plain_cost(PlannerInfo *root, const Path *child, List *tlist, AggSplit split,
 
 	MemSet(&costs, 0, sizeof(costs));
 	if (root->parse->hasAggs)
-		get_agg_clause_costs(root, split, &costs);
+		tess_agg_clause_costs(root, split, &costs);
 	result->startup_cost = child->total_cost + rowwise * rows +
 		share * (costs.transCost.startup + (costs.transCost.per_tuple - rowwise) * rows +
 				 costs.finalCost.startup + costs.finalCost.per_tuple);
@@ -784,6 +788,8 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	return tess_path_create(&config);
 }
 
+/* Partial stages over PostgreSQL's Gather, which Greengage does not run. */
+#if !TESS_GREENGAGE
 /*
  * The partial relation (UPPERREL_PARTIAL_GROUP_AGG or
  * UPPERREL_PARTIAL_DISTINCT) of an upper one, when the core built partial
@@ -891,7 +897,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 	if (list_length(tlist) == list_length(keys))
 	{
 		create_key_stack_paths(root, partial_rel, grouped_rel, AGGSPLIT_INITIAL_SERIAL, keys,
-							   grouped_rel->reltarget, root->processed_groupClause,
+							   grouped_rel->reltarget, tess_group_clause(root),
 							   AGG_PATH_HAVING, groups);
 		return;
 	}
@@ -930,7 +936,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		{
 			final = create_agg_path(root, grouped_rel, gathered, grouped_rel->reltarget,
 									strategy, AGGSPLIT_FINAL_DESERIAL,
-									keys != NIL ? root->processed_groupClause : NIL,
+									keys != NIL ? tess_group_clause(root) : NIL,
 									(List *) extra->havingQual,
 									&extra->agg_final_costs, keys != NIL ? groups : 1.0);
 			path = make_agg_path(root, final, final_tlist, list_length(keys),
@@ -958,13 +964,14 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		final = create_agg_path(root, grouped_rel, &gather->path,
 								grouped_rel->reltarget, strategy,
 								AGGSPLIT_FINAL_DESERIAL,
-								keys != NIL ? root->processed_groupClause : NIL,
+								keys != NIL ? tess_group_clause(root) : NIL,
 								(List *) extra->havingQual,
 								&extra->agg_final_costs,
 								keys != NIL ? groups : 1.0);
 		add_path(grouped_rel, &final->path);
 	}
 }
+#endif
 
 /* Whether an aggregate of the target list has DISTINCT. */
 static bool
@@ -996,9 +1003,9 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 		agg = (Aggref *) entry->expr;
 		if (list_length(keys) >= TESS_TABLE_MAX_KEYS)
 			return false;
-		pairs = estimate_num_groups(root,
+		pairs = tess_estimate_num_groups(root,
 									lappend(list_copy(keys), aggregate_argument(agg)),
-									input_rel->rows, NULL, NULL);
+									input_rel->rows);
 		bytes += pairs * (double) tess_table_record_bytes(list_length(keys) + 1, 0);
 		/* A dictionary of the values a word does not hold: an entry and a copy each. */
 		{
@@ -1006,8 +1013,7 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 			TessTableKeyKind kind;
 
 			if (!tess_word_key_kind(exprType(argument), &kind))
-				bytes += estimate_num_groups(root, list_make1(argument), input_rel->rows,
-											 NULL, NULL) *
+				bytes += tess_estimate_num_groups(root, list_make1(argument), input_rel->rows) *
 					(sizeof(KeyEntry) * 2 + sizeof(Datum) +
 					 get_typavgwidth(exprType(argument), exprTypmod(argument)));
 		}
@@ -1028,11 +1034,13 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 {
 	List	   *keys;
 	List	   *tlist;
+#if !TESS_GREENGAGE
 	double		groups = 0;
+#endif
 
 	if (root->parse->hasDistinctOn || IS_DUMMY_REL(input_rel))
 		return;
-	keys = clause_keys(root, root->processed_distinctClause);
+	keys = clause_keys(root, tess_distinct_clause(root));
 	if (keys == NIL)
 		return;
 	tlist = add_to_flat_tlist(NIL, keys);
@@ -1049,13 +1057,17 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
+#if !TESS_GREENGAGE
 	foreach_ptr(Path, path, output_rel->pathlist)
 		groups = Max(groups, path->rows);
 	create_key_stack_paths(root, partial_upper_rel(root, UPPERREL_PARTIAL_DISTINCT, output_rel),
 						   output_rel, AGGSPLIT_SIMPLE, keys, NULL,
-						   root->processed_distinctClause, 0, groups);
+						   tess_distinct_clause(root), 0, groups);
+#endif
 }
 
+/* Greengage's set operations stay the core's: their path has one input there. */
+#if !TESS_GREENGAGE
 /* The relations of a set operation's leaves, the tree's whole in the top one. */
 static Relids
 setop_leaves(Node *node, Relids leaves)
@@ -1228,6 +1240,7 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 			add_path(output_rel, &path->path);
 	}
 }
+#endif
 
 /*
  * A key's equality for the private data: 0 for a word key, else its type's
@@ -1264,6 +1277,7 @@ key_eqop(Node *key, List *clauses, int *eqop)
  * grouping one with the command in its place.
  */
 
+#if !TESS_GREENGAGE
 static void
 create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 {
@@ -1339,6 +1353,7 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		add_path(output_rel, &tess_path_create(&config)->path);
 	}
 }
+#endif
 
 /*
  * The node's path in place of each of the core's plain aggregate paths
@@ -1353,7 +1368,9 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	List	   *tlist = NIL;
 	List	   *templates;
 	AggStrategy strategy = AGG_PLAIN;
+#if !TESS_GREENGAGE
 	double		groups = 0;
+#endif
 
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
@@ -1367,7 +1384,9 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	}
 	if (stage == UPPERREL_SETOP)
 	{
+#if !TESS_GREENGAGE
 		create_setop_paths(root, output_rel);
+#endif
 		return;
 	}
 	if (stage != UPPERREL_GROUP_AGG ||
@@ -1417,6 +1436,8 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
+	/* Greengage: the two stages are its own, through a Motion (not yet). */
+#if !TESS_GREENGAGE
 	/*
 	 * The planner's estimate of the groups, for a Finalize HashAggregate:
 	 * the rows of the core's grouped paths, the relation's own being set
@@ -1426,6 +1447,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		groups = Max(groups, path->rows);
 	create_partial_paths(root, output_rel, (GroupPathExtraData *) extra, keys, tlist,
 						 groups);
+#endif
 }
 
 /*
@@ -1497,8 +1519,10 @@ setop_count(bool side)
 	agg->aggstar = !side;
 	agg->aggkind = AGGKIND_NORMAL;
 	agg->aggsplit = AGGSPLIT_SIMPLE;
+#if !TESS_GREENGAGE
 	agg->aggno = -1;
 	agg->aggtransno = -1;
+#endif
 	agg->location = -1;
 	if (side)
 	{

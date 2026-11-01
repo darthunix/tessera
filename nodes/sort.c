@@ -91,6 +91,8 @@ abbrev_order_of(SortSupport abbrev, Oid type)
 {
 	if (abbrev->abbrev_converter == NULL)
 		return SORT_ABBREV_NONE;
+#if !TESS_GREENGAGE
+	/* PostgreSQL 12 has no shared comparators of abbreviated keys to know. */
 	if (abbrev->comparator == ssup_datum_uint64_cmp)
 		return SORT_ABBREV_UNSIGNED;
 	if (abbrev->comparator == ssup_datum_int64_cmp)
@@ -99,6 +101,7 @@ abbrev_order_of(SortSupport abbrev, Oid type)
 		return SORT_ABBREV_UINT32;
 	if (abbrev->comparator == ssup_datum_int32_cmp)
 		return SORT_ABBREV_INT32;
+#endif
 	if (type == NUMERICOID &&
 		abbrev->comparator(Int64GetDatum(0), Int64GetDatum(1), abbrev) > 0 &&
 		abbrev->comparator(Int64GetDatum(-1), Int64GetDatum(0), abbrev) > 0)
@@ -1103,9 +1106,8 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	TessSortState *state = (TessSortState *) css;
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
-	List	   *context = set_deparse_context_plan(es->deparse_cxt,
-												   css->ss.ps.plan, ancestors);
-	bool		useprefix = es->rtable_size > 1 || es->verbose;
+	List	   *context = tess_deparse_context(es, &css->ss.ps, ancestors);
+	bool		useprefix = tess_explain_rtable_size(es) > 1 || es->verbose;
 	List	   *keys = NIL;
 	const uint64 *totals;
 	uint64		own[SORT_NCOUNTERS];

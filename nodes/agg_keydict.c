@@ -301,11 +301,12 @@ key_dict_images_equal(KeyDict *dict, Oid type)
 	/* PostgreSQL 12 has no equal-image support function to ask. */
 	(void) entry;
 	return false;
-#endif
+#else
 	entry = lookup_type_cache(type, TYPECACHE_BTREE_OPFAMILY);
 	return OidIsValid(entry->btree_opf) &&
 		get_opfamily_proc(entry->btree_opf, entry->btree_opintype, entry->btree_opintype,
 						  BTEQUALIMAGE_PROC) == F_BTEQUALIMAGE;
+#endif
 }
 
 KeyDict *

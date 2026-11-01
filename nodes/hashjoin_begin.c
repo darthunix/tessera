@@ -429,14 +429,13 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	TessHashJoinState *state = (TessHashJoinState *) css;
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
-	bool		useprefix = es->rtable_size > 1 || es->verbose;
+	bool		useprefix = tess_explain_rtable_size(es) > 1 || es->verbose;
 	List	   *context;
 	const uint64 *totals;
 	uint64		own[JOIN_NCOUNTERS];
 	uint64		overrun;
 
-	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
-									   ancestors);
+	context = tess_deparse_context(es, &css->ss.ps, ancestors);
 	if (state->plan_jointype != JOIN_INNER)
 		ExplainPropertyText("Join Type",
 							state->plan_jointype == JOIN_SEMI ? "Semi" :
