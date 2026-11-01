@@ -462,6 +462,18 @@ SELECT types_same($$SELECT count(*) FROM types_fl WHERE id < 5000 AND f8 = 'NaN'
 SELECT types_same($$SELECT count(*) FROM types_fl WHERE (f8 = 'Infinity' OR f8 = '-Infinity') AND f8 * (n - n) = 'NaN'$$);
 SELECT types_same($$SELECT id % 10, sum(f8::int8), sum(f4::int8), sum(f4::int) FROM types_fl WHERE id = 5006 OR id = 7 GROUP BY 1$$);
 SELECT types_same($$SELECT id % 10, sum(f8::int8), sum(f4::int8) FROM types_fl WHERE id = 5008 OR id = 7 GROUP BY 1$$);
+-- Comparisons at equality, where < and <= part: zeros of both signs.
+SELECT types_same($$SELECT count(*) FROM types_fl WHERE f8 < 0$$);
+SELECT types_same($$SELECT count(*) FROM types_fl WHERE f8 >= 0$$);
+SELECT types_same($$SELECT count(*) FROM types_fl WHERE f4 <= 0$$);
+SELECT types_same($$SELECT count(*) FROM types_fl WHERE f4 > 0::float8$$);
+-- Results that succeed at the edges, in batch filters: a subnormal
+-- doubled, a float4 subnormal through float8 and back, the casts to -2^63
+-- and near the top of int4 and of float4's integers.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_fl WHERE id = 5008 AND f8::int8 = -9223372036854775808 AND f4::int8 = -9223372036854775808;
+SELECT count(*) FROM types_fl WHERE id = 5008 AND f8::int8 = -9223372036854775808 AND f4::int8 = -9223372036854775808;
+SELECT count(*) FROM types_fl WHERE id = 5005 AND f8 * 2 > f8 AND f4 * 2::float4 > f4 AND f4::float8::float4 = f4;
+SELECT count(*) FROM types_fl WHERE id = 5006 AND f4::int = 2147483520 AND f8::int8 = 2147483648;
 \set VERBOSITY terse
 SELECT count(*) FROM types_fl WHERE id = 5001 AND f8 * 1e300 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5002 AND f8 * 1e-300 > 0;
