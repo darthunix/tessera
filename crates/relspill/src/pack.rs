@@ -21,8 +21,8 @@
 use anyhow::Result;
 use relhash::{CHUNK_HEADER, KEY_SLOT, RECORD_HEADER, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET};
 
-use crate::Damaged;
 use crate::damaged::intact;
+use crate::{Damaged, low};
 
 // The packing knows the records of this format of `relhash`: a new
 // format stops the build here until the packing is checked against it.
@@ -79,7 +79,7 @@ fn put<const W: usize>(records: &[u8], len: usize, lane: usize, out: &mut [u8]) 
     let at = lane * 4;
     for (record, place) in records.chunks_exact(len).zip(out.as_chunks_mut::<W>().0) {
         let value = word(record, at).to_ne_bytes();
-        place.copy_from_slice(&value[..W]);
+        place.copy_from_slice(&value[low::<W, 4>()..][..W]);
     }
 }
 
@@ -88,7 +88,7 @@ fn get<const W: usize>(packed: &[u8], len: usize, lane: usize, records: &mut [u8
     let at = lane * 4;
     for (record, place) in records.chunks_exact_mut(len).zip(packed.as_chunks::<W>().0) {
         let mut value = [0_u8; 4];
-        value[..W].copy_from_slice(place);
+        value[low::<W, 4>()..][..W].copy_from_slice(place);
         record[at..at + 4].copy_from_slice(&value);
     }
 }

@@ -23,6 +23,7 @@
 use anyhow::{Result, ensure};
 
 use crate::damaged::intact;
+use crate::low;
 
 /// Bytes of a chunk's header; the lanes follow.
 pub const HEADER: usize = 16;
@@ -201,7 +202,7 @@ fn lane(chunk: &[u8], shape: &Shape, lane: usize) -> impl Iterator<Item = u64> {
 /// Store the differences of the values from `base` in `W` bytes each.
 fn put<const W: usize>(values: impl Iterator<Item = u64>, base: u64, out: &mut [u8]) {
     for (value, place) in values.zip(out.as_chunks_mut::<W>().0) {
-        place.copy_from_slice(&value.wrapping_sub(base).to_ne_bytes()[..W]);
+        place.copy_from_slice(&value.wrapping_sub(base).to_ne_bytes()[low::<W, 8>()..][..W]);
     }
 }
 
@@ -214,7 +215,7 @@ fn get<const W: usize>(packed: &[u8], base: u64, out: &mut [u8]) {
         .zip(out.as_chunks_mut::<8>().0)
     {
         let mut bytes = [0_u8; 8];
-        bytes[..W].copy_from_slice(place);
+        bytes[low::<W, 8>()..][..W].copy_from_slice(place);
         *word = u64::from_ne_bytes(bytes).wrapping_add(base).to_ne_bytes();
     }
 }

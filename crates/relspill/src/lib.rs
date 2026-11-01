@@ -118,6 +118,17 @@ fn get_u64(bytes: &[u8], at: usize) -> u64 {
     u64::from_ne_bytes(word)
 }
 
+/// Where the low `W` bytes of a word of `N` bytes start in its bytes in
+/// the machine's order: a value stored narrower than its word keeps these
+/// bytes, as the narrower integer has them.
+const fn low<const W: usize, const N: usize>() -> usize {
+    if cfg!(target_endian = "big") {
+        N - W
+    } else {
+        0
+    }
+}
+
 impl BlockHeader {
     fn check(&self, max_len: u64) -> Result<()> {
         ensure!(
