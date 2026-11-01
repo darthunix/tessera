@@ -22,7 +22,8 @@
 //! rows, leaving to the caller every row it does not take. [`calendar`]
 //! is PostgreSQL's calendar of dates and timestamps: its Julian day
 //! routines, the truncations, intervals and fields of the date functions.
-//! [`text`] compares strings, matches LIKE patterns of literals and `%`,
+//! [`float`] holds the comparisons, arithmetic and casts of float4 and
+//! float8 with the core's checks. [`text`] compares strings, matches LIKE patterns of literals and `%`,
 //! and counts and cuts characters over their bytes. [`set`] answers `x IN
 //! (…)` of integer constants.
 //! Errors do not roll back previously completed words; callers must discard a
@@ -74,6 +75,7 @@ pub mod column_keys;
 pub mod count;
 pub mod decimal;
 pub mod error;
+pub mod float;
 mod int;
 pub mod int32;
 pub mod int64;

@@ -7,6 +7,7 @@
 use tessera_spill::Damaged;
 
 use crate::calendar::CalendarError;
+use crate::float::FloatError;
 use crate::ops::ArithmeticError;
 use crate::text::TextError;
 
@@ -54,6 +55,16 @@ impl SqlError for CalendarError {
     }
 }
 
+impl SqlError for FloatError {
+    fn sqlstate(&self) -> &'static str {
+        FloatError::sqlstate(*self)
+    }
+
+    fn kind(&self) -> ErrorKind {
+        ErrorKind::Data
+    }
+}
+
 impl SqlError for TextError {
     fn sqlstate(&self) -> &'static str {
         TextError::sqlstate(*self)
@@ -82,6 +93,9 @@ pub fn classify(error: &anyhow::Error) -> Option<&dyn SqlError> {
     }
     if let Some(calendar) = error.downcast_ref::<CalendarError>() {
         return Some(calendar);
+    }
+    if let Some(float) = error.downcast_ref::<FloatError>() {
+        return Some(float);
     }
     if let Some(text) = error.downcast_ref::<TextError>() {
         return Some(text);
