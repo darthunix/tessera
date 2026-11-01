@@ -399,7 +399,9 @@ SET work_mem = '256kB';
 SET hash_mem_multiplier = 1;
 EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset GROUP BY g;
 -- One set of 3000 values in the group's table: its last regrow, both of
--- its indexes alive, is the highest moment.
+-- its indexes alive, is the highest moment; its chunks past the first are
+-- an eighth of hash_mem, 64 kB here.
+-- spec: table-memory/A DISTINCT set under a small limit
 SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dset GROUP BY g$$);
 -- spec: table-memory/A regrow is counted with both indexes
 SELECT agg_memory($$SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset GROUP BY g$$);

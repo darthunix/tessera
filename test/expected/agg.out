@@ -1322,18 +1322,20 @@ EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset
 (3 rows)
 
 -- One set of 3000 values in the group's table: its last regrow, both of
--- its indexes alive, is the highest moment.
+-- its indexes alive, is the highest moment; its chunks past the first are
+-- an eighth of hash_mem, 64 kB here.
+-- spec: table-memory/A DISTINCT set under a small limit
 SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dset GROUP BY g$$);
  agg_memory 
 ------------
-       1205
+        245
 (1 row)
 
 -- spec: table-memory/A regrow is counted with both indexes
 SELECT agg_memory($$SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset GROUP BY g$$);
  agg_memory 
 ------------
-       1273
+        313
 (1 row)
 
 -- spec: table-memory/DISTINCT over no rows

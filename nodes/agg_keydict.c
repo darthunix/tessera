@@ -124,7 +124,10 @@ static void
 distinct_add_chunk(TessAggState *state, DistinctSet *set)
 {
 	int			chunk = set->table.nchunks;
-	Size		len = chunk == 0 ? AGG_FIRST_CHUNK : TESS_TABLE_MAX_CHUNK_LEN;
+	/* As the grouping's chunks: past the first, an eighth of hash_mem. */
+	Size		len = chunk == 0 ? AGG_FIRST_CHUNK :
+		Max(AGG_FIRST_CHUNK, Min(TESS_TABLE_MAX_CHUNK_LEN,
+								 TYPEALIGN_DOWN(8, tess_hash_memory_limit() / 8)));
 	void	   *base;
 
 	if (chunk == TESS_TABLE_MAX_CHUNKS)
