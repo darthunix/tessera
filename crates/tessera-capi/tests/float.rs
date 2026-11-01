@@ -656,3 +656,54 @@ fn a_call_a_caller_gets_wrong_is_an_internal_error() {
     );
     wrong(code, &status);
 }
+
+/// A column as a caller built against the first headers allocates it:
+/// the fields through `nrows` and no more.
+#[repr(C)]
+struct ShortColumn {
+    struct_size: usize,
+    values: *const u64,
+    isnull: *const bool,
+    nrows: i32,
+}
+
+#[test]
+fn a_column_of_only_the_required_fields_is_read() {
+    let values = [1.0_f64.to_bits()];
+    let isnull = [false];
+    let short = Box::new(ShortColumn {
+        struct_size: size_of::<ShortColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 1,
+    });
+    let left = FloatArg {
+        column: (&raw const *short).cast::<DatumColumn>(),
+        scalar: 0,
+    };
+    let right = FloatArg {
+        column: ptr::null(),
+        scalar: 2.0_f64.to_bits(),
+    };
+    let rows = [1_u64];
+    let mut out = [0_u64];
+    let mut present = [0_u64];
+    let mut status = Status::new();
+    // SAFETY: a column of the required fields, which the ABI accepts; local
+    // masks, buffers and status.
+    let code = unsafe {
+        tess_float_arith(
+            0,
+            FLOAT8,
+            &left,
+            FLOAT8,
+            &right,
+            &mask(1, &mut rows.clone()),
+            out.as_mut_ptr(),
+            &mut mask(1, &mut present),
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    assert_eq!((out[0], present[0]), (3.0_f64.to_bits(), 1));
+}
