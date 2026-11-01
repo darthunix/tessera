@@ -26,13 +26,14 @@ impl ModelTable {
     }
 
     /// Make the index for `records` records, as the participant elected
-    /// to size a shared table does.
-    ///
-    /// # Safety
-    ///
-    /// No other thread uses the index during the call.
-    pub unsafe fn size(&self, records: u64) -> Result<()> {
-        // SAFETY: the caller's contract.
+    /// to size a shared table does. Only that participant should use the
+    /// index meanwhile; one that did would read a header half made, which
+    /// the model's checks report.
+    pub fn size(&self, records: u64) -> Result<()> {
+        // SAFETY: the model's index is loom's atomic words: the header's
+        // stores are atomic, and `zero_u32` writes nothing, as the buckets
+        // start cleared, so another thread's use of the index meanwhile
+        // races on no memory.
         unsafe { init(&self.0, &CONFIG, records) }.map(drop)
     }
 

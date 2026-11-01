@@ -144,9 +144,9 @@ fn participate(build: &Build, shares: &[&[i32]], chunk: usize) {
     assert_eq!(build.table.append(chunk, keys).unwrap(), keys.len());
     if build.appended.fetch_add(1, Ordering::AcqRel) + 1 == shares.len() {
         let total = shares.iter().map(|keys| keys.len()).sum::<usize>();
-        // SAFETY: every participant has appended, and none uses the index
-        // before `sized`.
-        unsafe { build.table.size(total as u64) }.unwrap();
+        // Every participant has appended, and none uses the index before
+        // `sized`.
+        build.table.size(total as u64).unwrap();
         build.sized.store(true, Ordering::Release);
     }
     while !build.sized.load(Ordering::Acquire) {

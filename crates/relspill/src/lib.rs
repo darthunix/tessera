@@ -18,6 +18,10 @@
 //! same machine: the header is in native byte order and carries no
 //! checksum, as PostgreSQL's own temporary files do not.
 
+// All memory comes to the crate as safe slices its host makes, so the
+// compiler alone keeps it sound, its loom models included.
+#![forbid(unsafe_code)]
+
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("relspill needs a target whose pointers are 64 bits wide");
 
