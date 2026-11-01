@@ -1178,6 +1178,28 @@ SELECT join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$) 
        join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id AND jf.v > jd.n$$) AS residual;
 DROP FUNCTION join_costs_carried(text);
 
+-- A serial build checks, before each batch, its chunks, its values, room
+-- for two more chunks and the index its records will need, against
+-- hash_mem. At 16 MiB, 420 000 keys of 32-byte records take 13 697 024
+-- bytes of chunks and a 4 194 400-byte index: the build spills, and its
+-- memory stays within hash_mem; 250 000 keys fit with their index.
+CREATE TABLE jgbuild AS SELECT g AS k FROM generate_series(1, 420000) AS g;
+CREATE TABLE jgprobe AS SELECT g % 450000 AS k FROM generate_series(1, 600000) AS g;
+ANALYZE jgbuild, jgprobe;
+SET work_mem = '16MB';
+SET hash_mem_multiplier = 1;
+SET max_parallel_workers_per_gather = 0;
+-- spec: table-memory/A build whose index would pass the limit
+SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k)$$, false);
+SELECT join_same($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k)$$);
+-- spec: table-memory/A build that fits with its index
+SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k) WHERE b.k <= 250000$$, false);
+SELECT join_same($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k) WHERE b.k <= 250000$$);
+RESET work_mem;
+RESET hash_mem_multiplier;
+RESET max_parallel_workers_per_gather;
+DROP TABLE jgbuild, jgprobe;
+
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jslong, jsouter, jsheavy;
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();
