@@ -610,3 +610,6 @@ fn float4_bits(value: f32) -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(kani)]
+mod proofs;

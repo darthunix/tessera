@@ -206,10 +206,12 @@ jobs:
         run: make rust-loom
   # The proofs by Kani of the hash table's checks (relhash's
   # table/proofs.rs): for every value its blocks may hold, the checks keep
-  # each read inside its block and nothing panics. Kani brings its own
-  # nightly. A cover that no value reaches fails the job: the proof
-  # around it would hold for no value at all. It takes about six minutes,
-  # so it runs on pull requests only.
+  # each read inside its block and nothing panics. And of the casts of a
+  # float to an integer (tessera-kernels' float/proofs.rs): for every
+  # float, the integer rounded half to even, or the error of its range.
+  # Kani brings its own nightly. A cover that no value reaches fails the
+  # job: the proof around it would hold for no value at all. It takes
+  # about six minutes, so it runs on pull requests only.
   kani:
     name: Kani proofs (ubuntu-24.04)
     if: github.event_name == 'pull_request'
@@ -224,6 +226,11 @@ jobs:
       - name: cargo kani -p relhash
         run: |
           cargo kani -p relhash 2>&1 | tee kani.log
+          grep 'cover properties satisfied' kani.log |
+            awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
+      - name: cargo kani -p tessera-kernels
+        run: |
+          cargo kani -p tessera-kernels 2>&1 | tee kani.log
           grep 'cover properties satisfied' kani.log |
             awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
   # Every suite against PostgreSQL and Tessera's C built with
