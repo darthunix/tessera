@@ -34,7 +34,7 @@ named in a task comes on top.
 
 ## 3. One reader and one loop
 
-- [ ] 3.1 Move `Source<T>` and the row loop of
+- [x] 3.1 Move `Source<T>` and the row loop of
       `tessera_kernels::calendar` into a module of their own, the loop
       generic over its error; the calendar uses them. Only lines move.
       Check: `cargo ab moved`; `cargo run --release --locked -p
