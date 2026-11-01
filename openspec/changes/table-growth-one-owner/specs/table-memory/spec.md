@@ -93,7 +93,8 @@ to a power of two, and at least for the table's least capacity.
   start at 3 MiB
 - **THEN** the buckets of the first three take 512 kB, 512 kB and
   1 MiB, and the others the estimate's and the least capacity's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/A limit that is not a power of two`
 
 ### Requirement: The most chunks of a table
 A `TessHashJoin` or a `TessAgg` SHALL fail with SQLSTATE 54000 before

@@ -1390,6 +1390,52 @@ SELECT agg_same($$SELECT v, count(DISTINCT CASE WHEN v <= 100 THEN v % 100 END) 
 RESET work_mem;
 RESET hash_mem_multiplier;
 DROP TABLE agg_dset;
+-- A grouping's first index is sized for the planner's estimate of its
+-- groups, at most for as many as fill a quarter of hash_mem with buckets
+-- of 4 bytes, rounded up to a power of two, and at least for 256. Over no
+-- rows its Memory Usage is that index alone: at 2, 3 and 4 MiB an
+-- estimate of 200 000 groups gives 524 384, 524 384 and 1 048 672 bytes.
+CREATE TABLE agg_cap AS SELECT g AS k FROM generate_series(1, 600000) AS g;
+ANALYZE agg_cap;
+SET hash_mem_multiplier = 1;
+SET work_mem = '2MB';
+SELECT agg_memory($$SELECT k, count(*) FROM agg_cap WHERE k + 0 < 0 GROUP BY k$$);
+ agg_memory 
+------------
+        513
+(1 row)
+
+-- spec: table-memory/A limit that is not a power of two
+SET work_mem = '3MB';
+SELECT agg_memory($$SELECT k, count(*) FROM agg_cap WHERE k + 0 < 0 GROUP BY k$$);
+ agg_memory 
+------------
+        513
+(1 row)
+
+-- An estimate of about 3000 groups: 32 864 bytes; one of 200: the least, 4192.
+SELECT agg_memory($$SELECT k, count(*) FROM agg_cap WHERE k + 0 < 0 AND k <= 9000 GROUP BY k$$);
+ agg_memory 
+------------
+         33
+(1 row)
+
+SELECT agg_memory($$SELECT v, count(*) FROM generate_series(1, 3000) AS t(v) WHERE v + 0 < 0 GROUP BY v$$);
+ agg_memory 
+------------
+          5
+(1 row)
+
+SET work_mem = '4MB';
+SELECT agg_memory($$SELECT k, count(*) FROM agg_cap WHERE k + 0 < 0 GROUP BY k$$);
+ agg_memory 
+------------
+       1025
+(1 row)
+
+RESET work_mem;
+RESET hash_mem_multiplier;
+DROP TABLE agg_cap;
 -- A text argument through a dictionary of its values.
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT c) FROM agg_t;
                 QUERY PLAN                 
