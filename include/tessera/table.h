@@ -1166,9 +1166,11 @@ extern TessStatusCode tess_table_spill_partitions(uint64 *words, Size nwords,
 
 /*
  * Add bytes of chunks in memory (negative when freed), of a partition, or
- * of none (-1) before the split: *over is whether all of them pass the
- * budget, which a total equal to it does not. A count that would go below
- * zero or past 2^64 - 1 fails.
+ * of none (-1), which the total alone counts, before the split or after
+ * it: *over is whether all of them pass the budget, which a total equal to
+ * it does not. A count that would go below zero or past 2^64 - 1 fails,
+ * and leaves the words as they were while the other calls take away only
+ * what they added.
  */
 extern TessStatusCode tess_table_spill_add_bytes(uint64 *words, Size nwords, bool shared,
 												 int64 delta, int32 partition,
@@ -1221,7 +1223,9 @@ extern TessStatusCode tess_table_spill_flags(uint64 *words, Size nwords,
 
 /*
  * Add records to a partition; then its records into *records unless NULL.
- * Records that would pass 2^64 - 1 fail.
+ * A partition past the partitions in force fails, whatever is added or
+ * asked, and so do records that would pass 2^64 - 1, which stay as they
+ * were.
  */
 extern TessStatusCode tess_table_spill_records(uint64 *words, Size nwords,
 											   uint32 partition, uint64 added,

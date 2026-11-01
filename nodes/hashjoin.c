@@ -432,7 +432,10 @@ join_shared_partitions(TessHashJoinState *state)
 	return partitions;
 }
 
-/* Count bytes of this participant's chunks while the table is whole. */
+/*
+ * Count bytes of this participant's chunks of no partition: those of the
+ * table while it is whole, taken away again as the split moves them.
+ */
 void
 join_shared_count(TessHashJoinState *state, int64 delta)
 {

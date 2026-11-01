@@ -505,8 +505,9 @@ inner or outer files to one call, and `tess_table_spill_take_alone`
 SHALL take a partition whole for one participant only.
 `tess_table_spill_flags` SHALL read whether a partition is on disk and
 whether one took it whole. A partition past the partitions in force
-SHALL be refused, and so SHALL records past 2^64 - 1 and a file number
-past 2^32 - 1.
+SHALL be refused, by a count of records also when it adds none and
+reads none, and so SHALL records past 2^64 - 1 and a file number past
+2^32 - 1.
 
 #### Scenario: Rounds of several participants
 - **WHEN** two or three participants join a round at any phase, load
@@ -528,12 +529,14 @@ past 2^32 - 1.
 - **WHEN** two participants take the files of a partition, and take it
   whole, at once, and participants ask where to start their rounds
 - **THEN** each file goes to one of them, the partition to one, and the
-  starts go round the partitions; a partition past those in force, or a
-  file number past 2^32 - 1, is refused
+  starts go round the partitions; a partition past those in force, by a
+  count of records too that adds none and reads none, or a file number
+  past 2^32 - 1, is refused
 - **Verified by:**
   `crates/tessera-kernels/src/loom.rs::files_and_a_whole_partition_go_to_one_participant_each`;
   `crates/tessera-kernels/src/shared_spill.rs::files_and_partitions_are_taken_once`;
-  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`
+  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`;
+  `crates/tessera-capi/tests/spill.rs::the_records_refuse_a_partition_past_the_split`
 
 ### Requirement: The words of a spill
 A table that spills SHALL keep its decisions in words: a process's own
@@ -565,10 +568,12 @@ by atomic operations.
 partitions, up to the words' capacity, unless a participant split it
 before: the first split holds, and every call SHALL return the
 partitions in force. `tess_table_spill_add_bytes` SHALL add the bytes
-of a partition's chunks, or of none for a negative partition before the
-split, to that partition and to the total, and answer whether the
-total passes the budget; a total equal to it does not. A count of
-bytes SHALL never go below zero, nor past 2^64 - 1: such a call fails.
+of a partition's chunks to that partition and to the total, or, for a
+negative partition, bytes of no partition to the total alone, before
+the split or after it; and answer whether the total passes the budget;
+a total equal to it does not. A count of bytes SHALL never go below
+zero, nor past 2^64 - 1: such a call fails, and leaves the words as
+they were while the other calls take away only what they added.
 
 #### Scenario: The count of words
 - **WHEN** the words are sized for 1, 4 and 65536 partitions, and for 0
@@ -599,12 +604,20 @@ bytes SHALL never go below zero, nor past 2^64 - 1: such a call fails.
 
 #### Scenario: The budget
 - **WHEN** bytes up to the budget, past it, below zero and past 2^64 - 1
-  are added
+  are added, the last to a total past which a partition's count would
+  still go, and records past 2^64 - 1
 - **THEN** the first is not over, the second is, and the others fail
+  and leave the words, own or shared, as they were; against another
+  participant's call that takes away what it did not add, no count
+  wraps, and a call whose second count refuses gives the first one its
+  part back
 - **Verified by:**
   `crates/tessera-kernels/src/shared_spill.rs::a_total_equal_to_the_budget_is_not_over`;
   `crates/tessera-kernels/src/shared_spill.rs::a_counter_never_goes_below_zero`;
-  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`
+  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`;
+  `crates/tessera-kernels/src/shared_spill.rs::a_refused_update_leaves_the_words_as_they_were`;
+  `crates/tessera-kernels/src/loom.rs::a_refused_addition_lends_no_bytes_to_another_call`;
+  `crates/tessera-kernels/src/loom.rs::a_refused_taking_away_gives_the_partition_back`
 
 ### Requirement: Sending partitions to disk
 `tess_table_spill_evict` SHALL choose the next partition to send to

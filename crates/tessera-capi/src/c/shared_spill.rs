@@ -364,7 +364,8 @@ pub unsafe extern "C" fn tess_table_spill_flags(
 }
 
 /// `tess_table_spill_records`: add records to a partition, then its
-/// records into `records` unless null.
+/// records into `records` unless null; a partition past the partitions in
+/// force is refused, whatever it adds or asks.
 ///
 /// # Safety
 ///
@@ -386,8 +387,9 @@ pub unsafe extern "C" fn tess_table_spill_records(
             if added > 0 {
                 spill.add_records(partition, added)?;
             }
+            let held = spill.records(partition)?;
             if let Some(records) = records.as_mut() {
-                *records = spill.records(partition)?;
+                *records = held;
             }
             Ok(())
         })
