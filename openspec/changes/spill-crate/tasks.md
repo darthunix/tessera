@@ -87,7 +87,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       `tessera_test_spill_error`; `make installcheck`
 - [x] 2.5 Run the tests of the C entry points of the spill under Miri,
       and fix what it finds. Check: the Miri job of CI
-- [ ] 2.6 Add a counter program to `tessera-bench` for the kernels of a
+- [x] 2.6 Add a counter program to `tessera-bench` for the kernels of a
       spill: packing and unpacking a chunk of records and a chunk of
       columns, appending rows by partition, and the header of a block.
       Check: the program runs under `tessera-bench`; a first run of the
@@ -118,7 +118,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       `join` that split a level with long values and that fill one
       partition several times in a batch, compared with the core;
       `make installcheck` under the sanitizers of CI
-- [ ] 2.9 Lift the join's limit of 64 outer columns kept on disk,
+- [x] 2.9 Lift the join's limit of 64 outer columns kept on disk,
       which fails a query that spills with SQLSTATE `54000` though the
       format holds 4096 words a row. The C of the join reads one lane
       of NULL bits and reaches lanes by `1 + word`; the entry point

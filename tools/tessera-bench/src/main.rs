@@ -33,7 +33,7 @@ const MODULES: [(&str, &str); 3] = [
 ];
 
 /// The benchmarks of tessera-capi (its `[[bench]]` targets), in the order a full run takes them.
-const BENCHES: [&str; 14] = [
+const BENCHES: [&str; 15] = [
     "column_reader",
     "filter_int32",
     "compare_int32",
@@ -48,6 +48,7 @@ const BENCHES: [&str; 14] = [
     "set_int32",
     "table_int32",
     "table_large",
+    "spill",
 ];
 
 #[derive(Parser, Debug)]
