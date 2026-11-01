@@ -78,7 +78,12 @@ that the hint pays, so that the box costs its first user nothing it
 does not earn back.
 - **Checked by:** agent review — run `tessera-bench --base <base>
   --disasm` on every benchmark program and with `--module`, and list
-  every loop longer than the base's, each with its reason
+  every loop longer than the base's, each with its reason; for a loop
+  that grew by a prefetch hint, name the hint's bound of table size
+  and the runs that show it pays: on every measured size above the
+  bound, minimum and median cycles lower by more than 3 % and by more
+  than the spread of identical sides, in two runs on each machine;
+  and under the bound, the loop without the hint
 
 ### SQL stays outside
 No rule of SQL, of PostgreSQL's types or of Tessera's executor lives in
