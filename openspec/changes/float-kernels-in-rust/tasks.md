@@ -47,7 +47,7 @@ named in a task comes on top.
 
 ## 4. The rules in Rust
 
-- [ ] 4.1 Write `tessera_kernels::float`: `FloatError` with the core's
+- [x] 4.1 Write `tessera_kernels::float`: `FloatError` with the core's
       SQLSTATEs and messages, classified in `error.rs`; the comparison,
       the arithmetic of f32 and f64, the casts; the batch functions over
       `Source<T>`: compare (narrows the selection), arith, cast. Its
