@@ -278,7 +278,7 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 	config.level = spill->level;
 	config.fingerprint = side->fingerprint;
 	config.max_chunk = chunk_len;
-	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(state->memory_limit);
 	side->file = tess_spill_create(&config);
 }
 
@@ -1098,7 +1098,7 @@ join_spill_begin(TessHashJoinState *state)
 	int			nstored = outer_layout(state, stored, word_of, key_words, typlens, byvals);
 
 	*params = (TessJoinParams) {
-		.limit = tess_hash_memory_limit(),
+		.limit = state->memory_limit,
 		.shape = join_spill_shape(state),
 		.outer_words = (uint64) nstored,
 		.page = BLCKSZ,
@@ -1308,7 +1308,7 @@ join_spill_check(TessHashJoinState *state, uint64 needed)
 	state->counters[JOIN_BLOOM_FILTERS]++;
 	expected_rows = Max((uint64) state->inner_rows, state->build_rows * 2);
 	check(state, state->kernels->table_bloom_words_within(Max(expected_rows, 1),
-														  tess_hash_memory_limit(),
+														  state->memory_limit,
 														  &spill->bloom_words,
 														  &state->status));
 	spill->bloom = MemoryContextAllocExtended(spill->context,

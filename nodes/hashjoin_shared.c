@@ -572,7 +572,7 @@ join_build_shared(TessHashJoinState *state)
 		.start = tess_join_spill_start,
 		.target = tess_join_spill_target,
 		.spilled = tess_join_spill_spilled_weight,
-		.limit = tess_hash_memory_limit(),
+		.limit = state->memory_limit,
 		.max_chunks = TESS_TABLE_MAX_CHUNKS,
 		.per_check = (uint32) tess_join_shared_spill_evictions,
 		.preserve = state->preserve_inner ? 1 : 0,
@@ -807,7 +807,7 @@ side_share(TessHashJoinState *state, SpillSide *side, const char *prefix, bool m
 	config.shared = &state->parallel.shared->fileset;
 	config.participant = state->parallel.spill_participant;
 	config.name = psprintf("%s%d", prefix, state->css.ss.ps.plan->plan_node_id);
-	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(state->memory_limit);
 	side->file = tess_spill_create(&config);
 	side->shared_files = true;
 	if (!memory)
@@ -841,7 +841,7 @@ shared_split(TessHashJoinState *state)
 	TessSpillLevel level = {
 		.expected = state->kernels->spill_expected(held, (double) state->build_rows,
 												   state->inner_rows, (uint32) participants),
-		.limit = tess_hash_memory_limit(),
+		.limit = state->memory_limit,
 		.at_least = 2 * (uint32) participants,
 	};
 	TessSpillPlan plan;

@@ -23,11 +23,12 @@
 
 /*
  * The length of a table's chunks past the first: the level plan's for one
- * partition at a share of 8 of hash_mem (tess_spill_plan), between
- * TABLE_FIRST_CHUNK and TESS_TABLE_MAX_CHUNK_LEN, so that a table spills
- * only near its limit.
+ * partition at a share of 8 of the node's memory (tess_spill_plan),
+ * hash_mem or the share a core of the Greenplum family gave the node,
+ * between TABLE_FIRST_CHUNK and TESS_TABLE_MAX_CHUNK_LEN, so that a table
+ * spills only near its limit.
  */
-extern Size table_chunk_len(const TessKernelOps *kernels, TessStatus *status);
+extern Size table_chunk_len(const TessKernelOps *kernels, Size memory, TessStatus *status);
 
 /* 54000, naming table, if a table would hold nchunks chunks, past the most. */
 extern void table_chunks_limit(uint64 nchunks, const char *table);
