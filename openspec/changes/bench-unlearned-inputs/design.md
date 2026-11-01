@@ -154,10 +154,12 @@ schedule of reads, over inputs that repeat:
 A form and its control are two cases of one program, so their code
 lies at the same addresses, and the difference of their misses is the
 novelty alone; the controls' cycles against the plain case of the same
-program show what the footprint or the schedule costs by itself. The
-listing of each pilot build against the base (`tessera-bench
---disasm`) records where the measured loops lie, so that a difference
-between the pilot build and the base is not read as the form's.
+program, a ring of one input, show what the footprint or the schedule
+costs by itself. `tessera-bench` compares no two builds whose
+benchmark files differ, its listing included, so the pilot is judged
+within its one build, and no case of it against a build before it.
+Each case of the pilot also measures the case's reference over the
+same inputs and schedule, as the tool asks of every case.
 
 A form passes when, in both runs on each machine where its case
 applies, and with no UNSTABLE reported:
@@ -184,6 +186,25 @@ Refused:
   of a side would differ, and so would the two sides, by chance.
 - Inputs drawn row by row from new seeds. Their counts of selected and
   NULL rows would differ, and with them the instructions of a call.
+
+### The hypotheses of the pilot
+
+Written before its runs. The models, from the cases themselves (in
+`tests/benchmark.rs`, the test
+`the_pilot_cases_hold_the_models_of_their_misses`):
+11 misses a call for the fold of `column_reader`, as 11 of its 16
+words hold a count of rows other than the commonest; 3068 of the 7168
+steps for the halving of `set_int32` on the Intel Mac.
+
+- The ring: its misses rise with `K` and reach the model by `K` of 32
+  on both cases, where its inputs pass L1, so that its control's
+  cycles rise too while its control's misses stay at the plain case's.
+- The long input: its misses reach the model at the same `K` as the
+  ring's, and its calls cost `K` times the plain case's work.
+- The fresh input: its misses reach the model at once, since no input
+  repeats; its control's stay at the plain case's; the reads of the
+  counters around each call add the same instructions to the form and
+  to its control.
 
 ### Which cases change
 
@@ -214,10 +235,10 @@ the maintainer asked before every run, five minutes a run at most,
 the tools and not scripts for the occasion. On the Intel Mac the runs
 as root are the maintainer's commands; the M5 Pro's are relayed.
 
-- The base of the pilot is a commit with the pilot's fixtures in
-  place, so that `tessera-bench` can compare it; each form and control
-  is a candidate against it, `--filter` on the pilot's cases, twice on
-  each machine.
+- The pilot runs its two programs against themselves
+  (`tessera-bench --base WORKTREE --filter /pilot-`), twice on each
+  machine; the misses and cycles of its forms, controls and plain case
+  are read off one report.
 - The runs of identical sides, as above, after the cases change.
 - The runs worth citing are copied to `docs/benchmarks/<date>/`.
 
