@@ -25,8 +25,13 @@ use anyhow::{Result, ensure};
 
 pub mod columns;
 mod damaged;
+#[cfg(all(test, loom))]
+mod loom;
 mod pack;
+pub mod phases;
 pub mod plan;
+pub mod shared_spill;
+pub mod spill_columns;
 pub use damaged::Damaged;
 use damaged::intact;
 pub use pack::{pack, unpack};

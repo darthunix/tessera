@@ -1,8 +1,8 @@
 //! Rows appended by partition to chunks of columns
-//! ([`relspill::columns`]): a join's outer rows that wait for their
+//! ([`crate::columns`]): a join's outer rows that wait for their
 //! partition, kept without the table's records. Each row goes to the
 //! current chunk of its hash's partition, as
-//! [`ChunkWriter::append_partitioned_columns`](crate::table::ChunkWriter::append_partitioned_columns) appends records, in row order
+//! [`ChunkWriter::append_partitioned_columns`](relhash::ChunkWriter::append_partitioned_columns) appends records, in row order
 //! as long as the chunk has room: a row whose chunk is full stays pending
 //! while the rows after it go on. A row's place is referred to as the
 //! table refers to a record, by the chunk's number above
@@ -10,11 +10,11 @@
 
 use std::ops::Range;
 
+use crate::columns;
 use anyhow::{Result, bail, ensure};
-use relspill::columns;
-use tessera_core::{RowMask, ones};
+use relhash::{RowMask, ones};
 
-use crate::table::{MAX_PARTITIONS, Partitions, PayloadColumns};
+use relhash::{MAX_PARTITIONS, Partitions, PayloadColumns};
 
 /// Bits of a row's place in a reference; the chunk's number is above them.
 pub const PLACE_BITS: u32 = 17;

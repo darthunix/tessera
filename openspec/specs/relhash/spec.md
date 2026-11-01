@@ -687,8 +687,8 @@ only once every writer's appends are done, as the contracts of
 - **THEN** every key is found
 - **Verified by:**
   `crates/relhash/src/table/loom/table.rs::two_participants_build_a_table_and_find_every_key`;
-  `crates/tessera-kernels/src/loom.rs::two_participants_append_size_link_and_probe`;
-  `crates/tessera-kernels/src/loom.rs::three_participants_attach_at_any_phase`
+  `crates/relspill/src/loom.rs::two_participants_append_size_link_and_probe`;
+  `crates/relspill/src/loom.rs::three_participants_attach_at_any_phase`
 
 #### Scenario: A filter built after the appends
 - **WHEN** a filter is built over a shared table

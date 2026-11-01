@@ -38,10 +38,10 @@
 //! [`table`] is a hash table in a region of memory the caller owns, for
 //! joins and grouping, addressed by offsets so that the same bytes serve
 //! local and shared memory, and [`sort`] orders a table's records by their
-//! integer keys. `unsafe` is denied crate-wide and allowed only in the
-//! modules that need it: `simd`, for vector loads and intrinsics, and
-//! [`phases`] and [`shared_spill`], for the words that the participants
-//! of a shared table map; [`table`] keeps its own in its crate.
+//! integer keys. `unsafe` is denied crate-wide and allowed only in
+//! `simd`, for vector loads and intrinsics; [`table`] keeps its own in its
+//! crate. [`phases`], [`shared_spill`] and [`spill_columns`] are the
+//! spill's crate's, re-exported as [`table`] is.
 //!
 //! Code shape. `#[inline(always)]` and `#[inline(never)]` on a hot path
 //! record a decision checked in the disassembly of the bench binaries or by
@@ -79,16 +79,12 @@ pub mod float;
 mod int;
 pub mod int32;
 pub mod int64;
-#[cfg(all(test, loom))]
-mod loom;
 pub mod ops;
 pub mod order;
-pub mod phases;
 pub mod set;
-pub mod shared_spill;
 mod simd;
 pub mod sort;
 pub mod source;
-pub mod spill_columns;
 pub use relhash as table;
+pub use relspill::{phases, shared_spill, spill_columns};
 pub mod text;

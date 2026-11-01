@@ -387,8 +387,8 @@ output before it writes any.
 - **THEN** no number is given twice, the records and the duplicates are
   their sums, and the NULL bits their OR
 - **Verified by:**
-  `crates/tessera-kernels/src/phases.rs::participants_count_a_build_at_once`;
-  `crates/tessera-kernels/src/loom.rs::three_participants_attach_at_any_phase`
+  `crates/relspill/src/phases.rs::participants_count_a_build_at_once`;
+  `crates/relspill/src/loom.rs::three_participants_attach_at_any_phase`
 
 #### Scenario: Wrong counters and outputs
 - **WHEN** a call gets null or misaligned counters, a null output, or a
@@ -398,7 +398,7 @@ output before it writes any.
 - **Verified by:**
   `crates/tessera-capi/tests/table.rs::the_build_counters_refuse_null_and_misaligned_words`;
   `crates/tessera-capi/tests/table.rs::outputs_are_checked_before_anything_changes`;
-  `crates/tessera-kernels/src/phases.rs::counts_past_their_words_are_refused`
+  `crates/relspill/src/phases.rs::counts_past_their_words_are_refused`
 
 ### Requirement: The phases of a shared build
 A participant of a shared build SHALL step through these phases, which
@@ -443,7 +443,7 @@ participant stops so only when its plan wants no more rows.
 - **THEN** its actions are attach, build, wait, flush, wait, size,
   wait, link, wait, outer, wait, probe, leave and free
 - **Verified by:**
-  `crates/tessera-kernels/src/phases.rs::a_participant_alone_builds_flushes_sizes_links_and_probes`;
+  `crates/relspill/src/phases.rs::a_participant_alone_builds_flushes_sizes_links_and_probes`;
   `test/tessera_table_test.c::build_alone`
 
 #### Scenario: A participant that attaches late
@@ -451,15 +451,15 @@ participant stops so only when its plan wants no more rows.
 - **THEN** it does that phase's work, or waits at SIZE, or leaves at
   FREE, and then the phases after it
 - **Verified by:**
-  `crates/tessera-kernels/src/phases.rs::a_late_participant_joins_the_phase_the_others_are_in`
+  `crates/relspill/src/phases.rs::a_late_participant_joins_the_phase_the_others_are_in`
 
 #### Scenario: A state or a phase unknown
 - **WHEN** a participant holds a state no step makes, or an attach
   answers a phase past FREE
 - **THEN** the step fails, SQLSTATE `XX000`
 - **Verified by:**
-  `crates/tessera-kernels/src/phases.rs::an_unknown_state_is_an_error`;
-  `crates/tessera-kernels/src/phases.rs::an_attach_past_the_last_phase_is_an_error`;
+  `crates/relspill/src/phases.rs::an_unknown_state_is_an_error`;
+  `crates/relspill/src/phases.rs::an_attach_past_the_last_phase_is_an_error`;
   `crates/tessera-capi/tests/table.rs::a_step_refuses_a_phase_or_a_state_it_does_not_know`
 
 #### Scenario: A participant that stops while it probes
@@ -473,9 +473,9 @@ participant stops so only when its plan wants no more rows.
   probe nothing is marked; the join returns no row without a pair where
   every inner row has one
 - **Verified by:**
-  `crates/tessera-kernels/src/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
-  `crates/tessera-kernels/src/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
-  `crates/tessera-kernels/src/phases.rs::a_participant_stops_only_while_it_probes`;
+  `crates/relspill/src/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
+  `crates/relspill/src/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
+  `crates/relspill/src/phases.rs::a_participant_stops_only_while_it_probes`;
   `crates/tessera-capi/tests/table.rs::a_participant_marks_its_stop_only_while_it_probes`;
   `test/sql/join.sql::worker that has its share stops while it probes`
 
@@ -515,15 +515,15 @@ reads none, and so SHALL records past 2^64 - 1 and a file number past
 - **THEN** every file is loaded once, every key is found, and the round
   is freed once
 - **Verified by:**
-  `crates/tessera-kernels/src/loom.rs::two_participants_load_a_partition_and_probe_it`;
-  `crates/tessera-kernels/src/loom.rs::three_participants_join_a_round_at_any_phase`
+  `crates/relspill/src/loom.rs::two_participants_load_a_partition_and_probe_it`;
+  `crates/relspill/src/loom.rs::three_participants_join_a_round_at_any_phase`
 
 #### Scenario: A round alone and late
 - **WHEN** one participant attaches at ELECT, at ALLOCATE, at LOAD, at
   PROBE and at FREE
 - **THEN** its actions follow the phases from the one it attached at
 - **Verified by:**
-  `crates/tessera-kernels/src/phases.rs::a_round_elects_allocates_loads_probes_and_frees`
+  `crates/relspill/src/phases.rs::a_round_elects_allocates_loads_probes_and_frees`
 
 #### Scenario: Taken once
 - **WHEN** two participants take the files of a partition, and take it
@@ -533,9 +533,9 @@ reads none, and so SHALL records past 2^64 - 1 and a file number past
   count of records too that adds none and reads none, or a file number
   past 2^32 - 1, is refused
 - **Verified by:**
-  `crates/tessera-kernels/src/loom.rs::files_and_a_whole_partition_go_to_one_participant_each`;
-  `crates/tessera-kernels/src/shared_spill.rs::files_and_partitions_are_taken_once`;
-  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`;
+  `crates/relspill/src/loom.rs::files_and_a_whole_partition_go_to_one_participant_each`;
+  `crates/relspill/src/shared_spill.rs::files_and_partitions_are_taken_once`;
+  `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`;
   `crates/tessera-capi/tests/spill.rs::the_records_refuse_a_partition_past_the_split`
 
 ### Requirement: The words of a spill
@@ -581,16 +581,16 @@ they were while the other calls take away only what they added.
 - **THEN** the first three are 15, 30 and 327690 words, and the others
   are refused
 - **Verified by:**
-  `crates/tessera-kernels/src/shared_spill.rs::the_words_are_sized_for_1_to_65536_partitions`;
-  `crates/tessera-kernels/src/shared_spill.rs::words_attach_only_as_words_for_sizes_them`;
-  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`
+  `crates/relspill/src/shared_spill.rs::the_words_are_sized_for_1_to_65536_partitions`;
+  `crates/relspill/src/shared_spill.rs::words_attach_only_as_words_for_sizes_them`;
+  `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`
 
 #### Scenario: Own and shared words
 - **WHEN** the same steps run over a process's own words and over shared
   ones
 - **THEN** every answer is the same
 - **Verified by:**
-  `crates/tessera-kernels/src/shared_spill.rs::local_words_choose_as_shared_ones_do`;
+  `crates/relspill/src/shared_spill.rs::local_words_choose_as_shared_ones_do`;
   `crates/tessera-capi/tests/spill.rs::the_spill_entry_points_choose_by_the_weights`
 
 #### Scenario: The first split holds
@@ -599,8 +599,8 @@ they were while the other calls take away only what they added.
 - **THEN** the first split holds for both, and a count not a power of
   two is refused
 - **Verified by:**
-  `crates/tessera-kernels/src/loom.rs::participants_past_the_budget_agree_on_one_split`;
-  `crates/tessera-kernels/src/shared_spill.rs::the_first_split_holds_and_the_largest_partition_goes_to_disk`
+  `crates/relspill/src/loom.rs::participants_past_the_budget_agree_on_one_split`;
+  `crates/relspill/src/shared_spill.rs::the_first_split_holds_and_the_largest_partition_goes_to_disk`
 
 #### Scenario: The budget
 - **WHEN** bytes up to the budget, past it, below zero and past 2^64 - 1
@@ -612,12 +612,12 @@ they were while the other calls take away only what they added.
   wraps, and a call whose second count refuses gives the first one its
   part back
 - **Verified by:**
-  `crates/tessera-kernels/src/shared_spill.rs::a_total_equal_to_the_budget_is_not_over`;
-  `crates/tessera-kernels/src/shared_spill.rs::a_counter_never_goes_below_zero`;
-  `crates/tessera-kernels/src/shared_spill.rs::counts_past_their_words_are_refused`;
-  `crates/tessera-kernels/src/shared_spill.rs::a_refused_update_leaves_the_words_as_they_were`;
-  `crates/tessera-kernels/src/loom.rs::a_refused_addition_lends_no_bytes_to_another_call`;
-  `crates/tessera-kernels/src/loom.rs::a_refused_taking_away_gives_the_partition_back`
+  `crates/relspill/src/shared_spill.rs::a_total_equal_to_the_budget_is_not_over`;
+  `crates/relspill/src/shared_spill.rs::a_counter_never_goes_below_zero`;
+  `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`;
+  `crates/relspill/src/shared_spill.rs::a_refused_update_leaves_the_words_as_they_were`;
+  `crates/relspill/src/loom.rs::a_refused_addition_lends_no_bytes_to_another_call`;
+  `crates/relspill/src/loom.rs::a_refused_taking_away_gives_the_partition_back`
 
 ### Requirement: Sending partitions to disk
 `tess_table_spill_evict` SHALL choose the next partition to send to
@@ -656,16 +656,16 @@ negative or not finite, and bits past 32, SHALL be refused.
   no check passes its limit, and weights below zero or not finite are
   refused
 - **Verified by:**
-  `crates/tessera-kernels/src/shared_spill.rs::a_grouping_goes_from_its_start_down_to_its_target`;
-  `crates/tessera-kernels/src/shared_spill.rs::a_join_keeps_reserve_for_its_tails_and_a_quarter_in_memory`;
-  `crates/tessera-kernels/src/shared_spill.rs::the_first_split_holds_and_the_largest_partition_goes_to_disk`;
+  `crates/relspill/src/shared_spill.rs::a_grouping_goes_from_its_start_down_to_its_target`;
+  `crates/relspill/src/shared_spill.rs::a_join_keeps_reserve_for_its_tails_and_a_quarter_in_memory`;
+  `crates/relspill/src/shared_spill.rs::the_first_split_holds_and_the_largest_partition_goes_to_disk`;
   `crates/tessera-capi/tests/spill.rs::weights_that_are_not_finite_are_refused`
 
 #### Scenario: Marked once
 - **WHEN** two participants send the largest partition at once
 - **THEN** it is marked and counted once
 - **Verified by:**
-  `crates/tessera-kernels/src/loom.rs::a_partition_goes_to_disk_once`
+  `crates/relspill/src/loom.rs::a_partition_goes_to_disk_once`
 
 #### Scenario: A partition chosen again
 - **WHEN** a join, alone and with a shared table, spills with a weight
@@ -673,7 +673,7 @@ negative or not finite, and bits past 32, SHALL be refused.
 - **THEN** it frees what it holds of a partition chosen again, ends,
   and returns the core's rows
 - **Verified by:**
-  `crates/tessera-kernels/src/shared_spill.rs::a_grouping_goes_from_its_start_down_to_its_target`;
+  `crates/relspill/src/shared_spill.rs::a_grouping_goes_from_its_start_down_to_its_target`;
   `test/sql/join.sql::A partition on disk chosen again`;
   `test/sql/join.sql::A shared table's partition on disk chosen again`
 
@@ -684,8 +684,8 @@ negative or not finite, and bits past 32, SHALL be refused.
 - **THEN** only the one past the room, with bits left and below the
   share, splits, and bits past 32 are refused
 - **Verified by:**
-  `crates/tessera-kernels/src/shared_spill.rs::a_partition_splits_past_its_room_with_bits_left_and_many_keys`;
-  `crates/tessera-kernels/src/shared_spill.rs::a_level_past_the_bits_of_the_hash_is_refused`;
+  `crates/relspill/src/shared_spill.rs::a_partition_splits_past_its_room_with_bits_left_and_many_keys`;
+  `crates/relspill/src/shared_spill.rs::a_level_past_the_bits_of_the_hash_is_refused`;
   `crates/tessera-capi/tests/spill.rs::the_split_entry_point_weighs_room_bits_and_keys`
 
 ### Requirement: The partitions of a level

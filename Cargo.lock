@@ -941,7 +941,10 @@ name = "relspill"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "loom",
+ "proptest",
  "relhash",
+ "tessera-testing",
 ]
 
 [[package]]
@@ -1197,7 +1200,6 @@ name = "tessera-kernels"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "loom",
  "memchr",
  "proptest",
  "relhash",

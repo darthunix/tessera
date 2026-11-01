@@ -1042,13 +1042,13 @@ How a spilled chunk of records is written to disk is in
   design of [relhash](../relhash/design.md) lists
 - `crates/tessera-kernels/src/column_keys.rs`: the keys read from
   Tessera's columns
-- `crates/tessera-kernels/src/phases.rs`: the participant of a
+- `crates/relspill/src/phases.rs`: the participant of a
   shared build and of a round, the counters of a build and the stop
   word
-- `crates/tessera-kernels/src/shared_spill.rs`: the words of a
+- `crates/relspill/src/shared_spill.rs`: the words of a
   spill, the split, the rule that sends partitions to disk, the
   counters of the rounds and the rule of a split read back
-- `crates/tessera-kernels/src/loom.rs`: the models of a shared build,
+- `crates/relspill/src/loom.rs`: the models of a shared build,
   of the rounds and of the words of a spill
 - `crates/tessera-capi/src/c/table.rs`: the C entry points
 - `crates/tessera-capi/src/c/shared_spill.rs`: the C entry points of a
@@ -1072,14 +1072,14 @@ How a spilled chunk of records is written to disk is in
 - The unit tests in `crates/tessera-kernels/src/accumulate.rs`: the
   states of groups merged by their kinds, and a count past the int8
   range.
-- The unit tests in `crates/tessera-kernels/src/phases.rs`: the
+- The unit tests in `crates/relspill/src/phases.rs`: the
   actions of a participant alone, attached at every phase of a build
   and of a round, and the counters of a build under threads.
-- The unit tests in `crates/tessera-kernels/src/shared_spill.rs`:
+- The unit tests in `crates/relspill/src/shared_spill.rs`:
   the split, the budget, the weights of each node, a process's own
   words against shared ones, and the counters of the rounds.
 - `crates/relhash/src/table/loom/` and
-  `crates/tessera-kernels/src/loom.rs`, run by `make rust-loom`.
+  `crates/relspill/src/loom.rs`, run by `make rust-loom`.
 - The unit tests in `crates/relspill/src/plan.rs`: the plan of a
   level on examples, against the nodes' former rules, and the arguments
   it refuses.

@@ -27,7 +27,7 @@ use core::sync::atomic::AtomicU64;
 
 use anyhow::{Result, ensure};
 
-use crate::table::MAX_PARTITIONS;
+use relhash::MAX_PARTITIONS;
 
 /// The orderings of the words of a shared spill, by operation, which the
 /// loom model shares, so that it checks the orderings this code runs with.
