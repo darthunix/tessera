@@ -8,10 +8,12 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView};
 
+use tessera_capi::DenseIntColumn;
+
 use crate::support::{
     fixture::Fixture,
     reference::{self, Mask},
-    runner::Runner,
+    runner::{Group, Runner},
 };
 
 // Every measured entry point takes the same borrowed input. It is built before
@@ -142,7 +144,130 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
             &case,
         )?;
     }
+    pilot(runner)
+}
+
+/// The rings of inputs of the pilot of unlearned inputs: their sizes, and
+/// those of the long inputs made of them.
+pub const PILOT_RINGS: [usize; 6] = [1, 8, 16, 32, 64, 128];
+
+/// The case of the pilot: a random selection over random NULL flags, whose
+/// loop over the selected rows of a word ends after a count of rows that a
+/// predictor which has not seen the word cannot know.
+pub fn pilot_case() -> Fixture {
+    case(1024, "random", "random", false)
+}
+
+/// The pilot of unlearned inputs, on dense blocks: each form of inputs
+/// that the predictor cannot learn beside its control, the same form,
+/// footprint and schedule over inputs that repeat. A form and its control
+/// are cases of this one program, so their code lies at the same
+/// addresses.
+fn pilot(runner: &mut Runner) -> Result<()> {
+    let name = pilot_case().name;
+    for count in PILOT_RINGS {
+        let repeated = || (0..count).map(|_| pilot_case()).collect::<Vec<_>>();
+        for (form, inputs) in [
+            ("ring", pilot_case().ring(count)),
+            ("ring-same", repeated()),
+        ] {
+            let columns = inputs
+                .iter()
+                .map(Fixture::dense_column)
+                .collect::<Result<Vec<_>>>()?;
+            let reads: Vec<_> = columns
+                .iter()
+                .zip(&inputs)
+                .map(|(column, input)| Input::new(column, input))
+                .collect();
+            for (read, input) in reads.iter().zip(&inputs) {
+                check_pilot(read, input)?;
+            }
+            let mut group =
+                runner.group(format!("column_reader/dense/pilot-{form}-{count}/{name}"));
+            ring_ops(&mut group, &reads)?;
+        }
+        for (form, long) in [
+            ("long", Fixture::concat(&pilot_case().ring(count))),
+            ("long-same", Fixture::concat(&repeated())),
+        ] {
+            let column = long.dense_column()?;
+            let read = Input::new(&column, &long);
+            check_pilot(&read, &long)?;
+            let mut group =
+                runner.group(format!("column_reader/dense/pilot-{form}-{count}/{name}"));
+            ring_ops(&mut group, std::slice::from_ref(&read))?;
+        }
+    }
+    let first = pilot_case();
+    for (form, same) in [("fresh", false), ("fresh-same", true)] {
+        let mut group = runner.group(format!("column_reader/dense/pilot-{form}/{name}"));
+        // A function as a value is not general over the column's lifetime,
+        // so each call goes through a closure.
+        #[allow(clippy::redundant_closure, reason = "see the comment above")]
+        {
+            fresh_op(&mut group, "fold", &first, same, |read| fold_sum(read))?;
+            fresh_op(&mut group, "reference", &first, same, |read| {
+                dense_reference(read)
+            })?;
+        }
+    }
     Ok(())
+}
+
+fn check_pilot<C: ColumnReader<Value = i32>>(read: &Input<'_, C>, input: &Fixture) -> Result<()> {
+    ensure!(
+        fold_sum(read)? == input.expected && dense_reference(read)? == input.expected,
+        "a pilot's input differs from its model"
+    );
+    Ok(())
+}
+
+/// The fold and the reference over `reads` taken in turn, in whole turns.
+fn ring_ops<C: ColumnReader<Value = i32>>(
+    group: &mut Group<'_>,
+    reads: &[Input<'_, C>],
+) -> Result<()> {
+    use std::hint::black_box;
+    let count = reads.len();
+    let mut at = 0;
+    group.op_ring("fold", count, || {
+        at = (at + 1) % count;
+        fold_sum(black_box(&reads[at])).unwrap()
+    })?;
+    let mut at = 0;
+    group.op_ring("reference", count, || {
+        at = (at + 1) % count;
+        dense_reference(black_box(&reads[at])).unwrap()
+    })
+}
+
+/// `call` over a fresh input before every call: `first` permuted by a new
+/// seed each time, or by one seed in the control, so that the preparation
+/// does the same work and the control's inputs repeat. The counters count
+/// the calls alone.
+fn fresh_op(
+    group: &mut Group<'_>,
+    op: &str,
+    first: &Fixture,
+    same: bool,
+    call: impl Fn(&Input<'_, DenseIntColumn<'_, i32>>) -> Result<i64>,
+) -> Result<()> {
+    use std::hint::black_box;
+    let mut seed = 0;
+    group.op_blocks(op, |counters, iters| {
+        let mut total = pmu::Reading::default();
+        for _ in 0..iters {
+            seed += 1;
+            let input = first.permuted(if same { 1 } else { seed });
+            let column = input.dense_column()?;
+            let read = Input::new(&column, &input);
+            let start = counters.read()?;
+            black_box(call(black_box(&read))?);
+            total += counters.read()?.since(start);
+        }
+        Ok(total)
+    })
 }
 
 fn measure_column<C: ColumnReader<Value = i32>>(

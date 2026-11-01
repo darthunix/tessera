@@ -22,13 +22,14 @@ and relays.
       of a case, and the period of a ring in the runner. Check: `cargo
       test --locked -p tessera-capi --benches`; a test that every input
       of a case holds the same words, in another order
-- [ ] 2.2 The three forms of the design and their controls on the two
+- [x] 2.2 The three forms of the design and their controls on the two
       cases of the pilot, each a case of its own name, so that the runs
       can filter them; `K` a constant of the case. Check: `cargo test
       --locked -p tessera-capi --benches`, every input checked against
-      its model; the listing of the build against the base
+      its model; `cargo bench --locked -p tessera-capi --bench <program>
+      -- --list` names every form and control with its reference
 - [ ] 2.3 The runs of the pilot, as root and on the M5 Pro, twice each,
-      the base a commit with the pilot's fixtures, with the hypothesis
+      each program against itself, with the hypothesis
       of each form written down first; the form chosen by the criterion
       of the design, and the others removed. A pilot where no form
       passes stops the work for the maintainer. Check: the ids of the

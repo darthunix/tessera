@@ -107,6 +107,31 @@ pub fn exit_misses(selected: &Bitmap) -> u64 {
     words - counts.values().max().copied().unwrap_or(0)
 }
 
+/// The misses a call of the search by halving of `keys` over `values`: at
+/// each step, the values that take its rarer way, as a predictor that
+/// knows each step's odds, but not the values, would miss them. The steps
+/// are those of `tessera_kernels::set::KeySet::contains` beyond the keys it
+/// compares all.
+pub fn halving_misses<T: Ord + Copy>(keys: &[T], values: &[T]) -> u64 {
+    let mut steps: Vec<[u64; 2]> = Vec::new();
+    for &value in values {
+        let (mut base, mut size, mut step) = (0, keys.len(), 0);
+        while size > 1 {
+            let half = size / 2;
+            let middle = base + half;
+            let right = keys[middle] <= value;
+            if steps.len() == step {
+                steps.push([0; 2]);
+            }
+            steps[step][usize::from(right)] += 1;
+            base = if right { middle } else { base };
+            size -= half;
+            step += 1;
+        }
+    }
+    steps.iter().map(|ways| ways[0].min(ways[1])).sum()
+}
+
 #[derive(Clone)]
 pub struct Bitmap {
     nrows: usize,
@@ -306,6 +331,57 @@ impl<T: FixtureValue> Fixture<T> {
             prepared: self.prepared.as_ref().map(moved),
             non_nulls: self.non_nulls.as_ref().map(moved),
             expected: self.expected,
+        }
+    }
+
+    /// One input of the rows of `inputs`, one after another, so that a call
+    /// over it does the work of a call over each in turn. Every input but
+    /// the last holds whole words, so that its words stay words; the name is
+    /// the first input's.
+    pub fn concat(inputs: &[Self]) -> Self {
+        let rows = |input: &Self| input.values.len();
+        assert!(
+            inputs
+                .split_last()
+                .is_some_and(|(_, init)| init.iter().all(|input| rows(input) % 64 == 0)),
+            "inputs to join in words"
+        );
+        let flags = |bitmap: &Bitmap| -> Vec<bool> {
+            (0..bitmap.nrows)
+                .map(|row| bitmap.words[row / 64] & (1 << (row % 64)) != 0)
+                .collect()
+        };
+        let joined = |bitmap: fn(&Self) -> Option<&Bitmap>| {
+            bitmap(&inputs[0]).is_some().then(|| {
+                Bitmap::new(
+                    &inputs
+                        .iter()
+                        .flat_map(|input| flags(bitmap(input).unwrap()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        };
+        Self {
+            name: inputs[0].name.clone(),
+            values: inputs
+                .iter()
+                .flat_map(|input| input.values.clone())
+                .collect(),
+            datums: inputs
+                .iter()
+                .flat_map(|input| input.datums.clone())
+                .collect(),
+            nulls: inputs
+                .iter()
+                .flat_map(|input| input.nulls.clone())
+                .collect(),
+            selected: joined(|input| Some(&input.selected)).unwrap(),
+            prepared: joined(|input| input.prepared.as_ref()),
+            non_nulls: joined(|input| input.non_nulls.as_ref()),
+            expected: inputs
+                .iter()
+                .map(|input| input.expected)
+                .fold(0, i64::wrapping_add),
         }
     }
 }
