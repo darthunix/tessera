@@ -136,9 +136,10 @@ a Rust frame: Rust returns a status, and C raises it after the call.
   and `Source<T>` with the loop into a module of `tessera-kernels` that
   both families use; the loop becomes generic over the error type.
   `tessera-capi` reads a float8 Datum as `f64::from_bits` and a float4
-  Datum as `f32::from_bits` of its low 32 bits, through two new
-  `FromDatum` impls, and writes a float4 result as those bits widened
-  with zeros, as `Float4GetDatum` does.
+  Datum as `f32::from_bits` of its low 32 bits, through the reader's
+  trait of a Datum's value, as it reads an interval; the public
+  `FromDatum` stays the integers'. A float4 result is written as its
+  bits widened with zeros, as `Float4GetDatum` does.
 - **Why:** one owner of how an argument is read and of the order in
   which rows are computed: the rows go in ascending order and the first
   error ends the call, so an error comes from the row the core would

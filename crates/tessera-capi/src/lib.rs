@@ -79,7 +79,7 @@
 //! ```sh
 //! export PROPTEST_CASES=16 MIRIFLAGS=-Zmiri-disable-isolation
 //! cargo +nightly miri test -p tessera-kernels --lib --locked table::
-//! cargo +nightly miri test -p tessera-capi --test columns --test table --locked
+//! cargo +nightly miri test -p tessera-capi --test columns --test table --test float --locked
 //! ```
 
 pub mod c;

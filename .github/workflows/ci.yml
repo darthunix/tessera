@@ -330,7 +330,7 @@ jobs:
       - name: The tests of the unsafe code
         run: |
           cargo miri test --locked -p relhash
-          cargo miri test --locked -p tessera-capi --test columns --test table
+          cargo miri test --locked -p tessera-capi --test columns --test table --test float
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)
