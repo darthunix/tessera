@@ -63,7 +63,7 @@ static const CustomPathMethods agg_path_methods = {
 
 static Node *aggregate_argument(const Aggref *agg);
 static bool key_eqop(Node *key, List *clauses, int *eqop);
-#if !TESS_GREENGAGE
+#if TESS_PG_MAJOR >= 18
 static void create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel);
 #endif
 
@@ -786,8 +786,8 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	return tess_path_create(&config);
 }
 
-/* Partial stages over PostgreSQL's Gather, which Greengage does not run. */
-#if !TESS_GREENGAGE
+/* Partial stages over PostgreSQL's Gather, which the Greenplum family does not run. */
+#if TESS_PARALLEL_QUERY
 /*
  * The partial relation (UPPERREL_PARTIAL_GROUP_AGG or
  * UPPERREL_PARTIAL_DISTINCT) of an upper one, when the core built partial
@@ -1032,7 +1032,7 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 {
 	List	   *keys;
 	List	   *tlist;
-#if !TESS_GREENGAGE
+#if TESS_PARALLEL_QUERY
 	double		groups = 0;
 #endif
 
@@ -1055,7 +1055,7 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
-#if !TESS_GREENGAGE
+#if TESS_PARALLEL_QUERY
 	foreach_ptr(Path, path, output_rel->pathlist)
 		groups = Max(groups, path->rows);
 	create_key_stack_paths(root, partial_upper_rel(root, UPPERREL_PARTIAL_DISTINCT, output_rel),
@@ -1064,8 +1064,8 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 #endif
 }
 
-/* Greengage's set operations stay the core's: their path has one input there. */
-#if !TESS_GREENGAGE
+/* Set operations of two inputs (PostgreSQL 18); before, they stay the core's. */
+#if TESS_PG_MAJOR >= 18
 /* The relations of a set operation's leaves, the tree's whole in the top one. */
 static Relids
 setop_leaves(Node *node, Relids leaves)
@@ -1275,7 +1275,7 @@ key_eqop(Node *key, List *clauses, int *eqop)
  * grouping one with the command in its place.
  */
 
-#if !TESS_GREENGAGE
+#if TESS_PG_MAJOR >= 18
 static void
 create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 {
@@ -1358,9 +1358,9 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
  * whose input can be read in batches, and the parallel stack in place of
  * each partial one.
  */
-#if TESS_GREENGAGE
+#if TESS_MPP
 /*
- * Greengage's paths of two-stage grouping, Agg (final) <- Motion <- Agg
+ * The Greenplum family's paths of two-stage grouping, Agg (final) <- Motion <- Agg
  * (partial): the partial stage groups on each segment and a Motion brings
  * the partial values of a group together for the final one. Taken from
  * the grouped relation before add_path changes its list.
@@ -1456,7 +1456,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	List	   *tlist = NIL;
 	List	   *templates;
 	AggStrategy strategy = AGG_PLAIN;
-#if TESS_GREENGAGE
+#if TESS_MPP
 	List	   *stages;
 #else
 	double		groups = 0;
@@ -1474,7 +1474,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	}
 	if (stage == UPPERREL_SETOP)
 	{
-#if !TESS_GREENGAGE
+#if TESS_PG_MAJOR >= 18
 		create_setop_paths(root, output_rel);
 #endif
 		return;
@@ -1509,7 +1509,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		return;
 	/* add_path changes the list: the candidates are taken first. */
 	templates = aggregate_templates(output_rel->pathlist, strategy, AGGSPLIT_SIMPLE);
-#if TESS_GREENGAGE
+#if TESS_MPP
 	stages = cdb_stage_templates(output_rel->pathlist);
 #endif
 	/*
@@ -1529,7 +1529,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
-#if TESS_GREENGAGE
+#if TESS_MPP
 	foreach_ptr(AggPath, final, stages)
 		add_cdb_stage_path(root, output_rel, final, keys, tlist);
 #else
@@ -1614,7 +1614,7 @@ setop_count(bool side)
 	agg->aggstar = !side;
 	agg->aggkind = AGGKIND_NORMAL;
 	agg->aggsplit = AGGSPLIT_SIMPLE;
-#if !TESS_GREENGAGE
+#if TESS_PG_MAJOR >= 14
 	agg->aggno = -1;
 	agg->aggtransno = -1;
 #endif

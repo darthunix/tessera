@@ -206,9 +206,9 @@ limit_exec(CustomScanState *css)
 	if (!state->limits_ready)
 		compute_limits(state);
 	slot = tess_unary_exec(state->unary);
-#if TESS_GREENGAGE
+#if TESS_MPP
 	/*
-	 * As Greengage's Limit does: at the end, with no rescan to come, the
+	 * As the Limit of the Greenplum family does: at the end, with no rescan to come, the
 	 * subtree is squelched, so that the senders of a Motion below stop
 	 * waiting for this reader. The squelch reaches TessPack and the rest
 	 * through custom_ps. A batch parent reads the end here too.

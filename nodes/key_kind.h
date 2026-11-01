@@ -108,14 +108,14 @@ typedef enum TessKeyBytes
 } TessKeyBytes;
 
 /*
- * Whether equal strings of the collation are equal bytes. PostgreSQL 12's
- * pg_newlocale_from_collation returns no locale for the default collation,
- * so Greengage asks the catalog.
+ * Whether equal strings of the collation are equal bytes. Before
+ * PostgreSQL 18 pg_newlocale_from_collation returns no locale for the
+ * default collation, so the catalog is asked.
  */
 static inline bool
 tess_collation_deterministic(Oid collation)
 {
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 18
 	return get_collation_isdeterministic(collation);
 #else
 	return pg_newlocale_from_collation(collation)->deterministic;

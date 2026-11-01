@@ -297,8 +297,8 @@ key_dict_images_equal(KeyDict *dict, Oid type)
 
 	if (dict->bytes == TESS_KEY_BYTES_WHOLE)
 		return true;
-#if TESS_GREENGAGE
-	/* PostgreSQL 12 has no equal-image support function to ask. */
+#if TESS_PG_MAJOR < 13
+	/* No equal-image support function to ask before PostgreSQL 13. */
 	(void) entry;
 	return false;
 #else

@@ -4,11 +4,11 @@
 # selects the debug or the release library, and both must pass the tests.
 CARGO ?= cargo
 RUST_PROFILE ?= release
-# Greengage keeps its varlena headers in network byte order on every
-# machine: its kernels are built with the feature that reads them so, in a
-# target directory of their own (host.mk tells the cores apart).
-ifdef TESS_GREENGAGE
-RUST_TARGET = target/greengage
+# A core that writes varlena headers in network byte order (host.mk) gets
+# kernels built with the feature that reads them so, in a target
+# directory of their own.
+ifdef TESS_NETWORK_VARLENA
+RUST_TARGET = target/network-varlena
 RUST_FEATURES = --features network-varlena
 else
 RUST_TARGET = target

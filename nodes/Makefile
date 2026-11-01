@@ -4,11 +4,11 @@ PG_CPPFLAGS = -I$(srcdir)/../include $(TESS_HOST_CPPFLAGS)
 
 PG_CONFIG ?= pg_config
 include ../host.mk
-ifdef TESS_GREENGAGE
-# shortcut: the parts not ported to Greengage yet; greengage_stubs.c
-# stands in for their entry points.
-OBJS := $(filter-out append.o gather.o gather_planner.o join_planner.o,$(OBJS)) \
-	greengage_stubs.o
+ifdef TESS_MPP
+# The Greenplum family runs no PostgreSQL parallel query, so no gather
+# nodes; mpp_stubs.c stands in for their entry points and for the parts
+# not ported yet.
+OBJS := $(filter-out append.o gather.o gather_planner.o join_planner.o,$(OBJS)) mpp_stubs.o
 endif
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)

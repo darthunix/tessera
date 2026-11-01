@@ -13,8 +13,8 @@
 #include "decimal_cache.h"
 #include "heap_batch_internal.h"
 
-#if TESS_GREENGAGE
-/* Of master's CompactAttribute, the fields a walk reads. */
+#if TESS_PG_MAJOR < 19
+/* Of PostgreSQL 19's CompactAttribute, the fields a walk reads. */
 typedef struct TessHeapAttr
 {
 	int32		attcacheoff;
@@ -37,14 +37,15 @@ struct TessHeapBatch
 	TupleDesc	tuple_desc;
 	TupleDesc	other_desc;
 	int			first_non_guaranteed;
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 19
 	/*
-	 * PostgreSQL 12 has no compact attributes and no count of the
-	 * attributes at cached offsets, and fills attcacheoff only as rows are
-	 * deformed, so the batch keeps its own, once a descriptor: of each
-	 * column the fields a walk reads, and the offsets of the leading
-	 * fixed-width columns, the same in every tuple without a NULL up to
-	 * them, as master's TupleDescFinalize counts them.
+	 * Before PostgreSQL 19 a descriptor counts no attributes at cached
+	 * offsets (and has no compact attributes before 18), and attcacheoff
+	 * is filled only as rows are deformed, so the batch keeps its own,
+	 * once a descriptor: of each column the fields a walk reads, and the
+	 * offsets of the leading fixed-width columns, the same in every tuple
+	 * without a NULL up to them, as master's TupleDescFinalize counts
+	 * them.
 	 */
 	TessHeapAttr *attrs;
 	int			first_noncached;
@@ -123,11 +124,11 @@ struct TessHeapBatch
 #define KEEP_SAMPLE 4
 #define KEEP_WINDOW_ROWS 1024
 
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 19
 #define heap_attrs(heap) ((heap)->attrs)
 #define heap_first_noncached(heap) ((heap)->first_noncached)
 
-/* Three helpers of master's access/tupmacs.h, as master writes them. */
+/* Three helpers of PostgreSQL 19's access/tupmacs.h, as it writes them. */
 static inline int
 first_null_attr(const bits8 *bits, int natts)
 {
@@ -637,7 +638,7 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 	heap->selection = MemoryContextAlloc(context, sizeof(uint64) * heap->nwords);
 	heap->copies = AllocSetContextCreate(context, "Tessera heap batch copies",
 										 ALLOCSET_DEFAULT_SIZES);
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 19
 	heap->attrs = MemoryContextAlloc(context,
 									 sizeof(TessHeapAttr) * Max(config->ncolumns, 1));
 #endif
@@ -791,7 +792,7 @@ same_layout(TupleDesc a, TupleDesc b)
 		return false;
 	for (int attr = 0; attr < a->natts; attr++)
 	{
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 18
 		const Form_pg_attribute left = TupleDescAttr(a, attr);
 		const Form_pg_attribute right = TupleDescAttr(b, attr);
 

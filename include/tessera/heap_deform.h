@@ -52,11 +52,11 @@ tess_deform_cursor_init(TessDeformCursor *cursor)
  * only for descriptors that may hold cstring attributes, and should be a
  * compile-time constant.
  */
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 19
 
 /*
- * Greengage 7 keeps PostgreSQL 12's descriptor, without compact attributes
- * or a guaranteed prefix: the cursor walks the attributes one by one, as
+ * Before PostgreSQL 19 a descriptor has no guaranteed prefix (nor compact
+ * attributes before 18): the cursor walks the attributes one by one, as
  * slot_deform_heap_tuple does there, aligning each before it reads it.
  * first_non_guaranteed_attr and support_cstring change nothing here. The
  * heap batch caches the offsets of the fixed-width prefix itself and walks
@@ -250,6 +250,6 @@ tess_deform_advance(TessDeformCursor *cursor, HeapTuple tuple,
 	return false;
 }
 
-#endif							/* TESS_GREENGAGE */
+#endif
 
 #endif							/* TESSERA_HEAP_DEFORM_H */

@@ -108,11 +108,11 @@ check_partition(const TessSpill *spill, int partition)
 }
 
 /*
- * Greengage 7 keeps a set of shared files as PostgreSQL 12 did, without
- * master's FileSet inside it. Only parallel queries share spill files,
- * and Greengage runs none, so these calls are never reached there.
+ * Before PostgreSQL 15 a set of shared files has no FileSet inside it.
+ * Only parallel queries share spill files, and the forks of that age
+ * Tessera builds for run none, so these calls are never reached there.
  */
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 15
 #define tess_temporary_file() OpenTemporaryFile(false, "Tessera")
 #define tess_shared_create(shared, name) SharedFileSetCreate((shared), (name))
 #define tess_shared_open(shared, name) SharedFileSetOpen((shared), (name))

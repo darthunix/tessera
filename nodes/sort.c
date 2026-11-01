@@ -91,8 +91,7 @@ abbrev_order_of(SortSupport abbrev, Oid type)
 {
 	if (abbrev->abbrev_converter == NULL)
 		return SORT_ABBREV_NONE;
-#if !TESS_GREENGAGE
-	/* PostgreSQL 12 has no shared comparators of abbreviated keys to know. */
+#if TESS_PG_MAJOR >= 20
 	if (abbrev->comparator == ssup_datum_uint64_cmp)
 		return SORT_ABBREV_UNSIGNED;
 	if (abbrev->comparator == ssup_datum_int64_cmp)

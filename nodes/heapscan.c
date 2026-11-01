@@ -201,12 +201,15 @@ static void heap_scan_initialize_worker(CustomScanState *css, shm_toc *toc,
 static void heap_scan_shutdown(CustomScanState *css);
 
 /*
- * Greengage 7 keeps PostgreSQL 12's table AM calls: no flags argument to
- * begin a scan, a bitmap iterated by the executor rather than the AM.
- * There the node reads whole tables only, a page at a time; the bitmap,
- * index and index-only modes are left to the core.
+ * A scan begins with flags since PostgreSQL 19. The bitmap, index and
+ * index-only modes follow the core's scans of master: a bitmap iterated
+ * inside the table AM (PostgreSQL 18), index scans begun with their
+ * instrumentation and flags (master). On an older core the node reads
+ * whole tables only, a page at a time, and leaves those scans to the core.
  */
-#if TESS_GREENGAGE
+#define HEAP_INDEX_MODES (TESS_PG_MAJOR >= 20)
+
+#if TESS_PG_MAJOR < 19
 #define tess_beginscan(rel, snapshot, flags) \
 	((void) (flags), table_beginscan((rel), (snapshot), 0, NULL))
 #define tess_beginscan_parallel(rel, pscan, flags) \
@@ -393,7 +396,7 @@ tess_bitmap_only_brin(Path *bitmapqual)
 Path *
 tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *target)
 {
-#if TESS_GREENGAGE
+#if !HEAP_INDEX_MODES
 	return NULL;
 #else
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
@@ -494,7 +497,7 @@ tess_index_correlation(PlannerInfo *root, IndexOptInfo *index)
 Path *
 tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
 {
-#if TESS_GREENGAGE
+#if !HEAP_INDEX_MODES
 	return NULL;
 #else
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
@@ -799,7 +802,7 @@ heap_scan_start(HeapScanState *state)
 static uint32
 heap_scan_flags(HeapScanState *state)
 {
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 19
 	return 0;
 #else
 	return ScanRelIsReadOnly(&state->css.ss) ? SO_HINT_REL_READ_ONLY : SO_NONE;
@@ -815,7 +818,7 @@ begin_scan(HeapScanState *state, TableScanDesc scan)
 	state->pagemode = (scan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
 }
 
-#if !TESS_GREENGAGE
+#if HEAP_INDEX_MODES
 /*
  * A parallel bitmap: whether this participant builds it, as the core's
  * BitmapShouldInitializeSharedState: the first to come does, the others
@@ -876,8 +879,8 @@ build_bitmap(HeapScanState *state)
 static void
 begin_bitmap_scan(HeapScanState *state)
 {
-#if TESS_GREENGAGE
-	elog(ERROR, "TessHeapScan reads no bitmap on Greengage");
+#if !HEAP_INDEX_MODES
+	elog(ERROR, "TessHeapScan reads no bitmap on this core");
 #else
 	EState	   *estate = state->css.ss.ps.state;
 	SharedBitmap *shared = state->shared_bitmap;
@@ -910,7 +913,7 @@ end_scan(HeapScanState *state)
 	ExecClearTuple(state->landing);
 	if (state->scan != NULL)
 	{
-#if !TESS_GREENGAGE
+#if HEAP_INDEX_MODES
 		if (state->bitmap_plan != NULL &&
 			!tbm_exhausted(&state->scan->st.rs_tbmiterator))
 			tbm_end_iterate(&state->scan->st.rs_tbmiterator);
@@ -944,7 +947,7 @@ next_page(HeapScanState *state)
 {
 	HeapScanDesc hscan = (HeapScanDesc) state->scan;
 
-#if !TESS_GREENGAGE
+#if HEAP_INDEX_MODES
 	if (state->bitmap_plan != NULL)
 	{
 		bool		recheck;
@@ -989,8 +992,8 @@ next_page(HeapScanState *state)
 static inline void
 count_heap_rows(Relation rel, bool fetched, int count)
 {
-#if TESS_GREENGAGE
-	/* PostgreSQL 12's counters of the table. */
+#if TESS_PG_MAJOR < 16
+	/* The counters of the table before PostgreSQL 16. */
 	if (count <= 0 || rel->pgstat_info == NULL)
 		return;
 	if (fetched)
@@ -1057,8 +1060,8 @@ give_out(HeapScanState *state, TessBatch *batch)
 static TessBatch *
 index_only_batch(HeapScanState *state, int limit)
 {
-#if TESS_GREENGAGE
-	elog(ERROR, "TessHeapScan reads no index on Greengage");
+#if !HEAP_INDEX_MODES
+	elog(ERROR, "TessHeapScan reads no index on this core");
 	return NULL;
 #else
 	IndexOnlyScanState *ios = state->ios_plan;

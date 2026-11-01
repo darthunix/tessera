@@ -109,8 +109,8 @@ _PG_init(void)
 	RegisterCustomScanMethods(&tess_sort_scan_methods);
 	api->nodes->add(&tess_sort_node);
 	tess_sort_planner_init();
-#if !TESS_GREENGAGE
-	/* Greengage runs no parallel query, and its appends stay the core's. */
+#if !TESS_MPP
+	/* The Greenplum family runs no parallel query; its appends stay the core's (mpp_stubs.c). */
 	RegisterCustomScanMethods(&tess_gather_scan_methods);
 	api->nodes->add(&tess_gather_node);
 	RegisterCustomScanMethods(&tess_send_scan_methods);
