@@ -20,7 +20,9 @@ use crate::error::{Error, Kind, Result, Rule, ensure};
 
 use super::region::Region;
 
-/// The format of the table this code writes and accepts.
+/// The format of the table this code writes and accepts: its index, its
+/// chunks and its records. A change of the layout of any of them takes a
+/// new version.
 pub const FORMAT_VERSION: u32 = 2;
 /// The most keys a record holds.
 pub const MAX_KEYS: usize = 16;
@@ -30,10 +32,15 @@ const MAGIC: u64 = u64::from_le_bytes(*b"RELHASH\0");
 pub(crate) const MIN_BUCKETS: u64 = 1024;
 /// The most buckets: the count stays below 2^32.
 pub(super) const MAX_BUCKETS: u64 = 1 << 31;
-/// Bytes of a record before its keys: hash, next, null bits, length.
-pub(super) const RECORD_HEADER: usize = 16;
-/// Bytes of one key slot.
-pub(super) const KEY_SLOT: usize = 8;
+/// Bytes of a record before its keys: its hash, the reference of the
+/// next record, the NULL bits and the size, at the offsets
+/// [`RECORD_HASH_OFFSET`](crate::RECORD_HASH_OFFSET) and those beside it
+/// name. The shortest record is this header and one key's slot.
+pub const RECORD_HEADER: usize = 16;
+/// Bytes of the slot of one key, a word in the machine's byte order;
+/// the slots of a record's keys follow its header, in the order of the
+/// keys.
+pub const KEY_SLOT: usize = 8;
 /// Bytes of the header of a table's index, 96, where its buckets start.
 ///
 /// The index of a table is this header, then the buckets, 4 bytes each.

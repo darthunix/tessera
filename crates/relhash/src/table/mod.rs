@@ -36,8 +36,8 @@ pub use batch::{Batch, Matches, MatchesView};
 pub use chunks::{Appended, ChunkWriter, Chunks, MAX_PARTITIONS, Partitions, Split};
 pub(crate) use header::MIN_BUCKETS;
 pub use header::{
-    CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS, TableConfig,
-    UNIT_BITS, VERSION_OFFSET, index_size, record_bytes,
+    CHUNK_HEADER, FORMAT_VERSION, HEADER_SIZE, KEY_SLOT, MAX_CHUNK_LEN, MAX_CHUNKS, MAX_KEYS,
+    RECORD_HEADER, TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, record_bytes,
 };
 use header::{Header, Layout, NRECORDS};
 pub use keys::KeySource;
@@ -45,7 +45,10 @@ pub use marks::{Marks, mark, mark_words, scan_unmarked};
 #[cfg(feature = "alloc")]
 pub use owned::OwnedTable;
 use record::Access;
-pub use record::{MAX_PAYLOAD_COLUMNS, PayloadColumns, Record, payload_null_words};
+pub use record::{
+    MAX_PAYLOAD_COLUMNS, PayloadColumns, RECORD_HASH_OFFSET, RECORD_NEXT_OFFSET,
+    RECORD_NULL_BITS_OFFSET, RECORD_SIZE_OFFSET, Record, payload_null_words,
+};
 use region::{RawRegion, Region};
 pub use writer::{Cursor, HELD, MergeStop, PayloadCursor};
 

@@ -273,11 +273,17 @@ pub const relhash::CHUNK_HEADER: usize
 pub const relhash::FORMAT_VERSION: u32
 pub const relhash::HEADER_SIZE: usize
 pub const relhash::HELD: usize
+pub const relhash::KEY_SLOT: usize
 pub const relhash::MAX_CHUNKS: usize
 pub const relhash::MAX_CHUNK_LEN: usize
 pub const relhash::MAX_KEYS: usize
 pub const relhash::MAX_PARTITIONS: usize
 pub const relhash::MAX_PAYLOAD_COLUMNS: usize
+pub const relhash::RECORD_HASH_OFFSET: usize
+pub const relhash::RECORD_HEADER: usize
+pub const relhash::RECORD_NEXT_OFFSET: usize
+pub const relhash::RECORD_NULL_BITS_OFFSET: usize
+pub const relhash::RECORD_SIZE_OFFSET: usize
 pub const relhash::UNIT_BITS: u32
 pub const relhash::VERSION_OFFSET: usize
 pub trait relhash::KeySource

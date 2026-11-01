@@ -20,10 +20,19 @@ use super::header::{CHUNK_HEADER, KEY_SLOT, Layout, NRECORDS, Place, RECORD_HEAD
 use super::keys::WordKeys;
 use super::region::Region;
 
-const HASH: usize = 0;
-const NEXT: usize = 4;
-const NULL_BITS: usize = 8;
-const LEN: usize = 12;
+/// The offset in a record of its hash, a `u32` in the machine's byte
+/// order, as [`Record`] draws the record.
+pub const RECORD_HASH_OFFSET: usize = 0;
+/// The offset in a record of the reference of the next record of its
+/// chain, a `u32`: 0 at the chain's end, and in a chunk that no table
+/// links yet.
+pub const RECORD_NEXT_OFFSET: usize = 4;
+/// The offset in a record of the NULL bits of its keys, a `u32`: bit `k`
+/// set when key `k` is NULL.
+pub const RECORD_NULL_BITS_OFFSET: usize = 8;
+/// The offset in a record of its size in units of 8 bytes, a `u32`, the
+/// same in every record of a table.
+pub const RECORD_SIZE_OFFSET: usize = 12;
 
 /// The steps down a chain after which a walk goes on out of line, where
 /// it also stops at a cycle: a healthy table's chains are far shorter.
@@ -54,6 +63,13 @@ pub(super) const LONG_CHAIN: u64 = 64;
 /// - next: the reference of the next record of the chain, 0 at its end,
 ///   as [`Chunks`](crate::Chunks) draws a reference;
 /// - size / 8: the record's size in units of 8 bytes.
+///
+/// [`RECORD_HASH_OFFSET`], [`RECORD_NEXT_OFFSET`],
+/// [`RECORD_NULL_BITS_OFFSET`] and [`RECORD_SIZE_OFFSET`] name the
+/// offsets of the header's fields, [`RECORD_HEADER`](crate::RECORD_HEADER)
+/// its bytes and [`KEY_SLOT`](crate::KEY_SLOT) a key's slot, so that a
+/// caller that keeps chunks of records, as a spill to disk does, reads
+/// them by these names.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
 pub struct Record<'a> {
@@ -84,23 +100,23 @@ impl<'r> View<'r> {
 
     #[inline(always)]
     pub(super) fn hash(&self) -> u32 {
-        self.field(HASH)
+        self.field(RECORD_HASH_OFFSET)
     }
 
     #[inline(always)]
     pub(super) fn next(&self) -> u32 {
-        self.field(NEXT)
+        self.field(RECORD_NEXT_OFFSET)
     }
 
     #[inline(always)]
     pub(super) fn null_bits(&self) -> u32 {
-        self.field(NULL_BITS)
+        self.field(RECORD_NULL_BITS_OFFSET)
     }
 
     /// The length the record claims, in bytes.
     #[inline(always)]
     pub(super) fn len(&self) -> usize {
-        self.field(LEN) as usize * 8
+        self.field(RECORD_SIZE_OFFSET) as usize * 8
     }
 
     #[inline(always)]
@@ -759,9 +775,11 @@ unsafe fn fill_head<'b, const N: usize>(
     let nkeys = if N > 0 { N } else { nkeys };
     let (words, _) = bytes.as_chunks_mut::<8>();
     let mut fields = [0; RECORD_HEADER];
-    fields[HASH..HASH + 4].copy_from_slice(&hash.to_ne_bytes());
-    fields[NULL_BITS..NULL_BITS + 4].copy_from_slice(&keys.null_bits(bit).to_ne_bytes());
-    fields[LEN..LEN + 4].copy_from_slice(&((record_size / 8) as u32).to_ne_bytes());
+    fields[RECORD_HASH_OFFSET..RECORD_HASH_OFFSET + 4].copy_from_slice(&hash.to_ne_bytes());
+    fields[RECORD_NULL_BITS_OFFSET..RECORD_NULL_BITS_OFFSET + 4]
+        .copy_from_slice(&keys.null_bits(bit).to_ne_bytes());
+    fields[RECORD_SIZE_OFFSET..RECORD_SIZE_OFFSET + 4]
+        .copy_from_slice(&((record_size / 8) as u32).to_ne_bytes());
     let (header, rest) = words.split_at_mut(RECORD_HEADER / 8);
     let (first, second) = fields.split_at(8);
     header[0].copy_from_slice(first);
@@ -859,7 +877,7 @@ impl<'r, R: Region> Access<'r, R> {
     #[inline(always)]
     pub(super) unsafe fn push_at(&self, offset: u32, spot: R::Spot, hash: u32) -> u32 {
         let bucket = self.bucket(hash);
-        let next = R::advance(spot, NEXT);
+        let next = R::advance(spot, RECORD_NEXT_OFFSET);
         // SAFETY: the bucket lies in the bucket array, as in `head`, and
         // the next field in the record, the caller's alone until published.
         unsafe {
@@ -894,11 +912,13 @@ impl<'r, R: Region> Access<'r, R> {
         // SAFETY: both next fields lie in records within their chunks, and
         // nothing else reads or writes the table meanwhile.
         unsafe {
-            let after = self.region.spot(after_chunk, after_byte + NEXT);
+            let after = self
+                .region
+                .spot(after_chunk, after_byte + RECORD_NEXT_OFFSET);
             // trust: next
             let next = self.region.load_next(after);
             self.region
-                .store_next(self.region.spot(chunk, byte + NEXT), next);
+                .store_next(self.region.spot(chunk, byte + RECORD_NEXT_OFFSET), next);
             self.region.store_next(after, offset);
         }
     }
@@ -1068,12 +1088,12 @@ pub(super) fn record_at<R: Region>(
         u32::from_ne_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
     };
     ensure!(
-        field(LEN) as usize * 8 == record_size,
+        field(RECORD_SIZE_OFFSET) as usize * 8 == record_size,
         Error::damaged(Rule::NoRecord)
             .with(place.chunk)
             .and(place.byte)
     );
-    Ok(Some(field(HASH)))
+    Ok(Some(field(RECORD_HASH_OFFSET)))
 }
 
 /// The records of a chunk from a byte on, in order: each place's first
