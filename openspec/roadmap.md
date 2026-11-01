@@ -934,16 +934,26 @@ of both trees on 2026-11-01.
        `CUSTOMPATH_SUPPORT_PROJECTION`, as PostgreSQL 15 does, and
        `create_projection_path_with_quals` (`pathnode.c`) keeps the
        Motion hazard of its input;
-     - `find_all_mat_nodes` (`execProcnode.c`) looks into `custom_ps`.
+     - `find_all_mat_nodes` (`execProcnode.c`) looks into `custom_ps`;
+     - `motion_sanity_walker` (`cdbllize.c`) counts the Motion nodes
+       under a custom scan;
+     - a real setting reaches the segments whole: `%.17g` in place of
+       `%f` (`cdbgang.c`, `guc_gp.c`), and `parse_real` (`guc.c`)
+       accepts a denormalized value, as `float8in` does.
   2. Build and compatibility layer (plan 7.1): `compat.h`; a Greengage
      build without the parts for PostgreSQL parallel queries
      (TessGather, TessGatherMerge, TessSend, the shared join);
      `PG_MODULE_MAGIC`; the kernels' `F_*` names mapped through
      Greengage's catalog by OID and argument types; the EXTRACT kernels
-     and the byte-equal key shortcut off; the binding's reset callback
+     off, and the equal-image lookup of a key's type, which PostgreSQL
+     12 lacks (bytea and text of a deterministic collation keep their
+     byte comparison); the binding's reset callback
      removed without `MemoryContextUnregisterResetCallback`; the
      settings the executor reads declared with `GUC_GPDB_NEED_SYNC`;
-     the memory budget from the node's `operatorMemKB`; spill files
+     the memory budget from `PlanStateOperatorMemKB`, `work_mem` when
+     the node has no `operatorMemKB` (until `memquota.c` classifies a
+     custom scan, it gets the fixed share of a node that is not
+     memory-intensive); spill files
      registered with the workfile manager. Every table, heap or
      append-only, is read by the core's scan under TessPack.
   3. Stopping under Motion: a node squelches each child it stops
@@ -957,8 +967,9 @@ of both trees on 2026-11-01.
      against the cluster with alternative expected files; the result
      in `docs/greengage.md`.
   5. Append-only sources (plan 7.5, 7.6, 7.8): a source chosen through
-     the node registry, `TessAocsScan` (a dense fixed-width block read
-     in place, the core's decoding for the other encodings), then
+     the node registry, `TessAocsScan` (the fixed-width values of a
+     decompressed block read in place where the block has no NULLs,
+     RLE or delta encoding, the core's decoding otherwise), then
      `TessAoScan`.
   6. Distributed planners: TessHashJoin takes its children from
      Greengage's hash join path, its Motion and Material nodes
@@ -997,17 +1008,17 @@ of both trees on 2026-11-01.
   states cross a Motion in Tessera's own format, with TessAgg as the
   final stage; ORCA is joined by rewriting its finished plan;
   append-only tables are required and come before Tessera's own heap
-  scan, which Greengage uses little. Earlier:
+  scan, as the workloads in mind use heap tables little. Earlier:
   lowered, no place in the queue (2026-10-05); design only, no code
   (2026-09-22). Checked in both trees on 2026-11-01, by reading the
   code and by a trial build of the C modules against Greengage's
   `pg_config` (below); nothing was run on a cluster:
-  - By the code, every plan the coordinator dispatches with a Tessera
-    node fails today. Greengage's `plan_tree_walker` walks
-    `custom_private`, and its expression walker stops with
-    "unrecognized node type" at the `String` and `Integer` nodes of
-    Tessera's plan data. The coordinator builds the slice table of
-    every plan of the core planner with that walker, and the operator
+  - On the unpatched `7x-mac`, by the code, every plan the
+    coordinator dispatches with a Tessera node fails. Greengage's
+    `plan_tree_walker` walks `custom_private`, and its expression walker
+    stops with "unrecognized node type" at the `String` and `Integer`
+    nodes of Tessera's plan data. The coordinator builds the slice table
+    of every plan of the core planner with that walker, and the operator
     memory under resource groups too.
   - The hash join planner prices Greengage's hash join path, which puts
     Motion nodes above its inputs, but runs over its own children
@@ -1048,14 +1059,18 @@ of both trees on 2026-11-01.
   - Greengage's `F_*` names come from the C function, and functions
     sharing one get only the lowest OID's; EXTRACT there is `date_part`
     and returns float8, not numeric.
-  - The trial build: `make -k` of `bridge`, `runtime`, `nodes` and
-    `kernels` with Greengage's `pg_config`, the version check of
-    `abi.h` removed and five missing headers replaced by stubs. The
-    errors that are not of the list macros are mostly in the planners
-    (about 190 in the aggregate's, 100 in the join's, 55 in the
-    scan's) and few in the executors (6 in the hash join, 4 in the
-    sort); the counts are a floor, as early errors hide later ones. The
-    Rust kernels include no PostgreSQL header.
+  - A local port builds the four C modules on both cores; most of its
+    changes are in the planners, few in the executors. The Rust
+    kernels include no PostgreSQL header.
+  - A probe of that port on the demo cluster (three segments, 10 M
+    rows of heap, ao_row and ao_column zstd, `optimizer = off`, time
+    with Tessera over time without, medians of 9 rounds; answers
+    equal): one-stage grouping by the distribution key 0.31 to 0.35;
+    a filter over the core's scan under TessPack 1.10 to 1.28, the
+    rows copied into batches costing more than the filter saves; a
+    sort under the core's preliminary Limit 1.48 to 1.71, a full sort
+    where the core keeps a top-N heap, as no bound reaches TessSort;
+    a two-stage grouping, which stays the core's, 0.99 to 1.07.
 
   From the log, still true: there are no PostgreSQL parallel queries;
   plans travel to segments and modules must be preloaded in every
