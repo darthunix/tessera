@@ -263,7 +263,10 @@ end, when the bytes it is given are not a table, as "A damaged table"
 of the spec of `relhash` says. Such an error, and a wrong argument,
 SHALL be status `TESS_ERROR_INVALID_ARGUMENT` with SQLSTATE `XX000`. A
 call SHALL check its arguments and its outputs before it changes
-anything.
+anything. A node that gives the table chunks it read back from its
+files reports such an error, or a wrong argument of a call over them,
+as damaged data instead, as "Damaged and foreign blocks are refused" of
+the spec of `spill-format` says.
 
 #### Scenario: A damaged table through C
 - **WHEN** a call is given an index of zeros, an index whose version is

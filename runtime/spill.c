@@ -215,6 +215,17 @@ tess_spill_expect_number(const TessSpillHeader *header, uint64 count)
 }
 
 void
+tess_spill_table_report(const TessStatus *status)
+{
+	if (status->code == TESS_ERROR_INVALID_ARGUMENT)
+		ereport(ERROR,
+				errcode(ERRCODE_DATA_CORRUPTED),
+				errmsg("Tessera read back a damaged chunk of records: %.*s",
+					   TESS_STATUS_MESSAGE_SIZE, status->message));
+	tess_status_report(status);
+}
+
+void
 tess_spill_columns_check_values(void *chunk, int ncolumns, const bool *byvals,
 								const int16 *typlens, const char *values, Size len)
 {

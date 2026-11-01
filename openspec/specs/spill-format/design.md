@@ -616,6 +616,15 @@ buffer that is shorter than a header. This is an internal error,
 SQLSTATE `XX000`. The two errors must not be mixed: the first says that
 the file is bad, the second says that the calling code is bad.
 
+A chunk of records is the one body that the reader cannot judge. Its
+records are the hash table's, and the table checks them when a node
+splits, links or merges the chunk. The table's C calls report bytes
+that are no table as a wrong argument, the status of a wrong call, as
+they cannot tell the two apart. So a node that gives the table a chunk
+it read back reports such an error as damaged data. A wrong call there
+is reported as damaged data too; but it is a fault of the node, which
+every run shows, not only a run over a damaged file.
+
 ## What we decided not to do
 
 - **A general compressor**, such as lz4. It is several times slower than

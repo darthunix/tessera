@@ -50,6 +50,19 @@ BEGIN
 END
 $$;
 
+-- A counter of a node of the query's plan, which shows the path that
+-- reads a block back.
+CREATE FUNCTION node_property(query text, node text, name text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        format('$[0]."Plan".** ? (@."Custom Plan Provider" == "%s").%I', node, name)::jsonpath)::text;
+END $$;
+
 -- spec: spill-format/Damage under a node
 -- 20000 keys, each once on the inner side and twice on the outer, with
 -- text on both.
@@ -91,6 +104,38 @@ SELECT damaged(:'damage_module', 'kind', :last_block, $$SELECT count(*), sum(len
 -- value past its chunk, and a block numbered past the one read with it.
 SELECT damaged(:'damage_module', 'value', 1, $$SELECT count(*), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
 SELECT damaged(:'damage_module', 'number', 1, $$SELECT count(*), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+-- Inner records whose used mark ends no record, which the hash table
+-- refuses: split into the partitions of a level below at this work_mem,
+-- and linked into a partition's table at one where every partition
+-- fits.
+SELECT node_property($$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$, 'TessHashJoin', 'Split Partitions')::int > 0 AS split;
+SELECT damaged(:'damage_module', 'mark', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+SET work_mem = '512kB';
+SELECT node_property($$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$, 'TessHashJoin', 'Split Partitions') IS NULL AND
+       node_property($$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$, 'TessHashJoin', 'Spilled Chunks')::int > 0 AS linked;
+SELECT damaged(:'damage_module', 'mark', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+-- A shared table, with no worker started: the leader loads each
+-- partition into the query's shared memory, linking each chunk as it
+-- reads it.
+SET work_mem = '256kB';
+SET max_parallel_workers_per_gather = 2;
+SET max_parallel_workers = 0;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
+SELECT node_property($$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$, 'TessHashJoin', 'Partitions Joined Together')::int > 0 AND
+       node_property($$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$, 'TessHashJoin', 'Partitions Joined Alone') IS NULL AS together;
+SELECT damaged(:'damage_module', 'mark', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
+RESET tessera.scan_worker_page_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET max_parallel_workers;
+SET max_parallel_workers_per_gather = 0;
+SET work_mem = '64kB';
 RESET tessera.join_spill_resident_share;
 
 -- The sort: runs on disk, merged.
@@ -136,12 +181,22 @@ SELECT damaged(:'damage_module', 'zero', 1, $$SELECT count(*), max(m) FROM (SELE
 EXPLAIN (COSTS OFF) SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q;
 SELECT damaged(:'damage_module', NULL, 0, $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$);
 SELECT damaged(:'damage_module', 'kind', 1, $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$);
+-- A used mark that ends no record, which the hash table refuses: as a
+-- partition too large splits into a level below at this work_mem, and
+-- as a partition merges at one where every partition fits.
+SELECT node_property($$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$, 'TessAgg', 'Split Partitions')::int > 0 AS split;
+SELECT damaged(:'damage_module', 'mark', 1, $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$);
+SET work_mem = '128kB';
+SELECT node_property($$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$, 'TessAgg', 'Split Partitions') IS NULL AND
+       node_property($$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$, 'TessAgg', 'Spilled Chunks')::int > 0 AS merged;
+SELECT damaged(:'damage_module', 'mark', 1, $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM damage_outer GROUP BY k) AS q$$);
 
 RESET enable_sort;
 RESET work_mem;
 RESET max_parallel_workers_per_gather;
 DROP TABLE damage_outer;
 DROP TABLE damage_inner;
+DROP FUNCTION node_property(text, text, text);
 DROP FUNCTION damaged(text, text, integer, text);
 DROP FUNCTION tessera_test_spill_damage(text, text, integer);
 DROP FUNCTION tessera_test_spill_damage_seen();

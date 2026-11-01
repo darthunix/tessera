@@ -293,9 +293,11 @@ agg_spill_free(TessAggState *state)
  * Split a chunk of records, placed at the source slot, into the level's
  * partitions by the kernel: a partition whose chunk fills keeps it and
  * gets another with keep, or writes it and starts it again otherwise.
+ * With read_back, a chunk the kernel refuses was read back damaged.
  */
 static void
-agg_split(TessAggState *state, AggSpill *spill, void *base, Size len, bool keep)
+agg_split(TessAggState *state, AggSpill *spill, void *base, Size len, bool keep,
+		  bool read_back)
 {
 	TessTableRef ref = {0};
 	uint32		offsets[AGG_GROUP_ROWS];
@@ -312,12 +314,13 @@ agg_split(TessAggState *state, AggSpill *spill, void *base, Size len, bool keep)
 		int			count;
 		int			full;
 
-		check(state, state->kernels->table_split(&ref, state->nkeys,
-												 state->payload_size,
-												 spill->current, spill->npartitions,
-												 spill->shift, AGG_SOURCE, &from,
-												 AGG_GROUP_ROWS, offsets, hashes,
-												 &count, &full, &state->status));
+		check_table(state, read_back,
+					state->kernels->table_split(&ref, state->nkeys,
+												state->payload_size,
+												spill->current, spill->npartitions,
+												spill->shift, AGG_SOURCE, &from,
+												AGG_GROUP_ROWS, offsets, hashes,
+												&count, &full, &state->status));
 		for (int index = 0; index < count; index++)
 		{
 			AggPart    *part = &spill->parts[agg_partition(spill, hashes[index])];
@@ -451,7 +454,7 @@ agg_start_spill(TessAggState *state)
 	memcpy(old_lens, state->chunk_lens, sizeof(Size) * nold);
 	for (int chunk = 0; chunk < nold; chunk++)
 	{
-		agg_split(state, spill, old[chunk], old_lens[chunk], true);
+		agg_split(state, spill, old[chunk], old_lens[chunk], true, false);
 		pfree(old[chunk]);
 	}
 	pfree(old);
@@ -634,10 +637,11 @@ agg_find_partitioned(TessAggState *state, TessRowMask *pending, TessRowMask *ins
  * Merge a chunk of groups' states, placed at the source slot, into the
  * partition's table by the kernel: a group the table lacks goes to the
  * chunk at *dest, or to a new one of the partition's when that is full.
+ * With read_back, a chunk the kernel refuses was read back damaged.
  */
 static void
 agg_combine(TessAggState *state, AggSpill *spill, AggPart *part, void *base,
-			Size len, int *dest)
+			Size len, int *dest, bool read_back)
 {
 	Size		from = TESS_TABLE_CHUNK_HEADER;
 
@@ -652,10 +656,11 @@ agg_combine(TessAggState *state, AggSpill *spill, AggPart *part, void *base,
 		if (*dest <= AGG_EMPTY)
 			stop = TESS_TABLE_COMBINE_CHUNK_FULL;
 		else
-			check(state, state->kernels->table_combine(&state->table, AGG_SOURCE,
-													   &from, *dest, state->nvalues,
-													   state->combines, &merged,
-													   &stop, &state->status));
+			check_table(state, read_back,
+						state->kernels->table_combine(&state->table, AGG_SOURCE,
+													  &from, *dest, state->nvalues,
+													  state->combines, &merged,
+													  &stop, &state->status));
 		if (stop == TESS_TABLE_COMBINE_DONE)
 			break;
 		if (stop == TESS_TABLE_COMBINE_INDEX_FULL)
@@ -778,7 +783,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 	for (int chunk = 0; chunk < nsplit; chunk++)
 	{
 		CHECK_FOR_INTERRUPTS();
-		agg_combine(state, spill, part, split[chunk], spill->chunk_len, &dest);
+		agg_combine(state, spill, part, split[chunk], spill->chunk_len, &dest, false);
 		pfree(split[chunk]);
 	}
 	if (split != NULL)
@@ -793,7 +798,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 		body = MemoryContextAllocExtended(spill->block_context, Max(header.len, 8),
 										  MCXT_ALLOC_HUGE);
 		tess_spill_read_body(reader, body, header.len);
-		agg_combine(state, spill, part, body, header.len, &dest);
+		agg_combine(state, spill, part, body, header.len, &dest, true);
 		MemoryContextReset(spill->block_context);
 	}
 	if (reader != NULL)
@@ -851,7 +856,7 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 		body = MemoryContextAllocExtended(level->block_context, Max(header.len, 8),
 										  MCXT_ALLOC_HUGE);
 		tess_spill_read_body(reader, body, header.len);
-		agg_split(state, level, body, header.len, false);
+		agg_split(state, level, body, header.len, false, true);
 		MemoryContextReset(level->block_context);
 	}
 	if (reader != NULL)
@@ -859,7 +864,7 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 	for (int chunk = 0; chunk < part->nchunks; chunk++)
 	{
 		CHECK_FOR_INTERRUPTS();
-		agg_split(state, level, part->chunks[chunk], spill->chunk_len, false);
+		agg_split(state, level, part->chunks[chunk], spill->chunk_len, false, false);
 	}
 	part_release(spill, part);
 	tess_spill_drop(spill->file, partition);
