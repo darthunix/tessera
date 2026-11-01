@@ -670,14 +670,16 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	/*
 	 * A batch adds a chunk of records and one of values at most, and the
 	 * index comes once the build is read: room for both chunks and for
-	 * the index of every record with this batch's, before it goes in. The
-	 * index is a check here, not memory taken: the count takes it when it
-	 * is made.
+	 * the index of every record with this batch's selected rows, before
+	 * they go in; a row with a NULL key, which makes no record, is counted
+	 * too. The index is a check here, not memory taken: the count takes it
+	 * when it is made.
 	 */
 	if (state->spill == NULL &&
 		state->table_bytes + state->values.bytes +
 		2 * join_chunk_len_for(JOIN_CHUNK_LEN) +
-		join_index_bytes(state, state->build_rows + (uint64) batch->rows.nrows) >
+		join_index_bytes(state, state->build_rows +
+						 (uint64) tess_row_mask_count(&batch->rows)) >
 		tess_hash_memory_limit())
 		join_start_spill(state);
 	if (state->spill != NULL)
