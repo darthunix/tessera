@@ -362,10 +362,46 @@ fn put(chunk: &mut [u8], at: usize, word: u64) {
 
 #[cfg(test)]
 mod tests {
+    use std::panic::Location;
+
     use proptest::prelude::*;
-    use tessera_testing::property;
+    use proptest::test_runner::{FileFailurePersistence, TestCaseError, TestRunner};
 
     use super::*;
+
+    /// Run `test` on the cases of `strategy`, and fail with the smallest
+    /// failing case, which `spill_columns.proptest-regressions` beside
+    /// this file keeps for the next runs.
+    #[track_caller]
+    #[allow(
+        clippy::panic,
+        reason = "a failed property fails its test, as an assertion does"
+    )]
+    fn property<S: Strategy>(strategy: S, test: impl Fn(S::Value) -> Result<()>) {
+        let config = ProptestConfig {
+            source_file: Some(Location::caller().file()),
+            failure_persistence: Some(Box::new(FileFailurePersistence::WithSource(
+                "proptest-regressions",
+            ))),
+            ..ProptestConfig::default()
+        };
+        let outcome = TestRunner::new(config).run(&strategy, |case| {
+            test(case).map_err(|error| TestCaseError::fail(format!("{error:?}")))
+        });
+        if let Err(failure) = outcome {
+            panic!("{failure}");
+        }
+    }
+
+    /// The words of a mask of `flags`: row `r` at bit `r % 64` of word
+    /// `r / 64`.
+    fn mask_words(flags: &[bool]) -> Vec<u64> {
+        let mut words = vec![0; flags.len().div_ceil(64)];
+        for (row, &flag) in flags.iter().enumerate() {
+            words[row / 64] |= u64::from(flag) << (row % 64);
+        }
+        words
+    }
 
     /// A test's column of values by row.
     #[derive(Clone, Debug)]
@@ -465,7 +501,7 @@ mod tests {
                 // Half the cases append after rows already there.
                 let before = if extra % 2 == 1 { capacity / 3 } else { 0 };
                 columns::set_rows(&mut chunk, before);
-                let mut mask = tessera_testing::words(&selected);
+                let mut mask = mask_words(&selected);
                 let mut rows = RowMask::try_new(nrows, &mut mask)?;
                 let mut values = vec![0_u8; budget];
                 let mut used = 0;
