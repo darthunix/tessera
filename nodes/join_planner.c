@@ -1873,6 +1873,30 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
  * and the outer child's cost is scaled down by as much.
  */
 #if TESS_MPP
+/*
+ * Whether clause reads a partition key of rel: a column of the key, or of
+ * an expression the key is, which a clause on the expression reads.
+ */
+static bool
+reads_partition_key(RelOptInfo *rel, Node *clause)
+{
+	foreach_node(Var, var, pull_var_clause(clause, PVC_RECURSE_PLACEHOLDERS))
+	{
+		for (int key = 0; key < rel->part_scheme->partnatts; key++)
+		{
+			foreach_ptr(Node, expr, rel->partexprs[key])
+			{
+				foreach_node(Var, column, pull_var_clause(expr, 0))
+				{
+					if (same_column((Node *) column, var))
+						return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 /* Whether a clause of the join reads a partition key of rel. */
 static bool
 join_reads_partition_key(RelOptInfo *rel, List *restrictlist)
@@ -1881,19 +1905,32 @@ join_reads_partition_key(RelOptInfo *rel, List *restrictlist)
 		return false;
 	foreach_node(RestrictInfo, rinfo, restrictlist)
 	{
-		foreach_node(Var, var, pull_var_clause((Node *) rinfo->clause, PVC_RECURSE_PLACEHOLDERS))
-		{
-			for (int key = 0; key < rel->part_scheme->partnatts; key++)
-			{
-				foreach_ptr(Node, expr, rel->partexprs[key])
-				{
-					if (same_column(expr, var))
-						return true;
-				}
-			}
-		}
+		if (reads_partition_key(rel, (Node *) rinfo->clause))
+			return true;
 	}
 	return false;
+}
+
+/*
+ * Whether a selector of the family could prune the partitions of an
+ * Append of rel: the partitioned tables of the Append are rel's own, one
+ * level of them, and a clause of the join reads its partition key. Below
+ * a level, or in an Append of a UNION ALL, the core translates the clauses
+ * to every partitioned table: such an Append counts as one a selector may
+ * prune.
+ */
+static bool
+selectable_append(RelOptInfo *rel, List *partitioned_rels, List *restrictlist)
+{
+	int			tables = 0;
+
+	if (partitioned_rels == NIL)
+		return false;
+	foreach_node(List, tree, partitioned_rels)
+		tables += list_length(tree);
+	if (rel == NULL || rel->part_scheme == NULL || tables != 1)
+		return true;
+	return join_reads_partition_key(rel, restrictlist);
 }
 
 /*
@@ -1922,8 +1959,8 @@ selector_append(Path *path, List *restrictlist)
 					((AppendPath *) path)->partitioned_rels :
 					((MergeAppendPath *) path)->partitioned_rels;
 
-				if (path->param_info == NULL && partitioned != NIL &&
-					join_reads_partition_key(path->parent, restrictlist))
+				if (path->param_info == NULL &&
+					selectable_append(path->parent, partitioned, restrictlist))
 					return true;
 				foreach_ptr(Path, subpath, subpaths)
 				{
@@ -1938,6 +1975,11 @@ selector_append(Path *path, List *restrictlist)
 			return selector_append(((JoinPath *) path)->outerjoinpath, restrictlist) ||
 				selector_append(((JoinPath *) path)->innerjoinpath, restrictlist);
 		case T_CustomPath:
+			/* TessAppend in place of an Append, its partitioned tables kept. */
+			if (tess_path_node(path) == &tess_append_node && path->param_info == NULL &&
+				selectable_append(path->parent, tess_append_partitioned_rels(path),
+								  restrictlist))
+				return true;
 			foreach_ptr(Path, child, ((CustomPath *) path)->custom_paths)
 			{
 				if (selector_append(child, restrictlist))
@@ -1954,6 +1996,149 @@ selector_append(Path *path, List *restrictlist)
 			return selector_append(((UniquePath *) path)->subpath, restrictlist);
 		case T_SubqueryScanPath:
 			return false;
+		case T_Path:
+		case T_IndexPath:
+		case T_BitmapHeapPath:
+			return false;
+		default:
+			return true;
+	}
+}
+
+/*
+ * Whether a side holds the scan of a recursive query's work table, as
+ * cdbpath_contains_wts finds it through joins and Appends, and through
+ * custom paths too, which it does not look into: a Motion above the scan
+ * would leave it without its recursive union's state, so the family keeps
+ * such a side in place, which it could not see under the node.
+ */
+static bool
+contains_worktable(Path *path)
+{
+	if (path == NULL)
+		return false;
+	if (IsA(path, NestPath) || IsA(path, MergePath) || IsA(path, HashPath))
+		return contains_worktable(((JoinPath *) path)->outerjoinpath) ||
+			contains_worktable(((JoinPath *) path)->innerjoinpath);
+	if (IsA(path, AppendPath))
+	{
+		foreach_ptr(Path, subpath, ((AppendPath *) path)->subpaths)
+		{
+			if (contains_worktable(subpath))
+				return true;
+		}
+		return false;
+	}
+	if (IsA(path, CustomPath))
+	{
+		foreach_ptr(Path, child, ((CustomPath *) path)->custom_paths)
+		{
+			if (contains_worktable(child))
+				return true;
+		}
+		return false;
+	}
+	return path->pathtype == T_WorkTableScan;
+}
+
+/*
+ * Whether a relation joined later than joinrelids may meet rel's partition
+ * key in a join clause: an equivalence class with a member of the key and
+ * one of another relation, or a join clause of rel's that reads the key
+ * and needs another relation.
+ */
+static bool
+partition_key_joins_later(PlannerInfo *root, RelOptInfo *rel, Relids joinrelids)
+{
+	if (rel == NULL || rel->part_scheme == NULL || rel->partexprs == NULL)
+		return false;
+	foreach_node(RestrictInfo, rinfo, rel->joininfo)
+	{
+		if (!bms_is_subset(rinfo->required_relids, joinrelids) &&
+			reads_partition_key(rel, (Node *) rinfo->clause))
+			return true;
+	}
+	foreach_node(EquivalenceClass, ec, root->eq_classes)
+	{
+		bool		key = false;
+		bool		later = false;
+
+		foreach_node(EquivalenceMember, member, ec->ec_members)
+		{
+			if (member->em_is_const || member->em_is_child)
+				continue;
+			if (bms_is_subset(member->em_relids, rel->relids) &&
+				reads_partition_key(rel, (Node *) member->em_expr))
+				key = true;
+			else if (!bms_is_subset(member->em_relids, joinrelids))
+				later = true;
+		}
+		if (key && later)
+			return true;
+	}
+	return false;
+}
+
+/*
+ * Whether a side holds, in its slice, an Append of partitions whose
+ * partition key a join above this one may read: the family's selector of
+ * that join prunes it only as a native Append, which the node would turn
+ * into its own (TessAppend), the side's partitions then all read.
+ */
+static bool
+append_pruned_later(PlannerInfo *root, Path *path, Relids joinrelids)
+{
+	if (path == NULL)
+		return false;
+	switch (nodeTag(path))
+	{
+		case T_CdbMotionPath:
+			return false;
+		case T_AppendPath:
+		case T_MergeAppendPath:
+			{
+				List	   *subpaths = IsA(path, AppendPath) ?
+					((AppendPath *) path)->subpaths : ((MergeAppendPath *) path)->subpaths;
+				List	   *partitioned = IsA(path, AppendPath) ?
+					((AppendPath *) path)->partitioned_rels :
+					((MergeAppendPath *) path)->partitioned_rels;
+
+				if (partitioned != NIL &&
+					(path->parent == NULL || path->parent->part_scheme == NULL ||
+					 partition_key_joins_later(root, path->parent, joinrelids)))
+					return true;
+				foreach_ptr(Path, subpath, subpaths)
+				{
+					if (append_pruned_later(root, subpath, joinrelids))
+						return true;
+				}
+				return false;
+			}
+		case T_NestPath:
+		case T_MergePath:
+		case T_HashPath:
+			return append_pruned_later(root, ((JoinPath *) path)->outerjoinpath, joinrelids) ||
+				append_pruned_later(root, ((JoinPath *) path)->innerjoinpath, joinrelids);
+		case T_CustomPath:
+			if (tess_path_node(path) == &tess_append_node &&
+				tess_append_partitioned_rels(path) != NIL &&
+				partition_key_joins_later(root, path->parent, joinrelids))
+				return true;
+			foreach_ptr(Path, child, ((CustomPath *) path)->custom_paths)
+			{
+				if (append_pruned_later(root, child, joinrelids))
+					return true;
+			}
+			return false;
+		case T_ProjectionPath:
+			return append_pruned_later(root, ((ProjectionPath *) path)->subpath, joinrelids);
+		case T_SortPath:
+			return append_pruned_later(root, ((SortPath *) path)->subpath, joinrelids);
+		case T_MaterialPath:
+			return append_pruned_later(root, ((MaterialPath *) path)->subpath, joinrelids);
+		case T_UniquePath:
+			return append_pruned_later(root, ((UniquePath *) path)->subpath, joinrelids);
+		case T_SubqueryScanPath:
 		case T_Path:
 		case T_IndexPath:
 		case T_BitmapHeapPath:
@@ -2033,6 +2218,14 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		if (made == NULL || !IsA(made, HashPath))
 			return NULL;
 		template = (HashPath *) made;
+		if (contains_worktable(template->jpath.outerjoinpath) ||
+			contains_worktable(template->jpath.innerjoinpath))
+			return NULL;
+		/* A join above may select the partitions of a side: its Append stays the core's. */
+		if (!bms_equal(joinrel->relids, root->all_baserels) &&
+			(append_pruned_later(root, template->jpath.outerjoinpath, joinrel->relids) ||
+			 append_pruned_later(root, template->jpath.innerjoinpath, joinrel->relids)))
+			return NULL;
 		outer_path = template->jpath.outerjoinpath;
 		inner_path = template->jpath.innerjoinpath;
 		inner_rows = inner_path->rows;
