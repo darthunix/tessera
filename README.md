@@ -66,9 +66,9 @@ them, newest first.
   planner crash and wrong rows from an anti join; each fix carries its
   case into the suites.
 - **Continuous integration** on every push: Linux on x86-64, where the
-  scalar kernels run, and macOS on arm64, where the vector kernels do,
-  against PostgreSQL built with assertions. The suites also run with the
-  debug build of the Rust kernels, under AddressSanitizer and
+  vector kernels run on AVX2, and macOS on arm64, where they run on
+  NEON, against PostgreSQL built with assertions. The suites also run
+  with the debug build of the Rust kernels, under AddressSanitizer and
   UndefinedBehaviorSanitizer, and Tessera's C builds with warnings as
   errors.
 - **Rust kernels** carry property tests, a loom model of the shared hash

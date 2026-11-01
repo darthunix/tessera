@@ -2,22 +2,43 @@
 //!
 //! The vector sets are named by tokens (`token.rs`), defined on every
 //! target: NEON runs on AArch64, and AVX2 on x86-64 where the processor
-//! has it. Under Miri no set runs, and callers fall back to the row
+//! has it, chosen at run time so that one build serves every x86-64
+//! processor. Under Miri no set runs, and callers fall back to the row
 //! paths. Instructions always drop with vectors, so a kernel here is kept
-//! on its cycle gain (see the benchmark guide). This is the one module of
-//! the crate allowed to use `unsafe`, for vector loads from borrowed
-//! arrays and for the intrinsics; every load states why it stays in
-//! bounds.
+//! on its cycle gain (see the benchmark guide): an operation opens on a
+//! set where its counters gain there, and one that does not gain keeps a
+//! hook that asks for [`Neon`], so that x86-64 reads it row by row. The
+//! module is allowed `unsafe`, for vector loads from borrowed arrays and
+//! for the intrinsics; every load states why it stays in bounds.
 //!
 //! A kernel is written once over the primitives of [`Vectors`], which each
-//! vector set implements (`neon.rs`, `avx2.rs`). Intrinsics are callable
-//! without `unsafe` only from functions carrying the `neon` feature;
+//! vector set implements (`neon.rs`, `avx2.rs`), so that a later class of
+//! lanes is written once too. Intrinsics are callable without `unsafe`
+//! only from functions carrying their set's feature (`neon`, `avx2`);
 //! closures inherit it from the function that defines them, and a
 //! primitive, which carries no feature, calls them in an `unsafe` block
-//! whose reason is its token.
-//! Public entry points are plain functions that take the token of NEON,
-//! whose value proves that the processor runs it, and make the one `unsafe`
-//! call into the feature-carrying code.
+//! whose reason is its token. Public entry points are plain functions
+//! that take the token of their set, whose value proves that the
+//! processor runs it, and make the one `unsafe` call into the
+//! feature-carrying code.
+//!
+//! The kernels came onto the primitives from NEON code of their own, and
+//! the machine code of AArch64 was compared at every move (`tessera-bench
+//! --disasm --target aarch64-apple-darwin`); where it changed, the
+//! counters of an Apple M5 Pro showed no loss. Refused: an implementation
+//! for each set, which would write every kernel and every later class of
+//! lanes twice; primitives compiled for their set, `unsafe` methods with
+//! `#[target_feature]`, which cannot be `#[inline(always)]` and leave
+//! every call to the inliner; `std::simd`, which is not stable, and crates
+//! of portable vectors, which choose the instructions themselves, where
+//! this code was shaped by its disassembly.
+//!
+//! The tests of this module take the set of the machine. CI sets
+//! `TESSERA_REQUIRE_SIMD=1` on runners that have their target's set, and
+//! a test then fails where no set runs, so that the vector code cannot
+//! pass on the row paths unseen. The tests of the crate compare a reader
+//! that exposes its storage with one that does not: the vector paths
+//! with the row paths.
 #![allow(unsafe_code)]
 
 use crate::int32::Divisor;
