@@ -912,7 +912,7 @@ of both trees on 2026-11-01.
   gets its own front end. Steps, in order:
   1. Fork patches in a branch of the Greengage tree off `7x-mac` (plan
      7.3); the maintainer rebuilds and restarts the cluster. Each is
-     about 5 to 15 lines:
+     about 5 to 20 lines:
      - `plan_tree_walker` (`walkers.c`) takes the value nodes `String`,
        `Integer` and `Float` as leaves;
      - `ExecSquelchNode` (`execAmi.c`) squelches the children in
@@ -921,7 +921,11 @@ of both trees on 2026-11-01.
      - `plan_tree_mutator` (`cdbplan.c`) mutates `custom_plans`,
        `custom_exprs` and `custom_scan_tlist`, but not `custom_private`,
        whose `Integer` nodes the core's expression mutator does not
-       know.
+       know;
+     - `shareinput_walker` (`cdbmutate.c`) visits `custom_plans` in
+       the order the node executes them: in list order, or last first
+       when the node sets a new flag in `CustomScan.flags`, as a hash
+       join that builds its inner side before it reads the outer one.
   2. Build and compatibility layer (plan 7.1): `compat.h`; a Greengage
      build without the parts for PostgreSQL parallel queries
      (TessGather, TessGatherMerge, TessSend, the shared join);
@@ -948,10 +952,8 @@ of both trees on 2026-11-01.
      Greengage's hash join path, its Motion and Material nodes
      included, and leaves the join to the core where Greengage rejects
      that path; TessLimit stands in for the preliminary limit under the
-     Gather Motion; TessSort under a merging Motion keeps its keys. A
-     subtree with a ShareInputScan stays the core's until a fork patch
-     lets the shared-scan walker visit a custom scan's children in
-     their order of execution, which only the node knows.
+     Gather Motion; TessSort under a merging Motion keeps its keys.
+     TessHashJoin sets the flag of the shared-scan walker's patch.
   7. Two-stage aggregation (plan 7.7): TessAgg in place of both stages
      of Greengage's `Agg (final) <- Motion <- Agg (partial)`. The
      partial states cross the Motion in Tessera's own format, so the
@@ -979,12 +981,14 @@ of both trees on 2026-11-01.
   which is real columnar input (lines 6017–6018, 6053–6055).
 - **Known:** The maintainer's decisions 2026-11-01: the failure on
   `custom_private` is fixed in Greengage, not in Tessera's plan data;
-  partial aggregate states cross a Motion in Tessera's own format, with
-  TessAgg as the final stage; ORCA is joined by rewriting its finished
-  plan. Earlier: lowered, no place in the queue (2026-10-05); design
-  only, no code (2026-09-22). Checked in both trees on 2026-11-01, by
-  reading the code and by a trial build of the C modules against
-  Greengage's `pg_config` (below); nothing was run on a cluster:
+  so is the shared-scan walker, by a fifth fork patch, rather than by
+  keeping shared scans out of Tessera's subtrees; partial aggregate
+  states cross a Motion in Tessera's own format, with TessAgg as the
+  final stage; ORCA is joined by rewriting its finished plan. Earlier:
+  lowered, no place in the queue (2026-10-05); design only, no code
+  (2026-09-22). Checked in both trees on 2026-11-01, by reading the
+  code and by a trial build of the C modules against Greengage's
+  `pg_config` (below); nothing was run on a cluster:
   - By the code, every plan the coordinator dispatches with a Tessera
     node fails today. Greengage's `plan_tree_walker` walks
     `custom_private`, and its expression walker stops with
@@ -999,7 +1003,9 @@ of both trees on 2026-11-01.
     expect.
   - The shared-scan walker (`shareinput_walker`, `cdbmutate.c`) visits
     only `lefttree`, `righttree` and `initPlan`: a ShareInputScan under
-    a Tessera node gets no producer and no slice.
+    a Tessera node gets no producer and no slice. It walks children in
+    their order of execution, which for a custom scan only the node
+    knows.
   - `ExecSquelchNode` raises an error on a custom scan, and Tessera's
     nodes never squelch a child they stop reading, so Motion senders on
     other segments can wait forever. `planstate_walk_kids` skips
