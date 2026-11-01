@@ -1,5 +1,6 @@
 #include "postgres.h"
 
+#include "catalog/pg_am_d.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "executor/executor.h"
@@ -104,6 +105,15 @@ physical_targets(PlannerInfo *root, const Path *child)
 		child->pathtype != T_SeqScan || !IS_SIMPLE_REL(rel) ||
 		rel->rtekind != RTE_RELATION)
 		return NIL;
+#if TESS_GREENGAGE
+	/*
+	 * Only a heap scan returns its buffer's tuples: an append-only scan
+	 * would read every column for the physical list, and a column-oriented
+	 * one reads just the columns its targets name.
+	 */
+	if (rel->relam != HEAP_TABLE_AM_OID)
+		return NIL;
+#endif
 	foreach_ptr(Expr, expr, child->pathtarget->exprs)
 	{
 		Var		   *var = (Var *) expr;
