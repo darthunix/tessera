@@ -204,7 +204,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 
 ## 3. The crate
 
-- [ ] 3.1 Make `crates/relspill` from `crates/tessera-spill`, a move
+- [x] 3.1 Make `crates/relspill` from `crates/tessera-spill`, a move
       and a rename only, with a manifest of its own, `publish = true`,
       and a build that refuses 32-bit targets. Check:
       `make rust-check`; the same machine code;

@@ -18,6 +18,9 @@
 //! same machine: the header is in native byte order and carries no
 //! checksum, as PostgreSQL's own temporary files do not.
 
+#[cfg(not(target_pointer_width = "64"))]
+compile_error!("relspill needs a target whose pointers are 64 bits wide");
+
 use anyhow::{Result, ensure};
 
 pub mod columns;
