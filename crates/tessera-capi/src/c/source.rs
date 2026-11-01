@@ -185,23 +185,35 @@ pub(super) unsafe fn column<'a, T>(
     column: *const DatumColumn,
     nrows: usize,
 ) -> Result<Values<'a, T>> {
-    // SAFETY: the caller's contract.
-    let column = unsafe { column.as_ref() }.context("a null column")?;
+    ensure!(!column.is_null(), "a null column");
+    // A caller built against older headers allocates only the fields
+    // through `nrows`: no reference to the whole struct is made, and each
+    // field of that prefix is read through its own pointer, the size first.
+    // SAFETY: the caller's contract; the struct is at least as large as
+    // its size field, and `MIN_SIZE` covers the fields read after it.
+    let (values, isnull, rows) = unsafe {
+        let struct_size = (&raw const (*column).struct_size).read();
+        ensure!(
+            struct_size >= DatumColumn::MIN_SIZE,
+            "a Datum column is smaller than its required fields"
+        );
+        (
+            (&raw const (*column).values).read(),
+            (&raw const (*column).isnull).read(),
+            (&raw const (*column).nrows).read(),
+        )
+    };
     ensure!(
-        column.struct_size >= DatumColumn::MIN_SIZE,
-        "a Datum column is smaller than its required fields"
-    );
-    ensure!(
-        usize::try_from(column.nrows).ok() == Some(nrows),
+        usize::try_from(rows).ok() == Some(nrows),
         "a column has another row count than its rows"
     );
     ensure!(
-        nrows == 0 || (!column.values.is_null() && !column.isnull.is_null()),
+        nrows == 0 || (!values.is_null() && !isnull.is_null()),
         "a column has null buffers"
     );
     Ok(Values {
-        values: column.values,
-        isnull: column.isnull.cast(),
+        values,
+        isnull: isnull.cast(),
         nrows,
         borrow: PhantomData,
     })
