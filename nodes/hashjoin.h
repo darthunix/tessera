@@ -986,7 +986,8 @@ extern void join_side_flush(TessHashJoinState *state, SpillSide *side, int parti
 extern void join_side_forget(SpillSide *side, int partition);
 extern JoinSpill *join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected, uint32 shift, int forced);
 extern void join_spill_free(TessHashJoinState *state);
-extern Size join_spill_memory(JoinSpill *spill, uint64 *resident);
+extern Size join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident);
+extern Size join_index_bytes(TessHashJoinState *state, uint64 rows);
 extern void join_spill_outer(TessHashJoinState *state, TessBatch *batch, TessRowMask *valid);
 extern void join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values,
 							 const Size *lens, int nvalues);

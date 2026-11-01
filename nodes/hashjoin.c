@@ -200,7 +200,7 @@ join_memory(TessHashJoinState *state)
 		MemoryContextMemAllocated(state->values_context, true);
 
 	if (state->spill != NULL)
-		memory += join_spill_memory(state->spill, NULL);
+		memory += join_spill_memory(state, state->spill, NULL);
 	return memory;
 }
 
@@ -346,7 +346,7 @@ add_table_chunk(TessHashJoinState *state)
 }
 
 /* The bytes of the index join_index_table makes for rows records. */
-static Size
+Size
 join_index_bytes(TessHashJoinState *state, uint64 rows)
 {
 	Size		size;

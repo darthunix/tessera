@@ -679,11 +679,12 @@ side_flush_queue(TessHashJoinState *state, SpillSide *side)
 }
 
 /*
- * The bytes spilling takes in memory, with 8 bytes of index per resident
- * row; the resident rows into *resident unless NULL.
+ * The bytes spilling takes in memory, with the index the resident rows
+ * will need once the build is read, as join_index_table makes it; the
+ * resident rows into *resident unless NULL.
  */
 Size
-join_spill_memory(JoinSpill *spill, uint64 *resident)
+join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident)
 {
 	uint64		rows = 0;
 	Size		bytes = 0;
@@ -705,7 +706,7 @@ join_spill_memory(JoinSpill *spill, uint64 *resident)
 			MemoryContextMemAllocated(level->block_context, true) +
 			tess_spill_memory(level->build.file) + tess_spill_memory(level->probe.file);
 	}
-	return bytes + (spill->indexed ? 0 : rows * sizeof(uint64));
+	return bytes + (spill->indexed || rows == 0 ? 0 : join_index_bytes(state, rows));
 }
 
 /*
@@ -834,7 +835,7 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 	/* A level below has what the levels above leave, a quarter at least. */
 	if (parent != NULL)
 	{
-		Size		used = join_spill_memory(parent, NULL);
+		Size		used = join_spill_memory(state, parent, NULL);
 
 		limit = used < limit / 4 * 3 ? limit - used : limit / 4;
 	}
@@ -1583,7 +1584,7 @@ add_loaded_chunk(TessHashJoinState *state, void *base, Size len)
 static Size
 spill_used(TessHashJoinState *state)
 {
-	return join_spill_memory(state->spill, NULL) + 2 * state->spill->probe.chunk_len;
+	return join_spill_memory(state, state->spill, NULL) + 2 * state->spill->probe.chunk_len;
 }
 
 /*

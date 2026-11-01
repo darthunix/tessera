@@ -65,18 +65,20 @@ spill before a batch whose records, with the chunks and values it has,
 room for two more chunks, and the index its records would need, would
 pass `hash_mem`. A build SHALL stay in memory while all of these fit.
 
-#### Scenario: A build whose index would pass the limit
+#### Scenario: A build whose index passes the limit
 - **WHEN** a serial join builds 420 000 rows of one integer key at
   `hash_mem` = 16 MiB
 - **THEN** it spills, its Memory Usage is within `hash_mem`, and its
   rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::spec: table-memory/A build whose index passes the limit`
 
 #### Scenario: A build that fits with its index
 - **WHEN** a serial join builds 250 000 rows of one integer key at
   `hash_mem` = 16 MiB
 - **THEN** it stays in memory, and its rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::spec: table-memory/A build that fits with its index`
 
 ### Requirement: The first index of a grouping
 A `TessAgg` grouping in memory SHALL size its first index for the
