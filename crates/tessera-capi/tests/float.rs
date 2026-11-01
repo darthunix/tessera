@@ -158,10 +158,11 @@ const PAIRS: [(u32, u32); 4] = [
     (FLOAT4, FLOAT8),
     (FLOAT8, FLOAT4),
 ];
-const SHAPES: [(Shape, Shape); 3] = [
+const SHAPES: [(Shape, Shape); 4] = [
     (Shape::Column, Shape::Column),
     (Shape::Column, Shape::Scalar),
     (Shape::Scalar, Shape::Column),
+    (Shape::Scalar, Shape::Scalar),
 ];
 
 #[test]
@@ -714,4 +715,136 @@ fn a_column_of_only_the_required_fields_is_read() {
     };
     assert_eq!(code, Code::Ok, "{}", status.message());
     assert_eq!((out[0], present[0]), (3.0_f64.to_bits(), 1));
+}
+
+#[test]
+fn float4_division_keeps_the_order_of_its_operands() {
+    let dividends: Vec<u64> = [6.0_f32, 1.0, f32::MAX]
+        .iter()
+        .map(|&x| float4_datum(x))
+        .collect();
+    let divisors: Vec<u64> = [2.0_f32, 0.0, 0.5]
+        .iter()
+        .map(|&x| float4_datum(x))
+        .collect();
+    let isnull = [false; 3];
+    let (dividends, divisors) = (column(&dividends, &isnull), column(&divisors, &isnull));
+    let divide = |left: &FloatArg, right: &FloatArg, nrows: usize| {
+        let rows = [(1_u64 << nrows) - 1];
+        let mut out = [0_u64; 3];
+        let mut present = [0_u64];
+        let mut status = Status::new();
+        // SAFETY: local columns, masks, buffers and status.
+        let code = unsafe {
+            tess_float_arith(
+                3,
+                FLOAT4,
+                left,
+                FLOAT4,
+                right,
+                &mask(nrows, &mut rows.clone()),
+                out.as_mut_ptr(),
+                &mut mask(nrows, &mut present),
+                &raw mut status,
+            )
+        };
+        (code, out[0], status)
+    };
+    let six = FloatArg {
+        column: ptr::null(),
+        scalar: float4_datum(6.0),
+    };
+    let two = FloatArg {
+        column: ptr::null(),
+        scalar: float4_datum(2.0),
+    };
+    let (six_value, two_value) = ([float4_datum(6.0)], [float4_datum(2.0)]);
+    let six_column = column(&six_value, &isnull[..1]);
+    let two_column = column(&two_value, &isnull[..1]);
+    let six_in = FloatArg {
+        column: &six_column,
+        scalar: 0,
+    };
+    let two_in = FloatArg {
+        column: &two_column,
+        scalar: 0,
+    };
+    for (left, right) in [
+        (&six_in, &two_in),
+        (&six_in, &two),
+        (&six, &two_in),
+        (&six, &two),
+    ] {
+        let (code, quotient, status) = divide(left, right, 1);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(quotient, datum4(3.0));
+    }
+    // Row 1 divides by zero before row 2 overflows; reversed, no row fails.
+    let (code, quotient, status) = divide(
+        &FloatArg {
+            column: &dividends,
+            scalar: 0,
+        },
+        &FloatArg {
+            column: &divisors,
+            scalar: 0,
+        },
+        3,
+    );
+    assert_eq!(
+        (code, status.message()),
+        (Code::DataException, "division by zero".to_owned())
+    );
+    assert_eq!(quotient, datum4(3.0));
+}
+
+#[test]
+fn casts_to_smallint_write_their_values() {
+    let isnull = [false, true, false, false];
+    let doubles: Vec<u64> = [2.5_f64, 9.0, -32768.4, 32766.6]
+        .iter()
+        .map(|x| x.to_bits())
+        .collect();
+    let singles: Vec<u64> = [2.5_f32, 9.0, -32768.4, 32766.6]
+        .iter()
+        .map(|&x| float4_datum(x))
+        .collect();
+    let (doubles, singles) = (column(&doubles, &isnull), column(&singles, &isnull));
+    for (from, source) in [(FLOAT8, &doubles), (FLOAT4, &singles)] {
+        let mut out = [7_i32; 4];
+        let mut present = [0];
+        let (code, status) = cast(
+            from,
+            INT2,
+            &FloatArg {
+                column: source,
+                scalar: 0,
+            },
+            out.as_mut_ptr().cast(),
+            &mut present,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(
+            (out[0], out[2], out[3], present[0]),
+            (2, -32768, 32767, 0b1101),
+            "{from}"
+        );
+        let scalar = if from == FLOAT8 {
+            (-3.5_f64).to_bits()
+        } else {
+            float4_datum(-3.5)
+        };
+        let (code, _) = cast(
+            from,
+            INT2,
+            &FloatArg {
+                column: ptr::null(),
+                scalar,
+            },
+            out.as_mut_ptr().cast(),
+            &mut present,
+        );
+        assert_eq!(code, Code::Ok);
+        assert_eq!((out, present[0]), ([-4; 4], 0b1111), "{from}");
+    }
 }
