@@ -49,7 +49,8 @@
 
 use core::sync::atomic::AtomicU64;
 
-use anyhow::{Result, ensure};
+use crate::error::ensure;
+use crate::{Error, Result, Rule};
 
 /// The orderings of the counters of a build and of the stop word, which
 /// the loom model shares, so that it checks the orderings this code runs
@@ -280,7 +281,7 @@ impl<W: CounterWords> Counters<W> {
     /// it saw a NULL in, before it arrives at the barrier; refused, the
     /// counters unchanged, when the records would pass their word.
     pub fn report(&self, records: u64, null_columns: u64) -> Result<()> {
-        self.add_checked(RECORDS, records, "records")?;
+        self.add_checked(RECORDS, records)?;
         self.words.fetch_or(NULL_COLUMNS, null_columns);
         Ok(())
     }
@@ -298,7 +299,7 @@ impl<W: CounterWords> Counters<W> {
     /// The number of a new chunk: every participant's chunks are numbered
     /// from 0 on, in the order they were taken.
     pub fn take_chunk(&self) -> Result<u64> {
-        self.add_checked(CHUNKS, 1, "chunks")
+        self.add_checked(CHUNKS, 1)
     }
 
     /// The chunks numbered so far, once the build is over.
@@ -309,8 +310,7 @@ impl<W: CounterWords> Counters<W> {
     /// Add the duplicates this participant's links found, before it
     /// arrives at the barrier after linking.
     pub fn add_duplicates(&self, duplicates: u64) -> Result<()> {
-        self.add_checked(DUPLICATES, duplicates, "duplicates")
-            .map(|_| ())
+        self.add_checked(DUPLICATES, duplicates).map(|_| ())
     }
 
     /// The duplicates every participant found, once linking is over.
@@ -321,11 +321,11 @@ impl<W: CounterWords> Counters<W> {
     /// Add `delta` to a counter by a compare-and-swap: the count before,
     /// or an error when the sum would pass the word, the counter then
     /// unchanged.
-    fn add_checked(&self, index: usize, delta: u64, what: &str) -> Result<u64> {
+    fn add_checked(&self, index: usize, delta: u64) -> Result<u64> {
         let mut count = self.words.load(index);
         loop {
             let Some(sum) = count.checked_add(delta) else {
-                anyhow::bail!("the {what} of a build, {count}, cannot take {delta} more");
+                return Err(Error::wrong_call(Rule::BuildCount).with(index).and(delta));
             };
             match self.words.compare_exchange(index, count, sum) {
                 Ok(before) => return Ok(before),
@@ -359,14 +359,13 @@ impl Participant {
         counters: &Counters<W>,
         reply: u32,
     ) -> Result<Action> {
-        let state = State::from_code(self.state)
-            .ok_or_else(|| anyhow::anyhow!("a build participant in no known state"))?;
+        let state = State::from_code(self.state).ok_or(Error::wrong_call(Rule::State))?;
         Ok(match state {
             State::New => self.to(State::Attaching, Action::Attach),
             State::Attaching => {
                 ensure!(
                     reply <= FREE,
-                    "a build participant attached at phase {reply}, past the last"
+                    Error::wrong_call(Rule::AttachPhase).with(reply)
                 );
                 self.phase = reply;
                 self.elected = 0;
@@ -425,14 +424,13 @@ impl Participant {
     /// The next action of a round over a partition, as [`Self::step`] for
     /// a build.
     pub fn round_step(&mut self, reply: u32) -> Result<Action> {
-        let state = State::from_code(self.state)
-            .ok_or_else(|| anyhow::anyhow!("a round participant in no known state"))?;
+        let state = State::from_code(self.state).ok_or(Error::wrong_call(Rule::State))?;
         Ok(match state {
             State::New => self.to(State::Attaching, Action::Attach),
             State::Attaching => {
                 ensure!(
                     reply <= ROUND_FREE,
-                    "a round participant attached at phase {reply}, past the last"
+                    Error::wrong_call(Rule::AttachPhase).with(reply)
                 );
                 self.phase = reply;
                 self.elected = 0;
@@ -477,6 +475,12 @@ impl Participant {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule of a wrong call, which every refusal here is.
+    fn wrong(error: Error) -> Rule {
+        assert_eq!(error.kind(), crate::Kind::WrongCall, "{error}");
+        error.rule()
+    }
 
     /// A test's own words of the counters, each `value`.
     fn counter_words(value: u64) -> [AtomicU64; COUNTER_WORDS] {
@@ -774,12 +778,28 @@ mod tests {
         let counters = SharedCounters::new(&words);
         let mut build = Participant::new();
         assert_eq!(build.next(&counters, 0).unwrap(), Action::Attach);
-        assert!(build.next(&counters, FREE + 1).is_err());
-        assert!(build.next(&counters, u32::MAX).is_err());
+        let refused = |result: Result<Action>| result.map_err(wrong);
+        let before = build;
+        assert_eq!(
+            refused(build.next(&counters, FREE + 1)),
+            Err(Rule::AttachPhase)
+        );
+        assert_eq!(
+            refused(build.next(&counters, u32::MAX)),
+            Err(Rule::AttachPhase)
+        );
+        // A refused reply leaves the participant as it was, so its next
+        // step goes as if the reply had not come.
+        assert_eq!(build, before);
         let mut round = Participant::new();
         assert_eq!(round.round_step(0).unwrap(), Action::Attach);
-        assert!(round.round_step(ROUND_FREE + 1).is_err());
-        assert!(round.round_step(u32::MAX).is_err());
+        let before = round;
+        assert_eq!(
+            refused(round.round_step(ROUND_FREE + 1)),
+            Err(Rule::AttachPhase)
+        );
+        assert_eq!(refused(round.round_step(u32::MAX)), Err(Rule::AttachPhase));
+        assert_eq!(round, before);
     }
 
     /// A count that would pass its word is refused, and the counter keeps
@@ -790,18 +810,38 @@ mod tests {
         let counters = SharedCounters::new(&words);
         counters.init();
         counters.report(u64::MAX, 0b01).unwrap();
-        assert!(counters.report(1, 0b10).is_err());
+        let error = counters
+            .report(1, 0b10)
+            .expect_err("records past their word");
+        assert_eq!(
+            (error.kind(), error.rule(), error.numbers().0),
+            (crate::Kind::WrongCall, Rule::BuildCount, RECORDS as u32)
+        );
         assert_eq!(
             (counters.total_records(), counters.nulls()),
             (u64::MAX, 0b01),
             "the counters unchanged"
         );
         counters.add_duplicates(u64::MAX).unwrap();
-        assert!(counters.add_duplicates(1).is_err());
+        let error = counters
+            .add_duplicates(1)
+            .expect_err("duplicates past their word");
+        assert_eq!(
+            (error.kind(), error.rule(), error.numbers().0),
+            (crate::Kind::WrongCall, Rule::BuildCount, DUPLICATES as u32)
+        );
         assert_eq!(counters.total_duplicates(), u64::MAX);
         counters.words.store(CHUNKS, u64::MAX - 1);
         assert_eq!(counters.take_chunk().unwrap(), u64::MAX - 1);
-        assert!(counters.take_chunk().is_err());
+        let error = counters.take_chunk().expect_err("a chunk past its word");
+        assert_eq!(
+            (error.kind(), error.rule(), error.numbers().0),
+            (crate::Kind::WrongCall, Rule::BuildCount, CHUNKS as u32)
+        );
+        assert_eq!(
+            error.to_string(),
+            "the chunks of a build cannot take 1 more"
+        );
         assert_eq!(counters.total_chunks(), u64::MAX);
     }
 
@@ -813,6 +853,11 @@ mod tests {
             elected: 0,
         };
         let words = counter_words(0);
-        assert!(participant.next(&SharedCounters::new(&words), 0).is_err());
+        assert_eq!(
+            participant
+                .next(&SharedCounters::new(&words), 0)
+                .map_err(wrong),
+            Err(Rule::State)
+        );
     }
 }
