@@ -1,0 +1,334 @@
+-- A cancel ends a spill's loop that can run long at its next turn, in
+-- a join and in a grouping: the first split of a table, the demotion
+-- and the eviction of a partition, the writing of its value chunks and
+-- of the tails, the links of a table's chunks, a round's load. Each turn
+-- checks for a cancel and then passes the loop's name to the injection
+-- point "tessera-loop", whose callback marks a cancel pending in the
+-- loop's first turn, as SIGINT does: the query ends after that one turn,
+-- where without the check the loop would run on first. Without
+-- injection points the suite ends here.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set spill_test :libdir '/tessera_spill_test' :dlsuffix
+\set interrupt_test :libdir '/tessera_interrupt_test' :dlsuffix
+\set loop_module :libdir '/tessera_interrupt_test'
+CREATE FUNCTION tessera_test_spill_injection()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_injection'
+LANGUAGE C STRICT;
+SELECT NOT tessera_test_spill_injection() AS skip \gset
+\if :skip
+DROP FUNCTION tessera_test_spill_injection();
+\quit
+\endif
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
+CREATE FUNCTION interrupt_loop(text, text, boolean, boolean) RETURNS void
+AS :'interrupt_test', 'tessera_test_interrupt_loop' LANGUAGE C;
+CREATE FUNCTION interrupt_turns() RETURNS integer
+AS :'interrupt_test', 'tessera_test_interrupt_turns' LANGUAGE C STRICT;
+-- The turns of a loop in a query that runs to its end, every call of the
+-- loop counted.
+CREATE FUNCTION loop_turns(library text, loop text, query text) RETURNS integer
+LANGUAGE plpgsql AS $$
+DECLARE
+    turns integer;
+BEGIN
+    PERFORM interrupt_loop(library, loop, false, false);
+    EXECUTE query;
+    turns := interrupt_turns();
+    PERFORM interrupt_loop(library, NULL, false, false);
+    RETURN turns;
+END $$;
+-- The query, cancelled in the loop's first turn: its SQLSTATE and the
+-- turns the loop took.
+CREATE FUNCTION loop_cancelled(library text, loop text, query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    turns integer;
+BEGIN
+    PERFORM interrupt_loop(library, loop, true, false);
+    BEGIN
+        EXECUTE query;
+    EXCEPTION WHEN query_canceled THEN
+        turns := interrupt_turns();
+        PERFORM interrupt_loop(library, NULL, false, false);
+        RETURN format('%s after %s turn', SQLSTATE, turns);
+    END;
+    turns := interrupt_turns();
+    PERFORM interrupt_loop(library, NULL, false, false);
+    RETURN format('no cancel, %s turns', turns);
+END $$;
+-- The query, its loop cancelled in the first turn of every process that
+-- takes it, workers too: its SQLSTATE.
+CREATE FUNCTION loop_cancelled_everywhere(library text, loop text, query text) RETURNS text
+LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM interrupt_loop(library, loop, true, true);
+    BEGIN
+        EXECUTE query;
+    EXCEPTION WHEN query_canceled THEN
+        PERFORM interrupt_loop(library, NULL, false, false);
+        RETURN SQLSTATE;
+    END;
+    PERFORM interrupt_loop(library, NULL, false, false);
+    RETURN 'no cancel';
+END $$;
+-- The workers a query's Gather launched.
+CREATE FUNCTION workers_launched(query text) RETURNS integer
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan, '$.**."Workers Launched"')::integer;
+END $$;
+-- 20000 keys, each once on the inner side and twice on the outer, with
+-- text on both; and 200000 groups.
+CREATE TABLE loop_inner (k int, t text) WITH (autovacuum_enabled = off);
+INSERT INTO loop_inner SELECT i, repeat('i', 30) || i FROM generate_series(1, 20000) AS i;
+CREATE TABLE loop_outer (k int, t text) WITH (autovacuum_enabled = off);
+INSERT INTO loop_outer SELECT i % 20000 + 1, repeat('o', 30) || i FROM generate_series(1, 40000) AS i;
+CREATE TABLE loop_groups (k int) WITH (autovacuum_enabled = off);
+INSERT INTO loop_groups SELECT i FROM generate_series(1, 200000) AS i;
+ANALYZE loop_inner, loop_outer, loop_groups;
+SET max_parallel_workers_per_gather = 0;
+-- The join: its first split, of every chunk of the table built so far;
+-- the demotion of a partition kept in memory, chunk by chunk to disk.
+SET work_mem = '512kB';
+SELECT loop_turns(:'loop_module', 'split', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'split', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+SET work_mem = '64kB';
+SELECT loop_turns(:'loop_module', 'demote', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'demote', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+-- The writing of a partition's value chunks, as it is demoted, evicted
+-- or flushed.
+SET work_mem = '1MB';
+SELECT loop_turns(:'loop_module', 'values', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'values', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+-- The tails of every partition, written as its level starts joining.
+SET work_mem = '64kB';
+SELECT loop_turns(:'loop_module', 'tails', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'tails', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+-- A shared table, with no worker started: the leader links its chunks,
+-- splits them as the table spills, and loads a partition on disk block
+-- by block into the query's shared memory.
+SET work_mem = '256kB';
+SET max_parallel_workers_per_gather = 2;
+SET max_parallel_workers = 0;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
+SELECT loop_turns(:'loop_module', 'link', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'link', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+SELECT loop_turns(:'loop_module', 'shared split', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'shared split', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+SELECT loop_turns(:'loop_module', 'load', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'load', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+-- The partitions of a shared table at the end of its build, those on
+-- disk with their tails written.
+SELECT loop_turns(:'loop_module', 'shared flush', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'shared flush', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+-- With workers that take the build and the rounds, and no leader: one
+-- cancelled in its load of a round, or in its link of a table that fits
+-- in memory, where each worker links the chunks it built, fails the
+-- query, and the others, at the barrier or past it, end with it.
+RESET max_parallel_workers;
+SET parallel_leader_participation = off;
+SELECT workers_launched($$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) AS workers;
+ workers 
+---------
+       2
+(1 row)
+
+SELECT loop_cancelled_everywhere(:'loop_module', 'load', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+ loop_cancelled_everywhere 
+---------------------------
+ 57014
+(1 row)
+
+SET work_mem = '1MB';
+SELECT workers_launched($$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$) AS workers;
+ workers 
+---------
+       2
+(1 row)
+
+SELECT loop_cancelled_everywhere(:'loop_module', 'link', $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM loop_outer o JOIN loop_inner i ON o.k = i.k$$);
+ loop_cancelled_everywhere 
+---------------------------
+ 57014
+(1 row)
+
+RESET parallel_leader_participation;
+RESET tessera.scan_worker_page_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+RESET max_parallel_workers;
+SET max_parallel_workers_per_gather = 0;
+-- The grouping, by hash: its first split; the links of the partitions
+-- kept in memory into the table it goes on with; the eviction of a
+-- partition, chunk by chunk to disk; the chunks in memory of the
+-- partitions with records on disk, written as a level is given out; and
+-- the links of a partition wholly in memory as it is given out.
+SET enable_sort = off;
+SET work_mem = '512kB';
+SELECT loop_turns(:'loop_module', 'group split', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_outer GROUP BY k) AS q$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'group split', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_outer GROUP BY k) AS q$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+SET work_mem = '128kB';
+SELECT loop_turns(:'loop_module', 'group link', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_outer GROUP BY k) AS q$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'group link', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_outer GROUP BY k) AS q$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+SET work_mem = '64kB';
+SELECT loop_turns(:'loop_module', 'evict', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_outer GROUP BY k) AS q$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'evict', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_outer GROUP BY k) AS q$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+SET work_mem = '256kB';
+SELECT loop_turns(:'loop_module', 'flush', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_outer GROUP BY k) AS q$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'flush', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_outer GROUP BY k) AS q$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+SET work_mem = '4MB';
+SELECT loop_turns(:'loop_module', 'merge link', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_groups GROUP BY k) AS q$$) > 1 AS turns;
+ turns 
+-------
+ t
+(1 row)
+
+SELECT loop_cancelled(:'loop_module', 'merge link', $$SELECT count(*), sum(s) FROM (SELECT k, sum(k) AS s FROM loop_groups GROUP BY k) AS q$$);
+   loop_cancelled   
+--------------------
+ 57014 after 1 turn
+(1 row)
+
+RESET enable_sort;
+RESET work_mem;
+RESET max_parallel_workers_per_gather;
+DROP TABLE loop_groups, loop_outer, loop_inner;
+DROP FUNCTION workers_launched(text), loop_cancelled_everywhere(text, text, text),
+    loop_cancelled(text, text, text), loop_turns(text, text, text);
+DROP FUNCTION interrupt_loop(text, text, boolean, boolean), interrupt_turns();
+DROP FUNCTION tessera_test_spill_injection();
+DROP EXTENSION tessera;

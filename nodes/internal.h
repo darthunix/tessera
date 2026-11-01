@@ -3,6 +3,8 @@
 #define TESSERA_NODES_INTERNAL_H
 
 #include "catalog/pg_type_d.h"
+#include "miscadmin.h"
+#include "utils/injection_point.h"
 #include "utils/sortsupport.h"
 #include "utils/typcache.h"
 
@@ -48,6 +50,19 @@ extern double tess_parallel_divisor(const Path *path);
  */
 #define TESS_CHUNK_CONTEXT_SIZES \
 	ALLOCSET_SMALL_INITSIZE, ALLOCSET_SMALL_INITSIZE, ALLOCSET_SMALL_MAXSIZE
+
+/*
+ * A turn of a spill's loop that can run long, over every chunk in memory
+ * or every block of a file: a cancel ends the loop at its next turn. The
+ * injection point "tessera-loop" is given the loop's name, so that a test
+ * can mark a cancel pending in its first turn (a build without injection
+ * points has none).
+ */
+#define tess_loop_turn(loop) \
+	do { \
+		CHECK_FOR_INTERRUPTS(); \
+		INJECTION_POINT("tessera-loop", (loop)); \
+	} while (0)
 
 /*
  * The weights a grouping's and a join's spills give the one rule that

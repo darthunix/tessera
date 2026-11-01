@@ -279,8 +279,17 @@ chunk, round or block itself, in C, between kernel calls, never inside one
 (plan 4.24, review item 11: a grouping of 20 M groups spilled to disk ran
 0.66 s past a cancel to its end without one, 15 ms with it;
 test/sql/interrupts.sql marks a cancel pending from a condition, as SIGINT
-does, and expects the node to stop within 64 of its calls). A single long
-kernel call, such as the sort of `tess_rows_sort`, is not interrupted.
+does, and expects the node to stop within 64 of its calls). The loops
+of a spill over every chunk in memory, every block of a file or every
+partition — the first split of a table, the demotion and the eviction
+of a partition, the writing of its value chunks and of the tails, the
+links of a table's chunks, a round's load — check once a turn with
+`tess_loop_turn` (`nodes/internal.h`), which then gives the loop's name
+to the injection point `tessera-loop`; test/sql/interrupt_loops.sql
+marks a cancel pending in a loop's first turn through it, on a build
+with injection points, and expects the query to end after that turn. A
+single long kernel call, such as the sort of `tess_rows_sort`, is not
+interrupted.
 
 ### Tests of every node
 

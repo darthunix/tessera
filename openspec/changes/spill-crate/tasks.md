@@ -140,7 +140,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       3.23, not of this task. Check: a parallel test of `join` with a
       skewed key of long values, compared with the core, that shows
       the partition taken alone and read in pieces; `make installcheck`
-- [ ] 2.11 Check for a cancel in every loop that can run long: the
+- [x] 2.11 Check for a cancel in every loop that can run long: the
       linking of a shared table's chunks, a round's load block by
       block (today once a file), the first split of a table, and the
       demotion of a resident partition. Check: a C test of
