@@ -661,16 +661,7 @@ agg_combine(TessAggState *state, AggSpill *spill, AggPart *part, void *base,
 			state->chunk_lens[AGG_SOURCE] = len;
 			continue;
 		}
-		if (state->table.nchunks == state->chunk_slots)
-		{
-			state->chunk_slots *= 2;
-			state->chunk_bases = repalloc(state->chunk_bases,
-										  sizeof(void *) * state->chunk_slots);
-			state->chunk_lens = repalloc(state->chunk_lens,
-										 sizeof(Size) * state->chunk_slots);
-			state->table.chunks = state->chunk_bases;
-			state->table.chunk_lens = state->chunk_lens;
-		}
+		agg_reserve_chunks(state, state->table.nchunks + 1);
 		*dest = state->table.nchunks++;
 		state->chunk_bases[*dest] = agg_new_chunk(state, spill);
 		state->chunk_lens[*dest] = spill->chunk_len;
@@ -729,14 +720,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 
 	if (state->table.index != NULL)
 		pfree(state->table.index);
-	if (part->nchunks + 3 > state->chunk_slots)
-	{
-		state->chunk_slots = Max(part->nchunks + 3, state->chunk_slots * 2);
-		state->chunk_bases = repalloc(state->chunk_bases,
-									  sizeof(void *) * state->chunk_slots);
-		state->chunk_lens = repalloc(state->chunk_lens,
-									 sizeof(Size) * state->chunk_slots);
-	}
+	agg_reserve_chunks(state, part->nchunks + 2);
 	state->chunk_bases[AGG_SOURCE] = spill->source_empty;
 	state->chunk_lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
 	state->chunk_bases[AGG_EMPTY] = spill->empty;

@@ -309,6 +309,20 @@ side_free(SpillSide *side, void *base, dsa_pointer pointer)
 		pfree(base);
 }
 
+/* Room for chunk `index` in the side's directory, within the most chunks. */
+static void
+side_reserve(SpillSide *side, int index)
+{
+	table_chunks_limit(index + 1, "TessHashJoin hash table");
+	if (index < side->slots)
+		return;
+	side->pointers = repalloc0(side->pointers, sizeof(dsa_pointer) * side->slots,
+							   sizeof(dsa_pointer) * side->slots * 2);
+	side->slots *= 2;
+	side->bases = repalloc(side->bases, sizeof(void *) * side->slots);
+	side->lens = repalloc(side->lens, sizeof(Size) * side->slots);
+}
+
 /* Free chunk `index` of a partition, and count it. */
 static void
 side_free_chunk(SpillSide *side, int partition, int index)
@@ -372,15 +386,7 @@ side_add_chunk(TessHashJoinState *state, SpillSide *side, int partition)
 	int			index = side->nchunks;
 	void	   *base;
 
-	table_chunks_limit(index + 1, "TessHashJoin hash table");
-	if (index == side->slots)
-	{
-		side->pointers = repalloc0(side->pointers, sizeof(dsa_pointer) * side->slots,
-								   sizeof(dsa_pointer) * side->slots * 2);
-		side->slots *= 2;
-		side->bases = repalloc(side->bases, sizeof(void *) * side->slots);
-		side->lens = repalloc(side->lens, sizeof(Size) * side->slots);
-	}
+	side_reserve(side, index);
 	base = side_alloc(side, side->chunk_len, &side->pointers[index]);
 	side_chunk_init(state, side, base, side->chunk_len);
 	side->bases[index] = base;
@@ -1064,14 +1070,7 @@ join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *va
 	for (int word = 0; word < side->nwords; word++)
 		byref |= !side->byvals[word];
 	/* The chunk joins the side's for the call, as a chunk of no partition. */
-	if (side->nchunks == side->slots)
-	{
-		side->pointers = repalloc0(side->pointers, sizeof(dsa_pointer) * side->slots,
-								   sizeof(dsa_pointer) * side->slots * 2);
-		side->slots *= 2;
-		side->bases = repalloc(side->bases, sizeof(void *) * side->slots);
-		side->lens = repalloc(side->lens, sizeof(Size) * side->slots);
-	}
+	side_reserve(side, side->nchunks);
 	source = side->nchunks++;
 	side->bases[source] = base;
 	side->lens[source] = len;
