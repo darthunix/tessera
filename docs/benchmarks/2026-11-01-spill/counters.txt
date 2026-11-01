@@ -1,0 +1,48 @@
+FULL RUN; baseline=a7d780c55fcc1eca05da28a0d0c8d83bab6bb9a2, candidate=WORKTREE@3c225f312018cc3842d47c88f9ddb9858392958c
+
+spill
+Per call over 10 blocks per process. FAIL: instructions +1%, or minimum cycles +10% on operations of at least 500 cycles. WARNING: minimum cycles +3% (or +4 cycles below 200). Cycle verdicts need the median to grow past the warning threshold too. MODES: process medians or blocks differ by more than 1.10x and 10 cycles. UNSTABLE: zero readings or instructions disagreeing beyond 0.1%.
+PASS spill/columns/4-words/pack: instructions before=20553.0 after=20553.0 change=+0.00%; cycles min before=4135.9 after=4140.8 change=+0.12% (median 4263.3/4210.0, modes 1.21/1.23, 3 processes); branch misses before=7.003 after=7.003 of 1118.0 branches; cores 9,11,12,13,14,16,17
+  REFERENCE instructions before=7534.0 after=7534.0; library/reference=2.728x, cycles 3.115x (informational)
+  IPC before=4.97 after=4.96
+  MODES before=1.21x after=1.23x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS spill/columns/4-words/unpack: instructions before=6116.0 after=6116.0 change=-0.00%; cycles min before=1406.5 after=1437.2 change=+2.19% (median 1670.7/1627.1, modes 1.42/1.51, 3 processes); branch misses before=1.001 after=1.000 of 433.0 branches; cores 7,10,12,13,14,16,17
+  REFERENCE instructions before=7534.0 after=7534.0; library/reference=0.812x, cycles 1.081x (informational)
+  IPC before=4.35 after=4.26
+  MODES before=1.42x after=1.51x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS spill/columns/70-words/pack: instructions before=154238.3 after=154238.3 change=+0.00%; cycles min before=30085.6 after=30010.5 change=-0.25% (median 30820.0/30531.7, modes 1.27/1.10, 3 processes); branch misses before=1.070 after=1.028 of 9341.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=54034.1 after=54034.1; library/reference=2.854x, cycles 2.215x (informational)
+  IPC before=5.13 after=5.14
+  MODES before=1.27x after=1.10x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS spill/columns/70-words/unpack: instructions before=44271.2 after=44271.2 change=-0.00%; cycles min before=18191.5 after=18290.8 change=+0.55% (median 18334.1/18438.3, modes 1.02/1.01, 3 processes); branch misses before=1.007 after=1.013 of 3654.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=54034.1 after=54034.1; library/reference=0.819x, cycles 1.350x (informational)
+  IPC before=2.43 after=2.42
+PASS spill/header/columns/read: instructions before=84.0 after=84.0 change=-0.00%; cycles min before=10.0 after=10.0 change=-0.01% (median 11.3/11.2, modes 1.13/1.13, 3 processes); branch misses before=0.000 after=0.000 of 20.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=13.0 after=13.0; library/reference=6.462x, cycles 1.953x (informational)
+  IPC before=8.40 after=8.40
+PASS spill/header/columns/write: instructions before=69.0 after=69.0 change=-0.00%; cycles min before=7.5 after=7.5 change=+0.00% (median 7.5/7.5, modes 1.06/1.06, 3 processes); branch misses before=0.000 after=0.000 of 15.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=13.0 after=13.0; library/reference=5.308x, cycles 1.465x (informational)
+  IPC before=9.20 after=9.20
+PASS spill/partitioned/4-words/append: instructions before=255295.4 after=255295.4 change=-0.00%; cycles min before=40298.8 after=40394.9 change=+0.24% (median 41301.6/41168.3, modes 1.03/1.03, 3 processes); branch misses before=98.128 after=83.818 of 50319.1 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=174497.3 after=174497.3; library/reference=1.463x, cycles 1.465x (informational)
+  IPC before=6.34 after=6.32
+PASS spill/partitioned/70-words/append: instructions before=2117536.3 after=2117536.2 change=-0.00%; cycles min before=1087668.8 after=1084317.1 change=-0.31% (median 1090396.9/1087320.3, modes 1.02/1.00, 3 processes); branch misses before=4470.056 after=4543.444 of 521476.7 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2588984.6 after=2588984.6; library/reference=0.818x, cycles 0.900x (informational)
+  IPC before=1.95 after=1.95
+UNSTABLE spill/records/join-int4/pack: instructions before=67494.2 after=67487.4 change=-0.01%; cycles min before=14697.3 after=14840.2 change=+0.97% (median 14891.9/14977.6, modes 1.03/1.01, 3 processes); branch misses before=6.039 after=6.014 of 8254.3 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=7535.0 after=7535.0; library/reference=8.957x, cycles 11.183x (informational)
+  IPC before=4.59 after=4.55
+  UNSTABLE before: blocks or processes disagree on instructions per call by 0.468%
+  UNSTABLE after: blocks or processes disagree on instructions per call by 0.468%
+PASS spill/records/join-int4/unpack: instructions before=53489.1 after=53489.1 change=-0.00%; cycles min before=11099.4 after=11081.8 change=-0.16% (median 11229.6/11267.5, modes 1.02/1.02, 3 processes); branch misses before=15.002 after=15.003 of 10158.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=7535.0 after=7535.0; library/reference=7.099x, cycles 8.351x (informational)
+  IPC before=4.82 after=4.83
+UNSTABLE spill/records/words-20-bits/pack: instructions before=125936.2 after=126008.2 change=+0.06%; cycles min before=21274.3 after=21540.6 change=+1.25% (median 21816.8/21682.9, modes 1.03/1.01, 3 processes); branch misses before=11.020 after=11.056 of 13387.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=10535.0 after=10535.0; library/reference=11.961x, cycles 11.738x (informational)
+  IPC before=5.92 after=5.85
+  UNSTABLE before: blocks or processes disagree on instructions per call by 0.194%
+  UNSTABLE after: blocks or processes disagree on instructions per call by 0.251%
+PASS spill/records/words-20-bits/unpack: instructions before=77693.1 after=77693.1 change=+0.00%; cycles min before=15263.0 after=15315.1 change=+0.34% (median 15337.8/15390.6, modes 1.01/1.01, 3 processes); branch misses before=17.005 after=17.004 of 14226.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=10535.0 after=10535.0; library/reference=7.375x, cycles 8.345x (informational)
+  IPC before=5.09 after=5.07
+UNSTABLE: 10 PASS, 0 FAIL (0 instructions, 0 cycles), 2 UNSTABLE library paths; 0 cycle warnings; 3 bistable

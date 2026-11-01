@@ -5,6 +5,10 @@ Summaries of full runs of the PostgreSQL-level benchmarks of
 TPC-H of [`bench/tpch`](../../bench/tpch/README.md), with the plans of
 the cases the README cites, newest first:
 
+- [2026-11-01, spill](2026-11-01-spill/README.md): the counters of the
+  spill's kernels and times of its reads of text, the base of later
+  comparisons of the spill, Apple M5 Pro, PostgreSQL master
+  0497318e442, Tessera at the commit of task 2.12 of `spill-crate`.
 - [2026-10-02, TPC-H](2026-10-02-tpch/README.md): the 22 queries derived
   from TPC-H at scale factor 1 (`bench/tpch`), Apple M5 Pro, PostgreSQL
   master 311df1dc, Tessera 1f6a7e7.
