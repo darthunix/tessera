@@ -440,6 +440,7 @@ link_own_chunks(TessHashJoinState *state)
 
 		Assert(state->parallel.own_chunks[own] < state->table.nchunks);
 
+		tess_loop_turn("link");
 		check(state, state->kernels->table_link(&state->table, state->parallel.own_chunks[own],
 												&from, NULL,
 												state->inner_unique ? NULL : &repeated,
@@ -842,6 +843,7 @@ shared_switch(TessHashJoinState *state)
 		JoinChunk  *header = dsa_get_address(area, block);
 		dsa_pointer next = header->next;
 
+		tess_loop_turn("shared split");
 		join_split_chunk(state, (char *) header + JOIN_CHUNK_HEADER, header->len,
 					state->values.bases, NULL, 0);
 		join_shared_count(state, -record_chunk_cost(header->len, state->record_size));
@@ -957,6 +959,7 @@ shared_flush(TessHashJoinState *state)
 	{
 		SpillPart  *part = &side->parts[partition];
 
+		tess_loop_turn("shared flush");
 		if (side->rows[partition] > 0)
 			check(state, state->kernels->table_spill_records(join_shared_words(state),
 															 state->parallel.shared->spill_nwords,
@@ -1417,6 +1420,7 @@ round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound 
 			uint32		slot;
 			Size		from = TESS_TABLE_CHUNK_HEADER;
 
+			tess_loop_turn("load");
 			tess_spill_read_body(reader, body, header.len);
 			if (header.kind == TESS_SPILL_VALUES)
 			{

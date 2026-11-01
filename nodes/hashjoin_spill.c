@@ -463,6 +463,7 @@ side_write_values(TessHashJoinState *state, SpillSide *side, int partition)
 	{
 		int			number = part->values[index];
 
+		tess_loop_turn("values");
 		write_block(state, side, partition, TESS_SPILL_VALUES, number,
 					side->value_bases[number], side->value_lens[number]);
 		side_free_values(side, partition, number);
@@ -523,6 +524,7 @@ join_side_demote(TessHashJoinState *state, SpillSide *side, int partition)
 	{
 		int			index = part->chunks[chunk];
 
+		tess_loop_turn("demote");
 		side_write_records(state, side, partition, index);
 		if (index == tail)
 			continue;
@@ -1164,6 +1166,7 @@ split_table(TessHashJoinState *state)
 
 	for (int chunk = 0; chunk < state->table.nchunks; chunk++)
 	{
+		tess_loop_turn("split");
 		join_split_chunk(state, state->chunk_bases[chunk], state->chunk_lens[chunk],
 					state->values.bases, NULL, 0);
 		pfree(state->chunk_bases[chunk]);
@@ -1500,6 +1503,7 @@ start_joining(TessHashJoinState *state)
 	spill->bloom_words = 0;
 	for (int partition = 0; partition < spill->npartitions; partition++)
 	{
+		tess_loop_turn("tails");
 		if (spill->build.parts[partition].resident)
 			side_release(&spill->build, partition);
 		else

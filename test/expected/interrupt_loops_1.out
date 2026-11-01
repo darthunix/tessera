@@ -1,0 +1,22 @@
+-- A cancel ends a spill's loop that can run long at its next turn, in
+-- a join and in a grouping: the first split of a table, the demotion
+-- and the eviction of a partition, the writing of its value chunks and
+-- of the tails, the links of a table's chunks, a round's load. Each turn
+-- checks for a cancel and then passes the loop's name to the injection
+-- point "tessera-loop", whose callback marks a cancel pending in the
+-- loop's first turn, as SIGINT does: the query ends after that one turn,
+-- where without the check the loop would run on first. Without
+-- injection points the suite ends here.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set spill_test :libdir '/tessera_spill_test' :dlsuffix
+\set interrupt_test :libdir '/tessera_interrupt_test' :dlsuffix
+\set loop_module :libdir '/tessera_interrupt_test'
+CREATE FUNCTION tessera_test_spill_injection()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_injection'
+LANGUAGE C STRICT;
+SELECT NOT tessera_test_spill_injection() AS skip \gset
+\if :skip
+DROP FUNCTION tessera_test_spill_injection();
+\quit

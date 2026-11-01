@@ -418,6 +418,7 @@ agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 	{
 		Size		from = TESS_TABLE_CHUNK_HEADER;
 
+		tess_loop_turn("group link");
 		check(state, state->kernels->table_link(&state->table, chunk, &from, NULL,
 												NULL, &state->status));
 	}
@@ -454,6 +455,7 @@ agg_start_spill(TessAggState *state)
 	memcpy(old_lens, state->chunk_lens, sizeof(Size) * nold);
 	for (int chunk = 0; chunk < nold; chunk++)
 	{
+		tess_loop_turn("group split");
 		agg_split(state, spill, old[chunk], old_lens[chunk], true, false);
 		pfree(old[chunk]);
 	}
@@ -500,7 +502,10 @@ agg_evict(TessAggState *state, Size extra)
 		if (largest < 0)
 			break;
 		for (int chunk = 0; chunk < spill->parts[largest].nchunks; chunk++)
+		{
+			tess_loop_turn("evict");
 			agg_write_chunk(state, spill, largest, spill->parts[largest].chunks[chunk]);
+		}
 		part_release(spill, &spill->parts[largest]);
 		state->evictions++;
 		evicted++;
@@ -776,6 +781,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 	{
 		Size		from = TESS_TABLE_CHUNK_HEADER;
 
+		tess_loop_turn("merge link");
 		check(state, state->kernels->table_link(&state->table, chunk, &from, NULL,
 												NULL, &state->status));
 	}
@@ -825,7 +831,10 @@ agg_flush_spilled(TessAggState *state, AggSpill *spill)
 		if (part->disk_records == 0 || part->nchunks == 0)
 			continue;
 		for (int chunk = 0; chunk < part->nchunks; chunk++)
+		{
+			tess_loop_turn("flush");
 			agg_write_chunk(state, spill, partition, part->chunks[chunk]);
+		}
 		part_release(spill, part);
 	}
 }
