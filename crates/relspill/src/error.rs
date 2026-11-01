@@ -433,7 +433,7 @@ impl fmt::Display for Error {
                 f,
                 "a chunk of values of {a} bytes is longer than a reference names"
             ),
-            Rule::ValuesUsed => write!(f, "values used to byte {a} of {b}"),
+            Rule::ValuesUsed => write!(f, "values used to byte {b} of {a}"),
             Rule::ByValueBytes => write!(f, "a by-value column {a} gave bytes"),
             Rule::ValueRead => write!(f, "the source of rows cannot give column {a} of row {b}"),
             Rule::Mask => f.write_str("a word past the mask of the rows"),

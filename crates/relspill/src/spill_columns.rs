@@ -10,11 +10,11 @@
 
 use std::ops::Range;
 
-use crate::columns;
-use anyhow::{Result, bail, ensure};
-use relhash::{RowMask, ones};
+use relhash::{MAX_PARTITIONS, Partitions, PayloadColumns, RowMask, ones};
 
-use relhash::{MAX_PARTITIONS, Partitions, PayloadColumns};
+use crate::columns;
+use crate::error::ensure;
+use crate::{Error, Result, Rule};
 
 /// Bits of a row's place in a reference; the chunk's number is above them.
 pub const PLACE_BITS: u32 = 17;
@@ -22,18 +22,22 @@ pub const PLACE_BITS: u32 = 17;
 /// The chunks rows are appended to, by number: each lent to the caller
 /// alone while it writes a row.
 pub trait ColumnChunks {
-    /// The bytes of chunk `index`.
-    fn chunk(&mut self, index: usize) -> Result<&mut [u8]>;
+    /// The bytes of chunk `index`, or `None` when the host cannot give
+    /// it: the append then fails with [`Rule::ChunkRead`], and a host that
+    /// must say why keeps its own error.
+    fn chunk(&mut self, index: usize) -> Option<&mut [u8]>;
 }
 
 /// Chunks each its own vector, by number.
 impl ColumnChunks for [Vec<u8>] {
-    fn chunk(&mut self, index: usize) -> Result<&mut [u8]> {
-        let count = self.len();
-        self.get_mut(index)
-            .map(Vec::as_mut_slice)
-            .ok_or_else(|| anyhow::anyhow!("chunk {index} of {count} chunks of columns"))
+    fn chunk(&mut self, index: usize) -> Option<&mut [u8]> {
+        self.get_mut(index).map(Vec::as_mut_slice)
     }
+}
+
+/// A mask's refusal of a word, which the loops' bounds never meet.
+fn masked(result: core::result::Result<(), relhash::Error>) -> Result<()> {
+    result.map_err(|_| Error::wrong_call(Rule::Mask))
 }
 
 /// Append the rows of `pending` to the chunks of their partitions, as
@@ -42,6 +46,15 @@ impl ColumnChunks for [Vec<u8>] {
 /// one per stored word of the chunk, and its NULL bits; appended rows
 /// leave `pending`, get their references in `offsets` and count in `rows`
 /// at their partition. The count appended is returned.
+///
+/// # Errors
+///
+/// Partitions, bits, row counts or chunk numbers out of their bounds,
+/// before anything is written; or a chunk the host cannot give, or that
+/// is no chunk of columns of the rows' words, which may come after rows
+/// of the same word of `pending` were appended while `pending` still
+/// holds them: the chunks, `offsets`, `rows` and `pending` are then to be
+/// dropped.
 pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     chunks: &mut C,
     partitions: &Partitions<'_>,
@@ -59,29 +72,32 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
     let count = partition_chunks.len();
     ensure!(
         count.is_power_of_two() && count <= MAX_PARTITIONS,
-        "{count} partitions are not a power of two up to {MAX_PARTITIONS}"
+        Error::wrong_call(Rule::Partitions)
+            .with(count)
+            .and(MAX_PARTITIONS)
     );
     let bits = count.trailing_zeros();
     ensure!(
         shift < 32 && shift + bits <= 32,
-        "partition bits {shift} to {} lie past the 32 bits of a hash",
-        shift + bits
+        Error::wrong_call(Rule::PartitionBits)
+            .with(shift)
+            .and(shift.saturating_add(bits))
     );
     ensure!(
         hashes.len() == nrows && offsets.len() == nrows && columns.nrows() == nrows,
-        "the hashes, offsets, columns and mask of the rows have different row counts"
+        Error::wrong_call(Rule::RowCounts)
     );
     ensure!(
         rows.len() == count,
-        "{} row counts for {count} partitions",
-        rows.len()
+        Error::wrong_call(Rule::PartitionRows)
+            .with(rows.len())
+            .and(count)
     );
     ensure!(
         partition_chunks
             .iter()
             .all(|&chunk| chunk < 1 << (32 - PLACE_BITS)),
-        "a chunk number past {} bits",
-        32 - PLACE_BITS
+        Error::wrong_call(Rule::ChunkNumber).with(32 - PLACE_BITS)
     );
     let mask = (count - 1) as u32;
     let width = columns.len();
@@ -94,12 +110,15 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
             let row = index * 64 + bit;
             let partition = ((hashes[row] >> shift) & mask) as usize;
             let number = partition_chunks[partition];
-            let chunk = chunks.chunk(number as usize)?;
+            let chunk = chunks
+                .chunk(number as usize)
+                .ok_or_else(|| Error::wrong_call(Rule::ChunkRead).with(number))?;
             let shape = columns::shape(chunk)?;
             ensure!(
                 shape.words == width,
-                "a chunk of {} words takes rows of {width}",
-                shape.words
+                Error::wrong_call(Rule::ChunkWidth)
+                    .with(shape.words)
+                    .and(width)
             );
             if shape.rows == shape.capacity {
                 continue;
@@ -120,7 +139,7 @@ pub fn append_partitioned<C: ColumnChunks + ?Sized>(
             appended += 1;
         }
         if done != 0 {
-            pending.intersect_word(index, !done)?;
+            masked(pending.intersect_word(index, !done))?;
         }
     }
     Ok(appended)
@@ -183,12 +202,19 @@ pub trait RowValues {
     /// Whether every column is by value, so that no row has bytes to copy.
     fn by_value(&self) -> bool;
 
-    /// Row `row`'s value of column `column`.
-    ///
-    /// # Errors
-    ///
-    /// A value whose bytes cannot be told.
-    fn value(&self, column: usize, row: usize) -> Result<Value<'_>>;
+    /// Row `row`'s value of column `column`, or `None` when the source
+    /// cannot tell its bytes: the append then fails with
+    /// [`Rule::ValueRead`], which names the column and the row, and a
+    /// source that must say why gives its own error for them.
+    fn value(&self, column: usize, row: usize) -> Option<Value<'_>>;
+}
+
+/// Row `row`'s value of `column`, or the error that names them.
+#[inline(always)]
+fn value_of(source: &impl RowValues, column: usize, row: usize) -> Result<Value<'_>> {
+    source
+        .value(column, row)
+        .ok_or_else(|| Error::wrong_call(Rule::ValueRead).with(column).and(row))
 }
 
 /// What [`append`] did: the rows it appended, and the bytes of values the
@@ -210,10 +236,13 @@ pub struct Appended {
 ///
 /// # Errors
 ///
-/// A chunk of fewer words than the columns, `values` longer than a
-/// reference names a byte of, `*used` past `values` or not aligned to 8,
-/// or a value [`RowValues::value`] cannot tell, before any row of the word
-/// it is in is written.
+/// A chunk that is no chunk of columns or has fewer words than the
+/// columns, `values` longer than a reference names a byte of, or `*used`
+/// past `values` or not aligned to 8, before anything is written; or a
+/// value [`RowValues::value`] cannot tell, or bytes from a source by
+/// value, which may come after rows were written past the chunk's count,
+/// values copied, `*used` moved and words of the mask taken: the chunk,
+/// `values`, `*used` and `rows` are then to be dropped.
 pub fn append(
     chunk: &mut [u8],
     source: &impl RowValues,
@@ -225,19 +254,19 @@ pub fn append(
     let ncolumns = source.ncolumns();
     ensure!(
         ncolumns <= shape.words,
-        "a chunk of {} words takes no row of {ncolumns} columns",
-        shape.words
+        Error::wrong_call(Rule::ChunkColumns)
+            .with(shape.words)
+            .and(ncolumns)
     );
     ensure!(
         values.len() as u64 <= 1 << columns::VALUE_BYTE_BITS,
-        "a chunk of values of {} bytes is longer than a reference names",
-        values.len()
+        Error::wrong_call(Rule::ValuesLength).with(values.len())
     );
     ensure!(
         *used <= values.len() && used.is_multiple_of(8),
-        "values used to byte {} of {}",
-        *used,
-        values.len()
+        Error::wrong_call(Rule::ValuesUsed)
+            .with(values.len())
+            .and(*used)
     );
     let null_lanes = columns::null_lanes(shape.words);
     let nrows = rows.as_view().nrows();
@@ -271,7 +300,7 @@ pub fn append(
                 let nulls = shape.lane_at(column / 64);
                 for (at, bit) in (place + appended..).zip(ones(done)) {
                     let row = index * 64 + bit;
-                    let word = match source.value(column, row)? {
+                    let word = match value_of(source, column, row)? {
                         Value::Null => {
                             let mut null = get(chunk, nulls + 8 * at);
                             null |= 1 << (column % 64);
@@ -279,13 +308,15 @@ pub fn append(
                             0
                         }
                         Value::Word(word) => word,
-                        Value::Bytes(_) => bail!("a by-value column {column} gave bytes"),
+                        Value::Bytes(_) => {
+                            return Err(Error::wrong_call(Rule::ByValueBytes).with(column));
+                        }
                     };
                     put(chunk, lane + 8 * at, word);
                 }
             }
             appended += done.count_ones() as usize;
-            rows.intersect_word(index, !done)?;
+            masked(rows.intersect_word(index, !done))?;
         }
         columns::set_rows(chunk, place + appended);
         return Ok(Appended {
@@ -300,20 +331,20 @@ pub fn append(
             let row = index * 64 + bit;
             let mut bytes = 0;
             for column in 0..ncolumns {
-                if let Value::Bytes(value) = source.value(column, row)? {
+                if let Value::Bytes(value) = value_of(source, column, row)? {
                     bytes += value.len().next_multiple_of(8);
                 }
             }
             if place == shape.capacity || *used + bytes > values.len() {
                 need = bytes;
-                rows.intersect_word(index, !done)?;
+                masked(rows.intersect_word(index, !done))?;
                 break 'words;
             }
             for lane in 0..null_lanes {
                 put(chunk, shape.lane_at(lane) + 8 * place, 0);
             }
             for column in 0..ncolumns {
-                let word = match source.value(column, row)? {
+                let word = match value_of(source, column, row)? {
                     Value::Null => {
                         let nulls = shape.lane_at(column / 64) + 8 * place;
                         let mut null = get(chunk, nulls);
@@ -339,7 +370,7 @@ pub fn append(
             appended += 1;
             done |= 1 << bit;
         }
-        rows.intersect_word(index, !done)?;
+        masked(rows.intersect_word(index, !done))?;
     }
     columns::set_rows(chunk, place);
     Ok(Appended {
@@ -364,10 +395,12 @@ fn put(chunk: &mut [u8], at: usize, word: u64) {
 mod tests {
     use std::panic::Location;
 
+    use anyhow::{Result, ensure};
     use proptest::prelude::*;
     use proptest::test_runner::{FileFailurePersistence, TestCaseError, TestRunner};
 
     use super::*;
+    use crate::Kind;
 
     /// Run `test` on the cases of `strategy`, and fail with the smallest
     /// failing case, which `spill_columns.proptest-regressions` beside
@@ -426,8 +459,8 @@ mod tests {
             self.by_value
         }
 
-        fn value(&self, column: usize, row: usize) -> Result<Value<'_>> {
-            Ok(match &self.columns[column][row] {
+        fn value(&self, column: usize, row: usize) -> Option<Value<'_>> {
+            Some(match &self.columns[column][row] {
                 Cell::Null => Value::Null,
                 Cell::Word(word) => Value::Word(*word),
                 Cell::Bytes(bytes) => Value::Bytes(bytes),
@@ -700,36 +733,115 @@ mod tests {
         let mut words = vec![1_u64];
         let mut pending = RowMask::try_new(1, &mut words).unwrap();
         let mut offsets = [0_u32];
-        let mut rows = [0_u64];
-        assert!(
+        let mut refused = |shift, numbers: &[u32], hashes: &[u32], rows: &mut [u64]| {
             append_partitioned(
                 chunks.as_mut_slice(),
                 &Partitions {
-                    shift: 0,
-                    chunks: &[0],
+                    shift,
+                    chunks: numbers,
                 },
-                &[0],
+                hashes,
                 &payload,
                 &mut pending,
                 &mut offsets,
-                &mut rows,
+                rows,
             )
-            .is_err()
+            .expect_err("appended")
+        };
+        let wrong = |rule, a, b| (Kind::WrongCall, rule, (a, b));
+        let seen = |error: Error| (error.kind(), error.rule(), error.numbers());
+        // A chunk of one word for rows of none, a chunk the chunks cannot
+        // give, and a chunk number past a reference's bits.
+        let error = refused(0, &[0], &[0], &mut [0]);
+        assert_eq!(seen(error), wrong(Rule::ChunkWidth, 1, 0));
+        let error = refused(0, &[1], &[0], &mut [0]);
+        assert_eq!(seen(error), wrong(Rule::ChunkRead, 1, 0));
+        let error = refused(0, &[1 << 15], &[0], &mut [0]);
+        assert_eq!(seen(error), wrong(Rule::ChunkNumber, 15, 0));
+        // Partitions that are no power of two, bits past the hash's, and
+        // counts that are not the rows' or the partitions'.
+        let error = refused(0, &[0, 0, 0], &[0], &mut [0; 3]);
+        assert_eq!(
+            seen(error),
+            wrong(Rule::Partitions, 3, MAX_PARTITIONS as u32)
         );
-        assert!(
-            append_partitioned(
-                chunks.as_mut_slice(),
-                &Partitions {
-                    shift: 0,
-                    chunks: &[0, 0, 0],
-                },
-                &[0],
-                &payload,
-                &mut pending,
-                &mut offsets,
-                &mut [0; 3],
-            )
-            .is_err()
-        );
+        let error = refused(32, &[0], &[0], &mut [0]);
+        assert_eq!(seen(error), wrong(Rule::PartitionBits, 32, 32));
+        let error = refused(0, &[0], &[0, 0], &mut [0]);
+        assert_eq!(seen(error), wrong(Rule::RowCounts, 0, 0));
+        let error = refused(0, &[0], &[0], &mut [0; 2]);
+        assert_eq!(seen(error), wrong(Rule::PartitionRows, 2, 1));
+    }
+
+    /// A source of two columns: the first NULL in every row, the second
+    /// giving `cell`.
+    struct One {
+        cell: Option<Cell>,
+        by_value: bool,
+    }
+
+    impl RowValues for One {
+        fn ncolumns(&self) -> usize {
+            2
+        }
+
+        fn by_value(&self) -> bool {
+            self.by_value
+        }
+
+        fn value(&self, column: usize, _: usize) -> Option<Value<'_>> {
+            if column == 0 {
+                return Some(Value::Null);
+            }
+            match self.cell.as_ref()? {
+                Cell::Null => Some(Value::Null),
+                Cell::Word(word) => Some(Value::Word(*word)),
+                Cell::Bytes(bytes) => Some(Value::Bytes(bytes)),
+            }
+        }
+    }
+
+    /// Each check of an append names its rule, its kind and its numbers:
+    /// a chunk too narrow, values used past an aligned byte, a value the
+    /// source cannot give, and bytes from a source by value, at row 3.
+    #[test]
+    fn an_append_names_the_rule_it_refuses_by() {
+        let refused = |words: usize, source: &One, used: usize| {
+            let mut chunk = vec![0_u8; columns::size(4, words)];
+            columns::init(&mut chunk, words).unwrap();
+            let mut mask = vec![1_u64 << 3];
+            let mut rows = RowMask::try_new(4, &mut mask).unwrap();
+            let mut values = vec![0_u8; 64];
+            let mut used = used;
+            append(&mut chunk, source, &mut rows, &mut values, &mut used).expect_err("appended")
+        };
+        let wrong = |rule, a, b| (Kind::WrongCall, rule, (a, b));
+        let seen = |error: Error| (error.kind(), error.rule(), error.numbers());
+        let word = One {
+            cell: Some(Cell::Word(7)),
+            by_value: true,
+        };
+        assert_eq!(seen(refused(1, &word, 0)), wrong(Rule::ChunkColumns, 1, 2));
+        let error = refused(2, &word, 4);
+        assert_eq!(seen(error), wrong(Rule::ValuesUsed, 64, 4));
+        assert_eq!(error.to_string(), "values used to byte 4 of 64");
+        assert_eq!(seen(refused(2, &word, 72)), wrong(Rule::ValuesUsed, 64, 72));
+        for by_value in [true, false] {
+            let none = One {
+                cell: None,
+                by_value,
+            };
+            let error = refused(2, &none, 0);
+            assert_eq!(
+                seen(error),
+                wrong(Rule::ValueRead, 1, 3),
+                "by value {by_value}"
+            );
+        }
+        let bytes = One {
+            cell: Some(Cell::Bytes(vec![1, 2, 3])),
+            by_value: true,
+        };
+        assert_eq!(seen(refused(2, &bytes, 0)), wrong(Rule::ByValueBytes, 1, 0));
     }
 }

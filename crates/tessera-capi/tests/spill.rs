@@ -812,14 +812,23 @@ fn rows_of_datums_append_to_a_chunk_of_columns() {
         );
         // An external varlena of an unknown tag has no size, and an
         // expanded object's pointer (read-only and read-write) is not
-        // copied: it means nothing outside its process.
+        // copied: it means nothing outside its process. A non-NULL Datum
+        // of 0 points nowhere, and a type of length -3 has no rule of size.
         let expanded_ro: Vec<u8> = [&[0x01, 2][..], &[7; 8]].concat();
         let expanded_rw: Vec<u8> = [&[0x01, 3][..], &[7; 8]].concat();
+        let expanded = "an expanded object, not flattened";
+        let cases = [
+            (unknown.as_ptr() as u64, -1, "an external varlena of tag 9"),
+            (expanded_ro.as_ptr() as u64, -1, expanded),
+            (expanded_rw.as_ptr() as u64, -1, expanded),
+            (0, -1, "a null by-reference value"),
+            (short.as_ptr() as u64, -3, "a type of length -3"),
+        ];
         // A plain value comes first in the row, so nothing of it may stay
         // either.
-        for refused in [&unknown, &expanded_ro, &expanded_rw] {
+        for (datum, typlen, reason) in cases {
             let plain = [short.as_ptr() as u64; 4];
-            let varlenas = [refused.as_ptr() as u64; 4];
+            let varlenas = [datum; 4];
             let columns = [column(&plain, &no_nulls), column(&varlenas, &no_nulls)];
             let mut first = 1_u64;
             let mut one = Mask {
@@ -833,7 +842,7 @@ fn rows_of_datums_append_to_a_chunk_of_columns() {
                 2,
                 columns.as_ptr(),
                 [false, false].as_ptr(),
-                [-1_i16, -1].as_ptr(),
+                [-1_i16, typlen].as_ptr(),
                 &raw mut one,
                 values.as_mut_ptr(),
                 256,
@@ -842,8 +851,81 @@ fn rows_of_datums_append_to_a_chunk_of_columns() {
                 &raw mut need,
                 &raw mut status,
             );
-            assert_eq!(code, Code::InvalidArgument, "tag {}", refused[1]);
-            assert_eq!(used, 0, "tag {}", refused[1]);
+            assert_eq!(code, Code::InvalidArgument, "{reason}");
+            assert_eq!(used, 0, "{reason}");
+            // The host's own reason, not the spill's rule that met it.
+            assert!(status.message().contains(reason), "{}", status.message());
         }
     }
+}
+
+/// A value refused at a row past the largest number an error of the
+/// spill keeps, 2^23 - 1, reports its own reason: the row before it,
+/// NULL with a Datum that points nowhere, is never read.
+#[test]
+#[cfg_attr(miri, ignore = "eight million rows")]
+fn a_refused_value_past_two_to_the_23_rows_reports_its_own_reason() {
+    use tessera_capi::c::{DatumColumn, Mask, tess_spill_columns_append, tess_spill_columns_init};
+
+    let nrows = (1_usize << 23) + 1;
+    let expanded: Vec<u8> = [&[0x01, 2][..], &[7; 8]].concat();
+    let mut datums = vec![0_u64; nrows];
+    let mut nulls = vec![false; nrows];
+    datums[nrows - 1] = expanded.as_ptr() as u64;
+    datums[nrows - 2] = 1;
+    nulls[nrows - 2] = true;
+    let columns = [DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: nulls.as_ptr(),
+        nrows: nrows as i32,
+        ..DatumColumn::EMPTY
+    }];
+    let mut bits = vec![0_u64; nrows.div_ceil(64)];
+    bits[(nrows - 1) / 64] = 1 << ((nrows - 1) % 64);
+    let mut rows = Mask {
+        nrows: nrows as i32,
+        bits: bits.as_mut_ptr(),
+    };
+    let len = 16 + 8 * 2 * 4;
+    let mut chunk = vec![0_u64; len / 8];
+    let mut values = vec![0_u8; 256];
+    let (mut used, mut appended, mut need) = (0_usize, 0, 0_usize);
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing
+    // else, throughout this test.
+    unsafe {
+        let mut capacity = 0;
+        let code = tess_spill_columns_init(
+            chunk.as_mut_ptr().cast(),
+            len,
+            1,
+            &raw mut capacity,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_spill_columns_append(
+            chunk.as_mut_ptr().cast(),
+            len,
+            1,
+            columns.as_ptr(),
+            [false].as_ptr(),
+            [-1_i16].as_ptr(),
+            &raw mut rows,
+            values.as_mut_ptr(),
+            values.len(),
+            &raw mut used,
+            &raw mut appended,
+            &raw mut need,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::InvalidArgument);
+    }
+    assert!(
+        status
+            .message()
+            .contains("an expanded object, not flattened"),
+        "{}",
+        status.message()
+    );
 }

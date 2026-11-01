@@ -3427,6 +3427,35 @@ fn rows_of_70_words_append_by_partition() -> Result<()> {
                 );
             }
         }
+        // A chunk that is gone, and one past the chunks: the host's own
+        // reason, not the spill's rule that met it.
+        for (base, number, reason) in [
+            (std::ptr::null_mut(), 0_u32, "chunk 0 of columns is gone"),
+            (bases[0], 1, "chunk 1 of 1 chunks of columns"),
+        ] {
+            let mut pending_words = [1_u64];
+            let mut pending = Mask {
+                nrows: nrows as i32,
+                bits: pending_words.as_mut_ptr(),
+            };
+            let code = tess_spill_columns_append_partitioned(
+                [base].as_ptr(),
+                [len].as_ptr(),
+                1,
+                [number].as_ptr(),
+                1,
+                0,
+                [0_u32; 6].as_ptr(),
+                width as i32,
+                columns.as_ptr(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                rows.as_mut_ptr(),
+                &raw mut status,
+            );
+            assert_eq!(code, Code::InvalidArgument);
+            assert!(status.message().contains(reason), "{}", status.message());
+        }
     }
     Ok(())
 }
