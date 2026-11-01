@@ -132,10 +132,8 @@ static void
 add_chunk(TessAggState *state)
 {
 	int			chunk = state->table.nchunks;
-	/* Past the first, an eighth of hash_mem, so that a small one spills late. */
-	Size		len = chunk == 0 ? AGG_FIRST_CHUNK :
-		Max(AGG_FIRST_CHUNK, Min(TESS_TABLE_MAX_CHUNK_LEN,
-								 TYPEALIGN_DOWN(8, tess_hash_memory_limit() / 8)));
+	Size		len = chunk == 0 ? TABLE_FIRST_CHUNK :
+		table_chunk_len(state->kernels, &state->status);
 	void	   *base;
 
 	agg_reserve_chunks(state, chunk + 1);

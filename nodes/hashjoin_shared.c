@@ -160,7 +160,7 @@ add_own_chunk(TessHashJoinState *state)
 {
 	dsa_area   *area = join_query_dsa(state);
 	/* A small hash_mem takes small chunks: they count against it before the table spills. */
-	Size		len = state->parallel.nown == 0 ? JOIN_FIRST_CHUNK : join_chunk_len_for(JOIN_CHUNK_LEN);
+	Size		len = state->parallel.nown == 0 ? TABLE_FIRST_CHUNK : join_table_chunk_len(state);
 	uint64		number;
 	dsa_pointer block;
 	JoinChunk  *header;

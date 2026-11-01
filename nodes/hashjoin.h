@@ -87,12 +87,12 @@ enum
 
 /*
  * The table's records lie in chunks the node allocates: the first of a
- * table, or of a participant of a shared build, of JOIN_FIRST_CHUNK
- * bytes, so that a small inner side takes little, and the others of the
- * most a chunk may have. Records never move; the index is made once the
+ * table, or of a participant of a shared build, of TABLE_FIRST_CHUNK
+ * bytes, so that a small inner side takes little, and the others of
+ * table_chunk_len (table_chunks.h); a spill's levels take chunks of at
+ * most JOIN_CHUNK_LEN. Records never move; the index is made once the
  * inner side is read, for exactly its rows.
  */
-#define JOIN_FIRST_CHUNK (64 * 1024)
 #define JOIN_CHUNK_LEN TESS_TABLE_MAX_CHUNK_LEN
 
 /*
@@ -133,8 +133,9 @@ record_chunk_cost(Size len, Size record_size)
 
 /*
  * By-reference inner values live in chunks of their own, the first of
- * JOIN_VALUE_FIRST bytes and the others of JOIN_VALUE_CHUNK, a value
- * larger than a quarter of one getting a chunk of its own: in the node's
+ * TABLE_FIRST_CHUNK bytes and the others of table_chunk_len, a value
+ * larger than a quarter of JOIN_VALUE_CHUNK getting a chunk of its own,
+ * an ordinary chunk at least as large as the value: in the node's
  * memory for a table of its own, in the query's dynamic shared memory for
  * a shared one, where each participant fills chunks of its own, numbered
  * under the lock and entered in the table's list after a JoinChunk
@@ -143,7 +144,6 @@ record_chunk_cost(Size len, Size record_size)
  * address of a process, so that the words mean the same in every process
  * and on disk. A gather turns them into addresses.
  */
-#define JOIN_VALUE_FIRST (64 * 1024)
 #define JOIN_VALUE_CHUNK (1024 * 1024)
 #define JOIN_VALUE_REF(number, byte) TESS_SPILL_VALUE_REF(number, byte)
 
@@ -922,6 +922,8 @@ typedef struct TessHashJoinState
 	JoinParallel parallel;
 	JoinValues values;
 	int			mark_chunks;
+	/* table_chunk_len, once it is asked for: 0 until then. */
+	Size		chunk_len;
 } TessHashJoinState;
 
 /* Raise the error a kernel stored, if the call failed. */
@@ -943,7 +945,7 @@ extern TessSpillWeights join_spill_weights(TessHashJoinState *state);
 extern bool join_append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk, TessRowMask *pending);
 extern void join_batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns, const TessTableKeyKind *kinds, TessRowMask *valid);
 extern void join_child_column(TessBatch *batch, int column, const TessRowMask *rows, TessColumnPurpose purpose, TessDatumColumn *result);
-extern Size join_chunk_len_for(Size largest);
+extern Size join_table_chunk_len(TessHashJoinState *state);
 extern void join_decide_compact(TessHashJoinState *state);
 extern void join_forget_marks(TessHashJoinState *state);
 extern void join_index_table(TessHashJoinState *state, int read_back);

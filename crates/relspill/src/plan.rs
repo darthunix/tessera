@@ -299,6 +299,23 @@ mod tests {
         Ok(())
     }
 
+    /// A node's table in memory takes one partition at a share of 8,
+    /// between its first chunk, 64 kB, and the most, 1 MiB.
+    #[test]
+    fn a_table_in_memory_takes_an_eighth_of_the_limit() -> Result<()> {
+        for (limit, len) in [
+            (256 << 10, 64 << 10),
+            (512 << 10, 64 << 10),
+            (524_352, 65_544),
+            (3 << 20, 393_216),
+            ((8 << 20) - 1, 1_048_568),
+            (8 << 20, 1 << 20),
+        ] {
+            assert_eq!(chunk_len(limit, 1, 8, 64 << 10, 1 << 20)?, len, "{limit}");
+        }
+        Ok(())
+    }
+
     #[test]
     fn a_plan_refuses_bounds_out_of_order() -> Result<()> {
         let base = level(1e9, 1 << 30, 0, 0, 0);

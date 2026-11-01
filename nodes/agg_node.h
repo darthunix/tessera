@@ -275,12 +275,11 @@ fast_decimals(const AggValue *value)
 }
 
 /*
- * The groups' records lie in chunks: the first of AGG_FIRST_CHUNK bytes,
- * so that a few groups take little, the others of the most a chunk may
- * have. Records never move; when they reach half the buckets, only the
- * index is made anew, larger.
+ * The groups' records lie in chunks: the first of TABLE_FIRST_CHUNK
+ * bytes, so that a few groups take little, the others of table_chunk_len
+ * (table_chunks.h). Records never move; when they reach half the
+ * buckets, only the index is made anew, larger.
  */
-#define AGG_FIRST_CHUNK (64 * 1024)
 
 /* The node (agg.c). */
 extern TessRowMask agg_filtered_rows(TessAggState *state, TessBatch *batch,
