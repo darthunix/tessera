@@ -1189,7 +1189,7 @@ ANALYZE jgbuild, jgprobe;
 SET work_mem = '16MB';
 SET hash_mem_multiplier = 1;
 SET max_parallel_workers_per_gather = 0;
--- spec: table-memory/A build whose index would pass the limit
+-- spec: table-memory/A build whose index passes the limit
 SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k)$$, false);
 SELECT join_same($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k)$$);
 -- spec: table-memory/A build that fits with its index
