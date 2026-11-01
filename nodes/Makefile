@@ -7,7 +7,7 @@ include ../host.mk
 ifdef TESS_GREENGAGE
 # shortcut: the parts not ported to Greengage yet; greengage_stubs.c
 # stands in for their entry points.
-OBJS := $(filter-out append.o gather.o gather_planner.o heapscan.o join_planner.o,$(OBJS)) \
+OBJS := $(filter-out append.o gather.o gather_planner.o join_planner.o,$(OBJS)) \
 	greengage_stubs.o
 endif
 PGXS := $(shell $(PG_CONFIG) --pgxs)
