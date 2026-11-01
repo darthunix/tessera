@@ -22,6 +22,7 @@
 #include "miscadmin.h"
 #include "nodes/memnodes.h"
 #include "nodes/pathnodes.h"
+#include "storage/shmem.h"
 #include "nodes/nodes.h"
 #include "nodes/pg_list.h"
 #include "utils/numeric.h"
@@ -31,9 +32,17 @@ extern Datum int8_numeric(PG_FUNCTION_ARGS);
 extern Datum numeric_in(PG_FUNCTION_ARGS);
 extern Datum numeric_mul(PG_FUNCTION_ARGS);
 
-/* A copy whose type drops the original's const, as master's copyObject. */
+/*
+ * A copy whose type drops the original's const, as master's copyObject;
+ * untyped, as master's too, where the compiler lacks __typeof_unqual__.
+ */
 #undef copyObject
+#if (defined(__clang__) && __clang_major__ >= 19) || \
+	(!defined(__clang__) && defined(__GNUC__) && __GNUC__ >= 14)
 #define copyObject(obj) ((__typeof_unqual__(*(obj)) *) copyObjectImpl(obj))
+#else
+#define copyObject(obj) copyObjectImpl(obj)
+#endif
 
 /*
  * Remove a callback registered with MemoryContextRegisterResetCallback
@@ -68,7 +77,9 @@ int64_to_numeric(int64 value)
 
 /*
  * value / 10^scale as a numeric whose display scale is Max(scale, 0)
- * (PostgreSQL 14): a product by 1e-scale, whose scales add up.
+ * (PostgreSQL 14): a product by 1e-scale, whose scales add up. The
+ * callers pass a decimal's scale; one past numeric's precision, whose
+ * factor numeric cannot hold, is refused.
  * shortcut: parses the factor on every call; cache it if a profile shows it.
  */
 static inline Numeric
@@ -76,6 +87,8 @@ int64_div_fast_to_numeric(int64 value, int scale)
 {
 	char		factor[16];
 
+	if (scale < -NUMERIC_MAX_PRECISION || scale > NUMERIC_MAX_DISPLAY_SCALE)
+		elog(ERROR, "Tessera cannot scale a numeric by 10^%d", scale);
 	snprintf(factor, sizeof(factor), "1e%d", -scale);
 	return DatumGetNumeric(DirectFunctionCall2(numeric_mul,
 											   NumericGetDatum(int64_to_numeric(value)),
@@ -100,11 +113,20 @@ typedef struct TessForEachState
 	int			index;
 } TessForEachState;
 
+/* The state at the list's first cell, the list's expression read once. */
+static inline TessForEachState
+tess_foreach_start(const List *list)
+{
+	TessForEachState state = {list, list_head(list), 0};
+
+	return state;
+}
+
 #define tess_foreach_internal(type, pointer, var, lst, value) \
 	for (type pointer var = 0, pointer var##__outerloop = (type pointer) 1; \
 		 var##__outerloop; \
 		 var##__outerloop = 0) \
-		for (TessForEachState var##__state = {(lst), list_head(lst), 0}; \
+		for (TessForEachState var##__state = tess_foreach_start(lst); \
 			 var##__state.cell != NULL && (var = (value), true); \
 			 var##__state.cell = lnext(var##__state.cell), var##__state.index++)
 
@@ -118,20 +140,11 @@ typedef struct TessForEachState
 	tess_foreach_internal(Oid, , var, lst, lfirst_oid(var##__state.cell))
 #define foreach_current_index(var) (var##__state.index)
 
-/* The first n cells of a list, copied (PostgreSQL 15). */
+/* The first n cells of a list, copied, of the list's type (PostgreSQL 15). */
 static inline List *
 list_copy_head(const List *list, int n)
 {
-	List	   *result = NIL;
-	ListCell   *cell;
-
-	foreach(cell, list)
-	{
-		if (n-- <= 0)
-			break;
-		result = lappend(result, lfirst(cell));
-	}
-	return result;
+	return list_truncate(list_copy(list), n);
 }
 
 /* A new list of both lists' cells, neither changed (PostgreSQL 13). */
@@ -145,22 +158,31 @@ list_concat_copy(const List *list1, const List *list2)
 static inline List *
 list_delete_last(List *list)
 {
-	return list_length(list) <= 1 ? NIL : list_truncate(list, list_length(list) - 1);
+	if (list_length(list) <= 1)
+	{
+		list_free(list);
+		return NIL;
+	}
+	return list_truncate(list, list_length(list) - 1);
 }
 
 /* Grow an allocation and zero the new tail (PostgreSQL 16). */
 static inline void *
 repalloc0(void *pointer, Size oldsize, Size size)
 {
-	char	   *result = repalloc(pointer, size);
+	char	   *result;
 
-	if (size > oldsize)
-		memset(result + oldsize, 0, size - oldsize);
+	if (oldsize > size)
+		elog(ERROR, "invalid repalloc0 call: oldsize %zu, new size %zu",
+			 oldsize, size);
+	result = repalloc(pointer, size);
+	memset(result + oldsize, 0, size - oldsize);
 	return result;
 }
 
 #define repalloc0_array(pointer, type, oldcount, count) \
-	((type *) repalloc0(pointer, sizeof(type) * (oldcount), sizeof(type) * (count)))
+	((type *) repalloc0(pointer, mul_size(sizeof(type), (oldcount)), \
+						mul_size(sizeof(type), (count))))
 
 /* Attributes of PostgreSQL 18 and master. */
 #define pg_noreturn __attribute__((noreturn))
