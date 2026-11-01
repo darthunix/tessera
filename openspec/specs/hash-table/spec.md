@@ -583,6 +583,7 @@ they were while the other calls take away only what they added.
 - **Verified by:**
   `crates/relspill/src/shared_spill.rs::the_words_are_sized_for_1_to_65536_partitions`;
   `crates/relspill/src/shared_spill.rs::words_attach_only_as_words_for_sizes_them`;
+  `crates/tessera-capi/tests/spill.rs::the_spill_words_refuse_null_and_misaligned_words`;
   `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`
 
 #### Scenario: Own and shared words
