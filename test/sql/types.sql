@@ -432,7 +432,10 @@ SELECT i AS id,
        i % 200 - 100 AS n, (i % 200 - 100)::int8 * 100000000000 AS n8, (i % 200 - 100)::int2 AS n2
 FROM generate_series(1, 3000) AS i;
 INSERT INTO types_fl VALUES (5001, 1e300, 1e30, 1, 1, 1), (5002, 1e-300, 1e-30, 2, 2, 2),
-    (5003, 2147483646.5, 32767.5, 3, 3, 3), (5004, -2147483648.5, -32768.5, 4, 4, 4);
+    (5003, 2147483646.5, 32767.5, 3, 3, 3), (5004, -2147483648.5, -32768.5, 4, 4, 4),
+    (5005, 4.9e-324, 1.4e-45, 5, 5, 5), (5006, 2147483647.5, 2147483520, 6, 6, 6),
+    (5007, 9223372036854775807, 9.223372e18, 7, 7, 7),
+    (5008, -9223372036854775808, -9.223372e18, 8, 8, 8);
 ANALYZE types_fl;
 EXPLAIN (COSTS OFF) SELECT id % 10, min(f8 * 2), sum(f4::int) FROM types_fl WHERE f8 > 100.5 AND f4 < f8 AND f8::int % 2 = 0 GROUP BY 1;
 SELECT types_same($$SELECT count(*), sum(id) FROM types_fl WHERE f8 > 100.5 OR f8 = 'NaN' OR f8 <= -2 OR f8 = 0$$);
@@ -452,6 +455,13 @@ SELECT types_same($$SELECT id % 10, min(n::float8), max(n8::float8), min(n2::flo
 SELECT types_same($$SELECT id % 10, sum((f8::float4 * 1000::float4)::int8), sum(f8::int), sum(f8::int8), sum(f4::int), sum(f4::int2), sum(f4::int8) FROM types_fl WHERE id < 5000 AND f8 BETWEEN -30000 AND 30000 AND f4 BETWEEN -30000 AND 30000 GROUP BY 1$$);
 SELECT types_same($$SELECT id % 10, sum((f8 / 4 + 0.125)::int), sum((f4 / 4 + 0.125::float4)::int2) FROM types_fl WHERE id < 5000 AND f8 BETWEEN -30000 AND 30000 AND f4 BETWEEN -30000 AND 30000 GROUP BY 1$$);
 SELECT types_same($$SELECT id % 10, sum(f8::int), sum(f8::int8), sum(f4::int) FROM types_fl WHERE id IN (5003, 5004) OR id = 7 GROUP BY 1$$);
+-- Subnormal values compare; NaN divided by zero and an infinity times
+-- zero are NaN, not errors; the casts at the edges of int4 and int8.
+SELECT types_same($$SELECT count(*) FROM types_fl WHERE id = 5005 AND f8 > 0 AND f4 > 0 AND f8 < 1e-300 AND f4 < 1e-40::float8$$);
+SELECT types_same($$SELECT count(*) FROM types_fl WHERE id < 5000 AND f8 = 'NaN' AND f8 / (n - n) = 'NaN'$$);
+SELECT types_same($$SELECT count(*) FROM types_fl WHERE (f8 = 'Infinity' OR f8 = '-Infinity') AND f8 * (n - n) = 'NaN'$$);
+SELECT types_same($$SELECT id % 10, sum(f8::int8), sum(f4::int8), sum(f4::int) FROM types_fl WHERE id = 5006 OR id = 7 GROUP BY 1$$);
+SELECT types_same($$SELECT id % 10, sum(f8::int8), sum(f4::int8) FROM types_fl WHERE id = 5008 OR id = 7 GROUP BY 1$$);
 \set VERBOSITY terse
 SELECT count(*) FROM types_fl WHERE id = 5001 AND f8 * 1e300 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5002 AND f8 * 1e-300 > 0;
@@ -461,6 +471,13 @@ SELECT count(*) FROM types_fl WHERE id = 5001 AND f8::float4 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5002 AND f8::float4 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5001 AND f4 * f4 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5003 AND f4::int2 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5002 AND f4 * f4 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5005 AND f8 / 2 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5005 AND f8::float4 > 0;
+SELECT count(*) FROM types_fl WHERE id < 5000 AND f8 = 0 AND f8 / (n - n) > 0;
+SELECT count(*) FROM types_fl WHERE id = 5006 AND f8::int > 0;
+SELECT count(*) FROM types_fl WHERE id = 5007 AND f8::int8 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5007 AND f4::int8 > 0;
 SET tessera.enable = off;
 SELECT count(*) FROM types_fl WHERE id = 5001 AND f8 * 1e300 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5002 AND f8 * 1e-300 > 0;
@@ -470,6 +487,13 @@ SELECT count(*) FROM types_fl WHERE id = 5001 AND f8::float4 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5002 AND f8::float4 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5001 AND f4 * f4 > 0;
 SELECT count(*) FROM types_fl WHERE id = 5003 AND f4::int2 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5002 AND f4 * f4 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5005 AND f8 / 2 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5005 AND f8::float4 > 0;
+SELECT count(*) FROM types_fl WHERE id < 5000 AND f8 = 0 AND f8 / (n - n) > 0;
+SELECT count(*) FROM types_fl WHERE id = 5006 AND f8::int > 0;
+SELECT count(*) FROM types_fl WHERE id = 5007 AND f8::int8 > 0;
+SELECT count(*) FROM types_fl WHERE id = 5007 AND f4::int8 > 0;
 RESET tessera.enable;
 \set VERBOSITY default
 DROP TABLE types_fl;

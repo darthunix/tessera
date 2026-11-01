@@ -24,7 +24,7 @@ named in a task comes on top.
       `bench/pg/README.md`. Check: `bench/pg/run.sh measure win` with
       `CASES='^float_'` and `REPETITIONS=1` runs them, and `plans.txt`
       shows the float functions computed by Tessera's node.
-- [ ] 2.2 Add to the float section of the suite `types` the rows the
+- [x] 2.2 Add to the float section of the suite `types` the rows the
       design's "Tests" lists (a subnormal, `NaN / 0`, `0 / 0`,
       infinity times zero, a float4 product that overflows, the edges
       of each cast), compared with Tessera on and off, and their
