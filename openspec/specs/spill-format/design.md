@@ -666,8 +666,8 @@ table that spills, in [hash-table](../hash-table/design.md).
   records
 - `crates/relspill/src/columns.rs`: a chunk of columns and its
   packed form
-- `crates/relspill/src/damaged.rs`: the error that marks damaged
-  data
+- `crates/relspill/src/error.rs`: the errors of the crate, a wrong
+  call or damaged bytes, each naming its rule
 - `crates/tessera-capi/src/c/spill.rs`: the C entry points
 - `crates/relspill/src/spill_columns.rs`: rows appended to chunks
   of columns

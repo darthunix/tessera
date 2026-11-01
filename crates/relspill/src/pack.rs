@@ -18,11 +18,10 @@
 //! after another, the whole padded to 8. Native byte order, as the
 //! header's.
 
-use anyhow::Result;
 use relhash::{CHUNK_HEADER, KEY_SLOT, RECORD_HEADER, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET};
 
-use crate::damaged::intact;
-use crate::{Damaged, low};
+use crate::error::ensure;
+use crate::{Error, Result, Rule, low};
 
 // The packing knows the records of this format of `relhash`: a new
 // format stops the build here until the packing is checked against it.
@@ -172,14 +171,13 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Option<usize> {
 /// Unpack a body [`pack`] made into `chunk`, which must be exactly the
 /// chunk's length.
 pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
-    intact!(
+    ensure!(
         packed.len() >= 8,
-        "a packed chunk of {} bytes has no counts",
-        packed.len()
+        Error::damaged(Rule::PackedCounts).with(packed.len())
     );
     let count = word(packed, 0) as usize;
     let len = word(packed, 4) as usize;
-    intact!(
+    ensure!(
         len >= MIN_RECORD
             && len.is_multiple_of(8)
             && count > 0
@@ -187,24 +185,20 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
                 .checked_mul(len)
                 .and_then(|bytes| bytes.checked_add(USED_MARK))
                 == Some(chunk.len()),
-        "a packed chunk of {count} records of {len} bytes does not fill {} bytes",
-        chunk.len()
+        Error::damaged(Rule::PackedFill).with(count).and(len)
     );
     let lanes = len / 4;
     let codes_end = 8 + lanes.next_multiple_of(4);
-    intact!(
-        packed.len() >= codes_end,
-        "a packed chunk is shorter than its lane codes"
-    );
+    ensure!(packed.len() >= codes_end, Error::damaged(Rule::LaneCodes));
     let used = chunk.len() as u64;
     chunk[..USED_MARK].copy_from_slice(&used.to_ne_bytes());
     let records = &mut chunk[USED_MARK..];
     let mut at = codes_end;
     for lane in 0..lanes {
         let code = packed[8 + lane];
-        intact!(
+        ensure!(
             lane != NEXT_LANE || code == ZERO,
-            "a packed chunk stores its next-record lane, with code {code}"
+            Error::damaged(Rule::NextLane).with(code)
         );
         let need = match code {
             ZERO => 0,
@@ -212,16 +206,16 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
             BYTE => count,
             HALF => 2 * count,
             WORD => 4 * count,
-            other => return Err(Damaged(format!("a packed chunk has lane code {other}")).into()),
+            other => return Err(Error::damaged(Rule::LaneCode).with(other)),
         };
-        intact!(
+        ensure!(
             at + need <= packed.len(),
-            "a packed chunk ends inside its lane {lane}"
+            Error::damaged(Rule::LaneEnd).with(lane)
         );
         let place = &packed[at..at + need];
-        intact!(
+        ensure!(
             lane != LEN_AT / 4 || (code == CONSTANT && word(place, 0) as usize == len / 8),
-            "the records of a packed chunk do not have its record length of {len} bytes"
+            Error::damaged(Rule::RecordLength).with(len)
         );
         match code {
             ZERO | CONSTANT => {
@@ -239,10 +233,9 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
         }
         at += need;
     }
-    intact!(
+    ensure!(
         at.next_multiple_of(8) == packed.len(),
-        "a packed chunk of {} bytes does not end with its lanes, at {at}",
-        packed.len()
+        Error::damaged(Rule::PackedTail).with(packed.len()).and(at)
     );
     Ok(())
 }
@@ -345,22 +338,24 @@ mod tests {
         let mut out = vec![0_u8; original.len()];
         let packed = pack(&original, &mut out).unwrap();
         let mut back = vec![0_u8; original.len()];
-        // Bytes read back that fail their checks are damaged data.
-        let damaged = |result: Result<()>| {
-            result
-                .expect_err("accepted")
-                .downcast_ref::<crate::Damaged>()
-                .is_some()
+        // Bytes read back that fail their checks are damaged data, and
+        // each names the rule it broke.
+        let refused = |result: Result<()>| {
+            let error = result.expect_err("accepted");
+            assert_eq!(error.kind(), crate::Kind::Damaged, "{error}");
+            error.rule()
         };
-        assert!(damaged(unpack(&out[..4], &mut back)));
-        assert!(damaged(unpack(
-            &out[..packed],
-            &mut back[..original.len() - 8]
-        )));
+        assert_eq!(refused(unpack(&out[..4], &mut back)), Rule::PackedCounts);
+        assert_eq!(
+            refused(unpack(&out[..packed], &mut back[..original.len() - 8])),
+            Rule::PackedFill
+        );
         let mut bad = out[..packed].to_vec();
         bad[8] = 9;
-        assert!(damaged(unpack(&bad, &mut back)));
-        assert!(damaged(unpack(&out[..12], &mut back)));
+        assert_eq!(refused(unpack(&bad, &mut back)), Rule::LaneCode);
+        assert_eq!(refused(unpack(&out[..12], &mut back)), Rule::LaneCodes);
+        // The first lane, a byte a record, would end at byte 26.
+        assert_eq!(refused(unpack(&out[..24], &mut back)), Rule::LaneEnd);
         // The next-record lane is never stored. Here it is stored as one
         // value for all, in a body that is whole in every other way: its
         // 4 bytes stand after the first lane's 10, and take the place of
@@ -373,13 +368,16 @@ mod tests {
         linked.extend_from_slice(&out[next_at..packed - 4]);
         linked[8 + NEXT_LANE] = CONSTANT;
         assert_eq!(linked.len(), packed);
-        assert!(damaged(unpack(&linked, &mut back)));
+        assert_eq!(refused(unpack(&linked, &mut back)), Rule::NextLane);
         // Bytes past the last lane, and a body cut inside its padding.
         let mut long = out[..packed].to_vec();
         long.extend_from_slice(&[0_u8; 8]);
-        assert!(damaged(unpack(&long, &mut back)));
+        assert_eq!(refused(unpack(&long, &mut back)), Rule::PackedTail);
         assert!(packed.is_multiple_of(8));
-        assert!(damaged(unpack(&out[..packed - 1], &mut back)));
+        assert_eq!(
+            refused(unpack(&out[..packed - 1], &mut back)),
+            Rule::PackedTail
+        );
         // Records of another length than the body's: the length's lane is
         // the fourth, after the counts, the codes and two lanes of a
         // byte a record.
@@ -387,6 +385,6 @@ mod tests {
         assert_eq!(out[length_at..length_at + 4], 3_u32.to_ne_bytes());
         let mut short = out[..packed].to_vec();
         short[length_at] = 4;
-        assert!(damaged(unpack(&short, &mut back)));
+        assert_eq!(refused(unpack(&short, &mut back)), Rule::RecordLength);
     }
 }

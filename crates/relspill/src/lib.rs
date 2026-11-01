@@ -17,6 +17,12 @@
 //! the process, or the processes of one query, that wrote them, on the
 //! same machine: the header is in native byte order and carries no
 //! checksum, as PostgreSQL's own temporary files do not.
+//!
+//! A call that refuses returns an [`Error`], one word: a wrong call, a
+//! value the caller passed, or damaged bytes, read back from a file, and
+//! the [`Rule`] it broke. A host reports damaged bytes as damaged data
+//! and a wrong call as its own fault; a limit of the host, and why a
+//! source of rows it gives cannot give a value, stay the host's to say.
 
 // All memory comes to the crate as safe slices its host makes, so the
 // compiler alone keeps it sound, its loom models included.
@@ -25,10 +31,8 @@
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("relspill needs a target whose pointers are 64 bits wide");
 
-use anyhow::{Result, ensure};
-
 pub mod columns;
-mod damaged;
+mod error;
 #[cfg(all(test, loom))]
 mod loom;
 mod pack;
@@ -36,8 +40,8 @@ pub mod phases;
 pub mod plan;
 pub mod shared_spill;
 pub mod spill_columns;
-pub use damaged::Damaged;
-use damaged::intact;
+use error::ensure;
+pub use error::{Error, Kind, Result, Rule};
 pub use pack::{pack, unpack};
 
 /// The first word of every block.
@@ -139,24 +143,25 @@ const fn low<const W: usize, const N: usize>() -> usize {
 }
 
 impl BlockHeader {
-    fn check(&self, max_len: u64) -> Result<()> {
+    /// Check the fields against each other and `max_len`: an error of
+    /// `kind`, a wrong call for a header to write, damaged bytes for one
+    /// read back.
+    fn check(&self, max_len: u64, kind: Kind) -> Result<()> {
+        let refuse = |rule| Error::new(kind, rule);
         ensure!(
             self.len.is_multiple_of(8) && self.len <= max_len,
-            "a spilled block of {} bytes is not a multiple of 8 up to {max_len}",
-            self.len
+            refuse(Rule::BlockLength).with(max_len).and(self.len)
         );
         ensure!(
             self.kind != BlockKind::Records || self.len >= relhash::CHUNK_HEADER as u64,
-            "a spilled chunk of records has no used mark"
+            refuse(Rule::UsedMark)
         );
         ensure!(
             self.kind != BlockKind::Columns
                 || (self.len >= columns::HEADER as u64
                     && self.packed >= 8
                     && self.packed.is_multiple_of(8)),
-            "a spilled chunk of columns of {} bytes packed into {} is no packed chunk",
-            self.len,
-            self.packed
+            refuse(Rule::ColumnsBlock).with(self.len).and(self.packed)
         );
         ensure!(
             self.packed == 0
@@ -166,15 +171,9 @@ impl BlockHeader {
                     // A packed body's two counts and its codes of lanes.
                     && u64::from(self.packed) >= 16
                     && u64::from(self.packed) < self.len),
-            "a spilled block packed into {} bytes of {} is no packed chunk of records",
-            self.packed,
-            self.len
+            refuse(Rule::PackedRecords).with(self.len).and(self.packed)
         );
-        ensure!(
-            self.level < MAX_LEVEL,
-            "a spilled block at level {} is past the hash's bits",
-            self.level
-        );
+        ensure!(self.level < MAX_LEVEL, refuse(Rule::Level).with(self.level));
         Ok(())
     }
 
@@ -184,9 +183,9 @@ impl BlockHeader {
     pub fn write(&self, out: &mut [u8], max_len: u64) -> Result<()> {
         ensure!(
             out.len() >= HEADER_SIZE,
-            "a spilled block header needs {HEADER_SIZE} bytes"
+            Error::wrong_call(Rule::Header).with(out.len())
         );
-        self.check(max_len)?;
+        self.check(max_len, Kind::WrongCall)?;
         put_u64(out, MAGIC_AT, MAGIC);
         put_u32(out, VERSION_AT, VERSION);
         put_u32(out, KIND_AT, self.kind as u32);
@@ -205,24 +204,19 @@ impl BlockHeader {
     pub fn read(bytes: &[u8], fingerprint: u64, max_len: u64) -> Result<Self> {
         ensure!(
             bytes.len() >= HEADER_SIZE,
-            "a spilled block header needs {HEADER_SIZE} bytes, got {}",
-            bytes.len()
+            Error::wrong_call(Rule::Header).with(bytes.len())
         );
-        intact!(
+        ensure!(
             get_u64(bytes, MAGIC_AT) == MAGIC,
-            "the bytes hold no spilled block"
+            Error::damaged(Rule::Magic)
         );
         let version = get_u32(bytes, VERSION_AT);
-        intact!(
+        ensure!(
             version == VERSION,
-            "spilled block version {version} is not the supported {VERSION}"
+            Error::damaged(Rule::Version).with(version)
         );
         let Some(kind) = BlockKind::from_code(get_u32(bytes, KIND_AT)) else {
-            return Err(Damaged(format!(
-                "a spilled block of unknown kind {}",
-                get_u32(bytes, KIND_AT)
-            ))
-            .into());
+            return Err(Error::damaged(Rule::BlockKind).with(get_u32(bytes, KIND_AT)));
         };
         let header = Self {
             kind,
@@ -233,13 +227,11 @@ impl BlockHeader {
             len: get_u64(bytes, LEN_AT),
             packed: get_u32(bytes, PACKED_AT),
         };
-        intact!(
+        ensure!(
             header.fingerprint == fingerprint,
-            "a spilled block belongs to another table"
+            Error::damaged(Rule::Fingerprint)
         );
-        header
-            .check(max_len)
-            .map_err(|error| Damaged(format!("{error:#}")))?;
+        header.check(max_len, Kind::Damaged)?;
         Ok(header)
     }
 }
@@ -286,18 +278,24 @@ mod tests {
         let mut good = [0_u8; HEADER_SIZE];
         header().write(&mut good, 1 << 20)?;
         let fingerprint = header().fingerprint;
-        let cases: [(&str, usize, u64, usize); 9] = [
-            ("magic", MAGIC_AT, 1, 8),
-            ("version", VERSION_AT, 1, 4),
-            ("kind", KIND_AT, 9, 4),
-            ("odd packing", PACKED_AT, 1001, 4),
-            ("packing no shorter", PACKED_AT, 4096, 4),
-            ("fingerprint", FINGERPRINT_AT, 1, 8),
-            ("odd length", LEN_AT, 4097, 8),
-            ("long length", LEN_AT, 2 << 20, 8),
-            ("level", LEVEL_AT, 32, 4),
+        let cases: [(&str, usize, u64, usize, Rule); 9] = [
+            ("magic", MAGIC_AT, 1, 8, Rule::Magic),
+            ("version", VERSION_AT, 1, 4, Rule::Version),
+            ("kind", KIND_AT, 9, 4, Rule::BlockKind),
+            ("odd packing", PACKED_AT, 1001, 4, Rule::PackedRecords),
+            (
+                "packing no shorter",
+                PACKED_AT,
+                4096,
+                4,
+                Rule::PackedRecords,
+            ),
+            ("fingerprint", FINGERPRINT_AT, 1, 8, Rule::Fingerprint),
+            ("odd length", LEN_AT, 4097, 8, Rule::BlockLength),
+            ("long length", LEN_AT, 2 << 20, 8, Rule::BlockLength),
+            ("level", LEVEL_AT, 32, 4, Rule::Level),
         ];
-        for (name, at, value, width) in cases {
+        for (name, at, value, width, rule) in cases {
             let mut bytes = good;
             if width == 4 {
                 put_u32(&mut bytes, at, value as u32);
@@ -307,39 +305,58 @@ mod tests {
             // A damaged field is damaged data, not a misuse of the call.
             let error = BlockHeader::read(&bytes, fingerprint, 1 << 20)
                 .expect_err(&format!("{name} accepted"));
-            assert!(error.downcast_ref::<Damaged>().is_some(), "{name}: {error}");
+            assert_eq!(
+                (error.kind(), error.rule()),
+                (Kind::Damaged, rule),
+                "{name}"
+            );
         }
         // A buffer shorter than a header is the caller's misuse.
         let short = BlockHeader::read(&good[..HEADER_SIZE - 1], fingerprint, 1 << 20)
             .expect_err("a short buffer accepted");
-        assert!(short.downcast_ref::<Damaged>().is_none());
+        assert_eq!(
+            (short.kind(), short.rule()),
+            (Kind::WrongCall, Rule::Header)
+        );
         let foreign = BlockHeader::read(&good, fingerprint + 1, 1 << 20)
             .expect_err("another table's block accepted");
-        assert!(foreign.downcast_ref::<Damaged>().is_some());
+        assert_eq!(
+            (foreign.kind(), foreign.rule()),
+            (Kind::Damaged, Rule::Fingerprint)
+        );
         Ok(())
     }
 
     #[test]
     fn a_header_that_would_not_read_back_is_not_written() {
         let mut bytes = [0_u8; HEADER_SIZE];
+        let refused = |result: Result<()>| result.map_err(|error| (error.kind(), error.rule()));
         let empty_records = BlockHeader { len: 0, ..header() };
-        assert!(empty_records.write(&mut bytes, 1 << 20).is_err());
-        assert!(header().write(&mut bytes, 1024).is_err());
+        assert_eq!(
+            refused(empty_records.write(&mut bytes, 1 << 20)),
+            Err((Kind::WrongCall, Rule::UsedMark))
+        );
+        assert_eq!(
+            refused(header().write(&mut bytes, 1024)),
+            Err((Kind::WrongCall, Rule::BlockLength))
+        );
         let packed_values = BlockHeader {
             kind: BlockKind::Values,
             packed: 64,
             ..header()
         };
-        assert!(packed_values.write(&mut bytes, 1 << 20).is_err());
+        assert_eq!(
+            refused(packed_values.write(&mut bytes, 1 << 20)),
+            Err((Kind::WrongCall, Rule::PackedRecords))
+        );
         let packed = BlockHeader {
             packed: 64,
             ..header()
         };
         assert!(packed.write(&mut bytes, 1 << 20).is_ok());
-        assert!(
-            header()
-                .write(&mut bytes[..HEADER_SIZE - 1], 1 << 20)
-                .is_err()
+        assert_eq!(
+            refused(header().write(&mut bytes[..HEADER_SIZE - 1], 1 << 20)),
+            Err((Kind::WrongCall, Rule::Header))
         );
     }
 
@@ -371,13 +388,20 @@ mod tests {
                 ..columns
             };
             let mut bytes = [0_u8; HEADER_SIZE];
-            assert!(bad.write(&mut bytes, 1 << 20).is_err(), "{name} written");
+            let error = bad.write(&mut bytes, 1 << 20).expect_err(name);
+            assert_eq!(
+                (error.kind(), error.rule()),
+                (Kind::WrongCall, Rule::ColumnsBlock)
+            );
             let mut bytes = good;
             put_u64(&mut bytes, LEN_AT, len);
             put_u32(&mut bytes, PACKED_AT, packed);
             let error = BlockHeader::read(&bytes, columns.fingerprint, 1 << 20)
                 .expect_err(&format!("{name} read"));
-            assert!(error.downcast_ref::<Damaged>().is_some(), "{name}: {error}");
+            assert_eq!(
+                (error.kind(), error.rule()),
+                (Kind::Damaged, Rule::ColumnsBlock)
+            );
         }
         Ok(())
     }
@@ -419,7 +443,7 @@ mod tests {
             put_u32(&mut damaged, LEVEL_AT, MAX_LEVEL);
             let error = BlockHeader::read(&damaged, good.fingerprint, 1 << 20)
                 .expect_err(&format!("{name} read past the last level"));
-            assert!(error.downcast_ref::<Damaged>().is_some(), "{name}: {error}");
+            assert_eq!((error.kind(), error.rule()), (Kind::Damaged, Rule::Level));
             // A body longer than the reader accepts.
             assert!(
                 good.write(&mut [0_u8; HEADER_SIZE], good.len - 8).is_err(),
@@ -427,7 +451,10 @@ mod tests {
             );
             let error = BlockHeader::read(&bytes, good.fingerprint, good.len - 8)
                 .expect_err(&format!("{name} read past the limit"));
-            assert!(error.downcast_ref::<Damaged>().is_some(), "{name}: {error}");
+            assert_eq!(
+                (error.kind(), error.rule()),
+                (Kind::Damaged, Rule::BlockLength)
+            );
         }
         Ok(())
     }

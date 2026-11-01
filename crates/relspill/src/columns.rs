@@ -20,10 +20,8 @@
 //! and the capacity (a `u32` each), the stored words (a `u32`) and a
 //! magic `u32`.
 
-use anyhow::{Result, ensure};
-
-use crate::damaged::intact;
-use crate::low;
+use crate::error::ensure;
+use crate::{Error, Result, Rule, low};
 
 /// Bytes of a chunk's header; the lanes follow.
 pub const HEADER: usize = 16;
@@ -136,12 +134,11 @@ pub fn capacity(len: usize, words: usize) -> usize {
 pub fn init(chunk: &mut [u8], words: usize) -> Result<usize> {
     ensure!(
         chunk.len() >= HEADER && chunk.len().is_multiple_of(8),
-        "a chunk of columns needs a header of {HEADER} bytes and a length of 8s, not {}",
-        chunk.len()
+        Error::wrong_call(Rule::ColumnsChunk).with(chunk.len())
     );
     ensure!(
         words <= MAX_WORDS,
-        "a chunk of columns keeps up to {MAX_WORDS} words, not {words}"
+        Error::wrong_call(Rule::ColumnsWords).with(words)
     );
     let capacity = capacity(chunk.len(), words);
     put_u32(chunk, ROWS_AT, 0);
@@ -155,11 +152,11 @@ pub fn init(chunk: &mut [u8], words: usize) -> Result<usize> {
 pub fn shape(chunk: &[u8]) -> Result<Shape> {
     ensure!(
         chunk.len() >= HEADER,
-        "a chunk of columns is shorter than its header"
+        Error::wrong_call(Rule::ColumnsChunk).with(chunk.len())
     );
     ensure!(
         get_u32(chunk, MAGIC_AT) == MAGIC,
-        "the bytes hold no chunk of columns"
+        Error::wrong_call(Rule::ColumnsMagic)
     );
     let shape = Shape {
         rows: get_u32(chunk, ROWS_AT) as usize,
@@ -171,11 +168,9 @@ pub fn shape(chunk: &[u8]) -> Result<Shape> {
             && shape.capacity <= MAX_ROWS
             && shape.rows <= shape.capacity
             && size(shape.capacity, shape.words) <= chunk.len(),
-        "a chunk of columns of {} rows in {} places of {} words does not fit its {} bytes",
-        shape.rows,
-        shape.capacity,
-        shape.words,
-        chunk.len()
+        Error::wrong_call(Rule::ColumnsShape)
+            .with(shape.capacity)
+            .and(shape.words)
     );
     Ok(shape)
 }
@@ -227,16 +222,14 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
     let shape = shape(chunk)?;
     ensure!(
         chunk.len().is_multiple_of(8),
-        "a chunk of columns of {} bytes is not a length of 8s",
-        chunk.len()
+        Error::wrong_call(Rule::ColumnsChunk).with(chunk.len())
     );
     let lanes = lanes(shape.words);
     ensure!(
         out.len() >= pack_bound(shape.rows, shape.words),
-        "a chunk of columns of {} rows packs into up to {} bytes, not {}",
-        shape.rows,
-        pack_bound(shape.rows, shape.words),
-        out.len()
+        Error::wrong_call(Rule::ColumnsRoom)
+            .with(pack_bound(shape.rows, shape.words))
+            .and(out.len())
     );
     out[..4].copy_from_slice(&(shape.rows as u32).to_ne_bytes());
     out[4..8].copy_from_slice(&(shape.words as u32).to_ne_bytes());
@@ -282,24 +275,23 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
 /// Unpack the `packed` bytes of a chunk into `out`, of the length
 /// [`pack`] returned for it: a chunk of a capacity of its row count.
 pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
-    intact!(packed.len() >= 8, "a packed chunk of columns has no counts");
+    ensure!(packed.len() >= 8, Error::damaged(Rule::ColumnsCounts));
     let rows = get_u32(packed, 0) as usize;
     let words = get_u32(packed, 4) as usize;
     // The limits a chunk is made within: a body past them would get a
     // header of fewer places than its rows.
-    intact!(
+    ensure!(
         words <= MAX_WORDS && rows <= capacity(usize::MAX / 2, words),
-        "a packed chunk of {rows} rows of {words} words is past the limits of a chunk"
+        Error::damaged(Rule::ColumnsLimits).with(rows).and(words)
     );
-    intact!(
+    ensure!(
         out.len() == size(rows, words),
-        "a packed chunk of {rows} rows of {words} words does not unpack into {} bytes",
-        out.len()
+        Error::damaged(Rule::ColumnsFill).with(rows).and(words)
     );
     let lanes = lanes(words);
-    intact!(
+    ensure!(
         packed.len() >= 8 + 16 * lanes,
-        "a packed chunk of columns is shorter than its descriptors"
+        Error::damaged(Rule::Descriptors)
     );
     init(out, words)?;
     let shape = Shape {
@@ -313,14 +305,14 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
         let descriptor = 8 + 16 * index;
         let width = packed[descriptor] as usize;
         let base = get_u64(packed, descriptor + 8);
-        intact!(
+        ensure!(
             matches!(width, 0 | 1 | 2 | 4 | 8),
-            "a packed lane of width {width}"
+            Error::damaged(Rule::LaneWidth).with(width)
         );
         let need = (width * rows).next_multiple_of(8);
-        intact!(
+        ensure!(
             packed.len() >= at + need,
-            "a packed chunk of columns ends inside lane {index}"
+            Error::damaged(Rule::ColumnsLaneEnd).with(index)
         );
         let lane_at = shape.lane_at(index);
         let target = &mut out[lane_at..lane_at + 8 * rows];
@@ -338,10 +330,9 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
         }
         at += need;
     }
-    intact!(
+    ensure!(
         at == packed.len(),
-        "a packed chunk of columns has {} bytes past its lanes",
-        packed.len() - at
+        Error::damaged(Rule::ColumnsTail).with(packed.len() - at)
     );
     Ok(())
 }
@@ -349,6 +340,7 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Kind;
 
     fn chunk_of(capacity: usize, words: usize, rows: &[Vec<u64>]) -> Vec<u8> {
         let mut chunk = vec![0_u8; size(capacity, words)];
@@ -456,27 +448,43 @@ mod tests {
         let mut chunk = chunk_of(4, 1, &[vec![0, 1]]);
         let mut out = vec![0_u8; pack_bound(4, 1)];
         chunk[MAGIC_AT] ^= 1;
-        assert!(pack(&chunk, &mut out).is_err());
+        let error = pack(&chunk, &mut out).expect_err("a foreign chunk packed");
+        assert_eq!(
+            (error.kind(), error.rule()),
+            (Kind::WrongCall, Rule::ColumnsMagic)
+        );
         let chunk = chunk_of(4, 1, &[vec![0, 1], vec![0, 300]]);
         let (packed, len) = pack(&chunk, &mut out).unwrap();
         let mut back = vec![0_u8; len];
-        // Bytes read back that fail their checks are damaged data.
-        let damaged = |result: Result<()>| {
-            result
-                .expect_err("accepted")
-                .downcast_ref::<crate::Damaged>()
-                .is_some()
+        // Bytes read back that fail their checks are damaged data, and
+        // each names the rule it broke.
+        let refused = |result: Result<()>| {
+            let error = result.expect_err("accepted");
+            assert_eq!(error.kind(), Kind::Damaged, "{error}");
+            error.rule()
         };
-        assert!(damaged(unpack(&out[..packed - 8], &mut back)));
-        assert!(damaged(unpack(&out[..packed], &mut back[..len - 8])));
+        assert_eq!(
+            refused(unpack(&out[..packed - 8], &mut back)),
+            Rule::ColumnsLaneEnd
+        );
+        assert_eq!(
+            refused(unpack(&out[..packed], &mut back[..len - 8])),
+            Rule::ColumnsFill
+        );
+        assert_eq!(refused(unpack(&out[..8], &mut back)), Rule::Descriptors);
+        assert_eq!(refused(unpack(&out[..4], &mut back)), Rule::ColumnsCounts);
         let mut bad = out[..packed].to_vec();
         bad[8] = 3;
-        assert!(damaged(unpack(&bad, &mut back)));
+        assert_eq!(refused(unpack(&bad, &mut back)), Rule::LaneWidth);
         // Bytes past the last lane.
         let mut long = out[..packed].to_vec();
         long.extend_from_slice(&[0_u8; 8]);
-        assert!(damaged(unpack(&long, &mut back)));
-        assert!(init(&mut [0_u8; 8], 1).is_err());
+        assert_eq!(refused(unpack(&long, &mut back)), Rule::ColumnsTail);
+        let error = init(&mut [0_u8; 8], 1).expect_err("a chunk shorter than its header");
+        assert_eq!(
+            (error.kind(), error.rule()),
+            (Kind::WrongCall, Rule::ColumnsChunk)
+        );
         assert_eq!(init(&mut [0_u8; HEADER], 3).unwrap(), 0);
     }
 
@@ -508,9 +516,21 @@ mod tests {
         // The most words a row, and one more.
         let mut widest = vec![0_u8; size(1, MAX_WORDS)];
         assert_eq!(init(&mut widest, MAX_WORDS)?, 1);
-        assert!(init(&mut widest, MAX_WORDS + 1).is_err());
+        let rule = |result: Result<usize>| {
+            result.map_err(|error| {
+                assert_eq!(error.kind(), Kind::WrongCall, "{error}");
+                error.rule()
+            })
+        };
+        assert_eq!(
+            rule(init(&mut widest, MAX_WORDS + 1)),
+            Err(Rule::ColumnsWords)
+        );
         // A length that is no multiple of 8.
-        assert!(init(&mut [0_u8; HEADER + 12], 1).is_err());
+        assert_eq!(
+            rule(init(&mut [0_u8; HEADER + 12], 1)),
+            Err(Rule::ColumnsChunk)
+        );
         // Bytes for more rows than a chunk holds: the capacity stops at
         // the most rows.
         let mut longest = vec![0_u8; size(MAX_ROWS + 5, 1)];
@@ -540,17 +560,21 @@ mod tests {
         };
         let refused = |rows: usize| {
             let error = unpack(&body(rows), &mut [0_u8; HEADER]).expect_err("unpacked");
-            assert!(error.downcast_ref::<crate::Damaged>().is_some());
-            format!("{error:#}")
+            assert_eq!(error.kind(), Kind::Damaged);
+            error.rule()
         };
-        assert!(refused(most + 1).contains("past the limits"));
-        assert!(refused(most).contains("does not unpack"));
+        assert_eq!(refused(most + 1), Rule::ColumnsLimits);
+        assert_eq!(refused(most), Rule::ColumnsFill);
         // A chunk with a byte past a length of 8s is not packed.
         let mut chunk = chunk_of(2, 1, &[vec![0, 1]]);
         let mut out = vec![0_u8; pack_bound(2, 1)];
         assert!(pack(&chunk, &mut out).is_ok());
         chunk.push(0);
-        assert!(pack(&chunk, &mut out).is_err());
+        let error = pack(&chunk, &mut out).expect_err("an odd length packed");
+        assert_eq!(
+            (error.kind(), error.rule()),
+            (Kind::WrongCall, Rule::ColumnsChunk)
+        );
         Ok(())
     }
 }

@@ -95,7 +95,7 @@ pub unsafe extern "C" fn tess_spill_header_write(
                 (!out.is_null()).then_some(out).context("a null buffer")?,
                 len,
             );
-            header.write(out, max_len)
+            Ok(header.write(out, max_len)?)
         })
     }
 }
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn tess_spill_unpack(
                     .context("a null chunk")?,
                 chunk_len,
             );
-            relspill::unpack(packed, chunk)
+            Ok(relspill::unpack(packed, chunk)?)
         })
     }
 }
@@ -680,7 +680,7 @@ pub unsafe extern "C" fn tess_spill_columns_unpack(
                     .context("a null chunk")?,
                 chunk_len,
             );
-            columns::unpack(packed, chunk)
+            Ok(columns::unpack(packed, chunk)?)
         })
     }
 }

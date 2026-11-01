@@ -2,7 +2,8 @@
 //! chunks each keeps in memory. A grouping's spill, a join's and a shared
 //! join table's split by these rules with their own parameters.
 
-use anyhow::{Result, ensure};
+use crate::error::ensure;
+use crate::{Error, Result, Rule};
 
 /// What a level of a spill holds and has.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -36,20 +37,18 @@ pub fn partitions(level: &Level) -> Result<u32> {
         level.min_partitions.is_power_of_two()
             && level.max_partitions.is_power_of_two()
             && level.min_partitions <= level.max_partitions,
-        "{} to {} partitions are not powers of two in order",
-        level.min_partitions,
-        level.max_partitions
+        Error::wrong_call(Rule::PlanPartitions)
+            .with(level.min_partitions)
+            .and(level.max_partitions)
     );
-    ensure!(
-        level.expected >= 0.0,
-        "a level that expects {} bytes",
-        level.expected
-    );
+    // Not below zero, and not a number refused too.
+    let counted = level.expected >= 0.0;
+    ensure!(counted, Error::wrong_call(Rule::Expected));
     ensure!(
         level.shift <= 32 - level.min_partitions.trailing_zeros(),
-        "{} partitions do not fit in the hash after {} bits",
-        level.min_partitions,
-        level.shift
+        Error::wrong_call(Rule::PlanBits)
+            .with(level.min_partitions)
+            .and(level.shift)
     );
     let half = level.limit / 2;
     let mut partitions = level.min_partitions;
@@ -81,11 +80,11 @@ pub fn chunk_len(
 ) -> Result<usize> {
     ensure!(
         share > 0 && partitions > 0,
-        "chunks of a {share} share of {partitions} partitions"
+        Error::wrong_call(Rule::Share).with(share).and(partitions)
     );
     ensure!(
         min_chunk >= relhash::CHUNK_HEADER && min_chunk.is_multiple_of(8),
-        "a least chunk of {min_chunk} bytes"
+        Error::wrong_call(Rule::LeastChunk).with(min_chunk)
     );
     let parts = share.saturating_mul(partitions as usize);
     Ok((limit / parts).min(max_chunk).max(min_chunk) & !7)
@@ -94,6 +93,12 @@ pub fn chunk_len(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule of a wrong call, which every refusal here is.
+    fn wrong(error: Error) -> Rule {
+        assert_eq!(error.kind(), crate::Kind::WrongCall, "{error}");
+        error.rule()
+    }
 
     /// A level's partitions and chunk length, as the old rules gave them.
     #[derive(Debug, PartialEq, Eq)]
@@ -276,7 +281,7 @@ mod tests {
         assert_eq!(partitions(&after(28))?, 8);
         assert_eq!(partitions(&after(29))?, 4);
         assert_eq!(partitions(&after(30))?, 4);
-        assert!(partitions(&after(31)).is_err());
+        assert_eq!(partitions(&after(31)).map_err(wrong), Err(Rule::PlanBits));
         Ok(())
     }
 
@@ -319,35 +324,39 @@ mod tests {
     #[test]
     fn a_plan_refuses_bounds_out_of_order() -> Result<()> {
         let base = level(1e9, 1 << 30, 0, 0, 0);
+        let plan = |level: Level| partitions(&level).map_err(wrong);
+        let chunk = |share, partitions, min_chunk| {
+            chunk_len(1 << 30, share, partitions, min_chunk, 1 << 20).map_err(wrong)
+        };
         for (min_partitions, max_partitions) in [(3, 1024), (8, 4), (4, 1000)] {
-            assert!(
-                partitions(&Level {
+            assert_eq!(
+                plan(Level {
                     min_partitions,
                     max_partitions,
                     ..base
-                })
-                .is_err()
+                }),
+                Err(Rule::PlanPartitions)
             );
         }
-        assert!(chunk_len(1 << 30, 4, 0, 8, 1 << 20).is_err());
-        assert!(chunk_len(1 << 30, 0, 8, 8, 1 << 20).is_err());
+        assert_eq!(chunk(4, 0, 8), Err(Rule::Share));
+        assert_eq!(chunk(0, 8, 8), Err(Rule::Share));
         // A least chunk below a header, or not a multiple of 8.
         for min_chunk in [0, 4, 4100] {
-            assert!(chunk_len(1 << 30, 4, 8, min_chunk, 1 << 20).is_err());
+            assert_eq!(chunk(4, 8, min_chunk), Err(Rule::LeastChunk));
         }
         // Expected bytes below zero or not a number.
         for expected in [-1.0, f64::NAN] {
-            assert!(partitions(&Level { expected, ..base }).is_err());
+            assert_eq!(plan(Level { expected, ..base }), Err(Rule::Expected));
         }
         // Four partitions after 30 bits fit; after 31 they do not.
         assert_eq!(partitions(&Level { shift: 30, ..base })?, 4);
-        assert!(partitions(&Level { shift: 31, ..base }).is_err());
-        assert!(
-            partitions(&Level {
+        assert_eq!(plan(Level { shift: 31, ..base }), Err(Rule::PlanBits));
+        assert_eq!(
+            plan(Level {
                 shift: u32::MAX,
                 ..base
-            })
-            .is_err()
+            }),
+            Err(Rule::PlanBits)
         );
         // The least chunk wins over the most.
         assert_eq!(chunk_len(1 << 30, 4, 8, 4096, 1024)?, 4096);
