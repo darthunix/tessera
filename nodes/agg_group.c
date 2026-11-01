@@ -6,6 +6,8 @@
  */
 #include "postgres.h"
 
+#include "port/pg_bitutils.h"
+
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "parser/parse_agg.h"
@@ -62,16 +64,19 @@ note_memory(TessAggState *state)
 }
 
 /*
- * A first index for capacity groups at most, and at most a quarter of
- * hash_mem, about 8 bytes of buckets per group: an estimate too large
- * would take the memory the groups need; the index grows as they come.
+ * A first index for capacity groups at most, and at most for as many as
+ * fill a quarter of hash_mem with buckets: an estimate too large would take
+ * the memory the groups need; the index grows as they come. The table has
+ * twice the groups' buckets, 4 bytes each, rounded up to a power of two:
+ * the most buckets a quarter holds is a power of two, and half as many
+ * groups fill it.
  */
 uint64
 first_capacity(uint64 capacity)
 {
-	uint64		most = tess_hash_memory_limit() / 32;
+	uint64		buckets = pg_prevpower2_64(Max(tess_hash_memory_limit() / 16, 1));
 
-	return Max(Min(capacity, most), AGG_INITIAL_GROUPS);
+	return Max(Min(capacity, buckets / 2), AGG_INITIAL_GROUPS);
 }
 
 /* An index for capacity groups in the table's memory. */
