@@ -24,6 +24,8 @@ typedef struct TessLimitState
 	bool		no_count;
 	/* The expressions are evaluated at the first execution after a rescan. */
 	bool		limits_ready;
+	/* A parent may rescan the node (EXEC_FLAG_REWIND): it stops nothing below. */
+	bool		expect_rescan;
 } TessLimitState;
 
 static void limit_begin(CustomScanState *css, EState *estate, int eflags);
@@ -129,6 +131,7 @@ limit_begin(CustomScanState *css, EState *estate, int eflags)
 	PlanState  *child;
 
 	tess_node_require_forward(eflags, "TessLimit");
+	state->expect_rescan = (eflags & EXEC_FLAG_REWIND) != 0;
 	tess_plan_get_info(cscan, &info);
 	if (info.nchildren != 1 || info.child_names[0] == NULL ||
 		list_length(cscan->custom_exprs) != 2)
@@ -198,10 +201,23 @@ static TupleTableSlot *
 limit_exec(CustomScanState *css)
 {
 	TessLimitState *state = (TessLimitState *) css;
+	TupleTableSlot *slot;
 
 	if (!state->limits_ready)
 		compute_limits(state);
-	return tess_unary_exec(state->unary);
+	slot = tess_unary_exec(state->unary);
+#if TESS_GREENGAGE
+	/*
+	 * As Greengage's Limit does: at the end, with no rescan to come, the
+	 * subtree is squelched, so that the senders of a Motion below stop
+	 * waiting for this reader. The squelch reaches TessPack and the rest
+	 * through custom_ps.
+	 * shortcut: rows only; a batch parent above stops nothing below yet.
+	 */
+	if (TupIsNull(slot) && !state->expect_rescan)
+		ExecSquelchNode(&css->ss.ps);
+#endif
+	return slot;
 }
 
 static void
