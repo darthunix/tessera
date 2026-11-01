@@ -502,12 +502,11 @@ filter_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	FilterState *state = (FilterState *) css;
 	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 	List	   *context;
-	bool		useprefix = es->rtable_size > 1 || es->verbose;
+	bool		useprefix = tess_explain_rtable_size(es) > 1 || es->verbose;
 	const uint64 *totals;
 	uint64		own[FILTER_NCOUNTERS];
 
-	context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
-									   ancestors);
+	context = tess_deparse_context(es, &css->ss.ps, ancestors);
 	if (cscan->custom_exprs != NIL)
 		ExplainPropertyText("Batch Filter",
 							deparse_expression((Node *) make_ands_explicit(cscan->custom_exprs),
