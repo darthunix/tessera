@@ -4756,10 +4756,55 @@ SELECT join_same($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k) WHERE
  1 rows, hash 26d14b21aa45daaf43fcbbb6c9993255
 (1 row)
 
+-- At 13 MiB, 262 144 keys take 8 454 144 bytes of chunks and need a
+-- 2 097 248-byte index; one key more needs a 4 194 400-byte one. A build
+-- of 262 150 keys spills in its last batch; one whose filter rejects six
+-- of them, in its last batches, counts the rows they select and fits.
+CREATE TABLE jgbound AS SELECT g AS k FROM generate_series(1, 262150) AS g;
+ANALYZE jgbound;
+SET work_mem = '13MB';
+-- spec: table-memory/A last batch that doubles the index
+SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbound b USING (k)$$, false);
+                                    join_explain                                     
+-------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   ->  Custom Scan (TessHashJoin) (actual rows=412150.00 loops=1)
+         Hash Cond: (p.k = b.k)
+         Buckets: 524288
+         Memory Usage: within hash_mem
+         Batches: 4
+         Disk Usage: 716 kB
+         Rows Removed by Bloom Filter: 46671
+         ->  Custom Scan (TessHeapScan) on jgprobe p (actual rows=600000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on jgbound b (actual rows=262150.00 loops=1)
+(10 rows)
+
+SELECT join_same($$SELECT count(*) FROM jgprobe p JOIN jgbound b USING (k)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash d4b4f7374ccf880bc451e52767d4f651
+(1 row)
+
+-- spec: table-memory/Rows a filter rejects
+SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbound b USING (k) WHERE b.k <= 262140 OR b.k > 262146$$, false);
+                                       join_explain                                        
+-------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   ->  Custom Scan (TessHashJoin) (actual rows=412144.00 loops=1)
+         Hash Cond: (p.k = b.k)
+         Buckets: 524288
+         Memory Usage: within hash_mem
+         ->  Custom Scan (TessHeapScan) on jgprobe p (actual rows=600000.00 loops=1)
+         ->  Custom Scan (TessFilter) on jgbound b (actual rows=262144.00 loops=1)
+               Batch Filter: ((b.k <= 262140) OR (b.k > 262146))
+               Rows Removed by Batch Filter: 6
+               ->  Custom Scan (TessHeapScan) on jgbound b (actual rows=262150.00 loops=1)
+(10 rows)
+
 RESET work_mem;
 RESET hash_mem_multiplier;
 RESET max_parallel_workers_per_gather;
-DROP TABLE jgbuild, jgprobe;
+DROP TABLE jgbuild, jgprobe, jgbound;
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jslong, jsouter, jsheavy;
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();

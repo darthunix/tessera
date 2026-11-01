@@ -145,11 +145,16 @@ one of them does not compute it at all.
   values and room for two more chunks pass `hash_mem`; the index comes
   after the last batch and is counted then.
 - **Will be:** the check before a batch also counts the exact size of
-  the index the build will need for its records with that batch's,
-  through the kernels' `table_size`. That is a check, not memory taken:
-  the node's bytes and its peak count the index when it is built, as
-  today, and the plan of a spill's first level reads the bytes as
-  today. The room for two more chunks stays.
+  the index the build will need for its records and the rows the batch
+  selects, through the kernels' `table_size`. A row a filter rejected
+  is not counted; a row with a NULL key, which makes no record, is,
+  since counting those would read the keys before the check. That is a
+  check, not memory taken: the node's bytes and its peak count the
+  index when it is built, as today, and the plan of a spill's first
+  level reads the bytes as today. The room for two more chunks stays.
+- **And:** a spill reserved 8 bytes a row for the index of its
+  resident partitions, whose buckets take 8 to 16 bytes a row: it now
+  reserves that index's exact size, until the index is made.
 - **Why:** the memory a built table takes is its chunks and its index;
   a check of the chunks alone lets the index pass the limit.
 - **Cost:** the room for two chunks was already a margin: a build
@@ -235,7 +240,10 @@ gives a lower bound.
   no payload at `hash_mem` = 16 MiB, serial, the plan checked to be
   TessHashJoin: it spills and its peak is within `hash_mem` (before:
   over, its chunks and index alone 17 891 424 bytes); 250 000 rows
-  stay in memory before and after; the results against the core.
+  stay in memory before and after; the results against the core. At
+  13 MiB, 262 150 rows spill in their last batch, where the index's
+  buckets double, and a filter that leaves 262 144 of them stays in
+  memory (before: it spilled, the check counting the rows it rejected).
 - The first index: an estimate far above the cap over no rows at
   `hash_mem` of 2, 3 and 4 MiB, whose first index is the peak: 513,
   513 and 1025 kB (at 3 MiB before: 1025); an estimate below the cap
