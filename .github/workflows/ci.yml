@@ -369,9 +369,18 @@ jobs:
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
             --test spill
       # A target whose bytes run from the most significant: the packing
-      # narrows values by their low bytes, which lie last there.
+      # narrows values by their low bytes, which lie last there. The
+      # property tests of the spill words and of the columns appended by
+      # partition, and the threads counting a build, take minutes under
+      # Miri there: they are left out.
       - name: The spill's tests on a big-endian target
-        run: cargo miri test --locked -p relspill --target s390x-unknown-linux-gnu
+        run: |
+          cargo miri test --locked -p relspill --target s390x-unknown-linux-gnu -- \
+            --skip local_words_choose_as_shared_ones_do \
+            --skip rows_go_in_order_until_the_chunk_or_the_values_fill \
+            --skip rows_go_to_their_partitions_until_a_chunk_fills \
+            --skip rows_wider_than_64_words_keep_a_lane_of_null_bits_per_64 \
+            --skip participants_count_a_build_at_once
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)

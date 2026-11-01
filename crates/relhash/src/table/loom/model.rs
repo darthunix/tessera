@@ -1,4 +1,4 @@
-//! The model table, which the loom models of the kernels share, and the
+//! The model table, which the loom models of relspill share, and the
 //! steps of the table's own models over the memory of [`super::memory`].
 
 use crate::RowMask;

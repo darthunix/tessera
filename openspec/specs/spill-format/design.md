@@ -669,7 +669,7 @@ table that spills, in [hash-table](../hash-table/design.md).
 - `crates/relspill/src/damaged.rs`: the error that marks damaged
   data
 - `crates/tessera-capi/src/c/spill.rs`: the C entry points
-- `crates/tessera-kernels/src/spill_columns.rs`: rows appended to chunks
+- `crates/relspill/src/spill_columns.rs`: rows appended to chunks
   of columns
 - `crates/relhash/src/table/header.rs`: the fingerprint of a
   hash table

@@ -18,10 +18,5 @@ relspill.workspace = true
 proptest.workspace = true
 tessera-testing.workspace = true
 
-# The model table of the table module, which other modules' loom models
-# run over.
-[target.'cfg(loom)'.dependencies]
-loom = "0.7"
-
 [lints]
 workspace = true

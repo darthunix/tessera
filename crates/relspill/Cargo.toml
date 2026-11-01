@@ -14,5 +14,14 @@ publish = true
 anyhow.workspace = true
 relhash.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+tessera-testing.workspace = true
+
+# The loom models of the spill words and the phases, over relhash's model
+# table.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
 [lints]
 workspace = true

@@ -53,11 +53,11 @@ rust-mutants:
 	$(CARGO) mutants --workspace --jobs 4
 
 # The loom models of the hash table's concurrent protocol, in relhash, and
-# of the phases, rounds and words of a spill over it, in the kernels; a
+# of the phases, rounds and words of a spill over it, in relspill; a
 # target directory of its own, since --cfg loom rebuilds every crate.
 rust-loom:
 	RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_TARGET_DIR=target/loom \
-		$(CARGO) test -p relhash -p tessera-kernels --lib --release --locked loom::
+		$(CARGO) test -p relhash -p relspill --lib --release --locked loom::
 
 rust-clean:
 	$(CARGO) clean
