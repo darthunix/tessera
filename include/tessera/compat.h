@@ -296,6 +296,26 @@ find_ec_member_matching_expr(EquivalenceClass *ec, Expr *expr, Relids relids)
 #endif							/* TESS_GREENGAGE */
 
 /*
+ * The segments a relation's tuples and pages spread over, by which the
+ * planner turns its counts into those of one segment: Greengage's paths
+ * count one segment's rows, a distributed table's tuples dividing among
+ * its segments and a replicated one's not (adjust_reloptinfo in
+ * costsize.c); one on PostgreSQL.
+ */
+#if TESS_GREENGAGE
+#include "catalog/gp_distribution_policy.h"
+
+static inline double
+tess_rel_segments(const RelOptInfo *rel)
+{
+	return rel->cdbpolicy != NULL && rel->cdbpolicy->ptype == POLICYTYPE_PARTITIONED ?
+		rel->cdbpolicy->numsegments : 1;
+}
+#else
+#define tess_rel_segments(rel) ((void) (rel), 1.0)
+#endif
+
+/*
  * The leading attributes every tuple has present, non-NULL and by value
  * (master's guaranteed prefix); none on Greengage, which keeps no such
  * knowledge.

@@ -496,7 +496,8 @@ add_index_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte,
 static double
 full_scan_time(RelOptInfo *rel)
 {
-	return rel->pages * tess_scan_page_cost + rel->tuples * tess_scan_tuple_cost;
+	return (rel->pages * tess_scan_page_cost + rel->tuples * tess_scan_tuple_cost) /
+		tess_rel_segments(rel);
 }
 
 /*
@@ -730,6 +731,8 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 	Path	   *scan;
 	double		time;
 	double		pages;
+	/* A segment's tuples, as the core's paths count them. */
+	double		segment_tuples = rel->tuples / tess_rel_segments(rel);
 
 	if (path->param_info != NULL)
 		return -1;
@@ -738,8 +741,8 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 		return -1;
 	if (scan == NULL || scan->pathtype == T_SeqScan)
 	{
-		time = full_scan_time(rel) + filter_time(root, rel, rel->tuples, true, NIL);
-		pages = rel->pages;
+		time = full_scan_time(rel) + filter_time(root, rel, segment_tuples, true, NIL);
+		pages = rel->pages / tess_rel_segments(rel);
 	}
 	else if (IsA(scan, IndexPath) &&
 			 (scan->pathtype == T_IndexOnlyScan || scan->pathtype == T_IndexScan))
@@ -747,9 +750,9 @@ scan_time(PlannerInfo *root, RelOptInfo *rel, Path *path)
 		IndexPath  *index = (IndexPath *) scan;
 		double		visible = scan->pathtype == T_IndexOnlyScan ? rel->allvisfrac : 0;
 
-		time = index->indexselectivity * rel->tuples *
+		time = index->indexselectivity * segment_tuples *
 			(visible * tess_index_only_tuple_cost + (1.0 - visible) * tess_index_tuple_cost) +
-			filter_time(root, rel, index->indexselectivity * rel->tuples,
+			filter_time(root, rel, index->indexselectivity * segment_tuples,
 						scan->pathtype == T_IndexScan, index_conditions(scan));
 		if (path->parallel_workers > 0)
 			return partial_index_time(time, path->parallel_workers);
@@ -927,7 +930,8 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 	bool		have_full = false;
 
 	if (!tess_enabled() ||
-		!relation_supported(root, rel, rte) || rel->pages > (BlockNumber) effective_cache_size ||
+		!relation_supported(root, rel, rte) ||
+		rel->pages / tess_rel_segments(rel) > effective_cache_size ||
 		(rel->baserestrictinfo != NIL && !clauses_supported(root, rel)) ||
 		(partial && !rel->consider_parallel))
 		return;

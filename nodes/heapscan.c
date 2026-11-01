@@ -334,7 +334,7 @@ heap_scan_rows(PlannerInfo *root, Path *path)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	CustomPath *scan;
-	double		rows = path->parent->tuples;
+	double		rows = path->parent->tuples / tess_rel_segments(path->parent);
 
 	if (!plain_heap_scan(root, path))
 		return NULL;
@@ -347,16 +347,6 @@ heap_scan_rows(PlannerInfo *root, Path *path)
 	/* Every row of the relation comes out: the node evaluates no clause. */
 	if (path->parallel_workers > 0)
 		rows /= tess_parallel_divisor(path);
-#if TESS_GREENGAGE
-	/*
-	 * Greengage's paths count the rows of one segment: a distributed
-	 * table's tuples divide among its segments, a replicated one's do not
-	 * (adjust_reloptinfo in costsize.c).
-	 */
-	if (path->parent->cdbpolicy != NULL &&
-		path->parent->cdbpolicy->ptype == POLICYTYPE_PARTITIONED)
-		rows /= path->parent->cdbpolicy->numsegments;
-#endif
 	scan->path.rows = clamp_row_est(rows);
 	return scan;
 }
