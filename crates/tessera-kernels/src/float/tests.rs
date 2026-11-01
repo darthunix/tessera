@@ -780,3 +780,111 @@ fn float4_operands_compute_in_their_own_width() {
         assert_eq!(got >> 32, 0, "{op:?}");
     }
 }
+
+/// The value one call of a batch function wrote into its one row.
+fn one_row(
+    call: impl FnOnce(RowMaskView<'_>, &mut [MaybeUninit<u64>], &mut RowMask<'_>) -> Result<()>,
+) -> Result<u64> {
+    let rows = [1];
+    let mut values = [MaybeUninit::new(u64::MAX)];
+    let mut non_nulls = [0];
+    call(
+        RowMaskView::try_new(1, &rows)?,
+        &mut values,
+        &mut RowMask::try_new(1, &mut non_nulls)?,
+    )?;
+    assert_eq!(non_nulls, [1]);
+    Ok(written(&values[0]))
+}
+
+fn float_error(outcome: Result<u64>) -> FloatError {
+    outcome.unwrap_err().downcast::<FloatError>().unwrap()
+}
+
+#[test]
+fn float4_rows_are_checked_in_float4() {
+    let tiny = f32::from_bits(1);
+    let binary = |op, left: f32, right: f32| {
+        one_row(|rows, values, non_nulls| {
+            binary_float4(op, &Scalar(left), &Scalar(right), rows, values, non_nulls)
+        })
+    };
+    // Each would pass if checked in float8 and narrowed after.
+    assert_eq!(
+        float_error(binary(FloatOp::Mul, f32::MAX, 2.0)),
+        FloatError::Overflow
+    );
+    assert_eq!(
+        float_error(binary(FloatOp::Add, f32::MAX, f32::MAX)),
+        FloatError::Overflow
+    );
+    assert_eq!(
+        float_error(binary(FloatOp::Div, tiny, 2.0)),
+        FloatError::Underflow
+    );
+    assert_eq!(
+        float_error(binary(FloatOp::Mul, tiny, 0.5)),
+        FloatError::Underflow
+    );
+    // A subnormal result that is not zero is no underflow.
+    assert_eq!(binary(FloatOp::Mul, tiny, 2.0).unwrap(), 2);
+    assert_eq!(binary(FloatOp::Div, f32::from_bits(4), 2.0).unwrap(), 2);
+}
+
+#[test]
+fn negation_and_abs_of_rows_keep_the_signs_of_zeros() {
+    let float4 = |op, x: f32| {
+        one_row(|rows, values, non_nulls| unary_float4(op, &Scalar(x), rows, values, non_nulls))
+            .unwrap()
+    };
+    let float8 = |op, x: f64| {
+        one_row(|rows, values, non_nulls| unary_float8(op, &Scalar(x), rows, values, non_nulls))
+            .unwrap()
+    };
+    for (x, neg, abs) in [
+        (0.0_f32, -0.0_f32, 0.0_f32),
+        (-0.0, 0.0, 0.0),
+        (2.0, -2.0, 2.0),
+        (-2.5, 2.5, 2.5),
+    ] {
+        assert_eq!(float4(FloatOp::Neg, x), u64::from(neg.to_bits()), "-{x}");
+        assert_eq!(float4(FloatOp::Abs, x), u64::from(abs.to_bits()), "abs {x}");
+        let (x, neg, abs) = (f64::from(x), f64::from(neg), f64::from(abs));
+        assert_eq!(float8(FloatOp::Neg, x), neg.to_bits(), "-{x}");
+        assert_eq!(float8(FloatOp::Abs, x), abs.to_bits(), "abs {x}");
+    }
+}
+
+#[test]
+fn integers_round_once_to_each_float() {
+    // 2^62 + 2^38 + 1: above the midpoint of two float4 only by its last
+    // bit, which a rounding through float8 first loses.
+    let above = (1_i64 << 62) + (1 << 38) + 1;
+    for (value, bits) in [(above, 0x5e80_0001_u32), (-above, 0xde80_0001)] {
+        assert_eq!(value.float4().unwrap().to_bits(), bits, "{value}");
+        let row =
+            one_row(|rows, values, non_nulls| to_float4(&Scalar(value), rows, values, non_nulls));
+        assert_eq!(row.unwrap(), u64::from(bits), "{value}");
+    }
+    // 2^24 + 1 is exact in float8, not in float4.
+    for value in [16_777_217_i64, -16_777_217] {
+        let row =
+            one_row(|rows, values, non_nulls| to_float8(&Scalar(value), rows, values, non_nulls));
+        assert_eq!(
+            f64::from_bits(row.unwrap()),
+            if value > 0 {
+                16_777_217.0
+            } else {
+                -16_777_217.0
+            }
+        );
+        assert_eq!(
+            (value as i32).float4(),
+            Ok(if value > 0 {
+                16_777_216.0
+            } else {
+                -16_777_216.0
+            })
+        );
+    }
+}
