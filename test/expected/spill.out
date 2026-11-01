@@ -315,6 +315,14 @@ SELECT tessera_test_spill_sqlstate(42);
  XX001: Tessera row read back refers to a value outside its chunk of values
 (1 row)
 
+-- A shared set's partition dropped before the set is finished, whose
+-- blocks the list its finish writes would lose: a wrong call.
+SELECT tessera_test_spill_sqlstate(43);
+                        tessera_test_spill_sqlstate                         
+----------------------------------------------------------------------------
+ XX000: Tessera shared spill set dropped partition 0 before it was finished
+(1 row)
+
 -- A file opened before its writer finished cannot be told from a
 -- damaged one.
 SELECT tessera_test_spill_sqlstate(27);

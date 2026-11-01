@@ -287,7 +287,8 @@ extern void tess_spill_close(TessSpillReader *reader);
  * Forget this participant's blocks of the partition, which no reader of
  * it may be reading any more; they stay counted, and their bytes stay in
  * the file until the set goes. A shared set's other participants still
- * find them.
+ * find them, by the list its finish writes: a shared set refuses a drop
+ * before it is finished.
  */
 extern void tess_spill_drop(TessSpill *spill, int partition);
 
