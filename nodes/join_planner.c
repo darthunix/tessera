@@ -1920,15 +1920,21 @@ join_reads_partition_key(RelOptInfo *rel, List *restrictlist)
  * prune.
  */
 static bool
-selectable_append(RelOptInfo *rel, List *partitioned_rels, List *restrictlist)
+several_levels(RelOptInfo *rel, List *partitioned_rels)
 {
 	int			tables = 0;
 
-	if (partitioned_rels == NIL)
-		return false;
 	foreach_node(List, tree, partitioned_rels)
 		tables += list_length(tree);
-	if (rel == NULL || rel->part_scheme == NULL || tables != 1)
+	return rel == NULL || rel->part_scheme == NULL || tables != 1;
+}
+
+static bool
+selectable_append(RelOptInfo *rel, List *partitioned_rels, List *restrictlist)
+{
+	if (partitioned_rels == NIL)
+		return false;
+	if (several_levels(rel, partitioned_rels))
 		return true;
 	return join_reads_partition_key(rel, restrictlist);
 }
@@ -2104,7 +2110,7 @@ append_pruned_later(PlannerInfo *root, Path *path, Relids joinrelids)
 					((MergeAppendPath *) path)->partitioned_rels;
 
 				if (partitioned != NIL &&
-					(path->parent == NULL || path->parent->part_scheme == NULL ||
+					(several_levels(path->parent, partitioned) ||
 					 partition_key_joins_later(root, path->parent, joinrelids)))
 					return true;
 				foreach_ptr(Path, subpath, subpaths)
@@ -2122,7 +2128,8 @@ append_pruned_later(PlannerInfo *root, Path *path, Relids joinrelids)
 		case T_CustomPath:
 			if (tess_path_node(path) == &tess_append_node &&
 				tess_append_partitioned_rels(path) != NIL &&
-				partition_key_joins_later(root, path->parent, joinrelids))
+				(several_levels(path->parent, tess_append_partitioned_rels(path)) ||
+				 partition_key_joins_later(root, path->parent, joinrelids)))
 				return true;
 			foreach_ptr(Path, child, ((CustomPath *) path)->custom_paths)
 			{
