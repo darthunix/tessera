@@ -8,7 +8,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-relhash.workspace = true
+# OwnedTable, the table that takes its own memory.
+relhash = { workspace = true, features = ["alloc"] }
 memchr.workspace = true
 tessera-core.workspace = true
 relspill.workspace = true

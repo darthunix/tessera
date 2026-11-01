@@ -213,7 +213,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       documented, with its requirement in the spec of `relhash` and in
       its snapshot of the public API. Check: the diff of the snapshot;
       `make rust-check`; the review of the new API in the pull request
-- [ ] 3.3 Make the packing of records take the layout from `relhash`;
+- [x] 3.3 Make the packing of records take the layout from `relhash`;
       the bare numbers go. Check: tests that pack and unpack records
       that a table of `relhash` wrote; the same machine code
 - [ ] 3.4 Move `shared_spill.rs`, `phases.rs`, their loom models and

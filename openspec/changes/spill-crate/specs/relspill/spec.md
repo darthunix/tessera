@@ -14,19 +14,25 @@ rules, the layouts and the limits of the API.
 - **WHEN** the crate is packaged with `relhash`, as for publishing
 - **THEN** it builds from the packaged files and the crates they name,
   and `relhash` is the only one of them from Tessera's workspace
-- **Verified by:** pending
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo publish --dry-run --locked -p relhash
+  -p relspill`
 
 #### Scenario: A 32-bit target
 - **WHEN** the crate is built for a target with 32-bit pointers
-- **THEN** the build fails with an error that says the crate needs
-  64-bit pointers
-- **Verified by:** pending
+- **THEN** the build fails with an error that says that 64-bit pointers
+  are needed
+- **Verified by:**
+  `.github/workflows/ci.yml::needs a target whose pointers are 64 bits wide`
 
 #### Scenario: Records packed as relhash lays them out
 - **WHEN** the crate packs and unpacks chunks of records that a
   `relhash` table wrote
-- **THEN** each record reads back equal to the table's, field by field
-- **Verified by:** pending
+- **THEN** each record reads back equal to the table's, field by field,
+  except the reference of the next record, which comes back as zero,
+  and another table links the chunk read back and finds every row
+- **Verified by:**
+  `crates/relspill/tests/records.rs::a_chunk_a_table_wrote_comes_back_and_links_again`
 
 #### Scenario: Every public item documented
 - **WHEN** the documentation of the crate is built

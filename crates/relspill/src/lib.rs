@@ -126,7 +126,7 @@ impl BlockHeader {
             self.len
         );
         ensure!(
-            self.kind != BlockKind::Records || self.len >= 8,
+            self.kind != BlockKind::Records || self.len >= relhash::CHUNK_HEADER as u64,
             "a spilled chunk of records has no used mark"
         );
         ensure!(
@@ -143,6 +143,7 @@ impl BlockHeader {
                 || self.kind == BlockKind::Columns
                 || (self.kind == BlockKind::Records
                     && self.packed.is_multiple_of(8)
+                    // A packed body's two counts and its codes of lanes.
                     && u64::from(self.packed) >= 16
                     && u64::from(self.packed) < self.len),
             "a spilled block packed into {} bytes of {} is no packed chunk of records",

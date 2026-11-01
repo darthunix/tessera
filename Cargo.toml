@@ -42,7 +42,7 @@ sha2 = "0.10"
 tempfile = "3"
 tpchgen = "3.0"
 pmu = { path = "tools/pmu" }
-relhash = { path = "crates/relhash" }
+relhash = { path = "crates/relhash", version = "0.1.0", default-features = false }
 relspill = { path = "crates/relspill" }
 tessera-core = { path = "crates/tessera-core" }
 tessera-kernels = { path = "crates/tessera-kernels" }

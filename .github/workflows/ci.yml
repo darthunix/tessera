@@ -84,8 +84,8 @@ jobs:
 
   # The crate relspill alone, as for relhash: its tests as the only
   # package, its documentation with every warning an error and its
-  # examples, a dry run of its publishing, and a 32-bit target refused by
-  # its compile_error!. It is not published.
+  # examples, a dry run of its publishing, and a 32-bit target refused,
+  # by relhash's compile_error! before its own. It is not published.
   relspill:
     name: relspill alone (ubuntu-24.04)
     runs-on: ubuntu-24.04
@@ -102,8 +102,10 @@ jobs:
         run: RUSTDOCFLAGS="-D warnings" cargo doc --locked -p relspill --no-deps
       - name: The examples of the documentation
         run: cargo test --locked -p relspill --doc
+      # relhash, which relspill depends on, is not on crates.io either:
+      # the two are packed and built together.
       - name: A dry run of publishing, from the packed files
-        run: cargo publish --dry-run --locked -p relspill
+        run: cargo publish --dry-run --locked -p relhash -p relspill
       - name: A 32-bit target refused
         run: |
           rustup target add i686-unknown-linux-gnu
@@ -112,7 +114,8 @@ jobs:
             echo "relspill built for a 32-bit target"
             exit 1
           fi
-          grep -q "relspill needs a target whose pointers are 64 bits wide" target/i686.log
+          # relhash refuses the target first, as relspill builds on it.
+          grep -qE "(relhash|relspill) needs a target whose pointers are 64 bits wide" target/i686.log
 
   # The crate pmu alone, as its contract asks ("Free of Tessera", "A small
   # surface"), in the cells a runner can reach. Its tests as the only
@@ -362,6 +365,7 @@ jobs:
       - name: The tests of the unsafe code
         run: |
           cargo miri test --locked -p relhash
+          cargo miri test --locked -p relspill --test records
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
             --test spill
 
