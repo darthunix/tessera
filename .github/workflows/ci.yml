@@ -82,6 +82,38 @@ jobs:
           cargo +"$API_TOOLCHAIN" public-api -p relhash -sss > target/public-api.txt
           diff -u openspec/specs/relhash/public-api.txt target/public-api.txt
 
+  # The crate relspill alone, as for relhash: its tests as the only
+  # package, its documentation with every warning an error and its
+  # examples, a dry run of its publishing, and a 32-bit target refused by
+  # its compile_error!. It is not published.
+  relspill:
+    name: relspill alone (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: relspill
+      - name: The crate's tests alone
+        run: cargo test --locked -p relspill
+      - name: The documentation, every warning an error
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked -p relspill --no-deps
+      - name: The examples of the documentation
+        run: cargo test --locked -p relspill --doc
+      - name: A dry run of publishing, from the packed files
+        run: cargo publish --dry-run --locked -p relspill
+      - name: A 32-bit target refused
+        run: |
+          rustup target add i686-unknown-linux-gnu
+          mkdir -p target
+          if cargo check --locked -p relspill --target i686-unknown-linux-gnu 2> target/i686.log; then
+            echo "relspill built for a 32-bit target"
+            exit 1
+          fi
+          grep -q "relspill needs a target whose pointers are 64 bits wide" target/i686.log
+
   # The crate pmu alone, as its contract asks ("Free of Tessera", "A small
   # surface"), in the cells a runner can reach. Its tests as the only
   # package: on x86-64 Linux, which has no PMU, the plumbing on software
