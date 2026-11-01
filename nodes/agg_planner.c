@@ -628,7 +628,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	double		rows = child->rows;
 	double		width = 0;
 	double		entry = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
-	double		limit = (double) tess_hash_memory_limit() / 8 * AGG_SPILL_FILL;
+	double		limit = (double) tess_planned_memory_limit(root) / 8 * AGG_SPILL_FILL;
 	int			naggs = 0;
 	int			ncolumns = 0;
 	int			nsums = sum_states(tlist);
@@ -1572,7 +1572,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	 */
 	if (has_distinct_aggregate(tlist))
 	{
-		double		limit = (double) tess_hash_memory_limit();
+		double		limit = (double) tess_planned_memory_limit(root);
 		bool		words;
 
 		spill.pairs = distinct_bytes(root, input_rel, keys, tlist, &words, &spill);
@@ -1908,6 +1908,12 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	config.scan_targetlist = info.expressions;
 	config.scanrelid = 0;
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
+	/*
+	 * A grouping, a set operation or a DISTINCT aggregate keeps a table:
+	 * a share of the query's memory, as the core's hashed Agg asks.
+	 */
+	if (nkeys > 0 || setop != 0 || has_distinct_aggregate(tlist))
+		tess_path_ask_memory(best_path);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 

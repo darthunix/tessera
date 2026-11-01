@@ -64,7 +64,7 @@ run_create(TessSortState *state, const TessRunsPlace *place)
 		config.level = 0;
 		config.fingerprint = ((uint64) state->ncolumns << 32) | (uint64) state->ext_words;
 		config.max_chunk = run_chunk_len(state);
-		config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_work_memory_limit());
+		config.buffer_len = TESS_SPILL_BUFFER_LEN(state->memory_limit);
 		sort_set_finish(state);
 		set->file = tess_spill_create(&config);
 		state->writing = set;
@@ -307,7 +307,7 @@ sort_plan_external(TessSortState *state)
 	row_bytes = sizeof(uint64) *
 		(tess_spill_columns_null_lanes(sort_run_words(state)) + sort_run_words(state));
 	state->runs_params = (TessRunsParams) {
-		.limit = tess_work_memory_limit(),
+		.limit = state->memory_limit,
 		.row = row_bytes,
 		.item = sizeof(uint32) + sizeof(uint64) * (Size) state->item_words,
 		.chunk = state->rows_config.chunk_len,

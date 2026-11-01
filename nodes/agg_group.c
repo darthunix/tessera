@@ -67,16 +67,16 @@ note_memory(TessAggState *state)
 
 /*
  * A first index for capacity groups at most, and at most for as many as
- * fill a quarter of hash_mem with buckets: an estimate too large would take
- * the memory the groups need; the index grows as they come. The table has
- * twice the groups' buckets, 4 bytes each, rounded up to a power of two:
- * the most buckets a quarter holds is a power of two, and half as many
- * groups fill it.
+ * fill a quarter of the node's memory with buckets: an estimate too large
+ * would take the memory the groups need; the index grows as they come.
+ * The table has twice the groups' buckets, 4 bytes each, rounded up to a
+ * power of two: the most buckets a quarter holds is a power of two, and
+ * half as many groups fill it.
  */
 uint64
-first_capacity(uint64 capacity)
+first_capacity(const TessAggState *state, uint64 capacity)
 {
-	uint64		buckets = pg_prevpower2_64(Max(tess_hash_memory_limit() / 16, 1));
+	uint64		buckets = pg_prevpower2_64(Max(state->memory_limit / 16, 1));
 
 	return Max(Min(capacity, buckets / 2), AGG_INITIAL_GROUPS);
 }
@@ -98,7 +98,7 @@ static void
 create_table(TessAggState *state)
 {
 	Size		payload_size = state->payload_size;
-	uint64		capacity = first_capacity(state->groups_estimate);
+	uint64		capacity = first_capacity(state, state->groups_estimate);
 	Size		size;
 
 	MemoryContextReset(state->table_context);
@@ -135,7 +135,7 @@ add_chunk(TessAggState *state)
 {
 	int			chunk = state->table.nchunks;
 	Size		len = chunk == 0 ? TABLE_FIRST_CHUNK :
-		table_chunk_len(state->kernels, tess_hash_memory_limit(), &state->status);
+		table_chunk_len(state->kernels, state->memory_limit, &state->status);
 	void	   *base;
 
 	agg_reserve_chunks(state, chunk + 1);
@@ -696,7 +696,7 @@ static void
 distinct_read_back(TessAggState *state)
 {
 	bool		crowded = groups_memory(state) >
-		(Size) (tess_hash_memory_limit() / 8 * AGG_SPILL_FILL);
+		(Size) (state->memory_limit / 8 * AGG_SPILL_FILL);
 
 	reserve_rows(state, AGG_GROUP_ROWS);
 	for (int index = 0; index < state->nvalues; index++)

@@ -205,7 +205,7 @@ void
 agg_spill_begin(TessAggState *state)
 {
 	state->spill_params = (TessGroupParams) {
-		.limit = tess_hash_memory_limit(),
+		.limit = state->memory_limit,
 		.shape = agg_spill_shape(state),
 		.merged = state->record_size + 2 * sizeof(uint64),
 		.fill = AGG_SPILL_FILL,
@@ -316,7 +316,7 @@ agg_spill_create(TessAggState *state, AggSpill *parent, const TessSpillPlan *pla
 	config.npartitions = npartitions;
 	config.level = spill->level;
 	config.max_chunk = spill->chunk_len;
-	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(state->memory_limit);
 	spill->file = tess_spill_create(&config);
 	state->partitions = Max(state->partitions, (uint64) npartitions);
 	/* The machine clears the words for the level's partitions. */
@@ -468,7 +468,7 @@ agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 	state->table.chunks = state->chunk_bases;
 	state->table.chunk_lens = state->chunk_lens;
 	state->table.nchunks = nchunks;
-	capacity = first_capacity(capacity);
+	capacity = first_capacity(state, capacity);
 	state->table.index = new_index(state, capacity, &size);
 	state->table.index_len = size;
 	check(state, state->kernels->table_create(state->table.index, size, state->nkeys, payload_size,
@@ -563,7 +563,7 @@ agg_spill_check(TessAggState *state, bool force)
 	/* Room for the index first: the old one goes, the new one is made last. */
 	pfree(state->table.index);
 	state->table.index = NULL;
-	(void) agg_evict(state, sizeof(uint64) * first_capacity(agg_records(spill) * 2));
+	(void) agg_evict(state, sizeof(uint64) * first_capacity(state, agg_records(spill) * 2));
 	agg_table_from_parts(state, spill, agg_records(spill) * 2);
 }
 
@@ -818,7 +818,7 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 {
 	AggPart    *part = &spill->parts[partition];
 	Size		payload_size = state->payload_size;
-	uint64		capacity = first_capacity(part_groups(spill, partition));
+	uint64		capacity = first_capacity(state, part_groups(spill, partition));
 	bool		unique = spill->parent == NULL;
 	void	  **split = NULL;
 	int			nsplit = 0;
@@ -1166,7 +1166,7 @@ void
 rows_machine_begin(TessAggState *state)
 {
 	state->rows_params = (TessRowsParams) {
-		.limit = tess_hash_memory_limit(),
+		.limit = state->memory_limit,
 		.shape = rows_shape(state),
 		.fill = AGG_SPILL_FILL,
 		.least = AGG_GROUP_ROWS,
@@ -1207,7 +1207,7 @@ level_create(TessAggState *state, const TessRowsAction *freeze, const TessRowsMa
 	config.level = freeze->level;
 	config.fingerprint = (uint64) words;
 	config.max_chunk = chunk_len;
-	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
+	config.buffer_len = TESS_SPILL_BUFFER_LEN(state->memory_limit);
 	spill->file = tess_spill_create(&config);
 	spill->level = (int) freeze->level;
 	spill->shift = freeze->plan.shift;
@@ -1606,7 +1606,7 @@ pairs_params_init(TessAggState *state, int sets)
 		sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + PAIRS_WORDS);
 
 	state->pairs_params = (TessRowsParams) {
-		.limit = tess_hash_memory_limit(),
+		.limit = state->memory_limit,
 		.shape = (TessSpillShape) {
 			.reserve = len,
 			.share = (Size) sets,
