@@ -5,7 +5,11 @@
 //! Its prefetch hint: `prfm pldl1keep` on AArch64,
 //! nothing elsewhere (other targets and Miri), in the manner of the hash
 //! kernels' `bulk_op`. The table keeps its own hint, so that it needs no
-//! module of the kernels; on x86-64 it would be `_mm_prefetch(_MM_HINT_T0)`.
+//! module of the kernels. On x86-64 the hint, `_mm_prefetch(_MM_HINT_T0)`,
+//! was measured on an Intel Core i5: probes of a table larger than the
+//! caches took 10 to 26 % fewer cycles with it, but probes of one that
+//! fits them up to 14 % more, with up to 9 % more instructions
+//! (compare-aXu7WT to compare-4Dnv47), so x86-64 gives none.
 //!
 //! Array comparisons in masks were tried and removed: the probe gathers a
 //! candidate's fields with scalar loads from scattered records into
