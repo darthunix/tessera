@@ -944,6 +944,8 @@ typedef struct TessHashJoinState
 	TessLayout	scan_layout;
 	/* Nothing is left to return. */
 	bool		done;
+	/* A parent may scan the join again (EXEC_FLAG_REWIND): no squelch at its end. */
+	bool		expect_rescan;
 	bool		compact_decided;
 
 	/* Written by a kernel on failure only. */

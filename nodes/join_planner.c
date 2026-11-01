@@ -1953,6 +1953,14 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	config.children = list_make2(outer, inner);
 	/* A target above the join becomes the node's, computed over the pairs. */
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
+#ifdef CUSTOMPATH_GP_LAST_CHILD_FIRST
+	/*
+	 * The inner side, the last child, runs first: a fork's walks that
+	 * follow the order of execution, such as the one that gives a Shared
+	 * Input Scan its producer, visit it so.
+	 */
+	config.flags |= CUSTOMPATH_GP_LAST_CHILD_FIRST;
+#endif
 	config.expressions = list_make5(keys->clauses, keys->outer, keys->inner,
 									keys->residual, keys->filters);
 	data = list_make5(keys->outer_kinds, keys->inner_kinds,

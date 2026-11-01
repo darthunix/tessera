@@ -1551,8 +1551,8 @@ join_decide_compact(TessHashJoinState *state)
 	state->compact.on = true;
 }
 
-TupleTableSlot *
-join_exec(CustomScanState *css)
+static TupleTableSlot *
+join_next(CustomScanState *css)
 {
 	TessHashJoinState *state = (TessHashJoinState *) css;
 
@@ -1586,6 +1586,24 @@ join_exec(CustomScanState *css)
 		join_decide_compact(state);
 	return state->request->output_mode == TESS_OUTPUT_BATCH ?
 		exec_batches(state) : exec_rows(state);
+}
+
+TupleTableSlot *
+join_exec(CustomScanState *css)
+{
+	TupleTableSlot *slot = join_next(css);
+
+#if TESS_MPP
+	/*
+	 * As the family's hash join does: at the end, with no rescan to come,
+	 * both sides are squelched (through custom_ps), so that the senders of
+	 * a Motion below stop waiting for this reader, the outer side's too
+	 * when the join never read it, as with an empty inner side.
+	 */
+	if (TupIsNull(slot) && !((TessHashJoinState *) css)->expect_rescan)
+		ExecSquelchNode(&css->ss.ps);
+#endif
+	return slot;
 }
 
 
