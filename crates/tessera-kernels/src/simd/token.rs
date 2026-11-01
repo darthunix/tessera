@@ -7,6 +7,19 @@
 //! Miri, it is an empty `enum`, so code that takes one cannot be reached,
 //! and the compiler knows it.
 //!
+//! A driver asks for its token once a call, with its decision for whole
+//! words, so the processor is tested once a call. A hook asks for the
+//! token of the sets where its operation is open: on x86-64 [`Neon`] has
+//! no values, so an operation open only on NEON takes the row path there
+//! with no test at run time. The entry points of the vector code stay safe
+//! functions, each with one `unsafe` call into code compiled for its set.
+//! Refused: a test of the processor at every word, a load and a branch a
+//! word and a path that panics; a constant for each family beside one
+//! token, a second gate to keep in step with the first; a pointer to a
+//! function chosen once, an indirect call at every word that stops
+//! inlining; the whole driver compiled twice, once for AVX2, which would
+//! change the code of the row paths too and double it.
+//!
 //! The tokens are `pub` so that the public trait of the sets,
 //! [`crate::set::SetValue`], can take them; `simd` is private, so nothing
 //! outside the crate can name or make one.

@@ -188,7 +188,7 @@ reason saying that both machines were measured.
 
 ## 6. The close
 
-- [ ] 6.1 Write what this design decided, and why, into the
+- [x] 6.1 Write what this design decided, and why, into the
       documentation of `simd` and of the crate, where the vector code
       is described, without dates or references to the change; the
       final words of `docs/limitations.md`. Check:

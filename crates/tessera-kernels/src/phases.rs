@@ -220,8 +220,9 @@ pub(super) trait Stop {
     fn stopped(&self) -> bool;
 }
 
-/// [`Stop`] in a word several participants map, of a build or of a
-/// round: 0 until a participant stops.
+/// Whether a participant left while it probed, in a word several
+/// participants map, of a build or of a round: 0 until a participant
+/// stops.
 #[derive(Debug)]
 pub struct StopWord<'a>(&'a AtomicU64);
 

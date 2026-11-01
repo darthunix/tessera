@@ -37,9 +37,10 @@
 //! [`table`] is a hash table in a region of memory the caller owns, for
 //! joins and grouping, addressed by offsets so that the same bytes serve
 //! local and shared memory, and [`sort`] orders a table's records by their
-//! integer keys. `unsafe` is denied crate-wide and allowed only in two
-//! isolated modules: [`simd`], for vector loads and intrinsics, and
-//! [`table`], for the region over raw pointers.
+//! integer keys. `unsafe` is denied crate-wide and allowed only in the
+//! modules that need it: `simd`, for vector loads and intrinsics, and
+//! [`phases`] and [`shared_spill`], for the words that the participants
+//! of a shared table map; [`table`] keeps its own in its crate.
 //!
 //! Code shape. `#[inline(always)]` and `#[inline(never)]` on a hot path
 //! record a decision checked in the disassembly of the bench binaries or by
