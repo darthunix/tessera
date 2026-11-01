@@ -24,7 +24,7 @@
 //! ([`filter`], [`compute`], [`to_int4`], [`to_int8`], [`read`]) run them
 //! over the selected rows of a [`Source`], with the rows they leave to the
 //! caller in a mask of their own. Integers are stored in native byte order;
-//! the varlena header is little-endian's, the only order Tessera builds for.
+//! the varlena header is the core's ([`crate::varlena`]).
 
 use std::cmp::Ordering;
 use std::mem::MaybeUninit;
@@ -32,7 +32,7 @@ use std::mem::MaybeUninit;
 use anyhow::{Result, ensure};
 use tessera_core::{RowMask, RowMaskView, check_rows, ones};
 
-#[cfg(not(target_endian = "little"))]
+#[cfg(all(not(target_endian = "little"), not(feature = "network-varlena")))]
 compile_error!("the varlena headers here are little-endian's");
 
 /// The most digits of a decimal's value.
@@ -198,7 +198,7 @@ impl Decimal {
             weight = 0;
         }
         let size = 4 + 2 + (ndigits - first) * 2;
-        out[..4].copy_from_slice(&((size as u32) << 2).to_le_bytes());
+        out[..4].copy_from_slice(&crate::varlena::long_header(size));
         let header = 0x8000_u16
             | if self.value < 0 && ndigits > 0 {
                 0x2000
@@ -1562,7 +1562,7 @@ mod tests {
             | if weight < 0 { 0x0040 } else { 0 }
             | (weight as u16 & 0x3F);
         let size = 6 + 2 * digits.len();
-        let mut bytes = ((size as u32) << 2).to_le_bytes().to_vec();
+        let mut bytes = crate::varlena::long_header(size).to_vec();
         bytes.extend(header.to_ne_bytes());
         for digit in digits {
             bytes.extend(digit.to_ne_bytes());

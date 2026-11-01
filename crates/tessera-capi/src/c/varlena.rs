@@ -1,13 +1,13 @@
 //! A varlena's bytes read in place behind a Datum, for the kernels of
-//! numeric and text. On a little-endian machine a first byte with the low
-//! bit set is a 1-byte header (0x01 alone: an external pointer, never read
-//! here) holding the size with the header in its upper seven bits; two low
-//! bits of zero, a 4-byte header holding the size in its upper 30 bits;
-//! two low bits of 10, a compressed value, never read here either.
+//! numeric and text, by the header layout of the core
+//! ([`tessera_kernels::varlena`]): a 1-byte or a 4-byte header is read,
+//! an external pointer or a compressed value never is.
 
 use std::slice;
 
-#[cfg(not(target_endian = "little"))]
+use tessera_kernels::varlena::{Kind, kind, long_size};
+
+#[cfg(all(not(target_endian = "little"), not(feature = "network-varlena")))]
 compile_error!("the varlena headers here are little-endian's");
 
 /// The bytes of the body of a TOAST pointer to data on disk after its
@@ -41,21 +41,16 @@ pub(super) unsafe fn varlena_data<'a>(datum: u64) -> Option<&'a [u8]> {
     // SAFETY: the caller guarantees a whole varlena at `pointer`; its
     // header states the size of the bytes that follow.
     unsafe {
-        let first = *pointer;
-        if first & 0x01 == 0x01 {
-            if first == 0x01 {
-                return None;
+        match kind(*pointer) {
+            Kind::Short(size) => Some(slice::from_raw_parts(pointer.add(1), size - 1)),
+            Kind::Long => {
+                let size = long_size(pointer.cast::<[u8; 4]>().read_unaligned());
+                if size < 4 {
+                    return None;
+                }
+                Some(slice::from_raw_parts(pointer.add(4), size - 4))
             }
-            let size = usize::from(first >> 1);
-            Some(slice::from_raw_parts(pointer.add(1), size - 1))
-        } else if first & 0x03 == 0x00 {
-            let size = (pointer.cast::<u32>().read_unaligned() >> 2) as usize;
-            if size < 4 {
-                return None;
-            }
-            Some(slice::from_raw_parts(pointer.add(4), size - 4))
-        } else {
-            None
+            Kind::Compressed | Kind::External => None,
         }
     }
 }
@@ -75,19 +70,21 @@ pub(super) unsafe fn varlena_size(pointer: *const u8) -> anyhow::Result<usize> {
     // SAFETY: the caller's contract; a header is read before the bytes it
     // says follow.
     unsafe {
-        let first = *pointer;
-        if first == 0x01 {
-            // VARTAG_INDIRECT holds a pointer; VARTAG_EXPANDED_RO and _RW
-            // are 2 and 3.
-            let body = match *pointer.add(1) {
-                1 => 8,
-                tag => ondisk_body(tag).ok_or_else(|| external_refused(tag))?,
-            };
-            Ok(2 + body)
-        } else if first & 0x01 == 0x01 {
-            Ok(usize::from(first >> 1))
-        } else {
-            Ok((pointer.cast::<u32>().read_unaligned() >> 2) as usize)
+        match kind(*pointer) {
+            Kind::External => {
+                // VARTAG_INDIRECT holds a pointer, VARTAG_ONDISK_OID and
+                // _OID8 a pointer to data on disk; VARTAG_EXPANDED_RO and
+                // _RW are 2 and 3.
+                let body = match *pointer.add(1) {
+                    1 => 8,
+                    tag => ondisk_body(tag).ok_or_else(|| external_refused(tag))?,
+                };
+                Ok(2 + body)
+            }
+            Kind::Short(size) => Ok(size),
+            Kind::Long | Kind::Compressed => {
+                Ok(long_size(pointer.cast::<[u8; 4]>().read_unaligned()))
+            }
         }
     }
 }

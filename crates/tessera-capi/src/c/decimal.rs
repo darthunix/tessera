@@ -1269,7 +1269,7 @@ mod tests {
     #[test]
     fn varlena_headers_are_read_or_refused() {
         // A 1-byte header: size 3 with the header.
-        let short = [0x07_u8, 0xAA, 0xBB];
+        let short = [tessera_kernels::varlena::short_header(3), 0xAA, 0xBB];
         // SAFETY: a whole varlena.
         assert_eq!(
             unsafe { varlena_data(short.as_ptr() as u64) },
@@ -1277,7 +1277,7 @@ mod tests {
         );
         // A 4-byte header: size 6 with the header.
         let mut long = [0_u8; 8];
-        long[..4].copy_from_slice(&(6_u32 << 2).to_le_bytes());
+        long[..4].copy_from_slice(&tessera_kernels::varlena::long_header(6));
         long[4..6].copy_from_slice(&[1, 2]);
         // SAFETY: a whole varlena, aligned or not.
         assert_eq!(
@@ -1285,8 +1285,8 @@ mod tests {
             Some(&[1, 2][..])
         );
         // An external pointer, a compressed value, a null pointer.
-        let external = [0x01_u8, 18];
-        let compressed = [0x02_u8, 0, 0, 0];
+        let external = [tessera_kernels::varlena::EXTERNAL, 18];
+        let compressed = [tessera_kernels::varlena::COMPRESSED, 0, 0, 0];
         // SAFETY: only the first byte of each is read.
         unsafe {
             assert_eq!(varlena_data(external.as_ptr() as u64), None);

@@ -4,13 +4,23 @@
 # selects the debug or the release library, and both must pass the tests.
 CARGO ?= cargo
 RUST_PROFILE ?= release
-RUST_LIB = $(srcdir)/../target/$(RUST_PROFILE)/libtessera_capi.a
+# Greengage keeps its varlena headers in network byte order on every
+# machine: its kernels are built with the feature that reads them so, in a
+# target directory of their own (host.mk tells the cores apart).
+ifdef TESS_GREENGAGE
+RUST_TARGET = target/greengage
+RUST_FEATURES = --features network-varlena
+else
+RUST_TARGET = target
+endif
+RUST_LIB = $(srcdir)/../$(RUST_TARGET)/$(RUST_PROFILE)/libtessera_capi.a
 ifeq ($(RUST_PROFILE),release)
 RUST_BUILD_FLAGS = --release
 endif
 
 $(RUST_LIB): FORCE
-	cd $(srcdir)/.. && $(CARGO) build -p tessera-capi --locked $(RUST_BUILD_FLAGS)
+	cd $(srcdir)/.. && CARGO_TARGET_DIR=$(RUST_TARGET) $(CARGO) build -p tessera-capi --locked \
+		$(RUST_BUILD_FLAGS) $(RUST_FEATURES)
 
 # The profile the modules link: a module that links the library depends
 # on this file too, which changes only when the profile does, so switching
