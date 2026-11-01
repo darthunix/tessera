@@ -15,15 +15,15 @@ product: what Tessera does is in `openspec/specs/`.
 
 ## The queue
 
-In this order. The maintainer placed `counters-on-x86-and-linux`,
-`simd-primitives-avx2`, `linux-x86-support` and `oltp-guard-bench` on
-2026-10-05, in the review of pull request 45; the first is closed, and
-its next stage, `bench-in-four-cells`, keeps its place. The maintainer
-placed `explain-rows-per-loop` first on 2026-10-08, after pull
-requests 49 and 50, and `join-pruning-cost` after it the same day; the
-other entries keep the order of the decisions of 2026-09-30 to
-2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390). The
-maintainer placed `spill-crate` first on 2026-10-28, after the close of
+In this order. The maintainer placed `counters-on-x86-and-linux`, the
+AVX2 kernels, `linux-x86-support` and `oltp-guard-bench` on 2026-10-05,
+in the review of pull request 45; the first two are closed, and the next
+stage of the first, `bench-in-four-cells`, keeps its place. The
+maintainer placed `explain-rows-per-loop` first on 2026-10-08, after
+pull requests 49 and 50, and `join-pruning-cost` after it the same day;
+the other entries keep the order of the decisions of 2026-09-30 to
+2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390). The maintainer
+placed `spill-crate` first on 2026-10-28, after the close of
 `table-crate`, and `float-kernels-in-rust` second on 2026-11-01, after
 the review of what more can move from C to Rust:
 
@@ -35,20 +35,19 @@ the review of what more can move from C to Rust:
    left
 5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-6. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
-7. `linux-x86-support`: Linux on x86-64 checked as the target platform
-8. `oltp-guard-bench`: OLTP guard family of benchmarks
-9. `runs-left-from-section-9`: Runs left to the maintainer from
+6. `linux-x86-support`: Linux on x86-64 checked as the target platform
+7. `oltp-guard-bench`: OLTP guard family of benchmarks
+8. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-13. `tpch-sf10`: TPC-H step 10: SF10
-14. `backward-scan-mark-restore`: Backward scan and mark/restore
-15. `postgresql-19`: PostgreSQL 19 support
-16. `pg-duckdb-comparison`: Comparison with pg_duckdb
+12. `tpch-sf10`: TPC-H step 10: SF10
+13. `backward-scan-mark-restore`: Backward scan and mark/restore
+14. `postgresql-19`: PostgreSQL 19 support
+15. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -61,7 +60,8 @@ Taken when a measurement of the TPC-H runs shows the loss (plan lines
 ## Later
 
 After the queue, by decisions of 2026-09-20 to 2026-09-22 (plan lines
-210, 2788–2799), which are older than the queue and put it after AVX2:
+210, 2788–2799), which are older than the queue and put it after AVX2;
+the AVX2 kernels are done, so these wait for the queue alone:
 
 - `prosupport-batch-functions`: Extension batch functions through prosupport
 - `table-key-types`: Keys of more types in the hash table itself; the
@@ -115,6 +115,8 @@ is wanted; several wait for a measured case. `greengage-port` and
   types in the debug build
 - `sturdy-bulk-loops`: Loops over whole words that keep their values
   across the call of a vector kernel
+- `x86-row-paths`: The row paths of x86-64 without the cost of the
+  decision for whole words
 - `pmu-on-x86-linux`: The counters on x86-64 Linux and on two kinds of
   cores, on hardware
 - `pmu-on-crates-io`: The crate `pmu` published on crates.io
@@ -298,71 +300,25 @@ written; the maintainer decided on 2026-10-08 that it is to be fixed.
 - **What:** Run `tessera-bench` in every cell the crate `pmu` counts
   in: on Linux without `sudo` where `kernel.perf_event_paranoid`
   allows the user, and with the cell (kperf or perf, NEON or AVX2) in
-  its report, so that a verdict is never compared across cells. Run it
-  once on the Intel Mac, which needs a calibration of its own. Then
-  correct the texts that say the counters work only on macOS: "Accepted
+  its report, so that a verdict is never compared across cells. Then
+  correct the texts that say its runs on Linux are planned: "Accepted
   limits" in `CONTRIBUTING.md`, `docs/measuring.md` and
   `crates/tessera-capi/benches/README.md`.
 - **Why:** `pmu` counts in the four cells, but `tessera-bench` still
-  runs its programs with `sudo` and reports no cell, and the kernels of
-  `simd-primitives-avx2` are accepted by its counts on an Intel Mac.
+  runs its programs with `sudo` and reports no cell, so its verdicts on
+  Linux, the target platform, cannot be taken.
 - **Known:** The first stage changed only the crate, by the
   maintainer's decision of 2026-10-24. `pmu` counts on an M5 Pro and on
   an Intel Core i5-1038NG7 as root, and on GitHub's Arm runner at every
   push; on Linux it needs no root at `kernel.perf_event_paranoid` 2.
   The benchmark runner of `tessera-capi` repeats a block that reads
-  zero.
+  zero. `tessera-bench` already runs on the Intel Mac as root: after a
+  run of every program against itself there, the maintainer kept the
+  limits of its verdicts on 2026-10-27, and the AVX2 kernels were
+  accepted by its counts.
 - **Depends on:** nothing.
 - **Capabilities:** tools, bench
 - **Size:** not estimated.
-
-### simd-primitives-avx2
-
-SIMD primitives layer and AVX2 for x86-64. From plan 3.9, lines 210–278;
-4.20, lines 928–941.
-
-- **What:** First a pilot: write the int32 filter on NEON over a small
-  set of primitives (a trait over a lane class, about 12 primitives of
-  1–5 intrinsics) and accept it only if the disassembly of the bulk loop
-  is unchanged. If the pilot holds, move the NEON kernels one by one
-  (filter → arith → aggregate → cast → hash) and add AVX2 as an
-  implementation of the primitives; if not, write AVX2 as a second
-  parallel implementation in `simd/avx2/`. On x86-64 the block path is
-  chosen at run time by `is_x86_feature_detected!("avx2")`, with no
-  `-C target-cpu` flags.
-- **Why:** Linux on x86-64 is the target platform (the maintainer,
-  2026-10-05), and vector kernels exist only for AArch64; on other
-  processors the scalar kernels run. AVX2 is on every Intel Mac since
-  2013 and all server x86 of the last ten years (line 211–213).
-- **Known:** The maintainer's decision 2026-10-05: taken after
-  `counters-on-x86-and-linux`. Decision
-  2026-09-20; revised 2026-09-25 (primitives, on the maintainer's
-  condition that the trait must not cost performance); clarified
-  2026-09-30 (the control loops of both widths are already shared
-  through `IntLane`, the pilot concerns only the vector code) and
-  2026-10-01 (on Intel re-measure the decisions tuned by time on the M5
-  Pro: `BULK_MIN_ROWS = 12`, the bounds of `SetValue::WORD_KEYS`, the
-  counted full-word loop, the branchless select in `read_masked`). Tests
-  run under Rosetta 2; counters under Rosetta are useless, so acceptance
-  by counters happens only on an Intel Mac. There `tools/pmu` counts
-  with the same names as on Apple silicon, with no table of Intel
-  events, and `tessera-bench` needs a fresh calibration
-  (`bench-in-four-cells`). A test may not
-  skip silently: with `TESSERA_REQUIRE_SIMD=1` a missing feature is an
-  error. The acceptance rule of 3.5 is unchanged: a vector path stays
-  only with a reproducible gain in cycles. The 21 stub bodies of the
-  non-NEON build get AVX2 bodies here (line 6889–6891). Commits per
-  kernel: filter → arith (with the divisor) → aggregate → hash → table
-  prefetch. Checked in the code: no `avx2` anywhere, `simd/` is not
-  split into `neon/` and `avx2/`.
-- **Depends on:** `bench-in-four-cells`, the run of `tessera-bench` on
-  an Intel Mac to measure with while the kernels are written; it goes
-  first. The lane helpers both
-  widths share, the packing of lane masks into row bits among them, are
-  in `simd/mod.rs`. The plan named an Intel Mac for the acceptance (line
-  2789).
-- **Capabilities:** kernel-abi, tools, ci
-- **Size:** large — a series with its own acceptance per kernel.
 
 ### linux-x86-support
 
@@ -376,8 +332,9 @@ request 45, 2026-10-05.
   of checks is not decided; the proposal of the change sets it.
 - **Why:** The target platform is Linux on x86-64; that the maintainer's
   machine is macOS on arm64 does not change it (the maintainer,
-  2026-10-05). All of the project's timings were taken on that machine,
-  and on x86-64 the scalar kernels run until `simd-primitives-avx2`.
+  2026-10-05). All of the project's timings were taken on that machine.
+  On x86-64 the vector kernels run on AVX2, measured by counters on an
+  Intel Mac alone.
 - **Known:** The maintainer's words: Linux is covered by CI in some
   form, and it needs more than that. Checked in the code: on
   `ubuntu-24.04`, which is x86-64, CI runs the Rust checks and tests,
@@ -386,8 +343,10 @@ request 45, 2026-10-05.
   against the core; it checks correctness, not speed. Every run in
   `docs/benchmarks` is from an Apple M5 Pro, and the defaults of the
   planner's cost parameters are the values measured there
-  (`docs/costs.md`, "The reference machine"), as are the thresholds of
-  the kernels that `simd-primitives-avx2` lists. The tools ask macOS
+  (`docs/costs.md`, "The reference machine"). The thresholds of the
+  kernels that were tuned by time there were measured again on an Intel
+  Core i5, and x86-64 kept them all (the documentation of
+  `tessera-kernels`, "Code shape"). The tools ask macOS
   only for the description of the machine and of its power (`sysctl`,
   `pmset`) and choose the suffix of a module by platform. The counters,
   `tools/pmu`, count on Linux, but on x86-64 no machine with a PMU has
@@ -407,7 +366,8 @@ OLTP guard family of benchmarks. From plan 4.16, lines 597–598.
 - **Why:** The tax and win families exist; this one was planned with
   them and never built.
 - **Known:** The maintainer's decision 2026-10-05: in the queue, after
-  `simd-primitives-avx2`. Checked in the code: `bench/pg` has no such
+  the AVX2 kernels, which are done, so now after `linux-x86-support`.
+  Checked in the code: `bench/pg` has no such
   family. The closest numbers are the start-up tax cases (`limit_1`: 3
   µs against 1–2) and `plan_exprs`/`plan_time`. The log does not record
   a decision to drop it.
@@ -663,8 +623,8 @@ Extension batch functions through prosupport. From plan 4.15, lines 578–582.
   `CREATE FUNCTION … SUPPORT`. Checked in the code: `bridge/function.c`
   says prosupport "is not asked". Since 4.27 the registry is a dynahash
   by OID (line 2144).
-- **Depends on:** nothing; ordered after `simd-primitives-avx2` by the
-  old decisions.
+- **Depends on:** nothing; the old decisions ordered it after the AVX2
+  kernels, which are done, so it waits for the queue alone.
 - **Capabilities:** batch-functions, bridge-api
 - **Size:** small.
 
@@ -894,7 +854,7 @@ Loops over whole words that keep their values across the call of a
 vector kernel. From the review of pull request 68 on 2026-10-14.
 
 - **What:** The loops that read a column a word of 64 rows at a time
-  call a NEON kernel for each word. Whether the compiler saves and
+  call a vector kernel for each word. Whether the compiler saves and
   restores the loop's values around that call depends on the rest of
   the function, so an unrelated change can make every word dearer. Give
   these loops a form that keeps their values without such saves: a
@@ -920,6 +880,43 @@ vector kernel. From the review of pull request 68 on 2026-10-14.
 - **Depends on:** nothing.
 - **Capabilities:** kernel-abi
 - **Size:** small to medium.
+
+### x86-row-paths
+
+The row paths of x86-64 without the cost of the decision for whole
+words. Left by the close of the AVX2 kernels, 2026-11-01.
+
+- **What:** Settle once, for every driver of the int4 and int8
+  families, where the decision for whole words lies, so that a call
+  that reads its rows one by one costs on x86-64 what it did before the
+  AVX2 kernels. With it, two leftovers of the loops over whole words:
+  the loops of `count` and of the aggregates, which take a shape of
+  their own on x86-64 and keep the old one on AArch64, made one where a
+  shape serves both machines; and `as_chunks` for the bounds of
+  `word_slots` in `tessera-capi`, which would take six more
+  instructions from a whole word of `count` on x86-64 but changes the
+  `word_block` of every family.
+- **Why:** On x86-64 the decision for whole words was compiled out
+  before AVX2; now it shares the function of the row loops, which run
+  short of registers there. The filter of int4 takes 38 cycles more on
+  one dense row in 128, the comparison of two columns 224 (4.5 %) on a
+  Datum batch partly prepared and 37 (4 %) on Datum words of 8 rows;
+  the cast and the hashes take 12 to 16 instructions more a call or a
+  key; the sets, which decide at every word, 19 % more instructions on
+  empty selections of 1024 rows. Moving the decision out of line traded
+  these for other losses: up to 25 cycles on 65 rows with 8 selected,
+  and 12.5 % on full dense words of the int8 filter.
+- **Known:** The maintainer's decision of 2026-10-27: the losses are
+  accepted for the pilot of the AVX2 kernels and settled here, once for
+  every driver. The shape of x86-64's loops of `count` and the
+  aggregates cost the M5 Pro 14 % more cycles in a least of int4 over
+  partly prepared words, so AArch64 kept its own. A change of a driver
+  is checked by the machine code of both targets (`tessera-bench
+  --disasm`, and with `--target aarch64-apple-darwin`) and by the
+  counters of both machines.
+- **Depends on:** nothing.
+- **Capabilities:** kernel-abi
+- **Size:** medium.
 
 ### direct-arrow-batches
 
@@ -1216,14 +1213,26 @@ Alignment of hot code. From plan 9.2 and 9.12, lines 6717–6721, 6962–6966.
 AVX-512 as a third SIMD group, if AVX2 proves not enough. From plan 3.9,
 line 214; the review of pull request 45, 2026-10-05.
 
-- **What:** AVX-512 (VL/BW, masks in registers) as a separate third
-  group of vector kernels.
+- **What:** AVX-512 (VL/BW, masks in registers) as a third vector set:
+  a third implementation of the primitives of `simd` and a token of its
+  own, the kernels unchanged.
 - **Why:** The log gives no gain; it only reserves the place.
 - **Known:** The maintainer's decision 2026-10-05: only if AVX2 proves
   not good enough. Before it: "later, and only for a particular machine
   where it can be measured". AVX-512 exists on part of the Xeons and on
-  Zen 4+, and lowers the frequency on old Xeons (line 212–213).
-- **Depends on:** `simd-primitives-avx2` and what it shows.
+  Zen 4+, and lowers the frequency on old Xeons (line 212–213). What
+  AVX2 showed on an Intel Core i5-1038NG7, an Ice Lake that has
+  AVX-512 too: every family opened on it, and on full words of 1024
+  rows its kernels take 79 to 93 % fewer cycles than the row path in
+  the filters, the comparisons, the cast and the hashes, and those of
+  the least and greatest of int8 62 to 83 % fewer on full, half and
+  random words. Its limits, which AVX-512
+  lifts: 16 registers, so the int8 kernel of the sets spills two masks
+  a quarter of a word; no least or greatest of int8 lanes, which the
+  kernels make of a compare and a select; the bits of a comparison
+  taken by `movemask` rather than written to a mask register. No case
+  was found that AVX2 does not serve.
+- **Depends on:** a case that AVX2 does not serve.
 - **Capabilities:** kernel-abi
 - **Size:** the log does not say.
 
@@ -1924,6 +1933,42 @@ becomes an entry, joins one, or is dropped.
     the workflow's Arm runner anyway, at `kernel.perf_event_paranoid`
     4. Suggested: mutants of `core_pmu.rs` and of the decoding of a
     read, which need no PMU, or drop.
+- **AVX2: findings without a decision** (the close of the AVX2
+  kernels, 2026-11-01).
+  - The benchmarks repeat their inputs every call, random selections,
+    NULL flags set at random and values in random order among them, so
+    the predictor learns even those: the branch of a set's search by
+    halving misses 12 to 15 times in about 19 750 a call, and a branch
+    on the NULL flag of a slot 0.004 times. A branch then cannot be
+    judged against a choice made as data, and a verdict of cycles
+    follows where the code lies: the int8 division took 12 to 14 % more
+    cycles on random words with its code unchanged, and three cases of
+    the sets' row paths failed on cycles in both runs, their loops the
+    same register for register. Suggested: cases whose inputs change
+    from call to call, or drop.
+  - The sets compare every lane of a whole word, also where its rows are
+    all NULL, which the row path skips: on AVX2 64 int4 keys take 90 to
+    151 % more cycles there. Suggested: the driver counts the non-NULL
+    rows of the word, or drop.
+  - No one bound of whole words fits every family on Intel: words of 8
+    rows taken whole gain on the filters, the hashes, the cast and
+    `count`, and lose on the sums, `min` and `max`, the arithmetic by a
+    constant, the compare of Datum columns and the sets, by up to 2.5
+    times the cycles. Suggested: a bound for each family, measured on
+    both machines, or drop.
+  - The bounds of the sets hold at 16 selected rows a word, but on
+    Intel full words pay to far more keys: there 65 int4 keys compared
+    whole cost a quarter of halving, and 64 int8 keys half. Suggested: a
+    bound that grows with the selected rows of a word, or drop.
+  - On x86-64 the call of a full word's counted loop costs the loop
+    over the other words: without it, sparse selections, words of 8
+    rows and calls of a row or none read 5 to 27 % faster. Suggested: a
+    form that keeps the full word inline without making empty and
+    sparse calls pay for its constants, or drop.
+  - The prefetch hint of `relhash` on x86-64 makes probes of a table
+    larger than the caches 10 to 26 % faster, and those of a table that
+    fits them up to 14 % slower. Suggested: a hint chosen by the size
+    of the table, or drop.
 
 ## Decided against
 
