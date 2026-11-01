@@ -297,6 +297,11 @@ key_dict_images_equal(KeyDict *dict, Oid type)
 
 	if (dict->bytes == TESS_KEY_BYTES_WHOLE)
 		return true;
+#if TESS_GREENGAGE
+	/* PostgreSQL 12 has no equal-image support function to ask. */
+	(void) entry;
+	return false;
+#endif
 	entry = lookup_type_cache(type, TYPECACHE_BTREE_OPFAMILY);
 	return OidIsValid(entry->btree_opf) &&
 		get_opfamily_proc(entry->btree_opf, entry->btree_opintype, entry->btree_opintype,

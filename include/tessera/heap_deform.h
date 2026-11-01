@@ -52,6 +52,61 @@ tess_deform_cursor_init(TessDeformCursor *cursor)
  * only for descriptors that may hold cstring attributes, and should be a
  * compile-time constant.
  */
+#if TESS_GREENGAGE
+
+/*
+ * Greengage 7 keeps PostgreSQL 12's descriptor, without compact attributes
+ * or a guaranteed prefix: the cursor walks the attributes one by one, as
+ * slot_deform_heap_tuple does there, aligning each before it reads it.
+ * first_non_guaranteed_attr and support_cstring change nothing here.
+ * shortcut: no cached offsets; use attcacheoff if a profile shows the walk.
+ */
+static pg_always_inline bool
+tess_deform_advance(TessDeformCursor *cursor, HeapTuple tuple,
+					TupleDesc tuple_desc, int first_non_guaranteed_attr,
+					AttrNumber target_attnum, Datum *value, bool *isnull,
+					bool support_cstring)
+{
+	HeapTupleHeader tup = tuple->t_data;
+	bool		hasnulls = HeapTupleHasNulls(tuple);
+	char	   *tp = (char *) tup + tup->t_hoff;
+	int			natts = Min(HeapTupleHeaderGetNatts(tup), target_attnum);
+	int			attnum = cursor->nvalid;
+	uint32		off = cursor->off;
+
+	Assert(target_attnum > 0 && target_attnum <= tuple_desc->natts);
+	Assert(cursor->nvalid >= 0 && cursor->nvalid < target_attnum);
+	(void) first_non_guaranteed_attr;
+	(void) support_cstring;
+
+	for (; attnum < natts; attnum++)
+	{
+		Form_pg_attribute att = TupleDescAttr(tuple_desc, attnum);
+		Datum		datum = (Datum) 0;
+		bool		null = hasnulls && att_isnull(attnum, tup->t_bits);
+
+		if (!null)
+		{
+			off = att_align_pointer(off, att->attalign, att->attlen, tp + off);
+			datum = fetchatt(att, tp + off);
+			off = att_addlength_pointer(off, att->attlen, tp + off);
+		}
+		if (attnum == target_attnum - 1)
+		{
+			*value = datum;
+			*isnull = null;
+			cursor->nvalid = target_attnum;
+			cursor->off = off;
+			return true;
+		}
+	}
+	cursor->nvalid = natts;
+	cursor->off = off;
+	return false;
+}
+
+#else
+
 static pg_always_inline bool
 tess_deform_advance(TessDeformCursor *cursor, HeapTuple tuple,
 					TupleDesc tuple_desc, int first_non_guaranteed_attr,
@@ -190,5 +245,7 @@ tess_deform_advance(TessDeformCursor *cursor, HeapTuple tuple,
 	cursor->off = off;
 	return false;
 }
+
+#endif							/* TESS_GREENGAGE */
 
 #endif							/* TESSERA_HEAP_DEFORM_H */

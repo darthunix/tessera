@@ -107,6 +107,23 @@ check_partition(const TessSpill *spill, int partition)
 			 partition, spill->npartitions - 1);
 }
 
+/*
+ * Greengage 7 keeps a set of shared files as PostgreSQL 12 did, without
+ * master's FileSet inside it. Only parallel queries share spill files,
+ * and Greengage runs none, so these calls are never reached there.
+ */
+#if TESS_GREENGAGE
+#define tess_temporary_file() OpenTemporaryFile(false, "Tessera")
+#define tess_shared_create(shared, name) SharedFileSetCreate((shared), (name))
+#define tess_shared_open(shared, name) SharedFileSetOpen((shared), (name))
+#define tess_shared_delete(shared, name) SharedFileSetDelete((shared), (name), true)
+#else
+#define tess_temporary_file() OpenTemporaryFile(false)
+#define tess_shared_create(shared, name) FileSetCreate(&(shared)->fs, (name))
+#define tess_shared_open(shared, name) FileSetOpen(&(shared)->fs, (name), O_RDONLY)
+#define tess_shared_delete(shared, name) FileSetDelete(&(shared)->fs, (name), true)
+#endif
+
 static void
 file_name(const TessSpill *spill, int participant, char name[MAXPGPATH])
 {
@@ -296,11 +313,11 @@ set_file(TessSpill *spill)
 	if (spill->file > 0)
 		return spill->file;
 	if (spill->shared == NULL)
-		spill->file = OpenTemporaryFile(false);
+		spill->file = tess_temporary_file();
 	else
 	{
 		file_name(spill, spill->participant, name);
-		spill->file = FileSetCreate(&spill->shared->fs, name);
+		spill->file = tess_shared_create(spill->shared, name);
 	}
 	if (spill->file <= 0)
 		ereport(ERROR,
@@ -315,7 +332,7 @@ write_at(File file, const char *bytes, Size len, uint64 offset)
 {
 	while (len > 0)
 	{
-		ssize_t		written = FileWrite(file, bytes, len, (pgoff_t) offset,
+		ssize_t		written = FileWrite(file, (char *) bytes, len, (pgoff_t) offset,
 										WAIT_EVENT_BUFFILE_WRITE);
 
 		if (written <= 0)
@@ -578,7 +595,7 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 		/* Another participant's file, a handle of its own. */
 		file_name(spill, participant, name);
 		old = MemoryContextSwitchTo(spill->context);
-		file = FileSetOpen(&spill->shared->fs, name, O_RDONLY);
+		file = tess_shared_open(spill->shared, name);
 		MemoryContextSwitchTo(old);
 		if (file <= 0)
 		{
@@ -860,7 +877,7 @@ tess_spill_free(TessSpill *spill)
 		if (spill->shared != NULL)
 		{
 			file_name(spill, spill->participant, name);
-			FileSetDelete(&spill->shared->fs, name, true);
+			tess_shared_delete(spill->shared, name);
 		}
 	}
 	MemoryContextDelete(spill->context);

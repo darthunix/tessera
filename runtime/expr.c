@@ -216,7 +216,9 @@ static bool
 valid_var(const Var *var, Index relid)
 {
 	return var->varattno > 0 && var->varlevelsup == 0 &&
+#if !TESS_GREENGAGE
 		var->varreturningtype == VAR_RETURNING_DEFAULT &&
+#endif
 		(relid == 0 || var->varno == relid);
 }
 
@@ -969,6 +971,7 @@ static void eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown);
  * fields and a date's epoch and Julian day; -1 for a unit that is not a
  * constant or that the core's function computes.
  */
+#if !TESS_GREENGAGE
 static int
 extract_scale(Node *unit, bool timestamp)
 {
@@ -1027,6 +1030,7 @@ extract_scale(Node *unit, bool timestamp)
 	pfree(lowunits);
 	return scale;
 }
+#endif
 
 /*
  * The display scale every value of a numeric expression has, as the core
@@ -1105,11 +1109,14 @@ numeric_scale(Node *node)
 		case F_NUMERIC_INT4:
 		case F_NUMERIC_INT8:
 			return 0;
+#if !TESS_GREENGAGE
+		/* Greengage's EXTRACT is date_part, a float8: no kernel. */
 		case F_EXTRACT_TEXT_DATE:
 			return extract_scale(linitial(args), false);
 		case F_EXTRACT_TEXT_TIMESTAMP:
 		case F_EXTRACT_TEXT_TIMESTAMPTZ:
 			return extract_scale(linitial(args), true);
+#endif
 		default:
 			return -1;
 	}
