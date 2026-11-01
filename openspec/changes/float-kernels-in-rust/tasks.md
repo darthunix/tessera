@@ -73,7 +73,7 @@ named in a task comes on top.
       job of `ci.yml` runs it. Check: `cargo test --locked -p
       tessera-capi --test float`; `cargo +nightly miri test --locked -p
       tessera-capi --test float`.
-- [ ] 5.2 Make `kernels/float.c` call the entry points once a batch: it
+- [x] 5.2 Make `kernels/float.c` call the entry points once a batch: it
       keeps the table of the functions, the call's checks and nothing
       else; no `ereport` is left in it. Update the paragraph on floats
       in `docs/function.md`. Check: `make installcheck` with

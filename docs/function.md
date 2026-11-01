@@ -192,10 +192,12 @@ in every shape: the comparisons of float8, float4 and the two
 (`float8eq` …, `float4eq` …, `float48eq` …, `float84eq` …) in the core's
 NaN-aware order, a float4 widened, the arithmetic `float8pl` … `float8div`,
 `float4pl` …, `float48pl` …, `float84pl` …, `float8um`, `float8abs`,
-`float4um`, `float4abs` by the core's inline functions of `utils/float.h`
+`float4um`, `float4abs` with the checks of the core's `utils/float.h`
 (22003 "value out of range: overflow" and "underflow", 22012 at the row
 that meets them), and the casts between floats and integers, a float to
-an integer rounded to even and checked as `dtoi4` checks it;
+an integer rounded to even and checked as `dtoi4` checks it, all
+computed a batch at a time by the Rust kernels (`tessera/float.h`,
+`tessera_kernels::float`);
 and `count(*)`,
 `count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
 `max(int8)` as aggregates, by the aggregate's own OID. An int4 column
