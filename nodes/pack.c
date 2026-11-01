@@ -12,6 +12,7 @@
 #if TESS_GREENGAGE
 #include "access/tableam.h"
 #include "cdb/cdbaocsam.h"
+#include "cdb/cdbappendonlyam.h"
 #endif
 
 #include "tessera/plan.h"
@@ -62,27 +63,34 @@ typedef struct PackState
 	int64		produced;
 	uint64		batches;
 #if TESS_GREENGAGE
-	/* A column-oriented table the pack reads in blocks, or NULL. */
+	/* An append-only table the pack reads in blocks, or NULL. */
 	struct PackAocs *aocs;
 #endif
 } PackState;
 
 #if TESS_GREENGAGE
 /*
- * Greengage's ao_column table read by the pack itself, in place of the
- * core's sequential scan under it: aocs_getnext_batch gives the rows of
- * the scan's projected columns column by column, straight from their
- * blocks, with no tuple slot or copy. The batch's columns are those
- * arrays; a by-reference value points into its column's block, which
- * the scan keeps until the next batch is read, after the parent released
- * this one. The child stays in the plan, initialized and never executed.
+ * Greengage's append-only table read by the pack itself, in place of the
+ * core's sequential scan under it, with no tuple slot: for ao_column
+ * aocs_getnext_batch gives the rows of the projected columns column by
+ * column straight from their blocks, for ao_row appendonly_getnext_batch
+ * deforms each row of a block and lays the columns asked for out the
+ * same way. The batch's columns are those arrays; a by-reference value
+ * points into its block, which the scan keeps until the next batch is
+ * read, after the parent released this one. The child stays in the plan,
+ * initialized and never executed.
  */
 typedef struct PackAocs
 {
 	TessBatch	batch;
 	Relation	relation;
+	bool		columns;		/* ao_column, else ao_row */
 	/* Begun at the first execution, with the columns of the child's targets. */
 	AOCSScanDesc scan;
+	TableScanDesc row_scan;
+	/* A row of ao_row deformed, the relation's attributes. */
+	Datum	   *row_values;
+	bool	   *row_nulls;
 	/* The zero-based attribute of each batch column. */
 	int			ncolumns;
 	AttrNumber *attnos;
@@ -474,8 +482,8 @@ static const TessBatchOps aocs_batch_ops = {
 
 /*
  * The block reader of the child, when it is a sequential scan of an
- * ao_column table with no clauses of its own and the table's columns for
- * targets, which are the batch's columns in order; NULL otherwise.
+ * append-only table with no clauses of its own and the table's columns
+ * for targets, which are the batch's columns in order; NULL otherwise.
  */
 static PackAocs *
 pack_aocs_create(PackState *state, EState *estate)
@@ -488,7 +496,9 @@ pack_aocs_create(PackState *state, EState *estate)
 	if (!IsA(plan, SeqScan) || plan->qual != NIL || plan->initPlan != NIL)
 		return NULL;
 	relation = ((SeqScanState *) state->child)->ss.ss_currentRelation;
-	if (relation == NULL || relation->rd_rel->relam != AO_COLUMN_TABLE_AM_OID ||
+	if (relation == NULL ||
+		(relation->rd_rel->relam != AO_COLUMN_TABLE_AM_OID &&
+		 relation->rd_rel->relam != AO_ROW_TABLE_AM_OID) ||
 		list_length(plan->targetlist) != state->layout.ncolumns)
 		return NULL;
 	foreach_node(TargetEntry, entry, plan->targetlist)
@@ -502,6 +512,7 @@ pack_aocs_create(PackState *state, EState *estate)
 	natts = RelationGetNumberOfAttributes(relation);
 	aocs = MemoryContextAllocZero(estate->es_query_cxt, sizeof(PackAocs));
 	aocs->relation = relation;
+	aocs->columns = relation->rd_rel->relam == AO_COLUMN_TABLE_AM_OID;
 	aocs->ncolumns = list_length(plan->targetlist);
 	aocs->attnos = MemoryContextAlloc(estate->es_query_cxt,
 									  sizeof(AttrNumber) * Max(aocs->ncolumns, 1));
@@ -517,6 +528,11 @@ pack_aocs_create(PackState *state, EState *estate)
 		aocs->isnull[attr] = MemoryContextAllocZero(estate->es_query_cxt,
 													sizeof(bool) * PACK_BATCH_ROWS);
 	}
+	if (!aocs->columns)
+	{
+		aocs->row_values = MemoryContextAlloc(estate->es_query_cxt, sizeof(Datum) * Max(natts, 1));
+		aocs->row_nulls = MemoryContextAlloc(estate->es_query_cxt, sizeof(bool) * Max(natts, 1));
+	}
 	aocs->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	aocs->batch.struct_size = sizeof(TessBatch);
 	aocs->batch.ops = &aocs_batch_ops;
@@ -531,7 +547,16 @@ static void
 pack_aocs_begin(PackAocs *aocs, EState *estate)
 {
 	int			natts = RelationGetNumberOfAttributes(aocs->relation);
-	bool	   *proj = palloc0(sizeof(bool) * natts);
+	bool	   *proj;
+
+	if (!aocs->columns)
+	{
+		aocs->row_scan = appendonly_beginscan(aocs->relation, estate->es_snapshot, 0, NULL,
+											  NULL, SO_TYPE_SEQSCAN | SO_ALLOW_STRAT |
+											  SO_ALLOW_SYNC | SO_ALLOW_PAGEMODE);
+		return;
+	}
+	proj = palloc0(sizeof(bool) * natts);
 
 	for (int column = 0; column < aocs->ncolumns; column++)
 		proj[aocs->attnos[column]] = true;
@@ -549,16 +574,22 @@ pack_aocs_next(PackState *state, int limit)
 {
 	PackAocs   *aocs = state->aocs;
 
-	if (aocs->scan == NULL)
+	if (aocs->scan == NULL && aocs->row_scan == NULL)
 		pack_aocs_begin(aocs, state->css.ss.ps.state);
 	for (;;)
 	{
 		int			nrows;
 
 		CHECK_FOR_INTERRUPTS();
-		nrows = aocs_getnext_batch(aocs->scan, RelationGetDescr(aocs->relation),
-								   Min(limit, PACK_BATCH_ROWS),
-								   aocs->values, aocs->isnull, &aocs->visible);
+		if (aocs->columns)
+			nrows = aocs_getnext_batch(aocs->scan, RelationGetDescr(aocs->relation),
+									   Min(limit, PACK_BATCH_ROWS),
+									   aocs->values, aocs->isnull, &aocs->visible);
+		else
+			nrows = appendonly_getnext_batch(aocs->row_scan, RelationGetDescr(aocs->relation),
+											 Min(limit, PACK_BATCH_ROWS), aocs->ncolumns,
+											 aocs->attnos, aocs->row_values, aocs->row_nulls,
+											 aocs->values, aocs->isnull, &aocs->visible);
 		if (nrows == 0)
 			return NULL;
 		aocs->rows_read += nrows;
@@ -665,6 +696,8 @@ pack_end(CustomScanState *css)
 	/* Before the child, which closes the relation the scan reads. */
 	if (state->aocs != NULL && state->aocs->scan != NULL)
 		aocs_endscan(state->aocs->scan);
+	if (state->aocs != NULL && state->aocs->row_scan != NULL)
+		appendonly_endscan(state->aocs->row_scan);
 #endif
 	ExecEndNode(state->child);
 }
@@ -683,6 +716,8 @@ pack_rescan(CustomScanState *css)
 #if TESS_GREENGAGE
 	if (state->aocs != NULL && state->aocs->scan != NULL)
 		aocs_rescan(state->aocs->scan);
+	if (state->aocs != NULL && state->aocs->row_scan != NULL)
+		appendonly_rescan(state->aocs->row_scan, NULL, false, false, false, false);
 #endif
 	/* Rows of a core plan: no batch input to start anew. */
 	tess_rescan_child(&css->ss.ps, state->child, NULL);
@@ -713,7 +748,8 @@ pack_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		ExplainPropertyInteger("Batch Size", NULL, state->capacity, es);
 #if TESS_GREENGAGE
 	if (state->aocs != NULL)
-		ExplainPropertyText("Rows Kept As", "ao_column blocks", es);
+		ExplainPropertyText("Rows Kept As",
+							state->aocs->columns ? "ao_column blocks" : "ao_row blocks", es);
 #endif
 	if (state->heap != NULL || state->builder != NULL)
 		ExplainPropertyText("Rows Kept As",
