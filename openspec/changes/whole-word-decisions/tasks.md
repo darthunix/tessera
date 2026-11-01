@@ -41,8 +41,9 @@ The words used below:
 - [ ] 2.2 The rows build and the whole build of the design, on
       branches never merged, measured against each other over the
       density cases and full words of every program, twice on each
-      machine; the transitions of each family, storage and key count
-      in the design. Check: the ids of the runs
+      machine; the transitions of each family, storage and key count,
+      with the ids of the runs and the instructions that show each
+      path, in the design. Check: `.github/scripts/check-specs.sh`
 - [ ] 2.3 The bound of each family, a constant beside its driver, one
       for each architecture where the machines part. Check: the
       listings; the counters of each family's program at and around
@@ -63,7 +64,8 @@ The words used below:
 
 - [ ] 3.1 The control build of the design, on a branch never merged,
       against the base, over the cases that go by rows: what the
-      vector path costs them. Check: the ids of the runs
+      vector path costs them, with the ids of the runs, in the design.
+      Check: `.github/scripts/check-specs.sh`
 - [ ] 3.2 The forms of the design for the drivers, each a hypothesis
       written down first, until the row cases are within the noise of
       the control or the search ends. Check: the listings; the counters

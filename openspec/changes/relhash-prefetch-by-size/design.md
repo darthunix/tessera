@@ -57,8 +57,9 @@ state of `relhash` that shapes the design.
 
 **Goals:**
 
-- The hint where it gains, on tables larger than a bound, and on
-  smaller tables the machine code of today, on both machines.
+- The hint where it gains, on tables larger than a bound, and none on
+  smaller tables: there x86-64 runs today's code, and AArch64 today's
+  code without its `prfm`.
 - A choice that costs a call one test, and the loops no instruction
   but the hint's own where it is given.
 - No change of the public API of `relhash` and no code of Tessera.
@@ -88,30 +89,34 @@ it gains. That is not searched around: the rules are the question.
   its address. If the maintainer approves this proposal, the change
   writes that exception into `docs/measuring.md`, beside the rule.
 
-On a table under the bound both rules hold as they are: the machine
-code there is today's. If either rule stays, the change closes
-without the hint.
+On a table under the bound both rules hold as they are: there the
+loops give no hint. If either rule stays, the change closes without
+the hint.
 
 ### The choice once a call
 
 The probe, the find or insert and the gathers of a batch compute,
 once a call, whether the table is larger than `PREFETCH_MIN_BYTES`:
-its buckets times their size plus its records times theirs. The
-batch's own arrays are on the stack and small beside a table that
-reaches the bound. They then run one of two copies of their loop,
-made by a constant parameter, as the gathers already are: one with
-the hint and one without. The loops hold no test of their own, and
-the copy without the hint is today's code.
+its buckets times their size plus its records times theirs. They
+then run one of two copies of their loop, made by a constant
+parameter: one with the hint and one without. The loops hold no test
+of their own. The copy without the hint is today's code on x86-64,
+which gives none, and today's code less its `prfm` on AArch64.
 
 `PREFETCH_MIN_BYTES` is a constant for each architecture, beside the
 hint in `table/lanes.rs`. A table whose size changes during a call,
 as a shared table whose records others append, keeps the choice the
 call made at its start: a hint is never wrong, only dearer or cheaper.
 
-The gathers already choose by a parameter, `gather::<true>` for
-records in no order; on x86-64 they would get the hint wherever they
-ask for it. So they take the same choice by size and are measured
-with the probes.
+The gathers already choose an algorithm by a parameter of their own:
+`gather::<false>` reads the records of a word in one pass,
+`gather::<true>` and `gather_words` locate them all first and read
+them in a second pass, so that their misses overlap, and ask for each
+record in the first. That choice stays the caller's. On x86-64 the
+first pass would now ask for each record wherever it runs, so the
+gathers take the size's choice as a second parameter, which decides
+only whether that pass gives the hint, and are measured with the
+probes.
 
 Refused:
 
@@ -136,7 +141,16 @@ of batches, as today. It also gains, for each size:
 - a find or insert that creates the records of half the rows of each
   batch, the table brought back to its built state between calls,
   outside the count;
-- a gather of the records of a batch in no order.
+- both gathers, `gather_scattered` and `gather_words`, of the records
+  of a batch in no order; at the sizes around the bound and the
+  largest, also over a payload of several cache lines, so that the
+  loop that asks for each line of a record runs.
+
+Each case records, beside the table's bytes, its working set: the
+rings of keys and hashes it streams, the Bloom filter where it reads
+one, and the buckets and records a batch touches. The bound is set in
+the table's bytes, the one measure the choice can know; the working
+sets show what else held the caches when it was measured.
 
 The bound of an architecture is the smallest measured size from which
 the hint gains on every measured size above it, by the rule of
@@ -185,12 +199,13 @@ relayed.
 - The rule of acceptance: the hint gains on a case when its minimum and
   its median cycles both fall by more than 3 % and by more than the
   case's spread in the runs of identical sides, in both runs. On a
-  table under the bound the candidate must change nothing: the same
-  machine code as the base in those loops, and no FAIL. On a table
-  above it, a growth of instructions passes only where the listing
-  shows it is the hint and its address, as the narrowed rules allow.
-  A run with an UNSTABLE on a case the candidate changes is repeated;
-  a second stops the work for the maintainer.
+  table under the bound the loops give no hint, as the comparisons of
+  the bound measured, and no case there fails. On a table above it, a
+  growth of instructions passes only where the listing shows it is the
+  hint and its address, as the narrowed rules allow. An UNSTABLE
+  decides nothing: the run is kept and explained, as
+  `docs/measuring.md` asks, and never repeated for its result; its
+  cause is a hypothesis of its own before another run.
 - The runs worth citing are copied to `docs/benchmarks/<date>/`.
 
 ## Risks / Trade-offs

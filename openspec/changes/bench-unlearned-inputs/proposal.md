@@ -16,8 +16,8 @@ a branch that depends on the data:
   over 30 % NULL rows at random places.
 - The `shuffled` values of `set_int32`. The branch of a search by
   halving on x86-64 misses 12 to 15 times in about 19 750 a call, as
-  with values in order, where half of its steps would miss on values
-  it had not seen.
+  with values in order, where a predictor that had not seen the values
+  would miss many times more.
 - The int8 division by a scalar over random words. After its code
   moved by 96 bytes, unchanged, it mispredicted 17 branches a call
   where it had 1 or 2, and took 12 to 14 % more cycles: what the
@@ -41,9 +41,9 @@ first, because the second, `whole-word-decisions`, measures with it.
 - The cases that are drawn at random get inputs that the predictor
   cannot learn: every call meets rows, NULL flags or values it has not
   met in the calls before it within reach of the predictor's memory.
-  The work of a call stays: every input of a case has the same row
-  count and, in each word, the same numbers of selected and NULL rows,
-  at positions drawn anew.
+  The work of a call stays: every input of a case holds the same words,
+  in an order and with rows at positions drawn anew, so that neither
+  where the rows lie nor how many the n-th word holds repeats.
 - The form is chosen by a pilot on both machines, among three: a ring
   of inputs drawn from different seeds and taken in turn; one input
   long enough that its branches do not repeat; a fresh input before
