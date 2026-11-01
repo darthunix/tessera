@@ -146,20 +146,24 @@ distinct_add_chunk(TessAggState *state, DistinctSet *set)
 	set->lens[chunk] = len;
 	set->table.nchunks++;
 	set->bytes += len;
+	note_memory(state);
 }
 
 static void
 distinct_regrow(TessAggState *state, DistinctSet *set, uint64 records)
 {
 	void	   *old = set->table.index;
+	Size		old_size = set->table.index_len;
 	Size		size;
 	void	   *index = distinct_index(state, set, records * 2, &size);
 
 	check(state, state->kernels->table_regrow(&set->table, index, size,
 											  records * 2, &state->status));
-	set->bytes = set->bytes - set->table.index_len + size;
+	set->bytes = set->bytes - old_size + size;
 	set->table.index = index;
 	set->table.index_len = size;
+	/* The highest moment of the set: both indexes alive. */
+	note_memory_alive(state, old_size);
 	pfree(old);
 }
 

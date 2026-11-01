@@ -16,17 +16,26 @@
 
 /*
  * The bytes of the table now, and the most so far; once it spills, the
- * index and every chunk of every level, which live in the levels' memory.
+ * index and every chunk of every level, which live in the levels' memory;
+ * every DISTINCT set; and alive, the bytes of an index that a new one has
+ * replaced and that is not freed yet, which none of these counts.
  */
 void
-note_memory(TessAggState *state)
+note_memory_alive(TessAggState *state, Size alive)
 {
 	Size		memory = state->spill == NULL ? state->table_bytes :
 		agg_spill_memory(state);
 
 	if (state->has_distinct)
 		memory += agg_distinct_bytes(state);
-	state->peak_memory = Max(state->peak_memory, memory);
+	state->peak_memory = Max(state->peak_memory, memory + alive);
+}
+
+/* The bytes of the node now, the most so far kept. */
+void
+note_memory(TessAggState *state)
+{
+	note_memory_alive(state, 0);
 }
 
 /*
@@ -123,6 +132,7 @@ void
 regrow_table(TessAggState *state, uint64 groups)
 {
 	void	   *old = state->table.index;
+	Size		old_size;
 	Size		size;
 	void	   *index;
 
@@ -133,10 +143,11 @@ regrow_table(TessAggState *state, uint64 groups)
 	check(state, state->kernels->table_regrow(&state->table, index, size,
 											  groups * 2, &state->status));
 	state->table_bytes = state->table_bytes - state->table.index_len + size;
-	state->peak_memory = Max(state->peak_memory, state->table_bytes +
-							 state->table.index_len);
+	old_size = state->table.index_len;
 	state->table.index = index;
 	state->table.index_len = size;
+	/* The highest moment: both indexes alive, with everything else. */
+	note_memory_alive(state, old_size);
 	pfree(old);
 	state->grows++;
 }

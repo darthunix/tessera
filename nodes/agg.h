@@ -286,6 +286,7 @@ typedef struct TessAggState
 
 /* The executor's side of the table, which the spill calls (agg.c). */
 extern void note_memory(TessAggState *state);
+extern void note_memory_alive(TessAggState *state, Size alive);
 extern uint64 first_capacity(uint64 capacity);
 extern void *new_index(TessAggState *state, uint64 capacity, Size *size);
 extern void regrow_table(TessAggState *state, uint64 groups);

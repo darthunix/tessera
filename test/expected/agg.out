@@ -1293,6 +1293,65 @@ SELECT agg_same($$SELECT count(DISTINCT v) FROM agg_dm$$);
 (1 row)
 
 DROP TABLE agg_dm;
+-- What a DISTINCT set's table takes, in the node's peak: its first
+-- index, its chunks, and while an index is rebuilt larger, the old one
+-- and the new. Integer keys and arguments keep no dictionary, so Memory
+-- Usage is the node's own count of chunk and index lengths, exact in kB.
+CREATE FUNCTION agg_memory(query text) RETURNS integer
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        IF line ~ 'Memory Usage: \d+ kB' THEN
+            RETURN substring(line FROM 'Memory Usage: (\d+) kB')::integer;
+        END IF;
+    END LOOP;
+    RETURN NULL;
+END $$;
+CREATE TABLE agg_dset AS SELECT 0 AS g, i AS v, i % 100 AS w FROM generate_series(1, 3000) AS i;
+ANALYZE agg_dset;
+SET work_mem = '256kB';
+SET hash_mem_multiplier = 1;
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset GROUP BY g;
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: g
+   ->  Custom Scan (TessHeapScan) on agg_dset
+(3 rows)
+
+-- One set of 3000 values in the group's table: its last regrow, both of
+-- its indexes alive, is the highest moment.
+SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dset GROUP BY g$$);
+ agg_memory 
+------------
+       1205
+(1 row)
+
+-- spec: table-memory/A regrow is counted with both indexes
+SELECT agg_memory($$SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset GROUP BY g$$);
+ agg_memory 
+------------
+       1273
+(1 row)
+
+-- spec: table-memory/DISTINCT over no rows
+SELECT agg_memory($$SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset WHERE v + 0 < 0 GROUP BY g$$);
+ agg_memory 
+------------
+         13
+(1 row)
+
+SELECT agg_same($$SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset GROUP BY g$$);
+     agg_same     
+------------------
+ {"(0,100,3000)"}
+(1 row)
+
+RESET work_mem;
+RESET hash_mem_multiplier;
+DROP TABLE agg_dset;
 -- A text argument through a dictionary of its values.
 EXPLAIN (COSTS OFF) SELECT count(DISTINCT c) FROM agg_t;
                 QUERY PLAN                 
@@ -2375,4 +2434,5 @@ SELECT agg_costs_ordered($$SELECT count(*), sum(a), max(c) FROM agg_t$$) AS plai
 DROP FUNCTION agg_costs_ordered(text);
 DROP TABLE agg_t;
 DROP FUNCTION agg_same(text);
+DROP FUNCTION agg_memory(text);
 DROP EXTENSION tessera;
