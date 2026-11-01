@@ -306,7 +306,12 @@ generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 		else
 			bytes += get_typavgwidth(agg->aggtranstype, -1);
 	}
-	return groups * bytes <= (double) tess_planned_memory_limit(root);
+	/*
+	 * A gate, not a price: the states of an aggregate the core computes do
+	 * not spill, so they must fit the memory the node is sure of, hash_mem,
+	 * not the family's planning estimate (tess_planned_memory_limit).
+	 */
+	return groups * bytes <= (double) tess_hash_memory_limit();
 }
 
 /* Whether an aggregate of the target list goes through the core's functions. */
@@ -981,6 +986,17 @@ has_distinct_aggregate(List *tlist)
 	return false;
 }
 
+/* Whether an expression holds a DISTINCT aggregate, at any depth. */
+static bool
+contains_distinct_aggregate(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Aggref) && ((Aggref *) node)->aggdistinct != NIL)
+		return true;
+	return expression_tree_walker(node, contains_distinct_aggregate, context);
+}
+
 /*
  * Whether the pairs of group and argument of the DISTINCT aggregates fit
  * hash_mem, as the planner estimates them: their tables do not spill. A
@@ -1016,7 +1032,8 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 					 get_typavgwidth(exprType(argument), exprTypmod(argument)));
 		}
 	}
-	return bytes <= (double) tess_planned_memory_limit(root);
+	/* A gate: a DISTINCT aggregate's pairs do not spill (generic_fits). */
+	return bytes <= (double) tess_hash_memory_limit();
 }
 
 /*
@@ -1828,7 +1845,8 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	 * A grouping, a set operation or a DISTINCT aggregate keeps a table:
 	 * a share of the query's memory, as the core's hashed Agg asks.
 	 */
-	if (nkeys > 0 || setop != 0 || has_distinct_aggregate(tlist))
+	if (nkeys > 0 || setop >= 0 || contains_distinct_aggregate((Node *) info.expressions, NULL) ||
+		contains_distinct_aggregate((Node *) tlist, NULL))
 		tess_path_ask_memory(best_path);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
