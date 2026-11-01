@@ -22,7 +22,7 @@ named in a task comes on top.
 - [x] 2.1 Add the three float cases of the design's measurement plan to
       the family `win` of `bench/pg`, with their lines in
       `bench/pg/README.md`. Check: `bench/pg/run.sh measure win` with
-      `CASES='^float_'` and `REPETITIONS=1` runs them, and `plans.txt`
+      `CASES='^float'` and `REPETITIONS=1` runs them, and `plans.txt`
       shows the float functions computed by Tessera's node.
 - [x] 2.2 Add to the float section of the suite `types` the rows the
       design's "Tests" lists (a subnormal, `NaN / 0`, `0 / 0`,
@@ -87,10 +87,10 @@ named in a task comes on top.
       branch's base, its `missed.txt` empty or listed.
 - [ ] 6.2 Measure as the design's plan says, on an idle machine the
       person confirms. Check: `cargo ab measure --base <task 2.1>
-      --family win --cases '^float_'` flags no case; the run's id in
+      --family win --cases '^float'` flags no case; the run's id in
       the pull request.
-- [ ] 6.3 Two outside reviews of the pull request; each finding fixed,
-      or answered in the pull request.
+- [ ] 6.3 Outside reviews of the work by Codex as it goes; each finding
+      fixed, or answered in the pull request.
 
 ## 7. The close
 

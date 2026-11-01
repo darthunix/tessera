@@ -225,7 +225,7 @@ a Rust frame: Rust returns a status, and C raises it after the call.
   under a sum (`sum((c2::float8 / 3)::int8)`), and float4 against
   float8 (`c3::float4 * 2::float4 < c4::float8`).
 - **Tool:** `cargo ab measure --base <the commit with the cases>
-  --family win --cases '^float_'`, release builds, on an idle machine
+  --family win --cases '^float'`, release builds, on an idle machine
   that the person asks for, at most five minutes.
 - **Threshold:** no case flagged by the tool, that is, no case slower
   beyond the drift of the core's own time between the sides.
