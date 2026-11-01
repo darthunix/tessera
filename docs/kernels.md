@@ -93,9 +93,10 @@ undefined behavior where it cannot (overlap, dangling pointers).
 
 One function, `tessera_kernels::error::classify`, tells the errors with an
 SQLSTATE of their own (the kernels' arithmetic, calendar and text errors,
-which share the trait `SqlError`, and `relspill::Damaged`) from every
-other error, which is a misuse of the call, the caller's bug, and comes
-back as `TESS_ERROR_INVALID_ARGUMENT` with `XX000`.
+which share the trait `SqlError`, and an error of `relspill` of the kind
+`relspill::Kind::Damaged`) from every other error, which is a misuse of
+the call, the caller's bug, and comes back as `TESS_ERROR_INVALID_ARGUMENT`
+with `XX000`.
 
 A `NULL` or undersized status (its `struct_size` below
 `TESS_STATUS_MIN_SIZE`) is left alone; the return value still carries the

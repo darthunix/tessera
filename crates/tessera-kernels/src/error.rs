@@ -1,10 +1,8 @@
 //! The errors a kernel reports with an SQLSTATE of their own, and the one
 //! place that tells them from the rest: a value of the data, as the
 //! function a kernel implements raises it, or spilled bytes read back
-//! damaged ([`relspill::Damaged`]). Any other error is a misuse of a
+//! damaged ([`relspill::Kind::Damaged`]). Any other error is a misuse of a
 //! call, which the C boundary reports as an internal error.
-
-use relspill::Damaged;
 
 use crate::calendar::CalendarError;
 use crate::float::FloatError;
@@ -75,7 +73,9 @@ impl SqlError for TextError {
     }
 }
 
-impl SqlError for Damaged {
+/// An error of the spill: damaged data when spilled bytes read back fail
+/// their checks; a wrong call is a misuse, which [`classify`] leaves out.
+impl SqlError for relspill::Error {
     fn sqlstate(&self) -> &'static str {
         "XX001"
     }
@@ -101,6 +101,7 @@ pub fn classify(error: &anyhow::Error) -> Option<&dyn SqlError> {
         return Some(text);
     }
     error
-        .downcast_ref::<Damaged>()
+        .downcast_ref::<relspill::Error>()
+        .filter(|spill| relspill::Error::kind(**spill) == relspill::Kind::Damaged)
         .map(|damaged| damaged as &dyn SqlError)
 }

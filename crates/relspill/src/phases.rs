@@ -175,10 +175,10 @@ pub type SharedCounters<'a> = Counters<&'a [AtomicU64; COUNTER_WORDS]>;
 pub const COUNTER_WORDS: usize = 4;
 
 // The words of the counters, by index.
-const RECORDS: usize = 0;
+pub(crate) const RECORDS: usize = 0;
 const NULL_COLUMNS: usize = 1;
-const CHUNKS: usize = 2;
-const DUPLICATES: usize = 3;
+pub(crate) const CHUNKS: usize = 2;
+pub(crate) const DUPLICATES: usize = 3;
 
 pub(super) use sealed::CounterWords;
 
