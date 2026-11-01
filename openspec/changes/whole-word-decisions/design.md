@@ -41,7 +41,8 @@ state of the drivers that shapes the design.
   `try_fold_full_word`, and every other word by a scan of its bits.
 - The benchmark cases: the reading fixtures (`support/reading.rs`,
   `support/reading64.rs`), which 10 programs share, have words of 8
-  (`eighth`) and 32 (`half`, `random`) selected rows; the filters
+  (`eighth`) and 32 (`half`) selected rows, and of about 32, each row
+  drawn with a chance of one half (`random`); the filters
   (`support/filtering.rs`, `support/filtering64.rs`) and the
   comparisons (`support/comparing.rs`) build matrices of their own,
   without `half`; `set_int32` adds words of 16 rows (`quarter`).
@@ -107,11 +108,21 @@ can compare it.
 
 A driver that takes a word whole at a density cannot show what its
 rows would cost there, and the reverse. So each density is measured
-between two builds that differ only in the bound:
+between two builds that differ only in the decision. In both, the
+whole decision of every driver, the test of rows, the shortcut of a
+full word (`selected == u64::MAX`) and, for the sets, the bound of
+keys, is replaced by one value that the compiler cannot see through
+(`std::hint::black_box`), so that both paths stay compiled as they are
+and only the value differs:
 
-- the rows build: no word is taken whole (a bound above 64);
-- the whole build: every word the reader exposes is taken whole (a
-  bound of 2).
+- the rows build: the value is false, and no word is taken whole;
+- the whole build: the value is true wherever the reader exposes the
+  block, and every such word is taken whole, whatever its rows or the
+  set's keys.
+
+Which path a case took is checked, not assumed: by the instructions a
+call takes, which differ many times between the paths, and by the
+listing of both builds.
 
 `tessera-bench --base <rows build> --candidate <whole build>` on the
 density cases gives, for each family, storage and density, the change
@@ -237,11 +248,12 @@ Mac are the maintainer's commands, and the M5 Pro's are relayed.
 - The rule of acceptance: a candidate gains on a case when its minimum
   and its median cycles both fall by more than 3 % and by more than the
   case's noise, in both runs. It loses on a case on 10 % more minimum
-  cycles confirmed by a second run, or on a FAIL of instructions. A run
-  with an UNSTABLE on a case the candidate changes is repeated, and a
-  second UNSTABLE stops the work for the maintainer. A FAIL that the
-  listing shows to be where the code lies is named and goes to the
-  maintainer.
+  cycles confirmed by a second run, or on a FAIL of instructions. An
+  UNSTABLE on a case the candidate changes decides nothing: the run is
+  kept and explained, as `docs/measuring.md` asks, and never repeated
+  for its result; its cause is a hypothesis of its own before another
+  run. A FAIL that the listing shows to be where the code lies is
+  named and goes to the maintainer.
 - The runs worth citing are copied to `docs/benchmarks/<date>/`.
 
 ## Risks / Trade-offs

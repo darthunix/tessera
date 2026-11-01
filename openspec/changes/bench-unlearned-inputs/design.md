@@ -61,8 +61,8 @@ state of the benchmarks that shapes the design.
 - The same instructions in every block, within the 0.1 % of
   `tessera-bench`, so that its verdicts keep their meaning.
 - A call of a new case does the work of the case it replaces: the same
-  rows, and in every word the same numbers of selected and NULL rows
-  as in every other input of the case.
+  rows, and the same numbers of full, single-row and other words, of
+  selected rows and of NULL rows, as every other input of the case.
 - The regular cases unchanged.
 
 **Non-Goals:**
@@ -85,12 +85,14 @@ about 7000 data-dependent branches a call, and Ice Lake learned them.
 So the inputs must not repeat within the predictor's reach.
 
 Every input of a case is drawn so that it does the same work as the
-others: in each word the same number of selected rows and of NULL
-rows, at positions drawn anew. Each input is the case's first input
-with the rows of each word permuted by its own seed, the masks and the
-values together. Two inputs then differ in where their rows lie, not
-in how many there are, and a call costs the same instructions whatever
-input it takes, but for the branches that miss.
+others, yet repeats neither where its rows lie nor how many each word
+holds. Each input is the case's first input with its words put in an
+order drawn by its own seed, and then the rows of each word permuted
+by the same seed, the masks and the values together. Two inputs then
+hold the same words, so a call costs the same instructions whatever
+input it takes, but for the branches that miss; yet the count of rows
+of the n-th word changes from input to input, and with it every loop
+over the rows of a word, whose exit the predictor cannot learn.
 
 Three forms keep the inputs from repeating:
 
@@ -118,11 +120,13 @@ Three forms keep the inputs from repeating:
 
 For each case of the pilot, the expected misses a call are those of a
 predictor that knows how often each data-dependent branch goes each
-way but has not seen the inputs: for each branch, the rarer outcome's
-share, summed over a call. They are computed from the case itself, by
-enumerating its inputs in the benchmark's own model, and printed with
-the case's check, so that the number the pilot is held to is the
-case's, not a guess.
+way, and how a loop's trip counts are spread, but has not seen the
+inputs: for each branch, the rarer outcome's share, and for each loop
+over the rows of a word, the share of its exits that a trip count
+drawn from that spread cannot foretell, summed over a call. They are
+computed from the case itself, by enumerating its inputs in the
+benchmark's own model, and printed with the case's check, so that the
+number the pilot is held to is the case's, not a guess.
 
 ### The pilot
 
@@ -137,36 +141,39 @@ Two cases, each in its new form:
   and the case shows nothing there.
 
 Each form is tried on each case, with `K` of 1, 8, 16, 32, 64 and 128
-where it has one, as a hypothesis written down first. Three controls
-run beside it, each the same in footprint, preparation and schedule
-of reads, but over one input:
+for the ring and the long input, as a hypothesis written down first.
+Beside each runs a control: the same form, footprint, preparation and
+schedule of reads, over inputs that repeat:
 
-- for the ring, a ring of `K` copies of the same input;
-- for the long input, the same input repeated `K` times;
-- for the fresh input, the same input copied anew before every call.
+- for the ring, a ring of `K` copies of one input;
+- for the long input, one input repeated `K` times;
+- for the fresh input, the same permutation, from the same saved
+  input with one seed, before every call, so that the preparation does
+  the same work and leaves the same branches, and the data repeat.
 
-A control's misses show what the predictor learns when the novelty is
-gone and all else stays; its cycles show what the footprint or the
-schedule costs by itself. The listing of each pilot build
-(`tessera-bench --disasm`) shows that the kernels lie at the same
-places in their lines of 64 bytes as in the base; a pilot whose
-kernels moved is compared with a base that moved them alike, or not
-judged on cycles.
+A form and its control are two cases of one program, so their code
+lies at the same addresses, and the difference of their misses is the
+novelty alone; the controls' cycles against the plain case of the same
+program show what the footprint or the schedule costs by itself. The
+listing of each pilot build against the base (`tessera-bench
+--disasm`) records where the measured loops lie, so that a difference
+between the pilot build and the base is not read as the form's.
 
 A form passes when, in both runs on each machine where its case
-applies:
+applies, and with no UNSTABLE reported:
 
-- its misses a call reach at least 80 % of the model, and its control
-  stays where the base is;
-- its misses at `2K` are within 5 % of those at `K`, so the predictor
-  learns nothing left;
-- `tessera-bench` reports no UNSTABLE for it.
+- its misses a call reach at least 80 % of the model, while its
+  control's stay near the plain case's;
+- for the ring and the long input, its misses at `2K` are within 5 %
+  of those at `K`, so the predictor learns nothing left; the fresh
+  input, never repeated, needs no such step.
 
 Of the forms that pass, the one that changes the conditions least is
-taken: the fresh input if its control costs no more than the base by
-the warning of 3 % of cycles, otherwise the ring with the smallest `K`
-that passes. A pilot where no form passes stops the work for the
-maintainer.
+taken: the fresh input if its control costs no more than the plain
+case by the warning of 3 % of cycles; else the ring with the smallest
+`K` that passes; else the long input, with the README saying that its
+calls are `K` times as long. A pilot where no form passes stops the
+work for the maintainer.
 
 Refused:
 

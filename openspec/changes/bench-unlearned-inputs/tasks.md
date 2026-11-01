@@ -21,8 +21,7 @@ and relays.
 - [ ] 2.1 The permuted inputs of the fixture, the model of the misses
       of a case, and the period of a ring in the runner. Check: `cargo
       test --locked -p tessera-capi --benches`; a test that every input
-      of a case has the same counts of selected and NULL rows in each
-      word
+      of a case holds the same words, in another order
 - [ ] 2.2 The three forms of the design and their controls on the two
       cases of the pilot, each a case of its own name, so that the runs
       can filter them; `K` a constant of the case. Check: `cargo test
@@ -47,8 +46,9 @@ and relays.
 - [ ] 3.3 `tessera-bench --base WORKTREE` over every program that has
       the new cases, as root and on the M5 Pro: no FAIL and no
       UNSTABLE on them; their spread, MODES and misses a call go into
-      the pull request. A FAIL or an UNSTABLE stops the work for the
-      maintainer
+      the design, with the ids of the runs. A FAIL or an UNSTABLE stops
+      the work for the maintainer. Check:
+      `.github/scripts/check-specs.sh`
 
 ## 4. The close
 

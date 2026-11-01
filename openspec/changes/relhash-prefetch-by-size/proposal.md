@@ -43,14 +43,16 @@ depend on the other two: its question is the caches, not the branches.
   prefetch hint when the table is larger than a bound of bytes, and
   none otherwise; the choice is made once a call, from the sizes the
   table already knows: its buckets and its records. Under the bound
-  their machine code is today's. The bound is a constant for each
-  architecture.
+  they give no hint: x86-64 keeps today's code there. The bound is a
+  constant for each architecture.
 - x86-64 gets the hint, `prefetcht0`, on tables above that bound;
-  AArch64 keeps `prfm pldl1keep` and gets a bound of its own, measured
-  on the M5 Pro, if a table in the cache pays for the hint there too.
+  AArch64 keeps `prfm pldl1keep` above a bound of its own, measured on
+  the M5 Pro, which is 0 if the hint costs a table in the cache
+  nothing there.
 - `table_large` measures tables of eight sizes between the caches and
-  memory, with a find or insert that creates records and a gather of
-  records in no order, so that the bound can be read off the counters.
+  memory, with a find or insert that creates records and both gathers
+  of records in no order, so that the bound can be read off the
+  counters.
 - The design of `relhash` says how the hint is chosen; the forecast of
   its contract says what the change touched.
 
