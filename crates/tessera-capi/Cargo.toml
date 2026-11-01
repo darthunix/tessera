@@ -80,3 +80,7 @@ harness = false
 [[bench]]
 name = "table_large"
 harness = false
+
+[[bench]]
+name = "spill"
+harness = false

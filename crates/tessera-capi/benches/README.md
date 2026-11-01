@@ -43,6 +43,17 @@ The benchmark programs:
   it passes. About 0.5 % of absent keys pass, and every batch holds as
   many of them, at the same rows, so the second one too does the same
   work in every call.
+- [spill](spill.rs) measures the kernels of a spill: a chunk of records
+  packed and unpacked (a join's record of int4 values, and a wider one
+  of words of 20 bits), a chunk of columns packed and unpacked (4 words,
+  and 70, whose NULL bits take two lanes), a batch of 1024 rows appended
+  by partition to 8 chunks of columns of 4 and of 70 words, and a
+  block's header written and read. The reference of a chunk is the copy
+  that writing it unpacked takes; that of the rows a plain loop that
+  lays them out in each partition's lanes; that of the header its fields
+  laid out with no check. The packing of records allocates three small
+  vectors a call, which its counts include and which make its
+  instructions differ a little from block to block.
 
 Neither measures SQL latency or requires PostgreSQL. They measure PMU
 counters, not time: retired instructions, core cycles, mispredicted branches
@@ -193,8 +204,11 @@ Each filter invocation starts with a fresh selection mask.
 
 The [runner](support/runner.rs) calibrates the number of calls per block so
 that a block takes about 20 million cycles, warms up with one block, and
-then counts ten blocks. The output file has one JSON line per operation with
-the raw readings of every block:
+then counts ten blocks. A calibration that reads zero cycles is a failed
+read, repeated up to three times, and the run stops if it stays zero:
+taken for a call of one cycle, it would choose ten million calls a block.
+The output file has one JSON line per operation with the raw readings of
+every block:
 
 ```json
 {"id":"column_reader/dense/words/1024/all/nulls-none/ready/fold","iters":50000,

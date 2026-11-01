@@ -1,7 +1,9 @@
 //! Benchmark runner on PMU counters; no wall time anywhere.
 //!
 //! Every operation is calibrated by cycles, warmed up at the chosen call
-//! count, and then measured in [`BLOCKS`] blocks of that many calls. Raw
+//! count, and then measured in [`BLOCKS`] blocks of that many calls. A
+//! calibration whose cycles read zero is repeated as a block is, and a run
+//! stops when they stay zero. Raw
 //! per-block readings go to a JSONL file together with the CPU each block
 //! started and ended on; statistics and limits belong to tessera-bench. A
 //! block whose counters read zero is a failed counter read, not a
@@ -130,7 +132,19 @@ impl Runner {
                 Ok(())
             }
             Mode::Measure { counters, output } => {
-                let calibration = run(counters, CALIBRATION_CALLS)?;
+                // A calibration that read zero is a failed read as well: taken
+                // for a call of one cycle, it would choose the most calls.
+                let mut calibration = run(counters, CALIBRATION_CALLS)?;
+                for _ in 0..MAX_RETRIES {
+                    if calibration.cycles != 0 {
+                        break;
+                    }
+                    calibration = run(counters, CALIBRATION_CALLS)?;
+                }
+                ensure!(
+                    calibration.cycles != 0,
+                    "{id}: the counters read zero cycles for {CALIBRATION_CALLS} calls"
+                );
                 let per_call = calibration.cycles.div_ceil(CALIBRATION_CALLS).max(1);
                 let iters = (TARGET_CYCLES / per_call).clamp(1, MAX_CALLS);
                 run(counters, iters)?;

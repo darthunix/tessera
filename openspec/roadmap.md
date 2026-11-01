@@ -1983,6 +1983,14 @@ becomes an entry, joins one, or is dropped.
     4. Suggested: mutants of `core_pmu.rs` and of the decoding of a
     read, which need no PMU, or drop.
 
+- **The append of rows by partition reads each row's chunk again** (the
+  change `spill-crate`, the counters of task 2.6).
+  `append_partitioned` reads the header of a row's chunk, checks its
+  magic and its width, for every row: at 4 words a row takes 249
+  instructions against 170 of a plain loop of the same lanes, and some
+  140 of them do not depend on the words. Suggested: keep the shape of
+  each partition's chunk for a batch, or drop.
+
 ## Decided against
 
 Not future work: each was weighed and refused, or left to the core, with
