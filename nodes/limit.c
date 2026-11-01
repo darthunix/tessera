@@ -211,8 +211,7 @@ limit_exec(CustomScanState *css)
 	 * As Greengage's Limit does: at the end, with no rescan to come, the
 	 * subtree is squelched, so that the senders of a Motion below stop
 	 * waiting for this reader. The squelch reaches TessPack and the rest
-	 * through custom_ps.
-	 * shortcut: rows only; a batch parent above stops nothing below yet.
+	 * through custom_ps. A batch parent reads the end here too.
 	 */
 	if (TupIsNull(slot) && !state->expect_rescan)
 		ExecSquelchNode(&css->ss.ps);
