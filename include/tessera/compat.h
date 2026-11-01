@@ -78,8 +78,9 @@ int64_to_numeric(int64 value)
 /*
  * value / 10^scale as a numeric whose display scale is Max(scale, 0)
  * (PostgreSQL 14): a product by 1e-scale, whose scales add up. The
- * callers pass a decimal's scale; one past numeric's precision, whose
- * factor numeric cannot hold, is refused.
+ * callers pass a decimal's scale, a few dozen at most: this version
+ * takes scales within +-NUMERIC_MAX_PRECISION only, a narrower range
+ * than master's, and refuses the others.
  * shortcut: parses the factor on every call; cache it if a profile shows it.
  */
 static inline Numeric
@@ -144,7 +145,21 @@ tess_foreach_start(const List *list)
 static inline List *
 list_copy_head(const List *list, int n)
 {
-	return list_truncate(list_copy(list), n);
+	List	   *result = NIL;
+	ListCell   *cell;
+
+	foreach(cell, list)
+	{
+		if (n-- <= 0)
+			break;
+		if (IsA(list, IntList))
+			result = lappend_int(result, lfirst_int(cell));
+		else if (IsA(list, OidList))
+			result = lappend_oid(result, lfirst_oid(cell));
+		else
+			result = lappend(result, lfirst(cell));
+	}
+	return result;
 }
 
 /* A new list of both lists' cells, neither changed (PostgreSQL 13). */
@@ -158,12 +173,15 @@ list_concat_copy(const List *list1, const List *list2)
 static inline List *
 list_delete_last(List *list)
 {
-	if (list_length(list) <= 1)
-	{
-		list_free(list);
+	ListCell   *prev = NULL;
+	ListCell   *cell;
+
+	if (list == NIL)
 		return NIL;
-	}
-	return list_truncate(list, list_length(list) - 1);
+	for (cell = list_head(list); lnext(cell) != NULL; cell = lnext(cell))
+		prev = cell;
+	/* Frees the cell, and the list with its only one. */
+	return list_delete_cell(list, cell, prev);
 }
 
 /* Grow an allocation and zero the new tail (PostgreSQL 16). */
