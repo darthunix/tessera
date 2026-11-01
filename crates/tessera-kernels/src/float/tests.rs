@@ -422,6 +422,7 @@ fn casts_to_floats_round_to_nearest_and_check_float4() {
     assert_eq!(16_777_217_i32.float4(), Ok(16_777_216.0));
     assert_eq!(i32::MIN.float8(), -2147483648.0);
     assert_eq!(1.5_f32.float8(), 1.5);
+    assert_eq!((-2.5_f64).float8().to_bits(), (-2.5_f64).to_bits());
     assert_eq!(f32::MAX.float4(), Ok(f32::MAX));
 }
 

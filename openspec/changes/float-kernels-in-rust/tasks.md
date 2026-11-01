@@ -81,7 +81,7 @@ named in a task comes on top.
 
 ## 6. The checks of the whole
 
-- [ ] 6.1 Run the mutants of the changed Rust lines: none survives, or
+- [x] 6.1 Run the mutants of the changed Rust lines: none survives, or
       each one left is listed in `.cargo/mutants.toml` with the reason
       it is equivalent. Check: `cargo mutants --in-diff` against the
       branch's base, its `missed.txt` empty or listed.
