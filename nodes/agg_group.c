@@ -301,7 +301,12 @@ group_batch(TessAggState *state, TessBatch *batch)
 
 				hash = hash_combine(hash, part);
 			}
-			state->value_hashes[row] = hash;
+			/*
+			 * Mixed: a dictionary takes the low bits of a value's hash for
+			 * its bucket, and the rows of a partition share those its
+			 * levels take.
+			 */
+			state->value_hashes[row] = murmurhash32(hash);
 		}
 	}
 	/*

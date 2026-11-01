@@ -1104,12 +1104,19 @@ table freezes and takes no new group, the rows of its groups go on into
 them, and the rows of the groups it lacks go, the values of every key
 and argument (`TESS_SPILL_COLUMNS` blocks of 256 rows and blocks of
 their by-reference values), to 32 partitions on disk by five bits of
-their hash. Once the groups in memory are out, each partition is read
-back, 64 rows a batch, into a table of its own with fresh states; one
-that does not fit either spills by the next five bits, depth first, six
-levels at most (`Spilled Rows` in `EXPLAIN (ANALYZE, VERBOSE)`). A group's rows stay
-in their order, as an order-sensitive aggregate such as `string_agg`
-needs. With a `DISTINCT` aggregate alongside, whose table does not
+their hash, the low ones, which the buckets of a partition's table,
+taken from the high bits, leave free; a key with a dictionary of values
+goes by its values' hash, mixed first, since the dictionary's buckets
+take that hash's low bits. Once the groups in memory are out, each
+partition is read back, 64 rows a batch, into a table of its own with
+fresh states; one that does not fit either spills by the next five
+bits, depth first, six levels at most (`Spilled Rows` in `EXPLAIN
+(ANALYZE, VERBOSE)`). The bits of a level and of its parents stay clear
+of the buckets of a table of 2^b of them for the first (32 - b) / 5
+levels, four of a table of 1024 buckets and three of 65536; a deeper
+level takes bits of the buckets too. A group's rows stay in their
+order, as an order-sensitive aggregate such as `string_agg` needs.
+With a `DISTINCT` aggregate alongside, whose table does not
 spill, the path is taken only when the planner's estimate of the groups
 and their states, a type's average width or an internal state's
 declared space or 1 kB as the core estimates them, fits `hash_mem`. Not

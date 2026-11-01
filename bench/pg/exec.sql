@@ -133,14 +133,20 @@ SELECT pg_temp.measure_pair('even_join',
     'SELECT count(*), sum(d.d1) FROM bench_fact AS f JOIN bench_dim AS d ON f.fk = d.id',
     '1MB', true, :repetitions);
 -- Text past work_mem: a sort whose runs carry a text column that a parent
--- reads back from them, and a grouping by a text key whose rows wait on
--- disk for their partition.
+-- reads back from them, a grouping by a text key whose rows wait on disk
+-- for their partition by the hashes of its dictionary of values, and one
+-- by an integer key, of an aggregate with no states of its own, whose
+-- rows wait by the hashes of its table of groups; at 1MB a partition's
+-- groups come near what its table holds.
 SELECT pg_temp.measure_pair('runs_text',
     'SELECT count(t) FROM (SELECT k4, t FROM bench_sort ORDER BY k4) AS s',
     '4MB', true, :repetitions);
 SELECT pg_temp.measure_pair('rows_text',
     'SELECT count(*), sum(s) FROM (SELECT b, sum(d) AS s FROM bench_mixed GROUP BY b) AS g',
     '4MB', true, :repetitions);
+SELECT pg_temp.measure_pair('rows_generic',
+    'SELECT count(*), max(m) FROM (SELECT a, max(e) AS m FROM bench_mixed GROUP BY a) AS g',
+    '1MB', true, :repetitions);
 -- Planning alone: EXPLAIN of thirty aggregates of expressions and a
 -- filter, planned every time.
 SELECT pg_temp.measure_pair('plan_exprs',

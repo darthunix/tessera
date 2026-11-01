@@ -500,9 +500,11 @@ moves into the crate once, and its copies go.
 - The rule of a full chunk: twice in the join, once in the grouping.
 - The partition of a hash: an inline function in C, and one in
   `relhash`.
-- The bits of the hash each level takes. The join and the grouping's
-  groups take the low bits, from level 0 up; the grouping's rows take
-  the high bits, down. Three rules, which the level plan holds.
+- The bits of the hash each level takes. The join and the grouping
+  take the low bits, from level 0 up, and the buckets of a table the
+  high bits; the grouping's rows by a key with a dictionary of values
+  go by the values' hashes mixed first, since the dictionary's buckets
+  take their low bits. Two rules, which the level plan holds.
 - The writer and the reader of a chunk of columns: for the grouping's
   rows, twice for the sort's runs, for the join's outer rows, and for
   the gather of parallel workers.

@@ -147,13 +147,14 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       `test/tessera_interrupt_test.c` that marks a cancel pending
       before each loop it can reach and shows that the loop stops
       before its end; `make installcheck`
-- [ ] 2.12 Take the partitions of the grouping's spilled rows from the
+- [x] 2.12 Take the partitions of the grouping's spilled rows from the
       low bits of the hash, as its spilled records do, and not from
       the high bits, which the buckets of a partition's table take
       too: today most buckets of such a table stay empty and its
-      chains grow long. The design's three rules of the bits of a
-      level become two. Check: a test of a level's bits that the rows
-      of a partition spread over the buckets of its table;
+      chains grow long. Rows by a key with a dictionary of values go
+      by the values' hashes, whose low bits the dictionary's buckets
+      take: those are mixed first. Check: a test of a level's bits that
+      the rows of a partition spread over the buckets of its table;
       `cargo ab measure` of a grouping of a generic aggregate over many
       groups at a small `work_mem`, before and after;
       `make installcheck`

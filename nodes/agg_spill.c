@@ -1119,11 +1119,16 @@ void
 rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
 {
 	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
-	int			shift = 32 - ROWS_PART_BITS * (spill->level + 1);
 	int			row = -1;
 
-	/* By the values' hashes when a key has a dictionary: the numbers are one table's. */
+	/*
+	 * By the values' hashes, mixed, when a key has a dictionary: the numbers
+	 * are one table's. The partitions take the low bits, the bits above for
+	 * each level, which the buckets of the table of groups, taken from the
+	 * high bits, leave free.
+	 */
 	const uint32 *hashes = state->has_dicts ? state->value_hashes : state->hashes;
+	uint32		shift = ROWS_PART_BITS * spill->level;
 
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
