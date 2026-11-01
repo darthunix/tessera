@@ -79,8 +79,10 @@ one of them does not compute it at all.
   `tess_spill_chunk_len(limit, 1, 8, 64 kB, 1 MiB)`, the limit being
   `tess_hash_memory_limit()` as today, with its cap of 16 GiB. The call
   is written once, with its arguments, in the helper of decision 2, and
-  the first chunk's 64 kB beside it. The join asks once and keeps the
-  answer, since its check before each batch needs it. The join's
+  the first chunk's 64 kB beside it. The join asks once a build and
+  keeps the answer, since its check before each batch needs it; a
+  build after `work_mem` changed, at a cursor's next fetch, asks
+  again. The join's
   values keep their own rule of size: a value larger than a quarter of
   1 MiB takes a chunk of its own size, and an ordinary chunk of values
   is the larger of the rule's length and the value.
