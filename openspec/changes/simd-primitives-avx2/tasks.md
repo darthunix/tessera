@@ -179,7 +179,7 @@ reason saying that both machines were measured.
 - [x] 5.4 The branch-free read of a NULL slot, `read_masked`, against
       a branch. Check: as root, twice, the candidate against `HEAD`
       on `column_reader`
-- [ ] 5.5 The prefetch hint of `relhash` on x86-64, `prefetcht0`, in
+- [x] 5.5 The prefetch hint of `relhash` on x86-64, `prefetcht0`, in
       `table/lanes.rs`, with the design of `relhash` and the forecast
       of its contract. Check: `cargo test --locked -p relhash`; the
       x86 listing of every program against `HEAD`, for the rule "No
