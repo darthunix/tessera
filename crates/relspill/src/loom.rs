@@ -5,7 +5,6 @@
 //! table's own code over loom's atomics; the words of a spill are loom
 //! atomics with the orderings of [`crate::shared_spill`]. Run with `make
 //! rust-loom`.
-#![allow(unsafe_code)]
 
 use ::loom::sync::Arc;
 use ::loom::sync::atomic::AtomicU64;
@@ -215,8 +214,8 @@ impl Build {
                 Action::Flush | Action::Outer => {}
                 Action::Allocate | Action::Load => panic!("a build got {action:?}"),
                 Action::Size => {
-                    // SAFETY: the elected one alone uses the index now.
-                    unsafe { self.table.size(self.counters.total_records()) }.unwrap();
+                    // The elected one alone uses the index now.
+                    self.table.size(self.counters.total_records()).unwrap();
                 }
                 Action::Link => {
                     self.table.link(chunk).unwrap();
@@ -560,8 +559,8 @@ impl Round {
                 Action::Attach => reply = self.barrier.attach(),
                 Action::ArriveAndWait => reply = u32::from(self.barrier.arrive_and_wait()),
                 Action::Allocate => {
-                    // SAFETY: the elected one alone uses the index now.
-                    unsafe { self.table.size(self.keys as u64) }.unwrap();
+                    // The elected one alone uses the index now.
+                    self.table.size(self.keys as u64).unwrap();
                 }
                 Action::Load => {
                     let mut loaded = false;
