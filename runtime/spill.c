@@ -480,7 +480,10 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 		body = out;
 		len = packed;
 	}
-	/* The header is checked before anything is written. */
+	/*
+	 * The header is checked before a byte of the block is written; a
+	 * chunk of columns may have flushed the blocks before it, whole.
+	 */
 	if (spill->kernels->spill_header_write(bytes, sizeof(bytes), &header,
 										   spill->max_len, &status) != TESS_OK)
 		tess_status_report(&status);
@@ -947,6 +950,10 @@ tess_spill_drop(TessSpill *spill, int partition)
 
 	check_spill(spill);
 	check_partition(spill, partition);
+	/* The list at the end of the file, written at the finish, would lose the blocks. */
+	if (spill->shared != NULL && !spill->finished)
+		elog(ERROR, "Tessera shared spill set dropped partition %d before it was finished",
+			 partition);
 	list = &spill->lists[partition];
 	if (list->count == 0)
 		return;

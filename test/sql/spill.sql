@@ -148,6 +148,9 @@ SELECT tessera_test_spill_sqlstate(39);
 SELECT tessera_test_spill_sqlstate(40);
 SELECT tessera_test_spill_sqlstate(41);
 SELECT tessera_test_spill_sqlstate(42);
+-- A shared set's partition dropped before the set is finished, whose
+-- blocks the list its finish writes would lose: a wrong call.
+SELECT tessera_test_spill_sqlstate(43);
 -- A file opened before its writer finished cannot be told from a
 -- damaged one.
 SELECT tessera_test_spill_sqlstate(27);

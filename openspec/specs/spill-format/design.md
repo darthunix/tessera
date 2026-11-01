@@ -582,7 +582,9 @@ reader of another participant's file opens the file for itself.
 
 `tess_spill_drop` removes the caller's list of a partition after the
 partition has been read. In a shared set the other participants still
-read the partition through the list in the file. The bytes stay in the
+read the partition through the list in the file, which the caller
+writes when it finishes the set; so a shared set refuses a drop before
+that. The bytes stay in the
 file until the set is freed. So the disk space of a set is freed all at
 once, not partition by partition.
 

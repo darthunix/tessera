@@ -498,14 +498,15 @@ resources are released.
   length than its header's; another participant's file of a serial set
   or a second reader of a serial partition is opened; a reader seeks to
   a position that holds no block of its partition; a partition is
-  dropped while a reader of it is open; a block of a kind that does not
-  exist is written
-- **THEN** each call raises an ERROR; the seek, the drop and the unknown
-  kind are internal errors, SQLSTATE `XX000`
+  dropped while a reader of it is open, or before its shared set is
+  finished; a block of a kind that does not exist is written
+- **THEN** each call raises an ERROR; the seek, the drops and the
+  unknown kind are internal errors, SQLSTATE `XX000`
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_error`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(16)`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(20)`;
-  `test/sql/spill.sql::tessera_test_spill_sqlstate(21)`
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(21)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(43)`
 
 #### Scenario: The limit and the tablespace of temporary files
 - **WHEN** a serial set, or a participant of a shared set, writes more
@@ -617,10 +618,11 @@ then give the body, unpacked when it was stored packed.
 `tess_spill_write` returned for it; any other position is a misuse of
 the call. `tess_spill_drop` SHALL forget the caller's list of a
 partition's blocks, which the caller then opens as no reader; the bytes
-stay in the file until the set goes. `tess_spill_stats` SHALL give the
-blocks and the bytes written, headers included, and the partitions that
-have blocks. Freeing or releasing a set closes its open readers, which
-the caller MUST NOT use afterwards.
+stay in the file until the set goes. A shared set SHALL refuse a drop
+before it is finished, as its finish writes the lists the others read.
+`tess_spill_stats` SHALL give the blocks and the bytes written, headers
+included, and the partitions that have blocks. Freeing or releasing a
+set closes its open readers, which the caller MUST NOT use afterwards.
 
 #### Scenario: Read to the end, reopen, drop
 - **WHEN** a partition is read to its end, opened again, and then dropped

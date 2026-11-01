@@ -923,6 +923,15 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			position.offset = 8;
 			tess_spill_seek(reader, position);
 			break;
+		case 43:
+			/* A shared set's partition dropped before the set is finished. */
+			segment = dsm_create(sizeof(SharedFileSet), 0);
+			shared = dsm_segment_address(segment);
+			tess_spill_shared_init(shared, segment);
+			other = make_spill(shared, 0, FINGERPRINT);
+			write_blocks(other, &block, 1);
+			tess_spill_drop(other, 0);
+			break;
 	}
 	PG_RETURN_VOID();
 }

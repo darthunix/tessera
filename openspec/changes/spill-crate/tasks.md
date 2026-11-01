@@ -81,7 +81,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       `test/tessera_spill_test.c` over damaged files through the
       join's reads, each refused with `XX001`, under the sanitizers of
       CI; `make installcheck`
-- [ ] 2.4 Refuse a partition of a shared set that is dropped before the
+- [x] 2.4 Refuse a partition of a shared set that is dropped before the
       set is finished; correct the comment that says a block of columns
       is checked before anything is written. Check: a case of
       `tessera_test_spill_error`; `make installcheck`
