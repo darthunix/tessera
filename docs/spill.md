@@ -186,11 +186,13 @@ level merges its chunks in memory as it merges those from disk. Grouping
 files from 447 MB to 211 MB (the core writes 446 MB).
 
 **Partial mode.** Under a `Gather`, past seven eighths of `hash_mem`,
-the node sends its groups up as partials, which the core's Finalize
-Aggregate merges, and starts its table anew, when that folds: a table of
-fewer groups than half the rows read since it started. Groups spread
-over the input fold nothing before the table fills, a group per row
-read, and sending them up would hand the Finalize Aggregate every row
+the node sends its groups up as partials, which the final grouping
+above the gather merges (the node's own above `TessGather`; the core's
+Finalize Aggregate only with `tessera.batch_gather` off, for the states
+it reads), and starts its table anew, when that folds: a table of fewer
+groups than half the rows read since it started. Groups spread over the
+input fold nothing before the table fills, a group per row read, and
+sending them up would hand the final grouping every row
 (1 M groups of 20 M rows at a `work_mem` of 4 MB: 6.15 M partials of
 6.7 M rows per participant, and the core's Finalize wrote 0.59 GB). Then
 the node spills from then on, as a serial one, and gives its groups out
@@ -199,7 +201,10 @@ aggregate does: that grouping ran in 1.03 s instead of 2.04 (the core
 1.35–1.51). Groups of sum states spill no state,
 since a merge of spilled records takes a word an aggregate, nor rows, which
 the table sent up would lose: they go up every time the table fills,
-their rests' memory counted, and the grouping above merges them.
+their rests' memory counted, and the grouping above merges them. Groups
+with a key through a dictionary go up the same: their records hold the
+key's number in the dictionary, not its value, and the next table
+makes the dictionary anew.
 
 **Memory.** The first index takes at most a quarter of `hash_mem`, a
 chunk an eighth; the node acts at seven eighths, the rest left for a

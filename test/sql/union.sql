@@ -431,7 +431,8 @@ SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
 -- value of its own, two columns, a count above, the workers alone; a
 -- branch without a partial path leaves the UNION serial, as the core's.
 CREATE TABLE union_keys AS
-SELECT i % 10 AS b, CASE WHEN i % 11 = 0 THEN NULL ELSE i % 13 END AS c
+SELECT i % 10 AS b, CASE WHEN i % 11 = 0 THEN NULL ELSE i % 13 END AS c,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE 'v' || (i % 13) END AS t
 FROM generate_series(1, 200000) AS i;
 ANALYZE union_keys;
 SET max_parallel_workers_per_gather = 2;
@@ -442,6 +443,27 @@ SET tessera.scan_worker_page_cost = 0;
 EXPLAIN (VERBOSE, COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT c AS x FROM union_keys UNION SELECT b FROM union_keys WHERE c IS NULL) AS s$$);
+-- Text through dictionaries, each participant's own.
+EXPLAIN (COSTS OFF) SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3;
+SELECT union_same($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$);
+-- Their tables sent up early, and none written to disk.
+CREATE FUNCTION union_partial(query text, name text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAgg" && @."Partial Mode" == "Partial").%I',
+               name)::jsonpath)::text;
+END $$;
+SET work_mem = '64kB';
+SELECT union_same($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$);
+SELECT union_partial($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$, 'Early Emits')::int > 0 AS early,
+       union_partial($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$, 'Disk Usage') IS NULL AS no_disk;
+RESET work_mem;
+DROP FUNCTION union_partial;
 -- The same as the left side of an EXCEPT.
 EXPLAIN (VERBOSE, COSTS OFF)
 (SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3) EXCEPT SELECT b FROM union_keys WHERE b = 1;

@@ -7,8 +7,8 @@
 
 ## 2. The work
 
-- [ ] 2.1 The dictionaries share a quarter of `hash_mem`, and a table
-      is too full only with a batch's groups at least; then remove
+- [x] 2.1 The dictionaries share a quarter of `hash_mem`, and a
+      partial table goes up only with a group in it; then remove
       `partial_keys` and its three conditions; tests of the plans and
       results in `parallel.sql` and `union.sql`; the documents. Check:
       `make installcheck` on a build of PostgreSQL master with

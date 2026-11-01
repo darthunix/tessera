@@ -398,6 +398,95 @@ SET parallel_tuple_cost = 0;
 RESET enable_sort;
 RESET work_mem;
 DROP TABLE parallel_groups, parallel_spread;
+-- Keys a word does not hold, text and numeric, under a Gather: each
+-- participant numbers their values in dictionaries of its own, which
+-- start anew with its table when the table goes up early; the groups go
+-- up as values, which the grouping above numbers again. Such a table
+-- never goes to disk: it goes up every time it fills, even when it folds
+-- nothing. NULL a group of its own; numeric of two scales, whose equal
+-- values are one group whatever their form (the first row's, as the
+-- core's, so the comparison drops it).
+CREATE TABLE parallel_dict AS
+SELECT 'k' || (g / 60) AS t, g % 3 AS i,
+       CASE WHEN g % 2 = 0 THEN (g / 60 % 50)::numeric ELSE (g / 60 % 50)::numeric(10, 2) END AS n,
+       CASE WHEN g % 11 = 0 THEN NULL ELSE 'v' || (g % 5000) END AS s, g AS v,
+       chr(65 + g % 3)::char(1) AS f, (CASE WHEN g % 2 = 0 THEN 'o' ELSE 'o  ' END)::bpchar AS st,
+       CASE WHEN g % 2 = 0 THEN 'K' || (g / 60) ELSE 'k' || (g / 60) END AS u
+FROM generate_series(1, 300000) AS g;
+ANALYZE parallel_dict;
+SET work_mem = '64kB';
+SET enable_sort = off;
+EXPLAIN (COSTS OFF) SELECT t, count(*), sum(v), sum(v::numeric) FROM parallel_dict GROUP BY t;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT t, count(*), sum(v), min(v), max(v), sum(v::numeric), avg(v) FROM parallel_dict GROUP BY t) AS q$$);
+SELECT partial_property($$SELECT t, count(*) FROM parallel_dict GROUP BY t$$, 'Early Emits')::int > 0 AS early,
+       partial_property($$SELECT t, count(*) FROM parallel_dict GROUP BY t$$, 'Disk Usage') IS NULL AS no_disk;
+-- Groups spread over the input: the table folds almost nothing, and
+-- goes up.
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT s, i, count(*), sum(v) FROM parallel_dict GROUP BY s, i) AS q$$);
+SELECT partial_property($$SELECT s, i, count(*) FROM parallel_dict GROUP BY s, i$$, 'Early Emits')::int > 0 AS early,
+       partial_property($$SELECT s, i, count(*) FROM parallel_dict GROUP BY s, i$$, 'Disk Usage') IS NULL AS no_disk;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT trim_scale(n), count(*), sum(v) FROM parallel_dict GROUP BY n) AS q$$);
+-- Without aggregates the same.
+SET parallel_tuple_cost = 0.1;
+EXPLAIN (COSTS OFF) SELECT DISTINCT t FROM parallel_dict;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT DISTINCT t FROM parallel_dict) AS q$$);
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT s FROM parallel_dict GROUP BY s) AS q$$);
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT t, trim_scale(n) FROM parallel_dict GROUP BY t, n) AS q$$);
+SET parallel_leader_participation = off;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT DISTINCT t FROM parallel_dict) AS q$$);
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT t, count(*), sum(v::numeric) FROM parallel_dict GROUP BY t) AS q$$);
+RESET parallel_leader_participation;
+SET parallel_tuple_cost = 0;
+-- Keys of char(n), as TPC-H Q1 has, and of bpchar, whose values of
+-- other lengths are one group without their trailing blanks (their form,
+-- the first row's, left out of the comparison).
+EXPLAIN (COSTS OFF) SELECT f, st, count(*), sum(v::numeric), avg(v) FROM parallel_dict GROUP BY f, st;
+SELECT parallel_same($$SELECT f, rtrim(st), count(*), sum(v::numeric), avg(v) FROM parallel_dict GROUP BY f, st$$);
+-- Many keys through dictionaries: the room each one takes for the groups
+-- expected and the empty table already pass hash_mem. A table goes up
+-- with a batch's groups at least, and the dictionaries share a quarter of
+-- hash_mem; an empty table sent up would be made anew of the same size,
+-- forever.
+SET statement_timeout = '60s';
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT t, s, upper(t), lower(s), count(*) FROM parallel_dict GROUP BY 1, 2, 3, 4) AS q$$);
+SELECT partial_property($$SELECT t, s, upper(t), lower(s), count(*) FROM parallel_dict GROUP BY 1, 2, 3, 4$$, 'Early Emits')::int > 0 AS early;
+RESET statement_timeout;
+-- At a hash_mem that holds many batches' groups, a table takes them
+-- before it goes up. Three dictionaries share their room: with a quarter
+-- of hash_mem each, they and the table's index would pass the limit
+-- before a row is read, and the table would go up after every batch.
+SET work_mem = '256kB';
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT s, i, count(*) FROM parallel_dict GROUP BY s, i) AS q$$);
+SELECT partial_property($$SELECT s, i, count(*) FROM parallel_dict GROUP BY s, i$$, 'Early Emits')::int
+       < partial_property($$SELECT s, i, count(*) FROM parallel_dict GROUP BY s, i$$, 'Input Batches')::int / 10 AS holds;
+SET work_mem = '1MB';
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT t, u, trim_scale(n), count(*) FROM parallel_dict GROUP BY t, u, n) AS q$$);
+SELECT coalesce(partial_property($$SELECT t, u, n, count(*) FROM parallel_dict GROUP BY t, u, n$$, 'Early Emits')::int, 0)
+       < partial_property($$SELECT t, u, n, count(*) FROM parallel_dict GROUP BY t, u, n$$, 'Input Batches')::int / 10 AS holds;
+SET work_mem = '64kB';
+-- Rescanned in a join: each participant groups its share anew, its
+-- dictionaries made anew.
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT t FROM parallel_dict) AS d) AS ss
+RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
+SELECT parallel_same($$SELECT x, n FROM (SELECT count(*) AS n FROM (SELECT DISTINCT t FROM parallel_dict) AS d) AS ss
+RIGHT JOIN (VALUES (1), (2), (3)) AS v(x) ON true$$);
+RESET enable_material;
+-- With the core's Gather its Finalize HashAggregate merges the groups.
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT t, count(*), sum(v) FROM parallel_dict GROUP BY t;
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT t, count(*), sum(v), max(v) FROM parallel_dict GROUP BY t) AS q$$);
+RESET tessera.batch_gather;
+-- Under a nondeterministic collation equal values of other bytes are one
+-- group, each participant's dictionary by the collation's equality.
+CREATE COLLATION parallel_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+EXPLAIN (COSTS OFF) SELECT DISTINCT u COLLATE parallel_ci FROM parallel_dict;
+SELECT parallel_same($$SELECT count(*) FROM (SELECT DISTINCT u COLLATE parallel_ci FROM parallel_dict) AS q$$);
+DROP COLLATION parallel_ci;
+RESET enable_sort;
+RESET work_mem;
+DROP TABLE parallel_dict;
 -- A batch node above a Gather: with the core's Gather (tessera.batch_gather
 -- off) the pack under it takes the leader's rows in the Gather's child's
 -- slot and the workers' in the Gather's own, two descriptors of one
