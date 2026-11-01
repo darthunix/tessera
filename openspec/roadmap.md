@@ -24,28 +24,31 @@ requests 49 and 50, and `join-pruning-cost` after it the same day; the
 other entries keep the order of the decisions of 2026-09-30 to
 2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390). The
 maintainer placed `spill-crate` first on 2026-10-28, after the close of
-`table-crate`:
+`table-crate`, and `float-kernels-in-rust` second on 2026-11-01, after
+the review of what more can move from C to Rust:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
-2. `explain-rows-per-loop`: The rows a node removed, per loop as the
+2. `float-kernels-in-rust`: The float kernels in Rust
+3. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-3. `join-pruning-cost`: The cost of a pruning join over the partitions
+4. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-4. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-5. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
-6. `linux-x86-support`: Linux on x86-64 checked as the target platform
-7. `oltp-guard-bench`: OLTP guard family of benchmarks
-8. `runs-left-from-section-9`: Runs left to the maintainer from section 9
-9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+6. `simd-primitives-avx2`: SIMD primitives layer and AVX2 for x86-64
+7. `linux-x86-support`: Linux on x86-64 checked as the target platform
+8. `oltp-guard-bench`: OLTP guard family of benchmarks
+9. `runs-left-from-section-9`: Runs left to the maintainer from
+   section 9
+10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-12. `tpch-sf10`: TPC-H step 10: SF10
-13. `backward-scan-mark-restore`: Backward scan and mark/restore
-14. `postgresql-19`: PostgreSQL 19 support
-15. `pg-duckdb-comparison`: Comparison with pg_duckdb
+13. `tpch-sf10`: TPC-H step 10: SF10
+14. `backward-scan-mark-restore`: Backward scan and mark/restore
+15. `postgresql-19`: PostgreSQL 19 support
+16. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -119,6 +122,31 @@ is wanted; several wait for a measured case. `greengage-port` and
   beside `relhash`
 - `relhash-on-crates-io`: The crate `relhash` published on crates.io
 
+From the review of 2026-11-01 of what more can move from C to Rust and
+what else would make Tessera more reliable, in the order the review
+proposes. The gain of a move is one owner of a rule and a place where a
+model test or a proof reaches it; most C calls PostgreSQL and stays.
+
+- `nightly-checks`: Checks that run every night and every week
+- `capi-miri-and-fuzz`: Miri over every test of `tessera-capi`, and a
+  fuzz target of its arguments
+- `golden-corpus`: The answers of PostgreSQL's functions as the
+  kernels' oracle
+- `kani-beyond-relhash`: Kani proofs of the kernels' arithmetic
+- `int2-and-date-bounds-in-rust`: The range of a smallint result and
+  the bound of a date against a timestamp, in Rust
+- `table-growth-one-owner`: One owner of how a table in memory grows
+- `contracts-of-the-c-path`: Contracts of `tessera-capi` and
+  `tessera-kernels`, with no memory taken
+- `bounded-rust-calls`: Rust calls bounded in time
+- `crosscheck-draws`: What the random queries never draw
+- `condition-logic-test`: A random test of the logic of conditions
+- `join-output-machine`: The join's rounds and tails as a Rust machine
+- `valgrind-and-c-coverage`: Valgrind over PostgreSQL's memory, and the
+  coverage of the C
+- `linux-arm64-ci`: PostgreSQL on Linux AArch64 in CI
+- `grouping-phases-machine`: The grouping's phases as a Rust machine
+
 ## Entries
 
 ### spill-crate
@@ -140,6 +168,36 @@ on 2026-10-28, after the close of `table-crate`; it is the change
 - **Depends on:** nothing.
 - **Capabilities:** relspill, spill-format, hash-table
 - **Size:** large: about fifty pull requests.
+
+### float-kernels-in-rust
+
+The float kernels in Rust. From the review of 2026-11-01; the
+maintainer placed it second in the queue the same day.
+
+- **What:** The comparisons, arithmetic and casts of `float4` and
+  `float8` in `kernels/float.c` (`float_compare_evaluate`,
+  `float_value_evaluate`, `float4_value`, `float8_value`,
+  `float_to_integer`, `float_cast`) move to `tessera-kernels`, behind
+  entry points of `tessera-capi` called once a batch, as the integer
+  kernels are. C keeps the registration of the functions and raises
+  the status the call returns.
+- **Why:** They are the last kernels that only the SQL suites judge:
+  no Rust test, no mutant and no proof reaches them. They go a row at
+  a time over Datums through the core's inline functions of
+  `utils/float.h`, which raise with `ereport` inside the loop. In Rust
+  their rules (NaN equal to itself and above every number, -0,
+  overflow and underflow, the rounding of a cast to an integer) have
+  one place and a test against the core's answers.
+- **Known:** `kernels/float.c` has 385 lines and no fixed fault in its
+  history. Rust's `as` from a float to an integer saturates; the casts
+  must keep `rint`'s rounding, half to even, and the core's range
+  checks and errors. The float transitions of the generic aggregates
+  (`fast_float_advance` in `nodes/agg_generic.c`) are a later step over
+  the same rules, keeping the core's order of additions (see "Decided
+  against").
+- **Depends on:** nothing.
+- **Capabilities:** batch-functions, kernel-abi
+- **Size:** small to medium: one or two pull requests.
 
 ### explain-rows-per-loop
 
@@ -1448,6 +1506,22 @@ run of every mutant of the workspace, at the maintainer's request,
   hours. A run by hand for one crate takes the workflow's input
   `package`. Many survivors are likely entry points that only C calls,
   and some will be equivalent.
+- **Known, from the review of 2026-11-01:** A reading of every
+  survivor at the run's commit 50168777 found 151 equivalent, 85
+  compiled out on the Arm runner (the stubs of the bulk paths off
+  AArch64, which the x86-64 job of `.cargo/mutants-avx2.toml` should
+  judge), 116 missing a test and 1 unsure; 22 of the 91 timeouts were
+  survivors whose doctests ran past the limit. The gaps that change
+  results: the lanes of the int8 IN list that no test hits; the NULL
+  bit of a second column appended by partition; the calendar (leap
+  years, quarters, the units Day and Week, `negate`, `extract`);
+  `Decimal::round` at scales 2 to 4 and the plain numeric sums; the
+  flags of the spill's words. One test closes the first for every
+  kernel: for each lane i of a word, a word whose only hit is lane i
+  gives bit i alone. Exclusions that name lines drift with edits:
+  `cast\.rs:7[34]` covers two of the seven lines of the guard it
+  means; the choice of the first word as one function, excluded by
+  name, would hold.
 - **Depends on:** nothing.
 - **Capabilities:** none; tests only.
 - **Size:** about four pull requests: `tessera-spill`, `tessera-core`
@@ -1473,6 +1547,347 @@ The crate `relhash` published on crates.io. Left by the close of
 - **Capabilities:** relhash
 - **Size:** small.
 
+### nightly-checks
+
+Checks that run every night and every week. From the review of
+2026-11-01.
+
+- **What:** One workflow on a schedule. Every night:
+  `tessera-crosscheck` with the date as its seed and some 20,000
+  queries, serial and with workers, at small `work_mem`, its shrunk
+  findings kept as artifacts; each fuzz target for twenty minutes, its
+  corpus cached; the suites against PostgreSQL's latest master beside
+  the pinned commit. Every week: every mutant of the workspace, failing
+  on a survivor that `.cargo/mutants.toml` does not list. And the
+  random queries in the sanitizer job.
+- **Why:** CI runs the random queries with one seed, `--seed 1
+  --queries 3000`, so after the first green run they find nothing new.
+  No workflow has a `schedule:` trigger; fuzzing and the full mutant
+  run start only by hand. Code that no pull request changes is never
+  looked at again.
+- **Known:** `relhash` keeps its zero survivors by a list that decides
+  (2c8ec60c). A shard of the full mutant run took two and a half to
+  three and a half hours.
+- **Depends on:** nothing.
+- **Capabilities:** ci, tools
+- **Size:** one or two pull requests.
+
+### capi-miri-and-fuzz
+
+Miri over every test of `tessera-capi`, and a fuzz target of its
+arguments. From the review of 2026-11-01.
+
+- **What:** Miri runs every test of `tessera-capi`, not only `columns`
+  and `table`, with fewer property cases under Miri. A fuzz target,
+  like `relhash`'s `arguments`, calls every entry point with any
+  arguments over real buffers the fuzzer sizes: a wrong `struct_size`,
+  row counts that disagree between a column and its masks, null
+  pointers, codes out of range. Each call returns a code, never a
+  panic, and leaves its outputs as its documentation says.
+- **Why:** The other entry points hold most of the crate's unsafe code:
+  `c/decimal.rs`, `c/spill.rs`, `c/calendar.rs`, `c/int.rs`,
+  `c/text.rs`, `c/sort.rs`. Both faults of undefined behavior found at
+  this boundary so far were found by Miri (69eb701b, a640abb8).
+- **Known:** The spill's part is task 2.5 of `spill-crate`. Random
+  pointers are not fuzzed: a false length is the caller's undefined
+  behavior, not a fault of a kernel. Under Miri the vector code is cut
+  out, so it checks the scalar paths.
+- **Depends on:** nothing.
+- **Capabilities:** kernel-abi
+- **Size:** small for Miri, medium for the fuzz target.
+
+### golden-corpus
+
+The answers of PostgreSQL's functions as the kernels' oracle. From the
+review of 2026-11-01.
+
+- **What:** A tool on `tools/tessera-pgtool`, which already starts a
+  cluster, runs PostgreSQL's own functions over values drawn at the
+  edges and writes lines of function, arguments, and result or
+  SQLSTATE into test files of `tessera-kernels`. Rust tests read them
+  and run the kernels on the same values. The files are made again
+  when `.github/postgres.env` moves. First families: the calendar
+  (`date_trunc` of every unit, `extract` of every field, months across
+  month ends and leap years, dates BC, infinities), decimals (`round`
+  and casts to integers at every scale 0 to 18, sums near 10^18),
+  integer arithmetic at the limits of each type, text (`bpchar`
+  comparison, `substr` with zero and negative lengths), floats.
+- **Why:** Only Rust tests judge a mutant, and the kernels' semantics
+  are the core's. Today the oracle is an SQL suite, which judges no
+  mutant, or a reference in Rust that repeats the code it checks: the
+  calendar's property test of intervals calls the same `days_in_month`
+  and `is_leap` it checks. A corpus puts the core in the loop with no
+  PostgreSQL in the test.
+- **Known:** A reading of the survivors found 54 of the calendar's 64
+  missing a test. A file stays small, a few thousand lines a family.
+  `timestamptz` needs a zone, so it stays with the SQL suites and
+  `crosscheck-draws`. The "Not placed" item of one test over every
+  entry of the function registry is the same idea on the C side; it
+  kills no Rust mutant.
+- **Depends on:** nothing.
+- **Capabilities:** batch-functions, tools
+- **Size:** medium: the tool, then a pull request a family.
+
+### kani-beyond-relhash
+
+Kani proofs of the kernels' arithmetic. From the review of 2026-11-01.
+
+- **What:** Proofs in the existing Kani job: the prepared divisors of
+  int32 and int64 (`quotient` and `remainder` equal `/` and `%` for
+  every `n` and every `|d| >= 2`; int64 split by shift);
+  `Decimal::round` against rounding half away from zero in i128 at
+  every scale 0 to 18; the bound of a date against a timestamp;
+  `WordValues` of `tessera-core` (the rows it gives are in range,
+  unique and increasing, at most 64 steps, and a refusal comes before
+  any read); the encoding of a sort key (order and the place of NULL);
+  the split of a timestamp into days and time.
+- **Why:** These are a few operations over words, where Kani proves
+  for every input what a test samples. The unsafe C adapters rely on
+  the promise of `WordValues`.
+- **Known:** Kani was decided against in section 9 of the log. The
+  proofs of `relhash` have since found an overflow no test had, a
+  shift of partitions summed in u32 (3b0813b6). Kani does not follow
+  NEON or AVX2 intrinsics: the scalar code is proven, and the
+  differential tests on both architectures hold the vector code to it.
+  `Divisor::quotient` is `#[cfg(test)]` today and must be visible to
+  `cfg(kani)`. Products of 128 bits are slow to prove.
+- **Depends on:** nothing; the date bound on
+  `int2-and-date-bounds-in-rust`.
+- **Capabilities:** batch-functions
+- **Size:** two or three pull requests.
+
+### int2-and-date-bounds-in-rust
+
+The range of a smallint result and the bound of a date against a
+timestamp, in Rust. From the review of 2026-11-01.
+
+- **What:** Two pieces of `kernels/int.c` move to `tessera-kernels`:
+  `smallint_range`, the check that a result fits a smallint, joins the
+  arithmetic it checks, so that one kernel computes and checks; and
+  the bound of `date_timestamp_evaluate`, which turns a date compared
+  with a timestamp into an int4 comparison with a rounded bound.
+- **Why:** `smallint_range` walks another kernel's output a second
+  time over raw memory, and once read a call before its status, which
+  UBSan found (90de317c). The bound is subtle at midnight, for
+  negative timestamps and for infinities; in Rust Kani proves that for
+  every date, timestamp and operator the rewritten comparison gives
+  the core's answer.
+- **Known:** About 100 to 150 lines. C keeps the registration and the
+  choice of arguments.
+- **Depends on:** nothing.
+- **Capabilities:** batch-functions, kernel-abi
+- **Size:** small: one or two pull requests.
+
+### table-growth-one-owner
+
+One owner of how a table in memory grows. From the review of
+2026-11-01.
+
+- **What:** One rule for how a hash table in a memory context grows:
+  the length of its next chunk from the chunk's number, the memory
+  limit and the record's size; the next capacity of its index; the
+  memory a regrow counts. Three nodes write it today: the join
+  (`join_chunk_len_for`), the grouping (`add_chunk`) and the DISTINCT
+  set of an aggregate (`distinct_add_chunk`).
+- **Why:** The copies already differ. Past the first chunk the join and
+  the grouping take an eighth of `hash_mem`, at least 64 kB and at most
+  1 MB; the DISTINCT set always takes 1 MB, so under a small
+  `hash_mem` it grows past its share. The grouping's regrow updates the
+  peak of memory, the DISTINCT set's does not. A fault of the same rule
+  took 22 files to fix (efe1e15d).
+- **Known:** The overshoot is read from the formulas, not measured. The
+  rule fits the plan of a level of `relspill`; the allocation and the
+  error at the most chunks go into one C helper the three nodes share.
+- **Depends on:** `spill-crate`, best inside its task 3.9.
+- **Capabilities:** hash-table, relspill, join-hash, aggregate
+- **Size:** small.
+
+### contracts-of-the-c-path
+
+Contracts of `tessera-capi` and `tessera-kernels`, with no memory
+taken. From the review of 2026-11-01.
+
+- **What:** A `contract.md` for each crate, as `relhash` has, with rules
+  checked in CI: Rust never calls PostgreSQL (no `extern "C" {` import
+  and no `extern "C-unwind"` under `crates/`); every entry point runs
+  under the guard that catches a panic, but a listed few that only
+  give a layout; every slice made from a C pointer is made in one
+  module, with a `// trust:` mark; no call over C memory takes memory,
+  also when it fails; an error is a closed enum with a static text,
+  written into the status without an allocation, and its SQLSTATE
+  comes from a `match` the compiler checks.
+- **Why:** When Rust's allocator fails the process aborts, and
+  PostgreSQL restarts every backend of the cluster; PostgreSQL's own
+  allocator raises an ERROR. Today an error is an `anyhow` value made
+  with `format!` at the moment memory may be short, and `classify`
+  finds its kind by downcasting, so a type it forgets becomes XX000
+  without a warning. Slices from C pointers are made in many files:
+  `c/spill.rs` 15, `c/table.rs` 5, `c/decimal.rs` 4, besides the
+  readers of arguments.
+- **Known:** Two documents disagree. The guard says an entry point
+  writes its outputs at its end, so nothing is written on failure
+  (`c/status.rs`); the kernels say an error does not roll back the
+  words already done (`tessera-kernels/src/lib.rs`). Each entry point
+  must say which holds. The kernels' root says unsafe code lives in two
+  modules, while `loom`, `phases` and `shared_spill` allow it too.
+  `relspill` has these rules in its contract already.
+- **Depends on:** nothing.
+- **Capabilities:** kernel-abi, batch-functions
+- **Size:** medium: mechanical over many files.
+
+### bounded-rust-calls
+
+Rust calls bounded in time. From the review of 2026-11-01.
+
+- **What:** List each entry point whose work is not bounded by its
+  batch or its chunk, and give it a budget of steps, as
+  `tess_table_probe` has, or measure its worst time at the largest
+  `work_mem`. Found so far: `tess_sort`, which sorts every item held in
+  memory in one call, and `tess_table_regrow`, which rebuilds the
+  whole index.
+- **Why:** C checks for interrupts between Rust calls, so a cancel
+  waits for a long call to end.
+- **Known:** The wait has not been measured. Each new machine
+  (`join-output-machine`, `grouping-phases-machine`) states the most
+  work it does before it returns.
+- **Depends on:** nothing.
+- **Capabilities:** sort, hash-table
+- **Size:** small to medium.
+
+### crosscheck-draws
+
+What the random queries never draw. From the review of 2026-11-01; it
+takes the "Not placed" item on subqueries in FROM (plan 9.8, lines
+6823–6824).
+
+- **What:** The generator of `tessera-crosscheck` draws, in this order:
+  `timestamptz` columns under `SET TimeZone` to a zone with summer
+  time, `date_trunc` and `extract` of every unit and field, intervals
+  of months and days, `float4`; a correlated subquery whose inner side
+  is a Tessera node, so that it rescans; subqueries in FROM; a scroll
+  cursor fetched backward. A strict mode for kernels fixes the order of
+  evaluation, compares the SQLSTATE, and compares the order of rows
+  where it is total. The runner records which node and path ran
+  (native or Datum, a spill, workers), and keeps the SQL of a finding,
+  not only its seed.
+- **Why:** It draws none of these today. The calendar holds the most
+  surviving mutants, and the time-zone caches of `kernels/date.c` are
+  judged only by hand-written suites. Faults of rescans (f26ce59d) and
+  of the direction of a scan (2f3c00f3, 8948fbfc) were found by other
+  means.
+- **Known:** The broad mode accepts two different errors on purpose;
+  `kernel-errors-on-demand` is why.
+- **Depends on:** nothing.
+- **Capabilities:** tools
+- **Size:** two pull requests.
+
+### condition-logic-test
+
+A random test of the logic of conditions. From the review of
+2026-11-01.
+
+- **What:** A test of the C test module draws trees of AND, OR, NOT,
+  IS [NOT] NULL, IS [NOT] TRUE, FALSE or UNKNOWN, ANY and ALL, four to
+  six levels deep, over columns with NULLs at the edges of a word. It
+  evaluates each tree with the batch evaluator and with a three-valued
+  evaluator a row at a time, compares the masks of true and of
+  unknown, and checks that no leaf ran on a row its left side had
+  already decided.
+- **Why:** The logic of conditions stays in C (see "Decided against"):
+  it is lazy, and its leaves may raise. `test/tessera_expr_test.c`
+  draws no random trees, and the random queries nest two levels.
+- **Depends on:** nothing.
+- **Capabilities:** batch-expressions
+- **Size:** one pull request.
+
+### join-output-machine
+
+The join's rounds and tails as a Rust machine. From the review of
+2026-11-01.
+
+- **What:** The decisions of `TessHashJoin` once a batch is probed, in
+  `nodes/hashjoin_pairs.c`: the next record of each row, the LEFT
+  join's NULL round, compact batches, SEMI and ANTI over rounds of
+  residual clauses, the tails of RIGHT and FULL. They become a state
+  machine in Rust that C steps once a round or a batch of a tail. C
+  keeps the residual clauses, the child node, the copies of values
+  and the interrupts, as actions the machine asks for.
+- **Why:** The join's semantics for every join type in one place, which
+  a property test compares with a nested-loop join without
+  PostgreSQL. Faults of this logic: an ANTI join published rows with
+  other rows' inner values, `count(b.v)` 600 instead of 0, found by the
+  crosscheck (f8c24e52); in a shared RIGHT or FULL join a participant
+  that stopped while it probed left pairs unmarked, and the last one
+  returned their inner rows as rows without a pair (501119a7).
+- **Known:** About 450 lines decide; the rest copies values and calls
+  PostgreSQL. The machine of the join's spill (`spill-crate` 3.13 to
+  3.16) should take the rounds in memory as a level with no partitions
+  on disk; otherwise the tails are decided in two places. One call a
+  round of up to 64 rows; check by the disassembly and the join
+  family. It changes the C API of the nodes.
+- **Depends on:** `spill-crate` 3.13 to 3.16.
+- **Capabilities:** join-hash
+- **Size:** medium: three pull requests, the model, the machine and the
+  node.
+
+### valgrind-and-c-coverage
+
+Valgrind over PostgreSQL's memory, and the coverage of the C. From the
+review of 2026-11-01.
+
+- **What:** A nightly job under Valgrind, PostgreSQL built with
+  `USE_VALGRIND`, over the suites of the spill, joins, aggregation,
+  sorts and parallel plans; `RANDOMIZE_ALLOCATED_MEMORY` in the assert
+  build of CI; and, per release, a run of the suites and the random
+  queries on a PostgreSQL configured with `--enable-coverage`, which
+  lists each C function nothing reaches.
+- **Why:** ASan sees blocks of `malloc`, but a memory context keeps
+  freed chunks and reset blocks for reuse, so a read after `pfree` or
+  after a reset inside a context is invisible to it. Faults of this
+  class were found by wrong answers and crashes: an expanded value
+  written as a pointer into memory freed with its batch (a5f5ac6e), a
+  key kept on disk as its address (24222429). No job measures which
+  lines of C the tests reach.
+- **Known:** Valgrind is slow, so only the suites named.
+- **Depends on:** nothing.
+- **Capabilities:** ci
+- **Size:** one pull request each.
+
+### linux-arm64-ci
+
+PostgreSQL on Linux AArch64 in CI. From the review of 2026-11-01.
+
+- **What:** The PostgreSQL jobs, the suites and the sanitizers, also on
+  Linux AArch64, beside Linux x86-64 and macOS arm64.
+- **Why:** In CI the NEON paths meet PostgreSQL only on macOS. The
+  mutants job runs on Linux Arm but loads no PostgreSQL.
+- **Known:** GitHub's `ubuntu-24.04-arm` runner, which the mutants job
+  uses, serves.
+- **Depends on:** nothing.
+- **Capabilities:** ci
+- **Size:** small.
+
+### grouping-phases-machine
+
+The grouping's phases as a Rust machine. From the review of
+2026-11-01.
+
+- **What:** The decisions of the grouping become a Rust machine, as in
+  `join-output-machine`: which path a row takes (numbers of the
+  dictionary, a probe only for the right side of INTERSECT or EXCEPT,
+  a frozen table, the replay of spilled rows), when the table regrows,
+  when the groups are drained. The key dictionary and the generic
+  aggregates stay in C.
+- **Why:** The phases checked against a plain grouping in memory, the
+  model `spill-crate` writes for its grouping. Faults: the mask of new
+  groups filled whole by each call, so a generic aggregate read a
+  float8 as an array (b742ebb7); groups given out twice when an index
+  regrew in the middle of a merged chunk (ca8792b8).
+- **Known:** Less gain than the join's machine: fewer faults here.
+- **Depends on:** `spill-crate` 3.17 and 3.18.
+- **Capabilities:** aggregate
+- **Size:** medium: two or three pull requests.
+
 ## Not placed: the maintainer decides
 
 Remarks of finished plan items that the plan neither closes nor
@@ -1485,8 +1900,6 @@ becomes an entry, joins one, or is dropped.
   coverage suite first.
 - **One table-driven test over every entry of the function registry**
   (plan 4.20, lines 938–939). Suggested: a small entry, or drop.
-- **Subqueries in FROM in the crosscheck generator** (plan 9.8, lines
-  6823–6824): it makes none. Suggested: a small `tools` entry, or drop.
 - **The costs of join pruning** (plan 5.14, lines 5139–5142): a worker's
   start-up once per Append, star-schema conditions, the Bloom filter's
   cost through TessAppend, hash partitioning. Suggested: an entry when a
@@ -1544,9 +1957,10 @@ fact.
 - The heap deform cursor rewritten in Rust or vectorized (6.1, line 5187).
 - The refresh functions and the throughput part of TPC-H (8.1, lines
   6242, 6325); tuning constants by TPC-H (8.10, lines 6581–6582).
-- Kani, cbindgen, Rust under ASan, a mutation tool for C, the parallel
+- cbindgen, Rust under ASan, a mutation tool for C, the parallel
   build's automata in Rust, overflow checks in the release profile,
-  `-Werror` by default (section 9, lines 7367–7376).
+  `-Werror` by default (section 9, lines 7367–7376). Kani, refused
+  there too, is back: see `kani-beyond-relhash`.
 - An Instruments template to count a backend's instructions (4.16, line 602).
 - A late worker of a shared build that spilled joining the rounds,
   whether by going round the partitions on disk after the build's last
