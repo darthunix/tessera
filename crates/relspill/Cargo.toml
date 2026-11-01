@@ -12,6 +12,7 @@ publish = true
 
 [dependencies]
 anyhow.workspace = true
+relhash.workspace = true
 
 [lints]
 workspace = true

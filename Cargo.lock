@@ -941,6 +941,7 @@ name = "relspill"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "relhash",
 ]
 
 [[package]]

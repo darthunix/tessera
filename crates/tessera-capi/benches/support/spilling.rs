@@ -9,7 +9,9 @@ use anyhow::{Context, Result, ensure};
 use relspill::{BlockHeader, BlockKind, HEADER_SIZE, columns};
 use tessera_core::RowMask;
 use tessera_kernels::spill_columns::append_partitioned;
-use tessera_kernels::table::{Partitions, PayloadColumns};
+use tessera_kernels::table::{
+    CHUNK_HEADER, Partitions, PayloadColumns, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET,
+};
 
 use crate::support::runner::Runner;
 
@@ -32,15 +34,15 @@ impl Random {
 /// bits and the length in words, and then the lanes of 4 bytes `word`
 /// gives by record and lane.
 fn records(count: usize, len: usize, mut word: impl FnMut(usize, usize) -> u32) -> Vec<u8> {
-    let mut bytes = vec![0_u8; 8 + count * len];
+    let mut bytes = vec![0_u8; CHUNK_HEADER + count * len];
     let total = bytes.len() as u64;
-    bytes[..8].copy_from_slice(&total.to_ne_bytes());
+    bytes[..CHUNK_HEADER].copy_from_slice(&total.to_ne_bytes());
     for record in 0..count {
-        let base = 8 + record * len;
+        let base = CHUNK_HEADER + record * len;
         for lane in 0..len / 4 {
-            let value = match lane {
-                1 => 12345,
-                3 => (len / 8) as u32,
+            let value = match lane * 4 {
+                RECORD_NEXT_OFFSET => 12345,
+                RECORD_SIZE_OFFSET => (len / 8) as u32,
                 _ => word(record, lane),
             };
             bytes[base + lane * 4..base + lane * 4 + 4].copy_from_slice(&value.to_ne_bytes());
@@ -156,9 +158,9 @@ fn measure_records(runner: &mut Runner, random: &mut Random) -> Result<()> {
         let mut back = vec![0_u8; chunk.len()];
         relspill::unpack(&packed[..len], &mut back)?;
         let mut expected = chunk.clone();
-        let record = (chunk.len() - 8) / 1000;
-        for at in (8..chunk.len()).step_by(record) {
-            expected[at + 4..at + 8].fill(0);
+        let record = (chunk.len() - CHUNK_HEADER) / 1000;
+        for at in (CHUNK_HEADER + RECORD_NEXT_OFFSET..chunk.len()).step_by(record) {
+            expected[at..at + 4].fill(0);
         }
         ensure!(back == expected, "{name}: unpacked differs");
         let mut out = vec![0_u8; chunk.len()];

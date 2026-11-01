@@ -69,8 +69,9 @@ pub fn partitions(level: &Level) -> Result<u32> {
 /// The length of a level's chunks: `limit / (share * partitions)` bytes,
 /// no more than `max_chunk`, no less than `min_chunk` (which wins over
 /// `max_chunk`: a chunk holds a few records however large), rounded down
-/// to a multiple of 8. A `min_chunk` below 8, a chunk's header, or not a
-/// multiple of 8 is refused, so the rounding never goes below it.
+/// to a multiple of 8. A `min_chunk` below a chunk's header,
+/// [`relhash::CHUNK_HEADER`], or not a multiple of 8 is refused, so the
+/// rounding never goes below it.
 pub fn chunk_len(
     limit: usize,
     partitions: u32,
@@ -83,7 +84,7 @@ pub fn chunk_len(
         "chunks of a {share} share of {partitions} partitions"
     );
     ensure!(
-        min_chunk >= 8 && min_chunk.is_multiple_of(8),
+        min_chunk >= relhash::CHUNK_HEADER && min_chunk.is_multiple_of(8),
         "a least chunk of {min_chunk} bytes"
     );
     let parts = share.saturating_mul(partitions as usize);

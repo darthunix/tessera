@@ -16,6 +16,9 @@ use tessera_capi::c::{
     tess_table_spill_splits, tess_table_spill_start, tess_table_spill_take_alone,
     tess_table_spill_take_file, tess_table_spill_words,
 };
+use tessera_kernels::table::{
+    CHUNK_HEADER, KEY_SLOT, RECORD_HEADER, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET,
+};
 
 /// The rule of a split through its entry point: past two thirds of what
 /// the limit leaves, with bits left and fewer than nine tenths of the
@@ -272,15 +275,15 @@ fn the_rounds_take_each_file_and_partition_once() {
 /// out: its used mark, then for each record a hash, a next link, NULL
 /// bits and the length in words, and then the words of `word`.
 fn records(count: usize, len: usize, word: impl Fn(usize, usize) -> u32) -> Vec<u8> {
-    let mut bytes = vec![0_u8; 8 + count * len];
+    let mut bytes = vec![0_u8; CHUNK_HEADER + count * len];
     let total = bytes.len() as u64;
-    bytes[..8].copy_from_slice(&total.to_ne_bytes());
+    bytes[..CHUNK_HEADER].copy_from_slice(&total.to_ne_bytes());
     for record in 0..count {
-        let base = 8 + record * len;
+        let base = CHUNK_HEADER + record * len;
         for lane in 0..len / 4 {
-            let value = match lane {
-                1 => 12345,
-                3 => (len / 8) as u32,
+            let value = match lane * 4 {
+                RECORD_NEXT_OFFSET => 12345,
+                RECORD_SIZE_OFFSET => (len / 8) as u32,
                 _ => word(record, lane),
             };
             bytes[base + lane * 4..base + lane * 4 + 4].copy_from_slice(&value.to_ne_bytes());
@@ -325,12 +328,13 @@ fn a_chunk_of_records_packs_and_unpacks_through_c() {
         assert_eq!(code, Code::Ok, "{}", status.message());
         let mut expected = original.clone();
         for record in 0..200 {
-            expected[8 + record * 40 + 4..8 + record * 40 + 8].fill(0);
+            let at = CHUNK_HEADER + record * 40 + RECORD_NEXT_OFFSET;
+            expected[at..at + 4].fill(0);
         }
         assert_eq!(back, expected);
         // One record of the shortest length: no lane narrows, and the
         // packed header would make it longer.
-        let one = records(1, 24, |_, _| u32::MAX);
+        let one = records(1, RECORD_HEADER + KEY_SLOT, |_, _| u32::MAX);
         let code = tess_spill_pack(
             one.as_ptr(),
             one.len(),

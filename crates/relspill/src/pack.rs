@@ -10,7 +10,8 @@
 //! nothing when all are zero, one word when all are equal, or 1, 2 or 4
 //! bytes each. Unpacking gives back the chunk byte for byte, except that
 //! the lane of the next-record references is zero, as a chunk not yet
-//! linked has it.
+//! linked has it. The offsets of a record's fields are `relhash`'s own
+//! constants, so a change of its layout changes the packing with it.
 //!
 //! The packed body: the record count and the record length (a `u32`
 //! each), a code byte per lane, padded to 4, then each lane's values one
@@ -18,18 +19,30 @@
 //! header's.
 
 use anyhow::Result;
+use relhash::{CHUNK_HEADER, KEY_SLOT, RECORD_HEADER, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET};
 
 use crate::Damaged;
 use crate::damaged::intact;
 
+// The packing knows the records of this format of `relhash`: a new
+// format stops the build here until the packing is checked against it.
+// The fields it reads lie on its lanes of 4 bytes, and records on words.
+const _: () = assert!(
+    relhash::FORMAT_VERSION == 2
+        && RECORD_NEXT_OFFSET.is_multiple_of(4)
+        && RECORD_SIZE_OFFSET.is_multiple_of(4)
+        && RECORD_HEADER.is_multiple_of(8)
+        && KEY_SLOT.is_multiple_of(8)
+);
+
 /// Bytes of the used mark that opens a chunk.
-const USED_MARK: usize = 8;
+const USED_MARK: usize = CHUNK_HEADER;
 /// The record header's word holding the record length in units of 8
 /// bytes, and the lane of the next-record reference.
-const LEN_AT: usize = 12;
-const NEXT_LANE: usize = 1;
-/// The shortest record: a header of 16 bytes and one key slot.
-const MIN_RECORD: usize = 24;
+const LEN_AT: usize = RECORD_SIZE_OFFSET;
+const NEXT_LANE: usize = RECORD_NEXT_OFFSET / 4;
+/// The shortest record: its header and one key slot.
+const MIN_RECORD: usize = RECORD_HEADER + KEY_SLOT;
 
 const ZERO: u8 = 0;
 const CONSTANT: u8 = 1;
@@ -248,8 +261,8 @@ mod tests {
             let base = USED_MARK + record * len;
             for lane in 0..len / 4 {
                 let value = match lane {
-                    1 => 12345,
-                    3 => (len / 8) as u32,
+                    NEXT_LANE => 12345,
+                    _ if lane == LEN_AT / 4 => (len / 8) as u32,
                     _ => word(record, lane),
                 };
                 bytes[base + lane * 4..base + lane * 4 + 4].copy_from_slice(&value.to_ne_bytes());
@@ -266,7 +279,7 @@ mod tests {
         let mut expected = original.to_vec();
         let len = record_len(original).unwrap();
         for record in 0..(original.len() - USED_MARK) / len {
-            let at = USED_MARK + record * len + 4;
+            let at = USED_MARK + record * len + RECORD_NEXT_OFFSET;
             expected[at..at + 4].fill(0);
         }
         assert_eq!(back, expected);
@@ -320,7 +333,7 @@ mod tests {
         mixed[USED_MARK + 32 + LEN_AT..USED_MARK + 32 + LEN_AT + 4]
             .copy_from_slice(&5_u32.to_ne_bytes());
         assert_eq!(pack(&mixed, &mut out), None, "records of two lengths");
-        let dense = chunk(2, 24, |record, lane| {
+        let dense = chunk(2, MIN_RECORD, |record, lane| {
             (record * 1_000_003 + lane) as u32 | 0x8000_0000
         });
         assert_eq!(pack(&dense, &mut out), None, "nothing to gain");
@@ -328,7 +341,7 @@ mod tests {
 
     #[test]
     fn damaged_packed_bodies_are_refused() {
-        let original = chunk(10, 24, |record, _| record as u32 + 1);
+        let original = chunk(10, MIN_RECORD, |record, _| record as u32 + 1);
         let mut out = vec![0_u8; original.len()];
         let packed = pack(&original, &mut out).unwrap();
         let mut back = vec![0_u8; original.len()];
