@@ -4801,6 +4801,29 @@ SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbound b USING (k) WH
                ->  Custom Scan (TessHeapScan) on jgbound b (actual rows=262150.00 loops=1)
 (10 rows)
 
+-- A table rebuilt after work_mem fell takes its chunks' length anew: at
+-- 512 kB, 3000 keys take 295 008 bytes with their index and room for two
+-- chunks of 64 kB, and stay in memory; with the 1 MiB chunks of 8 MiB
+-- the room alone would pass the limit.
+SET work_mem = '8MB';
+-- spec: table-memory/A table rebuilt at a lower limit
+SELECT join_explain($$SELECT s.n, set_config('work_mem', CASE s.n WHEN 1 THEN '8MB' ELSE '512kB' END, true) AS w, (SELECT count(*) FROM jgprobe p JOIN jgbound b ON p.k = b.k WHERE b.k <= 3000 + s.n - s.n) FROM generate_series(1, 2) AS s(n)$$, false);
+                                           join_explain                                            
+---------------------------------------------------------------------------------------------------
+ Function Scan on generate_series s (actual rows=2.00 loops=1)
+   SubPlan expr_1
+     ->  Custom Scan (TessAgg) (actual rows=1.00 loops=2)
+           ->  Custom Scan (TessHashJoin) (actual rows=6000.00 loops=2)
+                 Hash Cond: (p.k = b.k)
+                 Buckets: 8192
+                 Memory Usage: within hash_mem
+                 ->  Custom Scan (TessHeapScan) on jgprobe p (actual rows=600000.00 loops=2)
+                 ->  Custom Scan (TessFilter) on jgbound b (actual rows=3000.00 loops=2)
+                       Batch Filter: (b.k <= ((3000 + s.n) - s.n))
+                       Rows Removed by Batch Filter: 259150
+                       ->  Custom Scan (TessHeapScan) on jgbound b (actual rows=262150.00 loops=2)
+(12 rows)
+
 RESET work_mem;
 RESET hash_mem_multiplier;
 RESET max_parallel_workers_per_gather;

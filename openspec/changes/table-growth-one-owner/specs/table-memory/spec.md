@@ -28,6 +28,15 @@ of 1 MiB SHALL take a chunk of its own size.
 - **Verified by:**
   `test/sql/agg.sql::spec: table-memory/A DISTINCT set under a small limit`
 
+#### Scenario: A table rebuilt at a lower limit
+- **WHEN** a join's table of 3000 integer keys is built at `work_mem` =
+  8 MiB and built again, in the same query, after `work_mem` fell to
+  512 kB, with `hash_mem_multiplier` = 1
+- **THEN** the second build's chunks take the length of the new limit,
+  and it stays in memory
+- **Verified by:**
+  `test/sql/join.sql::spec: table-memory/A table rebuilt at a lower limit`
+
 ### Requirement: What Memory Usage counts
 The Memory Usage that EXPLAIN ANALYZE shows for a `TessHashJoin` or a
 `TessAgg` SHALL be the most memory its tables took at once in one
@@ -125,7 +134,8 @@ groups read back.
   directory is written
 - **Verified by:** review only — 32768 chunks take hundreds of MiB;
   every write of a chunk into a directory of `nodes/` follows a
-  reserve that checks the limit, and the reserve has its own test
+  reserve that checks the limit, or writes a slot already reserved or
+  one of a directory of fixed size, and the reserve has its own test
 
 #### Scenario: The limit of a directory
 - **WHEN** a table's directory is reserved for 32767, 32768 and 32769

@@ -519,6 +519,7 @@ join_build_shared(TessHashJoinState *state)
 
 	state->compact_decided = false;
 	join_reset_values(state);
+	state->chunk_len = 0;
 	state->build_rows = 0;
 	state->duplicates = 0;
 	state->null_columns = 0;

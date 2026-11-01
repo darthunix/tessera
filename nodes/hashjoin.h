@@ -922,7 +922,7 @@ typedef struct TessHashJoinState
 	JoinParallel parallel;
 	JoinValues values;
 	int			mark_chunks;
-	/* table_chunk_len, once it is asked for: 0 until then. */
+	/* table_chunk_len, once a build asks for it: 0 until then. */
 	Size		chunk_len;
 } TessHashJoinState;
 

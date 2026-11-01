@@ -291,14 +291,16 @@ create_table(TessHashJoinState *state)
 	state->table.index_len = 0;
 	state->table.nchunks = 0;
 	state->table_bytes = 0;
+	/* work_mem may have changed since the last build: a cursor's FETCH. */
+	state->chunk_len = 0;
 	join_reserve_chunks(state, 1);
 	join_note_memory(state);
 }
 
 /*
  * The chunks of a table and of its values past the first, a shared
- * table's participant's too: table_chunk_len, asked once, since the check
- * before each batch takes it.
+ * table's participant's too: table_chunk_len, asked once a build, since
+ * the check before each batch takes it.
  */
 Size
 join_table_chunk_len(TessHashJoinState *state)
