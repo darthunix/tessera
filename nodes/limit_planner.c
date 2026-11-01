@@ -73,6 +73,56 @@ make_limit_path(PlannerInfo *root, LimitPath *limit)
 	return tess_path_create(&config);
 }
 
+#if TESS_GREENGAGE
+/*
+ * Greengage limits rows on each segment before a Gather Motion too, with
+ * a preliminary limit of offset + count rows, and again above it: the
+ * final relation's path is a chain of Motion and Limit paths over the
+ * ordered rows. The chain with its lowest limit, one under a Motion, the
+ * node's: its bound reaches a sort below, and the limits above stay the
+ * core's. NULL when the chain has no such limit or the node cannot stand
+ * in for it.
+ */
+static Path *
+with_preliminary_limit(PlannerInfo *root, Path *path, bool under_motion)
+{
+	if (IsA(path, CdbMotionPath))
+	{
+		CdbMotionPath *copy;
+		Path	   *below = with_preliminary_limit(root, ((CdbMotionPath *) path)->subpath, true);
+
+		if (below == NULL)
+			return NULL;
+		copy = makeNode(CdbMotionPath);
+		*copy = *(CdbMotionPath *) path;
+		copy->subpath = below;
+		return &copy->path;
+	}
+	if (IsA(path, LimitPath))
+	{
+		LimitPath  *limit = (LimitPath *) path;
+		CustomPath *node;
+
+		if (IsA(limit->subpath, CdbMotionPath) || IsA(limit->subpath, LimitPath))
+		{
+			LimitPath  *copy;
+			Path	   *below = with_preliminary_limit(root, limit->subpath, under_motion);
+
+			if (below == NULL)
+				return NULL;
+			copy = makeNode(LimitPath);
+			*copy = *limit;
+			copy->subpath = below;
+			return &copy->path;
+		}
+		if (!under_motion || (node = make_limit_path(root, limit)) == NULL)
+			return NULL;
+		return &node->path;
+	}
+	return NULL;
+}
+#endif
+
 static void
 create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 				   RelOptInfo *input_rel, RelOptInfo *output_rel, void *extra)
@@ -89,6 +139,18 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		LimitPath  *limit;
 		CustomPath *path;
 
+#if TESS_GREENGAGE
+		{
+			Path	   *chain = with_preliminary_limit(root, lfirst(lc), false);
+
+			/* In place, as below. */
+			if (chain != NULL)
+			{
+				lfirst(lc) = chain;
+				continue;
+			}
+		}
+#endif
 		if (!IsA(lfirst(lc), LimitPath))
 			continue;
 		limit = lfirst(lc);
