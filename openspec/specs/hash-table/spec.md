@@ -719,14 +719,14 @@ SHALL be refused.
   least, then has a limit of 256 KiB
 - **THEN** it gets 8 partitions, then 16, then 4
 - **Verified by:**
-  `crates/tessera-spill/src/plan.rs::a_level_doubles_by_its_bytes_participants_and_reserve`
+  `crates/relspill/src/plan.rs::a_level_doubles_by_its_bytes_participants_and_reserve`
 
 #### Scenario: By the bits of the hash
 - **WHEN** a level of 4 to 1024 partitions that expects far more than
   its limit comes after 28, 29, 30 and 31 bits
 - **THEN** it gets 8, 4 and 4 partitions, and the last is refused
 - **Verified by:**
-  `crates/tessera-spill/src/plan.rs::a_level_keeps_to_the_bits_of_the_hash`;
+  `crates/relspill/src/plan.rs::a_level_keeps_to_the_bits_of_the_hash`;
   `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
 
 #### Scenario: Wrong bounds and bytes
@@ -735,7 +735,7 @@ SHALL be refused.
   number
 - **THEN** the call fails, SQLSTATE `XX000`
 - **Verified by:**
-  `crates/tessera-spill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
+  `crates/relspill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
   `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
 
 #### Scenario: A share of the limit
@@ -744,12 +744,12 @@ SHALL be refused.
   1000000 bytes among 8, with chunks of 8 bytes to 1 MiB
 - **THEN** the chunks are 32 KiB, 8 KiB and 1 MiB, and 7808 bytes
 - **Verified by:**
-  `crates/tessera-spill/src/plan.rs::a_chunk_is_a_share_of_the_limit_within_its_bounds`
+  `crates/relspill/src/plan.rs::a_chunk_is_a_share_of_the_limit_within_its_bounds`
 
 #### Scenario: Wrong shares and bounds
 - **WHEN** the share or the partitions are 0, or the least chunk is 4
   or 4100 bytes
 - **THEN** the call fails, SQLSTATE `XX000`
 - **Verified by:**
-  `crates/tessera-spill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
+  `crates/relspill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
   `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`

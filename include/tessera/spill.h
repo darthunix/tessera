@@ -1,5 +1,5 @@
 /*
- * C entry points of the spilled blocks' headers (crates/tessera-spill).
+ * C entry points of the spilled blocks' headers (crates/relspill).
  *
  * A node that spills writes chunks whole: a chunk of its hash table's
  * records, a chunk of the by-reference values that records or rows refer
@@ -101,7 +101,7 @@ extern TessStatusCode tess_spill_unpack(const void *packed, Size len, void *chun
 										Size chunk_len, TessStatus *status);
 
 /*
- * Chunks of rows by column (crates/tessera-spill, columns): the outer rows
+ * Chunks of rows by column (crates/relspill, columns): the outer rows
  * a join keeps for their partition, the runs of an external TessSort and
  * the messages of TessGather, which are only written and read back, never
  * linked. A chunk is a header of TESS_SPILL_COLUMNS_HEADER bytes (its
@@ -153,7 +153,7 @@ tess_spill_value_in(const char *values, uint64 len, uint64 ref)
 }
 /*
  * The lanes of NULL bits of a chunk of words stored words, one at least, as
- * crates/tessera-spill (columns::null_lanes) lays them out; a constant
+ * crates/relspill (columns::null_lanes) lays them out; a constant
  * expression, for the bound of an array. A message of TessGather is a
  * chunk of columns too.
  */

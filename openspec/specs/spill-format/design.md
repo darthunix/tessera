@@ -660,13 +660,13 @@ table that spills, in [hash-table](../hash-table/design.md).
 
 ## Files
 
-- `crates/tessera-spill/src/lib.rs`: the header of a block and its
+- `crates/relspill/src/lib.rs`: the header of a block and its
   checks
-- `crates/tessera-spill/src/pack.rs`: the packed form of a chunk of
+- `crates/relspill/src/pack.rs`: the packed form of a chunk of
   records
-- `crates/tessera-spill/src/columns.rs`: a chunk of columns and its
+- `crates/relspill/src/columns.rs`: a chunk of columns and its
   packed form
-- `crates/tessera-spill/src/damaged.rs`: the error that marks damaged
+- `crates/relspill/src/damaged.rs`: the error that marks damaged
   data
 - `crates/tessera-capi/src/c/spill.rs`: the C entry points
 - `crates/tessera-kernels/src/spill_columns.rs`: rows appended to chunks
@@ -680,7 +680,7 @@ table that spills, in [hash-table](../hash-table/design.md).
 
 ## Tests
 
-- The unit tests of `crates/tessera-spill/src/lib.rs`, `pack.rs` and
+- The unit tests of `crates/relspill/src/lib.rs`, `pack.rs` and
   `columns.rs`.
 - `crates/tessera-capi/tests/spill.rs` and `tests/table.rs`: the entry
   points, each by a test, also under Miri in CI.

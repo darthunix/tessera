@@ -1,5 +1,5 @@
 //! The spill entry points, declared in `include/tessera/spill.h`: the
-//! headers of spilled blocks ([`tessera_spill`]), which carry a table's
+//! headers of spilled blocks ([`relspill`]), which carry a table's
 //! layout fingerprint (`tess_table_fingerprint`).
 
 use std::ffi::{CStr, c_int};
@@ -7,9 +7,9 @@ use std::mem::MaybeUninit;
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
+use relspill::{BlockHeader, BlockKind, HEADER_SIZE, columns, plan};
 use tessera_kernels::spill_columns::{self, ColumnChunks, RowValues, Value};
 use tessera_kernels::table::{Partitions, PayloadColumns};
-use tessera_spill::{BlockHeader, BlockKind, HEADER_SIZE, columns, plan};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
@@ -164,8 +164,7 @@ pub unsafe extern "C" fn tess_spill_pack(
                 (!out.is_null()).then_some(out).context("a null buffer")?,
                 capacity,
             );
-            *packed.as_mut().context("a null length")? =
-                tessera_spill::pack(chunk, out).unwrap_or(0);
+            *packed.as_mut().context("a null length")? = relspill::pack(chunk, out).unwrap_or(0);
             Ok(())
         })
     }
@@ -201,7 +200,7 @@ pub unsafe extern "C" fn tess_spill_unpack(
                     .context("a null chunk")?,
                 chunk_len,
             );
-            tessera_spill::unpack(packed, chunk)
+            relspill::unpack(packed, chunk)
         })
     }
 }
@@ -249,7 +248,7 @@ pub extern "C" fn tess_spill_columns_shape(words: u32, what: c_int) -> usize {
 }
 
 /// `tess_spill_partitions`: the partitions of a level of a spill
-/// (tessera-spill, `plan::partitions`), into `partitions`.
+/// (relspill, `plan::partitions`), into `partitions`.
 ///
 /// # Safety
 ///
@@ -286,7 +285,7 @@ pub unsafe extern "C" fn tess_spill_partitions(
     }
 }
 
-/// `tess_spill_chunk_len`: the length of a level's chunks (tessera-spill,
+/// `tess_spill_chunk_len`: the length of a level's chunks (relspill,
 /// `plan::chunk_len`), into `chunk_len`.
 ///
 /// # Safety

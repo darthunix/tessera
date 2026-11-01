@@ -1,10 +1,10 @@
 //! The errors a kernel reports with an SQLSTATE of their own, and the one
 //! place that tells them from the rest: a value of the data, as the
 //! function a kernel implements raises it, or spilled bytes read back
-//! damaged ([`tessera_spill::Damaged`]). Any other error is a misuse of a
+//! damaged ([`relspill::Damaged`]). Any other error is a misuse of a
 //! call, which the C boundary reports as an internal error.
 
-use tessera_spill::Damaged;
+use relspill::Damaged;
 
 use crate::calendar::CalendarError;
 use crate::float::FloatError;

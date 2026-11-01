@@ -13,7 +13,7 @@ crate-type = ["staticlib", "rlib"]
 anyhow.workspace = true
 tessera-core.workspace = true
 tessera-kernels.workspace = true
-tessera-spill.workspace = true
+relspill.workspace = true
 
 [dev-dependencies]
 pmu.workspace = true

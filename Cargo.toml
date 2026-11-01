@@ -1,10 +1,10 @@
 [workspace]
 members = [
     "crates/relhash",
+    "crates/relspill",
     "crates/tessera-core",
     "crates/tessera-capi",
     "crates/tessera-kernels",
-    "crates/tessera-spill",
     "crates/tessera-testing",
     "tools/pmu",
     "tools/tessera-ab",
@@ -43,9 +43,9 @@ tempfile = "3"
 tpchgen = "3.0"
 pmu = { path = "tools/pmu" }
 relhash = { path = "crates/relhash" }
+relspill = { path = "crates/relspill" }
 tessera-core = { path = "crates/tessera-core" }
 tessera-kernels = { path = "crates/tessera-kernels" }
-tessera-spill = { path = "crates/tessera-spill" }
 tessera-testing = { path = "crates/tessera-testing" }
 tessera-pgtool = { path = "tools/tessera-pgtool" }
 
