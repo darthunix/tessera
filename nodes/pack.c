@@ -74,8 +74,8 @@ typedef struct PackState
  * core's sequential scan under it, with no tuple slot: for ao_column
  * aocs_getnext_batch gives the rows of the projected columns column by
  * column straight from their blocks, for ao_row appendonly_getnext_batch
- * deforms each row of a block and lays the columns asked for out the
- * same way. The batch's columns are those arrays; a by-reference value
+ * reads the columns asked for of each row of a block and lays them out
+ * the same way. The batch's columns are those arrays; a by-reference value
  * points into its block, which the scan keeps until the next batch is
  * read, after the parent released this one. The child stays in the plan,
  * initialized and never executed.
@@ -88,9 +88,6 @@ typedef struct PackAocs
 	/* Begun at the first execution, with the columns of the child's targets. */
 	AOCSScanDesc scan;
 	TableScanDesc row_scan;
-	/* A row of ao_row deformed, the relation's attributes. */
-	Datum	   *row_values;
-	bool	   *row_nulls;
 	/* The zero-based attribute of each batch column. */
 	int			ncolumns;
 	AttrNumber *attnos;
@@ -528,11 +525,6 @@ pack_aocs_create(PackState *state, EState *estate)
 		aocs->isnull[attr] = MemoryContextAllocZero(estate->es_query_cxt,
 													sizeof(bool) * PACK_BATCH_ROWS);
 	}
-	if (!aocs->columns)
-	{
-		aocs->row_values = MemoryContextAlloc(estate->es_query_cxt, sizeof(Datum) * Max(natts, 1));
-		aocs->row_nulls = MemoryContextAlloc(estate->es_query_cxt, sizeof(bool) * Max(natts, 1));
-	}
 	aocs->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	aocs->batch.struct_size = sizeof(TessBatch);
 	aocs->batch.ops = &aocs_batch_ops;
@@ -588,8 +580,7 @@ pack_aocs_next(PackState *state, int limit)
 		else
 			nrows = appendonly_getnext_batch(aocs->row_scan, RelationGetDescr(aocs->relation),
 											 Min(limit, PACK_BATCH_ROWS), aocs->ncolumns,
-											 aocs->attnos, aocs->row_values, aocs->row_nulls,
-											 aocs->values, aocs->isnull, &aocs->visible);
+											 aocs->attnos, aocs->values, aocs->isnull, &aocs->visible);
 		if (nrows == 0)
 			return NULL;
 		aocs->rows_read += nrows;
