@@ -2,9 +2,10 @@
  * The float functions: the C entry points of the Rust kernels
  * (tessera_kernels::float) for the comparisons, arithmetic and casts of
  * float4 and float8 of kernels/float.c. A float8 is its Datum's 64 bits, a
- * float4 the low 32 bits of its Datum, as Float4GetDatum writes them, an
- * int4 (an int2 too, its value sign-extended) the low 32 bits, and an int8
- * the whole Datum.
+ * float4 the low 32 bits of its Datum (a float4 result is written as
+ * Float4GetDatum writes it, those bits as an int32 sign-extended), an int4
+ * (an int2 too, its value sign-extended) the low 32 bits, and an int8 the
+ * whole Datum.
  *
  * The rules are the core's of utils/float.h: NaN is equal to itself and
  * greater than every number, -0 equals 0; an infinite result of finite

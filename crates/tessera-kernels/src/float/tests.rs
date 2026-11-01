@@ -460,6 +460,17 @@ fn errors_carry_the_core_sqlstate_and_message() {
     }
 }
 
+/// A float4 Datum by another derivation than the kernels': the bits, with
+/// the high half filled when the sign bit is set.
+fn datum4(value: f32) -> u64 {
+    let bits = u64::from(value.to_bits());
+    if bits & 0x8000_0000 == 0 {
+        bits
+    } else {
+        bits | 0xffff_ffff_0000_0000
+    }
+}
+
 /// The value a kernel wrote into a slot that was created initialized.
 #[allow(unsafe_code)]
 fn written<T: Copy>(slot: &MaybeUninit<T>) -> T {
@@ -650,10 +661,7 @@ fn unary_operations_and_casts_over_rows() {
     assert_eq!(non_nulls, [0b101]);
     assert_eq!(
         (written(&values[0]), written(&values[2])),
-        (
-            u64::from(0.0_f32.to_bits()),
-            u64::from((-32767.5_f32).to_bits())
-        )
+        (datum4(0.0), datum4(-32767.5))
     );
     unary_float8(
         FloatOp::Abs,
@@ -702,7 +710,7 @@ fn unary_operations_and_casts_over_rows() {
         &mut RowMask::try_new(nrows, &mut non_nulls).unwrap(),
     )
     .unwrap();
-    assert_eq!(written(&values[0]), u64::from(9.223372e18_f32.to_bits()));
+    assert_eq!(written(&values[0]), datum4(9.223372e18));
     let error = to_float4(
         &Scalar(1e300_f64),
         view,
@@ -773,12 +781,7 @@ fn float4_operands_compute_in_their_own_width() {
         )
         .unwrap();
         let got = written(&values[0]);
-        assert_eq!(
-            got,
-            u64::from(arith(op, left, right).unwrap().to_bits()),
-            "{op:?}"
-        );
-        assert_eq!(got >> 32, 0, "{op:?}");
+        assert_eq!(got, datum4(arith(op, left, right).unwrap()), "{op:?}");
     }
 }
 
@@ -829,6 +832,12 @@ fn float4_rows_are_checked_in_float4() {
     );
     // A subnormal result that is not zero is no underflow.
     assert_eq!(binary(FloatOp::Mul, tiny, 2.0).unwrap(), 2);
+    // A negative result's Datum has its high half set, as Float4GetDatum
+    // gives it.
+    assert_eq!(
+        binary(FloatOp::Sub, 1.0, 2.0).unwrap(),
+        0xffff_ffff_bf80_0000
+    );
     assert_eq!(binary(FloatOp::Div, f32::from_bits(4), 2.0).unwrap(), 2);
 }
 
@@ -848,8 +857,8 @@ fn negation_and_abs_of_rows_keep_the_signs_of_zeros() {
         (2.0, -2.0, 2.0),
         (-2.5, 2.5, 2.5),
     ] {
-        assert_eq!(float4(FloatOp::Neg, x), u64::from(neg.to_bits()), "-{x}");
-        assert_eq!(float4(FloatOp::Abs, x), u64::from(abs.to_bits()), "abs {x}");
+        assert_eq!(float4(FloatOp::Neg, x), datum4(neg), "-{x}");
+        assert_eq!(float4(FloatOp::Abs, x), datum4(abs), "abs {x}");
         let (x, neg, abs) = (f64::from(x), f64::from(neg), f64::from(abs));
         assert_eq!(float8(FloatOp::Neg, x), neg.to_bits(), "-{x}");
         assert_eq!(float8(FloatOp::Abs, x), abs.to_bits(), "abs {x}");
@@ -865,7 +874,7 @@ fn integers_round_once_to_each_float() {
         assert_eq!(value.float4().unwrap().to_bits(), bits, "{value}");
         let row =
             one_row(|rows, values, non_nulls| to_float4(&Scalar(value), rows, values, non_nulls));
-        assert_eq!(row.unwrap(), u64::from(bits), "{value}");
+        assert_eq!(row.unwrap(), datum4(f32::from_bits(bits)), "{value}");
     }
     // 2^24 + 1 is exact in float8, not in float4.
     for value in [16_777_217_i64, -16_777_217] {
