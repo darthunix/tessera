@@ -85,11 +85,11 @@ named in a task comes on top.
       each one left is listed in `.cargo/mutants.toml` with the reason
       it is equivalent. Check: `cargo mutants --in-diff` against the
       branch's base, its `missed.txt` empty or listed.
-- [ ] 6.2 Measure as the design's plan says, on an idle machine the
+- [x] 6.2 Measure as the design's plan says, on an idle machine the
       person confirms. Check: `cargo ab measure --base <task 2.1>
       --family win --cases '^float'` flags no case; the run's id in
       the pull request.
-- [ ] 6.3 Outside reviews of the work by Codex as it goes; each finding
+- [x] 6.3 Outside reviews of the work by Codex as it goes; each finding
       fixed, or answered in the pull request.
 
 ## 7. The close
