@@ -46,14 +46,13 @@ as it goes.
       `hash_mem`, at most 1 MiB. Check: the scenario "A DISTINCT set
       under a small limit" in `agg`, 245 kB (before: 1205 kB);
       `cargo ab measure` of the DISTINCT case against the parent
-- [ ] 3.3 A grouping's reload keeps its totals: a merge counts the
+- [x] 3.3 A grouping's reload keeps its totals: a merge counts the
       chunks it adds, starts from a reset total and ends with the index
       it has, and a rebuild notes the new index while the old is alive;
       in assert builds each note checks the count against the chunks
       it owns, the two reserved slots left out, and the index. Check:
-      the scenario "Groups read back and merged" in `agg`; its reload
-      cases, whose check fails before the fix; the peak's bound, which
-      fails with the rebuild's note left out
+      the scenario "Groups read back and merged" in `agg`, whose check
+      fails before the fix; the rebuild's note by review
 - [ ] 3.4 The serial join checks, before a batch, the exact size of the
       index its records will need, without counting it as memory.
       Check: the scenarios of "A serial build keeps its index within
