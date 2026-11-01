@@ -185,6 +185,15 @@ mod tests {
         assert_eq!(kind(external_header(ON_DISK)[0]), Kind::External);
         assert_eq!(external_size(ON_DISK), Some(EXTERNAL_HEADER + 16));
         assert_eq!(external_size(2), None);
+        // An indirect pointer: 10 bytes in PostgreSQL, 12 in Greengage.
+        #[cfg(not(feature = "network-varlena"))]
+        assert_eq!(external_size(INDIRECT), Some(10));
+        #[cfg(feature = "network-varlena")]
+        assert_eq!(external_size(INDIRECT), Some(12));
+        #[cfg(not(feature = "network-varlena"))]
+        assert_eq!(external_size(ON_DISK), Some(18));
+        #[cfg(feature = "network-varlena")]
+        assert_eq!(external_size(ON_DISK), Some(20));
     }
 
     #[test]
