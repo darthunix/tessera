@@ -107,7 +107,9 @@ groups read back.
   when its merge needs another
 - **THEN** the query fails with SQLSTATE 54000, and nothing past the
   directory is written
-- **Verified by:** pending
+- **Verified by:** review only — 32768 chunks take hundreds of MiB;
+  every write of a chunk into a directory of `nodes/` follows a
+  reserve that checks the limit, and the reserve has its own test
 
 #### Scenario: The limit of a directory
 - **WHEN** a table's directory is reserved for 32767, 32768 and 32769

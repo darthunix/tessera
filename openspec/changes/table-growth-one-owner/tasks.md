@@ -59,7 +59,7 @@ as it goes.
 
 ## 4. One owner
 
-- [ ] 4.1 Write `nodes/table_chunks.c`, the directory's reserve with
+- [x] 4.1 Write `nodes/table_chunks.c`, the directory's reserve with
       54000 and the add of a chunk, and make the serial join, its
       spill, the shared join's adoption, the grouping and its spill,
       and the DISTINCT sets use it; each keeps its own bookkeeping.
@@ -67,7 +67,7 @@ as it goes.
       test module; the suites, the shared and rescan cases of `join`
       and the reload cases of `agg`; `cargo run --release --locked -p
       tessera-bench -- --base HEAD~1 --disasm --module nodes` read
-- [ ] 4.2 The merge of a grouping's reload adds its chunks through the
+- [x] 4.2 The merge of a grouping's reload adds its chunks through the
       helper. Check: the scenario "A merge at the most chunks", review
       only: every write of a chunk into a directory in `nodes/` listed
       and shown to go through the helper; the reload cases of `agg`
