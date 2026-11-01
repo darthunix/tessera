@@ -85,7 +85,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       set is finished; correct the comment that says a block of columns
       is checked before anything is written. Check: a case of
       `tessera_test_spill_error`; `make installcheck`
-- [ ] 2.5 Run the tests of the C entry points of the spill under Miri,
+- [x] 2.5 Run the tests of the C entry points of the spill under Miri,
       and fix what it finds. Check: the Miri job of CI
 - [ ] 2.6 Add a counter program to `tessera-bench` for the kernels of a
       spill: packing and unpacking a chunk of records and a chunk of

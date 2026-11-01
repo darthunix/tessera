@@ -304,7 +304,7 @@ jobs:
   # Miri over the tests of the unsafe code (plan 9.6): every test of
   # relhash, the crate of the hash table, whose promise is that no call
   # touches memory outside its blocks, and the C entry points' borrows in
-  # tessera-capi.
+  # tessera-capi, those of the spill among them.
   # tessera-core forbids unsafe code and tessera-spill has none. The
   # vector code of tessera-kernels is cut out under Miri, and the rest of
   # it denies unsafe code. A nightly pinned here, not in
@@ -330,7 +330,8 @@ jobs:
       - name: The tests of the unsafe code
         run: |
           cargo miri test --locked -p relhash
-          cargo miri test --locked -p tessera-capi --test columns --test table --test float
+          cargo miri test --locked -p tessera-capi --test columns --test table --test float \
+            --test spill
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)

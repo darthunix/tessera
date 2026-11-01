@@ -9,10 +9,12 @@
 
 use tessera_capi::c::{
     Code, SpillHeader, SpillWeights, Status, tess_spill_chunk_len, tess_spill_header_read,
-    tess_spill_header_size, tess_spill_header_write, tess_spill_partitions, tess_spill_unpack,
-    tess_table_spill_add_bytes, tess_table_spill_evict, tess_table_spill_flags,
-    tess_table_spill_init, tess_table_spill_records, tess_table_spill_split,
-    tess_table_spill_splits, tess_table_spill_words,
+    tess_spill_header_size, tess_spill_header_write, tess_spill_pack, tess_spill_partitions,
+    tess_spill_unpack, tess_table_spill_add_bytes, tess_table_spill_evict,
+    tess_table_spill_evictions, tess_table_spill_flags, tess_table_spill_init,
+    tess_table_spill_partitions, tess_table_spill_records, tess_table_spill_split,
+    tess_table_spill_splits, tess_table_spill_start, tess_table_spill_take_alone,
+    tess_table_spill_take_file, tess_table_spill_words,
 };
 
 /// The rule of a split through its entry point: past two thirds of what
@@ -166,6 +168,178 @@ fn the_spill_entry_points_choose_by_the_weights() {
             assert_eq!(code, Code::InvalidArgument, "{shared}: a weight below zero");
             drop(words);
         }
+    }
+}
+
+/// The partitions in force, the starts of the rounds, the files and the
+/// partitions taken once each, and the partitions sent to disk, through
+/// their entry points over shared words.
+#[test]
+fn the_rounds_take_each_file_and_partition_once() {
+    let weights = SpillWeights {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        reserve: 0,
+        resident: 0.0,
+        per_check: 1,
+    };
+    let mut status = Status::new();
+    let mut nwords = 0;
+    let mut in_force = 0;
+    let mut count = 7_u32;
+    let mut evictions = 7_u64;
+    // SAFETY: local buffers of the declared sizes throughout this test.
+    unsafe {
+        let code = tess_table_spill_words(4, &raw mut nwords, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut words = vec![0_u64; nwords];
+        let at = words.as_mut_ptr();
+        let code = tess_table_spill_init(at, nwords, true, 100, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_table_spill_partitions(at, nwords, &raw mut count, &raw mut status);
+        assert_eq!((code, count), (Code::Ok, 0), "whole");
+        let code = tess_table_spill_split(at, nwords, true, 4, &raw mut in_force, &raw mut status);
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let code = tess_table_spill_partitions(at, nwords, &raw mut count, &raw mut status);
+        assert_eq!((code, count), (Code::Ok, 4), "split");
+        let starts: Vec<u32> = (0..5)
+            .map(|_| {
+                let mut start = 9;
+                let code = tess_table_spill_start(at, nwords, &raw mut start, &raw mut status);
+                assert_eq!(code, Code::Ok, "{}", status.message());
+                start
+            })
+            .collect();
+        assert_eq!(starts, [0, 1, 2, 3, 0]);
+        let take = |partition, outer| {
+            let mut status = Status::new();
+            let mut file = 9;
+            let code = tess_table_spill_take_file(
+                at,
+                nwords,
+                partition,
+                outer,
+                &raw mut file,
+                &raw mut status,
+            );
+            (code, file)
+        };
+        assert_eq!(take(1, false), (Code::Ok, 0));
+        assert_eq!(take(1, false), (Code::Ok, 1));
+        assert_eq!(take(1, true), (Code::Ok, 0), "the outer files apart");
+        assert_eq!(take(4, true), (Code::Ok, 0), "the resident rows");
+        assert_eq!(take(5, true).0, Code::InvalidArgument);
+        let alone = |partition| {
+            let mut status = Status::new();
+            let mut taken = false;
+            let code =
+                tess_table_spill_take_alone(at, nwords, partition, &raw mut taken, &raw mut status);
+            (code, taken)
+        };
+        assert_eq!(alone(3), (Code::Ok, true));
+        assert_eq!(alone(3), (Code::Ok, false), "taken once");
+        assert_eq!(alone(4).0, Code::InvalidArgument);
+        let code = tess_table_spill_evictions(at, nwords, &raw mut evictions, &raw mut status);
+        assert_eq!((code, evictions), (Code::Ok, 0));
+        let mut over = false;
+        let code =
+            tess_table_spill_add_bytes(at, nwords, true, 120, 2, &raw mut over, &raw mut status);
+        assert_eq!((code, over), (Code::Ok, true), "{}", status.message());
+        let mut partition = -1;
+        let code = tess_table_spill_evict(
+            at,
+            nwords,
+            true,
+            &raw const weights,
+            0,
+            0,
+            std::ptr::null(),
+            0,
+            0,
+            0,
+            &raw mut partition,
+            &raw mut status,
+        );
+        assert_eq!((code, partition), (Code::Ok, 2), "{}", status.message());
+        let code = tess_table_spill_evictions(at, nwords, &raw mut evictions, &raw mut status);
+        assert_eq!((code, evictions), (Code::Ok, 1));
+        drop(words);
+    }
+}
+
+/// A chunk of `count` records of `len` bytes, as the hash table lays them
+/// out: its used mark, then for each record a hash, a next link, NULL
+/// bits and the length in words, and then the words of `word`.
+fn records(count: usize, len: usize, word: impl Fn(usize, usize) -> u32) -> Vec<u8> {
+    let mut bytes = vec![0_u8; 8 + count * len];
+    let total = bytes.len() as u64;
+    bytes[..8].copy_from_slice(&total.to_ne_bytes());
+    for record in 0..count {
+        let base = 8 + record * len;
+        for lane in 0..len / 4 {
+            let value = match lane {
+                1 => 12345,
+                3 => (len / 8) as u32,
+                _ => word(record, lane),
+            };
+            bytes[base + lane * 4..base + lane * 4 + 4].copy_from_slice(&value.to_ne_bytes());
+        }
+    }
+    bytes
+}
+
+/// A chunk of records packed and unpacked through the entry points comes
+/// back as it was, its next links cleared; one that packing would not
+/// shorten packs into nothing.
+#[test]
+fn a_chunk_of_records_packs_and_unpacks_through_c() {
+    let original = records(200, 40, |record, lane| match lane {
+        0 => (record as u32).wrapping_mul(2_654_435_761),
+        4 => 1_000 + record as u32,
+        _ => 0,
+    });
+    let mut status = Status::new();
+    let mut out = vec![0_u8; original.len()];
+    let mut packed = 0;
+    let mut back = vec![0_u8; original.len()];
+    // SAFETY: local buffers of the declared sizes throughout this test.
+    unsafe {
+        let code = tess_spill_pack(
+            original.as_ptr(),
+            original.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &raw mut packed,
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert!(packed > 0 && packed < original.len(), "{packed} bytes");
+        let code = tess_spill_unpack(
+            out.as_ptr(),
+            packed,
+            back.as_mut_ptr(),
+            back.len(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut expected = original.clone();
+        for record in 0..200 {
+            expected[8 + record * 40 + 4..8 + record * 40 + 8].fill(0);
+        }
+        assert_eq!(back, expected);
+        // One record of the shortest length: no lane narrows, and the
+        // packed header would make it longer.
+        let one = records(1, 24, |_, _| u32::MAX);
+        let code = tess_spill_pack(
+            one.as_ptr(),
+            one.len(),
+            out.as_mut_ptr(),
+            out.len(),
+            &raw mut packed,
+            &raw mut status,
+        );
+        assert_eq!((code, packed), (Code::Ok, 0), "{}", status.message());
     }
 }
 
