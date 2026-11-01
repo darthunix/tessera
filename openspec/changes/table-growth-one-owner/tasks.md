@@ -23,15 +23,10 @@ as it goes.
 
 ## 2. What the code does now
 
-- [x] 2.1 Add the measured cases of the design's plan: in `join`, the
-      serial joins built on 250 000, 300 000 and 420 000 rows at
-      `hash_mem` = 16 MiB, their tables made by the family; in `spill`,
-      the grouping at 3 MiB above the cap and the grouping that reads
-      partitions back and regrows; in `anyagg`, the grouped
-      `count(DISTINCT)` of 3000 pairs at `work_mem` = 256 kB; and make
-      `bench/pg/run.sh` keep the `PGOPTIONS` it is given, so that a run
-      can bound its statements, with a line in its README. Check: one
-      run of each case under `statement_timeout`, its plan read in
+- [x] 2.1 Add the measured cases of the design's plan to `spill`, and
+      make `bench/pg/run.sh` keep the `PGOPTIONS` it is given, so that
+      a run can bound its statements, with a line in its README. Check:
+      one run of each case under `statement_timeout`, its plan read in
       `plans.txt` to be Tessera's, its Memory Usage noted
 
 ## 3. The faults, shown and fixed

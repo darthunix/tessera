@@ -257,17 +257,17 @@ gives a lower bound.
 - **What:** the time and the memory of queries whose tables grow,
   against the commit that adds the new cases.
 - **Cases:** of `join`, `fk_count`, `dup` and `left_dup` (tables that
-  fit); new cases of `join` built on 250 000, 300 000 and 420 000 rows
-  of one integer key at `hash_mem` = 16 MiB, serial; of `spill`, its
-  join and grouping cases; new cases of `spill`, a grouping at
-  `hash_mem` = 3 MiB whose estimate is above the cap, and a grouping
-  that reads partitions back and regrows; of `anyagg`, a new
-  `count(DISTINCT v)` of integers by 10 groups over the rows of
-  `bench_narrow`, 3000 distinct pairs in all, at `work_mem` = 256 kB,
-  with the statistics the planner's gate needs to admit it (it counts
-  32 bytes a pair, 96 000 bytes here), its result read by the outer
-  query. Each case's plan is read in the run's
-  `plans.txt` to be Tessera's, and its Memory Usage is given.
+  fit); of `spill`, its join and grouping cases, and six cases of its
+  own whose tables the family makes, at `hash_mem` twice `work_mem`
+  (the family sets the multiplier): serial joins built on 250 000,
+  300 000 and 420 000 integer keys at 16 MiB (`build_*`); the fact
+  table grouped by its key at 3 MiB, above the cap of the first index
+  (`group_fk_1536kb`); a `count(DISTINCT v)` by 10 groups over 2 M rows,
+  3000 pairs, at 256 kB, admitted by the planner's gate through
+  extended statistics (`distinct_128kb`); and 300 000 groups at 256 kB
+  whose partitions regrow their index while they merge
+  (`regrow_128kb`). Each case's plan is read in the run's `plans.txt`
+  to be Tessera's, and its Memory Usage is given.
 - **Tool:** `cargo ab measure --base <that commit> --family join
   --family spill --family anyagg --cases <the cases> --repetitions 11`,
   release builds, on an idle machine the person confirms, with

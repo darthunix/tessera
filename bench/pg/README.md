@@ -57,9 +57,11 @@ query down, and where it can, does it speed one up.
   with `measure spill 2`. Five cases more show how a table in memory
   grows, each at its own `hash_mem`: serial builds of 250 000, 300 000
   and 420 000 keys at 16 MiB (`build_*`), the grouping by the fact
-  table's key at 3 MiB (`group_fk_1536kb`), and a `count(DISTINCT)` of
-  3000 pairs at 256 kB (`distinct_128kb`); they mean the same at the
-  multiplier 1.
+  table's key at 3 MiB (`group_fk_1536kb`), a `count(DISTINCT)` of
+  3000 pairs at 256 kB (`distinct_128kb`), and a grouping whose
+  partitions regrow their index while they merge (`regrow_128kb`); their
+  tables are made by the family, so they mean the same at any data
+  multiplier. The family sets `hash_mem_multiplier` to 2 for every case.
 - **sort** (`sort.sql`): `ORDER BY` over `bench_sort` (2 M rows per
   multiplier, keys in no order of the rows): a unique int4 key, an int8 one
   past the int4 range, a key of 1000 values, two keys, a descending key with
