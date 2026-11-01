@@ -25,6 +25,9 @@ use std::mem::MaybeUninit;
 use anyhow::Result;
 use tessera_core::{RowMask, RowMaskView, check_rows, ones};
 
+pub use crate::source::Source;
+use crate::source::{Unary, map_rows};
+
 /// The Julian day of 2000-01-01, a date's zero.
 pub const POSTGRES_EPOCH_JDATE: i32 = 2_451_545;
 /// The Julian day of 1970-01-01.
@@ -666,52 +669,6 @@ pub fn extract(field: Field, day: i64, time: i64) -> (i64, u32) {
     extract_with(field, day, time, &mut DayFields::default())
 }
 
-/// A column or a scalar of a batch function: a row's value, `None` for
-/// NULL. The batch functions ask only for selected rows.
-pub trait Source<T> {
-    /// The value of a row.
-    fn get(&self, row: usize) -> Option<T>;
-}
-
-/// Run `apply` over the selected rows whose arguments are not NULL, in the
-/// order of the rows, writing each result and `non_nulls`; the first error
-/// fails the call, the outputs then unspecified.
-#[inline(always)]
-fn map_rows<L: Copy, R: Copy, T>(
-    left: &impl Source<L>,
-    right: &impl Source<R>,
-    rows: RowMaskView<'_>,
-    values: &mut [MaybeUninit<T>],
-    non_nulls: &mut RowMask<'_>,
-    apply: impl Fn(L, R) -> Result<T, CalendarError>,
-) -> Result<()> {
-    check_rows(rows.nrows(), &[values.len(), non_nulls.as_view().nrows()])?;
-    for word in 0..rows.nrows().div_ceil(64) {
-        let look = rows.word(word);
-        let mut present = 0;
-        for bit in ones(look) {
-            let row = word * 64 + bit;
-            let (Some(left), Some(right)) = (left.get(row), right.get(row)) else {
-                continue;
-            };
-            values[row].write(apply(left, right)?);
-            present |= 1 << bit;
-        }
-        non_nulls.set_word(word, present)?;
-    }
-    Ok(())
-}
-
-/// The second argument of a function of one: a placeholder every row has.
-struct Unary;
-
-impl Source<()> for Unary {
-    #[inline(always)]
-    fn get(&self, _row: usize) -> Option<()> {
-        Some(())
-    }
-}
-
 /// An operation of [`date_arith`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DateOp {
@@ -772,7 +729,7 @@ pub fn timestamps_to_dates(
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
     map_rows(source, &Unary, rows, values, non_nulls, |timestamp, ()| {
-        Ok(timestamp_to_date(timestamp))
+        Ok::<_, CalendarError>(timestamp_to_date(timestamp))
     })
 }
 
