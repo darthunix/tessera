@@ -117,7 +117,7 @@ agg_distinct_reset(TessAggState *state, AggValue *value)
 	check(state, state->kernels->table_create(set->table.index, size, set->nkeys, 0, capacity,
 											  &state->status));
 	if (value->distinct_dict != NULL)
-		agg_key_dict_reset(value->distinct_dict, 256);
+		agg_key_dict_reset(value->distinct_dict, 256, 1);
 }
 
 static void
@@ -318,17 +318,22 @@ agg_key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 	return dict;
 }
 
-/* Forget every value: the table they numbered is made anew. */
+/*
+ * Forget every value: the table they numbered is made anew, for one of
+ * `shares` dictionaries of the node's keys.
+ */
 void
-agg_key_dict_reset(KeyDict *dict, uint64 values)
+agg_key_dict_reset(KeyDict *dict, uint64 values, int shares)
 {
 	MemoryContextReset(dict->context);
 	/*
 	 * Room for the values expected, where the planner's estimate of the
-	 * groups is known and within a quarter of hash_mem: a dictionary grown
-	 * from 256 to half a million values took 5 % of an INTERSECT.
+	 * groups is known and within a quarter of hash_mem for every
+	 * dictionary of the keys together, which leaves the table its own
+	 * room: a dictionary grown from 256 to half a million values took 5 %
+	 * of an INTERSECT.
 	 */
-	values = Min(values, tess_hash_memory_limit() / 4 /
+	values = Min(values, tess_hash_memory_limit() / 4 / Max(shares, 1) /
 				 (sizeof(KeyEntry) * 2 / KEYDICT_FILLFACTOR + sizeof(Datum)));
 	values = Max(values, 256);
 	dict->table = keydict_create(dict->context, values, dict);

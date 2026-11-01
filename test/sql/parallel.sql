@@ -361,6 +361,11 @@ SELECT partial_property($$SELECT k, sum(v::numeric / 3) FROM parallel_groups GRO
 -- groups of sums of 2000 digits outgrow hash_mem in their rests alone.
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k % 100, sum(v * (10::numeric ^ 2000 - 1)) FROM parallel_groups GROUP BY 1) AS q$$);
 SELECT partial_property($$SELECT k % 100, sum(v * (10::numeric ^ 2000 - 1)) FROM parallel_groups GROUP BY 1$$, 'Early Emits')::int > 0 AS early;
+-- Fewer groups than a batch's go up too, once their states pass it: the
+-- floor of a partial table is one group, not a batch's (a serial table
+-- freezes with a batch's groups at least).
+SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k % 50, sum(v * (10::numeric ^ 2000 - 1)) FROM parallel_groups GROUP BY 1) AS q$$);
+SELECT partial_property($$SELECT k % 50, sum(v * (10::numeric ^ 2000 - 1)) FROM parallel_groups GROUP BY 1$$, 'Early Emits')::int > 0 AS early;
 -- Groups spread over the input fold nothing before the table fills, a
 -- group per row read: sending the table up would hand the grouping above
 -- every row. The groups go to disk instead, as a serial node's, and out as
