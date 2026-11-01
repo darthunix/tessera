@@ -345,6 +345,19 @@ add_table_chunk(TessHashJoinState *state)
 	state->counters[JOIN_CHUNKS]++;
 }
 
+/* The bytes of the index join_index_table makes for rows records. */
+static Size
+join_index_bytes(TessHashJoinState *state, uint64 rows)
+{
+	Size		size;
+
+	check(state, state->kernels->table_size(state->keys.nkeys,
+											sizeof(uint64) * (1 + state->npayload),
+											Max(rows, JOIN_INITIAL_ROWS),
+											&size, &state->status));
+	return size;
+}
+
 /*
  * The index for the records appended, made once the inner side is read,
  * and the records linked into it, those of a key next to each other: the
@@ -358,13 +371,10 @@ join_index_table(TessHashJoinState *state, int read_back)
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
 	uint64		capacity = Max(state->build_rows, JOIN_INITIAL_ROWS);
 	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
-	Size		size;
+	Size		size = join_index_bytes(state, capacity);
 
 	/* One index per build, made once every chunk is appended. */
 	Assert(state->table.index == NULL);
-	check(state, state->kernels->table_size(state->keys.nkeys,
-											payload_size, capacity,
-											&size, &state->status));
 	state->table.index = MemoryContextAllocExtended(state->table_context, size,
 													MCXT_ALLOC_HUGE);
 	state->table.index_len = size;
@@ -678,10 +688,18 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	int			count;
 	bool		fresh = false;
 
-	/* A batch adds a chunk of records and one of values at most. */
+	/*
+	 * A batch adds a chunk of records and one of values at most, and the
+	 * index comes once the build is read: room for both chunks and for
+	 * the index of every record with this batch's, before it goes in. The
+	 * index is a check here, not memory taken: the count takes it when it
+	 * is made.
+	 */
 	if (state->spill == NULL &&
 		state->table_bytes + state->values.bytes +
-		2 * join_chunk_len_for(JOIN_CHUNK_LEN) > tess_hash_memory_limit())
+		2 * join_chunk_len_for(JOIN_CHUNK_LEN) +
+		join_index_bytes(state, state->build_rows + (uint64) batch->rows.nrows) >
+		tess_hash_memory_limit())
 		join_start_spill(state);
 	if (state->spill != NULL)
 	{

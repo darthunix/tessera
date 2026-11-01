@@ -1020,7 +1020,7 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 20000
-         Chunks: 47
+         Chunks: 46
          Resident Partitions: 0
          Spilled Chunks: 200
          Tail Chunks Kept: 0
@@ -1853,7 +1853,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          Rows Removed by Bloom Filter: 13164
          Builds: 1
          Build Rows: 5000
-         Chunks: 12
+         Chunks: 11
          Resident Partitions: 0
          Spilled Chunks: 35
          Tail Chunks Kept: 0
@@ -2487,7 +2487,7 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 90910
-         Chunks: 149
+         Chunks: 144
          Resident Partitions: 0
          Spilled Chunks: 821
          Tail Chunks Kept: 0
@@ -2536,7 +2536,7 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 90910
-         Chunks: 167
+         Chunks: 162
          Resident Partitions: 1
          Spilled Chunks: 719
          Tail Chunks Kept: 0
@@ -2576,7 +2576,7 @@ SELECT join_explain($$SELECT count(*), sum(length(jsb.t)) FROM jsp JOIN jsb ON j
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 90910
-         Chunks: 182
+         Chunks: 177
          Resident Partitions: 1
          Spilled Chunks: 721
          Tail Chunks Kept: 0
@@ -2709,9 +2709,9 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 100000
-         Chunks: 139
+         Chunks: 133
          Resident Partitions: 0
-         Spilled Chunks: 828
+         Spilled Chunks: 827
          Tail Chunks Kept: 0
          Probe Rows: 40000
          Matches: 171130
@@ -2784,7 +2784,7 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
          Rows Removed by Bloom Filter: 90906
          Builds: 1
          Build Rows: 62000
-         Chunks: 55
+         Chunks: 52
          Resident Partitions: 0
          Spilled Chunks: 159
          Tail Chunks Kept: 0
@@ -2890,9 +2890,9 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 200000
-         Chunks: 276
+         Chunks: 275
          Resident Partitions: 0
-         Spilled Chunks: 3182
+         Spilled Chunks: 3183
          Tail Chunks Kept: 0
          Split Partitions: 4
          Probe Rows: 100000
@@ -3032,7 +3032,7 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp
          Rows Removed by Bloom Filter: 22727
          Builds: 1
          Build Rows: 40000
-         Chunks: 79
+         Chunks: 77
          Resident Partitions: 0
          Spilled Chunks: 807
          Tail Chunks Kept: 0
@@ -3090,7 +3090,7 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(jskew.w) FROM jsp RIGHT
          Rows Removed by Bloom Filter: 90906
          Builds: 1
          Build Rows: 62000
-         Chunks: 55
+         Chunks: 52
          Resident Partitions: 0
          Spilled Chunks: 160
          Tail Chunks Kept: 0
@@ -3143,9 +3143,9 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp R
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 200000
-         Chunks: 275
+         Chunks: 273
          Resident Partitions: 0
-         Spilled Chunks: 3740
+         Spilled Chunks: 3741
          Tail Chunks Kept: 0
          Split Partitions: 4
          Probe Rows: 100000
@@ -3199,7 +3199,7 @@ SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp
          Rows Removed by Bloom Filter: 22060
          Builds: 1
          Build Rows: 40000
-         Chunks: 323
+         Chunks: 322
          Resident Partitions: 0
          Spilled Chunks: 4157
          Tail Chunks Kept: 0
@@ -4701,6 +4701,65 @@ SELECT join_costs_carried($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$) 
 (1 row)
 
 DROP FUNCTION join_costs_carried(text);
+-- A serial build checks, before each batch, its chunks, its values, room
+-- for two more chunks and the index its records will need, against
+-- hash_mem. At 16 MiB, 420 000 keys of 32-byte records take 13 697 024
+-- bytes of chunks and a 4 194 400-byte index: the build spills, and its
+-- memory stays within hash_mem; 250 000 keys fit with their index.
+CREATE TABLE jgbuild AS SELECT g AS k FROM generate_series(1, 420000) AS g;
+CREATE TABLE jgprobe AS SELECT g % 450000 AS k FROM generate_series(1, 600000) AS g;
+ANALYZE jgbuild, jgprobe;
+SET work_mem = '16MB';
+SET hash_mem_multiplier = 1;
+SET max_parallel_workers_per_gather = 0;
+-- spec: table-memory/A build whose index would pass the limit
+SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k)$$, false);
+                                    join_explain                                     
+-------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   ->  Custom Scan (TessHashJoin) (actual rows=570000.00 loops=1)
+         Hash Cond: (p.k = b.k)
+         Buckets: 1048576
+         Memory Usage: over hash_mem
+         Batches: 4
+         Disk Usage: 1164 kB
+         Rows Removed by Bloom Filter: 7420
+         ->  Custom Scan (TessHeapScan) on jgprobe p (actual rows=600000.00 loops=1)
+         ->  Custom Scan (TessHeapScan) on jgbuild b (actual rows=420000.00 loops=1)
+(10 rows)
+
+SELECT join_same($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash c46cd2b75b709e3522d6938609d917e2
+(1 row)
+
+-- spec: table-memory/A build that fits with its index
+SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k) WHERE b.k <= 250000$$, false);
+                                       join_explain                                        
+-------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   ->  Custom Scan (TessHashJoin) (actual rows=400000.00 loops=1)
+         Hash Cond: (p.k = b.k)
+         Buckets: 524288
+         Memory Usage: within hash_mem
+         ->  Custom Scan (TessHeapScan) on jgprobe p (actual rows=600000.00 loops=1)
+         ->  Custom Scan (TessFilter) on jgbuild b (actual rows=250000.00 loops=1)
+               Batch Filter: (b.k <= 250000)
+               Rows Removed by Batch Filter: 170000
+               ->  Custom Scan (TessHeapScan) on jgbuild b (actual rows=420000.00 loops=1)
+(10 rows)
+
+SELECT join_same($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k) WHERE b.k <= 250000$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 26d14b21aa45daaf43fcbbb6c9993255
+(1 row)
+
+RESET work_mem;
+RESET hash_mem_multiplier;
+RESET max_parallel_workers_per_gather;
+DROP TABLE jgbuild, jgprobe;
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jslong, jsouter, jsheavy;
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();

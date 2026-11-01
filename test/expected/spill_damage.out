@@ -192,9 +192,9 @@ SELECT node_property($$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM 
 (1 row)
 
 SELECT damaged(:'damage_module', 'mark', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
-                                                       damaged                                                        
-----------------------------------------------------------------------------------------------------------------------
- XX001: Tessera read back a damaged chunk of records: table chunk 0 has a used mark of 8167 bytes that ends no record
+                                                        damaged                                                        
+-----------------------------------------------------------------------------------------------------------------------
+ XX001: Tessera read back a damaged chunk of records: table chunk 0 has a used mark of 16367 bytes that ends no record
 (1 row)
 
 -- A shared table, with no worker started: the leader loads each
