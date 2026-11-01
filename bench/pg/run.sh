@@ -7,7 +7,9 @@
 # last: the postmaster holds the ones it loaded, and every backend is
 # forked from it. See README.md. Run from the repository root:
 #   bench/pg/run.sh setup [scale] | measure <family> [workers] | stop
-# measure takes CASES, a regular expression of the case names to time
+# measure keeps the PGOPTIONS it is given, such as a statement_timeout
+# that bounds every statement of a run, and takes CASES, a regular
+# expression of the case names to time
 # (every case by default; the plans are written for all of them), and
 # REPETITIONS, the runs of each case in each mode (the family's own, 31,
 # by default): a development A/B times the cases a change touches, fewer
@@ -73,7 +75,7 @@ measure)
             "$LIB/libtessera_runtime.a" "$BIN/postgres"
     } > "$OUT/source.txt"
     { pmset -g batt 2>/dev/null | head -2; date; } > "$OUT/power.txt"
-    (cd "$OUT" && PGOPTIONS="-c bench.cases=${CASES:-}" "$BIN/psql" -X \
+    (cd "$OUT" && PGOPTIONS="${PGOPTIONS:-} -c bench.cases=${CASES:-}" "$BIN/psql" -X \
         -v workers="$WORKERS" ${REPETITIONS:+-v repetitions="$REPETITIONS"} \
         -f "$HERE/$FAMILY.sql" > run.log 2>&1)
     cat "$OUT/summary.txt"

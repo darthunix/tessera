@@ -54,7 +54,12 @@ query down, and where it can, does it speed one up.
   unique one (5 M). A case runs for seconds, so it is warmed up twice
   and timed 11 times (`-v warmups=`, `-v repetitions=` change that); the
   plans record the partitions and disk of both modes. Run serially and
-  with `measure spill 2`.
+  with `measure spill 2`. Five cases more show how a table in memory
+  grows, each at its own `hash_mem`: serial builds of 250 000, 300 000
+  and 420 000 keys at 16 MiB (`build_*`), the grouping by the fact
+  table's key at 3 MiB (`group_fk_1536kb`), and a `count(DISTINCT)` of
+  3000 pairs at 256 kB (`distinct_128kb`); they mean the same at the
+  multiplier 1.
 - **sort** (`sort.sql`): `ORDER BY` over `bench_sort` (2 M rows per
   multiplier, keys in no order of the rows): a unique int4 key, an int8 one
   past the int4 range, a key of 1000 values, two keys, a descending key with
@@ -231,7 +236,9 @@ SHARED_BUFFERS=4GB bench/pg/run.sh setup 10   # ten times the rows, larger buffe
 matches (the plans are still written for every case), and `REPETITIONS`
 the runs of each case in each mode, 31 by default: a development A/B times
 the cases a change touches, fewer times, so that a run takes minutes at
-most. [`cargo ab measure`](../../tools/tessera-ab/README.md) runs such an
+most. `PGOPTIONS` passes on to the family's session, so that
+`PGOPTIONS='-c statement_timeout=30s'` bounds every statement of a run,
+the warm-ups and the plans included. [`cargo ab measure`](../../tools/tessera-ab/README.md) runs such an
 A/B of two revisions, installing each in turn and comparing every case
 with the control without Tessera. `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
 `postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels`

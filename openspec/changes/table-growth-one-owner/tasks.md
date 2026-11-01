@@ -23,7 +23,7 @@ as it goes.
 
 ## 2. What the code does now
 
-- [ ] 2.1 Add the measured cases of the design's plan: in `join`, the
+- [x] 2.1 Add the measured cases of the design's plan: in `join`, the
       serial joins built on 250 000, 300 000 and 420 000 rows at
       `hash_mem` = 16 MiB, their tables made by the family; in `spill`,
       the grouping at 3 MiB above the cap and the grouping that reads
