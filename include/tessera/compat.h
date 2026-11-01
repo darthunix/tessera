@@ -268,6 +268,17 @@ find_ec_member_matching_expr(EquivalenceClass *ec, Expr *expr, Relids relids)
 #endif
 
 /*
+ * The flag that sends a setting to Greengage's segments: a newly started
+ * segment process gets only the synchronized ones, and an extension's are
+ * not by default.
+ */
+#if TESS_GREENGAGE
+#define TESS_GUC_SYNC GUC_GPDB_NEED_SYNC
+#else
+#define TESS_GUC_SYNC 0
+#endif
+
+/*
  * Calls whose arguments differ between the cores. PostgreSQL 12 costs
  * the aggregates of the clauses it is given, the target list and HAVING
  * as its grouping does; master costs every aggregate of the query. Its

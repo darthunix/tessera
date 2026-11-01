@@ -41,7 +41,7 @@ _PG_init(void)
 	 */
 	DefineCustomBoolVariable("tessera.enable",
 							 "Adds Tessera batch paths to query plans.",
-							 NULL, &tess_enable, true, PGC_USERSET, GUC_EXPLAIN,
+							 NULL, &tess_enable, true, PGC_USERSET, GUC_EXPLAIN | TESS_GUC_SYNC,
 							 NULL, NULL, NULL);
 	rendezvous = find_rendezvous_variable(TESS_API_RENDEZVOUS);
 	if (*rendezvous != NULL && *rendezvous != &tess_api)
