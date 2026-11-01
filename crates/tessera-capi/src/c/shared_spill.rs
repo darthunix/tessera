@@ -5,13 +5,16 @@
 //! steps of a round over a partition, and the filling of a shared Bloom
 //! filter.
 
+use std::cell::Cell;
 use std::ffi::c_int;
+use std::sync::atomic::AtomicU64;
 
 use anyhow::Context;
 use tessera_core::RowMaskView;
 use tessera_kernels::phases::Participant;
 use tessera_kernels::shared_spill::{
-    LocalSpill, Memory, Partition, Records, SharedSpill, SplitWeights, Weights, splits, words_for,
+    LocalSpill, Memory, Partition, Records, SharedSpill, SplitWeights, Weights, check_words,
+    splits, words_for,
 };
 use tessera_kernels::table::bloom;
 
@@ -19,27 +22,52 @@ use super::mask::Mask;
 use super::status::{Code, Status, guard};
 use super::table::values;
 
-/// The shared state at `words`, of `nwords` words.
-///
-/// # Safety
-///
-/// `words` is aligned to 8 and valid for reads and writes of `nwords`
-/// words, accessed only through shared spills, for `'a`.
-unsafe fn spill<'a>(words: *mut u64, nwords: usize) -> anyhow::Result<SharedSpill<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { SharedSpill::attach(words, nwords) }
+/// Refuse words in shared memory, named `what`, that are null or not
+/// aligned to 8, before a slice or a reference is made of them.
+pub(super) fn check_aligned(words: *mut u64, what: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !words.is_null() && words.addr().is_multiple_of(8),
+        "{what} must be aligned to 8 bytes"
+    );
+    Ok(())
 }
 
-/// A process's own state at `words`, of `nwords` words.
+/// Refuse spill words that are null, misaligned, or of a count that is
+/// no spill's, before a slice is made of them.
+fn check_spill_words(words: *mut u64, nwords: usize) -> anyhow::Result<()> {
+    check_aligned(words, "a spill's words")?;
+    check_words(nwords)
+}
+
+/// The shared state at `words`, of `nwords` words; null or misaligned
+/// words, and a count of words that is no spill's, are refused.
 ///
 /// # Safety
 ///
-/// `words` is aligned to 8 and valid for reads and writes of `nwords`
-/// words, which this thread alone accesses, only through local spills,
-/// for `'a`.
+/// `words` is refused as above, or aligned to 8 and valid for reads and
+/// writes of `nwords` words, reached only through shared spills, for
+/// `'a`.
+unsafe fn spill<'a>(words: *mut u64, nwords: usize) -> anyhow::Result<SharedSpill<'a>> {
+    check_spill_words(words, nwords)?;
+    // SAFETY: the caller's contract; an `AtomicU64` has the size and
+    // alignment of a `u64`.
+    SharedSpill::new(unsafe { std::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) })
+}
+
+/// A process's own state at `words`, of `nwords` words; null or
+/// misaligned words, and a count of words that is no spill's, are
+/// refused.
+///
+/// # Safety
+///
+/// `words` is refused as above, or aligned to 8 and valid for reads and
+/// writes of `nwords` words, which this thread alone reaches, only
+/// through local spills, for `'a`.
 unsafe fn local<'a>(words: *mut u64, nwords: usize) -> anyhow::Result<LocalSpill<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { LocalSpill::attach(words, nwords) }
+    check_spill_words(words, nwords)?;
+    // SAFETY: the caller's contract; a `Cell<u64>` has the size and
+    // alignment of a `u64`.
+    LocalSpill::new(unsafe { std::slice::from_raw_parts(words.cast::<Cell<u64>>(), nwords) })
 }
 
 /// `TessSpillWeights`: the weights of the rule that sends partitions to

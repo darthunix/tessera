@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, check_rows};
 use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Slot, SumSlot};
 use tessera_kernels::column_keys::normalize_word;
-use tessera_kernels::phases::{Participant, SharedCounters, StopWord};
+use tessera_kernels::phases::{COUNTER_WORDS, Participant, SharedCounters, StopWord};
 use tessera_kernels::table::{
     Appended, Batch, ChunkWriter, Chunks, Cursor, FORMAT_VERSION, HEADER_SIZE, KeySource, MAX_KEYS,
     MAX_PAYLOAD_COLUMNS, Marks, Matches, MatchesView, MergeStop, Partitions, PayloadColumns, Table,
@@ -28,7 +28,7 @@ use super::args::reader;
 use super::column::DatumColumn;
 use super::decimal::{PartialColumn, SumColumn, SumInput};
 use super::mask::Mask;
-use super::shared_spill::SpillWeights;
+use super::shared_spill::{SpillWeights, check_aligned};
 use super::status::{Code, Status, guard};
 use crate::{DatumInt32Column, DatumInt64Column};
 
@@ -2274,14 +2274,37 @@ pub unsafe extern "C" fn tess_bloom_shared_probe(
     }
 }
 
-/// Attach to a build's counters for the length of a call.
+/// Attach to a build's counters for the length of a call; null or
+/// misaligned counters are refused.
 ///
 /// # Safety
 ///
-/// `counters` as for [`SharedCounters::attach`] during the call.
+/// `counters` is null, misaligned, or aligned to 8 and valid for reads
+/// and writes of `TESS_BUILD_COUNTER_WORDS` words for `'a`, which are
+/// reached only through build counters, here or in other processes
+/// mapping them.
 unsafe fn build_counters<'a>(counters: *mut u64) -> Result<SharedCounters<'a>> {
-    // SAFETY: the caller's contract.
-    unsafe { SharedCounters::attach(counters) }
+    check_aligned(counters, "build counters")?;
+    // SAFETY: the caller's contract; an `AtomicU64` has the size and
+    // alignment of a `u64`, and the array of the words their layout.
+    let words = unsafe { &*counters.cast::<[AtomicU64; COUNTER_WORDS]>() };
+    Ok(SharedCounters::new(words))
+}
+
+/// Attach to a table's stop word for the length of a call; a null or
+/// misaligned word is refused.
+///
+/// # Safety
+///
+/// `word` is null, misaligned, or aligned to 8 and valid for reads and
+/// writes for `'a`, cleared before any participant attached to the
+/// table, and reached only through stop words, here or in other
+/// processes.
+unsafe fn stop_word<'a>(word: *mut u64) -> Result<StopWord<'a>> {
+    check_aligned(word, "a stop word")?;
+    // SAFETY: the caller's contract; an `AtomicU64` has the size and
+    // alignment of a `u64`.
+    Ok(StopWord::new(unsafe { &*word.cast::<AtomicU64>() }))
 }
 
 /// `tess_build_counters_init`: clear a shared build's counters before any
@@ -2435,7 +2458,7 @@ pub unsafe extern "C" fn tess_build_step(
 /// # Safety
 ///
 /// `participant` must point to a participant this process alone uses;
-/// `stopped` to a word as for [`StopWord::attach`]; `status` as for every
+/// `stopped` to a word as for [`stop_word`]; `status` as for every
 /// entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_build_stop(
@@ -2447,7 +2470,7 @@ pub unsafe extern "C" fn tess_build_stop(
     unsafe {
         guard(status, || {
             let participant = participant.as_ref().context("a null participant")?;
-            let word = StopWord::attach(stopped)?;
+            let word = stop_word(stopped)?;
             participant.stop(&word);
             Ok(())
         })
@@ -2471,7 +2494,7 @@ pub unsafe extern "C" fn tess_build_stopped(
     unsafe {
         guard(status, || {
             let any = any.as_mut().context("a null result")?;
-            *any = StopWord::attach(stopped)?.stopped();
+            *any = stop_word(stopped)?.stopped();
             Ok(())
         })
     }

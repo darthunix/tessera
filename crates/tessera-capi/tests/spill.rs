@@ -174,6 +174,45 @@ fn the_spill_entry_points_choose_by_the_weights() {
     }
 }
 
+/// Spill words that are null or not aligned to 8 are refused at the C
+/// boundary, shared or a process's own, before any word is read; words
+/// of another count than the partitions take are refused too, before a
+/// slice of that count is made.
+#[test]
+fn the_spill_words_refuse_null_and_misaligned_words() {
+    let mut status = Status::new();
+    let mut nwords = 0;
+    // SAFETY: a local status and count.
+    let code = unsafe { tess_table_spill_words(4, &raw mut nwords, &raw mut status) };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let mut words = vec![0_u64; nwords + 1];
+    for shared in [true, false] {
+        words.fill(7);
+        let at = words.as_mut_ptr();
+        let misaligned = at.cast::<u8>().wrapping_add(4).cast::<u64>();
+        for (base, count) in [
+            (std::ptr::null_mut(), nwords),
+            (misaligned, nwords),
+            (at, nwords + 1),
+            (at, usize::MAX / 8),
+        ] {
+            // SAFETY: the words of the vector, which the refused calls do
+            // not read.
+            let code = unsafe { tess_table_spill_init(base, count, shared, 100, &raw mut status) };
+            assert_eq!(
+                code,
+                Code::InvalidArgument,
+                "shared {shared}, {count} words"
+            );
+        }
+        assert!(words.iter().all(|&word| word == 7), "a refused call wrote");
+        // SAFETY: the words of the vector, as many as the count.
+        let code = unsafe { tess_table_spill_init(at, nwords, shared, 100, &raw mut status) };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        assert_eq!(words[nwords], 7, "a word past the count written");
+    }
+}
+
 /// The partitions in force, the starts of the rounds, the files and the
 /// partitions taken once each, and the partitions sent to disk, through
 /// their entry points over shared words.

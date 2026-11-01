@@ -20,7 +20,9 @@
 //! one at a time from a counter, and a partition too large for one
 //! participant's memory is taken whole by one of them. The loom model in
 //! `loom.rs` checks the races.
-#![allow(unsafe_code)]
+//!
+//! The words come to the crate as slices: its host attaches the memory
+//! they lie in, and owns the unsafe code that makes a slice of it.
 
 use core::cell::Cell;
 use core::sync::atomic::AtomicU64;
@@ -179,13 +181,11 @@ pub type SharedSpill<'a> = Spill<&'a [AtomicU64]>;
 /// The state of a process's own spill, in its memory.
 pub type LocalSpill<'a> = Spill<&'a [Cell<u64>]>;
 
-/// Check `nwords` words at `words` for a spill's state, as [`words_for`]
-/// sizes them.
-fn check_words(words: *mut u64, nwords: usize) -> Result<()> {
-    ensure!(
-        !words.is_null() && words.addr().is_multiple_of(8),
-        "a spill's words must be aligned to 8 bytes"
-    );
+/// Refuse a count of words that [`words_for`] gives for no count of
+/// partitions. A host that makes the slice of words itself checks the
+/// count first, so that it never makes a slice of a count it would
+/// refuse; [`SharedSpill::new`] and [`LocalSpill::new`] check it again.
+pub fn check_words(nwords: usize) -> Result<()> {
     ensure!(
         nwords > HEAD_WORDS + PART_WORDS
             && nwords <= HEAD_WORDS + PART_WORDS * (MAX_PARTITIONS + 1)
@@ -196,35 +196,20 @@ fn check_words(words: *mut u64, nwords: usize) -> Result<()> {
 }
 
 impl<'a> SharedSpill<'a> {
-    /// Attach to the `nwords` words at `words`, as [`words_for`] sized them.
-    ///
-    /// # Safety
-    ///
-    /// `words` is aligned to 8 and valid for reads and writes of `nwords`
-    /// words for `'a`, which are accessed only through shared spills, here
-    /// or in other processes mapping them.
-    pub unsafe fn attach(words: *mut u64, nwords: usize) -> Result<Self> {
-        check_words(words, nwords)?;
-        // SAFETY: the caller's contract; an `AtomicU64` has the size and
-        // alignment of a `u64`.
-        let words = unsafe { core::slice::from_raw_parts(words.cast::<AtomicU64>(), nwords) };
+    /// The state over `words`, as many as [`words_for`] sized, which every
+    /// participant reaches only through shared spills, here or in other
+    /// processes mapping them.
+    pub fn new(words: &'a [AtomicU64]) -> Result<Self> {
+        check_words(words.len())?;
         Ok(Self { words })
     }
 }
 
 impl<'a> LocalSpill<'a> {
-    /// Attach to the `nwords` words at `words`, as [`words_for`] sized them.
-    ///
-    /// # Safety
-    ///
-    /// `words` is aligned to 8 and valid for reads and writes of `nwords`
-    /// words for `'a`, which one thread accesses, only through local
-    /// spills.
-    pub unsafe fn attach(words: *mut u64, nwords: usize) -> Result<Self> {
-        check_words(words, nwords)?;
-        // SAFETY: the caller's contract; a `Cell<u64>` has the size and
-        // alignment of a `u64`.
-        let words = unsafe { core::slice::from_raw_parts(words.cast::<Cell<u64>>(), nwords) };
+    /// The state over `words`, as many as [`words_for`] sized, which one
+    /// thread reaches only through local spills.
+    pub fn new(words: &'a [Cell<u64>]) -> Result<Self> {
+        check_words(words.len())?;
         Ok(Self { words })
     }
 }
@@ -657,19 +642,27 @@ mod tests {
         per_check: 0,
     };
 
-    fn spill(words: &mut Vec<u64>, capacity: usize, budget: u64) -> SharedSpill<'_> {
-        *words = vec![0; words_for(capacity).unwrap()];
-        // SAFETY: the vector is aligned to 8 and used only here.
-        let spill = unsafe { SharedSpill::attach(words.as_mut_ptr(), words.len()) }.unwrap();
+    /// `count` shared words, zero.
+    fn atomics(count: usize) -> Vec<AtomicU64> {
+        (0..count).map(|_| AtomicU64::new(0)).collect()
+    }
+
+    /// The words of a process's own spill as they stand.
+    fn values(words: &[Cell<u64>]) -> Vec<u64> {
+        words.iter().map(Cell::get).collect()
+    }
+
+    fn spill(words: &mut Vec<AtomicU64>, capacity: usize, budget: u64) -> SharedSpill<'_> {
+        *words = atomics(words_for(capacity).unwrap());
+        let spill = SharedSpill::new(words).unwrap();
         spill.init(budget);
         spill
     }
 
     /// A process's own state of four partitions with the bytes given.
-    fn local(words: &mut Vec<u64>, bytes: [i64; 4]) -> LocalSpill<'_> {
-        *words = vec![0; words_for(4).unwrap()];
-        // SAFETY: the vector is aligned to 8 and used only here.
-        let spill = unsafe { LocalSpill::attach(words.as_mut_ptr(), words.len()) }.unwrap();
+    fn local(words: &mut Vec<Cell<u64>>, bytes: [i64; 4]) -> LocalSpill<'_> {
+        *words = vec![Cell::new(0); words_for(4).unwrap()];
+        let spill = LocalSpill::new(words).unwrap();
         spill.init(0);
         spill.split(4).unwrap();
         for (partition, bytes) in (0..).zip(bytes) {
@@ -860,29 +853,16 @@ mod tests {
 
     #[test]
     fn words_attach_only_as_words_for_sizes_them() {
-        let mut words = vec![0_u64; words_for(4).unwrap() + 1];
-        let at = words.as_mut_ptr();
         let len = words_for(4).unwrap();
-        // SAFETY: the vector is aligned to 8 and used only here; the
-        // calls that succeed read nothing.
-        unsafe {
-            assert!(SharedSpill::attach(at, len).is_ok());
-            assert!(LocalSpill::attach(at, len).is_ok());
-            assert!(
-                LocalSpill::attach(at, len + 1).is_err(),
-                "not a whole partition"
-            );
-            assert!(
-                SharedSpill::attach(at, HEAD_WORDS + PART_WORDS).is_err(),
-                "no partition"
-            );
-            assert!(
-                LocalSpill::attach(core::ptr::null_mut(), len).is_err(),
-                "null"
-            );
-            let odd = at.cast::<u8>().add(4).cast::<u64>();
-            assert!(SharedSpill::attach(odd, len).is_err(), "not aligned to 8");
-        }
+        let shared = atomics(len + 1);
+        let local = vec![Cell::new(0); len + 1];
+        assert!(SharedSpill::new(&shared[..len]).is_ok());
+        assert!(LocalSpill::new(&local[..len]).is_ok());
+        assert!(LocalSpill::new(&local).is_err(), "not a whole partition");
+        assert!(
+            SharedSpill::new(&shared[..HEAD_WORDS + PART_WORDS]).is_err(),
+            "no partition"
+        );
     }
 
     proptest! {
@@ -892,15 +872,11 @@ mod tests {
             adds in proptest::collection::vec((0_u32..8, 0_i64..1000, 0_u64..100), 0..32),
             checks in proptest::collection::vec((0_u64..4000, 0_u32..3, 0_usize..3), 0..16),
         ) {
-            let mut shared_words = vec![0; words_for(8).unwrap()];
-            let mut local_words = shared_words.clone();
+            let shared_words = atomics(words_for(8).unwrap());
+            let local_words = vec![Cell::new(0); shared_words.len()];
             {
-                let (at, len) = (shared_words.as_mut_ptr(), shared_words.len());
-                // SAFETY: the vectors are aligned to 8 and used only here.
-                let shared = unsafe { SharedSpill::attach(at, len) }.unwrap();
-                let (at, len) = (local_words.as_mut_ptr(), local_words.len());
-                // SAFETY: as above.
-                let local = unsafe { LocalSpill::attach(at, len) }.unwrap();
+                let shared = SharedSpill::new(&shared_words).unwrap();
+                let local = LocalSpill::new(&local_words).unwrap();
                 shared.init(2000);
                 local.init(2000);
                 prop_assert_eq!(shared.split(8).unwrap(), local.split(8).unwrap());
@@ -922,7 +898,8 @@ mod tests {
                     }
                 }
             }
-            prop_assert_eq!(shared_words, local_words);
+            let shared_words: Vec<u64> = shared_words.into_iter().map(AtomicU64::into_inner).collect();
+            prop_assert_eq!(shared_words, values(&local_words));
         }
     }
 
@@ -1046,11 +1023,9 @@ mod tests {
         assert_eq!(spill.take_file(1, false).unwrap(), u32::MAX);
         assert!(spill.take_file(1, false).is_err());
 
-        let mut many = vec![0; words_for(MAX_PARTITIONS).unwrap() + PART_WORDS];
-        // SAFETY: the vector is aligned to 8 and used only here.
-        assert!(unsafe { SharedSpill::attach(many.as_mut_ptr(), many.len()) }.is_err());
-        // SAFETY: as above.
-        assert!(unsafe { LocalSpill::attach(many.as_mut_ptr(), many.len()) }.is_err());
+        let many = words_for(MAX_PARTITIONS).unwrap() + PART_WORDS;
+        assert!(SharedSpill::new(&atomics(many)).is_err());
+        assert!(LocalSpill::new(&vec![Cell::new(0); many]).is_err());
     }
 
     #[test]
@@ -1151,9 +1126,8 @@ mod tests {
         }
         let mut words = Vec::new();
         check(&spill(&mut words, 4, u64::MAX));
-        let mut own = vec![0; words_for(4).unwrap()];
-        // SAFETY: the vector is aligned to 8 and used only here.
-        let spill = unsafe { LocalSpill::attach(own.as_mut_ptr(), own.len()) }.unwrap();
+        let own = vec![Cell::new(0); words_for(4).unwrap()];
+        let spill = LocalSpill::new(&own).unwrap();
         spill.init(u64::MAX);
         check(&spill);
     }

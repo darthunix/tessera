@@ -42,7 +42,10 @@
 //! [`StopWord`] first: the last one then returns no record without a
 //! mark, since the pairs of the rows left unprobed were never marked, as
 //! PostgreSQL's parallel hash join skips its unmatched rows then.
-#![allow(unsafe_code)]
+//!
+//! The words in shared memory come to the crate as references: its host
+//! attaches the memory they lie in, and owns the unsafe code that makes a
+//! reference of it.
 
 use core::sync::atomic::AtomicU64;
 
@@ -227,21 +230,11 @@ pub(super) trait Stop {
 pub struct StopWord<'a>(&'a AtomicU64);
 
 impl<'a> StopWord<'a> {
-    /// Attach to the word at `word`, cleared before any participant
-    /// attached to the table.
-    ///
-    /// # Safety
-    ///
-    /// `word` is aligned to 8 and valid for reads and writes for `'a`, and
-    /// accessed only through stop words, here or in other processes.
-    pub unsafe fn attach(word: *mut u64) -> Result<Self> {
-        ensure!(
-            !word.is_null() && word.addr().is_multiple_of(8),
-            "a stop word must be aligned to 8 bytes"
-        );
-        // SAFETY: the caller's contract; an `AtomicU64` has the size and
-        // alignment of a `u64`.
-        Ok(Self(unsafe { &*word.cast::<AtomicU64>() }))
+    /// The stop word `word`, cleared before any participant attached to
+    /// the table, and reached only through stop words, here or in other
+    /// processes.
+    pub fn new(word: &'a AtomicU64) -> Self {
+        Self(word)
     }
 
     /// Whether a participant stopped, once this one has left the table.
@@ -262,22 +255,10 @@ impl Stop for StopWord<'_> {
 }
 
 impl<'a> SharedCounters<'a> {
-    /// Attach to the [`COUNTER_WORDS`] words at `words`.
-    ///
-    /// # Safety
-    ///
-    /// `words` is aligned to 8 and valid for reads and writes of
-    /// [`COUNTER_WORDS`] words for `'a`, which are accessed only through
-    /// shared counters, here or in other processes mapping them.
-    pub unsafe fn attach(words: *mut u64) -> Result<Self> {
-        ensure!(
-            !words.is_null() && words.addr().is_multiple_of(8),
-            "build counters must be aligned to 8 bytes"
-        );
-        // SAFETY: the caller's contract; an `AtomicU64` has the size and
-        // alignment of a `u64`, and the array of the words their layout.
-        let words = unsafe { &*words.cast::<[AtomicU64; COUNTER_WORDS]>() };
-        Ok(Self { words })
+    /// The counters over `words`, reached only through shared counters,
+    /// here or in other processes mapping them.
+    pub fn new(words: &'a [AtomicU64; COUNTER_WORDS]) -> Self {
+        Self { words }
     }
 }
 
@@ -497,11 +478,9 @@ impl Participant {
 mod tests {
     use super::*;
 
-    /// The real counters over a test's own words.
-    fn attach_counters(words: &mut [u64; COUNTER_WORDS]) -> SharedCounters<'_> {
-        // SAFETY: the array is aligned to 8 and used only through these
-        // counters while they live.
-        unsafe { SharedCounters::attach(words.as_mut_ptr()) }.unwrap()
+    /// A test's own words of the counters, each `value`.
+    fn counter_words(value: u64) -> [AtomicU64; COUNTER_WORDS] {
+        core::array::from_fn(|_| AtomicU64::new(value))
     }
 
     /// The actions of a participant alone at the barrier, which elects it
@@ -513,8 +492,8 @@ mod tests {
     /// The actions of [`alone`] for a participant that attaches once
     /// others, gone since, appended `before` records.
     fn alone_after(before: u64, records: u64, attach_at: u32) -> Vec<Action> {
-        let mut words = [before, 0, 0, 0];
-        let counters = attach_counters(&mut words);
+        let words = [before, 0, 0, 0].map(AtomicU64::new);
+        let counters = SharedCounters::new(&words);
         let mut participant = Participant::new();
         let mut actions = Vec::new();
         let mut reply = 0;
@@ -581,8 +560,8 @@ mod tests {
     /// probe it has matched no pair, and once it left it probed its share.
     #[test]
     fn a_participant_stops_only_while_it_probes() {
-        let mut words = [0; COUNTER_WORDS];
-        let counters = attach_counters(&mut words);
+        let words = counter_words(0);
+        let counters = SharedCounters::new(&words);
         let mut participant = Participant::new();
         let mut reply = 0;
         let mut probed = false;
@@ -693,10 +672,8 @@ mod tests {
     /// and the duplicates are their sums, and the NULL bits their OR.
     #[test]
     fn participants_count_a_build_at_once() {
-        let mut words = [u64::MAX; COUNTER_WORDS];
-        // SAFETY: the array is aligned to 8 and used only through these
-        // counters.
-        let counters = unsafe { SharedCounters::attach(words.as_mut_ptr()) }.unwrap();
+        let words = counter_words(u64::MAX);
+        let counters = SharedCounters::new(&words);
         counters.init();
         let numbers: Vec<u64> = std::thread::scope(|scope| {
             let threads: Vec<_> = (0..3_u64)
@@ -793,8 +770,8 @@ mod tests {
     /// round, comes from no barrier of a sound node: the step refuses it.
     #[test]
     fn an_attach_past_the_last_phase_is_an_error() {
-        let mut words = [0; COUNTER_WORDS];
-        let counters = attach_counters(&mut words);
+        let words = counter_words(0);
+        let counters = SharedCounters::new(&words);
         let mut build = Participant::new();
         assert_eq!(build.next(&counters, 0).unwrap(), Action::Attach);
         assert!(build.next(&counters, FREE + 1).is_err());
@@ -809,10 +786,8 @@ mod tests {
     /// its value: records, chunks and duplicates alike.
     #[test]
     fn counts_past_their_words_are_refused() {
-        let mut words = [0_u64; COUNTER_WORDS];
-        // SAFETY: the array is aligned to 8 and used only through these
-        // counters.
-        let counters = unsafe { SharedCounters::attach(words.as_mut_ptr()) }.unwrap();
+        let words = counter_words(0);
+        let counters = SharedCounters::new(&words);
         counters.init();
         counters.report(u64::MAX, 0b01).unwrap();
         assert!(counters.report(1, 0b10).is_err());
@@ -837,7 +812,7 @@ mod tests {
             state: 99,
             elected: 0,
         };
-        let mut words = [0; COUNTER_WORDS];
-        assert!(participant.next(&attach_counters(&mut words), 0).is_err());
+        let words = counter_words(0);
+        assert!(participant.next(&SharedCounters::new(&words), 0).is_err());
     }
 }
