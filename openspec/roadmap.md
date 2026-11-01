@@ -244,13 +244,13 @@ it is the change `relhash-prefetch-by-size`.
   160 MiB and costs up to 14 % on one in L1, so x86-64 gives none
   today. On AArch64 it is given to every table, and its cost on a
   table in the cache was never measured.
-- **Known:** The design of the change. The hint fails the rule of 1 %
-  of instructions and the contract's rule "No cost to Tessera" on
-  every table where it is given; the maintainer chose on 2026-11-01 to
-  propose narrowing both, in a pull request of contracts and designs
-  only. The forecast of the contract names `table/lanes.rs` alone for
-  the hint of x86-64; a choice by size touches the loops that give it
-  too.
+- **Known:** The design of the change. The hint fails the rule of 1 % of
+  instructions and the contract's rule "No cost to Tessera" on every
+  table where it is given; the maintainer chose on 2026-11-01 to propose
+  narrowing both, the contract's rule in a pull request of contracts and
+  designs alone. The forecast of the contract names `table/lanes.rs`
+  alone for the hint of x86-64; a choice by size touches the loops that
+  give it too.
 - **Depends on:** the maintainer's decision on the narrowing of the
   rules.
 - **Capabilities:** hash-table

@@ -32,9 +32,13 @@ depend on the other two: its question is the caches, not the branches.
   the loops that give it, so it fails the rule of 1 % of instructions
   and the contract's rule "No cost to Tessera" on every table where it
   is given. The maintainer chose to propose narrowing both for a hint
-  given by size, in a pull request of contracts and designs only; this
-  change waits for that decision, and closes without the hint if the
-  rules stay.
+  given by size. The contract's rule changes in a pull request of
+  contracts and designs alone (#116); the rule of instructions, which
+  `docs/measuring.md` sets and no contract holds, is asked of the
+  maintainer here: above the bound, the hint is judged by its cycles,
+  with its own instructions named in the listing, and this change
+  writes that into `docs/measuring.md`. The change waits for both
+  decisions, and closes without the hint if the rules stay.
 - The probe, the find or insert and the gathers of a batch give the
   prefetch hint when the table is larger than a bound of bytes, and
   none otherwise; the choice is made once a call, from the sizes the

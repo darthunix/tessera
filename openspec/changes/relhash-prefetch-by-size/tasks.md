@@ -55,6 +55,9 @@ narrowing of the rules that the design names.
       for simplifying the crate's hint that `CONTRIBUTING.md` asks of
       a change that touches parts its forecast did not name, with the
       boundary it crossed. Check: `.github/scripts/check-specs.sh`
+- [ ] 4.3 `docs/measuring.md`, beside the rule of instructions, the
+      exception for a prefetch hint above its bound that the proposal
+      asked for. Check: `.github/scripts/check-specs.sh`
 
 ## 5. The close
 

@@ -37,8 +37,9 @@ state of `relhash` that shapes the design.
   and the rule "No cost to Tessera" of the contract of `relhash`: "A
   hot loop of Tessera compiles no longer through the crate's API than
   before the change". The maintainer chose on 2026-11-01 to propose
-  narrowing them for the hint, in a pull request of contracts and
-  designs only.
+  narrowing them for the hint: the contract's rule in a pull request
+  of contracts and designs alone (#116), the rule of instructions in
+  this proposal, since `docs/measuring.md` is no contract.
 - On the M5 Pro the vertical probe took a lookup that finds its key on
   a table far larger than the caches from about 75 to about 38 cycles a
   row; the share of the hint in that gain, and its cost on a table in
@@ -74,12 +75,22 @@ state of `relhash` that shapes the design.
 
 The hint adds its own instructions and lengthens the loops that give
 it, so it fails both rules on every table where it is given, whatever
-it gains. That is not searched around: the rules are the question. The
-pull request that narrows them, of contracts and designs only, says
-what they cost, that a hint by size keeps them for every table under
-the bound, and what is kept: on such a table, the machine code of
-today. This change waits for the maintainer's decision on it; if the
-rules stay, the change closes without the hint.
+it gains. That is not searched around: the rules are the question.
+
+- The contract's rule narrows in a pull request of contracts and
+  designs alone (#116): it allows the instructions of a hint given
+  only to a table larger than the bound from which the counters show
+  that it pays, and keeps every other instruction and every table
+  under the bound.
+- The rule of instructions of `docs/measuring.md` is asked here: on a
+  table above the bound, the hint is judged by its cycles, and a growth
+  of instructions passes where the listing shows it is the hint and
+  its address. If the maintainer approves this proposal, the change
+  writes that exception into `docs/measuring.md`, beside the rule.
+
+On a table under the bound both rules hold as they are: the machine
+code there is today's. If either rule stays, the change closes
+without the hint.
 
 ### The choice once a call
 
