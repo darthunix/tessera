@@ -1,5 +1,5 @@
 [package]
-name = "tessera-spill"
+name = "relspill"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

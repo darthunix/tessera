@@ -93,7 +93,7 @@ undefined behavior where it cannot (overlap, dangling pointers).
 
 One function, `tessera_kernels::error::classify`, tells the errors with an
 SQLSTATE of their own (the kernels' arithmetic, calendar and text errors,
-which share the trait `SqlError`, and `tessera_spill::Damaged`) from every
+which share the trait `SqlError`, and `relspill::Damaged`) from every
 other error, which is a misuse of the call, the caller's bug, and comes
 back as `TESS_ERROR_INVALID_ARGUMENT` with `XX000`.
 

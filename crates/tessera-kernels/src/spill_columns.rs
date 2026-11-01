@@ -1,5 +1,5 @@
 //! Rows appended by partition to chunks of columns
-//! ([`tessera_spill::columns`]): a join's outer rows that wait for their
+//! ([`relspill::columns`]): a join's outer rows that wait for their
 //! partition, kept without the table's records. Each row goes to the
 //! current chunk of its hash's partition, as
 //! [`ChunkWriter::append_partitioned_columns`](crate::table::ChunkWriter::append_partitioned_columns) appends records, in row order
@@ -11,8 +11,8 @@
 use std::ops::Range;
 
 use anyhow::{Result, bail, ensure};
+use relspill::columns;
 use tessera_core::{RowMask, ones};
-use tessera_spill::columns;
 
 use crate::table::{MAX_PARTITIONS, Partitions, PayloadColumns};
 

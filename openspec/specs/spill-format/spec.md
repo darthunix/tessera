@@ -59,7 +59,7 @@ that wrote it, on the same machine.
   then read with the same fingerprint and length limit
 - **THEN** every field is returned unchanged
 - **Verified by:**
-  `crates/tessera-spill/src/lib.rs::a_header_reads_back_as_written`
+  `crates/relspill/src/lib.rs::a_header_reads_back_as_written`
 
 #### Scenario: The size of a header through the C API
 - **WHEN** a module calls `tess_spill_header_size()` and writes and
@@ -91,14 +91,14 @@ limit the reader accepts.
   body longer than the limit, or a values header with a packed length
 - **THEN** the write fails and no header is produced
 - **Verified by:**
-  `crates/tessera-spill/src/lib.rs::a_header_that_would_not_read_back_is_not_written`
+  `crates/relspill/src/lib.rs::a_header_that_would_not_read_back_is_not_written`
 
 #### Scenario: The lengths of a columns header
 - **WHEN** a header of kind 3 has a body shorter than 16 bytes, or a
   packed length that is 0 or not a multiple of 8
 - **THEN** it is refused on writing and on reading
 - **Verified by:**
-  `crates/tessera-spill/src/lib.rs::a_columns_header_keeps_its_lengths`
+  `crates/relspill/src/lib.rs::a_columns_header_keeps_its_lengths`
 
 #### Scenario: The level and the limit for every kind
 - **WHEN** a header of records, of values or of columns has a level of
@@ -106,7 +106,7 @@ limit the reader accepts.
 - **THEN** it is refused on writing and on reading, while a header at
   level 31 with a body of exactly the limit is accepted
 - **Verified by:**
-  `crates/tessera-spill/src/lib.rs::the_level_and_the_limit_hold_for_every_kind`
+  `crates/relspill/src/lib.rs::the_level_and_the_limit_hold_for_every_kind`
 
 ### Requirement: Damaged and foreign blocks are refused
 A reader MUST check the magic, the version, the kind, the fingerprint,
@@ -134,7 +134,7 @@ take either as a wrong argument.
 - **THEN** reading the header fails as damaged data, and a query that
   reads such a block raises an ERROR
 - **Verified by:**
-  `crates/tessera-spill/src/lib.rs::every_damaged_field_is_refused`;
+  `crates/relspill/src/lib.rs::every_damaged_field_is_refused`;
   `test/sql/spill.sql::tessera_test_spill_error(7)`
 
 #### Scenario: A damaged packed body of records
@@ -145,7 +145,7 @@ take either as a wrong argument.
 - **THEN** unpacking fails as damaged data, and a query that reads such
   a body from a file raises `XX001`
 - **Verified by:**
-  `crates/tessera-spill/src/pack.rs::damaged_packed_bodies_are_refused`;
+  `crates/relspill/src/pack.rs::damaged_packed_bodies_are_refused`;
   `test/sql/spill.sql::tessera_test_spill_sqlstate(23)`
 
 #### Scenario: The status and SQLSTATE of damage and of misuse
@@ -223,14 +223,14 @@ as damaged data.
 - **THEN** each lane is stored at its width and the chunk reads back the
   same but for the next-record references
 - **Verified by:**
-  `crates/tessera-spill/src/pack.rs::widths_follow_the_values_of_each_lane`
+  `crates/relspill/src/pack.rs::widths_follow_the_values_of_each_lane`
 
 #### Scenario: A chunk that does not get shorter stays as it is
 - **WHEN** the bytes are not a chunk of records, the used mark does not
   match, the records differ in length, or packing would not shorten them
 - **THEN** packing is refused and the block is stored as it is
 - **Verified by:**
-  `crates/tessera-spill/src/pack.rs::what_is_no_chunk_of_records_stays_as_it_is`
+  `crates/relspill/src/pack.rs::what_is_no_chunk_of_records_stays_as_it_is`
 
 #### Scenario: Packed and plain blocks in a file
 - **WHEN** a chunk of 1000 records that packs and bytes that are no
@@ -271,7 +271,7 @@ kernels MUST agree on this layout.
 - **THEN** there are 1, 1, 2 and 3 lanes, the words' lanes start after
   them, and every lane reads back
 - **Verified by:**
-  `crates/tessera-spill/src/columns.rs::wide_chunks_take_a_lane_of_null_bits_per_64_words`
+  `crates/relspill/src/columns.rs::wide_chunks_take_a_lane_of_null_bits_per_64_words`
 
 #### Scenario: The C formulas match the kernels'
 - **WHEN** the C macros and the kernels' entry points compute the lanes
@@ -399,7 +399,7 @@ magic MUST be refused as a chunk of columns.
   not `COLS` is packed
 - **THEN** the call is refused
 - **Verified by:**
-  `crates/tessera-spill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`
+  `crates/relspill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`
 
 #### Scenario: The limits of a chunk
 - **WHEN** a chunk is initialized with more than 4096 words a row or
@@ -409,7 +409,7 @@ magic MUST be refused as a chunk of columns.
 - **THEN** the first two are refused, the capacity stops at 131071 or
   at the rows that pack into 4 GiB, and the packing is refused
 - **Verified by:**
-  `crates/tessera-spill/src/columns.rs::a_chunk_keeps_within_its_limits`
+  `crates/relspill/src/columns.rs::a_chunk_keeps_within_its_limits`
 
 ### Requirement: A chunk of columns on disk
 A chunk of columns SHALL be stored packed, for its rows only: the rows
@@ -450,15 +450,15 @@ its lanes MUST be refused as damaged data.
   reads back; the lane of -1 and 0 has a least value of -1, a width of 1
   byte and the bytes 0 and 1
 - **Verified by:**
-  `crates/tessera-spill/src/columns.rs::lanes_pack_at_the_width_of_their_span_and_read_back`;
-  `crates/tessera-spill/src/columns.rs::a_lane_is_stored_from_its_least_signed_value`
+  `crates/relspill/src/columns.rs::lanes_pack_at_the_width_of_their_span_and_read_back`;
+  `crates/relspill/src/columns.rs::a_lane_is_stored_from_its_least_signed_value`
 
 #### Scenario: Empty and full chunks
 - **WHEN** a chunk with no rows and a chunk filled to its capacity are
   packed and unpacked
 - **THEN** both read back as they were
 - **Verified by:**
-  `crates/tessera-spill/src/columns.rs::empty_and_full_chunks_round_trip`
+  `crates/relspill/src/columns.rs::empty_and_full_chunks_round_trip`
 
 #### Scenario: A damaged packed chunk of columns
 - **WHEN** a packed chunk of columns is cut short, has a wrong length
@@ -466,8 +466,8 @@ its lanes MUST be refused as damaged data.
   than a chunk of its words holds
 - **THEN** unpacking fails as damaged data
 - **Verified by:**
-  `crates/tessera-spill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`;
-  `crates/tessera-spill/src/columns.rs::a_chunk_keeps_within_its_limits`
+  `crates/relspill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`;
+  `crates/relspill/src/columns.rs::a_chunk_keeps_within_its_limits`
 
 ### Requirement: A set writes one temporary file
 A set of spilled blocks (`TessSpill`) SHALL write one temporary file,

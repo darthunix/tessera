@@ -305,7 +305,7 @@ jobs:
   # relhash, the crate of the hash table, whose promise is that no call
   # touches memory outside its blocks, and the C entry points' borrows in
   # tessera-capi, those of the spill among them.
-  # tessera-core forbids unsafe code and tessera-spill has none. The
+  # tessera-core forbids unsafe code and relspill has none. The
   # vector code of tessera-kernels is cut out under Miri, and the rest of
   # it denies unsafe code. A nightly pinned here, not in
   # rust-toolchain.toml; few property cases, as Miri runs each slowly;

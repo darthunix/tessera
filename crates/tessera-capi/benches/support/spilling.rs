@@ -6,10 +6,10 @@
 use std::hint::black_box;
 
 use anyhow::{Context, Result, ensure};
+use relspill::{BlockHeader, BlockKind, HEADER_SIZE, columns};
 use tessera_core::RowMask;
 use tessera_kernels::spill_columns::append_partitioned;
 use tessera_kernels::table::{Partitions, PayloadColumns};
-use tessera_spill::{BlockHeader, BlockKind, HEADER_SIZE, columns};
 
 use crate::support::runner::Runner;
 
@@ -152,9 +152,9 @@ fn measure_records(runner: &mut Runner, random: &mut Random) -> Result<()> {
     ];
     for (name, chunk) in cases {
         let mut packed = vec![0_u8; chunk.len()];
-        let len = tessera_spill::pack(&chunk, &mut packed).context("the chunk packs")?;
+        let len = relspill::pack(&chunk, &mut packed).context("the chunk packs")?;
         let mut back = vec![0_u8; chunk.len()];
-        tessera_spill::unpack(&packed[..len], &mut back)?;
+        relspill::unpack(&packed[..len], &mut back)?;
         let mut expected = chunk.clone();
         let record = (chunk.len() - 8) / 1000;
         for at in (8..chunk.len()).step_by(record) {
@@ -163,9 +163,9 @@ fn measure_records(runner: &mut Runner, random: &mut Random) -> Result<()> {
         ensure!(back == expected, "{name}: unpacked differs");
         let mut out = vec![0_u8; chunk.len()];
         let mut group = runner.group(format!("spill/records/{name}"));
-        group.op("pack", || tessera_spill::pack(black_box(&chunk), &mut out))?;
+        group.op("pack", || relspill::pack(black_box(&chunk), &mut out))?;
         group.op("unpack", || {
-            tessera_spill::unpack(black_box(&packed[..len]), &mut back).is_ok()
+            relspill::unpack(black_box(&packed[..len]), &mut back).is_ok()
         })?;
         group.op("reference", || {
             out.copy_from_slice(black_box(&chunk));
@@ -343,8 +343,8 @@ fn measure_header(runner: &mut Runner) -> Result<()> {
         "the header read back differs"
     );
     let plain = |header: &BlockHeader, out: &mut [u8; HEADER_SIZE]| {
-        out[..8].copy_from_slice(&tessera_spill::MAGIC.to_ne_bytes());
-        out[8..12].copy_from_slice(&tessera_spill::VERSION.to_ne_bytes());
+        out[..8].copy_from_slice(&relspill::MAGIC.to_ne_bytes());
+        out[8..12].copy_from_slice(&relspill::VERSION.to_ne_bytes());
         out[12..16].copy_from_slice(&(header.kind as u32).to_ne_bytes());
         out[16..20].copy_from_slice(&header.number.to_ne_bytes());
         out[20..24].copy_from_slice(&header.partition.to_ne_bytes());

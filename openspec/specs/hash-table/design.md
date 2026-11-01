@@ -1053,7 +1053,7 @@ How a spilled chunk of records is written to disk is in
 - `crates/tessera-capi/src/c/table.rs`: the C entry points
 - `crates/tessera-capi/src/c/shared_spill.rs`: the C entry points of a
   spill and of the rounds
-- `crates/tessera-spill/src/plan.rs`: the plan of a level, its
+- `crates/relspill/src/plan.rs`: the plan of a level, its
   partitions and the length of its chunks
 - `crates/tessera-capi/src/c/spill.rs`: the C entry points of the plan
   of a level, beside those of the format of a spill
@@ -1080,7 +1080,7 @@ How a spilled chunk of records is written to disk is in
   words against shared ones, and the counters of the rounds.
 - `crates/relhash/src/table/loom/` and
   `crates/tessera-kernels/src/loom.rs`, run by `make rust-loom`.
-- The unit tests in `crates/tessera-spill/src/plan.rs`: the plan of a
+- The unit tests in `crates/relspill/src/plan.rs`: the plan of a
   level on examples, against the nodes' former rules, and the arguments
   it refuses.
 - `crates/tessera-capi/tests/table.rs` and

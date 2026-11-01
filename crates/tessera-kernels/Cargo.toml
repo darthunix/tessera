@@ -11,7 +11,7 @@ anyhow.workspace = true
 relhash.workspace = true
 memchr.workspace = true
 tessera-core.workspace = true
-tessera-spill.workspace = true
+relspill.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

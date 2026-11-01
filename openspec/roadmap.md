@@ -1521,7 +1521,7 @@ run of every mutant of the workspace, at the maintainer's request,
   were all caught. Elsewhere 353 survived: 297 in `tessera-kernels`
   (the calendar 64, the comparisons and arithmetic of integers 86,
   decimals 23, hashing 19, the sort 19, filters 16), 34 in
-  `tessera-capi` (decimals 18, the calendar 14), 21 in `tessera-spill`
+  `tessera-capi` (decimals 18, the calendar 14), 21 in `relspill`
   (the packing of a record 15) and 1 in `tessera-core`. Give each a
   Rust test that catches it, or list it in `.cargo/mutants.toml` with
   the reason it is equivalent.
@@ -1551,7 +1551,7 @@ run of every mutant of the workspace, at the maintainer's request,
   name, would hold.
 - **Depends on:** nothing.
 - **Capabilities:** none; tests only.
-- **Size:** about four pull requests: `tessera-spill`, `tessera-core`
+- **Size:** about four pull requests: `relspill`, `tessera-core`
   and `tessera-capi` in one, `tessera-kernels` by its parts.
 
 ### relhash-on-crates-io

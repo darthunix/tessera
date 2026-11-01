@@ -937,6 +937,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "relspill"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+]
+
+[[package]]
 name = "rustix"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1157,11 +1164,11 @@ dependencies = [
  "anyhow",
  "pmu",
  "proptest",
+ "relspill",
  "serde",
  "serde_json",
  "tessera-core",
  "tessera-kernels",
- "tessera-spill",
  "tessera-testing",
 ]
 
@@ -1193,8 +1200,8 @@ dependencies = [
  "memchr",
  "proptest",
  "relhash",
+ "relspill",
  "tessera-core",
- "tessera-spill",
  "tessera-testing",
 ]
 
@@ -1207,13 +1214,6 @@ dependencies = [
  "serde",
  "sha2 0.10.9",
  "tempfile",
-]
-
-[[package]]
-name = "tessera-spill"
-version = "0.1.0"
-dependencies = [
- "anyhow",
 ]
 
 [[package]]
