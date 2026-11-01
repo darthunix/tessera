@@ -57,7 +57,13 @@ tess_path_create(const TessPathConfig *config)
 	path->path.pathtype = T_CustomScan;
 	path->flags = config->flags;
 	path->custom_paths = list_copy(config->children);
+#if TESS_GREENGAGE
+	/* shortcut: PostgreSQL 12 has no custom_restrictinfo; TessFilter's clauses are not ported yet. */
+	if (config->restrictinfo != NIL)
+		elog(ERROR, "Tessera cannot keep a custom path's clauses on Greengage");
+#else
 	path->custom_restrictinfo = copyObject(config->restrictinfo);
+#endif
 	writer = tess_plan_writer_create(PATH_DATA_KIND, DATA_VERSION);
 	tess_plan_write_string(writer, "node", config->node->name);
 	tess_plan_write_list(writer, "expressions", config->expressions);
@@ -328,8 +334,13 @@ tess_path_setop_constant(const Path *path)
 			}
 			return false;
 		case T_SetOpPath:
+#if TESS_GREENGAGE
+			/* PostgreSQL 12's set operation reads one appended input. */
+			return tess_path_setop_constant(((const SetOpPath *) path)->subpath);
+#else
 			return tess_path_setop_constant(((const SetOpPath *) path)->leftpath) ||
 				tess_path_setop_constant(((const SetOpPath *) path)->rightpath);
+#endif
 		case T_CustomPath:
 			foreach_ptr(Path, child, ((const CustomPath *) path)->custom_paths)
 			{
@@ -340,7 +351,9 @@ tess_path_setop_constant(const Path *path)
 		case T_AggPath:
 			return tess_path_setop_constant(((const AggPath *) path)->subpath);
 		case T_SortPath:
+#if !TESS_GREENGAGE
 		case T_IncrementalSortPath:
+#endif
 			return tess_path_setop_constant(((const SortPath *) path)->subpath);
 		case T_UniquePath:
 			return tess_path_setop_constant(((const UniquePath *) path)->subpath);

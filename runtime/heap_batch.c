@@ -368,6 +368,7 @@ deform_kept_rows(TessHeapBatch *heap, int column, const TessRowMask *rows,
  * cached offsets anyway. A tuple with a NULL among the attributes up to
  * this one, or too short for it, goes through the cursor.
  */
+#if !TESS_GREENGAGE
 static pg_always_inline void
 deform_cached_width(TessHeapBatch *heap, int column, const TessRowMask *rows,
 					const uint64 *deformed, int nwords, int offset, int attlen)
@@ -430,6 +431,7 @@ deform_cached(TessHeapBatch *heap, int column, const TessRowMask *rows,
 				 column + 1, cattr->attlen);
 	}
 }
+#endif
 
 /*
  * Count a request's rows behind their cursor: a row whose cursor a read of
@@ -469,6 +471,8 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 		elog(ERROR, "Tessera heap batch received a row mask of another batch");
 	deformed = &heap->deformed[(Size) column * heap->nwords];
 	nwords = tess_row_mask_word_count(rows->nrows);
+#if !TESS_GREENGAGE
+	/* Greengage keeps no cached offsets: every column goes by the cursor. */
 	if (column >= first_non_cached(heap))
 	{
 		if (unlikely(!heap->asked[column]))
@@ -485,6 +489,7 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 	else if (heap->kept[column] || heap->first_kept < column)
 		deform_kept_rows(heap, column, rows, deformed, nwords);
 	else
+#endif
 	{
 		for (int word = 0; word < nwords; word++)
 		{
@@ -742,11 +747,19 @@ same_layout(TupleDesc a, TupleDesc b)
 		return false;
 	for (int attr = 0; attr < a->natts; attr++)
 	{
+#if TESS_GREENGAGE
+		const Form_pg_attribute left = TupleDescAttr(a, attr);
+		const Form_pg_attribute right = TupleDescAttr(b, attr);
+
+		if (left->attlen != right->attlen || left->attbyval != right->attbyval ||
+			left->attalign != right->attalign ||
+#else
 		const CompactAttribute *left = TupleDescCompactAttr(a, attr);
 		const CompactAttribute *right = TupleDescCompactAttr(b, attr);
 
 		if (left->attlen != right->attlen || left->attbyval != right->attbyval ||
 			left->attalignby != right->attalignby ||
+#endif
 			left->attisdropped != right->attisdropped ||
 			left->atthasmissing != right->atthasmissing ||
 			TupleDescAttr(a, attr)->atttypid != TupleDescAttr(b, attr)->atttypid)
