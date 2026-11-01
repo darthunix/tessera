@@ -806,7 +806,7 @@ Compressed test table AM with the source planning contract. From plan
   consumer (line 6011). `get_datum_column` stays the mandatory common
   path (line 5203). pg_batch's nanoarrow submodule is not carried over
   (line 7478). Checked in the code: no PRUNE_ONLY classification exists.
-- **Depends on:** nothing stated. `greengage-port` step 8 (a source
+- **Depends on:** nothing stated. `greengage-port` step 5 (a source
   chosen through the node registry) touches the same contract.
 - **Capabilities:** batch-format, bridge-api, node-contract, kernel-abi,
   filter, planner-coverage
@@ -925,7 +925,16 @@ of both trees on 2026-11-01.
      - `shareinput_walker` (`cdbmutate.c`) visits `custom_plans` in
        the order the node executes them: in list order, or last first
        when the node sets a new flag in `CustomScan.flags`, as a hash
-       join that builds its inner side before it reads the outer one.
+       join that builds its inner side before it reads the outer one;
+     - `DirectDispatchUpdateContentIdsFromPlan`
+       (`cdbtargeteddispatch.c`) disables targeted dispatch above a
+       custom scan;
+     - `is_projection_capable_path` and `is_projection_capable_plan`
+       (`createplan.c`) let a custom scan project only with
+       `CUSTOMPATH_SUPPORT_PROJECTION`, as PostgreSQL 15 does, and
+       `create_projection_path_with_quals` (`pathnode.c`) keeps the
+       Motion hazard of its input;
+     - `find_all_mat_nodes` (`execProcnode.c`) looks into `custom_ps`.
   2. Build and compatibility layer (plan 7.1): `compat.h`; a Greengage
      build without the parts for PostgreSQL parallel queries
      (TessGather, TessGatherMerge, TessSend, the shared join);
@@ -935,36 +944,36 @@ of both trees on 2026-11-01.
      removed without `MemoryContextUnregisterResetCallback`; the
      settings the executor reads declared with `GUC_GPDB_NEED_SYNC`;
      the memory budget from the node's `operatorMemKB`; spill files
-     registered with the workfile manager.
-  3. Own deform metadata (plan 7.2), no `CompactAttribute` or
-     master-only fields; tax/win measured before and after on
-     PostgreSQL.
-  4. Stopping under Motion: a node squelches each child it stops
+     registered with the workfile manager. Every table, heap or
+     append-only, is read by the core's scan under TessPack.
+  3. Stopping under Motion: a node squelches each child it stops
      reading (the hash join's empty build, TessLimit, TessPack with a
      bound), and its Begin allocates nothing large, since the
      coordinator initializes the nodes of every slice. Tests: LIMIT,
      LIMIT 0, an empty build, a cancel while senders are blocked.
-  5. Smoke test and suites on the demo cluster (plan 7.4, 7.9): filter
-     and aggregate over a heap table on every segment; LIMIT, join and
-     sort above the node; `make installcheck` against the cluster with
-     alternative expected files; the result in `docs/greengage.md`.
+  4. Smoke test and suites on the demo cluster (plan 7.4, 7.9): filter
+     and aggregate over ao_row, ao_column and heap tables on every
+     segment; LIMIT, join and sort above the node; `make installcheck`
+     against the cluster with alternative expected files; the result
+     in `docs/greengage.md`.
+  5. Append-only sources (plan 7.5, 7.6, 7.8): a source chosen through
+     the node registry, `TessAocsScan` (a dense fixed-width block read
+     in place, the core's decoding for the other encodings), then
+     `TessAoScan`.
   6. Distributed planners: TessHashJoin takes its children from
      Greengage's hash join path, its Motion and Material nodes
      included, and leaves the join to the core where Greengage rejects
      that path; TessLimit stands in for the preliminary limit under the
-     Gather Motion; TessSort under a merging Motion keeps its keys.
-     TessHashJoin sets the flag of the shared-scan walker's patch.
+     Gather Motion; TessSort under a merging Motion keeps its keys;
+     TessAppend over partitioned tables, with PostgreSQL 12's run-time
+     pruning. TessHashJoin sets the flag of the shared-scan walker's
+     patch.
   7. Two-stage aggregation (plan 7.7): TessAgg in place of both stages
      of Greengage's `Agg (final) <- Motion <- Agg (partial)`. The
      partial states cross the Motion in Tessera's own format, so the
      final stage is always TessAgg: no plan puts the core's final
      aggregate over TessAgg's partial one.
-  8. Sources (plan 7.5, 7.6, 7.8): ao_row and ao_column tables first
-     through the core's scan and TessPack; then a source chosen through
-     the node registry, `TessAocsScan` (a dense fixed-width block read
-     in place, the core's decoding for the other encodings) and
-     `TessAoScan`.
-  9. ORCA (plan 7.10): each node's CustomScan built without a Path,
+  8. ORCA (plan 7.10): each node's CustomScan built without a Path,
      from the child plans, their resolved columns and the expressions;
      then a rewrite of ORCA's finished plan in `planner_hook` when
      `planGen` is `PLANGEN_OPTIMIZER`, with no batch cost model in
@@ -972,10 +981,12 @@ of both trees on 2026-11-01.
      ShareInputScan and a Result with a hash filter stay the core's.
      The builder and the rewrite can be made and tested on PostgreSQL
      master first, over finished plans of the core planner.
-  10. Later, by need: counters from segments in EXPLAIN, memory classes
-      of a custom scan in `memquota.c` (a fork patch), the bitmap and
-      index-only scans, partition pruning and set operations on the
-      PostgreSQL 12 interfaces, RLE runs as input to kernels.
+  9. Later, by need: Tessera's own heap scan on Greengage, with its own
+     deform metadata (plan 7.2; heap tables are rare there); counters
+     from segments in EXPLAIN; memory classes of a custom scan in
+     `memquota.c` (a fork patch); the bitmap and index-only scans and
+     set operations on the PostgreSQL 12 interfaces; RLE runs as input
+     to kernels.
 - **Why:** Greengage gives AO/AOCO tables and compression that
   PostgreSQL lacks; AOCO stores fixed-width values of a block in a row,
   which is real columnar input (lines 6017–6018, 6053–6055).
@@ -984,7 +995,9 @@ of both trees on 2026-11-01.
   so is the shared-scan walker, by a fifth fork patch, rather than by
   keeping shared scans out of Tessera's subtrees; partial aggregate
   states cross a Motion in Tessera's own format, with TessAgg as the
-  final stage; ORCA is joined by rewriting its finished plan. Earlier:
+  final stage; ORCA is joined by rewriting its finished plan;
+  append-only tables are required and come before Tessera's own heap
+  scan, which Greengage uses little. Earlier:
   lowered, no place in the queue (2026-10-05); design only, no code
   (2026-09-22). Checked in both trees on 2026-11-01, by reading the
   code and by a trial build of the C modules against Greengage's
@@ -1001,6 +1014,11 @@ of both trees on 2026-11-01.
     without them: each segment would join only its own rows. On
     Greengage that path may also be NULL, which the planner does not
     expect.
+  - Targeted dispatch raises "unknown plan node" on a custom scan, and
+    the planner runs it on every plan node it creates: no plan with a
+    custom scan can be made. The planner takes every custom scan as
+    able to project, so it may replace the target list of a node that
+    cannot compute one.
   - The shared-scan walker (`shareinput_walker`, `cdbmutate.c`) visits
     only `lefttree`, `righttree` and `initPlan`: a ShareInputScan under
     a Tessera node gets no producer and no slice. It walks children in
@@ -1049,13 +1067,15 @@ of both trees on 2026-11-01.
   step 7.4 preloads `tessera_limit`, a module removed in 4.32; "SET is
   not shipped to segments" holds only for new segment processes.
 - **Depends on:** `postgresql-19` is in the queue and creates `compat.h`
-  first. Step 9's builder needs nothing of Greengage.
+  first. Step 8's builder needs nothing of Greengage.
 - **Capabilities:** greengage, bridge-api, scan-heap, aggregate,
   join-hash, sort, pack, node-contract, planner-coverage
-- **Size:** large — a series. Steps 1 to 5 are the first milestone:
-  scans, filters and one-stage grouping whose keys hold the
-  distribution key, with joins left to the core; steps 6 and 7 open
-  the distributed joins and grouping.
+- **Size:** large — a series. Steps 1 to 4 are the first milestone:
+  scans of ao_row, ao_column and heap tables by the core under
+  Tessera's filters and one-stage grouping whose keys hold the
+  distribution key, with joins left to the core; step 5 reads
+  append-only blocks itself, and steps 6 and 7 open the distributed
+  joins and grouping.
 
 ### tpch-on-greengage
 
@@ -1068,7 +1088,7 @@ TPC-H on Greengage over AOCO. From plan section 8, list A item 6, line
   the TPC-H track.
 - **Known:** Only the line "tpch on Greengage over AOCO (after 7.6)". The
   log does not say how the tool would talk to a Greengage cluster.
-- **Depends on:** `greengage-port` step 8 (`TessAocsScan`).
+- **Depends on:** `greengage-port` step 5 (`TessAocsScan`).
 - **Capabilities:** greengage, bench
 - **Size:** the log does not say.
 
