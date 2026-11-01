@@ -87,6 +87,9 @@ level is planned](#how-a-level-is-planned)): a table in memory is
 planned as one partition at a share of 8. A node may also pass a
 chunk of 8 bytes, its used mark alone, where it has no chunk to give
 for a number: nothing fits in it, so nothing is ever written there.
+How a table grows in memory, its directory, what a node counts of its
+memory and how a join in one process keeps its index within the limit,
+is explained in the design of [table-memory](../table-memory/design.md).
 
 ## Keys of each SQL type
 
