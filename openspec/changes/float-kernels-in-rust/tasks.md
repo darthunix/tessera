@@ -19,7 +19,7 @@ named in a task comes on top.
 
 ## 2. What the C version answers
 
-- [ ] 2.1 Add the three float cases of the design's measurement plan to
+- [x] 2.1 Add the three float cases of the design's measurement plan to
       the family `win` of `bench/pg`, with their lines in
       `bench/pg/README.md`. Check: `bench/pg/run.sh measure win` with
       `CASES='^float_'` and `REPETITIONS=1` runs them, and `plans.txt`

@@ -165,6 +165,21 @@ SELECT pg_temp.measure_pair('int4_bigint',
     format('SELECT count(*) FROM bench_narrow WHERE c1 > %s::bigint', 1000000 * :scale),
     :repetitions);
 
+-- Floats: an int4 column widened to float8 and scaled under a
+-- comparison, half the rows pass; a float8 division rounded to bigint
+-- under a sum; float4 arithmetic against float8, half the rows pass.
+SELECT pg_temp.measure_pair('float_filter',
+    format('SELECT count(*) FROM bench_narrow WHERE c1::float8 * 0.5 > %s',
+           500000 * :scale),
+    :repetitions);
+SELECT pg_temp.measure_pair('float_sum',
+    'SELECT sum((c2::float8 / 3)::int8) FROM bench_narrow',
+    :repetitions);
+SELECT pg_temp.measure_pair('float4_mixed',
+    format('SELECT count(*) FROM bench_narrow WHERE c3::float4 * 2::float4 < c4::float8 + %s',
+           1000000 * :scale),
+    :repetitions);
+
 \copy timings TO 'timings.csv' CSV HEADER
 
 \o summary.txt
@@ -204,6 +219,9 @@ EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXEC
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_group_few;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_group_many;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_group_filter;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_float_filter;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_float_sum;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_float4_mixed;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_nothing;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sparse;
@@ -228,5 +246,8 @@ EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXEC
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_group_few;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_group_many;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_group_filter;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_float_filter;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_float_sum;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_float4_mixed;
 \o
 DEALLOCATE ALL;
