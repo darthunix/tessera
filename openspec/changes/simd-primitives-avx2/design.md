@@ -805,6 +805,21 @@ the crate's contract says: one module, no interface, no code of
 Tessera. Refused: the hint in `simd/`, which would make `relhash`
 depend on the kernels.
 
+The hint was measured as such a candidate, and x86-64 gives none. The
+candidate touched `table/lanes.rs` alone, as the forecast says. It
+changes the machine code of `table_int32` and `table_large` only, with
+two `prefetcht0` in each function of a probe or an insert, and none on
+AArch64 (`disasm-ieHfUc`, `disasm-kaHGJX`). Run twice against the base
+(`compare-aXu7WT` to `compare-4Dnv47`), it bears out the hypothesis on
+the large table: the five calls that probe it take 10 to 26 % fewer
+cycles. On the table that fits the caches it costs more than a few
+cycles: of the 86 calls of `table_int32` whose instructions it
+changes, by up to 9 %, 33 take more than 3 % more cycles in both
+runs, up to 14 %, and one of them passes the threshold of 10 %. So the
+rule keeps no hint, and the comment of the hint says why. A hint for
+tables larger than the caches alone is a finding the maintainer has
+not decided on.
+
 ## Measurement plan
 
 The rules of `docs/measuring.md` hold:

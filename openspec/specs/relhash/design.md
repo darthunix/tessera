@@ -590,7 +590,10 @@ it asks the processor to start fetching the memory of the step after
 it. This is the "lookups by batch" goal above. With fewer rows a probe
 goes row by row, which is cheaper for them. The hint to fetch is one
 instruction on AArch64, which reads nothing and never faults; on other
-processors, x86-64 among them, the crate gives no hint yet.
+processors the crate gives none. On x86-64 the same hint, `prefetcht0`,
+was measured on an Intel Core i5: probes of a table larger than the
+caches took 10 to 26 % fewer cycles with it, but probes of a table
+that fits them took up to 14 % more, so x86-64 gives none either.
 
 Two more ways to read are for records in no useful order. Tessera's
 sort keeps the rows it sorts as records of this format, in a table
