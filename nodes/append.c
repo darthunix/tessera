@@ -36,7 +36,24 @@
  * The node prunes the partitions while executing as the core's Append
  * does, through the core's pruning state: at its start by the query's
  * parameters and stable functions, then by the parameters of execution.
+ * shortcut: on a core of the Greenplum family the node takes no Partition
+ * Selectors of a join above, as the family's Append does: its path stands
+ * under a batch parent only, never right under the family's joins, which
+ * place the selectors (joinpartprune.c); the join then reads every
+ * partition. Take them (make_partition_join_pruneinfos) when a batch
+ * node comes between such a join and the append.
  */
+
+/*
+ * The children valid for the current parameters of execution, numbered
+ * among those the node initialized: the call has grown arguments over
+ * the releases, and the Greenplum family's takes a join's selectors too.
+ */
+#if TESS_PG_MAJOR >= 18
+#define find_matching(prune, estate) ExecFindMatchingSubPlans((prune), false, NULL)
+#else
+#define find_matching(prune, estate) ExecFindMatchingSubPlans((prune), (estate), 0, NIL)
+#endif
 
 /* The core's cost of a row through an Append (costsize.c), which the node saves. */
 #define APPEND_CPU_COST_MULTIPLIER 0.5
@@ -74,6 +91,8 @@ typedef struct TessAppendState
 	 */
 	int			nplanned;
 	int			nchildren;
+	/* The relation the plan data names, before PostgreSQL 18 (prune_start). */
+	int			relid;
 	PlanState **children;
 	TessInput **inputs;
 	/* Each child's layout: the column of each of its targets. */
@@ -134,12 +153,14 @@ static const CustomPathMethods append_path_methods = {
 
 /*
  * Whether a batch child only packs the rows of a core path: a pack over a
- * subquery planned as a batch path forwards its batches.
+ * subquery planned as a batch path forwards its batches, and one over an
+ * append-only table may read its blocks itself.
  */
 static bool
 packs_rows(Path *child)
 {
-	return tess_path_node(child) == &tess_pack_node && !tess_pack_forwards(child);
+	return tess_path_node(child) == &tess_pack_node && !tess_pack_forwards(child) &&
+		!tess_pack_reads_blocks(child);
 }
 
 /*
@@ -208,6 +229,10 @@ append_wrap(PlannerInfo *root, Path *path)
 	config.children = children;
 	config.node_data = (Node *) makeInteger(path->parallel_aware ?
 											append->first_partial_path : 0);
+#if TESS_PG_MAJOR < 18
+	/* An older core's pruning needs the partitioned tables of the Append. */
+	config.node_data = (Node *) list_make2((Node *) config.node_data, append->partitioned_rels);
+#endif
 	built = tess_path_create(&config);
 	saved = APPEND_CPU_COST_MULTIPLIER * cpu_tuple_cost * path->rows;
 	built->path.total_cost = Max(built->path.startup_cost, built->path.total_cost - saved);
@@ -224,17 +249,26 @@ append_wrap(PlannerInfo *root, Path *path)
  * data.
  */
 static PartitionPruneInfo *
-prune_info(PlannerInfo *root, RelOptInfo *rel, List *children)
+prune_info(PlannerInfo *root, RelOptInfo *rel, List *children, List *partitioned_rels)
 {
 	List	   *clauses;
-	int			index;
+#if TESS_PG_MAJOR >= 18
 	PartitionPruneInfo *info;
+	int			index;
+#endif
 
 	if (!enable_partition_pruning || !IS_SIMPLE_REL(rel))
 		return NULL;
 	clauses = extract_actual_clauses(rel->baserestrictinfo, false);
 	if (clauses == NIL)
 		return NULL;
+#if TESS_PG_MAJOR < 18
+	/* An older core returns the description and keeps no list of them. */
+	if (partitioned_rels == NIL)
+		return NULL;
+	return make_partition_pruneinfo(root, rel, children, partitioned_rels, clauses);
+#else
+	(void) partitioned_rels;
 	index = make_partition_pruneinfo(root, rel, children, clauses);
 	if (index < 0)
 		return NULL;
@@ -244,6 +278,7 @@ prune_info(PlannerInfo *root, RelOptInfo *rel, List *children)
 		elog(ERROR, "TessAppend found another pruning description than its own");
 	root->partPruneInfos = list_delete_last(root->partPruneInfos);
 	return info;
+#endif
 }
 
 /*
@@ -259,8 +294,16 @@ append_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tli
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
 	TessPlanWriter *writer;
+	int			first_partial;
+	List	   *partitioned_rels = NIL;
 
 	tess_path_get_info(best_path, &info);
+#if TESS_PG_MAJOR < 18
+	first_partial = intVal(linitial(castNode(List, info.node_data)));
+	partitioned_rels = lsecond(castNode(List, info.node_data));
+#else
+	first_partial = intVal(info.node_data);
+#endif
 	for (int index = 0; index < list_length(custom_plans); index++)
 	{
 		TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
@@ -273,9 +316,15 @@ append_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tli
 	}
 	writer = tess_plan_writer_create(TESS_APPEND_DATA, TESS_APPEND_DATA_VERSION);
 	tess_plan_write_int(writer, "children", list_length(custom_plans));
-	tess_plan_write_int(writer, "first_partial", intVal(info.node_data));
+	tess_plan_write_int(writer, "first_partial", first_partial);
 	tess_plan_write_node(writer, "prune",
-						 (Node *) prune_info(root, rel, best_path->custom_paths));
+						 (Node *) prune_info(root, rel, best_path->custom_paths,
+											 partitioned_rels));
+#if TESS_PG_MAJOR < 18
+	/* The relation, whose range table number the description's carry. */
+	tess_plan_write_int(writer, "relid", rel->relid);
+#endif
+
 	config.methods = &tess_append_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.scanrelid = 0;
@@ -331,6 +380,39 @@ static const TessBatchOps append_batch_ops = {
  * besides the state: the leaf partitions it kept join es_unpruned_relids,
  * as an Append's do.
  */
+#if TESS_PG_MAJOR < 18
+/*
+ * An older core makes the pruning state of a node's description when the
+ * node asks (ExecCreatePartitionPruneState), its initial pruning done by
+ * a second call that leaves the children's numbers among those kept
+ * (ExecFindInitialMatchingSubPlans). The description's range table
+ * numbers are the node's query's own: set_plan_references added the
+ * offset of the query's range table in the statement's to the node's
+ * custom_relids, the relation's, and to an Append's description, not to
+ * the plan data, so a copy gets it here, by the relation the plan data
+ * names.
+ */
+static PartitionPruneState *
+prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset **valid)
+{
+	CustomScan *cscan = castNode(CustomScan, state->css.ss.ps.plan);
+	PartitionPruneInfo *info = copyObject(planned);
+	int			offset = bms_next_member(cscan->custom_relids, -1) - state->relid;
+	PartitionPruneState *prune;
+
+	if (state->relid <= 0 || bms_num_members(cscan->custom_relids) != 1)
+		elog(ERROR, "TessAppend's pruning description is not its relation's");
+	foreach_node(List, hierarchy, info->prune_infos)
+	{
+		foreach_node(PartitionedRelPruneInfo, rel, hierarchy)
+			rel->rtindex += offset;
+	}
+	prune = ExecCreatePartitionPruneState(&state->css.ss.ps, info);
+	if (prune->do_initial_prune)
+		*valid = ExecFindInitialMatchingSubPlans(prune, state->nplanned);
+	return prune;
+}
+#else
 static PartitionPruneState *
 prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset **valid)
 {
@@ -381,6 +463,7 @@ prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset
 	PG_END_TRY();
 	return prune;
 }
+#endif
 
 static void
 append_begin(CustomScanState *css, EState *estate, int eflags)
@@ -403,6 +486,9 @@ append_begin(CustomScanState *css, EState *estate, int eflags)
 	state->nplanned = tess_plan_read_int(reader, "children");
 	first_partial = tess_plan_read_int(reader, "first_partial");
 	planned = (PartitionPruneInfo *) tess_plan_read_node(reader, "prune");
+#if TESS_PG_MAJOR < 18
+	state->relid = tess_plan_read_int(reader, "relid");
+#endif
 	tess_plan_reader_finish(reader);
 	state->current = -1;
 	if (state->nplanned != info.nchildren || state->nplanned < 1 ||
@@ -512,7 +598,7 @@ find_valid(TessAppendState *state)
 {
 	if ((!state->exec_prune && !state->join_set) || state->valid_known)
 		return;
-	state->valid = state->exec_prune ? ExecFindMatchingSubPlans(state->prune, false, NULL) :
+	state->valid = state->exec_prune ? find_matching(state->prune, state->css.ss.ps.state) :
 		bms_add_range(NULL, 0, state->nchildren - 1);
 	if (state->join_set)
 		state->valid = bms_int_members(state->valid, state->join_valid);
@@ -786,6 +872,7 @@ append_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (state->nchildren < state->nplanned || es->format != EXPLAIN_FORMAT_TEXT)
 		ExplainPropertyInteger("Subplans Removed", NULL,
 							   state->nplanned - state->nchildren, es);
+
 	if (!es->analyze)
 		return;
 	append_counters(state, own);
@@ -988,7 +1075,7 @@ tess_append_join_prune(PlanState *node, const TessJoinKeys *keys)
 			if (index > 0 && keys->values[index] == keys->values[index - 1])
 				continue;
 			set_join_param(state, 0, keys->values[index], keys->int8);
-			planned = bms_join(planned, ExecFindMatchingSubPlans(state->join_values, false, NULL));
+			planned = bms_join(planned, find_matching(state->join_values, state->css.ss.ps.state));
 			if (bms_num_members(planned) >= state->nplanned)
 				break;
 		}
@@ -997,7 +1084,7 @@ tess_append_join_prune(PlanState *node, const TessJoinKeys *keys)
 	{
 		set_join_param(state, 1, keys->min, keys->int8);
 		set_join_param(state, 2, keys->max, keys->int8);
-		planned = ExecFindMatchingSubPlans(state->join_range, false, NULL);
+		planned = find_matching(state->join_range, state->css.ss.ps.state);
 	}
 	else
 		planned = bms_add_range(NULL, 0, state->nplanned - 1);

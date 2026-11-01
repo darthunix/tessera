@@ -39,6 +39,7 @@
 extern const TessNode tess_pack_node;
 extern const CustomScanMethods tess_pack_scan_methods;
 extern bool tess_pack_forwards(const Path *path);
+extern bool tess_pack_reads_blocks(const Path *path);
 
 extern const TessNode tess_heap_scan_node;
 extern const CustomScanMethods tess_heap_scan_scan_methods;

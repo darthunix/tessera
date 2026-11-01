@@ -226,6 +226,45 @@ tess_pack_forwards(const Path *path)
 }
 
 /*
+ * Whether a path is the pack node's reading an append-only table in
+ * blocks itself, a source of batches rather than a copy of rows: its
+ * child a core's sequential scan of the table with no clause of its own
+ * and plain columns, as pack_aocs_create requires once executed.
+ */
+bool
+tess_pack_reads_blocks(const Path *path)
+{
+#if PACK_AO_BLOCKS
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
+	const CustomPath *pack = (const CustomPath *) path;
+	Path	   *child;
+	RelOptInfo *rel;
+
+	if (tess_path_node(path) != &tess_pack_node || list_length(pack->custom_paths) != 1)
+		return false;
+	tess_path_get_info(pack, &info);
+	child = linitial(pack->custom_paths);
+	rel = child->parent;
+	if (info.node_data != NULL || child->pathtype != T_SeqScan ||
+		child->param_info != NULL || rel == NULL || child->pathtarget == NULL ||
+		(rel->relam != AO_COLUMN_TABLE_AM_OID && rel->relam != AO_ROW_TABLE_AM_OID))
+		return false;
+	foreach_ptr(Expr, expr, child->pathtarget->exprs)
+	{
+		Var		   *var = (Var *) expr;
+
+		if (!IsA(expr, Var) || var->varno != rel->relid ||
+			var->varattno <= 0 || var->varlevelsup != 0)
+			return false;
+	}
+	return true;
+#else
+	(void) path;
+	return false;
+#endif
+}
+
+/*
  * The path costs what its child costs and the copying of its rows:
  * tessera.pack_value_share (0.4) of cpu_operator_cost a value and one more
  * a row, as the builder took 7.8 ns a row of nine columns and 1.6 ns of

@@ -110,7 +110,7 @@ _PG_init(void)
 	api->nodes->add(&tess_sort_node);
 	tess_sort_planner_init();
 #if !TESS_MPP
-	/* The Greenplum family runs no parallel query; its appends stay the core's (mpp_stubs.c). */
+	/* The Greenplum family runs no parallel query (mpp_stubs.c). */
 	RegisterCustomScanMethods(&tess_gather_scan_methods);
 	api->nodes->add(&tess_gather_node);
 	RegisterCustomScanMethods(&tess_send_scan_methods);
@@ -118,9 +118,9 @@ _PG_init(void)
 	RegisterCustomScanMethods(&tess_gather_merge_scan_methods);
 	api->nodes->add(&tess_gather_merge_node);
 	tess_gather_planner_init();
+#endif
 	RegisterCustomScanMethods(&tess_append_scan_methods);
 	api->nodes->add(&tess_append_node);
-#endif
 	/*
 	 * The limit last: its hook runs after the others' and takes the final
 	 * relation's limits over the paths they made (the scan methods it
