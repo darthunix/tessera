@@ -9,6 +9,7 @@
 #include "nodes/execnodes.h"
 #include "nodes/extensible.h"
 #include "nodes/plannodes.h"
+#include "optimizer/cost.h"
 
 #include "tessera/table.h"
 
@@ -43,16 +44,18 @@ tess_node_memory_limit(const PlanState *ps)
 
 /*
  * The memory the planner prices such a node with, before the resource
- * manager shares the query's memory out: on a core of the family, the
- * work memory the family's planner prices its own operators with
- * (planner_work_mem); elsewhere hash_mem.
+ * manager shares the query's memory out: on a core of the family, what
+ * the family's planner sizes its own hash join's table with
+ * (global_work_mem, planner_work_mem of every segment, against one
+ * segment's rows, as cost_hashjoin does); elsewhere hash_mem.
  */
 static inline Size
-tess_planned_memory_limit(void)
+tess_planned_memory_limit(PlannerInfo *root)
 {
 #if TESS_MPP
-	return tess_table_memory_limit((Size) planner_work_mem * 1024);
+	return tess_table_memory_limit((Size) Min(global_work_mem(root), (double) SIZE_MAX / 2));
 #else
+	(void) root;
 	return tess_hash_memory_limit();
 #endif
 }
