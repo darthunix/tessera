@@ -8,7 +8,7 @@ ifdef TESS_MPP
 # The Greenplum family runs no PostgreSQL parallel query, so no gather
 # nodes; mpp_stubs.c stands in for their entry points and for the parts
 # not ported yet.
-OBJS := $(filter-out append.o gather.o gather_planner.o join_planner.o,$(OBJS)) mpp_stubs.o
+OBJS := $(filter-out gather.o gather_planner.o join_planner.o,$(OBJS)) mpp_stubs.o
 endif
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
