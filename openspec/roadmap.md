@@ -945,9 +945,13 @@ of both trees on 2026-11-01.
      sort above the node; `make installcheck` against the cluster with
      alternative expected files; the result in `docs/greengage.md`.
   6. Distributed planners: TessHashJoin takes its children from
-     Greengage's hash join path, its Motion nodes included; TessLimit
-     stands in for the preliminary limit under the Gather Motion;
-     TessSort under a merging Motion keeps its keys.
+     Greengage's hash join path, its Motion and Material nodes
+     included, and leaves the join to the core where Greengage rejects
+     that path; TessLimit stands in for the preliminary limit under the
+     Gather Motion; TessSort under a merging Motion keeps its keys. A
+     subtree with a ShareInputScan stays the core's until a fork patch
+     lets the shared-scan walker visit a custom scan's children in
+     their order of execution, which only the node knows.
   7. Two-stage aggregation (plan 7.7): TessAgg in place of both stages
      of Greengage's `Agg (final) <- Motion <- Agg (partial)`. The
      partial states cross the Motion in Tessera's own format, so the
@@ -980,41 +984,54 @@ of both trees on 2026-11-01.
   plan. Earlier: lowered, no place in the queue (2026-10-05); design
   only, no code (2026-09-22). Checked in both trees on 2026-11-01, by
   reading the code and by a trial build of the C modules against
-  Greengage's `pg_config` with the missing headers stubbed; nothing was
-  run on a cluster:
-  - By the code, every plan with a Tessera node fails today.
-    Greengage's `plan_tree_walker` walks `custom_private`, and its
-    expression walker stops with "unrecognized node type" at the
-    `String` and `Integer` nodes of Tessera's plan data. The slice
-    table of every plan of the core planner is built with that walker,
-    and so is the operator memory under resource groups.
+  Greengage's `pg_config` (below); nothing was run on a cluster:
+  - By the code, every plan the coordinator dispatches with a Tessera
+    node fails today. Greengage's `plan_tree_walker` walks
+    `custom_private`, and its expression walker stops with
+    "unrecognized node type" at the `String` and `Integer` nodes of
+    Tessera's plan data. The coordinator builds the slice table of
+    every plan of the core planner with that walker, and the operator
+    memory under resource groups too.
   - The hash join planner prices Greengage's hash join path, which puts
     Motion nodes above its inputs, but runs over its own children
-    without them: each segment would join only its own rows.
+    without them: each segment would join only its own rows. On
+    Greengage that path may also be NULL, which the planner does not
+    expect.
+  - The shared-scan walker (`shareinput_walker`, `cdbmutate.c`) visits
+    only `lefttree`, `righttree` and `initPlan`: a ShareInputScan under
+    a Tessera node gets no producer and no slice.
   - `ExecSquelchNode` raises an error on a custom scan, and Tessera's
     nodes never squelch a child they stop reading, so Motion senders on
     other segments can wait forever. `planstate_walk_kids` skips
     `custom_ps`: a segment does not find its sending Motion under a
     Tessera node, and EXPLAIN ANALYZE loses the counters below it.
-    `plan_tree_mutator` copies a custom scan without its children and
-    expressions, so subplans and Motion nodes under it are not prepared
-    for dispatch. `plan_tree_walker` itself visits all four lists.
+    `plan_tree_mutator` copies the pointers to a custom scan's children
+    and expressions without mutating them, so subplans and Motion nodes
+    under it are not prepared for dispatch. `plan_tree_walker` itself
+    visits all four lists.
   - An extension's settings are not synchronized by default: an
     explicit SET reaches the segments, but a newly started segment
     process gets only the synchronized ones.
-  - The core planner calls no hook for the first stage of grouping
-    (`UPPERREL_CDB_FIRST_STAGE_GROUP_AGG`); the final hook sees the
-    whole two-stage path. Tessera takes only one-stage templates today.
+  - The core planner calls no `create_upper_paths_hook` for the first
+    stage of grouping (`UPPERREL_CDB_FIRST_STAGE_GROUP_AGG`), only an
+    FDW's callback; the hook of the final stage sees the whole
+    two-stage path. Tessera's serial grouping takes one-stage templates
+    only; its partial stage is built for PostgreSQL's parallel plans,
+    over a Gather, not a Motion.
   - ORCA builds the whole plan itself, slices and executor references
     (`OUTER_VAR`, `INNER_VAR`) included; no `set_plan_references` runs
     after it. Its Agg nodes use the same splits as the core planner's.
   - Greengage's `F_*` names come from the C function, and functions
     sharing one get only the lowest OID's; EXTRACT there is `date_part`
     and returns float8, not numeric.
-  - The trial build: errors mostly in the planners (about 190 in the
-    aggregate's, 100 in the join's, 55 in the scan's), few in the
-    executors (6 in the hash join, 4 in the sort); the Rust kernels
-    include no PostgreSQL header.
+  - The trial build: `make -k` of `bridge`, `runtime`, `nodes` and
+    `kernels` with Greengage's `pg_config`, the version check of
+    `abi.h` removed and five missing headers replaced by stubs. The
+    errors that are not of the list macros are mostly in the planners
+    (about 190 in the aggregate's, 100 in the join's, 55 in the
+    scan's) and few in the executors (6 in the hash join, 4 in the
+    sort); the counts are a floor, as early errors hide later ones. The
+    Rust kernels include no PostgreSQL header.
 
   From the log, still true: there are no PostgreSQL parallel queries;
   plans travel to segments and modules must be preloaded in every
@@ -1029,7 +1046,10 @@ of both trees on 2026-11-01.
   first. Step 9's builder needs nothing of Greengage.
 - **Capabilities:** greengage, bridge-api, scan-heap, aggregate,
   join-hash, sort, pack, node-contract, planner-coverage
-- **Size:** large — a series; steps 1 to 5 are the first milestone.
+- **Size:** large — a series. Steps 1 to 5 are the first milestone:
+  scans, filters and one-stage grouping whose keys hold the
+  distribution key, with joins left to the core; steps 6 and 7 open
+  the distributed joins and grouping.
 
 ### tpch-on-greengage
 
