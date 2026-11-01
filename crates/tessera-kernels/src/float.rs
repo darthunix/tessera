@@ -21,6 +21,11 @@
 //! of the rows, so a call fails at the row the core would raise at. A float
 //! result is written as its bits, a float4's sign-extended to 64, as
 //! PostgreSQL's Datum holds it.
+//!
+//! The loops are scalar, one for each operation, pair of widths and
+//! shape of the arguments, so no row pays for a choice of operation. A
+//! vector comparison of floats would need NaN and -0 handled beyond one
+//! instruction, and no measurement has asked for it.
 
 use std::fmt;
 use std::mem::MaybeUninit;
