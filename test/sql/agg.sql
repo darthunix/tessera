@@ -411,6 +411,19 @@ SELECT agg_memory($$SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset
 -- spec: table-memory/DISTINCT over no rows
 SELECT agg_memory($$SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset WHERE v + 0 < 0 GROUP BY g$$);
 SELECT agg_same($$SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset GROUP BY g$$);
+-- 2048 values: the set's second chunk comes with the last value, and no
+-- regrow after it; its note alone counts it.
+SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dset WHERE v <= 2048 GROUP BY g$$);
+-- At 1 MiB the chunks past the first are 128 kB, above the least.
+SET work_mem = '1MB';
+SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dset GROUP BY g$$);
+-- 3000 groups the planner guesses at 200 (no statistics for a function's
+-- rows), and a set of 100 pairs, its argument NULL in the other rows: the
+-- groups' last regrow, both of its indexes alive beside the set, is the
+-- highest moment.
+SET work_mem = '256kB';
+SELECT agg_memory($$SELECT v, count(DISTINCT CASE WHEN v <= 100 THEN v % 100 END) FROM generate_series(1, 3000) AS t(v) GROUP BY v$$);
+SELECT agg_same($$SELECT v, count(DISTINCT CASE WHEN v <= 100 THEN v % 100 END) FROM generate_series(1, 3000) AS t(v) GROUP BY v$$) NOT LIKE 'MISMATCH%' AS same;
 RESET work_mem;
 RESET hash_mem_multiplier;
 DROP TABLE agg_dset;
