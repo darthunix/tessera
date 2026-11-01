@@ -108,17 +108,24 @@ check_partition(const TessSpill *spill, int partition)
 }
 
 /*
- * Before PostgreSQL 15 a set of shared files has no FileSet inside it.
- * Only parallel queries share spill files, and the forks of that age
- * Tessera builds for run none, so these calls are never reached there.
+ * The Greenplum family names a temporary file by a prefix. Before
+ * PostgreSQL 15 a set of shared files has no FileSet inside it, and before
+ * 14 it opens a file without a mode. Only parallel queries share spill
+ * files, and the forks of that age Tessera builds for run none, so these
+ * calls are never reached there.
  */
-#if TESS_PG_MAJOR < 15
+#if TESS_MPP
 #define tess_temporary_file() OpenTemporaryFile(false, "Tessera")
+#else
+#define tess_temporary_file() OpenTemporaryFile(false)
+#endif
+#if TESS_PG_MAJOR < 14
 #define tess_shared_create(shared, name) SharedFileSetCreate((shared), (name))
 #define tess_shared_open(shared, name) SharedFileSetOpen((shared), (name))
 #define tess_shared_delete(shared, name) SharedFileSetDelete((shared), (name), true)
+#elif TESS_PG_MAJOR < 15
+#error "the shared files of PostgreSQL 14 are not written"
 #else
-#define tess_temporary_file() OpenTemporaryFile(false)
 #define tess_shared_create(shared, name) FileSetCreate(&(shared)->fs, (name))
 #define tess_shared_open(shared, name) FileSetOpen(&(shared)->fs, (name), O_RDONLY)
 #define tess_shared_delete(shared, name) FileSetDelete(&(shared)->fs, (name), true)

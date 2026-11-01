@@ -229,7 +229,10 @@ tess_pack_forwards(const Path *path)
  * Whether a path is the pack node's reading an append-only table in
  * blocks itself, a source of batches rather than a copy of rows: its
  * child a core's sequential scan of the table with no clause of its own
- * and plain columns, as pack_aocs_create requires once executed.
+ * and plain columns, as pack_aocs_create requires once executed. A
+ * relation's restrictions stay the scan's clauses under a pack; an
+ * InitPlan on the scan, which the planner cannot see here, also makes
+ * the pack copy rows.
  */
 bool
 tess_pack_reads_blocks(const Path *path)
@@ -247,6 +250,7 @@ tess_pack_reads_blocks(const Path *path)
 	rel = child->parent;
 	if (info.node_data != NULL || child->pathtype != T_SeqScan ||
 		child->param_info != NULL || rel == NULL || child->pathtarget == NULL ||
+		rel->baserestrictinfo != NIL ||
 		(rel->relam != AO_COLUMN_TABLE_AM_OID && rel->relam != AO_ROW_TABLE_AM_OID))
 		return false;
 	foreach_ptr(Expr, expr, child->pathtarget->exprs)

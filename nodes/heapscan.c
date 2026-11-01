@@ -204,7 +204,8 @@ static void heap_scan_shutdown(CustomScanState *css);
  * A scan begins with flags since PostgreSQL 19. The bitmap, index and
  * index-only modes follow the core's scans of master: a bitmap iterated
  * inside the table AM (PostgreSQL 18), index scans begun with their
- * instrumentation and flags (master). On an older core the node reads
+ * instrumentation and flags (PostgreSQL 19) and the index-only argument
+ * of master. On an older core the node reads
  * whole tables only, a page at a time, and leaves those scans to the core.
  */
 #define HEAP_INDEX_MODES (TESS_PG_MAJOR >= 20)
@@ -992,14 +993,16 @@ next_page(HeapScanState *state)
 static inline void
 count_heap_rows(Relation rel, bool fetched, int count)
 {
-#if TESS_PG_MAJOR < 16
-	/* The counters of the table before PostgreSQL 16. */
+#if TESS_PG_MAJOR < 15
+	/* The counters of the table before PostgreSQL 15. */
 	if (count <= 0 || rel->pgstat_info == NULL)
 		return;
 	if (fetched)
 		rel->pgstat_info->t_counts.t_tuples_fetched += count;
 	else
 		rel->pgstat_info->t_counts.t_tuples_returned += count;
+#elif TESS_PG_MAJOR < 20
+#error "the table counters of PostgreSQL 15 to 19 are not written"
 #else
 	if (count <= 0 || !pgstat_should_count_relation(rel))
 		return;

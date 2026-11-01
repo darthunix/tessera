@@ -47,12 +47,15 @@
 /*
  * The children valid for the current parameters of execution, numbered
  * among those the node initialized: the call has grown arguments over
- * the releases, and the Greenplum family's takes a join's selectors too.
+ * the releases (PostgreSQL 15 and 18), and before 15 the Greenplum
+ * family's takes a join's selectors too.
  */
 #if TESS_PG_MAJOR >= 18
 #define find_matching(prune, estate) ExecFindMatchingSubPlans((prune), false, NULL)
-#else
+#elif TESS_PG_MAJOR < 15 && TESS_MPP
 #define find_matching(prune, estate) ExecFindMatchingSubPlans((prune), (estate), 0, NIL)
+#else
+#error "the pruning calls of this core are not written"
 #endif
 
 /* The core's cost of a row through an Append (costsize.c), which the node saves. */
@@ -229,8 +232,8 @@ append_wrap(PlannerInfo *root, Path *path)
 	config.children = children;
 	config.node_data = (Node *) makeInteger(path->parallel_aware ?
 											append->first_partial_path : 0);
-#if TESS_PG_MAJOR < 18
-	/* An older core's pruning needs the partitioned tables of the Append. */
+#if TESS_PG_MAJOR < 14
+	/* Before PostgreSQL 14 pruning needs the partitioned tables of the Append. */
 	config.node_data = (Node *) list_make2((Node *) config.node_data, append->partitioned_rels);
 #endif
 	built = tess_path_create(&config);
@@ -262,11 +265,16 @@ prune_info(PlannerInfo *root, RelOptInfo *rel, List *children, List *partitioned
 	clauses = extract_actual_clauses(rel->baserestrictinfo, false);
 	if (clauses == NIL)
 		return NULL;
-#if TESS_PG_MAJOR < 18
-	/* An older core returns the description and keeps no list of them. */
+#if TESS_PG_MAJOR < 14
+	/*
+	 * Before PostgreSQL 18 the planner returns the description and keeps no
+	 * list of them; before 14 it takes the Append's partitioned tables.
+	 */
 	if (partitioned_rels == NIL)
 		return NULL;
 	return make_partition_pruneinfo(root, rel, children, partitioned_rels, clauses);
+#elif TESS_PG_MAJOR < 18
+#error "the pruning descriptions of PostgreSQL 14 to 17 are not written"
 #else
 	(void) partitioned_rels;
 	index = make_partition_pruneinfo(root, rel, children, clauses);
@@ -298,7 +306,7 @@ append_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path, List *tli
 	List	   *partitioned_rels = NIL;
 
 	tess_path_get_info(best_path, &info);
-#if TESS_PG_MAJOR < 18
+#if TESS_PG_MAJOR < 14
 	first_partial = intVal(linitial(castNode(List, info.node_data)));
 	partitioned_rels = lsecond(castNode(List, info.node_data));
 #else
@@ -380,10 +388,10 @@ static const TessBatchOps append_batch_ops = {
  * besides the state: the leaf partitions it kept join es_unpruned_relids,
  * as an Append's do.
  */
-#if TESS_PG_MAJOR < 18
+#if TESS_PG_MAJOR < 15
 /*
- * An older core makes the pruning state of a node's description when the
- * node asks (ExecCreatePartitionPruneState), its initial pruning done by
+ * Before PostgreSQL 15 the core makes the pruning state of a node's
+ * description when the node asks (ExecCreatePartitionPruneState), its initial pruning done by
  * a second call that leaves the children's numbers among those kept
  * (ExecFindInitialMatchingSubPlans). The description's range table
  * numbers are the node's query's own: set_plan_references added the
@@ -412,6 +420,8 @@ prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset
 		*valid = ExecFindInitialMatchingSubPlans(prune, state->nplanned);
 	return prune;
 }
+#elif TESS_PG_MAJOR < 18
+#error "the pruning states of PostgreSQL 15 to 17 are not written"
 #else
 static PartitionPruneState *
 prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset **valid)

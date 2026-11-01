@@ -145,7 +145,8 @@ int64_div_fast_to_numeric(int64 value, int scale)
 #define VARHDRSZ_COMPRESSED offsetof(varattrib_4b, va_compressed.va_data)
 
 /*
- * hash_mem: an older core has no hash_mem_multiplier, so work_mem.
+ * The memory of a hash table in bytes (PostgreSQL 14): hash_mem in
+ * kilobytes in PostgreSQL 13, work_mem before its hash_mem_multiplier.
  * shortcut: the Greenplum family gives a node its own budget,
  * operatorMemKB; take it when the nodes read their memory through the
  * plan state.
@@ -153,12 +154,16 @@ int64_div_fast_to_numeric(int64 value, int scale)
 static inline size_t
 get_hash_memory_limit(void)
 {
+#if TESS_PG_MAJOR < 13
 	return (size_t) work_mem * 1024;
+#else
+	return (size_t) get_hash_mem() * 1024;
+#endif
 }
 
 /*
  * The member of an equivalence class that is expr, binary relabeling
- * aside (PostgreSQL 13): no constant, and a child only of relids.
+ * aside (PostgreSQL 14): no constant, and a child only of relids.
  */
 static inline EquivalenceMember *
 find_ec_member_matching_expr(EquivalenceClass *ec, Expr *expr, Relids relids)
@@ -352,7 +357,7 @@ murmurhash64(uint64 data)
 
 /*
  * Remove a callback registered with MemoryContextRegisterResetCallback
- * (PostgreSQL 18), as master does: unlink it from the context's list.
+ * (PostgreSQL 19), as master does: unlink it from the context's list.
  */
 static inline void
 MemoryContextUnregisterResetCallback(MemoryContext context,
@@ -381,17 +386,6 @@ MemoryContextUnregisterResetCallback(MemoryContext context,
 			pg_unreachable(); \
 	} while (0)
 
-/* No guaranteed prefix of attributes present, not NULL and by value. */
-#define tess_slot_first_nonguaranteed(slot) ((void) (slot), 0)
-#define tess_desc_first_nonguaranteed(desc) ((void) (desc), 0)
-#else
-#define tess_slot_first_nonguaranteed(slot) ((slot)->tts_first_nonguaranteed)
-#define tess_desc_first_nonguaranteed(desc) ((desc)->firstNonGuaranteedAttr)
-#endif
-
-/* ----------------------------------------------- what master (20) added */
-#if TESS_PG_MAJOR < 20
-
 /*
  * A copy whose type drops the original's const, as master's copyObject;
  * untyped, as master's too, where the compiler lacks __typeof_unqual__.
@@ -403,6 +397,17 @@ MemoryContextUnregisterResetCallback(MemoryContext context,
 #else
 #define copyObject(obj) copyObjectImpl(obj)
 #endif
+
+/* No guaranteed prefix of attributes present, not NULL and by value. */
+#define tess_slot_first_nonguaranteed(slot) ((void) (slot), 0)
+#define tess_desc_first_nonguaranteed(desc) ((void) (desc), 0)
+#else
+#define tess_slot_first_nonguaranteed(slot) ((slot)->tts_first_nonguaranteed)
+#define tess_desc_first_nonguaranteed(desc) ((desc)->firstNonGuaranteedAttr)
+#endif
+
+/* ----------------------------------------------- what master (20) added */
+#if TESS_PG_MAJOR < 20
 
 /* An attribute the copied lib/sort_template.h uses. */
 #define pg_attribute_no_sanitize_function()
