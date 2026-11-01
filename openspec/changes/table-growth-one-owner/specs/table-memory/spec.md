@@ -41,7 +41,8 @@ each process's most, which need not have come at the same time.
   is alive, and that is the node's highest moment
 - **THEN** Memory Usage is the bytes of that moment, the old and the
   new index included
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/A regrow is counted with both indexes`
 
 #### Scenario: Groups read back and merged
 - **WHEN** a grouping reads a partition back, merges it and rebuilds
@@ -54,7 +55,8 @@ each process's most, which need not have come at the same time.
 #### Scenario: DISTINCT over no rows
 - **WHEN** a grouping with two DISTINCT aggregates reads no rows
 - **THEN** Memory Usage counts the first index of each set
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/DISTINCT over no rows`
 
 ### Requirement: A serial build keeps its index within the limit
 A `TessHashJoin` that builds its table in one process SHALL start to

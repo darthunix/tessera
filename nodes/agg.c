@@ -739,13 +739,15 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	}
 }
 
-/* Empty every distinct set, before the input is read. */
+/* Empty every distinct set, before the input is read; their first indexes noted. */
 void
 agg_reset_distinct(TessAggState *state)
 {
 	for (int index = 0; index < state->nvalues; index++)
 		if (state->values[index].distinct != NULL)
 			agg_distinct_reset(state, &state->values[index]);
+	if (state->has_distinct)
+		note_memory(state);
 }
 
 /* Read every batch of the child into the running values. */

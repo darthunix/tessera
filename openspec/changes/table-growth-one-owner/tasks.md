@@ -36,7 +36,7 @@ as it goes.
 
 ## 3. The faults, shown and fixed
 
-- [ ] 3.1 One note of a node's memory that takes a replaced index still
+- [x] 3.1 One note of a node's memory that takes a replaced index still
       alive; a DISTINCT set notes its first index, its chunks and its
       regrows through it, and the grouping's regrow notes the same
       whole. Check: the scenarios "A regrow is counted with both
