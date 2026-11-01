@@ -167,6 +167,27 @@ packs_rows(Path *child)
 }
 
 /*
+ * The partitioned tables of the Append a TessAppend path stands in for,
+ * which pruning takes before PostgreSQL 14 (TessHashJoin's by its keys
+ * too); NIL from then on.
+ */
+List *
+tess_append_partitioned_rels(const Path *path)
+{
+#if TESS_PG_MAJOR < 14
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
+
+	if (tess_path_node(path) != &tess_append_node)
+		return NIL;
+	tess_path_get_info((const CustomPath *) path, &info);
+	return lsecond(castNode(List, info.node_data));
+#else
+	(void) path;
+	return NIL;
+#endif
+}
+
+/*
  * Whether rel is a set operation's, whose targets are its output columns:
  * Vars of no relation.
  */

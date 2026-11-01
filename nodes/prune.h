@@ -3,6 +3,7 @@
 #define TESSERA_NODES_PRUNE_H
 
 #include "nodes/execnodes.h"
+#include "nodes/pathnodes.h"
 #include "nodes/plannodes.h"
 
 /*
@@ -20,6 +21,9 @@ typedef struct TessJoinKeys
 	int			nvalues;
 	int64	   *values;
 } TessJoinKeys;
+/* The partitioned tables of a TessAppend path, for pruning before PostgreSQL 14: append.c. */
+extern List *tess_append_partitioned_rels(const Path *path);
+
 /* TessAppend's pruning by a hash join's keys: see append.c. */
 extern bool tess_append_join_prune_begin(PlanState *node, const PartitionPruneInfo *values,
 										 const PartitionPruneInfo *range, const int *params);

@@ -697,13 +697,6 @@ expected_leaves(PlannerInfo *root, RelOptInfo *outerrel, const JoinKeys *keys,
 	List	   *bounds;
 	Relids		leaves;
 
-	/*
-	 * shortcut: before PostgreSQL 18 the node prunes by its keys nowhere
-	 * yet (prune_description), so it expects no partition pruned; port
-	 * the description as TessAppend's prune_info to prune there.
-	 */
-	if (TESS_PG_MAJOR < 18)
-		return NULL;
 	if (!enable_partition_pruning || !IS_SIMPLE_REL(outerrel) ||
 		outerrel->part_scheme == NULL ||
 		(jointype != JOIN_INNER && jointype != JOIN_SEMI && jointype != JOIN_RIGHT &&
@@ -1979,8 +1972,8 @@ selector_append(Path *path, List *restrictlist)
  * pair (INNER, SEMI, RIGHT); with the sides the other way round, the
  * node's inner side is the core's outer one, its join INNER, SEMI or, for
  * the node's LEFT, RIGHT.
- * shortcut: the node then stays out; with its own pruning by the build's
- * keys over TessAppend, take the joins that pruning covers.
+ * The node stays out but where it prunes the same side by its own keys
+ * (make_join_path).
  */
 static bool
 core_selects_partitions(JoinType jointype, Path *outer, Path *inner, List *restrictlist)
@@ -2037,10 +2030,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 									extra, outer_path, inner_path, shared,
 									extra->restrictlist, NULL,
 									extra->redistribution_clauses, hashclauses);
-		if (made == NULL || !IsA(made, HashPath) ||
-			core_selects_partitions(jointype, ((HashPath *) made)->jpath.outerjoinpath,
-									((HashPath *) made)->jpath.innerjoinpath,
-									extra->restrictlist))
+		if (made == NULL || !IsA(made, HashPath))
 			return NULL;
 		template = (HashPath *) made;
 		outer_path = template->jpath.outerjoinpath;
@@ -2057,6 +2047,27 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		inner = with_key_targets(root, inner, keys->inner);
 	if (outer == NULL || inner == NULL)
 		return NULL;
+#if TESS_MPP
+	{
+		/*
+		 * Where the outer child is TessAppend over the partitioned table the
+		 * key prunes, the node prunes it by the build's keys as the core's
+		 * selector would (write_join_prune): only the other orientation
+		 * still counts against it.
+		 */
+		RelOptInfo *rel = outer_path->parent;
+		PartitionScheme scheme = NULL;
+		bool		prunes = enable_partition_pruning &&
+			tess_path_node(outer) == &tess_append_node &&
+			IS_SIMPLE_REL(rel) && rel->part_scheme != NULL &&
+			(jointype == JOIN_INNER || jointype == JOIN_SEMI || jointype == JOIN_RIGHT) &&
+			prune_key(root, rel, keys->clauses, keys->outer, keys->hashers, &scheme) >= 0;
+
+		if (core_selects_partitions(jointype, prunes ? NULL : outer_path, inner_path,
+									extra->restrictlist))
+			return NULL;
+	}
+#endif
 	priced = tess_path_node(outer) == &tess_append_node ?
 		pruned_append(root, outer_path, leaves) : outer_path;
 #if !TESS_MPP
@@ -2397,6 +2408,16 @@ align_nullingrels(Node *node, List *scan)
 static Param *
 prune_param(PlannerInfo *root, Node *inner)
 {
+#if TESS_MPP
+	/*
+	 * The Greenplum family dispatches every executor parameter a plan
+	 * names with the type its statement records, which a special one
+	 * lacks: the parameter is an ordinary one of the inner key's type, its
+	 * value set on each segment by the join there.
+	 */
+	return generate_new_exec_param(root, exprType(inner), exprTypmod(inner),
+								   exprCollation(inner));
+#else
 	Param	   *param = makeNode(Param);
 
 	param->paramkind = PARAM_EXEC;
@@ -2406,6 +2427,7 @@ prune_param(PlannerInfo *root, Node *inner)
 	param->paramcollid = exprCollation(inner);
 	param->location = -1;
 	return param;
+#endif
 }
 
 /* outer op param, op an operator of the given strategy of the family, or NULL. */
@@ -2431,15 +2453,22 @@ prune_clause(Oid opno, Var *outer, Param *param)
  * where the clauses prune none.
  */
 static PartitionPruneInfo *
-prune_description(PlannerInfo *root, RelOptInfo *rel, List *children, List *clauses)
+prune_description(PlannerInfo *root, RelOptInfo *rel, const Path *append, List *clauses)
 {
-#if TESS_PG_MAJOR < 18
-	/* No pruning by the keys there yet: expected_leaves expects none. */
-	(void) root;
-	(void) rel;
-	(void) children;
-	(void) clauses;
-	return NULL;
+	List	   *children = ((const CustomPath *) append)->custom_paths;
+#if TESS_PG_MAJOR < 14
+	/*
+	 * Before PostgreSQL 18 the planner returns the description and keeps no
+	 * list of them; before 14 it takes the Append's partitioned tables, as
+	 * TessAppend's own does (prune_info of append.c).
+	 */
+	List	   *partitioned_rels = tess_append_partitioned_rels(append);
+
+	if (partitioned_rels == NIL)
+		return NULL;
+	return make_partition_pruneinfo(root, rel, children, partitioned_rels, clauses);
+#elif TESS_PG_MAJOR < 18
+#error "the pruning descriptions of PostgreSQL 14 to 17 are not written"
 #else
 	int			index = make_partition_pruneinfo(root, rel, children, clauses);
 	PartitionPruneInfo *info;
@@ -2485,7 +2514,6 @@ write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild 
 		key = prune_key(root, rel, hash_clauses, outer_keys, hashers, &scheme);
 	if (key >= 0)
 	{
-		List	   *children = ((CustomPath *) outer->path)->custom_paths;
 		OpExpr	   *clause = list_nth_node(OpExpr, hash_clauses, key);
 		Var		   *outer_var = copyObject(list_nth_node(Var, outer_keys, key));
 		Node	   *inner_var = list_nth(inner_keys, key);
@@ -2503,7 +2531,7 @@ write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild 
 #if TESS_PG_MAJOR >= 16
 		outer_var->varnullingrels = NULL;
 #endif
-		values = prune_description(root, rel, children,
+		values = prune_description(root, rel, outer->path,
 								   list_make1(prune_clause(outer_operator(clause, outer_var),
 														   outer_var, value)));
 		if (values != NULL)
@@ -2515,7 +2543,7 @@ write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild 
 													 BTLessEqualStrategyNumber),
 								 outer_var, high);
 			if (lower != NULL && upper != NULL)
-				range = prune_description(root, rel, children, list_make2(lower, upper));
+				range = prune_description(root, rel, outer->path, list_make2(lower, upper));
 			tess_plan_write_int(writer, "prune_key", key);
 			tess_plan_write_int_list(writer, "prune_params",
 									 list_make3_int(value->paramid, low->paramid,
