@@ -154,7 +154,11 @@ one of them does not compute it at all.
   level reads the bytes as today. The room for two more chunks stays.
 - **And:** a spill reserved 8 bytes a row for the index of its
   resident partitions, whose buckets take 8 to 16 bytes a row: it now
-  reserves that index's exact size, until the index is made.
+  reserves that index's exact size, until the index is made. A shared
+  join's participant ends the reservation when it hands its resident
+  rows to the shared table, whose index the shared build reserves;
+  before, it kept charging an index it did not have while it joined
+  the partitions on disk.
 - **Why:** the memory a built table takes is its chunks and its index;
   a check of the chunks alone lets the index pass the limit.
 - **Cost:** the room for two chunks was already a margin: a build
@@ -244,6 +248,8 @@ gives a lower bound.
   13 MiB, 262 150 rows spill in their last batch, where the index's
   buckets double, and a filter that leaves 262 144 of them stays in
   memory (before: it spilled, the check counting the rows it rejected).
+  The shared participant's reservation is shown by review: which
+  participant joins which partition on disk depends on timing.
 - The first index: an estimate far above the cap over no rows at
   `hash_mem` of 2, 3 and 4 MiB, whose first index is the peak: 513,
   513 and 1025 kB (at 3 MiB before: 1025); an estimate below the cap
