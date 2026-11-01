@@ -977,13 +977,15 @@ would not be chosen. Of equal values of different forms (numeric of other
 scales, text under a case-insensitive collation) a group goes out in its
 first row's, the left side's, as the core's hashed `SetOp` puts it out
 (see the keys' forms below). A dictionary starts
-with room for the planner's estimate of the groups, within a quarter of
-`hash_mem`. The cost is the sides' batch paths and a share of the
-core's `SetOp` over its own inputs, 0.5 with keys of words and 0.9 with a
-key through a dictionary, as measured: 500 000 integers `EXCEPT` a third
-of them 23.9 ms against 57.8, `EXCEPT ALL` of 1000 values 34.9 against
-95.2, `INTERSECT ALL` 60.1 against 170.5, `INTERSECT` of texts 80.6
-against 89.7 (pg-setop-6kROdR).
+with room for the planner's estimate of the groups; the dictionaries of
+a node's keys share that room, a quarter of `hash_mem` together (256
+values each at least), which leaves the table its own, and their values
+grow past it as the groups come. The cost is the sides' batch paths and
+a share of the core's `SetOp` over its own inputs, 0.5 with keys of
+words and 0.9 with a key through a dictionary, as measured: 500 000
+integers `EXCEPT` a third of them 23.9 ms against 57.8, `EXCEPT ALL` of
+1000 values 34.9 against 95.2, `INTERSECT ALL` 60.1 against 170.5,
+`INTERSECT` of texts 80.6 against 89.7 (pg-setop-6kROdR).
 
 ### Planning
 

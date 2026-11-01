@@ -327,7 +327,7 @@ extern TessRowMask agg_distinct_rows(TessAggState *state, AggValue *value,
 extern Size agg_distinct_bytes(TessAggState *state);
 extern KeyDict *agg_key_dict_create(TessAggState *state, Oid eqop, Oid type,
 									Oid collation);
-extern void agg_key_dict_reset(KeyDict *dict, uint64 values);
+extern void agg_key_dict_reset(KeyDict *dict, uint64 values, int shares);
 extern void agg_keydict_numbers(KeyDict *dict, const TessDatumColumn *column,
 								const TessRowMask *rows, bool insert,
 								Datum *numbers, uint32 *hashes);

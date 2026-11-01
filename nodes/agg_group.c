@@ -192,7 +192,7 @@ reserve_rows(TessAggState *state, int nrows)
 	state->capacity = nrows;
 }
 
-/* The bytes the groups take: the table and, with generic aggregates, their states. */
+/* The bytes the groups take: the table, the states, the keys' dictionaries. */
 static Size
 groups_memory(TessAggState *state)
 {
@@ -205,6 +205,25 @@ groups_memory(TessAggState *state)
 		if (state->dicts[key] != NULL)
 			bytes += MemoryContextMemAllocated(state->dicts[key]->context, true);
 	return bytes;
+}
+
+/*
+ * Whether the groups are too many for memory: past seven eighths of
+ * hash_mem, the rest left for a batch's chunk and index, with at least
+ * min_records groups, whose table stats then are in *stats. Past the
+ * limit with fewer, the memory is the table's own room and its
+ * dictionaries' for the groups expected rather than groups: a serial
+ * table of fewer than a batch's groups frozen would split every
+ * partition again, level after level, and an empty partial table sent up
+ * would be made anew of the same size and sent up again, forever.
+ */
+static bool
+groups_overflow(TessAggState *state, uint64 min_records, TessTableStats *stats)
+{
+	if (groups_memory(state) <= tess_hash_memory_limit() / 8 * 7)
+		return false;
+	check(state, state->kernels->table_stats(&state->table, stats, &state->status));
+	return stats->records >= min_records;
 }
 
 /* The child's columns the node reads, in their order, before it computes anything. */
@@ -496,18 +515,11 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 * to disk; in partial mode the groups go out instead (agg_group_drain).
 	 */
 	if (state->row_spill && !state->partial && !state->has_distinct && !state->frozen &&
-		state->rows_level < ROWS_MAX_LEVELS &&
-		groups_memory(state) > tess_hash_memory_limit() / 8 * 7)
+		state->rows_level < ROWS_MAX_LEVELS)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 
-		/*
-		 * A table of fewer groups than a batch's is its own overhead past a
-		 * tiny hash_mem, not groups too many: freezing it would split every
-		 * partition again, level after level.
-		 */
-		check(state, state->kernels->table_stats(&state->table, &stats, &state->status));
-		if (stats.records >= AGG_GROUP_ROWS)
+		if (groups_overflow(state, AGG_GROUP_ROWS, &stats))
 		{
 			state->frozen = true;
 			state->rows_spill = rows_spill_create(state, state->rows_level);
@@ -534,12 +546,16 @@ agg_setop_side(TessAggState *state, int side)
 void
 agg_group_drain(TessAggState *state)
 {
+	int			ndicts = 0;
+
 	agg_spill_free(state);
 	rows_spill_free(state);
 	state->rows_level = 0;
 	for (int key = 0; key < state->nkeys; key++)
+		ndicts += state->dicts[key] != NULL;
+	for (int key = 0; key < state->nkeys; key++)
 		if (state->dicts[key] != NULL)
-			agg_key_dict_reset(state->dicts[key], state->groups_estimate);
+			agg_key_dict_reset(state->dicts[key], state->groups_estimate, ndicts);
 	/* The groups of a previous table and their states go together. */
 	if (state->generic_agg != NULL)
 		ReScanExprContext(state->generic_agg->curaggcontext);
@@ -548,26 +564,24 @@ agg_group_drain(TessAggState *state)
 	for (;;)
 	{
 		TessBatch  *batch;
+		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 		int			rows;
 
 		/*
-		 * Partial mode: a table near hash_mem, the states' memory counted,
-		 * goes out now, as partials the Finalize Aggregate merges, and the
-		 * input goes on after it.
+		 * Partial mode: a table near hash_mem, the states' and the
+		 * dictionaries' memory counted, goes out now, as partials the
+		 * Finalize Aggregate merges, and the input goes on after it.
 		 */
-		if (state->partial && !state->partial_spill &&
-			groups_memory(state) > tess_hash_memory_limit() / 8 * 7)
+		if (state->partial && !state->partial_spill && groups_overflow(state, 1, &stats))
 		{
-			TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
-
-			check(state, state->kernels->table_stats(&state->table, &stats,
-													 &state->status));
 			/*
 			 * More groups than half the rows read since the table started:
 			 * sending it up would fold nothing. The groups go into
 			 * partitions and to disk from now on, and out once the input is
 			 * done, still as partials. Sum states spill no state (their
-			 * records merge a word an aggregate): they go up still.
+			 * records merge a word an aggregate), nor do keys through a
+			 * dictionary (their records hold numbers of a dictionary the
+			 * next table makes anew): they go up still.
 			 */
 			if (!state->row_spill && stats.records * 2 > state->rows - state->emit_rows)
 			{
@@ -705,7 +719,7 @@ rows_drain(TessAggState *state)
 		ReScanExprContext(state->generic_agg->curaggcontext);
 	for (int key = 0; key < state->nkeys; key++)
 		if (state->dicts[key] != NULL)
-			agg_key_dict_reset(state->dicts[key], 256);
+			agg_key_dict_reset(state->dicts[key], 256, 1);
 	create_table(state);
 	state->frozen = false;
 	state->replaying = true;
