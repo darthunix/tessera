@@ -238,21 +238,41 @@ check read as other data, since a block has no checksum.
 - **Verified by:** pending
 
 ### Requirement: Errors of two kinds
-An error of the crate SHALL be either a wrong call or damaged bytes,
-SHALL name the rule it broke, and SHALL fit in 8 bytes. A machine given
-an event it does not expect in its state SHALL return a wrong call and
-stay as it was. A call that needs more memory, and an action the host
-could not do, SHALL NOT be errors of the crate.
+An error of the crate, an
+[`Error`](../../../crates/relspill/src/error.rs), SHALL be either a
+wrong call or damaged bytes, SHALL name the rule it broke, and SHALL
+fit in 8 bytes. A machine given an event it does not expect in its
+state SHALL return a wrong call and stay as it was. A call that needs
+more memory, and a read or a write a machine asked of the host that the
+host could not do, SHALL NOT be errors of the crate. A source of chunks
+or of values that the host gives and that cannot give one SHALL be a
+wrong call naming the chunk, or the column and the row, so that the
+host can report its own reason.
 
 #### Scenario: The kind follows what was wrong
 - **WHEN** one call is given a partition past the level's count, and
   another reads a block whose header is damaged
 - **THEN** the first is a wrong call and the second is damaged bytes,
   and each names its rule
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/shared_spill.rs::files_and_partitions_are_taken_once`;
+  `crates/relspill/src/lib.rs::every_damaged_field_is_refused`;
+  `crates/relspill/src/error.rs::an_error_keeps_its_kind_rule_and_numbers`
 
 #### Scenario: An event out of turn
 - **WHEN** a machine is given an event its state does not expect
 - **THEN** it returns a wrong call, and its next step goes as if the
   event had not come
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/phases.rs::an_attach_past_the_last_phase_is_an_error`
+
+#### Scenario: A source of the host that cannot give
+- **WHEN** a source of chunks cannot give a chunk, or a source of rows
+  a value, during an append
+- **THEN** the append fails with a wrong call that names the chunk, or
+  the column and the row, and the host reports its own reason
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::an_append_names_the_rule_it_refuses_by`;
+  `crates/relspill/src/spill_columns.rs::mismatched_shapes_are_refused`;
+  `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`;
+  `crates/tessera-capi/tests/table.rs::rows_of_70_words_append_by_partition`

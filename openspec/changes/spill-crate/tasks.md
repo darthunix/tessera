@@ -222,7 +222,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       as a slice of atomic words that `tessera-capi` makes. The kernels
       export the moved names again. Check: `cargo ab moved`; the same
       machine code; `make rust-loom`; `make installcheck`
-- [ ] 3.5 Replace the crate's errors of text with errors of two kinds in
+- [x] 3.5 Replace the crate's errors of text with errors of two kinds in
       one word, as `relhash` has them; a limit of the host stays the
       host's error. Check: `make rust-check`; the tests of SQLSTATE in
       the suite `spill`; the machine code

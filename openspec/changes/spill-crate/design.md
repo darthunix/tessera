@@ -641,8 +641,12 @@ refused, so it can show that each check is needed.
 
 A limit of the host, such as a row longer than PostgreSQL allows, is
 neither kind: it stays the host's error, with its own SQLSTATE. A call
-that needs more memory, and an action the host could not do, are
-outcomes of the protocol, not errors of the crate.
+that needs more memory, and a read or a write a machine asked of the
+host that the host could not do, are outcomes of the protocol, not
+errors of the crate. A source the host gives the crate, of chunks or
+of the values of rows, that cannot give one is a wrong call that names
+the chunk, or the column and the row; why it could not is the host's,
+which keeps its reason and reports it in place of the crate's error.
 
 ### Any bytes, a bounded read
 

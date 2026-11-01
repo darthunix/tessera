@@ -2,6 +2,7 @@
 //! headers of spilled blocks ([`relspill`]), which carry a table's
 //! layout fingerprint (`tess_table_fingerprint`).
 
+use std::cell::Cell;
 use std::ffi::{CStr, c_int};
 use std::mem::MaybeUninit;
 use std::slice;
@@ -346,21 +347,46 @@ pub unsafe extern "C" fn tess_spill_columns_init(
 struct RawChunks<'a> {
     bases: &'a [*mut u8],
     lens: &'a [usize],
+    /// Why `chunk` last gave none, which the error of the spill names
+    /// only by its rule.
+    failure: Option<anyhow::Error>,
 }
 
 impl ColumnChunks for RawChunks<'_> {
-    fn chunk(&mut self, index: usize) -> Result<&mut [u8]> {
-        ensure!(
-            index < self.bases.len(),
-            "chunk {index} of {} chunks of columns",
-            self.bases.len()
-        );
-        let base = self.bases[index];
-        ensure!(!base.is_null(), "chunk {index} of columns is gone");
+    /// `None` for a chunk past the chunks, or one that is gone, with why.
+    fn chunk(&mut self, index: usize) -> Option<&mut [u8]> {
+        let Some(&base) = self.bases.get(index) else {
+            return self.refuse(anyhow::anyhow!(
+                "chunk {index} of {} chunks of columns",
+                self.bases.len()
+            ));
+        };
+        if base.is_null() {
+            return self.refuse(anyhow::anyhow!("chunk {index} of columns is gone"));
+        }
         // SAFETY: the caller's contract of the entry point: every base is
         // valid for its length and nothing else accesses it during the
         // call; the borrow is the only one while it lasts.
-        Ok(unsafe { slice::from_raw_parts_mut(base, self.lens[index]) })
+        Some(unsafe { slice::from_raw_parts_mut(base, self.lens[index]) })
+    }
+}
+
+impl RawChunks<'_> {
+    /// Keep why a chunk cannot be given, and give none.
+    #[cold]
+    #[inline(never)]
+    fn refuse<'c>(&mut self, reason: anyhow::Error) -> Option<&'c mut [u8]> {
+        self.failure = Some(reason);
+        None
+    }
+
+    /// The error of an append over these chunks: the reason `chunk` kept,
+    /// when it gave none, as the spill stops there with
+    /// [`relspill::Rule::ChunkRead`]; any other error of the spill as it is.
+    #[cold]
+    #[inline(never)]
+    fn reason(&mut self, error: relspill::Error) -> anyhow::Error {
+        self.failure.take().unwrap_or_else(|| error.into())
     }
 }
 
@@ -400,6 +426,7 @@ pub unsafe extern "C" fn tess_spill_columns_append_partitioned(
             let mut chunks = RawChunks {
                 bases: values(bases, nchunks, "chunk bases")?,
                 lens: values(lens, nchunks, "chunk lengths")?,
+                failure: None,
             };
             let partition_chunks = values(partition_chunks, npartitions, "partition chunks")?;
             let mut pending = pending.as_mut().context("a null pending mask")?.mask()?;
@@ -459,7 +486,8 @@ pub unsafe extern "C" fn tess_spill_columns_append_partitioned(
                 offsets,
                 rows,
             )
-            .map(drop)
+            .map_err(|error| chunks.reason(error))?;
+            Ok(())
         })
     }
 }
@@ -473,6 +501,12 @@ struct DatumRows<'a> {
     byvals: &'a [bool],
     typlens: &'a [i16],
     by_value: bool,
+    /// Why `value` last refused a value, which the error of the spill
+    /// names only by its rule. A cell outside, not a field: a cell in the
+    /// rows would take from `&DatumRows` the promise that nothing else
+    /// writes it, and the appends' loops would read its fields again
+    /// after every store.
+    failure: &'a Cell<Option<anyhow::Error>>,
 }
 
 impl RowValues for DatumRows<'_> {
@@ -485,25 +519,52 @@ impl RowValues for DatumRows<'_> {
     }
 
     // Both passes of an append over a row take it: called, it was a fifth
-    // of a gather's leader (macOS sample of a sort's merge of text).
+    // of a gather's leader (macOS sample of a sort's merge of text). Why a
+    // value cannot be told is kept out of line.
     #[inline(always)]
-    fn value(&self, column: usize, row: usize) -> Result<Value<'_>> {
+    fn value(&self, column: usize, row: usize) -> Option<Value<'_>> {
         let given = &self.columns[column];
-        ensure!(row < self.nrows, "row {row} past the {} rows", self.nrows);
+        if row >= self.nrows {
+            self.refuse(anyhow::anyhow!("row {row} past the {} rows", self.nrows));
+            return None;
+        }
         // SAFETY: the entry point checked each column's arrays non-null
         // and of the rows' count, and its caller made them so.
         let (null, datum) = unsafe { (*given.isnull.add(row), *given.values.add(row)) };
         if null {
-            return Ok(Value::Null);
+            return Some(Value::Null);
         }
         if self.byvals[column] {
-            return Ok(Value::Word(datum));
+            return Some(Value::Word(datum));
         }
         // SAFETY: the entry point's contract: a by-reference column's
         // non-NULL Datum points to a whole value of its type's length.
-        Ok(Value::Bytes(unsafe {
-            datum_bytes(datum, self.typlens[column])?
-        }))
+        match unsafe { datum_bytes(datum, self.typlens[column]) } {
+            Ok(bytes) => Some(Value::Bytes(bytes)),
+            Err(reason) => {
+                self.refuse(reason);
+                None
+            }
+        }
+    }
+}
+
+impl DatumRows<'_> {
+    /// Keep why a value cannot be given. It returns nothing: a value of
+    /// 24 bytes would come back through memory, and the appends' loops
+    /// would keep every value there.
+    #[cold]
+    #[inline(never)]
+    fn refuse(&self, reason: anyhow::Error) {
+        self.failure.set(Some(reason));
+    }
+    /// The error of a call over these rows: the reason `value` kept, when
+    /// it gave none, as the spill stops there with
+    /// [`relspill::Rule::ValueRead`]; any other error of the spill as it is.
+    #[cold]
+    #[inline(never)]
+    fn reason(&self, error: relspill::Error) -> anyhow::Error {
+        self.failure.take().unwrap_or_else(|| error.into())
     }
 }
 
@@ -583,12 +644,14 @@ pub unsafe extern "C" fn tess_spill_columns_append(
                     column.nrows
                 );
             }
+            let failure = Cell::new(None);
             let source = DatumRows {
                 columns: given,
                 nrows,
                 byvals,
                 typlens,
                 by_value: byvals.iter().all(|&byval| byval),
+                failure: &failure,
             };
             let values_out = if values_len == 0 {
                 &mut [][..]
@@ -599,7 +662,8 @@ pub unsafe extern "C" fn tess_spill_columns_append(
             let used = values_used
                 .as_mut()
                 .context("a null count of values used")?;
-            let done = spill_columns::append(chunk, &source, &mut rows, values_out, used)?;
+            let done = spill_columns::append(chunk, &source, &mut rows, values_out, used)
+                .map_err(|error| source.reason(error))?;
             *appended.as_mut().context("a null count appended")? =
                 c_int::try_from(done.rows).context("rows past an int")?;
             *need.as_mut().context("a null count of bytes")? = done.need;

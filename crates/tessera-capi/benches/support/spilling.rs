@@ -101,7 +101,7 @@ fn append(chunks: &mut [Vec<u8>], batch: &Batch, shift: u32, numbers: &[u32]) ->
         shift,
         chunks: numbers,
     };
-    append_partitioned(
+    Ok(append_partitioned(
         chunks,
         &partitions,
         &batch.hashes,
@@ -109,7 +109,7 @@ fn append(chunks: &mut [Vec<u8>], batch: &Batch, shift: u32, numbers: &[u32]) ->
         &mut pending,
         &mut offsets,
         &mut rows,
-    )
+    )?)
 }
 
 /// The word of lane `lane` of row `place` of a chunk of columns.
