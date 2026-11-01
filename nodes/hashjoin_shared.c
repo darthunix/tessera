@@ -167,11 +167,7 @@ add_own_chunk(TessHashJoinState *state)
 
 	check(state, state->kernels->build_take_chunk(state->parallel.shared->counters, &number,
 												  &state->status));
-	if (number >= TESS_TABLE_MAX_CHUNKS)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessHashJoin hash table cannot hold more than %d chunks",
-						TESS_TABLE_MAX_CHUNKS)));
+	table_chunks_limit(number + 1, "TessHashJoin hash table");
 	if (state->parallel.nown == state->parallel.own_slots)
 	{
 		MemoryContext context = state->css.ss.ps.state->es_query_cxt;
@@ -320,11 +316,7 @@ size_shared_table(TessHashJoinState *state)
 				header->number = nchunks++;
 				block = header->next;
 			}
-		if (nchunks > TESS_TABLE_MAX_CHUNKS)
-			ereport(ERROR,
-					(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-					 errmsg("TessHashJoin hash table cannot hold more than %d chunks",
-							TESS_TABLE_MAX_CHUNKS)));
+		table_chunks_limit(nchunks, "TessHashJoin hash table");
 	}
 	state->parallel.shared->resident_rows = records;
 	capacity = Max(records, JOIN_INITIAL_ROWS);

@@ -46,6 +46,10 @@ CREATE FUNCTION tessera_test_table_memory_limit()
 RETURNS boolean
 AS :'table_test', 'tessera_test_table_memory_limit'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_table_chunks_limit()
+RETURNS text
+AS :'table_test', 'tessera_test_table_chunks_limit'
+LANGUAGE C STRICT;
 SELECT tessera_test_table_layout() AS layout \gset
 \echo :layout
 t
@@ -57,6 +61,15 @@ t
 SELECT tessera_test_table_memory_limit() AS memory_limit \gset
 \echo :memory_limit
 t
+-- A node's directory of a table holds the most chunks and fails one past
+-- them, SQLSTATE 54000.
+-- spec: table-memory/The limit of a directory
+SELECT tessera_test_table_chunks_limit();
+                                  tessera_test_table_chunks_limit                                   
+----------------------------------------------------------------------------------------------------
+ 32767: 32768 slots; 32768: 32768 slots; 32769: 54000 test table cannot hold more than 32768 chunks
+(1 row)
+
 SELECT tessera_test_table_cycle() AS cycle \gset
 \echo :cycle
 t
@@ -84,6 +97,7 @@ t
 DROP FUNCTION tessera_test_table_layout();
 DROP FUNCTION tessera_test_table_record_size();
 DROP FUNCTION tessera_test_table_memory_limit();
+DROP FUNCTION tessera_test_table_chunks_limit();
 DROP FUNCTION tessera_test_table_cycle();
 DROP FUNCTION tessera_test_table_groups();
 DROP FUNCTION tessera_test_table_regrow();

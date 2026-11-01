@@ -130,21 +130,11 @@ distinct_add_chunk(TessAggState *state, DistinctSet *set)
 								 TYPEALIGN_DOWN(8, tess_hash_memory_limit() / 8)));
 	void	   *base;
 
-	if (chunk == TESS_TABLE_MAX_CHUNKS)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessAgg distinct table cannot hold more than %d chunks",
-						TESS_TABLE_MAX_CHUNKS)));
-	if (chunk == set->slots)
-	{
-		set->slots *= 2;
-		set->bases = repalloc(set->bases, sizeof(void *) * set->slots);
-		set->lens = repalloc(set->lens, sizeof(Size) * set->slots);
-		set->table.chunks = set->bases;
-		set->table.chunk_lens = set->lens;
-	}
-	base = MemoryContextAlloc(set->context, len);
-	check(state, state->kernels->table_chunk_init(base, len, &state->status));
+	table_chunks_reserve(&set->bases, &set->lens, &set->slots, chunk + 1, set->context,
+						 "TessAgg distinct table");
+	set->table.chunks = set->bases;
+	set->table.chunk_lens = set->lens;
+	base = table_chunk_new(state->kernels, set->context, len, &state->status);
 	set->bases[chunk] = base;
 	set->lens[chunk] = len;
 	set->table.nchunks++;

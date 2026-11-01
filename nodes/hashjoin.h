@@ -13,6 +13,8 @@
 
 #include "tessera/runtime.h"
 
+#include "table_chunks.h"
+
 #include "internal.h"
 
 /* The payload holds a word of NULL bits, so at most 64 inner columns. */

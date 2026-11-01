@@ -372,11 +372,7 @@ side_add_chunk(TessHashJoinState *state, SpillSide *side, int partition)
 	int			index = side->nchunks;
 	void	   *base;
 
-	if (index == TESS_TABLE_MAX_CHUNKS)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessHashJoin hash table cannot hold more than %d chunks",
-						TESS_TABLE_MAX_CHUNKS)));
+	table_chunks_limit(index + 1, "TessHashJoin hash table");
 	if (index == side->slots)
 	{
 		side->pointers = repalloc0(side->pointers, sizeof(dsa_pointer) * side->slots,
@@ -1569,11 +1565,6 @@ add_loaded_chunk(TessHashJoinState *state, void *base, Size len)
 {
 	int			chunk = state->table.nchunks;
 
-	if (chunk == TESS_TABLE_MAX_CHUNKS)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessHashJoin hash table cannot hold more than %d chunks",
-						TESS_TABLE_MAX_CHUNKS)));
 	join_reserve_chunks(state, chunk + 1);
 	state->chunk_bases[chunk] = base;
 	state->chunk_lens[chunk] = len;

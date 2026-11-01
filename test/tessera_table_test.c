@@ -9,6 +9,9 @@
 #include "tessera/sort.h"
 #include "tessera/spill.h"
 #include "tessera/table.h"
+#include "utils/builtins.h"
+
+#include "../nodes/table_chunks.h"
 
 PG_MODULE_MAGIC;
 
@@ -23,6 +26,7 @@ PG_FUNCTION_INFO_V1(tessera_test_table_combine);
 PG_FUNCTION_INFO_V1(tessera_test_table_shared_spill);
 PG_FUNCTION_INFO_V1(tessera_test_table_record_size);
 PG_FUNCTION_INFO_V1(tessera_test_table_memory_limit);
+PG_FUNCTION_INFO_V1(tessera_test_table_chunks_limit);
 
 #define NROWS 200
 #define NWORDS 4
@@ -1403,4 +1407,49 @@ tessera_test_table_memory_limit(PG_FUNCTION_ARGS)
 		tess_table_memory_limit(SIZE_MAX) != 16 * gib)
 		elog(ERROR, "a limit above 16 GiB does not come back as 16 GiB");
 	PG_RETURN_BOOL(true);
+}
+
+/*
+ * The nodes' directory of a table reserved for one chunk below the most,
+ * the most, and one past: its slots, or the SQLSTATE of its error.
+ */
+Datum
+tessera_test_table_chunks_limit(PG_FUNCTION_ARGS)
+{
+	const int	counts[] = {TESS_TABLE_MAX_CHUNKS - 1, TESS_TABLE_MAX_CHUNKS,
+	TESS_TABLE_MAX_CHUNKS + 1};
+	MemoryContext context = CurrentMemoryContext;
+	StringInfoData out;
+
+	initStringInfo(&out);
+	for (int i = 0; i < lengthof(counts); i++)
+	{
+		void	  **bases = NULL;
+		Size	   *lens = NULL;
+		int			slots = 0;
+
+		PG_TRY();
+		{
+			table_chunks_reserve(&bases, &lens, &slots, counts[i], context, "test table");
+			appendStringInfo(&out, "%d: %d slots; ", counts[i], slots);
+		}
+		PG_CATCH();
+		{
+			ErrorData  *error;
+
+			MemoryContextSwitchTo(context);
+			error = CopyErrorData();
+			FlushErrorState();
+			appendStringInfo(&out, "%d: %s %s", counts[i],
+							 unpack_sql_state(error->sqlerrcode), error->message);
+			FreeErrorData(error);
+		}
+		PG_END_TRY();
+		if (bases != NULL)
+		{
+			pfree(bases);
+			pfree(lens);
+		}
+	}
+	PG_RETURN_TEXT_P(cstring_to_text(out.data));
 }
