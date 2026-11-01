@@ -133,7 +133,7 @@ distinct_add_chunk(TessAggState *state, DistinctSet *set)
 {
 	int			chunk = set->table.nchunks;
 	Size		len = chunk == 0 ? TABLE_FIRST_CHUNK :
-		table_chunk_len(state->kernels, tess_hash_memory_limit(), &state->status);
+		table_chunk_len(state->kernels, state->memory_limit, &state->status);
 	void	   *base;
 
 	table_chunks_reserve(&set->bases, &set->lens, &set->slots, chunk + 1, set->context,
@@ -321,6 +321,7 @@ agg_key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 	fmgr_info_cxt(get_opcode(eqop), &dict->eqfn, estate->es_query_cxt);
 	fmgr_info_cxt(hashproc, &dict->hashfn, estate->es_query_cxt);
 	dict->collation = collation;
+	dict->memory_limit = state->memory_limit;
 	dict->bytes = tess_key_bytes(hashproc, get_opcode(eqop), collation);
 	get_typlenbyval(type, &dict->typlen, &dict->typbyval);
 	dict->forms = state->nkeys > 1 && !key_dict_images_equal(dict, type);
@@ -339,12 +340,12 @@ agg_key_dict_reset(KeyDict *dict, uint64 values, int shares)
 	MemoryContextReset(dict->context);
 	/*
 	 * Room for the values expected, where the planner's estimate of the
-	 * groups is known and within a quarter of hash_mem for every
+	 * groups is known and within a quarter of the node's memory for every
 	 * dictionary of the keys together, which leaves the table its own
 	 * room: a dictionary grown from 256 to half a million values took 5 %
 	 * of an INTERSECT.
 	 */
-	values = Min(values, tess_hash_memory_limit() / 4 / Max(shares, 1) /
+	values = Min(values, dict->memory_limit / 4 / Max(shares, 1) /
 				 (sizeof(KeyEntry) * 2 / KEYDICT_FILLFACTOR + sizeof(Datum)));
 	values = Max(values, 256);
 	dict->table = keydict_create(dict->context, values, dict);

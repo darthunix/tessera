@@ -359,6 +359,8 @@ sort_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	config.expressions = key_exprs;
 	config.scanrelid = 0;
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
+	/* Its rows take a share of the query's memory, as the core's Sort asks. */
+	tess_path_ask_memory(best_path);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 

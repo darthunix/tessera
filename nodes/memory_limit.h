@@ -26,20 +26,35 @@ tess_hash_memory_limit(void)
 
 /*
  * The memory of a node while it runs: on a core of the Greenplum family,
- * where its path asked for a share of the query's memory
+ * where its plan asked for a share of the query's memory
  * (CUSTOMPATH_GP_MEMORY_INTENSIVE, a fork's patch), the share the resource
- * manager gave its plan; elsewhere hash_mem. At most what one table of the
- * kernels may take, as tess_hash_memory_limit.
+ * manager gave it; elsewhere the setting the node's kind fills, hash_mem
+ * for a join or a grouping, work_mem for a sort (elsewhere). At most what
+ * one table of the kernels may take.
  */
 static inline Size
-tess_node_memory_limit(const PlanState *ps)
+tess_node_memory_limit(const PlanState *ps, Size elsewhere)
 {
 #if TESS_MPP && defined(CUSTOMPATH_GP_MEMORY_INTENSIVE)
 	if (IsA(ps->plan, CustomScan) &&
 		(((const CustomScan *) ps->plan)->flags & CUSTOMPATH_GP_MEMORY_INTENSIVE) != 0)
 		return tess_table_memory_limit((Size) PlanStateOperatorMemKB(ps) * 1024);
 #endif
-	return tess_hash_memory_limit();
+	return elsewhere;
+}
+
+/*
+ * Ask the core, on a core of the family, for a share of the query's memory
+ * for the node a path plans (a fork's patch); nothing elsewhere.
+ */
+static inline void
+tess_path_ask_memory(CustomPath *path)
+{
+#ifdef CUSTOMPATH_GP_MEMORY_INTENSIVE
+	path->flags |= CUSTOMPATH_GP_MEMORY_INTENSIVE;
+#else
+	(void) path;
+#endif
 }
 
 /*

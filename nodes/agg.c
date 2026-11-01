@@ -115,6 +115,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	keys = tess_plan_read_list(reader, "keys");
 	groups = tess_plan_read_int(reader, "groups");
 	state->groups_estimate = (uint64) Max(groups, 0);
+	state->memory_limit = tess_node_memory_limit(&css->ss.ps, tess_hash_memory_limit());
 	state->setop = tess_plan_read_int(reader, "setop");
 	state->partial = tess_plan_read_int(reader, "partial") != 0;
 	state->own_states = tess_plan_read_int(reader, "own_states") != 0;

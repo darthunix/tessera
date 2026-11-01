@@ -194,7 +194,7 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->payload_columns = palloc0_array(int, JOIN_MAX_PAYLOAD);
 
 	state->expect_rescan = (eflags & EXEC_FLAG_REWIND) != 0;
-	state->memory_limit = tess_node_memory_limit(&css->ss.ps);
+	state->memory_limit = tess_node_memory_limit(&css->ss.ps, tess_hash_memory_limit());
 #if TESS_MPP
 	/*
 	 * As the family's hash join: the children start in the order they run,

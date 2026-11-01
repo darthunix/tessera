@@ -216,6 +216,8 @@ struct KeyDict
 {
 	struct keydict_hash *table;
 	MemoryContext context;
+	/* The node's memory, which bounds the values made room for (agg_key_dict_reset). */
+	Size		memory_limit;
 	FmgrInfo	hashfn;
 	FmgrInfo	eqfn;
 	Oid			collation;

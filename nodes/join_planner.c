@@ -2311,7 +2311,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	config.flags |= CUSTOMPATH_GP_LAST_CHILD_FIRST;
 #endif
 #ifdef CUSTOMPATH_GP_MEMORY_INTENSIVE
-	/* Its table takes a share of the query's memory, as a Hash does (a fork's patch). */
+	/* Its table takes a share of the query's memory, as a Hash does (tess_path_ask_memory). */
 	config.flags |= CUSTOMPATH_GP_MEMORY_INTENSIVE;
 #endif
 	config.expressions = list_make5(keys->clauses, keys->outer, keys->inner,

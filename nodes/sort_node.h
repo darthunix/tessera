@@ -266,6 +266,11 @@ typedef struct TessSortState
 	List	   *retired;
 	bool		single;
 	MergeInput	shown;
+	/*
+	 * The memory the node fills before it sends runs to disk, every one of
+	 * its decisions of memory taken by it (tess_node_memory_limit).
+	 */
+	Size		memory_limit;
 } TessSortState;
 
 /* The functions one file of the node calls in another. */

@@ -205,6 +205,11 @@ typedef struct TessAggState
 	Size		table_bytes;
 	Size		peak_memory;
 	uint64		groups_estimate;
+	/*
+	 * The memory the node fills before it sends groups to disk, every one
+	 * of its decisions of memory taken by it (tess_node_memory_limit).
+	 */
+	Size		memory_limit;
 	uint64		grows;
 	uint64		groups;
 	/* Per batch: the hashes, the record of each row and the masks. */
@@ -305,7 +310,7 @@ typedef struct TessAggState
 /* The executor's side of the table, which the spill calls (agg.c). */
 extern void note_memory(TessAggState *state);
 extern void note_memory_alive(TessAggState *state, Size alive);
-extern uint64 first_capacity(uint64 capacity);
+extern uint64 first_capacity(const TessAggState *state, uint64 capacity);
 extern void *new_index(TessAggState *state, uint64 capacity, Size *size);
 extern void regrow_table(TessAggState *state, uint64 groups);
 extern void agg_reserve_chunks(TessAggState *state, int nchunks);

@@ -65,16 +65,16 @@ note_memory(TessAggState *state)
 
 /*
  * A first index for capacity groups at most, and at most for as many as
- * fill a quarter of hash_mem with buckets: an estimate too large would take
- * the memory the groups need; the index grows as they come. The table has
- * twice the groups' buckets, 4 bytes each, rounded up to a power of two:
- * the most buckets a quarter holds is a power of two, and half as many
- * groups fill it.
+ * fill a quarter of the node's memory with buckets: an estimate too large
+ * would take the memory the groups need; the index grows as they come.
+ * The table has twice the groups' buckets, 4 bytes each, rounded up to a
+ * power of two: the most buckets a quarter holds is a power of two, and
+ * half as many groups fill it.
  */
 uint64
-first_capacity(uint64 capacity)
+first_capacity(const TessAggState *state, uint64 capacity)
 {
-	uint64		buckets = pg_prevpower2_64(Max(tess_hash_memory_limit() / 16, 1));
+	uint64		buckets = pg_prevpower2_64(Max(state->memory_limit / 16, 1));
 
 	return Max(Min(capacity, buckets / 2), AGG_INITIAL_GROUPS);
 }
@@ -96,7 +96,7 @@ static void
 create_table(TessAggState *state)
 {
 	Size		payload_size = state->payload_size;
-	uint64		capacity = first_capacity(state->groups_estimate);
+	uint64		capacity = first_capacity(state, state->groups_estimate);
 	Size		size;
 
 	MemoryContextReset(state->table_context);
@@ -133,7 +133,7 @@ add_chunk(TessAggState *state)
 {
 	int			chunk = state->table.nchunks;
 	Size		len = chunk == 0 ? TABLE_FIRST_CHUNK :
-		table_chunk_len(state->kernels, tess_hash_memory_limit(), &state->status);
+		table_chunk_len(state->kernels, state->memory_limit, &state->status);
 	void	   *base;
 
 	agg_reserve_chunks(state, chunk + 1);
@@ -220,7 +220,7 @@ groups_memory(TessAggState *state)
 static bool
 groups_overflow(TessAggState *state, uint64 min_records, TessTableStats *stats)
 {
-	if (groups_memory(state) <= tess_hash_memory_limit() / 8 * 7)
+	if (groups_memory(state) <= state->memory_limit / 8 * 7)
 		return false;
 	check(state, state->kernels->table_stats(&state->table, stats, &state->status));
 	return stats->records >= min_records;
@@ -508,7 +508,7 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 */
 	if (state->spill == NULL && (!state->partial || state->partial_spill) &&
 		!state->has_distinct && !state->row_spill &&
-		state->table_bytes > tess_hash_memory_limit() / 8 * 7)
+		state->table_bytes > state->memory_limit / 8 * 7)
 		agg_start_spill(state);
 	/*
 	 * Generic states past hash_mem: the table freezes, new groups' rows go
