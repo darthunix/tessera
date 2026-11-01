@@ -117,6 +117,16 @@ create_table(TessAggState *state)
 	note_memory(state);
 }
 
+/* Room for nchunks chunks in the table's directory: 54000 past the most. */
+void
+agg_reserve_chunks(TessAggState *state, int nchunks)
+{
+	table_chunks_reserve(&state->chunk_bases, &state->chunk_lens, &state->chunk_slots,
+						 nchunks, state->table_context, "TessAgg group table");
+	state->table.chunks = state->chunk_bases;
+	state->table.chunk_lens = state->chunk_lens;
+}
+
 /* Another chunk of records, the last one being full. */
 static void
 add_chunk(TessAggState *state)
@@ -128,23 +138,8 @@ add_chunk(TessAggState *state)
 								 TYPEALIGN_DOWN(8, tess_hash_memory_limit() / 8)));
 	void	   *base;
 
-	if (chunk == TESS_TABLE_MAX_CHUNKS)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessAgg group table cannot hold more than %d chunks",
-						TESS_TABLE_MAX_CHUNKS)));
-	if (chunk == state->chunk_slots)
-	{
-		state->chunk_slots *= 2;
-		state->chunk_bases = repalloc(state->chunk_bases,
-									  sizeof(void *) * state->chunk_slots);
-		state->chunk_lens = repalloc(state->chunk_lens,
-									 sizeof(Size) * state->chunk_slots);
-		state->table.chunks = state->chunk_bases;
-		state->table.chunk_lens = state->chunk_lens;
-	}
-	base = MemoryContextAlloc(state->table_context, len);
-	check(state, state->kernels->table_chunk_init(base, len, &state->status));
+	agg_reserve_chunks(state, chunk + 1);
+	base = table_chunk_new(state->kernels, state->table_context, len, &state->status);
 	state->chunk_bases[chunk] = base;
 	state->chunk_lens[chunk] = len;
 	state->table.nchunks++;

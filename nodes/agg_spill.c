@@ -136,11 +136,8 @@ part_push(AggSpill *spill, AggPart *part, void *base)
 static void *
 agg_new_chunk(TessAggState *state, AggSpill *spill)
 {
-	void	   *base = MemoryContextAlloc(spill->context, spill->chunk_len);
-
-	check(state, state->kernels->table_chunk_init(base, spill->chunk_len,
-												  &state->status));
-	return base;
+	return table_chunk_new(state->kernels, spill->context, spill->chunk_len,
+						   &state->status);
 }
 
 /* Free a partition's chunks in memory. */
@@ -376,14 +373,7 @@ agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 
 	for (int partition = 0; partition < spill->npartitions; partition++)
 		nchunks += spill->parts[partition].nchunks;
-	if (nchunks > state->chunk_slots)
-	{
-		state->chunk_slots = Max(nchunks, state->chunk_slots * 2);
-		state->chunk_bases = repalloc(state->chunk_bases,
-									  sizeof(void *) * state->chunk_slots);
-		state->chunk_lens = repalloc(state->chunk_lens,
-									 sizeof(Size) * state->chunk_slots);
-	}
+	agg_reserve_chunks(state, nchunks);
 	state->chunk_bases[AGG_SOURCE] = spill->source_empty;
 	state->chunk_lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
 	state->chunk_bases[AGG_EMPTY] = spill->empty;
@@ -608,21 +598,7 @@ agg_find_partitioned(TessAggState *state, TessRowMask *pending, TessRowMask *ins
 			if (seen[partition])
 				continue;
 			seen[partition] = true;
-			if (chunk == state->chunk_slots)
-			{
-				state->chunk_slots *= 2;
-				state->chunk_bases = repalloc(state->chunk_bases,
-											  sizeof(void *) * state->chunk_slots);
-				state->chunk_lens = repalloc(state->chunk_lens,
-											 sizeof(Size) * state->chunk_slots);
-				state->table.chunks = state->chunk_bases;
-				state->table.chunk_lens = state->chunk_lens;
-			}
-			if (chunk == TESS_TABLE_MAX_CHUNKS)
-				ereport(ERROR,
-						(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-						 errmsg("TessAgg group table cannot hold more than %d chunks",
-								TESS_TABLE_MAX_CHUNKS)));
+			agg_reserve_chunks(state, chunk + 1);
 			state->chunk_bases[chunk] = agg_new_chunk(state, spill);
 			state->chunk_lens[chunk] = spill->chunk_len;
 			part_push(spill, part, state->chunk_bases[chunk]);

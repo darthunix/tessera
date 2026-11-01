@@ -11,6 +11,8 @@
 #include "nodes/primnodes.h"
 
 #include "tessera/kernel_ops.h"
+
+#include "table_chunks.h"
 #include "tessera/runtime.h"
 #include "tessera/table.h"
 
@@ -299,6 +301,7 @@ extern void note_memory_alive(TessAggState *state, Size alive);
 extern uint64 first_capacity(uint64 capacity);
 extern void *new_index(TessAggState *state, uint64 capacity, Size *size);
 extern void regrow_table(TessAggState *state, uint64 groups);
+extern void agg_reserve_chunks(TessAggState *state, int nchunks);
 
 /*
  * The spill (agg_spill.c): the groups' partitions past hash_mem and their

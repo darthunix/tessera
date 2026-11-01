@@ -114,4 +114,5 @@ groups read back.
   chunks
 - **THEN** the first two succeed and the third fails with SQLSTATE
   54000
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/table.sql::spec: table-memory/The limit of a directory`

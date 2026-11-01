@@ -252,24 +252,9 @@ join_mark_words(TessHashJoinState *state)
 void
 join_reserve_chunks(TessHashJoinState *state, int nchunks)
 {
-	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-	int			slots = Max(state->chunk_slots, 16);
-
-	if (nchunks <= state->chunk_slots)
-		return;
-	while (slots < nchunks)
-		slots *= 2;
-	if (state->chunk_bases == NULL)
-	{
-		state->chunk_bases = MemoryContextAlloc(context, sizeof(void *) * slots);
-		state->chunk_lens = MemoryContextAlloc(context, sizeof(Size) * slots);
-	}
-	else
-	{
-		state->chunk_bases = repalloc(state->chunk_bases, sizeof(void *) * slots);
-		state->chunk_lens = repalloc(state->chunk_lens, sizeof(Size) * slots);
-	}
-	state->chunk_slots = slots;
+	table_chunks_reserve(&state->chunk_bases, &state->chunk_lens, &state->chunk_slots,
+						 nchunks, state->css.ss.ps.state->es_query_cxt,
+						 "TessHashJoin hash table");
 	state->table.chunks = state->chunk_bases;
 	state->table.chunk_lens = state->chunk_lens;
 }
@@ -330,14 +315,8 @@ add_table_chunk(TessHashJoinState *state)
 	Size		len = chunk == 0 ? JOIN_FIRST_CHUNK : join_chunk_len_for(JOIN_CHUNK_LEN);
 	void	   *base;
 
-	if (chunk == TESS_TABLE_MAX_CHUNKS)
-		ereport(ERROR,
-				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
-				 errmsg("TessHashJoin hash table cannot hold more than %d chunks",
-						TESS_TABLE_MAX_CHUNKS)));
 	join_reserve_chunks(state, chunk + 1);
-	base = MemoryContextAlloc(state->table_context, len);
-	check(state, state->kernels->table_chunk_init(base, len, &state->status));
+	base = table_chunk_new(state->kernels, state->table_context, len, &state->status);
 	state->chunk_bases[chunk] = base;
 	state->chunk_lens[chunk] = len;
 	state->table.nchunks++;

@@ -49,3 +49,9 @@ $(RUST_TESTS:%=%$(DLSUFFIX)): $(RUST_LIB) $(RUST_PROFILE_STAMP)
 $(RUST_TESTS:%=%$(DLSUFFIX)): LDFLAGS_SL += $(RUST_LIB)
 $(RUNTIME_TESTS:%=%$(DLSUFFIX)): $(RUNTIME_LIB)
 $(RUNTIME_TESTS:%=%$(DLSUFFIX)): LDFLAGS_SL += $(RUNTIME_LIB)
+# The test of a table's directory links the nodes' helper of it.
+NODES_TABLE_CHUNKS = $(srcdir)/../nodes/table_chunks.o
+$(NODES_TABLE_CHUNKS): $(srcdir)/../nodes/table_chunks.c $(srcdir)/../nodes/table_chunks.h
+	$(MAKE) -C $(srcdir)/../nodes PG_CONFIG="$(PG_CONFIG)" table_chunks.o
+tessera_table_test$(DLSUFFIX): $(NODES_TABLE_CHUNKS) $(RUNTIME_LIB)
+tessera_table_test$(DLSUFFIX): LDFLAGS_SL += $(NODES_TABLE_CHUNKS) $(RUNTIME_LIB)
