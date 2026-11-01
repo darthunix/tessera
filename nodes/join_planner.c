@@ -1020,7 +1020,7 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 	spills = table_rows *
 		(double) (tess_table_record_bytes(keys->nkeys,
 										  sizeof(uint64) * (1 + ints + texts)) + 8) >
-		Min((double) tess_planned_memory_limit() * participants,
+		Min((double) tess_planned_memory_limit(root) * participants,
 			(double) TESS_TABLE_MEMORY_MAX);
 
 	/*
