@@ -9,6 +9,10 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/plancat.h"
 #include "optimizer/tlist.h"
+#if TESS_GREENGAGE
+#include "access/tableam.h"
+#include "cdb/cdbaocsam.h"
+#endif
 
 #include "tessera/plan.h"
 #include "tessera/runtime.h"
@@ -57,7 +61,40 @@ typedef struct PackState
 	int64		tuples_needed;
 	int64		produced;
 	uint64		batches;
+#if TESS_GREENGAGE
+	/* A column-oriented table the pack reads in blocks, or NULL. */
+	struct PackAocs *aocs;
+#endif
 } PackState;
+
+#if TESS_GREENGAGE
+/*
+ * Greengage's ao_column table read by the pack itself, in place of the
+ * core's sequential scan under it: aocs_getnext_batch gives the rows of
+ * the scan's projected columns column by column, straight from their
+ * blocks, with no tuple slot or copy. The batch's columns are those
+ * arrays; a by-reference value points into its column's block, which
+ * the scan keeps until the next batch is read, after the parent released
+ * this one. The child stays in the plan, initialized and never executed.
+ */
+typedef struct PackAocs
+{
+	TessBatch	batch;
+	Relation	relation;
+	/* Begun at the first execution, with the columns of the child's targets. */
+	AOCSScanDesc scan;
+	/* The zero-based attribute of each batch column. */
+	int			ncolumns;
+	AttrNumber *attnos;
+	/* A row's values and NULL flags of each attribute, PACK_BATCH_ROWS rows. */
+	Datum	  **values;
+	bool	  **isnull;
+	uint64		visible;
+	uint64		rows_read;
+} PackAocs;
+
+static PackAocs *pack_aocs_create(PackState *state, EState *estate);
+#endif
 
 static Plan *pack_plan(PlannerInfo *root, RelOptInfo *rel,
 					   CustomPath *best_path, List *tlist, List *clauses,
@@ -365,6 +402,11 @@ pack_begin(CustomScanState *css, EState *estate, int eflags)
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   css->ss.ps.ps_ResultTupleSlot,
 									   &info.layout);
+#if TESS_GREENGAGE
+	/* Only a dense layout maps batch column N to the child's target N. */
+	if (info.node_data == NULL)
+		state->aocs = pack_aocs_create(state, estate);
+#endif
 }
 
 /* Freeze the parent's request; the batch size follows from it. */
@@ -406,6 +448,129 @@ pack_create_provider(PackState *state, TupleTableSlot *slot)
 	}
 }
 
+#if TESS_GREENGAGE
+static void
+aocs_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
+					  TessColumnPurpose purpose, TessDatumColumn *result)
+{
+	PackAocs   *aocs = (PackAocs *) batch->private_data;
+
+	if (result == NULL || result->struct_size < TESS_DATUM_COLUMN_MIN_SIZE)
+		elog(ERROR, "Tessera pack received an incompatible column request");
+	if (column < 0 || column >= aocs->ncolumns)
+		elog(ERROR, "Tessera pack column is out of range");
+	result->values = aocs->values[aocs->attnos[column]];
+	result->isnull = aocs->isnull[aocs->attnos[column]];
+	result->nrows = batch->rows.nrows;
+	if (result->struct_size >= TESS_DATUM_COLUMN_DECIMALS_SIZE)
+		result->decimal_rows = NULL;
+}
+
+static const TessBatchOps aocs_batch_ops = {
+	.abi_version = TESS_BATCH_OPS_ABI_VERSION,
+	.struct_size = sizeof(TessBatchOps),
+	.get_datum_column = aocs_get_datum_column,
+};
+
+/*
+ * The block reader of the child, when it is a sequential scan of an
+ * ao_column table with no clauses of its own and the table's columns for
+ * targets, which are the batch's columns in order; NULL otherwise.
+ */
+static PackAocs *
+pack_aocs_create(PackState *state, EState *estate)
+{
+	Plan	   *plan = state->child->plan;
+	Relation	relation;
+	PackAocs   *aocs;
+	int			natts;
+
+	if (!IsA(plan, SeqScan) || plan->qual != NIL || plan->initPlan != NIL)
+		return NULL;
+	relation = ((SeqScanState *) state->child)->ss.ss_currentRelation;
+	if (relation == NULL || relation->rd_rel->relam != AO_COLUMN_TABLE_AM_OID ||
+		list_length(plan->targetlist) != state->layout.ncolumns)
+		return NULL;
+	foreach_node(TargetEntry, entry, plan->targetlist)
+	{
+		Var		   *var = (Var *) entry->expr;
+
+		if (!IsA(var, Var) || var->varno != ((Scan *) plan)->scanrelid ||
+			var->varattno <= 0 || var->varlevelsup != 0)
+			return NULL;
+	}
+	natts = RelationGetNumberOfAttributes(relation);
+	aocs = MemoryContextAllocZero(estate->es_query_cxt, sizeof(PackAocs));
+	aocs->relation = relation;
+	aocs->ncolumns = list_length(plan->targetlist);
+	aocs->attnos = MemoryContextAlloc(estate->es_query_cxt,
+									  sizeof(AttrNumber) * Max(aocs->ncolumns, 1));
+	foreach_node(TargetEntry, entry, plan->targetlist)
+		aocs->attnos[foreach_current_index(entry)] = ((Var *) entry->expr)->varattno - 1;
+	/* Every attribute: with no column to read the scan picks one itself. */
+	aocs->values = MemoryContextAlloc(estate->es_query_cxt, sizeof(Datum *) * natts);
+	aocs->isnull = MemoryContextAlloc(estate->es_query_cxt, sizeof(bool *) * natts);
+	for (int attr = 0; attr < natts; attr++)
+	{
+		aocs->values[attr] = MemoryContextAllocZero(estate->es_query_cxt,
+													sizeof(Datum) * PACK_BATCH_ROWS);
+		aocs->isnull[attr] = MemoryContextAllocZero(estate->es_query_cxt,
+													sizeof(bool) * PACK_BATCH_ROWS);
+	}
+	aocs->batch.abi_version = TESS_BATCH_ABI_VERSION;
+	aocs->batch.struct_size = sizeof(TessBatch);
+	aocs->batch.ops = &aocs_batch_ops;
+	aocs->batch.private_data = aocs;
+	aocs->batch.rows.bits = &aocs->visible;
+	aocs->batch.table_oid = RelationGetRelid(relation);
+	return aocs;
+}
+
+/* Begin the scan of the batch columns' attributes, as the core's would. */
+static void
+pack_aocs_begin(PackAocs *aocs, EState *estate)
+{
+	int			natts = RelationGetNumberOfAttributes(aocs->relation);
+	bool	   *proj = palloc0(sizeof(bool) * natts);
+
+	for (int column = 0; column < aocs->ncolumns; column++)
+		proj[aocs->attnos[column]] = true;
+	aocs->scan = aocs_beginscan(aocs->relation, estate->es_snapshot,
+								aocs->ncolumns > 0 ? proj : NULL,
+								aocs->ncolumns > 0 ? AOCS_PROJ_SOME : AOCS_PROJ_ANY,
+								SO_TYPE_SEQSCAN | SO_ALLOW_STRAT | SO_ALLOW_SYNC |
+								SO_ALLOW_PAGEMODE);
+	pfree(proj);
+}
+
+/* The next batch of at most limit rows of the table, NULL at its end. */
+static TessBatch *
+pack_aocs_next(PackState *state, int limit)
+{
+	PackAocs   *aocs = state->aocs;
+
+	if (aocs->scan == NULL)
+		pack_aocs_begin(aocs, state->css.ss.ps.state);
+	for (;;)
+	{
+		int			nrows;
+
+		CHECK_FOR_INTERRUPTS();
+		nrows = aocs_getnext_batch(aocs->scan, RelationGetDescr(aocs->relation),
+								   Min(limit, PACK_BATCH_ROWS),
+								   aocs->values, aocs->isnull, &aocs->visible);
+		if (nrows == 0)
+			return NULL;
+		aocs->rows_read += nrows;
+		/* Rows of a batch the snapshot does not see are deleted ones. */
+		if (aocs->visible == 0)
+			continue;
+		aocs->batch.rows.nrows = nrows;
+		return &aocs->batch;
+	}
+}
+#endif
+
 static TupleTableSlot *
 pack_exec(CustomScanState *css)
 {
@@ -439,6 +604,20 @@ pack_exec(CustomScanState *css)
 			return NULL;
 		limit = (int) Min((int64) limit, state->tuples_needed - state->produced);
 	}
+#if TESS_GREENGAGE
+	if (state->aocs != NULL)
+	{
+		batch = pack_aocs_next(state, limit);
+		if (batch == NULL)
+		{
+			state->exhausted = true;
+			return NULL;
+		}
+		state->produced += tess_row_mask_count(&batch->rows);
+		state->batches++;
+		return tess_output_publish(state->output, batch);
+	}
+#endif
 	if (state->heap != NULL)
 		tess_heap_batch_reset(state->heap);
 	else if (state->builder != NULL)
@@ -482,6 +661,11 @@ pack_end(CustomScanState *css)
 		tess_unary_end(state->unary);
 	else
 		tess_output_end(state->output);
+#if TESS_GREENGAGE
+	/* Before the child, which closes the relation the scan reads. */
+	if (state->aocs != NULL && state->aocs->scan != NULL)
+		aocs_endscan(state->aocs->scan);
+#endif
 	ExecEndNode(state->child);
 }
 
@@ -496,6 +680,10 @@ pack_rescan(CustomScanState *css)
 		return;
 	}
 	tess_output_clear(state->output);
+#if TESS_GREENGAGE
+	if (state->aocs != NULL && state->aocs->scan != NULL)
+		aocs_rescan(state->aocs->scan);
+#endif
 	/* Rows of a core plan: no batch input to start anew. */
 	tess_rescan_child(&css->ss.ps, state->child, NULL);
 	state->exhausted = false;
@@ -523,6 +711,10 @@ pack_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	/* The parent's request, and so the size, is known once executed. */
 	if (state->request != NULL)
 		ExplainPropertyInteger("Batch Size", NULL, state->capacity, es);
+#if TESS_GREENGAGE
+	if (state->aocs != NULL)
+		ExplainPropertyText("Rows Kept As", "ao_column blocks", es);
+#endif
 	if (state->heap != NULL || state->builder != NULL)
 		ExplainPropertyText("Rows Kept As",
 							state->heap != NULL ? "heap tuples" : "copies", es);
