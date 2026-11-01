@@ -82,9 +82,11 @@ in](../relhash/design.md#putting-rows-in-append-then-link)).
 The nodes make the first chunk of a table small, 64 kB, so that a
 table of a few rows takes little memory. Later chunks are larger: an
 eighth of the node's memory limit, but at most 1 MiB, the limit of a
-chunk. A node may also pass a chunk of 8 bytes, its used mark alone,
-where it has no chunk to give for a number: nothing fits in it, so
-nothing is ever written there.
+chunk. The rule has one owner, the plan of a spill's level (see [How a
+level is planned](#how-a-level-is-planned)): a table in memory is
+planned as one partition at a share of 8. A node may also pass a
+chunk of 8 bytes, its used mark alone, where it has no chunk to give
+for a number: nothing fits in it, so nothing is ever written there.
 
 ## Keys of each SQL type
 
