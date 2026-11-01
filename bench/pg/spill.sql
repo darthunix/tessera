@@ -103,6 +103,37 @@ FROM unnest(ARRAY['4MB', '16MB', '64MB']) WITH ORDINALITY AS m(memory, m_order),
                   'SELECT count(*), sum(s) FROM (SELECT a, sum(d) AS s FROM bench_mixed GROUP BY a) AS g'])
          WITH ORDINALITY AS c(name, sql, c_order)
 ORDER BY m_order, c_order;
+/*
+ * How a table in memory grows, each at the hash_mem (twice work_mem) it
+ * is about:
+ * - build_250k, build_300k, build_420k: the fact table's foreign key
+ *   against a serial build of 250 000, 300 000 and 420 000 integer keys
+ *   at 16 MiB, whose chunks and index fit, fit only without the room for
+ *   two more chunks, and pass the limit;
+ * - group_fk_1536kb: group_fk at 3 MiB, a limit that is no power of two,
+ *   its estimate above the cap of the first index, read back and merged;
+ * - distinct_128kb: count(DISTINCT) at 256 kB over 2 M rows of 3000
+ *   pairs in 10 groups, its set past its first chunk.
+ */
+CREATE TEMP TABLE build_250k AS SELECT g AS k FROM generate_series(1, 250000) AS g;
+CREATE TEMP TABLE build_300k AS SELECT g AS k FROM generate_series(1, 300000) AS g;
+CREATE TEMP TABLE build_420k AS SELECT g AS k FROM generate_series(1, 420000) AS g;
+-- 3000 pairs of 10 groups in 2 M rows, whose statistics give the
+-- planner's gate of DISTINCT the 3000 pairs, not the product of the two.
+CREATE TEMP TABLE distinct_pairs AS
+SELECT i % 3000 AS v, i % 3000 % 10 AS g FROM generate_series(1, 2000000) AS i;
+CREATE STATISTICS distinct_pairs_nd (ndistinct) ON g, v FROM distinct_pairs;
+ANALYZE build_250k, build_300k, build_420k, distinct_pairs;
+SELECT pg_temp.measure_pair(name, sql, memory, :warmups, :repetitions)
+FROM unnest(ARRAY['build_250k', 'build_300k', 'build_420k', 'group_fk_1536kb', 'distinct_128kb'],
+            ARRAY['SELECT count(*) FROM bench_fact f JOIN build_250k b ON f.fk = b.k',
+                  'SELECT count(*) FROM bench_fact f JOIN build_300k b ON f.fk = b.k',
+                  'SELECT count(*) FROM bench_fact f JOIN build_420k b ON f.fk = b.k',
+                  'SELECT count(*), sum(s) FROM (SELECT fk, sum(f1) AS s FROM bench_fact GROUP BY fk) AS g',
+                  'SELECT sum(n) FROM (SELECT g, count(DISTINCT v) AS n FROM distinct_pairs GROUP BY g) AS q'],
+            ARRAY['8MB', '8MB', '8MB', '1536kB', '128kB'])
+         WITH ORDINALITY AS c(name, sql, memory, c_order)
+ORDER BY c_order;
 RESET work_mem;
 
 \copy timings TO 'timings.csv' CSV HEADER
