@@ -596,19 +596,22 @@ caches took 10 to 26 % fewer cycles with it, but probes of a table
 that fits them took up to 14 % more, so x86-64 gives none either.
 
 A hint lengthens the loops that give it and adds instructions wherever
-it is given, also where it saves nothing. The contract's rule "No cost
-to Tessera" once allowed no loop of Tessera to grow through the
-crate's API, so no hint could be added, whatever it gained. It now
-allows the instructions of a prefetch hint, the hint and its address,
-on a table larger than a bound from which the counters show that the
-hint pays, a bound for each architecture. On a smaller table a loop
-compiles as it would with no hint, and on a larger one the hint earns
-back more cycles than its instructions cost. The narrowing keeps the
-rule for every other instruction and for every table under the bound,
-and the rule's check lists the hint's loops as it lists any loop that
-grew. Refused: the hint on every table, which costs the tables in the
-cache; no hint at all, which leaves a join's build side, mostly larger
-than the caches, without the gain that the Intel Mac showed.
+it is given, also where it saves nothing: it is an instruction in the
+loop, with the address it needs, and no form of it keeps the loop's
+length. The contract's rule "No cost to Tessera" once allowed no loop of
+Tessera to grow through the crate's API, so the hint that the Intel Mac
+measured could not be added, whatever it gained. It now allows the
+instructions of a prefetch hint, the hint and its address, on a table
+larger than a bound from which the counters show that the hint pays, a
+bound for each architecture. On a smaller table a loop compiles as it
+would with no hint, and on a larger one the hint earns back more cycles
+than its instructions cost. The narrowing keeps the rule for every other
+instruction and for every table under the bound, and the rule's check
+lists the hint's loops as it lists any loop that grew, with the bound
+and the runs that show the hint pays above it. Refused: the hint on
+every table, which costs the tables in the cache; no hint at all, which
+leaves a join's build side, mostly larger than the caches, without the
+gain that the Intel Mac showed.
 
 Two more ways to read are for records in no useful order. Tessera's
 sort keeps the rows it sorts as records of this format, in a table
