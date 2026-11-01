@@ -27,6 +27,9 @@
 #include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/wait_event.h"
+#if TESS_MPP
+#include "utils/workfile_mgr.h"
+#endif
 
 #include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
@@ -58,6 +61,10 @@ struct TessSpill
 	File		file;
 	/* The kernels' writer of the file, which lays blocks out and keeps their lists. */
 	TessSpillWriter writer;
+#if TESS_MPP
+	/* The family's workfile set the file counts in, made with the file. */
+	struct workfile_set *work_set;
+#endif
 	/* The write buffer, until the set finishes. */
 	char	   *buffer;
 	Size		buffer_len;
@@ -320,7 +327,25 @@ set_file(TessSpill *spill)
 	if (spill->file > 0)
 		return spill->file;
 	if (spill->shared == NULL)
+	{
 		spill->file = tess_temporary_file();
+#if TESS_MPP
+
+		/*
+		 * As a BufFile of the family's operators: the workfile manager
+		 * counts the file's bytes and files against the query's and the
+		 * segment's limits and lists it (gp_toolkit). The set, not pinned,
+		 * goes with its last file, which FileClose takes off it.
+		 */
+		if (spill->file > 0)
+		{
+			if (spill->work_set == NULL)
+				spill->work_set = workfile_mgr_create_set("Tessera", NULL, false);
+			FileSetIsWorkfile(spill->file);
+			RegisterFileWithSet(spill->file, spill->work_set);
+		}
+#endif
+	}
 	else
 	{
 		file_name(spill, spill->participant, name);
