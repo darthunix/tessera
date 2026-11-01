@@ -920,8 +920,8 @@ node takes the path only when the planner's estimate of the pairs fits
 `UNION` without `ALL` is grouping of the branches' rows by every column:
 at the set operation stage (`UPPERREL_SETOP`) the node's path stands next
 to each of the core's hashed aggregates over the `Append` of the
-branches, its keys the columns, 1 to 16 of them, of the types a key's
-word holds (see `GROUP BY` below), and its
+branches, its keys the columns, 1 to 16 of them, of any type the
+grouping takes (words, or values through a dictionary), and its
 child `TessAppend` over the branches' batch paths. The core calls the
 hook for every set operation of the tree, and the node takes the one
 whose leaves are the relation's (a `UNION` of `UNION`s the core folds
@@ -1326,7 +1326,18 @@ partial stack below. With `GROUP BY`
 the node's partial path is the same over the core's partial hashed
 aggregate paths: each participant keeps a table of its own groups, sent
 up early when it fills and folds, and written to disk as a serial
-node's when it does not (see [spill.md](spill.md), "Partial mode"). The
+node's when it does not (see [spill.md](spill.md), "Partial mode"). Its
+keys are any the serial node takes. A key a word does not hold goes
+through a dictionary of the participant's own, which starts anew with
+the table each time the table goes up, after the rows sent are
+released; the groups go up as values, and the grouping above numbers
+them in a dictionary of its own. A table with such a key never goes to
+disk, as one of sum states does not (below): it goes up every time it
+fills, even when it folds nothing, and the grouping above merges what
+it did not fold. A table goes up only with a group in it: past the
+limit, an empty one is the room its index and its dictionaries take
+for the groups expected, and sent up it would be made anew of the same
+size, forever. The
 node merges them itself, in batches (`Partial Mode: Finalize`):
 `TessGather` over the partial path, and the node's grouping of the
 serial path's keys and aggregates above, marked final in the private
@@ -1390,9 +1401,8 @@ its partial path, marked partial in the private data, since no aggregate
 says so, `TessGather` over it (`tess_gather_path`, at the node's cost of
 a gathered row) and the node's grouping of the gathered groups above,
 with the grouped relation's target and `HAVING` for `GROUP BY` and the
-partial one's target for `DISTINCT`. Keys of words only, as for the
-partial stack with aggregates: a partial table empties early, and a
-dictionary's values would go with it. With two workers
+partial one's target for `DISTINCT`. Keys of any type, as for the
+partial stack with aggregates. With two workers
 (pg-sort-w2-OZRtZQ, pg-wordkey-w2-Pw1uLw against the build before,
 pg-sort-w2-b9yqFo, pg-wordkey-w2-z8KZiK) `DISTINCT` of 1000 values over
 2 M rows took 11.5 ms against 30.5 before (the core's partial
@@ -1577,7 +1587,9 @@ participants without rows, the leader not taking part, a generic plan's
 parameter in an argument, the `Gather` rescanned in a join, and an
 aggregate the node leaves to the core's partial aggregate; and groups
 under the `Gather` with a filter, an expression key with `HAVING`, the
-leader not taking part.
+leader not taking part, and keys through a dictionary (text with NULL,
+numeric of two scales), with aggregates and without, whose tables go up
+early whether they fold or not.
 
 ## TessHashJoin
 

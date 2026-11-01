@@ -801,24 +801,6 @@ partial_upper_rel(PlannerInfo *root, UpperRelationKind kind, RelOptInfo *upper_r
 }
 
 /*
- * Whether a partial grouping can key its table by these: the node's
- * partial table empties early, and the dictionaries of keys a word does
- * not hold would go with it.
- */
-static bool
-partial_keys(List *keys)
-{
-	foreach_ptr(Node, key, keys)
-	{
-		TessTableKeyKind kind;
-
-		if (!tess_word_key_kind(exprType(key), &kind))
-			return false;
-	}
-	return true;
-}
-
-/*
  * Grouping without aggregates, by GROUP BY, DISTINCT or UNION, in every
  * participant under a gather: over partial, a partial hashed path of the
  * core's, the node's partial path over its batch child, which groups for
@@ -861,7 +843,7 @@ create_key_stack_paths(PlannerInfo *root, RelOptInfo *partial_rel, RelOptInfo *o
 					   AggSplit split, List *keys, PathTarget *target, List *clauses,
 					   int flags, double groups)
 {
-	if (partial_rel == NULL || keys == NIL || groups <= 0 || !partial_keys(keys))
+	if (partial_rel == NULL || keys == NIL || groups <= 0)
 		return;
 	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
 												  AGG_HASHED, split))
@@ -922,7 +904,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		nsums = sum_states(tlist);
 	else
 		nown = own_partials(tlist);
-	if (nsums < 0 || !partial_keys(keys))
+	if (nsums < 0)
 		return;
 	foreach_ptr(AggPath, agg, aggregate_templates(partial_rel->partial_pathlist,
 												  strategy,
@@ -1217,7 +1199,7 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		}
 		if (keys == NIL)
 			continue;
-		if (!stacked && partial_keys(keys))
+		if (!stacked)
 		{
 			/* Under the core's Gather, or as the core would build it. */
 			Path	   *partial_append = branches != agg->subpath ? branches :
