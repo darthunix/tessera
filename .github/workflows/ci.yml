@@ -368,6 +368,10 @@ jobs:
           cargo miri test --locked -p relspill --test records
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
             --test spill
+      # A target whose bytes run from the most significant: the packing
+      # narrows values by their low bytes, which lie last there.
+      - name: The spill's tests on a big-endian target
+        run: cargo miri test --locked -p relspill --target s390x-unknown-linux-gnu
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)
