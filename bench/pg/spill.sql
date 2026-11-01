@@ -18,6 +18,8 @@
 \endif
 SET jit = off;
 SET max_parallel_workers_per_gather = :workers;
+-- hash_mem is twice work_mem in every case, whatever the session says.
+SET hash_mem_multiplier = 2;
 SELECT scale FROM bench_scale \gset
 
 CREATE TEMP TABLE timings
@@ -113,7 +115,11 @@ ORDER BY m_order, c_order;
  * - group_fk_1536kb: group_fk at 3 MiB, a limit that is no power of two,
  *   its estimate above the cap of the first index, read back and merged;
  * - distinct_128kb: count(DISTINCT) at 256 kB over 2 M rows of 3000
- *   pairs in 10 groups, its set past its first chunk.
+ *   pairs in 10 groups, its set past its first chunk;
+ * - regrow_128kb: 300 000 groups at 256 kB in 1 M rows, each partition
+ *   read back with more groups than its estimate, so that its index
+ *   grows in the middle of a merge.
+ * The tables are made here, whatever the data multiplier.
  */
 CREATE TEMP TABLE build_250k AS SELECT g AS k FROM generate_series(1, 250000) AS g;
 CREATE TEMP TABLE build_300k AS SELECT g AS k FROM generate_series(1, 300000) AS g;
@@ -123,15 +129,18 @@ CREATE TEMP TABLE build_420k AS SELECT g AS k FROM generate_series(1, 420000) AS
 CREATE TEMP TABLE distinct_pairs AS
 SELECT i % 3000 AS v, i % 3000 % 10 AS g FROM generate_series(1, 2000000) AS i;
 CREATE STATISTICS distinct_pairs_nd (ndistinct) ON g, v FROM distinct_pairs;
-ANALYZE build_250k, build_300k, build_420k, distinct_pairs;
+CREATE TEMP TABLE regrow_groups AS SELECT g % 300000 AS k, g AS v FROM generate_series(1, 1000000) AS g;
+ANALYZE build_250k, build_300k, build_420k, distinct_pairs, regrow_groups;
 SELECT pg_temp.measure_pair(name, sql, memory, :warmups, :repetitions)
-FROM unnest(ARRAY['build_250k', 'build_300k', 'build_420k', 'group_fk_1536kb', 'distinct_128kb'],
+FROM unnest(ARRAY['build_250k', 'build_300k', 'build_420k', 'group_fk_1536kb', 'distinct_128kb',
+                  'regrow_128kb'],
             ARRAY['SELECT count(*) FROM bench_fact f JOIN build_250k b ON f.fk = b.k',
                   'SELECT count(*) FROM bench_fact f JOIN build_300k b ON f.fk = b.k',
                   'SELECT count(*) FROM bench_fact f JOIN build_420k b ON f.fk = b.k',
                   'SELECT count(*), sum(s) FROM (SELECT fk, sum(f1) AS s FROM bench_fact GROUP BY fk) AS g',
-                  'SELECT sum(n) FROM (SELECT g, count(DISTINCT v) AS n FROM distinct_pairs GROUP BY g) AS q'],
-            ARRAY['8MB', '8MB', '8MB', '1536kB', '128kB'])
+                  'SELECT sum(n) FROM (SELECT g, count(DISTINCT v) AS n FROM distinct_pairs GROUP BY g) AS q',
+                  'SELECT count(*), sum(s) FROM (SELECT k, sum(v) AS s FROM regrow_groups GROUP BY k) AS g'],
+            ARRAY['8MB', '8MB', '8MB', '1536kB', '128kB', '128kB'])
          WITH ORDINALITY AS c(name, sql, memory, c_order)
 ORDER BY c_order;
 RESET work_mem;
