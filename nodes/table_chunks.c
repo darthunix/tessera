@@ -7,7 +7,20 @@
 #include "tessera/runtime_api.h"
 #include "tessera/table.h"
 
+#include "memory_limit.h"
 #include "table_chunks.h"
+
+Size
+table_chunk_len(const TessKernelOps *kernels, TessStatus *status)
+{
+	Size		len;
+
+	tess_status_check(kernels->spill_chunk_len(tess_hash_memory_limit(), 1, 8,
+											   TABLE_FIRST_CHUNK,
+											   TESS_TABLE_MAX_CHUNK_LEN, &len,
+											   status), status);
+	return len;
+}
 
 void
 table_chunks_limit(uint64 nchunks, const char *table)

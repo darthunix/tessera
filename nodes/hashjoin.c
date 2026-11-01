@@ -296,15 +296,16 @@ create_table(TessHashJoinState *state)
 }
 
 /*
- * The chunks of a table and of its values past the first: up to the
- * largest, and at most an eighth of hash_mem, so that a table spills only
- * near its limit; a shared table's participant's too.
+ * The chunks of a table and of its values past the first, a shared
+ * table's participant's too: table_chunk_len, asked once, since the check
+ * before each batch takes it.
  */
 Size
-join_chunk_len_for(Size largest)
+join_table_chunk_len(TessHashJoinState *state)
 {
-	return Max(JOIN_FIRST_CHUNK,
-			   Min(largest, TYPEALIGN_DOWN(8, tess_hash_memory_limit() / 8)));
+	if (state->chunk_len == 0)
+		state->chunk_len = table_chunk_len(state->kernels, &state->status);
+	return state->chunk_len;
 }
 
 /* Another chunk for the serial table, the last one being full. */
@@ -312,7 +313,7 @@ static void
 add_table_chunk(TessHashJoinState *state)
 {
 	int			chunk = state->table.nchunks;
-	Size		len = chunk == 0 ? JOIN_FIRST_CHUNK : join_chunk_len_for(JOIN_CHUNK_LEN);
+	Size		len = chunk == 0 ? TABLE_FIRST_CHUNK : join_table_chunk_len(state);
 	void	   *base;
 
 	join_reserve_chunks(state, chunk + 1);
@@ -552,8 +553,8 @@ join_store_value(TessHashJoinState *state, Datum value, int16 typlen)
 		if (state->values.current < 0 ||
 			state->values.used + aligned > state->values.len)
 		{
-			Size		len = state->values.own == 0 ? JOIN_VALUE_FIRST :
-				join_chunk_len_for(JOIN_VALUE_CHUNK);
+			Size		len = state->values.own == 0 ? TABLE_FIRST_CHUNK :
+				join_table_chunk_len(state);
 
 			state->values.len = Max(len, aligned);
 			state->values.current = new_value_chunk(state, state->values.len);
@@ -677,7 +678,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	 */
 	if (state->spill == NULL &&
 		state->table_bytes + state->values.bytes +
-		2 * join_chunk_len_for(JOIN_CHUNK_LEN) +
+		2 * join_table_chunk_len(state) +
 		join_index_bytes(state, state->build_rows +
 						 (uint64) tess_row_mask_count(&batch->rows)) >
 		tess_hash_memory_limit())

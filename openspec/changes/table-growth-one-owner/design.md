@@ -77,8 +77,10 @@ one of them does not compute it at all.
   formula again in `agg_group.c`, and 1 MiB in `agg_keydict.c`.
 - **Will be:** a chunk past the first takes
   `tess_spill_chunk_len(limit, 1, 8, 64 kB, 1 MiB)`, the limit being
-  `tess_hash_memory_limit()` as today, with its cap of 16 GiB. The
-  first chunk stays 64 kB, written once beside the call. The join's
+  `tess_hash_memory_limit()` as today, with its cap of 16 GiB. The call
+  is written once, with its arguments, in the helper of decision 2, and
+  the first chunk's 64 kB beside it. The join asks once and keeps the
+  answer, since its check before each batch needs it. The join's
   values keep their own rule of size: a value larger than a quarter of
   1 MiB takes a chunk of its own size, and an ordinary chunk of values
   is the larger of the rule's length and the value.
@@ -88,7 +90,7 @@ one of them does not compute it at all.
   take an eighth, bound it by 64 kB and 1 MiB and round down to 8,
   and both bounds are multiples of 8. No new entry point; one call per
   chunk of 64 kB to 1 MiB.
-- **Refused:** a C function of the rule shared by the nodes (a second
+- **Refused:** a C formula of the rule shared by the nodes (a second
   owner beside the level plan); a rule in `relhash` (the share of
   `hash_mem` is the engine's policy, and its contract keeps it free of
   the host's limits).

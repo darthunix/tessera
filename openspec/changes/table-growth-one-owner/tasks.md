@@ -71,7 +71,7 @@ as it goes.
       helper. Check: the scenario "A merge at the most chunks", review
       only: every write of a chunk into a directory in `nodes/` listed
       and shown to go through the helper; the reload cases of `agg`
-- [ ] 4.3 Every chunk past the first of a table in memory takes its
+- [x] 4.3 Every chunk past the first of a table in memory takes its
       length from `tess_spill_chunk_len` for one partition at a share
       of 8; `join_chunk_len_for` and the grouping's formula go. Check: a
       Rust test of `tess_spill_chunk_len` at the six limits of the
