@@ -193,8 +193,20 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	state->compact.round_columns = palloc0_array(TessDatumColumn, Max(state->ncolumns, 1));
 	state->payload_columns = palloc0_array(int, JOIN_MAX_PAYLOAD);
 
+	state->expect_rescan = (eflags & EXEC_FLAG_REWIND) != 0;
+#if TESS_MPP
+	/*
+	 * As the family's hash join: the children start in the order they run,
+	 * the inner side first, so that a Shared Input Scan under both takes
+	 * its producer on the side that runs first. The list stays outer,
+	 * inner.
+	 */
+	state->inner = ExecInitNode(lsecond(cscan->custom_plans), estate, eflags);
+	state->outer = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
+#else
 	state->outer = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
 	state->inner = ExecInitNode(lsecond(cscan->custom_plans), estate, eflags);
+#endif
 	css->custom_ps = list_make2(state->outer, state->inner);
 	if (state->prune.key >= 0 &&
 		tess_append_join_prune_begin(state->outer, state->prune.values, state->prune.range,
