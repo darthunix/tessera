@@ -40,7 +40,7 @@ named in a task comes on top.
       Check: `cargo ab moved`; `cargo run --release --locked -p
       tessera-bench -- --base HEAD~1 --disasm --module kernels` shows
       the calendar's loops the same.
-- [ ] 3.2 Move the reader of a column-or-scalar argument from
+- [x] 3.2 Move the reader of a column-or-scalar argument from
       `crates/tessera-capi/src/c/calendar.rs` into `c/source.rs`. Only
       lines move. Check: as 3.1; `cargo test --locked -p tessera-capi
       --test calendar`.

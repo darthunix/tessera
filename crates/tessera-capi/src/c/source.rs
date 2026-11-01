@@ -1,15 +1,21 @@
-//! What the calendar, decimal and text entry points share to read their
-//! arguments and to write their results: a call's argument, a column or a
-//! scalar with a loop for each ([`Input`], [`Constant`], `with_source!`
-//! and `with_sources!`), the selection, a result mask and result slots.
+//! What the calendar, decimal, text and float entry points share to read
+//! their arguments and to write their results: a call's argument, a column
+//! or a scalar with a loop for each ([`Input`], [`Constant`], `with_source!`
+//! and `with_sources!`), the reader of a column or a scalar Datum
+//! ([`DatumArg`], [`input`]), the selection, a result mask and result
+//! slots.
 
+use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::slice;
 
 use anyhow::{Context, Result, ensure};
 use tessera_core::{RowMask, RowMaskView};
+use tessera_kernels::source::Source;
 
+use super::column::DatumColumn;
 use super::mask::Mask;
+use crate::FromDatum;
 
 /// A call's argument: a column or a scalar, a loop for each.
 pub(super) enum Input<C, S> {
@@ -105,4 +111,119 @@ pub(super) unsafe fn slots<'a, T>(
     ensure!(!values.is_null(), "a null result buffer");
     // SAFETY: the caller's contract.
     Ok(unsafe { slice::from_raw_parts_mut(values.cast(), nrows) })
+}
+
+/// An argument of the calendar and float entry points (`TessCalendarArg`,
+/// `TessFloatArg`): a column, or a scalar Datum when the column is null.
+#[repr(C)]
+#[derive(Debug)]
+pub struct DatumArg {
+    /// The column, or null.
+    pub column: *const DatumColumn,
+    /// The scalar when `column` is null.
+    pub scalar: u64,
+}
+
+/// A value read from its Datum: an integer as [`FromDatum`] reads it, an
+/// interval through the pointer the Datum holds. The pointer read is safe
+/// only under the module's contract, so it stays in this trait, private,
+/// rather than in the public [`FromDatum`].
+pub(super) trait ReadDatum: Copy {
+    /// The value a Datum holds.
+    fn read_datum(datum: u64) -> Self;
+}
+
+impl<T: FromDatum> ReadDatum for T {
+    #[inline(always)]
+    fn read_datum(datum: u64) -> Self {
+        T::from_datum(datum)
+    }
+}
+
+/// A column's values and flags, read through raw pointers behind one check
+/// of the row against the row count.
+pub(super) struct Values<'a, T> {
+    values: *const u64,
+    isnull: *const u8,
+    nrows: usize,
+    borrow: PhantomData<(&'a (), T)>,
+}
+
+impl<T: ReadDatum> Source<T> for Values<'_, T> {
+    #[inline(always)]
+    fn get(&self, row: usize) -> Option<T> {
+        assert!(row < self.nrows, "a row past its column");
+        // SAFETY: the row is within the arrays, and the calls read selected
+        // rows only, whose flags and non-NULL values the constructor's
+        // caller guarantees; a flag is read as its byte.
+        unsafe {
+            if *self.isnull.add(row) != 0 {
+                return None;
+            }
+            Some(T::read_datum(*self.values.add(row)))
+        }
+    }
+}
+
+impl<T: Copy> Source<T> for Constant<T> {
+    #[inline(always)]
+    fn get(&self, _row: usize) -> Option<T> {
+        Some(self.0)
+    }
+}
+
+/// A call's argument: a column or a scalar, a loop for each.
+pub(super) type DatumInput<'a, T> = Input<Values<'a, T>, T>;
+
+/// Borrow a column of `nrows` rows.
+///
+/// # Safety
+///
+/// As the module documentation says of a column.
+#[inline]
+pub(super) unsafe fn column<'a, T>(
+    column: *const DatumColumn,
+    nrows: usize,
+) -> Result<Values<'a, T>> {
+    // SAFETY: the caller's contract.
+    let column = unsafe { column.as_ref() }.context("a null column")?;
+    ensure!(
+        column.struct_size >= DatumColumn::MIN_SIZE,
+        "a Datum column is smaller than its required fields"
+    );
+    ensure!(
+        usize::try_from(column.nrows).ok() == Some(nrows),
+        "a column has another row count than its rows"
+    );
+    ensure!(
+        nrows == 0 || (!column.values.is_null() && !column.isnull.is_null()),
+        "a column has null buffers"
+    );
+    Ok(Values {
+        values: column.values,
+        isnull: column.isnull.cast(),
+        nrows,
+        borrow: PhantomData,
+    })
+}
+
+/// The argument of a call with `nrows` rows.
+///
+/// # Safety
+///
+/// As the module documentation says of an argument.
+#[inline]
+pub(super) unsafe fn input<'a, T: ReadDatum>(
+    arg: *const DatumArg,
+    nrows: usize,
+) -> Result<DatumInput<'a, T>> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let arg = arg.as_ref().context("a null argument")?;
+        Ok(if arg.column.is_null() {
+            Input::Scalar(T::read_datum(arg.scalar))
+        } else {
+            Input::Column(column(arg.column, nrows)?)
+        })
+    }
 }
