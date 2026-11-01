@@ -28,23 +28,30 @@ depend on the other two: its question is the caches, not the branches.
 
 ## What Changes
 
-- The probe and the insert of a batch give the prefetch hint when the
-  table is larger than a bound of bytes, and none otherwise; the
-  choice is made once a call, from the sizes the table already knows:
-  its buckets and its records. The bound is a constant for each
+- First, the rules. The hint adds its own instructions and lengthens
+  the loops that give it, so it fails the rule of 1 % of instructions
+  and the contract's rule "No cost to Tessera" on every table where it
+  is given. The maintainer chose to propose narrowing both for a hint
+  given by size, in a pull request of contracts and designs only; this
+  change waits for that decision, and closes without the hint if the
+  rules stay.
+- The probe, the find or insert and the gathers of a batch give the
+  prefetch hint when the table is larger than a bound of bytes, and
+  none otherwise; the choice is made once a call, from the sizes the
+  table already knows: its buckets and its records. Under the bound
+  their machine code is today's. The bound is a constant for each
   architecture.
-- x86-64 gets the hint, `prefetcht0`, under that bound; AArch64 keeps
-  `prfm pldl1keep` and gets the same bound, measured on the M5 Pro,
-  if a table in the cache pays for the hint there too.
-- `table_large` measures tables of several sizes between the caches
-  and memory, so that the bound can be read off the counters.
+- x86-64 gets the hint, `prefetcht0`, on tables above that bound;
+  AArch64 keeps `prfm pldl1keep` and gets a bound of its own, measured
+  on the M5 Pro, if a table in the cache pays for the hint there too.
+- `table_large` measures tables of eight sizes between the caches and
+  memory, with a find or insert that creates records and a gather of
+  records in no order, so that the bound can be read off the counters.
 - The design of `relhash` says how the hint is chosen; the forecast of
   its contract says what the change touched.
 
 Not in this change:
 
-- The gathers of a sort, which already choose their hint by a
-  parameter of their own, keep it.
 - The other findings: `bench-unlearned-inputs` and
   `whole-word-decisions`.
 
@@ -64,12 +71,14 @@ declares `skip_specs: true`.
 
 ## Impact
 
-- Code: `crates/relhash`, `table/lanes.rs` (the hint), and the probe
-  and insert of a batch, `table/batch.rs` and `table/writer.rs`, which
-  choose it. The forecast of the contract, "A prefetch hint for
-  x86-64", names `table/lanes.rs` alone; a hint chosen by size touches
-  the two loops too, so the pull request says so under "Architecture"
-  and corrects the forecast.
+- Code: `crates/relhash`, `table/lanes.rs` (the hint), and the probe,
+  the find or insert and the gathers of a batch, `table/batch.rs` and
+  `table/writer.rs`, which choose it. The forecast of the contract, "A
+  prefetch hint for x86-64", names `table/lanes.rs` alone; a hint
+  chosen by size touches those loops too. The pull request says so
+  under "Architecture", corrects the forecast, and adds the entry of
+  the roadmap for simplifying the crate's hint that `CONTRIBUTING.md`
+  asks for, naming the boundary it crossed.
 - `unsafe`: the hint of x86-64 is one `unsafe` call of an SSE
   intrinsic in `table/lanes.rs`, a module on the design's list of
   unsafe code, as the hint of AArch64 is.

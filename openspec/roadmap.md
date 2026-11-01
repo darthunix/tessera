@@ -25,9 +25,10 @@ the other entries keep the order of the decisions of 2026-09-30 to
 2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390). The maintainer
 placed `spill-crate` first on 2026-10-28, after the close of
 `table-crate`, and the float kernels second on 2026-11-01, after the
-review of what more can move from C to Rust; they are closed. The
-maintainer took the six findings of the AVX2 kernels on 2026-11-01, in
-three changes, which come after `spill-crate` in this order:
+review of what more can move from C to Rust; the float kernels are
+closed. The maintainer took the six findings of the AVX2 kernels on
+2026-11-01, in three changes, which come after `spill-crate` in this
+order:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
@@ -235,17 +236,23 @@ The prefetch hint of `relhash` by the size of the table. A finding of
 the close of the AVX2 kernels, taken by the maintainer on 2026-11-01;
 it is the change `relhash-prefetch-by-size`.
 
-- **What:** The probe and the insert of a batch give the hint only on
-  a table larger than a bound of bytes for each architecture, chosen
-  once a call; x86-64 gets `prefetcht0` under that bound.
+- **What:** The probe, the find or insert and the gathers of a batch
+  give the hint only on a table larger than a bound of bytes for each
+  architecture, chosen once a call; x86-64 gets `prefetcht0` on tables
+  above that bound.
 - **Why:** On x86-64 the hint gains 10 to 26 % of cycles on a table of
   160 MiB and costs up to 14 % on one in L1, so x86-64 gives none
   today. On AArch64 it is given to every table, and its cost on a
   table in the cache was never measured.
-- **Known:** The design of the change. The forecast of the contract of
-  `relhash` names `table/lanes.rs` alone for the hint of x86-64; a
-  choice by size touches the probe and the insert too.
-- **Depends on:** nothing.
+- **Known:** The design of the change. The hint fails the rule of 1 %
+  of instructions and the contract's rule "No cost to Tessera" on
+  every table where it is given; the maintainer chose on 2026-11-01 to
+  propose narrowing both, in a pull request of contracts and designs
+  only. The forecast of the contract names `table/lanes.rs` alone for
+  the hint of x86-64; a choice by size touches the loops that give it
+  too.
+- **Depends on:** the maintainer's decision on the narrowing of the
+  rules.
 - **Capabilities:** hash-table
 - **Size:** small to medium: one pull request.
 

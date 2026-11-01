@@ -1,6 +1,7 @@
 ## 0. How the work goes
 
-Every task is one commit on the branch `bench-unlearned-inputs`. Each
+Every task is one commit on the branch `bench-unlearned-inputs`, but
+the opening of the pull request, which is a step of the work. Each
 commit passes `make rust-check` and `.github/scripts/check-specs.sh`,
 run with the version of OpenSpec that `ci.yml` names; the check named
 in a task comes on top. "As root" is a command the maintainer types on
@@ -17,14 +18,22 @@ and relays.
 
 ## 2. The pilot
 
-- [ ] 2.1 The three forms of the design on the two cases of the pilot,
-      each behind a name of its own case, so that the runs can filter
-      them; `K` a constant of the case. Check: `cargo test --locked -p
-      tessera-capi --benches`, every input checked against its model
-- [ ] 2.2 The runs of the pilot, as root and on the M5 Pro, twice each,
-      with the hypothesis of each form written down first; the form
-      chosen by the criterion of the design, and the others removed.
-      Check: the ids of the runs in the commit and in the design
+- [ ] 2.1 The permuted inputs of the fixture, the model of the misses
+      of a case, and the period of a ring in the runner. Check: `cargo
+      test --locked -p tessera-capi --benches`; a test that every input
+      of a case has the same counts of selected and NULL rows in each
+      word
+- [ ] 2.2 The three forms of the design and their controls on the two
+      cases of the pilot, each a case of its own name, so that the runs
+      can filter them; `K` a constant of the case. Check: `cargo test
+      --locked -p tessera-capi --benches`, every input checked against
+      its model; the listing of the build against the base
+- [ ] 2.3 The runs of the pilot, as root and on the M5 Pro, twice each,
+      the base a commit with the pilot's fixtures, with the hypothesis
+      of each form written down first; the form chosen by the criterion
+      of the design, and the others removed. A pilot where no form
+      passes stops the work for the maintainer. Check: the ids of the
+      runs in the commit and in the design
 
 ## 3. The cases
 
@@ -45,7 +54,9 @@ and relays.
 
 - [ ] 4.1 Close the change: delete its folder; the entry leaves the
       roadmap; what was decided goes into the README of the
-      benchmarks; a finding without a decision goes to "Not placed".
+      benchmarks; the runs cited are copied to `docs/benchmarks/`, as
+      `docs/measuring.md` says; a finding without a decision goes to
+      "Not placed".
       Check: `.github/scripts/check-specs.sh`; no line of the roadmap
       names `bench-unlearned-inputs`
 - [ ] 4.2 Open the pull request, with the outcome under Decision as

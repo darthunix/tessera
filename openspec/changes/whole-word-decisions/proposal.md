@@ -52,19 +52,24 @@ inputs the predictor has not learned.
 
 ## What Changes
 
-- A model of the cost of a word, measured for each family on both
-  machines: the cycles of a whole word, and the cycles of a selected
-  row on the row path over inputs the predictor has not learned. Each
-  family's bound of rows follows from it, a value for each
-  architecture, and so does the bound of keys of the sets, which then
-  grows with the rows of the word.
+- For each family, storage and density, on both machines, what taking
+  words whole saves or costs against reading their rows: two builds
+  that differ only in the bound, one that takes no word whole and one
+  that takes every word whole, measured against each other over cases
+  of 8, 12, 16, 24 and 32 selected rows a word, at positions the
+  predictor has not learned. Each family's bound of rows follows, a
+  value for each architecture where the machines part, and so does
+  the bound of keys of the sets, which then grows with the rows of the
+  word.
 - The sets decide on the rows that are present, not NULL, where the
   storage tells them at the cost of a mask (dense blocks) or of the
   NULL flags they read anyway (Datum blocks). A family that decides on
   its first word does the same where `nulls-all` shows a loss.
 - The place of the decision in the drivers on x86-64, chosen by the
   machine code and the counters among forms written down first, so
-  that a call that reads rows costs no more than before AVX2.
+  that a call that reads rows costs no more than in a control build
+  whose vector path the compiler removes, within the noise of the
+  benchmark.
 - One shape of the loops of `count` and of the aggregates for both
   machines, if one serves both; `as_chunks` in `word_slots`.
 - A form of the reader's fold on x86-64 that keeps the gain of full
@@ -103,8 +108,10 @@ changes. The change declares `skip_specs: true`.
     that gives their reasons;
   - `crates/tessera-capi`: `column.rs` (the fold of selected words)
     and `column/ints.rs` (`word_slots`);
-  - the benchmark programs: cases at 12, 16 and 24 selected rows a
-    word, beside `eighth`, for the bounds.
+  - the benchmark programs: cases of 8, 12, 16, 24 and 32 selected
+    rows a word at positions drawn anew, in the reading fixtures, in
+    the matrices of the filters and of the comparisons, and in
+    `set_int32`.
 - Documents: `docs/kernels.md`, where it gives the bounds.
 - No header, setting, SQL suite, format or dependency changes.
 - The roadmap: the four findings leave "Not placed" and

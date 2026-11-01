@@ -41,16 +41,19 @@ first, because the second, `whole-word-decisions`, measures with it.
 - The cases that are drawn at random get inputs that the predictor
   cannot learn: every call meets rows, NULL flags or values it has not
   met in the calls before it within reach of the predictor's memory.
-  The shape of a case stays: its row count, the share of rows
-  selected and of NULL rows, and the work of a call.
+  The work of a call stays: every input of a case has the same row
+  count and, in each word, the same numbers of selected and NULL rows,
+  at positions drawn anew.
 - The form is chosen by a pilot on both machines, among three: a ring
   of inputs drawn from different seeds and taken in turn; one input
   long enough that its branches do not repeat; a fresh input before
   every call, outside the counted calls.
-- The criterion of the pilot: on a case whose model says how often its
-  branches must miss, the misses a call reach that model, and they
-  stop growing when the inputs grow more varied. Blocks keep the same
-  instructions, within the 0.1 % that `tessera-bench` allows.
+- The criterion of the pilot: the misses a call reach those of a
+  predictor that has not seen the inputs, computed from the case
+  itself, and stop growing when the inputs grow more varied, while a
+  control of the same footprint over one input does not; blocks keep
+  the same instructions, within the 0.1 % that `tessera-bench`
+  allows.
 - The cases with a regular pattern (`all`, `half`, `eighth`,
   `sparse`, `empty`, `nulls-mixed`) stay as they are: they show the
   cost of a call whose branches the predictor knows.
