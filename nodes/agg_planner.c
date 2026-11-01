@@ -1408,8 +1408,11 @@ add_cdb_stage_path(PlannerInfo *root, RelOptInfo *grouped_rel, AggPath *final,
 	CdbMotionPath *tess_motion;
 	AggPath    *template;
 
+	/* A DISTINCT aggregate has no partial value the final stage merges. */
 	if ((keys != NIL) != (final->aggstrategy != AGG_PLAIN) ||
+		has_distinct_aggregate(final_tlist) ||
 		!collect_aggregates((Node *) partial->path.pathtarget->exprs, keys, &tlist) ||
+		has_distinct_aggregate(tlist) ||
 		list_length(tlist) == list_length(keys))
 		return;
 	if (keys != NIL)
@@ -1427,6 +1430,8 @@ add_cdb_stage_path(PlannerInfo *root, RelOptInfo *grouped_rel, AggPath *final,
 	tess_motion = makeNode(CdbMotionPath);
 	*tess_motion = *motion;
 	tess_motion->subpath = &tess_partial->path;
+	/* The node's groups come in no order: the Motion merges none. */
+	tess_motion->path.pathkeys = NIL;
 	tess_motion->path.startup_cost += tess_partial->path.startup_cost - partial->path.startup_cost;
 	tess_motion->path.total_cost += tess_partial->path.total_cost - partial->path.total_cost;
 	/* The final stage over it: a plain one keeps the template's cost, so moved too. */
