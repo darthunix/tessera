@@ -434,7 +434,8 @@ partition_column(PlannerInfo *root, RelOptInfo *child, Var *var)
  */
 /*
  * The partitions the planner's pruning left (PostgreSQL 15 keeps them as
- * live_parts): before, the pruned ones are dummy relations.
+ * live_parts): before, a partition it pruned has no relation, and one
+ * proved empty later is a dummy relation, left out too.
  */
 #if TESS_PG_MAJOR >= 15
 #define live_parts(rel) ((rel)->live_parts)
@@ -457,6 +458,7 @@ static PartitionScheme
 key_partitioning(PlannerInfo *root, RelOptInfo *rel, Var *column, Oid opno)
 {
 	PartitionScheme scheme = rel->part_scheme;
+	Bitmapset  *parts;
 	int			part = -1;
 
 	if (scheme == NULL || scheme->partnatts == 0)
@@ -470,7 +472,8 @@ key_partitioning(PlannerInfo *root, RelOptInfo *rel, Var *column, Oid opno)
 				return scheme;
 		}
 	}
-	while ((part = bms_next_member(live_parts(rel), part)) >= 0)
+	parts = live_parts(rel);
+	while ((part = bms_next_member(parts, part)) >= 0)
 	{
 		RelOptInfo *child = rel->part_rels[part];
 		PartitionScheme found;
@@ -2040,8 +2043,8 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 
 	/*
 	 * The core offers no hash join either without PGS_HASHJOIN (before
-	 * PostgreSQL 19, with enable_hashjoin off, but for a FULL join, which
-	 * only a hash join can do in an older core). The kinds
+	 * PostgreSQL 19, with enable_hashjoin off, but for a FULL join, for
+	 * which a hash join may be the only way). The kinds
 	 * that keep the outer side, which the node probes with: each outer
 	 * row's matches are known when its batch has been probed; RIGHT and
 	 * FULL keep the inner side too, marking the table's records that find
