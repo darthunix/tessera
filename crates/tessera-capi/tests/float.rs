@@ -61,6 +61,17 @@ fn float4_datum(value: f32) -> u64 {
     0xdead_beef_0000_0000 | u64::from(value.to_bits())
 }
 
+/// A float4 Datum by another derivation than the kernels': the bits, with
+/// the high half filled when the sign bit is set.
+fn datum4(value: f32) -> u64 {
+    let bits = u64::from(value.to_bits());
+    if bits & 0x8000_0000 == 0 {
+        bits
+    } else {
+        bits | 0xffff_ffff_0000_0000
+    }
+}
+
 /// The two test columns as Datums, with their NULLs.
 struct Columns {
     f8: Vec<u64>,
@@ -194,7 +205,7 @@ fn comparisons_of_every_pair_and_shape_keep_the_rows_that_hold() {
 /// operands are float4, a float8's otherwise; or its error.
 fn arith_bits(op: FloatOp, both_float4: bool, left: f64, right: f64) -> Result<u64, FloatError> {
     if both_float4 {
-        arith(op, left as f32, right as f32).map(|x| u64::from(x.to_bits()))
+        arith(op, left as f32, right as f32).map(datum4)
     } else {
         arith(op, left, right).map(f64::to_bits)
     }
@@ -402,11 +413,7 @@ fn casts_between_floats_and_integers() {
             } else {
                 (column_values[row] as u32 as i32).float4()
             };
-            assert_eq!(
-                values[row],
-                u64::from(want.unwrap().to_bits()),
-                "{from} row {row}"
-            );
+            assert_eq!(values[row], datum4(want.unwrap()), "{from} row {row}");
         }
     }
     // Floats to floats and to integers.
@@ -445,7 +452,8 @@ fn casts_between_floats_and_integers() {
         &mut present,
     );
     assert_eq!(code, Code::Ok);
-    assert_eq!(values[1], u64::from((-32768.5_f32).to_bits()));
+    assert_eq!(values[1], 0xffff_ffff_c700_0080);
+    assert_eq!(values[1], datum4(-32768.5));
     for (from, column) in [(FLOAT8, &double_column), (FLOAT4, &single_column)] {
         let source = FloatArg { column, scalar: 0 };
         let mut ints = [0_i32; 4];

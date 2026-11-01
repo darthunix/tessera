@@ -19,7 +19,7 @@
 //! Each error is a [`FloatError`] with the core's SQLSTATE and message. The
 //! batch functions run over the selected rows of a [`Source`] in the order
 //! of the rows, so a call fails at the row the core would raise at. A float
-//! result is written as its bits, a float4's widened with zeros, as
+//! result is written as its bits, a float4's sign-extended to 64, as
 //! PostgreSQL's Datum holds it.
 
 use std::fmt;
@@ -541,8 +541,8 @@ pub fn to_float8<T: Number>(
     })
 }
 
-/// The selected rows cast to float4, written as its bits widened with
-/// zeros.
+/// The selected rows cast to float4, written as its bits sign-extended,
+/// as a Datum holds them.
 ///
 /// # Errors
 ///
@@ -602,10 +602,11 @@ pub fn to_int64<T: Rounded>(
     })
 }
 
-/// A float4's bits as a Datum holds them: widened with zeros.
+/// A float4's bits as a Datum holds them: `Float4GetDatum` makes them an
+/// int32 and `Int32GetDatum` extends its sign.
 #[inline(always)]
 fn float4_bits(value: f32) -> u64 {
-    u64::from(value.to_bits())
+    i64::from(value.to_bits() as i32) as u64
 }
 
 #[cfg(test)]
