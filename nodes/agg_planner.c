@@ -641,7 +641,8 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	Cost		run;
 
 	MemSet(&costs, 0, sizeof(costs));
-	if (root->parse->hasAggs)
+	/* A grouping of keys alone, a dedup stage, computes none of the query's aggregates. */
+	if (root->parse->hasAggs && list_length(tlist) > nkeys)
 		tess_agg_clause_costs(root, split, &costs);
 	foreach_node(TargetEntry, entry_node, tlist)
 	{
@@ -1476,8 +1477,9 @@ add_cdb_stage_path(PlannerInfo *root, RelOptInfo *grouped_rel, AggPath *final,
 	tess_motion->subpath = &tess_partial->path;
 	/* The node's groups come in no order: the Motion merges none. */
 	tess_motion->path.pathkeys = NIL;
-	tess_motion->path.startup_cost += tess_partial->path.startup_cost - partial->path.startup_cost;
-	tess_motion->path.total_cost += tess_partial->path.total_cost - partial->path.total_cost;
+	tess_motion->path.startup_cost += tess_partial->path.startup_cost -
+		motion->subpath->startup_cost;
+	tess_motion->path.total_cost += tess_partial->path.total_cost - motion->subpath->total_cost;
 	/* The final stage over it: a plain one keeps the template's cost, so moved too. */
 	template = makeNode(AggPath);
 	*template = *final;
@@ -1530,11 +1532,23 @@ agg_path_keys(const AggPath *agg)
 static bool
 dedup_stage(const AggPath *agg, List **keys)
 {
+	List	   *unique = NIL;
+
 	if (agg->aggsplit != AGGSPLIT_SIMPLE || agg->groupClause == NIL || agg->qual != NIL)
 		return false;
-	*keys = agg_path_keys(agg);
-	return *keys != NIL &&
-		list_length(*keys) == list_length(agg->path.pathtarget->exprs);
+	/* The family may name the argument once a grouping clause: keys repeat. */
+	foreach_ptr(Expr, key, agg_path_keys(agg))
+		unique = list_append_unique(unique, key);
+	if (unique == NIL || list_length(unique) > TESS_TABLE_MAX_KEYS)
+		return false;
+	/* Every column of the target a key, a column of a FILTER among them not one. */
+	foreach_ptr(Expr, expr, agg->path.pathtarget->exprs)
+	{
+		if (!list_member(unique, expr))
+			return false;
+	}
+	*keys = unique;
+	return list_length(unique) == list_length(agg->path.pathtarget->exprs);
 }
 
 /*
@@ -1605,18 +1619,23 @@ add_cdb_distinct_paths(PlannerInfo *root, RelOptInfo *grouped_rel, List *candida
 
 		if (!IsA(path, AggPath) || top->qual != NIL)
 			continue;
-		if (top->aggsplit == AGGSPLIT_DEDUPLICATED && top->groupClause != NIL &&
-			IsA(top->subpath, AggPath))
+		if (top->aggsplit == AGGSPLIT_DEDUPLICATED &&
+			(IsA(top->subpath, AggPath) || IsA(top->subpath, CdbMotionPath)))
 		{
-			/* With groups: the Agg over the dedup stages directly. */
+			/*
+			 * One stage over the dedup stages, with groups or without, the
+			 * input distributed by the argument putting a Motion between.
+			 */
 			AggPath    *template;
 			CustomPath *built;
 
-			keys = agg_path_keys(top);
-			tlist = add_to_flat_tlist(NIL, keys);
-			if (keys == NIL ||
+			keys = top->groupClause != NIL ? agg_path_keys(top) : NIL;
+			tlist = keys != NIL ? add_to_flat_tlist(NIL, keys) : NIL;
+			if ((top->groupClause != NIL && keys == NIL) ||
+				list_length(keys) > TESS_TABLE_MAX_KEYS ||
 				!collect_aggregates((Node *) top->path.pathtarget->exprs, keys, &tlist) ||
-				list_length(tlist) == list_length(keys))
+				list_length(tlist) == list_length(keys) ||
+				list_length(tlist) - list_length(keys) > AGG_MAX_GROUPED)
 				continue;
 			below = tess_dedup_stages(root, top->subpath);
 			if (below == NULL || below == top->subpath)
@@ -1641,9 +1660,9 @@ add_cdb_distinct_paths(PlannerInfo *root, RelOptInfo *grouped_rel, List *candida
 
 			tlist = NIL;
 			if (partial->aggsplit != (AGGSPLIT_INITIAL_SERIAL | AGGSPLITOP_DEDUPLICATED) ||
-				!IsA(partial->subpath, AggPath) ||
+				(!IsA(partial->subpath, AggPath) && !IsA(partial->subpath, CdbMotionPath)) ||
 				!collect_aggregates((Node *) top->path.pathtarget->exprs, NIL, &tlist) ||
-				tlist == NIL)
+				tlist == NIL || list_length(tlist) > AGG_MAX_GROUPED)
 				continue;
 			below = tess_dedup_stages(root, partial->subpath);
 			if (below == NULL || below == partial->subpath)
