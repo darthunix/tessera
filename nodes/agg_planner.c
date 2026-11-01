@@ -49,6 +49,14 @@
 #define AGG_PATH_PARTIAL 0x02
 #define AGG_PATH_FINALIZE 0x04
 #define AGG_PATH_OWN_STATES 0x08
+/*
+ * The input holds no duplicate of a DISTINCT aggregate's argument within a
+ * group, as the family's plans for one leave it (AGGSPLITOP_DEDUPLICATED):
+ * the aggregates keep DISTINCT in the targets, which the plans above name,
+ * and the node computes them without it, as setrefs.c converts the
+ * family's Agg.
+ */
+#define AGG_PATH_DEDUPLICATED 0x10
 
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
 
@@ -411,7 +419,7 @@ unavailable(Node *node, List *exprs)
  * aggregate's partial value, which the node merges.
  */
 static bool
-partials_available(const List *tlist, const Path *child)
+partials_available(const List *tlist, const Path *child, bool deduplicated)
 {
 	foreach_ptr(TargetEntry, entry, tlist)
 	{
@@ -422,6 +430,9 @@ partials_available(const List *tlist, const Path *child)
 			Aggref	   *partial = copyObject((Aggref *) expr);
 
 			mark_partial_aggref(partial, AGGSPLIT_INITIAL_SERIAL);
+			/* Over input without duplicates the family's partial has no DISTINCT. */
+			if (deduplicated)
+				partial->aggdistinct = NIL;
 			expr = (Node *) partial;
 		}
 		if (!list_member(child->pathtarget->exprs, expr))
@@ -750,7 +761,8 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 		child = ((SortPath *) child)->subpath;
 	child = tess_batch_input_path(root, child);
 	if (child == NULL ||
-		!((flags & AGG_PATH_FINALIZE) ? partials_available(tlist, child) :
+		!((flags & AGG_PATH_FINALIZE) ?
+		  partials_available(tlist, child, (flags & AGG_PATH_DEDUPLICATED) != 0) :
 		  arguments_available(tlist, child)))
 		return NULL;
 	template = agg->path;
@@ -1413,7 +1425,7 @@ cdb_stage_templates(List *pathlist)
  */
 static void
 add_cdb_stage_path(PlannerInfo *root, RelOptInfo *grouped_rel, AggPath *final,
-				   List *keys, List *final_tlist)
+				   List *keys, List *final_tlist, Path *input, int dedup)
 {
 	CdbMotionPath *motion = (CdbMotionPath *) final->subpath;
 	AggPath    *partial = (AggPath *) motion->subpath;
@@ -1425,11 +1437,15 @@ add_cdb_stage_path(PlannerInfo *root, RelOptInfo *grouped_rel, AggPath *final,
 	CdbMotionPath *tess_motion;
 	AggPath    *template;
 
-	/* A DISTINCT aggregate has no partial value the final stage merges. */
+	/*
+	 * A DISTINCT aggregate has no partial value the final stage merges, but
+	 * over input without duplicates (dedup), where it is computed without
+	 * DISTINCT.
+	 */
 	if ((keys != NIL) != (final->aggstrategy != AGG_PLAIN) ||
-		has_distinct_aggregate(final_tlist) ||
+		(dedup == 0 && has_distinct_aggregate(final_tlist)) ||
 		!collect_aggregates((Node *) partial->path.pathtarget->exprs, keys, &tlist) ||
-		has_distinct_aggregate(tlist) ||
+		(dedup == 0 && has_distinct_aggregate(tlist)) ||
 		list_length(tlist) == list_length(keys))
 		return;
 	if (keys != NIL)
@@ -1438,8 +1454,19 @@ add_cdb_stage_path(PlannerInfo *root, RelOptInfo *grouped_rel, AggPath *final,
 		nown = own_partials(tlist);
 	if (nsums < 0)
 		return;
+	/* The partial stage over the input given, the family's dedup stages as the node's. */
+	if (input != NULL)
+	{
+		AggPath    *over = makeNode(AggPath);
+
+		*over = *partial;
+		over->subpath = input;
+		over->path.startup_cost += input->startup_cost - partial->subpath->startup_cost;
+		over->path.total_cost += input->total_cost - partial->subpath->total_cost;
+		partial = over;
+	}
 	tess_partial = make_agg_path(root, partial, tlist, list_length(keys),
-								 AGG_PATH_PARTIAL |
+								 AGG_PATH_PARTIAL | dedup |
 								 (nsums > 0 || nown > 0 ? AGG_PATH_OWN_STATES : 0));
 	if (tess_partial == NULL)
 		return;
@@ -1458,10 +1485,172 @@ add_cdb_stage_path(PlannerInfo *root, RelOptInfo *grouped_rel, AggPath *final,
 	template->path.startup_cost += tess_motion->path.startup_cost - motion->path.startup_cost;
 	template->path.total_cost += tess_motion->path.total_cost - motion->path.total_cost;
 	tess_final = make_agg_path(root, template, final_tlist, list_length(keys),
-							   AGG_PATH_HAVING | AGG_PATH_FINALIZE |
+							   AGG_PATH_HAVING | AGG_PATH_FINALIZE | dedup |
 							   (nown > 0 ? AGG_PATH_OWN_STATES : 0));
 	if (tess_final != NULL)
 		add_path(grouped_rel, &tess_final->path);
+}
+
+/*
+ * The grouping keys of an AggPath: the columns of its target that its
+ * grouping clauses name, in their order; NIL where one has none.
+ */
+static List *
+agg_path_keys(const AggPath *agg)
+{
+	PathTarget *target = agg->path.pathtarget;
+	List	   *keys = NIL;
+
+	if (target == NULL || target->sortgrouprefs == NULL)
+		return NIL;
+	foreach_node(SortGroupClause, clause, agg->groupClause)
+	{
+		Expr	   *found = NULL;
+
+		foreach_ptr(Expr, expr, target->exprs)
+		{
+			if (target->sortgrouprefs[foreach_current_index(expr)] == clause->tleSortGroupRef)
+			{
+				found = expr;
+				break;
+			}
+		}
+		if (found == NULL)
+			return NIL;
+		keys = lappend(keys, found);
+	}
+	return keys;
+}
+
+/*
+ * A stage of the family's plans for a DISTINCT aggregate that only drops
+ * duplicate pairs of group and argument (cdbgroupingpaths.c): a grouping
+ * of no aggregate, every column of its target a key.
+ */
+static bool
+dedup_stage(const AggPath *agg, List **keys)
+{
+	if (agg->aggsplit != AGGSPLIT_SIMPLE || agg->groupClause == NIL || agg->qual != NIL)
+		return false;
+	*keys = agg_path_keys(agg);
+	return *keys != NIL &&
+		list_length(*keys) == list_length(agg->path.pathtarget->exprs);
+}
+
+/*
+ * The dedup stages at the top of path, with the Motions between them, as
+ * TessAgg groupings, which spill as any grouping does: the family drops
+ * the duplicates of a DISTINCT aggregate's argument on each segment, then
+ * again after the Motion that brings each group together. The path
+ * itself where it holds none; NULL where the node cannot take one.
+ */
+static Path *
+tess_dedup_stages(PlannerInfo *root, Path *path)
+{
+	List	   *keys;
+
+	if (IsA(path, AggPath) && dedup_stage((AggPath *) path, &keys))
+	{
+		AggPath    *template = makeNode(AggPath);
+		CustomPath *built;
+
+		*template = *(AggPath *) path;
+		template->subpath = tess_dedup_stages(root, template->subpath);
+		if (template->subpath == NULL)
+			return NULL;
+		built = make_agg_path(root, template, add_to_flat_tlist(NIL, keys),
+							  list_length(keys), 0);
+		return built != NULL ? &built->path : NULL;
+	}
+	if (IsA(path, CdbMotionPath))
+	{
+		CdbMotionPath *motion = (CdbMotionPath *) path;
+		CdbMotionPath *moved;
+		Path	   *below = tess_dedup_stages(root, motion->subpath);
+
+		if (below == NULL || below == motion->subpath)
+			return below == NULL ? NULL : path;
+		moved = makeNode(CdbMotionPath);
+		*moved = *motion;
+		moved->subpath = below;
+		/* The node's groups come in no order: the Motion merges none. */
+		moved->path.pathkeys = NIL;
+		moved->path.startup_cost += below->startup_cost - motion->subpath->startup_cost;
+		moved->path.total_cost += below->total_cost - motion->subpath->total_cost;
+		return &moved->path;
+	}
+	return path;
+}
+
+/*
+ * The family's plans for one DISTINCT aggregate, each stage TessAgg in
+ * place of the core's (cdbgroupingpaths.c): with groups, an Agg of the
+ * aggregates over the argument without DISTINCT, over its dedup stages;
+ * without, a final stage over a Motion over a partial one over them. The
+ * aggregates are those of the stages' own targets, which the family's
+ * planner rewrote; HAVING, which still names the DISTINCT aggregate,
+ * leaves the query to the core.
+ */
+static void
+add_cdb_distinct_paths(PlannerInfo *root, RelOptInfo *grouped_rel, List *candidates)
+{
+	if (root->parse->havingQual != NULL)
+		return;
+	foreach_ptr(Path, path, candidates)
+	{
+		AggPath    *top = (AggPath *) path;
+		List	   *keys;
+		List	   *tlist;
+		Path	   *below;
+
+		if (!IsA(path, AggPath) || top->qual != NIL)
+			continue;
+		if (top->aggsplit == AGGSPLIT_DEDUPLICATED && top->groupClause != NIL &&
+			IsA(top->subpath, AggPath))
+		{
+			/* With groups: the Agg over the dedup stages directly. */
+			AggPath    *template;
+			CustomPath *built;
+
+			keys = agg_path_keys(top);
+			tlist = add_to_flat_tlist(NIL, keys);
+			if (keys == NIL ||
+				!collect_aggregates((Node *) top->path.pathtarget->exprs, keys, &tlist) ||
+				list_length(tlist) == list_length(keys))
+				continue;
+			below = tess_dedup_stages(root, top->subpath);
+			if (below == NULL || below == top->subpath)
+				continue;
+			template = makeNode(AggPath);
+			*template = *top;
+			template->subpath = below;
+			template->path.startup_cost += below->startup_cost - top->subpath->startup_cost;
+			template->path.total_cost += below->total_cost - top->subpath->total_cost;
+			built = make_agg_path(root, template, tlist, list_length(keys),
+								  AGG_PATH_DEDUPLICATED);
+			if (built != NULL)
+				add_path(grouped_rel, &built->path);
+		}
+		else if (top->aggsplit == (AGGSPLIT_FINAL_DESERIAL | AGGSPLITOP_DEDUPLICATED) &&
+				 top->groupClause == NIL &&
+				 IsA(top->subpath, CdbMotionPath) &&
+				 IsA(((CdbMotionPath *) top->subpath)->subpath, AggPath))
+		{
+			/* Without groups: the two stages of the plain aggregate over them. */
+			AggPath    *partial = (AggPath *) ((CdbMotionPath *) top->subpath)->subpath;
+
+			tlist = NIL;
+			if (partial->aggsplit != (AGGSPLIT_INITIAL_SERIAL | AGGSPLITOP_DEDUPLICATED) ||
+				!IsA(partial->subpath, AggPath) ||
+				!collect_aggregates((Node *) top->path.pathtarget->exprs, NIL, &tlist) ||
+				tlist == NIL)
+				continue;
+			below = tess_dedup_stages(root, partial->subpath);
+			if (below == NULL || below == partial->subpath)
+				continue;
+			add_cdb_stage_path(root, grouped_rel, top, NIL, tlist, below, AGG_PATH_DEDUPLICATED);
+		}
+	}
 }
 #endif
 
@@ -1499,6 +1688,21 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	if (stage != UPPERREL_GROUP_AGG ||
 		!query_supported(root, input_rel, output_rel))
 		return;
+#if TESS_MPP
+	/*
+	 * The family's own plans for a DISTINCT aggregate, their dedup stages
+	 * groupings that spill. The node's own table of a DISTINCT aggregate
+	 * does not spill, and the share of memory the node gets there may be
+	 * smaller than the hash_mem its gate counts on: the family takes no
+	 * other path of the node for such a query.
+	 */
+	if (contains_distinct_aggregate((Node *) output_rel->reltarget->exprs, NULL) ||
+		contains_distinct_aggregate(root->parse->havingQual, NULL))
+	{
+		add_cdb_distinct_paths(root, output_rel, list_copy(output_rel->pathlist));
+		return;
+	}
+#endif
 	if (root->parse->groupClause != NIL)
 	{
 		/* The grouping expressions lead the scan tuple, the table's keys. */
@@ -1548,7 +1752,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	}
 #if TESS_MPP
 	foreach_ptr(AggPath, final, stages)
-		add_cdb_stage_path(root, output_rel, final, keys, tlist);
+		add_cdb_stage_path(root, output_rel, final, keys, tlist, NULL, 0);
 #else
 	/*
 	 * The planner's estimate of the groups, for a Finalize HashAggregate:
@@ -1786,6 +1990,8 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			Aggref	   *partial = copyObject((Aggref *) entry->expr);
 
 			mark_partial_aggref(partial, AGGSPLIT_INITIAL_SERIAL);
+			if (flags & AGG_PATH_DEDUPLICATED)
+				partial->aggdistinct = NIL;
 			arguments = lappend(arguments, resolve_argument((Node *) partial, &child));
 			more = lappend(more, NIL);
 			filters = lappend(filters, NULL);
@@ -1834,6 +2040,9 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int(writer, "partial", (flags & AGG_PATH_PARTIAL) != 0);
 	tess_plan_write_int(writer, "own_states", (flags & AGG_PATH_OWN_STATES) != 0);
 	tess_plan_write_int(writer, "finalize", (flags & AGG_PATH_FINALIZE) != 0);
+#if TESS_MPP
+	tess_plan_write_int(writer, "deduplicated", (flags & AGG_PATH_DEDUPLICATED) != 0);
+#endif
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.qual = (flags & AGG_PATH_HAVING) ? (List *) root->parse->havingQual : NIL;
@@ -1845,8 +2054,10 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	 * A grouping, a set operation or a DISTINCT aggregate keeps a table:
 	 * a share of the query's memory, as the core's hashed Agg asks.
 	 */
-	if (nkeys > 0 || setop >= 0 || contains_distinct_aggregate((Node *) info.expressions, NULL) ||
-		contains_distinct_aggregate((Node *) tlist, NULL))
+	if (nkeys > 0 || setop >= 0 ||
+		((flags & AGG_PATH_DEDUPLICATED) == 0 &&
+		 (contains_distinct_aggregate((Node *) info.expressions, NULL) ||
+		  contains_distinct_aggregate((Node *) tlist, NULL))))
 		tess_path_ask_memory(best_path);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }

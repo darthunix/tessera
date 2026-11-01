@@ -120,6 +120,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	state->partial = tess_plan_read_int(reader, "partial") != 0;
 	state->own_states = tess_plan_read_int(reader, "own_states") != 0;
 	state->finalize = tess_plan_read_int(reader, "finalize") != 0;
+#if TESS_MPP
+	state->deduplicated = tess_plan_read_int(reader, "deduplicated") != 0;
+#endif
 	tess_plan_reader_finish(reader);
 	if (state->finalize && (state->partial || state->setop >= 0))
 		elog(ERROR, "TessAgg received a foreign plan");
@@ -230,7 +233,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		 */
 		if (state->finalize && ((value->kind == AGG_GENERIC && state->nkeys > 0 &&
 								 !value->generic->sum_state) ||
-								agg->aggdistinct != NIL))
+								(agg->aggdistinct != NIL && !state->deduplicated)))
 			elog(ERROR, "TessAgg received a foreign plan");
 		if (state->partial && value->kind == AGG_GENERIC && state->nkeys > 0 &&
 			!value->generic->sum_state)
@@ -284,7 +287,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			}
 			value->gathered_values = palloc_array(Datum, 64);
 			value->gathered_isnull = palloc_array(bool, 64);
-			if (agg->aggdistinct != NIL)
+			/* Over input without duplicates the argument's values are taken as they come. */
+			if (agg->aggdistinct != NIL && !state->deduplicated)
 			{
 				SortGroupClause *clause = linitial_node(SortGroupClause, agg->aggdistinct);
 

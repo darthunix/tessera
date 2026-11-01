@@ -210,6 +210,11 @@ typedef struct TessAggState
 	 * of its decisions of memory taken by it (tess_node_memory_limit).
 	 */
 	Size		memory_limit;
+	/*
+	 * The input has no duplicate of a DISTINCT aggregate's argument within a
+	 * group (AGG_PATH_DEDUPLICATED of agg_planner.c): DISTINCT is ignored.
+	 */
+	bool		deduplicated;
 	uint64		grows;
 	uint64		groups;
 	/* Per batch: the hashes, the record of each row and the masks. */
