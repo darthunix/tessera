@@ -120,7 +120,11 @@ data. A node MUST also check a block it reads back against what it wrote
 there: its kind, a chunk of columns' stored words and, where the node
 counted them, its rows, and a block of values' number against the
 chunks of values written, or, where each writer of a file numbers its
-own, against the number of the block of values before it.
+own, against the number of the block of values before it. A call of
+the hash table over a chunk of records read back that the table refuses
+SHALL be damaged data too, though the table's own calls report it as a
+wrong argument: they cannot tell damaged bytes from a wrong call, and
+take either as a wrong argument.
 
 #### Scenario: A damaged field of a header, or another table's block
 - **WHEN** one field of a valid header is overwritten with an invalid
@@ -170,8 +174,10 @@ own, against the number of the block of values before it.
   values numbered past those written or as the one read before it, a
   block of a sort's run numbered as the run's next, a chunk of columns
   of a word or a row fewer than was written, a value longer than the
-  bytes left in its chunk, or a word that refers past every chunk or is
-  0 in a row it does not mark NULL
+  bytes left in its chunk, a word that refers past every chunk or is 0
+  in a row it does not mark NULL, or a chunk of records whose used mark
+  ends no record, which the hash table refuses as the node splits,
+  links or merges it
 - **THEN** the query fails as damaged data, SQLSTATE `XX001`
 - **Verified by:**
   `test/sql/spill_damage.sql::spec: spill-format/Damage under a node`

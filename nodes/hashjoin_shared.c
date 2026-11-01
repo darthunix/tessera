@@ -1440,8 +1440,9 @@ round_load(TessHashJoinState *state, JoinSpill *spill, int partition, JoinRound 
 			lens[slot] = header.len;
 			spill->round_bases[slot] = body;
 			spill->round_lens[slot] = header.len;
-			check(state, state->kernels->table_link(&ref, (int) slot, &from, NULL, NULL,
-													&state->status));
+			check_table(state, true,
+						state->kernels->table_link(&ref, (int) slot, &from, NULL, NULL,
+												   &state->status));
 		}
 		tess_spill_close(reader);
 	}

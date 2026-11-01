@@ -349,10 +349,11 @@ add_table_chunk(TessHashJoinState *state)
  * The index for the records appended, made once the inner side is read,
  * and the records linked into it, those of a key next to each other: the
  * rounds step from one to the next, and a table without duplicates has
- * no second round.
+ * no second round. The first read_back chunks were read back from a file:
+ * one of them the link refuses was read back damaged.
  */
 void
-join_index_table(TessHashJoinState *state)
+join_index_table(TessHashJoinState *state, int read_back)
 {
 	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
 	uint64		capacity = Max(state->build_rows, JOIN_INITIAL_ROWS);
@@ -378,10 +379,11 @@ join_index_table(TessHashJoinState *state)
 		uint64		duplicates;
 
 		CHECK_FOR_INTERRUPTS();
-		check(state, state->kernels->table_link_grouped(&state->table, chunk,
-														&from, NULL,
-														&duplicates,
-														&state->status));
+		check_table(state, chunk < read_back,
+					state->kernels->table_link_grouped(&state->table, chunk,
+													   &from, NULL,
+													   &duplicates,
+													   &state->status));
 		state->duplicates += duplicates;
 	}
 	check(state, state->kernels->table_stats(&state->table, &stats,
@@ -841,7 +843,7 @@ build_table(TessHashJoinState *state)
 	if (state->spill != NULL)
 		join_finish_spill_build(state);
 	else
-		join_index_table(state);
+		join_index_table(state, 0);
 	state->counters[JOIN_BUILDS]++;
 	state->built = true;
 }

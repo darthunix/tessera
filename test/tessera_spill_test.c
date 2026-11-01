@@ -1156,6 +1156,7 @@ typedef enum DamageKind
 	DAMAGE_ZERO,				/* a chunk of columns whose first row is 0 and not NULL */
 	DAMAGE_NEXT,				/* a block of values or of columns numbered one past its own */
 	DAMAGE_AGAIN,				/* a block of values numbered as the one read before it */
+	DAMAGE_MARK,				/* a chunk of records whose used mark ends no record */
 } DamageKind;
 
 typedef struct Damage
@@ -1245,6 +1246,12 @@ tessera_test_spill_damage_body(const char *name, const void *private_data, void 
 						damage->what == DAMAGE_REF ? TESS_SPILL_VALUE_REF(1 << 20, 0) : 0;
 			}
 			break;
+		case DAMAGE_MARK:
+			/* Records are 8 bytes long at least: a mark a byte short ends none. */
+			if (damage_now(damage, read->kind == TESS_SPILL_RECORDS &&
+						   *(uint64 *) read->body > TESS_TABLE_CHUNK_HEADER))
+				(*(uint64 *) read->body)--;
+			break;
 		default:
 			break;
 	}
@@ -1306,14 +1313,15 @@ module_from_pkglib(const char *module)
 /*
  * Damage what this backend reads back from now on: the nth block (from 1)
  * of the kind that `what` names (kind, number, words, rows, value, ref,
- * zero, next or again); with `what` NULL, no longer. The callbacks are
- * loaded from `module`, this module's file without its suffix.
+ * zero, next, again or mark); with `what` NULL, no longer. The
+ * callbacks are loaded from `module`, this module's file without its
+ * suffix.
  */
 Datum
 tessera_test_spill_damage(PG_FUNCTION_ARGS)
 {
 	static const char *const names[] = {"kind", "number", "words", "rows", "value", "ref", "zero",
-		"next", "again"};
+		"next", "again", "mark"};
 	char	   *library = module_from_pkglib(text_to_cstring(PG_GETARG_TEXT_PP(0)));
 	Damage		damage = {MyProcPid, DAMAGE_KIND, PG_GETARG_INT32(2)};
 	bool		found = false;

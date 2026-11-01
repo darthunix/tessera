@@ -43,7 +43,7 @@ a merge.
 ## 2. The spill as it is, checked
 
 The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
-2.16, 2.3, 2.14, 2.15, 2.11, 2.12 and 2.13, then 2.4 to 2.6.
+2.16, 2.3, 2.14, 2.15, 2.17, 2.11, 2.12 and 2.13, then 2.4 to 2.6.
 
 - [x] 2.1 Have outside reviews read the spill: the C of the nodes and
       of `runtime/spill.c`; the Rust of `tessera-spill`, of the spill
@@ -190,6 +190,16 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       no block of values. Check: a test of `join` with a skewed key
       whose text payload is NULL, compared with the core, that shows
       extra passes; `make installcheck`
+- [x] 2.17 Show by a test, then fix: a chunk of records damaged on
+      disk, which the hash table refuses as a join or a grouping
+      splits, links or merges it, fails the query as an internal
+      error, `XX000`, while every other damaged block is damaged data,
+      `XX001`. The table's C calls report bytes that are no table as a
+      wrong argument, as they report a wrong call; over chunks read
+      back the node reports either as damaged data. Check: cases of
+      `test/sql/spill_damage.sql` that damage a chunk's used mark at
+      each place that reads records back, each shown by a counter of
+      EXPLAIN to run; `make installcheck`; `make crosscheck`
 
 ## 3. The crate
 

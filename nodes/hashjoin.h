@@ -924,6 +924,9 @@ typedef struct TessHashJoinState
 
 /* Raise the error a kernel stored, if the call failed. */
 #define check(state, code) tess_status_check((code), &(state)->status)
+/* The same for a call of the table, damaged data over chunks read back. */
+#define check_table(state, read_back, code) \
+	((read_back) ? tess_spill_table_check : tess_status_check) ((code), &(state)->status)
 
 /* The partition of a hash on the current level of the spill; per row. */
 static inline uint32
@@ -941,7 +944,7 @@ extern void join_child_column(TessBatch *batch, int column, const TessRowMask *r
 extern Size join_chunk_len_for(Size largest);
 extern void join_decide_compact(TessHashJoinState *state);
 extern void join_forget_marks(TessHashJoinState *state);
-extern void join_index_table(TessHashJoinState *state);
+extern void join_index_table(TessHashJoinState *state, int read_back);
 extern Size join_memory(TessHashJoinState *state);
 extern Size join_mark_words(TessHashJoinState *state);
 extern Size join_marks_of(TessHashJoinState *state, Size chunk_len);

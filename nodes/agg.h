@@ -280,6 +280,9 @@ typedef struct TessAggState
 
 /* Raise the error a kernel or table call stored, if it failed. */
 #define check(state, code) tess_status_check((code), &(state)->status)
+/* The same for a call of the table, damaged data over chunks read back. */
+#define check_table(state, read_back, code) \
+	((read_back) ? tess_spill_table_check : tess_status_check) ((code), &(state)->status)
 
 /* The executor's side of the table, which the spill calls (agg.c). */
 extern void note_memory(TessAggState *state);

@@ -10,6 +10,7 @@
 
 #include "tessera/abi.h"
 #include "tessera/spill.h"
+#include "tessera/status.h"
 
 /* Declared in tessera/kernel_ops.h. */
 typedef struct TessKernelOps TessKernelOps;
@@ -133,6 +134,23 @@ extern void tess_spill_expect_columns(const void *chunk, int words, int64 rows);
 
 /* The block's number is below count, the chunks of its kind written. */
 extern void tess_spill_expect_number(const TessSpillHeader *header, uint64 count);
+
+/*
+ * Raise the ERROR a call of the hash table over chunks of records read
+ * back stored in status. The table refuses bytes that are no table as it
+ * refuses a wrong call, TESS_ERROR_INVALID_ARGUMENT; over chunks read
+ * back either is taken as damaged data, its message kept. Another failure
+ * is raised as tess_status_report raises it.
+ */
+pg_noreturn extern void tess_spill_table_report(const TessStatus *status);
+
+/* tess_status_check for a call of the hash table over chunks of records read back. */
+static inline void
+tess_spill_table_check(TessStatusCode code, const TessStatus *status)
+{
+	if (code != TESS_OK)
+		tess_spill_table_report(status);
+}
 
 /*
  * Every value that a word of the first ncolumns of a chunk of columns

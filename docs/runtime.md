@@ -510,8 +510,10 @@ the value a reference names only when it lies whole inside a chunk of
 values that was read, by the length its type gives
 (`tess_spill_value_of`, `tess_spill_value_fits`); a reader that reads a
 value many times checks every value of a chunk once, when it loads it,
-with `tess_spill_columns_check_values`. Each failure is damaged data,
-SQLSTATE `XX001`.
+with `tess_spill_columns_check_values`. A call of the hash table over
+chunks of records read back is checked with `tess_spill_table_check`,
+which reports the table's refusal of a chunk as damaged data, not as a
+wrong argument. Each failure is damaged data, SQLSTATE `XX001`.
 
 ## Named plan data
 

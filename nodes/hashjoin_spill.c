@@ -1046,6 +1046,8 @@ spill_reserve(TessHashJoinState *state)
  * kernel to its partition's chunk, its by-reference values, found through
  * values (the bases of the value chunks it refers to), copied into its
  * partition's value chunks, and its hash into the level's Bloom filter.
+ * lens, of a chunk read back, are the value chunks' lengths: its values
+ * are checked against them, and a chunk the split refuses is damaged.
  */
 void
 join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values,
@@ -1082,11 +1084,12 @@ join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *va
 		int			full;
 		uint64		bits;
 
-		check(state, state->kernels->table_split(&side->ref, side->nkeys, side->payload_size,
-												 side->current, spill->npartitions,
-												 spill->shift, source, &from,
-												 JOIN_COMPACT_ROWS, offsets, hashes,
-												 &count, &full, &state->status));
+		check_table(state, lens != NULL,
+					state->kernels->table_split(&side->ref, side->nkeys, side->payload_size,
+												side->current, spill->npartitions,
+												spill->shift, source, &from,
+												JOIN_COMPACT_ROWS, offsets, hashes,
+												&count, &full, &state->status));
 		bits = count == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << count) - 1;
 		if (count > 0 && spill->bloom != NULL)
 			check(state, (spill->shared ? state->kernels->bloom_add_atomic :
@@ -1432,13 +1435,13 @@ join_finish_spill_build(TessHashJoinState *state)
 	state->values.nchunks = side->nvalues;
 	spill->indexed = true;
 	if (spill->parent == NULL)
-		join_index_table(state);
+		join_index_table(state, 0);
 	else
 	{
 		uint64		buckets = state->counters[JOIN_BUCKETS];
 
 		/* The buckets count for the build, not for a level below. */
-		join_index_table(state);
+		join_index_table(state, 0);
 		state->counters[JOIN_BUCKETS] = buckets;
 	}
 }
@@ -1722,6 +1725,7 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 	uint64		rows = 0;
 	Size		room;
 	bool		values = false;
+	int			nread;
 
 	drop_piece(state);
 	room = whole ? SIZE_MAX : spill_room(state);
@@ -1788,6 +1792,7 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 		rows += (header.len - TESS_TABLE_CHUNK_HEADER) / record;
 		records = true;
 	}
+	nread = state->table.nchunks;
 	if (spill->carried == NULL)
 	{
 		/* The file is done: the tail goes with the last piece. */
@@ -1817,7 +1822,7 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 	state->values.bases = side->value_bases;
 	state->values.lens = side->value_lens;
 	state->values.nchunks = side->nvalues;
-	join_index_table(state);
+	join_index_table(state, nread);
 	/* The buckets count for the build, not for each partition. */
 	state->counters[JOIN_BUCKETS] = buckets;
 	/* Duplicates the resident table did not have: the pairs go compact. */
