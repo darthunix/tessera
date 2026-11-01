@@ -466,8 +466,8 @@ typedef struct JoinSpill
 	/* The outer child is done: the partitions on disk are joined in turn. */
 	bool		joining;
 	/*
-	 * The resident partitions' index is made: its bytes are the table's
-	 * now, no longer estimated per resident row.
+	 * The resident partitions' index is made, or the shared table's: its
+	 * bytes are the table's now, no longer reserved by the spill.
 	 */
 	bool		indexed;
 	/* The outer child returned its last batch. */

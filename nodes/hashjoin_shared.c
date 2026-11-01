@@ -996,6 +996,8 @@ shared_flush(TessHashJoinState *state)
 	}
 	join_side_compact(side);
 	tess_spill_finish(side->file);
+	/* The resident rows are the shared table's: so is their index. */
+	spill->indexed = true;
 }
 
 /*
