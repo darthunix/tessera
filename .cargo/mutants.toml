@@ -13,7 +13,8 @@
 # models are not the product. The table's loom models, their memory and
 # the model table (table/loom/) compile only with --cfg loom, which a
 # mutant's build lacks: each of their mutants would survive unseen. So do
-# the table's proofs by Kani (table/proofs.rs), built only under Kani.
+# the proofs by Kani (the table's table/proofs.rs, the float casts'
+# float/proofs.rs), built only under Kani.
 exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
@@ -21,6 +22,7 @@ exclude_globs = [
     "**/loom.rs",
     "crates/relhash/src/table/loom/**",
     "crates/relhash/src/table/proofs.rs",
+    "crates/tessera-kernels/src/float/proofs.rs",
     "crates/tessera-kernels/src/simd/avx2.rs",
 ]
 

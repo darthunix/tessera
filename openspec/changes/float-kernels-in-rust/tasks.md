@@ -56,7 +56,7 @@ named in a task comes on top.
       patterns; the batch functions over NULLs, sparse and dense
       selections, more than one word, and the first error at a later
       row. Check: `cargo test --locked -p tessera-kernels float`.
-- [ ] 4.2 A Kani proof that a cast to an integer accepts exactly the
+- [x] 4.2 A Kani proof that a cast to an integer accepts exactly the
       floats whose rounded value is in range, and gives that value, for
       each source and target width, run by the Kani job of `ci.yml`.
       Check: `cargo kani --harness-timeout 600 -Z unstable-options -p
