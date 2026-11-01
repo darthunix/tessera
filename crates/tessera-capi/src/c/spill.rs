@@ -519,7 +519,9 @@ impl RowValues for DatumRows<'_> {
 /// valid for `'a`.
 #[inline]
 unsafe fn datum_bytes<'a>(datum: u64, typlen: i16) -> Result<&'a [u8]> {
-    let pointer = datum as usize as *const u8;
+    // A Datum is an integer that holds a pointer C made: its provenance
+    // is exposed, which Miri takes on trust and says so.
+    let pointer = core::ptr::with_exposed_provenance::<u8>(datum as usize);
     ensure!(!pointer.is_null(), "a null by-reference value");
     // SAFETY: the caller's contract.
     unsafe {

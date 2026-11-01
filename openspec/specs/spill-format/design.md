@@ -683,7 +683,7 @@ table that spills, in [hash-table](../hash-table/design.md).
 - The unit tests of `crates/tessera-spill/src/lib.rs`, `pack.rs` and
   `columns.rs`.
 - `crates/tessera-capi/tests/spill.rs` and `tests/table.rs`: the entry
-  points.
+  points, each by a test, also under Miri in CI.
 - `test/sql/spill.sql` with `test/tessera_spill_test.c`: the sets of
   files; `test/sql/table.sql`: the header through the C API.
 - `test/sql/spill_damage.sql` with `test/tessera_spill_test.c`: blocks

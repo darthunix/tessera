@@ -19,7 +19,9 @@ compile_error!("the varlena headers here are little-endian's");
 /// unchanged for `'a`.
 #[inline(always)]
 pub(super) unsafe fn varlena_data<'a>(datum: u64) -> Option<&'a [u8]> {
-    let pointer = datum as usize as *const u8;
+    // A Datum is an integer that holds a pointer C made: its provenance
+    // is exposed, which Miri takes on trust and says so.
+    let pointer = core::ptr::with_exposed_provenance::<u8>(datum as usize);
     if pointer.is_null() {
         return None;
     }
