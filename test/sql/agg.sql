@@ -310,6 +310,9 @@ CREATE TABLE agg_regrow AS SELECT g % 300000 AS k, g AS v FROM generate_series(1
 ANALYZE agg_regrow;
 SET work_mem = '128kB';
 SET enable_sort = off;
+-- In a build with assertions every note of the node's memory checks its
+-- count of the table against the chunks it owns and its index.
+-- spec: table-memory/Groups read back and merged
 SELECT agg_same($$SELECT k, count(*), sum(v) FROM agg_regrow GROUP BY k$$) NOT LIKE 'MISMATCH%' AS same;
 RESET enable_sort;
 DROP TABLE agg_regrow;

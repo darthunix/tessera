@@ -23,15 +23,11 @@
  * (tess_table_combine). A partition too large to merge is split first by
  * the next bits of the hash into a level of its own.
  *
- * The chunk arrays keep two slots first: AGG_SOURCE, empty or a chunk read
- * back for a merge or a split, and AGG_EMPTY, an empty chunk a partition
- * without one appends to, which sends its rows back for a chunk.
+ * The chunk arrays keep two slots first, AGG_SOURCE and AGG_EMPTY (agg.h).
  */
 #define AGG_SPILL_MIN_CHUNK (8 * 1024)
 #define AGG_SPILL_MIN_PARTITIONS 4
 #define AGG_SPILL_MAX_PARTITIONS 1024
-#define AGG_SOURCE 0
-#define AGG_EMPTY 1
 
 /* A partition: its chunks in memory, the last the one it appends to. */
 typedef struct AggPart
@@ -376,6 +372,7 @@ agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 	int			nchunks = 2;
 	Size		size;
 	void	   *old = state->table.index;
+	Size		old_size = old != NULL ? state->table.index_len : 0;
 
 	for (int partition = 0; partition < spill->npartitions; partition++)
 		nchunks += spill->parts[partition].nchunks;
@@ -422,10 +419,11 @@ agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 		check(state, state->kernels->table_link(&state->table, chunk, &from, NULL,
 												NULL, &state->status));
 	}
+	state->table_bytes += size;
+	/* The old index is freed last: the highest moment, both alive. */
+	note_memory_alive(state, old_size);
 	if (old != NULL)
 		pfree(old);
-	state->table_bytes += size;
-	note_memory(state);
 }
 
 /*
@@ -701,6 +699,8 @@ agg_combine(TessAggState *state, AggSpill *spill, AggPart *part, void *base,
 		state->chunk_bases[*dest] = agg_new_chunk(state, spill);
 		state->chunk_lens[*dest] = spill->chunk_len;
 		part_push(spill, part, state->chunk_bases[*dest]);
+		state->table_bytes += spill->chunk_len;
+		note_memory(state);
 	}
 	state->chunk_bases[AGG_SOURCE] = spill->source_empty;
 	state->chunk_lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
@@ -775,6 +775,8 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 	state->table.nchunks = nchunks;
 	state->table.index = new_index(state, capacity, &size);
 	state->table.index_len = size;
+	/* The table is the partition's chunks and this index; combines add. */
+	state->table_bytes = (Size) (nchunks - AGG_EMPTY - 1) * spill->chunk_len + size;
 	check(state, state->kernels->table_create(state->table.index, size, state->nkeys, payload_size,
 											  capacity, &state->status));
 	for (int chunk = AGG_EMPTY + 1; chunk < nchunks; chunk++)
@@ -810,7 +812,6 @@ agg_merge(TessAggState *state, AggSpill *spill, int partition)
 	if (reader != NULL)
 		tess_spill_close(reader);
 	tess_spill_drop(spill->file, partition);
-	state->table_bytes = size + part->bytes;
 	note_memory(state);
 }
 

@@ -284,6 +284,15 @@ typedef struct TessAggState
 #define check_table(state, read_back, code) \
 	((read_back) ? tess_spill_table_check : tess_status_check) ((code), &(state)->status)
 
+/*
+ * Once the groups spill, the chunk arrays keep two slots first:
+ * AGG_SOURCE, empty or a chunk read back for a merge or a split, and
+ * AGG_EMPTY, an empty chunk a partition without one appends to, which
+ * sends its rows back for a chunk. Neither is the table's own.
+ */
+#define AGG_SOURCE 0
+#define AGG_EMPTY 1
+
 /* The executor's side of the table, which the spill calls (agg.c). */
 extern void note_memory(TessAggState *state);
 extern void note_memory_alive(TessAggState *state, Size alive);

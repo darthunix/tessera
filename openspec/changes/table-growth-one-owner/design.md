@@ -225,11 +225,12 @@ gives a lower bound.
 - The reload: in assert builds, each note checks that the node's count
   of its table equals the chunks it owns, its two reserved slots
   (the source and the empty chunk) left out, and the index it has;
-  the reload cases of `agg`, merging and regrowing, fail that check
-  before the fix. Apart from it, a reload whose rebuild, both indexes
-  of several MiB alive, is its highest moment gives a peak of at least
-  those indexes and the merged chunks, a bound the allocator can only
-  raise; with the rebuild's note left out, that bound fails.
+  the reload case of `agg` that merges and regrows fails that check
+  before the fix. The rebuild of a spilled table notes both indexes as
+  a regrow does, which the DISTINCT cases test; a case where that
+  rebuild is the node's highest moment was not found, since the node
+  evicts partitions first and frees more than the new index takes, so
+  that note is shown by review.
 - The serial join's index: 420 000 inner rows of one integer key and
   no payload at `hash_mem` = 16 MiB, serial, the plan checked to be
   TessHashJoin: it spills and its peak is within `hash_mem` (before:

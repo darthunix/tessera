@@ -20,11 +20,34 @@
  * every DISTINCT set; and alive, the bytes of an index that a new one has
  * replaced and that is not freed yet, which none of these counts.
  */
+#ifdef USE_ASSERT_CHECKING
+/*
+ * Whether the table's count of its bytes is its index and the chunks it
+ * owns: every chunk, and once it spills every one but the two slots it
+ * keeps for the chunks of others.
+ */
+static bool
+table_bytes_agree(TessAggState *state)
+{
+	Size		owned;
+
+	if (state->table.index == NULL)
+		return true;
+	owned = state->table.index_len;
+	for (int chunk = state->spill != NULL ? AGG_EMPTY + 1 : 0;
+		 chunk < state->table.nchunks; chunk++)
+		owned += state->table.chunk_lens[chunk];
+	return owned == state->table_bytes;
+}
+#endif
+
 void
 note_memory_alive(TessAggState *state, Size alive)
 {
 	Size		memory = state->spill == NULL ? state->table_bytes :
 		agg_spill_memory(state);
+
+	Assert(table_bytes_agree(state));
 
 	if (state->has_distinct)
 		memory += agg_distinct_bytes(state);

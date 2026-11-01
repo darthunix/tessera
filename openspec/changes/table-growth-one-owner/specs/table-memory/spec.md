@@ -47,11 +47,11 @@ each process's most, which need not have come at the same time.
 
 #### Scenario: Groups read back and merged
 - **WHEN** a grouping reads a partition back, merges it and rebuilds
-  its index
-- **THEN** Memory Usage is at least the merged chunks with both the
-  old and the new index, and the node's count of its table equals its
-  chunks and the index it has
-- **Verified by:** pending
+  its index larger, in a build with assertions
+- **THEN** at every note of its memory the node's count of its table
+  equals the chunks it owns and the index it has
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Groups read back and merged`
 
 #### Scenario: DISTINCT over no rows
 - **WHEN** a grouping with two DISTINCT aggregates reads no rows
