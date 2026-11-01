@@ -250,7 +250,9 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       a level below, and the bits of the hash each level takes, with
       the differences of each node as parameters. The join, the shared
       join, the grouping and the estimate in the grouping's planner use
-      it. Check: `make installcheck`; the machine code
+      it, and so do the tables in memory, whose chunks past the first
+      take its length through `table_chunk_len` of `nodes/`. Check:
+      `make installcheck`; the machine code
 - [ ] 3.10 Make one writer and one reader of a chunk of columns, and
       move the grouping's rows to them; the copy of 2.2 stays before
       the writer. Check: `make installcheck`; `cargo ab measure` of

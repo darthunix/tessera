@@ -76,7 +76,7 @@ as it goes.
       of 8; `join_chunk_len_for` and the grouping's formula go. Check: a
       Rust test of `tess_spill_chunk_len` at the six limits of the
       design; the disassembly of `nodes` read
-- [ ] 4.4 Bring the documents up to date: the design of `hash-table`
+- [x] 4.4 Bring the documents up to date: the design of `hash-table`
       names the one owner; `docs/nodes.md` on Memory Usage; task 3.9 of
       `spill-crate` moves the rule with its callers, the tables in
       memory included. Check: `.github/scripts/check-specs.sh`

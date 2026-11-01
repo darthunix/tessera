@@ -1472,7 +1472,12 @@ shows the totals.
 
 `EXPLAIN` shows the grouping expressions as the core's `Group Key`,
 `HAVING` as the core's `Filter` and `Partial Mode: Partial` under a
-`Gather`; with `ANALYZE` and `GROUP BY`, the table's `Memory Usage` and,
+`Gather`; with `ANALYZE` and `GROUP BY`, the table's `Memory Usage`, the
+most its tables took at once in one process (their chunks and indexes,
+both indexes while one replaces the other, the sets of `DISTINCT`
+aggregates from their first index on, the chunks a reload merges, and
+what it counted of its spill; under a `Gather` the sum of each
+process's most), and,
 for a table that spilled, `Batches`, the most partitions of a level, and
 `Disk Usage`, the bytes written, as the core's hashed aggregate shows
 them; with `VERBOSE` too, the batches and rows read from the child, the
@@ -1986,8 +1991,9 @@ clauses as `Hash Cond`, `Shared Table` for a shared table, the residual ones tha
 Join Filter` and the others as `Join Filter`, and an outer join's filters
 as `Batch Filter` and `Filter`. With `ANALYZE` it adds what the core's
 hash join and hash show: the bucket count of the last table built,
-`Memory Usage`, the most the table, the copies of inner values and
-spilling took, `Overrun`, what of it exceeded `hash_mem` (shown only
+`Memory Usage`, the most the table (its chunks and, once made, its
+index), the copies of inner values and spilling took at once,
+`Overrun`, what of it exceeded `hash_mem` (shown only
 then: a partition larger than it is joined whole), for a table that
 spilled `Batches`, its partitions, and `Disk Usage`, the bytes written by
 both sides, `Rows Removed by Join Filter`, `Rows Removed by Filter` and
