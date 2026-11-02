@@ -129,7 +129,11 @@ it lies before the column, and starts it again from the row's start,
 counted as restarted, when it has passed the column too, so that
 columns read in ascending order behind the row's cursor walk the tuple
 once between them, not once each; an expression that compares two
-columns reads the one before in the tuple first. A by-value column at
+columns reads the one before in the tuple first. The second cursor is
+set at a row's first restart, a bit a row, and not when the row is
+appended, which would cost every scan a store a row (2 % to 5 % of
+TPC-H Q3, Q6, Q10 and Q12); TPC-H Q1 and Q21 take 7 % to 13 % less
+(see [2026-11-02-deform-without-restarts](benchmarks/2026-11-02-deform-without-restarts/README.md)). A by-value column at
 a cached offset is read at that offset in a plain loop with the width
 fixed per call, for the rows whose tuple has the attribute and no NULL
 before it, leaving their cursors alone, since a later column starts from

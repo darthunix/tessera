@@ -30,7 +30,7 @@ closed. The maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
 order. The maintainer took six entries out of turn on 2026-11-02, after
 an analysis of TPC-H with Tessera on, in the order
-`deform-without-restarts`, `bpchar-constant-compare`,
+`deform-without-restarts` (done), `bpchar-constant-compare`,
 `right-anti-join`, `agg-dependent-columns`, `early-key-filter`,
 `batch-index-join`:
 
@@ -164,31 +164,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
 
 ## Entries
 
-### deform-without-restarts
-
-A row's columns read without walking the tuple again from its start.
-
-- **What:** A heap batch keeps, beside each row's cursor, the cursor of
-  its last restart, so that columns read in ascending order before the
-  row's cursor continue from the previous one instead of from the
-  tuple's start; an expression asks its columns in the order of their
-  attributes.
-- **Why:** `deform` throws away the cursor of a restart. TPC-H Q1 reads
-  `l_shipdate` (attribute 11) in its filter and then attributes 5 to 10
-  in TessAgg, each from the tuple's start: 35.5 M of its 41.5 M
-  deformed values are restarts, 45 steps a row where 10 would do.
-  Restarts are 6.0 M of 16.0 M in Q21 (`l_receiptdate >
-  l_commitdate` asks 13 before 12), 4.5 M of 10.5 M in Q12, 1.3 M in
-  Q6, 1.1 M in Q19 (EXPLAIN VERBOSE, SF 1, serial). `deform` is 29 % to
-  45 % of the profiles of Q1, Q14, Q19 and Q21.
-- **Known:** No change of the C API: the cursor and the order stay
-  inside the heap batch and the expression compiler. A walk that stores
-  the values it passes would save the last restart too, but changes
-  `tess_deform_advance` of the public header.
-- **Depends on:** nothing.
-- **Capabilities:** batch-format, aggregate, filter
-- **Size:** small: one pull request.
-
 ### bpchar-constant-compare
 
 char(n) compared with a constant without trimming both on every row.
@@ -256,8 +231,8 @@ small builds.
 - **Known:** The spec of `key-filter` says a TessFilter of batch clauses
   alone refuses a filter: the proposal changes it, and the maintainer
   approves the proposal before the code.
-- **Depends on:** `deform-without-restarts`, which changes what the
-  clauses cost.
+- **Depends on:** nothing; measure the clauses' cost again first,
+  since a row's columns are no longer walked again.
 - **Capabilities:** key-filter
 - **Size:** medium: one pull request.
 

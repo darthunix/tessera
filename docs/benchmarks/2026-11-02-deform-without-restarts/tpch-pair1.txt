@@ -1,0 +1,15 @@
+A SF 1, schema pk, serial, work_mem 256MB, jit off, 7 pairs ABBA after 1 warm-up; 74d7e39823d3 at 2026-11-02 15:49:19.488596+07, PostgreSQL 20devel, AC Power
+B SF 1, schema pk, serial, work_mem 256MB, jit off, 7 pairs ABBA after 1 warm-up; 2f75754d18cb at 2026-11-02 15:50:24.489528+07, PostgreSQL 20devel, AC Power
+┌───────────────────────────────────────┬──────────┬──────────┬────────┬───────────────┬─────────┬──────────┬──────────┐
+│ query                                 ┆ on A, ms ┆ on B, ms ┆ B/A on ┆ 95 % interval ┆ B/A off ┆ on/off A ┆ on/off B │
+╞═══════════════════════════════════════╪══════════╪══════════╪════════╪═══════════════╪═════════╪══════════╪══════════╡
+│ Q01 pricing summary report            ┆    765.0 ┆    711.1 ┆  0.929 ┆   0.912–0.940 ┆   1.008 ┆    0.483 ┆    0.445 │
+│ Q03 shipping priority                 ┆    142.3 ┆    145.8 ┆  1.024 ┆   0.995–1.059 ┆   1.024 ┆    0.534 ┆    0.534 │
+│ Q06 forecasting revenue change        ┆    127.6 ┆    133.0 ┆  1.042 ┆   1.032–1.063 ┆   1.031 ┆    0.669 ┆    0.677 │
+│ Q10 returned item reporting           ┆    209.3 ┆    213.3 ┆  1.019 ┆   1.007–1.043 ┆   1.043 ┆    0.688 ┆    0.672 │
+│ Q12 shipping modes and order priority ┆    293.0 ┆    287.8 ┆  0.982 ┆   0.963–1.013 ┆   1.028 ┆    0.689 ┆    0.658 │
+│ Q14 promotion effect                  ┆    134.1 ┆    132.9 ┆  0.991 ┆   0.976–1.012 ┆   1.014 ┆    0.722 ┆    0.705 │
+│ Q19 discounted revenue                ┆    300.7 ┆    297.0 ┆  0.988 ┆   0.967–0.996 ┆   1.015 ┆    0.874 ┆    0.850 │
+│ Q21 suppliers who kept orders waiting ┆    298.1 ┆    258.6 ┆  0.867 ┆   0.848–0.885 ┆   1.017 ┆    0.857 ┆    0.731 │
+└───────────────────────────────────────┴──────────┴──────────┴────────┴───────────────┴─────────┴──────────┴──────────┘
+geometric mean over 8 queries: B/A on 0.979, B/A off 1.022 (the control: the core is the same)
