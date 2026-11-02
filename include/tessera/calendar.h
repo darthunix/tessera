@@ -110,6 +110,22 @@ extern TessStatusCode tess_date_to_timestamp(const TessCalendarArg *arg,
 											 TessRowMask *non_nulls,
 											 TessStatus *status);
 
+/*
+ * The selected rows of a date column whose non-NULL date satisfies
+ * date op timestamp, as the core compares them (date_cmp_timestamp): rows
+ * is narrowed to them. The timestamp becomes once an operator and a bound
+ * in days, and the dates are filtered as int4 values: an infinite
+ * timestamp is the infinite date of its sign, a finite one its day,
+ * rounded down, and the time into it; a finite date past the last
+ * timestamp stays above every finite bound and below infinity.
+ */
+extern TessStatusCode tess_date_timestamp_filter(const TessDatumColumn *column,
+												 const TessRowMask *prepared,
+												 TessRowMask *rows,
+												 TessCompareOp op,
+												 int64 timestamp,
+												 TessStatus *status);
+
 /* date(timestamp): the day, rounded down. */
 extern TessStatusCode tess_timestamp_to_date(const TessCalendarArg *arg,
 											 const TessRowMask *rows,

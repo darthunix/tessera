@@ -299,6 +299,12 @@ SQLSTATE 22008 and the core's message, at the first row the core would.
   date plus or minus days, the days between dates.
 - `tess_date_to_timestamp` and `tess_timestamp_to_date(arg, rows, values,
   non_nulls, status)`: the casts.
+- `tess_date_timestamp_filter(column, prepared, rows, op, timestamp,
+  status)`: the selected dates where `date op timestamp`, as
+  `date_cmp_timestamp` orders them: the timestamp becomes once an operator
+  and a bound in days (`calendar::date_bound`), and the int4 filter
+  narrows `rows`. A Kani proof checks the bound against the core's
+  comparison for every date, day, time of day and operator.
 - `tess_timestamp_trunc(unit, arg, rows, values, non_nulls, status)`:
   `date_trunc` of a timestamp; `tess_timestamp_trunc_local(unit, locals,
   rows, values, days, rest, status)` the same over local times, a unit of a
