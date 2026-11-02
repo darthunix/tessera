@@ -94,6 +94,13 @@ asking for one:
   Summarize a report as how many cases have fewer, the same and more
   instructions, with the median change, before judging it: a net gain
   still prints failures.
+- **A branch is judged on inputs the predictor has not learned.** The
+  predictor learns any input it meets call after call, not only regular
+  patterns. A branch against a choice made as data is judged on the
+  benchmark cases drawn at random, which take a ring of inputs that it
+  cannot learn; the regular cases show a call whose branches it knows.
+  The [benchmarks' README](../crates/tessera-capi/benches/README.md)
+  lists both kinds and where the inputs of a ring lie.
 - **More cycles with fewer instructions** is first compared with a run
   of three repeats, then with the address of the loop's head. A function
   moved by 16 bytes against a 64-byte line has cost 5 %: build both
