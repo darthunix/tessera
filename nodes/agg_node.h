@@ -11,6 +11,7 @@
 #include "common/hashfn.h"
 
 #include "agg.h"
+#include "key_kind.h"
 
 /* The table's first capacity when the planner expects fewer groups. */
 #define AGG_INITIAL_GROUPS 256
@@ -221,12 +222,13 @@ struct KeyDict
 	int16		typlen;
 	bool		typbyval;
 	/*
-	 * Equal values are equal bytes, and the hash function hashes them
-	 * (text and varchar under a deterministic collation, bytea): a value
-	 * neither compressed nor external is hashed and compared here, without
-	 * a call through fmgr, which looked the collation up on every call.
+	 * The bytes the type's hash and equality read, where they read bytes
+	 * (tess_key_bytes: text and varchar under a deterministic collation,
+	 * bytea, char(n) without its trailing blanks): a value neither
+	 * compressed nor external is hashed and compared here, without a call
+	 * through fmgr, which looked the collation up on every call.
 	 */
-	bool		bytewise;
+	TessKeyBytes bytes;
 	/*
 	 * The values by their numbers, copies in the context: one after
 	 * another in blocks of the dictionary's own, without a chunk's header

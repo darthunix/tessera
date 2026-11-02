@@ -114,7 +114,10 @@ A grouping and a join make that number in different ways.
 
 - **A grouping** keeps a dictionary of the values it has met: a hash
   table of the node's own, in C, that hashes and compares the values
-  with the type's functions. The first of each set of equal values
+  with the type's functions, or, where those functions read the
+  value's bytes (text, char(n) without its trailing blanks, bytea),
+  hashes and compares the bytes itself, as the functions would. The
+  first of each set of equal values
   gets the next number, and the table groups the rows by the numbers.
   Equal values get one number, so they make one group, and different
   values never share a number, so a comparison of the numbers is

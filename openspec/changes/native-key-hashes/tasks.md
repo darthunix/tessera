@@ -8,7 +8,7 @@
 
 ## 2. The work
 
-- [ ] 2.1 `tess_key_bytes`, and the dictionary by it, char(n) included;
+- [x] 2.1 `tess_key_bytes`, and the dictionary by it, char(n) included;
       tests in `types.sql`. Check: `make installcheck` on PostgreSQL
       master with assertions; the tests fail without the trim
 - [ ] 2.2 The join's hash by the bytes; tests in `join.sql`. Check: the

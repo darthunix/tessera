@@ -33,27 +33,35 @@ keydict_plain(Datum value)
 	return !VARATT_IS_COMPRESSED(pointer) && !VARATT_IS_EXTERNAL(pointer);
 }
 
-/* As hashtext and hashvarlena hash a value: its bytes, whatever its header. */
-static inline uint32
+/*
+ * As the type's hash function hashes a value: of a key of bytes
+ * (tess_key_bytes), its bytes, whatever its header, to the same hash.
+ */
+static pg_always_inline uint32
 keydict_value_hash(KeyDict *dict, Datum value)
 {
-	if (dict->bytewise && keydict_plain(value))
-		return hash_bytes((const unsigned char *) VARDATA_ANY(DatumGetPointer(value)),
-						  VARSIZE_ANY_EXHDR(DatumGetPointer(value)));
+	const char *data;
+	Size		len;
+
+	if (dict->bytes != TESS_KEY_BYTES_NONE &&
+		tess_key_value_bytes(value, dict->bytes, &data, &len))
+		return hash_bytes((const unsigned char *) data, len);
 	return DatumGetUInt32(FunctionCall1Coll(&dict->hashfn, dict->collation, value));
 }
 
-static inline bool
+/* Inline in the table's loops, as before char(n) made it longer. */
+static pg_always_inline bool
 keydict_value_equal(KeyDict *dict, Datum a, Datum b)
 {
-	if (dict->bytewise && keydict_plain(a) && keydict_plain(b))
-	{
-		Size		len = VARSIZE_ANY_EXHDR(DatumGetPointer(a));
+	const char *a_data;
+	const char *b_data;
+	Size		a_len;
+	Size		b_len;
 
-		return len == VARSIZE_ANY_EXHDR(DatumGetPointer(b)) &&
-			memcmp(VARDATA_ANY(DatumGetPointer(a)), VARDATA_ANY(DatumGetPointer(b)),
-				   len) == 0;
-	}
+	if (dict->bytes != TESS_KEY_BYTES_NONE &&
+		tess_key_value_bytes(a, dict->bytes, &a_data, &a_len) &&
+		tess_key_value_bytes(b, dict->bytes, &b_data, &b_len))
+		return a_len == b_len && memcmp(a_data, b_data, a_len) == 0;
 	return DatumGetBool(FunctionCall2Coll(&dict->eqfn, dict->collation, a, b));
 }
 
@@ -287,7 +295,7 @@ key_dict_images_equal(KeyDict *dict, Oid type)
 {
 	TypeCacheEntry *entry;
 
-	if (dict->bytewise)
+	if (dict->bytes == TESS_KEY_BYTES_WHOLE)
 		return true;
 	entry = lookup_type_cache(type, TYPECACHE_BTREE_OPFAMILY);
 	return OidIsValid(entry->btree_opf) &&
@@ -307,10 +315,7 @@ agg_key_dict_create(TessAggState *state, Oid eqop, Oid type, Oid collation)
 	fmgr_info_cxt(get_opcode(eqop), &dict->eqfn, estate->es_query_cxt);
 	fmgr_info_cxt(hashproc, &dict->hashfn, estate->es_query_cxt);
 	dict->collation = collation;
-	dict->bytewise =
-		(get_opcode(eqop) == F_BYTEAEQ && hashproc == F_HASHVARLENA) ||
-		(get_opcode(eqop) == F_TEXTEQ && hashproc == F_HASHTEXT &&
-		 OidIsValid(collation) && pg_newlocale_from_collation(collation)->deterministic);
+	dict->bytes = tess_key_bytes(hashproc, get_opcode(eqop), collation);
 	get_typlenbyval(type, &dict->typlen, &dict->typbyval);
 	dict->forms = state->nkeys > 1 && !key_dict_images_equal(dict, type);
 	dict->context = AllocSetContextCreate(estate->es_query_cxt, "TessAgg key values",
