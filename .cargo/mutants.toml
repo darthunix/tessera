@@ -69,6 +69,10 @@ exclude_globs = [
 # share no bit and | is ^.
 # decimal::read_with keeps the rows of a word outside its selection and
 # adds the rows it found in it: the two share no bit, so | is ^.
+# The reference of the date bound's tests (calendar's module reference)
+# is test code: holds goes through both sides of each check, and the
+# reference's own branches give the same order as its general one at the
+# dates the tests reach, so a mutant of it changes no verdict.
 # OwnedTable::chunk_is_empty matters only when an append placed no row
 # in an empty chunk, a record larger than a chunk, which OwnedTable::new
 # refuses: false skips an error that never comes.
@@ -159,6 +163,7 @@ exclude_re = [
     "table/record\\.rs:438:22: replace == with != in Access<'r, R>::find$",
     "table/lanes\\.rs:121:18: replace == with != in probe_word$",
     "replace \\| with \\^ in place$",
+    "calendar\\.rs:.*reference::",
     "replace <impl Drop for Block>::drop with \\(\\)$",
     "<impl Token for Avx2>::get( -> Option<Self> with None)?$",
 ]
