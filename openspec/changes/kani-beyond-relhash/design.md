@@ -23,16 +23,19 @@ harness given 300 s; times are ratios more than absolutes, since other
 runs shared the machine:
 
 - the prepared divisor, checked against the `/` operator or against a
-  remainder: int32 with any dividend and divisor, int32 with fixed
+  remainder: int32 with any dividend and divisor, int32 with the fixed
   divisors 7 and 641, int64 with the divisor 7, and a 16-bit copy with
-  any of both: all timed out, with the default solver and with z3;
+  any of both: all timed out (int32 by 7 with z3 too). One fixed
+  divisor did verify, `i32::MAX`, whose multiplier has two bits set,
+  in 0.1 s;
 - the same divisors restricted to the powers of two, `±2^k` with `k`
   any shift, `i32::MIN` and `i64::MIN` among them, `Divisor::new` as it
   is: int32 verified in 2.1 s, int64 in 11.5 s;
 - the walk of `WordValues`, copied without `anyhow`, every call of the
-  reader checked inside it: by `next` in 120 s with a count of the
-  rows as its oracle, in 43 s with the set of rows seen; by `fold` in
-  175 s;
+  reader checked inside it and the rows counted: by `next` in 120 s,
+  by `fold` in 175 s. With the set of rows seen as its oracle and no
+  check inside the reader, `next` took 43 s; the harnesses here keep
+  both checks, and their time is measured when they are written;
 - the sort item in six shapes, from one int4 to two int8 and an int4
   over four words: under two seconds each;
 - `Decimal::round` with its division inside: scales 1 and 18 verified,
@@ -116,11 +119,19 @@ The approach, for each target:
 - **Will be:** the same as decision 1: its checks and its walk in a
   helper without `anyhow`, the error built outside it.
 - **Proofs** (`tessera-capi/src/column/proofs.rs`): with any selection,
-  readiness and NULL bits of up to two words (128 rows), a refusal
-  calls no reader; the reader is called for each selected, prepared
-  row once, in order, and for no other, also when a fold step fails.
-  The bound of two words reaches a full word and a sparse one after
-  it; the loop over words repeats the same body.
+  readiness and NULL bits of up to two words (128 rows):
+  - the reader is called only for selected, prepared rows, each once,
+    in increasing order, and the fold step gets the row read;
+  - a row count that differs from the selection's reads nothing;
+  - a word with an unprepared selected row is refused before any of
+    its rows is read, and nothing after it is read; the rows of the
+    words before it may have been read already, as today;
+  - a fold step that fails stops the walk: no row after it is read;
+  - with no refusal and no failure, every selected row is read.
+  Covers: a full word, a sparse one after it, a refusal of the second
+  word after reads of the first, and a failing fold step. The bound of
+  two words reaches each of these; the loop over words repeats the same
+  body.
 
 ### 3. The sort key's encoding without `anyhow` in its path
 
@@ -168,8 +179,11 @@ The approach, for each target:
 
 ### 5. The divisors by a multiplier: the maintainer chooses
 
-Kani cannot prove `quotient(n) == n / d` when `d` is not a power of
-two, at any width tried, 16 bits included. Two ways are left:
+Kani does not finish `quotient(n) == n / d` for a divisor by a
+multiplier in general, at any width tried, 16 bits included, nor for
+the fixed divisors 7 and 641; a single one, `i32::MAX`, verified. The
+change leaves these divisors out by choice of scope. Two ways are
+left:
 
 - **Keep the property tests** (the default): the divisors of every
   shape and the dividends where a wrong multiplier shows, both signs, at
@@ -186,11 +200,12 @@ two, at any width tried, 16 bits included. Two ways are left:
 
 ### 6. `Decimal::round` and `split` stay with their tests
 
-Both divide by a constant, a power of ten or the microseconds of a
-day, then correct the quotient by the rest in two or three lines. The
-division is beyond Kani where it matters (`round` at scales 3 and 9),
-and a proof of the correction alone would restate it. The tests keep
-both, as today.
+`round` divides by the power of ten of the decimal's scale, a
+constant for the scales 1 to 4 and picked at run time for 5 to 18;
+`split` divides by the microseconds of a day. Both then correct the
+quotient by the rest in two or three lines. The division is beyond
+Kani where it matters (`round` at scales 3 and 9), and a proof of the
+correction alone would restate it. The tests keep both, as today.
 
 ## What we do not do
 
@@ -210,7 +225,8 @@ both, as today.
 - [What the proofs do not reach] → a caller that passes another word's
   bits, or values shorter than its rows; the extraction of a batch's
   keys into slots and NULL bits before `encode`; the sort's 128-bit
-  key for items of two words; the division of `round` and `split`.
+  key for items of two words; `run_words`; a walk of `WordValues`
+  that mixes `next` and `fold`; the division of `round` and `split`.
   These stay with their tests.
 - [A new Kani or Rust may break the compilation of a harness, as
   `anyhow` does today] → Kani is pinned in CI; a failure there shows on

@@ -54,8 +54,9 @@ placed.
       decision 2), up to two words; `cargo kani -p tessera-capi` joins
       the Kani job; `.cargo/mutants.toml` excludes the file. Check:
       `cargo kani -p tessera-capi`, every cover satisfied; the
-      harnesses fail with the readiness check dropped and with a full
-      word read from its second row.
+      harnesses fail with the readiness check dropped, with a full
+      word read from its second row, and with the walk going on past a
+      failed fold step.
 
 ## 4. The sort key
 
@@ -95,9 +96,13 @@ placed.
 ## 7. The close
 
 - [ ] 7.1 Close the change: its folder goes and its entry leaves the
-      roadmap. The bounds of each proof stay in its module's
-      documentation and in the comment of the Kani job of `ci.yml`; the
-      divisors by a multiplier, `Decimal::round` and `split`, left out,
-      go into `openspec/roadmap.md` (an entry or "Not placed") with the
-      measured reasons; the pull request says what was proven, the Kani
+      roadmap. The decisions of the design go into a section "Proofs
+      by Kani" of `docs/kernels.md`: the checks a proof reaches live in
+      a helper that builds no `anyhow` error and takes the reader, and
+      why; what each proof covers and its bounds; what is left to the
+      tests and why. The bounds also stay in each proof module's
+      documentation and in the comment of the Kani job of `ci.yml`.
+      The divisors by a multiplier, `Decimal::round` and `split` go
+      into `openspec/roadmap.md` (an entry or "Not placed") with the
+      measured reasons. The pull request says what was proven, the Kani
       times, and what was left. Check: `.github/scripts/check-specs.sh`.

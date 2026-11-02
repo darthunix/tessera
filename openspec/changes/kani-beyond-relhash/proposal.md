@@ -25,19 +25,22 @@ The roadmap's entry `kani-beyond-relhash` named the divisors,
 - the sort item, in six shapes up to four words: under two seconds
   each;
 - the divisors by a power of two, any sign and shift: 2.1 s (int4) and
-  11.5 s (int8). Every other divisor tried, at 16, 32 and 64 bits,
-  timed out at 300 s, as did `Decimal::round` at scales 3 and 9.
+  11.5 s (int8). A divisor by a multiplier did not finish in 300 s,
+  in general at 16, 32 and 64 bits nor for the fixed divisors 7 and
+  641, though `i32::MAX` alone did; nor did `Decimal::round` at scales
+  3 and 9.
 
 ## What Changes
 
 - `WordValues::try_new` and `try_fold_words` are each checked and
   walked by a private helper that never builds an `anyhow` error and
   never calls the reader before its checks; the public functions only
-  turn the helper's reason into the same error. Proofs: a refusal calls
-  no reader; the reader is called for exactly the selected, prepared
-  rows in range, once each, in increasing order. `try_fold_words` is
-  proven over up to two words. `cargo kani -p tessera-core` and `-p
-  tessera-capi` join the Kani job of CI.
+  turn the helper's reason into the same error. Proofs: the reader is
+  called only for selected, prepared rows in range, once each, in
+  increasing order; a refused word is not read, nor anything after a
+  refusal or a failed fold step; with neither, every selected row is
+  read. `try_fold_words` is proven over up to two words. `cargo kani
+  -p tessera-core` and `-p tessera-capi` join the Kani job of CI.
 - Proofs of the sort key in `tessera-kernels`: for every pair of rows,
   their items compare as the rows do by their keys, NULL placed and a
   descending key reversed, and then by reference; in six shapes that
