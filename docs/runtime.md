@@ -123,8 +123,12 @@ Deformation resumes: every row keeps a `TessDeformCursor`
 offset in the tuple data, and `tess_deform_advance` moves it to one target
 attribute without materializing the ones in between, through cached
 offsets while they hold and by walking past the first variable-length or
-NULL attribute; a column before a row's cursor is deformed from the row's
-start with a local cursor and counted as restarted. A by-value column at
+NULL attribute. A column before a row's cursor goes through the row's
+back cursor, the cursor of its last restart: it continues that one when
+it lies before the column, and starts it again from the row's start,
+counted as restarted, when it has passed the column too, so that
+columns read in ascending order behind the row's cursor walk the tuple
+once between them, not once each. A by-value column at
 a cached offset is read at that offset in a plain loop with the width
 fixed per call, for the rows whose tuple has the attribute and no NULL
 before it, leaving their cursors alone, since a later column starts from

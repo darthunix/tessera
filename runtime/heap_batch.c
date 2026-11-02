@@ -57,25 +57,51 @@ struct TessHeapBatch
 	int			nrows;
 	bool		sealed;
 	TessHeapBatchStats stats;
+	/*
+	 * Per row, the cursor of its last restart: a column before the row's
+	 * cursor continues it when it lies before the column, so that columns
+	 * read in ascending order behind the row's cursor walk the tuple once
+	 * between them, not once each from its start. Set at a row's first
+	 * restart (back_set, a bit a row), so that appending a row stores no
+	 * more than before.
+	 */
+	TessDeformCursor *back_cursors;
+	uint64	   *back_set;
 };
 
-/* Deform one value, resuming the row's cursor or restarting before it. */
+/*
+ * The cursor of a row's column before the row's cursor: the cursor of the
+ * row's last restart when it lies before the column, else that one
+ * restarted from the tuple's start. Out of line, so that the common path
+ * of deform stays as it was.
+ */
+static pg_noinline TessDeformCursor *
+back_cursor(TessHeapBatch *heap, int row, AttrNumber attnum)
+{
+	TessDeformCursor *cursor = &heap->back_cursors[row];
+	uint64		bit = UINT64CONST(1) << (row % 64);
+
+	if ((heap->back_set[row / 64] & bit) == 0 || cursor->nvalid >= attnum)
+	{
+		tess_deform_cursor_init(cursor);
+		heap->back_set[row / 64] |= bit;
+		heap->stats.restarted_datums++;
+	}
+	return cursor;
+}
+
+/* Deform one value, resuming the row's cursor or, before it, its back cursor. */
 static void
 deform(TessHeapBatch *heap, int column, int row)
 {
 	AttrNumber	attnum = column + 1;
 	TessDeformCursor *cursor = &heap->cursors[row];
-	TessDeformCursor local;
 	Datum		value = (Datum) 0;
 	bool		isnull = false;
 	Size		offset = (Size) column * heap->capacity + row;
 
-	if (cursor->nvalid >= attnum)
-	{
-		tess_deform_cursor_init(&local);
-		cursor = &local;
-		heap->stats.restarted_datums++;
-	}
+	if (unlikely(cursor->nvalid >= attnum))
+		cursor = back_cursor(heap, row, attnum);
 	if (!tess_deform_advance(cursor, &heap->tuples[row], heap->tuple_desc,
 							 heap->first_non_guaranteed, attnum,
 							 &value, &isnull, false))
@@ -315,6 +341,9 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 									  mul_size(sizeof(HeapTupleData), config->capacity));
 	heap->cursors = MemoryContextAlloc(context,
 									   mul_size(sizeof(TessDeformCursor), config->capacity));
+	heap->back_cursors = MemoryContextAlloc(context,
+											mul_size(sizeof(TessDeformCursor), config->capacity));
+	heap->back_set = MemoryContextAllocZero(context, sizeof(uint64) * heap->nwords);
 	heap->pins = MemoryContextAlloc(context,
 									mul_size(sizeof(Buffer), config->capacity));
 	heap->values = MemoryContextAllocZero(context, mul_size(sizeof(Datum), nvalues));
@@ -387,6 +416,7 @@ tess_heap_batch_reset(TessHeapBatch *heap)
 {
 	unpin(heap);
 	memset(heap->deformed, 0, sizeof(uint64) * (Size) heap->ncolumns * heap->nwords);
+	memset(heap->back_set, 0, sizeof(uint64) * heap->nwords);
 	if (heap->decimal_values != NULL)
 		for (int column = 0; column < heap->ncolumns; column++)
 		{
