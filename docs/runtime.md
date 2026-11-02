@@ -128,7 +128,8 @@ back cursor, the cursor of its last restart: it continues that one when
 it lies before the column, and starts it again from the row's start,
 counted as restarted, when it has passed the column too, so that
 columns read in ascending order behind the row's cursor walk the tuple
-once between them, not once each. A by-value column at
+once between them, not once each; an expression that compares two
+columns reads the one before in the tuple first. A by-value column at
 a cached offset is read at that offset in a plain loop with the width
 fixed per call, for the rows whose tuple has the attribute and no NULL
 before it, leaving their cursors alone, since a later column starts from

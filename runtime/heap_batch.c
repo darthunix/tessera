@@ -10,6 +10,8 @@
 #include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
+#include "heap_batch_internal.h"
+
 struct TessHeapBatch
 {
 	TessBatch	batch;
@@ -560,6 +562,12 @@ tess_heap_batch_append_page(TessHeapBatch *heap, Buffer buffer,
 		tess_deform_cursor_init(&cursors[index]);
 	}
 	heap->nrows = first + n;
+}
+
+bool
+tess_batch_is_heap(const TessBatch *batch)
+{
+	return batch != NULL && batch->ops == &heap_ops;
 }
 
 TessBatch *
