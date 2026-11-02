@@ -1,0 +1,12 @@
+A SF 1, schema pk, 2 workers, work_mem 256MB, jit off, 7 pairs ABBA after 1 warm-up; 16128ec26696 at 2026-11-02 21:01:16.377104+07, PostgreSQL 20devel, Battery Power
+B SF 1, schema pk, 2 workers, work_mem 256MB, jit off, 7 pairs ABBA after 1 warm-up; b93dce4c2429 at 2026-11-02 21:01:39.64207+07, PostgreSQL 20devel, Battery Power
+┌───────────────────────────────────────┬──────────┬──────────┬────────┬───────────────┬─────────┬──────────┬──────────┐
+│ query                                 ┆ on A, ms ┆ on B, ms ┆ B/A on ┆ 95 % interval ┆ B/A off ┆ on/off A ┆ on/off B │
+╞═══════════════════════════════════════╪══════════╪══════════╪════════╪═══════════════╪═════════╪══════════╪══════════╡
+│ Q01 pricing summary report            ┆    281.4 ┆    280.9 ┆  0.998 ┆   0.977–1.021 ┆   0.978 ┆    0.439 ┆    0.447 │
+│ Q06 forecasting revenue change        ┆     71.0 ┆     72.6 ┆  1.021 ┆   0.954–1.092 ┆   1.100 ┆    0.764 ┆    0.709 │
+│ Q14 promotion effect                  ┆     78.7 ┆     78.9 ┆  1.003 ┆   0.967–1.025 ┆   1.026 ┆    0.856 ┆    0.836 │
+│ Q19 discounted revenue                ┆    109.0 ┆     50.0 ┆  0.458 ┆   0.449–0.477 ┆   1.020 ┆    0.746 ┆    0.335 │
+│ Q21 suppliers who kept orders waiting ┆    127.8 ┆    104.0 ┆  0.814 ┆   0.787–0.841 ┆   1.053 ┆    0.798 ┆    0.617 │
+└───────────────────────────────────────┴──────────┴──────────┴────────┴───────────────┴─────────┴──────────┴──────────┘
+geometric mean over 5 queries: B/A on 0.825, B/A off 1.035 (the control: the core is the same)

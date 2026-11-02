@@ -48,9 +48,10 @@ the hash; a row that fails has no pair.
 ## Goals and what they cost
 
 - **Drop the rows early** (question 1). The child checks the filter
-  before its first row-wise clause. The price is a hash of the keys in
-  the child for every row it checks, and the join hashes the rows that
-  pass once more to probe its table.
+  before its first row-wise clause, or before its batch clauses when it
+  has no other kind, while the filter drops more rows than they do. The
+  price is a hash of the keys in the child for every row it checks, and
+  the join hashes the rows that pass once more to probe its table.
 - **An offer the child may refuse** (question 2). A node kind may offer
   a callback that takes a filter; a parent offers its filter through the
   runtime, and keeps checking rows itself when the child refuses. A
@@ -112,8 +113,16 @@ held stays as it was.
 ## Who hands a filter down
 
 A hash join decides on its filter after its first 4096 probe rows, or
-at once when `tessera.join_bloom_ratio` is 1, and offers it to its
-outer child right after it builds it, when three things hold:
+at once when `tessera.join_bloom_ratio` is 1. A table of 4096 records
+at least gets one when fewer than that share of the probe rows found a
+record; a smaller table stays in the cache, where a probe costs about
+what a check of the filter does, so it gets one under the same share
+only for the child, which saves its clauses' work on the rows it
+removes, and the join drops it when the child refuses it. A shared
+table allocates the filter's words with its directory: a small one too,
+when the join may hand a filter down, since fewer than 4096 records
+take under 16 kB. The join offers the filter to its outer child, a
+small table's before it builds it, when three things hold:
 
 - **The join drops a row without a pair.** INNER and SEMI joins do, and
   so does a RIGHT join, which keeps the rows of its inner side and drops
@@ -135,11 +144,14 @@ the table keeps the filter below.
 
 ## Who takes a filter
 
-- **TessFilter** takes a filter when it has a row-wise clause: without
-  one, a check in the child saves nothing over the join's own. The keys
-  must be columns of its child, since a column the node computes exists
-  only after its clauses ran, and of the two kinds the table keeps as
-  words.
+- **TessFilter** takes a filter when it has a row-wise clause, or when
+  all its clauses run in batches. A batch clause still reads its column
+  for every row, and a row's columns are read in order, so a clause on
+  a late column walks most of the row: in TPC-H Q19 the batch clauses of
+  the lineitem scan took about 220 of the query's 290 ms on 6 M rows of
+  which the join kept 121. The keys must be columns of its child, since
+  a column the node computes exists only after its clauses ran, and of
+  the two kinds the table keeps as words.
 - **TessAppend** forwards the filter to the node of each partition, with
   the keys mapped to the partition's own columns, and takes it only when
   every partition does: the join checks no more rows once a node below
@@ -151,10 +163,23 @@ filter](spec.md#requirement-who-takes-a-filter).
 
 ## What the child removes
 
-TessFilter runs its clauses in the planner's order. It checks the filter
-once a batch, right before its first row-wise clause, after the batch
-clauses before it. It hashes the keys of the rows still taken as the
-join hashes them, and removes two kinds of row:
+TessFilter runs its clauses in the planner's order. With a row-wise
+clause it checks the filter once a batch, right before that clause,
+after the batch clauses before it, which the planner put in front as
+cheap guards. With batch clauses alone it checks the filter before them
+or after them, whichever drops more rows first: it counts the rows the
+filter and the clauses are shown and keep, and each time both were
+shown 4096 more rows, it puts the filter first when it kept no larger a
+share. A check of the filter costs about what a batch clause does, so
+the shares decide. They are taken again in every window because rows
+come in the table's order, which a clause's column may follow, and a
+window waits for both sides because the second sees only the rows the
+first kept. Behind the clauses the filter checks the rows they kept,
+as the join would. The second side's share is over the rows the first
+kept, so where the filter and the clauses keep the same rows, the rule
+may hold the costlier order, by under half a check a row. Wherever it
+is, it hashes the keys of the rows still taken as the join hashes them,
+and removes two kinds of row:
 
 - a row with a NULL key, which equals no key, so it has no pair;
 - a row whose hash the filter rejects.
@@ -195,6 +220,20 @@ core's `Rows Removed by Filter` of that node.
   what it needs instead.
 - **A filter for ANTI, LEFT and FULL joins.** They return the outer
   rows without a pair, so a child may not drop them.
+- **The filter first in every TessFilter.** Before a row-wise clause the
+  gain is already taken, and a batch clause the planner put first may
+  be the more selective one.
+- **One decision over the first rows.** A filter that keeps two rows in
+  five ahead of a clause on a column that follows the table's order
+  stayed first after the clause stopped keeping rows, 1.37 times as
+  slow as without the change.
+- **A window of the first side's rows alone.** In Q19 the clauses saw
+  about 10 rows of each 4096 behind the filter; the order turned back
+  and forth on that noise and lost half the gain.
+- **The join's share of rows found sent in `TessKeyFilter`.** It would
+  change the C API for a number the child measures itself.
+- **A filter the join checks itself for a small table.** Its probe stays
+  in the cache and costs about what the check does.
 
 ## Files
 
@@ -213,6 +252,8 @@ core's `Rows Removed by Filter` of that node.
 
 - `test/sql/join.sql`: joins of every type over a TessFilter, alone,
   shared and over TessAppend, with their plans, their rows against the
-  core's and the lines of EXPLAIN.
+  core's and the lines of EXPLAIN; small tables that hand a filter down
+  or drop it, alone and shared; a TessFilter of batch clauses alone that
+  checks the filter first, moves it behind its clauses and back.
 - `test/sql/unary.sql` with `test/tessera_unary_test.c`: the call
   through the runtime, a kind that refuses, and a filter too small.
