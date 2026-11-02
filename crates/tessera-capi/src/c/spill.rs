@@ -8,7 +8,7 @@ use std::mem::MaybeUninit;
 use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
-use relspill::{BlockHeader, BlockKind, HEADER_SIZE, columns, plan};
+use relspill::{BlockHeader, BlockKind, Bounds, HEADER_SIZE, columns, plan};
 use tessera_kernels::spill_columns::{self, ColumnChunks, RowValues, Value};
 use tessera_kernels::table::{Partitions, PayloadColumns};
 
@@ -74,7 +74,7 @@ pub extern "C" fn tess_spill_header_size() -> usize {
 
 /// `tess_spill_header_write`: lay out the header of a block in the first
 /// `tess_spill_header_size` bytes at `out`, checked as a reader would
-/// with `max_len` the most body bytes it accepts.
+/// with `max_len` the most body bytes it accepts, of every kind.
 ///
 /// # Safety
 ///
@@ -96,14 +96,14 @@ pub unsafe extern "C" fn tess_spill_header_write(
                 (!out.is_null()).then_some(out).context("a null buffer")?,
                 len,
             );
-            Ok(header.write(out, max_len)?)
+            Ok(header.write(out, Bounds::all(max_len))?)
         })
     }
 }
 
 /// `tess_spill_header_read`: read and check the header at `bytes`: its
 /// magic, version, kind, the set's `fingerprint`, a body of at most
-/// `max_len` bytes, the packed length its kind allows and the level.
+/// `max_len` bytes of every kind, the packed length its kind allows and the level.
 ///
 /// # Safety
 ///
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn tess_spill_header_read(
                     .context("a null buffer")?,
                 len,
             );
-            let block = BlockHeader::read(bytes, fingerprint, max_len)?;
+            let block = BlockHeader::read(bytes, fingerprint, Bounds::all(max_len))?;
             *header.as_mut().context("a null spill header")? = SpillHeader::from_block(block);
             Ok(())
         })

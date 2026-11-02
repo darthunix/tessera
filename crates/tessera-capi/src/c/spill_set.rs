@@ -7,10 +7,10 @@ use std::ffi::c_int;
 use std::mem::{offset_of, size_of};
 
 use anyhow::{Context, Result, bail, ensure};
-use relspill::BlockKind;
 use relspill::set::{
     Block, Config, Entry, Lists, MAX_RANGES, ReadConfig, ReadStep, Reader, Region, Step, Writer,
 };
+use relspill::{BlockKind, Bounds};
 
 use super::spill::SpillHeader;
 use super::status::{Code, Status, guard};
@@ -177,7 +177,9 @@ unsafe fn writer_at<'a>(writer: *mut Writer) -> Result<&'a mut Writer> {
     unsafe { writer.as_mut() }.context("a null writer")
 }
 
-/// `tess_spill_set_init`: make `*writer` the writer of an empty set.
+/// `tess_spill_set_init`: make `*writer` the writer of an empty set,
+/// whose chunks of records and of columns take at most `max_chunk` body
+/// bytes, and chunks of values at most `max_values`.
 ///
 /// # Safety
 ///
@@ -190,7 +192,8 @@ pub unsafe extern "C" fn tess_spill_set_init(
     npartitions: c_int,
     level: u32,
     fingerprint: u64,
-    max_len: u64,
+    max_chunk: u64,
+    max_values: u64,
     buffer_len: usize,
     shared: bool,
     status: *mut Status,
@@ -203,7 +206,10 @@ pub unsafe extern "C" fn tess_spill_set_init(
                 partitions: u32::try_from(npartitions).context("negative partitions")?,
                 level,
                 fingerprint,
-                max_len,
+                bounds: Bounds {
+                    chunk: max_chunk,
+                    values: max_values,
+                },
                 buffer_len,
                 shared,
             })?;
@@ -341,19 +347,22 @@ pub unsafe extern "C" fn tess_spill_set_drop(
     }
 }
 
-/// `tess_spill_set_stats`: the blocks and the bytes written, and the
-/// partitions whose lists hold blocks.
+/// `tess_spill_set_stats`: the blocks and the bytes written, the
+/// partitions whose lists hold blocks, and the longest body of values
+/// written, a reader's bound for values ([`Writer::read_bounds`]).
 ///
 /// # Safety
 ///
-/// `writer` must point to a writer; each of `blocks`, `bytes` and
-/// `files` must be null or writable; `status` as for every entry point.
+/// `writer` must point to a writer; each of `blocks`, `bytes`, `files`
+/// and `values` must be null or writable; `status` as for every entry
+/// point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_spill_set_stats(
     writer: *const Writer,
     blocks: *mut u64,
     bytes: *mut u64,
     files: *mut c_int,
+    values: *mut u64,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
@@ -369,6 +378,9 @@ pub unsafe extern "C" fn tess_spill_set_stats(
             }
             if let Some(files) = files.as_mut() {
                 *files = c_int::try_from(writer.files()).context("files past an int")?;
+            }
+            if let Some(values) = values.as_mut() {
+                *values = writer.read_bounds().values;
             }
             Ok(())
         })
@@ -506,20 +518,22 @@ fn read_config(
     level: u32,
     partition: c_int,
     fingerprint: u64,
-    max_len: u64,
+    bounds: Bounds,
 ) -> Result<ReadConfig> {
     Ok(ReadConfig {
         partitions: u32::try_from(npartitions).context("negative partitions")?,
         level,
         partition: u32::try_from(partition).context("a negative partition")?,
         fingerprint,
-        max_len,
+        bounds,
     })
 }
 
 /// `tess_spill_reader_own`: make `*reader` a reader of `partition` of the
 /// caller's own set, whose list is the `count` entries at `entries`
-/// ([`Reader::own`]); `*largest` gets the bytes of its largest block.
+/// ([`Reader::own`]), its blocks within `max_chunk` and `max_values` as
+/// [`tess_spill_set_init`] takes them; `*largest` gets the bytes of its
+/// largest block.
 ///
 /// # Safety
 ///
@@ -534,7 +548,8 @@ pub unsafe extern "C" fn tess_spill_reader_own(
     level: u32,
     partition: c_int,
     fingerprint: u64,
-    max_len: u64,
+    max_chunk: u64,
+    max_values: u64,
     entries: *const Entry,
     count: u64,
     largest: *mut u64,
@@ -544,7 +559,11 @@ pub unsafe extern "C" fn tess_spill_reader_own(
     unsafe {
         guard(status, || {
             let out = reader_at(reader)?;
-            let config = read_config(npartitions, level, partition, fingerprint, max_len)?;
+            let bounds = Bounds {
+                chunk: max_chunk,
+                values: max_values,
+            };
+            let config = read_config(npartitions, level, partition, fingerprint, bounds)?;
             let list = page_at(entries, usize::try_from(count)?)?;
             let made = Reader::own(config, list)?;
             ensure!(largest.is_aligned(), "a largest not aligned to 8");
@@ -556,7 +575,8 @@ pub unsafe extern "C" fn tess_spill_reader_own(
 }
 
 /// `tess_spill_reader_file`: make `*reader` a reader of `partition` of
-/// another participant's file of `file_len` bytes ([`Reader::file`]).
+/// another participant's file of `file_len` bytes ([`Reader::file`]),
+/// with the bounds of [`tess_spill_reader_own`].
 ///
 /// # Safety
 ///
@@ -569,7 +589,8 @@ pub unsafe extern "C" fn tess_spill_reader_file(
     level: u32,
     partition: c_int,
     fingerprint: u64,
-    max_len: u64,
+    max_chunk: u64,
+    max_values: u64,
     file_len: u64,
     status: *mut Status,
 ) -> Code {
@@ -577,7 +598,11 @@ pub unsafe extern "C" fn tess_spill_reader_file(
     unsafe {
         guard(status, || {
             let out = reader_at(reader)?;
-            let config = read_config(npartitions, level, partition, fingerprint, max_len)?;
+            let bounds = Bounds {
+                chunk: max_chunk,
+                values: max_values,
+            };
+            let config = read_config(npartitions, level, partition, fingerprint, bounds)?;
             *out = Reader::file(config, file_len)?;
             Ok(())
         })
