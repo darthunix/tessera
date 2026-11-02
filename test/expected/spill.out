@@ -214,6 +214,35 @@ SELECT tessera_test_spill_sqlstate(26);
  XX001: a spilled block at byte 0 of 120 bytes runs past the next block or the lists
 (1 row)
 
+-- A chunk of values longer than the bounds the participants agreed on
+-- is damaged data; another participant's file read before they agreed
+-- is a wrong call.
+SELECT tessera_test_spill_sqlstate(44);
+                      tessera_test_spill_sqlstate                       
+------------------------------------------------------------------------
+ XX001: a spilled block of 4096 bytes is not a multiple of 8 up to 1024
+(1 row)
+
+SELECT tessera_test_spill_sqlstate(45);
+                                 tessera_test_spill_sqlstate                                  
+----------------------------------------------------------------------------------------------
+ XX000: Tessera spill set reads another participant's file only after their bounds are agreed
+(1 row)
+
+-- An agreement below the bounds of the blocks a participant wrote, or of
+-- a serial set, is a wrong call.
+SELECT tessera_test_spill_sqlstate(46);
+                                     tessera_test_spill_sqlstate                                     
+-----------------------------------------------------------------------------------------------------
+ XX000: Tessera spill set agreed on bounds of 2097152 and 1024 bytes, below its own 2097152 and 4096
+(1 row)
+
+SELECT tessera_test_spill_sqlstate(47);
+                    tessera_test_spill_sqlstate                    
+-------------------------------------------------------------------
+ XX000: Tessera serial spill set has no participants to agree with
+(1 row)
+
 -- A row read back that refers to a value outside its chunk of values.
 SELECT tessera_test_spill_sqlstate(28);
                         tessera_test_spill_sqlstate                         

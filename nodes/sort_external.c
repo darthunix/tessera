@@ -38,6 +38,14 @@ sort_set_finish(TessSortState *state)
 	state->writing = NULL;
 }
 
+/* The bytes of a run's chunk of columns: block_rows rows of the run's words. */
+static Size
+run_chunk_len(TessSortState *state)
+{
+	return TESS_SPILL_COLUMNS_HEADER + sizeof(uint64) * (Size) state->block_rows *
+		(tess_spill_columns_null_lanes(sort_run_words(state)) + sort_run_words(state));
+}
+
 /* A run of no blocks yet, the next partition of the set being written. */
 static SortRun *
 run_create(TessSortState *state)
@@ -57,7 +65,7 @@ run_create(TessSortState *state)
 		config.npartitions = SORT_SET_RUNS;
 		config.level = 0;
 		config.fingerprint = ((uint64) state->ncolumns << 32) | (uint64) state->ext_words;
-		config.max_len = (uint64) MaxAllocHugeSize;
+		config.max_chunk = run_chunk_len(state);
 		config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_work_memory_limit());
 		set->file = tess_spill_create(&config);
 		state->writing = set;
@@ -118,8 +126,7 @@ writer_start(TessSortState *state, RunWriter *writer, SortRun *run)
 
 	writer->run = run;
 	writer->null_lanes = tess_spill_columns_null_lanes(sort_run_words(state));
-	writer->chunk_len = TESS_SPILL_COLUMNS_HEADER +
-		sizeof(uint64) * (Size) state->block_rows * (writer->null_lanes + sort_run_words(state));
+	writer->chunk_len = run_chunk_len(state);
 	writer->chunk = MemoryContextAllocExtended(context, writer->chunk_len, MCXT_ALLOC_HUGE);
 	writer->values_len = state->block_values;
 	writer->values = MemoryContextAllocExtended(context, writer->values_len, MCXT_ALLOC_HUGE);

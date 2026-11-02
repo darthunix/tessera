@@ -236,6 +236,14 @@ SHALL refuse a block past the bound of its kind as damaged bytes.
   `crates/relspill/src/set/reader.rs::a_block_past_the_bound_of_its_kind_is_damaged`;
   `crates/relspill/src/lib.rs::each_kind_of_block_takes_its_own_bound`
 
+#### Scenario: Values longer than a chunk
+- **WHEN** a join that spills keeps values longer than any of its
+  chunks
+- **THEN** each goes to disk in a chunk of values of its own, and reads
+  back by the bound its set gives
+- **Verified by:**
+  `test/sql/join.sql::spec: relspill/Values longer than a chunk`
+
 ### Requirement: Any bytes, a bounded read
 Whatever bytes a file holds, a read of the crate SHALL return the data
 or an error. It SHALL NOT panic, loop without end, or ask for more than

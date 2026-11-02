@@ -586,6 +586,11 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 		pg_atomic_init_u64(&join_part_stats(state, partition)[0], 0);
 		pg_atomic_init_u64(&join_part_stats(state, partition)[1], 0);
 	}
+	for (int set = 0; set < JOIN_SPILL_SETS; set++)
+	{
+		pg_atomic_init_u64(&state->parallel.shared->spill_bounds[set][0], 0);
+		pg_atomic_init_u64(&state->parallel.shared->spill_bounds[set][1], 0);
+	}
 	state->parallel.shared->spill_filter = InvalidDsaPointer;
 	state->parallel.shared->spill_filter_words = 0;
 	state->parallel.shared->resident_rows = 0;

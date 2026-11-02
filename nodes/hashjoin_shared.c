@@ -727,7 +727,7 @@ side_share(TessHashJoinState *state, SpillSide *side, const char *prefix, bool m
 	config.npartitions = side->npartitions;
 	config.level = 0;
 	config.fingerprint = side->fingerprint;
-	config.max_len = (uint64) MaxAllocHugeSize;
+	config.max_chunk = side->chunk_len;
 	config.shared = &state->parallel.shared->fileset;
 	config.participant = state->parallel.spill_participant;
 	config.name = psprintf("%s%d", prefix, state->css.ss.ps.plan->plan_node_id);
@@ -933,6 +933,28 @@ shared_join(TessHashJoinState *state)
 	shared_sync(state, false);
 }
 
+/* Advance the bounds of a set's files by this participant's, once they are written. */
+static void
+publish_bounds(TessHashJoinState *state, TessSpill *file, JoinSpillSet set)
+{
+	pg_atomic_uint64 *bounds = state->parallel.shared->spill_bounds[set];
+	uint64		max_chunk;
+	uint64		max_values;
+
+	tess_spill_bounds(file, &max_chunk, &max_values);
+	pg_atomic_monotonic_advance_u64(&bounds[0], max_chunk);
+	pg_atomic_monotonic_advance_u64(&bounds[1], max_values);
+}
+
+/* Past the barrier that ends the writes: the bounds every participant's files keep. */
+static void
+agree_bounds(TessHashJoinState *state, TessSpill *file, JoinSpillSet set)
+{
+	pg_atomic_uint64 *bounds = state->parallel.shared->spill_bounds[set];
+
+	tess_spill_agree(file, pg_atomic_read_u64(&bounds[0]), pg_atomic_read_u64(&bounds[1]));
+}
+
 /*
  * FLUSH: this participant counts its records by partition, writes its
  * chunks of the partitions on disk, the tails too, and hands those of the
@@ -999,6 +1021,7 @@ shared_flush(TessHashJoinState *state)
 	}
 	join_side_compact(side);
 	tess_spill_finish(side->file);
+	publish_bounds(state, side->file, JOIN_SET_BUILD);
 	/* The resident rows are the shared table's: so is their index. */
 	spill->indexed = true;
 }
@@ -1088,6 +1111,8 @@ shared_outer(TessHashJoinState *state)
 	join_side_forget(&spill->resident, 0);
 	tess_spill_finish(spill->probe.file);
 	tess_spill_finish(spill->resident.file);
+	publish_bounds(state, spill->probe.file, JOIN_SET_PROBE);
+	publish_bounds(state, spill->resident.file, JOIN_SET_RESIDENT);
 }
 
 /*
@@ -1105,6 +1130,9 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 	tess_spill_finish(spill->build.file);
 	tess_spill_finish(spill->probe.file);
 	tess_spill_finish(spill->resident.file);
+	agree_bounds(state, spill->build.file, JOIN_SET_BUILD);
+	agree_bounds(state, spill->probe.file, JOIN_SET_PROBE);
+	agree_bounds(state, spill->resident.file, JOIN_SET_RESIDENT);
 	spill->joining = true;
 	spill->partition = -1;
 	spill->build.values_written = state->parallel.shared->next_value_chunk;

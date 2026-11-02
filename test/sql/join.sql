@@ -650,6 +650,15 @@ SELECT join_same($$SELECT count(*), sum(length(jsb.t)), sum(jsp.k), sum(jsb.n) F
 RESET tessera.join_spill_tail_weight;
 RESET tessera.join_spill_resident_share;
 SELECT join_same($$SELECT jsp.s, jsb.t, jsb.n FROM jsp JOIN jsb ON jsp.k = jsb.k WHERE jsp.s LIKE '%7'$$);
+-- spec: relspill/Values longer than a chunk
+-- Values of up to 130 kB, longer than any chunk of the join: each goes
+-- to disk in a chunk of values of its own, and reads back by the longest
+-- chunk of values the set wrote. OFFSET 0 keeps the value computed below
+-- the join, which stores it; else the join stores the short text and
+-- computes the value above.
+SELECT EXISTS (SELECT FROM join_explain($$SELECT count(*), sum(length(w.t)), md5(string_agg(md5(w.t), ',' ORDER BY w.n, jsp.s)) FROM jsp JOIN (SELECT k, n, CASE WHEN n % 997 = 0 THEN repeat(t, 2000) ELSE t END AS t FROM jsb OFFSET 0) AS w ON jsp.k = w.k$$) AS line
+               WHERE line ~ 'Spilled Chunks: [1-9]') AS spilled;
+SELECT join_same($$SELECT count(*), sum(length(w.t)), md5(string_agg(md5(w.t), ',' ORDER BY w.n, jsp.s)) FROM jsp JOIN (SELECT k, n, CASE WHEN n % 997 = 0 THEN repeat(t, 2000) ELSE t END AS t FROM jsb OFFSET 0) AS w ON jsp.k = w.k$$);
 -- A hashed key that is an expression its child computes, such as
 -- lower(t), goes to disk by its own type: the bytes of the text, not the
 -- address of a value its batch frees; it is hashed again when read back.
@@ -1067,6 +1076,14 @@ SELECT join_same($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp LE
 SELECT join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Shared Table') AS shared,
        join_property($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, 'Spilled Chunks')::int > 0 AS spilled;
 SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
+-- spec: spill-format/Bounds agreed by the participants
+-- Keys longer than any chunk: a hashed key its child computes goes to
+-- disk by its bytes, each participant's of its own length, and each
+-- participant reads the others' files by the longest chunk of values any
+-- of them wrote.
+SELECT join_property($$SELECT count(*), sum(length(a.t)), md5(string_agg(md5(a.t), ',' ORDER BY a.n)) FROM jsb AS a JOIN jsb AS b ON (CASE WHEN a.n % 997 = 0 THEN repeat(a.t, 2000) ELSE a.t END) = (CASE WHEN b.n % 997 = 0 THEN repeat(b.t, 2000) ELSE b.t END)$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(length(a.t)), md5(string_agg(md5(a.t), ',' ORDER BY a.n)) FROM jsb AS a JOIN jsb AS b ON (CASE WHEN a.n % 997 = 0 THEN repeat(a.t, 2000) ELSE a.t END) = (CASE WHEN b.n % 997 = 0 THEN repeat(b.t, 2000) ELSE b.t END)$$, 'Spilled Chunks')::int > 0 AS spilled;
+SELECT join_same($$SELECT count(*), sum(length(a.t)), md5(string_agg(md5(a.t), ',' ORDER BY a.n)) FROM jsb AS a JOIN jsb AS b ON (CASE WHEN a.n % 997 = 0 THEN repeat(a.t, 2000) ELSE a.t END) = (CASE WHEN b.n % 997 = 0 THEN repeat(b.t, 2000) ELSE b.t END)$$);
 -- One key held by 60000 inner rows the planner does not expect: the
 -- table splits late, and the key's partition, larger than hash_mem, is
 -- joined in pieces by the participant that takes it.

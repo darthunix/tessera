@@ -240,8 +240,8 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       checked before the bytes it names are asked for. Check: the cases
       of damaged lists and trailers; a file written before the move and
       read after it; `make installcheck`
-- [ ] 3.8 Make every node pass the bounds of its blocks, a chunk by the
-      plan of its level and a block of values by its largest row,
+- [x] 3.8 Make every node pass the bounds of its blocks, a chunk by the
+      plan of its level and a block of values by the longest written,
       instead of the largest allocation PostgreSQL allows; a reader of
       a shared set takes the bounds its writers agreed on. Check: tests
       of wide values and of long lists; `make installcheck`

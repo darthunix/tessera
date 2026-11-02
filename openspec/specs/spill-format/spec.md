@@ -84,7 +84,8 @@ header that its own reader would reject.
   and at least 8: a chunk of columns is always stored packed.
 
 For every kind the level is below 32 and the body length is at most the
-limit the reader accepts.
+bound of its kind the reader accepts: one bound for chunks of records
+and of columns, another for chunks of values.
 
 #### Scenario: A header that would not read back is not written
 - **WHEN** a writer is given a records header with a body length of 0, a
@@ -550,6 +551,15 @@ The format has no mark of a finished file. The caller ensures that a
 participant's file is opened only after that participant finished its
 set, and that the opener finished its own.
 
+A reader of another participant's file SHALL take the bounds the
+participants agreed on. Each gives the bounds of its finished set,
+`tess_spill_bounds`: the longest chunk its `TessSpillConfig` names, and
+the longest chunk of values it wrote. The caller gives the largest of
+all to every participant's set through `tess_spill_agree`, and a set
+MUST refuse to open another participant's file before that call. Bounds
+below those of the blocks a participant wrote, and an agreement of a
+serial set, MUST be refused as a misuse.
+
 ```
  ┌────────┬─────┬─────────────────┬────────────────────┬─────────────┐
  │ blocks │  …  │ blocks in each  │ for each block of  │ trailer     │
@@ -574,6 +584,23 @@ set, and that the opener finished its own.
   a participant that releases its set leaves its file readable by the
   other
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_shared`
+
+#### Scenario: Bounds agreed by the participants
+- **WHEN** participants of a shared set agree on the bounds of their
+  blocks, and one of them wrote a partition of more blocks than a
+  reader's page of entries and a chunk of values longer than any chunk;
+  or a join that spills keeps values longer than any of its chunks
+- **THEN** every participant reads the others' blocks back; a chunk of
+  values longer than the agreed bound is damaged data; a file opened
+  before the agreement, an agreement below a participant's own blocks
+  and an agreement of a serial set are internal errors, SQLSTATE
+  `XX000`
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_shared`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(44)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(45)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(46)`;
+  `test/sql/spill.sql::tessera_test_spill_sqlstate(47)`;
+  `test/sql/join.sql::spec: spill-format/Bounds agreed by the participants`
 
 #### Scenario: A file without its lists
 - **WHEN** a participant's file ends without a trailer, the trailer's
@@ -610,7 +637,7 @@ set, and that the opener finished its own.
 a buffer as large as the partition's largest block, so that the memory
 of a read is known before it starts. `tess_spill_read_header` SHALL read
 the next block whole and MUST check its header against the set's
-fingerprint and longest body, the partition, the level, the bytes on
+fingerprint and the bound of its kind, the partition, the level, the bytes on
 disk and, for a packed body, the length that the body's own counts give;
 it answers false at the partition's end. `tess_spill_read_body` SHALL
 then give the body, unpacked when it was stored packed.

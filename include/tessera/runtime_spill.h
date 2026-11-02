@@ -46,8 +46,12 @@ typedef struct TessSpillConfig
 	uint32		level;
 	/* The table's layout fingerprint (tess_table_fingerprint). */
 	uint64		fingerprint;
-	/* The longest body a block may have: longer ones are an error. */
-	uint64		max_len;
+	/*
+	 * The longest body of a chunk of records or of columns, by the plan of
+	 * the node's level: a longer one is an error. A chunk of values is
+	 * bounded by the longest one written (tess_spill_bounds).
+	 */
+	uint64		max_chunk;
 	/* NULL for a serial set; else the query's file set and the names. */
 	SharedFileSet *shared;
 	/* This participant's number in the shared set's file names. */
@@ -259,15 +263,16 @@ extern void tess_spill_finish(TessSpill *spill);
  * After tess_spill_finish: a reader of the partition's blocks in the
  * file that the participant wrote, at the first of them, or NULL when
  * that participant wrote no block to the partition. A serial set reads
- * only its own participant's.
+ * only its own participant's; a shared set another participant's only
+ * after tess_spill_agree.
  */
 extern TessSpillReader *tess_spill_open(TessSpill *spill, int participant,
 										int partition);
 
 /*
  * The next block's header, checked against the set's fingerprint and
- * longest body; false at the end of the file. A damaged header is an
- * ERROR.
+ * the bounds of its kind; false at the end of the file. A damaged header
+ * is an ERROR.
  */
 extern bool tess_spill_read_header(TessSpillReader *reader,
 								   TessSpillHeader *header);
@@ -298,6 +303,24 @@ extern void tess_spill_drop(TessSpill *spill, int partition);
  */
 extern void tess_spill_stats(const TessSpill *spill, uint64 *blocks,
 							 uint64 *bytes, int *files);
+
+/*
+ * The bounds of this participant's blocks: the set's max_chunk, and the
+ * longest body of values written so far. A reader of the participant's
+ * own file takes them.
+ */
+extern void tess_spill_bounds(const TessSpill *spill, uint64 *max_chunk,
+							  uint64 *max_values);
+
+/*
+ * The bounds a reader of another participant's file of a shared set
+ * takes: the largest of every participant's tess_spill_bounds, gathered
+ * once every participant finished its writes. Bounds below this
+ * participant's own, when it wrote a block, or a serial set, are an
+ * ERROR.
+ */
+extern void tess_spill_agree(TessSpill *spill, uint64 max_chunk,
+							 uint64 max_values);
 
 /* The bytes of memory the set's buffers take now, its readers' included; 0 for NULL. */
 extern Size tess_spill_memory(const TessSpill *spill);

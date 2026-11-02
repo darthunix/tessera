@@ -586,6 +586,21 @@ A set first only writes, and then only reads.
 position that `tess_spill_write` returned for that block. A sort uses
 it to go to a block inside a run.
 
+A reader takes a bound for each kind of block, so that a damaged list
+or header cannot ask for a buffer larger than the node's own blocks.
+A chunk of records or of columns is as long as the node's plan of its
+level makes it, and the node gives that length to `tess_spill_create`.
+A chunk of values is as long as its rows need: a wide value gets a
+chunk of its own. Its bound is the longest one the set wrote, which the
+writer measures. A reader of the caller's own file takes these bounds.
+The participants of a shared set each wrote their own values, so a
+reader of another's file takes the largest of them all: a join gathers
+them in its shared memory, each participant's once its files are
+written, and gives them to every set after the barrier that ends the
+writes. Two other ways were refused. A bound written in the file would
+come from the bytes that are not trusted. The largest allocation
+PostgreSQL allows, which every node gave before, bounds nothing.
+
 A partition of a serial set can have only one reader at a time. A
 reader of another participant's file opens the file for itself.
 

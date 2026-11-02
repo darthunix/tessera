@@ -257,7 +257,7 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 	config.kernels = state->kernels;
 	config.npartitions = npartitions;
 	config.level = spill->level;
-	config.max_len = (uint64) MaxAllocHugeSize;
+	config.max_chunk = spill->chunk_len;
 	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
 	spill->file = tess_spill_create(&config);
 	state->partitions = Max(state->partitions, (uint64) npartitions);
@@ -1032,13 +1032,15 @@ rows_spill_create(TessAggState *state, int level)
 	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
 	RowSpill   *spill = MemoryContextAllocZero(context, sizeof(RowSpill));
 	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
+	Size		chunk_len = TESS_SPILL_COLUMNS_HEADER +
+		sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + rows_words(state));
 
 	config.parent_context = context;
 	config.kernels = state->kernels;
 	config.npartitions = ROWS_PARTS;
 	config.level = (uint32) level;
 	config.fingerprint = (uint64) rows_words(state);
-	config.max_len = MaxAllocHugeSize;
+	config.max_chunk = chunk_len;
 	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
 	spill->file = tess_spill_create(&config);
 	spill->level = level;
@@ -1046,8 +1048,7 @@ rows_spill_create(TessAggState *state, int level)
 	{
 		RowWriter  *writer = &spill->writers[part];
 
-		writer->chunk_len = TESS_SPILL_COLUMNS_HEADER +
-			sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + rows_words(state));
+		writer->chunk_len = chunk_len;
 		writer->chunk = MemoryContextAlloc(context, writer->chunk_len);
 		writer->values_len = ROWS_BLOCK_VALUES;
 		writer->values = MemoryContextAlloc(context, writer->values_len);

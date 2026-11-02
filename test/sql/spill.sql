@@ -122,6 +122,15 @@ SELECT tessera_test_spill_sqlstate(24);
 SELECT tessera_test_spill_sqlstate(25);
 -- A block that the list says runs into the next block of its partition.
 SELECT tessera_test_spill_sqlstate(26);
+-- A chunk of values longer than the bounds the participants agreed on
+-- is damaged data; another participant's file read before they agreed
+-- is a wrong call.
+SELECT tessera_test_spill_sqlstate(44);
+SELECT tessera_test_spill_sqlstate(45);
+-- An agreement below the bounds of the blocks a participant wrote, or of
+-- a serial set, is a wrong call.
+SELECT tessera_test_spill_sqlstate(46);
+SELECT tessera_test_spill_sqlstate(47);
 -- A row read back that refers to a value outside its chunk of values.
 SELECT tessera_test_spill_sqlstate(28);
 -- What a node reads back is checked against what it wrote there, as the
