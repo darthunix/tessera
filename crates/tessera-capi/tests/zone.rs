@@ -79,8 +79,14 @@ enum Op {
 
 /// Run an operation in rounds over `arg`'s `nrows` rows, as C runs it:
 /// every answer so far given to each call, the unknown rows the next
-/// round's. The values of the ready rows, `None` for the core's.
-fn run(cache: &mut ZoneCache, op: Op, arg: &CalendarArg, nrows: usize) -> Vec<Option<i64>> {
+/// round's. The values of the ready rows, `None` for the core's, and the
+/// questions asked.
+fn run_asking(
+    cache: &mut ZoneCache,
+    op: Op,
+    arg: &CalendarArg,
+    nrows: usize,
+) -> (Vec<Option<i64>>, usize) {
     let words = nrows.div_ceil(64);
     let mut rows_words = vec![u64::MAX >> (64 * words - nrows); words];
     for word in rows_words.iter_mut().take(words - 1) {
@@ -90,6 +96,7 @@ fn run(cache: &mut ZoneCache, op: Op, arg: &CalendarArg, nrows: usize) -> Vec<Op
     let mut answers: Vec<ZoneAnswer> = Vec::new();
     let mut values64 = vec![MaybeUninit::<i64>::uninit(); nrows];
     let mut values32 = vec![MaybeUninit::<i32>::uninit(); nrows];
+    let mut asked_all = 0;
     for round in 0.. {
         assert!(round < 2 * nrows + 2, "the rounds do not end");
         let mut unknown_words = vec![0; words];
@@ -154,10 +161,11 @@ fn run(cache: &mut ZoneCache, op: Op, arg: &CalendarArg, nrows: usize) -> Vec<Op
             .iter()
             .map(|q| unsafe { q.assume_init() })
             .collect();
+        asked_all += asked.len();
         answers.extend(asked.iter().map(answer));
         rows_words = unknown_words;
     }
-    (0..nrows)
+    let values = (0..nrows)
         .map(|row| {
             let (ready, core) = (
                 ready_words[row / 64] >> (row % 64) & 1 == 1,
@@ -172,7 +180,13 @@ fn run(cache: &mut ZoneCache, op: Op, arg: &CalendarArg, nrows: usize) -> Vec<Op
                 }
             })
         })
-        .collect()
+        .collect();
+    (values, asked_all)
+}
+
+/// [`run_asking`]'s values.
+fn run(cache: &mut ZoneCache, op: Op, arg: &CalendarArg, nrows: usize) -> Vec<Option<i64>> {
+    run_asking(cache, op, arg, nrows).0
 }
 
 fn cache() -> Box<ZoneCache> {
@@ -209,6 +223,31 @@ fn every_operation_over_a_column_in_rounds() {
     };
     let mut cache = cache();
     let locals = run(&mut cache, Op::Locals, &arg, 70);
+    // A second later each instant lies in the span it lay in, which the
+    // cache keeps: nothing is asked.
+    let later: Vec<u64> = datums
+        .iter()
+        .enumerate()
+        .map(|(row, &d)| {
+            if (7..=9).contains(&row) {
+                d
+            } else {
+                d + USECS as u64
+            }
+        })
+        .collect();
+    let later_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: later.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 70,
+        ..DatumColumn::EMPTY
+    };
+    let later_arg = CalendarArg {
+        column: &later_column,
+        scalar: 0,
+    };
+    assert_eq!(run_asking(&mut cache, Op::Locals, &later_arg, 70).1, 0);
     let hours = run(&mut cache, Op::Truncate(HOUR_UNIT), &arg, 70);
     let days = run(&mut cache, Op::Truncate(DAY_UNIT), &arg, 70);
     let dates = run(&mut cache, Op::Dates, &arg, 70);

@@ -94,12 +94,17 @@ impl<'a> Cache<'a> {
     ///
     /// # Errors
     ///
-    /// Another count of words.
+    /// Another count of words, or a header no cache writes: more spans
+    /// than the cache keeps, or a last span or a next victim past them.
     pub fn new(words: &'a mut [u64]) -> Result<Self> {
         ensure!(
             words.len() == CACHE_WORDS,
             "a zone cache of {} words, not {CACHE_WORDS}",
             words.len()
+        );
+        ensure!(
+            words[0] <= SPANS as u64 && words[1] < SPANS as u64 && words[2] < SPANS as u64,
+            "a damaged zone cache"
         );
         Ok(Self { words })
     }
@@ -110,7 +115,7 @@ impl<'a> Cache<'a> {
     }
 
     fn spans(&self) -> usize {
-        (self.words[0] as usize).min(SPANS)
+        self.words[0] as usize
     }
 
     fn span(&self, index: usize) -> Span {
@@ -130,12 +135,14 @@ impl<'a> Cache<'a> {
     }
 
     /// The offset at a Unix second, if a span holds it: the span found
-    /// last first, then each in turn; the one found becomes the last.
+    /// last first, then each in turn; the one found becomes the last. The
+    /// last span is a kept one, or an empty slot, all zeros, which holds
+    /// no second.
     fn offset_at(&mut self, second: i64) -> Option<i64> {
         let count = self.spans();
         let last = self.words[1] as usize;
         let holds = |span: Span| span.start <= second && second < span.end;
-        if last < count && holds(self.span(last)) {
+        if holds(self.span(last)) {
             return Some(self.span(last).offset);
         }
         let found = (0..count).find(|&index| holds(self.span(index)))?;
@@ -161,7 +168,7 @@ impl<'a> Cache<'a> {
             self.words[0] = count as u64 + 1;
             count
         } else {
-            let victim = self.words[2] as usize % SPANS;
+            let victim = self.words[2] as usize;
             self.words[2] = ((victim + 1) % SPANS) as u64;
             victim
         };
@@ -564,14 +571,4 @@ pub fn dates(
             },
         })
     })
-}
-
-impl Question {
-    /// The question's key: a Unix second, or a Julian day.
-    pub fn key(self) -> i64 {
-        match self {
-            Self::Span(second) => second,
-            Self::Midnight(julian) => i64::from(julian),
-        }
-    }
 }

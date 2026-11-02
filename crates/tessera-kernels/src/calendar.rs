@@ -1191,6 +1191,28 @@ mod tests {
         );
     }
 
+    /// The filter keeps the selected non-NULL dates the bound keeps: dates
+    /// around 2000-01-01 against noon of its day.
+    #[test]
+    fn the_filter_narrows_the_rows_by_the_bound() {
+        let dates = [-1, 0, 1, 2, 0, DATE_NOEND];
+        let non_null_words = [0b10_1111_u64];
+        let non_nulls = tessera_core::RowMaskView::try_new(6, &non_null_words).unwrap();
+        let column = tessera_core::ColumnView::try_new(&dates, Some(non_nulls)).unwrap();
+        let noon = USECS_PER_DAY / 2;
+        for (op, kept) in [
+            (CompareOp::Lt, 0b00_0011),
+            (CompareOp::Gt, 0b10_1100),
+            (CompareOp::Eq, 0),
+            (CompareOp::Ne, 0b10_1111),
+        ] {
+            let mut words = [0b11_1111_u64];
+            let mut rows = RowMask::try_new(6, &mut words).unwrap();
+            filter_by_timestamp(&column, &mut rows, op, noon).unwrap();
+            assert_eq!(words, [kept], "{op:?}");
+        }
+    }
+
     /// Days since 1970-01-01 to the proleptic Gregorian date, by Howard
     /// Hinnant's `civil_from_days`: a reference of another derivation.
     fn civil_from_days(days: i64) -> (i64, i64, i64) {

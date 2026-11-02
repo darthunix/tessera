@@ -587,6 +587,9 @@ fn the_spans_are_kept_as_the_c_code_keeps_them() {
             today.offset(&model, second);
         }
         assert_eq!(spans(&words_), today.spans, "{seconds:?}");
+        // The same rows again: the cache answers them all, in one call.
+        let again = run(&mut words_, &model, Op::Locals, &values, &selected, true).unwrap();
+        assert_eq!((again.asked, again.calls), (0, 1));
     }
     // Two batches of one span, the second's row before the first's: the
     // span starts earlier, in its slot, as the C code joins it.
@@ -606,6 +609,59 @@ fn the_spans_are_kept_as_the_c_code_keeps_them() {
     }
     assert_eq!(spans(&words_), vec![(1500, 2000, 3600)]);
     assert_eq!(spans(&words_), today.spans);
+}
+
+/// A second that a transition starts belongs to the new span, the one
+/// before to the old: a kept span ends before its transition.
+#[test]
+fn a_span_ends_before_its_transition() {
+    let model = steps(3);
+    let mut words_ = vec![0_u64; CACHE_WORDS];
+    run(
+        &mut words_,
+        &model,
+        Op::Locals,
+        &[Some(at_second(1500))],
+        &[true],
+        true,
+    )
+    .unwrap();
+    for second in [1999, 2000, 2001] {
+        let row = [Some(at_second(second))];
+        let result = run(&mut words_, &model, Op::Locals, &row, &[true], true).unwrap();
+        assert_eq!(
+            result.results,
+            vec![Some(Some(model.local(at_second(second))))],
+            "{second}"
+        );
+    }
+}
+
+/// The victims of a full cache in turn, as the C code takes them: span 32
+/// replaces slot 0, span 33 slot 1.
+#[test]
+fn a_full_cache_replaces_its_slots_in_turn() {
+    let model = steps(40);
+    let mut words_ = vec![0_u64; CACHE_WORDS];
+    let mut today = Today::new();
+    let first: Vec<Option<i64>> = (0..32).map(|n| Some(at_second(n * 1000 + 500))).collect();
+    run(&mut words_, &model, Op::Locals, &first, &[true; 32], true).unwrap();
+    for n in 0..32 {
+        today.offset(&model, n * 1000 + 500);
+    }
+    for second in [32_500, 33_500, 34_500] {
+        run(
+            &mut words_,
+            &model,
+            Op::Locals,
+            &[Some(at_second(second))],
+            &[true],
+            true,
+        )
+        .unwrap();
+        today.offset(&model, second);
+        assert_eq!(spans(&words_), today.spans, "{second}");
+    }
 }
 
 /// A full cache whose next victim a later row reads: the C code evicts
@@ -712,8 +768,26 @@ fn spans_without_end_failing_seconds_and_more_spans_than_slots() {
 /// at its second, are refused.
 #[test]
 fn a_wrong_cache_or_answer_is_refused() {
+    assert_eq!(
+        CACHE_WORDS,
+        3 + 32 * 3 + 1024 * 3,
+        "the header's TESS_ZONE_CACHE_WORDS"
+    );
     let mut short = vec![0_u64; CACHE_WORDS - 1];
     assert!(Cache::new(&mut short).is_err());
+    // A header no cache writes: more spans than slots, a last span or a
+    // next victim past them.
+    for (word, value) in [(0, 33_u64), (1, 32), (2, 32)] {
+        let mut damaged = vec![0_u64; CACHE_WORDS];
+        damaged[word] = value;
+        assert!(Cache::new(&mut damaged).is_err(), "word {word} at {value}");
+        damaged[word] = value - 1;
+        assert!(
+            Cache::new(&mut damaged).is_ok(),
+            "word {word} at {}",
+            value - 1
+        );
+    }
     let mut words_ = vec![0_u64; CACHE_WORDS];
     let mut cache = Cache::new(&mut words_).unwrap();
     let answers = [Answer::Span {
