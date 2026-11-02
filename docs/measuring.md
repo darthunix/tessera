@@ -32,7 +32,9 @@ them. Most rules here were paid for with a wrong finding.
   source. A laptop runs on mains power.
 - **A run takes five minutes at most.** Time the cases the change
   touches, with fewer repetitions; a whole family with 31 repetitions is
-  for a baseline the maintainer asks for. Every run has a timeout.
+  for a baseline the maintainer asks for. Every run has a timeout:
+  `cargo ab measure --deadline 300` stops a run, with its queries, at
+  five minutes.
 - **Nothing is retried, discarded or stopped early** because of its
   result. A bad run is kept and explained. UNSTABLE in a report means
   the precision was not enough, not success and not failure.

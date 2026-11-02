@@ -240,7 +240,9 @@ the runs of each case in each mode, 31 by default: a development A/B times
 the cases a change touches, fewer times, so that a run takes minutes at
 most. `PGOPTIONS` passes on to the family's session, so that
 `PGOPTIONS='-c statement_timeout=30s'` bounds every statement of a run,
-the warm-ups and the plans included. [`cargo ab measure`](../../tools/tessera-ab/README.md) runs such an
+the warm-ups and the plans included; `run.sh` adds
+`client_connection_check_interval`, so that a query whose `psql` was
+stopped ends within a second. [`cargo ab measure`](../../tools/tessera-ab/README.md) runs such an
 A/B of two revisions, installing each in turn and comparing every case
 with the control without Tessera. `PG_CONFIG` selects the PostgreSQL build; `PGPORT` the port. The cluster's
 `postgresql.conf` preloads `tessera, tessera_nodes, tessera_kernels`
