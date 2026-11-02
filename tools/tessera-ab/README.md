@@ -65,7 +65,12 @@ COPT, so that the next run of the same revisions, with other families or
 cases, builds nothing; delete the directory to take the room back.
 `--cases` and `--repetitions` pass `CASES` and `REPETITIONS` to `run.sh`,
 `--workers` its workers. A family of 10 to 25 cases takes 10 to 50 seconds
-a run at the default 31 repetitions.
+a run at the default 31 repetitions. `--deadline SECONDS` bounds the
+whole run, its builds included: at the deadline the step under way, a
+`make` or a `run.sh`, is stopped with every process it started, its
+`psql` among them, the server stops the query within a second (`run.sh`
+sets `client_connection_check_interval`), and the run fails. A run the
+deadline stops is kept and explained, as any other.
 
 The report goes to `target/bench-runs/ab-*/report.md` and to the terminal;
 this one is the cut of `agg.c` (`--cases '^g_(sum|avg)_int8$'

@@ -9,8 +9,11 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
@@ -148,13 +151,20 @@ impl Pg {
 /// build of `pg`, as the README asks before any timing: a debug build left
 /// installed by a test run would be measured otherwise.
 pub fn install_tessera(root: &Path, pg: &Pg, log: &Path) -> Result<()> {
-    install_tessera_with(root, pg, log, &[])
+    install_tessera_with(root, pg, log, &[], None)
 }
 
 /// [`install_tessera`] with variables of make for both its runs, such as
 /// `COPT=-falign-functions=64`: a comparison of two revisions builds both
-/// with the same ones.
-pub fn install_tessera_with(root: &Path, pg: &Pg, log: &Path, variables: &[String]) -> Result<()> {
+/// with the same ones. Past `deadline` make is stopped, as [`run_until`]
+/// stops a step, and the call fails.
+pub fn install_tessera_with(
+    root: &Path,
+    pg: &Pg,
+    log: &Path,
+    variables: &[String],
+    deadline: Option<Instant>,
+) -> Result<()> {
     let jobs = std::thread::available_parallelism().map_or(4, |n| n.get());
     let pg_config = format!("PG_CONFIG={}", pg.pg_config.display());
     let mut file = File::create(log)?;
@@ -173,16 +183,49 @@ pub fn install_tessera_with(root: &Path, pg: &Pg, log: &Path, variables: &[Strin
             .args(variables);
         make.args(target);
         writeln!(file, "$ {make:?}")?;
-        let status = make
-            .stdout(file.try_clone()?)
-            .stderr(file.try_clone()?)
-            .status()
-            .context("cannot run make")?;
+        make.stdout(file.try_clone()?).stderr(file.try_clone()?);
+        let status = run_until(&mut make, deadline).context("cannot run make")?;
         if !status.success() {
             bail!("{make:?} failed:\n{}", tail(log, 30));
         }
     }
     Ok(())
+}
+
+/// Run a step of a tool to its end, or stop it at `deadline`.
+///
+/// The step runs in a process group of its own, so that a deadline ends
+/// it with every process it started, such as the `psql` of a script; a
+/// process that leaves the group itself, as `pg_ctl` starts a server in
+/// a session of its own, outlives it. The step's output goes where the
+/// command sends it. Without a deadline the call waits as
+/// [`Command::status`] does.
+///
+/// # Errors
+///
+/// The step cannot start, or the deadline passed: then every process of
+/// the group got SIGTERM and the step was waited for.
+pub fn run_until(command: &mut Command, deadline: Option<Instant>) -> Result<ExitStatus> {
+    let mut child = command
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("cannot start {command:?}"))?;
+    let Some(deadline) = deadline else {
+        return Ok(child.wait()?);
+    };
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            // The group's id is its leader's, the child's own.
+            let group = format!("-{}", child.id());
+            let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
+            let _ = child.wait();
+            bail!("the deadline passed: {command:?} was stopped with its group");
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The last lines of a log, for an error message.
@@ -417,6 +460,54 @@ pub fn message(error: &postgres::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_step_within_its_deadline_gives_its_status() -> Result<()> {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 3"]);
+        let status = run_until(&mut command, Some(Instant::now() + Duration::from_secs(30)))?;
+        assert_eq!(status.code(), Some(3));
+        let status = run_until(&mut command, None)?;
+        assert_eq!(status.code(), Some(3));
+        Ok(())
+    }
+
+    #[test]
+    fn a_step_past_its_deadline_ends_with_the_processes_it_started() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pid = directory.path().join("pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg(format!("sleep 60 & echo $! > '{}'; wait", pid.display()));
+        let started = Instant::now();
+        let error = run_until(&mut command, Some(started + Duration::from_millis(500)))
+            .err()
+            .map(|error| error.to_string());
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(error.is_some_and(|error| error.contains("deadline passed")));
+        // The sleep, a child of the step's shell, went with its group; once
+        // its parent is gone it is reaped, so it no longer exists.
+        let sleep = fs::read_to_string(&pid)?;
+        let mut alive = true;
+        for _ in 0..100 {
+            alive = Command::new("kill")
+                .args(["-0", sleep.trim()])
+                .stderr(Stdio::null())
+                .status()?
+                .success();
+            if !alive {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !alive,
+            "the step's child {} outlived the deadline",
+            sleep.trim()
+        );
+        Ok(())
+    }
 
     fn pg(version: &str) -> Pg {
         Pg {

@@ -5,14 +5,15 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::fs;
-use std::num::NonZeroUsize;
+use std::fs::{self, File};
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 use tessera_pgtool::snapshot::{Snapshot, digest, text};
-use tessera_pgtool::{Pg, install_tessera_with};
+use tessera_pgtool::{Pg, install_tessera_with, run_until};
 
 use crate::stats::{self, Verdict};
 
@@ -51,6 +52,11 @@ pub struct Options {
     /// median beyond the control's to be flagged.
     #[arg(long, value_name = "PERCENT", default_value = "2")]
     pub threshold: f64,
+    /// The most seconds the whole run may take, its builds included: at
+    /// the deadline the step under way is stopped with every process it
+    /// started, its psql among them, and the run fails.
+    #[arg(long, value_name = "SECONDS")]
+    pub deadline: Option<NonZeroU64>,
 }
 
 /// The installed libraries a run must have taken from the side's build.
@@ -65,6 +71,9 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
         options.threshold > 0. && options.threshold < 100.,
         "--threshold is a percent between 0 and 100"
     );
+    let deadline = options
+        .deadline
+        .map(|seconds| Instant::now() + Duration::from_secs(seconds.get()));
     let pg = Pg::discover()?;
     let runs = repo.join("target/bench-runs");
     ensure!(
@@ -123,8 +132,10 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
                     &pg,
                     &root.join(format!("install-{side}.log")),
                     &variables,
+                    deadline,
                 )?;
-                let directory = measure(repo, &pg, family, options)?;
+                let log = root.join(format!("measure-{family}-{side}-{round}"));
+                let directory = measure(repo, &pg, family, options, &log, deadline)?;
                 check_installed(&directory, &snapshot.directory)?;
                 fs::write(
                     directory.join("build.txt"),
@@ -178,8 +189,16 @@ fn cached(snapshot: Snapshot, builds: &Path, variables: &[String]) -> Result<Sna
     })
 }
 
-/// One run of a family: run.sh's results directory.
-fn measure(repo: &Path, pg: &Pg, family: &str, options: &Options) -> Result<PathBuf> {
+/// One run of a family: run.sh's results directory. Its output goes to
+/// `log` with the extensions `out` and `err`.
+fn measure(
+    repo: &Path,
+    pg: &Pg,
+    family: &str,
+    options: &Options,
+    log: &Path,
+    deadline: Option<Instant>,
+) -> Result<PathBuf> {
     let mut command = Command::new(repo.join("bench/pg/run.sh"));
     command
         .current_dir(repo)
@@ -191,21 +210,25 @@ fn measure(repo: &Path, pg: &Pg, family: &str, options: &Options) -> Result<Path
     if let Some(repetitions) = options.repetitions {
         command.env("REPETITIONS", repetitions.to_string());
     }
-    let output = command.output().context("cannot start bench/pg/run.sh")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let (out, err) = (log.with_extension("out"), log.with_extension("err"));
+    command
+        .stdout(File::create(&out)?)
+        .stderr(File::create(&err)?);
+    let status = run_until(&mut command, deadline).context("bench/pg/run.sh measure")?;
+    let stdout = fs::read_to_string(&out).unwrap_or_default();
     let directory = stdout
         .lines()
         .rev()
         .find_map(|line| line.strip_prefix("results: "))
         .map(PathBuf::from);
     match directory {
-        Some(directory) if output.status.success() && directory.join("timings.csv").is_file() => {
+        Some(directory) if status.success() && directory.join("timings.csv").is_file() => {
             Ok(directory)
         }
         _ => bail!(
             "bench/pg/run.sh measure {family} failed:\n{}\n{}",
             stdout.lines().rev().take(10).collect::<Vec<_>>().join("\n"),
-            String::from_utf8_lossy(&output.stderr)
+            fs::read_to_string(&err).unwrap_or_default()
         ),
     }
 }

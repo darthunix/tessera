@@ -110,6 +110,8 @@ stop the server and delete the data directory.
 | `Pg::binaries()` | The installed Tessera modules and `postgres`, whose hashes record which build a run used. |
 | `Pg::require_contrib(names)` | Fails with the `make … install` commands for the contrib modules the build lacks. |
 | `install_tessera(root, pg, log)` | Runs `make` and `make install` with `RUST_PROFILE=release` into `pg`; the output goes to `log`. |
+| `install_tessera_with(root, pg, log, variables, deadline)` | The same with variables of make, such as `COPT=…`, stopped at the deadline if one is given. |
+| `run_until(command, deadline)` | Runs a step in a process group of its own and waits for it; at the deadline it stops the group and fails. |
 | `ClusterSpec` | The cluster's name, database, application name, settings file, port, socket directory, initdb arguments, extensions and stop hint. |
 | `Cluster::start()` | Creates the cluster if needed, writes the settings, starts or restarts the server, creates the database and extensions. Returns whether the server ran before. |
 | `Cluster::stop()` | Stops the server if it runs. Returns whether it did. |
