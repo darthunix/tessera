@@ -32,7 +32,9 @@ order. The maintainer took six entries out of turn on 2026-11-02, after
 an analysis of TPC-H with Tessera on, in the order
 `deform-without-restarts` (done), `bpchar-constant-compare` (done),
 `right-anti-join` (done), `agg-dependent-columns`, `early-key-filter`,
-`batch-index-join`:
+`batch-index-join`; on the same day he moved `agg-dependent-columns`
+after `batch-index-join`, once a measurement of Q10 showed its
+aggregate's input row-wise:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
@@ -176,7 +178,12 @@ TessAgg with columns its keys determine.
   customer columns: TessAgg refuses it (`not_from_groups`), and the
   core's HashAggregate takes 46 ms serial and 34 with workers.
 - **Known:** Not a "first value" aggregate: only columns the planner
-  proved dependent.
+  proved dependent. Measured on 2026-11-02: the aggregate takes 35 to
+  45 of Q10's 290 ms, its input comes row by row from an index nested
+  loop with `nation`, and Q10 with the five columns as `any_value`,
+  which TessAgg takes, ran no faster than the core's (303 ms against
+  289); after `batch-index-join` the input is batches, and the entry is
+  measured again before its proposal.
 - **Depends on:** nothing.
 - **Capabilities:** aggregate
 - **Size:** medium: one pull request.
