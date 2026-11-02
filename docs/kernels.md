@@ -151,7 +151,8 @@ inside a kernel.
   operation and its check are one step, and the vector code of a whole
   word flags a lane past the range as it flags an overflow, so the call
   fails with the error of the first row that fails, a range error or a
-  zero divisor, as the core does.
+  zero divisor, as the core does. The operands must be smallints, but
+  for `x + 0`, the cast `int2(int4)`, whose `x` may be any int4.
 - `tess_int4_hash(column, prepared, rows, nulls, hashes, valid, status)`
   and `tess_int4_hash_next(column, prepared, nulls, hashes, valid, status)`:
   the 32-bit key hashes of pg_batch (`murmurhash32`, further keys folded in
