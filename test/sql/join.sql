@@ -1133,6 +1133,35 @@ RESET enable_parallel_hash;
 -- A text key: the table keeps the hash of the value, and the equality
 -- stays a join clause, which decides the pair.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.v > jd.n AND jf.note = jd.label;
+-- Keys of text, char(n) and bytea are hashed by their bytes, as their
+-- types' functions hash them, and a value stored compressed by the
+-- function, to the same hash: the same value compressed on one side and
+-- stored plain on the other meets. char(n) without its trailing blanks;
+-- under a nondeterministic collation every value by the function.
+CREATE TABLE jbytes_l AS
+SELECT i AS id, repeat('k', 3000) || (i % 10) AS big,
+       ('c' || (i % 7) || repeat(' ', i % 3))::bpchar AS c,
+       convert_to('b' || (i % 9), 'UTF8') AS b, 'Key' || (i % 5) AS t
+FROM generate_series(1, 2000) AS i;
+CREATE TABLE jbytes_r (id int, c char(4), b bytea, t text, big text);
+ALTER TABLE jbytes_r ALTER COLUMN big SET STORAGE PLAIN;
+INSERT INTO jbytes_r
+SELECT i, ('c' || (i % 7))::char(4), convert_to('b' || (i % 9), 'UTF8'), 'key' || (i % 5),
+       repeat('k', 3000) || (i % 10)
+FROM generate_series(1, 300) AS i;
+ANALYZE jbytes_l, jbytes_r;
+SELECT (SELECT pg_column_compression(big) IS NOT NULL FROM jbytes_l LIMIT 1) AS left_compressed,
+       (SELECT pg_column_compression(big) IS NULL FROM jbytes_r LIMIT 1) AS right_plain;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jbytes_l l JOIN jbytes_r r ON l.c = r.c;
+SELECT join_same($$SELECT l.id, r.id FROM jbytes_l l JOIN jbytes_r r ON l.c = r.c$$);
+SELECT join_same($$SELECT l.id, r.id FROM jbytes_l l JOIN jbytes_r r ON l.b = r.b$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jbytes_l l JOIN jbytes_r r ON l.big = r.big;
+SELECT join_same($$SELECT l.id, r.id FROM jbytes_l l JOIN jbytes_r r ON l.big = r.big$$);
+CREATE COLLATION join_nd (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM jbytes_l l JOIN jbytes_r r ON l.t COLLATE join_nd = r.t;
+SELECT join_same($$SELECT l.id, r.id FROM jbytes_l l JOIN jbytes_r r ON l.t COLLATE join_nd = r.t$$);
+DROP COLLATION join_nd;
+DROP TABLE jbytes_l, jbytes_r;
 -- A key over an expression or a cast: its side's child computes it as a
 -- target of its own, a word or a hashed value; on either side, both, in
 -- a left and an anti join. A volatile one stays with the core.

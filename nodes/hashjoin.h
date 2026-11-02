@@ -568,10 +568,13 @@ typedef struct JoinKeyState
 	 * A key a word does not hold: its type's 64-bit hash function, whose
 	 * value is the table's key, a residual clause deciding the match; the
 	 * hashes of a batch, in a context reset per batch. fn_oid is
-	 * InvalidOid for a word key.
+	 * InvalidOid for a word key. The bytes the hash function reads, where
+	 * it reads bytes (tess_key_bytes): those of a value neither compressed
+	 * nor external are hashed here, to the same hash, without a call.
 	 */
 	FmgrInfo	hashers[TESS_TABLE_MAX_KEYS];
 	Oid			collations[TESS_TABLE_MAX_KEYS];
+	TessKeyBytes hash_bytes[TESS_TABLE_MAX_KEYS];
 	bool		hashed_keys;
 	Datum	   *hash_values[TESS_TABLE_MAX_KEYS];
 	bool	   *hash_isnull[TESS_TABLE_MAX_KEYS];

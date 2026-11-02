@@ -1,5 +1,7 @@
 #include "postgres.h"
 
+#include "common/hashfn.h"
+
 #include "commands/explain_format.h"
 #include "executor/executor.h"
 #include "miscadmin.h"
@@ -46,13 +48,24 @@ hash_key_column(TessHashJoinState *state, int key, const TessRowMask *rows,
 	FmgrInfo   *hasher = &state->keys.hashers[key];
 	Datum	   *values = state->keys.hash_values[key];
 	bool	   *isnull = state->keys.hash_isnull[key];
+	TessKeyBytes form = state->keys.hash_bytes[key];
 	MemoryContext old = MemoryContextSwitchTo(state->keys.hash_context);
 	int			row = -1;
 
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
+		const char *data;
+		Size		len;
+
 		isnull[row] = column->isnull[row];
-		if (!isnull[row])
+		if (isnull[row])
+			continue;
+		/* As hashtextextended and its kin hash the bytes, with seed 0. */
+		if (form != TESS_KEY_BYTES_NONE &&
+			tess_key_value_bytes(column->values[row], form, &data, &len))
+			values[row] = UInt64GetDatum(hash_bytes_extended((const unsigned char *) data,
+															 len, 0));
+		else
 			values[row] = FunctionCall2Coll(hasher, state->keys.collations[key],
 											column->values[row], Int64GetDatum(0));
 	}

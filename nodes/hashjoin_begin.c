@@ -123,6 +123,9 @@ read_node_data(TessHashJoinState *state, const List *data)
 				state->keys.inner_kinds[key] != TESS_KEY_KIND_NUMBER)
 				elog(ERROR, "TessHashJoin received foreign plan data");
 			fmgr_info((Oid) list_nth_int(hashers, key), &state->keys.hashers[key]);
+			state->keys.hash_bytes[key] = tess_key_bytes(state->keys.hashers[key].fn_oid,
+														 InvalidOid,
+														 state->keys.collations[key]);
 			state->keys.hashed_keys = true;
 		}
 	}

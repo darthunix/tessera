@@ -1637,7 +1637,12 @@ the join's target is plain columns and at most
 64 of them, the inner keys and the inner columns of the residual clauses
 are the inner side's. Each such clause, up to 16, is a key of the table;
 a key a word does not hold is its value's 64-bit hash by that function
-under the clause's collation (seed 0), kept in the table as an int8, and
+under the clause's collation (seed 0), kept in the table as an int8 (a
+key whose function reads the value's bytes, text and char(n) under a
+deterministic collation and bytea, `tess_key_bytes`, is hashed by the
+node with `hash_bytes_extended` as the function would, without a call,
+and a compressed or external value by the function, to the same hash),
+and
 its equality is also a residual clause, which decides whether two rows
 of one hash are a pair: the kernels pick candidates by the hashes, and a
 false one is no pair, for every join kind, spilling and the shared table
