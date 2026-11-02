@@ -53,7 +53,11 @@ typedef struct TessHeapBatchStats
 {
 	/* Values deformed on request. */
 	uint64		deformed_datums;
-	/* Of those, values before a row's cursor, deformed from the row's start. */
+	/*
+	 * Of those, values read by walking the row's tuple again from its
+	 * start: before the row's cursor and before none of its earlier walks
+	 * back (see docs/runtime.md).
+	 */
 	uint64		restarted_datums;
 	/* Rows copied as tuples, from slots without a pinned page. */
 	uint64		copied_tuples;

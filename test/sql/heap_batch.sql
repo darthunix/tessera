@@ -18,6 +18,11 @@ RETURNS boolean
 AS :'heap_batch_test', 'tessera_test_heap_batch_nulls'
 LANGUAGE C STRICT;
 
+CREATE FUNCTION tessera_test_heap_batch_back(regclass, regclass)
+RETURNS boolean
+AS :'heap_batch_test', 'tessera_test_heap_batch_back'
+LANGUAGE C STRICT;
+
 -- Wide rows, so that one batch of 64 rows spans several pages.
 CREATE TABLE heap_batch_t (a int, b text, c bigint);
 INSERT INTO heap_batch_t
@@ -36,6 +41,23 @@ FROM generate_series(1, 100) AS i;
 SELECT tessera_test_heap_batch_nulls('heap_batch_n') AS heap_batch_nulls \gset
 \echo :heap_batch_nulls
 DROP TABLE heap_batch_n;
+
+-- Columns behind a row's cursor read in ascending order continue one walk
+-- of the tuple; b is NULL in every fourth row. heap_batch_b2 holds longer
+-- texts, so that a back cursor left from the other table would read b at
+-- the wrong place.
+CREATE TABLE heap_batch_b (a text, b text, c text, d bigint);
+INSERT INTO heap_batch_b
+SELECT 'a' || i, CASE WHEN i % 4 = 0 THEN NULL ELSE 'b' || i END, 'c' || i, i
+FROM generate_series(1, 100) AS i;
+CREATE TABLE heap_batch_b2 (a text, b text, c text, d bigint);
+INSERT INTO heap_batch_b2
+SELECT repeat('a', 20) || i, CASE WHEN i % 4 = 0 THEN NULL ELSE repeat('b', 20) || i END,
+       repeat('c', 20) || i, i
+FROM generate_series(1, 100) AS i;
+SELECT tessera_test_heap_batch_back('heap_batch_b', 'heap_batch_b2') AS heap_batch_back \gset
+\echo :heap_batch_back
+DROP TABLE heap_batch_b, heap_batch_b2;
 
 \set VERBOSITY terse
 SELECT tessera_test_heap_batch_errors(0, 'heap_batch_t');

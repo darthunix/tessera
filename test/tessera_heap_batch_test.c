@@ -20,6 +20,7 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch);
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch_errors);
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch_nulls);
+PG_FUNCTION_INFO_V1(tessera_test_heap_batch_back);
 
 /* An expectation, reported by number on failure. */
 static bool
@@ -384,4 +385,107 @@ tessera_test_heap_batch_errors(PG_FUNCTION_ARGS)
 	}
 	elog(ERROR, "Tessera test expected a heap batch error");
 	PG_RETURN_VOID();
+}
+
+/*
+ * Row r of heap_batch_b holds, for i = r + 1, a = 'a' || i, b = 'b' || i or
+ * NULL when i is a multiple of 4, c = 'c' || i and d = i; heap_batch_b2
+ * the same with each text's letter twenty times.
+ */
+static bool
+back_row_holds(const TessDatumColumn *column, int row, int attnum, bool twenty)
+{
+	int			i = row + 1;
+	char		expected[40];
+	char		letter = 'a' + attnum - 1;
+
+	if (attnum == 4)
+		return !column->isnull[row] && DatumGetInt64(column->values[row]) == i;
+	if (attnum == 2 && i % 4 == 0)
+		return column->isnull[row];
+	memset(expected, letter, twenty ? 20 : 1);
+	snprintf(expected + (twenty ? 20 : 1), sizeof(expected) - 20, "%d", i);
+	return !column->isnull[row] &&
+		strcmp(text_to_cstring(DatumGetTextPP(column->values[row])), expected) == 0;
+}
+
+static bool
+back_column_holds(TessBatch *batch, int column, int attnum, bool twenty)
+{
+	TessDatumColumn values;
+	bool		holds = true;
+
+	get_column(batch, column, &batch->rows, &values);
+	for (int row = 0; row < 64; row++)
+		holds &= back_row_holds(&values, row, attnum, twenty);
+	return holds;
+}
+
+/* The first 64 rows of rel, a batch to read again. */
+static TessBatch *
+back_batch(TessHeapBatch *heap, Relation rel, Oid relid)
+{
+	tess_heap_batch_reset(heap);
+	fill(heap, rel, FILL_PAGES, 64);
+	return tess_heap_batch_finish(heap, relid);
+}
+
+/*
+ * Columns before a row's cursor, read in ascending order: the first one
+ * walks the tuple from its start again, the next ones continue that walk
+ * (the row's back cursor), and one the back cursor has passed starts it
+ * anew. A reset batch forgets its back cursors: after a batch whose back
+ * cursors stopped at a, a batch of other tuples, whose texts are longer,
+ * reads b by a walk from each tuple's start, not from a's end in the
+ * tuples before.
+ */
+Datum
+tessera_test_heap_batch_back(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Oid			other_relid = PG_GETARG_OID(1);
+	Relation	rel = table_open(relid, AccessShareLock);
+	Relation	other = table_open(other_relid, AccessShareLock);
+	TessHeapBatch *heap = make_heap(4, 64, RelationGetDescr(rel));
+	const TessHeapBatchStats *stats = tess_heap_batch_stats(heap);
+	TessBatch  *batch;
+	bool		result = true;
+
+	batch = back_batch(heap, rel, relid);
+	result &= check(60, back_column_holds(batch, 3, 4, false) &&
+		stats->deformed_datums == 64 && stats->restarted_datums == 0);
+	/* a restarts each row's walk; b and c continue it. */
+	result &= check(61, back_column_holds(batch, 0, 1, false) &&
+		stats->deformed_datums == 128 && stats->restarted_datums == 64);
+	result &= check(62, back_column_holds(batch, 1, 2, false) &&
+		back_column_holds(batch, 2, 3, false) &&
+		stats->deformed_datums == 256 && stats->restarted_datums == 64);
+	batch->ops->release(batch);
+
+	/* c from a new back cursor, a past it anew, then b. */
+	batch = back_batch(heap, rel, relid);
+	result &= check(63, back_column_holds(batch, 3, 4, false) &&
+		back_column_holds(batch, 2, 3, false) &&
+		stats->restarted_datums == 64 + 64);
+	result &= check(64, back_column_holds(batch, 0, 1, false) &&
+		stats->restarted_datums == 64 + 128);
+	result &= check(65, back_column_holds(batch, 1, 2, false) &&
+		stats->restarted_datums == 64 + 128 &&
+		stats->deformed_datums == 256 + 256);
+	batch->ops->release(batch);
+
+	/* The back cursors stop at a; the next batch holds other tuples. */
+	batch = back_batch(heap, rel, relid);
+	result &= check(66, back_column_holds(batch, 3, 4, false) &&
+		back_column_holds(batch, 0, 1, false) &&
+		stats->restarted_datums == 64 + 128 + 64);
+	batch->ops->release(batch);
+	batch = back_batch(heap, other, other_relid);
+	result &= check(67, back_column_holds(batch, 3, 4, true) &&
+		back_column_holds(batch, 1, 2, true) &&
+		stats->restarted_datums == 64 + 128 + 64 + 64);
+	batch->ops->release(batch);
+	table_close(other, AccessShareLock);
+	table_close(rel, AccessShareLock);
+	PG_RETURN_BOOL(result);
 }

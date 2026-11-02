@@ -704,7 +704,8 @@ With `VERBOSE`, `EXPLAIN` shows `Batch Size` and `Rows Kept As` (`heap tuples` o
 under `ANALYZE`) once the node has executed, since both follow the parent's
 request and the child's slot, and with `ANALYZE` the number of `Batches`
 and, for kept tuples, the `Deformed Datums`, the `Restarted Datums`
-(values before a row's cursor, deformed from the row's start) and any
+(values read by walking a row's tuple again from its start, see
+[runtime.md](runtime.md)) and any
 `Copied Tuples` from slots without a page; the row counts are corrected by
 the output helper, so the node reports the rows it packed.
 
