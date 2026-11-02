@@ -27,7 +27,9 @@ query down, and where it can, does it speed one up.
   range and an int4 key against an int8 one, two keys and a residual join
   clause over columns of both sides, a dimension filtered to one key in a
   hundred and a key that matches nothing, a top-N sort above the
-  join and a join over a join; then where the core may merge: a full and
+  join and a join over a join; semi, anti and left joins, and a right
+  anti join that keeps the dimension (`right_anti`, every key of it
+  found); then where the core may merge: a full and
   a right join, which the batch hash join does not do, a join with hash
   joins disabled (`measure_setting`), and sides already in the order of
   their keys through their indexes (`bench_mj_outer`, `bench_mj_inner`);

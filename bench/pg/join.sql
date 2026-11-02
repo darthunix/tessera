@@ -176,6 +176,11 @@ SELECT pg_temp.measure_pair('semi',
 SELECT pg_temp.measure_pair('anti',
     'SELECT count(*) FROM bench_fact f WHERE NOT EXISTS (SELECT 1 FROM bench_dim d WHERE d.id = f.fk)',
     :repetitions);
+-- The kept side the smaller: the right anti join builds the dimension,
+-- and the fact table's rows only mark its records.
+SELECT pg_temp.measure_pair('right_anti',
+    'SELECT count(*) FROM bench_dim d WHERE NOT EXISTS (SELECT 1 FROM bench_fact f WHERE f.fk = d.id)',
+    :repetitions);
 SELECT pg_temp.measure_pair('left_nulls',
     'SELECT count(*), count(d.d1) FROM bench_fact f LEFT JOIN bench_dim d ON f.fk = d.id',
     :repetitions);
@@ -232,13 +237,13 @@ SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'miss', 'dup', 'dup_text', 'two_keys', 'residual', 'rows_parent',
-                  'chain', 'semi', 'anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
+                  'chain', 'semi', 'anti', 'right_anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
                   'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'miss', 'dup', 'two_keys', 'residual', 'rows_parent',
-                  'chain', 'semi', 'anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
+                  'chain', 'semi', 'anti', 'right_anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
                   'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few']) AS name \gexec
 \o
 DEALLOCATE ALL;
