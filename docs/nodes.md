@@ -815,7 +815,9 @@ a row it rejects. A hash join above may hand the node its Bloom filter,
 which the capability [key-filter](../openspec/specs/key-filter/design.md)
 describes: the node checks it before its first row-wise clause, or,
 when all its clauses run in batches, before them all, so that they read
-their columns only for the rows it passed. A batch-aware parent receives the child's slot with
+their columns only for the rows it passed, while over windows of 4096
+rows shown to each it keeps no larger a share than the clauses keep;
+else behind them. A batch-aware parent receives the child's slot with
 the whole batch; an ordinary parent receives rows through the helper. With
 computed targets the helper publishes the projection provider's wrapper of
 each batch instead ([runtime.md](runtime.md)), which computes a column

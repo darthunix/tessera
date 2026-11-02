@@ -16,6 +16,26 @@
 #include "internal.h"
 
 /*
+ * The rows shown to each of a key filter and the batch clauses, after
+ * which the node compares the shares of rows each kept and may change
+ * their order: as many as the join samples before it decides on a
+ * filter.
+ */
+#define KEY_FILTER_WINDOW_ROWS 4096
+
+/*
+ * Where a parent's key filter is checked: before the first row-wise clause
+ * (through TessQual), or, with batch clauses alone, before them or after
+ * them.
+ */
+typedef enum KeyFilterPlace
+{
+	KEY_FILTER_ROW_WISE,
+	KEY_FILTER_FIRST,
+	KEY_FILTER_LAST
+} KeyFilterPlace;
+
+/*
  * TessFilter stands on the unary helper: it applies the relation's
  * clauses to each batch of its child in the planner's order, those the
  * compiler takes as batch filters and the others row by row, each over
@@ -56,14 +76,20 @@ typedef struct FilterState
 	TessSharedStats *stats;
 
 	/*
-	 * A parent's key filter, applied before the first row-wise clause, or
-	 * before every clause when all run in batches (key_filter_first): its
-	 * keys and their kinds, whether a shared filter was seen ready, and the
-	 * buffers of a batch for capacity rows.
+	 * A parent's key filter and its place: its keys and their kinds,
+	 * whether a shared filter was seen ready, and the buffers of a batch
+	 * for capacity rows. With batch clauses alone it goes first while it
+	 * keeps no larger a share of its rows than the clauses keep of theirs,
+	 * over windows of KEY_FILTER_WINDOW_ROWS: the rows each was shown and
+	 * kept in the window.
 	 */
 	const TessKernelOps *kernels;
 	bool		key_filter_set;
-	bool		key_filter_first;
+	KeyFilterPlace key_filter_place;
+	uint64		window_key_rows;
+	uint64		window_key_kept;
+	uint64		window_clause_rows;
+	uint64		window_clause_kept;
 	TessKeyFilter key_filter;
 	int			key_columns[TESS_TABLE_MAX_KEYS];
 	TessTableKeyKind key_kinds[TESS_TABLE_MAX_KEYS];
@@ -217,7 +243,6 @@ filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
 	if (filter == NULL)
 	{
 		state->key_filter_set = false;
-		state->key_filter_first = false;
 		tess_qual_set_row_prefilter(state->qual, NULL, NULL);
 		return true;
 	}
@@ -247,11 +272,20 @@ filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
 	state->key_filter.kinds = state->key_kinds;
 	state->key_filter_ready = false;
 	state->key_filter_set = true;
-	state->key_filter_first = !tess_qual_has_row_clauses(state->qual);
-	if (state->key_filter_first)
-		tess_qual_set_row_prefilter(state->qual, NULL, NULL);
-	else
+	state->window_key_rows = 0;
+	state->window_key_kept = 0;
+	state->window_clause_rows = 0;
+	state->window_clause_kept = 0;
+	if (tess_qual_has_row_clauses(state->qual))
+	{
+		state->key_filter_place = KEY_FILTER_ROW_WISE;
 		tess_qual_set_row_prefilter(state->qual, apply_key_filter, state);
+	}
+	else
+	{
+		state->key_filter_place = KEY_FILTER_FIRST;
+		tess_qual_set_row_prefilter(state->qual, NULL, NULL);
+	}
 	return true;
 }
 
@@ -266,23 +300,77 @@ tess_filter_create_state(CustomScan *cscan)
 }
 
 /*
+ * At the end of a window, the order of the key filter and the batch
+ * clauses that drops the most rows first: the filter first when it kept
+ * no larger a share of the rows it was shown than the clauses kept of
+ * theirs. Rows may come in an order the clauses' column follows, so the
+ * shares are taken again in every window. A window ends once each side
+ * was shown KEY_FILTER_WINDOW_ROWS rows: the second sees only the rows
+ * the first kept, and a share of a few rows is noise that would turn the
+ * order back and forth.
+ */
+static void
+key_filter_window(FilterState *state)
+{
+	if (state->window_key_rows < KEY_FILTER_WINDOW_ROWS ||
+		state->window_clause_rows < KEY_FILTER_WINDOW_ROWS)
+		return;
+	state->key_filter_place =
+		(double) state->window_key_kept * (double) state->window_clause_rows <=
+		(double) state->window_clause_kept * (double) state->window_key_rows ?
+		KEY_FILTER_FIRST : KEY_FILTER_LAST;
+	state->window_key_rows = 0;
+	state->window_key_kept = 0;
+	state->window_clause_rows = 0;
+	state->window_clause_kept = 0;
+}
+
+/*
+ * A parent's key filter over the batch's rows, counted for its window
+ * once it checks them: a shared filter not ready yet passes every row.
+ */
+static int
+check_key_filter(FilterState *state, TessBatch *batch, int rows)
+{
+	int			kept = apply_key_filter(state, batch, rows);
+
+	if (state->key_filter.shared && !state->key_filter_ready)
+		return kept;
+	state->window_key_rows += rows;
+	state->window_key_kept += kept;
+	return kept;
+}
+
+/*
  * Apply the clauses in the planner's order, each over the rows the
- * previous ones left, after a parent's key filter when it goes first.
+ * previous ones left, with a parent's key filter before or after them
+ * when they all run in batches.
  */
 static int
 filter_batch(void *private_data, TessBatch *batch, int rows)
 {
 	FilterState *state = private_data;
+	KeyFilterPlace place = state->key_filter_set ? state->key_filter_place :
+		KEY_FILTER_ROW_WISE;
+	int			kept = rows;
 
-	if (state->key_filter_set && state->key_filter_first)
+	if (place == KEY_FILTER_FIRST)
+		rows = kept = check_key_filter(state, batch, rows);
+	if (rows > 0)
 	{
-		rows = apply_key_filter(state, batch, rows);
-		if (rows == 0)
-			return 0;
+		ResetExprContext(state->css.ss.ps.ps_ExprContext);
+		kept = tess_qual_apply(state->qual, batch, state->css.ss.ps.ps_ExprContext,
+							   rows);
 	}
-	ResetExprContext(state->css.ss.ps.ps_ExprContext);
-	return tess_qual_apply(state->qual, batch, state->css.ss.ps.ps_ExprContext,
-						   rows);
+	if (place != KEY_FILTER_ROW_WISE)
+	{
+		state->window_clause_rows += rows;
+		state->window_clause_kept += kept;
+		if (place == KEY_FILTER_LAST && kept > 0)
+			kept = check_key_filter(state, batch, kept);
+		key_filter_window(state);
+	}
+	return kept;
 }
 
 static void

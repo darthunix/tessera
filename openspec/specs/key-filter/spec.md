@@ -144,8 +144,12 @@ Tessera takes a filter.
 ### Requirement: What a child removes
 A TessFilter that holds a filter SHALL, for each batch, check it before
 its first clause that runs row by row and after the clauses that run in
-batches before it, or, when all its clauses run in batches, before its
-first clause, reading only the key columns. It SHALL hash each
+batches before it. When all its clauses run in batches, it SHALL check
+the filter before its first clause, reading only the key columns, and
+each time both the filter and the clauses were shown 4096 more rows
+SHALL keep the filter first when it kept no larger a share of its rows
+than the clauses kept of theirs, and check it after its clauses
+otherwise. It SHALL hash each
 remaining row's keys as the join hashes them,
 remove the rows with a NULL key and the rows whose hash the filter
 rejects, and pass the others on. A row it removes SHALL reach none of
@@ -169,6 +173,15 @@ returns SHALL be those it would return without the filter below.
   the filter passed, and the join returns the rows of the core's plan
 - **Verified by:**
   `test/sql/join.sql::Batch clauses after the filter: a TessFilter`
+
+#### Scenario: A filter that keeps more than the clauses
+- **WHEN** a TessFilter of batch clauses alone gets a filter that keeps
+  two rows in five, where its clauses keep three in ten
+- **THEN** once each was shown 4096 rows the filter goes behind the
+  clauses, which read every row from then on, and the join returns the
+  rows of the core's plan
+- **Verified by:**
+  `test/sql/join.sql::A filter that keeps more rows than the clauses`
 
 ### Requirement: The rows a filter removes, as EXPLAIN shows them
 With `ANALYZE`, a hash join SHALL show `Rows Removed by Bloom Filter`:
