@@ -45,6 +45,7 @@ pub use decimal::{
 };
 pub use float::{FloatArg, tess_float_arith, tess_float_cast, tess_float_compare};
 pub use int::{
+    tess_int2_arith_columns, tess_int2_arith_scalar, tess_int2_arith_scalar_left,
     tess_int4_arith_columns, tess_int4_arith_scalar, tess_int4_arith_scalar_left,
     tess_int4_compare_columns, tess_int4_filter, tess_int4_hash, tess_int4_hash_next,
     tess_int4_max, tess_int4_min, tess_int4_sum, tess_int8_arith_columns, tess_int8_arith_scalar,

@@ -8,7 +8,7 @@ use std::ffi::c_uint;
 
 use anyhow::{Context, Result};
 use tessera_core::RowMaskView;
-use tessera_kernels::{int32, int64};
+use tessera_kernels::{int32, int64, smallint};
 
 use super::args::{arith_op, compare_op, hash_outputs, inputs, null_keys, outputs, reader};
 use super::column::DatumColumn;
@@ -64,88 +64,19 @@ pub unsafe extern "C" fn tess_kernels_test_panic(status: *mut Status) -> Code {
     unsafe { guard(status, || panic!("injected panic")) }
 }
 
-/// The entry points of one integer width: `$value` is its Rust type, `$sql`
-/// the name of its PostgreSQL type, `$kernels` the module of its kernels,
-/// and each other key names the C symbol of an entry point.
-macro_rules! int_entry_points {
+/// The arithmetic entry points of an integer family: a scalar on the
+/// right, on the left, and two columns, into a dense result of the width.
+/// The int4 and int8 families have them, and smallint, whose results are
+/// int4 lanes within the smallint range.
+macro_rules! arith_entry_points {
     (
         value: $value:ty,
         sql: $sql:literal,
         kernels: $kernels:ident,
-        filter: $filter:ident,
-        compare_columns: $compare_columns:ident,
         arith_scalar: $arith_scalar:ident,
         arith_scalar_left: $arith_scalar_left:ident,
-        arith_columns: $arith_columns:ident,
-        hash: $hash:ident,
-        hash_next: $hash_next:ident,
-        min: $min:ident,
-        max: $max:ident $(,)?
+        arith_columns: $arith_columns:ident $(,)?
     ) => {
-        #[doc = concat!("`", stringify!($filter), "`: keep in `rows` the selected rows whose")]
-        /// non-NULL value satisfies `value op scalar`.
-        ///
-        /// # Safety
-        ///
-        /// `column` must point to a valid `TessDatumColumn` satisfying
-        /// [`DatumColumn::ints`]'s contract with `prepared` (null or a valid
-        /// mask) as its readiness; `rows` must point to a valid mask that
-        /// nothing else accesses during the call; `status` as for every entry
-        /// point.
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn $filter(
-            column: *const DatumColumn,
-            prepared: *const Mask,
-            rows: *mut Mask,
-            op: c_uint,
-            scalar: $value,
-            status: *mut Status,
-        ) -> Code {
-            // SAFETY: the caller's status contract.
-            unsafe {
-                guard(status, || {
-                    let op = compare_op(op)?;
-                    let column = reader::<$value>(column, prepared)?;
-                    let rows = rows.as_mut().context("a null row mask")?;
-                    let mut rows = rows.mask()?;
-                    $kernels::filter(&column, &mut rows, op, scalar)
-                })
-            }
-        }
-
-        #[doc = concat!("`", stringify!($compare_columns), "`: keep in `rows` the selected rows")]
-        #[doc = concat!("where both ", $sql, " columns are non-NULL and `left op right`.")]
-        ///
-        /// # Safety
-        ///
-        /// `left` and `right` must point to valid `TessDatumColumn`s
-        /// satisfying [`DatumColumn::ints`]'s contract with their readiness
-        /// masks (null or valid); `rows` must point to a valid mask that
-        /// nothing else accesses during the call; `status` as for every entry
-        /// point.
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn $compare_columns(
-            left: *const DatumColumn,
-            left_prepared: *const Mask,
-            right: *const DatumColumn,
-            right_prepared: *const Mask,
-            rows: *mut Mask,
-            op: c_uint,
-            status: *mut Status,
-        ) -> Code {
-            // SAFETY: the caller's status contract.
-            unsafe {
-                guard(status, || {
-                    let op = compare_op(op)?;
-                    let left = reader::<$value>(left, left_prepared)?;
-                    let right = reader::<$value>(right, right_prepared)?;
-                    let rows = rows.as_mut().context("a null row mask")?;
-                    let mut rows = rows.mask()?;
-                    $kernels::compare_columns(&left, &right, &mut rows, op)
-                })
-            }
-        }
-
         #[doc = concat!("`", stringify!($arith_scalar), "`: `column op scalar` into a dense ")]
         #[doc = concat!($sql, " result.")]
         ///
@@ -231,6 +162,99 @@ macro_rules! int_entry_points {
                     $kernels::arith_columns(op, &left, &right, &rows, values, &mut non_nulls)
                 })
             }
+        }
+    };
+}
+
+/// The entry points of one integer width: `$value` is its Rust type, `$sql`
+/// the name of its PostgreSQL type, `$kernels` the module of its kernels,
+/// and each other key names the C symbol of an entry point.
+macro_rules! int_entry_points {
+    (
+        value: $value:ty,
+        sql: $sql:literal,
+        kernels: $kernels:ident,
+        filter: $filter:ident,
+        compare_columns: $compare_columns:ident,
+        arith_scalar: $arith_scalar:ident,
+        arith_scalar_left: $arith_scalar_left:ident,
+        arith_columns: $arith_columns:ident,
+        hash: $hash:ident,
+        hash_next: $hash_next:ident,
+        min: $min:ident,
+        max: $max:ident $(,)?
+    ) => {
+        #[doc = concat!("`", stringify!($filter), "`: keep in `rows` the selected rows whose")]
+        /// non-NULL value satisfies `value op scalar`.
+        ///
+        /// # Safety
+        ///
+        /// `column` must point to a valid `TessDatumColumn` satisfying
+        /// [`DatumColumn::ints`]'s contract with `prepared` (null or a valid
+        /// mask) as its readiness; `rows` must point to a valid mask that
+        /// nothing else accesses during the call; `status` as for every entry
+        /// point.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $filter(
+            column: *const DatumColumn,
+            prepared: *const Mask,
+            rows: *mut Mask,
+            op: c_uint,
+            scalar: $value,
+            status: *mut Status,
+        ) -> Code {
+            // SAFETY: the caller's status contract.
+            unsafe {
+                guard(status, || {
+                    let op = compare_op(op)?;
+                    let column = reader::<$value>(column, prepared)?;
+                    let rows = rows.as_mut().context("a null row mask")?;
+                    let mut rows = rows.mask()?;
+                    $kernels::filter(&column, &mut rows, op, scalar)
+                })
+            }
+        }
+
+        #[doc = concat!("`", stringify!($compare_columns), "`: keep in `rows` the selected rows")]
+        #[doc = concat!("where both ", $sql, " columns are non-NULL and `left op right`.")]
+        ///
+        /// # Safety
+        ///
+        /// `left` and `right` must point to valid `TessDatumColumn`s
+        /// satisfying [`DatumColumn::ints`]'s contract with their readiness
+        /// masks (null or valid); `rows` must point to a valid mask that
+        /// nothing else accesses during the call; `status` as for every entry
+        /// point.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $compare_columns(
+            left: *const DatumColumn,
+            left_prepared: *const Mask,
+            right: *const DatumColumn,
+            right_prepared: *const Mask,
+            rows: *mut Mask,
+            op: c_uint,
+            status: *mut Status,
+        ) -> Code {
+            // SAFETY: the caller's status contract.
+            unsafe {
+                guard(status, || {
+                    let op = compare_op(op)?;
+                    let left = reader::<$value>(left, left_prepared)?;
+                    let right = reader::<$value>(right, right_prepared)?;
+                    let rows = rows.as_mut().context("a null row mask")?;
+                    let mut rows = rows.mask()?;
+                    $kernels::compare_columns(&left, &right, &mut rows, op)
+                })
+            }
+        }
+
+        arith_entry_points! {
+            value: $value,
+            sql: $sql,
+            kernels: $kernels,
+            arith_scalar: $arith_scalar,
+            arith_scalar_left: $arith_scalar_left,
+            arith_columns: $arith_columns,
         }
 
         #[doc = concat!("`", stringify!($hash), "`: hash the first ", $sql, " key of the selected")]
@@ -436,4 +460,13 @@ unsafe fn extreme<T: FromDatum + Default>(
             Ok(())
         })
     }
+}
+
+arith_entry_points! {
+    value: i32,
+    sql: "smallint",
+    kernels: smallint,
+    arith_scalar: tess_int2_arith_scalar,
+    arith_scalar_left: tess_int2_arith_scalar_left,
+    arith_columns: tess_int2_arith_columns,
 }

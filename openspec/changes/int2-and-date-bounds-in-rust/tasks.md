@@ -65,7 +65,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
       kernels` shows the int4 and int8 loops the same; `tessera-bench`
       counts the program with the measurement of task 6.2, which needs
       the person for its privileges, its report in the pull request.
-- [ ] 3.2 The three entry points in `tessera-capi`, declared in
+- [x] 3.2 The three entry points in `tessera-capi`, declared in
       `include/tessera/kernels.h`, with a test target of their own
       through the raw structs: every operation and shape, NULLs, the
       exact first error. The target joins the Miri command of `ci.yml`
