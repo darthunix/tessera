@@ -634,19 +634,37 @@ SELECT types_same($$SELECT DISTINCT n, t FROM types_g$$);
 EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label);
 SELECT types_same($$SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label)$$);
 SELECT types_same($$SELECT n FROM types_g UNION SELECT n * 2 FROM types_g$$);
--- Text, varchar and bytea are hashed and compared by their bytes, without
--- a call through fmgr: a value stored compressed goes the type's way and
--- is one group with the same value computed, uncompressed; under a
--- nondeterministic collation every value goes the type's way.
+-- Text, varchar, bytea and char(n), this one without its trailing blanks,
+-- are hashed and compared by their bytes, without a call through fmgr: a
+-- value stored compressed goes the type's way and is one group with the
+-- same value computed, uncompressed; under a nondeterministic collation
+-- every value goes the type's way.
 CREATE TABLE types_b AS
 SELECT i AS id, CASE WHEN i % 9 = 0 THEN NULL ELSE ('v' || (i % 23))::varchar END AS v,
        CASE WHEN i % 11 = 0 THEN NULL ELSE convert_to('b' || (i % 19), 'UTF8') END AS b,
-       repeat('long', 3000) || (i % 5) AS big
+       repeat('long', 3000) || (i % 5) AS big,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE ('c' || (i % 17))::char(8) END AS c,
+       ('w' || (i % 7) || repeat(' ', i % 3))::bpchar AS cb,
+       (repeat('long', 3000) || (i % 5))::bpchar AS bigc
 FROM generate_series(1, 3000) AS i;
 ANALYZE types_b;
 SELECT pg_column_compression(big) IS NOT NULL AS compressed FROM types_b LIMIT 1;
 SELECT types_same($$SELECT v, count(*) FROM types_b GROUP BY v$$);
 SELECT types_same($$SELECT b, count(*), max(id) FROM types_b GROUP BY b$$);
+EXPLAIN (COSTS OFF) SELECT c, count(*) FROM types_b GROUP BY c;
+SELECT types_same($$SELECT c, count(*), max(id) FROM types_b GROUP BY c$$);
+SELECT types_same($$SELECT rtrim(cb), count(*), max(id) FROM types_b GROUP BY cb$$);
+-- With two keys each group keeps its own first row's form of char(n),
+-- as the core's hashed grouping does: equal values of other trailing
+-- blanks are one number, not one form.
+SET enable_sort = off;
+EXPLAIN (COSTS OFF) SELECT c, cb, octet_length(cb), count(*) FROM types_b GROUP BY c, cb;
+SELECT types_same($$SELECT c, cb, octet_length(cb), count(*) FROM types_b GROUP BY c, cb$$);
+RESET enable_sort;
+SELECT types_same($$SELECT count(*) FROM (SELECT DISTINCT cb FROM types_b) AS q$$);
+SELECT types_same($$SELECT rtrim(x) FROM (SELECT cb FROM types_b INTERSECT SELECT ('w' || (i % 3))::bpchar FROM generate_series(1, 10) AS i) AS q(x)$$);
+SELECT pg_column_compression(bigc) IS NOT NULL AS compressed FROM types_b LIMIT 1;
+SELECT types_same($$SELECT length(t), count(*) FROM (SELECT bigc AS t FROM types_b UNION ALL SELECT (repeat('long', 3000) || (i % 7) || '  ')::bpchar FROM generate_series(1, 50) AS i) AS q GROUP BY t$$);
 SELECT types_same($$SELECT length(t), count(*) FROM (SELECT big AS t FROM types_b UNION ALL SELECT repeat('long', 3000) || (i % 7) FROM generate_series(1, 50) AS i) AS q GROUP BY t$$);
 -- Values past a quarter of the dictionary's block of 64 kB are copies of their own.
 SELECT types_same($$SELECT length(t), md5(t), count(*) FROM (SELECT repeat(v, 5000) AS t FROM types_b UNION ALL SELECT v FROM types_b) AS q GROUP BY t$$);
@@ -655,6 +673,8 @@ SELECT types_same($$SELECT md5(big) FROM (SELECT big FROM types_b EXCEPT ALL SEL
 CREATE COLLATION types_nd (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
 SELECT types_same($$SELECT lower(t), count(*) FROM (SELECT (CASE WHEN id % 2 = 0 THEN upper(v) ELSE v END) COLLATE types_nd AS t FROM types_b) AS q GROUP BY t$$);
 SELECT count(*) FROM (SELECT (CASE WHEN id % 2 = 0 THEN upper(v) ELSE v END) COLLATE types_nd AS t FROM types_b GROUP BY 1) AS q;
+SELECT types_same($$SELECT lower(rtrim(t)), count(*) FROM (SELECT (CASE WHEN id % 2 = 0 THEN upper(cb) ELSE cb END)::bpchar COLLATE types_nd AS t FROM types_b) AS q GROUP BY t$$);
+SELECT count(*) FROM (SELECT (CASE WHEN id % 2 = 0 THEN upper(cb) ELSE cb END)::bpchar COLLATE types_nd AS t FROM types_b GROUP BY 1) AS q;
 DROP COLLATION types_nd;
 DROP TABLE types_b;
 -- Past hash_mem the rows spill with their values, by the values' hashes,

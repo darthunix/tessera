@@ -10,7 +10,10 @@
 #include "tessera/spill.h"
 #include "tessera/table.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
+#include "utils/typcache.h"
 
+#include "../nodes/key_kind.h"
 #include "../nodes/table_chunks.h"
 
 PG_MODULE_MAGIC;
@@ -27,6 +30,7 @@ PG_FUNCTION_INFO_V1(tessera_test_table_shared_spill);
 PG_FUNCTION_INFO_V1(tessera_test_table_record_size);
 PG_FUNCTION_INFO_V1(tessera_test_table_memory_limit);
 PG_FUNCTION_INFO_V1(tessera_test_table_chunks_limit);
+PG_FUNCTION_INFO_V1(tessera_test_key_bytes);
 
 #define NROWS 200
 #define NWORDS 4
@@ -1450,4 +1454,41 @@ tessera_test_table_chunks_limit(PG_FUNCTION_ARGS)
 		}
 	}
 	PG_RETURN_TEXT_P(cstring_to_text(out.data));
+}
+
+static const char *
+key_bytes_name(TessKeyBytes form)
+{
+	switch (form)
+	{
+		case TESS_KEY_BYTES_WHOLE:
+			return "whole";
+		case TESS_KEY_BYTES_TRIMMED:
+			return "trimmed";
+		default:
+			return "none";
+	}
+}
+
+/*
+ * The rule of a key's bytes (tess_key_bytes) for the default hash
+ * functions of a type under a collation, as "grouping/join": the
+ * grouping's by the 32-bit hash and the equality, the join's by the
+ * extended hash alone.
+ */
+Datum
+tessera_test_key_bytes(PG_FUNCTION_ARGS)
+{
+	Oid			type = PG_GETARG_OID(0);
+	Oid			collation = PG_GETARG_OID(1);
+	TypeCacheEntry *entry = lookup_type_cache(type, TYPECACHE_EQ_OPR | TYPECACHE_HASH_PROC |
+											  TYPECACHE_HASH_EXTENDED_PROC);
+	TessKeyBytes grouping = tess_key_bytes(entry->hash_proc,
+										   OidIsValid(entry->eq_opr) ?
+										   get_opcode(entry->eq_opr) : InvalidOid,
+										   collation);
+	TessKeyBytes join = tess_key_bytes(entry->hash_extended_proc, InvalidOid, collation);
+
+	PG_RETURN_TEXT_P(cstring_to_text(psprintf("%s/%s", key_bytes_name(grouping),
+											  key_bytes_name(join))));
 }
