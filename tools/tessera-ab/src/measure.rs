@@ -160,6 +160,7 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
     within(deadline, "before the report")?;
     let report = report(&pg, &base, &candidate, options, &measured)?;
     fs::write(root.join("report.md"), &report.text)?;
+    within(deadline, "while the report was written")?;
     println!("\n{}", report.text);
     println!(
         "The candidate stays installed. Report: {}",
@@ -223,13 +224,22 @@ fn measure(
         command.env("REPETITIONS", repetitions.to_string());
     }
     let (out, err) = (log.with_extension("out"), log.with_extension("err"));
+    // The server restarts outside the deadline, so that a deadline never
+    // stops it halfway, stopped; pg_ctl waits a minute at most.
+    let restart = Command::new(repo.join("bench/pg/run.sh"))
+        .current_dir(repo)
+        .env("PG_CONFIG", &pg.pg_config)
+        .arg("restart")
+        .stdout(File::create(log.with_extension("restart"))?)
+        .stderr(File::create(log.with_extension("restart-err"))?)
+        .status()
+        .context("cannot start bench/pg/run.sh restart")?;
+    ensure!(restart.success(), "bench/pg/run.sh restart failed");
     command
+        .env("BENCH_RESTARTED", "1")
         .stdout(File::create(&out)?)
         .stderr(File::create(&err)?);
-    let status = run_until(&mut command, deadline).context(
-        "bench/pg/run.sh measure; a deadline in the server's restart may leave it stopped, \
-         and the next run of run.sh starts it",
-    )?;
+    let status = run_until(&mut command, deadline).context("bench/pg/run.sh measure")?;
     let stdout = fs::read_to_string(&out).unwrap_or_default();
     let directory = stdout
         .lines()

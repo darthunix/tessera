@@ -48,6 +48,9 @@ CONF
     "$BIN/psql" -X -c "CREATE EXTENSION IF NOT EXISTS tessera"
     "$BIN/psql" -X -v scale="$SCALE" -f "$HERE/setup.sql"
     ;;
+restart)
+    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -m fast -w restart > /dev/null
+    ;;
 measure)
     FAMILY=$2
     WORKERS=${3:-0}
@@ -57,7 +60,11 @@ measure)
     else
         OUT=$RUNS/pg-$FAMILY-$ID
     fi
-    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -m fast -w restart > /dev/null
+    # A caller that restarted the server itself, outside its deadline, says
+    # so; a deadline must not stop a restart halfway, the server stopped.
+    if [ -z "${BENCH_RESTARTED:-}" ]; then
+        "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -m fast -w restart > /dev/null
+    fi
     mkdir -p "$OUT/source"
     cp "$HERE/README.md" "$OUT/protocol.md"
     cp "$HERE/setup.sql" "$HERE/$FAMILY.sql" "$OUT/source/"
@@ -89,7 +96,7 @@ stop)
     rm -rf "$DATA"
     ;;
 *)
-    echo "usage: $0 setup [scale] | measure <family> [workers] | stop" >&2
+    echo "usage: $0 setup [scale] | restart | measure <family> [workers] | stop" >&2
     exit 2
     ;;
 esac
