@@ -41,12 +41,24 @@ forbids it, so that no unsafe code goes unproven.
 ### References checked by the crate
 Every reference into a table, whether the caller passed it or the call
 read it, is checked by the crate before it is followed, and code
-outside the crate reads no table's bytes by an offset of its own: it
-trusts the record the crate returns. So the checks live, and are
-proven, in one place, and none is skipped or done twice.
+outside the crate reaches a table's bytes only through the crate's
+calls and the records and payloads they return, but that it may read a
+chunk, and write a chunk it makes before a table links it, taking each
+field at the offset and in the unit the crate publishes, copying other
+bytes without a meaning, and following and checking no reference; so
+the checks of references live, and are proven, in one place, none is
+skipped or done twice, and a change of the layout reaches every reader
+and writer.
 - **Checked by:** agent review — list every place outside the crate
-  that reads a table's index, chunks or records by an offset, and every
-  check of a reference there; each one fails the rule
+  that reads or writes a table's index, chunks or records other than
+  through the crate's calls and what they return, and every check of a
+  reference there; each one fails the rule, but for a read of a chunk,
+  or a write of a chunk made before a table links it, field by field at
+  the offsets and in the units the crate publishes (in C, by macros
+  that the check of the layout ties to the crate) with no reference
+  followed or checked, and for a test that damages a table on purpose
+  to show a check of the crate, at the offsets the crate publishes
+  where its language has them
 
 ### The masks of rows are the crate's
 The masks that choose the rows of a batch are defined once, in the
