@@ -91,7 +91,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
       `.cargo/mutants.toml` as the float proofs are. Check: `cargo test
       --locked -p tessera-kernels calendar`; `cargo kani
       --harness-timeout 600 -Z unstable-options -p tessera-kernels`.
-- [ ] 4.2 The entry point `tess_date_timestamp_filter`, declared in
+- [x] 4.2 The entry point `tess_date_timestamp_filter`, declared in
       `include/tessera/calendar.h`, with a test target under Miri that
       joins the Miri command of `ci.yml`; `date_timestamp_evaluate` in
       `kernels/int.c` calls it and keeps only the call's checks. Update

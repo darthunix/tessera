@@ -32,8 +32,9 @@ mod varlena;
 
 pub use calendar::{
     CalendarArg, tess_date_add_interval, tess_date_arith, tess_date_extract,
-    tess_date_to_timestamp, tess_timestamp_add_interval, tess_timestamp_extract,
-    tess_timestamp_to_date, tess_timestamp_trunc, tess_timestamp_trunc_local,
+    tess_date_timestamp_filter, tess_date_to_timestamp, tess_timestamp_add_interval,
+    tess_timestamp_extract, tess_timestamp_to_date, tess_timestamp_trunc,
+    tess_timestamp_trunc_local,
 };
 pub use cast::{tess_int4_to_int8, tess_int8_to_int4};
 pub use column::DatumColumn;
