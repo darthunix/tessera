@@ -124,7 +124,9 @@ A grouping and a join make that number in different ways.
   exact. When a group goes out, the dictionary gives its key back as
   the value.
 - **A join** puts in the value's hash of 64 bits, made by the type's
-  own hash function. A hash needs no dictionary shared by the two sides
+  own hash function, or, where that function reads the value's bytes,
+  by the node from the bytes, to the same hash. A hash needs no
+  dictionary shared by the two sides
   of the join, which are read at different times and, in a parallel
   plan, by different processes: each row's number comes from its own
   value. The price is that two different values may have the same hash.
