@@ -182,17 +182,50 @@ configuration is used with both `dense` and `datum` storage; these count as
 separate cases.
 
 Regular patterns such as `half`, `sparse` and `nulls-mixed` are periodic, and
-a branch predictor learns them perfectly, so they hide what a data-dependent
-branch costs. The `random` selection (every second row on average) and
-`nulls-random` flags (30% NULL) come from a fixed-seed generator and show
-that cost; the two kinds of cases are meant to be read together.
+a branch predictor learns them perfectly: they show a call whose branches the
+predictor knows. It learns more than patterns. One input met call after call
+is learned too, even the 7000 steps of a search by halving over values in
+random order. So a case drawn at random takes a ring of 64 inputs
+([`RING`](support/fixture.rs)), and every call takes the next one: the same
+words of the case in another order, with the rows of each word permuted, so
+that a call does the same work, but neither where its rows lie nor how many
+the n-th word holds repeats. The predictor learns none of them. The fold of
+`column_reader` over `random/nulls-random` misses about 17 branches a call
+on an Intel Core i5-1038NG7 and 15 on Apple's M5 Pro, where one input
+repeated missed none in some processes and 17 in others on the Intel, and
+one on the M5 Pro. The cases drawn at random are:
+
+- `random` (every second row on average) and `nulls-random` (30% NULL) of
+  the reading cases and of the filters' cases, of both widths;
+- the pair of `compare_int32` whose selection is `random`, both sides
+  permuted alike; the other pairs keep one input, though the NULL flags of
+  their right side are drawn at random;
+- `shuffled` of `set_int32`, every row selected and its values in random
+  order.
+
+The two kinds of cases are meant to be read together: a branch is judged
+against a choice made as data on the cases drawn at random, where the
+predictor cannot help it.
+
+A ring takes more memory than one input. The inputs that a dense int4 read
+touches in a turn take about 280 KiB, inside the Intel Core's L2 of 512 KiB;
+those of an int8 read or of a Datum read, about 540 and 590 KiB, pass it.
+`table_int32` builds one table for a ring, which the inputs share, as they
+hold the same keys: the table stays in the cache as for one input, and only
+the buffers of the rows go round, about 1 MiB. A reference, a scalar loop
+with a branch a row, may be learned over one input and not over a ring, so
+the ratio of the library to the reference of a case drawn at random is not
+that of one input.
 
 ### Adding an operation
 
-An operation is registered on a case's group with `Group::op(name, closure)`
-in the `measure_*` function of its module; the closure must return a value,
-which the runner black-boxes, and must not allocate or check results (do
-that once before registering, as `measure_column` does). Names are free:
+An operation is registered on a case's group in the `measure_*` function of
+its module with `Group::op_each(name, &inputs, closure)`, which gives the
+closure each input of the case in turn; over a case of one input it is
+`Group::op(name, closure)`. The closure must return a value, which the
+runner black-boxes, and must not allocate or check results (do that once
+for every input before registering, as `measure_column` does). Names are
+free:
 tessera-bench treats every operation as a library path except `reference`,
 and every group must register a `reference`. A new operation, like any
 change under `benches/`, makes the benchmark incompatible with earlier
@@ -209,8 +242,9 @@ that a block takes about 20 million cycles, warms up with one block, and
 then counts ten blocks. A calibration that reads zero cycles is a failed
 read, repeated up to three times, and the run stops if it stays zero:
 taken for a call of one cycle, it would choose ten million calls a block.
-The output file has one JSON line per operation with the raw readings of
-every block:
+Over a ring, the calibration and every block are whole turns of it, so that
+a block takes every input as often. The output file has one JSON line per
+operation with the raw readings of every block:
 
 ```json
 {"id":"column_reader/dense/words/1024/all/nulls-none/ready/fold","iters":50000,

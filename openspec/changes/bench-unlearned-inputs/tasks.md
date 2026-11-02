@@ -43,7 +43,7 @@ and relays.
       form. Check:
       `cargo test --locked -p tessera-capi --benches`;
       `tests/benchmark.rs` names the cases
-- [ ] 3.2 The README of the benchmarks and `docs/measuring.md` say
+- [x] 3.2 The README of the benchmarks and `docs/measuring.md` say
       which cases the predictor learns and which it cannot, and where
       the inputs of a case lie. Check: `.github/scripts/check-specs.sh`
 - [ ] 3.3 `tessera-bench --base WORKTREE` over every program that has
