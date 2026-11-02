@@ -83,7 +83,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
 
 ## 4. A date against a timestamp
 
-- [ ] 4.1 In `tessera_kernels::calendar`: the bound of a date against a
+- [x] 4.1 In `tessera_kernels::calendar`: the bound of a date against a
       timestamp over `split`, its rule over the day and the time a
       function of its own; the tests of decision 2 and of the bound; the
       Kani proof of the rule, with covers of each operator's two
