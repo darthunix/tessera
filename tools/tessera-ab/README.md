@@ -74,11 +74,14 @@ has ended), and fails. The server ends the query of a `psql` that is
 gone at its next check, within a second (`run.sh` sets
 `client_connection_check_interval`). The server's restart before each
 run is not stopped: the tool runs `run.sh restart` outside the deadline,
-a minute at most by `pg_ctl`'s own wait, and then `run.sh measure` with
-`BENCH_RESTARTED` set, so that a deadline never leaves the server
-stopped. Nor is a stall in the work between steps, such as `pg_config`
-or `git`, which the deadline is checked after. A run the deadline stops
-is kept and explained, as any other.
+and only before it, a minute at most (`pg_ctl -t 30` for the stop and
+for the start), and then `run.sh measure` with `BENCH_RESTARTED` set, so
+that a deadline never leaves the server stopped. Nor is a stall in the
+work between steps, such as `pg_config` or `git`, which the deadline is
+checked after. Ctrl-C ends the tool and the step under way, its group
+included; during the restart it stops the server, which the next run
+starts again. A run the deadline stops is kept and explained, as any
+other.
 
 The report goes to `target/bench-runs/ab-*/report.md` and to the terminal;
 this one is the cut of `agg.c` (`--cases '^g_(sum|avg)_int8$'
