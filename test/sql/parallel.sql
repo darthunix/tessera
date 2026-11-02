@@ -685,6 +685,7 @@ ANALYZE parallel_dim;
 EXPLAIN (COSTS OFF)
 SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s);
 SELECT parallel_same($$SELECT count(*), sum(b) FROM (SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)) AS q$$);
+SELECT parallel_same($$SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)$$);
 DROP TABLE parallel_fact, parallel_dim;
 -- The switch off.
 SET tessera.enable = off;

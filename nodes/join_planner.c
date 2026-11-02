@@ -639,7 +639,8 @@ expected_leaves(PlannerInfo *root, RelOptInfo *outerrel, const JoinKeys *keys,
 
 	if (!enable_partition_pruning || !IS_SIMPLE_REL(outerrel) ||
 		outerrel->part_scheme == NULL ||
-		(jointype != JOIN_INNER && jointype != JOIN_SEMI && jointype != JOIN_RIGHT))
+		(jointype != JOIN_INNER && jointype != JOIN_SEMI && jointype != JOIN_RIGHT &&
+		 jointype != JOIN_RIGHT_ANTI))
 		return NULL;
 	key = prune_key(root, outerrel, keys->clauses, keys->outer, keys->hashers, &scheme);
 	if (key < 0)
@@ -767,6 +768,23 @@ with_key_targets(PlannerInfo *root, Path *child, List *keys)
 #define JOIN_COST_BATCH_ROWS 64
 
 /*
+ * The pairs of an inner join of the two sides by these clauses, of these
+ * many combinations of their rows, as the core counts them for its right
+ * anti join (approx_tuple_count, which it does not export).
+ */
+static double
+inner_pairs(PlannerInfo *root, Relids outer, Relids inner, List *clauses, double tuples)
+{
+	SpecialJoinInfo sjinfo;
+	Selectivity selectivity = 1.0;
+
+	init_dummy_sjinfo(&sjinfo, outer, inner);
+	foreach_node(RestrictInfo, rinfo, clauses)
+		selectivity *= clause_selectivity(root, (Node *) rinfo, 0, JOIN_INNER, &sjinfo);
+	return clamp_row_est(tuples * selectivity);
+}
+
+/*
  * The path's cost: the children's as they are, and the node's own time in
  * the units of the scan model (docs/nodes.md, Parameters), from the rows
  * the planner expects of each side and of the join. A row built, a row
@@ -809,6 +827,8 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 	double		per_key = 1.0;
 	double		matched;
 	double		pairs;
+	double		tail = 0;
+	double		gathered;
 	double		share;
 	double		out_share;
 	double		batches;
@@ -869,6 +889,17 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 			matched = Min(rows, probe_rows);
 			pairs = rows;
 			break;
+		case JOIN_RIGHT_ANTI:
+			/*
+			 * The pairs, an inner join's, only mark their records and are
+			 * not copied into compact batches; the rows returned are the
+			 * records left unmarked.
+			 */
+			pairs = inner_pairs(root, outer->parent->relids, innerrel->relids,
+								keys->rinfos, probe_rows * table_rows);
+			matched = pairs / per_key;
+			compact = false;
+			break;
 		default:
 			matched = compact ? rows / per_key : rows;
 			pairs = rows;
@@ -880,10 +911,21 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 		out_share = probe_rows > 0 ? Min(rows / probe_rows, 1.0) : 0;
 	else if (jointype == JOIN_LEFT || jointype == JOIN_FULL)
 		out_share = 1.0;
+	else if (jointype == JOIN_RIGHT_ANTI)
+		out_share = 0;
 	else
 		out_share = share;
 	batches = compact ? pairs / JOIN_COST_BATCH_ROWS :
 		probe_rows / JOIN_COST_BATCH_ROWS * (1.0 - pow(1.0 - out_share, JOIN_COST_BATCH_ROWS));
+	/*
+	 * RIGHT ANTI returns its tail alone, the whole of it by the last
+	 * participant to leave a shared table, in batches of its own.
+	 */
+	if (jointype == JOIN_RIGHT_ANTI)
+	{
+		tail = rows * participants;
+		batches += tail / JOIN_COST_BATCH_ROWS;
+	}
 	bloom = join_bloom_wanted(tess_join_bloom_ratio, table_rows, share, 1.0);
 	/*
 	 * A record, its payload 8 bytes for the NULL bits of the columns kept
@@ -895,16 +937,22 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 		Min((double) tess_hash_memory_limit() * participants,
 			(double) TESS_TABLE_MEMORY_MAX);
 
+	/*
+	 * RIGHT ANTI gathers the columns of the records it returns, and of
+	 * its pairs those of the join clauses, which every pair is checked by.
+	 */
+	gathered = jointype != JOIN_RIGHT_ANTI ? pairs :
+		tail + (keys->residual != NIL ? pairs : 0);
 	build = build_rows * (tess_join_build_cost + texts * tess_join_text_value_cost +
 						  hashed * tess_join_hashed_key_cost);
 	probe = probe_rows * (hashed * tess_join_hashed_key_cost +
 						  (bloom ? tess_join_bloom_test_cost : tess_join_probe_cost)) +
 		(bloom ? matched * tess_join_probe_cost : 0) +
-		pairs * (tess_join_pair_cost + ints * tess_join_gather_cost +
-				 texts * tess_join_text_value_cost +
-				 (compact ? tess_join_compact_pair_cost : 0)) +
+		pairs * (tess_join_pair_cost + (compact ? tess_join_compact_pair_cost : 0)) +
+		gathered * (ints * tess_join_gather_cost + texts * tess_join_text_value_cost) +
 		batches * tess_join_batch_cost +
-		matched * list_length(keys->residual) * tess_filter_clause_cost;
+		(jointype == JOIN_RIGHT_ANTI ? pairs : matched) *
+		list_length(keys->residual) * tess_filter_clause_cost;
 	if (spills)
 	{
 		build += build_rows * tess_join_spill_row_cost;
@@ -914,6 +962,11 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 	probe /= tess_join_cost_unit;
 	path->startup_cost = outer->startup_cost * outer_scale + inner->total_cost + build;
 	path->total_cost = outer->total_cost * outer_scale + inner->total_cost + build + probe;
+	/* RIGHT ANTI returns nothing before the probe is over: all but its tail is startup. */
+	if (jointype == JOIN_RIGHT_ANTI)
+		path->startup_cost = path->total_cost -
+			(tail * (ints * tess_join_gather_cost + texts * tess_join_text_value_cost) +
+			 tail / JOIN_COST_BATCH_ROWS * tess_join_batch_cost) / tess_join_cost_unit;
 }
 
 /*
@@ -993,9 +1046,9 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
  * table, where the core offers a Parallel Hash: the inner side's partial
  * path divides the build among the participants too, into one table in
  * the query's shared memory. The paths are parallel-aware for the
- * counters the node shares. RIGHT and FULL take a shared table only, as
- * the core does: with a table each, every participant would return the
- * records without a pair.
+ * counters the node shares. RIGHT, FULL and RIGHT ANTI take a shared
+ * table only, as the core does: with a table each, every participant
+ * would return the records without a pair.
  */
 static void
 add_partial_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel,
@@ -1011,7 +1064,7 @@ add_partial_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *inner
 		if (filtered != NULL)
 			outer_path = filtered;
 	}
-	path = jointype == JOIN_RIGHT || jointype == JOIN_FULL ? NULL :
+	path = jointype == JOIN_RIGHT || jointype == JOIN_FULL || jointype == JOIN_RIGHT_ANTI ? NULL :
 		make_join_path(root, joinrel, jointype, extra, keys,
 					   outer_path, inner_path, false, leaves);
 	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
@@ -1047,12 +1100,14 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	 * that keep the outer side, which the node probes with: each outer
 	 * row's matches are known when its batch has been probed; RIGHT and
 	 * FULL keep the inner side too, marking the table's records that find
-	 * a pair and returning the others after the outer side.
+	 * a pair and returning the others after the outer side, and RIGHT
+	 * ANTI returns only those.
 	 */
 	if (!tess_enabled() ||
 		(jointype != JOIN_INNER && jointype != JOIN_SEMI &&
 		 jointype != JOIN_ANTI && jointype != JOIN_LEFT &&
-		 jointype != JOIN_RIGHT && jointype != JOIN_FULL) ||
+		 jointype != JOIN_RIGHT && jointype != JOIN_FULL &&
+		 jointype != JOIN_RIGHT_ANTI) ||
 		(extra->pgs_mask & PGS_HASHJOIN) == 0 ||
 		!find_keys(root, joinrel, extra->restrictlist, outerrel, innerrel,
 				   jointype, &keys) ||
@@ -1291,7 +1346,8 @@ write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild 
 
 	if (enable_partition_pruning && tess_path_node(outer->path) == &tess_append_node &&
 		IS_SIMPLE_REL(rel) && rel->part_scheme != NULL &&
-		(jointype == JOIN_INNER || jointype == JOIN_SEMI || jointype == JOIN_RIGHT))
+		(jointype == JOIN_INNER || jointype == JOIN_SEMI || jointype == JOIN_RIGHT ||
+		 jointype == JOIN_RIGHT_ANTI))
 		key = prune_key(root, rel, hash_clauses, outer_keys, hashers, &scheme);
 	if (key >= 0)
 	{

@@ -85,7 +85,7 @@ them, newest first.
 | scans | heap tables: sequential, bitmap, index, index-only, BRIN | other access methods, foreign tables, `TABLESAMPLE` |
 | conditions | comparisons, arithmetic, `IN`, `BETWEEN`, `LIKE`, `CASE` over integers, numeric, dates and text; other functions row by row inside the batch filter | — |
 | aggregation | `count`, `sum`, `avg`, `min`, `max` by kernels, other aggregates of PostgreSQL's own functions; `GROUP BY` up to 16 keys; `DISTINCT`; spilling | grouping sets, ordered-set aggregates, `ORDER BY` inside an aggregate, aggregates of other extensions in C |
-| joins | hash joins: inner, left, right, full, semi, anti; spilling; one shared table in parallel plans; partitions pruned by the join's keys | nested loop, merge join, right semi and right anti joins |
+| joins | hash joins: inner, left, right, full, semi, anti, right anti; spilling; one shared table in parallel plans; partitions pruned by the join's keys | nested loop, merge join, right semi joins |
 | sorting | `ORDER BY`, top-N, external sort | sorts inside a plan (under a merge join or a window function), `WITH TIES`, incremental sort |
 | set operations | `UNION ALL`, `UNION`, `INTERSECT`, `EXCEPT` | — |
 | parallel query | Tessera's own `Gather` and `Gather Merge` | — |

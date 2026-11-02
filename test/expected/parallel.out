@@ -2185,8 +2185,8 @@ ANALYZE parallel_fact;
 ANALYZE parallel_dim;
 EXPLAIN (COSTS OFF)
 SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s);
-                                                QUERY PLAN                                                
-----------------------------------------------------------------------------------------------------------
+                                                      QUERY PLAN                                                      
+----------------------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
    Group Key: unnamed_subquery.b
    Set Operation: Except All
@@ -2196,21 +2196,32 @@ SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WH
                ->  Parallel Custom Scan (TessSend)
                      ->  Parallel Custom Scan (TessHeapScan) on parallel_fact
    ->  Custom Scan (TessPack)
-         ->  Gather
-               Workers Planned: 2
-               ->  Parallel Hash Right Anti Join
-                     Hash Cond: (m.a = f.s)
-                     ->  Parallel Custom Scan (TessHeapScan) on parallel_dim m
-                     ->  Parallel Hash
-                           ->  Parallel Custom Scan (TessFilter) on parallel_fact f
-                                 Batch Filter: (f.d = ANY ('{09-04-1997,05-25-2000,06-27-1996}'::date[]))
-                                 ->  Parallel Custom Scan (TessHeapScan) on parallel_fact f
-(18 rows)
+         ->  Sort
+               Sort Key: ((f.b - 1))
+               ->  Result
+                     ->  Custom Scan (TessGather)
+                           Workers Planned: 2
+                           ->  Parallel Custom Scan (TessSend)
+                                 ->  Parallel Custom Scan (TessHashJoin)
+                                       Join Type: Right Anti
+                                       Hash Cond: (m.a = f.s)
+                                       Shared Table: true
+                                       ->  Parallel Custom Scan (TessHeapScan) on parallel_dim m
+                                       ->  Parallel Custom Scan (TessFilter) on parallel_fact f
+                                             Batch Filter: (f.d = ANY ('{09-04-1997,05-25-2000,06-27-1996}'::date[]))
+                                             ->  Parallel Custom Scan (TessHeapScan) on parallel_fact f
+(23 rows)
 
 SELECT parallel_same($$SELECT count(*), sum(b) FROM (SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)) AS q$$);
    parallel_same    
 --------------------
  {"(2000,-159230)"}
+(1 row)
+
+SELECT parallel_same($$SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)$$);
+   parallel_same   
+-------------------
+ {(-77178),(6628)}
 (1 row)
 
 DROP TABLE parallel_fact, parallel_dim;
