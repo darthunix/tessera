@@ -46,7 +46,7 @@ and relays.
 - [x] 3.2 The README of the benchmarks and `docs/measuring.md` say
       which cases the predictor learns and which it cannot, and where
       the inputs of a case lie. Check: `.github/scripts/check-specs.sh`
-- [ ] 3.3 `tessera-bench --base WORKTREE` over every program that has
+- [x] 3.3 `tessera-bench --base WORKTREE` over every program that has
       the new cases, as root and on the M5 Pro: no FAIL and no
       UNSTABLE on them; their spread, MODES and misses a call go into
       the design, with the ids of the runs. A FAIL or an UNSTABLE stops

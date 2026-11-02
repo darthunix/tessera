@@ -381,6 +381,83 @@ of its own.
   is recorded; it is the noise against which `whole-word-decisions`
   judges its gains.
 
+### The runs of the new cases
+
+At commit `becb677`, every program with new cases against itself:
+`tessera-bench --base WORKTREE --bench <program>`, with the filters
+`/1024/random/nulls-random/`, `/1024/all/nulls-random/` and
+`/shuffled/`, once on each machine. No FAIL, no UNSTABLE and no
+warning. For each program: its runs on the Intel Mac and on the M5
+Pro; then, on each, the largest change of the minimum cycles between
+the two sides, over the operations of 500 cycles or more; the largest
+change of the median cycles; and the largest MODES.
+
+- `column_reader`: `compare-WbHHrW`, `compare-IEzeFJ`; 1.5 and
+  0.3 %; 2.0 and 0.5 %; 1.16 and 1.03.
+- `aggregate_int32`: `compare-WZP0Su`, `compare-6RSrKR`; 0.8 and
+  1.2 %; 4.8 and 1.0 %; 2.01 and 1.33.
+- `aggregate_int64`: `compare-8hTjRR`, `compare-86tzI4`; 0.7 and
+  1.1 %; 6.2 and 1.6 %; 2.13 and 1.37.
+- `arith_int32`: `compare-O4abX0`, `compare-6xxIT8`; 2.0 and 2.5 %;
+  33 and 3.7 %; 2.04 and 2.05.
+- `arith_int64`: `compare-vZfCEG`, `compare-PyC46F`; 1.4 and 2.2 %;
+  7.8 and 2.2 %; 1.80 and 1.07.
+- `cast_int32`: `compare-v6X2p9`, `compare-hxENpu`; 1.0 and 0.9 %;
+  1.5 and 0.5 %; 1.82 and 1.02.
+- `hash_int32`: `compare-Itc6Cq`, `compare-BNAl8e`; 2.2 and 0.5 %;
+  5.2 and 0.6 %; 2.43 and 1.58.
+- `hash_int64`: `compare-aOyBoB`, `compare-vrsFHw`; 1.0 and 0.5 %;
+  7.8 and 1.1 %; 1.80 and 1.11.
+- `set_int32`: `compare-BAjngB`, `compare-sWuGJ1`; 1.8 and 4.4 %;
+  24 and 9.5 %; 1.83 and 1.52.
+- `table_int32`: `compare-aGVUYz`, `compare-y1fGGr`; 1.9 and 4.1 %;
+  9.4 and 12 %; 1.58 and 1.53.
+- `filter_int32`: `compare-p2GjIk`, `compare-3w1jki`; 0.5 % and no
+  operation of 500 cycles; 5.4 and 0.3 %; 1.77 and 1.26.
+- `filter_int64`: `compare-SSAeGd`, `compare-G9jjzK`; 0.3 % and no
+  operation of 500 cycles; 0.7 and 2.2 %; 1.62 and 1.18.
+- `compare_int32`: `compare-SCAshC`, `compare-GK3FcH`; 0.0 and 21 %;
+  1.7 and 3.7 %; 1.71 and 1.33.
+
+What stands out:
+
+- On the M5 Pro the minimum of `compare_int32` over Datum `random`
+  moved by 21 % between the two sides, 985 cycles against 1194, while
+  their medians, 1283 and 1236, moved the other way. The operation
+  has two costs there, near 985 and near 1240, and only one side met
+  the lower one. The tool did not count it, as the median did not
+  confirm it; it is the one operation of 500 cycles or more whose
+  minimum moved past the limit of 10 %.
+- Under 500 cycles the minimum moved a few cycles: by 12.7 % on the
+  Intel Mac, 138 against 155 cycles of `count` of `aggregate_int32`
+  over dense `random`, and by 5.2 % on the M5 Pro on the same
+  operation, with the medians within 0.3 %.
+- On the Intel Mac the medians of identical sides move far, by up to
+  33 %, and nearly every operation is bistable, with MODES up to 2.4.
+  On the M5 Pro the medians move by up to 12 %, on `table_int32`.
+
+The misses a call of the new cases:
+
+- The fold of `column_reader` misses 17.0 times over dense `random`
+  and dense `all/nulls-random` on the Intel Mac, and 15.6 and 15.8
+  over Datum `random`; on the M5 Pro 14.3 and 14.1 over `random`.
+- The search by halving of `set_int32` over `shuffled`, 65 keys,
+  misses 1418 to 1489 times on the Intel Mac, where the model says
+  1351; on the M5 Pro 17, where the step is a select.
+- `table_int32` misses 168 to 363 times in `insert`, 262 to 546 in
+  `probe_hit` and 282 to 569 in `find_or_insert` on the Intel Mac;
+  34 to 195, 51 to 173 and 67 to 255 on the M5 Pro.
+- The division and the modulo of int8 miss 17 times on the Intel Mac
+  and 12 to 16 on the M5 Pro.
+- The filters and the comparison miss once a call or never: they
+  branch on no row.
+
+Before the rings the same cases missed far less on the Intel Mac: the
+fold 0.03 times (`compare-F6x7L1`), the search over `shuffled` 12.7
+(`compare-jrOJVK`), and `probe_hit` of `table_int32` over dense
+`random` 8.7, in 12 132 cycles against 19 722 now (`compare-zOahIK`,
+whose base is a build of another branch, so a guide only).
+
 ## Measurement plan
 
 The rules of `docs/measuring.md` hold: an idle machine on mains power,
