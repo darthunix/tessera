@@ -5,6 +5,10 @@ Summaries of full runs of the PostgreSQL-level benchmarks of
 TPC-H of [`bench/tpch`](../../bench/tpch/README.md), with the plans of
 the cases the README cites, newest first:
 
+- [2026-11-02, keys hashed by their
+  bytes](2026-11-02-native-key-hashes/README.md): profiles and times on
+  battery of TPC-H Q1 and the family `anykey`, Apple M5 Pro,
+  PostgreSQL master, the change `native-key-hashes` against `7978d70a`.
 - [2026-11-01, partial grouping by dictionary
   keys](2026-11-01-partial-keys/README.md): TPC-H Q1 with two workers
   and the family `anykey`, Apple M5 Pro, PostgreSQL master, the change

@@ -1,0 +1,40 @@
+Sort by top of stack, same collapsed (when >= 5):
+        deform  (in tessera_nodes.dylib)        2222
+        [rust tessera_capi]  (in tessera_kernels.dylib)        771
+        [rust tessera_capi]  (in tessera_kernels.dylib)        514
+        [rust tessera_capi]  (in tessera_kernels.dylib)        353
+        [rust tessera_capi]  (in tessera_kernels.dylib)        269
+        [rust tessera_capi]  (in tessera_kernels.dylib)        239
+        agg_keydict_numbers  (in tessera_nodes.dylib)        200
+        heap_get_datum_column  (in tessera_nodes.dylib)        189
+        keydict_value_equal  (in tessera_nodes.dylib)        189
+        expr_column  (in tessera_nodes.dylib)        172
+        [rust tessera_capi]  (in tessera_kernels.dylib)        163
+        hash_bytes  (in postgres)        163
+        _platform_memcmp  (in libsystem_platform.dylib)        105
+        [rust tessera_capi]  (in tessera_kernels.dylib)        79
+        __kill  (in libsystem_kernel.dylib)        79
+        [rust tessera_kernels]  (in tessera_kernels.dylib)        64
+        [rust tessera_capi]  (in tessera_kernels.dylib)        60
+        [rust relhash]  (in tessera_kernels.dylib)        57
+        tess_heap_batch_append_page  (in tessera_nodes.dylib)        56
+        StartReadBuffers  (in postgres)        55
+        _platform_memset  (in libsystem_platform.dylib)        52
+        [rust tessera_capi]  (in tessera_kernels.dylib)        48
+        group_batch  (in tessera_nodes.dylib)        44
+        [rust tessera_capi]  (in tessera_kernels.dylib)        42
+        [rust tessera_capi]  (in tessera_kernels.dylib)        40
+        [rust tessera_capi]  (in tessera_kernels.dylib)        36
+        numeric_value_evaluate  (in tessera_kernels.dylib)        31
+        projection_get_datum_column  (in tessera_nodes.dylib)        31
+        agg_sum_states_accumulate  (in tessera_nodes.dylib)        30
+        tess_expr_bind  (in tessera_nodes.dylib)        27
+        LWLockRelease  (in postgres)        25
+        bind_selection  (in tessera_nodes.dylib)        23
+        hash_search_with_hash_value  (in postgres)        22
+        heap_prepare_pagescan  (in postgres)        22
+        [rust tessera_capi]  (in tessera_kernels.dylib)        21
+        ResourceOwnerForget  (in postgres)        19
+        [rust tessera_kernels]  (in tessera_kernels.dylib)        18
+        <deduplicated_symbol>  (in tessera_kernels.dylib)        16
+        __bzero  (in libsystem_platform.dylib)        13
