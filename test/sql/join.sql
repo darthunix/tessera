@@ -352,6 +352,24 @@ SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELEC
 -- the column after the key, see only the rows it passed.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
 SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
+-- A filter that keeps more rows than the clauses: jmove's keys come in
+-- runs of 2000 in the table and 3000 not, and three in ten rows pass
+-- v % 10 < 3. Once each has seen 4096 rows, the filter goes behind the
+-- clauses, which then read every row, and checks only the rows they
+-- kept: it removes far fewer rows than it would first all along.
+CREATE TABLE jmove AS SELECT (g % 5000 + 1) * 100 AS k, g AS v FROM generate_series(1, 60000) AS g;
+ANALYZE jmove;
+SELECT line FROM join_explain($$SELECT count(*) FROM jmove JOIN (SELECT * FROM jbuild WHERE w <= 2000) AS b ON jmove.k = b.k WHERE jmove.v % 10 < 3$$) AS line
+WHERE line ~ 'Bloom Filter Below|Rows Removed by (Batch|Bloom) Filter';
+SELECT join_same($$SELECT jmove.v, b.w FROM jmove JOIN (SELECT * FROM jbuild WHERE w <= 2000) AS b ON jmove.k = b.k WHERE jmove.v % 10 < 3$$);
+-- The shares taken again in every window: the clauses keep three rows
+-- in ten of the first 30000 and nine in ten after, so the filter goes
+-- behind them, then first again; first, it spares the clauses most rows
+-- of the second half, which then remove far fewer than the 3000 they
+-- would remove reading them all.
+SELECT line FROM join_explain($$SELECT count(*) FROM jmove JOIN (SELECT * FROM jbuild WHERE w <= 2000) AS b ON jmove.k = b.k WHERE (jmove.v <= 30000 AND jmove.v % 10 < 3) OR (jmove.v > 30000 AND jmove.v % 10 < 9)$$) AS line
+WHERE line ~ 'Bloom Filter Below|Rows Removed by (Batch|Bloom) Filter';
+SELECT join_same($$SELECT jmove.v, b.w FROM jmove JOIN (SELECT * FROM jbuild WHERE w <= 2000) AS b ON jmove.k = b.k WHERE (jmove.v <= 30000 AND jmove.v % 10 < 3) OR (jmove.v > 30000 AND jmove.v % 10 < 9)$$);
 -- A table built anew for each value of a parameter, with keys apart
 -- from the last one's: each takes the filter of the table before back
 -- and hands its own down to the TessFilter of batch clauses alone.
@@ -1366,7 +1384,7 @@ RESET hash_mem_multiplier;
 RESET max_parallel_workers_per_gather;
 DROP TABLE jgbuild, jgprobe, jgbound;
 
-DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jslong, jsouter, jsheavy;
+DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jmove, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jslong, jsouter, jsheavy;
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();
 DROP FUNCTION jskewnull();

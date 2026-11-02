@@ -24,8 +24,8 @@ get no filter.
 alone before its clauses read their columns; a small table's filter
 when it can go below; the join's rows unchanged.
 
-**Non-Goals:** an order of the filter among the clauses by their
-measured shares; a filter checked by the join itself for a small table;
+**Non-Goals:** an order of the filter among each of the clauses; a
+filter checked by the join itself for a small table;
 a filter for a scan without a TessFilter (TessHeapScan alone); a change
 of `TessQual` or of `TessKeyFilter`.
 
@@ -46,10 +46,37 @@ front.
 
 Refused: the filter first in every TessFilter. Before a row-wise clause
 the gain is already taken, and a batch clause the planner put first may
-be the more selective one. Refused for now: an order by the shares the
-clauses and the filter keep, measured as the batches go; it needs the
-join's share in the filter and counters per clause, and no query
-measured asks for it.
+be the more selective one.
+
+### First while it keeps fewer rows than the clauses
+
+The filter first is the cheaper order when it keeps a smaller share of
+the rows than the clauses do: a check of the filter costs about what a
+batch clause does, and each removes rows the other then skips. The
+measurement showed the other side: a filter that keeps two rows in five
+ahead of a clause that keeps one in a hundred made the case
+`filter_first` 1.35 times as slow. So TessFilter counts, in windows,
+the rows the filter and the clauses were shown and kept; a window ends
+once each was shown 4096 rows, and then the filter goes first when it
+kept no larger a share, else behind the clauses, where it checks the
+rows they kept. Behind the clauses the filter checks what the join
+checked before.
+
+The shares are taken again in every window because rows come in the
+order of the table, which a clause's column may follow: in
+`filter_first` the clause on f1 keeps every row of the first 20 000 and
+none after, so a single decision over the first rows kept the filter
+first for the rest. Refused: one decision after the first rows. A
+window waits for both sides because the second sees only the rows the
+first kept: in Q19 about 10 of each 4096, a share that is noise, and a
+window of 4096 rows of the first side alone turned the order back and
+forth and lost half the gain (Q19 at 0.54 of the base instead of
+0.25).
+
+Refused: the join's share of rows found sent down in `TessKeyFilter`,
+which changes the C API for a number the child measures itself; an
+order by the clauses' costs, which the shares alone settle in every
+query measured.
 
 ### A small table's filter, to hand down only
 
@@ -75,12 +102,23 @@ same.
 ## Risks / Trade-offs
 
 - The worst order: a filter that keeps nearly half the rows, the most
-  the join's share allows, ahead of a cheap clause on an early column
-  that keeps few of them. The filter's cost is a hash and a read of the
-  filter a row, about one batch clause. A prototype in front of
-  `l_shipdate = date '1995-01-01'`, which keeps one row in 100, still
-  made the query faster, 124 ms to 98: the key column comes before the
-  date in the row. The measurement takes a case for this order.
+  the join's share allows, ahead of a cheap clause that keeps few of
+  them, cost 1.35 times the base in `filter_first`; the order by shares
+  above takes it back after the first 4096 rows.
+- The shares compare unlike things: the side that goes first is
+  measured over all its rows, the other over the rows the first kept.
+  Where the two keep the same rows, the rule may hold the costlier
+  order for the whole scan: with a filter that keeps 20 % ahead of
+  clauses that keep 10 %, 4.5 % passing both, it reads 20 % against
+  22.5 % and keeps the filter first, 1.2 checks a row where the other
+  order takes 1.1. The excess is below half a check a row, since a
+  filter comes only when fewer than half the rows find a pair; the
+  result never changes. A window of each side measured first now and
+  then would settle it; no query measured needs it.
+- A window in the wrong order before each change: when the first side
+  keeps few rows the window is long, up to 4096 rows of the second side
+  over the share the first keeps, but then the first side is the one
+  that removes the most.
 - A small table's filter that the child takes and that removes few rows
   costs a hash a row for nothing; the share rule keeps the filters to
   joins where most probe rows find no record.
