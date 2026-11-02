@@ -111,7 +111,9 @@ date column and a timestamp scalar, which becomes the date bound the
 comparison keeps once a call, as a date is its days since 2000-01-01
 (`d < T` keeps `d < ceil(T / day)`, `d = T` none where `T` is past a
 midnight), an infinite timestamp the infinite date and a date past the
-timestamps' range above every finite bound, as the core orders them;
+timestamps' range above every finite bound, as the core orders them,
+by the kernels (`tess_date_timestamp_filter`, `calendar::date_bound`,
+whose rule a Kani proof checks against the core's comparison);
 the string functions of `text` and `bpchar` (`char(n)`, and `varchar`
 through its binary cast to text) with `TESS_FUNCTION_DETERMINISTIC_COLLATION`
 as predicates: `texteq`, `textne`, `bpchareq` and `bpcharne` in every

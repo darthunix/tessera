@@ -12,11 +12,12 @@
 //! timestamp, or a pointer to an interval. A scalar interval must point to
 //! an interval.
 
-use std::ffi::c_int;
+use std::ffi::{c_int, c_uint};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use tessera_kernels::calendar::{self, DateOp, Field, Fields, Interval, Unit};
 
+use super::args::{compare_op, reader};
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::source::{
@@ -419,6 +420,37 @@ pub unsafe extern "C" fn tess_timestamp_extract(
             with_source!(arg, |source| calendar::extract_timestamps(
                 field, source, rows, &mut out
             ))
+        })
+    }
+}
+
+/// `tess_date_timestamp_filter`: keep in `rows` the selected rows of a
+/// date column whose non-NULL date satisfies `date op timestamp`, by the
+/// bound of [`calendar::date_bound`] and the int4 filter.
+///
+/// # Safety
+///
+/// `column` must point to a valid `TessDatumColumn` of dates satisfying
+/// [`DatumColumn::ints`]'s contract with `prepared` (null or a valid mask)
+/// as its readiness; `rows` must point to a valid mask that nothing else
+/// accesses during the call; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_date_timestamp_filter(
+    column: *const DatumColumn,
+    prepared: *const Mask,
+    rows: *mut Mask,
+    op: c_uint,
+    timestamp: i64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let op = compare_op(op)?;
+            let column = reader::<i32>(column, prepared)?;
+            let rows = rows.as_mut().context("a null row mask")?;
+            let mut rows = rows.mask()?;
+            calendar::filter_by_timestamp(&column, &mut rows, op, timestamp)
         })
     }
 }
