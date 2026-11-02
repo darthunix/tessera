@@ -16,7 +16,6 @@
 //! counting.
 
 use anyhow::{Result, ensure};
-use tessera_capi::DenseIntColumn;
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 use tessera_kernels::set::{self, KeySet, SetValue};
 
@@ -296,10 +295,10 @@ pub fn pilot_case() -> Result<Fixture<i32>> {
 }
 
 /// The pilot of unlearned inputs, on dense int4 blocks with the largest
-/// set: each form of inputs that the predictor cannot learn beside its
-/// control, the same form, footprint and schedule over inputs that repeat.
-/// A form and its control are cases of this one program, so their code
-/// lies at the same addresses.
+/// set: a ring of inputs that the predictor cannot learn beside its
+/// control, a ring of as many copies of one input. A form and its control
+/// are cases of this one program, so their code lies at the same
+/// addresses.
 fn pilot(runner: &mut Runner) -> Result<()> {
     let reading = reading::cases();
     let keys = keys(&reading)?;
@@ -328,27 +327,6 @@ fn pilot(runner: &mut Runner) -> Result<()> {
                 runner.group(format!("set_int32/int4/dense/pilot-{form}-{count}/{name}"));
             ring_ops(&mut group, &op, &set, &keys, &reads)?;
         }
-        for (form, long) in [
-            ("long", Fixture::concat(&pilot_case()?.ring(count))),
-            ("long-same", Fixture::concat(&repeated()?)),
-        ] {
-            let column = long.dense_column()?;
-            let read = Input::new(&column, &long);
-            check(&read, &long, &keys, dense_reference)?;
-            let mut group =
-                runner.group(format!("set_int32/int4/dense/pilot-{form}-{count}/{name}"));
-            ring_ops(&mut group, &op, &set, &keys, std::slice::from_ref(&read))?;
-        }
-    }
-    let first = pilot_case()?;
-    for (form, same) in [("fresh", false), ("fresh-same", true)] {
-        let mut group = runner.group(format!("set_int32/int4/dense/pilot-{form}/{name}"));
-        fresh_op(&mut group, &op, &first, same, |read, out| {
-            in_set(&set, read, out)
-        })?;
-        fresh_op(&mut group, "reference", &first, same, |read, out| {
-            dense_reference(&keys[..REFERENCE_KEYS], read, out)
-        })?;
     }
     Ok(())
 }
@@ -379,35 +357,6 @@ fn ring_ops<C: ColumnReader<Value = i32>>(
             &mut out,
         )
         .unwrap()
-    })
-}
-
-/// `call` over a fresh input before every call: `first` permuted by a new
-/// seed each time, or by one seed in the control, so that the preparation
-/// does the same work and the control's inputs repeat. The counters count
-/// the calls alone.
-fn fresh_op(
-    group: &mut Group<'_>,
-    op: &str,
-    first: &Fixture<i32>,
-    same: bool,
-    call: impl Fn(&Input<'_, DenseIntColumn<'_, i32>, i32>, &mut Output) -> Result<()>,
-) -> Result<()> {
-    use std::hint::black_box;
-    let mut out = Output::new(first.values.len());
-    let mut seed = 0;
-    group.op_blocks(op, |counters, iters| {
-        let mut total = pmu::Reading::default();
-        for _ in 0..iters {
-            seed += 1;
-            let input = first.permuted(if same { 1 } else { seed });
-            let column = input.dense_column()?;
-            let read = Input::new(&column, &input);
-            let start = counters.read()?;
-            call(black_box(&read), &mut out)?;
-            total += counters.read()?.since(start);
-        }
-        Ok(total)
     })
 }
 

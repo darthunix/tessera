@@ -28,7 +28,7 @@ and relays.
       --locked -p tessera-capi --benches`, every input checked against
       its model; `cargo bench --locked -p tessera-capi --bench <program>
       -- --list` names every form and control with its reference
-- [ ] 2.3 The runs of the pilot, as root and on the M5 Pro, twice each,
+- [x] 2.3 The runs of the pilot, as root and on the M5 Pro, twice each,
       each program against itself, with the hypothesis
       of each form written down first; the form chosen by the criterion
       of the design, and the others removed. A pilot where no form

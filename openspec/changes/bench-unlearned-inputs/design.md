@@ -292,11 +292,50 @@ the steps before it in the same search, it is 1792.
 The form then taken is the ring, with the smallest `K` that passes on
 both cases and on both machines: by the first pilot, 64 or more.
 
+### The second pilot of the sets
+
+Its runs, at commit `1fb5002`, on the Intel Mac as root:
+`compare-xtVxg1` and `compare-3cQu4h`, all PASS and none UNSTABLE.
+Medians as above, run by run.
+
+- The ring: 1267 and 1283 misses a call at `K` of 8, 1378 and 1382 at
+  16, 1422 and 1421 at 32, 1441 and 1438 at 64, 1446 and 1448 at 128.
+  From 16 to 32 they grew by 3.2 and 2.8 %, and less after. Its
+  controls miss 7.6 to 13.8 times a call, where the plain case's
+  control misses 9.9 and 9.2, and their minimum cycles differ from it
+  by 0.4 % at most. The hypothesis held, and from `K` of 16, not 32.
+- The long input: its misses for each 1024 rows are the ring's at the
+  same `K`, 1264 at 8 to 1447 at 128, and its control's 13 to 16, as
+  the hypothesis said.
+- The fresh input: 1453 misses a call in both runs, past the model at
+  once; its control costs 2.8 and 3.2 % more minimum cycles than the
+  plain case, less than the hypothesis said.
+
+### The form taken
+
+The ring of 64 inputs. By the rule above:
+
+- the fresh input passes on both cases, but its control costs 37 % on
+  the Intel Mac and 24 % on the M5 Pro on `column_reader`, past the
+  warning, so it is not taken;
+- the ring passes from `K` of 16 on both cases on the Intel Mac and
+  from `K` of 64 on `column_reader` on the M5 Pro, so 64 is the
+  smallest `K` that passes on both cases and machines;
+- the long input does not pass: on `column_reader` on the Intel Mac
+  its control misses as much as the form.
+
+At 64 the inputs that a dense int4 read touches take about 280 KiB,
+inside the Intel Mac's L2 of 512 KiB; those of an int8 read or of a
+Datum read, about 540 and 590 KiB, pass it. The pilot measured the
+dense int4 read alone, so the README of the benchmarks says where the
+inputs of each case lie.
+
 ### Which cases change
 
 The cases drawn at random: `random` and `nulls-random` of the reading
-fixtures, of both widths, and `shuffled` of `set_int32`. Their names
-stay, with their meaning sharpened: drawn at random and not learned.
+fixtures, of both widths, and `shuffled` of `set_int32`, each a ring
+of 64 inputs. Their names stay, with their meaning sharpened: drawn at
+random and not learned.
 `table_large` keeps its ring, which already gives each call new keys.
 
 The regular cases keep their inputs. A pattern that repeats is what a
