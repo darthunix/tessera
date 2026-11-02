@@ -15,8 +15,12 @@ query down, and where it can, does it speed one up.
 - **win** (`win.sql`): filters over large tables with aggregates above
   them, through `TessAgg` above `TessFilter` above `TessHeapScan`, two
   aggregate cases without a filter or with four aggregates over one
-  column, and three cases of the float functions (`float_*`). A ratio
-  below one is the win; each run is compared with the previous one.
+  column, three cases of the float functions (`float_*`), two of
+  smallint arithmetic (`int2_*`), a date against a timestamp
+  (`date_ts_filter`), and three of `timestamptz` in `Europe/Berlin`
+  (`tstz_*`), the last of which misses the time zone's cache in every
+  batch. A ratio below one is the win; each run is compared with the
+  previous one.
 - **join** (`join.sql`): equi-joins over one integer key between a fact
   table of 2 M rows and a dimension of 100 k, or a table with four rows
   per key (also with a text outer column): a count, a column of either side, int8 keys past the int4
