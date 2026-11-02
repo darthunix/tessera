@@ -418,6 +418,35 @@ own, as the spill to disk does when it packs a chunk, reads records by
 these names. It keeps no numbers of its own that a change of the layout
 would leave wrong.
 
+The contract's rule "References checked by the crate" once let code
+outside the crate read no table's bytes by an offset at all: it was to
+take every record from a call of the crate. But the spill to disk packs
+a chunk of records lane by lane, the same 4 bytes of every record
+together, and unpacks it into a chunk that a table links again. It reads
+every record below the chunk's used mark, not records that a reference
+names, so taking them through calls of the crate would check a reference
+for each record and give nothing in return. The rule now lets code
+outside the crate read a chunk, and write a chunk that it makes before a
+table links it, as the spill does: each field it takes at the offset and
+in the unit the crate publishes, here the used mark, a record's size in
+units of 8 bytes and the field next, and the rest copied as bytes it
+gives no meaning. It follows no reference it finds there and checks
+none: its checks that the mark covers the chunk and that every record
+has one size are those of its own format, which a chunk must meet to be
+packed. A read at the published layout that follows no reference keeps
+the reason of the rule whatever it is for, so reads are not bound to the
+spill. A write into a chunk that a table links could break its chains,
+so writes are bound to a chunk that no table links yet. The spill packs
+the field next as zero, and the table that links a chunk read back
+writes every link anew and checks each reference before it follows it,
+as in any chunk. The index stays the crate's alone. A test that damages
+a table on purpose, to show that a check of the crate holds, reads and
+writes the bytes it damages, at the offsets the crate publishes where
+its language has them. Refused: a call of the crate that packs a chunk,
+which would put the format of the spill's files into the hash table;
+offsets kept by the spill, which a change of the layout would leave
+wrong.
+
 ## References
 
 A reference names a record in 32 bits. The high 15 bits are the number
