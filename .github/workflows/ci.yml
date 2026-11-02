@@ -367,7 +367,7 @@ jobs:
           cargo miri test --locked -p relhash
           cargo miri test --locked -p relspill --test records
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
-            --test spill
+            --test spill --test smallint
       # A target whose bytes run from the most significant: the packing
       # narrows values by their low bytes, which lie last there. The
       # property tests of the spill words, of the columns appended by
