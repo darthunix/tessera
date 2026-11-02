@@ -66,10 +66,15 @@ cases, builds nothing; delete the directory to take the room back.
 `--cases` and `--repetitions` pass `CASES` and `REPETITIONS` to `run.sh`,
 `--workers` its workers. A family of 10 to 25 cases takes 10 to 50 seconds
 a run at the default 31 repetitions. `--deadline SECONDS` bounds the
-whole run, its builds included: at the deadline the step under way, a
-`make` or a `run.sh`, is stopped with every process it started, its
-`psql` among them, the server stops the query within a second (`run.sh`
-sets `client_connection_check_interval`), and the run fails. A run the
+run, its builds included: the tool checks it before each step and
+between its phases, and at the deadline stops the step under way, a
+`make` or a `run.sh`, with every process it started, its `psql` among
+them (SIGTERM, then SIGKILL a second later), and fails. The server ends
+the query of a `psql` that is gone at its next check, within a second
+(`run.sh` sets `client_connection_check_interval`). Two things it does
+not stop: a stall in the work between steps, such as `pg_config` or
+`git`; and a deadline that falls in the server's restart may leave the
+server stopped, which the next `run.sh measure` starts. A run the
 deadline stops is kept and explained, as any other.
 
 The report goes to `target/bench-runs/ab-*/report.md` and to the terminal;
