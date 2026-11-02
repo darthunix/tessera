@@ -33,8 +33,9 @@ them. Most rules here were paid for with a wrong finding.
 - **A run takes five minutes at most.** Time the cases the change
   touches, with fewer repetitions; a whole family with 31 repetitions is
   for a baseline the maintainer asks for. Every run has a timeout:
-  `cargo ab measure --deadline 300` stops a run, with its queries, at
-  five minutes.
+  `cargo ab measure --deadline 300` stops its builds and its runs, with
+  their queries, at five minutes, and fails a run whose other steps pass
+  it ([tools/tessera-ab](../tools/tessera-ab/README.md) says which).
 - **Nothing is retried, discarded or stopped early** because of its
   result. A bad run is kept and explained. UNSTABLE in a report means
   the precision was not enough, not success and not failure.
