@@ -35,6 +35,14 @@ pub const PROBE_DATUM_COLUMN_NROWS_OFFSET: c_uint = 2;
 pub const PROBE_STATUS_SIZE: c_uint = 3;
 /// The offset of a `TessStatus`'s `message`.
 pub const PROBE_STATUS_MESSAGE_OFFSET: c_uint = 4;
+/// `TESS_PROBE_ZONE_CACHE_SIZE`: `sizeof(TessZoneCache)`.
+pub const PROBE_ZONE_CACHE_SIZE: c_uint = 5;
+/// `TESS_PROBE_ZONE_ROUND_SIZE`: `sizeof(TessZoneRound)`.
+pub const PROBE_ZONE_ROUND_SIZE: c_uint = 6;
+/// `TESS_PROBE_ZONE_ANSWER_SIZE`: `sizeof(TessZoneAnswer)`.
+pub const PROBE_ZONE_ANSWER_SIZE: c_uint = 7;
+/// `TESS_PROBE_ZONE_QUESTION_SIZE`: `sizeof(TessZoneQuestion)`.
+pub const PROBE_ZONE_QUESTION_SIZE: c_uint = 8;
 
 /// `tess_kernels_probe`: the size or offset for a `TessKernelsProbe`, or 0.
 #[unsafe(no_mangle)]
@@ -45,6 +53,10 @@ pub extern "C" fn tess_kernels_probe(kind: c_uint) -> usize {
         PROBE_DATUM_COLUMN_NROWS_OFFSET => std::mem::offset_of!(DatumColumn, nrows),
         PROBE_STATUS_SIZE => size_of::<Status>(),
         PROBE_STATUS_MESSAGE_OFFSET => std::mem::offset_of!(Status, message),
+        PROBE_ZONE_CACHE_SIZE => size_of::<super::ZoneCache>(),
+        PROBE_ZONE_ROUND_SIZE => size_of::<super::ZoneRound>(),
+        PROBE_ZONE_ANSWER_SIZE => size_of::<super::ZoneAnswer>(),
+        PROBE_ZONE_QUESTION_SIZE => size_of::<super::ZoneQuestion>(),
         _ => 0,
     }
 }

@@ -216,4 +216,108 @@ extern TessStatusCode tess_timestamp_extract(TessCalendarField field,
 											 TessRowMask *rest,
 											 TessStatus *status);
 
+/*
+ * The local time of a timestamp with time zone in the session's zone
+ * (tessera_kernels::calendar::zone). Only PostgreSQL's time zone library
+ * knows the zone's transitions, and the kernels never call PostgreSQL: a
+ * call answers what its cache knows, sorts each selected non-NULL row into
+ * ready (its value written), core (for the core's function: an infinity
+ * the operation does not keep, a day before the Julian day 0, a midnight
+ * the zone cannot give, a result out of range) or unknown, and lists the
+ * distinct questions of the unknown rows, sorted: the spans first, by
+ * second, then the midnights, by day. The caller asks the library, adds
+ * the answers to those it has, and calls again over the unknown rows with
+ * all of them; a call never asks a question that an answer it was given
+ * covers, so the rounds end.
+ *
+ * The cache is the caller's: 32 spans of the zone and 1024 local midnights
+ * by day, its zero bytes an empty cache. The caller keeps the zone's
+ * identity and resets the cache when the session's zone changes.
+ */
+#define TESS_ZONE_CACHE_WORDS (3 + 32 * 3 + 1024 * 3)
+
+typedef struct TessZoneCache
+{
+	uint64		words[TESS_ZONE_CACHE_WORDS];
+} TessZoneCache;
+
+/* What a question asks, and an answer tells. */
+typedef enum TessZoneKind
+{
+	/* the offset at a Unix second and the next transition: pg_next_dst_boundary */
+	TESS_ZONE_SPAN = 0,
+	/* the offset west of UTC of a Julian day's local midnight: DetermineTimeZoneOffset */
+	TESS_ZONE_MIDNIGHT = 1
+} TessZoneKind;
+
+typedef struct TessZoneQuestion
+{
+	int64		key;			/* a Unix second, or a Julian day */
+	int32		kind;			/* TessZoneKind */
+} TessZoneQuestion;
+
+typedef struct TessZoneAnswer
+{
+	int64		key;			/* the asked second, or the Julian day */
+	int64		offset;			/* seconds east of UTC at the second, or west
+								 * of UTC of the midnight */
+	int64		boundary;		/* the next transition, when found is 1 */
+	int32		kind;			/* TessZoneKind */
+	int32		found;			/* a span: pg_next_dst_boundary's result, 1 a
+								 * transition at boundary, 0 none, -1 a
+								 * failure, offset then pg_localtime's */
+} TessZoneAnswer;
+
+/*
+ * One call of a round. ready and core gain the rows the call settles and
+ * keep their other bits; unknown gets every word of rows written;
+ * questions, room for rows' row count, gets the questions, nquestions
+ * their count.
+ */
+typedef struct TessZoneRound
+{
+	size_t		struct_size;
+	TessZoneCache *cache;
+	const TessZoneAnswer *answers;	/* every answer of the batch so far */
+	int			nanswers;
+	const TessRowMask *rows;	/* the rows to settle */
+	TessRowMask *ready;
+	TessRowMask *core;
+	TessRowMask *unknown;
+	TessZoneQuestion *questions;
+	int			nquestions;		/* out */
+} TessZoneRound;
+
+/* Forget everything the cache keeps: the zone changed. */
+extern TessStatusCode tess_zone_reset(TessZoneCache *cache, TessStatus *status);
+
+/* The local times of a timestamptz argument into locals, for extract. */
+extern TessStatusCode tess_zone_locals(TessZoneRound *round,
+									   const TessCalendarArg *instants,
+									   int64 *locals,
+									   TessStatus *status);
+
+/*
+ * date_trunc(unit, timestamptz), as timestamptz_trunc_internal: a unit
+ * below a day keeps the instant's offset, a day or more starts at the
+ * local midnight of its first day.
+ */
+extern TessStatusCode tess_zone_truncate(TessZoneRound *round,
+										 TessCalendarUnit unit,
+										 const TessCalendarArg *instants,
+										 int64 *values,
+										 TessStatus *status);
+
+/* timestamptz(date), a date's local midnight. */
+extern TessStatusCode tess_zone_midnights(TessZoneRound *round,
+										  const TessCalendarArg *dates,
+										  int64 *values,
+										  TessStatus *status);
+
+/* date(timestamptz), the day of an instant's local time. */
+extern TessStatusCode tess_zone_dates(TessZoneRound *round,
+									  const TessCalendarArg *instants,
+									  int32 *values,
+									  TessStatus *status);
+
 #endif							/* TESSERA_CALENDAR_H */

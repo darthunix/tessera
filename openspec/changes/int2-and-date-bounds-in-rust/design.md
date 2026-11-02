@@ -183,12 +183,13 @@ A few facts the design rests on:
   A call writes values only at its ready rows. It changes nothing else:
   the values of other rows, and the inputs a later call needs (the
   instants, the local times, the truncated days), stay as they are.
-  With the unknown rows it gives a list of questions: their distinct
-  keys, in order. A key is an instant in whole seconds for a span, or a
-  Julian day for a midnight. C asks PostgreSQL the questions and passes
-  the answers to a second call over the unknown rows, which keeps the
-  answers in the cache and settles each row from the answers
-  themselves:
+  The call adds its ready and core rows to the round's masks, and with
+  the unknown rows it gives a list of questions: their distinct keys, in
+  order, the spans first. A key is an instant in whole seconds for a
+  span, or a Julian day for a midnight. C asks PostgreSQL the questions,
+  adds the answers to those it has, and calls again over the unknown
+  rows with every answer of the batch so far; the call keeps the
+  answers in the cache and settles each row from them:
 
   ```
      C (kernels/date.c)                Rust (calendar::zone)
@@ -196,12 +197,11 @@ A few facts the design rests on:
      call over the rows          --->  answer from the cache:
                                  <---  ready, unknown, for the core,
                                        and the questions
-     add ready and core rows
      none unknown: done
      ask PostgreSQL the questions
      call over the unknown rows  --->  keep the answers; settle each
-       with the answers                row from them
-                                 <---  ready, for the core
+       with every answer so far        row from them
+                                 <---  ready, unknown, for the core
   ```
 
   The answers, with their units and signs:
@@ -222,18 +222,19 @@ A few facts the design rests on:
     and for the range of timestamps. A midnight out of range is kept
     as "no midnight", and its rows go to the core.
 
-  The second call settles every row an answer covers, whatever the
-  cache keeps after it: a batch of 64 rows spread over decades can need
-  more spans than the cache holds. A row no answer covers stays unknown
-  and comes back as a question; since each round's answers cover at
-  least its first question, the loop ends, and with C's skip it ends
-  after one round. A call that is given no answers, or answers that
-  cover nothing, fails rather than loop. A stage thus takes one call
-  when the cache knows every row and two otherwise. `date_trunc` has
-  two stages, the local times and then the midnights.
+  A call settles every row an answer covers, whatever the cache keeps
+  after it: a batch of 64 rows spread over decades can need more spans
+  than the cache holds. It never asks a question that an answer it was
+  given covers; an answer of a span that ends at its own second is
+  refused. So each round adds answers, a row asks at most two questions,
+  its span and then, for `date_trunc` by a day or more, its midnight,
+  and the rounds end: one call when the cache knows every row, two for
+  the spans, three when the midnights follow. The answers are passed
+  whole each time, so that a row whose span and midnight a full cache
+  has evicted between rounds still finds both.
 
-  The second call keeps the answers in the cache in the order of the
-  rows that need them, row by row, as today's code learns them, a span
+  A call keeps the answers in the cache in the order of the rows that
+  need them, row by row, as today's code learns them, a span
   joining a kept span of the same end and offset as today. So, from
   the same cache, after a batch the cache holds what today's code
   holds, with two exceptions:
@@ -301,9 +302,10 @@ A few facts the design rests on:
   `tessera-capi` makes a slice of the words, the one `unsafe` step; the
   kernels read the slice through a view that names the words: a header,
   the spans (start, end, offset), the midnights (state, day, instant).
-  The count of words is Rust's; C learns it from the header, the
-  layout probe of `kernels_layout.h` checks it against Rust's when the
-  module loads, and C passes it to every call, which refuses another.
+  The count of words is Rust's; C learns it from the header, and the
+  layout probe of `kernels_layout.h` checks it, with the sizes of the
+  round, the question and the answer, against Rust's when the module
+  loads.
 - The entry points require of the caller: the words initialized and
   aligned, as many as the header says, used by this call alone, not
   overlapping the call's inputs and outputs. No Rust reference to them

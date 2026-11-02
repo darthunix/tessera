@@ -29,6 +29,7 @@ mod status;
 mod table;
 mod text;
 mod varlena;
+mod zone;
 
 pub use calendar::{
     CalendarArg, tess_date_add_interval, tess_date_arith, tess_date_extract,
@@ -107,4 +108,8 @@ pub use table::{
 pub use text::{
     TextArg, tess_text_compare, tess_text_lengths, tess_text_like, tess_text_pieces,
     tess_text_starts_with,
+};
+pub use zone::{
+    ZONE_MIDNIGHT, ZONE_SPAN, ZoneAnswer, ZoneCache, ZoneQuestion, ZoneRound, tess_zone_dates,
+    tess_zone_locals, tess_zone_midnights, tess_zone_reset, tess_zone_truncate,
 };

@@ -300,6 +300,17 @@ SQLSTATE 22008 and the core's message, at the first row the core would.
   date plus or minus days, the days between dates.
 - `tess_date_to_timestamp` and `tess_timestamp_to_date(arg, rows, values,
   non_nulls, status)`: the casts.
+- `tess_zone_reset(cache, status)`, `tess_zone_locals(round, instants,
+  locals, status)`, `tess_zone_truncate(round, unit, instants, values,
+  status)`, `tess_zone_midnights(round, dates, values, status)` and
+  `tess_zone_dates(round, instants, values, status)`: the local time of a
+  timestamptz in the session's zone (`calendar::zone`). The cache
+  (`TessZoneCache`) is the caller's, 32 spans of the zone and 1024
+  midnights, zero bytes an empty cache. A call over a round
+  (`TessZoneRound`) sorts each row into ready, core and unknown and lists
+  the questions of the unknown rows, which the caller asks the time zone
+  library (`pg_next_dst_boundary`, `DetermineTimeZoneOffset`) and passes
+  back with every answer so far; the kernels never call PostgreSQL.
 - `tess_date_timestamp_filter(column, prepared, rows, op, timestamp,
   status)`: the selected dates where `date op timestamp`, as
   `date_cmp_timestamp` orders them: the timestamp becomes once an operator

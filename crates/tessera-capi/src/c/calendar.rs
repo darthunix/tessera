@@ -38,7 +38,7 @@ impl ReadDatum for Interval {
     }
 }
 
-fn unit_of(unit: c_int) -> Result<Unit> {
+pub(super) fn unit_of(unit: c_int) -> Result<Unit> {
     Ok(match unit {
         0 => Unit::Microsecond,
         1 => Unit::Millisecond,

@@ -84,7 +84,11 @@ fn abi_and_layout_match_the_rust_types() {
     assert_eq!(tess_kernels_probe(2), 24);
     assert_eq!(tess_kernels_probe(3), size_of::<Status>());
     assert_eq!(tess_kernels_probe(4), 18);
-    assert_eq!(tess_kernels_probe(5), 0);
+    assert_eq!(tess_kernels_probe(5), (3 + 32 * 3 + 1024 * 3) * 8);
+    assert_eq!(tess_kernels_probe(6), 80);
+    assert_eq!(tess_kernels_probe(7), 32);
+    assert_eq!(tess_kernels_probe(8), 16);
+    assert_eq!(tess_kernels_probe(9), 0);
 }
 
 #[test]

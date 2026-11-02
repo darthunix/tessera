@@ -110,7 +110,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
       skips as C does and one that does not, and the check that each
       round settles its first question. Check: `cargo test --locked -p
       tessera-kernels zone`.
-- [ ] 5.2 `TessZoneCache` and the entry points of the module in
+- [x] 5.2 `TessZoneCache` and the entry points of the module in
       `include/tessera/calendar.h` and `tessera-capi`; the count of
       words in the layout probe of `kernels_layout.h`; a test target
       through the raw structs, the calls over one value among them, that

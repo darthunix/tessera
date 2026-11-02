@@ -18,6 +18,7 @@
 
 #include "postgres.h"
 
+#include "tessera/calendar.h"
 #include "tessera/kernels.h"
 #include "tessera/sort.h"
 #include "tessera/spill.h"
@@ -46,6 +47,11 @@ tess_kernels_layout_matches(void)
 		tess_kernels_probe(TESS_PROBE_STATUS_SIZE) == sizeof(TessStatus) &&
 		tess_kernels_probe(TESS_PROBE_STATUS_MESSAGE_OFFSET) ==
 		offsetof(TessStatus, message) &&
+		tess_kernels_probe(TESS_PROBE_ZONE_CACHE_SIZE) == sizeof(TessZoneCache) &&
+		tess_kernels_probe(TESS_PROBE_ZONE_ROUND_SIZE) == sizeof(TessZoneRound) &&
+		tess_kernels_probe(TESS_PROBE_ZONE_ANSWER_SIZE) == sizeof(TessZoneAnswer) &&
+		tess_kernels_probe(TESS_PROBE_ZONE_QUESTION_SIZE) ==
+		sizeof(TessZoneQuestion) &&
 		tess_kernels_probe((TessKernelsProbe) 99) == 0 &&
 		tess_table_format_version() == TESS_TABLE_FORMAT_VERSION &&
 		tess_table_layout(TESS_TABLE_LAYOUT_HEADER_SIZE) ==
