@@ -1,0 +1,40 @@
+Sort by top of stack, same collapsed (when >= 5):
+        deform  (in tessera_nodes.dylib)        1993
+        [rust tessera_capi]  (in tessera_kernels.dylib)        687
+        [rust tessera_capi]  (in tessera_kernels.dylib)        507
+        [rust tessera_capi]  (in tessera_kernels.dylib)        325
+        [rust tessera_capi]  (in tessera_kernels.dylib)        278
+        [rust tessera_capi]  (in tessera_kernels.dylib)        252
+        heap_get_datum_column  (in tessera_nodes.dylib)        212
+        bpchareq  (in postgres)        176
+        [rust tessera_capi]  (in tessera_kernels.dylib)        174
+        expr_column  (in tessera_nodes.dylib)        149
+        hash_bytes  (in postgres)        147
+        agg_keydict_numbers  (in tessera_nodes.dylib)        141
+        pg_newlocale_from_collation  (in postgres)        135
+        pg_detoast_datum_packed  (in postgres)        111
+        FunctionCall1Coll  (in postgres)        91
+        _platform_memcmp  (in libsystem_platform.dylib)        90
+        FunctionCall2Coll  (in postgres)        84
+        hashbpchar  (in postgres)        82
+        [rust tessera_capi]  (in tessera_kernels.dylib)        64
+        [rust tessera_kernels]  (in tessera_kernels.dylib)        64
+        [rust tessera_capi]  (in tessera_kernels.dylib)        57
+        [rust relhash]  (in tessera_kernels.dylib)        57
+        __kill  (in libsystem_kernel.dylib)        55
+        tess_heap_batch_append_page  (in tessera_nodes.dylib)        52
+        LWLockRelease  (in postgres)        45
+        [rust tessera_capi]  (in tessera_kernels.dylib)        43
+        group_batch  (in tessera_nodes.dylib)        41
+        [rust tessera_capi]  (in tessera_kernels.dylib)        37
+        [rust tessera_capi]  (in tessera_kernels.dylib)        34
+        numeric_value_evaluate  (in tessera_kernels.dylib)        34
+        _platform_memset  (in libsystem_platform.dylib)        31
+        tess_expr_bind  (in tessera_nodes.dylib)        30
+        DYLD-STUB$$FunctionCall1Coll  (in tessera_nodes.dylib)        28
+        DYLD-STUB$$FunctionCall2Coll  (in tessera_nodes.dylib)        28
+        DYLD-STUB$$memcmp  (in postgres)        25
+        [rust tessera_capi]  (in tessera_kernels.dylib)        22
+        heap_prepare_pagescan  (in postgres)        22
+        StartReadBuffers  (in postgres)        19
+        [rust tessera_capi]  (in tessera_kernels.dylib)        19

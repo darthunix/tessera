@@ -28,8 +28,7 @@ placed `spill-crate` first on 2026-10-28, after the close of
 review of what more can move from C to Rust; the float kernels are
 closed. The maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
-order. The maintainer took `native-key-hashes` out of turn on
-2026-11-02, after profiles of the calls of a key's type functions:
+order:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
@@ -161,22 +160,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
 
 ## Entries
 
-### native-key-hashes
-
-Keys hashed and compared by their bytes. The maintainer took it on
-2026-11-02, after profiles of the calls of a key's type functions; it
-is the change `native-key-hashes`.
-
-- **What:** A grouping's char(n) key, and a join's text, char(n) and
-  bytea key, hashed and compared by the value's bytes, as the type's
-  functions would, without a call through fmgr.
-- **Why:** Those calls are 997 of 6806 samples of TPC-H Q1, serial, and
-  532 of 6785 of a join on a text key (`any_join_text`).
-- **Known:** The design of the change.
-- **Depends on:** nothing.
-- **Capabilities:** hash-table, aggregate
-- **Size:** small: one pull request.
-
 ### numeric-keys-by-digits
 
 numeric keys hashed and compared by their digits, in the grouping's
@@ -195,7 +178,8 @@ dictionary and in the join.
 - **Known:** `1.0` and `1.00` must stay one number and keep their own
   forms in the output. A hash of the value as a coefficient and a scale
   would split them; one through float would be wrong.
-- **Depends on:** `native-key-hashes`, whose rule it extends.
+- **Depends on:** nothing; it extends the rule of a key's bytes,
+  `tess_key_bytes` in `nodes/key_kind.h`.
 - **Capabilities:** aggregate, hash-table
 - **Size:** medium: one pull request.
 
@@ -1959,6 +1943,13 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **The cost of a hashed join key** (the close of `native-key-hashes`,
+  2026-11-02). `tessera.join_hashed_key_cost` was measured when every
+  key a word does not hold went through its type's hash function. A
+  text, char(n) or bytea key now is hashed by its bytes without the
+  call, which was about half of such a key's hashing in a profile, so
+  the model overstates those keys. Suggested: measure the joins of `anykey` on
+  mains power and set the cost per kind of key, if they differ.
 - **The cost of a partial grouping that folds little** (the close of
   `partial-dictionary-keys`, 2026-11-01). The cost of `TessAgg`'s
   partial stage counts a dictionary's lookups but not its memory per

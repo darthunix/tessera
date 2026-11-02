@@ -1,0 +1,40 @@
+Sort by top of stack, same collapsed (when >= 5):
+        [rust tessera_capi]  (in tessera_kernels.dylib)        927
+        deform  (in tessera_nodes.dylib)        854
+        hash_bytes_extended  (in postgres)        586
+        [rust tessera_capi]  (in tessera_kernels.dylib)        519
+        [rust relhash]  (in tessera_kernels.dylib)        437
+        join_get_column  (in tessera_nodes.dylib)        408
+        _platform_memcmp  (in libsystem_platform.dylib)        368
+        join_batch_keys  (in tessera_nodes.dylib)        318
+        heap_prepare_pagescan  (in postgres)        228
+        tess_heap_batch_append_page  (in tessera_nodes.dylib)        226
+        FunctionCall2Coll  (in postgres)        161
+        pg_newlocale_from_collation  (in postgres)        128
+        hashtextextended  (in postgres)        112
+        heap_get_datum_column  (in tessera_nodes.dylib)        101
+        pg_detoast_datum_packed  (in postgres)        99
+        [rust relhash]  (in tessera_kernels.dylib)        91
+        expr_column  (in tessera_nodes.dylib)        82
+        join_prepare_inner  (in tessera_nodes.dylib)        56
+        [rust tessera_capi]  (in tessera_kernels.dylib)        47
+        [rust relhash]  (in tessera_kernels.dylib)        46
+        [rust relhash]  (in tessera_kernels.dylib)        40
+        DYLD-STUB$$memcmp  (in tessera_kernels.dylib)        33
+        <deduplicated_symbol>  (in tessera_kernels.dylib)        32
+        DYLD-STUB$$FunctionCall2Coll  (in tessera_nodes.dylib)        32
+        [rust tessera_capi]  (in tessera_kernels.dylib)        31
+        agg_exec  (in tessera_nodes.dylib)        31
+        [rust relhash]  (in tessera_kernels.dylib)        29
+        [rust tessera_capi]  (in tessera_kernels.dylib)        26
+        [rust tessera_capi]  (in tessera_kernels.dylib)        25
+        _platform_memset  (in libsystem_platform.dylib)        24
+        MemoryContextReset  (in postgres)        21
+        aggregate_evaluate  (in tessera_kernels.dylib)        21
+        [rust tessera_capi]  (in tessera_kernels.dylib)        20
+        [rust tessera_capi]  (in tessera_kernels.dylib)        19
+        [rust tessera_kernels]  (in tessera_kernels.dylib)        18
+        tess_output_publish  (in tessera_nodes.dylib)        18
+        [rust tessera_capi]  (in tessera_kernels.dylib)        17
+        bind_selection  (in tessera_nodes.dylib)        17
+        tess_expr_apply_filter  (in tessera_nodes.dylib)        17

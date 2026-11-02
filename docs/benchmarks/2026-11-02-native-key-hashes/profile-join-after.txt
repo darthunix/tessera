@@ -1,0 +1,40 @@
+Sort by top of stack, same collapsed (when >= 5):
+        [rust tessera_capi]  (in tessera_kernels.dylib)        939
+        deform  (in tessera_nodes.dylib)        918
+        hash_bytes_extended  (in postgres)        716
+        join_batch_keys  (in tessera_nodes.dylib)        520
+        [rust tessera_capi]  (in tessera_kernels.dylib)        492
+        [rust relhash]  (in tessera_kernels.dylib)        460
+        _platform_memcmp  (in libsystem_platform.dylib)        427
+        join_get_column  (in tessera_nodes.dylib)        404
+        heap_prepare_pagescan  (in postgres)        285
+        tess_heap_batch_append_page  (in tessera_nodes.dylib)        217
+        expr_column  (in tessera_nodes.dylib)        92
+        [rust relhash]  (in tessera_kernels.dylib)        84
+        heap_get_datum_column  (in tessera_nodes.dylib)        70
+        join_prepare_inner  (in tessera_nodes.dylib)        60
+        [rust tessera_capi]  (in tessera_kernels.dylib)        58
+        [rust relhash]  (in tessera_kernels.dylib)        55
+        [rust relhash]  (in tessera_kernels.dylib)        45
+        DYLD-STUB$$memcmp  (in tessera_kernels.dylib)        41
+        agg_exec  (in tessera_nodes.dylib)        38
+        [rust relhash]  (in tessera_kernels.dylib)        34
+        DYLD-STUB$$hash_bytes_extended  (in tessera_nodes.dylib)        33
+        <deduplicated_symbol>  (in tessera_kernels.dylib)        32
+        hash_search_with_hash_value  (in postgres)        27
+        [rust tessera_capi]  (in tessera_kernels.dylib)        26
+        [rust tessera_capi]  (in tessera_kernels.dylib)        25
+        [rust tessera_capi]  (in tessera_kernels.dylib)        23
+        [rust tessera_kernels]  (in tessera_kernels.dylib)        23
+        aggregate_evaluate  (in tessera_kernels.dylib)        23
+        [rust tessera_capi]  (in tessera_kernels.dylib)        22
+        tess_output_publish  (in tessera_nodes.dylib)        20
+        _platform_memmove  (in libsystem_platform.dylib)        19
+        MemoryContextReset  (in postgres)        18
+        [rust tessera_capi]  (in tessera_kernels.dylib)        18
+        _platform_memset  (in libsystem_platform.dylib)        18
+        tess_expr_bind  (in tessera_nodes.dylib)        17
+        UnpinBufferNoOwner  (in postgres)        16
+        [rust relhash]  (in tessera_kernels.dylib)        15
+        fill_from_page  (in tessera_nodes.dylib)        15
+        tess_input_next  (in tessera_nodes.dylib)        15
