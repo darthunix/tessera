@@ -1143,28 +1143,32 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
                  Builds: 1
                  Build Rows: 139
                  Chunks: 1
-                 Probe Rows: 6150
+                 Probe Rows: 4819
                  Matches: 2165
                  Compact Batches: 39
-                 ->  Custom Scan (TessFilter) on public.jf (actual rows=615.00 loops=10)
+                 Bloom Filters: 1
+                 Bloom Filter Below: true
+                 ->  Custom Scan (TessFilter) on public.jf (actual rows=481.90 loops=10)
                        Batch Filter: (jf.v > (jsmall.k * 10))
-                       Rows Removed by Batch Filter: 385
+                       Rows Removed by Batch Filter: 220
+                       Rows Removed by Bloom Filter: 260
+                       Rows Removed by NULL Key: 38
                        Input Batches: 180
                        Input Rows: 10000
-                       Output Rows: 6150
+                       Output Rows: 4819
                        ->  Custom Scan (TessHeapScan) on public.jf (actual rows=1000.00 loops=10)
                              Batch Size: 64
                              Batches: 180
                              Pages: 90
-                             Deformed Datums: 16150
-                             Restarted Datums: 687
+                             Deformed Datums: 15063
+                             Restarted Datums: 516
                  ->  Custom Scan (TessHeapScan) on public.jdup (actual rows=150.00 loops=1)
                        Batch Size: 64
                        Batches: 3
                        Pages: 1
                        Deformed Datums: 150
                        Restarted Datums: 0
-(40 rows)
+(44 rows)
 
 SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > jsmall.k * 10) FROM jsmall$$);
                    join_same                    
@@ -1846,8 +1850,9 @@ SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELEC
  4882 rows, hash f053a1ff4cc3faad320d8e430ebedef8
 (1 row)
 
--- A TessFilter of batch clauses alone has nothing to save and refuses
--- the filter: the join checks its rows itself.
+-- Batch clauses after the filter: a TessFilter of batch clauses alone
+-- takes the filter and checks it before them, so that its clauses on v,
+-- the column after the key, see only the rows it passed.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
                                          join_explain                                         
 ----------------------------------------------------------------------------------------------
@@ -1860,32 +1865,97 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          Hash Cond: (jprobe.k = jbuild.k)
          Buckets: 16384
          Memory Usage: within hash_mem
-         Rows Removed by Bloom Filter: 14483
          Builds: 1
          Build Rows: 5000
          Chunks: 2
-         Probe Rows: 18999
+         Probe Rows: 4364
          Matches: 188
          Bloom Filters: 1
-         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=18999.00 loops=1)
+         Bloom Filter Below: true
+         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=4364.00 loops=1)
                Batch Filter: ((jprobe.v > 0) AND (jprobe.v < 19000))
-               Rows Removed by Batch Filter: 1001
+               Rows Removed by Batch Filter: 10
+               Rows Removed by Bloom Filter: 15463
+               Rows Removed by NULL Key: 163
                Input Batches: 354
                Input Rows: 20000
-               Output Rows: 18999
+               Output Rows: 4364
                ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
                      Batch Size: 64
                      Batches: 354
                      Pages: 89
-                     Deformed Datums: 38999
-                     Restarted Datums: 195
+                     Deformed Datums: 24374
+                     Restarted Datums: 43
          ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
                Batch Size: 64
                Batches: 89
                Pages: 23
                Deformed Datums: 10000
                Restarted Datums: 0
-(34 rows)
+(36 rows)
+
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
+                    join_same                    
+-------------------------------------------------
+ 188 rows, hash 1aa0f6e388c10c3fdd4eb196c10cd1c5
+(1 row)
+
+-- A table built anew for each value of a parameter, with keys apart
+-- from the last one's: each takes the filter of the table before back
+-- and hands its own down to the TessFilter of batch clauses alone.
+SELECT line FROM join_explain($$SELECT v.x, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w BETWEEN v.x AND v.x + 999 AND jprobe.v < 19000) FROM (VALUES (1), (2001), (4001)) AS v(x)$$) AS line
+WHERE line ~ 'Builds|Bloom Filter';
+                           line                            
+-----------------------------------------------------------
+                 Builds: 3
+                 Bloom Filters: 3
+                 Bloom Filter Below: true
+                       Rows Removed by Bloom Filter: 15508
+(4 rows)
+
+SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w BETWEEN v.x AND v.x + 999 AND jprobe.v < 19000) FROM (VALUES (1), (2001), (4001)) AS v(x)$$);
+                   join_same                   
+-----------------------------------------------
+ 3 rows, hash c24f63250dd88cf8f6069e57a7a63a9d
+(1 row)
+
+-- A small table's filter: a table of fewer than 4096 records gets one
+-- only for the outer child, which takes it here; a key the child
+-- computes is refused, and the join then checks no filter.
+SELECT line FROM join_explain($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$) AS line
+WHERE line ~ 'TessHashJoin|Build Rows|Bloom|TessFilter';
+                                        line                                         
+-------------------------------------------------------------------------------------
+   ->  Custom Scan (TessHashJoin) (actual rows=188.00 loops=1)
+         Build Rows: 4000
+         Bloom Filters: 1
+         Bloom Filter Below: true
+         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=4410.00 loops=1)
+               Rows Removed by Bloom Filter: 15414
+         ->  Custom Scan (TessFilter) on public.jbuild (actual rows=4000.00 loops=1)
+(7 rows)
+
+SELECT join_same($$SELECT jprobe.v, b.w FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$);
+                    join_same                    
+-------------------------------------------------
+ 188 rows, hash 1aa0f6e388c10c3fdd4eb196c10cd1c5
+(1 row)
+
+SELECT line FROM join_explain($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$) AS line
+WHERE line ~ 'TessHashJoin|Build Rows|Bloom|TessFilter';
+                                         line                                         
+--------------------------------------------------------------------------------------
+   ->  Custom Scan (TessHashJoin) (actual rows=188.00 loops=1)
+         Build Rows: 4000
+         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=18999.00 loops=1)
+         ->  Custom Scan (TessFilter) on public.jbuild (actual rows=4000.00 loops=1)
+(4 rows)
+
+SELECT join_same($$SELECT jprobe.v, b.w FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$);
+                    join_same                    
+-------------------------------------------------
+ 188 rows, hash 1aa0f6e388c10c3fdd4eb196c10cd1c5
+(1 row)
 
 -- A table that spills keeps its filter: it knows only the rows in memory.
 SET work_mem = '64kB';
@@ -4177,10 +4247,12 @@ SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbu
  1       | true
 (1 row)
 
--- A shared table of fewer than 4096 rows never wants a filter at the
--- default ratio, and none is allocated; at a ratio of 1 every table may
--- want one, and its 1025 words are allocated with the table.
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k;
+-- A shared table of fewer than 4096 rows never wants a filter of its own
+-- at the default ratio: a LEFT join, which keeps its outer rows, can hand
+-- none down, and none is allocated; at a ratio of 1 every table may want
+-- one, and its 1025 words are allocated with the table. An INNER join's
+-- small table allocates them for its outer child at the default ratio.
+EXPLAIN (COSTS OFF) SELECT count(*), count(b.w) FROM jprobe LEFT JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k;
                                     QUERY PLAN                                     
 -----------------------------------------------------------------------------------
  Custom Scan (TessAgg)
@@ -4191,22 +4263,60 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE
                ->  Parallel Custom Scan (TessAgg)
                      Partial Mode: Partial
                      ->  Parallel Custom Scan (TessHashJoin)
+                           Join Type: Left
                            Hash Cond: (jprobe.k = jbuild.k)
                            Shared Table: true
                            ->  Parallel Custom Scan (TessHeapScan) on jprobe
                            ->  Parallel Custom Scan (TessFilter) on jbuild
                                  Batch Filter: (jbuild.w <= 4000)
                                  ->  Parallel Custom Scan (TessHeapScan) on jbuild
-(14 rows)
+(15 rows)
 
 SET tessera.join_bloom_ratio = 1;
-SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS with_filter \gset
+SELECT join_property($$SELECT count(*), count(b.w) FROM jprobe LEFT JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS with_filter \gset
 RESET tessera.join_bloom_ratio;
-SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS without_filter \gset
+SELECT join_property($$SELECT count(*), count(b.w) FROM jprobe LEFT JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS without_filter \gset
 SELECT :with_filter - :without_filter >= 8 AS filter_only_where_wanted;
  filter_only_where_wanted 
 --------------------------
  t
+(1 row)
+
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS inner_filter \gset
+SELECT :inner_filter - :without_filter >= 8 AS for_the_child;
+ for_the_child 
+---------------
+ t
+(1 row)
+
+-- A shared small table hands its filter to each participant's TessFilter.
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$, 'Bloom Filter Below') AS below;
+ shared | below 
+--------+-------
+ true   | true
+(1 row)
+
+SELECT join_same($$SELECT jprobe.v, b.w FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$);
+                    join_same                    
+-------------------------------------------------
+ 188 rows, hash 1aa0f6e388c10c3fdd4eb196c10cd1c5
+(1 row)
+
+-- A key each participant's TessFilter computes: every one refuses the
+-- filter, and no participant counts or checks one.
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$, 'Bloom Filters') AS filters,
+       join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$, 'Rows Removed by Bloom Filter') AS removed;
+ shared | filters | removed 
+--------+---------+---------
+ true   |         | 
+(1 row)
+
+SELECT join_same($$SELECT jprobe.v, b.w FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$);
+                    join_same                    
+-------------------------------------------------
+ 188 rows, hash 1aa0f6e388c10c3fdd4eb196c10cd1c5
 (1 row)
 
 SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);

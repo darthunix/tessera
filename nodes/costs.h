@@ -88,6 +88,17 @@ join_bloom_wanted(double ratio, double table_rows, double found, double probed)
 		return false;
 	return ratio >= 1.0 || found < ratio * probed;
 }
+
+/*
+ * Whether a table too small for a filter of its own (join_bloom_possible
+ * false, so ratio below 1) gets one for its outer child: under the same
+ * share of rows found, never at a ratio of 0.
+ */
+static inline bool
+join_bloom_below_wanted(double ratio, double found, double probed)
+{
+	return ratio > 0.0 && found < ratio * probed;
+}
 /* tessera.bitmap_page_rows: see nodes/module.c. */
 extern double tess_bitmap_page_rows;
 /* tessera.index_min_correlation and tessera.index_min_rows: see nodes/module.c. */

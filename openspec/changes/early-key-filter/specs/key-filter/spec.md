@@ -36,7 +36,9 @@ keeps the table SHALL keep the filter below.
 - **THEN** the first hand it down and show `Bloom Filter Below`, the
   second check no filter, and every join returns the rows of the core's
   plan
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::A small table's filter: a table of fewer than 4096`;
+  `test/sql/join.sql::A shared small table hands its filter to each`
 
 #### Scenario: The joins that keep their filter
 - **WHEN** a join's table spills, its key is hashed from a value, or
@@ -69,8 +71,9 @@ Tessera takes a filter.
   refuses it and the join checks its rows itself
 - **Verified by:**
   `test/sql/join.sql::Only row-wise clauses: TessFilter takes them`;
-  `test/sql/join.sql::A partitioned outer side: TessAppend hands the filter`;
-  pending
+  `test/sql/join.sql::Batch clauses after the filter: a TessFilter`;
+  `test/sql/join.sql::a key the child`;
+  `test/sql/join.sql::A partitioned outer side: TessAppend hands the filter`
 
 ### Requirement: What a child removes
 A TessFilter that holds a filter SHALL, for each batch, check it before
@@ -94,9 +97,9 @@ returns SHALL be those it would return without the filter below.
 
 #### Scenario: Batch clauses after the filter
 - **WHEN** a join hands its filter to a TessFilter of batch clauses
-  alone, a clause on a column after the key and one that would fail on
-  a row without a pair
+  alone, on a column after the key
 - **THEN** the TessFilter's `Rows Removed by Bloom Filter` counts rows
   its clauses never saw, its `Rows Removed by Batch Filter` only rows
   the filter passed, and the join returns the rows of the core's plan
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/join.sql::Batch clauses after the filter: a TessFilter`

@@ -56,12 +56,14 @@ typedef struct FilterState
 	TessSharedStats *stats;
 
 	/*
-	 * A parent's key filter, applied before the first row-wise clause: its
+	 * A parent's key filter, applied before the first row-wise clause, or
+	 * before every clause when all run in batches (key_filter_first): its
 	 * keys and their kinds, whether a shared filter was seen ready, and the
 	 * buffers of a batch for capacity rows.
 	 */
 	const TessKernelOps *kernels;
 	bool		key_filter_set;
+	bool		key_filter_first;
 	TessKeyFilter key_filter;
 	int			key_columns[TESS_TABLE_MAX_KEYS];
 	TessTableKeyKind key_kinds[TESS_TABLE_MAX_KEYS];
@@ -115,7 +117,7 @@ const TessNode tess_filter_node = {
 
 /*
  * The parent's key filter, right before the first row-wise clause, over
- * the rows the batch clauses before it kept: the keys hashed as the join
+ * the rows the batch clauses before it kept, or before every clause: the keys hashed as the join
  * hashes them, the rows with a NULL key and those whose hash the filter
  * rejects removed, each counted apart. A shared filter is used once it is
  * seen ready; until then every row passes.
@@ -201,8 +203,11 @@ apply_key_filter(void *private_data, TessBatch *batch, int rows)
 }
 
 /*
- * Take a parent's key filter, when the node has row-wise clauses for it
- * to save and its keys are columns of the child; NULL takes it back.
+ * Take a parent's key filter, when its keys are columns of the child; NULL
+ * takes it back. It goes before the first row-wise clause, the costliest,
+ * with the batch clauses the planner put in front of it first; with batch
+ * clauses alone, before them all, so that they read their columns only
+ * for the rows it passed.
  */
 static bool
 filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
@@ -212,11 +217,11 @@ filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
 	if (filter == NULL)
 	{
 		state->key_filter_set = false;
+		state->key_filter_first = false;
 		tess_qual_set_row_prefilter(state->qual, NULL, NULL);
 		return true;
 	}
-	if (!tess_qual_has_row_clauses(state->qual) ||
-		filter->nkeys < 1 || filter->nkeys > TESS_TABLE_MAX_KEYS ||
+	if (filter->nkeys < 1 || filter->nkeys > TESS_TABLE_MAX_KEYS ||
 		filter->words == NULL || filter->nwords == 0)
 		return false;
 	for (int key = 0; key < filter->nkeys; key++)
@@ -242,7 +247,11 @@ filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
 	state->key_filter.kinds = state->key_kinds;
 	state->key_filter_ready = false;
 	state->key_filter_set = true;
-	tess_qual_set_row_prefilter(state->qual, apply_key_filter, state);
+	state->key_filter_first = !tess_qual_has_row_clauses(state->qual);
+	if (state->key_filter_first)
+		tess_qual_set_row_prefilter(state->qual, NULL, NULL);
+	else
+		tess_qual_set_row_prefilter(state->qual, apply_key_filter, state);
 	return true;
 }
 
@@ -256,12 +265,21 @@ tess_filter_create_state(CustomScan *cscan)
 	return (Node *) state;
 }
 
-/* Apply the clauses in the planner's order, each over the rows the previous ones left. */
+/*
+ * Apply the clauses in the planner's order, each over the rows the
+ * previous ones left, after a parent's key filter when it goes first.
+ */
 static int
 filter_batch(void *private_data, TessBatch *batch, int rows)
 {
 	FilterState *state = private_data;
 
+	if (state->key_filter_set && state->key_filter_first)
+	{
+		rows = apply_key_filter(state, batch, rows);
+		if (rows == 0)
+			return 0;
+	}
 	ResetExprContext(state->css.ss.ps.ps_ExprContext);
 	return tess_qual_apply(state->qual, batch, state->css.ss.ps.ps_ExprContext,
 						   rows);
