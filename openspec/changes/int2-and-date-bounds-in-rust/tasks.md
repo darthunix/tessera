@@ -101,7 +101,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
 
 ## 5. The time zone
 
-- [ ] 5.1 The module `tessera_kernels::calendar::zone`: the view of the
+- [x] 5.1 The module `tessera_kernels::calendar::zone`: the view of the
       cache's words, learning a span, a second and a midnight, the
       reset, and the calls of the design over a batch, each sorting its
       rows into ready, unknown and for the core and giving the

@@ -29,6 +29,8 @@ use crate::ops::CompareOp;
 pub use crate::source::Source;
 use crate::source::{Unary, map_rows};
 
+pub mod zone;
+
 /// The Julian day of 2000-01-01, a date's zero.
 pub const POSTGRES_EPOCH_JDATE: i32 = 2_451_545;
 /// The Julian day of 1970-01-01.
