@@ -83,6 +83,7 @@ pub mod ops;
 pub mod order;
 pub mod set;
 mod simd;
+pub mod smallint;
 pub mod sort;
 pub mod source;
 pub use relhash as table;

@@ -11,7 +11,9 @@ The benchmark programs:
 - [aggregate_int32](aggregate_int32.rs) runs the `sum`, `min` and `count`
   kernels over the reading cases.
 - [arith_int32](arith_int32.rs) computes `x + 7`, `x * 7`, `x / 7` and
-  `x + x` into a result column over the reading cases.
+  `x + x` into a result column over the reading cases, and `x + 7`,
+  `x * 7`, `x / 7` and `x + x` of the smallint kernels over the same
+  cases, their values brought into the smallint range (`smallint/`).
 - [hash_int32](hash_int32.rs) hashes one and two keys into a hash column
   and a valid mask over the reading cases.
 - [filter_int64](filter_int64.rs), [arith_int64](arith_int64.rs) and

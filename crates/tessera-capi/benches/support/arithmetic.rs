@@ -10,6 +10,7 @@ use std::mem::MaybeUninit;
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::int32::{self, ArithOp, ArithmeticError};
+use tessera_kernels::smallint;
 
 use crate::reading::{self, Input};
 use crate::support::{fixture::Fixture, runner::Runner};
@@ -128,6 +129,78 @@ pub fn add_column<C: ColumnReader<Value = i32>>(
     )
 }
 
+/// The smallint forms of the same operations, over a case whose values
+/// are smallints ([`smallint_case`]).
+#[inline(never)]
+pub fn add_scalar_smallint<C: ColumnReader<Value = i32>>(
+    input: &Input<'_, C>,
+    out: &mut Output,
+) -> Result<()> {
+    let (values, mut mask) = out.parts()?;
+    smallint::arith_scalar(
+        ArithOp::Add,
+        input.column,
+        SCALAR,
+        &input.rows,
+        values,
+        &mut mask,
+    )
+}
+
+#[inline(never)]
+pub fn mul_scalar_smallint<C: ColumnReader<Value = i32>>(
+    input: &Input<'_, C>,
+    out: &mut Output,
+) -> Result<()> {
+    let (values, mut mask) = out.parts()?;
+    smallint::arith_scalar(
+        ArithOp::Mul,
+        input.column,
+        SCALAR,
+        &input.rows,
+        values,
+        &mut mask,
+    )
+}
+
+#[inline(never)]
+pub fn div_scalar_smallint<C: ColumnReader<Value = i32>>(
+    input: &Input<'_, C>,
+    out: &mut Output,
+) -> Result<()> {
+    let (values, mut mask) = out.parts()?;
+    smallint::arith_scalar(
+        ArithOp::Div,
+        input.column,
+        SCALAR,
+        &input.rows,
+        values,
+        &mut mask,
+    )
+}
+
+#[inline(never)]
+pub fn add_column_smallint<C: ColumnReader<Value = i32>>(
+    input: &Input<'_, C>,
+    out: &mut Output,
+) -> Result<()> {
+    let (values, mut mask) = out.parts()?;
+    smallint::arith_columns(
+        ArithOp::Add,
+        input.column,
+        input.column,
+        &input.rows,
+        values,
+        &mut mask,
+    )
+}
+
+/// A case whose values are smallints: each modulo 4096, so that `x * 7`
+/// and `x + x` stay within the range.
+pub fn smallint_case(case: &Fixture) -> Fixture {
+    case.map_values(|value| value % 4096)
+}
+
 /// `value + SCALAR` for every selected non-NULL row, straight from the
 /// dense fixture buffers and their masks.
 #[inline(never)]
@@ -243,6 +316,34 @@ pub fn check<C: ColumnReader<Value = i32>>(
     Ok(())
 }
 
+/// The smallint kernels against i16 arithmetic over a smallint case.
+pub fn check_smallint<C: ColumnReader<Value = i32>>(
+    input: &Input<'_, C>,
+    case: &Fixture,
+) -> Result<()> {
+    let small = |value: Option<i16>| value.map(i32::from);
+    let narrow = |x: i32| i16::try_from(x).unwrap();
+    let seven = narrow(SCALAR);
+    let mut out = Output::new(case.values.len());
+    add_scalar_smallint(input, &mut out)?;
+    check_op(case, &out, "add_scalar_smallint", |x| {
+        small(narrow(x).checked_add(seven))
+    })?;
+    mul_scalar_smallint(input, &mut out)?;
+    check_op(case, &out, "mul_scalar_smallint", |x| {
+        small(narrow(x).checked_mul(seven))
+    })?;
+    div_scalar_smallint(input, &mut out)?;
+    check_op(case, &out, "div_scalar_smallint", |x| {
+        small(narrow(x).checked_div(seven))
+    })?;
+    add_column_smallint(input, &mut out)?;
+    check_op(case, &out, "add_column_smallint", |x| {
+        small(narrow(x).checked_add(narrow(x)))
+    })?;
+    Ok(())
+}
+
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in reading::cases() {
         measure_column(
@@ -259,7 +360,38 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
             datum_reference,
             &case,
         )?;
+        let small = smallint_case(&case);
+        measure_smallint(runner, "dense", &small.dense_column()?, &small)?;
+        measure_smallint(runner, "datum", &small.datum_column()?, &small)?;
     }
+    Ok(())
+}
+
+/// The smallint kernels, in a group of their own beside the int4 ones of
+/// the same rows and masks.
+fn measure_smallint<C: ColumnReader<Value = i32>>(
+    runner: &mut Runner,
+    format: &str,
+    column: &C,
+    case: &Fixture,
+) -> Result<()> {
+    use std::hint::black_box;
+    let input = Input::new(column, case);
+    check_smallint(&input, case)?;
+    let mut out = Output::new(case.values.len());
+    let mut group = runner.group(format!("arith_int32/{format}/smallint/{}", case.name));
+    group.op("add_scalar", || {
+        add_scalar_smallint(black_box(&input), &mut out).unwrap()
+    })?;
+    group.op("mul_scalar", || {
+        mul_scalar_smallint(black_box(&input), &mut out).unwrap()
+    })?;
+    group.op("div_scalar", || {
+        div_scalar_smallint(black_box(&input), &mut out).unwrap()
+    })?;
+    group.op("add_column", || {
+        add_column_smallint(black_box(&input), &mut out).unwrap()
+    })?;
     Ok(())
 }
 

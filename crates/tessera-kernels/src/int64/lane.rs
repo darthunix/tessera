@@ -9,7 +9,7 @@ use tessera_core::{WordBlock, ones};
 
 use super::fold;
 use super::{CompareOp, Divisor, Side};
-use crate::int::{Evaluate, IntLane};
+use crate::int::{Evaluate, IntLane, Range};
 use crate::ops::{ArithOp, ArithmeticError};
 use crate::simd::{Simd, Vectors};
 
@@ -140,7 +140,7 @@ impl IntLane for i64 {
     /// NEON has no 64-bit multiplication: `*`, a prepared division and a
     /// division by a column go lane by lane from the blocks.
     #[inline(always)]
-    fn arith_block<E: Evaluate<i64>>(
+    fn arith_block<E: Evaluate<i64>, G: Range<i64>>(
         simd: Simd,
         op: ArithOp,
         lhs: Side<'_>,
