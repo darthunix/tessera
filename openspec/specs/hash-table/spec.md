@@ -80,6 +80,12 @@ Beside them the C API SHALL do what the crate leaves to its caller:
   record size other than the index's;
 - a debug build of the entry points SHALL check every chunk it is
   given;
+- `TESS_TABLE_CHUNK_HEADER`, `TESS_TABLE_RECORD_HASH_OFFSET`,
+  `TESS_TABLE_RECORD_NEXT_OFFSET`, `TESS_TABLE_RECORD_NULL_BITS_OFFSET`,
+  `TESS_TABLE_RECORD_SIZE_OFFSET`, `TESS_TABLE_RECORD_HEADER` and
+  `TESS_TABLE_KEY_SLOT` SHALL hold the crate's constants of a chunk and
+  of a record, which `tess_table_layout` gives, and the kernels' module
+  SHALL refuse a library whose constants differ;
 - `tess_table_memory_limit` SHALL return a limit of memory as it is up
   to `TESS_TABLE_MEMORY_MAX`, 16 GiB, half of what the most chunks of
   the longest length hold, and that maximum for a larger limit;
@@ -125,14 +131,19 @@ Beside them the C API SHALL do what the crate leaves to its caller:
 
 #### Scenario: Sizes and partitions through C
 - **WHEN** the size of a record is asked through the C API for 1 to 16
-  keys and payloads of 0 to 1024 bytes, and for 0 and 17 keys; and a
-  chunk of records is split into partitions through the C API
+  keys and payloads of 0 to 1024 bytes, and for 0 and 17 keys; a chunk
+  of records is split into partitions through the C API; and the
+  kernels are asked the bytes of a chunk's used mark and the offsets
+  of a record's fields
 - **THEN** each size is the one `tess_table_record_bytes` gives, 0 and
-  17 keys are refused, and every record goes to the chunk of the
-  partition `tess_table_partition` gives for its hash
+  17 keys are refused, every record goes to the chunk of the partition
+  `tess_table_partition` gives for its hash, and the kernels give the
+  crate's constants
 - **Verified by:**
   `test/sql/table.sql::tessera_test_table_record_size`;
-  `test/sql/table.sql::tessera_test_table_partitions`
+  `test/sql/table.sql::tessera_test_table_partitions`;
+  `crates/tessera-capi/tests/table.rs::the_layout_probes_match_the_types`;
+  `test/sql/table.sql::tessera_test_table_layout`
 
 ### Requirement: The used mark of a chunk
 `tess_table_chunk_used` SHALL give the used mark of a chunk the caller

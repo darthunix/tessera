@@ -521,7 +521,12 @@ fn the_layout_probes_match_the_types() {
     assert_eq!(tess_table_layout(10), 17);
     assert_eq!(tess_table_layout(11), 48);
     assert_eq!(tess_table_layout(12), 40);
-    assert_eq!(tess_table_layout(13), 0);
+    // A chunk's used mark, and a record's fields, header and key slot.
+    let record = [8, 0, 4, 8, 12, 16, 8];
+    for (kind, bytes) in (13..).zip(record) {
+        assert_eq!(tess_table_layout(kind), bytes, "kind {kind}");
+    }
+    assert_eq!(tess_table_layout(20), 0);
 }
 
 #[test]

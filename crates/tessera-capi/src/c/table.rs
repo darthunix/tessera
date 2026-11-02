@@ -18,10 +18,12 @@ use tessera_kernels::accumulate::{self, Combine, ExtremeSlot, Fold, MAX_SUMS, Sl
 use tessera_kernels::column_keys::normalize_word;
 use tessera_kernels::phases::{COUNTER_WORDS, Participant, SharedCounters, StopWord};
 use tessera_kernels::table::{
-    Appended, Batch, ChunkWriter, Chunks, Cursor, FORMAT_VERSION, HEADER_SIZE, KeySource, MAX_KEYS,
-    MAX_PAYLOAD_COLUMNS, Marks, Matches, MatchesView, MergeStop, Partitions, PayloadColumns, Table,
-    TableConfig, TableMut, UNIT_BITS, VERSION_OFFSET, bloom::SharedFilter, index_size, mark,
-    mark_words, payload_null_words, record_bytes, scan_unmarked,
+    Appended, Batch, CHUNK_HEADER, ChunkWriter, Chunks, Cursor, FORMAT_VERSION, HEADER_SIZE,
+    KEY_SLOT, KeySource, MAX_KEYS, MAX_PAYLOAD_COLUMNS, Marks, Matches, MatchesView, MergeStop,
+    Partitions, PayloadColumns, RECORD_HASH_OFFSET, RECORD_HEADER, RECORD_NEXT_OFFSET,
+    RECORD_NULL_BITS_OFFSET, RECORD_SIZE_OFFSET, Table, TableConfig, TableMut, UNIT_BITS,
+    VERSION_OFFSET, bloom::SharedFilter, index_size, mark, mark_words, payload_null_words,
+    record_bytes, scan_unmarked,
 };
 
 use super::args::reader;
@@ -269,6 +271,13 @@ pub extern "C" fn tess_table_layout(kind: c_uint) -> usize {
         10 => UNIT_BITS as usize,
         11 => size_of::<SpillWeights>(),
         12 => offset_of!(SpillWeights, per_check),
+        13 => CHUNK_HEADER,
+        14 => RECORD_HASH_OFFSET,
+        15 => RECORD_NEXT_OFFSET,
+        16 => RECORD_NULL_BITS_OFFSET,
+        17 => RECORD_SIZE_OFFSET,
+        18 => RECORD_HEADER,
+        19 => KEY_SLOT,
         _ => 0,
     }
 }

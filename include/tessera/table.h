@@ -119,6 +119,22 @@ tess_table_partition(uint32 hash, uint32 shift, uint32 npartitions)
 }
 #define TESS_TABLE_CHUNK_HEADER 8
 
+/*
+ * A record in its chunk: the offsets of the fields of its header, a uint32
+ * each, and the bytes of the header and of a key's slot, which follow it.
+ * The hash is the row's; next is the reference of the next record of its
+ * chain, 0 at its end and in a chunk no table links yet; the NULL bits have
+ * bit k set when key k is NULL; the size is the record's in units of 8
+ * bytes, the same in every record of a table. Code outside the kernels reads
+ * a chunk by these names, and follows and checks no reference it finds.
+ */
+#define TESS_TABLE_RECORD_HASH_OFFSET 0
+#define TESS_TABLE_RECORD_NEXT_OFFSET 4
+#define TESS_TABLE_RECORD_NULL_BITS_OFFSET 8
+#define TESS_TABLE_RECORD_SIZE_OFFSET 12
+#define TESS_TABLE_RECORD_HEADER 16
+#define TESS_TABLE_KEY_SLOT 8
+
 
 /*
  * A table as this process sees it: the index, and the chunks by number.
@@ -187,7 +203,15 @@ typedef enum TessTableLayoutKind
 	TESS_TABLE_LAYOUT_REF_NCHUNKS_OFFSET = 9,
 	TESS_TABLE_LAYOUT_UNIT_BITS = 10,
 	TESS_TABLE_LAYOUT_SPILL_WEIGHTS_SIZE = 11,
-	TESS_TABLE_LAYOUT_SPILL_WEIGHTS_PER_CHECK_OFFSET = 12
+	TESS_TABLE_LAYOUT_SPILL_WEIGHTS_PER_CHECK_OFFSET = 12,
+	/* A chunk and a record as they lie in memory, not the C structs. */
+	TESS_TABLE_LAYOUT_CHUNK_HEADER = 13,
+	TESS_TABLE_LAYOUT_RECORD_HASH_OFFSET = 14,
+	TESS_TABLE_LAYOUT_RECORD_NEXT_OFFSET = 15,
+	TESS_TABLE_LAYOUT_RECORD_NULL_BITS_OFFSET = 16,
+	TESS_TABLE_LAYOUT_RECORD_SIZE_OFFSET = 17,
+	TESS_TABLE_LAYOUT_RECORD_HEADER = 18,
+	TESS_TABLE_LAYOUT_KEY_SLOT = 19
 } TessTableLayoutKind;
 
 /* The table format the library writes and accepts; must equal the header's. */
@@ -209,13 +233,14 @@ extern TessStatusCode tess_table_record_size(int nkeys,
 
 /*
  * tess_table_record_size for the planner's estimates, which call no
- * kernel: a header of 16 bytes, a slot of 8 per key and the payload,
- * rounded up to 8. A test ties it to the kernels' (tessera_table_test).
+ * kernel: the header, a slot per key and the payload, rounded up to 8.
+ * A test ties it to the kernels' (tessera_table_test).
  */
 static inline Size
 tess_table_record_bytes(int nkeys, Size payload_size)
 {
-	return TYPEALIGN(8, 16 + 8 * (Size) nkeys + payload_size);
+	return TYPEALIGN(8, TESS_TABLE_RECORD_HEADER +
+					 TESS_TABLE_KEY_SLOT * (Size) nkeys + payload_size);
 }
 
 /*
