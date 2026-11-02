@@ -38,6 +38,7 @@ mod loom;
 mod pack;
 pub mod phases;
 pub mod plan;
+pub mod set;
 pub mod shared_spill;
 pub mod spill_columns;
 use error::ensure;

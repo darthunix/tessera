@@ -214,6 +214,34 @@ rules! {
     ValueRead,
     /// A word past the mask of the rows.
     Mask,
+
+    /// A set of no partitions.
+    SetPartitions,
+    /// A write buffer shorter than a header and a chunk worth packing,
+    /// not a multiple of 8, or not the set's.
+    SetBuffer,
+    /// A writer of a set in no state a call of it leaves.
+    SetState,
+    /// A call of a set whose last ranges were not reported written.
+    SetOutstanding,
+    /// A call of a set that failed a write, but for a reset.
+    SetFailed,
+    /// A block written to a set that is finished.
+    SetFinished,
+    /// A block of a partition past the set's.
+    SetPartition,
+    /// Another block, or a finish, where a step left a block undone.
+    SetPending,
+    /// A block list that counts more blocks than its region holds.
+    SetList,
+    /// Ranges reported written where none wait.
+    SetWritten,
+    /// A partition of a shared set dropped before the set is finished.
+    SetDrop,
+    /// A chunk that packs into more bytes than a header can say.
+    PackedLength,
+    /// A finish where a step left a block undone.
+    FinishPending,
 }
 
 impl Error {
@@ -437,6 +465,33 @@ impl fmt::Display for Error {
             Rule::ByValueBytes => write!(f, "a by-value column {a} gave bytes"),
             Rule::ValueRead => write!(f, "the source of rows cannot give column {a} of row {b}"),
             Rule::Mask => f.write_str("a word past the mask of the rows"),
+            Rule::SetPartitions => write!(f, "a spill set of {a} partitions"),
+            Rule::SetBuffer => write!(
+                f,
+                "a spill set's write buffer of {a} bytes where it takes {b}"
+            ),
+            Rule::SetState => f.write_str("a spill set in no state its writer keeps"),
+            Rule::SetOutstanding => {
+                f.write_str("a spill set's last ranges were not reported written")
+            }
+            Rule::SetFailed => f.write_str("a spill set that failed a write takes only a reset"),
+            Rule::SetFinished => f.write_str("a spill set that was finished takes no more blocks"),
+            Rule::SetPartition => write!(f, "partition {a} is past the {b} of the spill set"),
+            Rule::SetPending => write!(
+                f,
+                "a block of partition {a} where a step left one of partition {b} undone"
+            ),
+            Rule::SetList => write!(f, "a block list of {a} entries counts {b} blocks"),
+            Rule::SetWritten => f.write_str("no ranges of the spill set wait to be written"),
+            Rule::SetDrop => write!(
+                f,
+                "a shared spill set dropped partition {a} before it was finished"
+            ),
+            Rule::PackedLength => write!(f, "a chunk packs into {a} bytes, past a header's"),
+            Rule::FinishPending => write!(
+                f,
+                "a spill set finished where a step left a block of partition {a} undone"
+            ),
         }
     }
 }

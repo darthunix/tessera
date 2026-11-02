@@ -370,9 +370,9 @@ jobs:
             --test spill
       # A target whose bytes run from the most significant: the packing
       # narrows values by their low bytes, which lie last there. The
-      # property tests of the spill words and of the columns appended by
-      # partition, and the threads counting a build, take minutes under
-      # Miri there: they are left out.
+      # property tests of the spill words, of the columns appended by
+      # partition and of a set's file, and the threads counting a build,
+      # take minutes under Miri there: they are left out.
       - name: The spill's tests on a big-endian target
         run: |
           cargo miri test --locked -p relspill --target s390x-unknown-linux-gnu -- \
@@ -380,7 +380,9 @@ jobs:
             --skip rows_go_in_order_until_the_chunk_or_the_values_fill \
             --skip rows_go_to_their_partitions_until_a_chunk_fills \
             --skip rows_wider_than_64_words_keep_a_lane_of_null_bits_per_64 \
-            --skip participants_count_a_build_at_once
+            --skip participants_count_a_build_at_once \
+            --skip a_set_written_in_memory_reads_back \
+            --skip a_set_cut_by_a_failed_write_takes_only_a_reset
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)
