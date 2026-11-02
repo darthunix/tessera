@@ -37,7 +37,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
       measure win` with `CASES='^(int2|date_ts|tstz)'` and
       `REPETITIONS=1` runs them, and `plans.txt` shows each function
       computed by Tessera's node.
-- [ ] 2.3 Add to the suite `types` the rows the design's "Tests" lists
+- [x] 2.3 Add to the suite `types` the rows the design's "Tests" lists
       that the C version already answers as the core does: the edges of
       a date against a timestamp; the edges of smallint arithmetic and
       of `int2(int4)` that do not mix two errors; for the time zone, a
