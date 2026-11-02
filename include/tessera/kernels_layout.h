@@ -102,6 +102,12 @@ tess_kernels_layout_matches(void)
 		tess_spill_set_layout(TESS_SPILL_SET_STEP_SIZE) == sizeof(TessSpillStep) &&
 		tess_spill_set_layout(TESS_SPILL_SET_STEP_RANGES_OFFSET) ==
 		offsetof(TessSpillStep, ranges) &&
+		tess_spill_set_layout(TESS_SPILL_SET_READER_SIZE) ==
+		sizeof(TessSpillReadState) &&
+		tess_spill_set_layout(TESS_SPILL_SET_READ_STEP_SIZE) ==
+		sizeof(TessSpillReadStep) &&
+		tess_spill_set_layout(TESS_SPILL_SET_READ_STEP_HEADER_OFFSET) ==
+		offsetof(TessSpillReadStep, header) &&
 		tess_spill_set_layout((TessSpillSetLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of

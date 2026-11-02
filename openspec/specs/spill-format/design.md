@@ -564,7 +564,12 @@ A set first only writes, and then only reads.
 3. `tess_spill_open` creates a reader for one partition. The reader
    starts at the first block of the partition. Its buffer is as large
    as the largest block of the partition. For a partition without
-   blocks there is no reader.
+   blocks there is no reader. The reader of `relspill` reads no byte
+   itself: of the caller's own set it takes the list in memory; of
+   another participant's file it asks for the trailer, then for the
+   counts of the lists, then for the partition's entries, a page of 256
+   at a time, and checks each part before it asks for the bytes it
+   names. `runtime/spill.c` reads what it asks for.
 4. `tess_spill_read_header` reads the next block of the partition, the
    header and the body together, with one read. Then it checks the
    block:
@@ -609,8 +614,14 @@ the caller must not use such a reader afterwards.
 
 A reader does not trust bytes that it has not checked.
 
+- It rejects a trailer without its mark, of another count of
+  partitions or table, or whose lists do not lie in the file; counts
+  that do not fill the lists exactly; an entry of a length no block
+  takes, or one that runs into the next block of its partition or into
+  the lists. Each is checked before the bytes it names are read.
 - It rejects a header with a wrong magic, version, kind, fingerprint,
-  length or level.
+  length or level, and a block of another partition or level, or of
+  other bytes on disk than its entry gives.
 - It rejects a packed body that does not unpack into exactly the chunk
   that the header describes.
 - It never uses the body of a rejected block.
@@ -674,8 +685,10 @@ table that spills, in [hash-table](../hash-table/design.md).
   call or damaged bytes, each naming its rule
 - `crates/relspill/src/set.rs`: the writer of a set's file: the
   write buffer, the lists of blocks and the trailer
+- `crates/relspill/src/set/reader.rs`: the reader of a partition: the
+  lists, the trailer and the blocks, each checked before it is used
 - `crates/tessera-capi/src/c/spill_set.rs`: the C entry points of the
-  writer of a set
+  writer and the reader of a set
 - `crates/tessera-capi/src/c/spill.rs`: the C entry points
 - `crates/relspill/src/spill_columns.rs`: rows appended to chunks
   of columns
@@ -690,7 +703,9 @@ table that spills, in [hash-table](../hash-table/design.md).
 
 - The unit tests of `crates/relspill/src/lib.rs`, `pack.rs` and
   `columns.rs`; those of `set.rs`, which keep the file of a set in
-  memory and cut its writes at random places.
+  memory and cut its writes at random places; those of
+  `set/reader.rs`, which read every partition back through its list
+  and from its file, and damage each part of a file.
 - `crates/tessera-capi/tests/spill.rs` and `tests/table.rs`: the entry
   points, each by a test, also under Miri in CI.
 - `test/sql/spill.sql` with `test/tessera_spill_test.c`: the sets of

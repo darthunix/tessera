@@ -234,7 +234,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       today. Check: a property test of a set in memory, with writes cut
       by failures; `make installcheck`; `cargo ab measure` of the
       family `spill`
-- [ ] 3.7 Move the reading of a set into the crate: the set's own lists,
+- [x] 3.7 Move the reading of a set into the crate: the set's own lists,
       and another participant's trailer and lists, a page of entries at
       a time, from the length of the file that the host gives; each is
       checked before the bytes it names are asked for. Check: the cases

@@ -1238,9 +1238,358 @@ fn the_set_entry_points_refuse_what_no_set_takes() {
     assert_eq!(code, Code::InvalidArgument);
     assert!(status.message().contains("finished takes no more blocks"));
     assert_eq!(
-        (0..8)
+        (0..11)
             .map(|what| tess_spill_set_layout(what))
             .collect::<Vec<_>>(),
-        [152, 16, 24, 8, 32, 128, 32, 0]
+        [152, 16, 24, 8, 32, 128, 32, 216, 72, 32, 0]
+    );
+}
+
+/// One step of a reader through its entry points: read what it asks
+/// into the page or the block buffer from `file`, or give what it found.
+fn read_step(
+    step: &tessera_capi::c::SpillReadStep,
+    file: &[u8],
+    page: &mut [relspill::set::Entry],
+    block: &mut [u8],
+) -> bool {
+    use tessera_capi::c::{READ_BLOCK, READ_PAGE};
+
+    let bytes = &file[step.at as usize..(step.at + step.len) as usize];
+    match step.kind {
+        READ_PAGE => {
+            for (entry, pair) in page.iter_mut().zip(bytes.chunks(16)) {
+                let word = |at: usize| {
+                    pair.get(at..at + 8)
+                        .map_or(0, |word| u64::from_ne_bytes(word.try_into().unwrap()))
+                };
+                *entry = relspill::set::Entry {
+                    offset: word(0),
+                    stored: word(8),
+                };
+            }
+            true
+        }
+        READ_BLOCK => {
+            block[..bytes.len()].copy_from_slice(bytes);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// A set's partitions read back through the reader's entry points: the
+/// own list, and the file as another participant reads it with a page of
+/// two entries; a seek to a block by its place; each block's header and
+/// body as written.
+#[test]
+fn a_set_reads_back_through_its_entry_points() {
+    use relspill::set::{Entry, Reader};
+    use tessera_capi::c::{
+        READ_END, READ_FOUND, READ_HEADER, READ_READY, SpillReadStep, tess_spill_reader_body,
+        tess_spill_reader_file, tess_spill_reader_next, tess_spill_reader_open,
+        tess_spill_reader_own, tess_spill_reader_seek,
+    };
+
+    let mut set = CSet::new(2, 256);
+    let mut places = Vec::new();
+    for len in [16_usize, 400, 24] {
+        let body = vec![len as u8; len];
+        places.push(set.write(1, 2, &body));
+    }
+    // A chunk of records, which goes packed, in partition 0.
+    let chunk = records(64, 40, |record, lane| (record * 7 + lane) as u32);
+    set.write(0, 1, &chunk);
+    set.finish();
+    let list = &set.entries[1][..set.lists[1].count as usize];
+
+    // Each block of a reader, by its entry points, then a seek to the
+    // second and its block again.
+    let read_all = |reader: &mut Reader, page: &mut Vec<Entry>, block: &mut Vec<u8>| {
+        let mut numbers = Vec::new();
+        loop {
+            let mut step = SpillReadStep::default();
+            let mut status = Status::new();
+            // SAFETY: the reader, page and block of this test.
+            let code = unsafe {
+                tess_spill_reader_next(
+                    reader,
+                    page.as_ptr(),
+                    page.len(),
+                    block.as_ptr(),
+                    block.len(),
+                    &raw mut step,
+                    &raw mut status,
+                )
+            };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            if read_step(&step, &set.file, page, block) {
+                continue;
+            }
+            if step.kind == READ_END {
+                return numbers;
+            }
+            assert_eq!(step.kind, READ_HEADER);
+            let mut body = vec![0_u8; step.header.len as usize];
+            // SAFETY: as above, and a local body.
+            let code = unsafe {
+                tess_spill_reader_body(
+                    reader,
+                    block.as_ptr(),
+                    block.len(),
+                    body.as_mut_ptr(),
+                    body.len(),
+                    &raw mut status,
+                )
+            };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert!(body.iter().all(|&byte| byte == body.len() as u8));
+            numbers.push(body.len());
+        }
+    };
+    let seek = |reader: &mut Reader, page: &mut Vec<Entry>, block: &mut Vec<u8>, at: u64| loop {
+        let mut step = SpillReadStep::default();
+        let mut status = Status::new();
+        // SAFETY: the reader and page of this test.
+        let code = unsafe {
+            tess_spill_reader_seek(
+                reader,
+                page.as_ptr(),
+                page.len(),
+                at,
+                &raw mut step,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        if step.kind == READ_FOUND {
+            return;
+        }
+        assert!(read_step(&step, &set.file, page, block));
+    };
+
+    let mut own = Reader::default();
+    let mut largest = 0;
+    let mut status = Status::new();
+    // SAFETY: a local reader, the set's list, a local output.
+    let code = unsafe {
+        tess_spill_reader_own(
+            &raw mut own,
+            2,
+            1,
+            1,
+            77,
+            1 << 20,
+            list.as_ptr(),
+            list.len() as u64,
+            &raw mut largest,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let mut page = list.to_vec();
+    let mut block = vec![0_u8; largest as usize];
+    assert_eq!(read_all(&mut own, &mut page, &mut block), [16, 400, 24]);
+    seek(&mut own, &mut page, &mut block, places[1]);
+    assert_eq!(read_all(&mut own, &mut page, &mut block), [400, 24]);
+
+    let mut other = Reader::default();
+    // SAFETY: a local reader.
+    let code = unsafe {
+        tess_spill_reader_file(
+            &raw mut other,
+            2,
+            1,
+            1,
+            77,
+            1 << 20,
+            set.file.len() as u64,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let mut page = vec![Entry::default(); 2];
+    let mut block = Vec::new();
+    loop {
+        let mut step = SpillReadStep::default();
+        // SAFETY: the reader and page of this test.
+        let code = unsafe {
+            tess_spill_reader_open(
+                &raw mut other,
+                page.as_ptr(),
+                page.len(),
+                &raw mut step,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        if step.kind == READ_READY {
+            block = vec![0; step.largest as usize];
+            break;
+        }
+        assert!(read_step(&step, &set.file, &mut page, &mut block));
+    }
+    assert_eq!(read_all(&mut other, &mut page, &mut block), [16, 400, 24]);
+    seek(&mut other, &mut page, &mut block, places[2]);
+    assert_eq!(read_all(&mut other, &mut page, &mut block), [24]);
+
+    // The chunk of records reads back unpacked, its links cleared.
+    let list = &set.entries[0][..set.lists[0].count as usize];
+    let mut records = Reader::default();
+    // SAFETY: a local reader, the set's list, a local output.
+    let code = unsafe {
+        tess_spill_reader_own(
+            &raw mut records,
+            2,
+            1,
+            0,
+            77,
+            1 << 20,
+            list.as_ptr(),
+            list.len() as u64,
+            &raw mut largest,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let mut page = list.to_vec();
+    let mut block = vec![0_u8; largest as usize];
+    let mut step = SpillReadStep::default();
+    loop {
+        // SAFETY: the reader, page and block of this test.
+        let code = unsafe {
+            tess_spill_reader_next(
+                &raw mut records,
+                page.as_ptr(),
+                page.len(),
+                block.as_ptr(),
+                block.len(),
+                &raw mut step,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        if !read_step(&step, &set.file, &mut page, &mut block) {
+            break;
+        }
+    }
+    assert_eq!(step.kind, READ_HEADER);
+    assert!(step.header.packed > 0, "the chunk of records packs");
+    let mut body = vec![0_u8; step.header.len as usize];
+    // SAFETY: as above, and a local body.
+    let code = unsafe {
+        tess_spill_reader_body(
+            &raw mut records,
+            block.as_ptr(),
+            block.len(),
+            body.as_mut_ptr(),
+            body.len(),
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let mut expected = chunk.clone();
+    for record in 0..64 {
+        let at = CHUNK_HEADER + record * 40 + RECORD_NEXT_OFFSET;
+        expected[at..at + 4].fill(0);
+    }
+    assert_eq!(body, expected);
+}
+
+/// Each misuse of a reader's entry points is refused with its reason.
+#[test]
+fn the_reader_entry_points_refuse_what_no_reader_takes() {
+    use relspill::set::Reader;
+    use tessera_capi::c::{
+        SpillReadStep, tess_spill_reader_body, tess_spill_reader_file, tess_spill_reader_next,
+        tess_spill_reader_open, tess_spill_reader_seek,
+    };
+
+    let mut status = Status::new();
+    let mut step = SpillReadStep::default();
+    // SAFETY: a null reader, refused, and local outputs.
+    let code = unsafe {
+        tess_spill_reader_next(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            0,
+            std::ptr::null(),
+            0,
+            &raw mut step,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("a null reader"));
+    let mut reader = Reader::default();
+    // SAFETY: a local reader.
+    let code = unsafe {
+        tess_spill_reader_file(&raw mut reader, 2, 1, 2, 77, 1 << 20, 64, &raw mut status)
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("partition 2 is past the 2"));
+    // SAFETY: a local reader.
+    let code = unsafe {
+        tess_spill_reader_file(&raw mut reader, 2, 1, 0, 77, 1 << 20, 16, &raw mut status)
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    // SAFETY: a page of no entries, refused, and a local step.
+    let code = unsafe {
+        tess_spill_reader_open(
+            &raw mut reader,
+            std::ptr::null(),
+            0,
+            &raw mut step,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("a page of 0 entries"));
+    let page = [relspill::set::Entry::default(); 2];
+    // SAFETY: a local page and step.
+    let code = unsafe {
+        tess_spill_reader_open(
+            &raw mut reader,
+            page.as_ptr(),
+            2,
+            &raw mut step,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::DataCorrupted, "{}", status.message());
+    assert!(
+        status
+            .message()
+            .contains("16 bytes has no list of its blocks")
+    );
+    // SAFETY: a local reader, a body with no header before it.
+    let code = unsafe {
+        tess_spill_reader_body(
+            &raw mut reader,
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("read after its header"));
+    // SAFETY: a local reader, a seek with no block.
+    let code = unsafe {
+        tess_spill_reader_seek(
+            &raw mut reader,
+            page.as_ptr(),
+            2,
+            8,
+            &raw mut step,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(
+        status.message().contains("no state"),
+        "{}",
+        status.message()
     );
 }

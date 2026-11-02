@@ -118,6 +118,12 @@
 	X(spill_set_written) \
 	X(spill_set_finish) \
 	X(spill_set_drop) \
-	X(spill_set_stats)
+	X(spill_set_stats) \
+	X(spill_reader_own) \
+	X(spill_reader_file) \
+	X(spill_reader_open) \
+	X(spill_reader_next) \
+	X(spill_reader_body) \
+	X(spill_reader_seek)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */
