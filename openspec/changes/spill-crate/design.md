@@ -266,7 +266,8 @@ that got fewer bytes than it asked for, an error of the file manager,
 the limit of temporary files, a cancel. The crate does not retry and
 does not try to recover. The host reports the failure. After that, the
 set or the machine accepts only a free or a reset; any other call is a
-wrong call.
+wrong call. In Tessera a failed action raises an ERROR, which ends the
+query and frees the set with its memory; nothing is left to report.
 
 In a shared build, a participant whose action failed never arrives at
 a barrier as done, and its claims in the shared words are not taken

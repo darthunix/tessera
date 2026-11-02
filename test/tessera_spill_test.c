@@ -49,6 +49,12 @@ static const TessKernelOps kernels = {
 	.spill_columns_init = tess_spill_columns_init,
 	.spill_columns_pack = tess_spill_columns_pack,
 	.spill_columns_unpack = tess_spill_columns_unpack,
+	.spill_set_init = tess_spill_set_init,
+	.spill_set_write = tess_spill_set_write,
+	.spill_set_written = tess_spill_set_written,
+	.spill_set_finish = tess_spill_set_finish,
+	.spill_set_drop = tess_spill_set_drop,
+	.spill_set_stats = tess_spill_set_stats,
 };
 
 /* A block's body: every word names its partition, chunk and place. */

@@ -937,3 +937,310 @@ fn a_refused_value_past_two_to_the_23_rows_reports_its_own_reason() {
         status.message()
     );
 }
+
+/// A file of a set kept in memory, written through the set's entry
+/// points: the regions the writer asks for grow as C grows them.
+struct CSet {
+    writer: relspill::set::Writer,
+    buffer: Vec<u8>,
+    scratch: Vec<u8>,
+    entries: Vec<Vec<relspill::set::Entry>>,
+    lists: Vec<tessera_capi::c::SpillList>,
+    file: Vec<u8>,
+}
+
+impl CSet {
+    fn new(partitions: usize, buffer_len: usize) -> Self {
+        use tessera_capi::c::tess_spill_set_init;
+
+        let mut set = Self {
+            writer: relspill::set::Writer::default(),
+            buffer: vec![0; buffer_len],
+            scratch: Vec::new(),
+            entries: vec![Vec::new(); partitions],
+            lists: (0..partitions)
+                .map(|_| tessera_capi::c::SpillList {
+                    entries: std::ptr::null_mut(),
+                    count: 0,
+                    slots: 0,
+                })
+                .collect(),
+            file: Vec::new(),
+        };
+        let mut status = Status::new();
+        // SAFETY: a local writer and status.
+        let code = unsafe {
+            tess_spill_set_init(
+                &raw mut set.writer,
+                partitions as i32,
+                1,
+                77,
+                1 << 20,
+                buffer_len,
+                true,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        set
+    }
+
+    /// Serve a step: grow a region, or write its ranges and report them;
+    /// whether the call is done.
+    fn serve(&mut self, step: &tessera_capi::c::SpillStep, partition: usize, body: &[u8]) -> bool {
+        use tessera_capi::c::{
+            REGION_BODY, REGION_BUFFER, REGION_LIST, REGION_SCRATCH, STEP_DONE, STEP_LIST,
+            STEP_SCRATCH, tess_spill_set_written,
+        };
+
+        match step.kind {
+            STEP_SCRATCH => {
+                self.scratch.resize(step.need as usize, 0);
+                return false;
+            }
+            STEP_LIST => {
+                self.entries[partition].resize(step.need as usize, relspill::set::Entry::default());
+                let list = &mut self.lists[partition];
+                list.entries = self.entries[partition].as_mut_ptr();
+                list.slots = step.need;
+                return false;
+            }
+            _ => {}
+        }
+        for range in &step.ranges[..step.nranges as usize] {
+            let list;
+            let from: &[u8] = match range.region {
+                REGION_BUFFER => &self.buffer,
+                REGION_SCRATCH => &self.scratch,
+                REGION_BODY => body,
+                REGION_LIST => {
+                    list = self.entries[range.partition as usize]
+                        .iter()
+                        .flat_map(|entry| [entry.offset, entry.stored])
+                        .flat_map(u64::to_ne_bytes)
+                        .collect::<Vec<u8>>();
+                    &list
+                }
+                other => panic!("a range of region {other}"),
+            };
+            let bytes = &from[range.start as usize..(range.start + range.len) as usize];
+            let at = range.at as usize;
+            if self.file.len() < at + bytes.len() {
+                self.file.resize(at + bytes.len(), 0);
+            }
+            self.file[at..at + bytes.len()].copy_from_slice(bytes);
+        }
+        if step.nranges > 0 {
+            let mut status = Status::new();
+            // SAFETY: the set's writer and a local status.
+            let code = unsafe { tess_spill_set_written(&raw mut self.writer, &raw mut status) };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+        }
+        step.kind == STEP_DONE
+    }
+
+    /// One call of `tess_spill_set_write`, its code, status and step.
+    fn call(
+        &mut self,
+        nlists: i32,
+        partition: i32,
+        kind: u32,
+        body: &[u8],
+    ) -> (Code, Status, tessera_capi::c::SpillStep) {
+        use tessera_capi::c::{SpillStep, tess_spill_set_write};
+
+        let mut status = Status::new();
+        let mut step = SpillStep::default();
+        // SAFETY: the set's regions and lists, each list's entries the
+        // vector's, and a local body, step and status.
+        let code = unsafe {
+            tess_spill_set_write(
+                &raw mut self.writer,
+                self.buffer.as_mut_ptr(),
+                self.buffer.len(),
+                self.scratch.as_mut_ptr(),
+                self.scratch.len(),
+                self.lists.as_mut_ptr(),
+                nlists,
+                partition,
+                kind,
+                3,
+                body.as_ptr(),
+                body.len(),
+                &raw mut step,
+                &raw mut status,
+            )
+        };
+        (code, status, step)
+    }
+
+    /// Write a block of `kind` to `partition`: where it starts.
+    fn write(&mut self, partition: usize, kind: u32, body: &[u8]) -> u64 {
+        loop {
+            let nlists = self.lists.len() as i32;
+            let (code, status, step) = self.call(nlists, partition as i32, kind, body);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            if self.serve(&step, partition, body) {
+                return step.offset;
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        use tessera_capi::c::{SpillStep, tess_spill_set_finish};
+
+        loop {
+            let mut status = Status::new();
+            let mut step = SpillStep::default();
+            // SAFETY: as for `call`.
+            let code = unsafe {
+                tess_spill_set_finish(
+                    &raw mut self.writer,
+                    self.buffer.as_mut_ptr(),
+                    self.buffer.len(),
+                    self.lists.as_mut_ptr(),
+                    self.lists.len() as i32,
+                    &raw mut step,
+                    &raw mut status,
+                )
+            };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            if self.serve(&step, 0, &[]) {
+                return;
+            }
+        }
+    }
+
+    /// The blocks and bytes written, and the partitions with blocks.
+    fn stats(&self) -> (u64, u64, i32) {
+        use tessera_capi::c::tess_spill_set_stats;
+
+        let (mut blocks, mut bytes, mut files) = (0, 0, 0);
+        let mut status = Status::new();
+        // SAFETY: the set's writer and local outputs.
+        let code = unsafe {
+            tess_spill_set_stats(
+                &raw const self.writer,
+                &raw mut blocks,
+                &raw mut bytes,
+                &raw mut files,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        (blocks, bytes, files)
+    }
+}
+
+/// A shared set written through its entry points: values, a chunk of
+/// records longer than the buffer packed aside, a list that grows, and a
+/// finish that lays the lists and the trailer out after the blocks; each
+/// block's header reads back where its list says, and a dropped
+/// partition no longer counts.
+#[test]
+fn a_set_writes_through_its_entry_points() {
+    use tessera_capi::c::tess_spill_set_drop;
+
+    let mut set = CSet::new(3, 256);
+    let values = vec![9_u8; 16];
+    for _ in 0..20 {
+        set.write(1, 2, &values);
+    }
+    let chunk = records(1000, 40, |record, lane| (record * lane) as u32);
+    let at = set.write(2, 1, &chunk);
+    set.write(0, 2, &values);
+    assert!(set.scratch.len() >= chunk.len(), "packed aside");
+    set.finish();
+    let (blocks, bytes, files) = set.stats();
+    assert_eq!((blocks, files), (22, 3));
+    let word = |at: usize| u64::from_ne_bytes(set.file[at..at + 8].try_into().unwrap());
+    let trailer = set.file.len() - 32;
+    assert_eq!(
+        [
+            word(trailer),
+            word(trailer + 8),
+            word(trailer + 16),
+            word(trailer + 24)
+        ],
+        [0x5445_5353_5452_4149, bytes, 3, 77]
+    );
+    for (partition, list) in set.lists.iter().enumerate() {
+        assert_eq!(word(bytes as usize + 8 * partition), list.count);
+        for entry in &set.entries[partition][..list.count as usize] {
+            let block = &set.file[entry.offset as usize..(entry.offset + entry.stored) as usize];
+            let mut header = SpillHeader::default();
+            let mut status = Status::new();
+            // SAFETY: a block of the file and local outputs.
+            let code = unsafe {
+                tess_spill_header_read(
+                    block.as_ptr().cast(),
+                    block.len(),
+                    77,
+                    1 << 20,
+                    &raw mut header,
+                    &raw mut status,
+                )
+            };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(header.partition as usize, partition);
+            if partition == 2 {
+                assert_eq!((entry.offset, header.len), (at, chunk.len() as u64));
+                assert!(header.packed > 0, "the chunk of records packs");
+            }
+        }
+    }
+    let mut status = Status::new();
+    // SAFETY: the set's writer and lists, and a local status.
+    let code = unsafe {
+        tess_spill_set_drop(
+            &raw mut set.writer,
+            set.lists.as_mut_ptr(),
+            3,
+            1,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    assert_eq!((set.lists[1].count, set.stats().2), (0, 2));
+}
+
+/// Each misuse of a set's entry points is refused with its reason: lists
+/// of another count, an unknown kind, a null writer, a block after the
+/// finish, and ranges reported where none wait.
+#[test]
+fn the_set_entry_points_refuse_what_no_set_takes() {
+    use tessera_capi::c::{tess_spill_set_layout, tess_spill_set_written};
+
+    let mut set = CSet::new(2, 256);
+    let values = vec![1_u8; 8];
+    let (code, status, _) = set.call(3, 0, 2, &values);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("3 block lists for 2 partitions"));
+    let (code, status, _) = set.call(2, 0, 9, &values);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("unknown kind 9"));
+    let (code, status, _) = set.call(2, 2, 2, &values);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("partition 2 is past the 2"));
+    let mut status = Status::new();
+    // SAFETY: a null writer, refused, and a local status.
+    let code = unsafe { tess_spill_set_written(std::ptr::null_mut(), &raw mut status) };
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("a null writer"));
+    let mut status = Status::new();
+    // SAFETY: the set's writer and a local status.
+    let code = unsafe { tess_spill_set_written(&raw mut set.writer, &raw mut status) };
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("no ranges"));
+    set.write(0, 2, &values);
+    set.finish();
+    let (code, status, _) = set.call(2, 0, 2, &values);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(status.message().contains("finished takes no more blocks"));
+    assert_eq!(
+        (0..8)
+            .map(|what| tess_spill_set_layout(what))
+            .collect::<Vec<_>>(),
+        [152, 16, 24, 8, 32, 128, 32, 0]
+    );
+}

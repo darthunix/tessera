@@ -112,6 +112,12 @@
 	X(table_spill_splits) \
 	X(build_stop) \
 	X(build_stopped) \
-	X(table_chunk_used)
+	X(table_chunk_used) \
+	X(spill_set_init) \
+	X(spill_set_write) \
+	X(spill_set_written) \
+	X(spill_set_finish) \
+	X(spill_set_drop) \
+	X(spill_set_stats)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

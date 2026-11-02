@@ -226,7 +226,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       one word, as `relhash` has them; a limit of the host stays the
       host's error. Check: `make rust-check`; the tests of SQLSTATE in
       the suite `spill`; the machine code
-- [ ] 3.6 Move the writing of a set into the crate, without input or
+- [x] 3.6 Move the writing of a set into the crate, without input or
       output: the write buffer, the block lists, the trailer, and what
       a set accepts after a failed write. `runtime/spill.c` keeps its
       calls of PostgreSQL and its C API. The regions come from the

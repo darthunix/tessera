@@ -24,6 +24,7 @@ mod shared_spill;
 mod sort;
 mod source;
 mod spill;
+mod spill_set;
 mod status;
 mod table;
 mod text;
@@ -75,6 +76,12 @@ pub use spill::{
     tess_spill_columns_pack, tess_spill_columns_shape, tess_spill_columns_unpack,
     tess_spill_header_read, tess_spill_header_size, tess_spill_header_write, tess_spill_pack,
     tess_spill_partitions, tess_spill_unpack,
+};
+pub use spill_set::{
+    REGION_BODY, REGION_BUFFER, REGION_LIST, REGION_SCRATCH, STEP_AGAIN, STEP_DONE, STEP_LIST,
+    STEP_SCRATCH, SpillList, SpillRange, SpillStep, tess_spill_set_drop, tess_spill_set_finish,
+    tess_spill_set_init, tess_spill_set_layout, tess_spill_set_stats, tess_spill_set_write,
+    tess_spill_set_written,
 };
 pub use status::{Code, MESSAGE_SIZE, Status};
 pub use table::{

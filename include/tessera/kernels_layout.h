@@ -90,6 +90,19 @@ tess_kernels_layout_matches(void)
 		offsetof(TessSortKey, flags) &&
 		tess_sort_layout((TessSortLayoutKind) 99) == 0 &&
 		tess_spill_header_size() == TESS_SPILL_HEADER_SIZE &&
+		tess_spill_set_layout(TESS_SPILL_SET_WRITER_SIZE) ==
+		sizeof(TessSpillWriter) &&
+		tess_spill_set_layout(TESS_SPILL_SET_ENTRY_SIZE) ==
+		sizeof(TessSpillEntry) &&
+		tess_spill_set_layout(TESS_SPILL_SET_LIST_SIZE) == sizeof(TessSpillList) &&
+		tess_spill_set_layout(TESS_SPILL_SET_LIST_COUNT_OFFSET) ==
+		offsetof(TessSpillList, count) &&
+		tess_spill_set_layout(TESS_SPILL_SET_RANGE_SIZE) ==
+		sizeof(TessSpillRange) &&
+		tess_spill_set_layout(TESS_SPILL_SET_STEP_SIZE) == sizeof(TessSpillStep) &&
+		tess_spill_set_layout(TESS_SPILL_SET_STEP_RANGES_OFFSET) ==
+		offsetof(TessSpillStep, ranges) &&
+		tess_spill_set_layout((TessSpillSetLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of
 	 * tessera/spill.h take it: the row count, the capacity and the stored
