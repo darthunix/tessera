@@ -50,22 +50,22 @@ ownership, lifetime and errors. The check named in a task comes on top.
 
 ## 3. Smallint
 
-- [ ] 3.1 In `tessera-kernels`: the range of a result as a type
+- [x] 3.1 In `tessera-kernels`: the range of a result as a type
       parameter of the driver of the integer arithmetic, the type's own
       for int4 and int8; the smallint check in every row-by-row step,
       the lane loops of a whole word among them; the smallint forms of
       the vector `+`, `-` and `*` in the module `simd`, which flag a
       result out of range; `ArithmeticError::SmallintOutOfRange`,
-      classified in `error.rs`; the cast `int4_to_int2`; the smallint
-      operations and the cast in the benchmark programs `arith_int32`
-      and `cast_int32` beside the int4 ones. The tests of the design,
-      each error checked exactly, on the vector and the row-by-row
-      paths. Check: `cargo test --locked -p tessera-kernels`, which CI
-      runs on x86-64 and on arm64; `cargo run --release --locked -p
-      tessera-bench -- --base HEAD~1 --disasm --module kernels` shows
-      the int4 and int8 loops the same; `tessera-bench` counts the
-      programs, its report in the pull request.
-- [ ] 3.2 The four entry points in `tessera-capi`, declared in
+      classified in `error.rs`; the smallint operations in the benchmark
+      program `arith_int32` beside the int4 ones. The tests of the
+      design, each error checked exactly, on the vector and the
+      row-by-row paths. Check: `cargo test --locked -p tessera-kernels`,
+      which CI runs on x86-64 and on arm64; `cargo run --release
+      --locked -p tessera-bench -- --base HEAD~1 --disasm --module
+      kernels` shows the int4 and int8 loops the same; `tessera-bench`
+      counts the program with the measurement of task 6.2, which needs
+      the person for its privileges, its report in the pull request.
+- [ ] 3.2 The three entry points in `tessera-capi`, declared in
       `include/tessera/kernels.h`, with a test target of their own
       through the raw structs: every operation and shape, NULLs, the
       exact first error. The target joins the Miri command of `ci.yml`
@@ -85,8 +85,8 @@ ownership, lifetime and errors. The check named in a task comes on top.
 
 - [ ] 4.1 In `tessera_kernels::calendar`: the bound of a date against a
       timestamp over `split`, its rule over the day and the time a
-      function of its own; the tests of decision 2 and of the bound;
-      the Kani proof of the rule, with covers of each operator's two
+      function of its own; the tests of decision 2 and of the bound; the
+      Kani proof of the rule, with covers of each operator's two
       outcomes, run by the Kani job of `ci.yml`, its module excluded in
       `.cargo/mutants.toml` as the float proofs are. Check: `cargo test
       --locked -p tessera-kernels calendar`; `cargo kani

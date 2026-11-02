@@ -49,13 +49,16 @@ pub enum ArithmeticError {
     BigintOutOfRange,
     /// SQLSTATE 22012: a zero divisor.
     DivisionByZero,
+    /// SQLSTATE 22003: a smallint result does not fit. Last, so that the
+    /// earlier variants keep their values in the code that returns them.
+    SmallintOutOfRange,
 }
 
 impl ArithmeticError {
     /// The five-character SQLSTATE of the error.
     pub fn sqlstate(self) -> &'static str {
         match self {
-            Self::IntegerOutOfRange | Self::BigintOutOfRange => "22003",
+            Self::IntegerOutOfRange | Self::BigintOutOfRange | Self::SmallintOutOfRange => "22003",
             Self::DivisionByZero => "22012",
         }
     }
@@ -66,6 +69,7 @@ impl fmt::Display for ArithmeticError {
         f.write_str(match self {
             Self::IntegerOutOfRange => "integer out of range",
             Self::BigintOutOfRange => "bigint out of range",
+            Self::SmallintOutOfRange => "smallint out of range",
             Self::DivisionByZero => "division by zero",
         })
     }

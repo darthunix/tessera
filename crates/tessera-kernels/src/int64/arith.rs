@@ -59,7 +59,7 @@ pub fn arith_scalar<C: ColumnReader<Value = i64>>(
     values: &mut [MaybeUninit<i64>],
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
-    crate::int::arith_scalar(op, column, scalar, rows, values, non_nulls)
+    crate::int::arith_scalar::<_, crate::int::Own, _>(op, column, scalar, rows, values, non_nulls)
 }
 
 /// Compute `scalar op column` for the selected rows into `values` and
@@ -76,7 +76,9 @@ pub fn arith_scalar_left<C: ColumnReader<Value = i64>>(
     values: &mut [MaybeUninit<i64>],
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
-    crate::int::arith_scalar_left(op, scalar, column, rows, values, non_nulls)
+    crate::int::arith_scalar_left::<_, crate::int::Own, _>(
+        op, scalar, column, rows, values, non_nulls,
+    )
 }
 
 /// Compute `left op right` row by row for two columns of the batch; a NULL
@@ -97,7 +99,7 @@ where
     L: ColumnReader<Value = i64>,
     R: ColumnReader<Value = i64>,
 {
-    crate::int::arith_columns(op, left, right, rows, values, non_nulls)
+    crate::int::arith_columns::<_, crate::int::Own, _, _>(op, left, right, rows, values, non_nulls)
 }
 
 /// A whole-word operand of int8: the storage of a full prepared word, or a

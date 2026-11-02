@@ -718,7 +718,7 @@ pub use aggregate::{
     count_datum, max_datum, max_dense, min_datum, min_dense, sum_datum, sum_dense,
 };
 pub use aggregate64::{max_datum64, max_dense64, min_datum64, min_dense64};
-pub use arith::{add, div, mul, rem, sub};
+pub use arith::{add, add_smallint, div, mul, mul_smallint, rem, sub, sub_smallint};
 pub use arith64::{add64, sub64};
 pub use cast::{widen_datum, widen_dense};
 pub use filter::{compare_sides, filter_datum, filter_dense};

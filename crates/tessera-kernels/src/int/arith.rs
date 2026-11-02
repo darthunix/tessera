@@ -2,20 +2,23 @@
 //! row loops with the NULL placeholder pair, the choice between whole words
 //! and rows and the loop over whole words, whose operation is the width's
 //! ([`IntLane::arith_block`]). The semantics are the widths' ([`crate::int32`]
-//! and [`crate::int64`] arithmetic).
+//! and [`crate::int64`] arithmetic); the range of a result, the width's own
+//! or smallint's ([`crate::smallint`]), is a type parameter ([`Range`]),
+//! checked in every row-by-row step, so the first failing row gives its
+//! error.
 
 use std::mem::MaybeUninit;
 
 use anyhow::{Context, Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-use super::{IntLane, Side};
+use super::{IntLane, Range, Side};
 use crate::BULK_MIN_ROWS;
 use crate::ops::{ArithOp, ArithmeticError};
 use crate::simd::Token;
 
 /// The driver of `arith_scalar`: `column op scalar`.
-pub(crate) fn arith_scalar<T: IntLane, C: ColumnReader<Value = T>>(
+pub(crate) fn arith_scalar<T: IntLane, G: Range<T>, C: ColumnReader<Value = T>>(
     op: ArithOp,
     column: &C,
     scalar: T,
@@ -24,11 +27,11 @@ pub(crate) fn arith_scalar<T: IntLane, C: ColumnReader<Value = T>>(
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
     let operands: Operands<'_, T, C, C> = Operands::ColumnScalar(column, scalar);
-    run(op, operands, rows, values, non_nulls)
+    run::<T, G, C, C>(op, operands, rows, values, non_nulls)
 }
 
 /// The driver of `arith_scalar_left`: `scalar op column`.
-pub(crate) fn arith_scalar_left<T: IntLane, C: ColumnReader<Value = T>>(
+pub(crate) fn arith_scalar_left<T: IntLane, G: Range<T>, C: ColumnReader<Value = T>>(
     op: ArithOp,
     scalar: T,
     column: &C,
@@ -37,11 +40,11 @@ pub(crate) fn arith_scalar_left<T: IntLane, C: ColumnReader<Value = T>>(
     non_nulls: &mut RowMask<'_>,
 ) -> Result<()> {
     let operands: Operands<'_, T, C, C> = Operands::ScalarColumn(scalar, column);
-    run(op, operands, rows, values, non_nulls)
+    run::<T, G, C, C>(op, operands, rows, values, non_nulls)
 }
 
 /// The driver of `arith_columns`: `left op right`.
-pub(crate) fn arith_columns<T, L, R>(
+pub(crate) fn arith_columns<T, G, L, R>(
     op: ArithOp,
     left: &L,
     right: &R,
@@ -51,10 +54,11 @@ pub(crate) fn arith_columns<T, L, R>(
 ) -> Result<()>
 where
     T: IntLane,
+    G: Range<T>,
     L: ColumnReader<Value = T>,
     R: ColumnReader<Value = T>,
 {
-    run(op, Operands::Columns(left, right), rows, values, non_nulls)
+    run::<T, G, L, R>(op, Operands::Columns(left, right), rows, values, non_nulls)
 }
 
 /// The operands of one call.
@@ -168,7 +172,7 @@ where
 }
 
 /// Check the dimensions, choose the operation and the strategy, and run.
-fn run<T, L, R>(
+fn run<T, G, L, R>(
     op: ArithOp,
     operands: Operands<'_, T, L, R>,
     rows: &RowMaskView<'_>,
@@ -177,6 +181,7 @@ fn run<T, L, R>(
 ) -> Result<()>
 where
     T: IntLane,
+    G: Range<T>,
     L: ColumnReader<Value = T>,
     R: ColumnReader<Value = T>,
 {
@@ -211,23 +216,44 @@ where
             }),
             None => false,
         };
-    // The operation is chosen once; each arm's function, the width's own,
-    // is inlined into its own loops, unlike a trait object, which called per
-    // row.
-    match op {
-        ArithOp::Add => execute(op, &operands, output, set, whole_words, &T::add),
-        ArithOp::Sub => execute(op, &operands, output, set, whole_words, &T::sub),
-        ArithOp::Mul => execute(op, &operands, output, set, whole_words, &T::mul),
-        ArithOp::Div => execute(op, &operands, output, set, whole_words, &T::div),
-        ArithOp::Mod => execute(op, &operands, output, set, whole_words, &T::rem),
+    // The operation is chosen once; each arm's function, the width's own
+    // with the range's check, is inlined into its own loops, unlike a trait
+    // object, which called per row.
+    // The width's own range passes the operation itself, as before the
+    // range was a parameter, so that its code stays the same.
+    macro_rules! execute {
+        ($operation:expr) => {
+            if G::NARROW {
+                let evaluate = checked::<T, G>($operation);
+                execute::<T, G, L, R, _>(op, &operands, output, set, whole_words, &evaluate)
+            } else {
+                execute::<T, G, L, R, _>(op, &operands, output, set, whole_words, &$operation)
+            }
+        };
     }
+    match op {
+        ArithOp::Add => execute!(T::add),
+        ArithOp::Sub => execute!(T::sub),
+        ArithOp::Mul => execute!(T::mul),
+        ArithOp::Div => execute!(T::div),
+        ArithOp::Mod => execute!(T::rem),
+    }
+}
+
+/// A width's operation followed by the range's check: one step, so that a
+/// row's own error comes before any later row's.
+#[inline(always)]
+fn checked<T, G: Range<T>>(
+    operation: impl Fn(T, T) -> Result<T, ArithmeticError>,
+) -> impl Fn(T, T) -> Result<T, ArithmeticError> {
+    move |a, b| operation(a, b).and_then(G::check)
 }
 
 /// One operation on two non-NULL values of the width.
 pub(crate) trait Evaluate<T>: Fn(T, T) -> Result<T, ArithmeticError> {}
 impl<T, F: Fn(T, T) -> Result<T, ArithmeticError>> Evaluate<T> for F {}
 
-fn execute<T, L, R, E: Evaluate<T>>(
+fn execute<T, G, L, R, E: Evaluate<T>>(
     op: ArithOp,
     operands: &Operands<'_, T, L, R>,
     output: Output<'_, '_, '_, '_, T>,
@@ -237,13 +263,14 @@ fn execute<T, L, R, E: Evaluate<T>>(
 ) -> Result<()>
 where
     T: IntLane,
+    G: Range<T>,
     L: ColumnReader<Value = T>,
     R: ColumnReader<Value = T>,
 {
     if let Some(set) = set
         && whole_words
     {
-        bulk(set, op, operands, output, evaluate)
+        bulk::<T, G, L, R, E>(set, op, operands, output, evaluate)
     } else {
         operands.rows(output, evaluate)
     }
@@ -252,7 +279,7 @@ where
 /// Whole words where every column operand exposes them, rows elsewhere; a
 /// whole word is the width's own ([`IntLane::arith_block`]).
 #[inline(never)]
-fn bulk<T, L, R, E: Evaluate<T>>(
+fn bulk<T, G, L, R, E: Evaluate<T>>(
     set: T::Arith,
     op: ArithOp,
     operands: &Operands<'_, T, L, R>,
@@ -261,6 +288,7 @@ fn bulk<T, L, R, E: Evaluate<T>>(
 ) -> Result<()>
 where
     T: IntLane,
+    G: Range<T>,
     L: ColumnReader<Value = T>,
     R: ColumnReader<Value = T>,
 {
@@ -289,7 +317,7 @@ where
         let out: &mut [MaybeUninit<T>; 64] = (&mut output.values[base..base + 64])
             .try_into()
             .context("a whole-word operand implies a full word")?;
-        T::arith_block(set, op, lhs, rhs, present, &divisor, out, evaluate)?;
+        T::arith_block::<E, G>(set, op, lhs, rhs, present, &divisor, out, evaluate)?;
         output.non_nulls.set_word(index, present)?;
     }
     Ok(())

@@ -8,7 +8,7 @@ use anyhow::{Result, ensure};
 use tessera_core::{WordBlock, ones};
 
 use super::{CompareOp, Divisor, Side};
-use crate::int::{Evaluate, IntLane};
+use crate::int::{Evaluate, IntLane, Range};
 use crate::ops::{ArithOp, ArithmeticError};
 use crate::simd::{Simd, Vectors};
 
@@ -137,7 +137,7 @@ impl IntLane for i32 {
     }
 
     #[inline(always)]
-    fn arith_block<E: Evaluate<i32>>(
+    fn arith_block<E: Evaluate<i32>, G: Range<i32>>(
         simd: Simd,
         op: ArithOp,
         lhs: Side<'_>,
@@ -149,8 +149,19 @@ impl IntLane for i32 {
     ) -> Result<()> {
         // A word without rows to divide divides nothing: a division is
         // too dear to spend on absent lanes, and a whole word of them is
-        // a NULL column.
+        // a NULL column. A narrow range takes the vector forms that flag a
+        // lane outside the smallint range with an overflow; a division by
+        // a prepared divisor, of magnitude two or more, cannot leave it.
         let overflow = match (op, divisor) {
+            (ArithOp::Add, _) if G::NARROW => {
+                crate::simd::add_smallint(simd, lhs, rhs, present, out)
+            }
+            (ArithOp::Sub, _) if G::NARROW => {
+                crate::simd::sub_smallint(simd, lhs, rhs, present, out)
+            }
+            (ArithOp::Mul, _) if G::NARROW => {
+                crate::simd::mul_smallint(simd, lhs, rhs, present, out)
+            }
             (ArithOp::Add, _) => crate::simd::add(simd, lhs, rhs, present, out),
             (ArithOp::Sub, _) => crate::simd::sub(simd, lhs, rhs, present, out),
             (ArithOp::Mul, _) => crate::simd::mul(simd, lhs, rhs, present, out),
@@ -176,7 +187,11 @@ impl IntLane for i32 {
                 false
             }
         };
-        ensure!(!overflow, ArithmeticError::IntegerOutOfRange);
+        if G::NARROW {
+            ensure!(!overflow, ArithmeticError::SmallintOutOfRange);
+        } else {
+            ensure!(!overflow, ArithmeticError::IntegerOutOfRange);
+        }
         Ok(())
     }
 }
