@@ -279,3 +279,116 @@ fn pieces_match_the_characters() {
         Ok(())
     });
 }
+
+/// A column of bpchar values: NULL, a value not in place, or bytes.
+struct Bpchars(Vec<Option<Option<Vec<u8>>>>);
+
+impl Strings for Bpchars {
+    fn get(&self, row: usize) -> Text<'_> {
+        match &self.0[row] {
+            None => Text::Null,
+            Some(None) => Text::Other,
+            Some(Some(bytes)) => Text::Bytes(bytes),
+        }
+    }
+}
+
+/// A scalar, which `compare` prepares once.
+struct Scalar(Vec<u8>);
+
+impl Strings for Scalar {
+    fn get(&self, _row: usize) -> Text<'_> {
+        Text::Bytes(&self.0)
+    }
+
+    fn constant(&self) -> Option<&[u8]> {
+        Some(&self.0)
+    }
+}
+
+/// The same scalar read row by row, as a column of one value: the
+/// reference.
+struct Repeated(Vec<u8>);
+
+impl Strings for Repeated {
+    fn get(&self, _row: usize) -> Text<'_> {
+        Text::Bytes(&self.0)
+    }
+}
+
+/// Bytes of `a`, `b` and spaces, so that values differ in their trailing
+/// spaces alone.
+fn bpchar_bytes() -> impl Strategy<Value = Vec<u8>> {
+    vec(select(vec![b'a', b'b', b' ']), 0..6)
+}
+
+/// A bpchar column's equality and inequality with a scalar on either side
+/// keep and set aside the same rows whether the scalar is prepared once or
+/// read row by row.
+#[test]
+fn a_bpchar_scalar_prepared_once_compares_as_one_read_per_row() {
+    let row = prop_oneof![
+        1 => Just(None),
+        1 => Just(Some(None)),
+        6 => bpchar_bytes().prop_map(|bytes| Some(Some(bytes))),
+    ];
+    property(
+        (vec(row, 0..130), bpchar_bytes()),
+        |(values, scalar)| -> Result<()> {
+            let nrows = values.len();
+            let column = Bpchars(values);
+            let selected = selected(nrows);
+            for equal in [true, false] {
+                for scalar_left in [false, true] {
+                    let run = |prepared: bool| -> Result<(Vec<u64>, Vec<u64>)> {
+                        let mut kept = selected.clone();
+                        let mut rest = vec![0_u64; kept.len()];
+                        let mut rows = RowMask::try_new(nrows, &mut kept)?;
+                        let mut other = RowMask::try_new(nrows, &mut rest)?;
+                        match (prepared, scalar_left) {
+                            (true, false) => text::compare(
+                                equal,
+                                true,
+                                &column,
+                                &Scalar(scalar.clone()),
+                                &mut rows,
+                                &mut other,
+                            )?,
+                            (true, true) => text::compare(
+                                equal,
+                                true,
+                                &Scalar(scalar.clone()),
+                                &column,
+                                &mut rows,
+                                &mut other,
+                            )?,
+                            (false, false) => text::compare(
+                                equal,
+                                true,
+                                &column,
+                                &Repeated(scalar.clone()),
+                                &mut rows,
+                                &mut other,
+                            )?,
+                            (false, true) => text::compare(
+                                equal,
+                                true,
+                                &Repeated(scalar.clone()),
+                                &column,
+                                &mut rows,
+                                &mut other,
+                            )?,
+                        }
+                        Ok((kept, rest))
+                    };
+                    assert_eq!(
+                        run(true)?,
+                        run(false)?,
+                        "equal {equal}, scalar on the left {scalar_left}, {scalar:?}"
+                    );
+                }
+            }
+            Ok(())
+        },
+    );
+}

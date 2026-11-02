@@ -235,6 +235,15 @@ pub enum Text<'a> {
 pub trait Strings {
     /// The string of a row. The batch functions ask only for selected rows.
     fn get(&self, row: usize) -> Text<'_>;
+
+    /// The one string of a scalar, the same for every row, so that a
+    /// function can prepare it once; `None`, the default, for a column.
+    /// When it is `Some(bytes)`, `get` gives `Text::Bytes(bytes)` for every
+    /// row: a function that prepared the scalar reads it no more.
+    #[inline(always)]
+    fn constant(&self) -> Option<&[u8]> {
+        None
+    }
 }
 
 /// Narrow `rows` to the rows where `test` holds of the rows' strings: a row
@@ -265,6 +274,34 @@ fn filter_rows(
     Ok(())
 }
 
+/// Whether a bpchar's bytes equal `trimmed`, a bpchar's bytes without its
+/// trailing spaces: the first bytes compared, and only when they are equal
+/// the rest looked at for spaces.
+#[inline(always)]
+fn bpchar_equals_trimmed(value: &[u8], trimmed: &[u8]) -> bool {
+    value.len() >= trimmed.len()
+        && value[..trimmed.len()] == *trimmed
+        && value[trimmed.len()..].iter().all(|&byte| byte == b' ')
+}
+
+/// A bpchar column's equality (`equal`) or inequality with a scalar, the
+/// scalar's trailing spaces counted off once for the call.
+#[inline(always)]
+fn compare_bpchar_constant(
+    equal: bool,
+    column: &impl Strings,
+    constant: &[u8],
+    rows: &mut RowMask<'_>,
+    rest: &mut RowMask<'_>,
+) -> Result<()> {
+    let trimmed = &constant[..bpchar_len(constant)];
+    filter_rows(rows, rest, |row| match column.get(row) {
+        Text::Null => None,
+        Text::Bytes(value) => Some(Some(bpchar_equals_trimmed(value, trimmed) == equal)),
+        Text::Other => Some(None),
+    })
+}
+
 /// Equality (`equal`) or inequality of two strings, a bpchar's without its
 /// trailing spaces.
 ///
@@ -279,6 +316,14 @@ pub fn compare(
     rows: &mut RowMask<'_>,
     rest: &mut RowMask<'_>,
 ) -> Result<()> {
+    if bpchar {
+        if let Some(constant) = right.constant() {
+            return compare_bpchar_constant(equal, left, constant, rows, rest);
+        }
+        if let Some(constant) = left.constant() {
+            return compare_bpchar_constant(equal, right, constant, rows, rest);
+        }
+    }
     filter_rows(rows, rest, |row| match (left.get(row), right.get(row)) {
         (Text::Null, _) | (_, Text::Null) => None,
         (Text::Bytes(a), Text::Bytes(b)) => Some(Some(
@@ -555,6 +600,21 @@ mod tests {
         assert_eq!(char_offset(&s[..2], 2, Chars::Utf8), 2);
         assert_eq!(bpchar_len(b"ab  "), 2);
         assert_eq!(bpchar_len(b"   "), 0);
+    }
+
+    #[test]
+    fn a_trimmed_bpchar_compares_as_its_trimmed_bytes() {
+        let values: [&[u8]; 9] = [b"", b" ", b"  ", b"a", b"a ", b"a  ", b"ab", b"ab ", b"a b"];
+        for value in values {
+            for constant in values {
+                let trimmed = &constant[..bpchar_len(constant)];
+                assert_eq!(
+                    bpchar_equals_trimmed(value, trimmed),
+                    value[..bpchar_len(value)] == *trimmed,
+                    "{value:?} = {constant:?}"
+                );
+            }
+        }
     }
 
     #[test]
