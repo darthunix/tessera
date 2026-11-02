@@ -5,6 +5,10 @@ Summaries of full runs of the PostgreSQL-level benchmarks of
 TPC-H of [`bench/tpch`](../../bench/tpch/README.md), with the plans of
 the cases the README cites, newest first:
 
+- [2026-11-01, partial grouping by dictionary
+  keys](2026-11-01-partial-keys/README.md): TPC-H Q1 with two workers
+  and the family `anykey`, Apple M5 Pro, PostgreSQL master, the change
+  `partial-dictionary-keys` against `ee33f2e4`.
 - [2026-11-01, table growth](2026-11-01-table-growth/README.md): the
   times and the memory of how a table in memory grows, the change
   `table-growth-one-owner` against the commit of its cases, Apple M5

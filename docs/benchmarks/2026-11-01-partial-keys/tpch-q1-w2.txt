@@ -1,0 +1,9 @@
+A SF 1, schema pk, 2 workers, work_mem 256MB, jit off, 11 pairs ABBA after 1 warm-up; ee33f2e4b429 at 2026-11-01 21:43:25.618064+07, PostgreSQL 20devel, AC Power
+B SF 1, schema pk, 2 workers, work_mem 256MB, jit off, 11 pairs ABBA after 1 warm-up; 27effe4683d6 at 2026-11-01 21:55:47.49629+07, PostgreSQL 20devel, AC Power
+┌────────────────────────────────┬──────────┬──────────┬────────┬───────────────┬─────────┬──────────┬──────────┐
+│ query                          ┆ on A, ms ┆ on B, ms ┆ B/A on ┆ 95 % interval ┆ B/A off ┆ on/off A ┆ on/off B │
+╞════════════════════════════════╪══════════╪══════════╪════════╪═══════════════╪═════════╪══════════╪══════════╡
+│ Q01 pricing summary report     ┆    632.5 ┆    307.8 ┆  0.487 ┆   0.476–0.497 ┆   0.997 ┆    1.079 ┆    0.526 │
+│ Q06 forecasting revenue change ┆     60.8 ┆     59.2 ┆  0.974 ┆   0.957–0.992 ┆   0.987 ┆    0.733 ┆    0.724 │
+└────────────────────────────────┴──────────┴──────────┴────────┴───────────────┴─────────┴──────────┴──────────┘
+geometric mean over 2 queries: B/A on 0.688, B/A off 0.992 (the control: the core is the same)

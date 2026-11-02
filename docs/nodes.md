@@ -1337,7 +1337,12 @@ fills, even when it folds nothing, and the grouping above merges what
 it did not fold. A table goes up only with a group in it: past the
 limit, an empty one is the room its index and its dictionaries take
 for the groups expected, and sent up it would be made anew of the same
-size, forever. The
+size, forever. TPC-H Q1 at SF 1 with two workers, which groups by two
+`char(1)` keys, took 632.5 ms in the core's partial aggregate over the
+node's scan, more than the core alone, and takes 307.8 in the node's
+stack (tpch-sf1-qAvr06, tpch-sf1-TdXv16, see
+[2026-11-01-partial-keys](benchmarks/2026-11-01-partial-keys/README.md)).
+The
 node merges them itself, in batches (`Partial Mode: Finalize`):
 `TessGather` over the partial path, and the node's grouping of the
 serial path's keys and aggregates above, marked final in the private
