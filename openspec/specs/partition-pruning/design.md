@@ -217,8 +217,9 @@ TessAppend. The conditions are in [When a hash join prunes its outer
 side](spec.md#requirement-when-a-hash-join-prunes-its-outer-side). Two
 of them need a reason:
 
-- **The join type.** An INNER, SEMI or RIGHT join returns no outer row
-  without a pair, so an outer partition without a pair can be skipped.
+- **The join type.** An INNER, SEMI, RIGHT or RIGHT ANTI join returns
+  no outer row without a pair, so an outer partition without a pair can
+  be skipped.
   A LEFT, ANTI or FULL join returns such rows, and must read them.
 - **The key.** The join hands TessAppend the values of its keys, and
   the core's pruning compares those values with the partition bounds.
