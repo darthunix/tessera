@@ -344,3 +344,75 @@ fn a_whole_word_past_the_range_fails_and_absent_lanes_do_not() {
     assert_eq!(words, [u64::MAX, u64::MAX >> 1]);
     assert!(out[..127].iter().all(|&value| value == 2));
 }
+
+/// The cast int2(int4) is `x + 0` over any int4: a value past the smallint
+/// range at either end, and the int4 extremes, fail; the edges of the
+/// range pass; a bad value in a NULL or unselected row does not fail; on
+/// the whole-word path and the row path, at a row of the first word and of
+/// the tail.
+#[test]
+fn the_cast_is_x_plus_zero_over_any_int4() {
+    let nrows = 70;
+    for (value, fits) in [
+        (32767, true),
+        (-32768, true),
+        (32768, false),
+        (-32769, false),
+        (i32::MAX, false),
+        (i32::MIN, false),
+    ] {
+        for row in [3, 66] {
+            let mut values = vec![5; nrows];
+            values[row] = value;
+            for row_path in [false, true] {
+                let column = ColumnView::try_new(&values, None).unwrap();
+                let all = [u64::MAX, (1 << (nrows - 64)) - 1];
+                let rows = RowMaskView::try_new(nrows, &all).unwrap();
+                let outcome = run(
+                    ArithOp::Add,
+                    Shape::ColumnScalar(&column, 0),
+                    &rows,
+                    row_path,
+                );
+                match outcome {
+                    Ok((out, _)) => {
+                        assert!(fits, "{value} at {row} passed");
+                        assert_eq!(out[row], value);
+                    }
+                    Err(error) => {
+                        assert!(!fits, "{value} at {row}: {error}");
+                        assert_eq!(
+                            error.downcast_ref::<ArithmeticError>(),
+                            Some(&ArithmeticError::SmallintOutOfRange)
+                        );
+                    }
+                }
+                // The bad row unselected, then NULL: no error.
+                let mut unselected = all;
+                unselected[row / 64] &= !(1 << (row % 64));
+                let rows = RowMaskView::try_new(nrows, &unselected).unwrap();
+                assert!(
+                    run(
+                        ArithOp::Add,
+                        Shape::ColumnScalar(&column, 0),
+                        &rows,
+                        row_path
+                    )
+                    .is_ok()
+                );
+                let non_nulls = RowMaskView::try_new(nrows, &unselected).unwrap();
+                let column = ColumnView::try_new(&values, Some(non_nulls)).unwrap();
+                let rows = RowMaskView::try_new(nrows, &all).unwrap();
+                assert!(
+                    run(
+                        ArithOp::Add,
+                        Shape::ColumnScalar(&column, 0),
+                        &rows,
+                        row_path
+                    )
+                    .is_ok()
+                );
+            }
+        }
+    }
+}

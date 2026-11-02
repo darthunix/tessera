@@ -187,7 +187,9 @@ extern TessStatusCode tess_int4_arith_columns(TessArithOp op,
  * TESS_ERROR_INTEGER_OUT_OF_RANGE (SQLSTATE 22003, "smallint out of
  * range"). Each row is computed and checked in one step, so the call fails
  * with the error of the first row that fails, a range error or a zero
- * divisor, in row order. The operands must be smallints.
+ * divisor, in row order. The operands must be smallints, but for x + 0,
+ * the cast int2(int4), whose x may be any int4: its sum cannot overflow,
+ * and the range check refuses a value past the smallint range.
  */
 extern TessStatusCode tess_int2_arith_scalar(TessArithOp op,
 											 const TessDatumColumn *column,

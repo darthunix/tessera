@@ -361,18 +361,32 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
             &case,
         )?;
         let small = smallint_case(&case);
-        measure_smallint(runner, "dense", &small.dense_column()?, &small)?;
-        measure_smallint(runner, "datum", &small.datum_column()?, &small)?;
+        measure_smallint(
+            runner,
+            "dense",
+            &small.dense_column()?,
+            dense_reference,
+            &small,
+        )?;
+        measure_smallint(
+            runner,
+            "datum",
+            &small.datum_column()?,
+            datum_reference,
+            &small,
+        )?;
     }
     Ok(())
 }
 
 /// The smallint kernels, in a group of their own beside the int4 ones of
-/// the same rows and masks.
+/// the same rows and masks, with the scalar loop of the int4 group as its
+/// reference.
 fn measure_smallint<C: ColumnReader<Value = i32>>(
     runner: &mut Runner,
     format: &str,
     column: &C,
+    direct: impl Fn(&Input<'_, C>, &mut Output) -> Result<()> + Copy,
     case: &Fixture,
 ) -> Result<()> {
     use std::hint::black_box;
@@ -392,6 +406,7 @@ fn measure_smallint<C: ColumnReader<Value = i32>>(
     group.op("add_column", || {
         add_column_smallint(black_box(&input), &mut out).unwrap()
     })?;
+    group.op("reference", || direct(black_box(&input), &mut out).unwrap())?;
     Ok(())
 }
 

@@ -12,8 +12,11 @@
 //! with the error of the first row that fails in row order, a range error
 //! or a division by zero, as the core meets them row by row. Otherwise the
 //! kernels are [`crate::int32`]'s: the same shapes, NULLs, buffers and
-//! errors of a misuse. The operands must be smallints; a value outside the
-//! range is a misuse, whose result is unspecified.
+//! errors of a misuse. The operands must be smallints, but for one use:
+//! `x + 0`, the cast of an int4 to smallint, whose `x` may be any int4.
+//! The int4 sum of it cannot overflow, and the range check refuses a value
+//! past the smallint range. Any other operand outside the range is a
+//! misuse, whose result is unspecified.
 
 use std::mem::MaybeUninit;
 
