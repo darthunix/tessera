@@ -226,18 +226,20 @@ A few facts the design rests on:
   after it: a batch of 64 rows spread over decades can need more spans
   than the cache holds. It never asks a question that an answer it was
   given covers; an answer of a span that ends at its own second is
-  refused. So each round adds answers, a row asks at most two questions,
-  its span and then, for `date_trunc` by a day or more, its midnight,
-  and the rounds end: one call when the cache knows every row, two for
-  the spans, three when the midnights follow. The answers are passed
-  whole each time, so that a row whose span and midnight a full cache
-  has evicted between rounds still finds both.
+  refused. An operation asks of one kind, spans or midnights, a question
+  a row at most, so the rounds end: one call when the cache knows every
+  row, two otherwise. `date_trunc` runs two operations, the local times
+  of every row and then the truncation, which asks only midnights, so
+  that the midnights are learned in the order of the rows after every
+  local time, as the C code learned them. The answers are passed whole
+  each time, so that a row whose answer a full cache has evicted still
+  finds it.
 
   A call keeps the answers in the cache in the order of the rows that
   need them, row by row, as today's code learns them, a span
   joining a kept span of the same end and offset as today. So, from
   the same cache, after a batch the cache holds what today's code
-  holds, with two exceptions:
+  holds, with three exceptions:
   - the two new kinds of entry, a span of one second and "no
     midnight", which today's code does not keep;
   - a batch in which today's code, learning in row order from the same
@@ -246,7 +248,10 @@ A few facts the design rests on:
     its first call and does not. A full cache whose next victim a
     later row needs is enough: rows of spans S32 and S0, in that
     order, over a cache of S0 to S31 whose next victim is S0. The case
-    `tstz_spans` of the measurement does this in every batch.
+    `tstz_spans` of the measurement does this in every batch;
+  - after a change of zone, a call whose rows are all NULL, which
+    resets the part of the cache it would use before it, where today's
+    code resets a part at its first lookup (decision 4).
 
   Once the two caches differ, they may stay different, and a later
   batch may hit or miss where today's code would not; its answers are
@@ -267,11 +272,12 @@ A few facts the design rests on:
   - the local times of a `timestamptz` column, and of one finite value,
     for `extract`; `extract` of an infinity stays with the core, as
     today;
-  - the instants of a `date_trunc` once the calendar has truncated the
-    local times: a unit below a day keeps the original instant's
-    offset, and asks nothing; a day or more takes the local midnight of
-    its first day. The fast path stays as narrow as today: a constant,
-    known unit over a column; anything else is the core's;
+  - the instants of a `date_trunc` from the instants and their local
+    times: the calendar truncates the local time; a unit below a day
+    keeps the original instant's offset, and asks nothing; a day or more
+    takes the local midnight of its first day. The fast path stays as
+    narrow as today: a constant, known unit over a column; anything else
+    is the core's;
   - `timestamptz(date)`, a date's local midnight; an infinite date is
     the infinite instant, and a date past the last timestamp goes to
     the core before any question;
@@ -310,10 +316,13 @@ A few facts the design rests on:
   aligned, as many as the header says, used by this call alone, not
   overlapping the call's inputs and outputs. No Rust reference to them
   outlives the call, so none is held while C asks PostgreSQL.
-- C keeps the identity of the zone, a pointer of PostgreSQL. When the
-  session's zone changes, C resets the whole cache before any lookup,
-  the calls over one value included. Today the two caches reset apart;
-  one reset serves both now that they have one owner.
+- C keeps the zone the spans were learned in and the zone the
+  midnights were, pointers of PostgreSQL, as today. When the session's
+  zone differs from a part's, C resets that part before a call that
+  uses it, the calls over one value included; the spans' next victim
+  stays, as today. Today's code resets a part at its first lookup; a
+  call whose rows are all NULL resets it one call earlier, the third
+  exception of decision 3.
 - The sizes and the eviction stay: 32 spans replaced in turn, 1024
   midnights by day. One thing is new: a midnight the zone cannot give
   is kept, where today it is asked again each time. A slot may then
@@ -456,7 +465,7 @@ undoes the change.
   `simd/arith.rs` (the smallint forms of the vector functions),
   `ops.rs`, `error.rs`, `calendar.rs`, the new `calendar/zone.rs`;
   `crates/tessera-capi/src/c/int.rs`, `c/calendar.rs`.
-- Tests: `crates/tessera-kernels/tests/arith.rs` and the tests of the
+- Tests: `crates/tessera-kernels/tests/smallint.rs` and the tests of the
   new modules; new test targets of `tessera-capi`, each added to the
   Miri command of `.github/workflows/ci.yml`; `test/sql/types.sql`; a
   C test callback for the answer of one second.

@@ -231,8 +231,9 @@ extern TessStatusCode tess_timestamp_extract(TessCalendarField field,
  * covers, so the rounds end.
  *
  * The cache is the caller's: 32 spans of the zone and 1024 local midnights
- * by day, its zero bytes an empty cache. The caller keeps the zone's
- * identity and resets the cache when the session's zone changes.
+ * by day, its zero bytes an empty cache. The caller keeps the zone of the
+ * spans and the zone of the midnights, and resets each part before a call
+ * that uses it when the session's zone changed.
  */
 #define TESS_ZONE_CACHE_WORDS (3 + 32 * 3 + 1024 * 3)
 
@@ -288,8 +289,12 @@ typedef struct TessZoneRound
 	int			nquestions;		/* out */
 } TessZoneRound;
 
-/* Forget everything the cache keeps: the zone changed. */
-extern TessStatusCode tess_zone_reset(TessZoneCache *cache, TessStatus *status);
+/*
+ * Forget the spans (TESS_ZONE_SPAN) or the midnights (TESS_ZONE_MIDNIGHT)
+ * the cache keeps: the zone changed. The spans' next victim stays.
+ */
+extern TessStatusCode tess_zone_reset(TessZoneCache *cache, TessZoneKind kind,
+									  TessStatus *status);
 
 /* The local times of a timestamptz argument into locals, for extract. */
 extern TessStatusCode tess_zone_locals(TessZoneRound *round,
@@ -298,13 +303,15 @@ extern TessStatusCode tess_zone_locals(TessZoneRound *round,
 									   TessStatus *status);
 
 /*
- * date_trunc(unit, timestamptz), as timestamptz_trunc_internal: a unit
+ * date_trunc(unit, timestamptz), as timestamptz_trunc_internal, from the
+ * instants and their local times, which tess_zone_locals gave: a unit
  * below a day keeps the instant's offset, a day or more starts at the
- * local midnight of its first day.
+ * local midnight of its first day. It asks only midnights.
  */
 extern TessStatusCode tess_zone_truncate(TessZoneRound *round,
 										 TessCalendarUnit unit,
 										 const TessCalendarArg *instants,
+										 const TessCalendarArg *locals,
 										 int64 *values,
 										 TessStatus *status);
 

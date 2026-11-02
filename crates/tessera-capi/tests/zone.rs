@@ -87,6 +87,17 @@ fn run_asking(
     arg: &CalendarArg,
     nrows: usize,
 ) -> (Vec<Option<i64>>, usize) {
+    run_with(cache, op, arg, None, nrows)
+}
+
+/// [`run_asking`] with the local times of `arg` for `date_trunc`.
+fn run_with(
+    cache: &mut ZoneCache,
+    op: Op,
+    arg: &CalendarArg,
+    locals: Option<&CalendarArg>,
+    nrows: usize,
+) -> (Vec<Option<i64>>, usize) {
     let words = nrows.div_ceil(64);
     let mut rows_words = vec![u64::MAX >> (64 * words - nrows); words];
     for word in rows_words.iter_mut().take(words - 1) {
@@ -99,7 +110,8 @@ fn run_asking(
     let mut asked_all = 0;
     for round in 0.. {
         assert!(round < 2 * nrows + 2, "the rounds do not end");
-        let mut unknown_words = vec![0; words];
+        // Words left dirty: a call writes every word of its unknown rows.
+        let mut unknown_words = rows_words.clone();
         let rows = Mask {
             nrows: nrows as i32,
             bits: rows_words.as_mut_ptr(),
@@ -140,6 +152,7 @@ fn run_asking(
                     &mut call,
                     unit,
                     arg,
+                    locals.expect("date_trunc takes the local times"),
                     values64.as_mut_ptr().cast(),
                     &mut status,
                 ),
@@ -248,8 +261,35 @@ fn every_operation_over_a_column_in_rounds() {
         scalar: 0,
     };
     assert_eq!(run_asking(&mut cache, Op::Locals, &later_arg, 70).1, 0);
-    let hours = run(&mut cache, Op::Truncate(HOUR_UNIT), &arg, 70);
-    let days = run(&mut cache, Op::Truncate(DAY_UNIT), &arg, 70);
+    // date_trunc from the local times, which C passes as a column.
+    let local_datums: Vec<u64> = locals.iter().map(|l| l.unwrap_or(0) as u64).collect();
+    let local_column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: local_datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 70,
+        ..DatumColumn::EMPTY
+    };
+    let local_arg = CalendarArg {
+        column: &local_column,
+        scalar: 0,
+    };
+    let hours = run_with(
+        &mut cache,
+        Op::Truncate(HOUR_UNIT),
+        &arg,
+        Some(&local_arg),
+        70,
+    )
+    .0;
+    let days = run_with(
+        &mut cache,
+        Op::Truncate(DAY_UNIT),
+        &arg,
+        Some(&local_arg),
+        70,
+    )
+    .0;
     let dates = run(&mut cache, Op::Dates, &arg, 70);
     for row in 0..70 {
         match row {
@@ -301,32 +341,125 @@ fn every_operation_over_a_column_in_rounds() {
     assert_eq!(midnights[7], Some(i64::MIN));
 }
 
-/// A scalar instant and a scalar date, as `extract` of a constant and the
-/// casts pass them; then a reset, after which the cache asks again.
+/// Scalar instants and a scalar date through every entry point, as C
+/// passes a constant; then the spans and the midnights reset apart.
 #[test]
-fn a_scalar_and_a_reset() {
+fn scalars_and_a_reset_of_each_part() {
     let second = EPOCH + 100 * DAY + 10;
+    let instant = ((second - EPOCH) * USECS) as u64;
     let arg = CalendarArg {
         column: ptr::null(),
-        scalar: ((second - EPOCH) * USECS) as u64,
+        scalar: instant,
     };
     let mut cache = cache();
     let local = run(&mut cache, Op::Locals, &arg, 1);
     assert_eq!(local, vec![Some((second + 7200 - EPOCH) * USECS)]);
-    assert!(cache.words.iter().any(|&word| word != 0));
-    let mut status = Status::new();
-    // SAFETY: a local cache and status.
-    assert_eq!(
-        unsafe { tess_zone_reset(&mut *cache, &mut status) },
-        Code::Ok
-    );
-    assert!(cache.words.iter().all(|&word| word == 0));
+    assert_eq!(run(&mut cache, Op::Dates, &arg, 1), vec![Some(100)]);
+    let local_arg = CalendarArg {
+        column: ptr::null(),
+        scalar: local[0].unwrap() as u64,
+    };
+    let day = run_with(
+        &mut cache,
+        Op::Truncate(DAY_UNIT),
+        &arg,
+        Some(&local_arg),
+        1,
+    )
+    .0;
+    assert_eq!(day, vec![Some((100 * DAY - 7200) * USECS)]);
     let date = CalendarArg {
         column: ptr::null(),
         scalar: 100,
     };
-    let midnight = run(&mut cache, Op::Midnights, &date, 1);
-    assert_eq!(midnight, vec![Some((100 * DAY - 7200) * USECS)]);
+    assert_eq!(run(&mut cache, Op::Midnights, &date, 1), day);
+    let reset = |cache: &mut ZoneCache, kind: i32| {
+        let mut status = Status::new();
+        // SAFETY: a local cache and status.
+        unsafe { tess_zone_reset(cache, kind, &mut status) }
+    };
+    let midnights = cache.words[3 + 32 * 3..].to_vec();
+    assert_eq!(reset(&mut cache, ZONE_SPAN), Code::Ok);
+    assert!(cache.words[..3 + 32 * 3].iter().all(|&word| word == 0));
+    assert_eq!(cache.words[3 + 32 * 3..], midnights[..]);
+    assert_eq!(run_asking(&mut cache, Op::Midnights, &date, 1).1, 0);
+    assert_eq!(reset(&mut cache, ZONE_MIDNIGHT), Code::Ok);
+    assert!(cache.words.iter().all(|&word| word == 0));
+    assert_eq!(reset(&mut cache, 9), Code::InvalidArgument);
+}
+
+/// The library failing on a second: its answer covers that second alone,
+/// so the next second asks again.
+#[test]
+fn a_failed_span_covers_its_second() {
+    let mut cache = cache();
+    let base = EPOCH + 10 * DAY;
+    let datums = [0, 1].map(|n| ((base + n - EPOCH) * USECS) as u64);
+    let isnull = [false; 2];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 2,
+        ..DatumColumn::EMPTY
+    };
+    let arg = CalendarArg {
+        column: &column,
+        scalar: 0,
+    };
+    let answers = [ZoneAnswer {
+        key: base,
+        offset: 3600,
+        boundary: 0,
+        kind: ZONE_SPAN,
+        found: -1,
+    }];
+    // A mask a word each, apart: one array would make each pointer retire
+    // the last.
+    let (mut rows_word, mut ready_word, mut core_word, mut unknown_word) =
+        ([0b11_u64], [0_u64], [0_u64], [0b11_u64]);
+    let rows = Mask {
+        nrows: 2,
+        bits: rows_word.as_mut_ptr(),
+    };
+    let mut ready = Mask {
+        nrows: 2,
+        bits: ready_word.as_mut_ptr(),
+    };
+    let mut core = Mask {
+        nrows: 2,
+        bits: core_word.as_mut_ptr(),
+    };
+    let mut unknown = Mask {
+        nrows: 2,
+        bits: unknown_word.as_mut_ptr(),
+    };
+    let mut questions = [ZoneQuestion::default(); 2];
+    let mut call = ZoneRound {
+        struct_size: size_of::<ZoneRound>(),
+        cache: &mut *cache,
+        answers: answers.as_ptr(),
+        nanswers: 1,
+        rows: &rows,
+        ready: &mut ready,
+        core: &mut core,
+        unknown: &mut unknown,
+        questions: questions.as_mut_ptr(),
+        nquestions: 0,
+    };
+    let mut locals = [0_i64; 2];
+    let mut status = Status::new();
+    // SAFETY: a local round, argument and buffers.
+    let code = unsafe { tess_zone_locals(&mut call, &arg, locals.as_mut_ptr(), &mut status) };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let _ = &rows_word;
+    assert_eq!(
+        (ready_word[0], core_word[0], unknown_word[0]),
+        (0b01, 0, 0b10)
+    );
+    assert_eq!(locals[0], (base + 3600 - EPOCH) * USECS);
+    assert_eq!(call.nquestions, 1);
+    assert_eq!((questions[0].key, questions[0].kind), (base + 1, ZONE_SPAN));
 }
 
 /// A null cache, an answer of an unknown kind, a midnight's day past an
@@ -366,22 +499,22 @@ fn wrong_rounds_are_refused() {
         (shared, &bad[1..], 1),
         (shared, &bad[..0], -1),
     ] {
-        let mut words = [1_u64; 4];
+        let (mut a, mut b, mut c, mut d) = ([1_u64], [0_u64], [0_u64], [0_u64]);
         let rows = Mask {
             nrows: 1,
-            bits: words.as_mut_ptr(),
+            bits: a.as_mut_ptr(),
         };
         let mut ready = Mask {
             nrows: 1,
-            bits: words[1..].as_mut_ptr(),
+            bits: b.as_mut_ptr(),
         };
         let mut core = Mask {
             nrows: 1,
-            bits: words[2..].as_mut_ptr(),
+            bits: c.as_mut_ptr(),
         };
         let mut unknown = Mask {
             nrows: 1,
-            bits: words[3..].as_mut_ptr(),
+            bits: d.as_mut_ptr(),
         };
         let mut questions = [ZoneQuestion::default()];
         let mut call = ZoneRound {

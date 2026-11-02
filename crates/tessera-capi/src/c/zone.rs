@@ -136,17 +136,25 @@ unsafe fn with_round(
         let mut core = output(round.core)?;
         let mut unknown = output(round.unknown)?;
         let room = slots(round.questions, nrows)?;
-        let mut questions = vec![Question::Span(0); nrows];
+        // A batch's questions on the stack; a larger one allocates.
+        let mut stack = [Question::Span(0); 64];
+        let mut heap = Vec::new();
+        let questions: &mut [Question] = if nrows <= stack.len() {
+            &mut stack[..nrows]
+        } else {
+            heap.resize(nrows, Question::Span(0));
+            &mut heap
+        };
         let mut out = Outcome {
             ready: &mut ready,
             core: &mut core,
             unknown: &mut unknown,
-            questions: &mut questions,
+            questions,
             asked: 0,
         };
         call(&mut cache, &answers, rows, &mut out)?;
         let asked = out.asked;
-        for (slot, question) in room.iter_mut().zip(&questions[..asked]) {
+        for (slot, question) in room.iter_mut().zip(&out.questions[..asked]) {
             slot.write(match *question {
                 Question::Span(second) => ZoneQuestion {
                     key: second,
@@ -163,19 +171,30 @@ unsafe fn with_round(
     }
 }
 
-/// `tess_zone_reset`: forget everything the cache keeps.
+/// `tess_zone_reset`: forget the spans (`ZONE_SPAN`) or the midnights
+/// (`ZONE_MIDNIGHT`) the cache keeps, the zone changed; the spans' next
+/// victim stays.
 ///
 /// # Safety
 ///
 /// `cache` must point to a valid `TessZoneCache` that nothing else accesses
 /// during the call; `status` as for every entry point.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_zone_reset(cache: *mut ZoneCache, status: *mut Status) -> Code {
+pub unsafe extern "C" fn tess_zone_reset(
+    cache: *mut ZoneCache,
+    kind: c_int,
+    status: *mut Status,
+) -> Code {
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
             let cache = cache.as_mut().context("a null zone cache")?;
-            Cache::new(&mut cache.words)?.reset();
+            let mut cache = Cache::new(&mut cache.words)?;
+            match kind {
+                ZONE_SPAN => cache.reset_spans(),
+                ZONE_MIDNIGHT => cache.reset_midnights(),
+                _ => bail!("a reset of an unknown kind {kind}"),
+            }
             Ok(())
         })
     }
@@ -210,16 +229,20 @@ pub unsafe extern "C" fn tess_zone_locals(
 }
 
 /// `tess_zone_truncate`: `date_trunc(unit, timestamptz)` of `instants`' rows
-/// into `values`.
+/// into `values`, from their local times, `locals`, which
+/// [`tess_zone_locals`] gave.
 ///
 /// # Safety
 ///
-/// As for [`tess_zone_locals`], `values` as many writable int8 slots.
+/// As for [`tess_zone_locals`]; `locals` a valid argument of the rows' row
+/// count whose selected non-NULL rows hold their local times, `values` as
+/// many writable int8 slots.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_zone_truncate(
     round: *mut ZoneRound,
     unit: c_int,
     instants: *const CalendarArg,
+    locals: *const CalendarArg,
     values: *mut i64,
     status: *mut Status,
 ) -> Code {
@@ -230,9 +253,12 @@ pub unsafe extern "C" fn tess_zone_truncate(
             with_round(round, |cache, answers, rows, out| {
                 let nrows = rows.nrows();
                 let values = slots(values, nrows)?;
-                with_source!(input::<i64>(instants, nrows)?, |source| zone::truncate(
-                    cache, answers, unit, source, rows, values, out
-                ))
+                let locals = input::<i64>(locals, nrows)?;
+                with_source!(input::<i64>(instants, nrows)?, |instants| {
+                    with_source!(locals, |locals| zone::truncate(
+                        cache, answers, unit, instants, locals, rows, values, out
+                    ))
+                })
             })
         })
     }

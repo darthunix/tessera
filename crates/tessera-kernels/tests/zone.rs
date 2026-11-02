@@ -217,12 +217,45 @@ struct Run {
     calls: usize,
 }
 
-/// Run an operation in rounds, as C runs it, until no row is unknown.
+/// Run an operation in rounds, as C runs it, until no row is unknown:
+/// `date_trunc` in two stages, the local times and then the truncation.
 fn run(
     words_: &mut [u64],
     model: &Model,
     op: Op,
     values: &[Option<i64>],
+    selected: &[bool],
+    skip: bool,
+) -> Result<Run> {
+    let Op::Truncate(unit) = op else {
+        return rounds(words_, model, op, values, None, selected, skip);
+    };
+    let locals = rounds(words_, model, Op::Locals, values, None, selected, skip)?;
+    let local_values: Vec<Option<i64>> = locals.results.iter().map(|r| r.flatten()).collect();
+    let mut run = rounds(
+        words_,
+        model,
+        Op::Truncate(unit),
+        values,
+        Some(&local_values),
+        selected,
+        skip,
+    )?;
+    run.asked += locals.asked;
+    run.calls += locals.calls;
+    Ok(run)
+}
+
+/// What a value slot holds until the module writes it.
+const SENTINEL: i64 = 0x5EED;
+
+/// One stage's rounds.
+fn rounds(
+    words_: &mut [u64],
+    model: &Model,
+    op: Op,
+    values: &[Option<i64>],
+    locals: Option<&[Option<i64>]>,
     selected: &[bool],
     skip: bool,
 ) -> Result<Run> {
@@ -233,8 +266,9 @@ fn run(
     let mut round_rows = selection.clone();
     let mut answers: Vec<Answer> = Vec::new();
     let asked = Cell::new(0);
-    let mut out64 = vec![MaybeUninit::new(0_i64); nrows];
-    let mut out32 = vec![MaybeUninit::new(0_i32); nrows];
+    let mut out64 = vec![MaybeUninit::new(SENTINEL); nrows];
+    let mut out32 = vec![MaybeUninit::new(SENTINEL as i32); nrows];
+    let local_column = Column(locals.unwrap_or(&[]).to_vec());
     let mut questions = vec![Question::Span(0); nrows];
     let instants = Column(values.to_vec());
     let dates = Column(values.iter().map(|v| v.map(|d| d as i32)).collect());
@@ -242,7 +276,8 @@ fn run(
     loop {
         calls += 1;
         assert!(calls <= 2 * nrows + 2, "{op:?}: the rounds do not end");
-        let mut unknown_words = vec![0; nrows.div_ceil(64)];
+        // Words left dirty: a call writes every word of its unknown rows.
+        let mut unknown_words = words(&vec![true; nrows]);
         let rows = RowMaskView::try_new(nrows, &round_rows)?;
         let mut ready = RowMask::try_new(nrows, &mut ready_words)?;
         let mut core = RowMask::try_new(nrows, &mut core_words)?;
@@ -260,7 +295,14 @@ fn run(
                 zone::locals(&mut cache, &answers, &instants, rows, &mut out64, &mut out)?
             }
             Op::Truncate(unit) => zone::truncate(
-                &mut cache, &answers, unit, &instants, rows, &mut out64, &mut out,
+                &mut cache,
+                &answers,
+                unit,
+                &instants,
+                &local_column,
+                rows,
+                &mut out64,
+                &mut out,
             )?,
             Op::Dates => zone::dates(&mut cache, &answers, &instants, rows, &mut out32, &mut out)?,
             Op::Midnights => {
@@ -298,6 +340,11 @@ fn run(
                 Op::Dates => i64::from(written(&out32[row])),
                 _ => written(&out64[row]),
             };
+            // A slot not ready is left as it was.
+            assert!(
+                is_ready || value == SENTINEL,
+                "{op:?} row {row} written, not ready"
+            );
             (is_ready || is_core).then_some(is_ready.then_some(value))
         })
         .collect();
@@ -410,7 +457,19 @@ fn batch(model: &Model) -> impl Strategy<Value = (Vec<Option<i64>>, Vec<bool>)> 
         .iter()
         .map(|&(at, _)| (at - EPOCH_SECONDS) * USECS_PER_SEC)
         .collect();
+    // A transition's own second and those either side, where the end of a
+    // span decides.
+    let seconds = if near.is_empty() {
+        Just(0_i64).boxed()
+    } else {
+        (prop::sample::select(near.clone()), -1_i64..=1)
+            .prop_map(|(at, step)| {
+                (at + step * USECS_PER_SEC).clamp(MIN_TIMESTAMP, END_TIMESTAMP - 1)
+            })
+            .boxed()
+    };
     let instant = prop_oneof![
+        2 => seconds,
         4 => if near.is_empty() { Just(0_i64).boxed() } else {
             (prop::sample::select(near), -2 * USECS_PER_DAY..2 * USECS_PER_DAY)
                 .prop_map(|(at, delta)| (at + delta).clamp(MIN_TIMESTAMP, END_TIMESTAMP - 1))
@@ -477,14 +536,24 @@ fn every_operation_follows_the_model() {
                         values[row]
                     );
                 }
-                assert!(run.calls <= 3, "{op:?}: {} calls", run.calls);
+                // A stage takes one call, or two when it asks; date_trunc
+                // has two stages.
+                let most = if matches!(op, Op::Truncate(_)) { 4 } else { 2 };
+                assert!(run.calls <= most, "{op:?}: {} calls", run.calls);
                 if skip {
+                    // The C code: the local times of every row first, then
+                    // the midnights row by row.
                     let mut today = Today::new();
-                    for (row, value) in values.iter().enumerate() {
-                        if let (true, Some(instant)) = (selected[row], *value) {
-                            today_row(&mut today, &model, op, instant);
-                        }
+                    let chosen = || {
+                        values
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(row, v)| v.filter(|_| selected[row]))
+                    };
+                    if matches!(op, Op::Truncate(_)) {
+                        chosen().for_each(|v| today_row(&mut today, &model, Op::Locals, v));
                     }
+                    chosen().for_each(|v| today_row(&mut today, &model, op, v));
                     assert!(
                         run.asked <= today.asked,
                         "{op:?}: asked {} where today asks {}",
@@ -521,9 +590,8 @@ fn today_row(today: &mut Today, model: &Model, op: Op, value: i64) {
             today.offset(model, value.div_euclid(USECS_PER_SEC) + EPOCH_SECONDS);
         }
         Op::Truncate(unit) if !infinite => {
-            let second = value.div_euclid(USECS_PER_SEC) + EPOCH_SECONDS;
-            let local = value + today.offset(model, second) * USECS_PER_SEC;
-            if let Some(Truncated::Day(julian)) = truncate_local(local, unit) {
+            // The local time is known: its span was asked before.
+            if let Some(Truncated::Day(julian)) = truncate_local(model.local(value), unit) {
                 midnight(today, julian);
             }
         }
@@ -662,6 +730,104 @@ fn a_full_cache_replaces_its_slots_in_turn() {
         today.offset(&model, second);
         assert_eq!(spans(&words_), today.spans, "{second}");
     }
+}
+
+/// The midnights of date_trunc are learned in the order of the rows, after
+/// every local time, as the C code learned them: day 0's row first, whose
+/// span is not kept, then day 1024's, whose span is; both midnights on one
+/// slot, which holds day 1024's at the end.
+#[test]
+fn midnights_are_learned_in_the_order_of_the_rows() {
+    let model = Model {
+        initial: 0,
+        transitions: vec![(EPOCH_SECONDS + 500 * SECS_PER_DAY, 3600)],
+        failing: 0,
+    };
+    let noon = |day: i64| Some(day * USECS_PER_DAY + USECS_PER_DAY / 2);
+    let mut words_ = vec![0_u64; CACHE_WORDS];
+    run(
+        &mut words_,
+        &model,
+        Op::Locals,
+        &[noon(1024)],
+        &[true],
+        true,
+    )
+    .unwrap();
+    let batch = [noon(0), noon(1024)];
+    let run = run(
+        &mut words_,
+        &model,
+        Op::Truncate(Unit::Day),
+        &batch,
+        &[true; 2],
+        true,
+    )
+    .unwrap();
+    for (row, value) in batch.iter().enumerate() {
+        let want = model.reference(Op::Truncate(Unit::Day), value.unwrap());
+        assert_eq!(run.results[row], Some(want), "row {row}");
+    }
+    // The slot of days 0 and 1024: its state, then its day.
+    let slot = 3 + SPANS * 3;
+    assert_eq!((words_[slot], words_[slot + 1]), (1, 1024));
+}
+
+/// A change of zone forgets the spans or the midnights apart, and the
+/// spans' next victim stays, as the C code kept them.
+#[test]
+fn the_spans_and_the_midnights_reset_apart() {
+    let model = steps(40);
+    let mut words_ = vec![0_u64; CACHE_WORDS];
+    let spans_of: Vec<Option<i64>> = (0..33).map(|n| Some(at_second(n * 1000 + 500))).collect();
+    run(
+        &mut words_,
+        &model,
+        Op::Locals,
+        &spans_of,
+        &[true; 33],
+        true,
+    )
+    .unwrap();
+    run(
+        &mut words_,
+        &model,
+        Op::Midnights,
+        &[Some(7)],
+        &[true],
+        true,
+    )
+    .unwrap();
+    let victim = words_[2];
+    assert_eq!(victim, 1);
+    let midnights: Vec<u64> = words_[3 + SPANS * 3..].to_vec();
+    Cache::new(&mut words_).unwrap().reset_spans();
+    assert_eq!((words_[0], words_[1], words_[2]), (0, 0, victim));
+    assert!(words_[3..3 + SPANS * 3].iter().all(|&word| word == 0));
+    assert_eq!(words_[3 + SPANS * 3..], midnights[..]);
+    let again = run(
+        &mut words_,
+        &model,
+        Op::Midnights,
+        &[Some(7)],
+        &[true],
+        true,
+    )
+    .unwrap();
+    assert_eq!(again.asked, 0, "the midnights stay");
+    run(
+        &mut words_,
+        &model,
+        Op::Locals,
+        &[Some(at_second(500))],
+        &[true],
+        true,
+    )
+    .unwrap();
+    let spans_now = spans(&words_);
+    Cache::new(&mut words_).unwrap().reset_midnights();
+    assert_eq!(spans(&words_), spans_now, "the spans stay");
+    assert!(words_[3 + SPANS * 3..].iter().all(|&word| word == 0));
 }
 
 /// A full cache whose next victim a later row reads: the C code evicts

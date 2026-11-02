@@ -114,6 +114,19 @@ impl<'a> Cache<'a> {
         self.words.fill(0);
     }
 
+    /// Forget the spans, the zone changed, but keep the next victim, as
+    /// the C code these rules replace kept it across zones.
+    pub fn reset_spans(&mut self) {
+        let victim = self.words[2];
+        self.words[..MIDNIGHT_BASE].fill(0);
+        self.words[2] = victim;
+    }
+
+    /// Forget the midnights: the zone changed.
+    pub fn reset_midnights(&mut self) {
+        self.words[MIDNIGHT_BASE..].fill(0);
+    }
+
     fn spans(&self) -> usize {
         self.words[0] as usize
     }
@@ -470,20 +483,27 @@ pub fn locals(
 }
 
 /// `date_trunc(unit, instant)` in the zone, as `timestamptz_trunc_internal`
-/// computes it: the local time truncated by the calendar; a unit below a
-/// day keeps the instant's own offset, a day or more takes the local
-/// midnight of its first day. An infinity, a local time the calendar
-/// leaves, a midnight the zone cannot give or a result out of the
-/// timestamps is for the core.
+/// computes it, from the instants and their local times, which
+/// [`locals`] gave before: the local time truncated by the calendar; a
+/// unit below a day keeps the instant's own offset, a day or more takes
+/// the local midnight of its first day. An infinity, a local time the
+/// calendar leaves, a midnight the zone cannot give or a result out of
+/// the timestamps is for the core. Only midnights are asked, so that they
+/// are learned in the order of the rows, after every local time, as the
+/// C code learned them.
 ///
 /// # Errors
 ///
 /// As for [`locals`].
+// The cache, the answers, the unit, two arguments, the rows, the values
+// and the outcome, each its own.
+#[allow(clippy::too_many_arguments)]
 pub fn truncate(
     cache: &mut Cache<'_>,
     answers: &[Answer],
     unit: Unit,
     instants: &impl Source<i64>,
+    locals: &impl Source<i64>,
     rows: RowMaskView<'_>,
     values: &mut [MaybeUninit<i64>],
     out: &mut Outcome<'_, '_>,
@@ -493,10 +513,7 @@ pub fn truncate(
         if timestamp_is_infinite(instant) {
             return Some(Step::Core);
         }
-        let local = match zone.local(instant) {
-            Ok(local) => local,
-            Err(question) => return Some(Step::Ask(question)),
-        };
+        let local = locals.get(row)?;
         Some(match truncate_local(local, unit) {
             None => Step::Core,
             Some(Truncated::Time(time)) => {

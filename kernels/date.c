@@ -225,11 +225,12 @@ typedef struct DateScratch
 
 /*
  * The cache of the session's zone the kernels read (calendar.h), kept by
- * the process, and the zone it was filled in: a change of the session's
- * zone resets it before its next use.
+ * the process, and the zones its spans and its midnights were filled in:
+ * a change of the session's zone resets each part before a call uses it.
  */
 static TessZoneCache zone_cache;
-static pg_tz *cache_zone;
+static pg_tz *span_zone;
+static pg_tz *midnight_zone;
 
 /*
  * What the injection point "tessera-zone-span" is given: the library's
@@ -330,13 +331,15 @@ typedef struct ZoneScratch
  * Run an operation of the zone over the rows of selection in rounds: a
  * call answers what the cache knows, sets ready and core, and asks for the
  * rest; the questions are answered and the call made again over the
- * unknown rows with every answer so far, until none is unknown. A row
- * asks at most two questions, so the answers fit twice the rows.
+ * unknown rows with every answer so far, until none is unknown. An
+ * operation asks of one kind, spans or midnights, one question a row at
+ * most. locals are date_trunc's, the local times of arg.
  */
 static TessStatusCode
 zone_rounds(TessFunctionCall *call, const TessRowMask *selection, ZoneOp op,
-			TessCalendarUnit unit, const TessCalendarArg *arg, void *values,
-			TessRowMask *ready, TessRowMask *core)
+			TessCalendarUnit unit, const TessCalendarArg *arg,
+			const TessCalendarArg *locals, void *values, TessRowMask *ready,
+			TessRowMask *core)
 {
 	int			nrows = selection->nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
@@ -349,13 +352,16 @@ zone_rounds(TessFunctionCall *call, const TessRowMask *selection, ZoneOp op,
 												 space.answers, sizeof(space.answers));
 	TessZoneRound round = {sizeof(TessZoneRound)};
 	TessStatusCode code = TESS_OK;
+	bool		spans = op == ZONE_LOCALS || op == ZONE_DATES;
+	pg_tz	  **filled = spans ? &span_zone : &midnight_zone;
 
-	if (session_timezone != cache_zone)
+	if (session_timezone != *filled)
 	{
-		code = tess_zone_reset(&zone_cache, call->status);
+		code = tess_zone_reset(&zone_cache, spans ? TESS_ZONE_SPAN : TESS_ZONE_MIDNIGHT,
+							   call->status);
 		if (code != TESS_OK)
 			return code;
-		cache_zone = session_timezone;
+		*filled = session_timezone;
 	}
 	memcpy(rows.bits, selection->bits, sizeof(uint64) * nwords);
 	memset(ready->bits, 0, sizeof(uint64) * nwords);
@@ -375,7 +381,7 @@ zone_rounds(TessFunctionCall *call, const TessRowMask *selection, ZoneOp op,
 				code = tess_zone_locals(&round, arg, values, call->status);
 				break;
 			case ZONE_TRUNCATE:
-				code = tess_zone_truncate(&round, unit, arg, values, call->status);
+				code = tess_zone_truncate(&round, unit, arg, locals, values, call->status);
 				break;
 			case ZONE_MIDNIGHTS:
 				code = tess_zone_midnights(&round, arg, values, call->status);
@@ -387,7 +393,7 @@ zone_rounds(TessFunctionCall *call, const TessRowMask *selection, ZoneOp op,
 		if (code != TESS_OK || round.nquestions == 0)
 			break;
 		if (round.nanswers + round.nquestions > 2 * nrows)
-			elog(ERROR, "the time zone's rounds asked more than two questions a row");
+			elog(ERROR, "the time zone's rounds asked more than a question a row");
 		round.nanswers += zone_answer(questions, round.nquestions, answers + round.nanswers,
 									  session_timezone);
 		memcpy(rows.bits, unknown.bits, sizeof(uint64) * nwords);
@@ -413,7 +419,7 @@ local_column(TessFunctionCall *call, const TessDatumColumn *column, int64 *local
 	int			nrows = call->rows->nrows;
 	TessRowMask ready = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
 	TessRowMask core = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
-	TessStatusCode code = zone_rounds(call, call->rows, ZONE_LOCALS, 0, &arg, locals,
+	TessStatusCode code = zone_rounds(call, call->rows, ZONE_LOCALS, 0, &arg, NULL, locals,
 									  &ready, &core);
 
 	tess_scratch_release(core.bits, space.words[1]);
@@ -437,7 +443,8 @@ local_scalar(TessFunctionCall *call, Datum instant, Datum *local)
 	TessRowMask ready = {.nrows = 1, .bits = &ready_bits};
 	TessRowMask core = {.nrows = 1, .bits = &core_bits};
 	int64		value = 0;
-	TessStatusCode code = zone_rounds(call, &row, ZONE_LOCALS, 0, &arg, &value, &ready, &core);
+	TessStatusCode code = zone_rounds(call, &row, ZONE_LOCALS, 0, &arg, NULL, &value, &ready,
+									  &core);
 
 	*local = Int64GetDatum(value);
 	return code;
@@ -494,11 +501,17 @@ trunc_zoned(TessFunctionCall *call, TessCalendarUnit unit)
 	int			nrows = call->rows->nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
 	DateScratch space;
-	TessRowMask core = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
+	int64	   *locals = tess_scratch_alloc(sizeof(int64) * nrows, space.locals, sizeof(space.locals));
+	TessRowMask core = tess_scratch_mask(space.words[2], sizeof(space.words[2]), nrows);
+	TessDatumColumn local;
+	TessCalendarArg local_arg = {&local, 0};
 	TessStatusCode code;
 
-	code = zone_rounds(call, call->rows, ZONE_TRUNCATE, unit, &stamps, values,
-					   call->non_nulls, &core);
+	/* Every local time first, then the midnights in the order of the rows. */
+	code = local_column(call, call->args[1].column, locals, &local);
+	if (code == TESS_OK)
+		code = zone_rounds(call, call->rows, ZONE_TRUNCATE, unit, &stamps, &local_arg, values,
+						   call->non_nulls, &core);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
 	{
 		for (uint64 look = core.bits[word]; look != 0; look &= look - 1)
@@ -510,7 +523,8 @@ trunc_zoned(TessFunctionCall *call, TessCalendarUnit unit)
 		}
 		call->non_nulls->bits[word] |= core.bits[word];
 	}
-	tess_scratch_release(core.bits, space.words[0]);
+	tess_scratch_release(core.bits, space.words[2]);
+	tess_scratch_release(locals, space.locals);
 	return code;
 }
 
@@ -844,7 +858,7 @@ zone_cast_evaluate(TessFunctionCall *call)
 	nwords = tess_row_mask_word_count(nrows);
 	core = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
 	code = zone_rounds(call, call->rows, to_instant ? ZONE_MIDNIGHTS : ZONE_DATES, 0, &source,
-					   call->values, call->non_nulls, &core);
+					   NULL, call->values, call->non_nulls, &core);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
 	{
 		for (uint64 look = core.bits[word]; look != 0; look &= look - 1)

@@ -105,9 +105,10 @@ None. No requirement of an existing spec changes. The change sets
   points), `include/tessera/calendar.h` (the date bound and the time
   zone: `TessZoneCache` and its calls).
 - Code: `kernels/int.c` and `kernels/date.c` (shrink);
-  `crates/tessera-kernels/src/int/`, `int32/`, `cast.rs`, `ops.rs`,
-  `error.rs`, `calendar.rs` and a new `calendar/zone.rs`;
-  `crates/tessera-capi/src/c/int.rs`, `cast.rs`, `calendar.rs`.
+  `crates/tessera-kernels/src/int/`, `int32/`, `simd/`, `ops.rs`,
+  `error.rs`, `calendar.rs` and the new `smallint.rs` and
+  `calendar/zone.rs`;
+  `crates/tessera-capi/src/c/int.rs`, `calendar.rs`, `zone.rs`.
 - Tests: Rust tests of each rule against a reference written another
   way; a Kani proof of the date bound; property tests of the time zone
   over model zones; tests of the entry points under Miri (Rust's
