@@ -1,0 +1,23 @@
+# tstz_spans: the zone in rounds (Tessera a168afe9)
+
+macOS sample of the backend for 6 s, a sample a millisecond,
+the query in a loop under TimeZone Europe/Berlin; the functions on
+top of the stack, by samples of 4968, inlined code counted in
+its caller.
+
+  4070  zone: Zone::local
+   255  pg_next_dst_boundary
+   151  zone: settle, dates
+   149  zone: the sort of the questions
+    39  heap_get_datum_column
+    37  tessera-capi: the answers read
+    35  tess_heap_batch_append_page
+    33  zone_rounds
+    31  tessera-capi: with_round
+    24  heap_prepare_pagescan
+    20  expr_column
+    18  xzm_realloc
+    15  _xzm_free
+    12  DYLD-STUB$$pg_next_dst_boundary
+    12  __bzero
+    12  mach_absolute_time

@@ -5,6 +5,12 @@ Summaries of full runs of the PostgreSQL-level benchmarks of
 TPC-H of [`bench/tpch`](../../bench/tpch/README.md), with the plans of
 the cases the README cites, newest first:
 
+- [2026-11-02, smallint arithmetic, the date bound and the
+  zone](2026-11-02-int2-and-date-bounds/README.md): six cases of the
+  family `win` and the counts of `arith_int32`, Apple M5 Pro,
+  PostgreSQL master 0497318e442, the change
+  `int2-and-date-bounds-in-rust` against c14180a5, and the attempt of
+  the zone in rounds it left out.
 - [2026-11-02, a char(n) scalar trimmed
   once](2026-11-02-bpchar-constant-compare/README.md): TPC-H Q19, Q12
   and Q10, Apple M5 Pro, PostgreSQL master, the change

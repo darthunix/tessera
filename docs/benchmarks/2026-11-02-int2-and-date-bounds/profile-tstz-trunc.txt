@@ -1,0 +1,23 @@
+# tstz_trunc: the zone in rounds (Tessera a168afe9)
+
+macOS sample of the backend for 6 s, a sample a millisecond,
+the query in a loop under TimeZone Europe/Berlin; the functions on
+top of the stack, by samples of 4939, inlined code counted in
+its caller.
+
+  1336  zone: Zone::midnight
+   713  pg_next_dst_boundary
+   529  zone: Zone::local
+   464  zone: settle
+   350  zone: the sort of the questions
+   324  DetermineTimeZoneOffsetInternal
+   153  tessera-capi: with_round
+   120  heap_get_datum_column
+    94  tessera-capi: the answers read
+    88  heap_prepare_pagescan
+    84  zone: settle, locals
+    80  other Rust code
+    75  j2date
+    60  tess_heap_batch_append_page
+    44  expr_column
+    38  zone_rounds

@@ -147,8 +147,8 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
 - `golden-corpus`: The answers of PostgreSQL's functions as the
   kernels' oracle
 - `kani-beyond-relhash`: Kani proofs of the kernels' arithmetic
-- `int2-and-date-bounds-in-rust`: The range of a smallint result and
-  the bound of a date against a timestamp, in Rust
+- `zone-rules-in-rust`: The rules of local time of a zone in Rust, as
+  fast as the C code
 - `contracts-of-the-c-path`: Contracts of `tessera-capi` and
   `tessera-kernels`, with no memory taken
 - `bounded-rust-calls`: Rust calls bounded in time
@@ -1762,11 +1762,10 @@ Kani proofs of the kernels' arithmetic. From the review of 2026-11-01.
   int32 and int64 (`quotient` and `remainder` equal `/` and `%` for
   every `n` and every `|d| >= 2`; int64 split by shift);
   `Decimal::round` against rounding half away from zero in i128 at
-  every scale 0 to 18; the bound of a date against a timestamp;
-  `WordValues` of `tessera-core` (the rows it gives are in range,
-  unique and increasing, at most 64 steps, and a refusal comes before
-  any read); the encoding of a sort key (order and the place of NULL);
-  the split of a timestamp into days and time.
+  every scale 0 to 18; `WordValues` of `tessera-core` (the rows it
+  gives are in range, unique and increasing, at most 64 steps, and a
+  refusal comes before any read); the encoding of a sort key (order
+  and the place of NULL); the split of a timestamp into days and time.
 - **Why:** These are a few operations over words, where Kani proves
   for every input what a test samples. The unsafe C adapters rely on
   the promise of `WordValues`.
@@ -1777,32 +1776,48 @@ Kani proofs of the kernels' arithmetic. From the review of 2026-11-01.
   differential tests on both architectures hold the vector code to it.
   `Divisor::quotient` is `#[cfg(test)]` today and must be visible to
   `cfg(kani)`. Products of 128 bits are slow to prove.
-- **Depends on:** nothing; the date bound on
-  `int2-and-date-bounds-in-rust`.
+- **Depends on:** nothing.
 - **Capabilities:** batch-functions
 - **Size:** two or three pull requests.
 
-### int2-and-date-bounds-in-rust
+### zone-rules-in-rust
 
-The range of a smallint result and the bound of a date against a
-timestamp, in Rust. From the review of 2026-11-01.
+The rules of local time of a zone in Rust, as fast as the C code. From
+the change `int2-and-date-bounds-in-rust`, which tried them and left
+them out.
 
-- **What:** Two pieces of `kernels/int.c` move to `tessera-kernels`:
-  `smallint_range`, the check that a result fits a smallint, joins the
-  arithmetic it checks, so that one kernel computes and checks; and
-  the bound of `date_timestamp_evaluate`, which turns a date compared
-  with a timestamp into an int4 comparison with a rounded bound.
-- **Why:** `smallint_range` walks another kernel's output a second
-  time over raw memory, and once read a call before its status, which
-  UBSan found (90de317c). The bound is subtle at midnight, for
-  negative timestamps and for infinities; in Rust Kani proves that for
-  every date, timestamp and operator the rewritten comparison gives
-  the core's answer.
-- **Known:** About 100 to 150 lines. C keeps the registration and the
-  choice of arguments.
+- **What:** The rules of `kernels/date.c` that read a `timestamptz` in
+  the session's zone move to `tessera-kernels`: the cache of 32 spans
+  of the zone's offset and 1024 local midnights, an instant's local
+  time, a day's local midnight, how `date_trunc` turns a truncated
+  local time back into an instant, and the casts between `date` and
+  `timestamptz`. Property tests over random model zones hold them to a
+  reference, as the attempt's tests did.
+- **Why:** These rules decide the answers around the changes of summer
+  time, and only hand-written SQL suites judge them
+  (`crosscheck-draws`); in Rust a model test reaches every rule, and a
+  mutant of it meets a Rust test.
+- **Known:** The attempt is on the branch `zone-rules-in-rust-rounds`.
+  Rust never called PostgreSQL there: a call answered what the cache
+  knew and returned the rest as questions, sorted; C asked the time
+  zone library and called again with the answers. Against the C code
+  (docs/benchmarks/2026-11-02-int2-and-date-bounds) the cases of the
+  family `win` ran 1.68 (`tstz_cast`), 1.78 (`tstz_trunc`) and 2.47
+  (`tstz_spans`) times as long by the median, and `tstz_spans` longer
+  than PostgreSQL without Tessera. The profiles put the time in the
+  work around each row, not in PostgreSQL: a row the cache lacks goes
+  through Rust twice and through C once, where the C code takes it
+  once; a binary search of the answers changed nothing. The way left
+  is one pass: C gives Rust a function that answers a question, and
+  Rust calls it at a miss. An error of PostgreSQL must not unwind
+  through Rust's frames, so the function either runs the library
+  under `PG_TRY`, at a cost at each miss, or relies on
+  `pg_next_dst_boundary`, `DetermineTimeZoneOffset` and `pg_localtime`
+  raising none. The maintainer decides which; the cases `tstz_*` of
+  `win` decide whether it is fast enough.
 - **Depends on:** nothing.
 - **Capabilities:** batch-functions, kernel-abi
-- **Size:** small: one or two pull requests.
+- **Size:** one or two pull requests.
 
 ### contracts-of-the-c-path
 
@@ -2162,6 +2177,28 @@ becomes an entry, joins one, or is dropped.
   out each set's index and the room left in its last chunk, so a set
   may pass the estimate by its index. Suggested: count the index in the
   gate, with a case near the limit, or drop.
+
+- **Whole-word division leaves NULL slots unwritten** (an outside review
+  of `int2-and-date-bounds-in-rust`, 2026-11-02). The int4 and
+  smallint entry points promise a written placeholder in every
+  selected row, NULL ones too, and allow an output the caller has not
+  initialized (`include/tessera/kernels.h`). Division and remainder of
+  a whole word without a prepared divisor write only the present lanes;
+  with one they write nothing when the whole word is NULL. 64 rows of
+  12 with row 3 NULL, divided by 1, leave slot 3 as it was. Tessera's
+  own caller zeroes its output (`palloc0_array` in `runtime/expr.c`),
+  so no query reads such a slot today. Suggested: write the
+  placeholders on these paths, with a test of NULLs in a whole word
+  and of a word all NULL.
+- **The smallint multiply checks the int32 overflow too** (the counts
+  of the same change). The vector smallint multiply checks that the
+  int32 product did not overflow and that it fits a smallint; the
+  product of two smallints cannot overflow an int32, so the first
+  check is spent. In the program `arith_int32` a row of a dense column
+  times a constant takes 9.8 instructions as smallint against 5.0 as
+  int4. The case `int2_arith` of `win` shows no loss against the C
+  code. Suggested: drop the check where both operands are smallints,
+  which the entry points promise, or leave it.
 
 ## Decided against
 
