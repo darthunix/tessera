@@ -108,28 +108,27 @@ pub fn exit_misses(selected: &Bitmap) -> u64 {
 }
 
 /// The misses a call of the search by halving of `keys` over `values`: at
-/// each step, the values that take its rarer way, as a predictor that
-/// knows each step's odds, but not the values, would miss them. The steps
-/// are those of `tessera_kernels::set::KeySet::contains` beyond the keys it
+/// each node of the search, the values that take its rarer way, as a
+/// predictor would miss them that has seen the steps before it in the same
+/// search and knows each node's odds, but not the values. The steps are
+/// those of `tessera_kernels::set::KeySet::contains` beyond the keys it
 /// compares all.
 pub fn halving_misses<T: Ord + Copy>(keys: &[T], values: &[T]) -> u64 {
-    let mut steps: Vec<[u64; 2]> = Vec::new();
+    // A node is the range of keys left to search: the steps before it
+    // lead to no other.
+    let mut nodes: BTreeMap<(usize, usize), [u64; 2]> = BTreeMap::new();
     for &value in values {
-        let (mut base, mut size, mut step) = (0, keys.len(), 0);
+        let (mut base, mut size) = (0, keys.len());
         while size > 1 {
             let half = size / 2;
             let middle = base + half;
             let right = keys[middle] <= value;
-            if steps.len() == step {
-                steps.push([0; 2]);
-            }
-            steps[step][usize::from(right)] += 1;
+            nodes.entry((base, size)).or_insert([0; 2])[usize::from(right)] += 1;
             base = if right { middle } else { base };
             size -= half;
-            step += 1;
         }
     }
-    steps.iter().map(|ways| ways[0].min(ways[1])).sum()
+    nodes.values().map(|ways| ways[0].min(ways[1])).sum()
 }
 
 #[derive(Clone)]

@@ -753,19 +753,14 @@ fn column_comparisons_match_the_model_on_every_case() -> Result<()> {
 
 /// The misses a call that the pilot of unlearned inputs holds each form
 /// to: of the fold's loop over the rows of each of 16 words, and of the
-/// 7 steps of halving of 1024 rows over 65 keys.
+/// 7 steps of halving of 1024 rows over 65 keys, in `shuffled`.
 #[test]
 fn the_pilot_cases_hold_the_models_of_their_misses() -> Result<()> {
     let fold = reading::pilot_case();
     assert_eq!(fixture::exit_misses(&fold.selected), 11);
-    let span = sets::pilot_case()?;
+    let shuffled = sets::pilot_case()?;
     let keys = sets::keys(&reading::cases())?;
-    assert!(
-        span.values
-            .iter()
-            .all(|value| (keys[0]..=keys[64]).contains(value)),
-        "every row within the keys"
-    );
-    assert_eq!(fixture::halving_misses(&keys, &span.values), 3068);
+    assert_eq!(shuffled.name, "words/1024/shuffled/nulls-none/ready");
+    assert_eq!(fixture::halving_misses(&keys, &shuffled.values), 1351);
     Ok(())
 }
