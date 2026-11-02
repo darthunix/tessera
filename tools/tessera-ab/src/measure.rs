@@ -52,11 +52,20 @@ pub struct Options {
     /// median beyond the control's to be flagged.
     #[arg(long, value_name = "PERCENT", default_value = "2")]
     pub threshold: f64,
-    /// The most seconds the whole run may take, its builds included: at
-    /// the deadline the step under way is stopped with every process it
-    /// started, its psql among them, and the run fails.
+    /// The most seconds the run may take, its builds included: the tool
+    /// checks it before each step and between its phases, and stops the
+    /// step under way, a make or a run.sh, with every process it started,
+    /// its psql among them; the run then fails.
     #[arg(long, value_name = "SECONDS")]
     pub deadline: Option<NonZeroU64>,
+}
+
+/// Fail when the deadline, if any, has passed.
+fn within(deadline: Option<Instant>, what: &str) -> Result<()> {
+    if let Some(deadline) = deadline {
+        ensure!(Instant::now() < deadline, "the deadline passed {what}");
+    }
+    Ok(())
 }
 
 /// The installed libraries a run must have taken from the side's build.
@@ -75,6 +84,7 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
         .deadline
         .map(|seconds| Instant::now() + Duration::from_secs(seconds.get()));
     let pg = Pg::discover()?;
+    within(deadline, "while PostgreSQL's build was read")?;
     let runs = repo.join("target/bench-runs");
     ensure!(
         runs.join("pgdata-bench/PG_VERSION").is_file(),
@@ -121,6 +131,7 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
             snapshot.directory.display()
         );
     }
+    within(deadline, "while the sides were taken")?;
     let sides = [("base", &base), ("candidate", &candidate)];
     let mut measured: BTreeMap<&str, [Vec<PathBuf>; 2]> = BTreeMap::new();
     for family in &options.family {
@@ -146,6 +157,7 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
             }
         }
     }
+    within(deadline, "before the report")?;
     let report = report(&pg, &base, &candidate, options, &measured)?;
     fs::write(root.join("report.md"), &report.text)?;
     println!("\n{}", report.text);
@@ -214,7 +226,10 @@ fn measure(
     command
         .stdout(File::create(&out)?)
         .stderr(File::create(&err)?);
-    let status = run_until(&mut command, deadline).context("bench/pg/run.sh measure")?;
+    let status = run_until(&mut command, deadline).context(
+        "bench/pg/run.sh measure; a deadline in the server's restart may leave it stopped, \
+         and the next run of run.sh starts it",
+    )?;
     let stdout = fs::read_to_string(&out).unwrap_or_default();
     let directory = stdout
         .lines()

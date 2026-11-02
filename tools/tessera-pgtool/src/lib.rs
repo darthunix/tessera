@@ -15,7 +15,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 
 pub mod snapshot;
 
@@ -195,17 +195,25 @@ pub fn install_tessera_with(
 /// Run a step of a tool to its end, or stop it at `deadline`.
 ///
 /// The step runs in a process group of its own, so that a deadline ends
-/// it with every process it started, such as the `psql` of a script; a
-/// process that leaves the group itself, as `pg_ctl` starts a server in
-/// a session of its own, outlives it. The step's output goes where the
-/// command sends it. Without a deadline the call waits as
-/// [`Command::status`] does.
+/// it with every process it started, such as the `psql` of a script: the
+/// group gets SIGTERM, a second to go, then SIGKILL, whatever of it is
+/// left, so that a process that ignores SIGTERM ends too. A process that
+/// leaves the group itself, as `pg_ctl` starts a server in a session of
+/// its own, outlives it. A step that ends after the deadline fails as one
+/// still running would. The step's output goes where the command sends it.
+/// Without a deadline the call waits as [`Command::status`] does.
 ///
 /// # Errors
 ///
-/// The step cannot start, or the deadline passed: then every process of
-/// the group got SIGTERM and the step was waited for.
+/// The deadline passed before the step started, while it ran, or before
+/// its end was seen; or the step could not start, or be stopped.
 pub fn run_until(command: &mut Command, deadline: Option<Instant>) -> Result<ExitStatus> {
+    if let Some(deadline) = deadline {
+        ensure!(
+            Instant::now() < deadline,
+            "the deadline passed before {command:?}"
+        );
+    }
     let mut child = command
         .process_group(0)
         .spawn()
@@ -214,18 +222,43 @@ pub fn run_until(command: &mut Command, deadline: Option<Instant>) -> Result<Exi
         return Ok(child.wait()?);
     };
     loop {
-        if let Some(status) = child.try_wait()? {
-            return Ok(status);
-        }
-        if Instant::now() >= deadline {
-            // The group's id is its leader's, the child's own.
-            let group = format!("-{}", child.id());
-            let _ = Command::new("kill").args(["-TERM", "--", &group]).status();
-            let _ = child.wait();
+        let status = child.try_wait()?;
+        let now = Instant::now();
+        if now >= deadline {
+            if status.is_none() {
+                stop_group(&mut child)?;
+            }
             bail!("the deadline passed: {command:?} was stopped with its group");
         }
-        thread::sleep(Duration::from_millis(50));
+        if let Some(status) = status {
+            return Ok(status);
+        }
+        thread::sleep((deadline - now).min(Duration::from_millis(50)));
     }
+}
+
+/// End a step's process group: SIGTERM, a second's grace, then SIGKILL to
+/// every member left, the step's descendants among them, and the step
+/// waited for. A signal to a group already gone is no failure.
+fn stop_group(child: &mut std::process::Child) -> Result<()> {
+    let group = format!("-{}", child.id());
+    let signal = |name: &str| {
+        Command::new("kill")
+            .args([name, "--", &group])
+            .stderr(Stdio::null())
+            .status()
+            .context("cannot run kill")
+    };
+    signal("-TERM")?;
+    let grace = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < grace && child.try_wait()?.is_none() {
+        thread::sleep(Duration::from_millis(20));
+    }
+    signal("-KILL")?;
+    // The leader, should the group's signal not have reached it.
+    let _ = child.kill();
+    child.wait()?;
+    Ok(())
 }
 
 /// The last lines of a log, for an error message.
@@ -472,6 +505,63 @@ mod tests {
         Ok(())
     }
 
+    /// Whether a process of the given id still runs, after its parent is
+    /// gone and it is reaped.
+    fn alive(pid: &str) -> Result<bool> {
+        for _ in 0..100 {
+            let running = Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stderr(Stdio::null())
+                .status()?
+                .success();
+            if !running {
+                return Ok(false);
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        Ok(true)
+    }
+
+    #[test]
+    fn a_step_that_ignores_sigterm_ends_at_the_deadline() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pid = directory.path().join("pid");
+        // The leader ignores SIGTERM, and so does a descendant it leaves.
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(format!(
+            "trap '' TERM; (trap '' TERM; exec sleep 60) & echo $! > '{}'; sleep 60",
+            pid.display()
+        ));
+        let started = Instant::now();
+        let error = run_until(&mut command, Some(started + Duration::from_millis(300)));
+        assert!(error.is_err());
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(
+            !alive(&fs::read_to_string(&pid)?)?,
+            "a descendant outlived the deadline"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_step_that_ends_after_the_deadline_fails() -> Result<()> {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 0.05; exit 0"]);
+        let outcome = run_until(
+            &mut command,
+            Some(Instant::now() + Duration::from_millis(15)),
+        );
+        assert!(outcome.is_err());
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exit 0"]);
+        let outcome = run_until(
+            &mut command,
+            Some(Instant::now() - Duration::from_millis(1)),
+        );
+        assert!(outcome.is_err(), "a step after its deadline does not start");
+        Ok(())
+    }
+
     #[test]
     fn a_step_past_its_deadline_ends_with_the_processes_it_started() -> Result<()> {
         let directory = tempfile::tempdir()?;
@@ -486,25 +576,10 @@ mod tests {
             .map(|error| error.to_string());
         assert!(started.elapsed() < Duration::from_secs(20));
         assert!(error.is_some_and(|error| error.contains("deadline passed")));
-        // The sleep, a child of the step's shell, went with its group; once
-        // its parent is gone it is reaped, so it no longer exists.
-        let sleep = fs::read_to_string(&pid)?;
-        let mut alive = true;
-        for _ in 0..100 {
-            alive = Command::new("kill")
-                .args(["-0", sleep.trim()])
-                .stderr(Stdio::null())
-                .status()?
-                .success();
-            if !alive {
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
+        // The sleep, a child of the step's shell, went with its group.
         assert!(
-            !alive,
-            "the step's child {} outlived the deadline",
-            sleep.trim()
+            !alive(&fs::read_to_string(&pid)?)?,
+            "the step's child outlived the deadline"
         );
         Ok(())
     }
