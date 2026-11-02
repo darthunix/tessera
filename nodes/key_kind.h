@@ -11,6 +11,7 @@
 
 #include "catalog/pg_type_d.h"
 #include "utils/fmgroids.h"
+#include "utils/lsyscache.h"
 #include "utils/pg_locale.h"
 #include "varatt.h"
 
@@ -107,6 +108,21 @@ typedef enum TessKeyBytes
 } TessKeyBytes;
 
 /*
+ * Whether equal strings of the collation are equal bytes. PostgreSQL 12's
+ * pg_newlocale_from_collation returns no locale for the default collation,
+ * so Greengage asks the catalog.
+ */
+static inline bool
+tess_collation_deterministic(Oid collation)
+{
+#if TESS_GREENGAGE
+	return get_collation_isdeterministic(collation);
+#else
+	return pg_newlocale_from_collation(collation)->deterministic;
+#endif
+}
+
+/*
  * The bytes of a key hashed by hashproc (the 32-bit or the extended hash
  * of the type) under collation; with equality valid, the key's equality
  * function must also be the one of those bytes, as a grouping compares
@@ -147,7 +163,7 @@ tess_key_bytes(Oid hashproc, Oid equality, Oid collation)
 		return TESS_KEY_BYTES_NONE;
 	/* Text and char(n) hash by bytes only where equal means equal bytes. */
 	if (bytes_equality != F_BYTEAEQ &&
-		(!OidIsValid(collation) || !pg_newlocale_from_collation(collation)->deterministic))
+		(!OidIsValid(collation) || !tess_collation_deterministic(collation)))
 		return TESS_KEY_BYTES_NONE;
 	return form;
 }
