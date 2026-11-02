@@ -254,7 +254,8 @@ into the postmaster (`shared_preload_libraries`, so that
 parallel workers do not load them again in every query) and sets
 `shared_buffers` to `SHARED_BUFFERS`, 2GB by default; `measure` restarts
 the server before it runs, so that the modules installed last are the ones
-measured, and every case's warm-up runs bring its tables back into
+measured (unless `BENCH_RESTARTED` says its caller did, as `cargo ab` does
+with `run.sh restart`), and every case's warm-up runs bring its tables back into
 the buffers. `setup` takes a multiplier of the base row counts (2 M narrow,
 250 k wide, 500 k mixed, 100 k dimension, 2 M fact, 100 k with duplicate
 keys), stored in the table `bench_scale`; the win and join families

@@ -69,13 +69,16 @@ a run at the default 31 repetitions. `--deadline SECONDS` bounds the
 run, its builds included: the tool checks it before each step and
 between its phases, and at the deadline stops the step under way, a
 `make` or a `run.sh`, with every process it started, its `psql` among
-them (SIGTERM, then SIGKILL a second later), and fails. The server ends
-the query of a `psql` that is gone at its next check, within a second
-(`run.sh` sets `client_connection_check_interval`). Two things it does
-not stop: a stall in the work between steps, such as `pg_config` or
-`git`; and a deadline that falls in the server's restart may leave the
-server stopped, which the next `run.sh measure` starts. A run the
-deadline stops is kept and explained, as any other.
+them (SIGTERM, then SIGKILL a second later, also when the step itself
+has ended), and fails. The server ends the query of a `psql` that is
+gone at its next check, within a second (`run.sh` sets
+`client_connection_check_interval`). The server's restart before each
+run is not stopped: the tool runs `run.sh restart` outside the deadline,
+a minute at most by `pg_ctl`'s own wait, and then `run.sh measure` with
+`BENCH_RESTARTED` set, so that a deadline never leaves the server
+stopped. Nor is a stall in the work between steps, such as `pg_config`
+or `git`, which the deadline is checked after. A run the deadline stops
+is kept and explained, as any other.
 
 The report goes to `target/bench-runs/ab-*/report.md` and to the terminal;
 this one is the cut of `agg.c` (`--cases '^g_(sum|avg)_int8$'
