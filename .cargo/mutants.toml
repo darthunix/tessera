@@ -84,7 +84,9 @@ exclude_globs = [
 #   also when the word was probed with another word's hashes, found by
 #   its own walk; a copy or a zeroing of four words inline or by
 #   a call (copy_words, zero_words); the shape of the loop of a record's
-#   tail words (Layout::tail_words), which the generic one writes alike.
+#   tail words (Layout::tail_words), which the generic one writes alike;
+#   a bpchar scalar prepared once or read row by row (the scalar source's
+#   Strings::constant).
 # - An append whose chunk is full goes on over words with no room left
 #   (append_rows, append_column_rows); a link finds no record of its keys
 #   in a chain with no rest (link_counting): the loop ends later, the
@@ -130,6 +132,7 @@ exclude_re = [
     "int/hash\\.rs:197:5: replace block -> Option<.*> with None$",
     "int/filter\\.rs:59:17: replace && with \\|\\| in filter_with$",
     "replace bulk_passing -> Option<u64> with None$",
+    "replace <impl Strings for Constant<&\\[u8\\]>>::constant -> Option<&\\[u8\\]> with None$",
     "src/set\\.rs:150:[0-9]+: replace (&& with \\|\\||<= with >) in in_set$",
     "src/set\\.rs:157:[0-9]+: replace (\\|\\| with &&|== with !=|>= with <) in in_set$",
     "delete match arm \\(ArithOp::((Add|Sub), _|(Div|Mod), Some\\(divisor\\))\\) in <impl IntLane for i64>::arith_block$",

@@ -70,6 +70,62 @@ fn mask(nrows: usize, words: &mut [u64]) -> Mask {
     }
 }
 
+/// A bpchar column against a scalar with a trailing space, on either side,
+/// equal and not equal: values that differ in their trailing spaces
+/// alone are equal, a NULL leaves the rows, a compressed value goes to the
+/// rest, as the generic comparison of both strings row by row.
+#[test]
+fn a_bpchar_scalar_on_either_side() {
+    let mut strings = Strings(Vec::new());
+    let values = vec![
+        strings.short("ab"),
+        strings.short("ab  "),
+        strings.short("a"),
+        strings.compressed(),
+        0,
+        strings.short("ab c"),
+    ];
+    let isnull = [false, false, false, false, true, false];
+    let source = column(&values, &isnull);
+    let scalar = TextArg {
+        column: ptr::null(),
+        scalar: strings.short("ab "),
+    };
+    let values_arg = TextArg {
+        column: &raw const source,
+        scalar: 0,
+    };
+    for (equal, kept) in [(true, 0b00_0011_u64), (false, 0b10_0100)] {
+        for scalar_left in [false, true] {
+            let (left, right) = if scalar_left {
+                (&scalar, &values_arg)
+            } else {
+                (&values_arg, &scalar)
+            };
+            let (mut rows, mut rest) = ([0b11_1111_u64], [0_u64]);
+            let mut status = Status::new();
+            // SAFETY: local columns, masks and status.
+            let code = unsafe {
+                tess_text_compare(
+                    equal,
+                    true,
+                    left,
+                    right,
+                    &mut mask(6, &mut rows),
+                    &mut mask(6, &mut rest),
+                    &raw mut status,
+                )
+            };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            assert_eq!(
+                (rows[0], rest[0]),
+                (kept, 0b00_1000),
+                "equal {equal}, scalar on the left {scalar_left}"
+            );
+        }
+    }
+}
+
 #[test]
 fn comparisons_patterns_and_the_rest() {
     let mut strings = Strings(Vec::new());

@@ -319,7 +319,9 @@ more than one detoasted value. Characters count as the database encoding
 counts them (`TessTextChars`: a byte each, or UTF-8 by its lead bytes).
 
 - `tess_text_compare(equal, bpchar, left, right, rows, rest, status)`:
-  equality or inequality of text, or of bpchar without trailing spaces.
+  equality or inequality of text, or of bpchar without trailing spaces;
+  a bpchar scalar is trimmed once a call, and each value compared by
+  its first bytes, its rest looked at for spaces only when they match.
 - `tess_text_starts_with(column, prefix, len, rows, rest, status)` and
   `tess_text_like(column, pattern, len, negate, rows, rest, simple,
   status)`: a prefix, and a LIKE pattern of literals and `%` matched by its

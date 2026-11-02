@@ -67,6 +67,11 @@ impl Strings for Constant<&[u8]> {
     fn get(&self, _row: usize) -> Text<'_> {
         Text::Bytes(self.0)
     }
+
+    #[inline(always)]
+    fn constant(&self) -> Option<&[u8]> {
+        Some(self.0)
+    }
 }
 
 /// A call's argument: a column or a scalar's bytes, a loop for each.

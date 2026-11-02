@@ -6,7 +6,7 @@
 
 ## 2. The work
 
-- [ ] 2.1 `Strings::constant` and the prepared scalar in `compare`, the
+- [x] 2.1 `Strings::constant` and the prepared scalar in `compare`, the
       tests and the mutants' exclusion. Check: `make rust-check`; `make
       installcheck` on PostgreSQL master with assertions
 - [ ] 2.2 The measurement of the design
