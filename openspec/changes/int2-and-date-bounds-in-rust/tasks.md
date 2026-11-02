@@ -16,14 +16,14 @@ ownership, lifetime and errors. The check named in a task comes on top.
 
 ## 1. The proposal
 
-- [ ] 1.1 Write the proposal, the design and the tasks of this change,
+- [x] 1.1 Write the proposal, the design and the tasks of this change,
       with `skip_specs: true`. Check: `openspec validate
       int2-and-date-bounds-in-rust --strict`;
       `.github/scripts/check-specs.sh`
 
 ## 2. What the C version answers
 
-- [ ] 2.1 Give `cargo ab measure` a deadline, `--deadline <seconds>`,
+- [x] 2.1 Give `cargo ab measure` a deadline, `--deadline <seconds>`,
       one for the whole run, its builds included: each step of a run in
       a process group of its own, the group ended and the run failed at
       the deadline; `bench/pg/run.sh` sets

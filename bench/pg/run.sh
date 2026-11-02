@@ -75,7 +75,10 @@ measure)
             "$LIB/libtessera_runtime.a" "$BIN/postgres"
     } > "$OUT/source.txt"
     { pmset -g batt 2>/dev/null | head -2; date; } > "$OUT/power.txt"
-    (cd "$OUT" && PGOPTIONS="${PGOPTIONS:-} -c bench.cases=${CASES:-}" "$BIN/psql" -X \
+    # A query whose psql is gone, stopped by a deadline, ends within a
+    # second instead of running on.
+    (cd "$OUT" && PGOPTIONS="${PGOPTIONS:-} -c bench.cases=${CASES:-} \
+        -c client_connection_check_interval=1000" "$BIN/psql" -X \
         -v workers="$WORKERS" ${REPETITIONS:+-v repetitions="$REPETITIONS"} \
         -f "$HERE/$FAMILY.sql" > run.log 2>&1)
     cat "$OUT/summary.txt"
