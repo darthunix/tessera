@@ -17,7 +17,8 @@ use tessera_capi::c::{
     tess_table_spill_take_file, tess_table_spill_words,
 };
 use tessera_kernels::table::{
-    CHUNK_HEADER, KEY_SLOT, RECORD_HEADER, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET,
+    CHUNK_HEADER, KEY_SLOT, RECORD_HASH_OFFSET, RECORD_HEADER, RECORD_NEXT_OFFSET,
+    RECORD_SIZE_OFFSET,
 };
 
 /// The rule of a split through its entry point: past two thirds of what
@@ -336,11 +337,18 @@ fn records(count: usize, len: usize, word: impl Fn(usize, usize) -> u32) -> Vec<
 /// shorten packs into nothing.
 #[test]
 fn a_chunk_of_records_packs_and_unpacks_through_c() {
-    let original = records(200, 40, |record, lane| match lane {
-        0 => (record as u32).wrapping_mul(2_654_435_761),
-        4 => 1_000 + record as u32,
-        _ => 0,
-    });
+    // A record of one key and a payload of 16 bytes: its hash and its key.
+    const HASH: usize = RECORD_HASH_OFFSET / 4;
+    const KEY: usize = RECORD_HEADER / 4;
+    let original = records(
+        200,
+        RECORD_HEADER + KEY_SLOT + 16,
+        |record, lane| match lane {
+            HASH => (record as u32).wrapping_mul(2_654_435_761),
+            KEY => 1_000 + record as u32,
+            _ => 0,
+        },
+    );
     let mut status = Status::new();
     let mut out = vec![0_u8; original.len()];
     let mut packed = 0;

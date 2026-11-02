@@ -276,25 +276,36 @@ cut_shared_file(SharedFileSet *shared, int participant, int64 len)
 	FileClose(file);
 }
 
+/* The bytes of a record of one key and a payload of 16 bytes: 40. */
+#define RECORD_LEN tess_table_record_bytes(1, 16)
+
+/* The uint32 at offset in record number record of a chunk. */
+static uint32 *
+record_word(void *chunk, int record, Size offset)
+{
+	return (uint32 *) ((char *) chunk + TESS_TABLE_CHUNK_HEADER +
+					   (Size) record * RECORD_LEN + offset);
+}
+
 /*
- * A chunk of nrecords records of 40 bytes that packs: a hash, the length
- * and a key in each, as a join's table holds them.
+ * A chunk of nrecords records of RECORD_LEN bytes that packs: a hash, the
+ * length and a key in each, as a join's table holds them.
  */
 static uint32 *
 packable_chunk(int nrecords, Size *len)
 {
 	uint32	   *chunk;
 
-	*len = 8 + (Size) nrecords * 40;
+	*len = TESS_TABLE_CHUNK_HEADER + (Size) nrecords * RECORD_LEN;
 	chunk = palloc0(*len);
 	*(uint64 *) chunk = *len;
 	for (int record = 0; record < nrecords; record++)
 	{
-		uint32	   *words = chunk + 2 + record * 10;
-
-		words[0] = (uint32) record * 2654435761U;
-		words[3] = 5;
-		words[4] = 1000000 + record;
+		*record_word(chunk, record, TESS_TABLE_RECORD_HASH_OFFSET) =
+			(uint32) record * 2654435761U;
+		*record_word(chunk, record, TESS_TABLE_RECORD_SIZE_OFFSET) =
+			RECORD_LEN / 8;
+		*record_word(chunk, record, TESS_TABLE_RECORD_HEADER) = 1000000 + record;
 	}
 	return chunk;
 }
@@ -433,7 +444,7 @@ Datum
 tessera_test_spill_packed(PG_FUNCTION_ARGS)
 {
 	const int	nrecords = 1000;
-	Size		len = 8 + nrecords * 40;
+	Size		len = TESS_TABLE_CHUNK_HEADER + nrecords * RECORD_LEN;
 	uint32	   *chunk = palloc0(len);
 	uint32	   *back = palloc(len);
 	uint64	   *noise = palloc(4096);
@@ -447,13 +458,16 @@ tessera_test_spill_packed(PG_FUNCTION_ARGS)
 	*(uint64 *) chunk = len;
 	for (int record = 0; record < nrecords; record++)
 	{
-		uint32	   *words = chunk + 2 + record * 10;
-
-		words[0] = (uint32) record * 2654435761U;
-		words[1] = 12345;
-		words[3] = 5;
-		words[4] = 1000000 + record;
-		words[8] = 7 * record + 100000;
+		*record_word(chunk, record, TESS_TABLE_RECORD_HASH_OFFSET) =
+			(uint32) record * 2654435761U;
+		*record_word(chunk, record, TESS_TABLE_RECORD_NEXT_OFFSET) = 12345;
+		*record_word(chunk, record, TESS_TABLE_RECORD_SIZE_OFFSET) =
+			RECORD_LEN / 8;
+		*record_word(chunk, record, TESS_TABLE_RECORD_HEADER) = 1000000 + record;
+		/* The payload's second word. */
+		*record_word(chunk, record,
+					 TESS_TABLE_RECORD_HEADER + TESS_TABLE_KEY_SLOT + 8) =
+			7 * record + 100000;
 	}
 	for (int word = 0; word < 512; word++)
 		noise[word] = UINT64CONST(0x9e3779b97f4a7c15) * (word + 1);
@@ -472,7 +486,7 @@ tessera_test_spill_packed(PG_FUNCTION_ARGS)
 		elog(ERROR, "a packed chunk reads back with a wrong header");
 	tess_spill_read_body(reader, back, len);
 	for (int record = 0; record < nrecords; record++)
-		chunk[2 + record * 10 + 1] = 0;
+		*record_word(chunk, record, TESS_TABLE_RECORD_NEXT_OFFSET) = 0;
 	if (memcmp(back, chunk, len) != 0)
 		elog(ERROR, "a packed chunk reads back wrong");
 	if (!tess_spill_read_header(reader, &header) || header.len != 4096 ||

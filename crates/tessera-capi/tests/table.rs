@@ -37,8 +37,8 @@ use tessera_kernels::column_keys::KeyColumns;
 use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::phases::{Action, PROBE, Participant};
 use tessera_kernels::table::{
-    CHUNK_HEADER, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, Matches, OwnedTable, TableConfig, index_size,
-    payload_null_words,
+    CHUNK_HEADER, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, Matches, OwnedTable, RECORD_NEXT_OFFSET,
+    TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, payload_null_words,
 };
 
 thread_local! {
@@ -803,7 +803,7 @@ fn the_entry_points_round_trip() -> Result<()> {
             tess_table_record(table.ptr(), 1, &raw mut record, &raw mut status),
             invalid
         );
-        let version = base.add(8).cast::<u32>();
+        let version = base.add(VERSION_OFFSET).cast::<u32>();
         version.write_unaligned(3);
         assert_eq!(attach(table.ptr(), &raw mut status), invalid);
         assert!(
@@ -2533,11 +2533,11 @@ fn the_lookups_narrow_a_mask_in_place() -> Result<()> {
         // past the table's 64 records fails.
         let reference = first[0];
         let (chunk, byte) = (
-            (reference >> 17) as usize,
-            (reference as usize & 0x1_ffff) * 8,
+            (reference >> UNIT_BITS) as usize,
+            (reference as usize & ((1 << UNIT_BITS) - 1)) * 8,
         );
         table.bases[chunk]
-            .add(byte + 4)
+            .add(byte + RECORD_NEXT_OFFSET)
             .cast::<u32>()
             .write(reference);
         for in_group in [true, false] {
@@ -3165,7 +3165,7 @@ fn the_partitioned_columns_entry_point_counts_each_partition() -> Result<()> {
             payload_size: 0,
         };
         for row in (0..70).filter(|row| !expected.contains(row)) {
-            assert_eq!((offsets[row] >> 17) as usize, row % 4, "row {row}");
+            assert_eq!((offsets[row] >> UNIT_BITS) as usize, row % 4, "row {row}");
             let code =
                 tess_table_record(table.ptr(), offsets[row], &raw mut record, &raw mut status);
             assert_eq!(code, Code::Ok, "{}", status.message());

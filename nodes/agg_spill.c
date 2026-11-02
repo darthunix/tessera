@@ -230,8 +230,12 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 	check(state, state->kernels->table_spill_split(spill->words, spill->nwords, false,
 												   npartitions, &npartitions,
 												   &state->status));
-	spill->source_empty[0] = TESS_TABLE_CHUNK_HEADER;
-	spill->empty[0] = TESS_TABLE_CHUNK_HEADER;
+	check(state, state->kernels->table_chunk_init(spill->source_empty,
+												  TESS_TABLE_CHUNK_HEADER,
+												  &state->status));
+	check(state, state->kernels->table_chunk_init(spill->empty,
+												  TESS_TABLE_CHUNK_HEADER,
+												  &state->status));
 	spill->bases[AGG_SOURCE] = spill->source_empty;
 	spill->lens[AGG_SOURCE] = TESS_TABLE_CHUNK_HEADER;
 	for (int partition = 0; partition < npartitions; partition++)

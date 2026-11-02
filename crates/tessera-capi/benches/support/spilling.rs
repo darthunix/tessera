@@ -10,7 +10,8 @@ use relspill::{BlockHeader, BlockKind, HEADER_SIZE, columns};
 use tessera_core::RowMask;
 use tessera_kernels::spill_columns::append_partitioned;
 use tessera_kernels::table::{
-    CHUNK_HEADER, Partitions, PayloadColumns, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET,
+    CHUNK_HEADER, KEY_SLOT, Partitions, PayloadColumns, RECORD_HASH_OFFSET, RECORD_HEADER,
+    RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET,
 };
 
 use crate::support::runner::Runner;
@@ -131,15 +132,23 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 /// key and an int4 value, whose lanes pack to a few bytes, and a wider
 /// record of words of 20 bits.
 fn measure_records(runner: &mut Runner, random: &mut Random) -> Result<()> {
+    // The lanes of a record's hash, its key and its payload's first word.
+    const HASH: usize = RECORD_HASH_OFFSET / 4;
+    const KEY: usize = RECORD_HEADER / 4;
+    const VALUE: usize = (RECORD_HEADER + KEY_SLOT) / 4;
     let cases = [
         (
             "join-int4",
-            records(1000, 40, |record, lane| match lane {
-                0 => (record as u32).wrapping_mul(2_654_435_761),
-                4 => 1_000_000 + record as u32,
-                8 => 7 * record as u32 + 100_000,
-                _ => 0,
-            }),
+            records(
+                1000,
+                RECORD_HEADER + KEY_SLOT + 16,
+                |record, lane| match lane {
+                    HASH => (record as u32).wrapping_mul(2_654_435_761),
+                    KEY => 1_000_000 + record as u32,
+                    VALUE => 7 * record as u32 + 100_000,
+                    _ => 0,
+                },
+            ),
         ),
         (
             "words-20-bits",

@@ -254,8 +254,8 @@ stats_of(const Table *table, TessTableStats *stats)
 /* The record at an offset holds the key of a row and the payload of one with that key. */
 /*
  * Whether a reference names its record through the helpers of the C API:
- * its chunk and byte make it again, and the record's key slots begin past
- * the record's header of 16 bytes at that byte of that chunk.
+ * its chunk and byte make it again, the kernels take it, and the record's
+ * key slots begin past the record's header at that byte of that chunk.
  */
 static bool
 reference_names(const Table *table, uint32 offset)
@@ -266,12 +266,10 @@ reference_names(const Table *table, uint32 offset)
 	Size		byte = tess_table_ref_byte(offset);
 
 	record.struct_size = sizeof(TessTableRecord);
-	return chunk < (uint32) table->ref.nchunks &&
-		byte >= TESS_TABLE_CHUNK_HEADER &&
-		tess_table_ref(chunk, byte) == offset &&
+	return tess_table_ref(chunk, byte) == offset &&
 		tess_table_record(&table->ref, offset, &record, &status) == TESS_OK &&
 		(const char *) record.keys ==
-		(const char *) table->chunks[chunk] + byte + 16;
+		(const char *) table->chunks[chunk] + byte + TESS_TABLE_RECORD_HEADER;
 }
 
 static bool
