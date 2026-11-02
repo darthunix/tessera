@@ -5,6 +5,10 @@ Summaries of full runs of the PostgreSQL-level benchmarks of
 TPC-H of [`bench/tpch`](../../bench/tpch/README.md), with the plans of
 the cases the README cites, newest first:
 
+- [2026-11-02, a char(n) scalar trimmed
+  once](2026-11-02-bpchar-constant-compare/README.md): TPC-H Q19, Q12
+  and Q10, Apple M5 Pro, PostgreSQL master, the change
+  `bpchar-constant-compare` against `12e35e04`.
 - [2026-11-02, a row's columns without walking it
   again](2026-11-02-deform-without-restarts/README.md): restarts of the
   deform and times of TPC-H and the family `win`, Apple M5 Pro,

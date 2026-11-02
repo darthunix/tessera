@@ -30,7 +30,7 @@ closed. The maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
 order. The maintainer took six entries out of turn on 2026-11-02, after
 an analysis of TPC-H with Tessera on, in the order
-`deform-without-restarts` (done), `bpchar-constant-compare`,
+`deform-without-restarts` (done), `bpchar-constant-compare` (done),
 `right-anti-join`, `agg-dependent-columns`, `early-key-filter`,
 `batch-index-join`:
 
@@ -163,23 +163,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
-
-### bpchar-constant-compare
-
-char(n) compared with a constant without trimming both on every row.
-
-- **What:** The text kernel's equality of a char(n) column with a
-  constant trims the constant once, compares the column's first bytes
-  with it and looks at the rest only on a match.
-- **Why:** `compare` in `tessera-kernels` counts the trailing blanks of
-  both strings on every row. TPC-H Q19 compares `l_shipmode` and
-  `l_shipinstruct` with constants: the kernel is 29 % to 32 % of its
-  profile; Q12 and Q10 do the same. Greengage runs the same kernels.
-- **Known:** The same result as `bpchareq` under a deterministic
-  collation; a Rust change with its tests and mutants.
-- **Depends on:** nothing.
-- **Capabilities:** batch-functions, kernel-abi
-- **Size:** small: one pull request.
 
 ### right-anti-join
 
