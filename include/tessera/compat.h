@@ -49,6 +49,7 @@
 #include "nodes/nodes.h"
 #include "nodes/pathnodes.h"
 #include "nodes/pg_list.h"
+#include "port/pg_bitutils.h"
 #include "storage/shmem.h"
 #include "utils/numeric.h"
 #endif
@@ -76,6 +77,14 @@ list_delete_last(List *list)
 		prev = cell;
 	/* Frees the cell, and the list with its only one. */
 	return list_delete_cell(list, cell, prev);
+}
+
+/* The greatest power of two not above num, num > 0 (PostgreSQL 13). */
+static inline uint64
+pg_prevpower2_64(uint64 num)
+{
+	Assert(num > 0);
+	return ((uint64) 1) << pg_leftmost_one_pos64(num);
 }
 
 #define TYPALIGN_DOUBLE 'd'
