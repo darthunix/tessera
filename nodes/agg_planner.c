@@ -240,7 +240,6 @@ own_partial_aggregate(const Aggref *agg)
 	return agg->aggtranstype == INTERNALOID && sum_state_aggregate(agg);
 }
 
-#if !TESS_GREENGAGE
 /* The aggregates of the target list whose partial values are the node's own format. */
 static int
 own_partials(List *tlist)
@@ -252,7 +251,6 @@ own_partials(List *tlist)
 			count++;
 	return count;
 }
-#endif
 
 /*
  * Whether the groups of a grouping with generic aggregates fit hash_mem,
@@ -1360,6 +1358,91 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
  * whose input can be read in batches, and the parallel stack in place of
  * each partial one.
  */
+#if TESS_GREENGAGE
+/*
+ * Greengage's paths of two-stage grouping, Agg (final) <- Motion <- Agg
+ * (partial): the partial stage groups on each segment and a Motion brings
+ * the partial values of a group together for the final one. Taken from
+ * the grouped relation before add_path changes its list.
+ */
+static List *
+cdb_stage_templates(List *pathlist)
+{
+	List	   *result = NIL;
+
+	foreach_ptr(Path, path, pathlist)
+	{
+		AggPath    *final = (AggPath *) path;
+		CdbMotionPath *motion;
+
+		if (!IsA(path, AggPath) || final->aggsplit != AGGSPLIT_FINAL_DESERIAL ||
+			!IsA(final->subpath, CdbMotionPath))
+			continue;
+		motion = (CdbMotionPath *) final->subpath;
+		if (IsA(motion->subpath, AggPath) &&
+			((AggPath *) motion->subpath)->aggsplit == AGGSPLIT_INITIAL_SERIAL)
+			result = lappend(result, final);
+	}
+	return result;
+}
+
+/*
+ * TessAgg in place of both stages of one of those paths, the Motion as it
+ * was between them: the partial values cross it in the node's own format
+ * where the aggregates have one (sum states with keys, the node's own
+ * partial values without), so the final stage is TessAgg too, merging the
+ * values its TessPack reads from the Motion. The grouping keys' table of
+ * the partial stage takes words only, as under a Gather.
+ */
+static void
+add_cdb_stage_path(PlannerInfo *root, RelOptInfo *grouped_rel, AggPath *final,
+				   List *keys, List *final_tlist)
+{
+	CdbMotionPath *motion = (CdbMotionPath *) final->subpath;
+	AggPath    *partial = (AggPath *) motion->subpath;
+	List	   *tlist = keys != NIL ? add_to_flat_tlist(NIL, keys) : NIL;
+	int			nsums = 0;
+	int			nown = 0;
+	CustomPath *tess_partial;
+	CustomPath *tess_final;
+	CdbMotionPath *tess_motion;
+	AggPath    *template;
+
+	if ((keys != NIL) != (final->aggstrategy != AGG_PLAIN) ||
+		!collect_aggregates((Node *) partial->path.pathtarget->exprs, keys, &tlist) ||
+		list_length(tlist) == list_length(keys))
+		return;
+	if (keys != NIL)
+		nsums = sum_states(tlist);
+	else
+		nown = own_partials(tlist);
+	if (nsums < 0)
+		return;
+	tess_partial = make_agg_path(root, partial, tlist, list_length(keys),
+								 AGG_PATH_PARTIAL |
+								 (nsums > 0 || nown > 0 ? AGG_PATH_OWN_STATES : 0));
+	if (tess_partial == NULL)
+		return;
+	/* The same Motion over the node's partial stage, its cost moved by as much. */
+	tess_motion = makeNode(CdbMotionPath);
+	*tess_motion = *motion;
+	tess_motion->subpath = &tess_partial->path;
+	tess_motion->path.startup_cost += tess_partial->path.startup_cost - partial->path.startup_cost;
+	tess_motion->path.total_cost += tess_partial->path.total_cost - partial->path.total_cost;
+	/* The final stage over it: a plain one keeps the template's cost, so moved too. */
+	template = makeNode(AggPath);
+	*template = *final;
+	template->subpath = &tess_motion->path;
+	template->path.startup_cost += tess_motion->path.startup_cost - motion->path.startup_cost;
+	template->path.total_cost += tess_motion->path.total_cost - motion->path.total_cost;
+	tess_final = make_agg_path(root, template, final_tlist, list_length(keys),
+							   AGG_PATH_HAVING | AGG_PATH_FINALIZE |
+							   (nown > 0 ? AGG_PATH_OWN_STATES : 0));
+	if (tess_final != NULL)
+		add_path(grouped_rel, &tess_final->path);
+}
+#endif
+
 static void
 create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 				   RelOptInfo *input_rel, RelOptInfo *output_rel, void *extra)
@@ -1368,7 +1451,9 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	List	   *tlist = NIL;
 	List	   *templates;
 	AggStrategy strategy = AGG_PLAIN;
-#if !TESS_GREENGAGE
+#if TESS_GREENGAGE
+	List	   *stages;
+#else
 	double		groups = 0;
 #endif
 
@@ -1419,6 +1504,9 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		return;
 	/* add_path changes the list: the candidates are taken first. */
 	templates = aggregate_templates(output_rel->pathlist, strategy, AGGSPLIT_SIMPLE);
+#if TESS_GREENGAGE
+	stages = cdb_stage_templates(output_rel->pathlist);
+#endif
 	/*
 	 * The core's sorted grouping may have beaten its hashed one out of the
 	 * list, as its spill costs more (and with DISTINCT in an aggregate it
@@ -1436,8 +1524,10 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
-	/* Greengage: the two stages are its own, through a Motion (not yet). */
-#if !TESS_GREENGAGE
+#if TESS_GREENGAGE
+	foreach_ptr(AggPath, final, stages)
+		add_cdb_stage_path(root, output_rel, final, keys, tlist);
+#else
 	/*
 	 * The planner's estimate of the groups, for a Finalize HashAggregate:
 	 * the rows of the core's grouped paths, the relation's own being set
