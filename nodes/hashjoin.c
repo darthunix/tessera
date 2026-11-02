@@ -1372,12 +1372,14 @@ join_decide_compact(TessHashJoinState *state)
 	state->compact_decided = true;
 	state->compact.on = false;
 	/*
-	 * SEMI and ANTI return outer rows, not pairs; LEFT with join clauses
-	 * must see each round whole to know the rows without a match.
+	 * SEMI and ANTI return outer rows, not pairs, and RIGHT ANTI no pairs;
+	 * LEFT with join clauses must see each round whole to know the rows
+	 * without a match.
 	 */
 	if (state->request->output_mode != TESS_OUTPUT_BATCH ||
 		state->inner_unique || state->duplicates == 0 ||
 		state->jointype == JOIN_SEMI || state->jointype == JOIN_ANTI ||
+		state->plan_jointype == JOIN_RIGHT_ANTI ||
 		(state->jointype == JOIN_LEFT && state->qual != NULL))
 		return;
 	for (int index = 0; index < state->compact.nouter; index++)

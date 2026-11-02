@@ -343,6 +343,10 @@ RESET tessera.join_bloom_ratio;
 -- side, which a WHERE on the join would turn into an INNER join.
 SELECT join_explain($$SELECT count(*), count(p.v), sum(jbuild.w) FROM (SELECT * FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%') AS p RIGHT JOIN jbuild ON p.k = jbuild.k$$);
 SELECT join_same($$SELECT p.v, jbuild.w FROM (SELECT * FROM jprobe WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%') AS p RIGHT JOIN jbuild ON p.k = jbuild.k$$);
+-- A RIGHT ANTI join drops an outer row without a pair as well, and hands
+-- its filter down.
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%')$$);
+SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%')$$);
 -- A TessFilter of batch clauses alone has nothing to save and refuses
 -- the filter: the join checks its rows itself.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
@@ -501,6 +505,12 @@ SELECT join_same($$SELECT jpr.k FROM jpr WHERE EXISTS (SELECT 1 FROM jkf WHERE j
 SELECT join_same($$SELECT jpr.k, jkf.k, jkf.w FROM jpr RIGHT JOIN jkf ON jpr.k = jkf.k$$);
 SELECT join_same($$SELECT jpr.k, jkf.w FROM jpr LEFT JOIN jkf ON jpr.k = jkf.k$$);
 SELECT join_same($$SELECT jpr.k FROM jpr WHERE NOT EXISTS (SELECT 1 FROM jkf WHERE jkf.k = jpr.k)$$);
+-- RIGHT ANTI keeps the inner rows without a pair, not the outer ones,
+-- and prunes as RIGHT does.
+SELECT line FROM join_explain($$SELECT count(*) FROM jkf WHERE NOT EXISTS (SELECT 1 FROM jpr WHERE jpr.k = jkf.k)$$, false) AS line
+WHERE line ~ 'Join Type';
+SELECT join_pruned($$SELECT count(*) FROM jkf WHERE NOT EXISTS (SELECT 1 FROM jpr WHERE jpr.k = jkf.k)$$) AS right_anti;
+SELECT join_same($$SELECT jkf.k, jkf.w FROM jkf WHERE NOT EXISTS (SELECT 1 FROM jpr WHERE jpr.k = jkf.k)$$);
 -- A rescan: a table kept for the outer side's new parameter prunes again
 -- by the same keys, which go down anew; a table built anew for the inner
 -- side's parameter by its own: jkr's keys of w = 4 reach jpr_1, those of
@@ -719,6 +729,20 @@ SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp FULL JOIN jsb ON jsp.k = jsb.k W
 SELECT join_same($$SELECT count(*), count(jsp.s), count(jskew.w), sum(jskew.w) FROM jsp FULL JOIN jskew() AS jskew ON jsp.k = jskew.k$$);
 SELECT join_same($$SELECT count(*), count(jsp.s), count(w.t), sum(length(w.t)) FROM jsp FULL JOIN jwide() AS w ON jsp.k = w.k$$);
 SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jsb WHERE jsb.k = jsp.k)$$);
+-- RIGHT ANTI over the same tables: the marks of every table it spills
+-- into, and only the records without a pair go out, NULL keys among them;
+-- jskew's one key of 60000 records is joined in pieces.
+SELECT line FROM join_explain($$SELECT count(*), sum(jsb.n) FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$) AS line
+WHERE line ~ 'TessHashJoin|Join Type|Disk Usage|Build Rows|Probe Rows|Matches';
+SELECT join_same($$SELECT jsb.k, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$);
+SELECT line FROM join_explain($$SELECT count(*), sum(jskew.w) FROM jskew() AS jskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jskew.k)$$) AS line
+WHERE line ~ 'TessHashJoin|Join Type|Disk Usage|Extra Passes|Build Rows|Matches';
+SELECT join_same($$SELECT jskew.k, jskew.w FROM jskew() AS jskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jskew.k)$$);
+-- A join clause that marks two thirds of the key's records, piece by
+-- piece.
+SELECT line FROM join_explain($$SELECT jskew.k, jskew.w FROM jskew() AS jskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jskew.k AND jskew.w % 3 <> jsp.k % 3)$$) AS line
+WHERE line ~ 'Join Type|Extra Passes';
+SELECT join_same($$SELECT jskew.k, jskew.w FROM jskew() AS jskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jskew.k AND jskew.w % 3 <> jsp.k % 3)$$);
 RESET work_mem;
 
 -- RIGHT and FULL: the inner side's records that find a pair are marked,
@@ -751,6 +775,38 @@ SELECT join_same($$SELECT jempty.e, jd.id FROM jempty FULL JOIN jd ON jempty.k =
 SELECT join_same($$
 SELECT x, (SELECT count(*) FROM (SELECT jd.id FROM jsmall FULL JOIN jd ON jsmall.k = jd.id AND jd.id > x) s)
 FROM generate_series(0, 300, 100) AS x$$);
+
+-- RIGHT ANTI, the core's plan of NOT EXISTS that builds the side it keeps:
+-- the pairs mark their records and go nowhere, and the records left
+-- without a mark, NULL keys among them, go out after the outer side.
+EXPLAIN (COSTS OFF) SELECT jd.id, jd.label FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v < 500);
+SELECT join_same($$SELECT jd.id, jd.label FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v < 500)$$);
+-- NULL keys and duplicates on the kept side, three records a key; and a
+-- join clause true, false or NULL for the records of one key, which marks
+-- only those it passes.
+SELECT line FROM join_explain($$SELECT jdup.k, jdup.w, jdup.t FROM jdup WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jdup.k)$$, false) AS line WHERE line ~ 'Join Type';
+SELECT join_same($$SELECT jdup.k, jdup.w, jdup.t FROM jdup WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jdup.k)$$);
+SELECT line FROM join_explain($$SELECT jdup.k, jdup.w FROM jdup WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jdup.k AND jf.m > jdup.w * 5)$$, false) AS line WHERE line ~ 'Join Type';
+SELECT join_same($$SELECT jdup.k, jdup.w FROM jdup WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jdup.k AND jf.m > jdup.w * 5)$$);
+-- A join clause beyond the keys decides the marks: NULL in jd.n marks none.
+EXPLAIN (COSTS OFF) SELECT jd.id FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > jd.n);
+SELECT join_same($$SELECT jd.id, jd.n FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > jd.n)$$);
+-- Empty sides: every kept row goes out, or none. jsp's rows all leave
+-- by a value the planner does not know.
+SELECT line FROM join_explain($$SELECT jd.id FROM jd WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jd.id AND jsp.k < (SELECT -1))$$, false) AS line WHERE line ~ 'Join Type';
+SELECT join_same($$SELECT jd.id FROM jd WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jd.id AND jsp.k < (SELECT -1))$$);
+SELECT line FROM join_explain($$SELECT jempty.e FROM jempty WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jempty.k)$$, false) AS line WHERE line ~ 'Join Type';
+SELECT join_same($$SELECT jempty.e FROM jempty WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jempty.k)$$);
+-- A rescan with a parameter of the outer side only: the table stays, its
+-- marks start anew, and fewer outer rows mark fewer records each time.
+SELECT line FROM join_explain($$SELECT x, (SELECT count(*) FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 1000, 250) AS x$$) AS line
+WHERE line ~ 'Join Type|Builds';
+SELECT join_same($$SELECT x, (SELECT count(*) FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 1000, 250) AS x$$);
+-- A parameter of the kept side too: the table is built anew.
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x;
+SELECT join_same($$
+SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x$$);
 
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
 EXPLAIN (COSTS OFF)
@@ -849,6 +905,27 @@ SET tessera.batch_gather = off;
 EXPLAIN (COSTS OFF) SELECT jhit.v FROM jhit RIGHT JOIN jbuild ON jhit.k = jbuild.k LIMIT 100;
 SELECT count(*), count(*) FILTER (WHERE v IS NULL) AS without_pair
 FROM (SELECT jhit.v FROM jhit RIGHT JOIN jbuild ON jhit.k = jbuild.k LIMIT 100) AS q;
+RESET tessera.batch_gather;
+-- RIGHT ANTI takes the shared table only too, and returns nothing while
+-- it probes: a worker with its share of the LIMIT stops in the tail only,
+-- after every participant has marked. Every row of jbuild has a pair in
+-- jhit: none may come out.
+EXPLAIN (COSTS OFF) SELECT count(*), sum(jbuild.w) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k);
+SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k)$$);
+SET parallel_leader_participation = off;
+SELECT join_property($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k)$$, 'Join Type') AS kind, join_property($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k)$$, 'Shared Table') AS shared;
+SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k)$$);
+RESET parallel_leader_participation;
+SELECT join_property($$SELECT jsmall.k, (SELECT count(*) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100)) FROM jsmall$$, 'Join Type') AS kind, join_property($$SELECT jsmall.k, (SELECT count(*) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100)) FROM jsmall$$, 'Shared Table') AS shared;
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100)) FROM jsmall$$);
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jhit WHERE jhit.k = jbuild.k) LIMIT 100;
+SELECT count(*) FROM (SELECT jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jhit WHERE jhit.k = jbuild.k) LIMIT 100) AS q;
+-- 4802 records without a pair in jprobe: the LIMIT stops in the tail,
+-- each row returned without a pair.
+EXPLAIN (COSTS OFF) SELECT jbuild.k FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k) LIMIT 100;
+SELECT count(*), count(*) FILTER (WHERE EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = q.k)) AS with_pair
+FROM (SELECT jbuild.k FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k) LIMIT 100) AS q;
 RESET tessera.batch_gather;
 -- Duplicate keys: the next record of a key is found down its chain.
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jgrow.g) FROM jbig JOIN jgrow ON jbig.fk = jgrow.k;
@@ -981,6 +1058,16 @@ SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(jsb.t)), sum(jsb.n)
 SELECT join_same($$SELECT count(*), count(jsp.s), count(jsb.t), sum(jsb.n) FROM jsp FULL JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT jsp.s, jsb.t FROM jsp FULL JOIN jsb ON jsp.k = jsb.k WHERE jsb.n % 100 = 3 OR jsp.s LIKE '%77'$$);
 SELECT join_same($$SELECT count(*), count(jsp.s), count(jsskew.w), sum(jsskew.w) FROM jsp FULL JOIN jsskew ON jsp.k = jsskew.k$$);
+-- RIGHT ANTI: the same marks, and only the tails.
+SELECT join_property($$SELECT count(*), sum(jsb.n) FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$, 'Join Type') AS kind,
+       join_property($$SELECT count(*), sum(jsb.n) FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(jsb.n) FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$, 'Spilled Chunks')::int > 0 AS spilled;
+SELECT join_same($$SELECT jsb.k, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$);
+SELECT join_same($$SELECT count(*), sum(jsskew.w) FROM jsskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsskew.k)$$);
+SET tessera.batch_gather = off;
+SELECT count(*), count(*) FILTER (WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = q.k + 7000)) AS with_pair
+FROM (SELECT jsb.k FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000) LIMIT 100) AS q;
+RESET tessera.batch_gather;
 -- The workers alone, and a rescan of the Gather: the files go with the
 -- set, and the table spills anew.
 SET parallel_leader_participation = off;

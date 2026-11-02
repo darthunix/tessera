@@ -568,7 +568,11 @@ join_next_output(TessHashJoinState *state)
 					state->matched_bits[word] |= state->probe.published_bits[word];
 		}
 		if (state->preserve_inner && !state->null_round && !state->tail.on)
+		{
 			mark_pairs(state);
+			if (state->plan_jointype == JOIN_RIGHT_ANTI)
+				continue;
+		}
 		/* An outer join's filters over every row it returns. */
 		if (state->filter != NULL)
 		{

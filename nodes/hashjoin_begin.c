@@ -67,11 +67,15 @@ read_node_data(TessHashJoinState *state, const List *data)
 	state->filter_batch = tess_plan_read_int_list(reader, "filter_batch");
 	state->jointype = (JoinType) tess_plan_read_int(reader, "jointype");
 	state->plan_jointype = state->jointype;
-	/* RIGHT is INNER and FULL is LEFT, the unmatched inner rows added last. */
-	if (state->jointype == JOIN_RIGHT || state->jointype == JOIN_FULL)
+	/*
+	 * RIGHT is INNER and FULL is LEFT, the unmatched inner rows added last;
+	 * RIGHT ANTI is RIGHT whose pairs only mark their records.
+	 */
+	if (state->jointype == JOIN_RIGHT || state->jointype == JOIN_FULL ||
+		state->jointype == JOIN_RIGHT_ANTI)
 	{
 		state->preserve_inner = true;
-		state->jointype = state->jointype == JOIN_RIGHT ? JOIN_INNER : JOIN_LEFT;
+		state->jointype = state->jointype == JOIN_FULL ? JOIN_LEFT : JOIN_INNER;
 	}
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
@@ -408,6 +412,7 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 							state->plan_jointype == JOIN_SEMI ? "Semi" :
 							state->plan_jointype == JOIN_ANTI ? "Anti" :
 							state->plan_jointype == JOIN_RIGHT ? "Right" :
+							state->plan_jointype == JOIN_RIGHT_ANTI ? "Right Anti" :
 							state->plan_jointype == JOIN_FULL ? "Full" : "Left", es);
 	ExplainPropertyText("Hash Cond",
 						deparse_expression((Node *) make_ands_explicit(list_copy_head(cscan->custom_exprs,

@@ -777,8 +777,8 @@ cost, and a partial path next to the parallel one
 (`tess_filter_row_path`): the node's rows cost less than the core scan's
 under any parent, a row-wise one included (`bench/pg/rowwise.sql`:
 `bit_or` over `LIKE` 9.4 ms against 11.2), and a batch parent above reads
-its batches instead of a pack's copies. An inner, semi or right hash
-join above it may hand it its Bloom filter, which then reaches the rows
+its batches instead of a pack's copies. An inner, semi, right or right
+anti hash join above it may hand it its Bloom filter, which then reaches the rows
 before the row-wise clauses
 ([key-filter](../openspec/specs/key-filter/design.md)). Such a node
 shows no `Batch Filter`.
@@ -1617,8 +1617,9 @@ node calls through the bridge's kernel registry (see
 
 The module's `set_join_pathlist` hook offers the path for an inner, a
 semi, an anti or a left join, the kinds that keep the outer side, which
-the node probes with, and for a right or a full join, which keep the
-inner side too (see "Right and full joins" below), with at least one
+the node probes with, for a right or a full join, which keep the inner
+side too, and for a right anti join, which returns only the inner rows
+without a pair (see "Right and full joins" below), with at least one
 equality that compares words bit for bit between a column of each side:
 of integers (int2, int4, int8) in any combination, of two dates, two
 timestamps, two timestamps with time zone or two booleans (a date against
@@ -1650,7 +1651,8 @@ false one is no pair, for every join kind, spilling and the shared table
 alike. The others are residual clauses, evaluated over the joined rows, when
 they read plain columns only (no placeholder) and are not
 pseudoconstant, in the order the core's hash join evaluates them. An
-outer join, left or anti, splits its clauses as the core does: a clause
+outer join, left, anti, right, full or right anti, splits its clauses as
+the core does: a clause
 pushed down to the join from above (a `WHERE` clause over a left join)
 is no join clause and never a key but a filter over the rows the join
 returns, after NULL extension, in the same order. Above a left join an
@@ -1723,9 +1725,10 @@ partial path divides the build among the participants too, into one
 table in the query's dynamic shared memory; its template is the core's
 Parallel Hash join, each participant costed for its share of the build,
 and the table may take every participant's `hash_mem`, as the core's
-does. The cheaper of the two wins. A right or
-a full join takes the second only, as the core does: with a table each,
-every participant would return the records without a pair.
+does. The cheaper of the two wins. A right, a
+full or a right anti join takes the second only, as the core does: with
+a table each, every participant would return the records without a
+pair.
 
 The plan's scan tuple is the join's columns, the outer side's first, and
 the keys of both sides and the residual clauses' columns, which the
@@ -1888,6 +1891,17 @@ unmatched rows then. The partitions on disk of a
 shared table that one participant joins alone are its own tables, as a
 serial join's. A rescan that keeps the table clears the marks.
 
+A right anti join, the core's plan of `NOT EXISTS` that builds the side
+it keeps, runs as a right join whose pairs only mark their records: none
+is returned or copied into a compact batch, and the tail is the join's
+output. It takes the shared table only under a `Gather`, hands its
+Bloom filter down and prunes its outer side as a right join does. Its
+cost counts the pairs as the core's `approx_tuple_count` does, a probe
+and a mark each, the join clauses and the gather of their columns for
+every pair, and the gather of the columns of the records returned. All
+but the tail is its startup cost: nothing goes out before the probe
+ends.
+
 ### Spilling
 
 A table of the node's own spills once it would outgrow `hash_mem` (see
@@ -2015,7 +2029,8 @@ filter at the first batch whatever the sizes, at 0 never. The join may
 then hand the filter to its outer child, as the capability
 [key-filter](../openspec/specs/key-filter/design.md) describes.
 
-`EXPLAIN` shows the join type for a semi, anti, left, right or full join, the key
+`EXPLAIN` shows the join type for a semi, anti, left, right, full or
+right anti join, the key
 clauses as `Hash Cond`, `Shared Table` for a shared table, the residual ones that run in batches as `Batch
 Join Filter` and the others as `Join Filter`, and an outer join's filters
 as `Batch Filter` and `Filter`. With `ANALYZE` it adds what the core's
@@ -2133,8 +2148,13 @@ an index sized for them all), one shared Bloom filter built for all, and
 by-reference inner columns: text in the target and in a join clause,
 numeric and text with NULLs over many value blocks under inner and left
 joins, a table with text past the estimate, and a rescan that frees the
-blocks and fills new ones. The tests of pruning the outer side's
-partitions are in the capability
+blocks and fills new ones. Right anti joins: `NOT EXISTS` over a kept
+side smaller than the other, with NULL keys and duplicates, a join
+clause, empty sides, a rescan, a table spilled at 64 kB, one key of
+60000 records joined in pieces, a Bloom filter handed down, and under
+the `Gather` the shared table, spilled too, the workers alone, a rescan
+and a `LIMIT` under the core's `Gather`. The tests of pruning the outer
+side's partitions are in the capability
 [partition-pruning](../openspec/specs/partition-pruning/design.md).
 
 ## TessSort

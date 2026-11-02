@@ -1793,6 +1793,59 @@ SELECT join_same($$SELECT p.v, jbuild.w FROM (SELECT * FROM jprobe WHERE jprobe.
  5000 rows, hash c0ff3d0b49828b63669de11cd2e60e03
 (1 row)
 
+-- A RIGHT ANTI join drops an outer row without a pair as well, and hands
+-- its filter down.
+SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%')$$);
+                                         join_explain                                         
+----------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Input Batches: 77
+   Input Rows: 4882
+   Kernel Calls: 154
+   Computed Datums: 4882
+   ->  Custom Scan (TessHashJoin) (actual rows=4882.00 loops=1)
+         Join Type: Right Anti
+         Hash Cond: (jprobe.k = jbuild.k)
+         Buckets: 16384
+         Memory Usage: within hash_mem
+         Builds: 1
+         Build Rows: 5000
+         Chunks: 2
+         Probe Rows: 4295
+         Matches: 118
+         Bloom Filters: 1
+         Bloom Filter Below: true
+         ->  Custom Scan (TessFilter) on public.jprobe (actual rows=4295.00 loops=1)
+               Filter: ((jprobe.v)::text ~~ '%1%'::text)
+               Rows Removed by Filter: 15705
+               Batch Filter: (jprobe.v > 0)
+               Rows Removed by Batch Filter: 0
+               Rows Removed by Bloom Filter: 9048
+               Rows Removed by NULL Key: 96
+               Rows Removed by Residual Filter: 6561
+               Input Batches: 354
+               Input Rows: 20000
+               Output Rows: 4295
+               ->  Custom Scan (TessHeapScan) on public.jprobe (actual rows=20000.00 loops=1)
+                     Batch Size: 64
+                     Batches: 354
+                     Pages: 89
+                     Deformed Datums: 33440
+                     Restarted Datums: 137
+         ->  Custom Scan (TessHeapScan) on public.jbuild (actual rows=5000.00 loops=1)
+               Batch Size: 64
+               Batches: 89
+               Pages: 23
+               Deformed Datums: 10000
+               Restarted Datums: 0
+(40 rows)
+
+SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%')$$);
+                    join_same                     
+--------------------------------------------------
+ 4882 rows, hash f053a1ff4cc3faad320d8e430ebedef8
+(1 row)
+
 -- A TessFilter of batch clauses alone has nothing to save and refuses
 -- the filter: the join checks its rows itself.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
@@ -2310,6 +2363,27 @@ SELECT join_same($$SELECT jpr.k FROM jpr WHERE NOT EXISTS (SELECT 1 FROM jkf WHE
                      join_same                     
 ---------------------------------------------------
  31501 rows, hash ab664aa9a0420c0941847ba5c890961d
+(1 row)
+
+-- RIGHT ANTI keeps the inner rows without a pair, not the outer ones,
+-- and prunes as RIGHT does.
+SELECT line FROM join_explain($$SELECT count(*) FROM jkf WHERE NOT EXISTS (SELECT 1 FROM jpr WHERE jpr.k = jkf.k)$$, false) AS line
+WHERE line ~ 'Join Type';
+             line              
+-------------------------------
+         Join Type: Right Anti
+(1 row)
+
+SELECT join_pruned($$SELECT count(*) FROM jkf WHERE NOT EXISTS (SELECT 1 FROM jpr WHERE jpr.k = jkf.k)$$) AS right_anti;
+ right_anti 
+------------
+ 3
+(1 row)
+
+SELECT join_same($$SELECT jkf.k, jkf.w FROM jkf WHERE NOT EXISTS (SELECT 1 FROM jpr WHERE jpr.k = jkf.k)$$);
+                   join_same                   
+-----------------------------------------------
+ 2 rows, hash 6b6b4fc74d47899d80d83ec38e79dc41
 (1 row)
 
 -- A rescan: a table kept for the outer side's new parameter prunes again
@@ -3259,6 +3333,61 @@ SELECT join_same($$SELECT jsp.s FROM jsp WHERE NOT EXISTS (SELECT 1 FROM jsb WHE
  31817 rows, hash 6392f4045fc17bd928976ebddedae950
 (1 row)
 
+-- RIGHT ANTI over the same tables: the marks of every table it spills
+-- into, and only the records without a pair go out, NULL keys among them;
+-- jskew's one key of 60000 records is joined in pieces.
+SELECT line FROM join_explain($$SELECT count(*), sum(jsb.n) FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$) AS line
+WHERE line ~ 'TessHashJoin|Join Type|Disk Usage|Build Rows|Probe Rows|Matches';
+                              line                              
+----------------------------------------------------------------
+   ->  Custom Scan (TessHashJoin) (actual rows=6117.00 loops=1)
+         Join Type: Right Anti
+         Disk Usage: 1441 kB
+         Build Rows: 40000
+         Probe Rows: 100000
+         Matches: 154013
+(6 rows)
+
+SELECT join_same($$SELECT jsb.k, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$);
+                    join_same                     
+--------------------------------------------------
+ 6117 rows, hash 27326c7d7edb1bcdbdcd315fb9b27eb2
+(1 row)
+
+SELECT line FROM join_explain($$SELECT count(*), sum(jskew.w) FROM jskew() AS jskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jskew.k)$$) AS line
+WHERE line ~ 'TessHashJoin|Join Type|Disk Usage|Extra Passes|Build Rows|Matches';
+                              line                              
+----------------------------------------------------------------
+   ->  Custom Scan (TessHashJoin) (actual rows=2000.00 loops=1)
+         Join Type: Right Anti
+         Disk Usage: 351 kB
+         Build Rows: 62000
+         Extra Passes: 37
+         Matches: 240000
+(6 rows)
+
+SELECT join_same($$SELECT jskew.k, jskew.w FROM jskew() AS jskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jskew.k)$$);
+                    join_same                     
+--------------------------------------------------
+ 2000 rows, hash 5ae86b0a05f0fdb05acf0822d52322cf
+(1 row)
+
+-- A join clause that marks two thirds of the key's records, piece by
+-- piece.
+SELECT line FROM join_explain($$SELECT jskew.k, jskew.w FROM jskew() AS jskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jskew.k AND jskew.w % 3 <> jsp.k % 3)$$) AS line
+WHERE line ~ 'Join Type|Extra Passes';
+          line           
+-------------------------
+   Join Type: Right Anti
+   Extra Passes: 44
+(2 rows)
+
+SELECT join_same($$SELECT jskew.k, jskew.w FROM jskew() AS jskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jskew.k AND jskew.w % 3 <> jsp.k % 3)$$);
+                     join_same                     
+---------------------------------------------------
+ 22000 rows, hash 2614831a9de339bd0a2c1913a1492bbb
+(1 row)
+
 RESET work_mem;
 -- RIGHT and FULL: the inner side's records that find a pair are marked,
 -- and those without one, NULL keys among them, go out after the outer
@@ -3394,6 +3523,140 @@ FROM generate_series(0, 300, 100) AS x$$);
                    join_same                   
 -----------------------------------------------
  4 rows, hash 0232b9ddc7060747fa23496b03c0a6e5
+(1 row)
+
+-- RIGHT ANTI, the core's plan of NOT EXISTS that builds the side it keeps:
+-- the pairs mark their records and go nowhere, and the records left
+-- without a mark, NULL keys among them, go out after the outer side.
+EXPLAIN (COSTS OFF) SELECT jd.id, jd.label FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v < 500);
+                  QUERY PLAN                  
+----------------------------------------------
+ Custom Scan (TessHashJoin)
+   Join Type: Right Anti
+   Hash Cond: (jf.fk = jd.id)
+   ->  Custom Scan (TessFilter) on jf
+         Batch Filter: (jf.v < 500)
+         ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jd
+(7 rows)
+
+SELECT join_same($$SELECT jd.id, jd.label FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v < 500)$$);
+                   join_same                    
+------------------------------------------------
+ 19 rows, hash aeac8daf58ed9b03c921d36f94d2ad18
+(1 row)
+
+-- NULL keys and duplicates on the kept side, three records a key; and a
+-- join clause true, false or NULL for the records of one key, which marks
+-- only those it passes.
+SELECT line FROM join_explain($$SELECT jdup.k, jdup.w, jdup.t FROM jdup WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jdup.k)$$, false) AS line WHERE line ~ 'Join Type';
+          line           
+-------------------------
+   Join Type: Right Anti
+(1 row)
+
+SELECT join_same($$SELECT jdup.k, jdup.w, jdup.t FROM jdup WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jdup.k)$$);
+                   join_same                    
+------------------------------------------------
+ 11 rows, hash 359c84baa67933b8fbe8330c8d318979
+(1 row)
+
+SELECT line FROM join_explain($$SELECT jdup.k, jdup.w FROM jdup WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jdup.k AND jf.m > jdup.w * 5)$$, false) AS line WHERE line ~ 'Join Type';
+          line           
+-------------------------
+   Join Type: Right Anti
+(1 row)
+
+SELECT join_same($$SELECT jdup.k, jdup.w FROM jdup WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jdup.k AND jf.m > jdup.w * 5)$$);
+                   join_same                    
+------------------------------------------------
+ 44 rows, hash 124fc6734d9ba94ad068ca2491dba78c
+(1 row)
+
+-- A join clause beyond the keys decides the marks: NULL in jd.n marks none.
+EXPLAIN (COSTS OFF) SELECT jd.id FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > jd.n);
+               QUERY PLAN               
+----------------------------------------
+ Custom Scan (TessHashJoin)
+   Join Type: Right Anti
+   Hash Cond: (jf.fk = jd.id)
+   Batch Join Filter: (jf.v > jd.n)
+   ->  Custom Scan (TessHeapScan) on jf
+   ->  Custom Scan (TessHeapScan) on jd
+(6 rows)
+
+SELECT join_same($$SELECT jd.id, jd.n FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > jd.n)$$);
+                    join_same                    
+-------------------------------------------------
+ 238 rows, hash 29114987246d629032086e114bba6e0a
+(1 row)
+
+-- Empty sides: every kept row goes out, or none. jsp's rows all leave
+-- by a value the planner does not know.
+SELECT line FROM join_explain($$SELECT jd.id FROM jd WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jd.id AND jsp.k < (SELECT -1))$$, false) AS line WHERE line ~ 'Join Type';
+          line           
+-------------------------
+   Join Type: Right Anti
+(1 row)
+
+SELECT join_same($$SELECT jd.id FROM jd WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jd.id AND jsp.k < (SELECT -1))$$);
+                    join_same                    
+-------------------------------------------------
+ 300 rows, hash 199b542372ca1bbb9a62cbb4914eed4f
+(1 row)
+
+SELECT line FROM join_explain($$SELECT jempty.e FROM jempty WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jempty.k)$$, false) AS line WHERE line ~ 'Join Type';
+          line           
+-------------------------
+   Join Type: Right Anti
+(1 row)
+
+SELECT join_same($$SELECT jempty.e FROM jempty WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jempty.k)$$);
+                   join_same                   
+-----------------------------------------------
+ 0 rows, hash d41d8cd98f00b204e9800998ecf8427e
+(1 row)
+
+-- A rescan with a parameter of the outer side only: the table stays, its
+-- marks start anew, and fewer outer rows mark fewer records each time.
+SELECT line FROM join_explain($$SELECT x, (SELECT count(*) FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 1000, 250) AS x$$) AS line
+WHERE line ~ 'Join Type|Builds';
+                 line                  
+---------------------------------------
+                 Join Type: Right Anti
+                 Builds: 1
+(2 rows)
+
+SELECT join_same($$SELECT x, (SELECT count(*) FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 1000, 250) AS x$$);
+                   join_same                   
+-----------------------------------------------
+ 5 rows, hash 3d3fe89976e682916794ce3f5cbf5016
+(1 row)
+
+-- A parameter of the kept side too: the table is built anew.
+EXPLAIN (COSTS OFF)
+SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x;
+                         QUERY PLAN                         
+------------------------------------------------------------
+ Function Scan on generate_series x
+   SubPlan expr_1
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessHashJoin)
+                 Join Type: Right Anti
+                 Hash Cond: (jf.fk = jd.id)
+                 ->  Custom Scan (TessFilter) on jf
+                       Batch Filter: (jf.v > x.x)
+                       ->  Custom Scan (TessHeapScan) on jf
+                 ->  Custom Scan (TessFilter) on jd
+                       Batch Filter: (jd.id > x.x)
+                       ->  Custom Scan (TessHeapScan) on jd
+(12 rows)
+
+SELECT join_same($$
+SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x$$);
+                   join_same                   
+-----------------------------------------------
+ 4 rows, hash 181df9af6f7feb606c77b08468cb3ce8
 (1 row)
 
 -- Row-wise parents: a sort, a limit, a scrollable cursor.
@@ -3748,6 +4011,102 @@ FROM (SELECT jhit.v FROM jhit RIGHT JOIN jbuild ON jhit.k = jbuild.k LIMIT 100) 
  count | without_pair 
 -------+--------------
    100 |            0
+(1 row)
+
+RESET tessera.batch_gather;
+-- RIGHT ANTI takes the shared table only too, and returns nothing while
+-- it probes: a worker with its share of the LIMIT stops in the tail only,
+-- after every participant has marked. Every row of jbuild has a pair in
+-- jhit: none may come out.
+EXPLAIN (COSTS OFF) SELECT count(*), sum(jbuild.w) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k);
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessHashJoin)
+                     Join Type: Right Anti
+                     Hash Cond: (jprobe.k = jbuild.k)
+                     Shared Table: true
+                     ->  Parallel Custom Scan (TessHeapScan) on jprobe
+                     ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(10 rows)
+
+SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k)$$);
+                    join_same                     
+--------------------------------------------------
+ 4802 rows, hash 9ec9cc8f99f61c5bebb6e84628ac2baf
+(1 row)
+
+SET parallel_leader_participation = off;
+SELECT join_property($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k)$$, 'Join Type') AS kind, join_property($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k)$$, 'Shared Table') AS shared;
+     kind     | shared 
+--------------+--------
+ "Right Anti" | true
+(1 row)
+
+SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k)$$);
+                    join_same                     
+--------------------------------------------------
+ 4802 rows, hash 9ec9cc8f99f61c5bebb6e84628ac2baf
+(1 row)
+
+RESET parallel_leader_participation;
+SELECT join_property($$SELECT jsmall.k, (SELECT count(*) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100)) FROM jsmall$$, 'Join Type') AS kind, join_property($$SELECT jsmall.k, (SELECT count(*) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100)) FROM jsmall$$, 'Shared Table') AS shared;
+     kind     | shared 
+--------------+--------
+ "Right Anti" | 
+(1 row)
+
+SELECT join_same($$SELECT jsmall.k, (SELECT count(*) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > jsmall.k * 100)) FROM jsmall$$);
+                   join_same                    
+------------------------------------------------
+ 10 rows, hash 569d549c3f1aeab6efa7285e5670e897
+(1 row)
+
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jhit WHERE jhit.k = jbuild.k) LIMIT 100;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Limit
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessHashJoin)
+               Join Type: Right Anti
+               Hash Cond: (jhit.k = jbuild.k)
+               Shared Table: true
+               ->  Parallel Custom Scan (TessHeapScan) on jhit
+               ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(9 rows)
+
+SELECT count(*) FROM (SELECT jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jhit WHERE jhit.k = jbuild.k) LIMIT 100) AS q;
+ count 
+-------
+     0
+(1 row)
+
+-- 4802 records without a pair in jprobe: the LIMIT stops in the tail,
+-- each row returned without a pair.
+EXPLAIN (COSTS OFF) SELECT jbuild.k FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k) LIMIT 100;
+                           QUERY PLAN                            
+-----------------------------------------------------------------
+ Limit
+   ->  Gather
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessHashJoin)
+               Join Type: Right Anti
+               Hash Cond: (jprobe.k = jbuild.k)
+               Shared Table: true
+               ->  Parallel Custom Scan (TessHeapScan) on jprobe
+               ->  Parallel Custom Scan (TessHeapScan) on jbuild
+(9 rows)
+
+SELECT count(*), count(*) FILTER (WHERE EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = q.k)) AS with_pair
+FROM (SELECT jbuild.k FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k) LIMIT 100) AS q;
+ count | with_pair 
+-------+-----------
+   100 |         0
 (1 row)
 
 RESET tessera.batch_gather;
@@ -4192,6 +4551,36 @@ SELECT join_same($$SELECT count(*), count(jsp.s), count(jsskew.w), sum(jsskew.w)
  1 rows, hash b4e0ed78f4a3a4c8861e9f5b6d2add82
 (1 row)
 
+-- RIGHT ANTI: the same marks, and only the tails.
+SELECT join_property($$SELECT count(*), sum(jsb.n) FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$, 'Join Type') AS kind,
+       join_property($$SELECT count(*), sum(jsb.n) FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*), sum(jsb.n) FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$, 'Spilled Chunks')::int > 0 AS spilled;
+     kind     | shared | spilled 
+--------------+--------+---------
+ "Right Anti" | true   | t
+(1 row)
+
+SELECT join_same($$SELECT jsb.k, jsb.n FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000)$$);
+                    join_same                     
+--------------------------------------------------
+ 6117 rows, hash 27326c7d7edb1bcdbdcd315fb9b27eb2
+(1 row)
+
+SELECT join_same($$SELECT count(*), sum(jsskew.w) FROM jsskew WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsskew.k)$$);
+                   join_same                   
+-----------------------------------------------
+ 1 rows, hash 177907c6cbd613c554529a35693e1d0b
+(1 row)
+
+SET tessera.batch_gather = off;
+SELECT count(*), count(*) FILTER (WHERE EXISTS (SELECT 1 FROM jsp WHERE jsp.k = q.k + 7000)) AS with_pair
+FROM (SELECT jsb.k FROM jsb WHERE NOT EXISTS (SELECT 1 FROM jsp WHERE jsp.k = jsb.k + 7000) LIMIT 100) AS q;
+ count | with_pair 
+-------+-----------
+   100 |         0
+(1 row)
+
+RESET tessera.batch_gather;
 -- The workers alone, and a rescan of the Gather: the files go with the
 -- set, and the table spills anew.
 SET parallel_leader_participation = off;
