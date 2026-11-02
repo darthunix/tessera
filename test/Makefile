@@ -8,12 +8,12 @@ MODULES = tessera_batch_test tessera_binding_test tessera_bridge_test \
 	tessera_project_test \
 	tessera_request_test tessera_row_mask_test tessera_rows_test tessera_shared_stats_test \
 	tessera_source_test tessera_spill_test tessera_table_test tessera_transfer_test \
-	tessera_unary_test
+	tessera_unary_test tessera_zone_test
 REGRESS = agg batch binding bridge builder coverage expr filter forward function heap_batch \
 	heap_deform index input interrupt_loops interrupts join kernel_ops kernels kernels_module \
 	limit modules node output pack parallel plan planner project project_provider request \
 	row_mask rows settings shared_stats sort source spill spill_damage table transfer types \
-	union unary
+	union unary zone_answers
 # The suites use ICU collations, which need a UTF-8 database, and expect
 # the plans of a database whose collation is not C (where a LIKE prefix
 # makes no index range): a temporary instance takes the environment's

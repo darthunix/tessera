@@ -331,9 +331,10 @@ SQLSTATE 22008 and the core's message, at the first row the core would.
   at a scale (6 for seconds, 3 for milliseconds, else 0), an infinite value
   left in `rest`.
 
-The session's time zone stays in C: the local times of a timestamptz, the
-midnights of local days (both kept in caches of the process), the unit
-names and the rows the kernels leave.
+The rules of the session's time zone are the kernels' (`tess_zone_*`
+above), its cache in the memory of `kernels/date.c`, which asks the time
+zone library the questions of each round; the unit names and the rows
+the kernels leave stay in C.
 
 ## Text
 

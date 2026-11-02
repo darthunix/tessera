@@ -116,7 +116,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
       through the raw structs, the calls over one value among them, that
       joins the Miri command of `ci.yml`. Check: `cargo test --locked -p
       tessera-capi`; the Miri test.
-- [ ] 5.3 Make `kernels/date.c` use them: the loops that ask the time
+- [x] 5.3 Make `kernels/date.c` use them: the loops that ask the time
       zone library and teach the cache, with an injection point in the
       loop of spans; the reset on a change of zone; the statics and the
       functions the design's decision 5 lists go. A suite of its own,

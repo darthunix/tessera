@@ -1,0 +1,20 @@
+-- The answer of one second: when the time zone library fails to find the
+-- span of an instant (pg_next_dst_boundary, a failure its sources call
+-- unreachable), the offset of that second (pg_localtime) is the answer,
+-- and the kernels keep it as a span of that one second. The injection
+-- point "tessera-zone-span" makes every span a failure; the answers of
+-- date_trunc, extract and the casts of a timestamptz stay the core's.
+-- Without injection points the suite ends here.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set spill_test :libdir '/tessera_spill_test' :dlsuffix
+\set zone_test :libdir '/tessera_zone_test' :dlsuffix
+\set zone_module :libdir '/tessera_zone_test'
+CREATE FUNCTION tessera_test_spill_injection()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_injection'
+LANGUAGE C STRICT;
+SELECT NOT tessera_test_spill_injection() AS skip \gset
+\if :skip
+DROP FUNCTION tessera_test_spill_injection();
+\quit

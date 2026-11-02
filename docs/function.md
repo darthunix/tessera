@@ -187,12 +187,15 @@ years and months neither allocate nor compare twice; the functions of a
 timestamp with time zone in the session's zone: `date_trunc(text,
 timestamptz)` (and so `date_trunc('month', d)` over a date, which the
 parser casts), `extract(text, timestamptz)`, `timestamptz(date)` and
-`date(timestamptz)`, reading an instant's local time by the zone's offset
-over the span up to its next transition (`pg_next_dst_boundary`, as
-`pg_localtime` picks it; 32 spans of the zone kept by the process) and a
-local day's midnight by `DetermineTimeZoneOffset` (1024 days kept), and
-leaving to the core's function a row with an infinity, an unknown unit, a
-day before the Julian day 0 or a result out of range; the float functions
+`date(timestamptz)`, by the kernels' rules of local time
+(`calendar::zone`, `tess_zone_*`): an instant's local time by the zone's
+offset over the span up to its next transition and a local day's
+midnight, from a cache of the process (32 spans, 1024 days) that the
+kernels fill in rounds of questions to the time zone library
+(`pg_next_dst_boundary`, `pg_localtime` when it fails,
+`DetermineTimeZoneOffset`), and leaving to the core's function a row with
+an infinity, an unknown unit, a day before the Julian day 0 or a result
+out of range; the float functions
 in every shape: the comparisons of float8, float4 and the two
 (`float8eq` …, `float4eq` …, `float48eq` …, `float84eq` …) in the core's
 NaN-aware order, a float4 widened, the arithmetic `float8pl` … `float8div`,

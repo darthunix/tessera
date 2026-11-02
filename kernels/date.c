@@ -21,13 +21,14 @@
  * core's function a row, its NULL for an oscillating field of infinity
  * kept.
  *
- * A timestamp with time zone is read in the session's zone: its local
- * time is the instant plus the offset pg_localtime gives, as timestamp2tm
- * reads it, the offset kept for the span of instants up to the zone's
- * next transition that pg_next_dst_boundary names; a local day's midnight
- * is the instant DetermineTimeZoneOffset makes of it, kept for the next
- * rows of that day in a cache of the process for the zone. The kernels
- * truncate and extract the local times, a batch of them at a time.
+ * A timestamp with time zone is read in the session's zone by the
+ * kernels' rules of local time (tessera/calendar.h, tess_zone_*): its
+ * local time, a local day's midnight, date_trunc and the casts between
+ * date and timestamptz. The kernels keep a cache of the zone in this
+ * process's memory and never call PostgreSQL: a call answers what the
+ * cache knows and asks for the rest, and here the questions go to the
+ * time zone library (pg_next_dst_boundary, pg_localtime when it fails,
+ * DetermineTimeZoneOffset) in rounds until no row is unknown.
  */
 #include "postgres.h"
 
@@ -41,6 +42,7 @@
 #include "utils/date.h"
 #include "utils/datetime.h"
 #include "utils/fmgroids.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
 #include "utils/timestamp.h"
@@ -160,21 +162,6 @@ arg_null(const TessFunctionArg *arg, int row)
 	return arg->column != NULL && arg->column->isnull[row];
 }
 
-/* The day and the microseconds into it of a finite timestamp, rounded down. */
-static inline int64
-timestamp_day(Timestamp timestamp, int64 *time)
-{
-	int64		day = timestamp / USECS_PER_DAY;
-
-	*time = timestamp - day * USECS_PER_DAY;
-	if (*time < 0)
-	{
-		*time += USECS_PER_DAY;
-		day--;
-	}
-	return day;
-}
-
 /* An argument for the kernels: its column or its scalar. */
 static inline TessCalendarArg
 calendar_arg(const TessFunctionArg *arg)
@@ -223,146 +210,6 @@ date_evaluate(TessFunctionCall *call)
 }
 
 /*
- * Spans of instants [start, end) over which the zone keeps one offset:
- * pg_next_dst_boundary gives the offset at an instant, the one localsub
- * picks for pg_localtime, and the next transition, where the span ends;
- * an earlier instant with the same next transition and offset lies in the
- * same segment and moves the span's start down.
- */
-#define ZONE_SPANS 32
-
-typedef struct ZoneSpan
-{
-	pg_time_t	start;
-	pg_time_t	end;
-	long int	offset;
-} ZoneSpan;
-
-static const pg_tz *span_zone;
-static ZoneSpan spans[ZONE_SPANS];
-static int	nspans;
-static int	last_span;
-static int	next_victim;
-
-static long int
-zone_offset(pg_time_t instant, const pg_tz *zone)
-{
-	long int	before;
-	long int	after;
-	int			before_isdst;
-	int			after_isdst;
-	pg_time_t	boundary;
-	pg_time_t	end;
-	int			found;
-	int			slot;
-
-	if (zone != span_zone)
-	{
-		nspans = 0;
-		last_span = 0;
-		span_zone = zone;
-	}
-	if (last_span < nspans && instant >= spans[last_span].start &&
-		instant < spans[last_span].end)
-		return spans[last_span].offset;
-	for (int span = 0; span < nspans; span++)
-		if (instant >= spans[span].start && instant < spans[span].end)
-		{
-			last_span = span;
-			return spans[span].offset;
-		}
-	found = pg_next_dst_boundary(&instant, &before, &before_isdst, &boundary,
-								 &after, &after_isdst, zone);
-	if (found < 0)
-		return pg_localtime(&instant, zone)->tm_gmtoff;
-	end = found == 0 ? PG_INT64_MAX : boundary;
-	for (int span = 0; span < nspans; span++)
-		if (spans[span].end == end && spans[span].offset == before)
-		{
-			spans[span].start = Min(spans[span].start, instant);
-			last_span = span;
-			return before;
-		}
-	slot = nspans < ZONE_SPANS ? nspans++ : next_victim++ % ZONE_SPANS;
-	spans[slot].start = instant;
-	spans[slot].end = end;
-	spans[slot].offset = before;
-	last_span = slot;
-	return before;
-}
-
-/*
- * A finite timestamptz in the zone's local time, as timestamp2tm reads it:
- * the instant plus the zone's offset at its second.
- */
-static inline Timestamp
-local_timestamp(TimestampTz timestamp, const pg_tz *zone)
-{
-	pg_time_t	utime;
-	int64		seconds = timestamp / USECS_PER_SEC;
-
-	if (timestamp % USECS_PER_SEC < 0)
-		seconds--;
-	utime = (pg_time_t) (seconds + (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * SECS_PER_DAY);
-	return timestamp + (int64) zone_offset(utime, zone) * USECS_PER_SEC;
-}
-
-/* The local midnights met in the zone, by day. */
-#define MIDNIGHTS 1024
-
-typedef struct Midnight
-{
-	int64		day;
-	TimestampTz instant;
-	bool		valid;
-} Midnight;
-
-static pg_tz *midnight_zone;
-static Midnight midnights[MIDNIGHTS];
-
-/*
- * The instant of a day's 00:00 in the zone, the day a Julian day, as
- * date2timestamptz and timestamptz_trunc make it: false out of range,
- * where the caller leaves the row to the core. A day in the cache needs
- * no calendar; a new one its fields for DetermineTimeZoneOffset.
- */
-static bool
-local_midnight(int julian, pg_tz *zone, TimestampTz *result)
-{
-	int64		day = (int64) julian - POSTGRES_EPOCH_JDATE;
-	Midnight   *slot;
-	struct pg_tm tm;
-	int			offset;
-
-	if (zone != midnight_zone)
-	{
-		memset(midnights, 0, sizeof(midnights));
-		midnight_zone = zone;
-	}
-	slot = &midnights[(uint64) day % MIDNIGHTS];
-	if (slot->valid && slot->day == day)
-	{
-		*result = slot->instant;
-		return true;
-	}
-	if (julian < 0)
-		return false;
-	memset(&tm, 0, sizeof(tm));
-	j2date(julian, &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
-	if (!IS_VALID_JULIAN(tm.tm_year, tm.tm_mon, tm.tm_mday))
-		return false;
-	offset = DetermineTimeZoneOffset(&tm, zone);
-	if (pg_mul_s64_overflow(day, USECS_PER_DAY, result) ||
-		pg_add_s64_overflow(*result, (int64) offset * USECS_PER_SEC, result) ||
-		!IS_VALID_TIMESTAMP(*result))
-		return false;
-	slot->day = day;
-	slot->instant = *result;
-	slot->valid = true;
-	return true;
-}
-
-/*
  * Scratch of a call: the local times of a batch's timestamptz column, and
  * the masks and scales the kernels write, on the stack for a batch of up
  * to this many rows, palloc'd beyond.
@@ -377,32 +224,223 @@ typedef struct DateScratch
 } DateScratch;
 
 /*
+ * The cache of the session's zone the kernels read (calendar.h), kept by
+ * the process, and the zone it was filled in: a change of the session's
+ * zone resets it before its next use.
+ */
+static TessZoneCache zone_cache;
+static pg_tz *cache_zone;
+
+/*
+ * What the injection point "tessera-zone-span" is given: the library's
+ * result and the offset it found, which a test changes.
+ */
+typedef struct ZoneSpanResult
+{
+	int		   *found;
+	long int   *before;
+} ZoneSpanResult;
+
+/* The operations of the zone the kernels compute in rounds. */
+typedef enum ZoneOp
+{
+	ZONE_LOCALS,
+	ZONE_TRUNCATE,
+	ZONE_MIDNIGHTS,
+	ZONE_DATES
+} ZoneOp;
+
+/*
+ * Answer the questions of a round from the time zone library, in their
+ * order: a span question that falls before the end of the span answered
+ * last is covered by it and not asked, so the library is asked once a
+ * span; a midnight is asked as the core makes one, DetermineTimeZoneOffset
+ * of the day's local 00:00. The answers' count.
+ */
+static int
+zone_answer(const TessZoneQuestion *questions, int nquestions, TessZoneAnswer *answers,
+			pg_tz *zone)
+{
+	int			count = 0;
+	bool		covered = false;
+	int64		covered_to = 0;
+
+	for (int i = 0; i < nquestions; i++)
+	{
+		TessZoneAnswer *answer = &answers[count];
+
+		if (questions[i].kind == TESS_ZONE_SPAN)
+		{
+			pg_time_t	instant = questions[i].key;
+			long int	before;
+			long int	after;
+			int			before_isdst;
+			int			after_isdst;
+			pg_time_t	boundary = 0;
+			int			found;
+
+			if (covered && questions[i].key < covered_to)
+				continue;
+			found = pg_next_dst_boundary(&instant, &before, &before_isdst, &boundary,
+										 &after, &after_isdst, zone);
+#ifdef USE_INJECTION_POINTS
+			{
+				/* A test makes the library fail here, a path no zone takes. */
+				ZoneSpanResult result = {&found, &before};
+
+				INJECTION_POINT("tessera-zone-span", &result);
+			}
+#endif
+			if (found < 0)
+				before = pg_localtime(&instant, zone)->tm_gmtoff;
+			*answer = (TessZoneAnswer) {
+				questions[i].key, before, found > 0 ? boundary : 0, TESS_ZONE_SPAN,
+					found > 0 ? 1 : found
+			};
+			covered = true;
+			covered_to = found > 0 ? boundary :
+				found == 0 ? PG_INT64_MAX : questions[i].key + 1;
+		}
+		else
+		{
+			struct pg_tm tm;
+
+			memset(&tm, 0, sizeof(tm));
+			j2date((int) questions[i].key, &tm.tm_year, &tm.tm_mon, &tm.tm_mday);
+			*answer = (TessZoneAnswer) {
+				questions[i].key, DetermineTimeZoneOffset(&tm, zone), 0, TESS_ZONE_MIDNIGHT, 0
+			};
+		}
+		count++;
+	}
+	return count;
+}
+
+/* Room for the questions and the answers of a batch of up to 64 rows. */
+#define ZONE_ROWS 64
+
+typedef struct ZoneScratch
+{
+	uint64		words[2][SCRATCH_ROWS / 64];
+	TessZoneQuestion questions[ZONE_ROWS];
+	TessZoneAnswer answers[2 * ZONE_ROWS];
+} ZoneScratch;
+
+/*
+ * Run an operation of the zone over the rows of selection in rounds: a
+ * call answers what the cache knows, sets ready and core, and asks for the
+ * rest; the questions are answered and the call made again over the
+ * unknown rows with every answer so far, until none is unknown. A row
+ * asks at most two questions, so the answers fit twice the rows.
+ */
+static TessStatusCode
+zone_rounds(TessFunctionCall *call, const TessRowMask *selection, ZoneOp op,
+			TessCalendarUnit unit, const TessCalendarArg *arg, void *values,
+			TessRowMask *ready, TessRowMask *core)
+{
+	int			nrows = selection->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	ZoneScratch space;
+	TessRowMask rows = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
+	TessRowMask unknown = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
+	TessZoneQuestion *questions = tess_scratch_alloc(sizeof(TessZoneQuestion) * nrows,
+													 space.questions, sizeof(space.questions));
+	TessZoneAnswer *answers = tess_scratch_alloc(sizeof(TessZoneAnswer) * 2 * nrows,
+												 space.answers, sizeof(space.answers));
+	TessZoneRound round = {sizeof(TessZoneRound)};
+	TessStatusCode code = TESS_OK;
+
+	if (session_timezone != cache_zone)
+	{
+		code = tess_zone_reset(&zone_cache, call->status);
+		if (code != TESS_OK)
+			return code;
+		cache_zone = session_timezone;
+	}
+	memcpy(rows.bits, selection->bits, sizeof(uint64) * nwords);
+	memset(ready->bits, 0, sizeof(uint64) * nwords);
+	memset(core->bits, 0, sizeof(uint64) * nwords);
+	round.cache = &zone_cache;
+	round.answers = answers;
+	round.rows = &rows;
+	round.ready = ready;
+	round.core = core;
+	round.unknown = &unknown;
+	round.questions = questions;
+	for (;;)
+	{
+		switch (op)
+		{
+			case ZONE_LOCALS:
+				code = tess_zone_locals(&round, arg, values, call->status);
+				break;
+			case ZONE_TRUNCATE:
+				code = tess_zone_truncate(&round, unit, arg, values, call->status);
+				break;
+			case ZONE_MIDNIGHTS:
+				code = tess_zone_midnights(&round, arg, values, call->status);
+				break;
+			case ZONE_DATES:
+				code = tess_zone_dates(&round, arg, values, call->status);
+				break;
+		}
+		if (code != TESS_OK || round.nquestions == 0)
+			break;
+		if (round.nanswers + round.nquestions > 2 * nrows)
+			elog(ERROR, "the time zone's rounds asked more than two questions a row");
+		round.nanswers += zone_answer(questions, round.nquestions, answers + round.nanswers,
+									  session_timezone);
+		memcpy(rows.bits, unknown.bits, sizeof(uint64) * nwords);
+	}
+	tess_scratch_release(answers, space.answers);
+	tess_scratch_release(questions, space.questions);
+	tess_scratch_release(unknown.bits, space.words[1]);
+	tess_scratch_release(rows.bits, space.words[0]);
+	return code;
+}
+
+/*
  * The session zone's local times of a timestamptz column's selected
  * non-NULL rows into locals, an infinity kept: a column of them with the
  * column's NULL flags.
  */
-static TessDatumColumn
-local_column(const TessDatumColumn *column, const TessRowMask *rows, int64 *locals)
+static TessStatusCode
+local_column(TessFunctionCall *call, const TessDatumColumn *column, int64 *locals,
+			 TessDatumColumn *result)
 {
-	TessDatumColumn result = TESS_STRUCT_INITIALIZER(TessDatumColumn);
-	int			nwords = tess_row_mask_word_count(rows->nrows);
+	TessCalendarArg arg = {column, 0};
+	DateScratch space;
+	int			nrows = call->rows->nrows;
+	TessRowMask ready = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
+	TessRowMask core = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
+	TessStatusCode code = zone_rounds(call, call->rows, ZONE_LOCALS, 0, &arg, locals,
+									  &ready, &core);
 
-	for (int word = 0; word < nwords; word++)
-	{
-		for (uint64 look = rows->bits[word]; look != 0; look &= look - 1)
-		{
-			int			row = word * 64 + pg_rightmost_one_pos64(look);
-			TimestampTz instant = DatumGetTimestampTz(column->values[row]);
+	tess_scratch_release(core.bits, space.words[1]);
+	tess_scratch_release(ready.bits, space.words[0]);
+	*result = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	result->values = (Datum *) locals;
+	result->isnull = column->isnull;
+	result->nrows = column->nrows;
+	return code;
+}
 
-			if (!column->isnull[row])
-				locals[row] = TIMESTAMP_NOT_FINITE(instant) ? instant :
-					local_timestamp(instant, session_timezone);
-		}
-	}
-	result.values = (Datum *) locals;
-	result.isnull = column->isnull;
-	result.nrows = column->nrows;
-	return result;
+/* A finite timestamptz scalar's local time, as a one-row round. */
+static TessStatusCode
+local_scalar(TessFunctionCall *call, Datum instant, Datum *local)
+{
+	TessCalendarArg arg = {NULL, instant};
+	uint64		one = 1;
+	uint64		ready_bits = 0;
+	uint64		core_bits = 0;
+	TessRowMask row = {.nrows = 1, .bits = &one};
+	TessRowMask ready = {.nrows = 1, .bits = &ready_bits};
+	TessRowMask core = {.nrows = 1, .bits = &core_bits};
+	int64		value = 0;
+	TessStatusCode code = zone_rounds(call, &row, ZONE_LOCALS, 0, &arg, &value, &ready, &core);
+
+	*local = Int64GetDatum(value);
+	return code;
 }
 
 /* The kernels' unit of a DecodeUnits unit date_trunc truncates, or -1. */
@@ -443,61 +481,36 @@ trunc_unit(int val)
 }
 
 /*
- * date_trunc(unit, timestamptz) of a column in the session's zone, as
- * timestamptz_trunc_internal: the kernels truncate the local times, a unit
- * below a day kept at the instant's offset, a day and above at its first
- * day's midnight in the zone; the rest by the core's function a row.
+ * date_trunc(unit, timestamptz) of a column in the session's zone, by the
+ * kernels (tess_zone_truncate): a unit below a day keeps the instant's
+ * offset, a day and above starts at its first day's midnight in the zone;
+ * the rows the kernels leave by the core's function, in row order.
  */
 static TessStatusCode
 trunc_zoned(TessFunctionCall *call, TessCalendarUnit unit)
 {
-	const TessDatumColumn *column = call->args[1].column;
+	TessCalendarArg stamps = calendar_arg(&call->args[1]);
 	Datum	   *values = (Datum *) call->values;
 	int			nrows = call->rows->nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
 	DateScratch space;
-	int64	   *locals = tess_scratch_alloc(sizeof(int64) * nrows, space.locals, sizeof(space.locals));
-	TessRowMask days = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
-	TessRowMask rest = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
-	TessDatumColumn local = local_column(column, call->rows, locals);
+	TessRowMask core = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
 	TessStatusCode code;
 
-	code = tess_timestamp_trunc_local(unit, &local, call->rows, (int64 *) values, &days, &rest,
-									  call->status);
+	code = zone_rounds(call, call->rows, ZONE_TRUNCATE, unit, &stamps, values,
+					   call->non_nulls, &core);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
 	{
-		uint64		present = 0;
-
-		for (uint64 look = call->rows->bits[word]; look != 0; look &= look - 1)
+		for (uint64 look = core.bits[word]; look != 0; look &= look - 1)
 		{
-			int			bit = pg_rightmost_one_pos64(look);
-			int			row = word * 64 + bit;
-			TimestampTz instant = DatumGetTimestampTz(column->values[row]);
-			TimestampTz result = 0;
-			bool		done = false;
+			int			row = word * 64 + pg_rightmost_one_pos64(look);
 
-			if (column->isnull[row])
-				continue;
-			if ((days.bits[word] >> bit) & 1)
-				done = local_midnight((int) DatumGetInt64(values[row]), session_timezone,
-									  &result);
-			else if (((rest.bits[word] >> bit) & 1) == 0)
-			{
-				result = DatumGetInt64(values[row]) - (locals[row] - instant);
-				done = IS_VALID_TIMESTAMP(result);
-			}
-			if (!done)
-				result = DatumGetTimestampTz(DirectFunctionCall2(timestamptz_trunc,
-																 arg_datum(&call->args[0], row),
-																 TimestampTzGetDatum(instant)));
-			values[row] = TimestampTzGetDatum(result);
-			present |= UINT64CONST(1) << bit;
+			values[row] = DirectFunctionCall2(timestamptz_trunc, arg_datum(&call->args[0], row),
+											  arg_datum(&call->args[1], row));
 		}
-		call->non_nulls->bits[word] = present;
+		call->non_nulls->bits[word] |= core.bits[word];
 	}
-	tess_scratch_release(rest.bits, space.words[1]);
-	tess_scratch_release(days.bits, space.words[0]);
-	tess_scratch_release(locals, space.locals);
+	tess_scratch_release(core.bits, space.words[0]);
 	return code;
 }
 
@@ -753,20 +766,21 @@ extract_evaluate(TessFunctionCall *call)
 	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
 	write = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
 	arg = calendar_arg(stamps);
+	code = TESS_OK;
 	if (zoned && stamps->column != NULL)
 	{
 		locals = tess_scratch_alloc(sizeof(int64) * nrows, space.locals, sizeof(space.locals));
-		local_stamps = local_column(stamps->column, call->rows, locals);
+		code = local_column(call, stamps->column, locals, &local_stamps);
 		arg.column = &local_stamps;
 	}
 	else if (zoned && !TIMESTAMP_NOT_FINITE(DatumGetTimestampTz(stamps->scalar)))
-		arg.scalar = TimestampGetDatum(local_timestamp(DatumGetTimestampTz(stamps->scalar),
-													   session_timezone));
-	code = timestamp ?
-		tess_timestamp_extract(field, &arg, call->rows, (int64 *) call->values, scales,
-							   call->non_nulls, &rest, call->status) :
-		tess_date_extract(field, &arg, call->rows, (int64 *) call->values, scales,
-						  call->non_nulls, &rest, call->status);
+		code = local_scalar(call, stamps->scalar, &arg.scalar);
+	if (code == TESS_OK)
+		code = timestamp ?
+			tess_timestamp_extract(field, &arg, call->rows, (int64 *) call->values, scales,
+								   call->non_nulls, &rest, call->status) :
+			tess_date_extract(field, &arg, call->rows, (int64 *) call->values, scales,
+							  call->non_nulls, &rest, call->status);
 	if (code == TESS_OK)
 	{
 		/* A call that asks for decimals takes the fields of its scale as they are. */
@@ -805,80 +819,49 @@ extract_evaluate(TessFunctionCall *call)
 
 /*
  * timestamptz(date), a date's local midnight, and date(timestamptz), an
- * instant's local day; an infinity kept, the rest by the core's function.
+ * instant's local day, by the kernels (tess_zone_midnights,
+ * tess_zone_dates); an infinity kept, the rows the kernels leave by the
+ * core's function, in row order.
  */
 static TessStatusCode
 zone_cast_evaluate(TessFunctionCall *call)
 {
 	const TessFunctionArg *arg;
+	TessCalendarArg source;
 	bool		to_instant;
+	int			nrows;
 	int			nwords;
+	DateScratch space;
+	TessRowMask core;
+	TessStatusCode code;
 
 	if (!date_call_valid(call, 1))
 		return tess_call_invalid(call, "a zone cast takes one argument");
 	arg = &call->args[0];
+	source = calendar_arg(arg);
 	to_instant = date_op(call) == DATE_TO_TIMESTAMPTZ;
-	nwords = tess_row_mask_word_count(call->rows->nrows);
-	for (int word = 0; word < nwords; word++)
+	nrows = call->rows->nrows;
+	nwords = tess_row_mask_word_count(nrows);
+	core = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
+	code = zone_rounds(call, call->rows, to_instant ? ZONE_MIDNIGHTS : ZONE_DATES, 0, &source,
+					   call->values, call->non_nulls, &core);
+	for (int word = 0; code == TESS_OK && word < nwords; word++)
 	{
-		uint64		look = call->rows->bits[word];
-		uint64		present = 0;
-
-		for (; look != 0; look &= look - 1)
+		for (uint64 look = core.bits[word]; look != 0; look &= look - 1)
 		{
-			int			bit = pg_rightmost_one_pos64(look);
-			int			row = word * 64 + bit;
-			Datum		value;
+			int			row = word * 64 + pg_rightmost_one_pos64(look);
+			Datum		value = arg_datum(arg, row);
 
-			if (arg_null(arg, row))
-				continue;
-			value = arg_datum(arg, row);
 			if (to_instant)
-			{
-				DateADT		date = DatumGetDateADT(value);
-				TimestampTz instant;
-
-				if (DATE_IS_NOBEGIN(date))
-					TIMESTAMP_NOBEGIN(instant);
-				else if (DATE_IS_NOEND(date))
-					TIMESTAMP_NOEND(instant);
-				else
-				{
-					bool		done = false;
-
-					if (date < (TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE))
-					{
-						done = local_midnight(date + POSTGRES_EPOCH_JDATE, session_timezone,
-											  &instant);
-					}
-					if (!done)
-						instant = DatumGetTimestampTz(DirectFunctionCall1(date_timestamptz, value));
-				}
-				((Datum *) call->values)[row] = TimestampTzGetDatum(instant);
-			}
+				((Datum *) call->values)[row] = DirectFunctionCall1(date_timestamptz, value);
 			else
-			{
-				TimestampTz instant = DatumGetTimestampTz(value);
-				int64		time;
-				int64		day = 0;
-				DateADT		date;
-
-				if (TIMESTAMP_IS_NOBEGIN(instant))
-					DATE_NOBEGIN(date);
-				else if (TIMESTAMP_IS_NOEND(instant))
-					DATE_NOEND(date);
-				else if ((day = timestamp_day(local_timestamp(instant, session_timezone),
-											  &time)) + POSTGRES_EPOCH_JDATE >= 0)
-					date = (DateADT) day;
-				else
-					date = DatumGetDateADT(DirectFunctionCall1(timestamptz_date, value));
-				((int32 *) call->values)[row] = date;
-			}
-			present |= UINT64CONST(1) << bit;
+				((int32 *) call->values)[row] =
+					DatumGetDateADT(DirectFunctionCall1(timestamptz_date, value));
 		}
-		call->non_nulls->bits[word] = present;
+		call->non_nulls->bits[word] |= core.bits[word];
 	}
-	return TESS_OK;
+	tess_scratch_release(core.bits, space.words[0]);
+	return code;
 }
 
 /* Register the date functions. */
