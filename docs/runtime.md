@@ -770,7 +770,8 @@ expression context; `tess_qual_stats` counts the rows the batch stages and the r
 `tess_qual_set_row_prefilter` adds a step that runs once per batch right
 before the first row-wise clause and may only remove rows (TessFilter
 checks a parent's key filter there), and `tess_qual_has_row_clauses`
-says whether there is a row-wise clause for it to precede.
+says whether there is a row-wise clause for it to precede; without one,
+TessFilter checks the filter itself before it calls `tess_qual_apply`.
 
 ## Batch expressions
 

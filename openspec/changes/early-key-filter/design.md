@@ -60,8 +60,9 @@ clauses' work instead. So such a table gets a filter under the same
 share of rows found, built after the sample, and the join offers it to
 its outer child; when the child refuses it, the join drops it and
 probes as before. A shared table allocates the words of the filter with
-its directory whatever its size: 16 to 32 bits a record of fewer than
-4096 records is under 16 kB.
+its directory whatever its size, when the join may hand a filter down
+at all: 16 to 32 bits a record of fewer than 4096 records is under
+16 kB.
 
 ### Rows and errors
 

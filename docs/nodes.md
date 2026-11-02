@@ -813,7 +813,9 @@ run of row-wise clauses fetches its columns with the narrowed mask, shows
 each row to `ExecQual` through the scan tuple slot, and clears the bit of
 a row it rejects. A hash join above may hand the node its Bloom filter,
 which the capability [key-filter](../openspec/specs/key-filter/design.md)
-describes. A batch-aware parent receives the child's slot with
+describes: the node checks it before its first row-wise clause, or,
+when all its clauses run in batches, before them all, so that they read
+their columns only for the rows it passed. A batch-aware parent receives the child's slot with
 the whole batch; an ordinary parent receives rows through the helper. With
 computed targets the helper publishes the projection provider's wrapper of
 each batch instead ([runtime.md](runtime.md)), which computes a column
@@ -2023,8 +2025,10 @@ through. A row it rejects has no pair, which a left or anti join returns
 as it does a probe miss. The decision is the batches' fact, not the
 planner's estimate of the join's selectivity, and holds until the table
 is built again; a smaller table stays in the cache, where a miss costs
-less than the check. Under a `Gather` each participant decides on the
-filter of its own table by its own rows. The setting at 1 builds the
+less than the check, and gets a filter under the same rule only for the
+outer child, which saves its clauses' work on the rows it removes: the
+join drops it when the child refuses it. Under a `Gather` each
+participant decides on the filter of its own table by its own rows. The setting at 1 builds the
 filter at the first batch whatever the sizes, at 0 never. The join may
 then hand the filter to its outer child, as the capability
 [key-filter](../openspec/specs/key-filter/design.md) describes.

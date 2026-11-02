@@ -22,8 +22,8 @@ from 265 to 97 ms and Q21 from 320 to 238 ms, serial, in one server.
   itself, since a probe of such a table stays in the cache. When the
   child refuses it, the join drops it. A shared table of that size
   allocates the filter's words with its directory.
-- EXPLAIN keeps its lines; `Bloom Filters` counts the filters a join
-  checks or hands down.
+- EXPLAIN keeps its lines: a small table's filter that the child
+  refused is dropped before it is counted in `Bloom Filters`.
 
 ## Capabilities
 

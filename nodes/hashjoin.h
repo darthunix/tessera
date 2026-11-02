@@ -973,6 +973,7 @@ extern uint32 join_shared_partitions(TessHashJoinState *state);
 extern uint64 *join_shared_words(TessHashJoinState *state);
 extern uint64 join_store_value(TessHashJoinState *state, Datum value, int16 typlen);
 extern void join_take_back_bloom(TessHashJoinState *state);
+extern bool join_bloom_below_possible(const TessHashJoinState *state);
 
 /* The spill (hashjoin_spill.c): the partitions of both sides past hash_mem and their rounds. */
 extern void join_finish_spill_build(TessHashJoinState *state);

@@ -118,9 +118,9 @@ attach_shared_table(TessHashJoinState *state)
 /*
  * A cleared shared Bloom filter for a table of `capacity` records, in
  * place of the one before, when a participant may want one for its
- * `records` (join_bloom_possible), else none; only the elected
- * participant, whom the build barrier separates from the probes, calls
- * it.
+ * `records` (join_bloom_possible) or for its outer child, else none; only
+ * the elected participant, whom the build barrier separates from the
+ * probes, calls it.
  */
 static void
 allocate_shared_filter(TessHashJoinState *state, uint64 records, uint64 capacity)
@@ -132,7 +132,9 @@ allocate_shared_filter(TessHashJoinState *state, uint64 records, uint64 capacity
 		dsa_free(area, state->parallel.shared->filter);
 	state->parallel.shared->filter = InvalidDsaPointer;
 	state->parallel.shared->filter_words = 0;
-	if (!join_bloom_possible(tess_join_bloom_ratio, (double) records))
+	/* A small table's filter, for the outer child only, takes a few words. */
+	if (!join_bloom_possible(tess_join_bloom_ratio, (double) records) &&
+		!(tess_join_bloom_ratio > 0.0 && join_bloom_below_possible(state)))
 		return;
 	check(state, state->kernels->bloom_shared_words(capacity, &nwords, &state->status));
 	state->parallel.shared->filter = dsa_allocate_extended(area, mul_size(sizeof(uint64), nwords),

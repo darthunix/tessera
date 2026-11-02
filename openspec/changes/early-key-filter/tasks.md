@@ -6,10 +6,10 @@
 
 ## 2. The work
 
-- [ ] 2.1 TessFilter of batch clauses alone takes the filter and checks
+- [x] 2.1 TessFilter of batch clauses alone takes the filter and checks
       it first; the tests. Check: `make installcheck` on PostgreSQL
       master with assertions
-- [ ] 2.2 A small table's filter, to hand down only, serial and shared;
+- [x] 2.2 A small table's filter, to hand down only, serial and shared;
       the tests
 - [ ] 2.3 The benchmark case of the worst order and the measurement of
       the design

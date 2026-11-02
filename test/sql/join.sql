@@ -347,9 +347,26 @@ SELECT join_same($$SELECT p.v, jbuild.w FROM (SELECT * FROM jprobe WHERE jprobe.
 -- its filter down.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%')$$);
 SELECT join_same($$SELECT jbuild.k, jbuild.w FROM jbuild WHERE NOT EXISTS (SELECT 1 FROM jprobe WHERE jprobe.k = jbuild.k AND jprobe.v > 0 AND jprobe.v::text LIKE '%1%')$$);
--- A TessFilter of batch clauses alone has nothing to save and refuses
--- the filter: the join checks its rows itself.
+-- Batch clauses after the filter: a TessFilter of batch clauses alone
+-- takes the filter and checks it before them, so that its clauses on v,
+-- the column after the key, see only the rows it passed.
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
+SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v < 19000$$);
+-- A table built anew for each value of a parameter, with keys apart
+-- from the last one's: each takes the filter of the table before back
+-- and hands its own down to the TessFilter of batch clauses alone.
+SELECT line FROM join_explain($$SELECT v.x, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w BETWEEN v.x AND v.x + 999 AND jprobe.v < 19000) FROM (VALUES (1), (2001), (4001)) AS v(x)$$) AS line
+WHERE line ~ 'Builds|Bloom Filter';
+SELECT join_same($$SELECT v.x, (SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jbuild.w BETWEEN v.x AND v.x + 999 AND jprobe.v < 19000) FROM (VALUES (1), (2001), (4001)) AS v(x)$$);
+-- A small table's filter: a table of fewer than 4096 records gets one
+-- only for the outer child, which takes it here; a key the child
+-- computes is refused, and the join then checks no filter.
+SELECT line FROM join_explain($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$) AS line
+WHERE line ~ 'TessHashJoin|Build Rows|Bloom|TessFilter';
+SELECT join_same($$SELECT jprobe.v, b.w FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$);
+SELECT line FROM join_explain($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$) AS line
+WHERE line ~ 'TessHashJoin|Build Rows|Bloom|TessFilter';
+SELECT join_same($$SELECT jprobe.v, b.w FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$);
 -- A table that spills keeps its filter: it knows only the rows in memory.
 SET work_mem = '64kB';
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k WHERE jprobe.v > 0 AND jprobe.v::text LIKE '%1%'$$);
@@ -948,15 +965,29 @@ RESET parallel_leader_participation;
 -- it once it is ready.
 SELECT join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Bloom Filters') AS filters,
        join_property($$SELECT count(*) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$, 'Shared Table') AS shared;
--- A shared table of fewer than 4096 rows never wants a filter at the
--- default ratio, and none is allocated; at a ratio of 1 every table may
--- want one, and its 1025 words are allocated with the table.
-EXPLAIN (COSTS OFF) SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k;
+-- A shared table of fewer than 4096 rows never wants a filter of its own
+-- at the default ratio: a LEFT join, which keeps its outer rows, can hand
+-- none down, and none is allocated; at a ratio of 1 every table may want
+-- one, and its 1025 words are allocated with the table. An INNER join's
+-- small table allocates them for its outer child at the default ratio.
+EXPLAIN (COSTS OFF) SELECT count(*), count(b.w) FROM jprobe LEFT JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k;
 SET tessera.join_bloom_ratio = 1;
-SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS with_filter \gset
+SELECT join_property($$SELECT count(*), count(b.w) FROM jprobe LEFT JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS with_filter \gset
 RESET tessera.join_bloom_ratio;
-SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS without_filter \gset
+SELECT join_property($$SELECT count(*), count(b.w) FROM jprobe LEFT JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS without_filter \gset
 SELECT :with_filter - :without_filter >= 8 AS filter_only_where_wanted;
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k$$, 'Memory Usage') AS inner_filter \gset
+SELECT :inner_filter - :without_filter >= 8 AS for_the_child;
+-- A shared small table hands its filter to each participant's TessFilter.
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$, 'Bloom Filter Below') AS below;
+SELECT join_same($$SELECT jprobe.v, b.w FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k = b.k WHERE jprobe.v < 19000$$);
+-- A key each participant's TessFilter computes: every one refuses the
+-- filter, and no participant counts or checks one.
+SELECT join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$, 'Shared Table') AS shared,
+       join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$, 'Bloom Filters') AS filters,
+       join_property($$SELECT count(*) FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$, 'Rows Removed by Bloom Filter') AS removed;
+SELECT join_same($$SELECT jprobe.v, b.w FROM jprobe JOIN (SELECT * FROM jbuild WHERE w <= 4000) AS b ON jprobe.k + 0 = b.k WHERE jprobe.v < 19000$$);
 SELECT join_same($$SELECT count(*), sum(jprobe.v) FROM jprobe WHERE NOT EXISTS (SELECT 1 FROM jbuild WHERE jbuild.k = jprobe.k)$$);
 -- The shared filter below the join: each participant's TessFilter checks
 -- its rows once the filter is ready.

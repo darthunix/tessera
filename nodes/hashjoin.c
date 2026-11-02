@@ -1001,24 +1001,31 @@ const TessBatchOps join_batch_ops = {
 
 
 /*
+ * Whether the outer child may get the filter: only when a row without a
+ * pair leaves the join's output, as INNER and SEMI drop it, and RIGHT and
+ * RIGHT ANTI joins, which run as INNER keeping their inner side; not for
+ * a table that spills, whose filter knows only the resident rows, nor
+ * for a hashed key, whose value the scan below has, not its hash.
+ */
+bool
+join_bloom_below_possible(const TessHashJoinState *state)
+{
+	return (state->jointype == JOIN_INNER || state->jointype == JOIN_SEMI) &&
+		state->spill == NULL && !state->keys.hashed_keys;
+}
+
+/*
  * Offer the filter to the outer child, which may check its rows against it
- * before its costlier work (TessFilter's row-wise clauses): only when a
- * row without a pair leaves the join's output, as INNER and SEMI drop it,
- * and a RIGHT join, which runs as INNER keeping its inner side.
- * A child that takes it passes only the rows the filter lets through, and
- * the join checks no more.
+ * before its costlier work (TessFilter's clauses). A child that takes it
+ * passes only the rows the filter lets through, and the join checks no
+ * more.
  */
 static void
 hand_down_bloom(TessHashJoinState *state)
 {
 	TessKeyFilter filter = TESS_STRUCT_INITIALIZER(TessKeyFilter);
 
-	/*
-	 * A table that spills: the filter knows only the resident rows. A
-	 * hashed key: the scan below has the value, not its hash.
-	 */
-	if ((state->jointype != JOIN_INNER && state->jointype != JOIN_SEMI) ||
-		state->spill != NULL || state->keys.hashed_keys)
+	if (!join_bloom_below_possible(state))
 		return;
 	filter.nkeys = state->keys.nkeys;
 	filter.columns = state->keys.outer_keys;
@@ -1033,13 +1040,15 @@ hand_down_bloom(TessHashJoinState *state)
 
 /*
  * After the first JOIN_BLOOM_SAMPLE valid probe rows, a Bloom filter of
- * the table's keys when most of them found no record and the table is
- * past the cache: from then on a row the filter rejects skips the table.
+ * the table's keys when most of them found no record: from then on a row
+ * the filter rejects skips the table, or the outer child removes it. A
+ * table in the cache gets one only for the child.
  */
 static void
 decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 {
 	double		ratio = tess_join_bloom_ratio;
+	bool		below_only;
 
 	state->sample_rows += rows;
 	state->sample_found += found;
@@ -1047,7 +1056,18 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 	if (ratio < 1.0 && state->sample_rows < JOIN_BLOOM_SAMPLE)
 		return;
 	state->bloom.decided = true;
-	if (!join_bloom_wanted(ratio, (double) state->build_rows, (double) state->sample_found,
+	/*
+	 * A table too small for a filter of its own, whose probe stays in the
+	 * cache, gets one under the same share of rows found only for the
+	 * outer child, which saves its clauses' work on the rows it removes:
+	 * when the child refuses it, the join drops it.
+	 */
+	below_only = !join_bloom_possible(ratio, (double) state->build_rows);
+	if (below_only ?
+		!join_bloom_below_wanted(ratio, (double) state->sample_found,
+								 (double) state->sample_rows) ||
+		!join_bloom_below_possible(state) :
+		!join_bloom_wanted(ratio, (double) state->build_rows, (double) state->sample_found,
 						   (double) state->sample_rows))
 		return;
 	/*
@@ -1065,13 +1085,30 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 		state->bloom.bits = dsa_get_address(join_query_dsa(state), state->parallel.shared->filter);
 		state->bloom.nwords = state->parallel.shared->filter_words;
 		state->bloom.shared = true;
+		/*
+		 * For the child only: offered before it is built, which the child
+		 * waits for, so that a participant whose child refuses it neither
+		 * builds nor counts it.
+		 */
+		if (below_only)
+		{
+			hand_down_bloom(state);
+			if (!state->bloom.below)
+			{
+				state->bloom.bits = NULL;
+				state->bloom.nwords = 0;
+				state->bloom.shared = false;
+				return;
+			}
+		}
 		check(state, state->kernels->table_try_build_bloom(&state->table,
 														   state->bloom.bits,
 														   state->bloom.nwords,
 														   &built, &state->status));
 		if (built)
 			state->counters[JOIN_BLOOM_FILTERS]++;
-		hand_down_bloom(state);
+		if (!below_only)
+			hand_down_bloom(state);
 		return;
 	}
 	check(state, state->kernels->table_bloom_words(state->build_rows,
@@ -1084,9 +1121,16 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 	check(state, state->kernels->table_bloom(&state->table,
 											 state->bloom.bits, state->bloom.nwords,
 											 &state->status));
+	hand_down_bloom(state);
+	if (below_only && !state->bloom.below)
+	{
+		pfree(state->bloom.bits);
+		state->bloom.bits = NULL;
+		state->bloom.nwords = 0;
+		return;
+	}
 	state->counters[JOIN_BLOOM_FILTERS]++;
 	join_note_memory(state);
-	hand_down_bloom(state);
 }
 
 /*
