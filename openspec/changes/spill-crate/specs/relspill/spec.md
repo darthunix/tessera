@@ -58,7 +58,8 @@ call.
 - **WHEN** the caller reports a write that it finished only in part
 - **THEN** the set refuses every call but a free or a reset, and a set
   that was reset writes and reads like a new one
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/set.rs::a_set_cut_by_a_failed_write_takes_only_a_reset`
 
 ### Requirement: No memory allocated
 A call of the crate SHALL allocate no memory, even when it fails. Every
@@ -79,7 +80,8 @@ row needs.
   room left
 - **THEN** the call returns the size the list needs, and the set is
   unchanged
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/set.rs::a_full_block_list_asks_for_room`
 
 #### Scenario: Rows that fit in part
 - **WHEN** two rows are appended to a chunk of columns whose region of
@@ -91,9 +93,11 @@ row needs.
 ### Requirement: The file of a set
 The crate SHALL own the whole format of the file of a set: the blocks,
 the block list of each partition, and the trailer of a file that other
-participants read. It SHALL keep the write buffer. It SHALL check every
-list, entry and trailer it reads before it asks for the bytes they
-point to.
+participants read. Its writer,
+[`Writer`](../../../crates/relspill/src/set.rs), SHALL keep the write
+buffer and the lists and lay the trailer out, as its documentation
+says. It SHALL check every list, entry and trailer it reads before it
+asks for the bytes they point to.
 
 #### Scenario: A shared file read by another participant
 - **WHEN** a participant finishes its file, and another participant
@@ -106,7 +110,8 @@ point to.
 - **WHEN** a participant drops a partition of a shared set before it
   finishes the set
 - **THEN** the call is a wrong call, and the set is unchanged
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/set.rs::a_shared_set_drops_no_partition_before_its_finish`
 
 ### Requirement: The spill of a join
 The crate SHALL provide a state machine for the spill of a hash join.
