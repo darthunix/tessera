@@ -1,0 +1,6 @@
+# Tessera nodes per query with Tessera on, SF 1, two workers:
+# base ee33f2e4 (tpch-sf1-htZCJC) against the branch (tpch-sf1-5rkPLC)
+1c1
+< Q01 on         TessFilter, TessHeapScan
+---
+> Q01 on         2 TessAgg, TessFilter, TessGather, TessHeapScan, TessSend, TessSort

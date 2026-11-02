@@ -28,8 +28,7 @@ placed `spill-crate` first on 2026-10-28, after the close of
 review of what more can move from C to Rust; the float kernels are
 closed. The maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
-order. The maintainer took `partial-dictionary-keys` out of turn on
-2026-11-01, after the TPC-H run on Greengage 7.
+order:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
@@ -158,23 +157,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
-
-### partial-dictionary-keys
-
-The partial grouping by keys through a dictionary. The maintainer took
-it on 2026-11-01, after TPC-H on Greengage 7 showed Q1 no faster with
-Tessera; it is the change `partial-dictionary-keys`.
-
-- **What:** The planner offers the node's partial grouping for keys of
-  any type the serial node takes, not only for keys a word holds.
-- **Why:** The rule guards against a fault the executor no longer
-  meets, and keeps the core's partial stage under every two-stage
-  grouping by text or numeric: Q1 on Greengage 7 takes 0.98 of the
-  core's time with it, 0.41 without.
-- **Known:** The design of the change.
-- **Depends on:** nothing.
-- **Capabilities:** aggregate
-- **Size:** small: one pull request.
 
 ### spill-crate
 
@@ -1936,6 +1918,26 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **The cost of a partial grouping that folds little** (the close of
+  `partial-dictionary-keys`, 2026-11-01). The cost of `TessAgg`'s
+  partial stage counts a dictionary's lookups but not its memory per
+  group, so the point where the planner expects the groups to pass
+  `hash_mem` comes late for keys through a dictionary. And nothing
+  counts a partial table that goes up whole each time it fills, as
+  tables of sum states and of such keys do: past that point the final
+  stage meets almost every row. Suggested: a case of many groups under
+  a `Gather` in a family first, then a cost by the share the partial
+  stage folds.
+- **`Memory Usage` leaves the dictionaries out** (the same close).
+  `EXPLAIN` shows the memory of `TessAgg`'s table and `DISTINCT` sets,
+  not of the keys' dictionaries, which count when the node decides the
+  table is full. Suggested: a small fix with a test.
+- **`char(n)` keys by their bytes** (the same close). A `char(n)` key's
+  dictionary calls the type's hash and equality through fmgr for every
+  row; under a deterministic collation it could hash and compare the
+  bytes without the trailing blanks, as it does for text. TPC-H Q1
+  groups by two such keys on both cores. Suggested: measure Q1's
+  dictionary time first.
 - **The integer entry points borrow a whole column struct** (the close
   of `float-kernels-in-rust`, 2026-11-01). `DatumColumn::ints`, behind
   every int4 and int8 entry point of `tessera-capi`, makes a reference
