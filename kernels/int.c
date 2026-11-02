@@ -17,9 +17,9 @@
  * the integer): their comparisons are the int4 and int8 ones. A smallint
  * is its value sign-extended in the word and a boolean 0 or 1, which the
  * int4 kernels read as int32: their comparisons are the int4 ones, and a
- * smallint's arithmetic the int4 one, whose results a smallint result
- * checks against its range, 22003 "smallint out of range" past it (no
- * operation of two smallints overflows an int32 first).
+ * smallint's arithmetic is the smallint kernels' (tess_int2_arith_*), the
+ * int4 arithmetic within the smallint range, which fail with 22003
+ * "smallint out of range" past it at the first row that fails.
  */
 #include "postgres.h"
 
@@ -371,36 +371,68 @@ compare_evaluate(TessFunctionCall *call)
 	return tess_call_invalid(call, "an int4 comparison needs a column argument");
 }
 
+/* The arithmetic entry points of int4 lanes: int4's or smallint's. */
+typedef struct Arith32
+{
+	TessStatusCode (*scalar) (TessArithOp, const TessDatumColumn *, int32,
+							  const TessRowMask *, const TessRowMask *, int32 *,
+							  TessRowMask *, TessStatus *);
+	TessStatusCode (*scalar_left) (TessArithOp, int32, const TessDatumColumn *,
+								   const TessRowMask *, const TessRowMask *, int32 *,
+								   TessRowMask *, TessStatus *);
+	TessStatusCode (*columns) (TessArithOp, const TessDatumColumn *,
+							   const TessRowMask *, const TessDatumColumn *,
+							   const TessRowMask *, const TessRowMask *, int32 *,
+							   TessRowMask *, TessStatus *);
+	const char *takes_two;
+	const char *needs_column;
+} Arith32;
+
+static const Arith32 int4_arith = {
+	tess_int4_arith_scalar, tess_int4_arith_scalar_left, tess_int4_arith_columns,
+	"int4 arithmetic takes two arguments", "int4 arithmetic needs a column argument"
+};
+
+static const Arith32 int2_arith = {
+	tess_int2_arith_scalar, tess_int2_arith_scalar_left, tess_int2_arith_columns,
+	"smallint arithmetic takes two arguments", "smallint arithmetic needs a column argument"
+};
+
 /* Any shape but two scalars, which the consumer folds itself. */
-static TessStatusCode
-arith_evaluate(TessFunctionCall *call)
+static inline TessStatusCode
+arith32_evaluate(TessFunctionCall *call, const Arith32 *kernels)
 {
 	const TessFunctionArg *left;
 	const TessFunctionArg *right;
 	TessArithOp op;
 
 	if (!valid_call(call))
-		return tess_call_invalid(call, "int4 arithmetic takes two arguments");
+		return tess_call_invalid(call, kernels->takes_two);
 	left = &call->args[0];
 	right = &call->args[1];
 	op = (TessArithOp) operation(call);
 	if (left->column != NULL && right->column != NULL)
-		return tess_int4_arith_columns(op, left->column, left->prepared,
-									   right->column, right->prepared,
-									   call->rows, (int32 *) call->values,
-									   call->non_nulls, call->status);
+		return kernels->columns(op, left->column, left->prepared,
+								right->column, right->prepared,
+								call->rows, (int32 *) call->values,
+								call->non_nulls, call->status);
 	if (left->column != NULL)
-		return tess_int4_arith_scalar(op, left->column,
-									  DatumGetInt32(right->scalar),
-									  left->prepared, call->rows,
-									  (int32 *) call->values, call->non_nulls,
-									  call->status);
+		return kernels->scalar(op, left->column, DatumGetInt32(right->scalar),
+							   left->prepared, call->rows,
+							   (int32 *) call->values, call->non_nulls,
+							   call->status);
 	if (right->column != NULL)
-		return tess_int4_arith_scalar_left(op, DatumGetInt32(left->scalar),
-										   right->column, right->prepared,
-										   call->rows, (int32 *) call->values,
-										   call->non_nulls, call->status);
-	return tess_call_invalid(call, "int4 arithmetic needs a column argument");
+		return kernels->scalar_left(op, DatumGetInt32(left->scalar),
+									right->column, right->prepared,
+									call->rows, (int32 *) call->values,
+									call->non_nulls, call->status);
+	return tess_call_invalid(call, kernels->needs_column);
+}
+
+static TessStatusCode
+arith_evaluate(TessFunctionCall *call)
+{
+	return arith32_evaluate(call, &int4_arith);
 }
 
 /* -x is 0 - x, including the overflow of the smallest value. */
@@ -524,64 +556,34 @@ narrow_evaluate(TessFunctionCall *call)
 							 call->non_nulls, call->status);
 }
 
-/*
- * A smallint result: the int4 kernel's values of the rows it computed,
- * 22003 "smallint out of range" for one past the smallint range.
- */
-static TessStatusCode
-smallint_range(TessFunctionCall *call, TessStatusCode code)
-{
-	const int32 *values;
-	int			nwords;
-	bool		outside = false;
-
-	/* A failed call may be no call at all: read it only after success. */
-	if (code != TESS_OK)
-		return code;
-	values = (const int32 *) call->values;
-	nwords = tess_row_mask_word_count(call->non_nulls->nrows);
-	/* A whole word without a branch a row; a partial one row by row. */
-	for (int word = 0; word < nwords && !outside; word++)
-	{
-		uint64		bits = call->non_nulls->bits[word];
-		const int32 *value = values + (Size) word * 64;
-
-		if (bits == UINT64_MAX)
-		{
-			for (int bit = 0; bit < 64; bit++)
-				outside |= (value[bit] < PG_INT16_MIN) | (value[bit] > PG_INT16_MAX);
-		}
-		else
-		{
-			for (; bits != 0; bits &= bits - 1)
-			{
-				int			bit = pg_rightmost_one_pos64(bits);
-
-				outside |= (value[bit] < PG_INT16_MIN) | (value[bit] > PG_INT16_MAX);
-			}
-		}
-	}
-	if (outside)
-		return tess_call_fail(call, TESS_ERROR_INTEGER_OUT_OF_RANGE, "22003",
-							  "smallint out of range");
-	return TESS_OK;
-}
-
 static TessStatusCode
 arith2_evaluate(TessFunctionCall *call)
 {
-	return smallint_range(call, arith_evaluate(call));
+	return arith32_evaluate(call, &int2_arith);
 }
 
+/* -x is 0 - x, the least smallint's negation past the range. */
 static TessStatusCode
 negate2_evaluate(TessFunctionCall *call)
 {
-	return smallint_range(call, negate_evaluate(call));
+	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
+		call->nargs != 1 || call->args == NULL ||
+		call->args[0].struct_size < TESS_FUNCTION_ARG_MIN_SIZE)
+		return tess_call_invalid(call, "smallint negation takes one argument");
+	if (call->args[0].column == NULL)
+		return tess_call_invalid(call, "smallint negation takes a column");
+	return tess_int2_arith_scalar_left(TESS_ARITH_SUB, 0, call->args[0].column,
+									   call->args[0].prepared, call->rows,
+									   (int32 *) call->values, call->non_nulls,
+									   call->status);
 }
 
-/* The column's int32 values as they are: x + 0. */
+/*
+ * The column's int32 values as they are, x + 0 by the int4 kernel, or,
+ * narrowed, x + 0 within the smallint range.
+ */
 static TessStatusCode
-widen2_evaluate(TessFunctionCall *call)
+cast2_evaluate(TessFunctionCall *call, bool narrow)
 {
 	if (call == NULL || call->struct_size < TESS_FUNCTION_CALL_MIN_SIZE ||
 		call->nargs != 1 || call->args == NULL ||
@@ -589,15 +591,21 @@ widen2_evaluate(TessFunctionCall *call)
 		return tess_call_invalid(call, "the cast between smallint and integer takes one argument");
 	if (call->args[0].column == NULL)
 		return tess_call_invalid(call, "the cast between smallint and integer takes a column");
-	return tess_int4_arith_scalar(TESS_ARITH_ADD, call->args[0].column, 0,
-								  call->args[0].prepared, call->rows,
-								  (int32 *) call->values, call->non_nulls, call->status);
+	return (narrow ? tess_int2_arith_scalar : tess_int4_arith_scalar)
+		(TESS_ARITH_ADD, call->args[0].column, 0, call->args[0].prepared, call->rows,
+		 (int32 *) call->values, call->non_nulls, call->status);
+}
+
+static TessStatusCode
+widen2_evaluate(TessFunctionCall *call)
+{
+	return cast2_evaluate(call, false);
 }
 
 static TessStatusCode
 narrow2_evaluate(TessFunctionCall *call)
 {
-	return smallint_range(call, widen2_evaluate(call));
+	return cast2_evaluate(call, true);
 }
 
 /*

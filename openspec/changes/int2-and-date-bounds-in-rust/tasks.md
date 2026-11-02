@@ -72,7 +72,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
       in this commit; `docs/kernels.md` lists the entry points. Check:
       `cargo test --locked -p tessera-capi`; `cargo +nightly miri test
       --locked -p tessera-capi --test <the target>`.
-- [ ] 3.3 Make `kernels/int.c` call them; `smallint_range` goes. Add to
+- [x] 3.3 Make `kernels/int.c` call them; `smallint_range` goes. Add to
       `types` the table of the proposal (row 2 `-32768 / -1`, row 5 a
       division by zero), run with Tessera on and off, both errors in the
       expected output, 22003 for each. Update the paragraph on smallint
