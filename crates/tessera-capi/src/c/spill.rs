@@ -53,7 +53,7 @@ impl SpillHeader {
         })
     }
 
-    fn from_block(block: BlockHeader) -> Self {
+    pub(super) fn from_block(block: BlockHeader) -> Self {
         Self {
             kind: block.kind as u32,
             number: block.number,

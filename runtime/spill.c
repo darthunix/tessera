@@ -34,17 +34,8 @@
 /* The write buffer when the config gives none. */
 #define SPILL_DEFAULT_BUFFER (64 * 1024)
 
-/* The end of a shared set's file: the list of its blocks by partition. */
-#define SPILL_TRAILER_MAGIC UINT64CONST(0x5445535354524149)
-
-typedef struct SpillTrailer
-{
-	uint64		magic;
-	/* Where the list starts: a count per partition, then the blocks by partition. */
-	uint64		offset;
-	uint64		npartitions;
-	uint64		fingerprint;
-} SpillTrailer;
+/* Entries of another participant's list a reader reads at a time. */
+#define SPILL_PAGE_ENTRIES 256
 
 struct TessSpill
 {
@@ -84,17 +75,15 @@ struct TessSpillReader
 	File		file;
 	bool		own;
 	int			partition;
-	/* The partition's blocks, and the next one to read. */
-	TessSpillEntry *blocks;
-	uint64		count;
-	uint64		next;
+	/* The kernels' reader of the partition, which checks what it reads. */
+	TessSpillReadState state;
+	/* The page of entries: the own list, or a page of another's file. */
+	TessSpillEntry *page;
+	Size		page_len;
 	/* The block just read, header and stored body, until its body is taken. */
 	char	   *buffer;
 	Size		buffer_len;
-	bool		pending;
-	uint32		pending_kind;
-	uint64		pending_len;
-	uint32		pending_packed;
+	uint32		kind;
 	TessSpillReader *next_reader;
 };
 
@@ -248,7 +237,13 @@ tess_spill_create(const TessSpillConfig *config)
 		config->kernels->spill_set_written == NULL ||
 		config->kernels->spill_set_finish == NULL ||
 		config->kernels->spill_set_drop == NULL ||
-		config->kernels->spill_set_stats == NULL)
+		config->kernels->spill_set_stats == NULL ||
+		config->kernels->spill_reader_own == NULL ||
+		config->kernels->spill_reader_file == NULL ||
+		config->kernels->spill_reader_open == NULL ||
+		config->kernels->spill_reader_next == NULL ||
+		config->kernels->spill_reader_body == NULL ||
+		config->kernels->spill_reader_seek == NULL)
 		elog(ERROR, "Tessera spill set requires the kernels of spilled blocks");
 	if (config->npartitions <= 0 || config->level >= 32)
 		elog(ERROR, "Tessera spill set requires partitions and a level below 32");
@@ -504,106 +499,41 @@ tess_spill_finish(TessSpill *spill)
 	spill->finished = true;
 }
 
-/* The lists at the end of a shared file do not hold: damaged data. */
-pg_noreturn static void
-list_damaged(void)
+/* Read into the reader's page or block buffer what a step of its reader asks. */
+static void
+read_step(TessSpillReader *reader, const TessSpillReadStep *step)
 {
-	ereport(ERROR,
-			errcode(ERRCODE_DATA_CORRUPTED),
-			errmsg("Tessera spill file's list of blocks is damaged"));
+	if (step->kind == TESS_SPILL_READ_PAGE)
+	{
+		if (step->len > reader->page_len * sizeof(TessSpillEntry))
+			elog(ERROR, "Tessera spill reader asked for a page of " UINT64_FORMAT " bytes",
+				 step->len);
+		read_at(reader->file, (char *) reader->page, (Size) step->len, step->at);
+	}
+	else if (step->kind == TESS_SPILL_READ_BLOCK)
+	{
+		if (step->len > reader->buffer_len)
+			elog(ERROR, "Tessera spill reader asked for a block of " UINT64_FORMAT " bytes",
+				 step->len);
+		read_at(reader->file, reader->buffer, (Size) step->len, step->at);
+	}
+	else
+		elog(ERROR, "Tessera spill reader took step %u where it reads", step->kind);
 }
 
 /*
- * Read another participant's list of the partition's blocks from the end
- * of its file. Nothing read from the file is trusted past what the file
- * can hold: the lists lie between the blocks and the trailer, a count for
- * each partition and then the blocks' entries, and every block lies whole
- * before the lists.
+ * The kernels' reader checks what it reads: of the own set the list in
+ * memory; of another participant's file the trailer at its end, the counts
+ * and the partition's entries, a page at a time, each before what it names
+ * is read. The reader's block buffer is as long as the partition's largest
+ * block, from the start.
  */
-static bool
-read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader)
-{
-	SpillTrailer trailer;
-	pgoff_t		size = FileSize(file);
-	uint64		counts = sizeof(uint64) * (uint64) spill->npartitions;
-	uint64		lists;
-	uint64		most;
-	uint64		before = 0;
-	uint64		total = 0;
-	uint64		count;
-	uint64	   *all;
-
-	if (size < 0)
-		ereport(ERROR,
-				errcode_for_file_access(),
-				errmsg("could not size Tessera spill file: %m"));
-	if ((uint64) size < sizeof(trailer))
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("Tessera spill file has no list of its blocks"));
-	read_at(file, (char *) &trailer, sizeof(trailer), (uint64) size - sizeof(trailer));
-	if (trailer.magic != SPILL_TRAILER_MAGIC ||
-		trailer.npartitions != (uint64) spill->npartitions ||
-		trailer.offset > (uint64) size - sizeof(trailer))
-		list_damaged();
-	if (trailer.fingerprint != spill->fingerprint)
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("Tessera spill file belongs to another table"));
-	lists = (uint64) size - sizeof(trailer) - trailer.offset;
-	if (lists < counts)
-		list_damaged();
-	/*
-	 * The blocks the lists have room for. The counts of all the partitions
-	 * are read at once and must fill that room exactly: a writer puts
-	 * nothing else between its blocks and its trailer.
-	 */
-	if ((lists - counts) % sizeof(TessSpillEntry) != 0)
-		list_damaged();
-	most = (lists - counts) / sizeof(TessSpillEntry);
-	all = palloc(counts);
-	read_at(file, (char *) all, counts, trailer.offset);
-	for (int other = 0; other < spill->npartitions; other++)
-	{
-		if (all[other] > most - total)
-			list_damaged();
-		if (other < partition)
-			before += all[other];
-		total += all[other];
-	}
-	count = all[partition];
-	pfree(all);
-	if (total != most)
-		list_damaged();
-	if (count == 0)
-		return false;
-	reader->blocks = MemoryContextAllocExtended(spill->context,
-												mul_size(count, sizeof(TessSpillEntry)),
-												MCXT_ALLOC_HUGE);
-	reader->count = count;
-	read_at(file, (char *) reader->blocks, mul_size(count, sizeof(TessSpillEntry)),
-			trailer.offset + counts + sizeof(TessSpillEntry) * before);
-	/*
-	 * A partition's blocks lie in the order they were written, each whole
-	 * before the next of them, and the last before the lists.
-	 */
-	for (uint64 index = 0; index < count; index++)
-	{
-		const TessSpillEntry *block = &reader->blocks[index];
-		uint64		end = index + 1 < count ? reader->blocks[index + 1].offset : trailer.offset;
-
-		if (end > trailer.offset || block->offset > end ||
-			block->stored > end - block->offset)
-			list_damaged();
-	}
-	return true;
-}
-
 TessSpillReader *
 tess_spill_open(TessSpill *spill, int participant, int partition)
 {
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	TessSpillReader *reader;
-	File		file;
+	uint64		largest = 0;
 	MemoryContext old;
 	char		name[MAXPGPATH];
 
@@ -620,7 +550,9 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 	reader->partition = partition;
 	if (participant == spill->participant)
 	{
-		if (spill->lists[partition].count == 0)
+		TessSpillList *list = &spill->lists[partition];
+
+		if (list->count == 0)
 		{
 			pfree(reader);
 			return NULL;
@@ -628,15 +560,24 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 		if (spill->shared == NULL && spill->reading[partition] > 0)
 			elog(ERROR, "Tessera serial spill file of partition %d is already being read",
 				 partition);
+		if (spill->kernels->spill_reader_own(&reader->state, spill->npartitions,
+											 spill->level, partition, spill->fingerprint,
+											 spill->max_len, list->entries, list->count,
+											 &largest, &status) != TESS_OK)
+			tess_status_report(&status);
 		spill->reading[partition]++;
 		reader->file = spill->file;
 		reader->own = true;
-		reader->blocks = spill->lists[partition].entries;
-		reader->count = spill->lists[partition].count;
+		reader->page = list->entries;
+		reader->page_len = (Size) list->count;
 	}
 	else
 	{
-		/* Another participant's file, a handle of its own, and its list of the partition's blocks. */
+		TessSpillReadStep step;
+		File		file;
+		pgoff_t		size;
+
+		/* Another participant's file, a handle of its own. */
 		file_name(spill, participant, name);
 		old = MemoryContextSwitchTo(spill->context);
 		file = FileSetOpen(&spill->shared->fs, name, O_RDONLY);
@@ -647,36 +588,41 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 			return NULL;
 		}
 		reader->file = file;
-		if (!read_trailer(spill, file, partition, reader))
-		{
-			FileClose(file);
-			pfree(reader);
-			return NULL;
-		}
-	}
-	/* A buffer of the largest block, from the start. */
-	for (uint64 index = 0; index < reader->count; index++)
-	{
-		uint64		stored = reader->blocks[index].stored;
-
-		/*
-		 * A block is a header and at most the longest body, or the packed
-		 * form of a chunk of columns, which may be longer than its body by
-		 * the room of its descriptors.
-		 */
-		uint64		extra = TESS_SPILL_HEADER_SIZE +
-			TESS_SPILL_COLUMNS_SLACK(TESS_SPILL_COLUMNS_MAX_WORDS);
-
-		if (stored < TESS_SPILL_HEADER_SIZE ||
-			(spill->max_len <= PG_UINT64_MAX - extra && stored > spill->max_len + extra))
+		size = FileSize(file);
+		if (size < 0)
 			ereport(ERROR,
-					errcode(ERRCODE_DATA_CORRUPTED),
-					errmsg("Tessera spilled block of " UINT64_FORMAT " bytes is out of range",
-						   stored));
-		reader->buffer_len = Max(reader->buffer_len, TYPEALIGN(8, (Size) stored));
+					errcode_for_file_access(),
+					errmsg("could not size Tessera spill file: %m"));
+		if (spill->kernels->spill_reader_file(&reader->state, spill->npartitions,
+											  spill->level, partition, spill->fingerprint,
+											  spill->max_len, (uint64) size,
+											  &status) != TESS_OK)
+			tess_status_report(&status);
+		reader->page_len = SPILL_PAGE_ENTRIES;
+		reader->page = MemoryContextAllocZero(spill->context,
+											  sizeof(TessSpillEntry) * SPILL_PAGE_ENTRIES);
+		for (;;)
+		{
+			if (spill->kernels->spill_reader_open(&reader->state, reader->page,
+												  reader->page_len, &step,
+												  &status) != TESS_OK)
+				tess_status_report(&status);
+			if (step.kind == TESS_SPILL_READ_EMPTY)
+			{
+				FileClose(file);
+				pfree(reader->page);
+				pfree(reader);
+				return NULL;
+			}
+			if (step.kind == TESS_SPILL_READ_READY)
+				break;
+			read_step(reader, &step);
+		}
+		largest = step.largest;
 	}
+	reader->buffer_len = TYPEALIGN(8, (Size) largest);
 	reader->buffer = MemoryContextAllocExtended(spill->context, Max(reader->buffer_len, 8),
-												MCXT_ALLOC_HUGE);
+												MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	reader->next_reader = spill->readers;
 	spill->readers = reader;
 	return reader;
@@ -689,77 +635,32 @@ check_reader(const TessSpillReader *reader)
 		elog(ERROR, "Tessera spill reader is missing or closed");
 }
 
+/* The next block whole, its header checked by the kernels' reader. */
 bool
 tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessSpillReadStep step;
 	TessSpill  *spill;
-	TessSpillEntry *block;
-	Size		stored;
 
 	check_reader(reader);
 	if (header == NULL)
 		elog(ERROR, "Tessera spill reader requires a header");
-	if (reader->pending)
-		elog(ERROR, "Tessera spilled block's body was not read");
 	spill = reader->spill;
-	if (reader->next >= reader->count)
-		return false;
-	block = &reader->blocks[reader->next];
-	stored = (Size) block->stored;
-	/* The whole block in one read: its header, then its stored body. */
-	Assert(stored <= reader->buffer_len);
-	read_at(reader->file, reader->buffer, stored, block->offset);
-	if (spill->kernels->spill_header_read(reader->buffer, TESS_SPILL_HEADER_SIZE,
-										  spill->fingerprint, spill->max_len,
-										  header, &status) != TESS_OK)
-		tess_status_report(&status);
-	if (header->partition != (uint32) reader->partition ||
-		header->level != spill->level)
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("Tessera spilled block of partition %u at level %u is in the file of partition %d at level %u",
-					   header->partition, header->level, reader->partition,
-					   spill->level));
-	if ((header->packed > 0 ? header->packed : header->len) + TESS_SPILL_HEADER_SIZE != stored)
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("Tessera spilled block's header does not match its length on disk"));
-
-	/*
-	 * A packed body begins with the counts of what it unpacks into. The
-	 * header's body length must be the length they give, before the caller
-	 * allocates by it: records and their length, or rows and words a row.
-	 */
-	if (header->packed > 0)
+	for (;;)
 	{
-		const char *packed = reader->buffer + TESS_SPILL_HEADER_SIZE;
-		uint32		count;
-		uint32		each;
-		bool		agrees;
-
-		memcpy(&count, packed, sizeof(count));
-		memcpy(&each, packed + sizeof(count), sizeof(each));
-		if (header->kind == TESS_SPILL_COLUMNS)
-		{
-			/* A row takes 8 bytes in every lane; divided, nothing overflows. */
-			uint64		row = 8 * ((uint64) tess_spill_columns_null_lanes(each) + each);
-			uint64		lanes = header->len - TESS_SPILL_COLUMNS_HEADER;
-
-			agrees = lanes % row == 0 && lanes / row == count;
-		}
-		else
-			agrees = header->len == 8 + (uint64) count * each;
-		if (!agrees)
-			ereport(ERROR,
-					errcode(ERRCODE_DATA_CORRUPTED),
-					errmsg("Tessera spilled block's header does not match its packed body"));
+		if (spill->kernels->spill_reader_next(&reader->state, reader->page, reader->page_len,
+											  reader->buffer, reader->buffer_len, &step,
+											  &status) != TESS_OK)
+			tess_status_report(&status);
+		if (step.kind == TESS_SPILL_READ_END)
+			return false;
+		if (step.kind == TESS_SPILL_READ_HEADER)
+			break;
+		read_step(reader, &step);
 	}
-	reader->next++;
-	reader->pending = true;
-	reader->pending_kind = header->kind;
-	reader->pending_len = header->len;
-	reader->pending_packed = header->packed;
+	*header = step.header;
+	reader->kind = header->kind;
 	/* A test damages here a header a node reads, past the reader's checks. */
 	INJECTION_POINT("tessera-spill-header", header);
 	return true;
@@ -768,71 +669,44 @@ tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 void
 tess_spill_read_body(TessSpillReader *reader, void *body, Size len)
 {
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
 	check_reader(reader);
-	if (!reader->pending || len != reader->pending_len)
-		elog(ERROR, "Tessera spilled block's body is read after its header, whole");
+	if (body == NULL && len > 0)
+		elog(ERROR, "Tessera spilled block's body requires a buffer");
+	if (reader->spill->kernels->spill_reader_body(&reader->state, reader->buffer,
+												  reader->buffer_len, body, len,
+												  &status) != TESS_OK)
+		tess_status_report(&status);
+#ifdef USE_INJECTION_POINTS
 	if (len > 0)
 	{
-		const char *stored = reader->buffer + TESS_SPILL_HEADER_SIZE;
+		TessSpillBodyRead read = {(TessSpillKind) reader->kind, body, len};
 
-		if (body == NULL)
-			elog(ERROR, "Tessera spilled block's body requires a buffer");
-		if (reader->pending_kind == TESS_SPILL_COLUMNS)
-		{
-			TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-
-			if (reader->spill->kernels->spill_columns_unpack == NULL)
-				elog(ERROR, "Tessera spill set requires the kernels of chunks of columns");
-			if (reader->spill->kernels->spill_columns_unpack(stored, reader->pending_packed,
-															 body, len, &status) != TESS_OK)
-				tess_status_report(&status);
-		}
-		else if (reader->pending_packed > 0)
-		{
-			TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-
-			if (reader->spill->kernels->spill_unpack(stored, reader->pending_packed,
-													 body, len, &status) != TESS_OK)
-				tess_status_report(&status);
-		}
-		else
-			memcpy(body, stored, len);
-#ifdef USE_INJECTION_POINTS
-		{
-			TessSpillBodyRead read = {(TessSpillKind) reader->pending_kind, body, len};
-
-			/* A test damages here a body a node reads, past the reader's checks. */
-			INJECTION_POINT("tessera-spill-body", &read);
-		}
-#endif
+		/* A test damages here a body a node reads, past the reader's checks. */
+		INJECTION_POINT("tessera-spill-body", &read);
 	}
-	reader->pending = false;
+#endif
 }
 
 void
 tess_spill_seek(TessSpillReader *reader, TessSpillPosition position)
 {
-	uint64		low = 0;
-	uint64		high;
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessSpillReadStep step;
 
 	check_reader(reader);
-	/* The partition's blocks are in the order of their offsets. */
-	high = reader->count;
-	while (low < high)
+	for (;;)
 	{
-		uint64		middle = low + (high - low) / 2;
-
-		if (reader->blocks[middle].offset < (uint64) position.offset)
-			low = middle + 1;
-		else
-			high = middle;
+		if (reader->spill->kernels->spill_reader_seek(&reader->state, reader->page,
+													  reader->page_len,
+													  (uint64) position.offset, &step,
+													  &status) != TESS_OK)
+			tess_status_report(&status);
+		if (step.kind == TESS_SPILL_READ_FOUND)
+			break;
+		read_step(reader, &step);
 	}
-	if (low >= reader->count ||
-		reader->blocks[low].offset != (uint64) position.offset)
-		elog(ERROR, "Tessera spill file has no block of partition %d at offset " INT64_FORMAT,
-			 reader->partition, position.offset);
-	reader->next = low;
-	reader->pending = false;
 }
 
 void
@@ -853,7 +727,7 @@ tess_spill_close(TessSpillReader *reader)
 	else
 	{
 		FileClose(reader->file);
-		pfree(reader->blocks);
+		pfree(reader->page);
 	}
 	if (reader->buffer != NULL)
 		pfree(reader->buffer);

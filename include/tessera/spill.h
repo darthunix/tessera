@@ -494,6 +494,93 @@ extern TessStatusCode tess_spill_set_stats(const TessSpillWriter *writer,
 										   uint64 *blocks, uint64 *bytes, int *files,
 										   TessStatus *status);
 
+/*
+ * The reader of a partition of a set (crates/relspill, set): it reads no
+ * byte itself. Of the caller's own set it takes the partition's list in
+ * memory; of another participant's file the file's length, and its open
+ * asks for the trailer, the counts and the partition's entries, a page
+ * at a time, each checked before what it names is asked for. Each step
+ * asks for bytes of the file to read into the page or into the block
+ * buffer, from their starts, after which the caller calls again; or says
+ * what it found. The reader's words are the caller's, made by
+ * tess_spill_reader_own or tess_spill_reader_file.
+ */
+#define TESS_SPILL_READER_WORDS 27
+
+typedef struct TessSpillReadState
+{
+	uint64		words[TESS_SPILL_READER_WORDS];
+} TessSpillReadState;
+
+typedef enum TessSpillReadStepKind
+{
+	/* Read len bytes at at into the page, from its start; call again. */
+	TESS_SPILL_READ_PAGE = 0,
+	/* Read len bytes at at into the block buffer, from its start; call again. */
+	TESS_SPILL_READ_BLOCK = 1,
+	/* The partition has no block. */
+	TESS_SPILL_READ_EMPTY = 2,
+	/* The open is done: the block buffer must hold largest bytes. */
+	TESS_SPILL_READ_READY = 3,
+	/* The next block's header, checked; its body waits in the block buffer. */
+	TESS_SPILL_READ_HEADER = 4,
+	/* Every block of the partition was read. */
+	TESS_SPILL_READ_END = 5,
+	/* A seek found its block. */
+	TESS_SPILL_READ_FOUND = 6
+} TessSpillReadStepKind;
+
+typedef struct TessSpillReadStep
+{
+	uint32		kind;
+	uint32		pad;
+	uint64		at;
+	uint64		len;
+	uint64		largest;
+	TessSpillHeader header;
+} TessSpillReadStep;
+
+/*
+ * A reader of a partition of the caller's own set, whose list is the count
+ * entries at entries; *largest gets the bytes of its largest block.
+ */
+extern TessStatusCode tess_spill_reader_own(TessSpillReadState *reader, int npartitions,
+											uint32 level, int partition,
+											uint64 fingerprint, uint64 max_len,
+											const TessSpillEntry *entries, uint64 count,
+											uint64 *largest, TessStatus *status);
+
+/* A reader of a partition of another participant's file of file_len bytes. */
+extern TessStatusCode tess_spill_reader_file(TessSpillReadState *reader, int npartitions,
+											 uint32 level, int partition,
+											 uint64 fingerprint, uint64 max_len,
+											 uint64 file_len, TessStatus *status);
+
+/* A step of opening another participant's file; page holds page_len entries. */
+extern TessStatusCode tess_spill_reader_open(TessSpillReadState *reader,
+											 const TessSpillEntry *page, Size page_len,
+											 TessSpillReadStep *step, TessStatus *status);
+
+/*
+ * A step of reading the next block: page is the page, or the own set's
+ * list, and block the block buffer.
+ */
+extern TessStatusCode tess_spill_reader_next(TessSpillReadState *reader,
+											 const TessSpillEntry *page, Size page_len,
+											 const void *block, Size block_len,
+											 TessSpillReadStep *step, TessStatus *status);
+
+/* The body of the block whose header the last step gave, into the len bytes at body. */
+extern TessStatusCode tess_spill_reader_body(TessSpillReadState *reader,
+											 const void *block, Size block_len,
+											 void *body, Size len, TessStatus *status);
+
+/* A step of going to the block a write placed at byte offset of the file. */
+extern TessStatusCode tess_spill_reader_seek(TessSpillReadState *reader,
+											 const TessSpillEntry *page, Size page_len,
+											 uint64 offset, TessSpillReadStep *step,
+											 TessStatus *status);
+
 /* Sizes and offsets of the mirrors above, for layout checks. */
 typedef enum TessSpillSetLayout
 {
@@ -503,7 +590,10 @@ typedef enum TessSpillSetLayout
 	TESS_SPILL_SET_LIST_COUNT_OFFSET = 3,
 	TESS_SPILL_SET_RANGE_SIZE = 4,
 	TESS_SPILL_SET_STEP_SIZE = 5,
-	TESS_SPILL_SET_STEP_RANGES_OFFSET = 6
+	TESS_SPILL_SET_STEP_RANGES_OFFSET = 6,
+	TESS_SPILL_SET_READER_SIZE = 7,
+	TESS_SPILL_SET_READ_STEP_SIZE = 8,
+	TESS_SPILL_SET_READ_STEP_HEADER_OFFSET = 9
 } TessSpillSetLayout;
 
 /* The size or offset for a kind, or 0 for an unknown one. */

@@ -1,14 +1,18 @@
-//! The writer of a spill set's file ([`relspill::set`]), declared in
-//! `include/tessera/spill.h`. The runtime's set keeps the writer's words,
-//! its buffers and its block lists, and writes the ranges a step names.
+//! The writer and the reader of a spill set's file ([`relspill::set`]),
+//! declared in `include/tessera/spill.h`. The runtime's set keeps the
+//! writer's and the readers' words, their buffers and the block lists,
+//! and writes and reads the ranges a step names.
 
 use std::ffi::c_int;
 use std::mem::{offset_of, size_of};
 
 use anyhow::{Context, Result, bail, ensure};
 use relspill::BlockKind;
-use relspill::set::{Block, Config, Entry, Lists, MAX_RANGES, Region, Step, Writer};
+use relspill::set::{
+    Block, Config, Entry, Lists, MAX_RANGES, ReadConfig, ReadStep, Reader, Region, Step, Writer,
+};
 
+use super::spill::SpillHeader;
 use super::status::{Code, Status, guard};
 use super::table::{slots, values};
 
@@ -382,6 +386,10 @@ pub const SET_LIST_COUNT_OFFSET: c_int = 3;
 pub const SET_RANGE_SIZE: c_int = 4;
 pub const SET_STEP_SIZE: c_int = 5;
 pub const SET_STEP_RANGES_OFFSET: c_int = 6;
+/// Of a reader, of a step of a reader, and where its header lies.
+pub const SET_READER_SIZE: c_int = 7;
+pub const SET_READ_STEP_SIZE: c_int = 8;
+pub const SET_READ_STEP_HEADER_OFFSET: c_int = 9;
 
 /// `tess_spill_set_layout`: the size or offset of a `TessSpillSetLayout`
 /// for the C side's mirrors to check; 0 for another code.
@@ -395,6 +403,294 @@ pub extern "C" fn tess_spill_set_layout(what: c_int) -> usize {
         SET_RANGE_SIZE => size_of::<SpillRange>(),
         SET_STEP_SIZE => size_of::<SpillStep>(),
         SET_STEP_RANGES_OFFSET => offset_of!(SpillStep, ranges),
+        SET_READER_SIZE => size_of::<Reader>(),
+        SET_READ_STEP_SIZE => size_of::<SpillReadStep>(),
+        SET_READ_STEP_HEADER_OFFSET => offset_of!(SpillReadStep, header),
         _ => 0,
+    }
+}
+
+/// `TessSpillReadStep`: what a call of a reader asks or found; see
+/// [`ReadStep`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpillReadStep {
+    pub kind: u32,
+    pub pad: u32,
+    /// Of a read: where in the file, and how many bytes.
+    pub at: u64,
+    pub len: u64,
+    /// Of an open done: the bytes the block buffer must hold.
+    pub largest: u64,
+    /// Of a block read: its header.
+    pub header: SpillHeader,
+}
+
+/// `TessSpillReadStepKind`: read into the page and call again.
+pub const READ_PAGE: u32 = 0;
+/// Read into the block buffer and call again.
+pub const READ_BLOCK: u32 = 1;
+/// The partition has no block.
+pub const READ_EMPTY: u32 = 2;
+/// The open is done.
+pub const READ_READY: u32 = 3;
+/// A block's header; its body waits.
+pub const READ_HEADER: u32 = 4;
+/// Every block was read.
+pub const READ_END: u32 = 5;
+/// A seek found its block.
+pub const READ_FOUND: u32 = 6;
+
+impl SpillReadStep {
+    fn from_step(step: ReadStep) -> Self {
+        let mut out = Self::default();
+        match step {
+            ReadStep::Page { at, len } => {
+                (out.kind, out.at, out.len) = (READ_PAGE, at, len as u64);
+            }
+            ReadStep::Block { at, len } => {
+                (out.kind, out.at, out.len) = (READ_BLOCK, at, len as u64);
+            }
+            ReadStep::Empty => out.kind = READ_EMPTY,
+            ReadStep::Ready { largest } => (out.kind, out.largest) = (READ_READY, largest),
+            ReadStep::Header(header) => {
+                (out.kind, out.header) = (READ_HEADER, SpillHeader::from_block(header));
+            }
+            ReadStep::End => out.kind = READ_END,
+            ReadStep::Found => out.kind = READ_FOUND,
+        }
+        out
+    }
+}
+
+/// The reader at `reader`.
+///
+/// # Safety
+///
+/// `reader` must be null or point to a reader this process alone uses.
+unsafe fn reader_at<'a>(reader: *mut Reader) -> Result<&'a mut Reader> {
+    ensure!(reader.is_aligned(), "a reader not aligned to 8");
+    // SAFETY: the caller's contract; any bytes are a reader, whose calls
+    // check them.
+    unsafe { reader.as_mut() }.context("a null reader")
+}
+
+/// `len` entries at `entries`, a page or a list, empty when there are
+/// none.
+///
+/// # Safety
+///
+/// `entries` must point to `len` initialized entries, valid and unchanged
+/// for `'a`, when `len` is positive.
+unsafe fn page_at<'a>(entries: *const Entry, len: usize) -> Result<&'a [Entry]> {
+    ensure!(len == 0 || entries.is_aligned(), "a page not aligned to 8");
+    // SAFETY: the caller's contract.
+    unsafe { values(entries, len, "page") }
+}
+
+/// Write `step` to `*out`, checked for null and alignment.
+///
+/// # Safety
+///
+/// `out` must be null or writable.
+unsafe fn put_step(out: *mut SpillReadStep, step: ReadStep) -> Result<()> {
+    ensure!(out.is_aligned(), "a step not aligned to 8");
+    // SAFETY: the caller's contract.
+    let out = unsafe { out.as_mut() }.context("a null step")?;
+    *out = SpillReadStep::from_step(step);
+    Ok(())
+}
+
+fn read_config(
+    npartitions: c_int,
+    level: u32,
+    partition: c_int,
+    fingerprint: u64,
+    max_len: u64,
+) -> Result<ReadConfig> {
+    Ok(ReadConfig {
+        partitions: u32::try_from(npartitions).context("negative partitions")?,
+        level,
+        partition: u32::try_from(partition).context("a negative partition")?,
+        fingerprint,
+        max_len,
+    })
+}
+
+/// `tess_spill_reader_own`: make `*reader` a reader of `partition` of the
+/// caller's own set, whose list is the `count` entries at `entries`
+/// ([`Reader::own`]); `*largest` gets the bytes of its largest block.
+///
+/// # Safety
+///
+/// `reader` as for [`tess_spill_set_init`]; `entries` must point to
+/// `count` entries when `count` is positive, unchanged while the reader
+/// reads; `largest` must be writable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
+pub unsafe extern "C" fn tess_spill_reader_own(
+    reader: *mut Reader,
+    npartitions: c_int,
+    level: u32,
+    partition: c_int,
+    fingerprint: u64,
+    max_len: u64,
+    entries: *const Entry,
+    count: u64,
+    largest: *mut u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let out = reader_at(reader)?;
+            let config = read_config(npartitions, level, partition, fingerprint, max_len)?;
+            let list = page_at(entries, usize::try_from(count)?)?;
+            let made = Reader::own(config, list)?;
+            ensure!(largest.is_aligned(), "a largest not aligned to 8");
+            *largest.as_mut().context("a null largest")? = made.largest();
+            *out = made;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_spill_reader_file`: make `*reader` a reader of `partition` of
+/// another participant's file of `file_len` bytes ([`Reader::file`]).
+///
+/// # Safety
+///
+/// As for [`tess_spill_set_init`].
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
+pub unsafe extern "C" fn tess_spill_reader_file(
+    reader: *mut Reader,
+    npartitions: c_int,
+    level: u32,
+    partition: c_int,
+    fingerprint: u64,
+    max_len: u64,
+    file_len: u64,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let out = reader_at(reader)?;
+            let config = read_config(npartitions, level, partition, fingerprint, max_len)?;
+            *out = Reader::file(config, file_len)?;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_spill_reader_open`: a step of opening another participant's
+/// file into `*step` ([`Reader::open`]); the page holds what the last
+/// step asked for.
+///
+/// # Safety
+///
+/// `reader` as for [`tess_spill_set_init`]; `page` must point to
+/// `page_len` entries; `step` must be writable; `status` as for every
+/// entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_reader_open(
+    reader: *mut Reader,
+    page: *const Entry,
+    page_len: usize,
+    step: *mut SpillReadStep,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let reader = reader_at(reader)?;
+            let found = reader.open(page_at(page, page_len)?)?;
+            put_step(step, found)
+        })
+    }
+}
+
+/// `tess_spill_reader_next`: a step of reading the next block into
+/// `*step` ([`Reader::next`]); the page (the list, of the own set) and
+/// the block buffer hold what the last step asked for.
+///
+/// # Safety
+///
+/// As for [`tess_spill_reader_open`], and `block` must point to
+/// `block_len` bytes when `block_len` is positive.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_reader_next(
+    reader: *mut Reader,
+    page: *const Entry,
+    page_len: usize,
+    block: *const u8,
+    block_len: usize,
+    step: *mut SpillReadStep,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let reader = reader_at(reader)?;
+            let found =
+                reader.next(page_at(page, page_len)?, values(block, block_len, "block")?)?;
+            put_step(step, found)
+        })
+    }
+}
+
+/// `tess_spill_reader_body`: the body of the block whose header the last
+/// step gave, from the block buffer into the `len` bytes at `body`
+/// ([`Reader::body`]).
+///
+/// # Safety
+///
+/// `reader` as for [`tess_spill_set_init`]; `block` must point to
+/// `block_len` bytes, and `body` to `len` writable bytes, when they are
+/// positive, not overlapping; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_reader_body(
+    reader: *mut Reader,
+    block: *const u8,
+    block_len: usize,
+    body: *mut u8,
+    len: usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let reader = reader_at(reader)?;
+            Ok(reader.body(
+                values(block, block_len, "block")?,
+                slots(body, len, "body")?,
+            )?)
+        })
+    }
+}
+
+/// `tess_spill_reader_seek`: a step of going to the block a write placed
+/// at byte `offset` of the file, into `*step` ([`Reader::seek`]).
+///
+/// # Safety
+///
+/// As for [`tess_spill_reader_open`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_reader_seek(
+    reader: *mut Reader,
+    page: *const Entry,
+    page_len: usize,
+    offset: u64,
+    step: *mut SpillReadStep,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let reader = reader_at(reader)?;
+            let found = reader.seek(page_at(page, page_len)?, offset)?;
+            put_step(step, found)
+        })
     }
 }
