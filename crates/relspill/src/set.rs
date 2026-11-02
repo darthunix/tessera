@@ -47,6 +47,10 @@
 use crate::error::ensure;
 use crate::{BlockHeader, BlockKind, Error, HEADER_SIZE, MAX_LEVEL, Result, Rule, columns};
 
+mod reader;
+
+pub use reader::{READER_WORDS, ReadConfig, ReadStep, Reader};
+
 /// The first word of a shared set's trailer.
 pub const TRAILER_MAGIC: u64 = 0x5445_5353_5452_4149;
 
@@ -846,7 +850,7 @@ impl Writer {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::panic::Location;
 
     use anyhow::{Context, Result, ensure};
@@ -865,7 +869,7 @@ mod tests {
         clippy::panic,
         reason = "a failed property fails its test, as an assertion does"
     )]
-    fn property<S: Strategy>(strategy: S, test: impl Fn(S::Value) -> Result<()>) {
+    pub(crate) fn property<S: Strategy>(strategy: S, test: impl Fn(S::Value) -> Result<()>) {
         let config = ProptestConfig {
             source_file: Some(Location::caller().file()),
             failure_persistence: Some(Box::new(FileFailurePersistence::WithSource(
@@ -883,7 +887,7 @@ mod tests {
 
     /// The block lists of a test: a region and a count for each
     /// partition.
-    type TestLists = Vec<(Vec<Entry>, u64)>;
+    pub(crate) type TestLists = Vec<(Vec<Entry>, u64)>;
 
     impl Lists for TestLists {
         fn list(&mut self, partition: usize) -> (&mut [Entry], &mut u64) {
@@ -893,7 +897,7 @@ mod tests {
     }
 
     /// The bytes of `entries` as a list lies in memory.
-    fn entry_bytes(entries: &[Entry]) -> Vec<u8> {
+    pub(crate) fn entry_bytes(entries: &[Entry]) -> Vec<u8> {
         entries
             .iter()
             .flat_map(|entry| [entry.offset, entry.stored])
@@ -901,16 +905,16 @@ mod tests {
             .collect()
     }
 
-    const FINGERPRINT: u64 = 0x1234_5678_9abc_def0;
-    const MAX_LEN: u64 = 1 << 20;
+    pub(crate) const FINGERPRINT: u64 = 0x1234_5678_9abc_def0;
+    pub(crate) const MAX_LEN: u64 = 1 << 20;
 
     /// A block of a test, owning its body.
     #[derive(Clone, Debug)]
-    struct Owned {
-        kind: BlockKind,
-        number: u32,
-        partition: u32,
-        body: Vec<u8>,
+    pub(crate) struct Owned {
+        pub(crate) kind: BlockKind,
+        pub(crate) number: u32,
+        pub(crate) partition: u32,
+        pub(crate) body: Vec<u8>,
     }
 
     impl Owned {
@@ -926,18 +930,18 @@ mod tests {
 
     /// A host that keeps the file of a set as bytes in memory, and grows
     /// its regions when a step asks.
-    struct Host {
-        writer: Writer,
+    pub(crate) struct Host {
+        pub(crate) writer: Writer,
         buffer: Vec<u8>,
         scratch: Vec<u8>,
-        lists: TestLists,
-        file: Vec<u8>,
+        pub(crate) lists: TestLists,
+        pub(crate) file: Vec<u8>,
         /// Ranges left to write before one is written only in part.
         cut: Option<usize>,
     }
 
     impl Host {
-        fn new(config: Config) -> Result<Self> {
+        pub(crate) fn new(config: Config) -> Result<Self> {
             Ok(Self {
                 writer: Writer::new(config)?,
                 buffer: vec![0; config.buffer_len],
@@ -1010,7 +1014,7 @@ mod tests {
 
         /// Write a block: its place in the file, or `None` when a write
         /// was cut.
-        fn write(&mut self, block: &Owned) -> Result<Option<Entry>> {
+        pub(crate) fn write(&mut self, block: &Owned) -> Result<Option<Entry>> {
             loop {
                 let step = self.writer.write(
                     &mut self.buffer,
@@ -1031,7 +1035,7 @@ mod tests {
         }
 
         /// Finish the set: false when a write was cut.
-        fn finish(&mut self) -> Result<bool> {
+        pub(crate) fn finish(&mut self) -> Result<bool> {
             loop {
                 let step = self.writer.finish(&mut self.buffer, &mut self.lists)?;
                 match self.serve(step, 0, &[])? {
@@ -1055,7 +1059,7 @@ mod tests {
 
     /// The bytes a block's body takes on disk, packed as the writer packs
     /// it, and the length its header gives.
-    fn stored_body(block: &Owned) -> Result<(Vec<u8>, u64)> {
+    pub(crate) fn stored_body(block: &Owned) -> Result<(Vec<u8>, u64)> {
         let len = block.body.len();
         match block.kind {
             BlockKind::Columns => {
@@ -1166,7 +1170,7 @@ mod tests {
 
     /// A chunk of `count` records of `len` bytes that packs: a used mark,
     /// each record's length, and words from `seed` elsewhere.
-    fn records(count: usize, len: usize, seed: u32) -> Vec<u8> {
+    pub(crate) fn records(count: usize, len: usize, seed: u32) -> Vec<u8> {
         let mut bytes = vec![0_u8; CHUNK_HEADER + count * len];
         let total = bytes.len() as u64;
         bytes[..CHUNK_HEADER].copy_from_slice(&total.to_ne_bytes());
@@ -1186,7 +1190,7 @@ mod tests {
 
     /// A chunk of columns of `rows` rows of `words` words, its lanes
     /// filled from `seed`.
-    fn columns_chunk(rows: usize, words: usize, seed: u64) -> Vec<u8> {
+    pub(crate) fn columns_chunk(rows: usize, words: usize, seed: u64) -> Vec<u8> {
         let mut chunk = vec![0_u8; columns::size(rows.max(1), words)];
         let made = columns::init(&mut chunk, words).and_then(|_| columns::shape(&chunk));
         let Ok(shape) = made else {
@@ -1205,7 +1209,7 @@ mod tests {
 
     /// Blocks of each kind and length a set meets: records that pack and
     /// bytes that do not, values, and chunks of columns.
-    fn blocks(partitions: u32) -> impl Strategy<Value = Vec<Owned>> {
+    pub(crate) fn blocks(partitions: u32) -> impl Strategy<Value = Vec<Owned>> {
         let block = (0..partitions, 0..4_u32, 0..400_usize, any::<u32>()).prop_map(
             |(partition, kind, size, seed)| {
                 let (kind, body) = match kind {
@@ -1241,7 +1245,7 @@ mod tests {
         prop::collection::vec(block, 0..40)
     }
 
-    fn config(partitions: u32, buffer_len: usize, shared: bool) -> Config {
+    pub(crate) fn config(partitions: u32, buffer_len: usize, shared: bool) -> Config {
         Config {
             partitions,
             level: 2,
