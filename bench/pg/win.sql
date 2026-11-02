@@ -180,6 +180,35 @@ SELECT pg_temp.measure_pair('float4_mixed',
            1000000 * :scale),
     :repetitions);
 
+-- Smallint arithmetic with a smallint result, summed: +, * and -x;
+-- a division and the cast from int4.
+SELECT pg_temp.measure_pair('int2_arith',
+    'SELECT sum(s + 1::int2), sum(s * 2::int2), sum(-s) FROM bench_dates',
+    :repetitions);
+SELECT pg_temp.measure_pair('int2_div',
+    'SELECT sum(s / 3::int2), sum((v % 30000)::int2) FROM bench_dates',
+    :repetitions);
+-- A date column against a timestamp past midnight; about half the rows
+-- pass.
+SELECT pg_temp.measure_pair('date_ts_filter',
+    $$SELECT count(*) FROM bench_dates WHERE d < timestamp '2022-06-01 12:00'$$,
+    :repetitions);
+-- A timestamp with time zone in a zone with summer time: date_trunc by
+-- day and by hour, the casts between date and timestamptz and extract
+-- over hourly instants of five years, whose spans fit the zone's cache
+-- and whose 1826 days do not all fit; then instants whose 64 rows of a
+-- batch lie in 64 spans, more than the cache keeps.
+SET TimeZone = 'Europe/Berlin';
+SELECT pg_temp.measure_pair('tstz_trunc',
+    $$SELECT count(*) FROM bench_tstz WHERE date_trunc('day', tz) > timestamptz '2022-06-01 00:00+00' AND date_trunc('hour', tz) <> timestamptz '2020-01-01 00:00+00'$$,
+    :repetitions);
+SELECT pg_temp.measure_pair('tstz_cast',
+    $$SELECT (SELECT count(*) FROM bench_tstz WHERE tz::date > date '2022-06-01' AND extract(hour FROM tz) <> 3), (SELECT count(*) FROM bench_dates WHERE d::timestamptz < timestamptz '2022-06-01 00:00+00')$$,
+    :repetitions);
+SELECT pg_temp.measure_pair('tstz_spans',
+    $$SELECT count(*) FROM bench_tstz WHERE tz_spread::date > date '2000-01-01'$$,
+    :repetitions);
+
 \copy timings TO 'timings.csv' CSV HEADER
 
 \o summary.txt
@@ -222,6 +251,12 @@ EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXEC
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_float_filter;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_float_sum;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_float4_mixed;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_int2_arith;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_int2_div;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_date_ts_filter;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tstz_trunc;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tstz_cast;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_tstz_spans;
 SET tessera.enable = off;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_nothing;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_sparse;
@@ -249,5 +284,11 @@ EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXEC
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_float_filter;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_float_sum;
 EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_float4_mixed;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_int2_arith;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_int2_div;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_date_ts_filter;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_tstz_trunc;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_tstz_cast;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_tstz_spans;
 \o
 DEALLOCATE ALL;

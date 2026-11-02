@@ -30,7 +30,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
       `client_connection_check_interval` for its `psql`. A test of the
       tool with a step that outlives its deadline, and the option in
       `docs/measuring.md`. Check: `cargo test --locked -p tessera-ab`.
-- [ ] 2.2 Add the six cases of the design's measurement plan to the
+- [x] 2.2 Add the six cases of the design's measurement plan to the
       family `win` of `bench/pg`, with `TimeZone` set in the family's
       session and their lines in `bench/pg/README.md`, and the table
       `bench_tstz` to `bench/pg/setup.sql`. Check: `bench/pg/run.sh
