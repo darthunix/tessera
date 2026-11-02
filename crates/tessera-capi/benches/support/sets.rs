@@ -83,10 +83,16 @@ pub fn cases<T: Width>() -> Result<Vec<Fixture<T>>> {
         "none",
         false,
     ));
+    cases.push(shuffled_case(values));
+    Ok(cases)
+}
+
+/// Every row selected, over `values` in random order, so that the steps
+/// of a search by halving do not follow the rows.
+fn shuffled_case<T: Width>(values: Vec<T>) -> Fixture<T> {
     let mut case = Fixture::from_values(fixture::shuffled(values), "all", "none", false);
     case.name = "words/1024/shuffled/nulls-none/ready".to_owned();
-    cases.push(case);
-    Ok(cases)
+    case
 }
 
 /// The largest set, of the values of every seventh row of the first case
@@ -280,17 +286,13 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 /// row searches by halving.
 const PILOT_KEYS: usize = KEY_COUNTS[KEY_COUNTS.len() - 1];
 
-/// The case of the pilot of unlearned inputs: 1024 rows of the int4 values
-/// of the rows that the keys span, spread evenly, so that every row lies
-/// within the keys and each step of a search by halving goes either way.
+/// The case of the pilot of unlearned inputs: the int4 case `shuffled`,
+/// the one whose inputs the pilot's form is for. Its values lie in random
+/// order, so each word holds values from all over the keys, and a
+/// permutation of its words and rows keeps no value near the one before.
 pub fn pilot_case() -> Result<Fixture<i32>> {
     let reading = reading::cases();
-    let values = &first_long(&reading)?.values;
-    let span = (PILOT_KEYS - 1) * KEY_STRIDE + 1;
-    let spread = (0..1024).map(|row| values[row * span / 1024]).collect();
-    let mut case = Fixture::from_values(spread, "all", "none", false);
-    case.name = "words/1024/span/nulls-none/ready".to_owned();
-    Ok(case)
+    Ok(shuffled_case(first_long(&reading)?.values.clone()))
 }
 
 /// The pilot of unlearned inputs, on dense int4 blocks with the largest
