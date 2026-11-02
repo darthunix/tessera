@@ -95,7 +95,7 @@ fn round_trip(config: &TableConfig) -> anyhow::Result<()> {
         table.link(0, &mut CHUNK_HEADER.clone())?;
     }
     let written = bytes(&chunk);
-    let used = u64::from_ne_bytes(written[..8].try_into()?) as usize;
+    let used = u64::from_ne_bytes(written[..CHUNK_HEADER].try_into()?) as usize;
     let records = &written[..used];
 
     let mut packed = vec![0_u8; used];

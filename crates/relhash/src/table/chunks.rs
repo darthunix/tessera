@@ -226,7 +226,7 @@ impl<'a> Chunks<'a> {
     /// The used mark of the chunk of `len` bytes at `base`, whose records
     /// take `record_size` bytes each: checked to lie between
     /// [`CHUNK_HEADER`] and `len` and to end a record, so that a caller
-    /// outside the crate never reads the mark by itself.
+    /// need not read the mark by itself.
     ///
     /// # Safety
     ///

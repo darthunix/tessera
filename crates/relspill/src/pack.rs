@@ -242,14 +242,22 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use relhash::RECORD_HASH_OFFSET;
+
     use super::*;
+
+    /// The lanes of a record's hash, its first key and the first word of
+    /// its payload after one key.
+    const HASH: usize = RECORD_HASH_OFFSET / 4;
+    const KEY: usize = RECORD_HEADER / 4;
+    const VALUE: usize = (RECORD_HEADER + KEY_SLOT) / 4;
 
     /// A chunk of `count` records of `len` bytes: a hash, a next link, NULL
     /// bits, the length, then words the closure gives per record and lane.
     fn chunk(count: usize, len: usize, word: impl Fn(usize, usize) -> u32) -> Vec<u8> {
         let mut bytes = vec![0_u8; USED_MARK + count * len];
         let total = bytes.len() as u64;
-        bytes[..8].copy_from_slice(&total.to_ne_bytes());
+        bytes[..USED_MARK].copy_from_slice(&total.to_ne_bytes());
         for record in 0..count {
             let base = USED_MARK + record * len;
             for lane in 0..len / 4 {
@@ -282,10 +290,11 @@ mod tests {
     #[test]
     fn a_join_record_of_int4_packs_to_twelve_bytes() {
         // Hash, key low half, NULL-bits word zero, an int4 value.
-        let original = chunk(1000, 40, |record, lane| match lane {
-            0 => (record as u32).wrapping_mul(2_654_435_761),
-            4 => 1_000_000 + record as u32,
-            8 => 7 * record as u32 + 100_000,
+        let len = RECORD_HEADER + KEY_SLOT + 16;
+        let original = chunk(1000, len, |record, lane| match lane {
+            HASH => (record as u32).wrapping_mul(2_654_435_761),
+            KEY => 1_000_000 + record as u32,
+            VALUE => 7 * record as u32 + 100_000,
             _ => 0,
         });
         let packed = round_trip(&original);
