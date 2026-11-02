@@ -5,7 +5,8 @@
  * The C side and the kernels library agree on the sizes and offsets of the
  * structures they pass each other (a row mask, a Datum column, a status, a
  * table key, a sort key, a chunk header) and on a few numbers the C side
- * computes with (the bits of a record reference, the bytes of a spilled
+ * computes with (the bits of a record reference, the bytes of a chunk's
+ * used mark, the offsets of a record's fields, the bytes of a spilled
  * block's header). The library reports them through its layout probes;
  * this check compares every one with the headers. The module that links
  * the library runs it when it loads, so a library built from another
@@ -70,6 +71,19 @@ tess_kernels_layout_matches(void)
 		sizeof(TessSpillWeights) &&
 		tess_table_layout(TESS_TABLE_LAYOUT_SPILL_WEIGHTS_PER_CHECK_OFFSET) ==
 		offsetof(TessSpillWeights, per_check) &&
+		tess_table_layout(TESS_TABLE_LAYOUT_CHUNK_HEADER) ==
+		TESS_TABLE_CHUNK_HEADER &&
+		tess_table_layout(TESS_TABLE_LAYOUT_RECORD_HASH_OFFSET) ==
+		TESS_TABLE_RECORD_HASH_OFFSET &&
+		tess_table_layout(TESS_TABLE_LAYOUT_RECORD_NEXT_OFFSET) ==
+		TESS_TABLE_RECORD_NEXT_OFFSET &&
+		tess_table_layout(TESS_TABLE_LAYOUT_RECORD_NULL_BITS_OFFSET) ==
+		TESS_TABLE_RECORD_NULL_BITS_OFFSET &&
+		tess_table_layout(TESS_TABLE_LAYOUT_RECORD_SIZE_OFFSET) ==
+		TESS_TABLE_RECORD_SIZE_OFFSET &&
+		tess_table_layout(TESS_TABLE_LAYOUT_RECORD_HEADER) ==
+		TESS_TABLE_RECORD_HEADER &&
+		tess_table_layout(TESS_TABLE_LAYOUT_KEY_SLOT) == TESS_TABLE_KEY_SLOT &&
 		tess_table_layout((TessTableLayoutKind) 99) == 0 &&
 		tess_sort_layout(TESS_SORT_LAYOUT_KEY_SIZE) == sizeof(TessSortKey) &&
 		tess_sort_layout(TESS_SORT_LAYOUT_KEY_FLAGS_OFFSET) ==

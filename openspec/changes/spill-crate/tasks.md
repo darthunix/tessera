@@ -327,6 +327,13 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 - [ ] 3.26 Have outside reviews read the crate, as in 2.1, and fix the
       accepted findings. Check: the review of the list in the pull
       request
+- [x] 3.27 Give C the names of a chunk's used mark and of a record's
+      layout, which the check of the layout at load compares with the
+      kernels, and make the nodes and the C tests take a record's
+      fields by them or by calls of the crate. Check: the test of the
+      layout probes; `make installcheck`; the review of the places
+      that the rule "References checked by the crate" of `relhash`
+      lists
 
 ## 4. The spec of the crate
 
