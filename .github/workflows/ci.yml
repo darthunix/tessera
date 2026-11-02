@@ -382,7 +382,8 @@ jobs:
             --skip rows_wider_than_64_words_keep_a_lane_of_null_bits_per_64 \
             --skip participants_count_a_build_at_once \
             --skip a_set_written_in_memory_reads_back \
-            --skip a_set_cut_by_a_failed_write_takes_only_a_reset
+            --skip a_set_cut_by_a_failed_write_takes_only_a_reset \
+            --skip a_set_reads_back_by_its_lists_and_from_its_file
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)

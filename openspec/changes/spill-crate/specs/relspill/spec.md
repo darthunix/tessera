@@ -52,7 +52,8 @@ call.
 - **WHEN** a caller keeps the file of a set as bytes in memory, writes
   the ranges the crate returns, and reads the ranges it asks for
 - **THEN** every block of every partition reads back as it was written
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/set/reader.rs::a_set_reads_back_by_its_lists_and_from_its_file`
 
 #### Scenario: A write that fails half way
 - **WHEN** the caller reports a write that it finished only in part
@@ -96,15 +97,17 @@ the block list of each partition, and the trailer of a file that other
 participants read. Its writer,
 [`Writer`](../../../crates/relspill/src/set.rs), SHALL keep the write
 buffer and the lists and lay the trailer out, as its documentation
-says. It SHALL check every list, entry and trailer it reads before it
-asks for the bytes they point to.
+says. Its reader, [`Reader`](../../../crates/relspill/src/set/reader.rs),
+SHALL check every list, entry and trailer it reads before it asks for
+the bytes they point to.
 
 #### Scenario: A shared file read by another participant
 - **WHEN** a participant finishes its file, and another participant
   reads one of its partitions
 - **THEN** the reader gets the blocks of that partition in the order
   they were written, and no block of another partition
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/set/reader.rs::a_set_reads_back_by_its_lists_and_from_its_file`
 
 #### Scenario: A partition dropped before the set is finished
 - **WHEN** a participant drops a partition of a shared set before it

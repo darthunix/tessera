@@ -242,6 +242,48 @@ rules! {
     PackedLength,
     /// A finish where a step left a block undone.
     FinishPending,
+
+    /// A reader of a set in no state its call takes.
+    ReaderState,
+    /// A region that does not hold the bytes a read asked for.
+    ReaderRead,
+    /// A page too short for a step, or a list shorter than its count.
+    ReaderPage,
+    /// A file shorter than a trailer.
+    Trailer,
+    /// A trailer without its mark.
+    TrailerMagic,
+    /// A trailer of another count of partitions than the reader's.
+    TrailerPartitions,
+    /// A trailer whose lists do not start inside the file.
+    TrailerLists,
+    /// A file of another table than the reader's.
+    FileFingerprint,
+    /// Lists too short for the counts, or not of whole entries.
+    ListsRoom,
+    /// Counts of blocks that do not fill the lists exactly.
+    ListCounts,
+    /// An entry of a length no block takes.
+    EntryLength,
+    /// An entry that does not lie whole before the next block of its
+    /// partition, or before the lists.
+    EntryPlace,
+    /// A block of another partition than the reader's.
+    BlockPartition,
+    /// A block of another level than the reader's.
+    BlockLevel,
+    /// A block that takes other bytes on disk than its header says.
+    BlockStored,
+    /// A packed block whose counts give another length than its header.
+    PackedHeader,
+    /// A block read before the last block's body was taken.
+    BodyNotRead,
+    /// A body taken with no header before it.
+    BodyRead,
+    /// A body asked for at another length than its header gives.
+    BodyLength,
+    /// A seek to a byte where no block of the partition starts.
+    SeekPosition,
 }
 
 impl Error {
@@ -488,6 +530,58 @@ impl fmt::Display for Error {
                 "a shared spill set dropped partition {a} before it was finished"
             ),
             Rule::PackedLength => write!(f, "a chunk packs into {a} bytes, past a header's"),
+            Rule::ReaderState => f.write_str("a spill reader in no state its call takes"),
+            Rule::ReaderRead => write!(f, "a region of {a} bytes for a read of {b}"),
+            Rule::ReaderPage => write!(f, "a page of {a} entries for a spill reader"),
+            Rule::Trailer => write!(f, "a spill file of {a} bytes has no list of its blocks"),
+            Rule::TrailerMagic => f.write_str("a spill file ends in no trailer of its lists"),
+            Rule::TrailerPartitions => write!(
+                f,
+                "a spill file's trailer gives {a} partitions where the set has {b}"
+            ),
+            Rule::TrailerLists => write!(
+                f,
+                "a spill file's lists start at byte {a}, past its trailer at {b}"
+            ),
+            Rule::FileFingerprint => f.write_str("a spill file belongs to another table"),
+            Rule::ListsRoom => write!(
+                f,
+                "a spill file's lists of {a} bytes hold no whole counts and entries of {b} partitions"
+            ),
+            Rule::ListCounts => {
+                write!(
+                    f,
+                    "a spill file's lists count {a} blocks where they hold {b}"
+                )
+            }
+            Rule::EntryLength => write!(f, "a spilled block of {a} bytes is out of range"),
+            Rule::EntryPlace => write!(
+                f,
+                "a spilled block at byte {a} of {b} bytes runs past the next block or the lists"
+            ),
+            Rule::BlockPartition => write!(
+                f,
+                "a spilled block of partition {a} is in the file of partition {b}"
+            ),
+            Rule::BlockLevel => write!(
+                f,
+                "a spilled block at level {a} is in the file of level {b}"
+            ),
+            Rule::BlockStored => write!(
+                f,
+                "a spilled block of {a} bytes on disk whose header gives a body of {b}"
+            ),
+            Rule::PackedHeader => write!(
+                f,
+                "a packed block's header gives {a} bytes, not what its {b} counted items take"
+            ),
+            Rule::BodyNotRead => f.write_str("a spilled block's body was not read"),
+            Rule::BodyRead => f.write_str("a spilled block's body is read after its header, once"),
+            Rule::BodyLength => write!(
+                f,
+                "a spilled block's body of {a} bytes where its header gives {b}"
+            ),
+            Rule::SeekPosition => write!(f, "no spilled block of partition {a} at byte {b}"),
             Rule::FinishPending => write!(
                 f,
                 "a spill set finished where a step left a block of partition {a} undone"
