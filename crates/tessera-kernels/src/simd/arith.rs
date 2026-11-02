@@ -3,7 +3,9 @@
 //! the primitives of [`Vectors`].
 //!
 //! Every lane is computed modulo 2^32 and stored; overflow is detected per
-//! lane, kept only for the lanes of `mask`, and reported once per word.
+//! lane, kept only for the lanes of `mask`, and reported once per word. The
+//! smallint forms flag too a lane outside -32768 to 32767, computed on the
+//! registers before the store, so that no lane is read back.
 //! NULL and unselected lanes thus get initialized placeholders and never
 //! raise. Division by a scalar is a multiplication by the divisor's
 //! prepared reciprocal ([`Divisor`]), which no lane can fail, so it takes
@@ -57,6 +59,48 @@ pub fn mul(
 ) -> bool {
     // SAFETY: as in add, for `mul_lanes`.
     unsafe { mul_lanes(simd, lhs, rhs, mask, out) }
+}
+
+/// `lhs + rhs` into `out`; true when a masked lane overflowed or left the
+/// smallint range.
+#[inline]
+pub fn add_smallint(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    // SAFETY: as in add, for `add_smallint_lanes`.
+    unsafe { add_smallint_lanes(simd, lhs, rhs, mask, out) }
+}
+
+/// `lhs - rhs` into `out`; true when a masked lane overflowed or left the
+/// smallint range.
+#[inline]
+pub fn sub_smallint(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    // SAFETY: as in add, for `sub_smallint_lanes`.
+    unsafe { sub_smallint_lanes(simd, lhs, rhs, mask, out) }
+}
+
+/// `lhs * rhs` into `out`; true when a masked lane overflowed or left the
+/// smallint range.
+#[inline]
+pub fn mul_smallint(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    // SAFETY: as in add, for `mul_smallint_lanes`.
+    unsafe { mul_smallint_lanes(simd, lhs, rhs, mask, out) }
 }
 
 /// `lhs / divisor` into every lane of `out`; no lane can fail.
@@ -141,6 +185,106 @@ unsafe fn mul_lanes(
         let product = simd.wrapping_mul(a, b);
         (product, simd.mul_overflows(a, b, product))
     })
+}
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn add_smallint_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    let (low, high) = smallint_bounds(simd);
+    dispatch(simd, lhs, rhs, mask, out, |a, b| {
+        let sum = simd.wrapping_add(a, b);
+        let over = simd.add_overflows(a, b, sum);
+        (sum, simd.or(over, outside(simd, sum, low, high)))
+    })
+}
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn sub_smallint_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    let (low, high) = smallint_bounds(simd);
+    dispatch(simd, lhs, rhs, mask, out, |a, b| {
+        let difference = simd.wrapping_sub(a, b);
+        let over = simd.sub_overflows(a, b, difference);
+        (
+            difference,
+            simd.or(over, outside(simd, difference, low, high)),
+        )
+    })
+}
+
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+unsafe fn mul_smallint_lanes(
+    simd: Simd,
+    lhs: Side<'_>,
+    rhs: Side<'_>,
+    mask: u64,
+    out: &mut [MaybeUninit<i32>; 64],
+) -> bool {
+    let (low, high) = smallint_bounds(simd);
+    dispatch(simd, lhs, rhs, mask, out, |a, b| {
+        let product = simd.wrapping_mul(a, b);
+        let over = simd.mul_overflows(a, b, product);
+        (product, simd.or(over, outside(simd, product, low, high)))
+    })
+}
+
+/// The least and the greatest smallint in every lane.
+#[inline]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn smallint_bounds<V: Vectors>(v: V) -> (V::I32, V::I32) {
+    (v.splat(i32::from(i16::MIN)), v.splat(i32::from(i16::MAX)))
+}
+
+/// The lanes below `low` or above `high`.
+#[inline]
+#[cfg_attr(
+    all(target_arch = "aarch64", not(miri)),
+    target_feature(enable = "neon")
+)]
+#[cfg_attr(
+    all(target_arch = "x86_64", not(miri)),
+    target_feature(enable = "avx2")
+)]
+fn outside<V: Vectors>(v: V, lanes: V::I32, low: V::I32, high: V::I32) -> V::M32 {
+    v.or(v.gt(low, lanes), v.gt(lanes, high))
 }
 
 #[cfg_attr(

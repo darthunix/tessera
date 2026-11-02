@@ -16,6 +16,7 @@ mod arith;
 mod compare;
 mod filter;
 mod hash;
+mod range;
 
 pub(crate) use aggregate::present;
 pub(crate) use aggregate::{aggregate, max, min};
@@ -23,6 +24,7 @@ pub(crate) use arith::{Evaluate, arith_columns, arith_scalar, arith_scalar_left}
 pub(crate) use compare::compare_columns;
 pub(crate) use filter::filter;
 pub(crate) use hash::{hash, hash_next};
+pub(crate) use range::{Own, Range, Smallint};
 
 use tessera_core::WordBlock;
 
@@ -108,10 +110,11 @@ pub(crate) trait IntLane: Copy + Ord + core::fmt::Debug + 'static {
     /// `lhs op rhs` over the present rows of a whole word into `out`, with
     /// the prepared divisor of a division by a scalar: each width's own mix
     /// of vector code and lanes one by one. An overflow fails with
-    /// `OUT_OF_RANGE`.
+    /// `OUT_OF_RANGE`, a result outside the range `G` with its error; the
+    /// lanes done one by one go through `evaluate`, which checks both.
     // The token and the seven parts of the call, each its own.
     #[allow(clippy::too_many_arguments)]
-    fn arith_block<E: Evaluate<Self>>(
+    fn arith_block<E: Evaluate<Self>, G: Range<Self>>(
         set: Self::Arith,
         op: ArithOp,
         lhs: Side<'_, Self>,

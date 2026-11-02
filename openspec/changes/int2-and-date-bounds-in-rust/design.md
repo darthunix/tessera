@@ -95,11 +95,12 @@ A few facts the design rests on:
     cannot leave the range and needs no check.
 
   A new error, "smallint out of range" (22003), joins
-  `ArithmeticError`. A cast from int4 to smallint joins the casts, as
-  `int8_to_int4` checks its range. `tessera-capi` gets four entry
-  points: the smallint arithmetic with a scalar on the right, on the
-  left, and of two columns, and the cast. `kernels/int.c` calls them;
-  `-x` is `0 - x`, as for int4.
+  `ArithmeticError`, after the others, so that their values in the code
+  stay as they are. `tessera-capi` gets three entry points: the smallint
+  arithmetic with a scalar on the right, on the left, and of two
+  columns. `kernels/int.c` calls them; `-x` is `0 - x`, as for int4, and
+  the cast `int2(int4)` is `x + 0`, as C computes it today: it needs no
+  kernel of its own.
 - **Refused:**
   - A second pass in Rust after the int4 kernel. It moves the code but
     keeps the wrong order of errors.
@@ -424,9 +425,10 @@ flagged slower (docs/measuring.md).
   are chosen so that the four rounds take well under five minutes. A
   run the deadline stops is kept and explained, not retried as it
   was.
-- `tessera-bench` counts the smallint arithmetic and the cast in its
-  programs `arith_int32` and `cast_int32`, beside the int4 ones: the
-  instructions a row of a smallint operation against those of int4.
+- `tessera-bench` counts the smallint arithmetic in its program
+  `arith_int32`, beside the int4 operations over the same rows and
+  masks, the values brought into the smallint range: the instructions a
+  row of a smallint operation against those of int4.
   The time zone gets no program: its cost is the lookups of the cache
   and the calls of PostgreSQL on a miss, which the whole queries
   above show.
@@ -447,10 +449,11 @@ undoes the change.
 
 - C: `kernels/int.c`, `kernels/date.c`; `include/tessera/kernels.h`,
   `include/tessera/calendar.h`, `include/tessera/kernels_layout.h`.
-- Rust: `crates/tessera-kernels/src/int/arith.rs`, `int32/lane.rs`,
-  `simd/` (the smallint forms of the vector functions), `cast.rs`,
+- Rust: `crates/tessera-kernels/src/int/arith.rs`, the new
+  `int/range.rs` and `smallint.rs`, `int32/lane.rs`, `int64/lane.rs`,
+  `simd/arith.rs` (the smallint forms of the vector functions),
   `ops.rs`, `error.rs`, `calendar.rs`, the new `calendar/zone.rs`;
-  `crates/tessera-capi/src/c/int.rs`, `c/cast.rs`, `c/calendar.rs`.
+  `crates/tessera-capi/src/c/int.rs`, `c/calendar.rs`.
 - Tests: `crates/tessera-kernels/tests/arith.rs` and the tests of the
   new modules; new test targets of `tessera-capi`, each added to the
   Miri command of `.github/workflows/ci.yml`; `test/sql/types.sql`; a
@@ -458,8 +461,8 @@ undoes the change.
 - Tools: `tools/tessera-ab/src/measure.rs` (the deadline),
   `bench/pg/run.sh`.
 - Benchmarks: `bench/pg/win.sql`, `bench/pg/setup.sql`,
-  `bench/pg/README.md`; `crates/tessera-capi/benches/arith_int32.rs`
-  and `cast_int32.rs`.
+  `bench/pg/README.md`; `crates/tessera-capi/benches/support/`, the
+  smallint operations of `arith_int32`.
 - Documents: `docs/function.md`; `docs/kernels.md`, its list of entry
   points and its paragraph on the time zone.
 - `.cargo/mutants.toml`: the module of the new Kani proofs, built only

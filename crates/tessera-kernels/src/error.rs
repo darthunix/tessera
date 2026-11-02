@@ -12,7 +12,7 @@ use crate::text::TextError;
 /// How the C boundary reports a classified error (`TessStatusCode`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {
-    /// An int4 or int8 result does not fit (SQLSTATE 22003).
+    /// An integer result does not fit its type (SQLSTATE 22003).
     IntegerOutOfRange,
     /// A zero divisor (22012).
     DivisionByZero,
@@ -37,7 +37,9 @@ impl SqlError for ArithmeticError {
 
     fn kind(&self) -> ErrorKind {
         match self {
-            Self::IntegerOutOfRange | Self::BigintOutOfRange => ErrorKind::IntegerOutOfRange,
+            Self::IntegerOutOfRange | Self::BigintOutOfRange | Self::SmallintOutOfRange => {
+                ErrorKind::IntegerOutOfRange
+            }
             Self::DivisionByZero => ErrorKind::DivisionByZero,
         }
     }

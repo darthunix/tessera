@@ -75,6 +75,7 @@ pub fn shuffled<T>(mut values: Vec<T>) -> Vec<T> {
     values
 }
 
+#[derive(Clone)]
 pub struct Bitmap {
     nrows: usize,
     words: Vec<u64>,
@@ -149,6 +150,29 @@ impl<T: FixtureValue> Fixture<T> {
                 as_uninit(&self.nulls),
                 self.prepared.as_ref().map(Bitmap::view),
             )
+        }
+    }
+
+    /// The same rows, masks and name with each value mapped, such as the
+    /// values of a smallint kernel brought into its range.
+    pub fn map_values(&self, map: impl Fn(T) -> T) -> Self {
+        let values: Vec<T> = self.values.iter().map(|&value| map(value)).collect();
+        let selected = self.selected.words();
+        let expected = values
+            .iter()
+            .enumerate()
+            .filter(|&(row, _)| selected[row / 64] & (1 << (row % 64)) != 0 && !self.nulls[row])
+            .map(|(_, &value)| value.wide())
+            .fold(0, i64::wrapping_add);
+        Self {
+            name: self.name.clone(),
+            datums: values.iter().map(|&value| value.datum()).collect(),
+            values,
+            nulls: self.nulls.clone(),
+            selected: self.selected.clone(),
+            prepared: self.prepared.clone(),
+            non_nulls: self.non_nulls.clone(),
+            expected,
         }
     }
 
