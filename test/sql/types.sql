@@ -195,6 +195,22 @@ SELECT count(*) FROM types_sedge WHERE x::int2 > 0;
 SELECT count(*) FROM types_sedge WHERE z::int2 > 0;
 RESET tessera.enable;
 DROP TABLE types_sedge;
+-- The first row that fails gives its error, as the core meets them row by
+-- row: 64 rows, row 2 -32768 / -1, past the range, before a division by
+-- zero at row 5, then the reverse, with Tessera on and off.
+CREATE TABLE types_sfirst AS
+SELECT i, CASE WHEN i IN (2, 5) THEN -32768 ELSE 1 END::int2 AS a,
+       CASE WHEN i = 2 THEN -1 WHEN i = 5 THEN 0 ELSE 1 END::int2 AS b,
+       CASE WHEN i = 2 THEN 0 WHEN i = 5 THEN -1 ELSE 1 END::int2 AS c
+FROM generate_series(1, 64) AS i;
+EXPLAIN (COSTS OFF) SELECT sum(a / b) FROM types_sfirst;
+SELECT sum(a / b) FROM types_sfirst;
+SELECT sum(a / c) FROM types_sfirst;
+SET tessera.enable = off;
+SELECT sum(a / b) FROM types_sfirst;
+SELECT sum(a / c) FROM types_sfirst;
+RESET tessera.enable;
+DROP TABLE types_sfirst;
 \set VERBOSITY default
 DROP TABLE types_min;
 -- IN and NOT IN of integer constants: a set of the integer words, sorted,
