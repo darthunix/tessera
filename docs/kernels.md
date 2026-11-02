@@ -143,6 +143,15 @@ inside a kernel.
   a NULL operand never fails, whatever the other operand holds
   (`2147483647 + NULL` is NULL): the row path computes it from the pair
   (0, 1), the whole-word path masks its lanes out of the checks.
+- `tess_int2_arith_scalar`, `tess_int2_arith_scalar_left` and
+  `tess_int2_arith_columns`, with the arguments of the int4 ones: the
+  smallint arithmetic, over int4 lanes that hold smallints, into a dense
+  int4 result within the smallint range (`tessera_kernels::smallint`). A
+  result past it reports `22003` "smallint out of range"; each row's
+  operation and its check are one step, and the vector code of a whole
+  word flags a lane past the range as it flags an overflow, so the call
+  fails with the error of the first row that fails, a range error or a
+  zero divisor, as the core does.
 - `tess_int4_hash(column, prepared, rows, nulls, hashes, valid, status)`
   and `tess_int4_hash_next(column, prepared, nulls, hashes, valid, status)`:
   the 32-bit key hashes of pg_batch (`murmurhash32`, further keys folded in

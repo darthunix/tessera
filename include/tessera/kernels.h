@@ -181,6 +181,43 @@ extern TessStatusCode tess_int4_arith_columns(TessArithOp op,
 											  TessStatus *status);
 
 /*
+ * smallint arithmetic, as tess_int4_arith_scalar and its siblings, over int4
+ * columns that hold smallints and into a dense int4 result within the
+ * smallint range: a result past it fails with
+ * TESS_ERROR_INTEGER_OUT_OF_RANGE (SQLSTATE 22003, "smallint out of
+ * range"). Each row is computed and checked in one step, so the call fails
+ * with the error of the first row that fails, a range error or a zero
+ * divisor, in row order. The operands must be smallints.
+ */
+extern TessStatusCode tess_int2_arith_scalar(TessArithOp op,
+											 const TessDatumColumn *column,
+											 int32 scalar,
+											 const TessRowMask *prepared,
+											 const TessRowMask *rows,
+											 int32 *values,
+											 TessRowMask *non_nulls,
+											 TessStatus *status);
+
+extern TessStatusCode tess_int2_arith_scalar_left(TessArithOp op,
+												  int32 scalar,
+												  const TessDatumColumn *column,
+												  const TessRowMask *prepared,
+												  const TessRowMask *rows,
+												  int32 *values,
+												  TessRowMask *non_nulls,
+												  TessStatus *status);
+
+extern TessStatusCode tess_int2_arith_columns(TessArithOp op,
+											  const TessDatumColumn *left,
+											  const TessRowMask *left_prepared,
+											  const TessDatumColumn *right,
+											  const TessRowMask *right_prepared,
+											  const TessRowMask *rows,
+											  int32 *values,
+											  TessRowMask *non_nulls,
+											  TessStatus *status);
+
+/*
  * Hash the first key of the selected rows: hashes[row] receives
  * murmurhash32 of the row's int4 value (32 bits, as pg_batch) and valid
  * receives the selection narrowed by the NULL policy. hashes has the
