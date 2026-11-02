@@ -13,7 +13,10 @@ use tessera_kernels::int32::{self, ArithOp, ArithmeticError};
 use tessera_kernels::smallint;
 
 use crate::reading::{self, Input};
-use crate::support::{fixture::Fixture, runner::Runner};
+use crate::support::{
+    fixture::{self, Fixture},
+    runner::Runner,
+};
 
 /// The scalar operand of every measured operation.
 pub const SCALAR: i32 = 7;
@@ -346,32 +349,33 @@ pub fn check_smallint<C: ColumnReader<Value = i32>>(
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in reading::cases() {
+        let inputs = case.inputs();
         measure_column(
             runner,
             "dense",
-            &case.dense_column()?,
+            &fixture::columns(&inputs, Fixture::dense_column)?,
             dense_reference,
-            &case,
+            &inputs,
         )?;
         measure_column(
             runner,
             "datum",
-            &case.datum_column()?,
+            &fixture::columns(&inputs, Fixture::datum_column)?,
             datum_reference,
-            &case,
+            &inputs,
         )?;
-        let small = smallint_case(&case);
+        let small: Vec<_> = inputs.iter().map(smallint_case).collect();
         measure_smallint(
             runner,
             "dense",
-            &small.dense_column()?,
+            &fixture::columns(&small, Fixture::dense_column)?,
             dense_reference,
             &small,
         )?;
         measure_smallint(
             runner,
             "datum",
-            &small.datum_column()?,
+            &fixture::columns(&small, Fixture::datum_column)?,
             datum_reference,
             &small,
         )?;
@@ -385,58 +389,64 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 fn measure_smallint<C: ColumnReader<Value = i32>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&Input<'_, C>, &mut Output) -> Result<()> + Copy,
-    case: &Fixture,
+    cases: &[Fixture],
 ) -> Result<()> {
-    use std::hint::black_box;
-    let input = Input::new(column, case);
-    check_smallint(&input, case)?;
-    let mut out = Output::new(case.values.len());
-    let mut group = runner.group(format!("arith_int32/{format}/smallint/{}", case.name));
-    group.op("add_scalar", || {
-        add_scalar_smallint(black_box(&input), &mut out).unwrap()
+    let inputs = Input::each(columns, cases);
+    for (input, case) in inputs.iter().zip(cases) {
+        check_smallint(input, case)?;
+    }
+    let mut out = Output::new(cases[0].values.len());
+    let mut group = runner.group(format!("arith_int32/{format}/smallint/{}", cases[0].name));
+    group.op_each("add_scalar", &inputs, |input| {
+        add_scalar_smallint(input, &mut out).unwrap()
     })?;
-    group.op("mul_scalar", || {
-        mul_scalar_smallint(black_box(&input), &mut out).unwrap()
+    group.op_each("mul_scalar", &inputs, |input| {
+        mul_scalar_smallint(input, &mut out).unwrap()
     })?;
-    group.op("div_scalar", || {
-        div_scalar_smallint(black_box(&input), &mut out).unwrap()
+    group.op_each("div_scalar", &inputs, |input| {
+        div_scalar_smallint(input, &mut out).unwrap()
     })?;
-    group.op("add_column", || {
-        add_column_smallint(black_box(&input), &mut out).unwrap()
+    group.op_each("add_column", &inputs, |input| {
+        add_column_smallint(input, &mut out).unwrap()
     })?;
-    group.op("reference", || direct(black_box(&input), &mut out).unwrap())?;
+    group.op_each("reference", &inputs, |input| {
+        direct(input, &mut out).unwrap()
+    })?;
     Ok(())
 }
 
 fn measure_column<C: ColumnReader<Value = i32>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&Input<'_, C>, &mut Output) -> Result<()> + Copy,
-    case: &Fixture,
+    cases: &[Fixture],
 ) -> Result<()> {
-    use std::hint::black_box;
-    let input = Input::new(column, case);
-    check(&input, case, direct)?;
-    let mut out = Output::new(case.values.len());
-    let mut group = runner.group(format!("arith_int32/{format}/{}", case.name));
-    group.op("add_scalar", || {
-        add_scalar(black_box(&input), &mut out).unwrap()
+    let inputs = Input::each(columns, cases);
+    for (input, case) in inputs.iter().zip(cases) {
+        check(input, case, direct)?;
+    }
+    let mut out = Output::new(cases[0].values.len());
+    let mut group = runner.group(format!("arith_int32/{format}/{}", cases[0].name));
+    group.op_each("add_scalar", &inputs, |input| {
+        add_scalar(input, &mut out).unwrap()
     })?;
-    group.op("mul_scalar", || {
-        mul_scalar(black_box(&input), &mut out).unwrap()
+    group.op_each("mul_scalar", &inputs, |input| {
+        mul_scalar(input, &mut out).unwrap()
     })?;
-    group.op("div_scalar", || {
-        div_scalar(black_box(&input), &mut out).unwrap()
+    group.op_each("div_scalar", &inputs, |input| {
+        div_scalar(input, &mut out).unwrap()
     })?;
-    group.op("mod_scalar", || {
-        mod_scalar(black_box(&input), &mut out).unwrap()
+    group.op_each("mod_scalar", &inputs, |input| {
+        mod_scalar(input, &mut out).unwrap()
     })?;
-    group.op("add_column", || {
-        add_column(black_box(&input), &mut out).unwrap()
+    group.op_each("add_column", &inputs, |input| {
+        add_column(input, &mut out).unwrap()
     })?;
-    group.op("reference", || direct(black_box(&input), &mut out).unwrap())?;
+    group.op_each("reference", &inputs, |input| {
+        direct(input, &mut out).unwrap()
+    })?;
     Ok(())
 }

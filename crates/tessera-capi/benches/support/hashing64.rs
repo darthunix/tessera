@@ -11,7 +11,10 @@ use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::int64::{self, NullKeys};
 
 use crate::reading64::{self, Input};
-use crate::support::{fixture::Fixture, runner::Runner};
+use crate::support::{
+    fixture::{self, Fixture},
+    runner::Runner,
+};
 
 /// The result buffers of one case: a hash per row and the valid mask.
 pub struct Output {
@@ -224,19 +227,20 @@ pub fn check<C: ColumnReader<Value = i64>>(
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in reading64::cases() {
+        let inputs = case.inputs();
         measure_column(
             runner,
             "dense",
-            &case.dense_column()?,
+            &fixture::columns(&inputs, Fixture::dense_column)?,
             dense_reference,
-            &case,
+            &inputs,
         )?;
         measure_column(
             runner,
             "datum",
-            &case.datum_column()?,
+            &fixture::columns(&inputs, Fixture::datum_column)?,
             datum_reference,
-            &case,
+            &inputs,
         )?;
     }
     Ok(())
@@ -245,22 +249,25 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 fn measure_column<C: ColumnReader<Value = i64>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&Input<'_, C>, &mut Output) -> Result<()> + Copy,
-    case: &Fixture<i64>,
+    cases: &[Fixture<i64>],
 ) -> Result<()> {
-    use std::hint::black_box;
-    let input = Input::new(column, case);
-    check(&input, case, direct)?;
-    let mut out = Output::new(case.values.len());
-    let mut group = runner.group(format!("hash_int64/{format}/{}", case.name));
-    group.op("hash", || hash(black_box(&input), &mut out).unwrap())?;
-    group.op("hash_group", || {
-        hash_group(black_box(&input), &mut out).unwrap()
+    let inputs = Input::each(columns, cases);
+    for (input, case) in inputs.iter().zip(cases) {
+        check(input, case, direct)?;
+    }
+    let mut out = Output::new(cases[0].values.len());
+    let mut group = runner.group(format!("hash_int64/{format}/{}", cases[0].name));
+    group.op_each("hash", &inputs, |input| hash(input, &mut out).unwrap())?;
+    group.op_each("hash_group", &inputs, |input| {
+        hash_group(input, &mut out).unwrap()
     })?;
-    group.op("two_keys", || {
-        two_keys(black_box(&input), &mut out).unwrap()
+    group.op_each("two_keys", &inputs, |input| {
+        two_keys(input, &mut out).unwrap()
     })?;
-    group.op("reference", || direct(black_box(&input), &mut out).unwrap())?;
+    group.op_each("reference", &inputs, |input| {
+        direct(input, &mut out).unwrap()
+    })?;
     Ok(())
 }

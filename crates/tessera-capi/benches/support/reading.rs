@@ -3,15 +3,16 @@
 //! Exercise the early-exit fold and copied-word iteration separately: their
 //! implementations and generated loops differ. The reference wrappers receive
 //! the same prebuilt input and use the same summation rule; allocation and
-//! construction stay outside the counted loop.
+//! construction stay outside the counted loop. A case drawn at random takes
+//! a ring of inputs, every operation the same ring in the same turn.
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView};
 
 use crate::support::{
-    fixture::Fixture,
+    fixture::{self, Fixture},
     reference::{self, Mask},
-    runner::{Group, Runner},
+    runner::Runner,
 };
 
 // Every measured entry point takes the same borrowed input. It is built before
@@ -45,6 +46,15 @@ impl<'a, C> Input<'a, C> {
                 .as_ref()
                 .map(crate::support::fixture::Bitmap::reference),
         }
+    }
+
+    /// An input for each column and the case it was built from.
+    pub fn each(columns: &'a [C], cases: &'a [Fixture]) -> Vec<Self> {
+        columns
+            .iter()
+            .zip(cases)
+            .map(|(column, case)| Self::new(column, case))
+            .collect()
     }
 }
 
@@ -127,118 +137,51 @@ pub fn cases() -> Vec<Fixture> {
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in cases() {
+        let inputs = case.inputs();
         measure_column(
             runner,
             "dense",
-            &case.dense_column()?,
+            &fixture::columns(&inputs, Fixture::dense_column)?,
             dense_reference,
-            &case,
+            &inputs,
         )?;
         measure_column(
             runner,
             "datum",
-            &case.datum_column()?,
+            &fixture::columns(&inputs, Fixture::datum_column)?,
             datum_reference,
-            &case,
+            &inputs,
         )?;
     }
-    pilot(runner)
-}
-
-/// The sizes of the rings of inputs of the pilot of unlearned inputs.
-pub const PILOT_RINGS: [usize; 6] = [1, 8, 16, 32, 64, 128];
-
-/// The case of the pilot: a random selection over random NULL flags, whose
-/// loop over the selected rows of a word ends after a count of rows that a
-/// predictor which has not seen the word cannot know.
-pub fn pilot_case() -> Fixture {
-    case(1024, "random", "random", false)
-}
-
-/// The pilot of unlearned inputs, on dense blocks: a ring of inputs that
-/// the predictor cannot learn beside its control, a ring of as many
-/// copies of one input. A form and its control are cases of this one
-/// program, so their code lies at the same addresses.
-fn pilot(runner: &mut Runner) -> Result<()> {
-    let name = pilot_case().name;
-    for count in PILOT_RINGS {
-        let repeated = || (0..count).map(|_| pilot_case()).collect::<Vec<_>>();
-        for (form, inputs) in [
-            ("ring", pilot_case().ring(count)),
-            ("ring-same", repeated()),
-        ] {
-            let columns = inputs
-                .iter()
-                .map(Fixture::dense_column)
-                .collect::<Result<Vec<_>>>()?;
-            let reads: Vec<_> = columns
-                .iter()
-                .zip(&inputs)
-                .map(|(column, input)| Input::new(column, input))
-                .collect();
-            for (read, input) in reads.iter().zip(&inputs) {
-                check_pilot(read, input)?;
-            }
-            let mut group =
-                runner.group(format!("column_reader/dense/pilot-{form}-{count}/{name}"));
-            ring_ops(&mut group, &reads)?;
-        }
-    }
     Ok(())
-}
-
-fn check_pilot<C: ColumnReader<Value = i32>>(read: &Input<'_, C>, input: &Fixture) -> Result<()> {
-    ensure!(
-        fold_sum(read)? == input.expected && dense_reference(read)? == input.expected,
-        "a pilot's input differs from its model"
-    );
-    Ok(())
-}
-
-/// The fold and the reference over `reads` taken in turn, in whole turns.
-fn ring_ops<C: ColumnReader<Value = i32>>(
-    group: &mut Group<'_>,
-    reads: &[Input<'_, C>],
-) -> Result<()> {
-    use std::hint::black_box;
-    let count = reads.len();
-    let mut at = 0;
-    group.op_ring("fold", count, || {
-        at = (at + 1) % count;
-        fold_sum(black_box(&reads[at])).unwrap()
-    })?;
-    let mut at = 0;
-    group.op_ring("reference", count, || {
-        at = (at + 1) % count;
-        dense_reference(black_box(&reads[at])).unwrap()
-    })
 }
 
 fn measure_column<C: ColumnReader<Value = i32>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&Input<'_, C>) -> Result<i64>,
-    case: &Fixture,
+    cases: &[Fixture],
 ) -> Result<()> {
-    use std::hint::black_box;
-    let input = Input::new(column, case);
-    ensure!(
-        direct(&input)? == case.expected,
-        "reference result differs from scalar model"
-    );
-    ensure!(
-        fold_sum(&input)? == case.expected,
-        "fold reader result differs"
-    );
-    ensure!(
-        word_sum(&input)? == case.expected,
-        "word reader result differs"
-    );
-    let mut group = runner.group(format!("column_reader/{format}/{}", case.name));
+    let inputs = Input::each(columns, cases);
+    for (input, case) in inputs.iter().zip(cases) {
+        ensure!(
+            direct(input)? == case.expected,
+            "reference result differs from scalar model"
+        );
+        ensure!(
+            fold_sum(input)? == case.expected,
+            "fold reader result differs"
+        );
+        ensure!(
+            word_sum(input)? == case.expected,
+            "word reader result differs"
+        );
+    }
+    let mut group = runner.group(format!("column_reader/{format}/{}", cases[0].name));
     // Separate closures preserve static dispatch inside every measured loop.
-    group.op("fold", || fold_sum(black_box(&input)).unwrap())?;
-    group.op("words", || word_sum(black_box(&input)).unwrap())?;
-    group.op("reference", || direct(black_box(&input)).unwrap())?;
+    group.op_each("fold", &inputs, |input| fold_sum(input).unwrap())?;
+    group.op_each("words", &inputs, |input| word_sum(input).unwrap())?;
+    group.op_each("reference", &inputs, |input| direct(input).unwrap())?;
     Ok(())
 }

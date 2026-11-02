@@ -8,7 +8,10 @@ use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::cast::int4_to_int8;
 
 use crate::reading::{self, Input};
-use crate::support::{fixture::Fixture, runner::Runner};
+use crate::support::{
+    fixture::{self, Fixture},
+    runner::Runner,
+};
 
 /// The result buffers of one case.
 pub struct Output {
@@ -135,19 +138,20 @@ pub fn check<C: ColumnReader<Value = i32>>(
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in reading::cases() {
+        let inputs = case.inputs();
         measure_column(
             runner,
             "dense",
-            &case.dense_column()?,
+            &fixture::columns(&inputs, Fixture::dense_column)?,
             dense_reference,
-            &case,
+            &inputs,
         )?;
         measure_column(
             runner,
             "datum",
-            &case.datum_column()?,
+            &fixture::columns(&inputs, Fixture::datum_column)?,
             datum_reference,
-            &case,
+            &inputs,
         )?;
     }
     Ok(())
@@ -156,16 +160,19 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 fn measure_column<C: ColumnReader<Value = i32>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&Input<'_, C>, &mut Output) -> Result<()> + Copy,
-    case: &Fixture,
+    cases: &[Fixture],
 ) -> Result<()> {
-    use std::hint::black_box;
-    let input = Input::new(column, case);
-    check(&input, case, direct)?;
-    let mut out = Output::new(case.values.len());
-    let mut group = runner.group(format!("cast_int32/{format}/{}", case.name));
-    group.op("widen", || widen(black_box(&input), &mut out).unwrap())?;
-    group.op("reference", || direct(black_box(&input), &mut out).unwrap())?;
+    let inputs = Input::each(columns, cases);
+    for (input, case) in inputs.iter().zip(cases) {
+        check(input, case, direct)?;
+    }
+    let mut out = Output::new(cases[0].values.len());
+    let mut group = runner.group(format!("cast_int32/{format}/{}", cases[0].name));
+    group.op_each("widen", &inputs, |input| widen(input, &mut out).unwrap())?;
+    group.op_each("reference", &inputs, |input| {
+        direct(input, &mut out).unwrap()
+    })?;
     Ok(())
 }

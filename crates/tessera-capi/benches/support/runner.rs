@@ -213,15 +213,57 @@ impl Group<'_> {
         })
     }
 
+    /// Measure `f` over `inputs` taken in turn, in whole turns of the ring
+    /// ([`Self::op_ring`]); over one input, as [`Self::op`]. `f` gets each
+    /// input through `black_box`.
+    pub fn op_each<I, R>(
+        &mut self,
+        name: &str,
+        inputs: &[I],
+        mut f: impl FnMut(&I) -> R,
+    ) -> Result<()> {
+        use std::hint::black_box;
+        if let [input] = inputs {
+            return self.op(name, || f(black_box(input)));
+        }
+        self.op_turns(name, inputs.len(), |at| f(black_box(&inputs[at])))
+    }
+
+    /// Measure `f` over a ring of `period` inputs ([`Self::op_ring`]): `f`
+    /// gets the index of the input to take, in turn.
+    pub fn op_turns<R>(
+        &mut self,
+        name: &str,
+        period: usize,
+        mut f: impl FnMut(usize) -> R,
+    ) -> Result<()> {
+        let mut at = 0;
+        self.op_ring(name, period, || {
+            at = if at + 1 == period { 0 } else { at + 1 };
+            f(at)
+        })
+    }
+
     /// Measure an operation that runs `iters` calls itself and returns the
     /// counters accumulated by exactly those calls.
     pub fn op_blocks(
         &mut self,
         name: &str,
+        run: impl FnMut(&Counters, u64) -> Result<Reading>,
+    ) -> Result<()> {
+        self.op_blocks_ring(name, 1, run)
+    }
+
+    /// [`Self::op_blocks`] over a ring of `period` inputs, which the
+    /// operation takes in turn: `iters` is whole turns of the ring.
+    pub fn op_blocks_ring(
+        &mut self,
+        name: &str,
+        period: usize,
         mut run: impl FnMut(&Counters, u64) -> Result<Reading>,
     ) -> Result<()> {
         let id = format!("{}/{name}", self.id);
-        self.runner.run(&id, 1, &mut run)
+        self.runner.run(&id, period as u64, &mut run)
     }
 }
 

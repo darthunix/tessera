@@ -10,7 +10,8 @@
 //! straight from the fixture buffers: each case has an `insert` group,
 //! where the reference builds that table, and a `probe` group, where it
 //! looks every row up. Results are checked against a model before
-//! counting.
+//! counting. A case drawn at random takes a ring of inputs, which hold the
+//! same keys in other rows, so one table serves them all.
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
@@ -20,7 +21,10 @@ use tessera_kernels::int32::{self, NullKeys};
 use tessera_kernels::table::{Batch, KeySource, Matches, OwnedTable, TableConfig};
 
 use crate::reading::Input;
-use crate::support::{fixture::Fixture, runner::Runner};
+use crate::support::{
+    fixture::{self, Fixture},
+    runner::Runner,
+};
 
 const CONFIG: TableConfig = TableConfig {
     nkeys: 1,
@@ -44,13 +48,17 @@ impl<C: ColumnReader<Value = i32>> KeySource for OneKey<'_, C> {
     }
 }
 
-/// The buffers of one case: the hashes of the batch and of absent keys,
-/// the valid mask, the table and the outputs.
+/// The table of a case, sized for one input and its chunks of 64 KiB.
+pub fn table(nrows: usize) -> Result<OwnedTable> {
+    Ok(OwnedTable::new(&CONFIG, nrows as u64, 64 << 10)?)
+}
+
+/// The buffers of one input: the hashes of the batch and of absent keys,
+/// the valid mask and the outputs.
 pub struct Setup {
     pub hashes: Vec<u32>,
     pub absent: Vec<u32>,
     pub valid: Vec<u64>,
-    pub table: OwnedTable,
     pub pending: Vec<u64>,
     pub found: Vec<u64>,
     pub inserted: Vec<u64>,
@@ -80,7 +88,6 @@ impl Setup {
             hashes,
             absent,
             valid,
-            table: OwnedTable::new(&CONFIG, nrows as u64, 64 << 10)?,
             pending: vec![0; words],
             found: vec![0; words],
             inserted: vec![0; words],
@@ -92,10 +99,10 @@ impl Setup {
 
 /// Recreate the table and insert every valid row.
 #[inline(never)]
-pub fn insert_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
+pub fn insert_all<K: KeySource>(table: &mut OwnedTable, setup: &mut Setup, keys: &K) -> Result<()> {
     let nrows = setup.hashes.len();
-    setup.table.reset()?;
-    setup.table.insert(
+    table.reset()?;
+    table.insert(
         &setup.hashes,
         keys,
         RowMaskView::try_new(nrows, &setup.valid)?,
@@ -107,8 +114,13 @@ pub fn insert_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
 
 /// Probe every valid row with the given hashes.
 #[inline(never)]
-pub fn probe_all<K: KeySource>(setup: &mut Setup, keys: &K, hashes: &[u32]) -> Result<()> {
-    let table = setup.table.table()?;
+pub fn probe_all<K: KeySource>(
+    table: &OwnedTable,
+    setup: &mut Setup,
+    keys: &K,
+    hashes: &[u32],
+) -> Result<()> {
+    let table = table.table()?;
     setup.found.copy_from_slice(&setup.valid);
     let mut matches = Matches::new(&mut setup.found, &mut setup.matches)?;
     table.probe(hashes, keys, &mut matches)?;
@@ -117,14 +129,18 @@ pub fn probe_all<K: KeySource>(setup: &mut Setup, keys: &K, hashes: &[u32]) -> R
 
 /// Resolve every valid row to its record.
 #[inline(never)]
-pub fn resolve_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
+pub fn resolve_all<K: KeySource>(
+    table: &mut OwnedTable,
+    setup: &mut Setup,
+    keys: &K,
+) -> Result<()> {
     let nrows = setup.hashes.len();
     setup.pending.copy_from_slice(&setup.valid);
     // The call adds the rows it creates: a caller clears them once a batch.
     setup.inserted.fill(0);
     let mut inserted = RowMask::try_new(nrows, &mut setup.inserted)?;
-    let chunk = setup.table.chunks() - 1;
-    setup.table.table_mut()?.find_or_insert(
+    let chunk = table.chunks() - 1;
+    table.table_mut()?.find_or_insert(
         chunk,
         &mut Batch::new(&setup.hashes, keys, &mut setup.pending, &mut setup.offsets)?,
         &mut inserted,
@@ -135,9 +151,9 @@ pub fn resolve_all<K: KeySource>(setup: &mut Setup, keys: &K) -> Result<()> {
 /// Add one to the first payload word of every valid row's record, the
 /// offsets of the last resolution: `count(*)` of a grouped aggregate.
 #[inline(never)]
-pub fn count_all(setup: &mut Setup) -> Result<()> {
+pub fn count_all(table: &mut OwnedTable, setup: &Setup) -> Result<()> {
     let nrows = setup.hashes.len();
-    let mut table = setup.table.table_mut()?;
+    let mut table = table.table_mut()?;
     let rows = RowMaskView::try_new(nrows, &setup.valid)?;
     accumulate::count_rows(&mut table, &setup.offsets, &rows, 0)
 }
@@ -260,6 +276,7 @@ pub fn reference_probe(
 /// every valid row gets a record with its key, is found at one, and misses
 /// under absent hashes.
 pub fn check<K: KeySource>(
+    table: &mut OwnedTable,
     setup: &mut Setup,
     keys: &K,
     reference: &mut Reference,
@@ -269,14 +286,14 @@ pub fn check<K: KeySource>(
     let valid_rows: Vec<usize> = RowMaskView::try_new(nrows, &setup.valid)?
         .selected_rows()
         .collect();
-    insert_all(setup, keys)?;
+    insert_all(table, setup, keys)?;
     ensure!(
         setup.pending.iter().all(|&word| word == 0),
         "rows without room"
     );
     let offsets = setup.offsets.clone();
     {
-        let table = setup.table.table()?;
+        let table = table.table()?;
         ensure!(
             table.stats().records == valid_rows.len() as u64,
             "record count differs from the valid rows"
@@ -292,11 +309,11 @@ pub fn check<K: KeySource>(
     }
     let absent = setup.absent.clone();
     let hashes = setup.hashes.clone();
-    probe_all(setup, keys, &hashes)?;
+    probe_all(table, setup, keys, &hashes)?;
     ensure!(setup.found == setup.valid, "a valid row is not found");
     for &row in &valid_rows {
         let (null, key) = key_of(row);
-        let table = setup.table.table()?;
+        let table = table.table()?;
         let record = table.record(setup.matches[row])?;
         ensure!(
             record.null_bits == u32::from(null) && record.keys == [key],
@@ -304,12 +321,12 @@ pub fn check<K: KeySource>(
         );
     }
     let matches = setup.matches.clone();
-    probe_all(setup, keys, &absent)?;
+    probe_all(table, setup, keys, &absent)?;
     ensure!(
         setup.found.iter().all(|&word| word == 0),
         "an absent hash hits"
     );
-    resolve_all(setup, keys)?;
+    resolve_all(table, setup, keys)?;
     ensure!(
         setup.pending.iter().all(|&word| word == 0)
             && setup.inserted.iter().all(|&word| word == 0)
@@ -330,75 +347,113 @@ pub fn check<K: KeySource>(
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in crate::reading::cases() {
-        let dense = case.dense_column()?;
-        let input = Input::new(&dense, &case);
-        let non_nulls = input.non_nulls;
-        let values = input.values;
-        measure_column(runner, "dense", &input, &case, &|row| {
-            let null = non_nulls.is_some_and(|mask| !mask.contains(row));
-            (null, if null { 0 } else { i64::from(values[row]) })
-        })?;
-        let datum = case.datum_column()?;
-        let input = Input::new(&datum, &case);
-        let (datums, nulls) = (input.datums, input.nulls);
-        measure_column(runner, "datum", &input, &case, &|row| {
-            let null = nulls[row];
-            (
-                null,
-                if null {
-                    0
-                } else {
-                    i64::from(datums[row] as i32)
-                },
-            )
-        })?;
+        let cases = case.inputs();
+        let dense = fixture::columns(&cases, Fixture::dense_column)?;
+        let inputs = Input::each(&dense, &cases);
+        let keys: Vec<_> = inputs
+            .iter()
+            .map(|input| {
+                let (non_nulls, values) = (input.non_nulls, input.values);
+                move |row: usize| {
+                    let null = non_nulls.is_some_and(|mask| !mask.contains(row));
+                    (null, if null { 0 } else { i64::from(values[row]) })
+                }
+            })
+            .collect();
+        let key_of: Vec<KeyOf<'_>> = keys.iter().map(|key| key as KeyOf<'_>).collect();
+        measure_column(runner, "dense", &inputs, &cases[0].name, &key_of)?;
+        let datum = fixture::columns(&cases, Fixture::datum_column)?;
+        let inputs = Input::each(&datum, &cases);
+        let keys: Vec<_> = inputs
+            .iter()
+            .map(|input| {
+                let (datums, nulls) = (input.datums, input.nulls);
+                move |row: usize| {
+                    let null = nulls[row];
+                    (
+                        null,
+                        if null {
+                            0
+                        } else {
+                            i64::from(datums[row] as i32)
+                        },
+                    )
+                }
+            })
+            .collect();
+        let key_of: Vec<KeyOf<'_>> = keys.iter().map(|key| key as KeyOf<'_>).collect();
+        measure_column(runner, "datum", &inputs, &cases[0].name, &key_of)?;
     }
     Ok(())
 }
 
+/// The operations over `inputs` taken in turn, one table for them all.
 fn measure_column<C: ColumnReader<Value = i32>>(
     runner: &mut Runner,
     format: &str,
-    input: &Input<'_, C>,
-    case: &Fixture,
-    key_of: KeyOf<'_>,
+    inputs: &[Input<'_, C>],
+    name: &str,
+    key_of: &[KeyOf<'_>],
 ) -> Result<()> {
     use std::hint::black_box;
-    let keys = OneKey(input.column);
-    let mut setup = Setup::new(input)?;
-    let mut reference = Reference::new(setup.hashes.len());
-    check(&mut setup, &keys, &mut reference, key_of)?;
-    let hashes = setup.hashes.clone();
-    let absent = setup.absent.clone();
+    let keys: Vec<_> = inputs.iter().map(|input| OneKey(input.column)).collect();
+    let mut setups = inputs.iter().map(Setup::new).collect::<Result<Vec<_>>>()?;
+    let mut table = table(inputs[0].rows.nrows())?;
+    let mut reference = Reference::new(setups[0].hashes.len());
+    for ((setup, keys), key_of) in setups.iter_mut().zip(&keys).zip(key_of) {
+        check(&mut table, setup, keys, &mut reference, *key_of)?;
+    }
+    let hashes: Vec<_> = setups.iter().map(|setup| setup.hashes.clone()).collect();
+    let absent: Vec<_> = setups.iter().map(|setup| setup.absent.clone()).collect();
+    // The table built from the last input holds the rows of every one.
+    for ((setup, keys), hashes) in setups.iter_mut().zip(&keys).zip(&hashes) {
+        probe_all(&table, setup, keys, hashes)?;
+        ensure!(
+            setup.found == setup.valid,
+            "a row is not in another input's table"
+        );
+        resolve_all(&mut table, setup, keys)?;
+        ensure!(
+            setup.inserted.iter().all(|&word| word == 0),
+            "a row is not in another input's table"
+        );
+    }
+    let period = inputs.len();
     // Two groups per case, each with the reference its operations compare
-    // with: building a table, and looking rows up in a built one.
-    let mut group = runner.group(format!("table_int32/{format}/{}/insert", case.name));
-    group.op("insert", || {
-        insert_all(&mut setup, black_box(&keys)).unwrap()
+    // with: building a table, and looking rows up in a built one. Every
+    // input holds the same keys, so the table built from any of them
+    // holds the keys of all.
+    let mut group = runner.group(format!("table_int32/{format}/{name}/insert"));
+    group.op_turns("insert", period, |at| {
+        insert_all(&mut table, &mut setups[at], black_box(&keys[at])).unwrap()
     })?;
-    group.op("reference", || {
-        reference_insert(&mut reference, black_box(&setup), key_of)
+    group.op_turns("reference", period, |at| {
+        reference_insert(&mut reference, black_box(&setups[at]), key_of[at])
     })?;
-    let mut group = runner.group(format!("table_int32/{format}/{}/probe", case.name));
-    group.op("probe_hit", || {
-        probe_all(&mut setup, black_box(&keys), &hashes).unwrap()
+    let mut group = runner.group(format!("table_int32/{format}/{name}/probe"));
+    group.op_turns("probe_hit", period, |at| {
+        probe_all(&table, &mut setups[at], black_box(&keys[at]), &hashes[at]).unwrap()
     })?;
-    group.op("probe_miss", || {
-        probe_all(&mut setup, black_box(&keys), &absent).unwrap()
+    group.op_turns("probe_miss", period, |at| {
+        probe_all(&table, &mut setups[at], black_box(&keys[at]), &absent[at]).unwrap()
     })?;
-    group.op("find_or_insert", || {
-        resolve_all(&mut setup, black_box(&keys)).unwrap()
+    group.op_turns("find_or_insert", period, |at| {
+        resolve_all(&mut table, &mut setups[at], black_box(&keys[at])).unwrap()
     })?;
-    group.op("reference", || {
-        reference_probe(&reference, black_box(&setup), &hashes, key_of)
+    group.op_turns("reference", period, |at| {
+        reference_probe(&reference, black_box(&setups[at]), &hashes[at], key_of[at])
     })?;
     // Grouping: count(*) into the records the resolution gave the rows,
     // against the same scatter into a plain array by offset.
-    resolve_all(&mut setup, &keys)?;
-    let mut counts = vec![0_u64; setup.table.chunks() << 17];
-    group.op("count_rows", || count_all(black_box(&mut setup)).unwrap())?;
-    group.op("reference_count", || {
-        reference_count(&mut counts, black_box(&setup))
+    for (setup, keys) in setups.iter_mut().zip(&keys) {
+        resolve_all(&mut table, setup, keys)?;
+    }
+    let mut counts = vec![0_u64; table.chunks() << 17];
+    group.op_turns("count_rows", period, |at| {
+        count_all(&mut table, black_box(&setups[at])).unwrap()
+    })?;
+    group.op_turns("reference_count", period, |at| {
+        reference_count(&mut counts, black_box(&setups[at]))
     })?;
     Ok(())
 }

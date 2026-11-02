@@ -36,6 +36,15 @@ impl<'a, C> Input<'a, C> {
             non_nulls: case.non_nulls.as_ref().map(Bitmap::reference),
         }
     }
+
+    /// An input for each column and the case it was built from.
+    pub fn each(columns: &'a [C], cases: &'a [Fixture<i64>]) -> Vec<Self> {
+        columns
+            .iter()
+            .zip(cases)
+            .map(|(column, case)| Self::new(column, case))
+            .collect()
+    }
 }
 
 fn case(nrows: usize, pattern: &str, nulls: &str, partial: bool) -> Fixture<i64> {

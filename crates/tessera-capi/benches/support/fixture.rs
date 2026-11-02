@@ -8,12 +8,12 @@
 //!
 //! Regular patterns (`half`, `sparse`, `nulls-mixed`) are what a branch
 //! predictor learns perfectly, so they hide the cost of data-dependent
-//! branches; the `random` selection and `nulls-random` flags come from a
-//! fixed-seed generator and show it, as long as the predictor does not learn
-//! the one input of the case. A case of several inputs ([`Fixture::ring`])
-//! takes, call after call, the same words in other orders, so that it does
-//! the same work but repeats neither where its rows lie nor how many the n-th
-//! word holds.
+//! branches. The `random` selection and `nulls-random` flags come from a
+//! fixed-seed generator, and a case drawn so takes a ring of [`RING`]
+//! inputs ([`Fixture::inputs`]): call after call, the same words in other
+//! orders, so that it does the same work but repeats neither where its rows
+//! lie nor how many the n-th word holds, and the predictor learns none of
+//! them.
 
 use super::reference::Mask;
 use anyhow::Result;
@@ -49,6 +49,12 @@ impl FixtureValue for i64 {
         self
     }
 }
+
+/// The inputs that the calls of a case drawn at random take in turn: the
+/// fewest from which the predictors of both machines learned nothing in
+/// the pilot of unlearned inputs, which the README of the benchmarks
+/// describes.
+pub const RING: usize = 64;
 
 /// xorshift64*: deterministic, and its high bits are well mixed.
 struct Random(u64);
@@ -174,6 +180,17 @@ pub struct Fixture<T = i32> {
     pub prepared: Option<Bitmap>,
     pub non_nulls: Option<Bitmap>,
     pub expected: i64,
+    /// Whether its selection, NULL flags or values are drawn at random:
+    /// its calls then take a ring of inputs ([`Self::inputs`]).
+    pub drawn: bool,
+}
+
+/// The columns of `inputs`, one for each, built by `column`.
+pub fn columns<'a, T, C>(
+    inputs: &'a [Fixture<T>],
+    column: impl Fn(&'a Fixture<T>) -> Result<C>,
+) -> Result<Vec<C>> {
+    inputs.iter().map(column).collect()
 }
 
 /// Borrow initialized values in the representation accepted by column constructors.
@@ -229,6 +246,7 @@ impl<T: FixtureValue> Fixture<T> {
             prepared: self.prepared.clone(),
             non_nulls: self.non_nulls.clone(),
             expected,
+            drawn: self.drawn,
         }
     }
 
@@ -282,6 +300,17 @@ impl<T: FixtureValue> Fixture<T> {
             values,
             datums,
             expected,
+            drawn: pattern == "random" || nulls == "random",
+        }
+    }
+
+    /// The inputs that the calls of the case take in turn: a ring of
+    /// [`RING`] if it is drawn at random, the case alone otherwise.
+    pub fn inputs(self) -> Vec<Self> {
+        if self.drawn {
+            self.ring(RING)
+        } else {
+            vec![self]
         }
     }
 
@@ -330,6 +359,7 @@ impl<T: FixtureValue> Fixture<T> {
             prepared: self.prepared.as_ref().map(moved),
             non_nulls: self.non_nulls.as_ref().map(moved),
             expected: self.expected,
+            drawn: self.drawn,
         }
     }
 }
