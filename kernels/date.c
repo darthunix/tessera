@@ -344,18 +344,22 @@ zone_rounds(TessFunctionCall *call, const TessRowMask *selection, ZoneOp op,
 	int			nrows = selection->nrows;
 	int			nwords = tess_row_mask_word_count(nrows);
 	ZoneScratch space;
-	TessRowMask rows = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
-	TessRowMask unknown = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
-	TessZoneQuestion *questions = tess_scratch_alloc(sizeof(TessZoneQuestion) * nrows,
-													 space.questions, sizeof(space.questions));
-	TessZoneAnswer *answers = tess_scratch_alloc(sizeof(TessZoneAnswer) * 2 * nrows,
-												 space.answers, sizeof(space.answers));
+	TessRowMask rows;
+	TessRowMask unknown;
+	TessZoneQuestion *questions;
+	TessZoneAnswer *answers;
 	TessZoneRound round = {sizeof(TessZoneRound)};
 	TessStatusCode code = TESS_OK;
 	bool		spans = op == ZONE_LOCALS || op == ZONE_DATES;
 	pg_tz	  **filled = spans ? &span_zone : &midnight_zone;
 
-	if (session_timezone != *filled)
+	/*
+	 * A part is reset before a call that reads it, as the core's cache is
+	 * at its first lookup; date_trunc below a day keeps the instant's own
+	 * offset and reads no midnight. Before the scratch, which a failure
+	 * would leave unreleased.
+	 */
+	if (session_timezone != *filled && (op != ZONE_TRUNCATE || unit >= TESS_UNIT_DAY))
 	{
 		code = tess_zone_reset(&zone_cache, spans ? TESS_ZONE_SPAN : TESS_ZONE_MIDNIGHT,
 							   call->status);
@@ -363,6 +367,12 @@ zone_rounds(TessFunctionCall *call, const TessRowMask *selection, ZoneOp op,
 			return code;
 		*filled = session_timezone;
 	}
+	rows = tess_scratch_mask(space.words[0], sizeof(space.words[0]), nrows);
+	unknown = tess_scratch_mask(space.words[1], sizeof(space.words[1]), nrows);
+	questions = tess_scratch_alloc(sizeof(TessZoneQuestion) * nrows,
+								   space.questions, sizeof(space.questions));
+	answers = tess_scratch_alloc(sizeof(TessZoneAnswer) * 2 * nrows,
+								 space.answers, sizeof(space.answers));
 	memcpy(rows.bits, selection->bits, sizeof(uint64) * nwords);
 	memset(ready->bits, 0, sizeof(uint64) * nwords);
 	memset(core->bits, 0, sizeof(uint64) * nwords);

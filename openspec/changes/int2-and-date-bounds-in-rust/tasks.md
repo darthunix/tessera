@@ -131,7 +131,7 @@ ownership, lifetime and errors. The check named in a task comes on top.
 
 ## 6. The checks of the whole
 
-- [ ] 6.1 The mutants of the changed Rust lines: none survives, or each
+- [x] 6.1 The mutants of the changed Rust lines: none survives, or each
       one left is listed in `.cargo/mutants.toml` with the reason it is
       equivalent; a survivor that is not gets a test. Check: `git diff
       <base> > diff.txt`; `cargo mutants --in-diff diff.txt`, its

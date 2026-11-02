@@ -249,9 +249,10 @@ A few facts the design rests on:
     later row needs is enough: rows of spans S32 and S0, in that
     order, over a cache of S0 to S31 whose next victim is S0. The case
     `tstz_spans` of the measurement does this in every batch;
-  - after a change of zone, a call whose rows are all NULL, which
-    resets the part of the cache it would use before it, where today's
-    code resets a part at its first lookup (decision 4).
+  - after a change of zone, a call that reads the part of the cache
+    but needs no entry of it, as when its rows are all NULL or
+    infinite: it resets the part before it, where today's code resets
+    a part at its first lookup (decision 4).
 
   Once the two caches differ, they may stay different, and a later
   batch may hit or miss where today's code would not; its answers are
@@ -308,10 +309,10 @@ A few facts the design rests on:
   `tessera-capi` makes a slice of the words, the one `unsafe` step; the
   kernels read the slice through a view that names the words: a header,
   the spans (start, end, offset), the midnights (state, day, instant).
-  The count of words is Rust's; C learns it from the header, and the
-  layout probe of `kernels_layout.h` checks it, with the sizes of the
-  round, the question and the answer, against Rust's when the module
-  loads.
+  The count of words is written twice, in the header and in Rust; the
+  layout probe of `kernels_layout.h` checks that the two agree, with
+  the sizes of the round, the question and the answer, when the module
+  loads, and a test of `tessera-kernels` checks it too.
 - The entry points require of the caller: the words initialized and
   aligned, as many as the header says, used by this call alone, not
   overlapping the call's inputs and outputs. No Rust reference to them
@@ -319,10 +320,12 @@ A few facts the design rests on:
 - C keeps the zone the spans were learned in and the zone the
   midnights were, pointers of PostgreSQL, as today. When the session's
   zone differs from a part's, C resets that part before a call that
-  uses it, the calls over one value included; the spans' next victim
+  reads it, the calls over one value included: `date_trunc` below a
+  day reads no midnight, so it resets none. The spans' next victim
   stays, as today. Today's code resets a part at its first lookup; a
-  call whose rows are all NULL resets it one call earlier, the third
-  exception of decision 3.
+  call that reads the part but needs no entry of it, its rows all NULL
+  or infinite, resets it one call earlier, the third exception of
+  decision 3.
 - The sizes and the eviction stay: 32 spans replaced in turn, 1024
   midnights by day. One thing is new: a midnight the zone cannot give
   is kept, where today it is asked again each time. A slot may then
