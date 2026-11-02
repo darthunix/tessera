@@ -8,7 +8,9 @@
 //! set holds some of a case's values. Besides the reading cases, two of
 //! the sets' own: 16 selected rows a word, near the rows from which a word
 //! is compared whole, and every row selected with its values in random
-//! order, so that the steps of a search by halving do not follow the rows.
+//! order, so that the steps of a search by halving do not follow the rows;
+//! that case, like the reading cases drawn at random, takes a ring of
+//! inputs.
 //! The kernel writes the rows found and the rows present into masks
 //! allocated once per case; the reference is an independent scalar loop
 //! over the fixture's buffers that searches the 16 keys with the standard
@@ -22,7 +24,7 @@ use tessera_kernels::set::{self, KeySet, SetValue};
 use crate::support::{
     fixture::{self, Bitmap, Fixture, FixtureValue},
     reference::Mask,
-    runner::{Group, Runner},
+    runner::Runner,
 };
 use crate::{reading, reading64};
 
@@ -87,10 +89,11 @@ pub fn cases<T: Width>() -> Result<Vec<Fixture<T>>> {
 }
 
 /// Every row selected, over `values` in random order, so that the steps
-/// of a search by halving do not follow the rows.
+/// of a search by halving do not follow the rows: drawn at random.
 fn shuffled_case<T: Width>(values: Vec<T>) -> Fixture<T> {
     let mut case = Fixture::from_values(fixture::shuffled(values), "all", "none", false);
     case.name = "words/1024/shuffled/nulls-none/ready".to_owned();
+    case.drawn = true;
     case
 }
 
@@ -133,6 +136,15 @@ impl<'a, C, T> Input<'a, C, T> {
             prepared: case.prepared.as_ref().map(Bitmap::reference),
             non_nulls: case.non_nulls.as_ref().map(Bitmap::reference),
         }
+    }
+
+    /// An input for each column and the case it was built from.
+    pub fn each(columns: &'a [C], cases: &'a [Fixture<T>]) -> Vec<Self> {
+        columns
+            .iter()
+            .zip(cases)
+            .map(|(column, case)| Self::new(column, case))
+            .collect()
     }
 }
 
@@ -277,107 +289,28 @@ pub fn check<T: Width, C: ColumnReader<Value = T>>(
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     measure_width::<i32>(runner)?;
-    measure_width::<i64>(runner)?;
-    pilot(runner)
-}
-
-/// The keys of the pilot of unlearned inputs: the largest set, which every
-/// row searches by halving.
-const PILOT_KEYS: usize = KEY_COUNTS[KEY_COUNTS.len() - 1];
-
-/// The case of the pilot of unlearned inputs: the int4 case `shuffled`,
-/// the one whose inputs the pilot's form is for. Its values lie in random
-/// order, so each word holds values from all over the keys, and a
-/// permutation of its words and rows keeps no value near the one before.
-pub fn pilot_case() -> Result<Fixture<i32>> {
-    let reading = reading::cases();
-    Ok(shuffled_case(first_long(&reading)?.values.clone()))
-}
-
-/// The pilot of unlearned inputs, on dense int4 blocks with the largest
-/// set: a ring of inputs that the predictor cannot learn beside its
-/// control, a ring of as many copies of one input. A form and its control
-/// are cases of this one program, so their code lies at the same
-/// addresses.
-fn pilot(runner: &mut Runner) -> Result<()> {
-    let reading = reading::cases();
-    let keys = keys(&reading)?;
-    let set = KeySet::new(&keys[..PILOT_KEYS]);
-    let op = format!("keys{PILOT_KEYS}");
-    let name = pilot_case()?.name;
-    for count in reading::PILOT_RINGS {
-        let repeated = || (0..count).map(|_| pilot_case()).collect::<Result<Vec<_>>>();
-        for (form, inputs) in [
-            ("ring", pilot_case()?.ring(count)),
-            ("ring-same", repeated()?),
-        ] {
-            let columns = inputs
-                .iter()
-                .map(Fixture::dense_column)
-                .collect::<Result<Vec<_>>>()?;
-            let reads: Vec<_> = columns
-                .iter()
-                .zip(&inputs)
-                .map(|(column, input)| Input::new(column, input))
-                .collect();
-            for (read, input) in reads.iter().zip(&inputs) {
-                check(read, input, &keys, dense_reference)?;
-            }
-            let mut group =
-                runner.group(format!("set_int32/int4/dense/pilot-{form}-{count}/{name}"));
-            ring_ops(&mut group, &op, &set, &keys, &reads)?;
-        }
-    }
-    Ok(())
-}
-
-/// The kernel on `set` and the reference over `reads` taken in turn, in
-/// whole turns.
-fn ring_ops<C: ColumnReader<Value = i32>>(
-    group: &mut Group<'_>,
-    op: &str,
-    set: &KeySet<'_, i32>,
-    keys: &[i32],
-    reads: &[Input<'_, C, i32>],
-) -> Result<()> {
-    use std::hint::black_box;
-    let count = reads.len();
-    let mut out = Output::new(reads[0].values.len());
-    let mut at = 0;
-    group.op_ring(op, count, || {
-        at = (at + 1) % count;
-        in_set(black_box(set), black_box(&reads[at]), &mut out).unwrap()
-    })?;
-    let mut at = 0;
-    group.op_ring("reference", count, || {
-        at = (at + 1) % count;
-        dense_reference(
-            black_box(&keys[..REFERENCE_KEYS]),
-            black_box(&reads[at]),
-            &mut out,
-        )
-        .unwrap()
-    })
+    measure_width::<i64>(runner)
 }
 
 fn measure_width<T: Width>(runner: &mut Runner) -> Result<()> {
     let cases = cases::<T>()?;
     let keys = keys(&cases)?;
-    for case in &cases {
+    for case in cases {
+        let inputs = case.inputs();
         measure_column(
             runner,
             "dense",
-            &case.dense_column()?,
+            &fixture::columns(&inputs, Fixture::dense_column)?,
             dense_reference,
-            case,
+            &inputs,
             &keys,
         )?;
         measure_column(
             runner,
             "datum",
-            &case.datum_column()?,
+            &fixture::columns(&inputs, Fixture::datum_column)?,
             datum_reference,
-            case,
+            &inputs,
             &keys,
         )?;
     }
@@ -387,25 +320,27 @@ fn measure_width<T: Width>(runner: &mut Runner) -> Result<()> {
 fn measure_column<T: Width, C: ColumnReader<Value = T>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&[T], &Input<'_, C, T>, &mut Output) -> Result<()> + Copy,
-    case: &Fixture<T>,
+    cases: &[Fixture<T>],
     keys: &[T],
 ) -> Result<()> {
     use std::hint::black_box;
-    let input = Input::new(column, case);
-    check(&input, case, keys, direct)?;
-    let mut out = Output::new(case.values.len());
-    let mut group = runner.group(format!("set_int32/{}/{format}/{}", T::NAME, case.name));
+    let inputs = Input::each(columns, cases);
+    for (input, case) in inputs.iter().zip(cases) {
+        check(input, case, keys, direct)?;
+    }
+    let mut out = Output::new(cases[0].values.len());
+    let mut group = runner.group(format!("set_int32/{}/{format}/{}", T::NAME, cases[0].name));
     for count in KEY_COUNTS {
         let set = KeySet::new(&keys[..count]);
-        group.op(&format!("keys{count}"), || {
-            in_set(black_box(&set), black_box(&input), &mut out).unwrap()
+        group.op_each(&format!("keys{count}"), &inputs, |input| {
+            in_set(black_box(&set), input, &mut out).unwrap()
         })?;
     }
     let reference_keys = &keys[..REFERENCE_KEYS];
-    group.op("reference", || {
-        direct(black_box(reference_keys), black_box(&input), &mut out).unwrap()
+    group.op_each("reference", &inputs, |input| {
+        direct(black_box(reference_keys), input, &mut out).unwrap()
     })?;
     Ok(())
 }

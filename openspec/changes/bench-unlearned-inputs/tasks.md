@@ -37,8 +37,10 @@ and relays.
 
 ## 3. The cases
 
-- [ ] 3.1 `random` and `nulls-random` of both widths' reading fixtures
-      and `shuffled` of `set_int32` take the chosen form. Check:
+- [x] 3.1 `random` and `nulls-random` of both widths' reading fixtures
+      and of the filters' fixtures, the `random` pair of
+      `compare_int32` and `shuffled` of `set_int32` take the chosen
+      form. Check:
       `cargo test --locked -p tessera-capi --benches`;
       `tests/benchmark.rs` names the cases
 - [ ] 3.2 The README of the benchmarks and `docs/measuring.md` say

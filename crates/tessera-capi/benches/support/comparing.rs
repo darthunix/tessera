@@ -4,7 +4,8 @@
 //! The left column is the filter family's fixture; the right one has other
 //! values over the same rows, the same selection and readiness, and NULLs
 //! of its own. Every call narrows a fresh copy of the selection, restored
-//! outside the counted region, as for the filters.
+//! outside the counted region, as for the filters. The case whose selection
+//! is drawn at random takes a ring of pairs, both sides permuted alike.
 
 use std::hint::black_box;
 use std::mem::MaybeUninit;
@@ -15,7 +16,7 @@ use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::int32::{CompareOp, compare_columns};
 
 use crate::support::{
-    fixture::{Fixture, as_uninit},
+    fixture::{Fixture, RING, as_uninit},
     runner::Runner,
 };
 
@@ -50,6 +51,23 @@ pub fn cases() -> Vec<[Fixture; 2]> {
     cases.push(case(1024, "random", "random", false));
     cases.push(case(1024, "all", "mixed", true));
     cases
+}
+
+/// The pairs that the calls of a case take in turn: a ring of [`RING`]
+/// if its left side, the selection and its NULL flags, is drawn at random,
+/// the pair alone otherwise. The right side's NULL flags are drawn in every
+/// case, but where the selection is regular the case keeps one pair. Both
+/// sides of a pair are permuted by the same seed, so their rows stay paired.
+pub fn inputs(pair: [Fixture; 2]) -> Vec<[Fixture; 2]> {
+    let [left, right] = pair;
+    if !left.drawn {
+        return vec![[left, right]];
+    }
+    left.ring(RING)
+        .into_iter()
+        .zip(right.ring(RING))
+        .map(|(left, right)| [left, right])
+        .collect()
 }
 
 /// What every measured call borrows.
@@ -148,37 +166,43 @@ pub fn expected(pair: &[Fixture; 2], op: CompareOp) -> Vec<u64> {
 /// Fresh copies of one selection for a block of calls, at most
 /// [`BLOCK_SIZE`] live at once.
 struct Masks {
-    original: Vec<u64>,
+    originals: Vec<Vec<u64>>,
     storage: Vec<u64>,
 }
 
 impl Masks {
-    fn new(original: &[u64]) -> Self {
+    /// The masks of calls over the pairs of a ring, whose selections are
+    /// `originals`, taken in turn.
+    fn new(originals: &[&[u64]]) -> Self {
         Self {
-            original: original.to_vec(),
-            storage: vec![0; original.len().max(1) * BLOCK_SIZE],
+            originals: originals.iter().map(|original| original.to_vec()).collect(),
+            storage: vec![0; originals[0].len().max(1) * BLOCK_SIZE],
         }
     }
 
-    /// `count` fresh copies; restoring them is not counted.
+    /// `count` fresh copies, of each pair's selection in turn; restoring
+    /// them is not counted.
     fn reset(&mut self, count: usize) -> impl Iterator<Item = &mut [u64]> {
-        let words = self.original.len();
+        let words = self.originals[0].len();
         let stride = words.max(1);
-        for chunk in self.storage[..count * stride].chunks_exact_mut(stride) {
-            chunk[..words].copy_from_slice(&self.original);
+        for (chunk, original) in self.storage[..count * stride]
+            .chunks_exact_mut(stride)
+            .zip(self.originals.iter().cycle())
+        {
+            chunk[..words].copy_from_slice(original);
         }
         self.storage[..count * stride]
             .chunks_exact_mut(stride)
             .map(move |chunk| &mut chunk[..words])
     }
 
-    /// Counters of `iterations` kernel calls on fresh masks, whose views are
-    /// built before the counters are read.
+    /// Counters of `iterations` kernel calls on fresh masks, over `inputs`
+    /// in turn, whose views are built before the counters are read.
     fn run_kernel<L, R>(
         &mut self,
         read: &mut dyn FnMut() -> Result<Reading, pmu::Error>,
         nrows: usize,
-        input: &Input<'_, L, R>,
+        inputs: &[Input<'_, L, R>],
         iterations: u64,
     ) -> Result<Reading>
     where
@@ -194,7 +218,7 @@ impl Masks {
                 .map(|words| RowMask::try_new(nrows, words).unwrap())
                 .collect();
             let start = read()?;
-            for rows in &mut views {
+            for (rows, input) in views.iter_mut().zip(inputs.iter().cycle()) {
                 black_box(kernel(black_box(input), black_box(rows))).unwrap();
             }
             total += read()?.since(start);
@@ -205,11 +229,12 @@ impl Masks {
         Ok(total)
     }
 
-    /// Counters of `iterations` reference calls on fresh masks.
+    /// Counters of `iterations` reference calls on fresh masks, over
+    /// `inputs` in turn.
     fn run_reference<L, R>(
         &mut self,
         read: &mut dyn FnMut() -> Result<Reading, pmu::Error>,
-        input: &Input<'_, L, R>,
+        inputs: &[Input<'_, L, R>],
         direct: impl Fn(&Input<'_, L, R>, &mut [u64]),
         iterations: u64,
     ) -> Result<Reading> {
@@ -219,7 +244,7 @@ impl Masks {
             let count = remaining.min(BLOCK_SIZE as u64) as usize;
             let mut views: Vec<_> = self.reset(count).collect();
             let start = read()?;
-            for words in &mut views {
+            for (words, input) in views.iter_mut().zip(inputs.iter().cycle()) {
                 direct(black_box(input), black_box(words));
             }
             total += read()?.since(start);
@@ -233,22 +258,31 @@ impl Masks {
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for pair in cases() {
-        let [left, right] = &pair;
+        let pairs = inputs(pair);
+        let sides = |side: usize| pairs.iter().map(move |pair| &pair[side]);
         measure(
             runner,
             "dense",
-            &left.dense_column()?,
-            &right.dense_column()?,
+            &sides(0)
+                .map(Fixture::dense_column)
+                .collect::<Result<Vec<_>>>()?,
+            &sides(1)
+                .map(Fixture::dense_column)
+                .collect::<Result<Vec<_>>>()?,
             dense_reference,
-            &pair,
+            &pairs,
         )?;
         measure(
             runner,
             "datum",
-            &left.datum_column()?,
-            &right.datum_column()?,
+            &sides(0)
+                .map(Fixture::datum_column)
+                .collect::<Result<Vec<_>>>()?,
+            &sides(1)
+                .map(Fixture::datum_column)
+                .collect::<Result<Vec<_>>>()?,
             datum_reference,
-            &pair,
+            &pairs,
         )?;
     }
     Ok(())
@@ -301,25 +335,33 @@ where
 fn measure<L, R>(
     runner: &mut Runner,
     format: &str,
-    left: &L,
-    right: &R,
+    lefts: &[L],
+    rights: &[R],
     direct: impl Fn(&Input<'_, L, R>, &mut [u64]) + Copy,
-    pair: &[Fixture; 2],
+    pairs: &[[Fixture; 2]],
 ) -> Result<()>
 where
     L: ColumnReader<Value = i32>,
     R: ColumnReader<Value = i32>,
 {
-    let input = input(left, right, pair, CompareOp::Lt);
-    check(&input, pair, direct)?;
-    let nrows = pair[0].values.len();
-    let mut masks = Masks::new(pair[0].selected.words());
-    let mut group = runner.group(format!("compare_int32/{format}/{}", pair[0].name));
-    group.op_blocks("kernel", |counters, iterations| {
-        masks.run_kernel(&mut || counters.read(), nrows, &input, iterations)
+    let inputs: Vec<_> = lefts
+        .iter()
+        .zip(rights)
+        .zip(pairs)
+        .map(|((left, right), pair)| input(left, right, pair, CompareOp::Lt))
+        .collect();
+    for (input, pair) in inputs.iter().zip(pairs) {
+        check(input, pair, direct)?;
+    }
+    let nrows = pairs[0][0].values.len();
+    let originals: Vec<_> = pairs.iter().map(|pair| pair[0].selected.words()).collect();
+    let mut masks = Masks::new(&originals);
+    let mut group = runner.group(format!("compare_int32/{format}/{}", pairs[0][0].name));
+    group.op_blocks_ring("kernel", inputs.len(), |counters, iterations| {
+        masks.run_kernel(&mut || counters.read(), nrows, &inputs, iterations)
     })?;
-    group.op_blocks("reference", |counters, iterations| {
-        masks.run_reference(&mut || counters.read(), &input, direct, iterations)
+    group.op_blocks_ring("reference", inputs.len(), |counters, iterations| {
+        masks.run_reference(&mut || counters.read(), &inputs, direct, iterations)
     })?;
     Ok(())
 }

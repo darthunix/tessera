@@ -634,7 +634,7 @@ fn mask_blocks_restore_every_invocation_and_handle_empty_rows() {
         let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", false);
         let column = tessera_core::ColumnView::try_new(&case.values, None).unwrap();
         let input = filtering::Input::new(&column, &case, CompareOp::Eq, 0);
-        let mut blocks = filter_blocks::Masks::new(nrows, case.selected.words()).unwrap();
+        let mut blocks = filter_blocks::Masks::new(nrows, &[case.selected.words()]).unwrap();
         for count in [filter_blocks::BLOCK_SIZE, 3, filter_blocks::BLOCK_SIZE, 0] {
             let mut visited = 0;
             for words in blocks.reset(count) {
@@ -646,8 +646,47 @@ fn mask_blocks_restore_every_invocation_and_handle_empty_rows() {
             assert_eq!(visited, count);
         }
     }
-    assert!(filter_blocks::Masks::new(65, &[u64::MAX]).is_err());
-    assert!(filter_blocks::Masks::new(1, &[2]).is_err());
+    assert!(filter_blocks::Masks::new(65, &[&[u64::MAX]]).is_err());
+    assert!(filter_blocks::Masks::new(1, &[&[2]]).is_err());
+}
+
+#[test]
+fn mask_blocks_take_the_inputs_of_a_ring_in_turn() {
+    use pmu::Reading;
+    use std::cell::Cell;
+    use tessera_kernels::int32::CompareOp;
+    let ring = fixture::Fixture::from_values(vec![42; 1024], "random", "none", false).ring(3);
+    let columns: Vec<_> = ring
+        .iter()
+        .map(|case| case.dense_column().unwrap())
+        .collect();
+    let inputs: Vec<_> = columns
+        .iter()
+        .zip(&ring)
+        .map(|(column, case)| filtering::Input::new(column, case, CompareOp::Eq, 0))
+        .collect();
+    let originals: Vec<_> = ring.iter().map(|case| case.selected.words()).collect();
+    assert_ne!(originals[0], originals[1], "the inputs differ");
+    let mut masks = filter_blocks::Masks::new(1024, &originals).unwrap();
+    for (call, words) in masks.reset(7).enumerate() {
+        assert_eq!(words, originals[call % 3]);
+    }
+    let calls = Cell::new(0);
+    masks
+        .run_reference(
+            &mut || Ok(Reading::default()),
+            &inputs,
+            |input, words| {
+                let call = calls.get();
+                assert!(std::ptr::eq(input, &inputs[call % 3]));
+                assert_eq!(words, originals[call % 3]);
+                calls.set(call + 1);
+                Ok(())
+            },
+            6,
+        )
+        .unwrap();
+    assert_eq!(calls.get(), 6);
 }
 
 #[test]
@@ -659,7 +698,7 @@ fn counted_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
         let case = fixture::Fixture::from_values(vec![42; nrows], "all", "none", false);
         let column = case.dense_column().unwrap();
         let input = filtering::Input::new(&column, &case, CompareOp::Eq, 0);
-        let mut masks = filter_blocks::Masks::new(nrows, case.selected.words()).unwrap();
+        let mut masks = filter_blocks::Masks::new(nrows, &[case.selected.words()]).unwrap();
         for count in [
             0,
             1,
@@ -680,7 +719,7 @@ fn counted_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
             let reading = masks
                 .run_reference(
                     &mut read,
-                    &input,
+                    std::slice::from_ref(&input),
                     |_, words| {
                         assert_eq!(words, case.selected.words());
                         words.fill(0);
@@ -695,7 +734,9 @@ fn counted_blocks_count_calls_and_restore_inputs_across_block_boundaries() {
                 reading.instructions,
                 count.div_ceil(filter_blocks::BLOCK_SIZE as u64)
             );
-            masks.run_scalar(&mut read, &input, count).unwrap();
+            masks
+                .run_scalar(&mut read, std::slice::from_ref(&input), count)
+                .unwrap();
         }
     }
 }
@@ -751,16 +792,89 @@ fn column_comparisons_match_the_model_on_every_case() -> Result<()> {
     Ok(())
 }
 
-/// The misses a call that the pilot of unlearned inputs holds each form
-/// to: of the fold's loop over the rows of each of 16 words, and of the
-/// 7 steps of halving of 1024 rows over 65 keys, in `shuffled`.
+/// The cases drawn at random, by name: each takes a ring of
+/// [`fixture::RING`] inputs, and every other case one input.
 #[test]
-fn the_pilot_cases_hold_the_models_of_their_misses() -> Result<()> {
-    let fold = reading::pilot_case();
-    assert_eq!(fixture::exit_misses(&fold.selected), 11);
-    let shuffled = sets::pilot_case()?;
-    let keys = sets::keys(&reading::cases())?;
+fn the_cases_drawn_at_random_take_a_ring() -> Result<()> {
+    fn drawn<T: fixture::FixtureValue>(cases: Vec<fixture::Fixture<T>>) -> Vec<String> {
+        let mut names = Vec::new();
+        for case in cases {
+            let (name, drawn) = (case.name.clone(), case.drawn);
+            assert_eq!(case.inputs().len(), if drawn { fixture::RING } else { 1 });
+            if drawn {
+                names.push(name);
+            }
+        }
+        names
+    }
+    let random = [
+        "words/1024/all/nulls-random/ready",
+        "words/1024/random/nulls-random/ready",
+    ];
+    assert_eq!(drawn(reading::cases()), random);
+    assert_eq!(drawn(reading64::cases()), random);
+    assert_eq!(drawn(filtering::cases()), random);
+    assert_eq!(drawn(filtering64::cases()), random);
+    let sets = drawn(sets::cases::<i32>()?);
+    assert_eq!(
+        sets,
+        [random[0], random[1], "words/1024/shuffled/nulls-none/ready"]
+    );
+    assert_eq!(drawn(sets::cases::<i64>()?), sets);
+    let pairs: Vec<_> = comparing::cases()
+        .into_iter()
+        .map(|pair| (pair[0].name.clone(), comparing::inputs(pair).len()))
+        .filter(|&(_, inputs)| inputs != 1)
+        .collect();
+    assert_eq!(pairs, [(random[1].to_owned(), fixture::RING)]);
+    Ok(())
+}
+
+/// The pairs of a comparison's ring are permuted alike, so that their
+/// rows stay paired.
+#[test]
+fn the_pairs_of_a_ring_keep_their_rows_paired() {
+    let pair = comparing::cases()
+        .into_iter()
+        .find(|pair| pair[0].drawn)
+        .unwrap();
+    let rows = |pair: &[fixture::Fixture; 2]| -> Vec<(i32, i32)> {
+        pair[0]
+            .values
+            .iter()
+            .copied()
+            .zip(pair[1].values.iter().copied())
+            .collect()
+    };
+    let mut first = rows(&pair);
+    first.sort_unstable();
+    for input in comparing::inputs(pair) {
+        assert_eq!(input[0].selected.words(), input[1].selected.words());
+        let mut paired = rows(&input);
+        paired.sort_unstable();
+        assert_eq!(paired, first);
+    }
+}
+
+/// The misses a call of the cases drawn at random by the model of a
+/// predictor that has not seen their inputs: of the fold's loop over the
+/// rows of each of 16 words in `random`, and of the 7 steps of halving of
+/// 1024 rows over 65 keys in `shuffled`.
+#[test]
+fn the_cases_drawn_at_random_hold_the_models_of_their_misses() -> Result<()> {
+    let reading = reading::cases();
+    let named = |name: &str| {
+        reading
+            .iter()
+            .find(|case| case.name == name)
+            .expect("the case")
+    };
+    let random = named("words/1024/random/nulls-random/ready");
+    assert_eq!(fixture::exit_misses(&random.selected), 11);
+    let sets = sets::cases::<i32>()?;
+    let shuffled = sets.last().unwrap();
     assert_eq!(shuffled.name, "words/1024/shuffled/nulls-none/ready");
+    let keys = sets::keys(&reading)?;
     assert_eq!(fixture::halving_misses(&keys, &shuffled.values), 1351);
     Ok(())
 }

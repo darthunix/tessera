@@ -10,7 +10,10 @@ use tessera_core::ColumnReader;
 use tessera_kernels::int64;
 
 use crate::reading64::{self, Input};
-use crate::support::{fixture::Fixture, runner::Runner};
+use crate::support::{
+    fixture::{self, Fixture},
+    runner::Runner,
+};
 
 #[inline(never)]
 pub fn min<C: ColumnReader<Value = i64>>(input: &Input<'_, C>) -> Result<Option<i64>> {
@@ -59,19 +62,20 @@ pub fn check<C: ColumnReader<Value = i64>>(
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in reading64::cases() {
+        let inputs = case.inputs();
         measure_column(
             runner,
             "dense",
-            &case.dense_column()?,
+            &fixture::columns(&inputs, Fixture::dense_column)?,
             reading64::dense_reference,
-            &case,
+            &inputs,
         )?;
         measure_column(
             runner,
             "datum",
-            &case.datum_column()?,
+            &fixture::columns(&inputs, Fixture::datum_column)?,
             reading64::datum_reference,
-            &case,
+            &inputs,
         )?;
     }
     Ok(())
@@ -80,21 +84,22 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 fn measure_column<C: ColumnReader<Value = i64>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&Input<'_, C>) -> Result<i64>,
-    case: &Fixture<i64>,
+    cases: &[Fixture<i64>],
 ) -> Result<()> {
-    use std::hint::black_box;
-    let input = Input::new(column, case);
-    ensure!(
-        direct(&input)? == case.expected,
-        "reference result differs from scalar model"
-    );
-    check(&input, case)?;
-    let mut group = runner.group(format!("aggregate_int64/{format}/{}", case.name));
-    group.op("min", || min(black_box(&input)).unwrap())?;
-    group.op("max", || max(black_box(&input)).unwrap())?;
-    group.op("count", || count(black_box(&input)).unwrap())?;
-    group.op("reference", || direct(black_box(&input)).unwrap())?;
+    let inputs = Input::each(columns, cases);
+    for (input, case) in inputs.iter().zip(cases) {
+        ensure!(
+            direct(input)? == case.expected,
+            "reference result differs from scalar model"
+        );
+        check(input, case)?;
+    }
+    let mut group = runner.group(format!("aggregate_int64/{format}/{}", cases[0].name));
+    group.op_each("min", &inputs, |input| min(input).unwrap())?;
+    group.op_each("max", &inputs, |input| max(input).unwrap())?;
+    group.op_each("count", &inputs, |input| count(input).unwrap())?;
+    group.op_each("reference", &inputs, |input| direct(input).unwrap())?;
     Ok(())
 }

@@ -33,6 +33,11 @@ state of the benchmarks that shapes the design.
     in a random order. Its keys are the values of every seventh row,
     65 of them, so they span the values 0 to 448 of the 1024: 575 rows
     are above every key and take the same steps of a search by halving;
+  - in the fixtures of the filters (`support/filtering.rs`,
+    `support/filtering64.rs`): `random` and `nulls-random` too;
+  - in the pairs of `compare_int32` (`support/comparing.rs`): the
+    selection of `random`, and the NULL flags of the right side in
+    every case;
   - `table_large` already probes a ring of batches of distinct keys,
     taken in turn, so that its records come from memory; its keys are
     chosen so that every batch does the same work.
@@ -199,8 +204,8 @@ Refused:
 ### The hypotheses of the pilot
 
 Written before the first pilot's runs. The models, from the cases
-themselves (in `tests/benchmark.rs`, the test
-`the_pilot_cases_hold_the_models_of_their_misses`):
+themselves (in `tests/benchmark.rs`, now the test
+`the_cases_drawn_at_random_hold_the_models_of_their_misses`):
 11 misses a call for the fold of `column_reader`, as 11 of its 16
 words hold a count of rows other than the commonest; 3068 of the 7168
 steps for the halving of `set_int32` on the Intel Mac, over the case
@@ -333,10 +338,33 @@ inputs of each case lie.
 ### Which cases change
 
 The cases drawn at random: `random` and `nulls-random` of the reading
-fixtures, of both widths, and `shuffled` of `set_int32`, each a ring
-of 64 inputs. Their names stay, with their meaning sharpened: drawn at
-random and not learned.
+fixtures and of the filters' fixtures, of both widths, the pair of
+`compare_int32` whose selection is `random`, and `shuffled` of
+`set_int32`, each a ring of 64 inputs. Their names stay, with their
+meaning sharpened: drawn at random and not learned. The smallint
+groups of `arith_int32`, whose values are those of a reading case cut
+to the smallint range, take the ring of their case. A fixture says
+whether it is drawn at random, and the programs measure every
+operation over the inputs of a case taken in turn, as the pilot did.
 `table_large` keeps its ring, which already gives each call new keys.
+
+The list of the cases drawn at random first named the reading fixtures
+and `shuffled` alone, while the proposal promises a ring to every case
+drawn at random. The maintainer took the cases of the filters and the
+comparisons that are drawn as the reading fixtures' are, and left the
+rest of the comparisons' matrix, whose right side has NULL flags drawn
+at random under a regular selection, to the change that redraws those
+matrices. The two sides of a pair of a ring are permuted by the same
+seed, so that their rows stay paired.
+
+`table_int32` builds one table for the whole ring, as the maintainer
+chose. Every input of a case holds the same keys, so a table built
+from any of them holds the keys of all, and its probes find every
+row. Only the buffers of the rows go round: their hashes, masks and
+offsets, about 1 MiB for a ring of 64. A table for each input would
+have put about 3 MiB of tables in the way of every turn, out of the
+Intel Mac's L2 and against the plain case's table, which stays in the
+cache.
 
 The regular cases keep their inputs. A pattern that repeats is what a
 predictor of any machine learns, and a call over such data is a case
@@ -394,12 +422,19 @@ the runs, then the close.
 ## Files
 
 - `crates/tessera-capi/benches/support/fixture.rs`: the permuted
-  inputs.
+  inputs, the ring of a case drawn at random, the models of its misses.
 - `crates/tessera-capi/benches/support/runner.rs`: the period of a
-  ring, if a ring is taken.
+  ring, and the operations over its inputs in turn.
 - `crates/tessera-capi/benches/support/reading.rs`,
   `crates/tessera-capi/benches/support/reading64.rs`,
+  `crates/tessera-capi/benches/support/filtering.rs`,
+  `crates/tessera-capi/benches/support/filtering64.rs`,
+  `crates/tessera-capi/benches/support/comparing.rs`,
   `crates/tessera-capi/benches/support/sets.rs`: the cases.
+- `crates/tessera-capi/benches/support/filter_blocks.rs`: the masks
+  of the filters' calls over a ring.
+- `crates/tessera-capi/benches/support/tabling.rs`: one table for a
+  ring.
 - `crates/tessera-capi/benches/README.md`, `docs/measuring.md`: what
   the cases show.
 

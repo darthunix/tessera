@@ -12,7 +12,7 @@ use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::int64::{CompareOp, filter};
 
 use crate::support::{
-    fixture::{Fixture, as_uninit},
+    fixture::{self, Fixture, as_uninit},
     reference::Mask,
     runner::Runner,
 };
@@ -204,19 +204,20 @@ pub fn expected(fixture: &Fixture<i64>, selected: &[u64], op: CompareOp, scalar:
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in cases() {
+        let inputs = case.inputs();
         measure_column(
             runner,
             "dense",
-            &case.dense_column()?,
+            &fixture::columns(&inputs, Fixture::dense_column)?,
             dense_reference,
-            &case,
+            &inputs,
         )?;
         measure_column(
             runner,
             "datum",
-            &case.datum_column()?,
+            &fixture::columns(&inputs, Fixture::datum_column)?,
             datum_reference,
-            &case,
+            &inputs,
         )?;
     }
     Ok(())
@@ -225,29 +226,36 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 fn measure_column<C: ColumnReader<Value = i64>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&Input<'_, C>, &mut [u64]) -> Result<()> + Copy,
-    case: &Fixture<i64>,
+    cases: &[Fixture<i64>],
 ) -> Result<()> {
-    let input = Input::new(column, case, CompareOp::Gt, 0);
-    let original = case.selected.words();
-    let expected = expected(case, original, input.op, input.scalar);
-    let mut reference = original.to_vec();
-    direct(&input, &mut reference)?;
-    ensure!(reference == expected, "reference differs from scalar model");
-    let mut actual = original.to_vec();
-    scalar(
-        &input,
-        &mut RowMask::try_new(case.values.len(), &mut actual)?,
-    )?;
-    ensure!(actual == expected, "filter differs from scalar model");
-    let mut masks = blocks::Masks::new(case.values.len(), original)?;
-    let mut group = runner.group(format!("filter_int64/{format}/{}", case.name));
-    group.op_blocks("scalar", |counters, iterations| {
-        masks.run_scalar(&mut || counters.read(), &input, iterations)
+    let inputs: Vec<_> = columns
+        .iter()
+        .zip(cases)
+        .map(|(column, case)| Input::new(column, case, CompareOp::Gt, 0))
+        .collect();
+    for (input, case) in inputs.iter().zip(cases) {
+        let original = case.selected.words();
+        let expected = expected(case, original, input.op, input.scalar);
+        let mut reference = original.to_vec();
+        direct(input, &mut reference)?;
+        ensure!(reference == expected, "reference differs from scalar model");
+        let mut actual = original.to_vec();
+        scalar(
+            input,
+            &mut RowMask::try_new(case.values.len(), &mut actual)?,
+        )?;
+        ensure!(actual == expected, "filter differs from scalar model");
+    }
+    let originals: Vec<_> = cases.iter().map(|case| case.selected.words()).collect();
+    let mut masks = blocks::Masks::new(cases[0].values.len(), &originals)?;
+    let mut group = runner.group(format!("filter_int64/{format}/{}", cases[0].name));
+    group.op_blocks_ring("scalar", inputs.len(), |counters, iterations| {
+        masks.run_scalar(&mut || counters.read(), &inputs, iterations)
     })?;
-    group.op_blocks("reference", |counters, iterations| {
-        masks.run_reference(&mut || counters.read(), &input, direct, iterations)
+    group.op_blocks_ring("reference", inputs.len(), |counters, iterations| {
+        masks.run_reference(&mut || counters.read(), &inputs, direct, iterations)
     })?;
     Ok(())
 }

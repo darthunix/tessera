@@ -9,7 +9,10 @@ use tessera_core::ColumnReader;
 use tessera_kernels::int32;
 
 use crate::reading::{self, Input};
-use crate::support::{fixture::Fixture, runner::Runner};
+use crate::support::{
+    fixture::{self, Fixture},
+    runner::Runner,
+};
 
 #[inline(never)]
 pub fn sum<C: ColumnReader<Value = i32>>(input: &Input<'_, C>) -> Result<Option<i64>> {
@@ -57,19 +60,20 @@ pub fn check<C: ColumnReader<Value = i32>>(input: &Input<'_, C>, case: &Fixture)
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in reading::cases() {
+        let inputs = case.inputs();
         measure_column(
             runner,
             "dense",
-            &case.dense_column()?,
+            &fixture::columns(&inputs, Fixture::dense_column)?,
             reading::dense_reference,
-            &case,
+            &inputs,
         )?;
         measure_column(
             runner,
             "datum",
-            &case.datum_column()?,
+            &fixture::columns(&inputs, Fixture::datum_column)?,
             reading::datum_reference,
-            &case,
+            &inputs,
         )?;
     }
     Ok(())
@@ -78,21 +82,22 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
 fn measure_column<C: ColumnReader<Value = i32>>(
     runner: &mut Runner,
     format: &str,
-    column: &C,
+    columns: &[C],
     direct: impl Fn(&Input<'_, C>) -> Result<i64>,
-    case: &Fixture,
+    cases: &[Fixture],
 ) -> Result<()> {
-    use std::hint::black_box;
-    let input = Input::new(column, case);
-    ensure!(
-        direct(&input)? == case.expected,
-        "reference result differs from scalar model"
-    );
-    check(&input, case)?;
-    let mut group = runner.group(format!("aggregate_int32/{format}/{}", case.name));
-    group.op("sum", || sum(black_box(&input)).unwrap())?;
-    group.op("min", || min(black_box(&input)).unwrap())?;
-    group.op("count", || count(black_box(&input)).unwrap())?;
-    group.op("reference", || direct(black_box(&input)).unwrap())?;
+    let inputs = Input::each(columns, cases);
+    for (input, case) in inputs.iter().zip(cases) {
+        ensure!(
+            direct(input)? == case.expected,
+            "reference result differs from scalar model"
+        );
+        check(input, case)?;
+    }
+    let mut group = runner.group(format!("aggregate_int32/{format}/{}", cases[0].name));
+    group.op_each("sum", &inputs, |input| sum(input).unwrap())?;
+    group.op_each("min", &inputs, |input| min(input).unwrap())?;
+    group.op_each("count", &inputs, |input| count(input).unwrap())?;
+    group.op_each("reference", &inputs, |input| direct(input).unwrap())?;
     Ok(())
 }
