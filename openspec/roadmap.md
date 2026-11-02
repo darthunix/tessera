@@ -31,8 +31,8 @@ closed. The maintainer took the six findings of the AVX2 kernels on
 order. The maintainer took six entries out of turn on 2026-11-02, after
 an analysis of TPC-H with Tessera on, in the order
 `deform-without-restarts` (done), `bpchar-constant-compare` (done),
-`right-anti-join` (done), `agg-dependent-columns`, `early-key-filter`,
-`batch-index-join`; on the same day he moved `agg-dependent-columns`
+`right-anti-join` (done), `agg-dependent-columns`, `early-key-filter`
+(done), `batch-index-join`; on the same day he moved `agg-dependent-columns`
 after `batch-index-join`, once a measurement of Q10 showed its
 aggregate's input row-wise:
 
@@ -186,26 +186,6 @@ TessAgg with columns its keys determine.
   measured again before its proposal.
 - **Depends on:** nothing.
 - **Capabilities:** aggregate
-- **Size:** medium: one pull request.
-
-### early-key-filter
-
-The join's key filter before a TessFilter's batch clauses, and for
-small builds.
-
-- **What:** A TessFilter of batch clauses alone takes the join's key
-  filter and runs it first, on the key column, before it reads the
-  columns its clauses need; a build of fewer than 4096 rows may make a
-  filter when that saves the clauses' work.
-- **Why:** TPC-H Q19 builds 485 parts and Q21 411 suppliers; their
-  lineitem filters spend 319 and 197 ms above the scan on rows the join
-  then drops.
-- **Known:** The spec of `key-filter` says a TessFilter of batch clauses
-  alone refuses a filter: the proposal changes it, and the maintainer
-  approves the proposal before the code.
-- **Depends on:** nothing; measure the clauses' cost again first,
-  since a row's columns are no longer walked again.
-- **Capabilities:** key-filter
 - **Size:** medium: one pull request.
 
 ### batch-index-join
@@ -2022,6 +2002,13 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **The key filter's order under correlated clauses** (the close of
+  `early-key-filter`, a finding of its review). A TessFilter of batch
+  clauses alone compares the filter's share of all its rows with the
+  clauses' share of the rows the filter kept; where both keep the same
+  rows it may hold the costlier order for the whole scan, by under half
+  a check a row. Suggested: a window of each side measured first now
+  and then, once a query shows the cost.
 - **TessHeapScan under a row-wise hash join** (the TPC-H analysis of
   2026-11-02). In Q22 the scan of orders feeding the core's hash join
   takes 56 ms against 36 for the core's Seq Scan, where

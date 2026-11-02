@@ -5,6 +5,10 @@ Summaries of full runs of the PostgreSQL-level benchmarks of
 TPC-H of [`bench/tpch`](../../bench/tpch/README.md), with the plans of
 the cases the README cites, newest first:
 
+- [2026-11-02, the join's key filter first, and for small
+  tables](2026-11-02-early-key-filter/README.md): TPC-H Q19 and Q21
+  serial and with two workers, the join family, Apple M5 Pro,
+  PostgreSQL master, the change `early-key-filter` against `16128ec2`.
 - [2026-11-02, a right anti join in
   TessHashJoin](2026-11-02-right-anti-join/README.md): TPC-H Q22 serial
   and with two workers, the join family, Apple M5 Pro, PostgreSQL
