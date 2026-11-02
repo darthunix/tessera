@@ -22,6 +22,8 @@
 #include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
+#include "heap_batch_internal.h"
+
 #define MAX_ARGS 3
 /* The most elements of an IN list compiled as an OR of comparisons. */
 #define MAX_ARRAY_ELEMENTS 32
@@ -2656,6 +2658,19 @@ tess_expr_apply_filter(TessExpr *expr)
 				   sizeof(uint64) * tess_row_mask_word_count(expr->rows->nrows));
 		return;
 	}
+	/*
+	 * Of two columns of a heap batch compared, the one before in the tuple
+	 * is read first: the other then goes on with the row's walk instead of
+	 * starting it again, and the batch keeps the first for the read
+	 * build_args makes. Only there: another batch may compute its columns
+	 * on request, whose order of computing, and of errors, stays.
+	 */
+	if (expr->column >= 0 && expr->nsteps == 0 && expr->predicate.operand != NULL &&
+		expr->predicate.operand->column >= 0 && expr->predicate.operand->nsteps == 0 &&
+		!expr->predicate.operand->ready &&
+		expr->predicate.operand->column < expr->column &&
+		tess_batch_is_heap(expr->batch))
+		(void) expr_column(expr->predicate.operand, false);
 	column = expr_column(expr, expr->predicate.reads_decimals && wants_decimals(expr));
 	if (build_args(expr, &expr->predicate, column, args))
 	{

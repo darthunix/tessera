@@ -10,7 +10,7 @@
 - [x] 2.1 The second cursor a row, and its test. Check: `make
       installcheck` on PostgreSQL master with assertions; the test fails
       without the second cursor
-- [ ] 2.2 The earlier of two compared columns first, and its test.
+- [x] 2.2 The earlier of two compared columns first, and its test.
       Check: the same; the test shows restarts without it
 - [ ] 2.3 The measurement of the design
 

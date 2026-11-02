@@ -378,6 +378,19 @@ SELECT :read AS read_on, seq_tup_read - :before - :read AS read_off
 FROM pg_stat_xact_user_tables WHERE relname = 'filter_t';
 COMMIT;
 
+-- Two columns compared: the one before in the tuple is read first, and the
+-- other goes on with each row's walk instead of starting it again, past
+-- the text before them.
+CREATE TABLE filter_two (t text, d1 date, d2 date);
+INSERT INTO filter_two
+SELECT repeat('x', i % 7), date '2020-01-01' + i % 50, date '2020-01-01' + i % 37
+FROM generate_series(1, 200) AS i;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM filter_two WHERE d2 > d1;
+SELECT filter_same($$SELECT count(*) FROM filter_two WHERE d2 > d1$$);
+SELECT filter_same($$SELECT count(*) FROM filter_two WHERE d1 < d2 AND t <> ''$$);
+DROP TABLE filter_two;
+
 DROP FUNCTION filter_same(text);
 
 DROP TABLE filter_t;

@@ -1383,6 +1383,50 @@ FROM pg_stat_xact_user_tables WHERE relname = 'filter_t';
 (1 row)
 
 COMMIT;
+-- Two columns compared: the one before in the tuple is read first, and the
+-- other goes on with each row's walk instead of starting it again, past
+-- the text before them.
+CREATE TABLE filter_two (t text, d1 date, d2 date);
+INSERT INTO filter_two
+SELECT repeat('x', i % 7), date '2020-01-01' + i % 50, date '2020-01-01' + i % 37
+FROM generate_series(1, 200) AS i;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT count(*) FROM filter_two WHERE d2 > d1;
+                                        QUERY PLAN                                        
+------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (count(*))
+   Input Batches: 4
+   Input Rows: 71
+   Kernel Calls: 4
+   ->  Custom Scan (TessFilter) on public.filter_two (actual rows=71.00 loops=1)
+         Batch Filter: (filter_two.d2 > filter_two.d1)
+         Rows Removed by Batch Filter: 129
+         Input Batches: 4
+         Input Rows: 200
+         Output Rows: 71
+         ->  Custom Scan (TessHeapScan) on public.filter_two (actual rows=200.00 loops=1)
+               Output: d2, d1
+               Batch Size: 64
+               Batches: 4
+               Pages: 2
+               Deformed Datums: 400
+               Restarted Datums: 0
+(18 rows)
+
+SELECT filter_same($$SELECT count(*) FROM filter_two WHERE d2 > d1$$);
+ filter_same 
+-------------
+ {(71)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_two WHERE d1 < d2 AND t <> ''$$);
+ filter_same 
+-------------
+ {(62)}
+(1 row)
+
+DROP TABLE filter_two;
 DROP FUNCTION filter_same(text);
 DROP TABLE filter_t;
 DROP EXTENSION tessera;
