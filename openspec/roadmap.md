@@ -28,7 +28,8 @@ placed `spill-crate` first on 2026-10-28, after the close of
 review of what more can move from C to Rust; the float kernels are
 closed. The maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
-order:
+order. The maintainer took `native-key-hashes` out of turn on
+2026-11-02, after profiles of the calls of a key's type functions:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
@@ -83,6 +84,8 @@ These have no place in the queue. The maintainer places an entry when it
 is wanted; several wait for a measured case. `greengage-port` and
 `tpch-on-greengage` came down here from "Later" on 2026-10-05.
 
+- `numeric-keys-by-digits`: numeric keys hashed and compared by their
+  digits
 - `window-functions`: Batch window functions
 - `merge-join`: TessMergeJoin
 - `minimal-tuples-for-storing-parents`: Minimal tuples for a parent that
@@ -157,6 +160,44 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
+
+### native-key-hashes
+
+Keys hashed and compared by their bytes. The maintainer took it on
+2026-11-02, after profiles of the calls of a key's type functions; it
+is the change `native-key-hashes`.
+
+- **What:** A grouping's char(n) key, and a join's text, char(n) and
+  bytea key, hashed and compared by the value's bytes, as the type's
+  functions would, without a call through fmgr.
+- **Why:** Those calls are 997 of 6806 samples of TPC-H Q1, serial, and
+  532 of 6785 of a join on a text key (`any_join_text`).
+- **Known:** The design of the change.
+- **Depends on:** nothing.
+- **Capabilities:** hash-table, aggregate
+- **Size:** small: one pull request.
+
+### numeric-keys-by-digits
+
+numeric keys hashed and compared by their digits, in the grouping's
+dictionary and in the join.
+
+- **What:** The dictionary and the join hash and compare a numeric
+  value from its own representation, as `hash_numeric` and `numeric_eq`
+  do: the base-10000 digits without the leading and trailing zero
+  groups, the weight, the scale left out of the hash, NaN equal to NaN,
+  the infinities apart; the existing decimal kernels where both values
+  fit them, the core's functions for the rest.
+- **Why:** A profile of `any_numeric` (500 000 rows by 1000 numeric
+  values, serial, 2026-11-02) puts 1710 of 5074 samples in the
+  dictionary: `hash_numeric`, `cmp_numerics`, `cmp_var_common`, the
+  unpacking and their fmgr frames.
+- **Known:** `1.0` and `1.00` must stay one number and keep their own
+  forms in the output. A hash of the value as a coefficient and a scale
+  would split them; one through float would be wrong.
+- **Depends on:** `native-key-hashes`, whose rule it extends.
+- **Capabilities:** aggregate, hash-table
+- **Size:** medium: one pull request.
 
 ### spill-crate
 
@@ -1932,12 +1973,21 @@ becomes an entry, joins one, or is dropped.
   `EXPLAIN` shows the memory of `TessAgg`'s table and `DISTINCT` sets,
   not of the keys' dictionaries, which count when the node decides the
   table is full. Suggested: a small fix with a test.
-- **`char(n)` keys by their bytes** (the same close). A `char(n)` key's
-  dictionary calls the type's hash and equality through fmgr for every
-  row; under a deterministic collation it could hash and compare the
-  bytes without the trailing blanks, as it does for text. TPC-H Q1
-  groups by two such keys on both cores. Suggested: measure Q1's
-  dictionary time first.
+- **Aggregate transitions through the core's functions** (profiles of
+  2026-11-02, before `native-key-hashes`). `bit_or`, `bit_and`,
+  `bool_and` and the text extremes call their transition function for
+  every row. `max(text)` over 500 000 rows (`g_max_text`) spends 2345
+  of 4400 samples in `text_larger`, most of it the locale's `strcoll`;
+  the call itself, the collation's lookup and the unpacking are about
+  7 %. A native form helps the bit and boolean aggregates and the
+  extremes under the C collation only. Suggested: measure `g_bit_or`
+  first.
+- **Comparisons computed as values** (an outside review, 2026-11-02).
+  A comparison that a WHERE clause runs in batches runs row by row in a
+  target list (`SELECT a > b`): it is registered as a condition, not as
+  a value, so the projection evaluates it through the core. UNKNOWN
+  must become NULL. No case measures it. Suggested: a case in a family
+  first.
 - **The integer entry points borrow a whole column struct** (the close
   of `float-kernels-in-rust`, 2026-11-01). `DatumColumn::ints`, behind
   every int4 and int8 entry point of `tessera-capi`, makes a reference
