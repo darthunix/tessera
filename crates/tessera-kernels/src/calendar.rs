@@ -25,6 +25,7 @@ use std::mem::MaybeUninit;
 use anyhow::Result;
 use tessera_core::{RowMask, RowMaskView, check_rows, ones};
 
+use crate::ops::CompareOp;
 pub use crate::source::Source;
 use crate::source::{Unary, map_rows};
 
@@ -286,6 +287,65 @@ pub const fn timestamp_to_date(timestamp: i64) -> i32 {
         TIMESTAMP_NOEND => DATE_NOEND,
         _ => split(timestamp).0 as i32,
     }
+}
+
+/// A comparison of a date with a timestamp as one of dates: for `date op
+/// timestamp`, the operator and the bound `B` such that `date op' B` is the
+/// core's answer (`date_cmp_timestamp`) for every date, infinities and the
+/// dates past the last timestamp included.
+///
+/// A date is the timestamp of its midnight. An infinite timestamp is the
+/// infinite date of its sign, with the same operator. A finite one is its
+/// day, rounded down ([`split`]), and the time into it ([`day_bound`]). A
+/// finite date past the last timestamp stays above every finite bound and
+/// below the infinite date, which is the core's order.
+#[inline]
+pub fn date_bound(op: CompareOp, timestamp: i64) -> (CompareOp, i32) {
+    match timestamp {
+        TIMESTAMP_NOBEGIN => (op, DATE_NOBEGIN),
+        TIMESTAMP_NOEND => (op, DATE_NOEND),
+        _ => {
+            let (day, time) = split(timestamp);
+            day_bound(op, day, time)
+        }
+    }
+}
+
+/// [`date_bound`] of a finite timestamp given as its day and the time into
+/// it, from 0 to less than a day. `d < T` holds for every day before the
+/// timestamp's and, past its midnight, for its day too: `d < day + 1`;
+/// `d <= T` is `d <= day`, `d > T` is `d > day`, `d >= T` is
+/// `d >= day + 1` past midnight. `d = T` is `d = day` at midnight, and no
+/// date past it (`d < DATE_NOBEGIN`); `d <> T` its complement. The day of a
+/// valid timestamp fits a date. A Kani proof shows this against the core's
+/// comparison for every date, day, time and operator.
+#[inline]
+pub fn day_bound(op: CompareOp, day: i64, time: i64) -> (CompareOp, i32) {
+    let day = day as i32;
+    let past_midnight = time > 0;
+    match op {
+        CompareOp::Lt | CompareOp::Ge => (op, day + i32::from(past_midnight)),
+        CompareOp::Le | CompareOp::Gt => (op, day),
+        CompareOp::Eq if past_midnight => (CompareOp::Lt, DATE_NOBEGIN),
+        CompareOp::Ne if past_midnight => (CompareOp::Ge, DATE_NOBEGIN),
+        CompareOp::Eq | CompareOp::Ne => (op, day),
+    }
+}
+
+/// The selected rows of a date column where `date op timestamp`: the
+/// int4 filter against [`date_bound`]'s bound.
+///
+/// # Errors
+///
+/// As [`crate::int32::filter`].
+pub fn filter_by_timestamp<C: tessera_core::ColumnReader<Value = i32>>(
+    column: &C,
+    rows: &mut RowMask<'_>,
+    op: CompareOp,
+    timestamp: i64,
+) -> Result<()> {
+    let (op, bound) = date_bound(op, timestamp);
+    crate::int32::filter(column, rows, op, bound)
 }
 
 /// A date's midnight, as `date2timestamp`: an infinity its timestamp's.
@@ -953,6 +1013,63 @@ pub fn extract_timestamps(
     })
 }
 
+/// The core's comparison of a date with a timestamp, written as
+/// PostgreSQL's `date_cmp_timestamp` writes it, the reference of the
+/// bound's tests and proof.
+#[cfg(any(test, kani))]
+mod reference {
+    use std::cmp::Ordering;
+
+    use super::{
+        DATE_NOBEGIN, DATE_NOEND, POSTGRES_EPOCH_JDATE, TIMESTAMP_END_JULIAN, TIMESTAMP_NOBEGIN,
+        TIMESTAMP_NOEND, USECS_PER_DAY,
+    };
+    use crate::ops::CompareOp;
+
+    /// Whether an ordering satisfies an operator.
+    pub(super) fn holds(op: CompareOp, ordering: Ordering) -> bool {
+        match op {
+            CompareOp::Eq => ordering == Ordering::Equal,
+            CompareOp::Ne => ordering != Ordering::Equal,
+            CompareOp::Lt => ordering == Ordering::Less,
+            CompareOp::Le => ordering != Ordering::Greater,
+            CompareOp::Gt => ordering == Ordering::Greater,
+            CompareOp::Ge => ordering != Ordering::Less,
+        }
+    }
+
+    /// The date's order against an infinite timestamp, or, for a finite
+    /// one, `None` when the date is finite and not past the timestamps.
+    fn infinite(date: i32, timestamp: i64) -> Option<Ordering> {
+        let past = date >= TIMESTAMP_END_JULIAN - POSTGRES_EPOCH_JDATE;
+        Some(match (date, timestamp) {
+            (DATE_NOBEGIN, TIMESTAMP_NOBEGIN) | (DATE_NOEND, TIMESTAMP_NOEND) => Ordering::Equal,
+            (DATE_NOBEGIN, _) | (_, TIMESTAMP_NOEND) => Ordering::Less,
+            (DATE_NOEND, _) | (_, TIMESTAMP_NOBEGIN) => Ordering::Greater,
+            _ if past => Ordering::Greater,
+            _ => return None,
+        })
+    }
+
+    /// `date_cmp_timestamp`: the date's midnight in microseconds against
+    /// the timestamp.
+    pub(super) fn compare(date: i32, timestamp: i64) -> Ordering {
+        infinite(date, timestamp)
+            .unwrap_or_else(|| (i64::from(date) * USECS_PER_DAY).cmp(&timestamp))
+    }
+
+    /// The same over a finite timestamp's day and time (0 to less than a
+    /// day): the date against the day, then midnight against the time,
+    /// which is the order of the microseconds; `timestamp` only tells an
+    /// infinity.
+    pub(super) fn compare_split(date: i32, timestamp: i64, day: i64, time: i64) -> Ordering {
+        infinite(date, timestamp).unwrap_or_else(|| i64::from(date).cmp(&day).then(0.cmp(&time)))
+    }
+}
+
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
@@ -961,6 +1078,116 @@ mod tests {
     use tessera_testing::property;
 
     use super::*;
+
+    /// Timestamps where a day decides: each side of a midnight, both signs,
+    /// the first and the last timestamp.
+    fn edge_timestamps() -> Vec<i64> {
+        let mut stamps = vec![MIN_TIMESTAMP, MIN_TIMESTAMP + 1, END_TIMESTAMP - 1];
+        for day in [-POSTGRES_EPOCH_JDATE as i64, -2, -1, 0, 1, 2, 106_751_982] {
+            for time in [-1, 0, 1, USECS_PER_DAY / 2, USECS_PER_DAY - 1] {
+                stamps.push(day * USECS_PER_DAY + time);
+            }
+        }
+        stamps.retain(|&t| is_valid_timestamp(t));
+        stamps
+    }
+
+    fn edge_dates() -> Vec<i32> {
+        let mut dates = vec![DATE_NOBEGIN, DATE_NOEND, -POSTGRES_EPOCH_JDATE, -1, 0, 1, 2];
+        dates.extend([106_751_981, 106_751_982, 106_751_983, 106_751_984]);
+        dates.push(DATE_END_JULIAN - POSTGRES_EPOCH_JDATE - 1);
+        dates
+    }
+
+    fn compare_ops() -> [CompareOp; 6] {
+        [
+            CompareOp::Eq,
+            CompareOp::Ne,
+            CompareOp::Lt,
+            CompareOp::Le,
+            CompareOp::Gt,
+            CompareOp::Ge,
+        ]
+    }
+
+    /// The day and the time `split` gives make the timestamp again, and
+    /// the time lies from 0 to less than a day, at every edge and over
+    /// random valid timestamps: what the proof of the bound takes of it.
+    #[test]
+    fn split_gives_the_floor_day_and_the_time_into_it() {
+        let check = |t: i64| {
+            let (day, time) = split(t);
+            assert!((0..USECS_PER_DAY).contains(&time), "{t}: time {time}");
+            assert_eq!(
+                i128::from(day) * i128::from(USECS_PER_DAY) + i128::from(time),
+                i128::from(t)
+            );
+        };
+        edge_timestamps().into_iter().for_each(check);
+        property(MIN_TIMESTAMP..END_TIMESTAMP, |t| -> Result<()> {
+            check(t);
+            Ok(())
+        });
+    }
+
+    /// The core's comparison over a day and a time, which the proof
+    /// takes, is the comparison of the microseconds, at the edges.
+    #[test]
+    fn the_comparison_over_the_day_is_the_one_of_the_microseconds() {
+        let mut stamps = edge_timestamps();
+        stamps.extend([TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND]);
+        for date in edge_dates() {
+            for &t in &stamps {
+                let (day, time) = if timestamp_is_infinite(t) {
+                    (0, 0)
+                } else {
+                    split(t)
+                };
+                assert_eq!(
+                    reference::compare_split(date, t, day, time),
+                    reference::compare(date, t),
+                    "{date} {t}"
+                );
+            }
+        }
+    }
+
+    /// The whole bound, `split` included, against the core at the edges and
+    /// over random dates and timestamps.
+    #[test]
+    fn the_bound_gives_the_cores_answer_at_the_edges() {
+        let check = |date: i32, t: i64| {
+            for op in compare_ops() {
+                let (bound_op, bound) = date_bound(op, t);
+                assert_eq!(
+                    reference::holds(bound_op, date.cmp(&bound)),
+                    reference::holds(op, reference::compare(date, t)),
+                    "{date} {op:?} {t}"
+                );
+            }
+        };
+        let mut stamps = edge_timestamps();
+        stamps.extend([TIMESTAMP_NOBEGIN, TIMESTAMP_NOEND]);
+        for date in edge_dates() {
+            for &t in &stamps {
+                check(date, t);
+            }
+        }
+        let dates = -POSTGRES_EPOCH_JDATE..DATE_END_JULIAN - POSTGRES_EPOCH_JDATE;
+        property(
+            (dates, MIN_TIMESTAMP..END_TIMESTAMP),
+            |(date, t)| -> Result<()> {
+                check(date, t);
+                check(
+                    date,
+                    i64::from(date)
+                        .saturating_mul(USECS_PER_DAY)
+                        .clamp(MIN_TIMESTAMP, END_TIMESTAMP - 1),
+                );
+                Ok(())
+            },
+        );
+    }
 
     /// Days since 1970-01-01 to the proleptic Gregorian date, by Howard
     /// Hinnant's `civil_from_days`: a reference of another derivation.
