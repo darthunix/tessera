@@ -657,11 +657,16 @@ never asks for a region past the bounds its caller gave.
 
 The caller gives a bound for each kind of block: for a chunk of records
 or of columns, by the plan of its level; for a block of values, by the
-largest row the node writes. A read asks at most for one block of its
-kind, with its header and the slack of packing, or for one page of a
-list, and never for more than the file holds. The promise holds for a
-file that nobody writes while it is read: a participant reads another's
-file only after the barrier that ends the writing of that file.
+longest one the set's writers wrote. The writer measures it, so a node
+need not know its largest row before it writes; the participants of a
+shared set agree on the largest in shared memory, after the barrier
+that ends their writes and before any of them reads another's file.
+A read asks at most for one block within the larger of the two bounds,
+with its header and the slack of packing, or for one page of a list, and
+never for more than the file holds; a block past the bound of its own
+kind is refused once its header is read. The promise holds for a file
+that nobody writes while it is read: a participant reads another's file
+only after the barrier that ends the writing of that file.
 
 Damaged bytes that still pass every check read as other data, since a
 block has no checksum (see "What we do not do"). The promise is that a

@@ -45,7 +45,12 @@ struct TessSpill
 	int			npartitions;
 	uint32		level;
 	uint64		fingerprint;
-	uint64		max_len;
+	/* The longest body of a chunk of records or of columns. */
+	uint64		max_chunk;
+	/* The bounds a reader of another participant's file takes, once agreed. */
+	uint64		agreed_chunk;
+	uint64		agreed_values;
+	bool		agreed;
 	SharedFileSet *shared;
 	int			participant;
 	char	   *name;
@@ -266,7 +271,7 @@ tess_spill_create(const TessSpillConfig *config)
 	spill->npartitions = config->npartitions;
 	spill->level = config->level;
 	spill->fingerprint = config->fingerprint;
-	spill->max_len = config->max_len;
+	spill->max_chunk = config->max_chunk;
 	spill->shared = config->shared;
 	spill->participant = config->shared != NULL ? config->participant : 0;
 	spill->name = config->shared != NULL ?
@@ -285,10 +290,11 @@ tess_spill_create(const TessSpillConfig *config)
 	spill->reading = MemoryContextAllocZero(context,
 											mul_size(config->npartitions,
 													 sizeof(int)));
+	/* A chunk of values is as long as its rows need: its readers take the longest written. */
 	if (spill->kernels->spill_set_init(&spill->writer, spill->npartitions, spill->level,
-									   spill->fingerprint, spill->max_len, spill->max_len,
-									   spill->buffer_len, spill->shared != NULL,
-									   &status) != TESS_OK)
+									   spill->fingerprint, spill->max_chunk,
+									   (uint64) MaxAllocHugeSize, spill->buffer_len,
+									   spill->shared != NULL, &status) != TESS_OK)
 		tess_status_report(&status);
 	return spill;
 }
@@ -551,6 +557,7 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 	if (participant == spill->participant)
 	{
 		TessSpillList *list = &spill->lists[partition];
+		uint64		max_values;
 
 		if (list->count == 0)
 		{
@@ -560,9 +567,10 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 		if (spill->shared == NULL && spill->reading[partition] > 0)
 			elog(ERROR, "Tessera serial spill file of partition %d is already being read",
 				 partition);
+		tess_spill_bounds(spill, NULL, &max_values);
 		if (spill->kernels->spill_reader_own(&reader->state, spill->npartitions,
 											 spill->level, partition, spill->fingerprint,
-											 spill->max_len, spill->max_len, list->entries,
+											 spill->max_chunk, max_values, list->entries,
 											 list->count, &largest, &status) != TESS_OK)
 			tess_status_report(&status);
 		spill->reading[partition]++;
@@ -577,6 +585,8 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 		File		file;
 		pgoff_t		size;
 
+		if (!spill->agreed)
+			elog(ERROR, "Tessera spill set reads another participant's file only after their bounds are agreed");
 		/* Another participant's file, a handle of its own. */
 		file_name(spill, participant, name);
 		old = MemoryContextSwitchTo(spill->context);
@@ -595,8 +605,8 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 					errmsg("could not size Tessera spill file: %m"));
 		if (spill->kernels->spill_reader_file(&reader->state, spill->npartitions,
 											  spill->level, partition, spill->fingerprint,
-											  spill->max_len, spill->max_len, (uint64) size,
-											  &status) != TESS_OK)
+											  spill->agreed_chunk, spill->agreed_values,
+											  (uint64) size, &status) != TESS_OK)
 			tess_status_report(&status);
 		reader->page_len = SPILL_PAGE_ENTRIES;
 		reader->page = MemoryContextAllocZero(spill->context,
@@ -777,6 +787,41 @@ tess_spill_stats(const TessSpill *spill, uint64 *blocks, uint64 *bytes,
 	if (spill->kernels->spill_set_stats(&spill->writer, blocks, bytes, files, NULL,
 										&status) != TESS_OK)
 		tess_status_report(&status);
+}
+
+void
+tess_spill_bounds(const TessSpill *spill, uint64 *max_chunk, uint64 *max_values)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
+	check_spill(spill);
+	if (max_chunk != NULL)
+		*max_chunk = spill->max_chunk;
+	if (spill->kernels->spill_set_stats(&spill->writer, NULL, NULL, NULL, max_values,
+										&status) != TESS_OK)
+		tess_status_report(&status);
+}
+
+void
+tess_spill_agree(TessSpill *spill, uint64 max_chunk, uint64 max_values)
+{
+	uint64		blocks;
+	uint64		own_chunk;
+	uint64		own_values;
+
+	check_spill(spill);
+	if (spill->shared == NULL)
+		elog(ERROR, "Tessera serial spill set has no participants to agree with");
+	/* Every participant that wrote a block gave its bounds to the agreement. */
+	tess_spill_stats(spill, &blocks, NULL, NULL);
+	tess_spill_bounds(spill, &own_chunk, &own_values);
+	if (blocks > 0 && (max_chunk < own_chunk || max_values < own_values))
+		elog(ERROR, "Tessera spill set agreed on bounds of " UINT64_FORMAT " and " UINT64_FORMAT
+			 " bytes, below its own " UINT64_FORMAT " and " UINT64_FORMAT,
+			 max_chunk, max_values, own_chunk, own_values);
+	spill->agreed_chunk = max_chunk;
+	spill->agreed_values = max_values;
+	spill->agreed = true;
 }
 
 Size

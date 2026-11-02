@@ -8,6 +8,7 @@
 
 #include "postgres.h"
 
+#include "port/atomics.h"
 #include "storage/barrier.h"
 #include "utils/dsa.h"
 
@@ -147,6 +148,15 @@ record_chunk_cost(Size len, Size record_size)
 #define JOIN_VALUE_CHUNK (1024 * 1024)
 #define JOIN_VALUE_REF(number, byte) TESS_SPILL_VALUE_REF(number, byte)
 
+/* The sets of a shared table's files on disk, each participant's own of each. */
+typedef enum JoinSpillSet
+{
+	JOIN_SET_BUILD,				/* the inner side's partitions on disk */
+	JOIN_SET_PROBE,				/* the outer rows of those partitions */
+	JOIN_SET_RESIDENT,			/* the outer rows the shared table answers */
+	JOIN_SPILL_SETS
+} JoinSpillSet;
+
 /* The part of the node's DSM chunk a shared build uses, before the counters. */
 typedef struct JoinShared
 {
@@ -196,6 +206,13 @@ typedef struct JoinShared
 	int			participants;
 	dsm_handle	segment;
 	SharedFileSet fileset;
+	/*
+	 * The bounds of the blocks of the files of each set, by JoinSpillSet:
+	 * the longest chunk and the longest chunk of values of every
+	 * participant (tess_spill_bounds), each advanced by a participant
+	 * once its files are written, and taken by every reader at PROBE.
+	 */
+	pg_atomic_uint64 spill_bounds[JOIN_SPILL_SETS][2];
 	/*
 	 * Per partition, as JOIN_SPILL_MAX_PARTITIONS pairs of atomics: the
 	 * bytes of the inner side's blocks on disk and its blocks of records,

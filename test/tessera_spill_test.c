@@ -36,7 +36,9 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_damage);
 PG_FUNCTION_INFO_V1(tessera_test_spill_damage_seen);
 
 #define FINGERPRINT UINT64CONST(0x5445535354455354)
+/* The longest chunk of a set of the tests, and the longest body of any block. */
 #define MAX_LEN (2 * 1024 * 1024)
+#define MAX_BODY (4 * MAX_LEN)
 
 /* The kernels of spilled blocks, which this module links. */
 static const TessKernelOps kernels = {
@@ -106,7 +108,7 @@ make_spill(SharedFileSet *shared, int participant, uint64 fingerprint)
 	config.npartitions = 4;
 	config.level = 1;
 	config.fingerprint = fingerprint;
-	config.max_len = MAX_LEN;
+	config.max_chunk = MAX_LEN;
 	config.shared = shared;
 	config.participant = participant;
 	config.name = "tess_test";
@@ -116,7 +118,7 @@ make_spill(SharedFileSet *shared, int participant, uint64 fingerprint)
 static void
 write_blocks(TessSpill *spill, Block *blocks, int nblocks)
 {
-	uint64	   *body = palloc(MAX_LEN);
+	uint64	   *body = palloc(MAX_BODY);
 
 	for (int i = 0; i < nblocks; i++)
 	{
@@ -185,7 +187,7 @@ read_partition(TessSpill *spill, int participant, int partition,
 {
 	TessSpillReader *reader = tess_spill_open(spill, participant, partition);
 	TessSpillHeader header;
-	uint64	   *body = palloc(MAX_LEN);
+	uint64	   *body = palloc(MAX_BODY);
 	bool		ok = true;
 	int			found = 0;
 
@@ -214,6 +216,29 @@ read_partition(TessSpill *spill, int participant, int partition,
 	return ok;
 }
 
+/*
+ * Past the barrier that ends the writes, as a node agrees: every
+ * participant takes the largest bounds of all.
+ */
+static void
+agree(TessSpill **spills, int nspills)
+{
+	uint64		chunk = 0;
+	uint64		values = 0;
+
+	for (int i = 0; i < nspills; i++)
+	{
+		uint64		max_chunk;
+		uint64		max_values;
+
+		tess_spill_bounds(spills[i], &max_chunk, &max_values);
+		chunk = Max(chunk, max_chunk);
+		values = Max(values, max_values);
+	}
+	for (int i = 0; i < nspills; i++)
+		tess_spill_agree(spills[i], chunk, values);
+}
+
 /* A block read after a seek to its position is the one written there. */
 static bool
 seek_block(TessSpill *spill, int participant, const Block *block)
@@ -221,7 +246,7 @@ seek_block(TessSpill *spill, int participant, const Block *block)
 	TessSpillReader *reader = tess_spill_open(spill, participant,
 											  block->partition);
 	TessSpillHeader header;
-	uint64	   *body = palloc(MAX_LEN);
+	uint64	   *body = palloc(MAX_BODY);
 	bool		ok;
 
 	tess_spill_seek(reader, block->position);
@@ -375,7 +400,10 @@ tessera_test_spill_serial(PG_FUNCTION_ARGS)
  * Two participants of a shared set in one segment: each reads the other's
  * file and its own, a partition one of them left empty has no reader, and
  * neither has a participant that wrote nothing; one that releases its set
- * leaves its file to the others, and the files go with the segment.
+ * leaves its file to the others, and the files go with the segment. A
+ * third writes a partition of more blocks than a reader's page of
+ * entries, and a chunk of values longer than any chunk of the set: the
+ * others read it by the bounds they agreed on.
  */
 Datum
 tessera_test_spill_shared(PG_FUNCTION_ARGS)
@@ -389,22 +417,42 @@ tessera_test_spill_shared(PG_FUNCTION_ARGS)
 		{1, TESS_SPILL_RECORDS, 2, 1024 * 1024},
 		{2, TESS_SPILL_VALUES, 1, 16},
 	};
+	Block		many[301];
 	dsm_segment *segment = dsm_create(sizeof(SharedFileSet), 0);
 	SharedFileSet *shared = dsm_segment_address(segment);
 	TessSpill  *one;
 	TessSpill  *two;
+	TessSpill  *three;
 	TessSpill  *none;
 	TessSpillReader *early;
 	TessSpillReader *late;
 	TessSpillHeader header;
+	uint64		max_chunk;
+	uint64		max_values;
 
+	for (int i = 0; i < 300; i++)
+		many[i] = (Block) {0, TESS_SPILL_VALUES, (uint32) i, 8};
+	many[300] = (Block) {0, TESS_SPILL_VALUES, 300, 3 * MAX_LEN};
 	tess_spill_shared_init(shared, segment);
 	one = make_spill(shared, 0, FINGERPRINT);
 	two = make_spill(shared, 1, FINGERPRINT);
+	three = make_spill(shared, 3, FINGERPRINT);
 	write_blocks(one, first, lengthof(first));
 	write_blocks(two, second, lengthof(second));
+	write_blocks(three, many, lengthof(many));
 	tess_spill_finish(one);
 	tess_spill_finish(two);
+	tess_spill_finish(three);
+	tess_spill_bounds(three, &max_chunk, &max_values);
+	if (max_chunk != MAX_LEN || max_values != 3 * MAX_LEN)
+		elog(ERROR, "bounds of " UINT64_FORMAT " and " UINT64_FORMAT " bytes",
+			 max_chunk, max_values);
+	agree((TessSpill *[]) {one, two, three}, 3);
+	if (!read_partition(one, 3, 0, many, lengthof(many)) ||
+		!read_partition(three, 3, 0, many, lengthof(many)) ||
+		!seek_block(two, 3, &many[300]))
+		elog(ERROR, "a long partition reads back wrong");
+	tess_spill_free(three);
 	for (int partition = 0; partition < 4; partition++)
 		if (!read_partition(one, 1, partition, second, lengthof(second)) ||
 			!read_partition(two, 0, partition, first, lengthof(first)) ||
@@ -594,6 +642,7 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 		tess_spill_finish(other);
 		other = make_spill(shared, 1, FINGERPRINT);
 		tess_spill_finish(other);
+		tess_spill_agree(other, MAX_LEN, MAX_LEN);
 	}
 
 	switch (which)
@@ -609,8 +658,8 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			tess_spill_write(spill, 0, TESS_SPILL_RECORDS, 0, body, 12, NULL);
 			break;
 		case 3:
-			/* A body longer than the set accepts. */
-			tess_spill_write(spill, 0, TESS_SPILL_VALUES, 0, body,
+			/* A chunk longer than the set's chunks. */
+			tess_spill_write(spill, 0, TESS_SPILL_RECORDS, 0, palloc0(MAX_LEN + 8),
 							 MAX_LEN + 8, NULL);
 			break;
 		case 4:
@@ -644,6 +693,7 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			tess_spill_finish(other);
 			other = make_spill(shared, 1, FINGERPRINT + 1);
 			tess_spill_finish(other);
+			tess_spill_agree(other, MAX_LEN, MAX_LEN);
 			reader = tess_spill_open(other, 0, 0);
 			tess_spill_read_header(reader, &header);
 			break;
@@ -723,6 +773,7 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			tess_spill_finish(other);
 			other = make_spill(shared, 1, FINGERPRINT);
 			tess_spill_finish(other);
+			tess_spill_agree(other, MAX_LEN, MAX_LEN);
 			if (which == 19)
 			{
 				/* Its header names another length than its body unpacks into. */
@@ -762,6 +813,7 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 				tess_spill_finish(other);
 				other = make_spill(shared, 1, FINGERPRINT);
 				tess_spill_finish(other);
+				tess_spill_agree(other, MAX_LEN, MAX_LEN);
 				word8 = MAX_LEN + 128 * 1024;
 				damage_shared_file(shared, 0, -(32 + 4 * 16) + 8, &word8, sizeof(word8));
 				tess_spill_open(other, 0, 0);
@@ -793,6 +845,7 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 				tess_spill_finish(other);
 				other = make_spill(shared, 1, FINGERPRINT);
 				tess_spill_finish(other);
+				tess_spill_agree(other, MAX_LEN, MAX_LEN);
 				word8 = TESS_SPILL_HEADER_SIZE + 64 + 8;
 				damage_shared_file(shared, 0, -(32 + 2 * 16) + 8, &word8, sizeof(word8));
 				tess_spill_open(other, 0, 0);
@@ -813,6 +866,7 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 				write_blocks(other, &long_block, 1);
 				other = make_spill(shared, 1, FINGERPRINT);
 				tess_spill_finish(other);
+				tess_spill_agree(other, MAX_LEN, MAX_LEN);
 				tess_spill_open(other, 0, 0);
 			}
 			break;
@@ -948,6 +1002,49 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			reader = tess_spill_open(spill, 0, 0);
 			position.offset = 8;
 			tess_spill_seek(reader, position);
+			break;
+		case 44:
+		case 45:
+			{
+				/*
+				 * A chunk of values longer than the bounds the participants
+				 * agreed on; another participant's file read before they
+				 * agreed.
+				 */
+				Block		values = {0, TESS_SPILL_VALUES, 0, 4096};
+
+				segment = dsm_create(sizeof(SharedFileSet), 0);
+				shared = dsm_segment_address(segment);
+				tess_spill_shared_init(shared, segment);
+				other = make_spill(shared, 0, FINGERPRINT);
+				write_blocks(other, &values, 1);
+				tess_spill_finish(other);
+				other = make_spill(shared, 1, FINGERPRINT);
+				tess_spill_finish(other);
+				if (which == 44)
+					tess_spill_agree(other, MAX_LEN, 1024);
+				reader = tess_spill_open(other, 0, 0);
+				tess_spill_read_header(reader, &header);
+			}
+			break;
+		case 46:
+			{
+				/* An agreement below the bounds of the blocks the participant wrote. */
+				Block		values = {0, TESS_SPILL_VALUES, 0, 4096};
+
+				segment = dsm_create(sizeof(SharedFileSet), 0);
+				shared = dsm_segment_address(segment);
+				tess_spill_shared_init(shared, segment);
+				other = make_spill(shared, 0, FINGERPRINT);
+				write_blocks(other, &values, 1);
+				tess_spill_finish(other);
+				tess_spill_agree(other, MAX_LEN, 1024);
+			}
+			break;
+		case 47:
+			/* An agreement of a serial set. */
+			tess_spill_finish(spill);
+			tess_spill_agree(spill, MAX_LEN, MAX_LEN);
 			break;
 		case 43:
 			/* A shared set's partition dropped before the set is finished. */
@@ -1114,6 +1211,7 @@ tessera_test_spill_reset(PG_FUNCTION_ARGS)
 	write_blocks(two, second, lengthof(second));
 	tess_spill_finish(one);
 	tess_spill_finish(two);
+	agree((TessSpill *[]) {one, two}, 2);
 	if (!read_partition(two, 0, 0, first, lengthof(first)) ||
 		!read_partition(two, 0, 2, first, lengthof(first)))
 		elog(ERROR, "the first use of the file set reads back wrong");
@@ -1127,6 +1225,7 @@ tessera_test_spill_reset(PG_FUNCTION_ARGS)
 	write_blocks(two, second, lengthof(second));
 	tess_spill_finish(one);
 	tess_spill_finish(two);
+	agree((TessSpill *[]) {one, two}, 2);
 	for (int partition = 0; partition < 4; partition++)
 		if (tess_spill_open(two, 0, partition) != NULL)
 			elog(ERROR, "partition %d of the first use is read after the reset", partition);

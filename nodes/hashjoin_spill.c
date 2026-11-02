@@ -239,7 +239,7 @@ side_init(TessHashJoinState *state, SpillSide *side, int nkeys, const TessTableK
 	config.npartitions = npartitions;
 	config.level = spill->level;
 	config.fingerprint = side->fingerprint;
-	config.max_len = (uint64) MaxAllocHugeSize;
+	config.max_chunk = chunk_len;
 	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
 	side->file = tess_spill_create(&config);
 }
