@@ -52,10 +52,11 @@ pub struct Options {
     /// median beyond the control's to be flagged.
     #[arg(long, value_name = "PERCENT", default_value = "2")]
     pub threshold: f64,
-    /// The most seconds the run may take, its builds included: the tool
-    /// checks it before each step and between its phases, and stops the
+    /// Seconds for the run's steps, its builds included: the tool checks
+    /// the deadline before each step and between its phases, and stops the
     /// step under way, a make or a run.sh, with every process it started,
-    /// its psql among them; the run then fails.
+    /// its psql among them; the run then fails. The server's restart
+    /// before each run and the work between steps are outside it (README).
     #[arg(long, value_name = "SECONDS")]
     pub deadline: Option<NonZeroU64>,
 }
@@ -225,7 +226,9 @@ fn measure(
     }
     let (out, err) = (log.with_extension("out"), log.with_extension("err"));
     // The server restarts outside the deadline, so that a deadline never
-    // stops it halfway, stopped; pg_ctl waits a minute at most.
+    // stops it halfway, stopped; a restart starts only within it, and
+    // pg_ctl waits half a minute at most for the stop and for the start.
+    within(deadline, "before the server's restart")?;
     let restart = Command::new(repo.join("bench/pg/run.sh"))
         .current_dir(repo)
         .env("PG_CONFIG", &pg.pg_config)
@@ -394,4 +397,108 @@ pub fn repository() -> Result<PathBuf> {
     Ok(PathBuf::from(text(
         Command::new("git").args(["rev-parse", "--show-toplevel"]),
     )?))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use clap::Parser;
+
+    use super::*;
+
+    #[derive(Parser)]
+    struct Cli {
+        #[command(flatten)]
+        options: Options,
+    }
+
+    /// An executable script at `path`.
+    fn script(path: &Path, text: &str) -> Result<()> {
+        fs::create_dir_all(path.parent().context("a script's directory")?)?;
+        fs::write(path, text)?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))?;
+        Ok(())
+    }
+
+    fn pg() -> Pg {
+        Pg {
+            pg_config: "/pg/bin/pg_config".into(),
+            bindir: "/pg/bin".into(),
+            pkglibdir: "/pg/lib".into(),
+            sharedir: "/pg/share".into(),
+            version: "PostgreSQL 20devel".into(),
+        }
+    }
+
+    /// A repository whose run.sh notes each of its calls once done, and
+    /// whether the caller says it restarted the server; a restart takes
+    /// `restart` seconds. The file of the calls.
+    fn repository(restart: &str) -> Result<(tempfile::TempDir, PathBuf)> {
+        let repo = tempfile::tempdir()?;
+        let run = repo.path().join("bench/pg/run.sh");
+        script(
+            &run,
+            &format!(
+                "#!/bin/sh\n[ \"$1\" = restart ] && sleep {restart}\n\
+                 echo \"$1${{BENCH_RESTARTED:+ restarted}}\" >> \"$0.calls\"\n"
+            ),
+        )?;
+        Ok((repo, run.with_extension("sh.calls")))
+    }
+
+    #[test]
+    fn the_server_restarts_only_within_the_deadline() -> Result<()> {
+        let (repo, calls) = repository("0")?;
+        let pg = pg();
+        let options = Cli::try_parse_from(["ab", "--base", "HEAD", "--family", "win"])?.options;
+        let log = repo.path().join("log");
+        let past = Instant::now() - Duration::from_millis(1);
+        assert!(measure(repo.path(), &pg, "win", &options, &log, Some(past)).is_err());
+        assert!(!calls.exists(), "the server restarted past the deadline");
+        // Within the deadline the restart runs, then the measurement, which
+        // fails for want of results.
+        let ahead = Instant::now() + Duration::from_secs(30);
+        assert!(measure(repo.path(), &pg, "win", &options, &log, Some(ahead)).is_err());
+        assert_eq!(fs::read_to_string(&calls)?, "restart\nmeasure restarted\n");
+        Ok(())
+    }
+
+    #[test]
+    fn a_restart_the_deadline_passes_ends_and_nothing_follows() -> Result<()> {
+        let (repo, calls) = repository("0.5")?;
+        let pg = pg();
+        let options = Cli::try_parse_from(["ab", "--base", "HEAD", "--family", "win"])?.options;
+        let log = repo.path().join("log");
+        let soon = Instant::now() + Duration::from_millis(100);
+        assert!(measure(repo.path(), &pg, "win", &options, &log, Some(soon)).is_err());
+        assert_eq!(fs::read_to_string(&calls)?, "restart\n");
+        Ok(())
+    }
+
+    #[test]
+    fn the_restart_of_run_sh_bounds_the_waits_of_pg_ctl() -> Result<()> {
+        // The repository's run.sh, over a pg_config and a pg_ctl that note
+        // their arguments.
+        let directory = tempfile::tempdir()?;
+        let bin = directory.path();
+        script(
+            &bin.join("pg_config"),
+            &format!("#!/bin/sh\necho '{}'\n", bin.display()),
+        )?;
+        script(
+            &bin.join("pg_ctl"),
+            "#!/bin/sh\necho \"$@\" > \"$0.args\"\n",
+        )?;
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let status = Command::new(repo.join("bench/pg/run.sh"))
+            .arg("restart")
+            .env("PG_CONFIG", bin.join("pg_config"))
+            .env("PGCTLTIMEOUT", "600")
+            .status()?;
+        assert!(status.success());
+        let args = fs::read_to_string(bin.join("pg_ctl.args"))?;
+        assert!(args.contains(" -t 30 restart"), "{args}");
+        Ok(())
+    }
 }
