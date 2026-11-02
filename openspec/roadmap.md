@@ -1943,6 +1943,15 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **C regions given to Rust as initialized bytes** (the review of
+  `spill-crate` task 3.6, 2026-11-02). An entry point that takes a
+  region C allocated makes a `&mut [u8]` over it, which Rust allows only
+  over initialized bytes. The set's writer gets its buffer, scratch and
+  lists zeroed; `tess_spill_columns_init` still gets the sort's chunks
+  as `palloc` leaves them (`nodes/sort_external.c`), as the packing's
+  entry points did. No compiler is known to miscompile it. Suggested:
+  zero such regions where they are made, or take them as
+  `MaybeUninit` in `tessera-capi`.
 - **The cost of a hashed join key** (the close of `native-key-hashes`,
   2026-11-02). `tessera.join_hashed_key_cost` was measured when every
   key a word does not hold went through its type's hash function. A

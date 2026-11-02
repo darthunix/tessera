@@ -489,9 +489,13 @@ in the file, and how many bytes it takes, with its header.
 ```
 
 A block does not go to the file at once. It first goes to the write
-buffer of the set. A join and a grouping ask for a buffer of one
-sixteenth of `hash_mem`, a sort for one sixteenth of `work_mem`. The
-buffer is never less than 8 kB and never more than 256 kB. A block
+buffer of the set. The writer of a set in `relspill` lays the blocks out
+in the buffer and keeps the lists, and writes nothing itself: each of
+its calls says which bytes of the buffer, of the block or of a list go
+where in the file, and `runtime/spill.c` writes them, so that every call
+of PostgreSQL's files stays in C. A join and a grouping ask for a buffer
+of one sixteenth of `hash_mem`, a sort for one sixteenth of `work_mem`.
+The buffer is never less than 8 kB and never more than 256 kB. A block
 larger than the buffer is written directly. A larger buffer would not
 help much: the time of a write depends mostly on its bytes, not on the
 number of calls.
@@ -668,6 +672,10 @@ table that spills, in [hash-table](../hash-table/design.md).
   packed form
 - `crates/relspill/src/error.rs`: the errors of the crate, a wrong
   call or damaged bytes, each naming its rule
+- `crates/relspill/src/set.rs`: the writer of a set's file: the
+  write buffer, the lists of blocks and the trailer
+- `crates/tessera-capi/src/c/spill_set.rs`: the C entry points of the
+  writer of a set
 - `crates/tessera-capi/src/c/spill.rs`: the C entry points
 - `crates/relspill/src/spill_columns.rs`: rows appended to chunks
   of columns
@@ -681,7 +689,8 @@ table that spills, in [hash-table](../hash-table/design.md).
 ## Tests
 
 - The unit tests of `crates/relspill/src/lib.rs`, `pack.rs` and
-  `columns.rs`.
+  `columns.rs`; those of `set.rs`, which keep the file of a set in
+  memory and cut its writes at random places.
 - `crates/tessera-capi/tests/spill.rs` and `tests/table.rs`: the entry
   points, each by a test, also under Miri in CI.
 - `test/sql/spill.sql` with `test/tessera_spill_test.c`: the sets of

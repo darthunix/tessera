@@ -360,4 +360,153 @@ extern TessStatusCode tess_spill_columns_unpack(const void *packed, Size len,
 												void *chunk, Size chunk_len,
 												TessStatus *status);
 
+/*
+ * The writer of a set's file (crates/relspill, set): it lays the blocks
+ * of every partition out in a write buffer, keeps a list of each
+ * partition's blocks, and at the finish of a shared set the lists and the
+ * trailer after the blocks, and writes nothing itself. Each call returns
+ * a step: the ranges of the buffer, the scratch region, the block's body
+ * or a list to write to the file, in order, and where; or the bytes of
+ * scratch or the entries of a list it needs first. The caller writes the
+ * ranges, calls tess_spill_set_written, and calls again until a step is
+ * done, changing none of the regions in between. The writer's words are
+ * the caller's; tess_spill_set_init makes them. The regions are
+ * initialized bytes: the runtime allocates them zeroed. A write that
+ * fails raises an ERROR, which ends the query and frees the set with its
+ * memory, so the runtime never reports a failed write to the writer.
+ */
+#define TESS_SPILL_WRITER_WORDS 19
+#define TESS_SPILL_MAX_RANGES 3
+
+typedef struct TessSpillWriter
+{
+	uint64		words[TESS_SPILL_WRITER_WORDS];
+} TessSpillWriter;
+
+/* Where a block lies in the file: its header's start, the bytes it takes. */
+typedef struct TessSpillEntry
+{
+	uint64		offset;
+	uint64		stored;
+} TessSpillEntry;
+
+/* A partition's block list: slots entries, the first count its blocks. */
+typedef struct TessSpillList
+{
+	TessSpillEntry *entries;
+	uint64		count;
+	uint64		slots;
+} TessSpillList;
+
+typedef enum TessSpillRegion
+{
+	TESS_SPILL_REGION_BUFFER = 0,
+	TESS_SPILL_REGION_SCRATCH = 1,
+	TESS_SPILL_REGION_BODY = 2,
+	/* The entries of the list of the range's partition, as bytes. */
+	TESS_SPILL_REGION_LIST = 3
+} TessSpillRegion;
+
+/* len bytes of a region from byte start, to the file at byte at. */
+typedef struct TessSpillRange
+{
+	uint32		region;
+	uint32		partition;
+	uint64		start;
+	uint64		len;
+	uint64		at;
+} TessSpillRange;
+
+typedef enum TessSpillStepKind
+{
+	/* Write the ranges, report them, and call again. */
+	TESS_SPILL_STEP_AGAIN = 0,
+	/* Write the ranges, report them if any: the call is done. */
+	TESS_SPILL_STEP_DONE = 1,
+	/* Give a scratch region of need bytes and call again. */
+	TESS_SPILL_STEP_SCRATCH = 2,
+	/* Give the block's partition a list of need entries and call again. */
+	TESS_SPILL_STEP_LIST = 3
+} TessSpillStepKind;
+
+typedef struct TessSpillStep
+{
+	uint32		kind;
+	uint32		nranges;
+	uint64		need;
+	/* Of a block written: where it starts, the bytes it takes. */
+	uint64		offset;
+	uint64		stored;
+	TessSpillRange ranges[TESS_SPILL_MAX_RANGES];
+} TessSpillStep;
+
+/*
+ * Make *writer the writer of an empty set of npartitions partitions at
+ * level, its headers carrying fingerprint and bodies of at most max_len
+ * bytes, through a write buffer of buffer_len bytes, a multiple of 8 of
+ * at least TESS_SPILL_HEADER_SIZE + 64; a shared set's finish writes its
+ * lists and trailer.
+ */
+extern TessStatusCode tess_spill_set_init(TessSpillWriter *writer, int npartitions,
+										  uint32 level, uint64 fingerprint,
+										  uint64 max_len, Size buffer_len, bool shared,
+										  TessStatus *status);
+
+/*
+ * A step of writing the block of kind, number and partition whose len
+ * bytes are at body: buffer is the set's write buffer, scratch a region
+ * the writer packs a block into aside (NULL and 0 until a step asks),
+ * lists the npartitions block lists.
+ */
+extern TessStatusCode tess_spill_set_write(TessSpillWriter *writer, void *buffer,
+										   Size buffer_len, void *scratch,
+										   Size scratch_len, TessSpillList *lists,
+										   int npartitions, int partition,
+										   TessSpillKind kind, uint32 number,
+										   const void *body, Size len,
+										   TessSpillStep *step, TessStatus *status);
+
+/* The ranges of the last step were written. */
+extern TessStatusCode tess_spill_set_written(TessSpillWriter *writer,
+											 TessStatus *status);
+
+/*
+ * A step of finishing the set: what the buffer holds and, for a shared set
+ * that wrote a block, the lists and the trailer. Once the step that is
+ * done is written and reported, the set takes no more blocks and needs its
+ * buffer no more.
+ */
+extern TessStatusCode tess_spill_set_finish(TessSpillWriter *writer, void *buffer,
+											Size buffer_len, TessSpillList *lists,
+											int npartitions, TessSpillStep *step,
+											TessStatus *status);
+
+/*
+ * Forget the blocks of partition: its list's count goes to 0. A shared set
+ * drops a partition only once it is finished.
+ */
+extern TessStatusCode tess_spill_set_drop(TessSpillWriter *writer, TessSpillList *lists,
+										  int npartitions, int partition,
+										  TessStatus *status);
+
+/* The blocks and bytes written, and the partitions with blocks. */
+extern TessStatusCode tess_spill_set_stats(const TessSpillWriter *writer,
+										   uint64 *blocks, uint64 *bytes, int *files,
+										   TessStatus *status);
+
+/* Sizes and offsets of the mirrors above, for layout checks. */
+typedef enum TessSpillSetLayout
+{
+	TESS_SPILL_SET_WRITER_SIZE = 0,
+	TESS_SPILL_SET_ENTRY_SIZE = 1,
+	TESS_SPILL_SET_LIST_SIZE = 2,
+	TESS_SPILL_SET_LIST_COUNT_OFFSET = 3,
+	TESS_SPILL_SET_RANGE_SIZE = 4,
+	TESS_SPILL_SET_STEP_SIZE = 5,
+	TESS_SPILL_SET_STEP_RANGES_OFFSET = 6
+} TessSpillSetLayout;
+
+/* The size or offset for a kind, or 0 for an unknown one. */
+extern Size tess_spill_set_layout(TessSpillSetLayout what);
+
 #endif							/* TESSERA_SPILL_H */

@@ -3,17 +3,19 @@
  *
  * A set writes one file, created on its first block: a serial set a
  * PostgreSQL temporary file, a shared one the participant's file of the
- * query's SharedFileSet. The blocks of every partition go into it one
- * after another through the set's own write buffer, so that the file is
- * written in large pieces however small the blocks; the set keeps, per
- * partition, where each of its blocks starts and the bytes it takes, and
- * a shared set writes that list at the end of its file when it finishes,
- * for the other participants to read. A block is a header, laid out and
- * checked by the kernels (tessera/spill.h), and a chunk of the node's
- * table; a reader reads a block whole with one read. This is the only
+ * query's SharedFileSet. The kernels' writer of the set (tessera/spill.h)
+ * lays the blocks of every partition out one after another in the set's
+ * write buffer, so that the file is written in large pieces however small
+ * the blocks; it keeps, per partition, where each of its blocks starts
+ * and the bytes it takes, and at the finish of a shared set it lays that
+ * list and a trailer out at the end of the file, for the other
+ * participants to read. This file writes the ranges the writer names and
+ * gives it the memory it asks for. A block is a header, laid out and
+ * checked by the kernels, and a chunk of the node's table; a reader reads
+ * a block whole with one read. This is the only
  * code that calls PostgreSQL's file layer for spilling; a core with
- * another manager of work files replaces it here. See docs/spill.md,
- * "Files".
+ * another manager of work files replaces it here. See
+ * openspec/specs/spill-format/design.md, "The files".
  */
 #include "postgres.h"
 
@@ -44,21 +46,6 @@ typedef struct SpillTrailer
 	uint64		fingerprint;
 } SpillTrailer;
 
-/* A block in the file: where its header starts and the bytes it takes, header included. */
-typedef struct SpillBlock
-{
-	uint64		offset;
-	uint64		stored;
-} SpillBlock;
-
-/* The blocks of a partition in the order they were written. */
-typedef struct SpillList
-{
-	SpillBlock *blocks;
-	uint64		count;
-	uint64		slots;
-} SpillList;
-
 struct TessSpill
 {
 	/* Owns the set, the readers and the buffers. */
@@ -71,23 +58,20 @@ struct TessSpill
 	SharedFileSet *shared;
 	int			participant;
 	char	   *name;
-	/* The set's file, and its length with what the buffer holds. */
+	/* The set's file. */
 	File		file;
-	uint64		end;
-	/* The write buffer, until the set finishes, and its bytes not yet written. */
+	/* The kernels' writer of the file, which lays blocks out and keeps their lists. */
+	TessSpillWriter writer;
+	/* The write buffer, until the set finishes. */
 	char	   *buffer;
 	Size		buffer_len;
-	Size		buffered;
-	/* This participant's blocks by partition. */
-	SpillList  *lists;
+	/* This participant's blocks by partition, the writer's lists. */
+	TessSpillList *lists;
 	/* This participant's readers of each partition: a serial one has one at a time, as ever. */
 	int		   *reading;
 	bool		finished;
 	/* The open readers, closed with the set. */
 	TessSpillReader *readers;
-	uint64		blocks;
-	uint64		bytes;
-	int			nfiles;
 	/* A buffer for packing a chunk too large for the write buffer. */
 	char	   *scratch;
 	Size		scratch_len;
@@ -101,7 +85,7 @@ struct TessSpillReader
 	bool		own;
 	int			partition;
 	/* The partition's blocks, and the next one to read. */
-	SpillBlock *blocks;
+	TessSpillEntry *blocks;
 	uint64		count;
 	uint64		next;
 	/* The block just read, header and stored body, until its body is taken. */
@@ -249,6 +233,7 @@ tess_spill_columns_check_values(void *chunk, int ncolumns, const bool *byvals,
 TessSpill *
 tess_spill_create(const TessSpillConfig *config)
 {
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	MemoryContext context;
 	TessSpill  *spill;
 
@@ -256,9 +241,14 @@ tess_spill_create(const TessSpillConfig *config)
 		config->parent_context == NULL)
 		elog(ERROR, "Tessera spill set requires a config and a context");
 	if (config->kernels == NULL ||
-		config->kernels->spill_header_write == NULL ||
 		config->kernels->spill_header_read == NULL ||
-		config->kernels->spill_pack == NULL || config->kernels->spill_unpack == NULL)
+		config->kernels->spill_unpack == NULL ||
+		config->kernels->spill_set_init == NULL ||
+		config->kernels->spill_set_write == NULL ||
+		config->kernels->spill_set_written == NULL ||
+		config->kernels->spill_set_finish == NULL ||
+		config->kernels->spill_set_drop == NULL ||
+		config->kernels->spill_set_stats == NULL)
 		elog(ERROR, "Tessera spill set requires the kernels of spilled blocks");
 	if (config->npartitions <= 0 || config->level >= 32)
 		elog(ERROR, "Tessera spill set requires partitions and a level below 32");
@@ -292,13 +282,19 @@ tess_spill_create(const TessSpillConfig *config)
 		config->buffer_len > 0)
 		spill->buffer_len = TYPEALIGN(8, Max(config->buffer_len, TESS_SPILL_HEADER_SIZE + 64));
 	/* The buffer from the start, so that the node counts it before any block. */
-	spill->buffer = MemoryContextAllocExtended(context, spill->buffer_len, MCXT_ALLOC_HUGE);
+	spill->buffer = MemoryContextAllocExtended(context, spill->buffer_len,
+											   MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	spill->lists = MemoryContextAllocZero(context,
 										  mul_size(config->npartitions,
-												   sizeof(SpillList)));
+												   sizeof(TessSpillList)));
 	spill->reading = MemoryContextAllocZero(context,
 											mul_size(config->npartitions,
 													 sizeof(int)));
+	if (spill->kernels->spill_set_init(&spill->writer, spill->npartitions, spill->level,
+									   spill->fingerprint, spill->max_len,
+									   spill->buffer_len, spill->shared != NULL,
+									   &status) != TESS_OK)
+		tess_status_report(&status);
 	return spill;
 }
 
@@ -366,71 +362,91 @@ read_at(File file, char *bytes, Size len, uint64 offset)
 	}
 }
 
-/* Write what the buffer holds. */
+/* A list of the partition with room for slots blocks, as the writer asked. */
 static void
-flush(TessSpill *spill)
+grow_list(TessSpill *spill, int partition, uint64 slots)
 {
-	if (spill->buffered == 0)
-		return;
-	write_at(set_file(spill), spill->buffer, spill->buffered, spill->end - spill->buffered);
-	spill->buffered = 0;
+	TessSpillList *list = &spill->lists[partition];
+	Size		bytes = mul_size((Size) slots, sizeof(TessSpillEntry));
+	Size		old = (Size) list->slots * sizeof(TessSpillEntry);
+
+	/* Zeroed past the old entries: the kernels take the whole region as initialized. */
+	list->entries = list->entries == NULL ?
+		MemoryContextAllocExtended(spill->context, bytes, MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO) :
+		repalloc_huge(list->entries, bytes);
+	if (old > 0)
+		memset((char *) list->entries + old, 0, bytes - old);
+	list->slots = slots;
 }
 
-/* Note a block of the partition, at offset and of stored bytes. */
+/* The set's buffer for packing aside, of at least len bytes, as the writer asked. */
 static void
-add_block(TessSpill *spill, int partition, uint64 offset, uint64 stored)
-{
-	SpillList  *list = &spill->lists[partition];
-
-	if (list->count == list->slots)
-	{
-		uint64		slots = Max(list->slots * 2, 16);
-
-		list->blocks = list->blocks == NULL ?
-			MemoryContextAllocExtended(spill->context, mul_size(slots, sizeof(SpillBlock)),
-									   MCXT_ALLOC_HUGE) :
-			repalloc_huge(list->blocks, mul_size(slots, sizeof(SpillBlock)));
-		list->slots = slots;
-	}
-	if (list->count == 0)
-		spill->nfiles++;
-	list->blocks[list->count].offset = offset;
-	list->blocks[list->count].stored = stored;
-	list->count++;
-}
-
-/* The set's buffer for packing, of at least len bytes. */
-static char *
-scratch(TessSpill *spill, Size len)
+grow_scratch(TessSpill *spill, Size len)
 {
 	if (spill->scratch_len < len)
 	{
 		if (spill->scratch != NULL)
 			pfree(spill->scratch);
-		spill->scratch = MemoryContextAllocExtended(spill->context, len, MCXT_ALLOC_HUGE);
+		spill->scratch = MemoryContextAllocExtended(spill->context, len,
+													MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 		spill->scratch_len = len;
 	}
-	return spill->scratch;
 }
 
+/*
+ * Write to the set's file the ranges a step of the writer names, in order,
+ * and report them written; body is the block's, when the step writes one.
+ */
+static void
+write_step(TessSpill *spill, const TessSpillStep *step, const void *body)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
+	for (uint32 index = 0; index < step->nranges; index++)
+	{
+		const TessSpillRange *range = &step->ranges[index];
+		const char *from;
+
+		switch (range->region)
+		{
+			case TESS_SPILL_REGION_BUFFER:
+				from = spill->buffer;
+				break;
+			case TESS_SPILL_REGION_SCRATCH:
+				from = spill->scratch;
+				break;
+			case TESS_SPILL_REGION_BODY:
+				from = body;
+				break;
+			case TESS_SPILL_REGION_LIST:
+				if (range->partition >= (uint32) spill->npartitions)
+					elog(ERROR, "Tessera spill set wrote the list of partition %u",
+						 range->partition);
+				from = (const char *) spill->lists[range->partition].entries;
+				break;
+			default:
+				elog(ERROR, "Tessera spill set wrote from region %u", range->region);
+		}
+		write_at(set_file(spill), from + range->start, (Size) range->len, range->at);
+	}
+	if (step->nranges > 0 &&
+		spill->kernels->spill_set_written(&spill->writer, &status) != TESS_OK)
+		tess_status_report(&status);
+}
+
+/*
+ * The writer lays the block out in the buffer, packed when that pays, and
+ * notes it in its partition's list; a step writes the buffer when the block
+ * does not fit what it has left, or a block larger than the buffer on its
+ * own. The regions it asks for come from the set's context.
+ */
 Size
 tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 				 uint32 number, const void *body, Size len,
 				 TessSpillPosition *position)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-	TessSpillHeader header = {0};
-	uint64		bytes[TESS_SPILL_HEADER_SIZE / sizeof(uint64)];
-	bool		pack;
-	/*
-	 * The body was packed in place, into the buffer at `at`: known from
-	 * where it was packed, not from its address, since a block aside may
-	 * lie right past the end of a full buffer, where `at` then points.
-	 */
-	bool		in_buffer = false;
-	char	   *at;
-	uint64		offset;
-	Size		stored;
+	TessSpillStep step;
 
 	check_spill(spill);
 	check_partition(spill, partition);
@@ -438,149 +454,50 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 		elog(ERROR, "Tessera spill set was finished; it takes no more blocks");
 	if (body == NULL && len > 0)
 		elog(ERROR, "Tessera spilled block has no body");
-	header.kind = kind;
-	header.number = number;
-	header.partition = partition;
-	header.level = spill->level;
-	header.fingerprint = spill->fingerprint;
-	header.len = len;
-	header.packed = 0;
-	at = spill->buffer + spill->buffered + sizeof(bytes);
-	/*
-	 * A chunk of columns always goes packed, into the buffer when its bytes
-	 * and the slack fit what is left there, else into an empty buffer, and
-	 * aside only when larger than the buffer; its header names the chunk
-	 * it unpacks into, of its rows only.
-	 */
-	if (kind == TESS_SPILL_COLUMNS)
+	for (;;)
 	{
-		Size		packed;
-		Size		unpacked;
-		Size		room = len + TESS_SPILL_COLUMNS_SLACK(tess_spill_columns_words(body));
-		char	   *out;
-
-		if (spill->buffered + sizeof(bytes) + room > spill->buffer_len &&
-			sizeof(bytes) + room <= spill->buffer_len)
-		{
-			flush(spill);
-			at = spill->buffer + sizeof(bytes);
-		}
-		in_buffer = spill->buffered + sizeof(bytes) + room <= spill->buffer_len;
-		out = in_buffer ? at : scratch(spill, room);
-
-		if (spill->kernels->spill_columns_pack == NULL)
-			elog(ERROR, "Tessera spill set requires the kernels of chunks of columns");
-		if (spill->kernels->spill_columns_pack(body, len, out, room, &packed, &unpacked,
-											   &status) != TESS_OK)
+		if (spill->kernels->spill_set_write(&spill->writer, spill->buffer, spill->buffer_len,
+											spill->scratch, spill->scratch_len,
+											spill->lists, spill->npartitions, partition,
+											kind, number, body, len, &step,
+											&status) != TESS_OK)
 			tess_status_report(&status);
-		if (packed > PG_UINT32_MAX)
-			elog(ERROR, "Tessera chunk of columns packs into too many bytes");
-		header.len = unpacked;
-		header.packed = (uint32) packed;
-		body = out;
-		len = packed;
-	}
-	/*
-	 * The header is checked before a byte of the block is written; a
-	 * chunk of columns may have flushed the blocks before it, whole.
-	 */
-	if (spill->kernels->spill_header_write(bytes, sizeof(bytes), &header,
-										   spill->max_len, &status) != TESS_OK)
-		tess_status_report(&status);
-	/*
-	 * A chunk of records goes packed when that makes it shorter: straight
-	 * into the buffer when its raw bytes fit what is left there, else
-	 * aside first.
-	 */
-	pack = kind == TESS_SPILL_RECORDS && len >= 64 && len <= PG_UINT32_MAX;
-	if (pack)
-	{
-		Size		packed;
-		bool		fits = spill->buffered + sizeof(bytes) + len <= spill->buffer_len;
-		char	   *out = fits ? at : scratch(spill, len);
-
-		if (spill->kernels->spill_pack(body, len, out, len, &packed,
-									   &status) != TESS_OK)
-			tess_status_report(&status);
-		if (packed > 0)
+		if (step.kind == TESS_SPILL_STEP_SCRATCH)
+			grow_scratch(spill, (Size) step.need);
+		else if (step.kind == TESS_SPILL_STEP_LIST)
+			grow_list(spill, partition, step.need);
+		else
 		{
-			header.packed = (uint32) packed;
-			if (spill->kernels->spill_header_write(bytes, sizeof(bytes), &header,
-												   spill->max_len, &status) != TESS_OK)
-				tess_status_report(&status);
-			in_buffer = fits;
-			body = out;
-			len = packed;
+			write_step(spill, &step, body);
+			if (step.kind == TESS_SPILL_STEP_DONE)
+				break;
 		}
 	}
-	stored = sizeof(bytes) + len;
-	offset = spill->end;
-	/*
-	 * A block that does not fit what the buffer has left starts a new
-	 * buffer. One packed in place fit, so only a block aside comes here.
-	 */
-	if (spill->buffered + stored > spill->buffer_len)
-	{
-		Assert(!in_buffer);
-		flush(spill);
-		at = spill->buffer + sizeof(bytes);
-	}
-	if (stored <= spill->buffer_len)
-	{
-		memcpy(spill->buffer + spill->buffered, bytes, sizeof(bytes));
-		if (len > 0 && !in_buffer)
-			memcpy(at, body, len);
-		spill->buffered += stored;
-	}
-	else
-	{
-		/* Larger than the buffer, which is empty now: written as it is. */
-		write_at(set_file(spill), (const char *) bytes, sizeof(bytes), offset);
-		if (len > 0)
-			write_at(spill->file, body, len, offset + sizeof(bytes));
-	}
-	spill->end += stored;
-	add_block(spill, partition, offset, stored);
 	if (position != NULL)
-		position->offset = (int64) offset;
-	spill->blocks++;
-	spill->bytes += stored;
-	return stored;
+		position->offset = (int64) step.offset;
+	return (Size) step.stored;
 }
 
+/* What the buffer holds, then a shared set's lists and trailer, for the others. */
 void
 tess_spill_finish(TessSpill *spill)
 {
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessSpillStep step;
+
 	check_spill(spill);
 	if (spill->finished)
 		return;
-	flush(spill);
-	/* A shared set's list of blocks, for the other participants, after its blocks. */
-	if (spill->shared != NULL && spill->file > 0)
+	do
 	{
-		SpillTrailer trailer;
-		uint64		offset = spill->end;
-
-		trailer.magic = SPILL_TRAILER_MAGIC;
-		trailer.offset = offset;
-		trailer.npartitions = (uint64) spill->npartitions;
-		trailer.fingerprint = spill->fingerprint;
-		for (int partition = 0; partition < spill->npartitions; partition++)
-		{
-			write_at(spill->file, (const char *) &spill->lists[partition].count,
-					 sizeof(uint64), offset);
-			offset += sizeof(uint64);
-		}
-		for (int partition = 0; partition < spill->npartitions; partition++)
-		{
-			Size		len = mul_size(spill->lists[partition].count, sizeof(SpillBlock));
-
-			if (len > 0)
-				write_at(spill->file, (const char *) spill->lists[partition].blocks, len, offset);
-			offset += len;
-		}
-		write_at(spill->file, (const char *) &trailer, sizeof(trailer), offset);
-	}
+		if (spill->kernels->spill_set_finish(&spill->writer, spill->buffer, spill->buffer_len,
+											 spill->lists, spill->npartitions, &step,
+											 &status) != TESS_OK)
+			tess_status_report(&status);
+		if (step.kind != TESS_SPILL_STEP_AGAIN && step.kind != TESS_SPILL_STEP_DONE)
+			elog(ERROR, "Tessera spill set's finish asked for step %u", step.kind);
+		write_step(spill, &step, NULL);
+	} while (step.kind != TESS_SPILL_STEP_DONE);
 	if (spill->buffer != NULL)
 		pfree(spill->buffer);
 	spill->buffer = NULL;
@@ -641,9 +558,9 @@ read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader
 	 * are read at once and must fill that room exactly: a writer puts
 	 * nothing else between its blocks and its trailer.
 	 */
-	if ((lists - counts) % sizeof(SpillBlock) != 0)
+	if ((lists - counts) % sizeof(TessSpillEntry) != 0)
 		list_damaged();
-	most = (lists - counts) / sizeof(SpillBlock);
+	most = (lists - counts) / sizeof(TessSpillEntry);
 	all = palloc(counts);
 	read_at(file, (char *) all, counts, trailer.offset);
 	for (int other = 0; other < spill->npartitions; other++)
@@ -661,18 +578,18 @@ read_trailer(TessSpill *spill, File file, int partition, TessSpillReader *reader
 	if (count == 0)
 		return false;
 	reader->blocks = MemoryContextAllocExtended(spill->context,
-												mul_size(count, sizeof(SpillBlock)),
+												mul_size(count, sizeof(TessSpillEntry)),
 												MCXT_ALLOC_HUGE);
 	reader->count = count;
-	read_at(file, (char *) reader->blocks, mul_size(count, sizeof(SpillBlock)),
-			trailer.offset + counts + sizeof(SpillBlock) * before);
+	read_at(file, (char *) reader->blocks, mul_size(count, sizeof(TessSpillEntry)),
+			trailer.offset + counts + sizeof(TessSpillEntry) * before);
 	/*
 	 * A partition's blocks lie in the order they were written, each whole
 	 * before the next of them, and the last before the lists.
 	 */
 	for (uint64 index = 0; index < count; index++)
 	{
-		const SpillBlock *block = &reader->blocks[index];
+		const TessSpillEntry *block = &reader->blocks[index];
 		uint64		end = index + 1 < count ? reader->blocks[index + 1].offset : trailer.offset;
 
 		if (end > trailer.offset || block->offset > end ||
@@ -714,7 +631,7 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 		spill->reading[partition]++;
 		reader->file = spill->file;
 		reader->own = true;
-		reader->blocks = spill->lists[partition].blocks;
+		reader->blocks = spill->lists[partition].entries;
 		reader->count = spill->lists[partition].count;
 	}
 	else
@@ -777,7 +694,7 @@ tess_spill_read_header(TessSpillReader *reader, TessSpillHeader *header)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	TessSpill  *spill;
-	SpillBlock *block;
+	TessSpillEntry *block;
 	Size		stored;
 
 	check_reader(reader);
@@ -946,7 +863,8 @@ tess_spill_close(TessSpillReader *reader)
 void
 tess_spill_drop(TessSpill *spill, int partition)
 {
-	SpillList  *list;
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessSpillList *list;
 
 	check_spill(spill);
 	check_partition(spill, partition);
@@ -966,25 +884,25 @@ tess_spill_drop(TessSpill *spill, int partition)
 	 * has them still, for the others: they drop the partition only once
 	 * every one of them is done with it.
 	 */
-	if (list->blocks != NULL)
-		pfree(list->blocks);
-	list->blocks = NULL;
-	list->count = 0;
+	if (spill->kernels->spill_set_drop(&spill->writer, spill->lists, spill->npartitions,
+									   partition, &status) != TESS_OK)
+		tess_status_report(&status);
+	if (list->entries != NULL)
+		pfree(list->entries);
+	list->entries = NULL;
 	list->slots = 0;
-	spill->nfiles--;
 }
 
 void
 tess_spill_stats(const TessSpill *spill, uint64 *blocks, uint64 *bytes,
 				 int *files)
 {
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+
 	check_spill(spill);
-	if (blocks != NULL)
-		*blocks = spill->blocks;
-	if (bytes != NULL)
-		*bytes = spill->bytes;
-	if (files != NULL)
-		*files = spill->nfiles;
+	if (spill->kernels->spill_set_stats(&spill->writer, blocks, bytes, files,
+										&status) != TESS_OK)
+		tess_status_report(&status);
 }
 
 Size
