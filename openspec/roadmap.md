@@ -28,7 +28,11 @@ placed `spill-crate` first on 2026-10-28, after the close of
 review of what more can move from C to Rust; the float kernels are
 closed. The maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
-order:
+order. The maintainer took six entries out of turn on 2026-11-02, after
+an analysis of TPC-H with Tessera on, in the order
+`deform-without-restarts`, `bpchar-constant-compare`,
+`right-anti-join`, `agg-dependent-columns`, `early-key-filter`,
+`batch-index-join`:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
@@ -159,6 +163,119 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
+
+### deform-without-restarts
+
+A row's columns read without walking the tuple again from its start.
+
+- **What:** A heap batch keeps, beside each row's cursor, the cursor of
+  its last restart, so that columns read in ascending order before the
+  row's cursor continue from the previous one instead of from the
+  tuple's start; an expression asks its columns in the order of their
+  attributes.
+- **Why:** `deform` throws away the cursor of a restart. TPC-H Q1 reads
+  `l_shipdate` (attribute 11) in its filter and then attributes 5 to 10
+  in TessAgg, each from the tuple's start: 35.5 M of its 41.5 M
+  deformed values are restarts, 45 steps a row where 10 would do.
+  Restarts are 6.0 M of 16.0 M in Q21 (`l_receiptdate >
+  l_commitdate` asks 13 before 12), 4.5 M of 10.5 M in Q12, 1.3 M in
+  Q6, 1.1 M in Q19 (EXPLAIN VERBOSE, SF 1, serial). `deform` is 29 % to
+  45 % of the profiles of Q1, Q14, Q19 and Q21.
+- **Known:** No change of the C API: the cursor and the order stay
+  inside the heap batch and the expression compiler. A walk that stores
+  the values it passes would save the last restart too, but changes
+  `tess_deform_advance` of the public header.
+- **Depends on:** nothing.
+- **Capabilities:** batch-format, aggregate, filter
+- **Size:** small: one pull request.
+
+### bpchar-constant-compare
+
+char(n) compared with a constant without trimming both on every row.
+
+- **What:** The text kernel's equality of a char(n) column with a
+  constant trims the constant once, compares the column's first bytes
+  with it and looks at the rest only on a match.
+- **Why:** `compare` in `tessera-kernels` counts the trailing blanks of
+  both strings on every row. TPC-H Q19 compares `l_shipmode` and
+  `l_shipinstruct` with constants: the kernel is 29 % to 32 % of its
+  profile; Q12 and Q10 do the same. Greengage runs the same kernels.
+- **Known:** The same result as `bpchareq` under a deterministic
+  collation; a Rust change with its tests and mutants.
+- **Depends on:** nothing.
+- **Capabilities:** batch-functions, kernel-abi
+- **Size:** small: one pull request.
+
+### right-anti-join
+
+TessHashJoin of the core's right anti join.
+
+- **What:** TessHashJoin takes `JOIN_RIGHT_ANTI`: it builds the side
+  whose rows it keeps, probes with the other, marks the records that
+  find a pair, and returns the unmarked ones after the probe, the tail
+  its RIGHT join already has, without the pairs.
+- **Why:** TPC-H Q22's NOT EXISTS is the core's `Hash Right Anti Join`
+  of 1.5 M orders against 19 000 customers: 77 of its 159 ms serial
+  (EXPLAIN ANALYZE), and the orders scan feeding it row by row.
+- **Known:** NULL keys of the kept side come out as without a pair; the
+  marks after the residual clauses; the shared table and the spill
+  keep the marks as RIGHT and FULL do.
+- **Depends on:** nothing.
+- **Capabilities:** join-hash
+- **Size:** medium: one pull request.
+
+### agg-dependent-columns
+
+TessAgg with columns its keys determine.
+
+- **What:** TessAgg takes a grouping whose target has columns that the
+  grouping's primary key makes functionally dependent, which the core
+  drops from the keys: it carries their values once a group, through
+  the partial and final stages and the spill.
+- **Why:** TPC-H Q10 groups by `c_custkey` and outputs five other
+  customer columns: TessAgg refuses it (`not_from_groups`), and the
+  core's HashAggregate takes 46 ms serial and 34 with workers.
+- **Known:** Not a "first value" aggregate: only columns the planner
+  proved dependent.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate
+- **Size:** medium: one pull request.
+
+### early-key-filter
+
+The join's key filter before a TessFilter's batch clauses, and for
+small builds.
+
+- **What:** A TessFilter of batch clauses alone takes the join's key
+  filter and runs it first, on the key column, before it reads the
+  columns its clauses need; a build of fewer than 4096 rows may make a
+  filter when that saves the clauses' work.
+- **Why:** TPC-H Q19 builds 485 parts and Q21 411 suppliers; their
+  lineitem filters spend 319 and 197 ms above the scan on rows the join
+  then drops.
+- **Known:** The spec of `key-filter` says a TessFilter of batch clauses
+  alone refuses a filter: the proposal changes it, and the maintainer
+  approves the proposal before the code.
+- **Depends on:** `deform-without-restarts`, which changes what the
+  clauses cost.
+- **Capabilities:** key-filter
+- **Size:** medium: one pull request.
+
+### batch-index-join
+
+A join that looks a batch of keys up in an index.
+
+- **What:** A nested loop whose inner side is a batch of index lookups:
+  the outer batch's keys sorted, one descent each, the rows fetched into
+  a heap batch and filtered in batches; inner, semi and anti.
+- **Why:** The core's index nested loops are the largest block of TPC-H
+  Q4, Q5, Q7 and Q21 serial and of Q3 and Q8 with workers: about 650 ms
+  serial. The hash join over a full scan loses to them at SF 1.
+- **Known:** It saves the executor's work around each lookup, not the
+  index's; measure where the hash join wins first, with nested loops off.
+- **Depends on:** nothing.
+- **Capabilities:** a new node
+- **Size:** large.
 
 ### numeric-keys-by-digits
 
@@ -1943,6 +2060,23 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **TessHeapScan under a row-wise hash join** (the TPC-H analysis of
+  2026-11-02). In Q22 the scan of orders feeding the core's hash join
+  takes 56 ms against 36 for the core's Seq Scan, where
+  `scan_planner.c` says the native scan is faster under any parent.
+  Suggested: a slot into the pinned page, as
+  `minimal-tuples-for-storing-parents` weighs; `right-anti-join`
+  removes the case of Q22.
+- **A build in every participant** (the same analysis). Q14 with two
+  workers builds `part` in each participant, 200 000 rows three times,
+  where the core's Parallel Hash shares the build. Suggested: read the
+  rule that chooses the shared table.
+- **TessAgg over a join's output** (the same analysis). In Q14 TessAgg
+  takes 24.7 ms over 76 000 rows where the core's Aggregate takes 7.8.
+  Suggested: a profile of Q14 after `deform-without-restarts`.
+- **The weak queries on Greengage** (the same analysis). Q5, Q8, Q9,
+  Q11, Q16, Q19 and Q22 gain least there, and only totals were taken.
+  Suggested: EXPLAIN ANALYZE of them on Greengage, Tessera on and off.
 - **C regions given to Rust as initialized bytes** (the review of
   `spill-crate` task 3.6, 2026-11-02). An entry point that takes a
   region C allocated makes a `&mut [u8]` over it, which Rust allows only
@@ -2077,6 +2211,11 @@ Not future work: each was weighed and refused, or left to the core, with
 the reason at the plan lines given. Proposing one again needs a new
 fact.
 
+- A guard of Tessera's join cost against the core's underestimate of a
+  join on several keys (TPC-H Q9: lineitem with partsupp estimated at
+  2392 rows, 6 M actual, then a nested loop of 6 M index probes). The
+  estimate is the core's, and with workers the core alone takes the
+  same plan: left to the core's planner (the maintainer, 2026-11-02).
 - Batches longer than 64 rows; parallel RIGHT and FULL joins without the
   shared table (4.27, line 2127).
 - An own radix sort; an external crate only when clearly better and
