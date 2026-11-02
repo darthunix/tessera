@@ -43,9 +43,18 @@
 //! step that writes the old one; a block larger than the buffer goes to
 //! the file on its own, its header from the buffer and its body from the
 //! caller's body or the scratch region.
+//!
+//! Each kind of block has a bound on its body, a [`Bounds`]: one for
+//! chunks of records and of columns, which the caller plans, and one for
+//! chunks of values, which are as long as their rows need. The writer
+//! refuses a block past the bound of its kind, and measures the longest
+//! chunk of values it writes; [`Writer::read_bounds`] gives the bounds a
+//! reader of the set takes. A reader of another participant's file of a
+//! shared set must take the largest bounds of every participant's
+//! writer, which the caller gathers after the writes end.
 
 use crate::error::ensure;
-use crate::{BlockHeader, BlockKind, Error, HEADER_SIZE, MAX_LEVEL, Result, Rule, columns};
+use crate::{BlockHeader, BlockKind, Bounds, Error, HEADER_SIZE, MAX_LEVEL, Result, Rule, columns};
 
 mod reader;
 
@@ -185,8 +194,9 @@ pub struct Config {
     pub level: u32,
     /// The table's layout fingerprint, which every header carries.
     pub fingerprint: u64,
-    /// The most body bytes a reader of the set accepts.
-    pub max_len: u64,
+    /// The most body bytes a block of each kind takes; a reader of the
+    /// set takes [`Writer::read_bounds`].
+    pub bounds: Bounds,
     /// Bytes of the write buffer: a multiple of 8, at least
     /// [`MIN_BUFFER`].
     pub buffer_len: usize,
@@ -223,7 +233,9 @@ const TRAILER: u32 = 3;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Writer {
     fingerprint: u64,
-    max_len: u64,
+    bounds: Bounds,
+    /// The longest body of a chunk of values written.
+    values_written: u64,
     buffer_len: u64,
     /// The file's length, with what the buffer holds, and what it holds.
     end: u64,
@@ -258,7 +270,7 @@ pub struct Writer {
 const _: () = assert!(size_of::<Writer>() == 8 * WRITER_WORDS);
 
 /// Words of 8 bytes a [`Writer`] takes.
-pub const WRITER_WORDS: usize = 19;
+pub const WRITER_WORDS: usize = 21;
 
 /// Where the body of a block lies when it is placed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -288,7 +300,7 @@ impl Writer {
         );
         Ok(Self {
             fingerprint: config.fingerprint,
-            max_len: config.max_len,
+            bounds: config.bounds,
             buffer_len: config.buffer_len as u64,
             partitions: config.partitions,
             level: config.level,
@@ -318,6 +330,15 @@ impl Writer {
         self.files
     }
 
+    /// The bounds a reader of the set takes: a chunk's of the set, and
+    /// the longest body of values written.
+    pub fn read_bounds(&self) -> Bounds {
+        Bounds {
+            chunk: self.bounds.chunk,
+            values: self.values_written,
+        }
+    }
+
     /// Whether the set was finished, and the ranges of its last step
     /// reported written: it takes no more blocks, and its write buffer is
     /// no longer needed.
@@ -343,6 +364,7 @@ impl Writer {
                 && self.finish <= TRAILER
                 && self.next_partition <= self.partitions
                 && self.files <= self.partitions
+                && self.values_written <= self.bounds.values
                 // A block left to be placed from the caller's body takes
                 // the body's length; one packed aside is checked against
                 // the scratch region where it lies.
@@ -507,7 +529,7 @@ impl Writer {
                 header.len = unpacked as u64;
                 header.packed = u32::try_from(packed)
                     .map_err(|_| Error::wrong_call(Rule::PackedLength).with(packed))?;
-                header.write(&mut bytes, self.max_len)?;
+                header.write(&mut bytes, self.bounds)?;
                 let source = if in_buffer {
                     Source::Buffer
                 } else {
@@ -520,7 +542,7 @@ impl Writer {
                 // anywhere. A chunk of records goes packed when that
                 // makes it shorter: straight into the buffer when its
                 // bytes fit what is left there, else aside.
-                header.write(&mut bytes, self.max_len)?;
+                header.write(&mut bytes, self.bounds)?;
                 let mut placed = (Source::Body, len);
                 if block.kind == BlockKind::Records && len >= 64 && len <= u32::MAX as usize {
                     let fits = buffered + HEADER_SIZE + len <= buffer_len;
@@ -547,7 +569,7 @@ impl Writer {
                 placed
             }
         };
-        header.write(&mut bytes, self.max_len)?;
+        header.write(&mut bytes, self.bounds)?;
         let stored = HEADER_SIZE + body_len;
         let end = self
             .end
@@ -610,6 +632,9 @@ impl Writer {
         self.end = end;
         self.blocks += 1;
         self.bytes += stored as u64;
+        if block.kind == BlockKind::Values {
+            self.values_written = self.values_written.max(header.len);
+        }
         self.pending = NONE;
         Ok(Step::Done {
             ranges,
@@ -659,7 +684,7 @@ impl Writer {
         }
         *self = Self {
             fingerprint: self.fingerprint,
-            max_len: self.max_len,
+            bounds: self.bounds,
             buffer_len: self.buffer_len,
             partitions: self.partitions,
             level: self.level,
@@ -1089,6 +1114,22 @@ pub(crate) mod tests {
     /// and its trailer.
     fn check_file(host: &Host, config: Config, written: &[Owned]) -> Result<()> {
         let partitions = config.partitions as usize;
+        // A reader takes the longest body of values written as its bound.
+        let values = written
+            .iter()
+            .filter(|block| block.kind == BlockKind::Values)
+            .map(|block| block.body.len() as u64)
+            .max()
+            .unwrap_or(0);
+        ensure!(
+            host.writer.read_bounds()
+                == Bounds {
+                    chunk: MAX_LEN,
+                    values
+                },
+            "bounds {:?} for the longest values of {values}",
+            host.writer.read_bounds()
+        );
         let mut end = 0_u64;
         for partition in 0..partitions {
             let (entries, count) = &host.lists[partition];
@@ -1107,7 +1148,7 @@ pub(crate) mod tests {
                     .file
                     .get(at..at + entry.stored as usize)
                     .context("an entry past the file")?;
-                let header = BlockHeader::read(bytes, FINGERPRINT, MAX_LEN)?;
+                let header = BlockHeader::read(bytes, FINGERPRINT, Bounds::all(MAX_LEN))?;
                 let (body, len) = stored_body(block)?;
                 ensure!(
                     (header.kind, header.number, header.partition, header.level)
@@ -1250,7 +1291,7 @@ pub(crate) mod tests {
             partitions,
             level: 2,
             fingerprint: FINGERPRINT,
-            max_len: MAX_LEN,
+            bounds: Bounds::all(MAX_LEN),
             buffer_len,
             shared,
         }
@@ -1336,6 +1377,41 @@ pub(crate) mod tests {
             partition: 1,
             body: vec![5; len],
         }
+    }
+
+    /// A block past the bound of its kind is refused, however large the
+    /// other kind's bound; a reader takes the longest values written.
+    #[test]
+    fn a_block_past_the_bound_of_its_kind_is_refused() -> Result<()> {
+        let bounds = Bounds {
+            chunk: MAX_LEN,
+            values: 64,
+        };
+        let mut host = Host::new(Config {
+            bounds,
+            ..config(2, MIN_BUFFER, false)
+        })?;
+        host.write(&values(56))?;
+        let long = host.try_write(&values(72));
+        ensure!(
+            long == Err(Error::wrong_call(Rule::BlockLength).with(64).and(72)),
+            "{long:?}"
+        );
+        ensure!(
+            host.writer.read_bounds()
+                == Bounds {
+                    values: 56,
+                    ..bounds
+                }
+        );
+        // Nor do the writer's words hold longer values than its bound.
+        host.writer.values_written = 72;
+        let changed = host.try_write(&values(8));
+        ensure!(
+            changed == Err(Error::wrong_call(Rule::SetState)),
+            "{changed:?}"
+        );
+        Ok(())
     }
 
     /// A block longer than the buffer goes to the file on its own, after

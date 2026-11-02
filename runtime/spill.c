@@ -286,7 +286,7 @@ tess_spill_create(const TessSpillConfig *config)
 											mul_size(config->npartitions,
 													 sizeof(int)));
 	if (spill->kernels->spill_set_init(&spill->writer, spill->npartitions, spill->level,
-									   spill->fingerprint, spill->max_len,
+									   spill->fingerprint, spill->max_len, spill->max_len,
 									   spill->buffer_len, spill->shared != NULL,
 									   &status) != TESS_OK)
 		tess_status_report(&status);
@@ -562,8 +562,8 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 				 partition);
 		if (spill->kernels->spill_reader_own(&reader->state, spill->npartitions,
 											 spill->level, partition, spill->fingerprint,
-											 spill->max_len, list->entries, list->count,
-											 &largest, &status) != TESS_OK)
+											 spill->max_len, spill->max_len, list->entries,
+											 list->count, &largest, &status) != TESS_OK)
 			tess_status_report(&status);
 		spill->reading[partition]++;
 		reader->file = spill->file;
@@ -595,7 +595,7 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 					errmsg("could not size Tessera spill file: %m"));
 		if (spill->kernels->spill_reader_file(&reader->state, spill->npartitions,
 											  spill->level, partition, spill->fingerprint,
-											  spill->max_len, (uint64) size,
+											  spill->max_len, spill->max_len, (uint64) size,
 											  &status) != TESS_OK)
 			tess_status_report(&status);
 		reader->page_len = SPILL_PAGE_ENTRIES;
@@ -774,7 +774,7 @@ tess_spill_stats(const TessSpill *spill, uint64 *blocks, uint64 *bytes,
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 
 	check_spill(spill);
-	if (spill->kernels->spill_set_stats(&spill->writer, blocks, bytes, files,
+	if (spill->kernels->spill_set_stats(&spill->writer, blocks, bytes, files, NULL,
 										&status) != TESS_OK)
 		tess_status_report(&status);
 }

@@ -375,7 +375,7 @@ extern TessStatusCode tess_spill_columns_unpack(const void *packed, Size len,
  * fails raises an ERROR, which ends the query and frees the set with its
  * memory, so the runtime never reports a failed write to the writer.
  */
-#define TESS_SPILL_WRITER_WORDS 19
+#define TESS_SPILL_WRITER_WORDS 21
 #define TESS_SPILL_MAX_RANGES 3
 
 typedef struct TessSpillWriter
@@ -442,14 +442,16 @@ typedef struct TessSpillStep
 
 /*
  * Make *writer the writer of an empty set of npartitions partitions at
- * level, its headers carrying fingerprint and bodies of at most max_len
- * bytes, through a write buffer of buffer_len bytes, a multiple of 8 of
- * at least TESS_SPILL_HEADER_SIZE + 64; a shared set's finish writes its
- * lists and trailer.
+ * level, its headers carrying fingerprint, its chunks of records and of
+ * columns of at most max_chunk body bytes and its chunks of values of at
+ * most max_values, through a write buffer of buffer_len bytes, a multiple
+ * of 8 of at least TESS_SPILL_HEADER_SIZE + 64; a shared set's finish
+ * writes its lists and trailer.
  */
 extern TessStatusCode tess_spill_set_init(TessSpillWriter *writer, int npartitions,
 										  uint32 level, uint64 fingerprint,
-										  uint64 max_len, Size buffer_len, bool shared,
+										  uint64 max_chunk, uint64 max_values,
+										  Size buffer_len, bool shared,
 										  TessStatus *status);
 
 /*
@@ -489,10 +491,14 @@ extern TessStatusCode tess_spill_set_drop(TessSpillWriter *writer, TessSpillList
 										  int npartitions, int partition,
 										  TessStatus *status);
 
-/* The blocks and bytes written, and the partitions with blocks. */
+/*
+ * The blocks and bytes written, the partitions with blocks, and the
+ * longest body of values written: a reader's max_values. Each output may
+ * be NULL.
+ */
 extern TessStatusCode tess_spill_set_stats(const TessSpillWriter *writer,
 										   uint64 *blocks, uint64 *bytes, int *files,
-										   TessStatus *status);
+										   uint64 *values, TessStatus *status);
 
 /*
  * The reader of a partition of a set (crates/relspill, set): it reads no
@@ -505,7 +511,7 @@ extern TessStatusCode tess_spill_set_stats(const TessSpillWriter *writer,
  * what it found. The reader's words are the caller's, made by
  * tess_spill_reader_own or tess_spill_reader_file.
  */
-#define TESS_SPILL_READER_WORDS 27
+#define TESS_SPILL_READER_WORDS 28
 
 typedef struct TessSpillReadState
 {
@@ -542,19 +548,26 @@ typedef struct TessSpillReadStep
 
 /*
  * A reader of a partition of the caller's own set, whose list is the count
- * entries at entries; *largest gets the bytes of its largest block.
+ * entries at entries, its blocks within max_chunk and max_values as
+ * tess_spill_set_init takes them; *largest gets the bytes of its largest
+ * block.
  */
 extern TessStatusCode tess_spill_reader_own(TessSpillReadState *reader, int npartitions,
 											uint32 level, int partition,
-											uint64 fingerprint, uint64 max_len,
+											uint64 fingerprint, uint64 max_chunk,
+											uint64 max_values,
 											const TessSpillEntry *entries, uint64 count,
 											uint64 *largest, TessStatus *status);
 
-/* A reader of a partition of another participant's file of file_len bytes. */
+/*
+ * A reader of a partition of another participant's file of file_len
+ * bytes, with the bounds of tess_spill_reader_own.
+ */
 extern TessStatusCode tess_spill_reader_file(TessSpillReadState *reader, int npartitions,
 											 uint32 level, int partition,
-											 uint64 fingerprint, uint64 max_len,
-											 uint64 file_len, TessStatus *status);
+											 uint64 fingerprint, uint64 max_chunk,
+											 uint64 max_values, uint64 file_len,
+											 TessStatus *status);
 
 /* A step of opening another participant's file; page holds page_len entries. */
 extern TessStatusCode tess_spill_reader_open(TessSpillReadState *reader,

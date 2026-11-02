@@ -951,6 +951,12 @@ struct CSet {
 
 impl CSet {
     fn new(partitions: usize, buffer_len: usize) -> Self {
+        Self::bounded(partitions, buffer_len, 1 << 20, 1 << 20)
+    }
+
+    /// A set whose chunks take at most `max_chunk` body bytes and chunks
+    /// of values `max_values`.
+    fn bounded(partitions: usize, buffer_len: usize, max_chunk: u64, max_values: u64) -> Self {
         use tessera_capi::c::tess_spill_set_init;
 
         let mut set = Self {
@@ -975,7 +981,8 @@ impl CSet {
                 partitions as i32,
                 1,
                 77,
-                1 << 20,
+                max_chunk,
+                max_values,
                 buffer_len,
                 true,
                 &raw mut status,
@@ -1111,11 +1118,12 @@ impl CSet {
         }
     }
 
-    /// The blocks and bytes written, and the partitions with blocks.
-    fn stats(&self) -> (u64, u64, i32) {
+    /// The blocks and bytes written, the partitions with blocks, and the
+    /// longest values written.
+    fn stats(&self) -> (u64, u64, i32, u64) {
         use tessera_capi::c::tess_spill_set_stats;
 
-        let (mut blocks, mut bytes, mut files) = (0, 0, 0);
+        let (mut blocks, mut bytes, mut files, mut values) = (0, 0, 0, 0);
         let mut status = Status::new();
         // SAFETY: the set's writer and local outputs.
         let code = unsafe {
@@ -1124,11 +1132,12 @@ impl CSet {
                 &raw mut blocks,
                 &raw mut bytes,
                 &raw mut files,
+                &raw mut values,
                 &raw mut status,
             )
         };
         assert_eq!(code, Code::Ok, "{}", status.message());
-        (blocks, bytes, files)
+        (blocks, bytes, files, values)
     }
 }
 
@@ -1151,7 +1160,7 @@ fn a_set_writes_through_its_entry_points() {
     set.write(0, 2, &values);
     assert!(set.scratch.len() >= chunk.len(), "packed aside");
     set.finish();
-    let (blocks, bytes, files) = set.stats();
+    let (blocks, bytes, files, _) = set.stats();
     assert_eq!((blocks, files), (22, 3));
     let word = |at: usize| u64::from_ne_bytes(set.file[at..at + 8].try_into().unwrap());
     let trailer = set.file.len() - 32;
@@ -1241,7 +1250,7 @@ fn the_set_entry_points_refuse_what_no_set_takes() {
         (0..11)
             .map(|what| tess_spill_set_layout(what))
             .collect::<Vec<_>>(),
-        [152, 16, 24, 8, 32, 128, 32, 216, 72, 32, 0]
+        [168, 16, 24, 8, 32, 128, 32, 224, 72, 32, 0]
     );
 }
 
@@ -1368,6 +1377,9 @@ fn a_set_reads_back_through_its_entry_points() {
         assert!(read_step(&step, &set.file, page, block));
     };
 
+    // The readers take the longest values written as their bound.
+    let values = set.stats().3;
+    assert_eq!(values, 400);
     let mut own = Reader::default();
     let mut largest = 0;
     let mut status = Status::new();
@@ -1380,6 +1392,7 @@ fn a_set_reads_back_through_its_entry_points() {
             1,
             77,
             1 << 20,
+            values,
             list.as_ptr(),
             list.len() as u64,
             &raw mut largest,
@@ -1403,6 +1416,7 @@ fn a_set_reads_back_through_its_entry_points() {
             1,
             77,
             1 << 20,
+            values,
             set.file.len() as u64,
             &raw mut status,
         )
@@ -1445,6 +1459,7 @@ fn a_set_reads_back_through_its_entry_points() {
             0,
             77,
             1 << 20,
+            values,
             list.as_ptr(),
             list.len() as u64,
             &raw mut largest,
@@ -1496,6 +1511,131 @@ fn a_set_reads_back_through_its_entry_points() {
     assert_eq!(body, expected);
 }
 
+/// Each kind of block keeps to its own bound through the entry points: a
+/// chunk of values longer than the chunk bound is written and read back,
+/// one past the values bound is refused by the writer, and readers of the
+/// own list and of the file take a block past the values they are given
+/// as damaged data.
+#[test]
+fn the_entry_points_keep_each_kind_to_its_bound() {
+    use relspill::set::{Entry, Reader};
+    use tessera_capi::c::{
+        READ_HEADER, READ_READY, SpillReadStep, tess_spill_reader_file, tess_spill_reader_next,
+        tess_spill_reader_open, tess_spill_reader_own,
+    };
+
+    let mut set = CSet::bounded(1, 256, 512, 2048);
+    set.write(0, 2, &[7; 1024]);
+    let (code, status, _) = set.call(1, 0, 2, &[7; 2056]);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(
+        status.message().contains("2056 bytes"),
+        "{}",
+        status.message()
+    );
+    let (code, status, _) = set.call(1, 0, 1, &[0; 520]);
+    assert_eq!(code, Code::InvalidArgument);
+    assert!(
+        status.message().contains("520 bytes"),
+        "{}",
+        status.message()
+    );
+    set.finish();
+    assert_eq!(set.stats().3, 1024);
+    let list = set.entries[0][..set.lists[0].count as usize].to_vec();
+
+    // The first block's header, or the code that refused it.
+    let header = |reader: &mut Reader, page: &mut Vec<Entry>, block: &mut Vec<u8>| loop {
+        let mut step = SpillReadStep::default();
+        let mut status = Status::new();
+        // SAFETY: the reader, page and block of this test.
+        let code = unsafe {
+            tess_spill_reader_next(
+                reader,
+                page.as_ptr(),
+                page.len(),
+                block.as_ptr(),
+                block.len(),
+                &raw mut step,
+                &raw mut status,
+            )
+        };
+        if code != Code::Ok || step.kind == READ_HEADER {
+            return (code, step.header.len);
+        }
+        assert!(read_step(&step, &set.file, page, block));
+    };
+    for values in [1024, 1016] {
+        let expected = if values == 1024 {
+            (Code::Ok, 1024)
+        } else {
+            (Code::DataCorrupted, 0)
+        };
+        let mut own = Reader::default();
+        let mut largest = 0;
+        let mut status = Status::new();
+        // SAFETY: a local reader, the set's list, a local output.
+        let code = unsafe {
+            tess_spill_reader_own(
+                &raw mut own,
+                1,
+                1,
+                0,
+                77,
+                512,
+                values,
+                list.as_ptr(),
+                list.len() as u64,
+                &raw mut largest,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut page = list.clone();
+        let mut block = vec![0_u8; largest as usize];
+        assert_eq!(header(&mut own, &mut page, &mut block), expected);
+
+        let mut other = Reader::default();
+        // SAFETY: a local reader.
+        let code = unsafe {
+            tess_spill_reader_file(
+                &raw mut other,
+                1,
+                1,
+                0,
+                77,
+                512,
+                values,
+                set.file.len() as u64,
+                &raw mut status,
+            )
+        };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let mut page = vec![Entry::default(); 2];
+        let mut block = Vec::new();
+        loop {
+            let mut step = SpillReadStep::default();
+            // SAFETY: the reader and page of this test.
+            let code = unsafe {
+                tess_spill_reader_open(
+                    &raw mut other,
+                    page.as_ptr(),
+                    page.len(),
+                    &raw mut step,
+                    &raw mut status,
+                )
+            };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            if step.kind == READ_READY {
+                block = vec![0; step.largest as usize];
+                break;
+            }
+            assert!(read_step(&step, &set.file, &mut page, &mut block));
+        }
+        assert_eq!(header(&mut other, &mut page, &mut block), expected);
+    }
+}
+
 /// Each misuse of a reader's entry points is refused with its reason.
 #[test]
 fn the_reader_entry_points_refuse_what_no_reader_takes() {
@@ -1524,13 +1664,33 @@ fn the_reader_entry_points_refuse_what_no_reader_takes() {
     let mut reader = Reader::default();
     // SAFETY: a local reader.
     let code = unsafe {
-        tess_spill_reader_file(&raw mut reader, 2, 1, 2, 77, 1 << 20, 64, &raw mut status)
+        tess_spill_reader_file(
+            &raw mut reader,
+            2,
+            1,
+            2,
+            77,
+            1 << 20,
+            0,
+            64,
+            &raw mut status,
+        )
     };
     assert_eq!(code, Code::InvalidArgument);
     assert!(status.message().contains("partition 2 is past the 2"));
     // SAFETY: a local reader.
     let code = unsafe {
-        tess_spill_reader_file(&raw mut reader, 2, 1, 0, 77, 1 << 20, 16, &raw mut status)
+        tess_spill_reader_file(
+            &raw mut reader,
+            2,
+            1,
+            0,
+            77,
+            1 << 20,
+            0,
+            16,
+            &raw mut status,
+        )
     };
     assert_eq!(code, Code::Ok, "{}", status.message());
     // SAFETY: a page of no entries, refused, and a local step.

@@ -216,15 +216,36 @@ split.
   if it does not fit, and no other participant joins it
 - **Verified by:** pending
 
+### Requirement: Bounds of a block by its kind
+A writer and a reader of a set SHALL take a bound for each kind of
+block, a [`Bounds`](../../../crates/relspill/src/lib.rs): one for a
+chunk of records or of columns, by the plan of the node's level, and
+one for a chunk of values, by the longest one the set's writers wrote.
+A writer SHALL refuse a block past the bound of its kind as a wrong
+call, and SHALL give the bounds a reader of its set takes,
+[`Writer::read_bounds`](../../../crates/relspill/src/set.rs). A reader
+SHALL refuse a block past the bound of its kind as damaged bytes.
+
+#### Scenario: A block past the bound of its kind
+- **WHEN** a block of values or a chunk is longer than the bound of its
+  kind, though not than the other kind's
+- **THEN** a writer refuses it as a wrong call and a reader as damaged
+  bytes; a writer's bound for values is the longest it wrote
+- **Verified by:**
+  `crates/relspill/src/set.rs::a_block_past_the_bound_of_its_kind_is_refused`;
+  `crates/relspill/src/set/reader.rs::a_block_past_the_bound_of_its_kind_is_damaged`;
+  `crates/relspill/src/lib.rs::each_kind_of_block_takes_its_own_bound`
+
 ### Requirement: Any bytes, a bounded read
 Whatever bytes a file holds, a read of the crate SHALL return the data
 or an error. It SHALL NOT panic, loop without end, or ask for more than
-its caller allows: one block of the kind it reads, with its header and
-the slack of packing, or one page of a list, and never more than the
-file holds. A read SHALL give its caller a chunk only of the kind and
-the shape the caller expects. The promise holds for a file that nobody
-writes while it is read. Bytes damaged into other bytes that pass every
-check read as other data, since a block has no checksum.
+its caller allows: one block within the larger of its caller's bounds,
+with its header and the slack of packing, or one page of a list, and
+never more than the file holds. A read SHALL give its caller a chunk
+only of the kind and the shape the caller expects. The promise holds for
+a file that nobody writes while it is read. Bytes damaged into other
+bytes that pass every check read as other data, since a block has no
+checksum.
 
 #### Scenario: Every damage against every read
 - **WHEN** each field of a header, a trailer, a list or a packed body

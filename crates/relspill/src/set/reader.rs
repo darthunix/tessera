@@ -28,7 +28,7 @@
 
 use super::{ENTRY_SIZE, Entry, TRAILER_MAGIC, TRAILER_SIZE};
 use crate::error::ensure;
-use crate::{BlockHeader, BlockKind, Error, HEADER_SIZE, MAX_LEVEL, Result, Rule, columns};
+use crate::{BlockHeader, BlockKind, Bounds, Error, HEADER_SIZE, MAX_LEVEL, Result, Rule, columns};
 
 /// What a reader reads: a partition of a set at a level, of a table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,8 +42,10 @@ pub struct ReadConfig {
     /// The table's layout fingerprint, which every header and a trailer
     /// carry.
     pub fingerprint: u64,
-    /// The most body bytes a block takes.
-    pub max_len: u64,
+    /// The most body bytes a block of each kind takes: those the set's
+    /// writer gives ([`super::Writer::read_bounds`]), or, for a shared
+    /// set, the largest of its participants'.
+    pub bounds: Bounds,
 }
 
 /// What a call of a [`Reader`] asks of its caller, or found.
@@ -96,7 +98,7 @@ fn block_slack() -> u64 {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Reader {
     fingerprint: u64,
-    max_len: u64,
+    bounds: Bounds,
     file_len: u64,
     /// Where the lists start, and where the partition's entries do.
     lists_at: u64,
@@ -143,7 +145,7 @@ pub struct Reader {
 const _: () = assert!(size_of::<Reader>() == 8 * READER_WORDS);
 
 /// Words of 8 bytes a [`Reader`] takes.
-pub const READER_WORDS: usize = 27;
+pub const READER_WORDS: usize = 28;
 
 fn check_config(config: &ReadConfig) -> Result<()> {
     ensure!(
@@ -167,7 +169,7 @@ impl Reader {
     fn made(config: ReadConfig, phase: u32) -> Self {
         Self {
             fingerprint: config.fingerprint,
-            max_len: config.max_len,
+            bounds: config.bounds,
             partitions: config.partitions,
             level: config.level,
             partition: config.partition,
@@ -245,7 +247,7 @@ impl Reader {
                 && self.seek_low <= self.seek_high
                 && self.seek_high <= self.count
                 && (self.phase != SEEK || matches!(self.seek_from, READY | BODY | EMPTY))
-                && self.largest <= self.max_len.saturating_add(block_slack()),
+                && self.largest <= self.bounds.largest().saturating_add(block_slack()),
             refuse
         );
         // A block asked for lies whole before the lists.
@@ -363,7 +365,7 @@ impl Reader {
         let most = if self.phase >= READY {
             self.largest
         } else {
-            self.max_len.saturating_add(slack)
+            self.bounds.largest().saturating_add(slack)
         };
         ensure!(
             entry.stored >= HEADER_SIZE as u64 && entry.stored <= most,
@@ -628,7 +630,7 @@ impl Reader {
 
     /// Check the block read whole into `bytes`, and give its header.
     fn read_block(&mut self, bytes: &[u8]) -> Result<ReadStep> {
-        let header = BlockHeader::read(bytes, self.fingerprint, self.max_len)?;
+        let header = BlockHeader::read(bytes, self.fingerprint, self.bounds)?;
         ensure!(
             header.partition == self.partition,
             Error::damaged(Rule::BlockPartition)
@@ -815,7 +817,7 @@ mod tests {
             level: 2,
             partition,
             fingerprint: FINGERPRINT,
-            max_len: MAX_LEN,
+            bounds: Bounds::all(MAX_LEN),
         }
     }
 
@@ -974,6 +976,12 @@ mod tests {
                 places[block.partition as usize].push(place.offset);
             }
             ensure!(host.finish()?);
+            // Read with the bounds the writer gives, as a node reads.
+            let bounds = host.writer.read_bounds();
+            let config = |partition| ReadConfig {
+                bounds,
+                ..read_config(partitions, partition)
+            };
             for partition in 0..partitions {
                 let ours: Vec<&Owned> = written
                     .iter()
@@ -982,7 +990,7 @@ mod tests {
                 let (entries, count) = &host.lists[partition as usize];
                 let list = &entries[..*count as usize];
                 let mut own = Back {
-                    reader: Reader::own(read_config(partitions, partition), list)?,
+                    reader: Reader::own(config(partition), list)?,
                     file: &host.file,
                     page: list.to_vec(),
                     block: vec![0; MAX_LEN as usize],
@@ -992,10 +1000,7 @@ mod tests {
                     continue;
                 }
                 let mut other = Back {
-                    reader: Reader::file(
-                        read_config(partitions, partition),
-                        host.file.len() as u64,
-                    )?,
+                    reader: Reader::file(config(partition), host.file.len() as u64)?,
                     file: &host.file,
                     page: vec![Entry::default(); page],
                     block: Vec::new(),
@@ -1030,6 +1035,55 @@ mod tests {
         ensure!(host.finish()?);
         let file = host.file.clone();
         Ok((host, file))
+    }
+
+    /// A block past the bound of its kind is damaged bytes, though its
+    /// entry is within the larger bound: values past the longest the
+    /// writers gave, a chunk past its plan.
+    #[test]
+    fn a_block_past_the_bound_of_its_kind_is_damaged() -> Result<()> {
+        let (host, file) = shared_file()?;
+        ensure!(
+            host.writer.read_bounds()
+                == Bounds {
+                    chunk: MAX_LEN,
+                    values: 40
+                }
+        );
+        let read = |partition, bounds| -> Result<Vec<u32>, Error> {
+            let mut back = Back {
+                reader: Reader::file(
+                    ReadConfig {
+                        bounds,
+                        ..read_config(3, partition)
+                    },
+                    file.len() as u64,
+                )?,
+                file: &file,
+                page: vec![Entry::default(); 2],
+                block: Vec::new(),
+            };
+            back.open()?;
+            let mut numbers = Vec::new();
+            while let Some((header, _)) = back.next()? {
+                numbers.push(header.number);
+            }
+            Ok(numbers)
+        };
+        let short_values = Bounds {
+            chunk: MAX_LEN,
+            values: 32,
+        };
+        let short_chunk = Bounds {
+            chunk: 8,
+            values: MAX_LEN,
+        };
+        let past = |len| Err(Error::damaged(Rule::BlockLength).with(32).and(len));
+        ensure!(read(0, short_values) == past(40));
+        ensure!(read(1, short_values) == Ok(vec![24, 8]));
+        let chunk = read(2, short_chunk).map_err(Error::rule);
+        ensure!(chunk == Err(Rule::BlockLength), "{chunk:?}");
+        Ok(())
     }
 
     /// The rule a damaged file breaks when partition `partition` of it is
@@ -1189,7 +1243,7 @@ mod tests {
                 packed: 0,
             };
             let mut bytes = [0; HEADER_SIZE];
-            header.write(&mut bytes, MAX_LEN)?;
+            header.write(&mut bytes, Bounds::all(MAX_LEN))?;
             entries.push(Entry {
                 offset: file.len() as u64,
                 stored: (HEADER_SIZE + body.len()) as u64,

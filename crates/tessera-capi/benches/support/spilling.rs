@@ -6,7 +6,7 @@
 use std::hint::black_box;
 
 use anyhow::{Context, Result, ensure};
-use relspill::{BlockHeader, BlockKind, HEADER_SIZE, columns};
+use relspill::{BlockHeader, BlockKind, Bounds, HEADER_SIZE, columns};
 use tessera_core::RowMask;
 use tessera_kernels::spill_columns::append_partitioned;
 use tessera_kernels::table::{
@@ -337,7 +337,7 @@ fn measure_partitioned(runner: &mut Runner, random: &mut Random) -> Result<()> {
 /// A block's header written and read, against its fields laid out at
 /// their offsets with no check.
 fn measure_header(runner: &mut Runner) -> Result<()> {
-    const MAX_LEN: u64 = 1 << 30;
+    const BOUNDS: Bounds = Bounds::all(1 << 30);
     let header = BlockHeader {
         kind: BlockKind::Columns,
         number: 7,
@@ -348,9 +348,9 @@ fn measure_header(runner: &mut Runner) -> Result<()> {
         packed: 1024,
     };
     let mut bytes = [0_u8; HEADER_SIZE];
-    header.write(&mut bytes, MAX_LEN)?;
+    header.write(&mut bytes, BOUNDS)?;
     ensure!(
-        BlockHeader::read(&bytes, header.fingerprint, MAX_LEN)? == header,
+        BlockHeader::read(&bytes, header.fingerprint, BOUNDS)? == header,
         "the header read back differs"
     );
     let plain = |header: &BlockHeader, out: &mut [u8; HEADER_SIZE]| {
@@ -370,10 +370,10 @@ fn measure_header(runner: &mut Runner) -> Result<()> {
     let mut out = [0_u8; HEADER_SIZE];
     let mut group = runner.group("spill/header/columns");
     group.op("write", || {
-        black_box(&header).write(&mut out, MAX_LEN).is_ok()
+        black_box(&header).write(&mut out, BOUNDS).is_ok()
     })?;
     group.op("read", || {
-        BlockHeader::read(black_box(&bytes), header.fingerprint, MAX_LEN).is_ok()
+        BlockHeader::read(black_box(&bytes), header.fingerprint, BOUNDS).is_ok()
     })?;
     group.op("reference", || {
         plain(black_box(&header), &mut out);
