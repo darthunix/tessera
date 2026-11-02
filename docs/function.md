@@ -95,11 +95,14 @@ comparisons of `boolean` (`booleq` … `boolge`) and of `smallint` against
 smallint and integer (`int2eq` …, `int24eq` …, `int42eq` …) as those of
 int4, since a boolean is 0 or 1 in its word and a smallint its value
 sign-extended; the smallint arithmetic (`int2pl`, `int2mi`, `int2mul`,
-`int2div`, `int2mod`, `int2um`) as int4's over those words with the
-results checked against the smallint range, 22003 "smallint out of range"
-past it, and with an integer (`int24pl` …, `int42pl` …) as int4's; the
-casts `int8(int2)` as `int8(int4)`, `int4(int2)` and `int2(int4)`, the
-last checked as the smallint arithmetic; the functions of a smallint and a
+`int2div`, `int2mod`, `int2um`) by the smallint kernels
+(`tessera_kernels::smallint`), int4's over those words with each row's
+result checked against the smallint range in the same step, 22003
+"smallint out of range" past it at the first row that fails, as the core
+meets a range error and a division by zero, and with an integer
+(`int24pl` …, `int42pl` …) as int4's; the casts `int8(int2)` as
+`int8(int4)`, `int4(int2)` as `x + 0` and `int2(int4)` as the smallint
+`x + 0`; the functions of a smallint and a
 bigint (`int28eq` …, `int82eq` …, `int28pl` …, `int82pl` …) as equivalents
 of the int8 function over `int8(int2)`; the six comparisons of a date
 against a timestamp (`date_eq_timestamp` … `date_ge_timestamp`, and
