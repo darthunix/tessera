@@ -179,7 +179,8 @@ SELECT count(*) FROM types_min WHERE abs(y) > 0;
 -- past the smallint range cast; the least smallint % -1, which is 0.
 CREATE TABLE types_sedge AS SELECT y, s, 32768 AS x, -32769 AS z
 FROM types_min, unnest(ARRAY[-32767, -1, 0, 1, 32767]::int2[]) AS s;
-SELECT types_same($$SELECT s + 0::int2, s - 0::int2, s * 1::int2, s / 1::int2, s / -1::int2, s % -1::int2, -s, s::int4::int2, y % -1::int2 FROM types_sedge$$);
+EXPLAIN (COSTS OFF) SELECT s + 0::int2, s / -1::int2, y % -1::int2, count(*) FROM types_sedge GROUP BY 1, 2, 3;
+SELECT types_same($$SELECT s + 0::int2, s - 0::int2, s * 1::int2, s / 1::int2, s / -1::int2, s % -1::int2, -s, s::int4::int2, y % -1::int2, count(*) FROM types_sedge GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9$$);
 SELECT count(*) FROM types_sedge WHERE y / -1::int2 > 0;
 SELECT count(*) FROM types_sedge WHERE -y > 0;
 SELECT count(*) FROM types_sedge WHERE y - 1::int2 > 0;
@@ -513,11 +514,12 @@ CREATE TABLE types_tzmin AS
 SELECT '4714-11-24 00:00:00+00 BC'::timestamptz AS tz, '4714-11-24 BC'::date AS d;
 CREATE TABLE types_tzpast AS SELECT '294277-01-01'::date AS d;
 SET TimeZone = 'America/New_York';
-SELECT types_same($$SELECT tz::date, d::timestamptz, date_trunc('day', tz), date_trunc('hour', tz) FROM types_tzedge$$);
-SELECT types_same($$SELECT tz::date, d::timestamptz FROM types_tzmin$$);
+EXPLAIN (COSTS OFF) SELECT tz::date, d::timestamptz, date_trunc('hour', tz), count(*) FROM types_tzedge GROUP BY 1, 2, 3;
+SELECT types_same($$SELECT tz::date, d::timestamptz, date_trunc('day', tz), date_trunc('hour', tz), count(*) FROM types_tzedge GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT tz::date, d::timestamptz, count(*) FROM types_tzmin GROUP BY 1, 2$$);
 SET TimeZone = 'Asia/Tokyo';
-SELECT types_same($$SELECT tz::date, d::timestamptz, date_trunc('day', tz), date_trunc('hour', tz) FROM types_tzedge$$);
-SELECT types_same($$SELECT tz::date FROM types_tzmin$$);
+SELECT types_same($$SELECT tz::date, d::timestamptz, date_trunc('day', tz), date_trunc('hour', tz), count(*) FROM types_tzedge GROUP BY 1, 2, 3, 4$$);
+SELECT types_same($$SELECT tz::date, count(*) FROM types_tzmin GROUP BY 1$$);
 \set VERBOSITY terse
 SET TimeZone = 'America/New_York';
 SELECT count(*) FROM types_tzmin WHERE tz::date > '2000-01-01';
