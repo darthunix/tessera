@@ -91,6 +91,47 @@ SELECT types_same($$SELECT d FROM types_dinf WHERE d <> 'infinity'::timestamp AN
 SELECT types_same($$SELECT d FROM types_dinf WHERE d = '2000-01-01 06:00'::timestamp$$);
 SELECT types_same($$SELECT d FROM types_dinf WHERE d <> '1999-12-31 18:00'::timestamp$$);
 DROP TABLE types_dinf;
+-- The edges of the bound: the Julian day 0, the days around 2000-01-01,
+-- the last day of the timestamps and the first past it, the last date,
+-- infinities; each operator, the timestamp on either side, against a
+-- midnight, a microsecond either side of it, a time before 2000 past
+-- midnight, the first and the last timestamp, and infinities.
+CREATE TABLE types_dedge AS
+SELECT d::date AS d
+FROM unnest(ARRAY['4714-11-24 BC', '1999-12-30', '1999-12-31', '2000-01-01', '2000-01-02',
+                  '294276-12-31', '294277-01-01', '5874897-12-31', 'infinity', '-infinity']) AS d;
+EXPLAIN (COSTS OFF) SELECT d FROM types_dedge WHERE d < '2000-01-01 00:00:00.000001'::timestamp;
+CREATE FUNCTION types_dbound() RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    stamp text;
+    op text;
+    query text;
+    result text;
+    failures text := '';
+BEGIN
+    FOREACH stamp IN ARRAY ARRAY['2000-01-01 00:00', '2000-01-01 00:00:00.000001',
+                                 '1999-12-31 23:59:59.999999', '1999-12-31 12:00',
+                                 '4714-11-24 00:00 BC', '294276-12-31 23:59:59.999999',
+                                 'infinity', '-infinity'] LOOP
+        FOREACH op IN ARRAY ARRAY['<', '<=', '=', '<>', '>', '>='] LOOP
+            FOREACH query IN ARRAY ARRAY[
+                format('SELECT d FROM types_dedge WHERE d %s %L::timestamp', op, stamp),
+                format('SELECT d FROM types_dedge WHERE %L::timestamp %s d', stamp, op)
+            ] LOOP
+                result := types_same(query);
+                IF result <> 'same' THEN
+                    failures := failures || query || ': ' || result || E'\n';
+                END IF;
+            END LOOP;
+        END LOOP;
+    END LOOP;
+    RETURN CASE WHEN failures = '' THEN 'same' ELSE failures END;
+END
+$$;
+SELECT types_dbound();
+DROP FUNCTION types_dbound();
+DROP TABLE types_dedge;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f WHERE d > ts;
 -- A smallint is its value sign-extended in the word and a boolean 0 or 1:
 -- their comparisons run in batches as int4's; a smallint's arithmetic as
@@ -133,6 +174,27 @@ CREATE TABLE types_min AS SELECT -2147483648 AS x, (-32768)::int2 AS y;
 \set VERBOSITY terse
 SELECT count(*) FROM types_min WHERE abs(x) > 0;
 SELECT count(*) FROM types_min WHERE abs(y) > 0;
+-- The edges of a smallint result, one error a statement, with Tessera on
+-- and off: the least smallint over -1, negated, minus one; an integer
+-- past the smallint range cast; the least smallint % -1, which is 0.
+CREATE TABLE types_sedge AS SELECT y, s, 32768 AS x, -32769 AS z
+FROM types_min, unnest(ARRAY[-32767, -1, 0, 1, 32767]::int2[]) AS s;
+SELECT types_same($$SELECT s + 0::int2, s - 0::int2, s * 1::int2, s / 1::int2, s / -1::int2, s % -1::int2, -s, s::int4::int2, y % -1::int2 FROM types_sedge$$);
+SELECT count(*) FROM types_sedge WHERE y / -1::int2 > 0;
+SELECT count(*) FROM types_sedge WHERE -y > 0;
+SELECT count(*) FROM types_sedge WHERE y - 1::int2 > 0;
+SELECT count(*) FROM types_sedge WHERE s + 1::int2 > 0;
+SELECT count(*) FROM types_sedge WHERE x::int2 > 0;
+SELECT count(*) FROM types_sedge WHERE z::int2 > 0;
+SET tessera.enable = off;
+SELECT count(*) FROM types_sedge WHERE y / -1::int2 > 0;
+SELECT count(*) FROM types_sedge WHERE -y > 0;
+SELECT count(*) FROM types_sedge WHERE y - 1::int2 > 0;
+SELECT count(*) FROM types_sedge WHERE s + 1::int2 > 0;
+SELECT count(*) FROM types_sedge WHERE x::int2 > 0;
+SELECT count(*) FROM types_sedge WHERE z::int2 > 0;
+RESET tessera.enable;
+DROP TABLE types_sedge;
 \set VERBOSITY default
 DROP TABLE types_min;
 -- IN and NOT IN of integer constants: a set of the integer words, sorted,
@@ -415,8 +477,47 @@ $$;
 SELECT zone, types_zone(zone)
 FROM unnest(ARRAY['UTC', 'America/New_York', 'Asia/Kolkata', 'Australia/Lord_Howe',
                   'America/Sao_Paulo', 'Europe/Amsterdam']) AS zone;
+-- A change of zone and back in one session: the caches of the zone are
+-- the process's and must forget the zone they were filled in.
+SELECT zone, types_zone(zone)
+FROM unnest(ARRAY['America/New_York', 'Asia/Kolkata', 'America/New_York']) AS zone;
 DROP FUNCTION types_zone(text);
 DROP TABLE types_tz;
+-- The edges of the zone's rules: the first timestamp, whose local day in
+-- a zone west of UTC falls before the Julian day 0 and is the core's to
+-- give; the first date, whose local midnight in a zone east of UTC falls
+-- before the first timestamp, and the first date past the timestamps,
+-- both errors of the core; the last day of the timestamps and its last
+-- microsecond, which local time takes past it in a zone east of UTC.
+CREATE TABLE types_tzedge AS
+SELECT tz::timestamptz AS tz, d::date AS d
+FROM (VALUES ('2000-01-01 00:00:00+00', '2000-01-01'),
+             ('294276-12-31 23:59:59.999999+00', '294276-12-31')) AS v (tz, d);
+CREATE TABLE types_tzmin AS
+SELECT '4714-11-24 00:00:00+00 BC'::timestamptz AS tz, '4714-11-24 BC'::date AS d;
+CREATE TABLE types_tzpast AS SELECT '294277-01-01'::date AS d;
+SET TimeZone = 'America/New_York';
+SELECT types_same($$SELECT tz::date, d::timestamptz, date_trunc('day', tz), date_trunc('hour', tz) FROM types_tzedge$$);
+SELECT types_same($$SELECT tz::date, d::timestamptz FROM types_tzmin$$);
+SET TimeZone = 'Asia/Tokyo';
+SELECT types_same($$SELECT tz::date, d::timestamptz, date_trunc('day', tz), date_trunc('hour', tz) FROM types_tzedge$$);
+SELECT types_same($$SELECT tz::date FROM types_tzmin$$);
+\set VERBOSITY terse
+SET TimeZone = 'America/New_York';
+SELECT count(*) FROM types_tzmin WHERE tz::date > '2000-01-01';
+SET TimeZone = 'Asia/Tokyo';
+SELECT count(*) FROM types_tzmin WHERE d::timestamptz < 'infinity';
+SELECT count(*) FROM types_tzpast WHERE d::timestamptz < 'infinity';
+SET tessera.enable = off;
+SET TimeZone = 'America/New_York';
+SELECT count(*) FROM types_tzmin WHERE tz::date > '2000-01-01';
+SET TimeZone = 'Asia/Tokyo';
+SELECT count(*) FROM types_tzmin WHERE d::timestamptz < 'infinity';
+SELECT count(*) FROM types_tzpast WHERE d::timestamptz < 'infinity';
+RESET tessera.enable;
+\set VERBOSITY default
+RESET TimeZone;
+DROP TABLE types_tzedge, types_tzmin, types_tzpast;
 
 -- Floats in batches: comparisons of float8, float4 and the two, NaN equal
 -- to itself and above every number, -0 equal to 0; arithmetic, negation
