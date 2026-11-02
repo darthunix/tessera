@@ -9,7 +9,7 @@
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::os::unix::process::CommandExt as _;
+use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
@@ -195,84 +195,160 @@ pub fn install_tessera_with(
 /// Run a step of a tool to its end, or stop it at `deadline`.
 ///
 /// With a deadline the step runs in a process group of its own, so that
-/// the deadline ends it with every process it started, such as the `psql` of a script: the
-/// group gets SIGTERM, a second to go, then SIGKILL, whatever of it is
-/// left, so that a process that ignores SIGTERM ends too. A process that
-/// leaves the group itself, as `pg_ctl` starts a server in a session of
-/// its own, outlives it. A step that ends after the deadline fails as one
-/// still running would. The step's output goes where the command sends it.
-/// Without a deadline the call waits as [`Command::status`] does, the step
-/// in the tool's own process group.
+/// the deadline ends it with every process it started, such as the `psql`
+/// of a script: the group gets SIGTERM, a second to go, then SIGKILL, so
+/// that a process that ignores SIGTERM ends too. A process that leaves the
+/// group itself, as `pg_ctl` starts a server in a session of its own,
+/// outlives it. A step that ends after the deadline fails as one still
+/// running would. Ctrl-C at the terminal does not reach the group; the
+/// group's leader, a watchdog started before the step, ends it in the
+/// same way when the tool ends first, by Ctrl-C or any signal. The step's
+/// output goes where the command sends it. Without a deadline the call
+/// waits as [`Command::status`] does, the step in the tool's own process
+/// group. With one the command is left set to join a group that is gone
+/// after the call: a command serves one step.
 ///
 /// # Errors
 ///
 /// The deadline passed before the step started, while it ran, or before
-/// its end was seen; or the step could not start, or be stopped.
+/// its end was seen; or the step or its watchdog could not start; or the
+/// group could not be signalled, or outlived SIGKILL, so that some of it
+/// may be left.
 pub fn run_until(command: &mut Command, deadline: Option<Instant>) -> Result<ExitStatus> {
-    if let Some(deadline) = deadline {
-        ensure!(
-            Instant::now() < deadline,
-            "the deadline passed before {command:?}"
-        );
-    }
-    // A deadline needs the step in a group of its own, to stop it whole;
-    // without one the step stays in the tool's group, so that Ctrl-C at
-    // the terminal ends it with the tool.
-    if deadline.is_some() {
-        command.process_group(0);
-    }
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("cannot start {command:?}"))?;
     let Some(deadline) = deadline else {
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("cannot start {command:?}"))?;
         return Ok(child.wait()?);
     };
+    ensure!(
+        Instant::now() < deadline,
+        "the deadline passed before {command:?}"
+    );
+    // Unreleased on an error below, the watchdog ends its group.
+    let watchdog = Watchdog::start()?;
+    let mut child = command
+        .process_group(watchdog.group())
+        .spawn()
+        .with_context(|| format!("cannot start {command:?}"))?;
     loop {
         let status = child.try_wait()?;
         let now = Instant::now();
         if now >= deadline {
             // The step may have ended and left processes of its group.
-            stop_group(&mut child)?;
-            bail!("the deadline passed: {command:?} was stopped with its group");
+            let ended = watchdog.end_group();
+            // The step's own id is still its own: it is not reaped yet.
+            let _ = child.kill();
+            child.wait()?;
+            ended?;
+            bail!(
+                "the deadline passed before the end of {command:?} was seen; its group was stopped"
+            );
         }
         if let Some(status) = status {
+            watchdog.release();
             return Ok(status);
         }
         thread::sleep((deadline - now).min(Duration::from_millis(50)));
     }
 }
 
-/// End a step's process group: SIGTERM, a second's grace, then SIGKILL to
-/// every member left, the step's descendants among them, whether or not
-/// the step itself has ended; the step waited for, and the group seen
-/// gone. A signal to a group already gone is no failure.
-fn stop_group(child: &mut std::process::Child) -> Result<()> {
-    let group = format!("-{}", child.id());
-    // Whether `kill` delivered the signal to a member of the group.
-    let signal = |name: &str| -> Result<bool> {
-        Ok(Command::new("kill")
-            .args([name, "--", &group])
+/// The leader of a step's process group: a shell started before the step,
+/// which joins its group, so that the step never runs unwatched. It waits
+/// for a line on a pipe only the tool holds. The line releases it; the
+/// pipe's end, which comes with the tool's end however it ends, or with
+/// [`Watchdog::end_group`], makes it signal its own group: SIGTERM, which
+/// it ignores itself, a second, then SIGKILL to every member, itself last.
+/// The group's number is the watchdog's process id, which no other process
+/// or group can take before the watchdog is reaped: no signal of it, nor
+/// of the tool, reaches a group that took the number since.
+struct Watchdog(std::process::Child);
+
+/// Reads a line, or else ends its own group.
+const WATCH: &str =
+    "trap '' TERM; read -r _ && exit 0; kill -s TERM 0 && sleep 1 && kill -s KILL 0; exit 3";
+
+impl Watchdog {
+    fn start() -> Result<Self> {
+        let child = Command::new("/bin/sh")
+            .args(["-c", WATCH])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status()
-            .context("cannot run kill")?
-            .success())
-    };
-    signal("-TERM")?;
-    let grace = Instant::now() + Duration::from_secs(1);
-    while Instant::now() < grace && signal("-0")? {
-        thread::sleep(Duration::from_millis(20));
+            .spawn()
+            .context("cannot start the watchdog of a step")?;
+        Ok(Self(child))
     }
-    signal("-KILL")?;
-    // The leader, should the group's signal not have reached it.
-    let _ = child.kill();
-    child.wait()?;
-    // A member killed is gone once its parent or init reaps it.
-    let gone = Instant::now() + Duration::from_secs(5);
-    while signal("-0")? {
-        ensure!(Instant::now() < gone, "the group {group} outlived SIGKILL");
-        thread::sleep(Duration::from_millis(20));
+
+    /// The step's process group, the watchdog's own.
+    fn group(&self) -> i32 {
+        // A process id fits an i32, as pid_t.
+        self.0.id().cast_signed()
     }
-    Ok(())
+
+    /// The step's end is seen: the watchdog leaves its group alone.
+    fn release(mut self) {
+        if let Some(mut pipe) = self.0.stdin.take() {
+            // A watchdog that is gone already has nothing to release.
+            let _ = pipe.write_all(b"\n");
+        }
+    }
+
+    /// End the step's group, and see every member of it end, a zombie at
+    /// most, before the watchdog, which holds the group's number, is
+    /// reaped. Its end by its own SIGKILL shows that both signals went out.
+    fn end_group(mut self) -> Result<()> {
+        let group = self.group();
+        drop(self.0.stdin.take());
+        let gone = Instant::now() + Duration::from_secs(6);
+        while live_member(&processes()?, group) {
+            ensure!(Instant::now() < gone, "the group {group} outlived SIGKILL");
+            thread::sleep(Duration::from_millis(50));
+        }
+        let status = self
+            .0
+            .wait()
+            .context("cannot wait for the watchdog of a step")?;
+        ensure!(
+            status.signal() == Some(SIGKILL),
+            "the watchdog of the group {group} could not signal it: {status}"
+        );
+        Ok(())
+    }
+}
+
+impl Drop for Watchdog {
+    /// Reaped whatever happened; unreleased, it ends its group first.
+    fn drop(&mut self) {
+        drop(self.0.stdin.take());
+        let _ = self.0.wait();
+    }
+}
+
+/// SIGKILL, the same number on every Unix.
+const SIGKILL: i32 = 9;
+
+/// The process group and the state of every process, as `ps -A -o pgid=
+/// -o stat=` lists them.
+fn processes() -> Result<String> {
+    let output = Command::new("ps")
+        .args(["-A", "-o", "pgid=", "-o", "stat="])
+        .stderr(Stdio::null())
+        .output()
+        .context("cannot run ps")?;
+    ensure!(output.status.success(), "ps failed");
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Whether a listing of [`processes`] has a member of `group` that is not
+/// a zombie.
+fn live_member(listing: &str, group: i32) -> bool {
+    listing.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next().and_then(|id| id.parse().ok()) == Some(group)
+            && fields.next().is_some_and(|state| !state.starts_with('Z'))
+    })
 }
 
 /// The last lines of a log, for an error message.
@@ -510,11 +586,14 @@ mod tests {
 
     #[test]
     fn a_step_within_its_deadline_gives_its_status() -> Result<()> {
-        let mut command = Command::new("/bin/sh");
-        command.args(["-c", "exit 3"]);
-        let status = run_until(&mut command, Some(Instant::now() + Duration::from_secs(30)))?;
+        let step = || {
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "exit 3"]);
+            command
+        };
+        let status = run_until(&mut step(), Some(Instant::now() + Duration::from_secs(30)))?;
         assert_eq!(status.code(), Some(3));
-        let status = run_until(&mut command, None)?;
+        let status = run_until(&mut step(), None)?;
         assert_eq!(status.code(), Some(3));
         Ok(())
     }
@@ -577,6 +656,48 @@ mod tests {
             "a descendant outlived the deadline"
         );
         Ok(())
+    }
+
+    #[test]
+    fn a_watchdog_dropped_unreleased_ends_its_group() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let pid = directory.path().join("pid");
+        let watchdog = Watchdog::start()?;
+        let mut step = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "/bin/sh -c \"trap '' TERM; echo \\$\\$ > '{}'; exec sleep 60\" & wait",
+                pid.display()
+            ))
+            .process_group(watchdog.group())
+            .spawn()?;
+        while fs::read_to_string(&pid).map_or(true, |text| text.trim().is_empty()) {
+            thread::sleep(Duration::from_millis(20));
+        }
+        // As on an error of the tool: the drop ends the group, long before
+        // the sleep would end by itself.
+        let dropped = Instant::now();
+        drop(watchdog);
+        while step.try_wait()?.is_none() {
+            assert!(
+                dropped.elapsed() < Duration::from_secs(10),
+                "the step outlived its watchdog"
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !alive(&fs::read_to_string(&pid)?)?,
+            "a member outlived its watchdog"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_group_of_zombies_alone_is_ended() {
+        let listing = "  1 Ss\n 123 Z\n 123 Z+\n1234 S\n";
+        assert!(!live_member(listing, 123), "zombies are ended");
+        assert!(live_member(&format!("{listing} 123 R+\n"), 123));
+        assert!(!live_member(listing, 12), "a group by its whole id");
     }
 
     #[test]

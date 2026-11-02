@@ -24,9 +24,10 @@ ownership, lifetime and errors. The check named in a task comes on top.
 ## 2. What the C version answers
 
 - [x] 2.1 Give `cargo ab measure` a deadline, `--deadline <seconds>`,
-      one for the whole run, its builds included: each step of a run in
-      a process group of its own, the group ended and the run failed at
-      the deadline; `bench/pg/run.sh` sets
+      one for the run's steps, its builds included: each step of a run
+      in a process group of its own, the group ended and the run failed
+      at the deadline, the server's restart and the work between steps
+      outside it, as the tool's README says; `bench/pg/run.sh` sets
       `client_connection_check_interval` for its `psql`. A test of the
       tool with a step that outlives its deadline, and the option in
       `docs/measuring.md`. Check: `cargo test --locked -p tessera-ab`.

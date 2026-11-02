@@ -49,7 +49,8 @@ CONF
     "$BIN/psql" -X -v scale="$SCALE" -f "$HERE/setup.sql"
     ;;
 restart)
-    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -m fast -w restart > /dev/null
+    # A bound of its own, whatever PGCTLTIMEOUT says: 30 seconds a wait.
+    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -m fast -w -t 30 restart > /dev/null
     ;;
 measure)
     FAMILY=$2
