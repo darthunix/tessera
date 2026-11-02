@@ -117,7 +117,8 @@ outer child right after it builds it, when three things hold:
 
 - **The join drops a row without a pair.** INNER and SEMI joins do, and
   so does a RIGHT join, which keeps the rows of its inner side and drops
-  outer rows without a pair. ANTI and LEFT joins return such a row,
+  outer rows without a pair, and a RIGHT ANTI join, which returns only
+  the inner rows without a pair. ANTI and LEFT joins return such a row,
   FULL too, so they keep their filter and check rows themselves.
 - **The table does not spill.** A table that spills holds only part of
   its rows in memory, and its filter knows only those.

@@ -5,6 +5,10 @@ Summaries of full runs of the PostgreSQL-level benchmarks of
 TPC-H of [`bench/tpch`](../../bench/tpch/README.md), with the plans of
 the cases the README cites, newest first:
 
+- [2026-11-02, a right anti join in
+  TessHashJoin](2026-11-02-right-anti-join/README.md): TPC-H Q22 serial
+  and with two workers, the join family, Apple M5 Pro, PostgreSQL
+  master, the change `right-anti-join` against `4b905b62`.
 - [2026-11-02, smallint arithmetic, the date bound and the
   zone](2026-11-02-int2-and-date-bounds/README.md): six cases of the
   family `win` and the counts of `arith_int32`, Apple M5 Pro,

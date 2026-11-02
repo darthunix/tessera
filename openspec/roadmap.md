@@ -31,7 +31,7 @@ closed. The maintainer took the six findings of the AVX2 kernels on
 order. The maintainer took six entries out of turn on 2026-11-02, after
 an analysis of TPC-H with Tessera on, in the order
 `deform-without-restarts` (done), `bpchar-constant-compare` (done),
-`right-anti-join`, `agg-dependent-columns`, `early-key-filter`,
+`right-anti-join` (done), `agg-dependent-columns`, `early-key-filter`,
 `batch-index-join`:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
@@ -163,24 +163,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
-
-### right-anti-join
-
-TessHashJoin of the core's right anti join.
-
-- **What:** TessHashJoin takes `JOIN_RIGHT_ANTI`: it builds the side
-  whose rows it keeps, probes with the other, marks the records that
-  find a pair, and returns the unmarked ones after the probe, the tail
-  its RIGHT join already has, without the pairs.
-- **Why:** TPC-H Q22's NOT EXISTS is the core's `Hash Right Anti Join`
-  of 1.5 M orders against 19 000 customers: 77 of its 159 ms serial
-  (EXPLAIN ANALYZE), and the orders scan feeding it row by row.
-- **Known:** NULL keys of the kept side come out as without a pair; the
-  marks after the residual clauses; the shared table and the spill
-  keep the marks as RIGHT and FULL do.
-- **Depends on:** nothing.
-- **Capabilities:** join-hash
-- **Size:** medium: one pull request.
 
 ### agg-dependent-columns
 
@@ -2039,7 +2021,7 @@ becomes an entry, joins one, or is dropped.
   `scan_planner.c` says the native scan is faster under any parent.
   Suggested: a slot into the pinned page, as
   `minimal-tuples-for-storing-parents` weighs; `right-anti-join`
-  removes the case of Q22.
+  removed the case of Q22.
 - **A build in every participant** (the same analysis). Q14 with two
   workers builds `part` in each participant, 200 000 rows three times,
   where the core's Parallel Hash shares the build. Suggested: read the

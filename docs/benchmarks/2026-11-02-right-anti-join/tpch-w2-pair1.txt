@@ -1,0 +1,12 @@
+A SF 1, schema pk, 2 workers, work_mem 256MB, jit off, 7 pairs ABBA after 1 warm-up; 4b905b622e61 at 2026-11-02 19:12:05.791915+07, PostgreSQL 20devel, AC Power
+B SF 1, schema pk, 2 workers, work_mem 256MB, jit off, 7 pairs ABBA after 1 warm-up; d1250e5592e4 at 2026-11-02 19:12:19.967117+07, PostgreSQL 20devel, AC Power
+┌───────────────────────────────────────┬──────────┬──────────┬────────┬───────────────┬─────────┬──────────┬──────────┐
+│ query                                 ┆ on A, ms ┆ on B, ms ┆ B/A on ┆ 95 % interval ┆ B/A off ┆ on/off A ┆ on/off B │
+╞═══════════════════════════════════════╪══════════╪══════════╪════════╪═══════════════╪═════════╪══════════╪══════════╡
+│ Q04 order priority checking           ┆     47.6 ┆     47.3 ┆  0.995 ┆   0.984–1.003 ┆   0.987 ┆    0.880 ┆    0.887 │
+│ Q13 customer distribution             ┆     61.5 ┆     61.2 ┆  0.996 ┆   0.974–1.050 ┆   1.017 ┆    0.199 ┆    0.195 │
+│ Q16 parts/supplier relationship       ┆     24.1 ┆     23.9 ┆  0.992 ┆   0.974–1.006 ┆   0.963 ┆    0.393 ┆    0.405 │
+│ Q21 suppliers who kept orders waiting ┆    130.8 ┆    126.6 ┆  0.968 ┆   0.959–1.006 ┆   1.003 ┆    0.812 ┆    0.784 │
+│ Q22 global sales opportunity          ┆     42.1 ┆     27.6 ┆  0.656 ┆   0.642–0.661 ┆   1.013 ┆    0.977 ┆    0.633 │
+└───────────────────────────────────────┴──────────┴──────────┴────────┴───────────────┴─────────┴──────────┴──────────┘
+geometric mean over 5 queries: B/A on 0.910, B/A off 0.996 (the control: the core is the same)

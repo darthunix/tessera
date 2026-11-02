@@ -151,8 +151,8 @@ otherwise:
 - `enable_partition_pruning` is on;
 - the outer side is a TessAppend over the partitions of one partitioned
   table;
-- the join is INNER, SEMI or RIGHT, which return no outer row without a
-  pair; LEFT, ANTI and FULL joins never prune;
+- the join is INNER, SEMI, RIGHT or RIGHT ANTI, which return no outer
+  row without a pair; LEFT, ANTI and FULL joins never prune;
 - a key of the join has one of the types int2, int4, int8, date, bool,
   timestamp and timestamptz, and its outer side is a column that is the
   first column of the partition key of the table, or of one of its
@@ -162,12 +162,14 @@ otherwise:
 When several keys can prune, the first one in the join's order SHALL.
 
 #### Scenario: Joins that keep an outer row without a pair
-- **WHEN** SEMI, RIGHT, LEFT and ANTI joins have keys that reach one
-  partition
-- **THEN** the SEMI and the RIGHT join prune the others, the LEFT and
-  the ANTI join read them all, and the results are the core's
+- **WHEN** SEMI, RIGHT, RIGHT ANTI, LEFT and ANTI joins have keys that
+  reach one partition
+- **THEN** the SEMI, the RIGHT and the RIGHT ANTI join prune the
+  others, the LEFT and the ANTI join read them all, and the results are
+  the core's
 - **Verified by:**
-  `test/sql/join.sql::SEMI and RIGHT keep no outer row without a pair and prune`
+  `test/sql/join.sql::SEMI and RIGHT keep no outer row without a pair`;
+  `test/sql/join.sql::RIGHT ANTI keeps the inner rows without a pair`
 
 #### Scenario: The key that prunes
 - **WHEN** a join has two keys, the partition key second; a join's key
