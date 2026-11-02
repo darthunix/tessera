@@ -141,6 +141,14 @@ SELECT pg_temp.measure_pair('selective',
     format('SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id WHERE d.d1 <= %s',
            1000 * :scale),
     :repetitions);
+-- A key filter ahead of a cheap clause that keeps fewer rows: the
+-- dimension filtered to two keys in five lets about 40 % of the fact
+-- table's rows through its filter, which a TessFilter of batch clauses
+-- alone checks before the clause on f1, which keeps one row in a hundred.
+SELECT pg_temp.measure_pair('filter_first',
+    format('SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id WHERE d.d2 < 40 AND f.f1 <= %s',
+           20000 * :scale),
+    :repetitions);
 SELECT pg_temp.measure_pair('miss',
     'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk_miss = d.id',
     :repetitions);
@@ -236,13 +244,13 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
-                  'selective', 'miss', 'dup', 'dup_text', 'two_keys', 'residual', 'rows_parent',
+                  'selective', 'filter_first', 'miss', 'dup', 'dup_text', 'two_keys', 'residual', 'rows_parent',
                   'chain', 'semi', 'anti', 'right_anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
                   'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
-                  'selective', 'miss', 'dup', 'two_keys', 'residual', 'rows_parent',
+                  'selective', 'filter_first', 'miss', 'dup', 'two_keys', 'residual', 'rows_parent',
                   'chain', 'semi', 'anti', 'right_anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
                   'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few']) AS name \gexec
 \o
