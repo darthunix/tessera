@@ -606,6 +606,63 @@ parameters, the direction always forward, the runtime keys not computed
 first, the rows not counted, every attribute taken from the index's
 first column.
 
+### Lookup mode
+
+A hash join in its index lookup mode (TessHashJoin, Index lookups)
+reads its inner side through TessHeapScan in a mode of its own: the
+scan finds the rows of a batch of keys the join gives, through a btree
+index, in one index scan with the keys as an array.
+
+The plan of a lookup scan names its relation, the index, and the
+lookup's scan key: index attribute 1, `BTEqualStrategyNumber`, the
+operator's function, its input collation and its right-hand type as
+the subtype, as the core's index scan builds an array key
+(`ExecIndexBuildScanKeys`). At its start the node opens the index with
+the relation's lock mode, unless the plan is only explained, and begins
+an index scan of that key (`index_beginscan`, the snapshot
+`es_snapshot`). The join gives it an array of keys of the outer side's
+type, as SQL values (a date stays a date, a text a text,
+`tess_heap_lookup`); the node puts the array into the key as an array
+key (`SK_SEARCHARRAY`), rescans the index (`index_rescan`), and fills
+its batches from the index fetch (`table_index_getnext_slot`), each row
+the tuple where it lies on its pinned page
+(`tess_heap_batch_append_slot`), as its index mode does. A btree sorts
+the array, drops its duplicates and NULLs at each rescan and walks its
+leaves from key to key, so the join neither sorts nor deduplicates. The
+visibility of a row, HOT chains and killed entries are the index
+fetch's; a btree never asks for a recheck, and the node refuses one.
+
+Every place where the node chooses between its modes takes the lookup
+mode: its start begins no heap scan, it sets up no parallel heap scan,
+a rescan rescans no heap scan, it shows no pages, and its batches come
+from the lookup. A rescan forgets the keys: until the next call the key
+reads as NULL and finds nothing. So the join rescans its inner child,
+which TessFilter passes down to the scan, and then makes the call. The
+array lives in a context of the join that is reset only before the next
+batch's call: the btree reads it when the scan starts fetching and
+keeps pointers into it while it runs. EXPLAIN shows `Lookup Index` and
+`Lookup Key`; the join counts the btree's descents
+(`tess_heap_lookup_searches`), since in a parallel plan only the join
+shares its counters.
+
+The lookup scan's path is made only inside the join's path
+(`tess_scan_lookup_path`) and never enters the relation's lists of
+paths: no other plan may take a scan nobody gives keys. Its eligibility
+is the node's own (`relation_supported`, `plain_heap_relation`: no
+inheritance parent, no lateral reference, no row marks, no sample, the
+heap access method), with no pseudoconstant restriction, which would
+put the core's gating `Result` above the scan; the relation's clauses
+go to TessFilter above it by the scan planner's helpers, all of them,
+in their security order.
+
+Refused: a parameter of the core's plan the join sets for an index scan
+of `key = ANY($p)`. The core accepts a parameter only from its own
+nodes: `finalize_plan` rejects one a CustomScan sets, EXPLAIN cannot
+name its owner, and a way around it (a placeholder replaced after
+planning, the dependencies written by hand through the subtree) is
+fragile. Refused: a callback of the C API for the keys; both nodes are
+of one module.
+
 ## TessPack
 
 `TessPack` turns the rows of an ordinary child into batches. It is the
@@ -2076,6 +2133,76 @@ may prune its partitions by the keys of its table, as the capability
 [partition-pruning](../openspec/specs/partition-pruning/design.md)
 describes.
 
+### Index lookups
+
+A join of a few outer rows with a large indexed table reads the whole
+inner side into its table, where the core's nested loop descends the
+index once an outer row: TPC-H keeps such loops at scale 1 (Q5 and Q7
+over `lineitem_pkey`, Q8 and Q21 over `orders_pkey`). For INNER and
+LEFT joins the node has an index lookup mode: for each outer batch of at
+most 64 rows it rescans its inner side, gives the batch's keys as one
+array to TessHeapScan in its lookup mode, and builds a table of the
+rows found before it probes the batch. EXPLAIN shows `Inner Lookups:
+per outer batch`; with `ANALYZE`, `Lookups` (the array scans), `Lookup
+Keys` (the keys given, duplicates included, NULLs not), `Index
+Searches` (the btree's descents) and `Overrun`, the most any batch's
+table took past the `hash_mem` in force when it was built, each summed
+over the participants of a parallel plan; with `VERBOSE`, `Builds` (the
+tables of batches with keys), and with the costs `Lookup Estimate`, the
+planner's counts and the two times of the cost model
+([costs.md](costs.md), the index join).
+
+In this mode the join builds no table at its start and never treats an
+empty table as the end. It asks its outer child for batches of at most
+64 rows, or fewer when its parent asks for fewer; a larger one is an
+error. One step, before an outer batch is probed, in `join_outer_next`,
+which the rounds, the matches and the row output all read through,
+prepares the batch (`join_lookup_batch`): the keys of its rows with a
+key, as an array of the outer key's type in the batch's order; a batch
+without one gets an empty table and finds no pairs, so LEFT returns its
+rows with NULL inner columns; otherwise the inner child rescanned, the
+call, and the batch's table built from the inner child's batches. The
+table of a batch keeps its first chunk and its index for the next
+batch's and frees the rest; values copied from the inner side are freed
+with each batch. The table never spills: what passes `hash_mem` is
+counted as the join's overrun.
+
+What assumes one table for the whole join is off in the mode for good:
+compact batches, which keep offsets of records across outer batches;
+the Bloom filter, whose decision every new table makes again and whose
+hand-down would drop the next batch's rows; the pruning of a
+partitioned outer side by the table's keys; the shared table and the
+spill. A rescan of the join forgets the batch's table whatever
+parameter changed. Under a Gather each participant looks up the keys of
+its own batches with a lookup scan of its own, not parallel-aware.
+
+The planner offers the mode for INNER and LEFT joins whose inner side
+passes the scan's eligibility, with a btree index (`amsearcharray`),
+not partial, not hypothetical, whose first column is a column of the
+table and the inner side of one of the join's equalities. The operator,
+turned to have the index column on its left, must be in the index's
+operator family with the equality strategy, its input collation must
+match the index's and be deterministic, and the clause must pass the
+rule for promoting a clause into an index scan
+(`restriction_is_securely_promotable`), as the core matches a clause to
+an index column. Any key type the join takes: a key hashed from its
+value has one type on both sides and the join's residual equality
+decides its pairs; an outer side of another type is possible only for
+the word equalities of integers, dates and timestamps, and the family
+must hold both comparisons a btree array key of that type needs. A
+batch's table must fit a quarter of `hash_mem` by the inner key's
+statistics: 64 keys times the rows of its most frequent value, times
+the bytes of a record and the values it copies, with the first chunks
+of the table's records and values and its index; a column without
+statistics gets no lookup, nor does a table past `effective_cache_size`.
+The path is then offered only where its time is within 0.8 of the
+core's nested loop's over the same keys ([costs.md](costs.md)).
+
+SEMI and ANTI joins keep the core's nested loop: it stops at the first
+match, where the mode reads every row of a key. A batch whose keys find
+more rows than `hash_mem` holds is built whole; splitting its keys into
+lookups that fit is left for later.
+
 ### Tests
 
 `test/sql/join.sql` compares the rows of every join with Tessera on and
@@ -2162,6 +2289,26 @@ the `Gather` the shared table, spilled too, the workers alone, a rescan
 and a `LIMIT` under the core's `Gather`. The tests of pruning the outer
 side's partitions are in the capability
 [partition-pruning](../openspec/specs/partition-pruning/design.md).
+
+`test/sql/index_join.sql` compares every index lookup with the core's
+rows, the lookup's prices set to nothing so that the planner takes it:
+batches with pairs, without and with NULL keys only; duplicates on both
+sides; sparse batches; other join clauses; LEFT rejected by `ON` and by
+`WHERE`; the inner side's clauses in TessFilter above the lookup and
+columns computed over the pairs; text, date, numeric (1.0 against
+1.00), char(n) of two lengths and a bigint key against an int index; a
+cursor read in part, a limit, rescans with a parameter of either side; a
+HOT update; a prepared plan whose index is dropped and made again;
+partial, expression and hash indexes, an inheritance parent and a
+nondeterministic collation refused, each beside an index or table the
+mode takes; a policy of the inner table; a skewed key past `hash_mem`
+whose `Overrun` stays when `work_mem` is raised during the query; no
+Bloom filter; a Gather with and without the leader and its rescan, the
+counters summed. At the default prices it checks the cost: keys of a
+batch next to each other take the lookup, keys spread over the index
+and batches of one key the core's nested loop, a table past
+`effective_cache_size` none, and the planner's counts serially and per
+participant under a Gather.
 
 ## TessSort
 

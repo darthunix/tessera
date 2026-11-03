@@ -33,9 +33,9 @@ took six entries out of turn on 2026-11-02, after an analysis of TPC-H
 with Tessera on, in the order
 `deform-without-restarts` (done), `bpchar-constant-compare` (done),
 `right-anti-join` (done), `agg-dependent-columns`, `early-key-filter`
-(done), `batch-index-join`; on the same day he moved `agg-dependent-columns`
-after `batch-index-join`, once a measurement of Q10 showed its
-aggregate's input row-wise:
+(done), `batch-index-join` (done); on the same day he moved
+`agg-dependent-columns` after `batch-index-join`, once a measurement of
+Q10 showed its aggregate's input row-wise:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `whole-word-decisions`: When and where a driver takes a word whole,
@@ -90,6 +90,12 @@ is wanted; several wait for a measured case. `greengage-port` and
 
 - `numeric-keys-by-digits`: numeric keys hashed and compared by their
   digits
+- `lookup-outer-compaction`: The outer rows of an index lookup gathered
+  into full batches
+- `semi-anti-lookups`: SEMI and ANTI joins by index lookups
+- `lookup-key-splitting`: A batch's keys split where their rows outgrow
+  hash_mem
+- `lookup-heap-pages`: The heap's pages in the index lookup's cost
 - `window-functions`: Batch window functions
 - `merge-join`: TessMergeJoin
 - `minimal-tuples-for-storing-parents`: Minimal tuples for a parent that
@@ -181,27 +187,82 @@ TessAgg with columns its keys determine.
   45 of Q10's 290 ms, its input comes row by row from an index nested
   loop with `nation`, and Q10 with the five columns as `any_value`,
   which TessAgg takes, ran no faster than the core's (303 ms against
-  289); after `batch-index-join` the input is batches, and the entry is
-  measured again before its proposal.
+  289). `batch-index-join` takes no lookup in TPC-H at scale 1, so the
+  input stays row-wise; the entry is measured again before its
+  proposal.
 - **Depends on:** nothing.
 - **Capabilities:** aggregate
 - **Size:** medium: one pull request.
 
-### batch-index-join
+### lookup-outer-compaction
 
-A join that looks a batch of keys up in an index.
+The outer rows of an index lookup gathered into full batches.
 
-- **What:** A nested loop whose inner side is a batch of index lookups:
-  the outer batch's keys sorted, one descent each, the rows fetched into
-  a heap batch and filtered in batches; inner, semi and anti.
-- **Why:** The core's index nested loops are the largest block of TPC-H
-  Q4, Q5, Q7 and Q21 serial and of Q3 and Q8 with workers: about 650 ms
-  serial. The hash join over a full scan loses to them at SF 1.
-- **Known:** It saves the executor's work around each lookup, not the
-  index's; measure where the hash join wins first, with nested loops off.
+- **What:** Before TessHashJoin looks a batch's keys up in an index,
+  the outer rows of several sparse batches are copied into one batch of
+  up to 64 keys, so that one array scan serves them.
+- **Why:** The index lookup wins where a batch's keys share the btree's
+  descents, and loses where a batch holds one or two keys: TPC-H Q5's
+  join of orders and lineitem gets 46 000 outer rows in 21 700 batches,
+  and its lookup ran 27 % slower than the core's nested loop
+  (`batch-index-join`, runs `tpch-sf1-nGKzZa` against `tpch-sf1-mVx1yP`).
+  The model now leaves such joins to the core.
+- **Known:** The copies cost what compact batches cost the hash join; a
+  by-reference outer value must outlive its batch. The cost model's
+  batches would come from the copies, not the scan.
 - **Depends on:** nothing.
-- **Capabilities:** a new node
-- **Size:** large.
+- **Capabilities:** a node's change (hash join)
+- **Size:** medium: one pull request.
+
+### semi-anti-lookups
+
+SEMI and ANTI joins by index lookups.
+
+- **What:** TessHashJoin's index lookup mode for SEMI and ANTI joins,
+  reading a key's first row only where the join needs no more.
+- **Why:** TPC-H Q4 and Q21 test `EXISTS` and `NOT EXISTS` over
+  `lineitem_pkey` with the core's nested loop: about 87 ms of Q4's time
+  serial for 57 000 lookups.
+- **Known:** The core's nested loop stops at the first match, where the
+  array scan reads every row of a key: Q4 and Q21 read about 4 rows a
+  key where the core reads 1.6. The lookup must stop at a key's first
+  row, or the cost model must count every row.
+- **Depends on:** nothing.
+- **Capabilities:** a node's change (hash join)
+- **Size:** medium: one pull request.
+
+### lookup-key-splitting
+
+A batch's keys split where their rows outgrow hash_mem.
+
+- **What:** An index lookup whose keys find more rows than `hash_mem`
+  holds looks them up in parts that fit, each part a table of its own.
+- **Why:** The planner offers the lookup only where a batch's table
+  fits a quarter of `hash_mem` by the statistics; a key with more rows
+  than they say builds its table whole past `hash_mem` and is counted
+  as an overrun.
+- **Known:** The parts must not split a key's rows, or a key must be
+  joined in rounds.
+- **Depends on:** nothing.
+- **Capabilities:** a node's change (hash join), table-memory
+- **Size:** medium: one pull request.
+
+### lookup-heap-pages
+
+The heap's pages in the index lookup's cost.
+
+- **What:** The cost model of the index lookup and of the core's nested
+  loop counts the heap pages a batch's rows lie on, from the index's
+  correlation with the table, beside the btree's descents.
+- **Why:** Keys whose rows lie on pages apart cost both joins more than
+  the model counts: on the calibration's samples it predicted their
+  times two fifths low, and the margin of 0.8 is what keeps such a
+  lookup out (`docs/costs.md`, the index join).
+- **Known:** The nested loop's time moves with the nearness of its keys
+  in the processor's caches too, which the descents stand for now.
+- **Depends on:** nothing.
+- **Capabilities:** costs
+- **Size:** small.
 
 ### numeric-keys-by-digits
 
@@ -1979,6 +2040,12 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **TPC-H Q9 with Tessera on** (the close of `batch-index-join`). Q9
+  takes 6.2 times the core's time with Tessera on (4.9 s against 0.8),
+  on a join the core expects 98 rows of where 319 404 come. The first
+  cost model of the index lookup took a lookup into `orders` there and
+  ran it in 0.48 s; the final one leaves it. Suggested: find what of the
+  node's plan of Q9 is slower than the core's, apart from the lookup.
 - **The key filter's order under correlated clauses** (the close of
   `early-key-filter`, a finding of its review). A TessFilter of batch
   clauses alone compares the filter's share of all its rows with the
