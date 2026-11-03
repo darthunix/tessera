@@ -35,7 +35,12 @@ with Tessera on, in the order
 `right-anti-join` (done), `agg-dependent-columns`, `early-key-filter`
 (done), `batch-index-join` (done); on the same day he moved
 `agg-dependent-columns` after `batch-index-join`, once a measurement of
-Q10 showed its aggregate's input row-wise:
+Q10 showed its aggregate's input row-wise. The maintainer took seven
+entries out of turn on 2026-11-03, after an analysis of TPC-H with
+`batch-index-join`, in the order `deform-past-varlena`,
+`lookup-outer-compaction`, `semi-anti-lookups`, `numeric-reading`,
+`like-substring-search`, `agg-table-presize`, `tpch-q9-plan`, the last
+with the foreign keys of the schema left undeclared for now:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `whole-word-decisions`: When and where a driver takes a word whole,
@@ -68,7 +73,6 @@ Taken when a measurement of the TPC-H runs shows the loss (plan lines
 2810–2814):
 
 - `spill-sum-states`: Spill of sum states instead of rows
-- `numeric-reading`: Faster reading of numeric
 
 ## Later
 
@@ -90,9 +94,6 @@ is wanted; several wait for a measured case. `greengage-port` and
 
 - `numeric-keys-by-digits`: numeric keys hashed and compared by their
   digits
-- `lookup-outer-compaction`: The outer rows of an index lookup gathered
-  into full batches
-- `semi-anti-lookups`: SEMI and ANTI joins by index lookups
 - `lookup-key-splitting`: A batch's keys split where their rows outgrow
   hash_mem
 - `lookup-heap-pages`: The heap's pages in the index lookup's cost
@@ -194,6 +195,86 @@ TessAgg with columns its keys determine.
 - **Capabilities:** aggregate
 - **Size:** medium: one pull request.
 
+### deform-past-varlena
+
+The columns past short varlena columns reached faster.
+
+- **What:** TessHeapScan's deform reaches a column past columns of
+  varying length with a path for a run of them with one-byte headers,
+  such as the four numerics and two char(1) of `lineitem` before
+  `l_shipdate`, which need no alignment. First the measure: the cycles
+  a row of the node's deform and of the core's `slot_deform_heap_tuple`
+  on the layout of `lineitem`, then the path.
+- **Why:** The deform takes about half of TPC-H Q06, Q12 and Q14 serial
+  and a quarter of Q01 (profiles of 2026-11-03, `deform` 50 %, 52 %,
+  50 % and 26 % of the samples), about 600 ms over the set: the columns
+  their clauses and aggregates read lie past six varlena columns. The
+  node is already faster than the core there (Q06's scan and filter
+  143 ms against the core's 211).
+- **Known:** A deform in Rust or vectorized was decided against; this
+  is the C cursor. `numeric-reading` would parse the numerics while the
+  tuple is deformed.
+- **Depends on:** nothing.
+- **Capabilities:** TessHeapScan
+- **Size:** medium: one pull request.
+
+### like-substring-search
+
+LIKE with % patterns by a fast substring search.
+
+- **What:** `tess_text_like` finds the fixed parts of a pattern between
+  `%` signs with a substring search over the value's bytes, under the
+  deterministic collations the kernel serves.
+- **Why:** TPC-H Q13's `o_comment NOT LIKE '%special%requests%'` takes
+  45 % of the query in `tess_text_like`, about 60 ms over 1.5 million
+  rows (profile of 2026-11-03).
+- **Known:** A crate such as `memchr`'s `memmem` only where it is
+  clearly better and widely used; the kernel's rules for escapes, `_`
+  and collations stay.
+- **Depends on:** nothing.
+- **Capabilities:** text kernels
+- **Size:** small.
+
+### agg-table-presize
+
+The grouping table sized for the groups it will hold.
+
+- **What:** TessAgg's table starts from the planner's estimate of the
+  groups, or grows in larger steps where the groups come many, so that
+  a grouping of 1.5 million groups does not regrow many times.
+- **Why:** In TPC-H Q18 (`GROUP BY l_orderkey`, 1.5 million groups) the
+  table's growth takes 9 % of the query and its inserts 21 % (profile of
+  2026-11-03); the estimate of the groups is four times low, a sample's
+  count of distinct `l_orderkey`.
+- **Known:** A table sized from an estimate too high takes memory it
+  does not use and may spill early. `relhash-prefetch-by-size` deals
+  with the misses of the inserts.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate, relhash
+- **Size:** small.
+
+### tpch-q9-plan
+
+TPC-H Q9's plan with Tessera on.
+
+- **What:** A way for Tessera's plan of Q9 to stop joining `lineitem`
+  with `partsupp` first on the core's estimate of 2392 rows, where 6
+  million come: the foreign keys of TPC-H declared in the benchmark's
+  schema, or a guard in the node's join planner.
+- **Why:** Q9 takes 6.2 times the core's time with Tessera on (4.7 s
+  against 0.75): the node's hash join of `lineitem` and `partsupp`
+  costs less than the core's, which tips the join order into a nested
+  loop of 6 million loops over `part`. With a foreign key
+  `lineitem (l_partkey, l_suppkey)` to `partsupp` the core estimates
+  the join right, and Q9 took 0.32 s against the core's 0.54 (a test in
+  a transaction rolled back, 2026-11-03).
+- **Known:** The maintainer decided on 2026-11-03 not to declare the
+  keys for now and put the entry last; declaring them changes every
+  TPC-H baseline.
+- **Depends on:** nothing.
+- **Capabilities:** costs, bench/tpch
+- **Size:** small to medium.
+
 ### lookup-outer-compaction
 
 The outer rows of an index lookup gathered into full batches.
@@ -206,7 +287,12 @@ The outer rows of an index lookup gathered into full batches.
   join of orders and lineitem gets 46 000 outer rows in 21 700 batches,
   and its lookup ran 27 % slower than the core's nested loop
   (`batch-index-join`, runs `tpch-sf1-nGKzZa` against `tpch-sf1-mVx1yP`).
-  The model now leaves such joins to the core.
+  The model now leaves such joins to the core. The analysis of
+  2026-11-03: the core's index nested loops over `lineitem` take 57,
+  46 and 121 ms of Q04, Q05 and Q07 serial, and 90 to 240 ms of
+  processor time of Q03 to Q08 with two workers; Q07's lookups, forced,
+  ran 158 ms against the nested loop's 135, their outer batches holding
+  4.6 keys each.
 - **Known:** The copies cost what compact batches cost the hash join; a
   by-reference outer value must outlive its batch. The cost model's
   batches would come from the copies, not the scan.
@@ -221,8 +307,10 @@ SEMI and ANTI joins by index lookups.
 - **What:** TessHashJoin's index lookup mode for SEMI and ANTI joins,
   reading a key's first row only where the join needs no more.
 - **Why:** TPC-H Q4 and Q21 test `EXISTS` and `NOT EXISTS` over
-  `lineitem_pkey` with the core's nested loop: about 87 ms of Q4's time
-  serial for 57 000 lookups.
+  `lineitem_pkey` with the core's nested loop: its index scan takes 57
+  ms of Q04 serial for 57 000 lookups (114 ms of processor time with
+  two workers), its anti join 84 ms of Q21 (the analysis of
+  2026-11-03).
 - **Known:** The core's nested loop stops at the first match, where the
   array scan reads every row of a key: Q4 and Q21 read about 4 rows a
   key where the core reads 1.6. The lookup must stop at a key's first
@@ -755,6 +843,10 @@ Faster reading of numeric. From plan 4.23 analysis of 2026-09-30, lines
 - **Why:** `sum(n)` without grouping is only ×0.40–0.435 of the core,
   where integer sums reach ×0.2. Three quarters of Tessera's time there
   is reading numeric (46 %) and deforming the varlena column (28 %).
+  The analysis of 2026-11-03: in TPC-H Q01 the decimal sums, reading
+  and expressions take about 37 % of the query (sum 12 %, reading 9 %),
+  in Q18 the sums 17 %; the deform of the numerics before them is
+  `deform-past-varlena`.
 - **Known:** Estimate for the first hypothesis: −3…4 ms of 19.4 (×0.40 →
   about ×0.33); the gain of the second is unknown. Not measured; the
   rule is to count instructions per row with objdump first (line
@@ -2040,12 +2132,6 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
-- **TPC-H Q9 with Tessera on** (the close of `batch-index-join`). Q9
-  takes 6.2 times the core's time with Tessera on (4.9 s against 0.8),
-  on a join the core expects 98 rows of where 319 404 come. The first
-  cost model of the index lookup took a lookup into `orders` there and
-  ran it in 0.48 s; the final one leaves it. Suggested: find what of the
-  node's plan of Q9 is slower than the core's, apart from the lookup.
 - **The key filter's order under correlated clauses** (the close of
   `early-key-filter`, a finding of its review). A TessFilter of batch
   clauses alone compares the filter's share of all its rows with the
