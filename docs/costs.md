@@ -270,9 +270,11 @@ The counts follow the core's estimates and the shape of the outer side:
 - the keys: the outer rows with a key. The btree looks a key repeated
   within a batch up once; the count leaves that out and errs high. The
   rows fetched: the keys times the rows the core expects a key to find,
-  as its estimate of an equality with a value it does not know: the
-  rows not NULL over the distinct values, at most the most common
-  value's;
+  by its selectivity of the join clause, which counts the distinct keys
+  of both sides, and no more than its estimate of an equality with a
+  value it does not know (the inner rows not NULL over their distinct
+  values, at most the most common value's): a sample's count of
+  distinct `l_orderkey` is four times low, the orders' keys are not;
 - the outer batches with a key: the batches of the node's full scan of
   the table that drives the outer side, through the filters and joins
   above it that keep its batches, that hold a key, no more than the

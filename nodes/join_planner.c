@@ -1243,7 +1243,11 @@ find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int n
 			lookup->key = key;
 			lookup->type = righttype;
 			lookup->index = index;
-			lookup->key_rows = lookup_expected_rows(root, innerrel, var);
+			/* The core's estimate of the join clause: both sides' distinct keys. */
+			lookup->key_rows = Min(lookup_expected_rows(root, innerrel, var),
+								   clamp_row_est(clause_selectivity(root, (Node *) rinfo, 0,
+																	JOIN_INNER, NULL) *
+												 innerrel->tuples));
 			lookup->coverage = lookup_coverage(root, innerrel, var, list_nth(keys->outer, key),
 											   family, lefttype, righttype,
 											   clause->inputcollid);
