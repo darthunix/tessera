@@ -62,69 +62,106 @@ kept column behind the cursor takes the stored value and starts no
 walk. The walk sets no bit of the batch's mask a stored value: the
 request sets it, as it does today. So a value stored and never read
 costs one store, and nothing else. For this to hold, every forward step
-of a cursor stores the kept columns: rows with NULLs, by their bitmap,
-and rows shorter than the column, by the attribute's missing value, as
-`tess_deform_advance` reads them. While the scan keeps no column, the
-walk is today's.
+of a cursor stores the kept columns it passes: a row with NULLs stores
+its NULLs, by its bitmap, and a row shorter than the column stops at
+its last attribute, so no column the row lacks lies behind its cursor.
+
+A request chooses its path once: a request for a kept column, or one
+that walks past a kept column, takes the path of kept columns; any
+other takes the plain path, the code it ran before the change. A row's
+choice is a test of its cursor.
 
 Refused: deforming every column of the scan's targets for every row at
 its first request. A filter that drops most rows on its first clause
 would pay for the columns of rows it drops; a kept value is a value the
 walk passes anyway.
 
-### Which columns are kept: the share of rows that read them
+Refused: the test of a kept column in the plain path. The machine code
+of a value's deform grew by five instructions against the base's, on
+every value of a scan that keeps nothing.
 
-A column is kept when its consumers read it on most of the rows whose
-walk passed it. Two counts per column, over a window of batches:
+### Which columns are kept: the walks they save
 
-- **reached**: the rows whose cursor ended the batch past the column,
-  that is, the rows a walk carried over it or to it;
-- **read**: the rows a consumer asked the column for, the batch's mask
-  of the column at its end.
+A column is kept when the walks it saves cost more than its stores.
+Two counts per column, over a window of batches:
 
-Both are taken when the batch is reset: `read` as the popcount of the
-column's mask; `reached` from the cursors, the rows counted by where
-their cursor stopped, then summed from the last column back. That is
-one pass over the rows and one over the columns a batch, and no work a
-value. A scan that has asked for one column past the cached offsets
+- **reached**: the rows a walk carried to the column or past it. A
+  row's cursor stands past a column when the row was read for the
+  column or for a later one, so this is the popcount of the union of
+  the masks of the column and of every later column, taken when the
+  batch is reset, from the last column back.
+- **behind**: the rows read for the column after a read of a later
+  column had carried their cursor past it. Unless the column is kept,
+  each of them walks again from the tuple's start. They are counted at
+  each request: the requested rows that the masks of the later columns
+  hold.
+
+Neither count looks at a row: a few operations a column, a batch or a
+request, and no work a value. They are taken on one batch in four, so
+that a scan that keeps nothing pays for them on a quarter of its
+batches. A scan that has asked for one column past the cached offsets
 only takes no counts: it has nothing to keep.
 
-When the window reaches 4096 rows, each column with `reached` above
-zero is kept for the next window if `read` is at least half of
-`reached`; the counts start again. A column no walk passed keeps its
-flag. The first window keeps nothing, so a scan shorter than a window
-runs as today. The window and its decision follow the key filter's in
-`nodes/filter.c`, with a constant of its own: the runtime does not
-include the nodes.
+Keeping a column costs a store on each reached row. Not keeping it
+costs, on each behind row, a walk from the cached offsets to the
+column, one step an attribute. So when the window reaches 1024 rows
+counted, about 4096 read, each column with `reached` above zero is
+kept for the next window if
 
-In Q01 the aggregate's columns come out at 0.98 and are kept. In Q14
-the filter asks for `l_shipdate` on 6 M rows and the aggregate for
-`l_extendedprice` and `l_discount` on the 76 000 it keeps: 0.013, not
-kept, and Q14 walks as today. A column read on every row it is reached,
-such as the filter's own, comes out at 1; keeping it costs nothing,
-since no walk passes it unread.
+```text
+behind × distance × 2 ≥ reached
+```
 
-The half is a guess. A kept value costs a store a row; a column not
-kept costs, on each row read behind the cursor, a walk from the start,
-about 17 instructions a value of varying length. The break-even share
-is lower than half when the walk is long; the measurement on Q01, Q06,
-Q12 and Q14 sets the constant.
+where `distance` is the number of attributes from the first one past
+the cached offsets to the column, both counted, and the factor 2 says
+that a store costs about half a step of the walk. The counts then
+start again. A column no walk reached keeps its flag. The first window
+keeps nothing, so a scan shorter than a window runs as before. The
+window and its decision follow the key filter's in `nodes/filter.c`,
+with a constant of its own: the runtime does not include the nodes.
 
-Refused: keeping every column a consumer ever asked for, as the
-prototype did. Q14 paid 2 to 3 % for stores of values read on 1.3 % of
-rows.
+On TPC-H's `lineitem` the cached offsets end at attribute 4. Q01's
+aggregate reads attributes 5 to 10 behind the cursor on 98 % of the
+rows: kept, and its 5.9 M walks from the start fall to 4 000. Q12 reads
+`l_commitdate` (distance 8) behind the cursor on 29 % of the rows and
+`l_shipdate` (distance 7) on 15 %: kept, 2.8 M walks fall to 2 000. Q06
+reads `l_discount` (distance 3) on 15 %: 0.9, not kept. Q14 reads its
+aggregate's columns on 1.3 %: not kept. A filter's own column is read
+on every row it is reached, but never behind the cursor: not kept, so
+its request takes the plain path.
 
-Refused: a count a row at each walk. The cursors already hold where
-each walk stopped.
+Refused, each measured on Q01, Q06, Q12 and Q14:
+
+- The share of all reads of a column, not of those behind the cursor.
+  A filter's own column came out at 1 and was kept, and its request,
+  on every row, went through the path of kept columns: Q06 took 4 to
+  8 % longer.
+- One share for every column, without the distance. At a half, Q12's
+  columns stayed unkept; at an eighth, Q06's `l_discount` was kept,
+  three steps from the cached offsets, for no gain.
+- Counting `reached` from the rows' cursors, a row at a time: the
+  increments of one counter wait for each other, and the reset took
+  3.1 % of Q14's profile against 0.4 % before. The masks give the same
+  count, short rows aside, with no work a row.
+- The counts on every batch. Q03, Q08 and Q21, which keep nothing,
+  took 2 to 7 % longer; counted on one batch in four they run as
+  before.
 
 ### The cost of a value of varying length
 
-The walk's step for a value of varying length is `align_fetch_then_add`
+The walk's step for a value of varying length was `align_fetch_then_add`
 of PostgreSQL: it checks for a padding byte, for an external value and
-for a four-byte header. A path for a one-byte header, the form of every
-short value, is tried in the walk and measured on Q06 and Q14; it stays
-only if it gains there, and a value of any other form takes the
-general step.
+for a four-byte header, 17 instructions of machine code a value in the
+walk. Every short value, such as each `numeric` and `char(1)` of
+`lineitem`, has a one-byte header that needs none of them. A forward
+walk to a column past the cached offsets goes through the batch's own
+loop, the one that keeps columns, with a step that reads a one-byte
+header first and leaves any other value to the general step. The back
+cursor and the columns at cached offsets keep `tess_deform_advance`.
+
+Q06 took 4 % less time with it, Q14 the same. The same loop with the
+general step was 5 to 17 % slower than with this step, and slower than
+`tess_deform_advance`: the gain is the step's, not the loop's.
 
 ## Risks / Trade-offs
 
@@ -146,8 +183,8 @@ Q01 and Q14 before and after.
 
 ## Files
 
-- `runtime/heap_batch.c`: the walk that keeps columns, the counts and
-  the window.
+- `runtime/heap_batch.c`: the walk that keeps columns, its step for a
+  one-byte header, the counts and the window.
 - `docs/runtime.md`: how a batch deforms.
 
 ## Tests
@@ -156,5 +193,8 @@ Q01 and Q14 before and after.
   ones on most rows, with no restart after the first window; the same
   read on few rows, with restarts and no kept column; rows with NULLs;
   rows shorter than the column; a reset batch.
-- `test/sql/heap_batch.sql`: a filter and an aggregate over a table of
-  `lineitem`'s layout, `Restarted Datums` near zero.
+- `test/sql/heap_batch.sql`: the C test over a table with NULLs and
+  short rows.
+- `test/sql/filter.sql`: a filter and an aggregate over a table of
+  `lineitem`'s layout, `Restarted Datums` those of the first window
+  when the aggregate reads most rows, every read when it reads 1 %.
