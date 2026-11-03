@@ -119,7 +119,10 @@ The approach, for each target:
 - **Will be:** the same as decision 1: its checks and its walk in a
   helper without `anyhow`, the error built outside it.
 - **Proofs** (`tessera-capi/src/column/proofs.rs`): with any selection,
-  readiness and NULL bits of up to two words (128 rows):
+  readiness and NULL bits of one word, either mask absent; and of two
+  words, the first word's selection empty or full and its rows
+  prepared, no mask of NULLs: 70 rows, the partial second word's bits
+  any, or 128, the second word wholly selected, its readiness any:
   - the reader is called only for selected, prepared rows, each once,
     in increasing order, and the fold step gets the row read;
   - a row count that differs from the selection's reads nothing;
@@ -129,9 +132,12 @@ The approach, for each target:
   - a fold step that fails stops the walk: no row after it is read;
   - with no refusal and no failure, every selected row is read.
   Covers: a full word, a sparse one after it, a refusal of the second
-  word after reads of the first, and a failing fold step. The bound of
-  two words reaches each of these; the loop over words repeats the same
-  body.
+  word after reads of the first, and a failing fold step. The loop over
+  words runs one body for each word; a first word of any bits together
+  with a second of any bits took Kani more than half an hour, and a full
+  first word with a second of any bits over six minutes, so the second
+  word comes after a first that was skipped or read whole, and what
+  varies in a word is proven by the harness of one word.
 
 ### 3. The sort key's encoding without `anyhow` in its path
 

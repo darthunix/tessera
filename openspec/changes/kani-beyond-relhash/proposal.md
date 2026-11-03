@@ -39,7 +39,8 @@ The roadmap's entry `kani-beyond-relhash` named the divisors,
   called only for selected, prepared rows in range, once each, in
   increasing order; a refused word is not read, nor anything after a
   refusal or a failed fold step; with neither, every selected row is
-  read. `try_fold_words` is proven over up to two words. `cargo kani
+  read. `try_fold_words` is proven over one word of any bits, and over
+  two after a first that is empty or full. `cargo kani
   -p tessera-core` and `-p tessera-capi` join the Kani job of CI.
 - Proofs of the sort key in `tessera-kernels`: for every pair of rows,
   their items compare as the rows do by their keys, NULL placed and a

@@ -245,14 +245,15 @@ jobs:
   # float to an integer (tessera-kernels' float/proofs.rs): for every
   # float, the integer rounded half to even, or the error of its range.
   # Of the bound of a date against a timestamp (calendar/proofs.rs). And
-  # of the walk over a selection word that unsafe readers trust
-  # (tessera-core's reader/proofs.rs): for any word, its rows given and
-  # read are exactly the selected, prepared ones in range, once each, in
-  # order, and a refusal reads nothing.
+  # of the two walks over a selection word that unsafe readers trust
+  # (tessera-core's reader/proofs.rs, tessera-capi's column/proofs.rs):
+  # the rows given and read are exactly the selected, prepared ones in
+  # range, once each, in order, a refused word is not read, and nothing
+  # is read after a refusal or a failed fold step.
   # Kani brings its own nightly. A cover that no value reaches fails the
   # job: the proof around it would hold for no value at all. A harness
   # gets ten minutes at most, so that one that slows down fails early.
-  # The job takes about ten minutes, so it runs on pull requests only.
+  # The job takes about twenty minutes, so it runs on pull requests only.
   kani:
     name: Kani proofs (ubuntu-24.04)
     if: github.event_name == 'pull_request'
@@ -277,6 +278,11 @@ jobs:
       - name: cargo kani -p tessera-core
         run: |
           cargo kani --harness-timeout 600 -Z unstable-options -p tessera-core 2>&1 | tee kani.log
+          grep 'cover properties satisfied' kani.log |
+            awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
+      - name: cargo kani -p tessera-capi
+        run: |
+          cargo kani --harness-timeout 600 -Z unstable-options -p tessera-capi 2>&1 | tee kani.log
           grep 'cover properties satisfied' kani.log |
             awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
   # Every suite against PostgreSQL and Tessera's C built with
