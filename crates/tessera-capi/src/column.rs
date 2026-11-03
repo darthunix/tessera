@@ -53,13 +53,13 @@ fn mask_word(mask: Option<RowMaskView<'_>>, word_index: usize) -> u64 {
 // the loop inlined cost empty and sparse calls up to 22% more
 // (compare-NUZTP5, compare-5YmvqE; compare-6OWqws, compare-RxRTzU).
 #[inline(never)]
-fn try_fold_full_word<B, V>(
+fn try_fold_full_word<B, V, E>(
     base: usize,
     bits: u64,
     read: &mut impl FnMut(usize, u64) -> Option<V>,
     mut acc: B,
-    fold: &mut impl FnMut(B, usize, Option<V>) -> Result<B>,
-) -> Result<B> {
+    fold: &mut impl FnMut(B, usize, Option<V>) -> Result<B, E>,
+) -> Result<B, E> {
     for bit in 0..64 {
         let row = base + bit;
         acc = fold(acc, row, read(row, bits))?;
@@ -73,23 +73,66 @@ fn try_fold_words<B, V>(
     rows: &RowMaskView<'_>,
     prepared: Option<RowMaskView<'_>>,
     non_nulls: Option<RowMaskView<'_>>,
+    read: impl FnMut(usize, u64) -> Option<V>,
+    acc: B,
+    fold: impl FnMut(B, usize, Option<V>) -> Result<B>,
+) -> Result<B> {
+    // Each refusal builds its error in place, as `ensure!` did, so the
+    // walk compiles as it did before it moved.
+    walk_words(
+        nrows,
+        rows,
+        prepared,
+        non_nulls,
+        read,
+        acc,
+        fold,
+        |refusal| match refusal {
+            WalkRefusal::Rows => anyhow::anyhow!("column and selection row counts differ"),
+            WalkRefusal::Unprepared => anyhow::anyhow!("selection contains unprepared rows"),
+        },
+    )
+}
+
+/// Why [`walk_words`] refuses a selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WalkRefusal {
+    /// The selection's row count is not the column's.
+    Rows,
+    /// A word of the selection has a selected row that is not prepared.
+    Unprepared,
+}
+
+/// The walk of [`try_fold_words`], with its errors of any type: a refusal
+/// is what `refuse` makes of its reason, a failed fold step ends the walk
+/// with its error. It builds no `anyhow` error of its own, which keeps it
+/// within reach of the proofs.
+#[inline(always)]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the arguments of try_fold_words and its refusal"
+)]
+fn walk_words<B, V, E>(
+    nrows: usize,
+    rows: &RowMaskView<'_>,
+    prepared: Option<RowMaskView<'_>>,
+    non_nulls: Option<RowMaskView<'_>>,
     mut read: impl FnMut(usize, u64) -> Option<V>,
     mut acc: B,
-    mut fold: impl FnMut(B, usize, Option<V>) -> Result<B>,
-) -> Result<B> {
-    ensure!(
-        nrows == rows.nrows(),
-        "column and selection row counts differ"
-    );
+    mut fold: impl FnMut(B, usize, Option<V>) -> Result<B, E>,
+    refuse: impl Fn(WalkRefusal) -> E,
+) -> Result<B, E> {
+    if nrows != rows.nrows() {
+        return Err(refuse(WalkRefusal::Rows));
+    }
     for index in 0..nrows.div_ceil(64) {
         let remaining = rows.word(index);
         if remaining == 0 {
             continue;
         }
-        ensure!(
-            remaining & !mask_word(prepared, index) == 0,
-            "selection contains unprepared rows"
-        );
+        if remaining & !mask_word(prepared, index) != 0 {
+            return Err(refuse(WalkRefusal::Unprepared));
+        }
         let bits = mask_word(non_nulls, index);
         let base = index * 64;
         if remaining == u64::MAX {
