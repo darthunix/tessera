@@ -20,7 +20,9 @@
 //! The walk over words runs one body for each word, so the second word,
 //! after a first that was skipped or read whole, is where the walk goes
 //! on, and refuses or fails after reads; what varies in a word is proven
-//! by the harness of one word. The errors are the proofs'
+//! by the harnesses of one word, a full one and one that is not. A
+//! selection of other rows: both counts up to 128 rows, the selection's
+//! bits any. The errors are the proofs'
 //! own: `try_fold_words` only builds `anyhow` ones with the same reasons,
 //! which Kani 0.68 cannot compile.
 
@@ -51,17 +53,17 @@ struct Walked {
     last: u64,
 }
 
-/// A walk over `nrows` rows, fixed by the harness, with any bits. With
-/// `first` given, a walk of two words: the first word's selection is one
-/// of the two, its rows all prepared and no mask of NULLs, so that the
-/// bits that vary are those of the second word; `second`, when given, is
-/// the second word's selection.
-fn walk(nrows: usize, first: Option<[u64; 2]>, second: Option<u64>) -> Option<Walked> {
+/// A walk over `nrows` rows, fixed by the harness, with any bits but the
+/// first word's selection, which `first` must hold for. A walk of two
+/// words has its first word's rows all prepared and no mask of NULLs, so
+/// that the bits that vary are those of the second word; `second`, when
+/// given, is the second word's selection.
+fn walk(nrows: usize, first: fn(u64) -> bool, second: Option<u64>) -> Option<Walked> {
     let words = nrows.div_ceil(64);
     let (mut selection, mut ready, valid): ([u64; 2], [u64; 2], [u64; 2]) =
         (kani::any(), kani::any(), kani::any());
-    if let Some(choices) = first {
-        selection[0] = if kani::any() { choices[0] } else { choices[1] };
+    kani::assume(first(selection[0]));
+    if words > 1 {
         ready[0] = u64::MAX;
     }
     if let Some(bits) = second {
@@ -73,7 +75,7 @@ fn walk(nrows: usize, first: Option<[u64; 2]>, second: Option<u64>) -> Option<Wa
     } else {
         Some(RowMaskView::try_new(nrows, &ready[..words]).ok()?)
     };
-    let non_nulls = if first.is_some() || kani::any() {
+    let non_nulls = if words > 1 || kani::any() {
         None
     } else {
         Some(RowMaskView::try_new(nrows, &valid[..words]).ok()?)
@@ -144,10 +146,20 @@ fn walk(nrows: usize, first: Option<[u64; 2]>, second: Option<u64>) -> Option<Wa
 
 #[kani::proof]
 #[kani::unwind(66)]
-fn one_word_is_read_as_selected() {
-    if let Some(walked) = walk(64, None, None) {
-        kani::cover!(walked.end.is_ok() && walked.first == u64::MAX);
-        kani::cover!(walked.end.is_ok() && walked.first != u64::MAX && walked.first != 0);
+fn a_sparse_word_is_read_as_selected() {
+    if let Some(walked) = walk(64, |bits| bits != u64::MAX, None) {
+        kani::cover!(walked.end.is_ok() && walked.first != 0);
+        kani::cover!(walked.end.is_ok() && walked.first == 0);
+        kani::cover!(walked.end == Err(Stop::Refused(WalkRefusal::Unprepared)));
+        kani::cover!(walked.end == Err(Stop::Failed) && walked.reads > 1);
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(66)]
+fn a_full_word_is_read_as_selected() {
+    if let Some(walked) = walk(64, |bits| bits == u64::MAX, None) {
+        kani::cover!(walked.end.is_ok());
         kani::cover!(walked.end == Err(Stop::Refused(WalkRefusal::Unprepared)));
         kani::cover!(walked.end == Err(Stop::Failed) && walked.reads > 1);
     }
@@ -156,7 +168,7 @@ fn one_word_is_read_as_selected() {
 #[kani::proof]
 #[kani::unwind(66)]
 fn a_full_second_word_is_read_as_selected() {
-    if let Some(walked) = walk(128, Some([0, u64::MAX]), Some(u64::MAX)) {
+    if let Some(walked) = walk(128, |bits| bits == 0 || bits == u64::MAX, Some(u64::MAX)) {
         kani::cover!(walked.end.is_ok() && walked.first == u64::MAX);
         kani::cover!(walked.end.is_ok() && walked.first == 0);
         kani::cover!(
@@ -168,8 +180,18 @@ fn a_full_second_word_is_read_as_selected() {
 
 #[kani::proof]
 #[kani::unwind(66)]
-fn a_partial_last_word_is_read_as_selected() {
-    if let Some(walked) = walk(70, Some([0, u64::MAX]), None) {
+fn a_partial_last_word_alone_is_read_as_selected() {
+    if let Some(walked) = walk(70, |bits| bits == 0, None) {
+        kani::cover!(walked.end.is_ok() && walked.last != 0);
+        kani::cover!(walked.end == Err(Stop::Refused(WalkRefusal::Unprepared)));
+        kani::cover!(walked.end == Err(Stop::Failed));
+    }
+}
+
+#[kani::proof]
+#[kani::unwind(66)]
+fn a_partial_last_word_after_a_full_one_is_read_as_selected() {
+    if let Some(walked) = walk(70, |bits| bits == u64::MAX, None) {
         kani::cover!(walked.end.is_ok() && walked.last != 0);
         kani::cover!(
             walked.end == Err(Stop::Refused(WalkRefusal::Unprepared)) && walked.reads == 64
@@ -179,15 +201,16 @@ fn a_partial_last_word_is_read_as_selected() {
 }
 
 // The refusal comes before the loop over words, which no unwinding then
-// reaches.
+// reaches. The selection is of any rows up to two words, nonempty among
+// them.
 #[kani::proof]
 #[kani::unwind(1)]
 fn a_selection_of_other_rows_reads_nothing() {
     let (nrows, other): (usize, usize) = (kani::any(), kani::any());
     kani::assume(nrows <= 128 && other <= 128 && nrows != other);
-    let words = [0u64; 2];
+    let words: [u64; 2] = kani::any();
     let Ok(rows) = RowMaskView::try_new(other, &words[..other.div_ceil(64)]) else {
-        panic!()
+        return;
     };
     let result = walk_words(
         nrows,
@@ -200,4 +223,5 @@ fn a_selection_of_other_rows_reads_nothing() {
         Stop::Refused,
     );
     assert!(result == Err(Stop::Refused(WalkRefusal::Rows)));
+    kani::cover!(other > 0 && rows.word(0) != 0);
 }
