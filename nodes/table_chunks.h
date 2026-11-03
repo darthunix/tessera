@@ -23,7 +23,7 @@
 
 /*
  * The length of a table's chunks past the first: the level plan's for one
- * partition at a share of 8 of hash_mem (tess_spill_chunk_len), between
+ * partition at a share of 8 of hash_mem (tess_spill_plan), between
  * TABLE_FIRST_CHUNK and TESS_TABLE_MAX_CHUNK_LEN, so that a table spills
  * only near its limit.
  */

@@ -8,13 +8,13 @@
 )]
 
 use tessera_capi::c::{
-    Code, SpillHeader, SpillWeights, Status, tess_spill_chunk_len, tess_spill_header_read,
-    tess_spill_header_size, tess_spill_header_write, tess_spill_pack, tess_spill_partitions,
-    tess_spill_unpack, tess_table_spill_add_bytes, tess_table_spill_evict,
-    tess_table_spill_evictions, tess_table_spill_flags, tess_table_spill_init,
-    tess_table_spill_partitions, tess_table_spill_records, tess_table_spill_split,
-    tess_table_spill_splits, tess_table_spill_start, tess_table_spill_take_alone,
-    tess_table_spill_take_file, tess_table_spill_words,
+    Code, SpillHeader, SpillLevel, SpillPlan, SpillShape, SpillWeights, Status,
+    tess_spill_expected, tess_spill_header_read, tess_spill_header_size, tess_spill_header_write,
+    tess_spill_pack, tess_spill_plan, tess_spill_unpack, tess_table_spill_add_bytes,
+    tess_table_spill_evict, tess_table_spill_evictions, tess_table_spill_flags,
+    tess_table_spill_init, tess_table_spill_partitions, tess_table_spill_records,
+    tess_table_spill_split, tess_table_spill_splits, tess_table_spill_start,
+    tess_table_spill_take_alone, tess_table_spill_take_file, tess_table_spill_words,
 };
 use tessera_kernels::table::{
     CHUNK_HEADER, KEY_SLOT, RECORD_HASH_OFFSET, RECORD_HEADER, RECORD_NEXT_OFFSET,
@@ -544,61 +544,145 @@ fn weights_that_are_not_finite_are_refused() {
     }
 }
 
-/// The plan of a level through its entry points refuses what no node
-/// gives it, SQLSTATE XX000, and writes nothing then: a shift past which
-/// the least partitions do not fit in the hash, expected bytes below zero
-/// or not a number, a least chunk not a multiple of 8, a null result.
+/// The plan of a level through its entry point: a level of 4 to 1024
+/// partitions that expects 10 MiB in 4 MiB gets 8 partitions of chunks of
+/// 32 KiB, counted by 50 words, the first 3 bits, and room for a level
+/// below; one that wants 16 partitions at least, of records of 4 KiB,
+/// gets 16 of chunks of four records past the most. What no node
+/// gives is refused, SQLSTATE XX000, and nothing is written then: a shift
+/// past which the least partitions do not fit in the hash, expected bytes
+/// below zero or not a number, a least chunk not a multiple of 8, given
+/// partitions no power of two, a null shape, level or plan.
 #[test]
 fn the_plan_of_a_level_refuses_what_no_node_gives() {
-    let partitions = |expected: f64, shift: u32, out: *mut u32| {
+    let shape = SpillShape {
+        reserve: 48 << 10,
+        share: 16,
+        min_chunk: 8 << 10,
+        max_chunk: 1 << 20,
+        record: 40,
+        min_partitions: 4,
+        max_partitions: 1024,
+    };
+    let level = SpillLevel {
+        expected: 10e6,
+        limit: 4 << 20,
+        shift: 0,
+        at_least: 0,
+        partitions: 0,
+    };
+    let call = |shape: *const SpillShape, level: *const SpillLevel, out: *mut SpillPlan| {
         let mut status = Status::new();
-        // SAFETY: a local status; `out` is null or a local count.
-        let code = unsafe {
-            tess_spill_partitions(
-                expected,
-                4 << 20,
-                48 << 10,
-                shift,
-                4,
-                1024,
-                0,
-                out,
-                &raw mut status,
-            )
-        };
+        // SAFETY: a local status; the others null or locals.
+        let code = unsafe { tess_spill_plan(shape, level, out, &raw mut status) };
         (code, status.sqlstate().to_owned())
     };
-    let mut count = 7_u32;
-    assert_eq!(partitions(10e6, 30, &raw mut count).0, Code::Ok);
-    assert_eq!(count, 4, "after 30 bits");
-    count = 7;
-    for (expected, shift) in [(10e6, 31), (-1.0, 0), (f64::NAN, 0)] {
-        let (code, sqlstate) = partitions(expected, shift, &raw mut count);
-        assert_eq!((code, sqlstate.as_str()), (Code::InvalidArgument, "XX000"));
-        assert_eq!(count, 7, "nothing written");
-    }
+    let mut plan = SpillPlan::default();
     assert_eq!(
-        partitions(10e6, 0, std::ptr::null_mut()).0,
+        call(&raw const shape, &raw const level, &raw mut plan).0,
+        Code::Ok
+    );
+    assert_eq!(
+        (plan.partitions, plan.chunk_len, plan.words),
+        (8, 32 << 10, 50)
+    );
+    assert_eq!((plan.shift, plan.below, plan.deeper), (0, 3, true));
+    // Sixteen at least, of chunks of four records of 4 KiB past the most.
+    let wide = SpillShape {
+        reserve: 0,
+        min_chunk: 8,
+        max_chunk: 1024,
+        record: 4096,
+        ..shape
+    };
+    let wanted = SpillLevel {
+        expected: 0.0,
+        at_least: 16,
+        ..level
+    };
+    assert_eq!(
+        call(&raw const wide, &raw const wanted, &raw mut plan).0,
+        Code::Ok
+    );
+    assert_eq!(
+        (plan.partitions, plan.chunk_len, plan.words),
+        (16, 16392, 90)
+    );
+    let given = SpillLevel {
+        shift: 3,
+        partitions: 16,
+        ..level
+    };
+    assert_eq!(
+        call(&raw const shape, &raw const given, &raw mut plan).0,
+        Code::Ok
+    );
+    assert_eq!((plan.partitions, plan.shift, plan.below), (16, 3, 7));
+    // After 28 bits, 8 partitions take three, and no level fits below.
+    let last = SpillLevel { shift: 28, ..level };
+    assert_eq!(
+        call(&raw const shape, &raw const last, &raw mut plan).0,
+        Code::Ok
+    );
+    assert_eq!((plan.partitions, plan.below, plan.deeper), (8, 31, false));
+
+    let untouched = SpillPlan {
+        chunk_len: 7,
+        ..SpillPlan::default()
+    };
+    let refused = [
+        (shape, SpillLevel { shift: 31, ..level }),
+        (
+            shape,
+            SpillLevel {
+                expected: -1.0,
+                ..level
+            },
+        ),
+        (
+            shape,
+            SpillLevel {
+                expected: f64::NAN,
+                ..level
+            },
+        ),
+        (
+            shape,
+            SpillLevel {
+                partitions: 48,
+                ..level
+            },
+        ),
+        (
+            SpillShape {
+                min_chunk: 4100,
+                ..shape
+            },
+            level,
+        ),
+    ];
+    for (shape, level) in refused {
+        let mut plan = untouched;
+        let (code, sqlstate) = call(&raw const shape, &raw const level, &raw mut plan);
+        assert_eq!((code, sqlstate.as_str()), (Code::InvalidArgument, "XX000"));
+        assert_eq!(plan, untouched, "nothing written");
+    }
+    let nowhere = std::ptr::null_mut();
+    assert_eq!(
+        call(std::ptr::null(), &raw const level, &raw mut plan).0,
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        call(&raw const shape, std::ptr::null(), &raw mut plan).0,
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        call(&raw const shape, &raw const level, nowhere).0,
         Code::InvalidArgument
     );
 
-    let chunk_len = |min_chunk: usize, out: *mut usize| {
-        let mut status = Status::new();
-        // SAFETY: a local status; `out` is null or a local length.
-        unsafe { tess_spill_chunk_len(4 << 20, 8, 16, min_chunk, 1 << 20, out, &raw mut status) }
-    };
-    let mut len = 7_usize;
-    assert_eq!(chunk_len(8 << 10, &raw mut len), Code::Ok);
-    assert_eq!(len, 32 << 10);
-    len = 7;
-    for min_chunk in [4, 4100] {
-        assert_eq!(chunk_len(min_chunk, &raw mut len), Code::InvalidArgument);
-        assert_eq!(len, 7, "nothing written");
-    }
-    assert_eq!(
-        chunk_len(8 << 10, std::ptr::null_mut()),
-        Code::InvalidArgument
-    );
+    // Twice 1000 bytes, or 30 rows at 100 bytes a row, for 2 participants.
+    assert_eq!(tess_spill_expected(1000.0, 10.0, 30.0, 2), 6000.0);
 }
 
 #[test]
@@ -1247,10 +1331,12 @@ fn the_set_entry_points_refuse_what_no_set_takes() {
     assert_eq!(code, Code::InvalidArgument);
     assert!(status.message().contains("finished takes no more blocks"));
     assert_eq!(
-        (0..11)
+        (0..17)
             .map(|what| tess_spill_set_layout(what))
             .collect::<Vec<_>>(),
-        [168, 16, 24, 8, 32, 128, 32, 224, 72, 32, 0]
+        [
+            168, 16, 24, 8, 32, 128, 32, 224, 72, 32, 48, 44, 32, 24, 32, 28, 0
+        ]
     );
 }
 

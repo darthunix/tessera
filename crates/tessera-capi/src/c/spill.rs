@@ -248,68 +248,104 @@ pub extern "C" fn tess_spill_columns_shape(words: u32, what: c_int) -> usize {
     }
 }
 
-/// `tess_spill_partitions`: the partitions of a level of a spill
-/// (relspill, `plan::partitions`), into `partitions`.
+/// `TessSpillShape`: what every level of a node's spill shares; see
+/// [`plan::Shape`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpillShape {
+    pub reserve: usize,
+    pub share: usize,
+    pub min_chunk: usize,
+    pub max_chunk: usize,
+    pub record: usize,
+    pub min_partitions: u32,
+    pub max_partitions: u32,
+}
+
+/// `TessSpillLevel`: a level about to be made; see [`plan::Level`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SpillLevel {
+    pub expected: f64,
+    pub limit: usize,
+    pub shift: u32,
+    pub at_least: u32,
+    pub partitions: u32,
+}
+
+/// `TessSpillPlan`: the plan of a level; see [`plan::Plan`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpillPlan {
+    pub chunk_len: usize,
+    pub words: usize,
+    pub partitions: u32,
+    pub shift: u32,
+    pub below: u32,
+    pub deeper: bool,
+}
+
+/// `tess_spill_plan`: the plan of a level of a node's spill (relspill,
+/// [`plan::plan`]), into `plan`.
 ///
 /// # Safety
 ///
-/// `partitions` must be null or writable; `status` as for every entry
-/// point.
+/// `shape` and `level` must be null or readable, `plan` null or writable;
+/// `status` as for every entry point.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
-pub unsafe extern "C" fn tess_spill_partitions(
-    expected: f64,
-    limit: usize,
-    reserve: usize,
-    shift: u32,
-    min_partitions: u32,
-    max_partitions: u32,
-    at_least: u32,
-    partitions: *mut u32,
+pub unsafe extern "C" fn tess_spill_plan(
+    shape: *const SpillShape,
+    level: *const SpillLevel,
+    plan: *mut SpillPlan,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let level = plan::Level {
-                expected,
-                limit,
-                reserve,
-                shift,
-                min_partitions,
-                max_partitions,
-                at_least,
+            let shape = shape.as_ref().context("a null shape of a spill")?;
+            let level = level.as_ref().context("a null level of a spill")?;
+            let out = plan.as_mut().context("a null plan of a level")?;
+            let got = plan::plan(
+                &plan::Shape {
+                    reserve: shape.reserve,
+                    min_partitions: shape.min_partitions,
+                    max_partitions: shape.max_partitions,
+                    share: shape.share,
+                    min_chunk: shape.min_chunk,
+                    max_chunk: shape.max_chunk,
+                    record: shape.record,
+                },
+                &plan::Level {
+                    expected: level.expected,
+                    limit: level.limit,
+                    shift: level.shift,
+                    at_least: level.at_least,
+                    partitions: level.partitions,
+                },
+            )?;
+            *out = SpillPlan {
+                chunk_len: got.chunk_len,
+                words: got.words,
+                partitions: got.partitions,
+                shift: got.shift,
+                below: got.below,
+                deeper: got.deeper,
             };
-            *partitions.as_mut().context("a null count of partitions")? = plan::partitions(&level)?;
             Ok(())
         })
     }
 }
 
-/// `tess_spill_chunk_len`: the length of a level's chunks (relspill,
-/// `plan::chunk_len`), into `chunk_len`.
-///
-/// # Safety
-///
-/// `chunk_len` must be null or writable; `status` as for every entry point.
+/// `tess_spill_expected`: the bytes the first level of a spill expects
+/// (relspill, [`plan::expected`]).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_spill_chunk_len(
-    limit: usize,
-    partitions: u32,
-    share: usize,
-    min_chunk: usize,
-    max_chunk: usize,
-    chunk_len: *mut usize,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            *chunk_len.as_mut().context("a null chunk length")? =
-                plan::chunk_len(limit, partitions, share, min_chunk, max_chunk)?;
-            Ok(())
-        })
-    }
+pub extern "C" fn tess_spill_expected(
+    held: f64,
+    rows: f64,
+    estimate: f64,
+    participants: u32,
+) -> f64 {
+    plan::expected(held, rows, estimate, participants)
 }
 
 /// `tess_spill_columns_init`: make the `len` bytes at `chunk` an empty

@@ -108,6 +108,15 @@ tess_kernels_layout_matches(void)
 		sizeof(TessSpillReadStep) &&
 		tess_spill_set_layout(TESS_SPILL_SET_READ_STEP_HEADER_OFFSET) ==
 		offsetof(TessSpillReadStep, header) &&
+		tess_spill_set_layout(TESS_SPILL_SET_SHAPE_SIZE) == sizeof(TessSpillShape) &&
+		tess_spill_set_layout(TESS_SPILL_SET_SHAPE_MAX_PARTITIONS_OFFSET) ==
+		offsetof(TessSpillShape, max_partitions) &&
+		tess_spill_set_layout(TESS_SPILL_SET_LEVEL_SIZE) == sizeof(TessSpillLevel) &&
+		tess_spill_set_layout(TESS_SPILL_SET_LEVEL_PARTITIONS_OFFSET) ==
+		offsetof(TessSpillLevel, partitions) &&
+		tess_spill_set_layout(TESS_SPILL_SET_PLAN_SIZE) == sizeof(TessSpillPlan) &&
+		tess_spill_set_layout(TESS_SPILL_SET_PLAN_DEEPER_OFFSET) ==
+		offsetof(TessSpillPlan, deeper) &&
 		tess_spill_set_layout((TessSpillSetLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of

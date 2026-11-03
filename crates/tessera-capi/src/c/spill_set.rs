@@ -12,7 +12,7 @@ use relspill::set::{
 };
 use relspill::{BlockKind, Bounds};
 
-use super::spill::SpillHeader;
+use super::spill::{SpillHeader, SpillLevel, SpillPlan, SpillShape};
 use super::status::{Code, Status, guard};
 use super::table::{slots, values};
 
@@ -402,6 +402,14 @@ pub const SET_STEP_RANGES_OFFSET: c_int = 6;
 pub const SET_READER_SIZE: c_int = 7;
 pub const SET_READ_STEP_SIZE: c_int = 8;
 pub const SET_READ_STEP_HEADER_OFFSET: c_int = 9;
+/// Of a level's shape, its level and its plan, and where the last field
+/// of each lies.
+pub const SET_SHAPE_SIZE: c_int = 10;
+pub const SET_SHAPE_MAX_PARTITIONS_OFFSET: c_int = 11;
+pub const SET_LEVEL_SIZE: c_int = 12;
+pub const SET_LEVEL_PARTITIONS_OFFSET: c_int = 13;
+pub const SET_PLAN_SIZE: c_int = 14;
+pub const SET_PLAN_DEEPER_OFFSET: c_int = 15;
 
 /// `tess_spill_set_layout`: the size or offset of a `TessSpillSetLayout`
 /// for the C side's mirrors to check; 0 for another code.
@@ -418,6 +426,12 @@ pub extern "C" fn tess_spill_set_layout(what: c_int) -> usize {
         SET_READER_SIZE => size_of::<Reader>(),
         SET_READ_STEP_SIZE => size_of::<SpillReadStep>(),
         SET_READ_STEP_HEADER_OFFSET => offset_of!(SpillReadStep, header),
+        SET_SHAPE_SIZE => size_of::<SpillShape>(),
+        SET_SHAPE_MAX_PARTITIONS_OFFSET => offset_of!(SpillShape, max_partitions),
+        SET_LEVEL_SIZE => size_of::<SpillLevel>(),
+        SET_LEVEL_PARTITIONS_OFFSET => offset_of!(SpillLevel, partitions),
+        SET_PLAN_SIZE => size_of::<SpillPlan>(),
+        SET_PLAN_DEEPER_OFFSET => offset_of!(SpillPlan, deeper),
         _ => 0,
     }
 }

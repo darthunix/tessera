@@ -289,9 +289,9 @@ typedef struct JoinRound
 #define JOIN_SPILL_MIN_PARTITIONS 4
 #define JOIN_SPILL_MAX_PARTITIONS 1024
 /*
- * What a partition keeps in memory at the least: a tail of records and
- * one of values and a file's buffer of a page on each side, at the
- * smallest chunk (tess_spill_partitions' reserve).
+ * What a partition keeps in memory at the least, the reserve of its level
+ * plan (join_spill_shape): a tail of records and one of values on each
+ * side at the smallest chunk, and a page more on each side.
  */
 #define JOIN_SPILL_RESERVE (4 * JOIN_SPILL_MIN_CHUNK + 2 * BLCKSZ)
 
@@ -562,6 +562,8 @@ typedef struct JoinSpill
 	uint64	   *before_bits;
 	uint8	  **payloads;
 	TessDatumColumn *columns;
+	/* The level plan's first bit of a level below; the level's own is shift. */
+	uint32		below;
 } JoinSpill;
 
 /* Which child a column of the scan tuple comes from. */
@@ -1009,7 +1011,8 @@ extern void join_side_demote(TessHashJoinState *state, SpillSide *side, int part
 extern bool join_side_send(TessHashJoinState *state, SpillSide *side, int partition);
 extern void join_side_flush(TessHashJoinState *state, SpillSide *side, int partition);
 extern void join_side_forget(SpillSide *side, int partition);
-extern JoinSpill *join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected, uint32 shift, int forced);
+extern TessSpillShape join_spill_shape(TessHashJoinState *state);
+extern JoinSpill *join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected, int forced);
 extern void join_spill_free(TessHashJoinState *state);
 extern Size join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident);
 extern Size join_index_bytes(TessHashJoinState *state, uint64 rows);

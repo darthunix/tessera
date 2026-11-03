@@ -383,11 +383,15 @@ from, since a regrow links every record of every chunk it is given.
 
 ### How a level is planned
 
-Before a node fills a level, it plans it: how many partitions the level
-gets, and how long their chunks are. One rule does it for every node,
-`tess_spill_partitions` and `tess_spill_chunk_len`, and each node gives
-it its own parameters. The exact rule is in [The partitions of a
-level](spec.md#requirement-the-partitions-of-a-level).
+Before a node fills a level, it plans it. The **level plan** says how
+many partitions the level gets, how long their chunks are, how many
+spill words count them, and which bits of the hash the level takes. One
+rule does it for every node, `tess_spill_plan`. What differs from node
+to node is the node's **shape**: the least and the most partitions,
+the reserve of a partition, and the bounds of a chunk. What differs from
+level to level is the level: the bytes it expects, its limit, and the
+bits the levels above took. The exact rule is in [The plan of a
+level](spec.md#requirement-the-plan-of-a-level).
 
 The number of partitions starts at the node's least, 4, and doubles
 while four things hold:
@@ -399,18 +403,21 @@ while four things hold:
   be joined or merged in one piece.
 - Twice as many partitions keep their **reserve** within half the
   limit. The reserve is what each partition keeps in memory while it
-  fills: the chunk it appends to and the buffer of its file, and in a
-  join the tails of the outer side too. With many partitions and little
-  memory the reserves alone would fill it, so a small limit keeps the
-  level at its least.
+  fills, at the least chunk: in a grouping the chunk it appends to, in
+  a join the tails of records and of values on both sides; and a page
+  more on each side. With many partitions and little memory the
+  reserves alone would fill it, so a small limit keeps the level at its
+  least.
 - The bits of twice as many partitions still fit in the hash. A level
-  takes the bits after those the levels above took, its **shift**. A
-  level past which not even the least partitions fit is refused; a
+  takes the bits after those the levels above took, from its **shift**.
+  A level past which not even the least partitions fit is refused; a
   node never asks for one, since a partition splits into a level below
   only while two bits are left.
 
 A shared table also asks for two partitions for each participant at the
-least, so that the participants spread over the rounds.
+least, so that the participants spread over the rounds. Each
+participant then plans its own level with the partitions the first one
+chose, and the plan takes them as they are.
 
 For example, a join of one process with a limit of 4 MiB keeps a
 reserve of 48 KiB for each partition: four chunks of 8 KiB and two
@@ -425,6 +432,34 @@ grouping and a sixteenth in a join, divided among the partitions. A
 chunk is 1 MiB at the most, the largest a reference can name, and 8 KiB
 or four records at the least, whichever is larger. In the example above
 the chunks are 4 MiB / 16 / 8 = 32 KiB.
+
+The first level expects twice what the table holds when it spills, or,
+if more, what the rows the planner expects would take at the bytes a
+row so far (`tess_spill_expected`). A shared table expects that for
+every participant. A level below expects the bytes of the partition it
+splits.
+
+The plan of a level gives the shift of a level below, the bit past its
+own, and says whether a level of the node's shape fits there. A level
+takes the low bits of the hash, and a table's buckets the high bits, so
+the rows of one partition still spread over the buckets of the table
+that holds them. The rows of a grouping whose key goes through a
+dictionary of values go by the values' hashes mixed first, since the
+dictionary's buckets take the low bits: the node chooses the hashes it
+gives a level, and the plan the bits it takes of them.
+
+The same rule plans the other levels of the nodes, with shapes of
+their own:
+
+- The rows of a grouping's generic aggregates go to 32 partitions at
+  every level, chunks of 256 rows, so each level takes 5 bits and six
+  levels fit. The planner's estimate of a grouping that spills counts
+  its levels by the same 32, the constant the rows' shape is made of;
+  it does not call the plan.
+- A table in memory, one partition, takes chunks of an eighth of the
+  limit past its first, from 64 KiB to 1 MiB, so that it spills only
+  near its limit. A shape of one partition takes no bits of the hash,
+  so the plan never gives it a level below.
 
 The grouping, the join and the shared table each had a rule of their
 own in C. They became one rule with parameters, and a test compares it

@@ -93,6 +93,8 @@ typedef struct AggSpill
 	/* The empty chunks of the two first slots. */
 	uint64		source_empty[1];
 	uint64		empty[1];
+	/* The level plan's first bit of a level below; the level's own is shift. */
+	uint32		below;
 } AggSpill;
 
 static bool agg_evict(TessAggState *state, Size extra);
@@ -172,35 +174,42 @@ agg_write_chunk(TessAggState *state, AggSpill *spill, int partition, void *base)
 }
 
 /*
- * A level of partitions by the hash bits from shift, for expected bytes:
- * the power of two that makes each about half of hash_mem, as long as the
- * bits last and a chunk per partition fits in half of hash_mem.
+ * A level of partitions by the level plan (tess_spill_plan), for expected
+ * bytes, by the hash bits the level above leaves: every level has all of
+ * hash_mem, each partition keeps a chunk and a page more at the least, and
+ * the chunks take an eighth of hash_mem among the partitions.
  */
 static AggSpill *
-agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 shift)
+agg_spill_create(TessAggState *state, AggSpill *parent, double expected)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-	Size		limit = tess_hash_memory_limit();
-	Size		record = state->record_size;
+	TessSpillShape shape = {
+		.reserve = AGG_SPILL_MIN_CHUNK + BLCKSZ,
+		.share = 8,
+		.min_chunk = AGG_SPILL_MIN_CHUNK,
+		.max_chunk = TESS_TABLE_MAX_CHUNK_LEN,
+		.record = state->record_size,
+		.min_partitions = AGG_SPILL_MIN_PARTITIONS,
+		.max_partitions = AGG_SPILL_MAX_PARTITIONS,
+	};
+	TessSpillLevel at = {
+		.expected = expected,
+		.limit = tess_hash_memory_limit(),
+		.shift = parent == NULL ? 0 : parent->below,
+	};
+	TessSpillPlan plan;
 	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
 	TessTableRef layout = {0};
 	AggSpill   *spill = MemoryContextAllocZero(context, sizeof(AggSpill));
 	uint32		npartitions;
 
-	/* Each partition keeps a chunk and its file's buffer of a page. */
-	check(state, state->kernels->spill_partitions(expected, limit, AGG_SPILL_MIN_CHUNK + BLCKSZ,
-												  shift, AGG_SPILL_MIN_PARTITIONS,
-												  AGG_SPILL_MAX_PARTITIONS, 0,
-												  &npartitions, &state->status));
-	/* A chunk an eighth of hash_mem among them, of four records at least. */
-	check(state, state->kernels->spill_chunk_len(limit, npartitions, 8,
-												 Max(AGG_SPILL_MIN_CHUNK,
-													 TESS_TABLE_CHUNK_HEADER + 4 * record),
-												 TESS_TABLE_MAX_CHUNK_LEN,
-												 &spill->chunk_len, &state->status));
+	check(state, state->kernels->spill_plan(&shape, &at, &plan, &state->status));
+	npartitions = plan.partitions;
+	spill->chunk_len = plan.chunk_len;
 	spill->parent = parent;
 	spill->level = parent == NULL ? 0 : parent->level + 1;
-	spill->shift = shift;
+	spill->shift = plan.shift;
+	spill->below = plan.below;
 	spill->npartitions = npartitions;
 	spill->partition = -1;
 	spill->context = AllocSetContextCreate(context, "TessAgg spill",
@@ -222,8 +231,7 @@ agg_spill_create(TessAggState *state, AggSpill *parent, double expected, uint32 
 	spill->lens = MemoryContextAlloc(spill->context, sizeof(Size) * (npartitions + 2));
 	spill->current = MemoryContextAlloc(spill->context, sizeof(uint32) * npartitions);
 	spill->kernels = state->kernels;
-	check(state, state->kernels->table_spill_words((int) npartitions, &spill->nwords,
-												   &state->status));
+	spill->nwords = plan.words;
 	spill->words = MemoryContextAlloc(context, sizeof(uint64) * spill->nwords);
 	check(state, state->kernels->table_spill_init(spill->words, spill->nwords, false, 0,
 												  &state->status));
@@ -437,11 +445,9 @@ agg_start_spill(TessAggState *state)
 	Size	   *old_lens = palloc(sizeof(Size) * Max(nold, 1));
 
 	check(state, state->kernels->table_stats(&state->table, &stats, &state->status));
-	expected = bytes * 2;
-	if (stats.records > 0)
-		expected = Max(expected,
-					   bytes / stats.records * (double) state->groups_estimate);
-	spill = agg_spill_create(state, NULL, expected, 0);
+	expected = state->kernels->spill_expected(bytes, (double) stats.records,
+											  (double) state->groups_estimate, 1);
+	spill = agg_spill_create(state, NULL, expected);
 	state->spill = spill;
 	memcpy(old, state->chunk_bases, sizeof(void *) * nold);
 	memcpy(old_lens, state->chunk_lens, sizeof(Size) * nold);
@@ -815,8 +821,7 @@ agg_split_level(TessAggState *state, AggSpill *spill, int partition)
 {
 	AggPart    *part = &spill->parts[partition];
 	AggSpill   *level = agg_spill_create(state, spill,
-										 (double) part->disk_bytes + part->bytes,
-										 spill->shift + pg_leftmost_one_pos32(spill->npartitions));
+										 (double) part->disk_bytes + part->bytes);
 	TessSpillReader *reader = tess_spill_open(spill->file, 0, partition);
 	TessSpillHeader header;
 
@@ -910,9 +915,7 @@ agg_advance(TessAggState *state)
 			bool		split;
 
 			check(state, state->kernels->table_spill_splits(tess_agg_spill_split_room, 0, size,
-															 others, limit, 0, 0,
-															 spill->shift +
-															 pg_leftmost_one_pos32(spill->npartitions),
+															 others, limit, 0, 0, spill->below,
 															 &split, &state->status));
 			if (split)
 			{
@@ -975,7 +978,7 @@ typedef struct RowWriter
 	uint64		written;
 } RowWriter;
 
-/* A level of partitions: one set of files, a partition per ROWS_PART_BITS bits. */
+/* A level of partitions: one set of files, its partitions by its plan's bits. */
 typedef struct RowSpill
 {
 	TessSpill  *file;
@@ -983,6 +986,10 @@ typedef struct RowSpill
 	RowWriter	writers[ROWS_PARTS];
 	/* Reading: the next partition to read. */
 	int			next;
+	/* The level plan's bits: its own from shift, a level below's from below. */
+	uint32		shift;
+	uint32		below;
+	bool		deeper;
 } RowSpill;
 
 /* A partition being read back: the block in hand and its next row. */
@@ -1024,26 +1031,50 @@ rows_writer_reset(TessAggState *state, RowWriter *writer)
 	writer->values_used = 0;
 }
 
-/* A level of partitions, their files not made until written. */
+/*
+ * A level of partitions by the hash bits from shift, their files not made
+ * until written: by the level plan, ROWS_PARTS partitions, each keeping a
+ * chunk of ROWS_BLOCK_ROWS rows and a chunk of their values.
+ */
 RowSpill *
-rows_spill_create(TessAggState *state, int level)
+rows_spill_create(TessAggState *state, int level, uint32 shift)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
 	RowSpill   *spill = MemoryContextAllocZero(context, sizeof(RowSpill));
 	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
-	Size		chunk_len = TESS_SPILL_COLUMNS_HEADER +
+	Size		rows_len = TESS_SPILL_COLUMNS_HEADER +
 		sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + rows_words(state));
+	TessSpillShape shape = {
+		.reserve = rows_len + ROWS_BLOCK_VALUES,
+		.share = 1,
+		.min_chunk = rows_len,
+		.max_chunk = rows_len,
+		.min_partitions = ROWS_PARTS,
+		.max_partitions = ROWS_PARTS,
+	};
+	TessSpillLevel at = {
+		.limit = tess_hash_memory_limit(),
+		.shift = shift,
+	};
+	TessSpillPlan plan;
+	Size		chunk_len;
+
+	check(state, state->kernels->spill_plan(&shape, &at, &plan, &state->status));
+	chunk_len = plan.chunk_len;
 
 	config.parent_context = context;
 	config.kernels = state->kernels;
-	config.npartitions = ROWS_PARTS;
+	config.npartitions = plan.partitions;
 	config.level = (uint32) level;
 	config.fingerprint = (uint64) rows_words(state);
 	config.max_chunk = chunk_len;
 	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
 	spill->file = tess_spill_create(&config);
 	spill->level = level;
+	spill->shift = plan.shift;
+	spill->below = plan.below;
+	spill->deeper = plan.deeper;
 	for (int part = 0; part < ROWS_PARTS; part++)
 	{
 		RowWriter  *writer = &spill->writers[part];
@@ -1094,7 +1125,7 @@ rows_write(TessAggState *state, RowSpill *spill, const TessRowMask *rows)
 	 * high bits, leave free.
 	 */
 	const uint32 *hashes = state->has_dicts ? state->value_hashes : state->hashes;
-	uint32		shift = ROWS_PART_BITS * spill->level;
+	uint32		shift = spill->shift;
 
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
@@ -1327,6 +1358,8 @@ rows_next_partition(TessAggState *state)
 			reader->next = 0;
 			/* The level below takes the next bits, the last level none. */
 			state->rows_level = spill->level + 1;
+			state->rows_shift = spill->below;
+			state->rows_last = !spill->deeper;
 			return true;
 		}
 		state->rows_pending = list_delete_first(state->rows_pending);

@@ -515,14 +515,15 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 * to disk; in partial mode the groups go out instead (agg_group_drain).
 	 */
 	if (state->row_spill && !state->partial && !state->has_distinct && !state->frozen &&
-		state->rows_level < ROWS_MAX_LEVELS)
+		!state->rows_last)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 
 		if (groups_overflow(state, AGG_GROUP_ROWS, &stats))
 		{
 			state->frozen = true;
-			state->rows_spill = rows_spill_create(state, state->rows_level);
+			state->rows_spill = rows_spill_create(state, state->rows_level,
+												  state->rows_shift);
 		}
 	}
 	if (state->spill != NULL)
@@ -551,6 +552,8 @@ agg_group_drain(TessAggState *state)
 	agg_spill_free(state);
 	rows_spill_free(state);
 	state->rows_level = 0;
+	state->rows_shift = 0;
+	state->rows_last = false;
 	for (int key = 0; key < state->nkeys; key++)
 		ndicts += state->dicts[key] != NULL;
 	for (int key = 0; key < state->nkeys; key++)

@@ -700,10 +700,14 @@ negative or not finite, and bits past 32, SHALL be refused.
   `crates/relspill/src/shared_spill.rs::a_level_past_the_bits_of_the_hash_is_refused`;
   `crates/tessera-capi/tests/spill.rs::the_split_entry_point_weighs_room_bits_and_keys`
 
-### Requirement: The partitions of a level
-`tess_spill_partitions` SHALL give the number of partitions of a level
-of a table that spills. It SHALL start from `min_partitions` and double
-the number while all of these hold:
+### Requirement: The plan of a level
+`tess_spill_plan` SHALL give the plan of a level of a node's spill from
+the node's `TessSpillShape` and the level's `TessSpillLevel`: its
+partitions, the length of its chunks, the spill words that count its
+partitions, the first bit of the hash it takes, the first bit of a
+level below, and whether a level of the shape fits below. The
+partitions SHALL start from `min_partitions` and double while all of
+these hold:
 
 - the number is below `max_partitions`;
 - the number is below `at_least`, or the partitions, each holding half
@@ -713,39 +717,57 @@ the number while all of these hold:
 - the bits of the doubled number, after the `shift` bits the levels
   above take, stay below 32.
 
-`min_partitions` and `max_partitions` SHALL be powers of two, the first
-no larger. Expected bytes below zero or not a number SHALL be refused,
-and so SHALL a `shift` past which `min_partitions` do not fit in the 32
-bits of the hash.
-
-`tess_spill_chunk_len` SHALL give the length of a level's chunks:
+A level given its `partitions` SHALL take them. The chunks SHALL be
 `limit` divided by `share` times the partitions, no more than
-`max_chunk`, then no less than `min_chunk`, which wins over
-`max_chunk`, rounded down to a multiple of 8. A `share` or a number of
-partitions of 0, and a `min_chunk` below 8 or not a multiple of 8,
-SHALL be refused.
+`max_chunk`, then no less than `min_chunk` nor than a chunk's header and
+four records of `record` bytes, which win over `max_chunk`, rounded down
+to a multiple of 8. A level below SHALL take the bits from the first
+past the partitions' bits; a level SHALL fit below while the bits left
+hold `min_partitions`, two or more. A shape of one partition takes no
+bits, and no level SHALL fit below it.
+
+`min_partitions` and `max_partitions` SHALL be powers of two, the first
+no larger. Refused SHALL be: expected bytes below zero or not a number;
+a `shift` of 32 or more, or one past which `min_partitions` do not fit
+in the 32 bits of the hash; given partitions that are no power of two
+between the two, or that pass the hash; a `share` of 0; a least chunk
+not a multiple of 8; more partitions than spill words count; and a null
+argument.
+
+`tess_spill_expected` SHALL give the bytes the first level expects:
+twice the bytes held, or the bytes the expected rows would take at the
+bytes a row so far, if more, times the participants.
 
 #### Scenario: By the bytes, the participants and the reserve
 - **WHEN** a level of 4 to 1024 partitions with a reserve of 48 KiB
   expects 10 MiB in a limit of 4 MiB, then wants 16 partitions at
-  least, then has a limit of 256 KiB
-- **THEN** it gets 8 partitions, then 16, then 4
+  least, then has a limit of 256 KiB, then is given 64 partitions
+- **THEN** it gets 8 partitions, then 16, then 4, then 64
 - **Verified by:**
-  `crates/relspill/src/plan.rs::a_level_doubles_by_its_bytes_participants_and_reserve`
+  `crates/relspill/src/plan.rs::a_level_doubles_by_its_bytes_participants_and_reserve`;
+  `crates/relspill/src/plan.rs::a_level_takes_the_partitions_it_is_given`;
+  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
 
 #### Scenario: By the bits of the hash
 - **WHEN** a level of 4 to 1024 partitions that expects far more than
-  its limit comes after 28, 29, 30 and 31 bits
-- **THEN** it gets 8, 4 and 4 partitions, and the last is refused
+  its limit comes after 28, 29, 30 and 31 bits; and a level of 32
+  partitions comes after each level above it; and a level of one
+  partition comes after 31 bits and after 32
+- **THEN** it gets 8, 4 and 4 partitions, and the last is refused; the
+  level of 32 takes 5 bits after those above, and fits six times, from
+  bit 0 to bit 25; the level of one has no level below, and after 32
+  bits is refused
 - **Verified by:**
   `crates/relspill/src/plan.rs::a_level_keeps_to_the_bits_of_the_hash`;
-  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
+  `crates/relspill/src/plan.rs::each_level_takes_the_bits_past_those_above`
 
 #### Scenario: Wrong bounds and bytes
 - **WHEN** the least or the most partitions are not powers of two or
-  are out of order, or the expected bytes are below zero or not a
-  number
-- **THEN** the call fails, SQLSTATE `XX000`
+  are out of order, the expected bytes are below zero or not a number,
+  the partitions given are no power of two of the shape, the share is
+  0, the least chunk is not a multiple of 8, or the partitions pass
+  what spill words count
+- **THEN** the call fails, SQLSTATE `XX000`, and writes no plan
 - **Verified by:**
   `crates/relspill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
   `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
@@ -758,10 +780,10 @@ SHALL be refused.
 - **Verified by:**
   `crates/relspill/src/plan.rs::a_chunk_is_a_share_of_the_limit_within_its_bounds`
 
-#### Scenario: Wrong shares and bounds
-- **WHEN** the share or the partitions are 0, or the least chunk is 4
-  or 4100 bytes
-- **THEN** the call fails, SQLSTATE `XX000`
+#### Scenario: The bytes a first level expects
+- **WHEN** 1000 bytes are held in 10 rows of 15 expected, of 30, of 30
+  for 4 participants, and in no rows
+- **THEN** the level expects 2000, 3000, 12000 and 2000 bytes
 - **Verified by:**
-  `crates/relspill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
+  `crates/relspill/src/plan.rs::the_first_level_expects_twice_its_bytes_or_the_estimate`;
   `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`

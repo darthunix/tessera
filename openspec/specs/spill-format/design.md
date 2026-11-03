@@ -684,9 +684,9 @@ format:
 
 [docs/spill.md](../../../docs/spill.md) describes them for the join and
 the grouping, [docs/nodes.md](../../../docs/nodes.md) for the sort. How
-many partitions a level gets and how long their chunks are
-(`tess_spill_partitions`, `tess_spill_chunk_len`) is a rule of the
-table that spills, in [hash-table](../hash-table/design.md).
+many partitions a level gets and how long their chunks are, the level
+plan (`tess_spill_plan`), is a rule of the table that spills, in
+[hash-table](../hash-table/design.md).
 
 ## Files
 

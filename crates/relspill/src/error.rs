@@ -155,8 +155,12 @@ rules! {
     PlanPartitions,
     /// A level that expects bytes below zero or not a number.
     Expected,
-    /// The least partitions of a level do not fit in the hash's bits.
+    /// The least partitions of a level do not fit in the hash's bits, or
+    /// its first bit is past them.
     PlanBits,
+    /// A level given partitions that are no power of two its shape plans,
+    /// or that do not fit in the hash's bits.
+    GivenPartitions,
     /// Chunks planned for no share or no partitions.
     Share,
     /// A least chunk shorter than a chunk's header or not a multiple of 8.
@@ -461,6 +465,11 @@ impl fmt::Display for Error {
             }
             Rule::Expected => f.write_str("a level expects bytes below zero or not a number"),
             Rule::PlanBits => write!(f, "{a} partitions do not fit in the hash after {b} bits"),
+            Rule::GivenPartitions => write!(
+                f,
+                "{a} partitions given to a level after {b} bits are no power of two of its \
+                 shape that fits in the hash"
+            ),
             Rule::Share => write!(f, "chunks of a {a} share of {b} partitions"),
             Rule::LeastChunk => write!(f, "a least chunk of {a} bytes"),
             Rule::SpillPartitions => write!(

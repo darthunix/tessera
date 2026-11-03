@@ -99,8 +99,6 @@
 	X(table_clear_key) \
 	X(table_gather_words) \
 	X(table_record_size) \
-	X(spill_partitions) \
-	X(spill_chunk_len) \
 	X(table_bloom_words_within) \
 	X(sort_run_words) \
 	X(decimal_extreme) \
@@ -124,6 +122,8 @@
 	X(spill_reader_open) \
 	X(spill_reader_next) \
 	X(spill_reader_body) \
-	X(spill_reader_seek)
+	X(spill_reader_seek) \
+	X(spill_plan) \
+	X(spill_expected)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */
