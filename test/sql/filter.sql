@@ -391,6 +391,25 @@ SELECT filter_same($$SELECT count(*) FROM filter_two WHERE d2 > d1$$);
 SELECT filter_same($$SELECT count(*) FROM filter_two WHERE d1 < d2 AND t <> ''$$);
 DROP TABLE filter_two;
 
+-- A scan's walk keeps the columns its consumers read behind it on most
+-- rows. The filter reads d past two numerics and a text; the aggregate
+-- then reads them on 98 % of the rows, and after the first window of
+-- 4096 rows they start no walk of their own. Read on 1 % of the rows,
+-- they are not kept and restart on each.
+CREATE TABLE filter_keep (k int, q numeric, p numeric, f text, d date);
+INSERT INTO filter_keep
+SELECT i, i % 50, (i % 1000) / 10.0, chr(65 + i % 3), date '2020-01-01' + i % 100
+FROM generate_series(1, 10000) AS i;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(q), sum(p), count(f) FROM filter_keep WHERE d <= date '2020-04-07';
+SELECT filter_same($$SELECT sum(q), sum(p), count(f) FROM filter_keep
+                     WHERE d <= date '2020-04-07'$$);
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(q), sum(p) FROM filter_keep WHERE d = date '2020-01-01';
+SELECT filter_same($$SELECT sum(q), sum(p) FROM filter_keep
+                     WHERE d = date '2020-01-01'$$);
+DROP TABLE filter_keep;
+
 DROP FUNCTION filter_same(text);
 
 DROP TABLE filter_t;

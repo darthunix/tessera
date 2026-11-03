@@ -1427,6 +1427,82 @@ SELECT filter_same($$SELECT count(*) FROM filter_two WHERE d1 < d2 AND t <> ''$$
 (1 row)
 
 DROP TABLE filter_two;
+-- A scan's walk keeps the columns its consumers read behind it on most
+-- rows. The filter reads d past two numerics and a text; the aggregate
+-- then reads them on 98 % of the rows, and after the first window of
+-- 4096 rows they start no walk of their own. Read on 1 % of the rows,
+-- they are not kept and restart on each.
+CREATE TABLE filter_keep (k int, q numeric, p numeric, f text, d date);
+INSERT INTO filter_keep
+SELECT i, i % 50, (i % 1000) / 10.0, chr(65 + i % 3), date '2020-01-01' + i % 100
+FROM generate_series(1, 10000) AS i;
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(q), sum(p), count(f) FROM filter_keep WHERE d <= date '2020-04-07';
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum(q)), (sum(p)), (count(f))
+   Input Batches: 191
+   Input Rows: 9800
+   Kernel Calls: 191
+   Computed Datums: 29400
+   ->  Custom Scan (TessFilter) on public.filter_keep (actual rows=9800.00 loops=1)
+         Output: q, p, f
+         Batch Filter: (filter_keep.d <= '04-07-2020'::date)
+         Rows Removed by Batch Filter: 200
+         Input Batches: 191
+         Input Rows: 10000
+         Output Rows: 9800
+         ->  Custom Scan (TessHeapScan) on public.filter_keep (actual rows=10000.00 loops=1)
+               Output: q, p, f, d
+               Batch Size: 64
+               Batches: 191
+               Pages: 64
+               Deformed Datums: 39400
+               Restarted Datums: 3973
+(20 rows)
+
+SELECT filter_same($$SELECT sum(q), sum(p), count(f) FROM filter_keep
+                     WHERE d <= date '2020-04-07'$$);
+                  filter_same                  
+-----------------------------------------------
+ {"(235300,488530.00000000000000000000,9800)"}
+(1 row)
+
+EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT sum(q), sum(p) FROM filter_keep WHERE d = date '2020-01-01';
+                                         QUERY PLAN                                          
+---------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum(q)), (sum(p))
+   Input Batches: 100
+   Input Rows: 100
+   Kernel Calls: 0
+   Computed Datums: 200
+   ->  Custom Scan (TessFilter) on public.filter_keep (actual rows=100.00 loops=1)
+         Output: q, p
+         Batch Filter: (filter_keep.d = '01-01-2020'::date)
+         Rows Removed by Batch Filter: 9900
+         Input Batches: 191
+         Input Rows: 10000
+         Output Rows: 100
+         ->  Custom Scan (TessHeapScan) on public.filter_keep (actual rows=10000.00 loops=1)
+               Output: q, p, d
+               Batch Size: 64
+               Batches: 191
+               Pages: 64
+               Deformed Datums: 10200
+               Restarted Datums: 100
+(20 rows)
+
+SELECT filter_same($$SELECT sum(q), sum(p) FROM filter_keep
+                     WHERE d = date '2020-01-01'$$);
+            filter_same            
+-----------------------------------
+ {"(0,4500.00000000000000000000)"}
+(1 row)
+
+DROP TABLE filter_keep;
 DROP FUNCTION filter_same(text);
 DROP TABLE filter_t;
 DROP EXTENSION tessera;

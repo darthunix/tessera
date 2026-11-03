@@ -69,7 +69,44 @@ struct TessHeapBatch
 	 */
 	TessDeformCursor *back_cursors;
 	uint64	   *back_set;
+	/*
+	 * The columns a walk keeps (deform_keeping): per column, whether a walk
+	 * forward stores its value as it passes it, and the first such column,
+	 * ncolumns when none. They change only between batches, by the counts of
+	 * a window of rows (count_keeping): per column, the rows a read of it or
+	 * of a later column carried a walk to it or past it, and the rows read
+	 * for it behind their cursor (count_behind), each a walk from the
+	 * tuple's start unless the column is kept. A scan that has asked for
+	 * one column past the cached offsets only (asked, nasked) counts
+	 * nothing: it has nothing to keep. Only every KEEP_SAMPLE-th batch is
+	 * counted (counting, batches), so that a scan that keeps nothing pays
+	 * for the counts on a few of its batches.
+	 */
+	bool	   *kept;
+	int			first_kept;
+	uint64	   *reached;
+	uint64	   *behind;
+	uint64		window_rows;
+	uint64		batches;
+	bool		counting;
+	bool	   *asked;
+	int			nasked;
+#ifdef USE_ASSERT_CHECKING
+	/* Per column, the rows a walk stored it for: column * nwords. */
+	uint64	   *stored;
+#endif
 };
+
+/*
+ * A column is kept when the walks its reads behind the cursor would take
+ * outweigh a store on every row a walk carries past it: when the share of
+ * such reads, times the attributes a walk from the cached offsets takes to
+ * reach the column, is at least a half. Counted on one batch in
+ * KEEP_SAMPLE, over a window of KEEP_WINDOW_ROWS rows counted, about 4096
+ * rows read; the first window keeps nothing.
+ */
+#define KEEP_SAMPLE 4
+#define KEEP_WINDOW_ROWS 1024
 
 /*
  * The cursor of a row's column before the row's cursor: the cursor of the
@@ -92,7 +129,97 @@ back_cursor(TessHeapBatch *heap, int row, AttrNumber attnum)
 	return cursor;
 }
 
-/* Deform one value, resuming the row's cursor or, before it, its back cursor. */
+/* Store a value of the row a walk passes; under assertions, mark it stored. */
+static pg_always_inline void
+keep_value(TessHeapBatch *heap, int column, int row, Datum value, bool isnull)
+{
+	Size		offset = (Size) column * heap->capacity + row;
+
+	heap->values[offset] = value;
+	heap->isnull[offset] = isnull;
+#ifdef USE_ASSERT_CHECKING
+	heap->stored[(Size) column * heap->nwords + row / 64] |= UINT64CONST(1) << (row % 64);
+#endif
+}
+
+/*
+ * Walk a row's cursor forward to a column, as tess_deform_advance does,
+ * storing on the way the value of every kept column it passes, so that a
+ * request for one of them behind the cursor finds it (deform). Every
+ * forward step of a cursor past a kept column comes here: a row with NULLs
+ * stores its NULLs, and a row shorter than the column stops at its last
+ * attribute, so no column the row lacks lies behind its cursor. The
+ * attributes at cached offsets are jumped over: they are fixed-width, and
+ * no kept column lies among them.
+ */
+static void
+deform_keeping(TessHeapBatch *heap, int column, int row)
+{
+	HeapTuple	tuple = &heap->tuples[row];
+	HeapTupleHeader tup = tuple->t_data;
+	TessDeformCursor *cursor = &heap->cursors[row];
+	TupleDesc	desc = heap->tuple_desc;
+	CompactAttribute *cattrs = desc->compact_attrs;
+	const bool *kept = heap->kept;
+	char	   *tp = (char *) tup + tup->t_hoff;
+	int			end = Min(HeapTupleHeaderGetNatts(tup), column + 1);
+	int			first_null = HeapTupleHasNulls(tuple) ?
+		first_null_attr(tup->t_bits, end) : end;
+	int			cached = Min(desc->firstNonCachedOffsetAttr, first_null);
+	int			attr = cursor->nvalid;
+	uint32		off = cursor->off;
+
+	Assert(attr <= column && heap->first_kept >= desc->firstNonCachedOffsetAttr);
+	if (attr < cached)
+	{
+		CompactAttribute *cattr = &cattrs[cached - 1];
+
+		Assert(cattr->attcacheoff >= 0 && cattr->attlen > 0);
+		off = cattr->attcacheoff + cattr->attlen;
+		attr = cached;
+	}
+	for (; attr < first_null; attr++)
+	{
+		CompactAttribute *cattr = &cattrs[attr];
+		Datum		value;
+
+		pg_assume(cattr->attlen > 0 || cattr->attlen == -1);
+		value = align_fetch_then_add(tp, &off, cattr->attbyval, cattr->attlen,
+									 cattr->attalignby);
+		if (attr == column || kept[attr])
+			keep_value(heap, attr, row, value, false);
+	}
+	for (; attr < end; attr++)
+	{
+		CompactAttribute *cattr = &cattrs[attr];
+		Datum		value = (Datum) 0;
+		bool		isnull = att_isnull(attr, tup->t_bits);
+
+		if (!isnull)
+		{
+			pg_assume(cattr->attlen > 0 || cattr->attlen == -1);
+			value = align_fetch_then_add(tp, &off, cattr->attbyval, cattr->attlen,
+										 cattr->attalignby);
+		}
+		if (attr == column || kept[attr])
+			keep_value(heap, attr, row, value, isnull);
+	}
+	cursor->nvalid = end;
+	cursor->off = off;
+	if (end <= column)
+	{
+		bool		isnull;
+		Datum		value = getmissingattr(desc, column + 1, &isnull);
+
+		keep_value(heap, column, row, isnull ? (Datum) 0 : value, isnull);
+	}
+}
+
+/*
+ * Deform one value, resuming the row's cursor or, before it, its back
+ * cursor. A walk past a kept column, and a kept column behind the cursor,
+ * do not come here (deform_kept_rows).
+ */
 static void
 deform(TessHeapBatch *heap, int column, int row)
 {
@@ -102,14 +229,57 @@ deform(TessHeapBatch *heap, int column, int row)
 	bool		isnull = false;
 	Size		offset = (Size) column * heap->capacity + row;
 
+	Assert(heap->first_kept >= column || cursor->nvalid >= attnum);
 	if (unlikely(cursor->nvalid >= attnum))
+	{
+		Assert(!heap->kept[column]);
 		cursor = back_cursor(heap, row, attnum);
+	}
 	if (!tess_deform_advance(cursor, &heap->tuples[row], heap->tuple_desc,
 							 heap->first_non_guaranteed, attnum,
 							 &value, &isnull, false))
 		value = getmissingattr(heap->tuple_desc, attnum, &isnull);
 	heap->values[offset] = isnull ? (Datum) 0 : value;
 	heap->isnull[offset] = isnull;
+}
+
+/*
+ * A column's requested rows in a batch that keeps columns: a row whose
+ * cursor passed a kept column holds it, a walk forward to a column past a
+ * kept one keeps them on the way, and any other row deforms as before.
+ * Chosen once a request, so that a scan that keeps no column before the
+ * one it reads runs deform's loop as without kept columns.
+ */
+static pg_noinline void
+deform_kept_rows(TessHeapBatch *heap, int column, const TessRowMask *rows,
+				 const uint64 *deformed, int nwords)
+{
+	bool		kept = heap->kept[column];
+	bool		keeping = heap->first_kept < column;
+
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		pending = rows->bits[word] & ~deformed[word];
+
+		while (pending != 0)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(pending);
+
+			if (heap->cursors[row].nvalid <= column)
+			{
+				if (keeping)
+					deform_keeping(heap, column, row);
+				else
+					deform(heap, column, row);
+			}
+			else if (!kept)
+				deform(heap, column, row);
+			else
+				Assert(heap->stored[(Size) column * heap->nwords + word] &
+					   (UINT64CONST(1) << (row % 64)));
+			pending &= pending - 1;
+		}
+	}
 }
 
 /*
@@ -247,6 +417,27 @@ decimal_column(TessHeapBatch *heap, int column, const TessRowMask *rows,
 	result->decimal_scale = heap->decimal_scale[column];
 }
 
+/*
+ * Count a request's rows behind their cursor: a row whose cursor a read of
+ * a later column carried past this one, as the masks of the later columns
+ * tell, without a look at the row. A short row whose walk stopped before
+ * the column counts too: these are counts, not the path of a row.
+ */
+static inline void
+count_behind(TessHeapBatch *heap, int column, const TessRowMask *rows,
+			 const uint64 *deformed, int nwords)
+{
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		ahead = 0;
+
+		for (int later = column + 1; later < heap->ncolumns; later++)
+			ahead |= heap->deformed[(Size) later * heap->nwords + word];
+		heap->behind[column] +=
+			pg_popcount64(rows->bits[word] & ~deformed[word] & ahead);
+	}
+}
+
 static void
 heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 					  TessColumnPurpose purpose, TessDatumColumn *result)
@@ -264,9 +455,21 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 		elog(ERROR, "Tessera heap batch received a row mask of another batch");
 	deformed = &heap->deformed[(Size) column * heap->nwords];
 	nwords = tess_row_mask_word_count(rows->nrows);
+	if (column >= heap->tuple_desc->firstNonCachedOffsetAttr)
+	{
+		if (unlikely(!heap->asked[column]))
+		{
+			heap->asked[column] = true;
+			heap->nasked++;
+		}
+		if (heap->nasked > 1 && heap->counting)
+			count_behind(heap, column, rows, deformed, nwords);
+	}
 	if (column < heap->tuple_desc->firstNonCachedOffsetAttr &&
 		heap->tuple_desc->compact_attrs[column].attbyval)
 		deform_cached(heap, column, rows, deformed, nwords);
+	else if (heap->kept[column] || heap->first_kept < column)
+		deform_kept_rows(heap, column, rows, deformed, nwords);
 	else
 	{
 		for (int word = 0; word < nwords; word++)
@@ -346,6 +549,17 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 	heap->back_cursors = MemoryContextAlloc(context,
 											mul_size(sizeof(TessDeformCursor), config->capacity));
 	heap->back_set = MemoryContextAllocZero(context, sizeof(uint64) * heap->nwords);
+	heap->kept = MemoryContextAllocZero(context, sizeof(bool) * Max(config->ncolumns, 1));
+	heap->first_kept = config->ncolumns;
+	heap->reached = MemoryContextAllocZero(context, sizeof(uint64) * Max(config->ncolumns, 1));
+	heap->behind = MemoryContextAllocZero(context, sizeof(uint64) * Max(config->ncolumns, 1));
+	heap->asked = MemoryContextAllocZero(context, sizeof(bool) * Max(config->ncolumns, 1));
+	heap->counting = true;
+#ifdef USE_ASSERT_CHECKING
+	heap->stored = MemoryContextAllocZero(context,
+										  mul_size(sizeof(uint64),
+												   mul_size(config->ncolumns, heap->nwords)));
+#endif
 	heap->pins = MemoryContextAlloc(context,
 									mul_size(sizeof(Buffer), config->capacity));
 	heap->values = MemoryContextAllocZero(context, mul_size(sizeof(Datum), nvalues));
@@ -413,11 +627,65 @@ keep_tuple(TessHeapBatch *heap, const HeapTupleData *tuple, Buffer buffer)
 	heap->nrows = row + 1;
 }
 
+/*
+ * The counts of a batch about to be reset, if it is one counted, for the
+ * columns past the cached offsets, and at a window's end the columns kept
+ * for the next one. A row's cursor stands past a column when the row was
+ * read for it or for a later one: the union of their masks, taken from
+ * the last column back. A column no walk reached in the window keeps its
+ * flag. Sets whether the next batch is counted.
+ */
+static void
+count_keeping(TessHeapBatch *heap)
+{
+	int			start;
+	int			ncolumns = heap->ncolumns;
+	int			nwords = tess_row_mask_word_count(heap->nrows);
+	bool		counted = heap->counting;
+
+	/* An empty batch read nothing, and leaves the turn of the counted one. */
+	if (heap->nrows == 0)
+		return;
+	heap->counting = ++heap->batches % KEEP_SAMPLE == 0;
+	if (!counted || heap->nasked < 2)
+		return;
+	start = heap->tuple_desc->firstNonCachedOffsetAttr;
+	for (int word = 0; word < nwords; word++)
+	{
+		uint64		reached = 0;
+
+		for (int column = ncolumns - 1; column >= start; column--)
+		{
+			reached |= heap->deformed[(Size) column * heap->nwords + word];
+			heap->reached[column] += pg_popcount64(reached);
+		}
+	}
+	heap->window_rows += heap->nrows;
+	if (heap->window_rows < KEEP_WINDOW_ROWS)
+		return;
+	heap->first_kept = ncolumns;
+	for (int column = start; column < ncolumns; column++)
+	{
+		if (heap->reached[column] > 0)
+			heap->kept[column] = heap->behind[column] * (column - start + 1) * 2 >=
+				heap->reached[column];
+		if (heap->kept[column] && heap->first_kept == ncolumns)
+			heap->first_kept = column;
+		heap->reached[column] = 0;
+		heap->behind[column] = 0;
+	}
+	heap->window_rows = 0;
+}
+
 void
 tess_heap_batch_reset(TessHeapBatch *heap)
 {
 	unpin(heap);
+	count_keeping(heap);
 	memset(heap->deformed, 0, sizeof(uint64) * (Size) heap->ncolumns * heap->nwords);
+#ifdef USE_ASSERT_CHECKING
+	memset(heap->stored, 0, sizeof(uint64) * (Size) heap->ncolumns * heap->nwords);
+#endif
 	memset(heap->back_set, 0, sizeof(uint64) * heap->nwords);
 	if (heap->decimal_values != NULL)
 		for (int column = 0; column < heap->ncolumns; column++)

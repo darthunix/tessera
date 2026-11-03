@@ -58,6 +58,28 @@ SELECT tessera_test_heap_batch_back('heap_batch_b', 'heap_batch_b2') AS heap_bat
 \echo :heap_batch_back
 t
 DROP TABLE heap_batch_b, heap_batch_b2;
+CREATE FUNCTION tessera_test_heap_batch_keep(regclass)
+RETURNS boolean
+AS :'heap_batch_test', 'tessera_test_heap_batch_keep'
+LANGUAGE C STRICT;
+-- A walk that keeps the columns read behind the cursor: k is NULL in
+-- every tenth row and b in every fourth; d is added after the first 40
+-- rows, which are shorter and take its default.
+CREATE TABLE heap_batch_k (k int, a text, b text, c text);
+INSERT INTO heap_batch_k
+SELECT CASE WHEN i % 10 = 0 THEN NULL ELSE i END, 'a' || i,
+       CASE WHEN i % 4 = 0 THEN NULL ELSE 'b' || i END, 'c' || i
+FROM generate_series(1, 40) AS i;
+ALTER TABLE heap_batch_k ADD COLUMN d bigint DEFAULT 7;
+INSERT INTO heap_batch_k
+SELECT CASE WHEN i % 10 = 0 THEN NULL ELSE i END, 'a' || i,
+       CASE WHEN i % 4 = 0 THEN NULL ELSE 'b' || i END, 'c' || i, i
+FROM generate_series(41, 100) AS i;
+SELECT tessera_test_heap_batch_keep('heap_batch_k') AS heap_batch_keep \gset
+\echo :heap_batch_keep
+t
+DROP TABLE heap_batch_k;
+DROP FUNCTION tessera_test_heap_batch_keep(regclass);
 \set VERBOSITY terse
 SELECT tessera_test_heap_batch_errors(0, 'heap_batch_t');
 ERROR:  Tessera heap batch is full

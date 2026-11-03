@@ -2929,7 +2929,7 @@ SELECT join_explain($$SELECT count(*), count(jsb.n), sum(length(jsb.t)) FROM jsp
                Batches: 723
                Pages: 362
                Deformed Datums: 115296
-               Restarted Datums: 37648
+               Restarted Datums: 3222
          ->  Custom Scan (TessHeapScan) on public.jsp (actual rows=100000.00 loops=1)
                Batch Size: 64
                Batches: 1597
