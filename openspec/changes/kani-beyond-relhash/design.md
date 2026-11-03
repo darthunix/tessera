@@ -90,13 +90,20 @@ The approach, for each target:
   readiness with three `ensure!`s, each of which builds an
   `anyhow::Error` on failure, then builds the iterator.
 - **Will be:** one private helper takes `nrows`, the word's index, the
-  selected and the prepared bits and the reader; it checks and builds
-  the iterator, or returns the reason of a refusal, a `&'static str`.
-  It never calls the reader. `try_new` calls it and turns a reason into
-  the same `anyhow` error, with the same text; nothing else.
+  selected and the prepared bits, the reader and a closure that builds
+  the error of a refusal from its reason, a small enum; it checks and
+  builds the iterator, or returns that error. It never calls the
+  reader. `try_new` passes a closure that builds each refusal's
+  `anyhow` error in place, with the same text, as `ensure!` did; the
+  proofs pass one that keeps the reason. A reason as a `&'static str`
+  kept its pointer and length in two registers across the readers'
+  loops, and a reason turned into an error out of line merged the
+  three checks into one computed branch, so neither was kept.
 - **Proofs** (`tessera-core/src/reader/proofs.rs`): with any `nrows`,
   index, selected and prepared bits, through the helper:
-  - a refusal comes with no call of the reader;
+  - a word is refused exactly when it calls for it, for the reason it
+    calls for, stated apart from the code's checks, with no call of the
+    reader;
   - the reader, checked inside each call, is called only for a row of
     the word that is selected, prepared and below `nrows`, each after
     the last, and the row it is called for is the row given;
