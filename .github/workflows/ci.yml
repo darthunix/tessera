@@ -244,7 +244,9 @@ jobs:
   # each read inside its block and nothing panics. Of the casts of a
   # float to an integer (tessera-kernels' float/proofs.rs): for every
   # float, the integer rounded half to even, or the error of its range.
-  # Of the bound of a date against a timestamp (calendar/proofs.rs). And
+  # Of the bound of a date against a timestamp (calendar/proofs.rs). Of
+  # the sort key (sort/proofs.rs): two rows' items compare as the rows do
+  # by their keys, NULL placed and a descending key reversed. And
   # of the two walks over a selection word that unsafe readers trust
   # (tessera-core's reader/proofs.rs, tessera-capi's column/proofs.rs):
   # the rows given and read are exactly the selected, prepared ones in
