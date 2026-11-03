@@ -251,3 +251,6 @@ where
     }
     acc
 }
+
+#[cfg(kani)]
+mod proofs;

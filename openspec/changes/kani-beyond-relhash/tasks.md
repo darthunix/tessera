@@ -33,7 +33,7 @@ placed.
       same text. Check: `cargo test --locked -p tessera-core -p
       tessera-capi`; `tessera-bench --disasm` on `column_reader` and
       the aggregate programs, the same loops.
-- [ ] 2.2 The proofs of `WordValues` in `tessera-core/src/reader/
+- [x] 2.2 The proofs of `WordValues` in `tessera-core/src/reader/
       proofs.rs` (design, decision 1), with their covers; `cargo kani
       -p tessera-core` joins the Kani job of `ci.yml` with its cover
       check, every Kani step there gets `--harness-timeout 600 -Z
