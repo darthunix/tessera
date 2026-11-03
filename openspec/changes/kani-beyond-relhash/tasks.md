@@ -77,7 +77,7 @@ placed.
 
 ## 5. The divisors of the powers of two
 
-- [ ] 5.1 The int4 divisor's `quotient` and `remainder` compiled for
+- [x] 5.1 The int4 divisor's `quotient` and `remainder` compiled for
       Kani as for the tests, and the proofs of both divisors in
       `int32/divisor/proofs.rs` and `int64/divisor/proofs.rs` (design,
       decision 4); `.cargo/mutants.toml` excludes the files. Check:

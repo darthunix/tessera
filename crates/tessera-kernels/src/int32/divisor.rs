@@ -59,14 +59,15 @@ impl Divisor {
     }
 
     /// `n / d`, truncating toward zero: the scalar form of what the vector
-    /// code computes, kept as the specification the tests check against.
+    /// code computes, kept as the specification the tests and the proofs
+    /// check against.
     ///
     /// The high half of the product is `floor(magic * n / 2^32) - n` when
     /// `magic` reads as negative and `0` for a power of two; adding `n`
     /// gives `floor(2^(32 + shift) / |d| * n / 2^32)` or `n`. That is one
     /// below the truncated quotient's shifted form for negative dividends,
     /// which the bias corrects before the shift.
-    #[cfg(test)]
+    #[cfg(any(test, kani))]
     pub(crate) fn quotient(self, n: i32) -> i32 {
         let high = ((i64::from(self.magic) * i64::from(n)) >> 32) as i32;
         let mut q = high.wrapping_add(n);
@@ -76,11 +77,14 @@ impl Divisor {
     }
 
     /// `n % d`, with the dividend's sign; the scalar form, for the tests.
-    #[cfg(test)]
+    #[cfg(any(test, kani))]
     pub(crate) fn remainder(self, n: i32) -> i32 {
         n.wrapping_sub(self.quotient(n).wrapping_mul(self.value))
     }
 }
+
+#[cfg(kani)]
+mod proofs;
 
 #[cfg(test)]
 pub(crate) mod tests {

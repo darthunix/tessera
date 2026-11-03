@@ -246,7 +246,10 @@ jobs:
   # float, the integer rounded half to even, or the error of its range.
   # Of the bound of a date against a timestamp (calendar/proofs.rs). Of
   # the sort key (sort/proofs.rs): two rows' items compare as the rows do
-  # by their keys, NULL placed and a descending key reversed. And
+  # by their keys, NULL placed and a descending key reversed. Of the
+  # prepared divisors of int4 and int8 by a power of two (int32/ and
+  # int64/divisor/proofs.rs): the quotient and remainder of every
+  # dividend are the truncating ones. And
   # of the two walks over a selection word that unsafe readers trust
   # (tessera-core's reader/proofs.rs, tessera-capi's column/proofs.rs):
   # the rows given and read are exactly the selected, prepared ones in
