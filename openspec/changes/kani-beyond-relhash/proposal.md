@@ -49,10 +49,10 @@ The roadmap's entry `kani-beyond-relhash` named the divisors,
 - Proofs of the prepared divisors of int4 and int8 for every power of
   two and every dividend: quotient and remainder equal the truncating
   ones.
-- The divisors by a multiplier are left out of Kani. Unless the
-  maintainer chooses otherwise, they keep their property tests; the
-  other way, one source of the divisor checked exhaustively at 8 and 16
-  bits, is in design.md.
+- The divisors by a multiplier are left out of Kani and keep their
+  property tests, as the maintainer chose; the other way weighed, one
+  source of the divisor checked exhaustively at 8 and 16 bits, is in
+  design.md.
 - `Decimal::round` and `split` stay with their tests: their divisions
   are beyond Kani where it matters, and a proof of the lines after
   them would restate them.

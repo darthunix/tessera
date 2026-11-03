@@ -245,7 +245,8 @@ base.
 
 ## Decisions of the maintainer
 
-- Pending: decision 5, the divisors by a multiplier.
+- 2026-11-03: the proposal is approved; decision 5 keeps the property
+  tests of the divisors by a multiplier, with no code changed.
 
 ## Files
 
