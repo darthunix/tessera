@@ -16,7 +16,7 @@
 //! The kernels allocate nothing: the caller hands the items' words and
 //! the output of references in.
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
 use tessera_core::{RowMask, RowMaskView, ones};
 
@@ -163,6 +163,21 @@ impl<'k> Encoder<'k> {
         null_bits: u32,
         reference: u32,
     ) -> Result<[u64; W]> {
+        self.encode_with(slots, null_bits, reference, null_refused)
+    }
+
+    /// The item of [`Self::encode`], or what `refuse` makes of the index
+    /// of a key declared not nullable that holds a NULL. It builds no
+    /// `anyhow` error of its own, which keeps it within reach of the
+    /// proofs.
+    #[inline(always)]
+    fn encode_with<const W: usize, E>(
+        &self,
+        slots: &[i64],
+        null_bits: u32,
+        reference: u32,
+        refuse: fn(usize) -> E,
+    ) -> Result<[u64; W], E> {
         debug_assert_eq!(W, self.words);
         let mut item = [0u64; W];
         let mut at = 0;
@@ -171,7 +186,7 @@ impl<'k> Encoder<'k> {
             if key.nullable {
                 put(&mut item, &mut at, u64::from(null != key.nulls_first), 1);
             } else if null {
-                bail!("sort key {index} holds a NULL but was declared not nullable");
+                return Err(refuse(index));
             }
             let value = if null { 0 } else { key.encode(slots[index]) };
             put(&mut item, &mut at, value, key.value_bits());
@@ -179,6 +194,13 @@ impl<'k> Encoder<'k> {
         item[W - 1] |= u64::from(reference);
         Ok(item)
     }
+}
+
+/// The error of a NULL in a key declared not nullable, built in place
+/// as `bail!` built it.
+#[inline(always)]
+fn null_refused(index: usize) -> anyhow::Error {
+    anyhow::anyhow!("sort key {index} holds a NULL but was declared not nullable")
 }
 
 /// Write the low `width` bits of `value` at bit `*at`, counted from the
