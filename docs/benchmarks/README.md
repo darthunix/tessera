@@ -7,6 +7,11 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-03, a walk that keeps the columns read behind
+  it](2026-11-03-deform-past-varlena/README.md): TPC-H serial and with
+  two workers, the probes of the rule and of the step for a one-byte
+  header, the families tax and win, Apple M5 Pro, PostgreSQL master,
+  the change `deform-past-varlena` against `06297a9f`.
 - [2026-11-03, index lookups by batch in the hash
   join](2026-11-03-batch-index-join/README.md): the family indexjoin,
   the calibration lookupcost, TPC-H serial and with two workers, Apple

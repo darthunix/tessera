@@ -37,7 +37,7 @@ with Tessera on, in the order
 `agg-dependent-columns` after `batch-index-join`, once a measurement of
 Q10 showed its aggregate's input row-wise. The maintainer took seven
 entries out of turn on 2026-11-03, after an analysis of TPC-H with
-`batch-index-join`, in the order `deform-past-varlena`,
+`batch-index-join`, in the order `deform-past-varlena` (done),
 `lookup-outer-compaction`, `semi-anti-lookups`, `numeric-reading`,
 `like-substring-search`, `agg-table-presize`, `tpch-q9-plan`, the last
 with the foreign keys of the schema left undeclared for now; the same
@@ -194,29 +194,6 @@ TessAgg with columns its keys determine.
   proposal.
 - **Depends on:** nothing.
 - **Capabilities:** aggregate
-- **Size:** medium: one pull request.
-
-### deform-past-varlena
-
-The columns past short varlena columns reached faster.
-
-- **What:** TessHeapScan's deform reaches a column past columns of
-  varying length with a path for a run of them with one-byte headers,
-  such as the four numerics and two char(1) of `lineitem` before
-  `l_shipdate`, which need no alignment. First the measure: the cycles
-  a row of the node's deform and of the core's `slot_deform_heap_tuple`
-  on the layout of `lineitem`, then the path.
-- **Why:** The deform takes about half of TPC-H Q06, Q12 and Q14 serial
-  and a quarter of Q01 (profiles of 2026-11-03, `deform` 50 %, 52 %,
-  50 % and 26 % of the samples), about 600 ms over the set: the columns
-  their clauses and aggregates read lie past six varlena columns. The
-  node is already faster than the core there (Q06's scan and filter
-  143 ms against the core's 211).
-- **Known:** A deform in Rust or vectorized was decided against; this
-  is the C cursor. `numeric-reading` would parse the numerics while the
-  tuple is deformed.
-- **Depends on:** nothing.
-- **Capabilities:** TessHeapScan
 - **Size:** medium: one pull request.
 
 ### like-substring-search
@@ -846,8 +823,8 @@ Faster reading of numeric. From plan 4.23 analysis of 2026-09-30, lines
   is reading numeric (46 %) and deforming the varlena column (28 %).
   The analysis of 2026-11-03: in TPC-H Q01 the decimal sums, reading
   and expressions take about 37 % of the query (sum 12 %, reading 9 %),
-  in Q18 the sums 17 %; the deform of the numerics before them is
-  `deform-past-varlena`.
+  in Q18 the sums 17 %; the deform of the numerics before them was
+  cut by `deform-past-varlena` (Q01 0.80 of its time).
 - **Known:** Estimate for the first hypothesis: −3…4 ms of 19.4 (×0.40 →
   about ×0.33); the gain of the second is unknown. Not measured; the
   rule is to count instructions per row with objdump first (line
