@@ -13,7 +13,8 @@
 //! inputs ([`Fixture::inputs`]): call after call, the same words in other
 //! orders, so that it does the same work but repeats neither where its rows
 //! lie nor how many the n-th word holds, and the predictor learns none of
-//! them.
+//! them. The density cases (`density-8` to `density-32`) select exactly
+//! that many rows of every word, at positions drawn so too.
 
 use super::reference::Mask;
 use anyhow::Result;
@@ -56,6 +57,16 @@ impl FixtureValue for i64 {
 /// describes.
 pub const RING: usize = 64;
 
+/// The selected rows a word of the density cases, around the bounds from
+/// which the kernels take a word whole.
+pub const DENSITIES: [usize; 5] = [8, 12, 16, 24, 32];
+
+/// The patterns of the density cases, `density-<rows>`, in the order of
+/// [`DENSITIES`].
+pub fn density_patterns() -> impl Iterator<Item = String> {
+    DENSITIES.iter().map(|rows| format!("density-{rows}"))
+}
+
 /// xorshift64*: deterministic, and its high bits are well mixed.
 struct Random(u64);
 
@@ -92,6 +103,21 @@ fn shuffle<T>(items: &mut [T], random: &mut Random) {
     for at in (1..items.len()).rev() {
         items.swap(at, (random.next() % (at as u64 + 1)) as usize);
     }
+}
+
+/// `rows` of the `ready` rows of each word of 64, at positions drawn from
+/// `random`; every ready row of a word that has fewer.
+fn drawn_rows(ready: &[bool], rows: usize, random: &mut Random) -> Vec<bool> {
+    let mut selected = vec![false; ready.len()];
+    for start in (0..ready.len()).step_by(64) {
+        let end = (start + 64).min(ready.len());
+        let mut candidates: Vec<_> = (start..end).filter(|&row| ready[row]).collect();
+        shuffle(&mut candidates, random);
+        for &row in candidates.iter().take(rows) {
+            selected[row] = true;
+        }
+    }
+    selected
 }
 
 /// The misses a call of a loop over the selected rows of each word: a
@@ -254,22 +280,26 @@ impl<T: FixtureValue> Fixture<T> {
         let nrows = values.len();
         let mut random = Random::seeded(nrows);
         let ready: Vec<_> = (0..nrows).map(|row| !partial || row % 3 != 2).collect();
-        let selected: Vec<_> = (0..nrows)
-            .map(|row| {
-                ready[row]
-                    && match pattern {
-                        "all" => true,
-                        "half" => row % 2 == 0,
-                        "quarter" => row % 4 == 0,
-                        "sparse" => row % 64 == 0,
-                        "eighth" => row % 8 == 0,
-                        "one-per128" => row % 128 == 0,
-                        "empty" => false,
-                        "random" => random.chance(50),
-                        _ => unreachable!(),
-                    }
-            })
-            .collect();
+        let density = pattern.strip_prefix("density-");
+        let selected: Vec<_> = match density {
+            Some(rows) => drawn_rows(&ready, rows.parse().unwrap(), &mut random),
+            None => (0..nrows)
+                .map(|row| {
+                    ready[row]
+                        && match pattern {
+                            "all" => true,
+                            "half" => row % 2 == 0,
+                            "quarter" => row % 4 == 0,
+                            "sparse" => row % 64 == 0,
+                            "eighth" => row % 8 == 0,
+                            "one-per128" => row % 128 == 0,
+                            "empty" => false,
+                            "random" => random.chance(50),
+                            _ => unreachable!(),
+                        }
+                })
+                .collect(),
+        };
         let flags: Vec<_> = (0..nrows)
             .map(|row| match nulls {
                 "none" => false,
@@ -300,7 +330,7 @@ impl<T: FixtureValue> Fixture<T> {
             values,
             datums,
             expected,
-            drawn: pattern == "random" || nulls == "random",
+            drawn: pattern == "random" || density.is_some() || nulls == "random",
         }
     }
 

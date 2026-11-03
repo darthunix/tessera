@@ -197,11 +197,20 @@ one on the M5 Pro. The cases drawn at random are:
 
 - `random` (every second row on average) and `nulls-random` (30% NULL) of
   the reading cases and of the filters' cases, of both widths;
-- the pair of `compare_int32` whose selection is `random`, both sides
-  permuted alike; the other pairs keep one input, though the NULL flags of
-  their right side are drawn at random;
+- the pairs of `compare_int32` whose selection is `random` or that of a
+  density case below, both sides permuted alike; the other pairs keep
+  one input, though the NULL flags of their right side are drawn at
+  random;
 - `shuffled` of `set_int32`, every row selected and its values in random
-  order.
+  order;
+- the density cases, `density-8`, `density-12`, `density-16`,
+  `density-24` and `density-32`, of the reading cases, and so of
+  `set_int32`, of the filters' cases and of the pairs of
+  `compare_int32`: exactly that many rows selected in every word, on
+  either side of the bounds from which the kernels take a word whole.
+  Every word holds as many rows, so a loop over them may exit as
+  learned, but where they lie, and the values there, change from input
+  to input.
 
 The two kinds of cases are meant to be read together: a branch is judged
 against a choice made as data on the cases drawn at random, where the

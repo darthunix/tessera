@@ -46,6 +46,9 @@ pub fn cases() -> Vec<Fixture> {
     cases.push(case(1024, "random", "random", false));
     cases.push(case(1024, "all", "mixed", true));
     cases.push(case(1024, "one-per128", "mixed", true));
+    for pattern in fixture::density_patterns() {
+        cases.push(case(1024, &pattern, "none", false));
+    }
     cases
 }
 
