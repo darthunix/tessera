@@ -4,7 +4,9 @@
 //! through [`WordValues::checked`], the checks and the building of
 //! [`WordValues::try_new`]:
 //!
-//! - a refusal comes with no call of the reader;
+//! - a word is refused exactly when it calls for it, for the reason it
+//!   calls for, stated apart from the code's checks, and a refusal comes
+//!   with no call of the reader;
 //! - the reader, checked inside each call, is called only for a row of
 //!   the word that is selected, prepared and below `nrows`, each row
 //!   after the last, and the row given is the row it was called for;
@@ -18,7 +20,7 @@
 
 use std::cell::Cell;
 
-use super::WordValues;
+use super::{Refusal, WordValues};
 
 /// What a reader checked in its calls: how many, and the last row.
 #[derive(Default)]
@@ -44,16 +46,26 @@ impl Calls {
     }
 }
 
-/// Covers of each refusal, by the inputs that call for it.
-fn cover_refusals(nrows: usize, word: usize, selected: u64, prepared: u64) {
-    let words = nrows.div_ceil(64);
-    kani::cover!(word >= words);
-    kani::cover!(word < words && 64 - selected.leading_zeros() as usize > nrows - word * 64);
-    kani::cover!(
-        word < words
-            && 64 - selected.leading_zeros() as usize <= nrows - word * 64
-            && selected & !prepared != 0
-    );
+/// The refusal a word calls for, stated apart from the code's checks: a
+/// word whose first row is past the rows, a selected row past the rows,
+/// a selected row that is not prepared; none for a word to walk.
+fn expected(nrows: usize, word: usize, selected: u64, prepared: u64) -> Option<Refusal> {
+    let Some(base) = word.checked_mul(64).filter(|&base| base < nrows) else {
+        return Some(Refusal::OutOfBounds);
+    };
+    let rows_in_word = nrows - base;
+    if rows_in_word < 64 && selected >> rows_in_word != 0 {
+        return Some(Refusal::Padding);
+    }
+    (selected & !prepared != 0).then_some(Refusal::Unprepared)
+}
+
+/// The refusal of a word is the one it calls for, and each is met.
+fn check_refusal(refusal: Refusal, nrows: usize, word: usize, selected: u64, prepared: u64) {
+    assert!(expected(nrows, word, selected, prepared) == Some(refusal));
+    kani::cover!(refusal == Refusal::OutOfBounds);
+    kani::cover!(refusal == Refusal::Padding);
+    kani::cover!(refusal == Refusal::Unprepared);
 }
 
 #[kani::proof]
@@ -66,11 +78,12 @@ fn the_walk_by_next_gives_the_selected_rows() {
         Some(row)
     };
     match WordValues::checked(nrows, word, selected, prepared, read, |refusal| refusal) {
-        Err(_) => {
+        Err(refusal) => {
             assert!(calls.count.get() == 0);
-            cover_refusals(nrows, word, selected, prepared);
+            check_refusal(refusal, nrows, word, selected, prepared);
         }
         Ok(values) => {
+            assert!(expected(nrows, word, selected, prepared).is_none());
             let mut seen = 0u64;
             let mut given = 0u32;
             for (row, value) in values {
@@ -98,9 +111,13 @@ fn the_walk_by_fold_gives_the_selected_rows() {
         calls.check(row, nrows, word, selected, prepared);
         Some(row)
     };
-    if let Ok(values) =
-        WordValues::checked(nrows, word, selected, prepared, read, |refusal| refusal)
-    {
+    let made = WordValues::checked(nrows, word, selected, prepared, read, |refusal| refusal);
+    if let Err(refusal) = made {
+        assert!(calls.count.get() == 0);
+        assert!(expected(nrows, word, selected, prepared) == Some(refusal));
+    }
+    if let Ok(values) = made {
+        assert!(expected(nrows, word, selected, prepared).is_none());
         let (seen, given) = values.fold((0u64, 0u32), |(seen, given), (row, value)| {
             assert!(value == Some(row));
             assert!(calls.count.get() == given + 1);
