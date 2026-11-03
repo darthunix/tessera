@@ -207,6 +207,20 @@ The two kinds of cases are meant to be read together: a branch is judged
 against a choice made as data on the cases drawn at random, where the
 predictor cannot help it.
 
+A pilot on both machines chose the ring and its size against a model of
+the misses that a predictor which has not seen the inputs makes, and
+refused two other forms. A fresh input before every call, permuted
+between two calls, keeps the footprint of one input, but its control,
+the same schedule over one input, cost 37% more cycles than the plain
+case on the Intel Core and 24% on the M5 Pro: the reads of the counters
+around every call and the permutation, past the warning of 3%. One input
+64 times longer needs no ring, but a call then does 64 times the work,
+the cases of 0 to 65 rows cannot be made long, and on the Intel Core its
+control, one input repeated within the call, missed as much as the form,
+so the form showed nothing new. A ring of 16 was enough on the Intel
+Core; on the M5 Pro the fold's misses still grew by 5% from a ring of 32
+to one of 64, so the ring holds 64.
+
 A ring takes more memory than one input. The inputs that a dense int4 read
 touches in a turn take about 280 KiB, inside the Intel Core's L2 of 512 KiB;
 those of an int8 read or of a Datum read, about 540 and 590 KiB, pass it.

@@ -1,0 +1,7 @@
+DIAGNOSTIC: selected cases only; baseline=WORKTREE@becb677fb1e01ebdc169fae64c615c2cd9cfb99d, candidate=WORKTREE@becb677fb1e01ebdc169fae64c615c2cd9cfb99d
+cast_int32
+PASS cast_int32/datum/words/1024/all/nulls-random/ready/widen: instructions before=2894.0 after=2894.0 change=+0.00%; cycles min before=522.7 after=527.4 change=+0.91% (median 528.5/529.0, modes 1.01/1.01, 3 processes); branch misses before=1.000 after=1.000 of 229.0 branches; cores 12,13,14,15,16,17
+PASS cast_int32/datum/words/1024/random/nulls-random/ready/widen: instructions before=2894.0 after=2894.0 change=+0.00%; cycles min before=521.5 after=526.1 change=+0.88% (median 528.0/529.2, modes 1.02/1.02, 3 processes); branch misses before=1.000 after=1.000 of 229.0 branches; cores 12,13,14,15,16,17
+PASS cast_int32/dense/words/1024/all/nulls-random/ready/widen: instructions before=1959.0 after=1959.0 change=+0.00%; cycles min before=390.4 after=391.6 change=+0.32% (median 393.2/395.0, modes 1.01/1.01, 3 processes); branch misses before=0.000 after=0.000 of 263.0 branches; cores 12,13,14,15,16,17
+PASS cast_int32/dense/words/1024/random/nulls-random/ready/widen: instructions before=1959.0 after=1959.0 change=-0.00%; cycles min before=394.4 after=394.9 change=+0.14% (median 396.3/396.2, modes 1.01/1.01, 3 processes); branch misses before=0.000 after=0.000 of 263.0 branches; cores 12,13,14,15,16,17
+PASS: 4 PASS, 0 FAIL (0 instructions, 0 cycles), 0 UNSTABLE library paths; 0 cycle warnings; 0 bistable
