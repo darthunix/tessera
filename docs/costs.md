@@ -281,11 +281,12 @@ The counts follow the core's estimates and the shape of the outer side:
   table's order, the run is the share of the table the most restricting
   such clause keeps, moved toward the whole table by 1 - c² for the
   column's correlation c; the rows are spread over the run's batches, of
-  64 rows at most and none across a page. A pack, an index or bitmap
-  scan, an aggregate or a sort gives full batches; above a join whose
+  64 rows at most and none across a page; under an append, the sum of
+  its partitions' batches. A pack, an index or bitmap scan, an
+  aggregate or a sort gives full batches; above a join whose
   rounds may each be a batch, or where no scan is found, a batch is
   counted a row;
-- the descents: the outer keys reach L of the index's P leaf pages, P
+- the descents: the outer keys reach L of the index's P pages, P
   times the core's selectivity, on the inner column, of the range
   between the first and the last bound of the outer key's histogram (P
   where it has none). A batch's keys at random over them descend once a
