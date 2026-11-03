@@ -423,11 +423,13 @@ What stands out:
 
 - On the M5 Pro the minimum of `compare_int32` over Datum `random`
   moved by 21 % between the two sides, 985 cycles against 1194, while
-  their medians, 1283 and 1236, moved the other way. The operation
-  has two costs there, near 985 and near 1240, and only one side met
-  the lower one. The tool did not count it, as the median did not
+  their medians, 1283 and 1236, moved the other way. The 985 is one
+  block, the first of one process; the other 59 blocks lie between
+  1194 and 1322, each process at a level of its own, from about 1200
+  to about 1300. The tool did not count it, as the median did not
   confirm it; it is the one operation of 500 cycles or more whose
-  minimum moved past the limit of 10 %.
+  minimum moved past the limit of 10 %. "The levels of the M5 Pro
+  over a ring" below follows it.
 - Under 500 cycles the minimum moved a few cycles: by 12.7 % on the
   Intel Mac, 138 against 155 cycles of `count` of `aggregate_int32`
   over dense `random`, and by 5.2 % on the M5 Pro on the same
@@ -457,6 +459,74 @@ fold 0.03 times (`compare-F6x7L1`), the search over `shuffled` 12.7
 (`compare-jrOJVK`), and `probe_hit` of `table_int32` over dense
 `random` 8.7, in 12 132 cycles against 19 722 now (`compare-zOahIK`,
 whose base is a build of another branch, so a guide only).
+
+### The reruns after the rebase
+
+The branch was then rebased onto `main` at `626b8ae7`, which had
+brought the smallint groups of `arith_int32`: their values are those
+of a reading case cut to the smallint range, and they now take the
+ring of their case. The commits this design names before are those of
+the branch before the rebase: `98b72bb`, `1fb5002` and `becb677` are
+now `6c7c7b42`, `0240b805` and `7680f0a0`.
+
+At commit `116693a3`, `arith_int32` against itself again, with the
+same filters: 36 operations, 16 of them smallint. No FAIL, no UNSTABLE
+and no warning.
+
+- The Intel Mac, `compare-2ikC92`: the minimum moved by 1.5 % at most,
+  the median by 2.5 %, and the largest MODES is 1.68. The 20
+  operations that `compare-O4abX0` measured cost what they cost there,
+  within about 1 %.
+- The M5 Pro, `compare-XKaRLo`: the minimum moved by 7.2 % at most,
+  on Datum `smallint/all` `div_scalar`, 1220 cycles against 1132, and
+  the median moved with it, 1244 against 1144. All 18 Datum operations
+  were cheaper on the second side, by 0.3 to 7.2 %; the dense ones
+  moved by 1.4 % at most, either way. With the sides the other way
+  round, that one would have been a warning, and none a FAIL. In
+  `compare-6xxIT8` the same 20 operations had moved by 2.5 % at most.
+
+### The levels of the M5 Pro over a ring
+
+The 21 % of `compare_int32` was followed in two tries, each a
+hypothesis written before it.
+
+- The first, from the runs at hand: the ring of Datum pairs takes
+  about 1.2 MiB a turn, where one pair took 18 KiB, so it moved them
+  out of the L1 cache, and the cost of a call then depends on where a
+  process's buffers land. The blocks of `compare-GK3FcH` show the 985
+  as one block and the processes at levels about 10 % apart, as above.
+  In the runs of `set_int32` on the M5 Pro before the rings,
+  `compare-3h7z3U` and `compare-wYIMAz`, the same cases had MODES of
+  1.00 to 1.03; over the rings several have 1.1 to 1.5, dense and
+  Datum. The hypothesis stood, but was not shown to be the cause.
+- The second, a probe on a branch never merged,
+  `probe-compare-ring-footprint` (`ca81060c`): the pair drawn at
+  random measured three ways in one build, as one pair, as a ring of 4
+  pairs, about 74 KiB and inside the M5 Pro's L1, and as a ring of 64.
+  Written before: if the ring of 4 spreads the processes as much as
+  the ring of 64, the footprint past L1 is not the cause. Its run,
+  `compare-SXZg8f`, all PASS. Over Datum, the medians of the six
+  processes lay within 1.2 % for one pair, 10.2 % for the ring of 4
+  and 11.9 % for the ring of 64. In two processes of the ring of 4 the
+  cost stepped from about 1075 to about 1188 within the run and stayed
+  there. The dense kernel kept its processes within 2.8 % in all
+  three. So the footprint past L1 is not the cause. It raises the
+  cost, from 1030 to 1067 to 1167 cycles over Datum and from 649 to
+  666 to 698 dense, but not the spread. The 985 lies below the cost of
+  one pair in L1, so that block met a state of the machine, not the
+  ring.
+
+What brings the second level is not known. One pair kept its processes
+together in this run and the rings did not, so taking the inputs in
+turn may; one run of six processes does not show it. The records of a
+run hold no time, so the clock of a block cannot be read from them. No
+form of the case avoids it: a smaller ring lets the M5 Pro learn part
+of the inputs, as the pilot showed, and the ring of 4 spreads as the
+ring of 64. The maintainer chose to close the change with this as a
+finding. On the M5 Pro too, a process over a ring can keep one of two
+costs, so a `FAIL cycles` on a case drawn at random counts there when
+a second run confirms it, as on the Intel Mac; the cause goes to "Not
+placed".
 
 ## Measurement plan
 
