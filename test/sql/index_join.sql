@@ -212,6 +212,17 @@ CREATE INDEX ij_inner_tk ON ij_inner (tk);
 EXECUTE ij_by_text;
 DEALLOCATE ij_by_text;
 
+-- A partitioned outer side: TessAppend's batches feed the lookups, and
+-- the planner counts each partition's.
+CREATE TABLE ij_parts (id int, ko int) PARTITION BY RANGE (id);
+CREATE TABLE ij_parts_1 PARTITION OF ij_parts FOR VALUES FROM (1) TO (1501);
+CREATE TABLE ij_parts_2 PARTITION OF ij_parts FOR VALUES FROM (1501) TO (3001);
+INSERT INTO ij_parts SELECT id, ko FROM ij_outer;
+ANALYZE ij_parts;
+SELECT ij_lookup($$SELECT count(*), sum(l.v) FROM ij_parts o JOIN ij_inner l ON l.id = o.ko WHERE o.id % 2 = 0$$) AS partitioned;
+SELECT ij_same($$SELECT o.id, l.v FROM ij_parts o JOIN ij_inner l ON l.id = o.ko WHERE o.id % 2 = 0$$);
+DROP TABLE ij_parts;
+
 -- Indexes the lookup refuses: partial, of an expression, of another
 -- access method; an inheritance parent; a nondeterministic collation.
 -- Beside each, the plain index or table the lookup takes.

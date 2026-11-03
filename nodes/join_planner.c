@@ -1332,10 +1332,10 @@ lookup_run(PlannerInfo *root, RelOptInfo *rel)
  * The batches of an index join's outer side with a row: those of the
  * node's full scan of the table that drives it, through the filters and
  * the joins above it that keep its batches, the outer rows spread over the
- * run of that scan its clauses select; full batches from a pack, an index
- * or bitmap scan, an aggregate, a sort or any other node; a batch a row
- * above a join whose rounds may each be a batch, or where no scan is
- * found. The counts of a partial path are one
+ * run of that scan its clauses select; the sum of its partitions' under
+ * an append; full batches from a pack, an index or bitmap scan, an
+ * aggregate, a sort or any other node; a batch a row above a join whose
+ * rounds may each be a batch, or where no scan is found. The counts of a partial path are one
  * participant's, the run and the span the whole table's.
  */
 static void
@@ -1372,6 +1372,21 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	if (!IS_SIMPLE_REL(driver->parent) || driver->parent->tuples <= 0)
 	{
 		shape->batches = Max(outer->rows, 1.0);
+		return;
+	}
+	/* A partitioned table's append: the batches of its partitions, summed. */
+	if (tess_path_node(driver) == &tess_append_node)
+	{
+		double		sum = 0;
+
+		foreach_ptr(Path, child, ((const CustomPath *) driver)->custom_paths)
+		{
+			LookupShape part;
+
+			lookup_shape(root, child, &part);
+			sum += part.batches;
+		}
+		shape->batches = Max(Min(sum, outer->rows), 1.0);
 		return;
 	}
 	/*
