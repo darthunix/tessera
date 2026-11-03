@@ -13,13 +13,18 @@
 Size
 table_chunk_len(const TessKernelOps *kernels, TessStatus *status)
 {
-	Size		len;
+	TessSpillShape shape = {
+		.share = 8,
+		.min_chunk = TABLE_FIRST_CHUNK,
+		.max_chunk = TESS_TABLE_MAX_CHUNK_LEN,
+		.min_partitions = 1,
+		.max_partitions = 1,
+	};
+	TessSpillLevel level = {.limit = tess_hash_memory_limit()};
+	TessSpillPlan plan;
 
-	tess_status_check(kernels->spill_chunk_len(tess_hash_memory_limit(), 1, 8,
-											   TABLE_FIRST_CHUNK,
-											   TESS_TABLE_MAX_CHUNK_LEN, &len,
-											   status), status);
-	return len;
+	tess_status_check(kernels->spill_plan(&shape, &level, &plan, status), status);
+	return plan.chunk_len;
 }
 
 void

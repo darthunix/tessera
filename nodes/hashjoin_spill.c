@@ -812,21 +812,46 @@ outer_column_type(TessHashJoinState *state, int column, int16 *typlen, bool *byv
 }
 
 /*
- * A level of partitions by the hash bits from shift, for an inner side
- * of expected bytes, as the current one: the power of two of them that
- * makes each about half of hash_mem, as long as the bits last and each
- * partition's tails on both sides fit in half of hash_mem.
+ * The level plan's shape of the join's levels: each partition keeps its
+ * reserve, JOIN_SPILL_RESERVE, and the chunks take a sixteenth of the
+ * limit among the partitions, from JOIN_SPILL_MIN_CHUNK to JOIN_CHUNK_LEN,
+ * of four records at least.
+ */
+TessSpillShape
+join_spill_shape(TessHashJoinState *state)
+{
+	return (TessSpillShape) {
+		.reserve = JOIN_SPILL_RESERVE,
+		.share = 16,
+		.min_chunk = JOIN_SPILL_MIN_CHUNK,
+		.max_chunk = JOIN_CHUNK_LEN,
+		.record = state->record_size,
+		.min_partitions = JOIN_SPILL_MIN_PARTITIONS,
+		.max_partitions = JOIN_SPILL_MAX_PARTITIONS,
+	};
+}
+
+/*
+ * A level of partitions by the level plan (tess_spill_plan), for an inner
+ * side of expected bytes, as the current one, by the hash bits the level
+ * above leaves; with forced partitions, those a shared table's every
+ * participant took.
  */
 JoinSpill *
 join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
-			 uint32 shift, int forced)
+			 int forced)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-	Size		limit = tess_hash_memory_limit();
-	Size		record = state->record_size;
+	TessSpillShape shape = join_spill_shape(state);
+	TessSpillLevel at = {
+		.expected = expected,
+		.limit = tess_hash_memory_limit(),
+		.shift = parent == NULL ? 0 : parent->below,
+		.partitions = (uint32) forced,
+	};
+	TessSpillPlan plan;
 	Size		chunk_len;
 	Size		outer_len;
-	uint32		count;
 	int			npartitions;
 	JoinSpill  *spill;
 	int16	   *typlens;
@@ -839,21 +864,11 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 	{
 		Size		used = join_spill_memory(state, parent, NULL);
 
-		limit = used < limit / 4 * 3 ? limit - used : limit / 4;
+		at.limit = used < at.limit / 4 * 3 ? at.limit - used : at.limit / 4;
 	}
-
-	/* Each partition's reserve on both sides: half of hash_mem bounds them all. */
-	check(state, state->kernels->spill_partitions(expected, limit, JOIN_SPILL_RESERVE, shift,
-												  JOIN_SPILL_MIN_PARTITIONS,
-												  JOIN_SPILL_MAX_PARTITIONS, 0, &count,
-												  &state->status));
-	/* A shared table's partitions, which every participant took. */
-	npartitions = forced > 0 ? forced : (int) count;
-	/* A chunk a sixteenth of hash_mem among them, of four records at least. */
-	check(state, state->kernels->spill_chunk_len(limit, (uint32) npartitions, 16,
-												 Max(JOIN_SPILL_MIN_CHUNK,
-													 TESS_TABLE_CHUNK_HEADER + 4 * record),
-												 JOIN_CHUNK_LEN, &chunk_len, &state->status));
+	check(state, state->kernels->spill_plan(&shape, &at, &plan, &state->status));
+	npartitions = (int) plan.partitions;
+	chunk_len = plan.chunk_len;
 
 	spill = MemoryContextAllocZero(context, sizeof(JoinSpill));
 	state->spill = spill;
@@ -868,7 +883,8 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 												 "TessHashJoin outer block",
 												 TESS_CHUNK_CONTEXT_SIZES);
 	spill->npartitions = npartitions;
-	spill->shift = shift;
+	spill->shift = plan.shift;
+	spill->below = plan.below;
 	spill->partition = -1;
 	/* A level's own files; a shared table's first level reads every participant's. */
 	spill->writers = 1;
@@ -891,8 +907,7 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 		SpillSide  *build = &spill->build;
 		uint32		in_force;
 
-		check(state, state->kernels->table_spill_words(npartitions, &build->spill_nwords,
-													   &state->status));
+		build->spill_nwords = plan.words;
 		build->spill_words = MemoryContextAlloc(build->context,
 												sizeof(uint64) * build->spill_nwords);
 		build->kernels = state->kernels;
@@ -997,13 +1012,13 @@ void
 join_start_spill(TessHashJoinState *state)
 {
 	double		bytes = (double) state->table_bytes + state->values.bytes;
-	double		expected = bytes * 2;
 	JoinSpill  *spill;
 	uint64		expected_rows;
 
-	if (state->build_rows > 0)
-		expected = Max(expected, bytes / state->build_rows * state->inner_rows);
-	spill = join_spill_create(state, NULL, expected, 0, 0);
+	spill = join_spill_create(state, NULL,
+							  state->kernels->spill_expected(bytes, (double) state->build_rows,
+															 state->inner_rows, 1),
+							  0);
 
 	/* A filter of every inner row, sized for the rows expected. */
 	state->counters[JOIN_BLOOM_FILTERS]++;
@@ -1887,8 +1902,7 @@ start_level(TessHashJoinState *state, int partition)
 	JoinSpill  *spill;
 	bool		records = false;
 
-	spill = join_spill_create(state, parent, (double) part->disk_bytes + part->bytes,
-						 parent->shift + pg_leftmost_one_pos32(parent->npartitions), 0);
+	spill = join_spill_create(state, parent, (double) part->disk_bytes + part->bytes, 0);
 	spill->input_rows = from->rows[partition];
 	spill->total_rows = from->rows[partition];
 	state->counters[JOIN_SPLITS]++;
@@ -2006,9 +2020,7 @@ join_open_partition(TessHashJoinState *state, int partition)
 													 spill->build.parts[partition].disk_bytes,
 													 spill_used(state), tess_hash_memory_limit(),
 													 spill->build.rows[partition],
-													 spill->input_rows,
-													 spill->shift +
-													 pg_leftmost_one_pos32(spill->npartitions),
+													 spill->input_rows, spill->below,
 													 &split, &state->status));
 	if (split)
 	{

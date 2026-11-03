@@ -245,7 +245,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       instead of the largest allocation PostgreSQL allows; a reader of
       a shared set takes the bounds its writers agreed on. Check: tests
       of wide values and of long lists; `make installcheck`
-- [ ] 3.9 Make the level plan one rule: the partitions, the chunks and
+- [x] 3.9 Make the level plan one rule: the partitions, the chunks and
       the words of a level, the expected bytes of level 0, the shift of
       a level below, and the bits of the hash each level takes, with
       the differences of each node as parameters. The join, the shared

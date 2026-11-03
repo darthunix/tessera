@@ -278,6 +278,13 @@ typedef struct TessAggState
 	Size		record_size;
 	/* The payloads of the walk's groups, for the sum and extreme states. */
 	uint8	   *walked_payloads[AGG_GROUP_ROWS];
+	/*
+	 * The hash bits the levels above rows_level took, and whether the
+	 * partition read is of the last level the bits allow: the level plan's
+	 * below and deeper of the partition's level.
+	 */
+	uint32		rows_shift;
+	bool		rows_last;
 } TessAggState;
 
 /* Raise the error a kernel or table call stored, if it failed. */
@@ -307,10 +314,12 @@ extern void agg_reserve_chunks(TessAggState *state, int nchunks);
  * The spill (agg_spill.c): the groups' partitions past hash_mem and their
  * merge, and the rows of generic aggregates past it, read back by level.
  */
-/* Hash bits a level of partitions of rows takes, and the most levels. */
+/*
+ * The partitions of every level of rows, and the hash bits each takes; the
+ * level plan gives a level its bits, and says whether a level fits below.
+ */
 #define ROWS_PART_BITS 5
 #define ROWS_PARTS (1 << ROWS_PART_BITS)
-#define ROWS_MAX_LEVELS (32 / ROWS_PART_BITS)
 extern void agg_start_spill(TessAggState *state);
 extern void agg_make_room(TessAggState *state);
 extern void agg_find_partitioned(TessAggState *state, TessRowMask *pending,
@@ -319,7 +328,7 @@ extern bool agg_advance(TessAggState *state);
 extern void agg_finish_input(TessAggState *state);
 extern Size agg_spill_memory(TessAggState *state);
 extern void agg_spill_free(TessAggState *state);
-extern struct RowSpill *rows_spill_create(TessAggState *state, int level);
+extern struct RowSpill *rows_spill_create(TessAggState *state, int level, uint32 shift);
 extern void rows_write(TessAggState *state, struct RowSpill *spill,
 					   const TessRowMask *rows);
 extern void rows_spill_close(TessAggState *state);

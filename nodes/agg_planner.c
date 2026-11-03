@@ -568,14 +568,14 @@ aggregate_templates(const List *pathlist, AggStrategy strategy, AggSplit aggspli
  * too, and call a generic aggregate's transition function as the core
  * does. A sum state is five words of the group's record, not the core's
  * estimate of its transition state (128 bytes for numeric's). Past seven
- * eighths of hash_mem the rows of the groups that do not fit go to 32
- * partitions and are read back once per level, their columns written in
- * blocks sequentially, without the core's penalty for random writes. The
+ * eighths of hash_mem the rows of the groups that do not fit go to the
+ * partitions of a level of rows, ROWS_PARTS by the level plan, and are
+ * read back once per level, their columns written in blocks sequentially,
+ * without the core's penalty for random writes. The
  * shares, tessera.agg_key_share and tessera.agg_kernel_share (0.25 each),
  * are measured: grouping alone took 0.30 of the core's time, with generic
  * aggregates 0.41 to 0.53, spilling 0.40 to 0.63 (plan 5.13).
  */
-#define AGG_SPILL_PARTS 32.0
 
 /*
  * The cost a row of the aggregates' arguments that the kernels do not
@@ -672,7 +672,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	if (groups * entry > limit && ncolumns > 0)
 	{
 		double		share = 1.0 - limit / (groups * entry);
-		double		depth = ceil(log(groups * entry / limit) / log(AGG_SPILL_PARTS));
+		double		depth = ceil(log(groups * entry / limit) / log((double) ROWS_PARTS));
 		double		spilled = rows * share * Max(depth, 1.0);
 		double		pages = spilled * width / BLCKSZ;
 

@@ -505,7 +505,9 @@ moves into the crate once, and its copies go.
   take the low bits, from level 0 up, and the buckets of a table the
   high bits; the grouping's rows by a key with a dictionary of values
   go by the values' hashes mixed first, since the dictionary's buckets
-  take their low bits. Two rules, which the level plan holds.
+  take their low bits. The level plan holds the first rule; the second
+  is the node's choice of the hashes it gives a level, which the plan's
+  documentation names.
 - The writer and the reader of a chunk of columns: for the grouping's
   rows, twice for the sort's runs, for the join's outer rows, and for
   the gather of parallel workers.

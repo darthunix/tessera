@@ -239,30 +239,97 @@ tess_spill_columns_word(void *chunk, int word)
 }
 
 /*
- * The partitions of a level of a spill: from min_partitions, the power of
- * two that makes each hold about half of limit of the expected bytes, or
- * at_least of them, as long as each partition's reserve (its tails of
- * chunks and its files' buffers) fits in half of limit, the hash bits from
- * shift last and max_partitions is not passed. A grouping's spill, a
- * join's and a shared join table's take it with their own parameters
- * (openspec/specs/hash-table/). Expected bytes below zero or not a
- * number, and a shift past which min_partitions do not fit in the 32 bits
- * of the hash, are refused.
+ * The plan of a level of a spill, one rule for every node's levels
+ * (relspill's plan): how many partitions a level splits into, how long
+ * the chunks each keeps in memory are, how many spill words count them,
+ * and which bits of the hash it takes. A level takes the low bits of a
+ * row's hash, the first level from bit 0 and each level below from the
+ * bit past those of the level above, so a row's partition is
+ * tess_table_partition(hash, plan.shift, plan.partitions); the buckets of
+ * a table take the high bits.
+ *
+ * TessSpillShape is what every level of a node's spill shares:
+ *
+ * - reserve: what each partition keeps in memory at the least, in bytes;
+ * - min_partitions and max_partitions: the partitions to start from and
+ *   the most, powers of two, the first no larger, the same for a node of
+ *   a fixed count;
+ * - share, min_chunk and max_chunk: the chunks take the limit shared
+ *   among share times the partitions, no longer than max_chunk, and no
+ *   shorter than min_chunk nor than a chunk's header and four records of
+ *   record bytes (0 for chunks of no records), which win over max_chunk.
+ *
+ * TessSpillLevel is a level about to be made: the bytes it expects
+ * (tess_spill_expected for the first level, the bytes of the partition it
+ * splits for a level below), its limit (hash_mem or what the levels above
+ * leave of it), the shift of its bits (0 for the first level, the plan's
+ * below of the level above for one below it), at_least partitions (0 for
+ * none), and the partitions another process planned for it, which it
+ * takes as they are (0 to plan them).
  */
-extern TessStatusCode tess_spill_partitions(double expected, Size limit, Size reserve,
-											uint32 shift, uint32 min_partitions,
-											uint32 max_partitions, uint32 at_least,
-											uint32 *partitions, TessStatus *status);
+typedef struct TessSpillShape
+{
+	Size		reserve;
+	Size		share;
+	Size		min_chunk;
+	Size		max_chunk;
+	Size		record;
+	uint32		min_partitions;
+	uint32		max_partitions;
+} TessSpillShape;
+
+typedef struct TessSpillLevel
+{
+	double		expected;
+	Size		limit;
+	uint32		shift;
+	uint32		at_least;
+	uint32		partitions;
+} TessSpillLevel;
 
 /*
- * The length of a level's chunks: limit / (share * partitions) bytes, no
- * more than max_chunk, no less than min_chunk (which wins over max_chunk),
- * rounded down to a multiple of 8. A share or partitions of 0, and a
- * min_chunk below 8 or not a multiple of 8, are refused.
+ * The plan of a level: its partitions; the length of its chunks, a
+ * multiple of 8; the spill words that count its partitions
+ * (tess_table_spill_init); the first bit of the hash it takes, its level's
+ * shift, below 32; the shift of a level below; and whether a level of its
+ * shape fits below, its least partitions, two or more, in the bits left. A
+ * shape of one partition takes no bits and has no level below.
  */
-extern TessStatusCode tess_spill_chunk_len(Size limit, uint32 partitions, Size share,
-										   Size min_chunk, Size max_chunk,
-										   Size *chunk_len, TessStatus *status);
+typedef struct TessSpillPlan
+{
+	Size		chunk_len;
+	Size		words;
+	uint32		partitions;
+	uint32		shift;
+	uint32		below;
+	bool		deeper;
+} TessSpillPlan;
+
+/*
+ * The plan of a level into plan. The partitions start from min_partitions
+ * and double while they are fewer than max_partitions; fewer than at_least,
+ * or, each holding half of the limit, hold less than the level expects;
+ * each reserve of twice as many fits in half of the limit; and the bits of
+ * twice as many, after shift, stay below 32. Refused, SQLSTATE XX000, with
+ * nothing written: least and most partitions that are not powers of two in
+ * order, expected bytes below zero or not a number, a shift of 32 or more or
+ * one past which the least partitions do not fit in the hash, given
+ * partitions that are no
+ * power of two of the shape or pass the hash, a share of 0, a least chunk
+ * not a multiple of 8, partitions past those spill words count, and a null
+ * argument (openspec/specs/hash-table/).
+ */
+extern TessStatusCode tess_spill_plan(const TessSpillShape *shape,
+									  const TessSpillLevel *level,
+									  TessSpillPlan *plan, TessStatus *status);
+
+/*
+ * The bytes the first level of a spill expects: twice the held bytes of
+ * the rows so far, or what estimate rows would take at as many bytes a
+ * row, if more; for each of participants that build one table.
+ */
+extern double tess_spill_expected(double held, double rows, double estimate,
+								  uint32 participants);
 
 /* What tess_spill_columns_layout gives the size or offset of. */
 typedef enum TessSpillColumnsField
@@ -606,7 +673,13 @@ typedef enum TessSpillSetLayout
 	TESS_SPILL_SET_STEP_RANGES_OFFSET = 6,
 	TESS_SPILL_SET_READER_SIZE = 7,
 	TESS_SPILL_SET_READ_STEP_SIZE = 8,
-	TESS_SPILL_SET_READ_STEP_HEADER_OFFSET = 9
+	TESS_SPILL_SET_READ_STEP_HEADER_OFFSET = 9,
+	TESS_SPILL_SET_SHAPE_SIZE = 10,
+	TESS_SPILL_SET_SHAPE_MAX_PARTITIONS_OFFSET = 11,
+	TESS_SPILL_SET_LEVEL_SIZE = 12,
+	TESS_SPILL_SET_LEVEL_PARTITIONS_OFFSET = 13,
+	TESS_SPILL_SET_PLAN_SIZE = 14,
+	TESS_SPILL_SET_PLAN_DEEPER_OFFSET = 15
 } TessSpillSetLayout;
 
 /* The size or offset for a kind, or 0 for an unknown one. */

@@ -745,37 +745,36 @@ side_share(TessHashJoinState *state, SpillSide *side, const char *prefix, bool m
 }
 
 /*
- * The first participant past the budget: the partitions, the power of two
- * that makes the inner side it expects (twice what the participants hold,
- * or the planner's estimate if more) about half of one participant's
- * hash_mem each, since a partition on disk is joined by one, and two per
- * participant at least; a filter of every inner row, within an eighth of
- * the budget, published before the split, so that whoever sees the split
- * finds it.
+ * The first participant past the budget: the partitions of the join's
+ * level plan, for the inner side it expects (twice what the participants
+ * hold, or the planner's estimate if more), each about half of one
+ * participant's hash_mem, since a partition on disk is joined by one, and
+ * two per participant at least; a filter of every inner row, within an
+ * eighth of the budget, published before the split, so that whoever sees
+ * the split finds it.
  */
 static void
 shared_split(TessHashJoinState *state)
 {
 	JoinShared *shared = state->parallel.shared;
 	dsa_area   *area = join_query_dsa(state);
-	Size		limit = tess_hash_memory_limit();
 	int			participants = Max(shared->participants, 1);
 	double		held = (double) state->parallel.own_bytes + state->values.bytes;
-	double		expected = held * 2 * participants;
+	TessSpillShape shape = join_spill_shape(state);
+	TessSpillLevel level = {
+		.expected = state->kernels->spill_expected(held, (double) state->build_rows,
+												   state->inner_rows, (uint32) participants),
+		.limit = tess_hash_memory_limit(),
+		.at_least = 2 * (uint32) participants,
+	};
+	TessSpillPlan plan;
 	uint64		rows = Max((uint64) state->inner_rows * participants,
 						   state->build_rows * 2 * participants);
-	uint32		npartitions;
 	uint32		in_force;
 	Size		nwords;
 	dsa_pointer filter;
 
-	if (state->build_rows > 0)
-		expected = Max(expected, held / state->build_rows * state->inner_rows * participants);
-	check(state, state->kernels->spill_partitions(expected, limit, JOIN_SPILL_RESERVE, 0,
-												  JOIN_SPILL_MIN_PARTITIONS,
-												  JOIN_SPILL_MAX_PARTITIONS,
-												  2 * (uint32) participants, &npartitions,
-												  &state->status));
+	check(state, state->kernels->spill_plan(&shape, &level, &plan, &state->status));
 	/*
 	 * The filter within an eighth of the table's budget, every
 	 * participant's hash_mem, as a serial spill's within an eighth of its
@@ -800,7 +799,7 @@ shared_split(TessHashJoinState *state)
 	else
 		state->counters[JOIN_BLOOM_FILTERS]++;
 	check(state, state->kernels->table_spill_split(join_shared_words(state), shared->spill_nwords,
-												   true, npartitions, &in_force,
+												   true, plan.partitions, &in_force,
 												   &state->status));
 }
 
@@ -818,7 +817,7 @@ shared_switch(TessHashJoinState *state)
 	JoinSpill  *spill;
 	dsa_pointer block;
 
-	spill = join_spill_create(state, NULL, 0, 0, (int) join_shared_partitions(state));
+	spill = join_spill_create(state, NULL, 0, (int) join_shared_partitions(state));
 	spill->shared = true;
 	spill->writers = shared->participants;
 	side_share(state, &spill->build, "tjb", true);
