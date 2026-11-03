@@ -220,6 +220,22 @@ fn selected_fold_checks_each_nonempty_word_once_before_reading() {
     assert_eq!(column.words.get(), 1);
 }
 
+/// Each refusal of a word has its own text, which the proofs of the
+/// walk, stopping at the reason, do not reach.
+#[test]
+fn each_refusal_of_a_word_has_its_text() {
+    for (nrows, index, selected, prepared, text) in [
+        (1, 1, 0, 0, "selection word is out of bounds"),
+        (1, 0, 2, 2, "selection has set padding bits"),
+        (64, 0, 3, 1, "selection contains unprepared rows"),
+    ] {
+        let error = WordValues::try_new(nrows, index, selected, prepared, |_| Some(1))
+            .err()
+            .map(|error| error.to_string());
+        assert_eq!(error.as_deref(), Some(text));
+    }
+}
+
 #[test]
 fn word_validation_never_calls_reader_for_invalid_requests() {
     for (nrows, index, selected, prepared) in [
