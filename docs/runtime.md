@@ -138,35 +138,47 @@ a cached offset is read at that offset in a plain loop with the width
 fixed per call, for the rows whose tuple has the attribute and no NULL
 before it, leaving their cursors alone, since a later column starts from
 the cached offsets anyway; such reads are never counted as restarted, and
-the other rows go through the cursor. A walk forward also keeps the
-columns its consumers read behind it: a column the scan keeps is stored
-by every walk that passes it, rows with NULLs and short rows too, and a
-request behind the cursor finds it there and starts no walk. A column is
-kept when the walks it would save outweigh its stores: over a window,
-the rows read for it behind the cursor, times the attributes
-from the cached offsets to it, times two, reach the rows a walk carried
-to it or past it. Both counts come from the columns' masks, not from the
-rows: a row's cursor stands past a column when the row was read for it
-or for a later one. They are taken on one batch in four, a window being
-1024 rows counted, and a scan that has read one column past the cached
-offsets counts nothing; counted on every batch they made TPC-H Q3, Q8
-and Q21, which keep nothing, 2 % to 7 % slower. The flags change only
-between batches, so a row's cursor tells which kept values the row
-holds. A request picks its
-path once, so a scan that keeps nothing before the column it reads runs
-the plain path. TPC-H Q1 and Q12 keep the columns their aggregate and
-their later clauses read behind the cursor, and their walks from the
-tuple's start fall from 5.9 M and 2.8 M to a few thousand; Q6 and Q14,
-which read such columns on 15 % and 1 % of the rows near the cached
-offsets, keep none. The cursor is the
-deformation of PostgreSQL's own slots reduced to one target and made
-resumable, ported from pg_batch; it relies only on public inline helpers,
-so PostgreSQL is not patched. A walk forward to a column past the cached
-offsets is the batch's own loop of the same steps: it reads a value of
-varying length with a one-byte header, the form of every short value,
-without the general step's checks for padding, an external value and a
-four-byte header. With that step TPC-H Q6 takes 4 % less time; the same
-loop with the general step took 5 % to 17 % more than with it. A tuple shorter than the descriptor yields
+the other rows go through the cursor.
+
+A walk forward also keeps the columns its consumers read behind it: a
+column the scan keeps is stored by every walk that passes it, rows with
+NULLs and short rows too, and a request behind the cursor finds it there
+and starts no walk. A column is kept when the walks it would save
+outweigh its stores: over a window, the rows read for it behind the
+cursor, times the attributes from the cached offsets to it, times two,
+reach the rows a walk carried to it or past it. Both counts come from
+the columns' masks, not from the rows: a row's cursor stands past a
+column when the row was read for it or for a later one. They are taken
+on one batch in four, a window being 1024 rows counted, and a scan that
+has read one column past the cached offsets counts nothing. The flags
+change only between batches, so a row's cursor tells which kept values
+the row holds, and a request picks its path once, so a scan that keeps
+nothing before the column it reads runs the plain path. TPC-H Q1 and
+Q12 keep the columns their aggregate and their later clauses read behind
+the cursor, and their walks from the tuple's start fall from 5.9 M and
+2.8 M to a few thousand; Q6 and Q14, which read such columns on 15 % and
+1 % of the rows near the cached offsets, keep none (see
+[2026-11-03-deform-past-varlena](benchmarks/2026-11-03-deform-past-varlena/README.md)).
+Each other way was measured and left: keeping every column a consumer
+asked for (Q14 paid for stores of values read on 1 % of its rows); the
+share of all reads, not of those behind the cursor (a filter's own
+column was kept, and its request took the kept path on every row); one
+share without the walk's length (a half left Q12's columns unkept, an
+eighth kept Q6's `l_discount` for nothing); the reached rows counted
+from the cursors a row at a time (the reset took 3.1 % of Q14); the
+counts on every batch (Q3, Q8 and Q21, which keep nothing, 2 % to 7 %
+slower); and the test of a kept column in the plain path of every
+value.
+
+The cursor is the deformation of PostgreSQL's own slots reduced to one
+target and made resumable, ported from pg_batch; it relies only on
+public inline helpers, so PostgreSQL is not patched. A walk forward to a
+column past the cached offsets is the batch's own loop of the same
+steps: it reads a value of varying length with a one-byte header, the
+form of every short value, without the general step's checks for
+padding, an external value and a four-byte header. With that step TPC-H
+Q6 takes 4 % less time; the same loop with the general step took 5 % to
+17 % more than with it. A tuple shorter than the descriptor yields
 the missing value, as a slot does. `tess_heap_batch_stats` gives the
 deformed and restarted values and the copied rows for `EXPLAIN`. The
 guaranteed prefix (`tts_first_nonguaranteed` of the first slot) and the
