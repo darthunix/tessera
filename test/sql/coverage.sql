@@ -196,8 +196,8 @@ UNION ALL
 SELECT cov_query('SELECT count(*) FROM cov GROUP BY ' || string_agg(format('i4 + %s', g), ', ')),
        'GROUP BY i4 + 1, …, i4 + ' || max(g)
 FROM generate_series(1, 17) AS g;
--- Over an index: incremental sort and a join that looks its inner keys
--- up in the index; and a merge join, whose sorts must restore.
+-- Over an index: incremental sort and a parameterized inner side of a
+-- nested loop; and a merge join, whose sorts must restore.
 CREATE INDEX cov_i4 ON cov (i4);
 ANALYZE cov;
 SELECT cov_query(q) AS level, q AS query

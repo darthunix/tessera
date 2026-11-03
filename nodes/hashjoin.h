@@ -830,6 +830,8 @@ typedef struct TessHashJoinState
 	char		lookup_typalign;
 	PlanState  *lookup_scan;
 	MemoryContext lookup_context;
+	/* The planner's estimates of the lookups, for EXPLAIN VERBOSE. */
+	const char *lookup_estimate;
 	/*
 	 * The first chunk and the index of the batch's table before, in
 	 * table_context, which the next batch's table takes again; NULL once

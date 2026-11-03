@@ -168,6 +168,22 @@ query down, and where it can, does it speed one up.
   `tessera.join_cost_unit`, the rate the planner converts the node's time
   at. Run it on another machine to set the parameters there; the model is described in
   [docs/costs.md](../../docs/costs.md).
+- **lookupcost** (`lookupcost.sql`): not a comparison but the
+  calibration of the planner's model of TessHashJoin's index lookups and
+  of the core's nested loop it is weighed against
+  (`tessera.join_lookup_batch_cost` and the rest). Every sample joins
+  `bench_lookup_outer` to `bench_lookup` of the indexjoin family through
+  an index of it, and varies the keys of a batch (in the index's order
+  and shuffled), their stride, the rows a batch holds, the rows a key
+  and the key's type. Each runs with the node, its lookup forced by its
+  prices set to nothing for the plan, and with the core's nested loop
+  over the same index; each own time is the query's less its outer
+  side's alone. The summary prints both times, the planner's counts of
+  batches, keys, descents and rows against the plan's, the six fitted
+  prices, and every sample against the model with its error, the choice
+  the model makes between the two times, and the one the planner makes
+  from its own counts within the margin. The model is described in
+  [docs/costs.md](../../docs/costs.md).
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
   an expression, one column of sixty, `max` of a text column, a window

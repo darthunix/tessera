@@ -52,6 +52,17 @@ extern double tess_join_compact_pair_cost;
 extern double tess_join_bloom_test_cost;
 extern double tess_join_spill_row_cost;
 extern double tess_join_cost_unit;
+/*
+ * The model of the hash join's lookup mode and of the core's nested loop
+ * it is weighed against, tessera.join_lookup_batch_cost and the rest: see
+ * join_planner.c, lookup_cost, and docs/costs.md.
+ */
+extern double tess_join_lookup_batch_cost;
+extern double tess_join_lookup_descent_cost;
+extern double tess_join_lookup_key_cost;
+extern double tess_join_loop_key_cost;
+extern double tess_join_loop_descent_cost;
+extern double tess_join_loop_row_cost;
 /* The correlation of an index's order with the table's: see heapscan.c. */
 extern double tess_index_correlation(PlannerInfo *root, IndexOptInfo *index);
 /* Whether every index of a bitmap is BRIN, whose bitmap names whole pages: see heapscan.c. */

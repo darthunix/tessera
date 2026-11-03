@@ -8,8 +8,8 @@ with the core's own costs is only as good as the core's. The code is in
 `nodes/scan_planner.c` (the scans and the filter), `nodes/join_planner.c`
 (`join_cost`), `nodes/agg_planner.c` (`group_cost`, `plain_cost`) and
 `nodes/module.c` (the parameters); the calibration families are
-`bench/pg/scancost.sql` and `bench/pg/joincost.sql` (see
-[bench/pg/README.md](../bench/pg/README.md)).
+`bench/pg/scancost.sql`, `bench/pg/joincost.sql` and
+`bench/pg/lookupcost.sql` (see [bench/pg/README.md](../bench/pg/README.md)).
 
 ## Principles
 
@@ -219,6 +219,119 @@ root mean square, the parallel ones within 20 % of one participant's
 share. The core's hash join took 159 ns a row built, 4.2 a row probed
 and 25 a pair, 4.9 µs a unit of its cost over the base's queries.
 
+## The index join
+
+In its lookup mode `TessHashJoin` builds a table for each outer batch
+from the rows an index of the inner side gives for the batch's keys, in
+one scan of the index with the keys as an array (see
+[nodes.md](nodes.md), TessHashJoin). It replaces the core's nested loop
+over that index. Its path is priced as the node's hash join prices its
+inner scan and its own work: the inner side's work at its time, as a
+scan's cost is, and the work of its tables at the hash join's rate,
+`join_cost_unit`; and it is offered only where its time is within 0.8 of
+the nested loop's over the same keys, the two times from one model.
+Priced whole at the hash join's rate, the lookup's reading of the inner
+table cost 18 times less than a scan reading the same rows, and TPC-H
+Q21 took a lookup of 1.8 million rows in place of a scan, three times
+slower. The core's costs could not decide it: the core prices its nested
+loop and its hash join at rates 33 to 98 times apart on data in memory,
+and its cost of a key of the nested loop barely moves where its time
+moves fourfold with the nearness of the keys in the index (the
+`indexjoin` family's nested loops took 0.05 to 0.21 µs a unit of their
+cost). Priced at the hash join's rate alone, a lookup cost less than the
+nested loop also where it ran 8 to 27 % slower; priced at the nested
+loop's, it lost to a hash join it ran 17 times faster than.
+
+The two times, in the units of the scan model:
+
+- the lookup's: `join_lookup_batch_cost` an outer batch with a key (the
+  array, the rescan, the btree's preprocessing of the array, the
+  table's reset and index), `join_lookup_descent_cost` a key whose rows
+  the btree reaches by a descent of its own, `join_lookup_key_cost` a
+  key found on a leaf page the scan has already reached;
+  `index_tuple_cost` a row fetched, as the node's index scan prices its
+  rows; and the hash join's model of its own work (above) over the
+  batches' tables, of the rows the relation's clauses keep: the rows
+  built, their by-reference values and hashed keys, the outer rows
+  probed, the pairs and their gathered values, and the batches
+  published, a round of pairs a batch;
+- the nested loop's: `join_loop_key_cost` an outer key, and
+  `join_loop_descent_cost` more for each of the descents the lookup
+  makes over the same keys, which stand for the keys far from the one
+  before in the index: keys near each other spare the nested loop's
+  descents too, the pages above them already in the processor's
+  caches; `join_loop_row_cost` a row fetched;
+- both: the relation's clauses over the rows fetched, at the filter's
+  prices (above), and the join's other clauses over the candidate
+  pairs, `filter_clause_cost` a clause.
+
+The counts follow the core's estimates and the shape of the outer side:
+
+- the keys: the outer rows with a key. The btree looks a key repeated
+  within a batch up once; the count leaves that out and errs high. The
+  rows fetched: the keys times the rows the core expects a key to find,
+  as its estimate of an equality with a value it does not know: the
+  rows not NULL over the distinct values, at most the most common
+  value's;
+- the outer batches with a key: the batches of the node's full scan of
+  the table that drives the outer side, through the filters and joins
+  above it that keep its batches, that hold a key, no more than the
+  keys. The rows lie in a run of that scan:
+  where a range or equality clause of the scan restricts a column in the
+  table's order, the run is the share of the table the most restricting
+  such clause keeps, moved toward the whole table by 1 - c² for the
+  column's correlation c; the rows are spread over the run's batches, of
+  64 rows at most and none across a page. A pack, an index or bitmap
+  scan, an aggregate or a sort gives full batches; above a join whose
+  rounds may each be a batch, or where no scan is found, a batch is
+  counted a row;
+- the descents: the outer keys reach L of the index's P leaf pages, P
+  times the core's selectivity, on the inner column, of the range
+  between the first and the last bound of the outer key's histogram (P
+  where it has none). A batch's keys at random over them descend once a
+  page they fall on. Where the outer key is a column of the driving
+  scan's relation, in its table's order by its correlation c, a batch
+  that spans s rows of the driving scan of T rows reaches at most
+  1 + s × L / T pages; the count takes c² of that and 1 - c² of the
+  first. Both are bounds: keys in a narrower part of the range, or a
+  scan that steps on to the next leaf page without a descent, make
+  fewer.
+
+The margin of 0.8: on the calibration's samples the lookups that ran
+faster came within 0.73 of the nested loop's time by the planner's
+counts, the slower ones at 1.06 or more; a lookup taken wrongly costs,
+where one left out leaves the core's plan. A partial path divides the counts among
+its participants. Before the
+first row the first batch is looked up and its table built. An inner
+table past `effective_cache_size`, whose pages may come from the disk,
+gets no lookup path: the prices are measured on data in memory, as the
+scans keep the core's costs for such a table (see Known limits).
+
+The parameters, with their defaults, in the units of the scan model:
+
+- `tessera.join_lookup_batch_cost` = 1.07: the lookup's outer batch
+  with a key;
+- `tessera.join_lookup_descent_cost` = 4.70: the lookup's key with a
+  descent of its own;
+- `tessera.join_lookup_key_cost` = 0.40: the lookup's key on a leaf
+  page already reached;
+- `tessera.join_loop_key_cost` = 1.45: the nested loop's outer key;
+- `tessera.join_loop_descent_cost` = 2.94: what the nested loop takes
+  more for a key far from the one before;
+- `tessera.join_loop_row_cost` = 0.177: the nested loop's row fetched.
+
+Measured by `bench/pg/lookupcost` (pg-lookupcost-zQqYRs, 94qad9), the
+mean of the two runs, a unit of the scan model 0.20 µs on the machine:
+the lookup's batch 0.16 to 0.28 µs (the sparse samples alone set it),
+a key with a descent 0.92 to 0.99 µs, another key 0.08 µs; the nested
+loop's key 0.29 to 0.30 µs, a far key 0.58 to 0.62 µs more and a row
+0.035. The model predicts the two times within a third on most
+samples, and up to two fifths below on keys whose rows lie on pages
+apart. From its own counts and within the margin, the planner took the
+lookup in 12 of the 26 samples of the two runs, each where it ran
+faster, and left to the nested loop four lookups that ran 3 to 21 %
+faster.
+
 ## Aggregates
 
 `TessAgg` groups and aggregates a batch child's rows, the kernels folding
@@ -296,7 +409,7 @@ path ties the core's and loses, since `add_path` keeps the path it has.
 
 ## Calibration
 
-Two families of `bench/pg` measure the models' prices; they calibrate,
+The families of `bench/pg` that measure the models' prices calibrate,
 they do not compare. Each runs on the benchmark cluster of
 `bench/pg/run.sh` (`setup` loads the tables, `measure <family>` runs one
 and writes a directory under `target/bench-runs/` with the samples, the
@@ -323,6 +436,24 @@ units, each sample against its prediction and the error over all:
   queries run again with Tessera off for `join_cost_unit`. The family
   stops with an error where the planner did not take the node, so it
   must run against a build whose model does.
+- `lookupcost`: index joins over the tables of the `indexjoin` family
+  that vary the keys of a batch (in the index's order and shuffled),
+  their stride, the rows a batch holds (all, a share), the rows a key
+  (one and four) and the key's type, each run with the node, its lookup
+  forced by its prices set to nothing for the plan, and with the core's
+  nested loop over the same index. The node's own time, the query's
+  less its outer side's alone and less what the model counts at prices
+  of its own (the rows fetched at `index_tuple_cost`, and the hash
+  join's model of its work over the batches' tables, the batches
+  published taken from the plan), is fitted by least squares over the
+  batches, the descents (the btree's `Index Searches`) and the other
+  keys of the node's plan; the nested loop's, the query's less its
+  outer side's, over the keys, the same descents and the rows. The
+  summary shows each sample against both predictions, whether the model
+  chooses between them as the times do, the choice the planner makes
+  from its own counts within the margin, and the planner's counts
+  against the plan's: the batches against `Lookups`, the descents
+  against `Index Searches`.
 
 To set the parameters on a machine: run the families there, then put the
 values the summary prints into `postgresql.conf` or `ALTER SYSTEM`, or
@@ -343,10 +474,15 @@ the defaults are the project's and not a deployment's.
   with itself: the core's sequential scan took 0.92 µs a unit of its
   cost, its bitmap 0.57, its index-only scan 0.74, its hash join 4.9
   (scancost, joincost). The hash join's rate is converted; the others
-  are not, so where the core weighs a nested loop over an index against
-  the node's hash join, the node's time is honest and the core's is the
-  core's (Q8 of TPC-H: the core's nested loops over `customer` and
-  `supplier` take two of its joins, 10 % slower than the node's).
+  are not, so
+  where the core weighs a nested loop over an index against the node's
+  hash join, the node's time is honest and the core's is the core's (Q8
+  of TPC-H: the core's nested loops over `customer` and `supplier` took
+  two of its joins, 10 % slower than the node's). The node's index join
+  is weighed against the core's nested loop by both times of its own
+  model, which leaves the heap's pages out: keys whose rows lie on pages
+  apart cost more than it counts, and the margin of 0.8 is what keeps
+  such a lookup out on the samples measured.
 - The rows are the core's estimates: a join the core expects 98 rows of
   where 319 404 come (Q9 of TPC-H) misleads every path alike.
 - The spill models count a row once the table spills, not the share on

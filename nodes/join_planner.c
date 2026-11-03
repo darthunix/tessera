@@ -86,19 +86,20 @@ typedef struct JoinKeys
 } JoinKeys;
 
 /*
- * Index join mode: the key looked up (its place among the keys) and the
+ * An index join's lookup: the join key looked up (its position) and the
  * type of its arrays, the inner side's path (a lookup scan of the index,
- * under TessFilter for the relation's clauses), the inner rows of the
- * most frequent key, and the correlation of the outer key with its
- * table's order, 0 where unknown.
+ * under TessFilter for the relation's clauses), the index, the inner rows
+ * the core expects a key to find, and the share of the index the outer
+ * keys reach (lookup_coverage).
  */
 typedef struct JoinLookup
 {
 	int			key;
 	Oid			type;
 	Path	   *inner;
+	IndexOptInfo *index;
 	double		key_rows;
-	double		correlation;
+	double		coverage;
 } JoinLookup;
 
 /*
@@ -804,6 +805,41 @@ inner_pairs(PlannerInfo *root, Relids outer, Relids inner, List *clauses, double
 }
 
 /*
+ * The inner columns the records keep, the target's and the residual
+ * clauses', by value and by reference; and the keys a word does not hold,
+ * hashed by their type's function.
+ */
+static void
+kept_columns(RelOptInfo *joinrel, RelOptInfo *innerrel, const JoinKeys *keys,
+			 int *ints, int *texts, int *hashed)
+{
+	List	   *kept = NIL;
+	List	   *vars;
+
+	*ints = *texts = *hashed = 0;
+	foreach_int(hasher, keys->hashers)
+		*hashed += hasher != 0;
+	vars = list_copy(joinrel->reltarget->exprs);
+	vars = list_concat(vars, pull_var_clause((Node *) keys->residual, 0));
+	foreach_ptr(Node, node, vars)
+	{
+		Var		   *var = (Var *) node;
+		int16		len;
+		bool		byval;
+
+		if (!IsA(node, Var) || !bms_is_member(var->varno, innerrel->relids) ||
+			list_member(kept, var))
+			continue;
+		kept = lappend(kept, var);
+		get_typlenbyval(var->vartype, &len, &byval);
+		if (byval)
+			(*ints)++;
+		else
+			(*texts)++;
+	}
+}
+
+/*
  * The path's cost: the children's as they are, and the node's own time in
  * the units of the scan model (docs/nodes.md, Parameters), from the rows
  * the planner expects of each side and of the join. A row built, a row
@@ -854,35 +890,13 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 	bool		compact;
 	bool		bloom;
 	bool		spills;
-	int			hashed = 0;
-	int			ints = 0;
-	int			texts = 0;
-	List	   *kept = NIL;
-	List	   *vars;
+	int			hashed;
+	int			ints;
+	int			texts;
 	Cost		build;
 	Cost		probe;
 
-	foreach_int(hasher, keys->hashers)
-		hashed += hasher != 0;
-	/* The inner columns kept in the records: the target's and the residual clauses'. */
-	vars = list_copy(joinrel->reltarget->exprs);
-	vars = list_concat(vars, pull_var_clause((Node *) keys->residual, 0));
-	foreach_ptr(Node, node, vars)
-	{
-		Var		   *var = (Var *) node;
-		int16		len;
-		bool		byval;
-
-		if (!IsA(node, Var) || !bms_is_member(var->varno, innerrel->relids) ||
-			list_member(kept, var))
-			continue;
-		kept = lappend(kept, var);
-		get_typlenbyval(var->vartype, &len, &byval);
-		if (byval)
-			ints++;
-		else
-			texts++;
-	}
+	kept_columns(joinrel, innerrel, keys, &ints, &texts, &hashed);
 	/* Records a key: a compact batch of the pairs when there are several. */
 	if (!inner_unique && keys->inner != NIL)
 	{
@@ -989,16 +1003,6 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 }
 
 /*
- * Index join mode's prices, in the units of the scan model (0.27 µs): a
- * lookup's call, rescan, the btree's preprocessing and its table; a
- * descent of the btree; an inner row fetched through the index.
- * Calibrated by bench/pg/indexjoin.
- */
-#define JOIN_LOOKUP_COST 37.0
-#define JOIN_LOOKUP_DESCENT_COST 1.4
-#define JOIN_LOOKUP_ROW_COST 0.9
-
-/*
  * The inner rows of the key the statistics count most often: the first of
  * the most common values, or the rest over the distinct values; -1
  * without statistics, where no lookup is offered.
@@ -1032,27 +1036,124 @@ lookup_key_rows(PlannerInfo *root, RelOptInfo *rel, Var *var)
 	return Max(share * rel->tuples, 1.0);
 }
 
-/* The correlation of a column of a table with its order, 0 where unknown. */
+/*
+ * The inner rows the core expects a key to find, as its estimate of an
+ * equality with a value it does not know (var_eq_non_const): the rows
+ * not NULL over the distinct values, at most the most common value's.
+ */
 static double
-lookup_correlation(PlannerInfo *root, Node *key)
+lookup_expected_rows(PlannerInfo *root, RelOptInfo *rel, Var *var)
+{
+	VariableStatData vardata;
+	AttStatsSlot sslot;
+	double		share;
+	double		ndistinct;
+	bool		isdefault;
+
+	examine_variable(root, (Node *) var, 0, &vardata);
+	ndistinct = get_variable_numdistinct(&vardata, &isdefault);
+	share = 1.0 / Max(ndistinct, 1.0);
+	if (HeapTupleIsValid(vardata.statsTuple))
+	{
+		share *= 1.0 - ((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac;
+		if (get_attstatsslot(&sslot, vardata.statsTuple, STATISTIC_KIND_MCV, InvalidOid,
+							 ATTSTATSSLOT_NUMBERS))
+		{
+			if (sslot.nnumbers > 0)
+				share = Min(share, sslot.numbers[0]);
+			free_attstatsslot(&sslot);
+		}
+	}
+	ReleaseVariableStats(vardata);
+	return clamp_row_est(share * rel->tuples);
+}
+
+/*
+ * The correlation of a column of a table with its order, 0 where unknown or
+ * where the key is not a column; and the share of its rows that are NULL,
+ * 0 where unknown.
+ */
+static double
+lookup_key_stats(PlannerInfo *root, Node *key, double *nullfrac)
 {
 	VariableStatData vardata;
 	AttStatsSlot sslot;
 	double		correlation = 0;
 
-	if (!IsA(key, Var))
-		return 0;
+	*nullfrac = 0;
 	examine_variable(root, key, 0, &vardata);
-	if (HeapTupleIsValid(vardata.statsTuple) &&
-		get_attstatsslot(&sslot, vardata.statsTuple, STATISTIC_KIND_CORRELATION, InvalidOid,
-						 ATTSTATSSLOT_NUMBERS))
+	if (HeapTupleIsValid(vardata.statsTuple))
 	{
-		if (sslot.nnumbers > 0)
-			correlation = sslot.numbers[0];
-		free_attstatsslot(&sslot);
+		*nullfrac = ((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac;
+		if (IsA(key, Var) &&
+			get_attstatsslot(&sslot, vardata.statsTuple, STATISTIC_KIND_CORRELATION,
+							 InvalidOid, ATTSTATSSLOT_NUMBERS))
+		{
+			if (sslot.nnumbers > 0)
+				correlation = sslot.numbers[0];
+			free_attstatsslot(&sslot);
+		}
 	}
 	ReleaseVariableStats(vardata);
 	return correlation;
+}
+
+/*
+ * The share of an index the outer keys reach: the core's selectivity, on
+ * the inner column, of the range between the first and the last bound of
+ * the outer key column's histogram, under the index's operator family; 1
+ * where the outer key is not a column, has no histogram in the family's
+ * order and the clause's collation, or its rows are not all the user's to
+ * read (the bounds would reach the inner side's estimators), or where the
+ * family has no such comparisons.
+ */
+static double
+lookup_coverage(PlannerInfo *root, RelOptInfo *innerrel, Var *var, Node *outer_key,
+				Oid family, Oid lefttype, Oid righttype, Oid collation)
+{
+	VariableStatData vardata;
+	AttStatsSlot sslot;
+	double		coverage = 1.0;
+	Oid			ge = get_opfamily_member(family, lefttype, righttype, BTGreaterEqualStrategyNumber);
+	Oid			le = get_opfamily_member(family, lefttype, righttype, BTLessEqualStrategyNumber);
+
+	if (!IsA(outer_key, Var) || !OidIsValid(ge) || !OidIsValid(le))
+		return 1.0;
+	examine_variable(root, outer_key, 0, &vardata);
+	/* The bounds go to the inner side's estimators: rows the user may read. */
+	if (HeapTupleIsValid(vardata.statsTuple) && vardata.acl_ok &&
+		get_attstatsslot(&sslot, vardata.statsTuple, STATISTIC_KIND_HISTOGRAM, InvalidOid,
+						 ATTSTATSSLOT_VALUES))
+	{
+		/* The histogram in the order and the collation of the index's family. */
+		if (sslot.nvalues >= 2 && sslot.valuetype == righttype &&
+			get_op_opfamily_strategy(sslot.staop, family) == BTLessStrategyNumber &&
+			(!OidIsValid(collation) || sslot.stacoll == collation))
+		{
+			int16		typlen;
+			bool		typbyval;
+			Const	   *low;
+			Const	   *high;
+			List	   *range;
+
+			get_typlenbyval(righttype, &typlen, &typbyval);
+			low = makeConst(righttype, -1, collation, typlen,
+							datumCopy(sslot.values[0], typbyval, typlen), false, typbyval);
+			high = makeConst(righttype, -1, collation, typlen,
+							 datumCopy(sslot.values[sslot.nvalues - 1], typbyval, typlen),
+							 false, typbyval);
+			range = list_make2(make_opclause(ge, BOOLOID, false, (Expr *) var, (Expr *) low,
+											 InvalidOid, collation),
+							   make_opclause(le, BOOLOID, false, (Expr *) var, (Expr *) high,
+											 InvalidOid, collation));
+			foreach_node(OpExpr, op, range)
+				set_opfuncid(op);
+			coverage = clauselist_selectivity(root, range, innerrel->relid, JOIN_INNER, NULL);
+		}
+		free_attstatsslot(&sslot);
+	}
+	ReleaseVariableStats(vardata);
+	return Min(Max(coverage, 0.0), 1.0);
 }
 
 /*
@@ -1063,8 +1164,8 @@ lookup_correlation(PlannerInfo *root, Node *key)
  * (as the core matches a clause to an index column), with both of the
  * comparisons an array key of the outer type needs, a deterministic
  * collation and a clause the table may promote into an index scan; and
- * whose most frequent key's rows for a batch fit a quarter of hash_mem.
- * False where none does.
+ * whose most frequent key's rows for a batch fit a quarter of hash_mem,
+ * of a table that fits effective_cache_size. False where none does.
  */
 static bool
 find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int ninner,
@@ -1072,7 +1173,9 @@ find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int n
 {
 	int			key = -1;
 
-	if (!enable_indexscan || innerrel->reloptkind != RELOPT_BASEREL)
+	/* Pages that may come from the disk: the prices are measured in memory. */
+	if (!enable_indexscan || innerrel->reloptkind != RELOPT_BASEREL ||
+		innerrel->pages > (BlockNumber) effective_cache_size)
 		return false;
 	foreach_node(RestrictInfo, rinfo, keys->rinfos)
 	{
@@ -1139,8 +1242,11 @@ find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int n
 				return false;
 			lookup->key = key;
 			lookup->type = righttype;
-			lookup->key_rows = key_rows;
-			lookup->correlation = lookup_correlation(root, list_nth(keys->outer, key));
+			lookup->index = index;
+			lookup->key_rows = lookup_expected_rows(root, innerrel, var);
+			lookup->coverage = lookup_coverage(root, innerrel, var, list_nth(keys->outer, key),
+											   family, lefttype, righttype,
+											   clause->inputcollid);
 			return true;
 		}
 	}
@@ -1173,63 +1279,233 @@ join_path_packs(const Path *path)
 }
 
 /*
- * The outer batches an index join looks up: the batches of the scan that
- * drives the outer side, which filters and joins above it keep, that hold
- * a row, its rows spread over them; full batches of rows a pack makes; a
- * batch a row above a join whose rounds may each be a batch, or where no
- * scan is found.
+ * The shape of an index join's outer side: its batches with a row; the
+ * relation of the scan that drives it (0 where none is found), that
+ * scan's rows and the rows of it a batch spans.
+ */
+typedef struct LookupShape
+{
+	double		batches;
+	Index		relid;
+	double		tuples;
+	double		span;
+} LookupShape;
+
+/*
+ * The share of a relation's rows in the run its clauses select in the
+ * table's order: for each range or equality of a column with a value, the
+ * share it keeps, moved toward the whole table by 1 - c² for the column's
+ * correlation c; the least of them, 1 without one.
  */
 static double
-lookup_batches(const Path *outer)
+lookup_run(PlannerInfo *root, RelOptInfo *rel)
 {
-	const Path *driver = outer;
-	double		share;
-	double		batches;
+	double		run = 1.0;
 
-	while (IsA(driver, CustomPath) && !IS_SIMPLE_REL(driver->parent) &&
-		   ((const CustomPath *) driver)->custom_paths != NIL)
+	foreach_node(RestrictInfo, rinfo, rel->baserestrictinfo)
 	{
-		if (tess_path_node(driver) == &tess_pack_node)
-			return Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0);
-		if (tess_path_node(driver) == &tess_hash_join_node && !join_path_packs(driver))
-			return Max(outer->rows, 1.0);
-		driver = linitial(((const CustomPath *) driver)->custom_paths);
+		OpExpr	   *clause = (OpExpr *) rinfo->clause;
+		Node	   *column;
+		RegProcedure estimator;
+		double		correlation;
+		double		nullfrac;
+		Selectivity share;
+
+		if (!IsA(clause, OpExpr) || list_length(clause->args) != 2 || rinfo->pseudoconstant)
+			continue;
+		column = bms_is_empty(rinfo->right_relids) ? linitial(clause->args) :
+			bms_is_empty(rinfo->left_relids) ? lsecond(clause->args) : NULL;
+		estimator = get_oprrest(clause->opno);
+		if (column == NULL || !IsA(column, Var) || contain_volatile_functions((Node *) clause) ||
+			(estimator != F_EQSEL && estimator != F_SCALARLTSEL &&
+			 estimator != F_SCALARLESEL && estimator != F_SCALARGTSEL &&
+			 estimator != F_SCALARGESEL))
+			continue;
+		correlation = lookup_key_stats(root, column, &nullfrac);
+		share = clause_selectivity(root, (Node *) rinfo, 0, JOIN_INNER, NULL);
+		run = Min(run, share * correlation * correlation + 1.0 - correlation * correlation);
 	}
-	if (!IS_SIMPLE_REL(driver->parent) || driver->parent->tuples <= 0)
-		return Max(outer->rows, 1.0);
-	share = Min(outer->rows / driver->parent->tuples, 1.0);
-	batches = driver->parent->tuples / JOIN_LOOKUP_ROWS *
-		(1.0 - pow(1.0 - share, JOIN_LOOKUP_ROWS));
-	return Max(Min(Max(batches, outer->rows / JOIN_LOOKUP_ROWS), outer->rows), 1.0);
+	return run;
 }
 
 /*
- * An index join's cost: per outer batch with a key, a lookup; the
- * descents of its keys, fewer where the outer side follows its key's
- * order; the inner rows fetched, their clauses checked by the TessFilter
- * above the lookup, and the rows put into the batch's table; the probe, the join clauses of the candidate pairs, and
- * the pairs. Nothing goes out before the first batch's table.
+ * The batches of an index join's outer side with a row: those of the
+ * node's full scan of the table that drives it, through the filters and
+ * the joins above it that keep its batches, the outer rows spread over the
+ * run of that scan its clauses select; full batches from a pack, an index
+ * or bitmap scan, an aggregate, a sort or any other node; a batch a row
+ * above a join whose rounds may each be a batch, or where no scan is
+ * found. The counts of a partial path are one
+ * participant's, the run and the span the whole table's.
  */
 static void
-lookup_cost(const JoinLookup *lookup, const JoinKeys *keys, const Path *outer, Path *path)
+lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 {
-	double		outer_rows = Max(outer->rows, 1.0);
-	double		batches = lookup_batches(outer);
-	double		descents = batches + (outer_rows - batches) * (1.0 - 0.9 * fabs(lookup->correlation));
-	double		fetched = outer_rows * lookup->key_rows;
-	/* The relation's clauses, priced as the node's scans price them. */
-	Cost		filter = fetched * lookup->inner->parent->baserestrictcost.per_tuple *
-		tess_scan_cost_factor;
-	Cost		work;
+	const Path *driver = outer;
+	const Path *scan;
+	double		divisor = outer->parallel_workers > 0 ? tess_parallel_divisor(outer) : 1.0;
+	double		rows = Max(outer->rows * divisor, 1.0);
+	double		per_page;
+	double		batch_rows;
+	double		run;
+	double		batches;
 
-	work = batches * (JOIN_LOOKUP_COST + tess_join_batch_cost) +
-		Max(descents, batches) * JOIN_LOOKUP_DESCENT_COST +
-		fetched * (JOIN_LOOKUP_ROW_COST + tess_join_build_cost) +
-		outer_rows * tess_join_probe_cost + path->rows * tess_join_pair_cost +
-		fetched * list_length(keys->residual) * tess_filter_clause_cost;
-	work = work / tess_join_cost_unit + filter;
-	path->startup_cost = outer->startup_cost + work / batches;
-	path->total_cost = outer->total_cost + work;
+	shape->relid = 0;
+	shape->tuples = 0;
+	shape->span = 0;
+	while (IsA(driver, CustomPath) && !IS_SIMPLE_REL(driver->parent) &&
+		   ((const CustomPath *) driver)->custom_paths != NIL)
+	{
+		if (tess_path_node(driver) != &tess_hash_join_node)
+		{
+			shape->batches = Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0);
+			return;
+		}
+		if (!join_path_packs(driver))
+		{
+			shape->batches = Max(outer->rows, 1.0);
+			return;
+		}
+		driver = linitial(((const CustomPath *) driver)->custom_paths);
+	}
+	scan = driver;
+	if (!IS_SIMPLE_REL(driver->parent) || driver->parent->tuples <= 0)
+	{
+		shape->batches = Max(outer->rows, 1.0);
+		return;
+	}
+	/*
+	 * The node's full scan of the table, under its filter, gives batches of
+	 * a page; a pack, an index or bitmap scan, or another node full ones.
+	 */
+	if (tess_path_node(driver) == &tess_filter_node &&
+		((const CustomPath *) driver)->custom_paths != NIL)
+		scan = linitial(((const CustomPath *) driver)->custom_paths);
+	if (tess_path_node(scan) != &tess_heap_scan_node ||
+		((const CustomPath *) scan)->custom_paths != NIL)
+	{
+		shape->batches = Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0);
+		return;
+	}
+	/* A scan's batch holds 64 rows at most and none across a page. */
+	per_page = driver->parent->pages > 0 ?
+		Max(driver->parent->tuples / driver->parent->pages, 1.0) : JOIN_LOOKUP_ROWS;
+	batch_rows = Min(per_page / ceil(per_page / JOIN_LOOKUP_ROWS), JOIN_LOOKUP_ROWS);
+	run = Max(driver->parent->tuples * lookup_run(root, driver->parent), 1.0);
+	batches = run / batch_rows * (1.0 - pow(1.0 - Min(rows / run, 1.0), batch_rows));
+	batches = Max(Min(Max(batches, rows / batch_rows), rows), 1.0);
+	shape->batches = Max(batches / divisor, 1.0);
+	shape->relid = driver->parent->relid;
+	shape->tuples = driver->parent->tuples;
+	shape->span = run / batches;
+}
+
+/*
+ * The share of the nested loop's time an index lookup must stay within to
+ * be offered: on the samples of bench/pg/lookupcost the lookups that ran
+ * faster came within 0.73 of the nested loop by the planner's counts, the
+ * slower ones at 1.06 or more, and a lookup taken wrongly costs where one
+ * left out leaves the core's plan.
+ */
+#define JOIN_LOOKUP_MARGIN 0.8
+
+/*
+ * An index join's cost: its time by the model of docs/costs.md (the index
+ * join), the inner side's work as a scan's, the tables' at the hash
+ * join's rate, as the node's hash join prices its child and its own work;
+ * false where that time is not within JOIN_LOOKUP_MARGIN of the time of
+ * the core's nested loop over the same keys by the same model, which
+ * then keeps the join. The
+ * lookup's time: its batches with a key, the keys that descend the btree,
+ * the other keys, the rows fetched as the node's index scan prices them,
+ * and the hash join's work over the batches' tables, of the rows the
+ * relation's clauses keep. The nested loop's: its keys, the same descents
+ * (the nearness of the keys in the index, which spares its descents too),
+ * and its rows. Both check the relation's clauses over the rows fetched
+ * and the join's over the candidate pairs, at the filter's prices.
+ * Nothing goes out before the first batch's table.
+ *
+ * The descents: a batch's keys at random over the L leaf pages the outer
+ * keys reach, one a leaf page they fall on. Where the outer key is a column
+ * of the driving scan's relation, in its table's order by c, a batch
+ * spanning s of its T rows reaches at most s × L / T pages; c² of that,
+ * 1 - c² of the first. *estimate is the counts and the two times, for
+ * EXPLAIN.
+ */
+static bool
+lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
+			const JoinKeys *keys, const Path *outer, Path *path, char **estimate)
+{
+	RelOptInfo *innerrel = lookup->inner->parent;
+	Node	   *outer_key = list_nth(keys->outer, lookup->key);
+	LookupShape shape;
+	double		nullfrac;
+	double		correlation = lookup_key_stats(root, outer_key, &nullfrac);
+	double		outer_rows = Max(outer->rows, 1.0);
+	double		keys_count = Max(outer_rows * (1.0 - nullfrac), 1.0);
+	double		leaves = Max(lookup->index->pages * lookup->coverage, 1.0);
+	double		keys_batch;
+	double		per_batch;
+	double		descents;
+	double		fetched;
+	double		kept;
+	double		rounds;
+	int			ints;
+	int			texts;
+	int			hashed;
+	Cost		filter;
+	Cost		residual;
+	Cost		inner;
+	Cost		table;
+	Cost		nested_loop;
+	Cost		cost;
+
+	lookup_shape(root, outer, &shape);
+	/* A batch of NULL keys only looks nothing up. */
+	shape.batches = Max(Min(shape.batches, keys_count), 1.0);
+	keys_batch = keys_count / shape.batches;
+	/* A batch's keys at random over the leaves the outer keys reach. */
+	per_batch = Min(keys_batch, leaves * (1.0 - pow(1.0 - 1.0 / leaves, keys_batch)));
+	if (shape.relid != 0 && IsA(outer_key, Var) && ((Var *) outer_key)->varno == shape.relid &&
+		shape.tuples > 0)
+	{
+		double		spanned = 1.0 + shape.span * leaves / shape.tuples;
+		double		c2 = correlation * correlation;
+
+		per_batch = c2 * Min(keys_batch, spanned) + (1.0 - c2) * per_batch;
+	}
+	descents = Min(Max(shape.batches * per_batch, shape.batches), keys_count);
+	fetched = keys_count * lookup->key_rows;
+	/* The inner rows the relation's clauses keep, and the candidate pairs. */
+	kept = fetched * (innerrel->tuples > 0 ? Min(innerrel->rows / innerrel->tuples, 1.0) : 1.0);
+	filter = tess_scan_index_rows_time(root, innerrel, fetched) - fetched * tess_index_tuple_cost;
+	residual = kept * list_length(keys->residual) * tess_filter_clause_cost;
+	/* A batch goes out in a round for each record a key at most. */
+	rounds = Min(shape.batches * Max(lookup->key_rows, 1.0), Max(path->rows, shape.batches));
+	kept_columns(joinrel, innerrel, keys, &ints, &texts, &hashed);
+	/* The inner side's work, a scan's: its cost is its time, as a child's. */
+	inner = shape.batches * tess_join_lookup_batch_cost +
+		descents * tess_join_lookup_descent_cost +
+		(keys_count - descents) * tess_join_lookup_key_cost +
+		fetched * tess_index_tuple_cost + filter;
+	/* The tables' work, the hash join's: at the hash join's rate. */
+	table = kept * (tess_join_build_cost + texts * tess_join_text_value_cost +
+					hashed * tess_join_hashed_key_cost) +
+		outer_rows * (tess_join_probe_cost + hashed * tess_join_hashed_key_cost) +
+		path->rows * (tess_join_pair_cost + ints * tess_join_gather_cost +
+					  texts * tess_join_text_value_cost) +
+		rounds * tess_join_batch_cost + residual;
+	nested_loop = keys_count * tess_join_loop_key_cost +
+		descents * tess_join_loop_descent_cost + fetched * tess_join_loop_row_cost +
+		filter + residual;
+	*estimate = psprintf("batches=%.0f keys=%.0f descents=%.0f rows=%.0f time=%.0f loop=%.0f",
+						 shape.batches, keys_count, descents, fetched, inner + table, nested_loop);
+	if (inner + table > JOIN_LOOKUP_MARGIN * nested_loop)
+		return false;
+	cost = inner + table / tess_join_cost_unit;
+	path->startup_cost = outer->startup_cost + cost / shape.batches;
+	path->total_cost = outer->total_cost + cost;
+	return true;
 }
 
 /*
@@ -1246,6 +1522,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 			   const JoinLookup *lookup)
 {
 	List	   *data;
+	char	   *estimate = NULL;
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	JoinCostWorkspace workspace;
 	List	   *hashclauses = keys->rinfos;
@@ -1283,7 +1560,10 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 									extra, priced, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
 	if (lookup != NULL)
-		lookup_cost(lookup, keys, outer, &template->jpath.path);
+	{
+		if (!lookup_cost(root, joinrel, lookup, keys, outer, &template->jpath.path, &estimate))
+			return NULL;
+	}
 	else
 		join_cost(root, joinrel, inner_path->parent, jointype, extra->inner_unique, keys,
 				  outer, inner,
@@ -1303,9 +1583,12 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 									 (int) jointype,
 									 shared ? 1 : 0),
 					  keys->hashers, keys->collations);
-	/* Index join mode: the key looked up and the type of its arrays. */
+	/* Index join mode: the key looked up, the type of its arrays, the estimates. */
 	if (lookup != NULL)
+	{
 		data = lappend(data, list_make2_int(lookup->key, (int) lookup->type));
+		data = lappend(data, makeString(estimate));
+	}
 	config.node_data = (Node *) data;
 	return tess_path_create(&config);
 }
@@ -1418,7 +1701,8 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		add_path(joinrel, &path->path);
 	/*
 	 * An index join: INNER and LEFT, each outer batch's keys looked up in
-	 * an index of the inner table, which builds the batch's table.
+	 * an index of the inner table, which builds the batch's table; where
+	 * it is faster than the core's nested loop over the index.
 	 */
 	lookup_found = (jointype == JOIN_INNER || jointype == JOIN_LEFT) &&
 		find_lookup(root, innerrel, &keys, ninner, &lookup);
@@ -1803,6 +2087,8 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 						list_length(data) > 5 ? linitial_int(list_nth(data, 5)) : -1);
 	tess_plan_write_int(writer, "lookup_type",
 						list_length(data) > 5 ? lsecond_int(list_nth(data, 5)) : 0);
+	tess_plan_write_string(writer, "lookup_estimate",
+						   list_length(data) > 6 ? strVal(list_nth(data, 6)) : "");
 
 	config.methods = &tess_hash_join_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PROJECTED;

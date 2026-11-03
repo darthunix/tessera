@@ -48,6 +48,12 @@ double		tess_join_compact_pair_cost = 0.020;
 double		tess_join_bloom_test_cost = 0.0027;
 double		tess_join_spill_row_cost = 0.015;
 double		tess_join_cost_unit = 17.9;
+double		tess_join_lookup_batch_cost = 1.07;
+double		tess_join_lookup_descent_cost = 4.70;
+double		tess_join_lookup_key_cost = 0.40;
+double		tess_join_loop_key_cost = 1.45;
+double		tess_join_loop_descent_cost = 2.94;
+double		tess_join_loop_row_cost = 0.177;
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
@@ -347,6 +353,42 @@ _PG_init(void)
 							 "is nominal: the node's own time, in the units above, is divided by this "
 							 "(4.9 µs of the core's time a unit here, 0.27 µs a unit of the node's).",
 							 &tess_join_cost_unit, 17.9, 1e-3, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	/*
+	 * The model of the hash join's lookup mode, and of the core's nested
+	 * loop over the index it replaces, in the same units (join_planner.c,
+	 * lookup_cost; docs/costs.md); bench/pg/lookupcost fits them.
+	 */
+	DefineCustomRealVariable("tessera.join_lookup_batch_cost",
+							 "The hash join's time for an outer batch whose keys it looks up in an index.",
+							 "The array of the keys, the rescan, the btree's preprocessing of the "
+							 "array, and the batch's table reset and indexed.",
+							 &tess_join_lookup_batch_cost, 1.07, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_lookup_descent_cost",
+							 "The hash join's time for a key whose rows the index lookup reaches by a descent of the btree.",
+							 NULL,
+							 &tess_join_lookup_descent_cost, 4.70, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_lookup_key_cost",
+							 "The hash join's time for a key the index lookup finds on a leaf page it has already reached.",
+							 NULL,
+							 &tess_join_lookup_key_cost, 0.40, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_loop_key_cost",
+							 "The core's nested loop's time for an outer key it looks up in an index, weighed against the index lookup.",
+							 NULL,
+							 &tess_join_loop_key_cost, 1.45, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_loop_descent_cost",
+							 "What the core's nested loop takes more for a key far from the one before in the index.",
+							 "Counted on the descents the index lookup makes for the same keys.",
+							 &tess_join_loop_descent_cost, 2.94, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_loop_row_cost",
+							 "The core's nested loop's time for an inner row it fetches, weighed against the index lookup.",
+							 NULL,
+							 &tess_join_loop_row_cost, 0.177, 0.0, 1e10,
 							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",
