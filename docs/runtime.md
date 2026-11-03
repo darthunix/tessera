@@ -138,7 +138,27 @@ a cached offset is read at that offset in a plain loop with the width
 fixed per call, for the rows whose tuple has the attribute and no NULL
 before it, leaving their cursors alone, since a later column starts from
 the cached offsets anyway; such reads are never counted as restarted, and
-the other rows go through the cursor. The cursor is the
+the other rows go through the cursor. A walk forward also keeps the
+columns its consumers read behind it: a column the scan keeps is stored
+by every walk that passes it, rows with NULLs and short rows too, and a
+request behind the cursor finds it there and starts no walk. A column is
+kept when the walks it would save outweigh its stores: over a window,
+the rows read for it behind the cursor, times the attributes
+from the cached offsets to it, times two, reach the rows a walk carried
+to it or past it. Both counts come from the columns' masks, not from the
+rows: a row's cursor stands past a column when the row was read for it
+or for a later one. They are taken on one batch in four, a window being
+1024 rows counted, and a scan that has read one column past the cached
+offsets counts nothing; counted on every batch they made TPC-H Q3, Q8
+and Q21, which keep nothing, 2 % to 5 % slower. The flags change only
+between batches, so a row's cursor tells which kept values the row
+holds. A request picks its
+path once, so a scan that keeps nothing before the column it reads runs
+the plain path. TPC-H Q1 and Q12 keep the columns their aggregate and
+their later clauses read behind the cursor, and their walks from the
+tuple's start fall from 5.9 M and 2.8 M to a few thousand; Q6 and Q14,
+which read such columns on 15 % and 1 % of the rows near the cached
+offsets, keep none. The cursor is the
 deformation of PostgreSQL's own slots reduced to one target and made
 resumable, ported from pg_batch; it relies only on public inline helpers,
 so PostgreSQL is not patched. A tuple shorter than the descriptor yields

@@ -21,6 +21,7 @@ PG_FUNCTION_INFO_V1(tessera_test_heap_batch);
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch_errors);
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch_nulls);
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch_back);
+PG_FUNCTION_INFO_V1(tessera_test_heap_batch_keep);
 
 /* An expectation, reported by number on failure. */
 static bool
@@ -486,6 +487,123 @@ tessera_test_heap_batch_back(PG_FUNCTION_ARGS)
 		stats->restarted_datums == 64 + 128 + 64 + 64);
 	batch->ops->release(batch);
 	table_close(other, AccessShareLock);
+	table_close(rel, AccessShareLock);
+	PG_RETURN_BOOL(result);
+}
+
+/*
+ * Row r of heap_batch_k holds, for i = r + 1, k = i or NULL when i is a
+ * multiple of 10, a = 'a' || i, b = 'b' || i or NULL when i is a multiple
+ * of 4, c = 'c' || i, and d = i, a column added after the first 40 rows:
+ * those rows are shorter, and their d is its default, 7.
+ */
+static bool
+keep_row_holds(const TessDatumColumn *column, int row, int attnum)
+{
+	int			i = row + 1;
+	char		expected[16];
+
+	if (attnum == 5)
+		return !column->isnull[row] &&
+			DatumGetInt64(column->values[row]) == (i <= 40 ? 7 : i);
+	if (attnum == 3 && i % 4 == 0)
+		return column->isnull[row];
+	snprintf(expected, sizeof(expected), "%c%d", 'a' + attnum - 2, i);
+	return !column->isnull[row] &&
+		strcmp(text_to_cstring(DatumGetTextPP(column->values[row])), expected) == 0;
+}
+
+/* A column read for the rows of a mask, each as keep_row_holds says. */
+static bool
+keep_column_holds(TessBatch *batch, int column, const TessRowMask *rows)
+{
+	TessDatumColumn values;
+	bool		holds = true;
+
+	get_column(batch, column, rows, &values);
+	for (int row = 0; row < 64; row++)
+		if (tess_row_mask_contains(rows, row))
+			holds &= keep_row_holds(&values, row, column + 1);
+	return holds;
+}
+
+/*
+ * One batch of heap_batch_k: d on every row, then b on the rows of
+ * b_rows and c on those of c_rows, behind the rows' cursors; whether the
+ * values hold and the batch restarted the walks of restarts rows.
+ */
+static bool
+keep_batch(TessHeapBatch *heap, Relation rel, Oid relid,
+		   const TessRowMask *b_rows, const TessRowMask *c_rows, int restarts)
+{
+	const TessHeapBatchStats *stats = tess_heap_batch_stats(heap);
+	TessBatch  *batch = back_batch(heap, rel, relid);
+	uint64		before = stats->restarted_datums;
+	bool		holds;
+
+	holds = keep_column_holds(batch, 4, &batch->rows);
+	if (b_rows != NULL)
+		holds &= keep_column_holds(batch, 2, b_rows);
+	if (c_rows != NULL)
+		holds &= keep_column_holds(batch, 3, c_rows);
+	holds &= stats->restarted_datums == before + restarts;
+	batch->ops->release(batch);
+	return holds;
+}
+
+/*
+ * A walk that keeps the columns read behind it. Batches 0 to 60 read d,
+ * then b and c on every row: b restarts each row's walk and c continues
+ * it. The heap batch counts one batch in four, 0, 4 and so on, and after
+ * 16 of them, at the end of batch 60, keeps b and c. From batch 61 on the
+ * walk to d stores them, and their reads start no walk, on rows with
+ * NULLs and on the short rows too, whose walk stops at c. a, read on no
+ * counted row, is not kept and restarts. Read on one row a batch over the
+ * next window, its counted batches 64 to 124, b and c are dropped at its
+ * end, and restart from batch 125.
+ */
+Datum
+tessera_test_heap_batch_keep(PG_FUNCTION_ARGS)
+{
+	Oid			relid = PG_GETARG_OID(0);
+	Relation	rel = table_open(relid, AccessShareLock);
+	TessHeapBatch *heap = make_heap(5, 64, RelationGetDescr(rel));
+	uint64		all_bits[1] = {UINT64_MAX};
+	uint64		one_bits[1] = {1};
+	TessRowMask all = {64, all_bits};
+	TessRowMask one = {64, one_bits};
+	bool		result = true;
+	bool		holds = true;
+
+	for (int batch = 0; batch <= 60; batch++)
+		holds &= keep_batch(heap, rel, relid, &all, &all, 64);
+	result &= check(70, holds);
+	result &= check(71, keep_batch(heap, rel, relid, &all, &all, 0));
+	{
+		const TessHeapBatchStats *stats = tess_heap_batch_stats(heap);
+		TessBatch  *batch = back_batch(heap, rel, relid);
+		uint64		before;
+
+		holds = keep_column_holds(batch, 4, &all) &&
+			keep_column_holds(batch, 2, &all);
+		before = stats->restarted_datums;
+		holds &= keep_column_holds(batch, 1, &all) &&
+			stats->restarted_datums == before + 64;
+		result &= check(72, holds);
+		batch->ops->release(batch);
+	}
+	holds = true;
+	for (int batch = 63; batch <= 124; batch++)
+		holds &= keep_batch(heap, rel, relid, &one, &one, 0);
+	result &= check(73, holds);
+	result &= check(74, keep_batch(heap, rel, relid, &one, &one, 1));
+
+	/* Read on one row a batch from the first window: never kept. */
+	heap = make_heap(5, 64, RelationGetDescr(rel));
+	holds = true;
+	for (int batch = 0; batch < 130; batch++)
+		holds &= keep_batch(heap, rel, relid, NULL, &one, 1);
+	result &= check(75, holds);
 	table_close(rel, AccessShareLock);
 	PG_RETURN_BOOL(result);
 }

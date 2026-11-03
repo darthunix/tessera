@@ -6,11 +6,11 @@
 
 ## 2. The work
 
-- [ ] 2.1 The walk that keeps columns, rows with NULLs and short rows
+- [x] 2.1 The walk that keeps columns, rows with NULLs and short rows
       too, the counts and the window that choose them, and their
       tests. Check: `make installcheck` on PostgreSQL master with
       assertions; the tests show restarts without it
-- [ ] 2.2 The share that keeps a column, set by the measurement of
+- [x] 2.2 The share that keeps a column, set by the measurement of
       Q01, Q06, Q12 and Q14
 - [ ] 2.3 The path for a one-byte header, measured on Q06 and Q14;
       kept only with a gain
