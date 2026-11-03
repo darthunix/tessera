@@ -8,6 +8,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
+#include "utils/array.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
 #include "storage/barrier.h"
@@ -220,7 +221,13 @@ join_memory(TessHashJoinState *state)
 void
 join_note_memory(TessHashJoinState *state)
 {
-	state->peak_memory = Max(state->peak_memory, join_memory(state));
+	Size		memory = join_memory(state);
+	Size		limit = tess_hash_memory_limit();
+
+	state->peak_memory = Max(state->peak_memory, memory);
+	/* A batch's table: its excess over the hash_mem in force as it grows. */
+	if (state->lookup_key >= 0 && memory > limit)
+		state->counters[JOIN_OVERRUN] = Max(state->counters[JOIN_OVERRUN], memory - limit);
 }
 
 /*
@@ -285,12 +292,39 @@ join_take_back_bloom(TessHashJoinState *state)
 	state->bloom.below = false;
 }
 
+/*
+ * Index join mode: the table of the batch before keeps its first chunk
+ * and its index for the next batch's, which add_table_chunk and
+ * join_index_table take again; its other chunks go.
+ */
+static void
+clear_lookup_table(TessHashJoinState *state)
+{
+	for (int chunk = 0; chunk < state->table.nchunks; chunk++)
+	{
+		if (chunk == 0 && state->kept_chunk == NULL)
+			state->kept_chunk = state->chunk_bases[0];
+		else
+			pfree(state->chunk_bases[chunk]);
+	}
+	if (state->table.index != NULL)
+	{
+		if (state->kept_index != NULL)
+			pfree(state->kept_index);
+		state->kept_index = state->table.index;
+		state->kept_index_len = state->table.index_len;
+	}
+}
+
 /* An empty table with no index yet, for a build that appends first. */
 static void
 create_table(TessHashJoinState *state)
 {
 	join_take_back_bloom(state);
-	MemoryContextReset(state->table_context);
+	if (state->lookup_key >= 0)
+		clear_lookup_table(state);
+	else
+		MemoryContextReset(state->table_context);
 	MemoryContextReset(state->values_context);
 	join_reset_values(state);
 	join_forget_marks(state);
@@ -332,7 +366,14 @@ add_table_chunk(TessHashJoinState *state)
 	void	   *base;
 
 	join_reserve_chunks(state, chunk + 1);
-	base = table_chunk_new(state->kernels, state->table_context, len, &state->status);
+	if (chunk == 0 && state->kept_chunk != NULL)
+	{
+		base = state->kept_chunk;
+		state->kept_chunk = NULL;
+		check(state, state->kernels->table_chunk_init(base, len, &state->status));
+	}
+	else
+		base = table_chunk_new(state->kernels, state->table_context, len, &state->status);
 	state->chunk_bases[chunk] = base;
 	state->chunk_lens[chunk] = len;
 	state->table.nchunks++;
@@ -370,8 +411,16 @@ join_index_table(TessHashJoinState *state, int read_back)
 
 	/* One index per build, made once every chunk is appended. */
 	Assert(state->table.index == NULL);
-	state->table.index = MemoryContextAllocExtended(state->table_context, size,
-													MCXT_ALLOC_HUGE);
+	if (state->kept_index != NULL && state->kept_index_len == size)
+		state->table.index = state->kept_index;
+	else
+	{
+		if (state->kept_index != NULL)
+			pfree(state->kept_index);
+		state->table.index = MemoryContextAllocExtended(state->table_context, size,
+														MCXT_ALLOC_HUGE);
+	}
+	state->kept_index = NULL;
 	state->table.index_len = size;
 	check(state, state->kernels->table_create(state->table.index, size,
 											  state->keys.nkeys,
@@ -691,7 +740,7 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 	 * too. The index is a check here, not memory taken: the count takes it
 	 * when it is made.
 	 */
-	if (state->spill == NULL &&
+	if (state->spill == NULL && state->lookup_key < 0 &&
 		state->table_bytes + state->values.bytes +
 		2 * join_table_chunk_len(state) +
 		join_index_bytes(state, state->build_rows +
@@ -866,6 +915,53 @@ build_table(TessHashJoinState *state)
 	state->built = true;
 }
 
+
+/*
+ * Index join mode: the table of this outer batch, built from the inner
+ * child rescanned and given the keys of the batch's rows with a key, as
+ * an array of the key's type, which the btree sorts and deduplicates; a
+ * batch without one gets an empty table. The array of the batch before
+ * goes with its context once the inner child is rescanned, before the
+ * scan reads the new one.
+ */
+void
+join_lookup_batch(TessHashJoinState *state, TessBatch *batch)
+{
+	TessDatumColumn column;
+	ArrayType  *array = NULL;
+	Datum	   *keys;
+	int			count = 0;
+	int			row = -1;
+
+	if (batch->rows.nrows > JOIN_LOOKUP_ROWS)
+		elog(ERROR, "TessHashJoin received a batch of %d rows to look up", batch->rows.nrows);
+	ExecReScan(state->inner);
+	tess_input_rescan(state->inner_input);
+	MemoryContextReset(state->lookup_context);
+	join_child_column(batch, state->keys.outer_keys[state->lookup_key], &batch->rows,
+					  TESS_COLUMN_FOR_FILTER, &column);
+	keys = MemoryContextAlloc(state->lookup_context, sizeof(Datum) * Max(batch->rows.nrows, 1));
+	while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+	{
+		if (!column.isnull[row])
+			keys[count++] = column.values[row];
+	}
+	if (count > 0)
+	{
+		MemoryContext old = MemoryContextSwitchTo(state->lookup_context);
+
+		array = construct_array(keys, count, state->lookup_type, state->lookup_typlen,
+								state->lookup_typbyval, state->lookup_typalign);
+		MemoryContextSwitchTo(old);
+		tess_heap_lookup(state->lookup_scan, PointerGetDatum(array));
+		state->counters[JOIN_LOOKUPS]++;
+		state->counters[JOIN_LOOKUP_KEYS] += count;
+	}
+	build_table(state);
+	/* Builds counts the tables of batches with a key (EXPLAIN). */
+	if (count == 0)
+		state->counters[JOIN_BUILDS]--;
+}
 
 /*
  * The inner column kept in payload word `word`, for the rows of the
@@ -1050,6 +1146,12 @@ decide_bloom(TessHashJoinState *state, uint64 rows, uint64 found)
 	double		ratio = tess_join_bloom_ratio;
 	bool		below_only;
 
+	/* A table of one outer batch's keys: no filter for the next batch. */
+	if (state->lookup_key >= 0)
+	{
+		state->bloom.decided = true;
+		return;
+	}
 	state->sample_rows += rows;
 	state->sample_found += found;
 	/* At 1 the filter comes at once, whatever the sizes; at 0 never. */
@@ -1389,6 +1491,10 @@ send_requests(TessHashJoinState *state)
 	outer_request.projection_columns = outer_columns;
 	outer_request.output_mode = TESS_OUTPUT_BATCH;
 	outer_request.max_batch_rows = request->max_batch_rows;
+	/* Index join mode: the arrays of at most a batch's keys. */
+	if (state->lookup_key >= 0)
+		outer_request.max_batch_rows = request->max_batch_rows > 0 ?
+			Min(request->max_batch_rows, JOIN_LOOKUP_ROWS) : JOIN_LOOKUP_ROWS;
 	tess_input_set_request(state->outer_input, &outer_request);
 	inner_request.filter_columns = inner_key;
 	inner_request.projection_columns = inner_columns;
@@ -1423,7 +1529,7 @@ join_decide_compact(TessHashJoinState *state)
 	if (state->request->output_mode != TESS_OUTPUT_BATCH ||
 		state->inner_unique || state->duplicates == 0 ||
 		state->jointype == JOIN_SEMI || state->jointype == JOIN_ANTI ||
-		state->plan_jointype == JOIN_RIGHT_ANTI ||
+		state->plan_jointype == JOIN_RIGHT_ANTI || state->lookup_key >= 0 ||
 		(state->jointype == JOIN_LEFT && state->qual != NULL))
 		return;
 	for (int index = 0; index < state->compact.nouter; index++)
@@ -1454,7 +1560,8 @@ join_exec(CustomScanState *css)
 		return NULL;
 	if (state->request == NULL)
 		send_requests(state);
-	if (!state->built)
+	/* Index join mode: each outer batch builds its own table, as it comes. */
+	if (!state->built && state->lookup_key < 0)
 	{
 		if (state->parallel.shared != NULL)
 			join_build_shared(state);
@@ -1468,7 +1575,8 @@ join_exec(CustomScanState *css)
 	 * Nothing to match: the outer child is never read, as in the core,
 	 * unless its rows go out without a match (LEFT, ANTI).
 	 */
-	if ((state->spill != NULL ? state->spill->total_rows : state->build_rows) == 0 &&
+	if (state->lookup_key < 0 &&
+		(state->spill != NULL ? state->spill->total_rows : state->build_rows) == 0 &&
 		(state->jointype == JOIN_INNER || state->jointype == JOIN_SEMI))
 	{
 		state->done = true;

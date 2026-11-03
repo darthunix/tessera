@@ -24,7 +24,9 @@
 #define TESS_FILTER_DATA "tessera.filter"
 #define TESS_FILTER_DATA_VERSION 1
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"
-#define TESS_HASH_JOIN_DATA_VERSION 8
+#define TESS_HASH_JOIN_DATA_VERSION 9
+/* The hash join's index join mode: the outer rows a lookup takes the keys of, at most. */
+#define JOIN_LOOKUP_ROWS 64
 #define TESS_SORT_DATA "tessera.sort"
 #define TESS_SORT_DATA_VERSION 2
 #define TESS_GATHER_DATA "tessera.gather"
@@ -45,10 +47,27 @@ extern Path *tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap,
 								   PathTarget *target);
 /* The node over the core's index scan, in the index's order. */
 extern Path *tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target);
+/*
+ * The node's lookup mode, inside the module only: a scan of an index of
+ * its relation for the arrays of keys a join gives it. The path belongs
+ * to the join that builds it; `lookup` is its plan data
+ * (tess_heap_lookup_data). The join finds the scan below it, at most one
+ * TessFilter down, and gives it each batch's keys after a rescan.
+ */
+extern List *tess_heap_lookup_data(Oid index, Oid opfuncid, Oid subtype, Oid collation);
+extern Path *tess_heap_lookup_path(PlannerInfo *root, RelOptInfo *rel, PathTarget *target,
+								   List *lookup, double rows);
+extern PlanState *tess_heap_lookup_scan(PlanState *inner);
+extern Path *tess_scan_lookup_path(PlannerInfo *root, RelOptInfo *rel, List *lookup,
+								   double rows);
+extern void tess_heap_lookup(PlanState *scan, Datum keys);
+extern uint64 tess_heap_lookup_searches(PlanState *scan);
 
 extern const TessNode tess_filter_node;
 extern const CustomScanMethods tess_filter_scan_methods;
 extern Node *tess_filter_create_state(CustomScan *cscan);
+/* The child of a TessFilter's state, or NULL for another node. */
+extern PlanState *tess_filter_child(PlanState *state);
 extern void tess_filter_planner_init(void);
 extern Path *tess_filter_row_path(PlannerInfo *root, RelOptInfo *rel, Path *seqscan);
 

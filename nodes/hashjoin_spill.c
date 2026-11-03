@@ -2379,6 +2379,9 @@ join_outer_next(TessHashJoinState *state)
 					batch = tess_input_next(state->outer_input);
 				if (batch != NULL)
 				{
+					/* Its table first: the build reserves rows for the inner batches. */
+					if (state->lookup_key >= 0)
+						join_lookup_batch(state, batch);
 					join_reserve_rows(state, batch->rows.nrows);
 					memcpy(state->active_bits, batch->rows.bits,
 						   sizeof(uint64) * tess_row_mask_word_count(batch->rows.nrows));

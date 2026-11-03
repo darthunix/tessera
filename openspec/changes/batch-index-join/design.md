@@ -222,13 +222,14 @@ its shared counters.
 
 On the join, `Inner Lookups: per outer batch`; with `ANALYZE`,
 `Lookups` (the array scans), `Lookup Keys` (the keys given, duplicates
-included, NULLs not) and `Overrun`: for each participant the most any
-batch's table took past the `hash_mem` in force when it was built, and
-the sum of the participants' in a parallel plan, as the join's other
-memory lines are sums; with
-`VERBOSE`, `Builds`, which counts the tables of batches with keys. On
-the lookup scan, `Lookup Index` (`explain_get_index_name`), `Lookup
-Key`, and `Index Searches`, the descents the btree made.
+included, NULLs not), `Index Searches` (the descents the btree made)
+and `Overrun`: for each participant the most any batch's table took
+past the `hash_mem` in force when it was built. In a parallel plan each
+is the sum of the participants', as the join's other lines are sums:
+the join counts the descents, since the lookup scan, not parallel-aware,
+shares no counters. With `VERBOSE`, `Builds`, which counts the tables
+of batches with keys. On the lookup scan, `Lookup Index`
+(`explain_get_index_name`) and `Lookup Key`.
 
 ## Risks / Trade-offs
 

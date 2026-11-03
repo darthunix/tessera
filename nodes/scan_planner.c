@@ -214,6 +214,29 @@ find_seqscan(const List *pathlist)
 }
 
 /*
+ * The inner side of an index join: the node's lookup scan of the
+ * relation (tess_heap_lookup_path, with the plan data `lookup`), under
+ * TessFilter for the relation's clauses, all of them, as the node's own
+ * scans take them; NULL where the node takes no scan of the relation, or
+ * a pseudoconstant clause would put the core's gating Result above it.
+ * The path belongs to the join: it never enters the relation's lists.
+ */
+Path *
+tess_scan_lookup_path(PlannerInfo *root, RelOptInfo *rel, List *lookup, double rows)
+{
+	Path	   *scan;
+
+	if (!relation_supported(root, rel, planner_rt_fetch(rel->relid, root)))
+		return NULL;
+	if (rel->baserestrictinfo == NIL)
+		return tess_heap_lookup_path(root, rel, rel->reltarget, lookup, rows);
+	if (!clauses_supported(root, rel))
+		return NULL;
+	scan = tess_heap_lookup_path(root, rel, filter_input_target(root, rel), lookup, rows);
+	return scan != NULL ? (Path *) make_filter_path(rel, scan, scan) : NULL;
+}
+
+/*
  * TessFilter over a base relation whose clauses all run row by row, in
  * place of its sequential scan (a partial one gives a partial path), or
  * NULL. The relation gets it as a path (add_row_filter_paths), and an

@@ -358,8 +358,8 @@ FROM generate_series(1, 17) AS g;
  core: Aggregate | GROUP BY i4 + 1, …, i4 + 17
 (2 rows)
 
--- Over an index: incremental sort and a parameterized inner side of a
--- nested loop; and a merge join, whose sorts must restore.
+-- Over an index: incremental sort and a join that looks its inner keys
+-- up in the index; and a merge join, whose sorts must restore.
 CREATE INDEX cov_i4 ON cov (i4);
 ANALYZE cov;
 SELECT cov_query(q) AS level, q AS query
@@ -371,7 +371,7 @@ ORDER BY o;
                    level                   |                                 query                                 
 -------------------------------------------+-----------------------------------------------------------------------
  core: Limit, Incremental Sort, Index Scan | SELECT i4, i2 FROM cov ORDER BY i4, i2 LIMIT 10
- core: Nested Loop, Index Scan, Index Scan | SELECT a.i2, b.i2 FROM cov a JOIN cov b ON a.i4 = b.i4 WHERE a.i4 < 3
+ core: Index Scan                          | SELECT a.i2, b.i2 FROM cov a JOIN cov b ON a.i4 = b.i4 WHERE a.i4 < 3
 (2 rows)
 
 SET enable_hashjoin = off;
