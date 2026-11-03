@@ -398,14 +398,19 @@ top of [report.rs](../../../tools/tessera-bench/src/report.rs):
   more than 3%. This catches slowdowns that instructions cannot see, such as
   a longer dependency chain on the accumulator. The minimum over the blocks
   of three processes stayed within 3% between identical binaries on long
-  operations, bistable ones included, on Apple's M5 Pro. On an Intel Core
-  i5-1038NG7 many operations have two costs, often about 10% apart, and a
-  process settles at one of them when it starts and keeps it on every core
-  it moves to. Over 690 long operations of identical binaries there, the
-  minimum moved by more than 3% on 22 and by more than 10% on 2. One of
-  them failed: all three processes of one side settled at the lower cost
-  and all three of the other at the higher one. On Intel a `FAIL cycles`
-  counts when a second run of its program confirms it.
+  operations of one input, bistable ones included, on Apple's M5 Pro. On an
+  Intel Core i5-1038NG7 many operations have two costs, often about 10%
+  apart, and a process settles at one of them when it starts and keeps it
+  on every core it moves to. Over 690 long operations of identical binaries
+  there, the minimum moved by more than 3% on 22 and by more than 10% on 2.
+  One of them failed: all three processes of one side settled at the lower
+  cost and all three of the other at the higher one. Over a ring of inputs
+  the M5 Pro behaves so too, Datum operations most: a process runs at one
+  of two costs about 10% apart, or steps from one to the other, a ring of
+  4 inputs inside L1 as a ring of 64, and the minimum of identical
+  binaries has moved by 7%, the median with it. On Intel, and on a case
+  drawn at random on the M5 Pro, a `FAIL cycles` counts when a second run
+  of its program confirms it.
 - `WARNING cycles` when the minimum cycles per call grow by more than 3%, or
   by more than 4 cycles for operations under 200 cycles, where a percentage
   is a fraction of a cycle, and the median grows by as much. A real slowdown
