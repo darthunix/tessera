@@ -27,7 +27,7 @@ placed.
 
 ## 2. WordValues
 
-- [ ] 2.1 One private helper that checks the word and builds the
+- [x] 2.1 One private helper that checks the word and builds the
       iterator, or gives the reason of a refusal, never calling the
       reader; `try_new` only turns a reason into its error, with the
       same text. Check: `cargo test --locked -p tessera-core -p
