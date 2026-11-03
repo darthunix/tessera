@@ -61,7 +61,7 @@ placed.
 
 ## 4. The sort key
 
-- [ ] 4.1 Write the bits of a sort item in a private helper that
+- [x] 4.1 Write the bits of a sort item in a private helper that
       returns the item or the key that refused its NULL; `Encoder::
       encode` keeps its error and text. Check: `cargo test --locked -p
       tessera-kernels sort`; `tessera-bench --disasm` on the sorting
