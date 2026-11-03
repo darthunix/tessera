@@ -557,8 +557,9 @@ keep_batch(TessHeapBatch *heap, Relation rel, Oid relid,
  * it. The heap batch counts one batch in four, 0, 4 and so on, and after
  * 16 of them, at the end of batch 60, keeps b and c. From batch 61 on the
  * walk to d stores them, and their reads start no walk, on rows with
- * NULLs and on the short rows too, whose walk stops at c. a, read on no
- * counted row, is not kept and restarts. Read on one row a batch over the
+ * NULLs and on the short rows too, whose walk stops at c; read before d,
+ * they start none either (batch 62). a, read on no counted row in batch
+ * 63, is not kept and restarts. Read on one row a batch over the
  * next window, its counted batches 64 to 124, b and c are dropped at its
  * end, and restart from batch 125.
  */
@@ -580,6 +581,27 @@ tessera_test_heap_batch_keep(PG_FUNCTION_ARGS)
 	result &= check(70, holds);
 	result &= check(71, keep_batch(heap, rel, relid, &all, &all, 0));
 	{
+		/*
+		 * Batch 62: kept columns read before a later one. b on the odd rows
+		 * walks to b; d then continues those walks, keeping c, and walks the
+		 * even rows from their start, keeping b and c. b and c then start no
+		 * walk.
+		 */
+		const TessHeapBatchStats *stats = tess_heap_batch_stats(heap);
+		TessBatch  *batch = back_batch(heap, rel, relid);
+		uint64		odd_bits[1];
+		TessRowMask odd = parity_mask(64, 1, odd_bits);
+		uint64		before = stats->restarted_datums;
+
+		holds = keep_column_holds(batch, 2, &odd) &&
+			keep_column_holds(batch, 4, &all) &&
+			keep_column_holds(batch, 2, &all) &&
+			keep_column_holds(batch, 3, &all) &&
+			stats->restarted_datums == before;
+		result &= check(76, holds);
+		batch->ops->release(batch);
+	}
+	{
 		const TessHeapBatchStats *stats = tess_heap_batch_stats(heap);
 		TessBatch  *batch = back_batch(heap, rel, relid);
 		uint64		before;
@@ -593,7 +615,7 @@ tessera_test_heap_batch_keep(PG_FUNCTION_ARGS)
 		batch->ops->release(batch);
 	}
 	holds = true;
-	for (int batch = 63; batch <= 124; batch++)
+	for (int batch = 64; batch <= 124; batch++)
 		holds &= keep_batch(heap, rel, relid, &one, &one, 0);
 	result &= check(73, holds);
 	result &= check(74, keep_batch(heap, rel, relid, &one, &one, 1));

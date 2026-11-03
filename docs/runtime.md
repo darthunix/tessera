@@ -150,7 +150,7 @@ rows: a row's cursor stands past a column when the row was read for it
 or for a later one. They are taken on one batch in four, a window being
 1024 rows counted, and a scan that has read one column past the cached
 offsets counts nothing; counted on every batch they made TPC-H Q3, Q8
-and Q21, which keep nothing, 2 % to 5 % slower. The flags change only
+and Q21, which keep nothing, 2 % to 7 % slower. The flags change only
 between batches, so a row's cursor tells which kept values the row
 holds. A request picks its
 path once, so a scan that keeps nothing before the column it reads runs
