@@ -15,7 +15,9 @@
       since no SQL reaches either without the other
 - [ ] 2.3 The planner: the lookup path inside the join's path, its
       eligibility through the scan planner's helpers, the admission by
-      statistics, the cost, serial and partial, calibrated by the family
+      statistics, the cost in the nested loop's currency, serial and
+      partial, its prices settings fitted by the family `lookupcost`,
+      and `docs/costs.md`
 - [ ] 2.4 The tests, each with its plan and against the core: batches
       with pairs, without and with NULL keys only, one after another;
       duplicates on both sides; sparse batches; other equalities; LEFT

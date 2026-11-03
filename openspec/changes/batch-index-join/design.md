@@ -190,27 +190,51 @@ its chunks. A column without statistics gets no lookup.
 
 ### The cost
 
-The cost counts what a lookup reads and what it keeps apart:
+The core's costs could not decide the lookup. On data in memory the core
+prices its nested loop over an index and its hash join at rates 33 to
+98 times apart, and its cost of a key of the nested loop barely moves
+where the nested loop's time moves fourfold with the nearness of the
+keys in the index (0.05 to 0.21 µs of its time a unit of its cost over
+the family). Priced at the hash join's rate alone, a lookup cost less
+than the nested loop also where it ran 8 to 27 % slower: where each key
+of a batch needed a descent of its own, or a batch held one or two keys
+(TPC-H Q5, 21 740 lookups of about two keys). Priced at the nested
+loop's rate, it lost to a hash join it ran 17 times faster than. Shares
+of the core's own estimate of the nested loop's scan, tried in between,
+could not be fitted: the estimate stays nearly the same over keys whose
+times differ fourfold.
 
-- the outer batches with a key, from the shape of the outer side: a
-  scan's batches and the share its clauses keep (sparse batches count
-  as batches), a join's rounds, or, where nothing better is known, a
-  batch a row;
-- per batch, a fixed price for the array, the call, the index's rescan
-  and preprocessing, and the table;
-- the descents: one for each distinct key of a batch, fewer where the
-  keys of a batch lie close in the index, which the correlation of the
-  outer key column says for a scan in the table's order; keys repeated
-  across batches are looked up again each time;
-- the inner rows fetched (the lookup equality's rows), the rows kept
-  after the inner side's clauses, and the pairs after the join's;
-- the start: the first outer batch, its lookup and its table before the
-  first row.
+The decisions, whose rules and parameters `docs/costs.md` writes in its
+section on the index join:
 
-None of the hash join's prices for compact batches or for pruning
-apply. The prices are calibrated by a benchmark against the core's
-nested loop, as `tess_join_cost_unit` was against the core's hash join.
-The join's path keeps no order.
+- The lookup's path is priced as the node's hash join prices its inner
+  scan and its own work: the inner side's work, the lookups and the
+  rows they read, at its time, as a scan's cost is; the work of its
+  tables at the hash join's rate. Priced whole at the hash join's rate,
+  its reading of the inner table cost 18 times less than a scan reading
+  the same rows (TPC-H Q21 took a lookup of 1.8 million rows in place of
+  a scan, three times slower).
+- It is offered only where its time is within 0.8 of the core's nested
+  loop's over the same keys, both times from one model of counts and
+  fitted prices: the batches, the keys that descend the btree and the
+  other keys for the lookup, its rows and clauses as the node's index
+  scan prices them; the keys, the same descents and the rows for the
+  nested loop, the descents standing for keys far from each other,
+  which cost the nested loop more too. The margin leaves the close
+  cases, where the model's error decides, to the core's plan.
+- The counts are the core's estimates where it has them (the rows a key
+  finds, not the most frequent key's rows, which only the admission
+  takes) and the shape of the outer side otherwise: the batches from
+  the run of the driving scan its clauses select, the descents from the
+  leaf pages a batch's keys reach, within the part of the index the
+  outer keys' histogram spans.
+- The prices are settings fitted by a calibration family,
+  `bench/pg/lookupcost`, which also shows the planner's counts against
+  the plan's.
+
+The model leaves the heap's pages out: keys whose rows lie on pages
+apart cost both joins more than it counts, which the margin covers on
+the samples measured.
 
 ### Under a Gather
 
@@ -220,16 +244,18 @@ its shared counters.
 
 ### EXPLAIN
 
-On the join, `Inner Lookups: per outer batch`; with `ANALYZE`,
-`Lookups` (the array scans), `Lookup Keys` (the keys given, duplicates
-included, NULLs not), `Index Searches` (the descents the btree made)
-and `Overrun`: for each participant the most any batch's table took
-past the `hash_mem` in force when it was built. In a parallel plan each
-is the sum of the participants', as the join's other lines are sums:
-the join counts the descents, since the lookup scan, not parallel-aware,
-shares no counters. With `VERBOSE`, `Builds`, which counts the tables
-of batches with keys. On the lookup scan, `Lookup Index`
-(`explain_get_index_name`) and `Lookup Key`.
+On the join, `Inner Lookups: per outer batch`; with `ANALYZE`, `Lookups`
+(the array scans), `Lookup Keys` (the keys given, duplicates included,
+NULLs not), `Index Searches` (the descents the btree made) and
+`Overrun`: for each participant the most any batch's table took past the
+`hash_mem` in force when it was built. In a parallel plan each is the
+sum of the participants', as the join's other lines are sums: the join
+counts the descents, since the lookup scan, not parallel-aware, shares
+no counters. With `VERBOSE`, `Builds`, which counts the tables of
+batches with keys, and with the costs `Lookup Estimate`, the planner's
+counts of batches, keys, descents and rows and the two times of the
+cost's model, which the calibration family reads. On the lookup scan,
+`Lookup Index` (`explain_get_index_name`) and `Lookup Key`.
 
 ## Risks / Trade-offs
 
@@ -238,18 +264,49 @@ of batches with keys. On the lookup scan, `Lookup Index`
   memory the planner did not expect: the admission is an estimate,
   not a bound.
 - The keys of a batch spread over the index: a descent a key, as in
-  the core, and the batch's fixed price on top; the cost takes it.
-- An index out of the table's order: each row a page, as in the core.
+  the core, and the batch's price on top; the cost takes it and leaves
+  the core's nested loop the join.
+- The lookup's comparison with the core's nested loop rests on the
+  model's two times, fitted on one machine with the data in memory: a
+  deployment calibrates again.
+- An index out of the table's order: each row on a page of its own.
+  The row's price is measured on data in memory; an inner table past
+  `effective_cache_size` gets no lookup.
 - A join of few outer batches: the fixed price of a lookup against a
   few row lookups; the cost takes it.
 
 ## Measurement
 
-A benchmark family of index nested loops, calibrated and then measured
-base against change: a selective outer side against a large table by its
-primary key, one row a key and four; a skewed key; outer keys repeated
-across batches, where the core may take Memoize; outer keys in index
-order and shuffled; dense and sparse outer batches; a LEFT join with
-misses; a join of a few outer rows; text and date keys. TPC-H Q3, Q5,
-Q7, Q8 and Q21, base and change twice in turn, serial and with two
-workers, Q1 and Q6 as controls; a profile of Q7 with the mode.
+The calibration family `lookupcost` fits the prices and checks the
+counts (batches against `Lookups`, descents against `Index Searches`);
+then the benchmark family `indexjoin` measures base against change: a
+selective outer side against a large table by its primary key, one row
+a key and four; a skewed key; outer keys repeated across batches, where
+the core may take Memoize; outer keys in index order and shuffled;
+dense and sparse outer batches; a LEFT join with misses; a join of a
+few outer rows; text and date keys. The cases the first model lost,
+shuffled keys, sparse batches and text keys, keep the core's nested
+loop or run faster. TPC-H, every query, base and change twice in turn,
+serial and with two workers: Q2, Q5, Q8, Q9, Q10, Q16, Q18 and Q22,
+whose plans the mode changed, Q5 and Q16 among them, which it slowed;
+Q1 and Q6 as controls; a profile of Q7 with the mode.
+
+## Files
+
+- `nodes/heapscan.c`: the lookup mode of TessHeapScan.
+- `nodes/hashjoin.c`, `nodes/hashjoin_begin.c`,
+  `nodes/hashjoin_spill.c`, `nodes/hashjoin.h`: the table per outer
+  batch, its counters and EXPLAIN.
+- `nodes/join_planner.c`: the lookup path, its admission and its cost;
+  `nodes/scan_planner.c` and `nodes/filter.c`: the inner side's scan
+  and filter.
+- `nodes/module.c`: the cost's settings; `docs/costs.md`: its rules.
+- `bench/pg/indexjoin.sql`, `bench/pg/lookupcost.sql`: the families.
+
+## Tests
+
+- `test/sql/index_join.sql`: every query against the core's rows, the
+  plans the mode takes and refuses, its counters, the memory past
+  `hash_mem`, no Bloom filter, Gather.
+- `test/sql/coverage.sql`: the join over an index the coverage suite
+  lists.
