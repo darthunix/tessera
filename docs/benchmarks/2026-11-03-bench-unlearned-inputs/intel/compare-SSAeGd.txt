@@ -1,0 +1,7 @@
+DIAGNOSTIC: selected cases only; baseline=WORKTREE@becb677fb1e01ebdc169fae64c615c2cd9cfb99d, candidate=WORKTREE@becb677fb1e01ebdc169fae64c615c2cd9cfb99d
+filter_int64
+PASS filter_int64/datum/words/1024/all/nulls-random/ready/scalar: instructions before=2644.1 after=2644.1 change=+0.00%; cycles min before=774.3 after=776.6 change=+0.30% (median 792.0/786.1, modes 1.49/1.50, 3 processes); branch misses before=0.003 after=0.003 of 315.0 branches; cores 0,1,2,4,6
+PASS filter_int64/datum/words/1024/random/nulls-random/ready/scalar: instructions before=2644.0 after=2644.1 change=+0.00%; cycles min before=784.0 after=781.8 change=-0.27% (median 791.3/788.6, modes 1.50/1.49, 3 processes); branch misses before=0.002 after=0.002 of 315.0 branches; cores 2,3,4,6
+PASS filter_int64/dense/words/1024/all/nulls-random/ready/scalar: instructions before=2798.1 after=2798.1 change=+0.00%; cycles min before=745.9 after=747.1 change=+0.16% (median 754.2/753.9, modes 1.62/1.60, 3 processes); branch misses before=0.003 after=0.002 of 315.0 branches; cores 2,4,6
+PASS filter_int64/dense/words/1024/random/nulls-random/ready/scalar: instructions before=2798.1 after=2798.1 change=+0.00%; cycles min before=747.4 after=745.4 change=-0.27% (median 754.4/750.4, modes 1.60/1.60, 3 processes); branch misses before=0.002 after=0.002 of 315.0 branches; cores 0,2,4,6
+PASS: 4 PASS, 0 FAIL (0 instructions, 0 cycles), 0 UNSTABLE library paths; 0 cycle warnings; 4 bistable

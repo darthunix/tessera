@@ -28,8 +28,9 @@ placed `spill-crate` first on 2026-10-28, after the close of
 review of what more can move from C to Rust; the float kernels are
 closed. The maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
-order. The maintainer took six entries out of turn on 2026-11-02, after
-an analysis of TPC-H with Tessera on, in the order
+order; the first, of the benchmarks' inputs, is closed. The maintainer
+took six entries out of turn on 2026-11-02, after an analysis of TPC-H
+with Tessera on, in the order
 `deform-without-restarts` (done), `bpchar-constant-compare` (done),
 `right-anti-join` (done), `agg-dependent-columns`, `early-key-filter`
 (done), `batch-index-join`; on the same day he moved `agg-dependent-columns`
@@ -37,31 +38,29 @@ after `batch-index-join`, once a measurement of Q10 showed its
 aggregate's input row-wise:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
-2. `bench-unlearned-inputs`: Benchmarks whose inputs the predictor
-   cannot learn
-3. `whole-word-decisions`: When and where a driver takes a word whole,
+2. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-4. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-5. `explain-rows-per-loop`: The rows a node removed, per loop as the
+4. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-6. `join-pruning-cost`: The cost of a pruning join over the partitions
+5. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-7. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-8. `linux-x86-support`: Linux on x86-64 checked as the target platform
-9. `oltp-guard-bench`: OLTP guard family of benchmarks
-10. `runs-left-from-section-9`: Runs left to the maintainer from
-    section 9
-11. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-12. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+7. `linux-x86-support`: Linux on x86-64 checked as the target platform
+8. `oltp-guard-bench`: OLTP guard family of benchmarks
+9. `runs-left-from-section-9`: Runs left to the maintainer from
+   section 9
+10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-13. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-14. `tpch-sf10`: TPC-H step 10: SF10
-15. `backward-scan-mark-restore`: Backward scan and mark/restore
-16. `postgresql-19`: PostgreSQL 19 support
-17. `pg-duckdb-comparison`: Comparison with pg_duckdb
+13. `tpch-sf10`: TPC-H step 10: SF10
+14. `backward-scan-mark-restore`: Backward scan and mark/restore
+15. `postgresql-19`: PostgreSQL 19 support
+16. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -247,28 +246,6 @@ on 2026-10-28, after the close of `table-crate`; it is the change
 - **Capabilities:** relspill, spill-format, hash-table
 - **Size:** large: about fifty pull requests.
 
-### bench-unlearned-inputs
-
-Benchmarks whose inputs the predictor cannot learn. A finding of the
-close of the AVX2 kernels, taken by the maintainer on 2026-11-01; it is
-the change `bench-unlearned-inputs`.
-
-- **What:** The cases drawn at random get inputs that the branch
-  predictor has not met within its reach: a ring of inputs, one long
-  input or a fresh input before every call, chosen by a pilot on both
-  machines against the misses a model expects.
-- **Why:** Every call meets the same inputs, so the predictor learns
-  even random selections, NULL flags set at random and values in random
-  order: a branch of a set's search by halving misses 12 to 15 times in
-  about 19 750 a call, a branch on the NULL flag of a slot 0.004 times.
-  A branch cannot be judged against a choice made as data, the row
-  paths look cheaper than they are, and a verdict of cycles follows
-  where the code lies.
-- **Known:** The design of the change.
-- **Depends on:** nothing.
-- **Capabilities:** bench
-- **Size:** medium: one pull request.
-
 ### whole-word-decisions
 
 When and where a driver takes a word whole, on both machines. Four
@@ -293,8 +270,8 @@ change `whole-word-decisions`.
 - **Known:** The design of the change. The maintainer accepted the
   losses of the row paths for the pilot of the AVX2 kernels on
   2026-10-27, to be settled here once for every driver.
-- **Depends on:** `bench-unlearned-inputs`, whose cases it measures
-  with.
+- **Depends on:** nothing. It measures with the cases drawn at random,
+  which now take a ring of inputs that the predictor cannot learn.
 - **Capabilities:** kernel-abi
 - **Size:** large: three pull requests.
 
@@ -2009,6 +1986,19 @@ becomes an entry, joins one, or is dropped.
   rows it may hold the costlier order for the whole scan, by under half
   a check a row. Suggested: a window of each side measured first now
   and then, once a query shows the cost.
+- **Two costs of a case over a ring on the M5 Pro** (the close of the
+  change of the benchmarks' inputs, 2026-11-03). Over a ring of inputs
+  a process of the M5 Pro runs an operation at one of two costs about
+  10 % apart, or steps from one to the other within the run, Datum
+  operations most. A ring of 4 inputs inside L1 spreads its processes
+  as a ring of 64 does; one input did not, in one run. The minimum of
+  identical sides moved by 7.2 % in `arith_int32`, the median with it,
+  and by 21 % on one block of `compare_int32`. Until the cause is
+  known, a `FAIL cycles` on a case drawn at random counts there when a
+  second run confirms it. Suggested: record the time of a block beside
+  its cycles, to read its clock; then rings of 1 and 2 inputs over
+  several runs, to see whether taking the inputs in turn brings the
+  second cost.
 - **TessHeapScan under a row-wise hash join** (the TPC-H analysis of
   2026-11-02). In Q22 the scan of orders feeding the core's hash join
   takes 56 ms against 36 for the core's Seq Scan, where

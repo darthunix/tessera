@@ -1,0 +1,13 @@
+== compare-F6x7L1
+FULL RUN; baseline=e250584c1b4e6754d7129517ce57901f44d8af0f, candidate=03c834f84e58cd4d116f433746c3d17dc1287ba9
+PASS column_reader/datum/words/1024/all/nulls-random/ready/fold: instructions before=7194.0 after=7194.0 change=+0.00%; cycles min before=1723.9 after=1725.9 change=+0.12% (median 1726.0/1734.6, modes 1.45/1.24, 3 processes); branch misses before=1.001 after=1.001 of 391.0 branches; cores 0,2,4,6,7
+PASS column_reader/datum/words/1024/random/nulls-random/ready/fold: instructions before=6534.0 after=6534.0 change=+0.00%; cycles min before=1943.3 after=1942.7 change=-0.03% (median 2383.5/1946.1, modes 1.23/1.28, 3 processes); branch misses before=17.001 after=0.005 of 596.0 branches; cores 0,2,4,6
+FAIL column_reader/dense/words/1024/all/nulls-random/ready/fold: instructions before=7482.0 after=7687.0 change=+2.74%; cycles min before=2020.9 after=1952.3 change=-3.39% (median 2033.2/2040.3, modes 1.02/1.05, 3 processes); branch misses before=17.001 after=0.004 of 1973.0 branches; cores 0,4,6
+PASS column_reader/dense/words/1024/random/nulls-random/ready/fold: instructions before=6137.0 after=5596.0 change=-8.82%; cycles min before=1791.2 after=1715.0 change=-4.25% (median 1795.5/1716.0, modes 1.25/1.02, 3 processes); branch misses before=0.027 after=0.003 of 1310.0 branches; cores 0,1,2,4
+== compare-jrOJVK
+DIAGNOSTIC: selected cases only; baseline=076e9cea806d019ba382d81aa5b10ad927c3133c, candidate=f0dfb1ea90701d2bfb75c8290b093347019cc519
+FAIL set_int32/int4/datum/words/1024/shuffled/nulls-none/ready/keys65: instructions before=118844.3 after=109116.3 change=-8.19%; cycles min before=26440.0 after=31144.9 change=+17.79% (median 26644.9/31221.8, modes 1.03/1.03, 3 processes); branch misses before=14.601 after=17.064 of 19749.1 branches; cores 0,2,4,6
+FAIL set_int32/int4/dense/words/1024/shuffled/nulls-none/ready/keys65: instructions before=122050.3 after=112322.3 change=-7.97%; cycles min before=28863.9 after=32476.4 change=+12.52% (median 29020.6/32553.9, modes 1.03/1.03, 3 processes); branch misses before=12.659 after=17.017 of 19765.1 branches; cores 2,4
+== compare-zOahIK
+FULL RUN; baseline=64730c952ef51ea883292da2bb9c58bd63fe9b2d, candidate=c840c17e2fca669971ed2e09dc41fba1535512e4
+FAIL table_int32/dense/words/1024/random/nulls-random/ready/probe/probe_hit: instructions before=46331.1 after=49459.1 change=+6.75%; cycles min before=12132.1 after=12291.2 change=+1.31% (median 12734.0/12934.4, modes 1.10/1.12, 3 processes); branch misses before=8.653 after=8.432 of 8802.0 branches; cores 0,2,4,6

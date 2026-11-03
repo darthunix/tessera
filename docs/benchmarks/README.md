@@ -1,10 +1,17 @@
 # Benchmark runs
 
 Summaries of full runs of the PostgreSQL-level benchmarks of
-[`bench/pg`](../../bench/pg/README.md) and of the queries derived from
-TPC-H of [`bench/tpch`](../../bench/tpch/README.md), with the plans of
-the cases the README cites, newest first:
+[`bench/pg`](../../bench/pg/README.md), of the queries derived from
+TPC-H of [`bench/tpch`](../../bench/tpch/README.md) and of the counts
+of the kernels' benchmarks of
+[`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
+with the plans of the cases the README cites, newest first:
 
+- [2026-11-03, inputs the predictor cannot
+  learn](2026-11-03-bench-unlearned-inputs/README.md): the pilot of
+  the forms and the runs of identical sides of every program whose
+  cases drawn at random took a ring of inputs, the Intel Mac and Apple
+  M5 Pro, the change `bench-unlearned-inputs`.
 - [2026-11-02, the join's key filter first, and for small
   tables](2026-11-02-early-key-filter/README.md): TPC-H Q19 and Q21
   serial and with two workers, the join family, Apple M5 Pro,
