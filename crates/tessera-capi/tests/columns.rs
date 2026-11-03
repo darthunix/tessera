@@ -424,6 +424,32 @@ fn non_nullable_prepared_column_rejects_a_whole_bad_word() {
     assert!(dense.get(65).is_err());
 }
 
+/// Each refusal of a fold has its own text, which the proofs of the walk,
+/// stopping at the reason, do not reach.
+#[test]
+fn each_refusal_of_a_fold_has_its_text() {
+    let values = [MaybeUninit::new(42); 64];
+    let prepared = RowMaskView::try_new(64, &[1]).unwrap();
+    // SAFETY: the one prepared row has an initialized non-NULL value.
+    let dense = unsafe { DenseInt32Column::try_new(&values, None, Some(prepared)) }.unwrap();
+    let text = |rows: &RowMaskView<'_>| {
+        dense
+            .try_fold_selected(rows, (), |(), _, _| Ok(()))
+            .err()
+            .map(|error| error.to_string())
+    };
+    let other = RowMaskView::try_new(1, &[1]).unwrap();
+    assert_eq!(
+        text(&other).as_deref(),
+        Some("column and selection row counts differ")
+    );
+    let unprepared = RowMaskView::try_new(64, &[3]).unwrap();
+    assert_eq!(
+        text(&unprepared).as_deref(),
+        Some("selection contains unprepared rows")
+    );
+}
+
 #[test]
 fn nullable_word_modes_preserve_rows_and_stop_on_consumer_error() {
     let nrows = 193;
