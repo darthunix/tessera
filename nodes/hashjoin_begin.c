@@ -80,6 +80,7 @@ read_node_data(TessHashJoinState *state, const List *data)
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
 	state->lookup_key = tess_plan_read_int(reader, "lookup_key");
 	state->lookup_type = (Oid) tess_plan_read_int(reader, "lookup_type");
+	state->lookup_estimate = tess_plan_read_string(reader, "lookup_estimate");
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
 	state->parallel.shared_mode = tess_plan_read_int(reader, "shared") != 0;
 	state->prune.key = tess_plan_read_int(reader, "prune_key");
@@ -441,6 +442,9 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 							state->plan_jointype == JOIN_FULL ? "Full" : "Left", es);
 	if (state->lookup_key >= 0)
 		ExplainPropertyText("Inner Lookups", "per outer batch", es);
+	/* The planner's counts and the core's index cost a key (docs/costs.md). */
+	if (state->lookup_key >= 0 && es->verbose && es->costs)
+		ExplainPropertyText("Lookup Estimate", state->lookup_estimate, es);
 	ExplainPropertyText("Hash Cond",
 						deparse_expression((Node *) make_ands_explicit(list_copy_head(cscan->custom_exprs,
 																					  state->keys.nkeys)),

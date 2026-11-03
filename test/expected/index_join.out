@@ -69,12 +69,18 @@ SELECT g AS id,
        CASE WHEN g <= 1000 THEN g * 3 WHEN g <= 2000 THEN 500000 + g END AS k,
        g / 2 AS kd, 'k' || (g * 3) AS kt, date '2000-01-01' + g * 3 AS kdate,
        ((g * 3)::numeric / 10)::numeric(12, 2) AS kn, lpad((g * 3)::text, 6, '0')::char(8) AS kc,
-       (g * 3)::bigint AS k8, g % 5 AS v
+       (g * 3)::bigint AS k8, g % 5 AS v, g * 3 AS ko,
+       ((g * 7919) % 3000 + 1) * 133 AS ks
 FROM generate_series(1, 3000) AS g;
 ANALYZE ij_outer;
 SET enable_mergejoin = off;
 SET enable_nestloop = off;
 SET max_parallel_workers_per_gather = 0;
+-- The lookup's prices set to nothing: the suite checks the mode's rows
+-- and plans; the section on the cost checks its model at the defaults.
+SET tessera.join_lookup_batch_cost = 0;
+SET tessera.join_lookup_descent_cost = 0;
+SET tessera.join_lookup_key_cost = 0;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.k;
                       QUERY PLAN                      
 ------------------------------------------------------
@@ -96,7 +102,7 @@ SELECT ij_property($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l O
        ij_property($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.k$$, 'Index Searches')::int > 0 AS searched;
  lookups | builds | lookup_keys | searched 
 ---------+--------+-------------+----------
- 41      | 41     | 2000        | t
+ 45      | 45     | 2000        | t
 (1 row)
 
 -- Batches with pairs, without, and with NULL keys only, one after another.
@@ -234,6 +240,84 @@ SELECT ij_same($$SELECT o.id, l.id FROM ij_outer o JOIN ij_inner l ON l.id = o.k
  1000 rows, hash 7cec2c49b1b2b83d3bb29734466511fa
 (1 row)
 
+-- The cost, against the core's nested loop over the index: keys of a
+-- batch next to each other in the index share its descents and take the
+-- lookup; shuffled keys, and batches of one key, descend once a key and
+-- leave the core's nested loop the join. An inner table past
+-- effective_cache_size gets no lookup. EXPLAIN VERBOSE shows the
+-- planner's counts with the costs.
+RESET tessera.join_lookup_batch_cost;
+RESET tessera.join_lookup_descent_cost;
+RESET tessera.join_lookup_key_cost;
+SET enable_nestloop = on;
+SELECT ij_lookup($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.ko WHERE o.id <= 1000$$) AS ordered,
+       ij_lookup($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.ks WHERE o.id <= 1000$$) AS shuffled,
+       ij_lookup($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.ko WHERE o.id % 50 = 0$$) AS sparse;
+    ordered    | shuffled | sparse 
+---------------+----------+--------
+ ij_inner_pkey | none     | none
+(1 row)
+
+SELECT ij_same($$SELECT o.id, l.v FROM ij_outer o JOIN ij_inner l ON l.id = o.ks WHERE o.id <= 1000$$);
+                     ij_same                      
+--------------------------------------------------
+ 1000 rows, hash 852be4ed612634e482a09077daaa9ffe
+(1 row)
+
+SET enable_nestloop = off;
+SET tessera.join_lookup_batch_cost = 0;
+SET tessera.join_lookup_descent_cost = 0;
+SET tessera.join_lookup_key_cost = 0;
+SET effective_cache_size = '8kB';
+SELECT ij_lookup($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.k WHERE o.id <= 1000$$) AS past_cache;
+ past_cache 
+------------
+ none
+(1 row)
+
+RESET effective_cache_size;
+-- The planner's counts of the ordered case, serial and under a Gather,
+-- each participant counting its share: the batches of a page of the
+-- outer table that hold a key, the keys, and the descents, a bound the
+-- keys of a batch share.
+CREATE FUNCTION ij_estimate(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+    estimate text;
+BEGIN
+    EXECUTE 'EXPLAIN (VERBOSE, FORMAT JSON) ' || query INTO plan;
+    estimate := jsonb_path_query_first(plan, '$.** ? (@."Lookup Estimate" != null)."Lookup Estimate"') #>> '{}';
+    RETURN substring(estimate from '^batches=[0-9]+ keys=[0-9]+') || ', descents within a quarter of the keys: ' ||
+           ((regexp_match(estimate, 'descents=([0-9]+)'))[1]::int * 4 <=
+            (regexp_match(estimate, 'keys=([0-9]+)'))[1]::int);
+END $$;
+SELECT ij_estimate($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.ko WHERE o.id <= 1000$$) AS serial;
+                              serial                               
+-------------------------------------------------------------------
+ batches=21 keys=1000, descents within a quarter of the keys: true
+(1 row)
+
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SELECT ij_lookup($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.ko WHERE o.id <= 1000$$) AS parallel,
+       ij_estimate($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.ko WHERE o.id <= 1000$$) AS each_participant;
+   parallel    |                        each_participant                         
+---------------+-----------------------------------------------------------------
+ ij_inner_pkey | batches=9 keys=417, descents within a quarter of the keys: true
+(1 row)
+
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+DROP FUNCTION ij_estimate(text);
 -- Row output, a cursor read in part, and a limit.
 SELECT ij_lookup($$SELECT o.id, l.tk FROM ij_outer o JOIN ij_inner l ON l.id = o.k$$) AS rows_out;
    rows_out    

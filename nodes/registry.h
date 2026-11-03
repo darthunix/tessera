@@ -58,6 +58,11 @@ extern List *tess_heap_lookup_data(Oid index, Oid opfuncid, Oid subtype, Oid col
 extern Path *tess_heap_lookup_path(PlannerInfo *root, RelOptInfo *rel, PathTarget *target,
 								   List *lookup, double rows);
 extern PlanState *tess_heap_lookup_scan(PlanState *inner);
+/*
+ * The node's time, in the scan model's units, for rows of a relation an
+ * index gives and the relation's clauses over them (scan_planner.c).
+ */
+extern double tess_scan_index_rows_time(PlannerInfo *root, RelOptInfo *rel, double rows);
 extern Path *tess_scan_lookup_path(PlannerInfo *root, RelOptInfo *rel, List *lookup,
 								   double rows);
 extern void tess_heap_lookup(PlanState *scan, Datum keys);

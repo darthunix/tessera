@@ -631,6 +631,17 @@ filter_time(PlannerInfo *root, RelOptInfo *rel, double rows, bool deform, List *
 }
 
 /*
+ * The time of rows of a relation an index gives, as the node's index scan
+ * prices its rows, and of the relation's clauses over them: an index
+ * join's rows fetched through its lookup scan and TessFilter above it.
+ */
+double
+tess_scan_index_rows_time(PlannerInfo *root, RelOptInfo *rel, double rows)
+{
+	return rows * tess_index_tuple_cost + filter_time(root, rel, rows, true, NIL);
+}
+
+/*
  * The relation's clauses an index scan or a bitmap answers: an index's
  * conditions, those of every index of a BitmapAnd; a BitmapOr's none of
  * the relation's own.
