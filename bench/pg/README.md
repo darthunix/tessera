@@ -101,6 +101,14 @@ query down, and where it can, does it speed one up.
   integers and a third of them, `EXCEPT ALL` of 1000 values with many
   copies, `INTERSECT` of texts through a dictionary, `INTERSECT ALL` of
   integers. A ratio below one is the win.
+- **indexjoin** (`indexjoin.sql`): joins of `bench_lookup_outer` to
+  `bench_lookup` (2 M rows) through an index of the larger, which the
+  core plans as index nested loops: 5000 outer rows by a key unique and
+  in the table's order, shuffled, scattered over the pages, text, date
+  and bigint against int, four rows a key and a LEFT join with half the
+  keys missing; outer rows spread over every batch, ten rows, 1000 keys
+  repeated over 20 000 rows (Memoize), 20 000 rows where the planner
+  takes a hash join, and a key one row in 100 holds.
 - **index** (`index.sql`): reads through the indexes of `bench_idx` (2 M
   rows per multiplier, `k` scattered over the pages, `w` of 97 values,
   a btree of `id` and a BRIN index of the day `d`, both in the order of the

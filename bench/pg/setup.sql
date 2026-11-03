@@ -152,6 +152,35 @@ CREATE INDEX bench_idx_w ON bench_idx (w);
 CREATE INDEX bench_idx_d ON bench_idx USING brin (d);
 CREATE INDEX bench_idx_id ON bench_idx (id);
 
+-- The indexjoin family: a table looked up through its indexes from a
+-- smaller one. id is unique and in the table's order, o4 holds four rows
+-- a key in order, s is unique and scattered over the pages, tk and dk are
+-- a text and a date key, h holds 0 for one row in 100 and is unique
+-- otherwise. The outer side's keys: in id's order (k), shuffled (ks),
+-- past the end for every other row (km), 1000 values repeated (kr), as
+-- bigint (k8), text (kt) and date (kd), 0 for one row in 64 (kh); sel
+-- spreads a filter over every page.
+DROP TABLE IF EXISTS bench_lookup;
+CREATE TABLE bench_lookup AS
+SELECT g AS id, g / 4 AS o4, (g::bigint * 7919 % (2000000 * :scale))::int AS s,
+       'key-' || g AS tk, date '1900-01-01' + g AS dk,
+       CASE WHEN g % 100 = 0 THEN 0 ELSE g END AS h, g % 1000 AS v
+FROM generate_series(1, 2000000 * :scale) AS g;
+ALTER TABLE bench_lookup ADD PRIMARY KEY (id);
+CREATE INDEX bench_lookup_o4 ON bench_lookup (o4);
+CREATE INDEX bench_lookup_s ON bench_lookup (s);
+CREATE INDEX bench_lookup_tk ON bench_lookup (tk);
+CREATE INDEX bench_lookup_dk ON bench_lookup (dk);
+CREATE INDEX bench_lookup_h ON bench_lookup (h);
+DROP TABLE IF EXISTS bench_lookup_outer;
+CREATE TABLE bench_lookup_outer AS
+SELECT g AS id, g * 10 AS k, ((g::bigint * 7919) % (200000 * :scale) + 1)::int * 10 AS ks,
+       CASE WHEN g % 2 = 0 THEN g * 10 ELSE 2000000 * :scale + g END AS km,
+       (g % 1000 + 1) * 100 AS kr, (g * 10)::bigint AS k8, 'key-' || (g * 10) AS kt,
+       date '1900-01-01' + g * 10 AS kd, CASE WHEN g % 64 = 0 THEN 0 ELSE g * 10 END AS kh,
+       g % 100 AS sel
+FROM generate_series(1, 200000 * :scale) AS g;
+
 -- The scancost family's parallel query with next to nothing to read: the
 -- workers' start and finish alone.
 DROP TABLE IF EXISTS bench_tiny;
@@ -184,6 +213,8 @@ VACUUM (ANALYZE) bench_tdim;
 VACUUM (ANALYZE) bench_tfact;
 VACUUM (ANALYZE) bench_idx;
 VACUUM (ANALYZE) bench_tiny;
+VACUUM (ANALYZE) bench_lookup;
+VACUUM (ANALYZE) bench_lookup_outer;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,
