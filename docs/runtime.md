@@ -161,7 +161,12 @@ which read such columns on 15 % and 1 % of the rows near the cached
 offsets, keep none. The cursor is the
 deformation of PostgreSQL's own slots reduced to one target and made
 resumable, ported from pg_batch; it relies only on public inline helpers,
-so PostgreSQL is not patched. A tuple shorter than the descriptor yields
+so PostgreSQL is not patched. A walk forward to a column past the cached
+offsets is the batch's own loop of the same steps: it reads a value of
+varying length with a one-byte header, the form of every short value,
+without the general step's checks for padding, an external value and a
+four-byte header. With that step TPC-H Q6 takes 4 % less time; the same
+loop with the general step took 5 % to 17 % more than with it. A tuple shorter than the descriptor yields
 the missing value, as a slot does. `tess_heap_batch_stats` gives the
 deformed and restarted values and the copied rows for `EXPLAIN`. The
 guaranteed prefix (`tts_first_nonguaranteed` of the first slot) and the
