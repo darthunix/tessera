@@ -651,6 +651,9 @@ pub fn merge(
     })
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use proptest::collection::vec;

@@ -15,7 +15,8 @@
 # mutant's build lacks: each of their mutants would survive unseen. So do
 # the proofs by Kani (the table's table/proofs.rs, the float casts'
 # float/proofs.rs, the date bound's calendar/proofs.rs, the word walks'
-# reader/proofs.rs and column/proofs.rs), built only under Kani.
+# reader/proofs.rs and column/proofs.rs, the sort key's sort/proofs.rs),
+# built only under Kani.
 exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
@@ -27,6 +28,7 @@ exclude_globs = [
     "crates/tessera-core/src/reader/proofs.rs",
     "crates/tessera-kernels/src/calendar/proofs.rs",
     "crates/tessera-kernels/src/float/proofs.rs",
+    "crates/tessera-kernels/src/sort/proofs.rs",
     "crates/tessera-kernels/src/simd/avx2.rs",
 ]
 

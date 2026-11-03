@@ -66,7 +66,7 @@ placed.
       encode` keeps its error and text. Check: `cargo test --locked -p
       tessera-kernels sort`; `tessera-bench --disasm` on the sorting
       programs and `--module kernels`, the same loops.
-- [ ] 4.2 The proofs of the sort key in `tessera-kernels/src/sort/
+- [x] 4.2 The proofs of the sort key in `tessera-kernels/src/sort/
       proofs.rs` (design, decision 3): the six shapes, both directions
       and NULL places, items and key bits, and the refusal of a NULL;
       `.cargo/mutants.toml` excludes the file. Check: `cargo kani -p
