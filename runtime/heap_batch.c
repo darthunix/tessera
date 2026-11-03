@@ -70,7 +70,7 @@ struct TessHeapBatch
 	TessDeformCursor *back_cursors;
 	uint64	   *back_set;
 	/*
-	 * The columns a walk keeps (deform_keeping): per column, whether a walk
+	 * The columns a walk keeps (deform_walk): per column, whether a walk
 	 * forward stores its value as it passes it, and the first such column,
 	 * ncolumns when none. They change only between batches, by the counts of
 	 * a window of rows (count_keeping): per column, the rows a read of it or
@@ -143,17 +143,41 @@ keep_value(TessHeapBatch *heap, int column, int row, Datum value, bool isnull)
 }
 
 /*
- * Walk a row's cursor forward to a column, as tess_deform_advance does,
- * storing on the way the value of every kept column it passes, so that a
- * request for one of them behind the cursor finds it (deform). Every
- * forward step of a cursor past a kept column comes here: a row with NULLs
- * stores its NULLs, and a row shorter than the column stops at its last
- * attribute, so no column the row lacks lies behind its cursor. The
- * attributes at cached offsets are jumped over: they are fixed-width, and
- * no kept column lies among them.
+ * One attribute of a walk. A value of varying length with a one-byte
+ * header, the form of every short value, is read without the general
+ * step's checks for padding, an external value and a four-byte header.
  */
-static void
-deform_keeping(TessHeapBatch *heap, int column, int row)
+static pg_always_inline Datum
+walk_step(const char *tp, uint32 *off, const CompactAttribute *cattr)
+{
+	pg_assume(cattr->attlen > 0 || cattr->attlen == -1);
+	if (cattr->attlen == -1)
+	{
+		const char *value = tp + *off;
+
+		if (VARATT_IS_1B(value) && !VARATT_IS_1B_E(value))
+		{
+			*off += VARSIZE_1B(value);
+			return PointerGetDatum(value);
+		}
+	}
+	return align_fetch_then_add(tp, off, cattr->attbyval, cattr->attlen,
+								cattr->attalignby);
+}
+
+/*
+ * Walk a row's cursor forward to a column past the cached offsets, as
+ * tess_deform_advance does, storing the column's value and, when keeping,
+ * the value of every kept column it passes, so that a request for one of
+ * them behind the cursor finds it (deform_kept_rows). Every forward step
+ * of a cursor past a kept column keeps: a row with NULLs stores its NULLs,
+ * and a row shorter than the column stops at its last attribute, so no
+ * column the row lacks lies behind its cursor. The attributes at cached
+ * offsets are jumped over: they are fixed-width, and no kept column lies
+ * among them.
+ */
+static pg_always_inline void
+deform_walk(TessHeapBatch *heap, int column, int row, bool keeping)
 {
 	HeapTuple	tuple = &heap->tuples[row];
 	HeapTupleHeader tup = tuple->t_data;
@@ -169,7 +193,8 @@ deform_keeping(TessHeapBatch *heap, int column, int row)
 	int			attr = cursor->nvalid;
 	uint32		off = cursor->off;
 
-	Assert(attr <= column && heap->first_kept >= desc->firstNonCachedOffsetAttr);
+	Assert(attr <= column && column >= desc->firstNonCachedOffsetAttr &&
+		   heap->first_kept >= desc->firstNonCachedOffsetAttr);
 	if (attr < cached)
 	{
 		CompactAttribute *cattr = &cattrs[cached - 1];
@@ -180,28 +205,19 @@ deform_keeping(TessHeapBatch *heap, int column, int row)
 	}
 	for (; attr < first_null; attr++)
 	{
-		CompactAttribute *cattr = &cattrs[attr];
-		Datum		value;
+		Datum		value = walk_step(tp, &off, &cattrs[attr]);
 
-		pg_assume(cattr->attlen > 0 || cattr->attlen == -1);
-		value = align_fetch_then_add(tp, &off, cattr->attbyval, cattr->attlen,
-									 cattr->attalignby);
-		if (attr == column || kept[attr])
+		if (attr == column || (keeping && kept[attr]))
 			keep_value(heap, attr, row, value, false);
 	}
 	for (; attr < end; attr++)
 	{
-		CompactAttribute *cattr = &cattrs[attr];
 		Datum		value = (Datum) 0;
 		bool		isnull = att_isnull(attr, tup->t_bits);
 
 		if (!isnull)
-		{
-			pg_assume(cattr->attlen > 0 || cattr->attlen == -1);
-			value = align_fetch_then_add(tp, &off, cattr->attbyval, cattr->attlen,
-										 cattr->attalignby);
-		}
-		if (attr == column || kept[attr])
+			value = walk_step(tp, &off, &cattrs[attr]);
+		if (attr == column || (keeping && kept[attr]))
 			keep_value(heap, attr, row, value, isnull);
 	}
 	cursor->nvalid = end;
@@ -234,6 +250,11 @@ deform(TessHeapBatch *heap, int column, int row)
 	{
 		Assert(!heap->kept[column]);
 		cursor = back_cursor(heap, row, attnum);
+	}
+	else if (column >= heap->tuple_desc->firstNonCachedOffsetAttr)
+	{
+		deform_walk(heap, column, row, false);
+		return;
 	}
 	if (!tess_deform_advance(cursor, &heap->tuples[row], heap->tuple_desc,
 							 heap->first_non_guaranteed, attnum,
@@ -268,7 +289,7 @@ deform_kept_rows(TessHeapBatch *heap, int column, const TessRowMask *rows,
 			if (heap->cursors[row].nvalid <= column)
 			{
 				if (keeping)
-					deform_keeping(heap, column, row);
+					deform_walk(heap, column, row, true);
 				else
 					deform(heap, column, row);
 			}
