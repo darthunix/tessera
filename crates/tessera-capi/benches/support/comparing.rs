@@ -4,8 +4,9 @@
 //! The left column is the filter family's fixture; the right one has other
 //! values over the same rows, the same selection and readiness, and NULLs
 //! of its own. Every call narrows a fresh copy of the selection, restored
-//! outside the counted region, as for the filters. The case whose selection
-//! is drawn at random takes a ring of pairs, both sides permuted alike.
+//! outside the counted region, as for the filters. The cases whose
+//! selection is drawn at random take a ring of pairs, both sides permuted
+//! alike.
 
 use std::hint::black_box;
 use std::mem::MaybeUninit;
@@ -16,7 +17,7 @@ use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::int32::{CompareOp, compare_columns};
 
 use crate::support::{
-    fixture::{Fixture, RING, as_uninit},
+    fixture::{self, Fixture, RING, as_uninit},
     runner::Runner,
 };
 
@@ -50,6 +51,9 @@ pub fn cases() -> Vec<[Fixture; 2]> {
     }
     cases.push(case(1024, "random", "random", false));
     cases.push(case(1024, "all", "mixed", true));
+    for pattern in fixture::density_patterns() {
+        cases.push(case(1024, &pattern, "none", false));
+    }
     cases
 }
 

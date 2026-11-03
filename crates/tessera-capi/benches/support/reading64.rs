@@ -6,7 +6,7 @@ use anyhow::{Result, ensure};
 use tessera_core::RowMaskView;
 
 use crate::support::{
-    fixture::{Bitmap, Fixture},
+    fixture::{self, Bitmap, Fixture},
     reference::Mask,
 };
 
@@ -71,6 +71,9 @@ pub fn cases() -> Vec<Fixture<i64>> {
     cases.push(case(1024, "all", "random", false));
     cases.push(case(1024, "random", "random", false));
     cases.push(case(1024, "all", "mixed", true));
+    for pattern in fixture::density_patterns() {
+        cases.push(case(1024, &pattern, "none", false));
+    }
     cases
 }
 

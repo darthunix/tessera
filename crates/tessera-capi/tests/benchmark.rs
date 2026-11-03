@@ -201,7 +201,7 @@ fn assert_sums<C: ColumnReader<Value = i32>>(
 #[test]
 fn reference_matches_scalar_model_and_bitmap_views() {
     let cases = reading::cases();
-    assert_eq!(cases.len() * 2, 38);
+    assert_eq!(cases.len() * 2, 48);
     for case in cases {
         let rows = case.selected.reference();
         let prepared = case.prepared.as_ref().map(fixture::Bitmap::reference);
@@ -432,6 +432,11 @@ fn reader_cases_are_fixed() {
             "words/1024/all/nulls-random/ready",
             "words/1024/random/nulls-random/ready",
             "words/1024/all/nulls-mixed/partial",
+            "words/1024/density-8/nulls-none/ready",
+            "words/1024/density-12/nulls-none/ready",
+            "words/1024/density-16/nulls-none/ready",
+            "words/1024/density-24/nulls-none/ready",
+            "words/1024/density-32/nulls-none/ready",
         ]
     );
 }
@@ -439,7 +444,7 @@ fn reader_cases_are_fixed() {
 #[test]
 fn filter_cases_are_fixed() {
     let cases = filtering::cases();
-    assert_eq!(cases.len() * 2, 50);
+    assert_eq!(cases.len() * 2, 60);
     let names: Vec<_> = cases.iter().map(|case| case.name.as_str()).collect();
     assert_eq!(
         names,
@@ -469,6 +474,11 @@ fn filter_cases_are_fixed() {
             "words/1024/random/nulls-random/ready",
             "words/1024/all/nulls-mixed/partial",
             "words/1024/one-per128/nulls-mixed/partial",
+            "words/1024/density-8/nulls-none/ready",
+            "words/1024/density-12/nulls-none/ready",
+            "words/1024/density-16/nulls-none/ready",
+            "words/1024/density-24/nulls-none/ready",
+            "words/1024/density-32/nulls-none/ready",
         ]
     );
 }
@@ -807,27 +817,69 @@ fn the_cases_drawn_at_random_take_a_ring() -> Result<()> {
         }
         names
     }
-    let random = [
-        "words/1024/all/nulls-random/ready",
-        "words/1024/random/nulls-random/ready",
+    let densities: Vec<_> = fixture::density_patterns()
+        .map(|pattern| format!("words/1024/{pattern}/nulls-none/ready"))
+        .collect();
+    let mut random = vec![
+        "words/1024/all/nulls-random/ready".to_owned(),
+        "words/1024/random/nulls-random/ready".to_owned(),
     ];
+    random.extend(densities.iter().cloned());
     assert_eq!(drawn(reading::cases()), random);
     assert_eq!(drawn(reading64::cases()), random);
     assert_eq!(drawn(filtering::cases()), random);
     assert_eq!(drawn(filtering64::cases()), random);
     let sets = drawn(sets::cases::<i32>()?);
-    assert_eq!(
-        sets,
-        [random[0], random[1], "words/1024/shuffled/nulls-none/ready"]
-    );
+    let mut own = random.clone();
+    own.push("words/1024/shuffled/nulls-none/ready".to_owned());
+    assert_eq!(sets, own);
     assert_eq!(drawn(sets::cases::<i64>()?), sets);
     let pairs: Vec<_> = comparing::cases()
         .into_iter()
         .map(|pair| (pair[0].name.clone(), comparing::inputs(pair).len()))
         .filter(|&(_, inputs)| inputs != 1)
         .collect();
-    assert_eq!(pairs, [(random[1].to_owned(), fixture::RING)]);
+    let mut expected = vec![(random[1].clone(), fixture::RING)];
+    expected.extend(densities.into_iter().map(|name| (name, fixture::RING)));
+    assert_eq!(pairs, expected);
     Ok(())
+}
+
+/// Every word of a density case holds exactly its rows, at positions that
+/// no other input of its ring repeats.
+#[test]
+fn the_density_cases_hold_their_rows_in_every_word_anew() {
+    for (rows, pattern) in fixture::DENSITIES
+        .into_iter()
+        .zip(fixture::density_patterns())
+    {
+        let name = format!("words/1024/{pattern}/nulls-none/ready");
+        let find = |cases: Vec<fixture::Fixture>| {
+            cases
+                .into_iter()
+                .find(|case| case.name == name)
+                .expect("the case")
+        };
+        let pair = comparing::cases()
+            .into_iter()
+            .find(|pair| pair[0].name == name)
+            .expect("the pair");
+        for case in [
+            find(reading::cases()),
+            find(filtering::cases()),
+            pair.into_iter().next().unwrap(),
+        ] {
+            let mut seen = std::collections::HashSet::new();
+            for input in case.inputs() {
+                let words = input.selected.words().to_vec();
+                assert!(words.iter().all(|word| word.count_ones() as usize == rows));
+                let distinct: std::collections::HashSet<_> = words.iter().collect();
+                assert!(distinct.len() > 1, "the words of {name} differ");
+                assert!(seen.insert(words), "an input of {name} repeats another");
+            }
+            assert_eq!(seen.len(), fixture::RING);
+        }
+    }
 }
 
 /// The pairs of a comparison's ring are permuted alike, so that their
