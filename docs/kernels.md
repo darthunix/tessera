@@ -353,3 +353,63 @@ counts them (`TessTextChars`: a byte each, or UTF-8 by its lead bytes).
   starts, lengths, non_nulls, rest, status)`: the bounds of `substring`,
   `left`, `right` and the trims, which the caller copies; a substring of
   negative length fails with 22011 at the first row without NULL.
+
+## Proofs by Kani
+
+Kani, a model checker for Rust, proves some kernels and their checks
+for every input, not for the inputs a test samples. The Kani job of CI
+runs each crate's proofs on a runner of its own. A harness that fails,
+or that passes its time limit, fails the job, and so does a cover that
+no input reaches: a proof around a branch no input reaches holds for
+no value at all. Each proof's module says what it proves and its
+bounds.
+
+- The two walks over a selection word, which unsafe readers trust to
+  read only rows in range, selected and prepared (`tessera-core`'s
+  `reader/proofs.rs`, `tessera-capi`'s `column/proofs.rs`): a word is
+  refused exactly when it calls for it, before any read; the rows read
+  are the selected, prepared ones, each once, in order; nothing is read
+  after a refusal or a failed fold step. The walk of `tessera-capi` is
+  proven over one word of any bits, either mask absent; and over two
+  words whose first is empty or full, its rows prepared and no mask of
+  NULLs: 70 rows with the six rows of the second word any, or 128 with
+  the second word wholly selected. Two words of any bits took Kani more
+  than half an hour.
+- The sort item (`tessera-kernels`' `sort/proofs.rs`): two rows' items
+  compare as the rows do by their keys, NULL placed and a descending
+  key reversed, then by reference, in six shapes of keys that reach
+  each branch of the packing of bits into words; not every layout of
+  up to 16 keys.
+- The prepared divisors of int4 and int8 by a power of two
+  (`int32/divisor/proofs.rs`, `int64/divisor/proofs.rs`): the quotient
+  and the remainder of every dividend are the truncating ones. The int4
+  proof is of the scalar formula, the specification the vector code
+  (NEON, AVX2) is held to by differential tests; the int8 one is of the
+  loop that divides a word's lanes on AArch64.
+- The bound of a date against a timestamp (`calendar/proofs.rs`) and
+  the casts of a float to an integer (`float/proofs.rs`).
+
+Code a proof reaches is kept within Kani's reach. Kani 0.68 cannot
+compile a path that builds an `anyhow` error, so the checks a proof
+reaches live in a private helper that takes a function making the
+error of a refusal from its reason: the code passes one that builds
+the `anyhow` error in place, as `ensure!` and `bail!` did, so that its
+machine code stays as it was, and a proof passes one that keeps the
+reason. The helper also takes the reader, and never calls it before
+its checks. A reason as a `&'static str` kept its pointer and length in
+two registers across the readers' loops, and a builder out of line
+merged the checks into one computed branch; neither was kept.
+
+Left to the tests:
+
+- the prepared divisors by a multiplier, of int4 and int8, and the
+  divisions of `Decimal::round` and of the split of a timestamp: Kani
+  does not finish a division or a multiplication of two unknowns, and a
+  proof of the lines after such a division would restate them;
+- around the sort item: the extraction of a batch's keys into slots and
+  NULL bits before it is written, the comparison of an item of two
+  words as one 128-bit key, and `run_words`;
+- around the walks: a caller that passes another word's bits or values
+  shorter than its rows, and a walk of `WordValues` that mixes `next`
+  and `fold`;
+- the vector code, which Kani does not model.

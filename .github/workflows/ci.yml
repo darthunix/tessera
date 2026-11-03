@@ -246,7 +246,8 @@ jobs:
   # float, the integer rounded half to even, or the error of its range.
   # Of the bound of a date against a timestamp (calendar/proofs.rs). Of
   # the sort key (sort/proofs.rs): two rows' items compare as the rows do
-  # by their keys, NULL placed and a descending key reversed. Of the
+  # by their keys, NULL placed and a descending key reversed, in six
+  # shapes of keys that reach each branch of the packing. Of the
   # prepared divisors of int4 and int8 by a power of two (int32/ and
   # int64/divisor/proofs.rs): the quotient and remainder of every
   # dividend are the truncating ones. And
@@ -254,7 +255,9 @@ jobs:
   # (tessera-core's reader/proofs.rs, tessera-capi's column/proofs.rs):
   # the rows given and read are exactly the selected, prepared ones in
   # range, once each, in order, a refused word is not read, and nothing
-  # is read after a refusal or a failed fold step.
+  # is read after a refusal or a failed fold step; tessera-capi's walk
+  # over one word of any bits, and over two after a first word that is
+  # empty or full (the bounds in each proof's module).
   # Kani brings its own nightly. A cover that no value reaches fails the
   # job: the proof around it would hold for no value at all. A harness
   # has a limit, ten minutes but for the walks of tessera-capi, so that

@@ -156,7 +156,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   fuzz target of its arguments
 - `golden-corpus`: The answers of PostgreSQL's functions as the
   kernels' oracle
-- `kani-beyond-relhash`: Kani proofs of the kernels' arithmetic
 - `zone-rules-in-rust`: The rules of local time of a zone in Rust, as
   fast as the C code
 - `contracts-of-the-c-path`: Contracts of `tessera-capi` and
@@ -1855,32 +1854,6 @@ review of 2026-11-01.
 - **Capabilities:** batch-functions, tools
 - **Size:** medium: the tool, then a pull request a family.
 
-### kani-beyond-relhash
-
-Kani proofs of the kernels' arithmetic. From the review of 2026-11-01.
-
-- **What:** Proofs in the existing Kani job: the prepared divisors of
-  int32 and int64 (`quotient` and `remainder` equal `/` and `%` for
-  every `n` and every `|d| >= 2`; int64 split by shift);
-  `Decimal::round` against rounding half away from zero in i128 at
-  every scale 0 to 18; `WordValues` of `tessera-core` (the rows it
-  gives are in range, unique and increasing, at most 64 steps, and a
-  refusal comes before any read); the encoding of a sort key (order
-  and the place of NULL); the split of a timestamp into days and time.
-- **Why:** These are a few operations over words, where Kani proves
-  for every input what a test samples. The unsafe C adapters rely on
-  the promise of `WordValues`.
-- **Known:** Kani was decided against in section 9 of the log. The
-  proofs of `relhash` have since found an overflow no test had, a
-  shift of partitions summed in u32 (3b0813b6). Kani does not follow
-  NEON or AVX2 intrinsics: the scalar code is proven, and the
-  differential tests on both architectures hold the vector code to it.
-  `Divisor::quotient` is `#[cfg(test)]` today and must be visible to
-  `cfg(kani)`. Products of 128 bits are slow to prove.
-- **Depends on:** nothing.
-- **Capabilities:** batch-functions
-- **Size:** two or three pull requests.
-
 ### zone-rules-in-rust
 
 The rules of local time of a zone in Rust, as fast as the C code. From
@@ -2320,6 +2293,13 @@ becomes an entry, joins one, or is dropped.
   int4. The case `int2_arith` of `win` shows no loss against the C
   code. Suggested: drop the check where both operands are smallints,
   which the entry points promise, or leave it.
+- **What Kani does not reach** (the close of `kani-beyond-relhash`,
+  2026-11-03). On Kani 0.68 and CBMC 6.11 `Decimal::round` at scales 3
+  and 9 did not finish in 300 s, nor, during the date bound's proof, a
+  64-bit division by the microseconds of a day in 600 s; the tests keep
+  them. The walk of `tessera-capi` is proven over two words only after
+  a first that is empty or full. Suggested: try them again on a later
+  Kani or with a bit-vector solver such as bitwuzla.
 
 ## Decided against
 
@@ -2361,7 +2341,11 @@ fact.
 - cbindgen, Rust under ASan, a mutation tool for C, the parallel
   build's automata in Rust, overflow checks in the release profile,
   `-Werror` by default (section 9, lines 7367–7376). Kani, refused
-  there too, is back: see `kani-beyond-relhash`.
+  there too, came back: docs/kernels.md, "Proofs by Kani".
+- Kani proofs of the prepared divisors by a multiplier: on Kani 0.68
+  and CBMC 6.11 none finished in 300 s, as a 16-bit copy or at 32 or
+  64 bits, any divisor or a fixed one, with z3 too; their tests stay
+  (the maintainer, 2026-11-03).
 - An Instruments template to count a backend's instructions (4.16, line 602).
 - A late worker of a shared build that spilled joining the rounds,
   whether by going round the partitions on disk after the build's last
