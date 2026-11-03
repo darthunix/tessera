@@ -2,8 +2,8 @@
 
 ## 0. How the work goes
 
-Two pull requests: sections 2 and 3, then sections 4 to 6 with the
-close; section 6 only if the maintainer chooses it. A task is one
+Two pull requests: sections 2 and 3, then sections 4 and 5 with the
+close. A task is one
 commit that builds and passes the checks by itself. Each commit that
 changes Rust is checked by `make rust-check` and by `tessera-bench
 --base <previous> --disasm` on the programs it touches and with
@@ -84,14 +84,10 @@ placed.
       harnesses fail with the bias of a power of two off by one;
       `tessera-bench --disasm` on `arith_int64`, the same loops.
 
-## 6. The divisors by a multiplier, if the maintainer chooses
+## 6. The divisors by a multiplier
 
-- [ ] 6.1 The way of design decision 5 the maintainer chose: none, or
-      the divisor written once for every width by a macro, with the
-      exhaustive tests at 8 and 16 bits. Check: `cargo test --locked -p
-      tessera-kernels divisor` in the debug and release runs;
-      `tessera-bench --disasm` on `arith_int32`, `arith_int64` and
-      `--module kernels`, the same loops.
+- [x] 6.1 The maintainer chose design decision 5's first way: the
+      property tests stay, and no code changes.
 
 ## 7. The close
 
