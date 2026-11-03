@@ -58,4 +58,5 @@ keep the filter below.
   take a filter
 - **THEN** it builds no filter, hands none down, and its rows are the
   core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/index_join.sql::spec: key-filter/A table per outer batch`

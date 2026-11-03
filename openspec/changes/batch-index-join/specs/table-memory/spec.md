@@ -45,4 +45,5 @@ overrun.
   rows for them than the planner expected, past `hash_mem`
 - **THEN** it builds the batch's table in memory, its `Overrun` is
   above 0, and its rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/index_join.sql::spec: table-memory/A batch's table past the limit`

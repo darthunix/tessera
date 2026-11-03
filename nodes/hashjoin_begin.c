@@ -78,6 +78,8 @@ read_node_data(TessHashJoinState *state, const List *data)
 		state->jointype = state->jointype == JOIN_FULL ? JOIN_LEFT : JOIN_INNER;
 	}
 	state->inner_unique = tess_plan_read_int(reader, "inner_unique") != 0;
+	state->lookup_key = tess_plan_read_int(reader, "lookup_key");
+	state->lookup_type = (Oid) tess_plan_read_int(reader, "lookup_type");
 	state->inner_rows = tess_plan_read_int(reader, "inner_rows");
 	state->parallel.shared_mode = tess_plan_read_int(reader, "shared") != 0;
 	state->prune.key = tess_plan_read_int(reader, "prune_key");
@@ -203,6 +205,19 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	state->outer_input = tess_input_create(estate->es_query_cxt, state->outer);
 	state->inner_input = tess_input_create(estate->es_query_cxt, state->inner);
+	/* Index join mode: the scan below the inner child that takes the keys. */
+	if (state->lookup_key >= 0)
+	{
+		state->lookup_scan = tess_heap_lookup_scan(state->inner);
+		if (state->lookup_scan == NULL || state->lookup_key >= state->keys.nkeys ||
+			(state->jointype != JOIN_INNER && state->jointype != JOIN_LEFT))
+			elog(ERROR, "TessHashJoin received foreign plan data");
+		get_typlenbyvalalign(state->lookup_type, &state->lookup_typlen,
+							 &state->lookup_typbyval, &state->lookup_typalign);
+		state->lookup_context = AllocSetContextCreate(estate->es_query_cxt,
+													  "TessHashJoin lookup keys",
+													  ALLOCSET_SMALL_SIZES);
+	}
 	state->layout = info.layout;
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   css->ss.ps.ps_ResultTupleSlot,
@@ -324,6 +339,9 @@ join_rescan(CustomScanState *css)
 			   sizeof(uint64) * join_marks_of(state, state->table.chunk_lens[chunk]));
 	state->next_row = -1;
 	state->done = false;
+	/* Index join mode: each outer batch builds its table anew. */
+	if (state->lookup_key >= 0)
+		state->built = false;
 	if (css->ss.ps.chgParam != NULL)
 	{
 		UpdateChangedParamSet(state->outer, css->ss.ps.chgParam);
@@ -382,9 +400,15 @@ join_counters(TessHashJoinState *state, uint64 *values)
 		values[JOIN_OUTPUT_REMOVED] = removed->batch_removed + removed->row_removed;
 	}
 	values[JOIN_MEMORY] = state->peak_memory;
-	/* A shared table's participants share a budget: EXPLAIN compares the total. */
-	values[JOIN_OVERRUN] = state->parallel.shared_budget == 0 && state->peak_memory > limit ?
-		state->peak_memory - limit : 0;
+	if (state->lookup_scan != NULL)
+		values[JOIN_INDEX_SEARCHES] = tess_heap_lookup_searches(state->lookup_scan);
+	/*
+	 * A shared table's participants share a budget: EXPLAIN compares the
+	 * total. The lookup mode counted its batches' excess as they grew.
+	 */
+	if (state->lookup_key < 0)
+		values[JOIN_OVERRUN] = state->parallel.shared_budget == 0 && state->peak_memory > limit ?
+			state->peak_memory - limit : 0;
 }
 
 /*
@@ -392,7 +416,8 @@ join_counters(TessHashJoinState *state, uint64 *values)
  * totals of every participant in a parallel plan. The memory is the most
  * the tables, the copies of inner values and spilling took, and Overrun
  * what of it exceeded hash_mem, which happens only where a partition on
- * disk larger than hash_mem is joined whole (docs/nodes.md).
+ * disk larger than hash_mem is joined whole (docs/nodes.md), or where the
+ * rows of an outer batch's keys outgrow it in the lookup mode.
  */
 static void
 join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
@@ -414,6 +439,8 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 							state->plan_jointype == JOIN_RIGHT ? "Right" :
 							state->plan_jointype == JOIN_RIGHT_ANTI ? "Right Anti" :
 							state->plan_jointype == JOIN_FULL ? "Full" : "Left", es);
+	if (state->lookup_key >= 0)
+		ExplainPropertyText("Inner Lookups", "per outer batch", es);
 	ExplainPropertyText("Hash Cond",
 						deparse_expression((Node *) make_ands_explicit(list_copy_head(cscan->custom_exprs,
 																					  state->keys.nkeys)),
@@ -475,6 +502,12 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		(totals[JOIN_BLOOM_BELOW] == 0 || totals[JOIN_BLOOM_REMOVED] > 0))
 		ExplainPropertyInteger("Rows Removed by Bloom Filter", NULL,
 							   totals[JOIN_BLOOM_REMOVED], es);
+	if (state->lookup_key >= 0)
+	{
+		ExplainPropertyInteger("Lookups", NULL, totals[JOIN_LOOKUPS], es);
+		ExplainPropertyInteger("Lookup Keys", NULL, totals[JOIN_LOOKUP_KEYS], es);
+		ExplainPropertyInteger("Index Searches", NULL, totals[JOIN_INDEX_SEARCHES], es);
+	}
 	/* The builds, the table's chunks, the spill and the probe: VERBOSE only. */
 	if (!es->verbose)
 		return;

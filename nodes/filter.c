@@ -289,6 +289,17 @@ filter_set_key_filter(CustomScanState *css, const TessKeyFilter *filter)
 	return true;
 }
 
+PlanState *
+tess_filter_child(PlanState *state)
+{
+	CustomScanState *css = (CustomScanState *) state;
+
+	if (state == NULL || !IsA(state, CustomScanState) || css->methods != &filter_exec_methods ||
+		list_length(css->custom_ps) != 1)
+		return NULL;
+	return linitial(css->custom_ps);
+}
+
 Node *
 tess_filter_create_state(CustomScan *cscan)
 {

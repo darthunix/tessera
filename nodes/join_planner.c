@@ -2,7 +2,10 @@
 
 #include <math.h>
 
+#include "access/htup_details.h"
+#include "access/nbtree.h"
 #include "access/stratnum.h"
+#include "catalog/pg_am_d.h"
 #include "catalog/pg_statistic.h"
 #include "catalog/pg_type_d.h"
 #include "miscadmin.h"
@@ -17,7 +20,7 @@
 #include "optimizer/paths.h"
 #include "optimizer/restrictinfo.h"
 #include "optimizer/tlist.h"
-#include "optimizer/tlist.h"
+#include "port/pg_bitutils.h"
 #include "partitioning/partprune.h"
 #include "utils/datum.h"
 #include "utils/fmgroids.h"
@@ -81,6 +84,22 @@ typedef struct JoinKeys
 	 */
 	List	   *filters;
 } JoinKeys;
+
+/*
+ * Index join mode: the key looked up (its place among the keys) and the
+ * type of its arrays, the inner side's path (a lookup scan of the index,
+ * under TessFilter for the relation's clauses), the inner rows of the
+ * most frequent key, and the correlation of the outer key with its
+ * table's order, 0 where unknown.
+ */
+typedef struct JoinLookup
+{
+	int			key;
+	Oid			type;
+	Path	   *inner;
+	double		key_rows;
+	double		correlation;
+} JoinLookup;
 
 /*
  * Whether an equality compares its operands' words bit for bit, as the
@@ -970,6 +989,250 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 }
 
 /*
+ * Index join mode's prices, in the units of the scan model (0.27 µs): a
+ * lookup's call, rescan, the btree's preprocessing and its table; a
+ * descent of the btree; an inner row fetched through the index.
+ * Calibrated by bench/pg/indexjoin.
+ */
+#define JOIN_LOOKUP_COST 37.0
+#define JOIN_LOOKUP_DESCENT_COST 1.4
+#define JOIN_LOOKUP_ROW_COST 0.9
+
+/*
+ * The inner rows of the key the statistics count most often: the first of
+ * the most common values, or the rest over the distinct values; -1
+ * without statistics, where no lookup is offered.
+ */
+static double
+lookup_key_rows(PlannerInfo *root, RelOptInfo *rel, Var *var)
+{
+	VariableStatData vardata;
+	AttStatsSlot sslot;
+	double		share;
+	double		ndistinct;
+	bool		isdefault;
+
+	examine_variable(root, (Node *) var, 0, &vardata);
+	if (!HeapTupleIsValid(vardata.statsTuple))
+	{
+		ReleaseVariableStats(vardata);
+		return -1;
+	}
+	ndistinct = get_variable_numdistinct(&vardata, &isdefault);
+	share = (1.0 - ((Form_pg_statistic) GETSTRUCT(vardata.statsTuple))->stanullfrac) /
+		Max(ndistinct, 1.0);
+	if (get_attstatsslot(&sslot, vardata.statsTuple, STATISTIC_KIND_MCV, InvalidOid,
+						 ATTSTATSSLOT_NUMBERS))
+	{
+		if (sslot.nnumbers > 0)
+			share = Max(share, sslot.numbers[0]);
+		free_attstatsslot(&sslot);
+	}
+	ReleaseVariableStats(vardata);
+	return Max(share * rel->tuples, 1.0);
+}
+
+/* The correlation of a column of a table with its order, 0 where unknown. */
+static double
+lookup_correlation(PlannerInfo *root, Node *key)
+{
+	VariableStatData vardata;
+	AttStatsSlot sslot;
+	double		correlation = 0;
+
+	if (!IsA(key, Var))
+		return 0;
+	examine_variable(root, key, 0, &vardata);
+	if (HeapTupleIsValid(vardata.statsTuple) &&
+		get_attstatsslot(&sslot, vardata.statsTuple, STATISTIC_KIND_CORRELATION, InvalidOid,
+						 ATTSTATSSLOT_NUMBERS))
+	{
+		if (sslot.nnumbers > 0)
+			correlation = sslot.numbers[0];
+		free_attstatsslot(&sslot);
+	}
+	ReleaseVariableStats(vardata);
+	return correlation;
+}
+
+/*
+ * The lookup of an index join: one of the join's equalities whose inner
+ * side is a column of the table that is the first column of a btree index
+ * of it, not partial, not hypothetical, whose operator family serves the
+ * equality with the index column on its left under the index's collation
+ * (as the core matches a clause to an index column), with both of the
+ * comparisons an array key of the outer type needs, a deterministic
+ * collation and a clause the table may promote into an index scan; and
+ * whose most frequent key's rows for a batch fit a quarter of hash_mem.
+ * False where none does.
+ */
+static bool
+find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int ninner,
+			JoinLookup *lookup)
+{
+	int			key = -1;
+
+	if (!enable_indexscan || innerrel->reloptkind != RELOPT_BASEREL)
+		return false;
+	foreach_node(RestrictInfo, rinfo, keys->rinfos)
+	{
+		OpExpr	   *clause = (OpExpr *) rinfo->clause;
+		Var		   *var = (Var *) list_nth(keys->inner, ++key);
+		Oid			opno;
+		Oid			lefttype;
+		Oid			righttype;
+		double		key_rows;
+		double		rows;
+		double		bytes;
+
+		if (!IsA(clause, OpExpr) || list_length(clause->args) != 2 || !IsA(var, Var) ||
+			var->varno != innerrel->relid || var->varlevelsup != 0 || var->varattno <= 0 ||
+			(OidIsValid(clause->inputcollid) &&
+			 !get_collation_isdeterministic(clause->inputcollid)) ||
+			!restriction_is_securely_promotable(rinfo, innerrel))
+			continue;
+		opno = bms_is_subset(rinfo->left_relids, innerrel->relids) ?
+			clause->opno : get_commutator(clause->opno);
+		if (!OidIsValid(opno))
+			continue;
+		op_input_types(opno, &lefttype, &righttype);
+		if (!OidIsValid(get_array_type(righttype)))
+			continue;
+		key_rows = lookup_key_rows(root, innerrel, var);
+		if (key_rows < 0)
+			continue;
+		/*
+		 * A batch's table: the records and the values copied, each in a
+		 * first chunk of 64 kB at least, and the index, 4 bytes a bucket,
+		 * at least 1024 buckets and 2 a record, a power of two.
+		 */
+		rows = Min(JOIN_LOOKUP_ROWS * key_rows, (double) PG_INT32_MAX);
+		bytes = 2 * 65536.0 +
+			rows * (tess_table_record_bytes(keys->nkeys, sizeof(uint64) * (1 + ninner)) +
+					innerrel->reltarget->width) +
+			4.0 * pg_nextpower2_64(Max((uint64) (2 * rows), 1024));
+		if (bytes > (double) tess_hash_memory_limit() / 4)
+			continue;
+		foreach_node(IndexOptInfo, index, innerrel->indexlist)
+		{
+			Oid			family = index->opfamily[0];
+
+			if (index->relam != BTREE_AM_OID || !index->amsearcharray ||
+				index->indpred != NIL || index->hypothetical ||
+				index->indexkeys[0] != var->varattno || lefttype != index->opcintype[0] ||
+				!op_in_opfamily(opno, family) ||
+				get_op_opfamily_strategy(opno, family) != BTEqualStrategyNumber ||
+				(OidIsValid(index->indexcollations[0]) &&
+				 index->indexcollations[0] != clause->inputcollid))
+				continue;
+			if (righttype != lefttype &&
+				(!OidIsValid(get_opfamily_proc(family, lefttype, righttype, BTORDER_PROC)) ||
+				 !OidIsValid(get_opfamily_proc(family, righttype, righttype, BTORDER_PROC))))
+				continue;
+			lookup->inner = tess_scan_lookup_path(root, innerrel,
+												  tess_heap_lookup_data(index->indexoid,
+																		get_opcode(opno),
+																		righttype,
+																		clause->inputcollid),
+												  key_rows);
+			if (lookup->inner == NULL)
+				return false;
+			lookup->key = key;
+			lookup->type = righttype;
+			lookup->key_rows = key_rows;
+			lookup->correlation = lookup_correlation(root, list_nth(keys->outer, key));
+			return true;
+		}
+	}
+	return false;
+}
+
+/*
+ * Whether the node's join path returns no more batches than its outer
+ * side, or full ones: where an outer row finds one record at most (a
+ * unique inner side, SEMI, ANTI), or the join copies its pairs into
+ * compact batches. An index join, and a LEFT join with join clauses,
+ * return each round of pairs as a batch of its own, as sparse as it is.
+ */
+static bool
+join_path_packs(const Path *path)
+{
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
+	List	   *data;
+	List	   *flags;
+	JoinType	jointype;
+
+	tess_path_get_info((const CustomPath *) path, &info);
+	data = (List *) info.node_data;
+	flags = list_nth(data, 2);
+	jointype = (JoinType) list_nth_int(flags, 2);
+	if (list_nth_int(flags, 0) != 0 || jointype == JOIN_SEMI || jointype == JOIN_ANTI)
+		return true;
+	return list_length(data) == 5 &&
+		!(jointype == JOIN_LEFT && list_nth(info.expressions, 3) != NIL);
+}
+
+/*
+ * The outer batches an index join looks up: the batches of the scan that
+ * drives the outer side, which filters and joins above it keep, that hold
+ * a row, its rows spread over them; full batches of rows a pack makes; a
+ * batch a row above a join whose rounds may each be a batch, or where no
+ * scan is found.
+ */
+static double
+lookup_batches(const Path *outer)
+{
+	const Path *driver = outer;
+	double		share;
+	double		batches;
+
+	while (IsA(driver, CustomPath) && !IS_SIMPLE_REL(driver->parent) &&
+		   ((const CustomPath *) driver)->custom_paths != NIL)
+	{
+		if (tess_path_node(driver) == &tess_pack_node)
+			return Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0);
+		if (tess_path_node(driver) == &tess_hash_join_node && !join_path_packs(driver))
+			return Max(outer->rows, 1.0);
+		driver = linitial(((const CustomPath *) driver)->custom_paths);
+	}
+	if (!IS_SIMPLE_REL(driver->parent) || driver->parent->tuples <= 0)
+		return Max(outer->rows, 1.0);
+	share = Min(outer->rows / driver->parent->tuples, 1.0);
+	batches = driver->parent->tuples / JOIN_LOOKUP_ROWS *
+		(1.0 - pow(1.0 - share, JOIN_LOOKUP_ROWS));
+	return Max(Min(Max(batches, outer->rows / JOIN_LOOKUP_ROWS), outer->rows), 1.0);
+}
+
+/*
+ * An index join's cost: per outer batch with a key, a lookup; the
+ * descents of its keys, fewer where the outer side follows its key's
+ * order; the inner rows fetched, their clauses checked by the TessFilter
+ * above the lookup, and the rows put into the batch's table; the probe, the join clauses of the candidate pairs, and
+ * the pairs. Nothing goes out before the first batch's table.
+ */
+static void
+lookup_cost(const JoinLookup *lookup, const JoinKeys *keys, const Path *outer, Path *path)
+{
+	double		outer_rows = Max(outer->rows, 1.0);
+	double		batches = lookup_batches(outer);
+	double		descents = batches + (outer_rows - batches) * (1.0 - 0.9 * fabs(lookup->correlation));
+	double		fetched = outer_rows * lookup->key_rows;
+	/* The relation's clauses, priced as the node's scans price them. */
+	Cost		filter = fetched * lookup->inner->parent->baserestrictcost.per_tuple *
+		tess_scan_cost_factor;
+	Cost		work;
+
+	work = batches * (JOIN_LOOKUP_COST + tess_join_batch_cost) +
+		Max(descents, batches) * JOIN_LOOKUP_DESCENT_COST +
+		fetched * (JOIN_LOOKUP_ROW_COST + tess_join_build_cost) +
+		outer_rows * tess_join_probe_cost + path->rows * tess_join_pair_cost +
+		fetched * list_length(keys->residual) * tess_filter_clause_cost;
+	work = work / tess_join_cost_unit + filter;
+	path->startup_cost = outer->startup_cost + work / batches;
+	path->total_cost = outer->total_cost + work;
+}
+
+/*
  * The path: the core's hash join of the same inputs as the template, for
  * its rows and properties, over batch paths of them, at the cost of
  * join_cost. Where the join prunes its outer TessAppend, the template
@@ -979,8 +1242,10 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 static CustomPath *
 make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 			   JoinPathExtraData *extra, const JoinKeys *keys,
-			   Path *outer_path, Path *inner_path, bool shared, Relids leaves)
+			   Path *outer_path, Path *inner_path, bool shared, Relids leaves,
+			   const JoinLookup *lookup)
 {
+	List	   *data;
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	JoinCostWorkspace workspace;
 	List	   *hashclauses = keys->rinfos;
@@ -994,7 +1259,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		inner_path->rows * tess_parallel_divisor(inner_path) : inner_path->rows;
 
 	outer = tess_batch_input_path(root, outer_path);
-	inner = tess_batch_input_path(root, inner_path);
+	inner = lookup != NULL ? lookup->inner : tess_batch_input_path(root, inner_path);
 	/* A key that is an expression: its side's child computes it. */
 	if (outer != NULL)
 		outer = with_key_targets(root, outer, keys->outer);
@@ -1017,10 +1282,13 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
 									extra, priced, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
-	join_cost(root, joinrel, inner_path->parent, jointype, extra->inner_unique, keys,
-			  outer, inner,
-			  outer_path->total_cost > 0 ? priced->total_cost / outer_path->total_cost : 1.0,
-			  shared, &template->jpath.path);
+	if (lookup != NULL)
+		lookup_cost(lookup, keys, outer, &template->jpath.path);
+	else
+		join_cost(root, joinrel, inner_path->parent, jointype, extra->inner_unique, keys,
+				  outer, inner,
+				  outer_path->total_cost > 0 ? priced->total_cost / outer_path->total_cost : 1.0,
+				  shared, &template->jpath.path);
 	config.template_path = &template->jpath.path;
 	config.methods = &join_path_methods;
 	config.node = &tess_hash_join_node;
@@ -1029,13 +1297,16 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	config.expressions = list_make5(keys->clauses, keys->outer, keys->inner,
 									keys->residual, keys->filters);
-	config.node_data = (Node *) list_make5(keys->outer_kinds, keys->inner_kinds,
-										   list_make4_int(extra->inner_unique ? 1 : 0,
-														  (int) Min(inner_rows,
-																	(double) PG_INT32_MAX),
-														  (int) jointype,
-														  shared ? 1 : 0),
-										   keys->hashers, keys->collations);
+	data = list_make5(keys->outer_kinds, keys->inner_kinds,
+					  list_make4_int(extra->inner_unique ? 1 : 0,
+									 (int) Min(inner_rows, (double) PG_INT32_MAX),
+									 (int) jointype,
+									 shared ? 1 : 0),
+					  keys->hashers, keys->collations);
+	/* Index join mode: the key looked up and the type of its arrays. */
+	if (lookup != NULL)
+		data = lappend(data, list_make2_int(lookup->key, (int) lookup->type));
+	config.node_data = (Node *) data;
 	return tess_path_create(&config);
 }
 
@@ -1053,7 +1324,8 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 static void
 add_partial_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel,
 					   JoinType jointype, JoinPathExtraData *extra, const JoinKeys *keys,
-					   Path *outer_path, Path *inner_path, Relids leaves)
+					   Path *outer_path, Path *inner_path, Relids leaves,
+					   const JoinLookup *lookup)
 {
 	CustomPath *path;
 
@@ -1066,7 +1338,16 @@ add_partial_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *inner
 	}
 	path = jointype == JOIN_RIGHT || jointype == JOIN_FULL || jointype == JOIN_RIGHT_ANTI ? NULL :
 		make_join_path(root, joinrel, jointype, extra, keys,
-					   outer_path, inner_path, false, leaves);
+					   outer_path, inner_path, false, leaves, NULL);
+	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
+	{
+		path->path.parallel_aware = true;
+		add_partial_path(joinrel, &path->path);
+	}
+	/* An index join: each participant looks up the keys of its own batches. */
+	path = lookup == NULL ? NULL :
+		make_join_path(root, joinrel, jointype, extra, keys,
+					   outer_path, inner_path, false, NULL, lookup);
 	if (path != NULL && path->path.parallel_safe && path->path.parallel_workers > 0)
 	{
 		path->path.parallel_aware = true;
@@ -1075,7 +1356,7 @@ add_partial_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *inner
 	if (!enable_parallel_hash || innerrel->partial_pathlist == NIL)
 		return;
 	path = make_join_path(root, joinrel, jointype, extra, keys,
-						  outer_path, linitial(innerrel->partial_pathlist), true, leaves);
+						  outer_path, linitial(innerrel->partial_pathlist), true, leaves, NULL);
 	if (path == NULL || !path->path.parallel_safe ||
 		path->path.parallel_workers <= 0)
 		return;
@@ -1089,6 +1370,8 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 			   JoinPathExtraData *extra)
 {
 	JoinKeys	keys;
+	JoinLookup	lookup;
+	bool		lookup_found;
 	int			ninner;
 	Path	   *outer_path = outerrel->cheapest_total_path;
 	Path	   *inner_path = innerrel->cheapest_total_path;
@@ -1130,7 +1413,18 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 			outer_path = filtered;
 	}
 	path = make_join_path(root, joinrel, jointype, extra, &keys,
-						  outer_path, inner_path, false, leaves);
+						  outer_path, inner_path, false, leaves, NULL);
+	if (path != NULL)
+		add_path(joinrel, &path->path);
+	/*
+	 * An index join: INNER and LEFT, each outer batch's keys looked up in
+	 * an index of the inner table, which builds the batch's table.
+	 */
+	lookup_found = (jointype == JOIN_INNER || jointype == JOIN_LEFT) &&
+		find_lookup(root, innerrel, &keys, ninner, &lookup);
+	path = lookup_found ?
+		make_join_path(root, joinrel, jointype, extra, &keys,
+					   outer_path, inner_path, false, NULL, &lookup) : NULL;
 	if (path != NULL)
 		add_path(joinrel, &path->path);
 
@@ -1161,13 +1455,13 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		if (divided != NULL && divided != outer_path)
 		{
 			add_partial_join_paths(root, joinrel, innerrel, jointype, extra, &keys,
-								   divided, inner_path, leaves);
+								   divided, inner_path, leaves, lookup_found ? &lookup : NULL);
 			if (list_length(left->subpaths) < participants)
 				return;
 		}
 	}
 	add_partial_join_paths(root, joinrel, innerrel, jointype, extra, &keys,
-						   outer_path, inner_path, leaves);
+						   outer_path, inner_path, leaves, lookup_found ? &lookup : NULL);
 }
 
 /* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
@@ -1338,13 +1632,14 @@ prune_description(PlannerInfo *root, RelOptInfo *rel, List *children, List *clau
 static void
 write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild *outer,
 				 List *hash_clauses, List *outer_keys, List *inner_keys, List *hashers,
-				 JoinType jointype)
+				 JoinType jointype, bool lookup)
 {
 	RelOptInfo *rel = outer->path->parent;
 	PartitionScheme scheme = NULL;
 	int			key = -1;
 
-	if (enable_partition_pruning && tess_path_node(outer->path) == &tess_append_node &&
+	/* An index join's table holds one outer batch's keys: it prunes nothing. */
+	if (!lookup && enable_partition_pruning && tess_path_node(outer->path) == &tess_append_node &&
 		IS_SIMPLE_REL(rel) && rel->part_scheme != NULL &&
 		(jointype == JOIN_INNER || jointype == JOIN_SEMI || jointype == JOIN_RIGHT ||
 		 jointype == JOIN_RIGHT_ANTI))
@@ -1501,7 +1796,13 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int(writer, "shared", list_length(lthird(data)) > 3 ?
 						lfourth_int(lthird(data)) : 0);
 	write_join_prune(writer, root, &outer, hash_clauses, outer_keys, inner_keys,
-					 list_nth(data, 3), (JoinType) lthird_int(lthird(data)));
+					 list_nth(data, 3), (JoinType) lthird_int(lthird(data)),
+					 list_length(data) > 5);
+	/* Index join mode: the key looked up and the type of its arrays. */
+	tess_plan_write_int(writer, "lookup_key",
+						list_length(data) > 5 ? linitial_int(list_nth(data, 5)) : -1);
+	tess_plan_write_int(writer, "lookup_type",
+						list_length(data) > 5 ? lsecond_int(list_nth(data, 5)) : 0);
 
 	config.methods = &tess_hash_join_scan_methods;
 	config.layout_policy = TESS_LAYOUT_PROJECTED;

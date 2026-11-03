@@ -83,6 +83,13 @@ enum
 	 */
 	JOIN_ROUNDS,
 	JOIN_ALONE,
+	/*
+	 * Index join mode: the arrays looked up, the keys in them, and the
+	 * btree's descents for them.
+	 */
+	JOIN_LOOKUPS,
+	JOIN_LOOKUP_KEYS,
+	JOIN_INDEX_SEARCHES,
 	JOIN_NCOUNTERS
 };
 
@@ -811,6 +818,27 @@ typedef struct TessHashJoinState
 	JoinType	plan_jointype;
 	bool		preserve_inner;
 	/*
+	 * Index join mode: the key looked up (its place among the keys, -1
+	 * without the mode), the type of its arrays, the lookup scan below the
+	 * inner child, and the context of a batch's array, reset before the
+	 * next batch's lookup.
+	 */
+	int			lookup_key;
+	Oid			lookup_type;
+	int16		lookup_typlen;
+	bool		lookup_typbyval;
+	char		lookup_typalign;
+	PlanState  *lookup_scan;
+	MemoryContext lookup_context;
+	/*
+	 * The first chunk and the index of the batch's table before, in
+	 * table_context, which the next batch's table takes again; NULL once
+	 * taken.
+	 */
+	void	   *kept_chunk;
+	void	   *kept_index;
+	Size		kept_index_len;
+	/*
 	 * RIGHT and FULL: per chunk of the table, a bit per record set once a
 	 * pair of it passed the join clauses (tess_table_mark); after the
 	 * outer side, the records without one go out with NULL outer columns
@@ -992,6 +1020,7 @@ extern uint32 join_shared_partitions(TessHashJoinState *state);
 extern uint64 *join_shared_words(TessHashJoinState *state);
 extern uint64 join_store_value(TessHashJoinState *state, Datum value, int16 typlen);
 extern void join_take_back_bloom(TessHashJoinState *state);
+extern void join_lookup_batch(TessHashJoinState *state, TessBatch *batch);
 extern bool join_bloom_below_possible(const TessHashJoinState *state);
 
 /* The spill (hashjoin_spill.c): the partitions of both sides past hash_mem and their rounds. */

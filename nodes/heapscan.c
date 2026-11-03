@@ -6,9 +6,11 @@
 #include "access/heapam.h"
 #include "access/parallel.h"
 #include "access/relscan.h"
+#include "access/stratnum.h"
 #include "access/table.h"
 #include "access/tableam.h"
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_index.h"
 #include "catalog/pg_statistic.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
@@ -162,9 +164,22 @@ typedef struct HeapScanState
 	int		   *index_columns;
 	uint64		exact_pages;
 	uint64		lossy_pages;
+	/*
+	 * Lookup mode: the index scanned for the arrays of keys a join gives
+	 * (tess_heap_lookup), its one scan key, whether a call gave it keys
+	 * since the last rescan, and the btree's descents.
+	 */
+	bool		lookup;
+	Oid			lookup_index_id;
+	Relation	lookup_index;
+	IndexScanDesc lookup_scan;
+	ScanKeyData lookup_key;
+	bool		lookup_armed;
+	IndexScanInstrumentation lookup_instrument;
 } HeapScanState;
 
 static CustomPath *heap_scan_rows(PlannerInfo *root, Path *path);
+static uint32 heap_scan_flags(HeapScanState *state);
 static int *index_only_columns(HeapScanState *state, IndexOnlyScan *plan);
 static Plan *heap_scan_plan(PlannerInfo *root, RelOptInfo *rel,
 							CustomPath *best_path, List *tlist, List *clauses,
@@ -492,6 +507,46 @@ tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
 }
 
 /*
+ * The plan data of a lookup scan: the index and its scan key's equality,
+ * as the core's index scan builds an array key (ExecIndexBuildScanKeys):
+ * the operator's function, its right-hand type, its input collation.
+ */
+List *
+tess_heap_lookup_data(Oid index, Oid opfuncid, Oid subtype, Oid collation)
+{
+	return list_make4_oid(index, opfuncid, subtype, collation);
+}
+
+/*
+ * The node in lookup mode over the relation: no child, a scan of the index
+ * that the plan data names for the keys a join gives. Its rows are those
+ * of one lookup, its cost the join's to count; it is not parallel-aware,
+ * each participant looking up its own keys.
+ */
+Path *
+tess_heap_lookup_path(PlannerInfo *root, RelOptInfo *rel, PathTarget *target,
+					  List *lookup, double rows)
+{
+	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+	Path		template = {0};
+
+	if (!plain_heap_relation(root, rel, target))
+		return NULL;
+	template.type = T_CustomPath;
+	template.pathtype = T_CustomScan;
+	template.parent = rel;
+	template.pathtarget = target;
+	template.parallel_safe = rel->consider_parallel;
+	template.rows = clamp_row_est(rows);
+	config.template_path = &template;
+	config.methods = &heap_scan_path_methods;
+	config.node = &tess_heap_scan_node;
+	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
+	config.node_data = (Node *) lookup;
+	return &tess_path_create(&config)->path;
+}
+
+/*
  * Every relation column is a batch column and the relation's row is the
  * scan tuple; the targets, PostgreSQL's projection among them, are derived
  * from it when the plan is read. A bitmap's scan keeps the bitmap's plan
@@ -525,6 +580,14 @@ heap_scan_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			custom_plans = list_make1(outerPlan(bitmap));
 	}
 
+	/* A lookup scan's plan data: its index and scan key. */
+	if (custom_plans == NIL)
+	{
+		TessPathInfo path = TESS_STRUCT_INITIALIZER(TessPathInfo);
+
+		tess_path_get_info(best_path, &path);
+		config.node_data = path.node_data;
+	}
 	layout.ncolumns = rel->max_attr;
 	layout.ntargets = rel->max_attr;
 	config.methods = &tess_heap_scan_scan_methods;
@@ -582,6 +645,32 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 		{
 			state->bitmap_plan = ExecInitNode(child, estate, eflags);
 			css->custom_ps = list_make1(state->bitmap_plan);
+		}
+	}
+	/*
+	 * Lookup mode: the index, opened as the core's index scan opens it, and
+	 * the scan of its one key, which reads as NULL until a join's call.
+	 */
+	else if (info.node_data != NULL)
+	{
+		List	   *lookup = (List *) info.node_data;
+
+		if (!IsA(lookup, OidList) || list_length(lookup) != 4)
+			elog(ERROR, "TessHeapScan received a foreign plan");
+		state->lookup = true;
+		state->lookup_index_id = linitial_oid(lookup);
+		ScanKeyEntryInitialize(&state->lookup_key, SK_SEARCHARRAY | SK_ISNULL, 1,
+							   BTEqualStrategyNumber, lthird_oid(lookup),
+							   lfourth_oid(lookup), lsecond_oid(lookup), (Datum) 0);
+		if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
+		{
+			LOCKMODE	lockmode = exec_rt_fetch(cscan->scan.scanrelid, estate)->rellockmode;
+
+			state->lookup_index = index_open(state->lookup_index_id, lockmode);
+			state->lookup_scan = index_beginscan(rel, state->lookup_index, false,
+												 estate->es_snapshot,
+												 &state->lookup_instrument, 1, 0,
+												 heap_scan_flags(state));
 		}
 	}
 	state->layout = info.layout;
@@ -1001,7 +1090,28 @@ next_batch(HeapScanState *state)
 		return give_out(state, index_only_batch(state, limit));
 	tess_heap_batch_reset(state->heap);
 	hscan = (HeapScanDesc) state->scan;
-	if (state->index_plan != NULL)
+	if (state->lookup)
+	{
+		/*
+		 * The rows of the keys given, in the index's order, each the tuple
+		 * where it lies; none before a call. A btree never asks to recheck.
+		 */
+		while (limit > 0)
+		{
+			if (!state->lookup_armed ||
+				!table_index_getnext_slot(state->lookup_scan, ForwardScanDirection,
+										  state->landing))
+			{
+				state->exhausted = true;
+				break;
+			}
+			if (state->lookup_scan->xs_recheck)
+				elog(ERROR, "TessHeapScan found a lookup to recheck");
+			tess_heap_batch_append_slot(state->heap, state->landing);
+			limit--;
+		}
+	}
+	else if (state->index_plan != NULL)
 	{
 		/*
 		 * The index scan's rows, in its order, from any pages: the batch
@@ -1138,7 +1248,8 @@ heap_scan_exec(CustomScanState *css)
 	/* Without a parallel scan from the callbacks, a serial one. */
 	if (state->scan == NULL && state->bitmap_plan != NULL)
 		begin_bitmap_scan(state);
-	else if (state->scan == NULL && state->index_plan == NULL && state->ios_plan == NULL)
+	else if (state->scan == NULL && state->index_plan == NULL && state->ios_plan == NULL &&
+			 !state->lookup)
 	{
 		EState	   *estate = css->ss.ps.state;
 
@@ -1175,6 +1286,10 @@ heap_scan_end(CustomScanState *css)
 		ExecEndNode(state->index_plan);
 	if (state->ios_plan != NULL)
 		ExecEndNode(&state->ios_plan->ss.ps);
+	if (state->lookup_scan != NULL)
+		index_endscan(state->lookup_scan);
+	if (state->lookup_index != NULL)
+		index_close(state->lookup_index, NoLock);
 	/* The relation is closed by the executor. */
 }
 
@@ -1224,6 +1339,11 @@ heap_scan_rescan(CustomScanState *css)
 			tess_builder_reset(state->builder);
 		state->built = NULL;
 	}
+	else if (state->lookup)
+	{
+		/* No keys until the join's next call, which rescans the index. */
+		state->lookup_armed = false;
+	}
 	else if (state->scan != NULL)
 		table_rescan(state->scan, NULL);
 	state->page_active = false;
@@ -1259,6 +1379,21 @@ heap_scan_counters(HeapScanState *state, uint64 *values)
 	values[HEAP_SCAN_LOSSY] = state->lossy_pages;
 }
 
+/* The column of a lookup's index the keys are looked up by. */
+static const char *
+lookup_key_name(HeapScanState *state)
+{
+	HeapTuple	tuple = SearchSysCache1(INDEXRELID, ObjectIdGetDatum(state->lookup_index_id));
+	const char *name;
+
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for index %u", state->lookup_index_id);
+	name = get_attname(RelationGetRelid(state->css.ss.ss_currentRelation),
+					   ((Form_pg_index) GETSTRUCT(tuple))->indkey.values[0], false);
+	ReleaseSysCache(tuple);
+	return name;
+}
+
 /* The totals of every participant in a parallel plan, else the node's own. */
 static void
 heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
@@ -1269,6 +1404,12 @@ heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 
 	heap_scan_counters(state, own);
 	totals = tess_shared_stats_totals_or(state->stats, own);
+	/* The index and key a join looks up; the join counts the descents. */
+	if (state->lookup)
+	{
+		ExplainPropertyText("Lookup Index", get_rel_name(state->lookup_index_id), es);
+		ExplainPropertyText("Lookup Key", lookup_key_name(state), es);
+	}
 	/* As the core's bitmap heap scan shows them. */
 	if (es->analyze && state->bitmap_plan != NULL)
 	{
@@ -1285,7 +1426,7 @@ heap_scan_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (!es->analyze)
 		return;
 	ExplainPropertyInteger("Batches", NULL, totals[HEAP_SCAN_BATCHES], es);
-	if (state->index_plan == NULL && state->ios_plan == NULL)
+	if (state->index_plan == NULL && state->ios_plan == NULL && !state->lookup)
 		ExplainPropertyInteger("Pages", NULL, totals[HEAP_SCAN_PAGES], es);
 	if (totals[HEAP_SCAN_RAN] > 0 && state->ios_plan == NULL)
 	{
@@ -1437,4 +1578,53 @@ heap_scan_shutdown(CustomScanState *css)
 	}
 	if (state->scan != NULL && state->scan->rs_parallel != NULL)
 		end_scan(state);
+}
+
+/*
+ * The lookup scan below a join: its inner child, or the child of a
+ * TessFilter there; NULL when it is not a scan in lookup mode.
+ */
+PlanState *
+tess_heap_lookup_scan(PlanState *inner)
+{
+	PlanState  *scan = tess_filter_child(inner);
+
+	if (scan == NULL)
+		scan = inner;
+	if (scan == NULL || !IsA(scan, CustomScanState) ||
+		((CustomScanState *) scan)->methods != &heap_scan_exec_methods ||
+		!((HeapScanState *) scan)->lookup)
+		return NULL;
+	return scan;
+}
+
+/*
+ * Give the scan an array of keys, after its rescan: the index is rescanned
+ * for them, and the scan's batches are their rows. The array is the
+ * caller's, alive until the next rescan, since the btree reads it when it
+ * starts to fetch and keeps pointers into it.
+ */
+/*
+ * The btree's descents of a lookup scan so far, every rescan's: the join
+ * that drives it counts them, since in a parallel plan only the join
+ * shares its counters (the scan is not parallel-aware).
+ */
+uint64
+tess_heap_lookup_searches(PlanState *scan)
+{
+	return ((HeapScanState *) scan)->lookup_instrument.nsearches;
+}
+
+void
+tess_heap_lookup(PlanState *scan, Datum keys)
+{
+	HeapScanState *state = (HeapScanState *) scan;
+
+	if (state->lookup_scan == NULL)
+		elog(ERROR, "TessHeapScan was given keys without its index");
+	state->lookup_key.sk_argument = keys;
+	state->lookup_key.sk_flags &= ~SK_ISNULL;
+	index_rescan(state->lookup_scan, &state->lookup_key, 1, NULL, 0);
+	state->lookup_armed = true;
+	state->exhausted = false;
 }
