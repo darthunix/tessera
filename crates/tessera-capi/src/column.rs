@@ -1,4 +1,6 @@
 mod ints;
+#[cfg(kani)]
+mod proofs;
 
 pub use ints::{
     DatumInt32Column, DatumInt64Column, DatumIntColumn, DatumNullsColumn, DenseInt32Column,

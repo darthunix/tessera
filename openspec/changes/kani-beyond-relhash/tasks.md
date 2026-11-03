@@ -50,9 +50,10 @@ placed.
       same text. Check: `cargo test --locked -p tessera-capi`;
       `tessera-bench --disasm` on `column_reader` and the aggregate
       programs, the same loops.
-- [ ] 3.2 Its proofs in `tessera-capi/src/column/proofs.rs` (design,
-      decision 2), up to two words; `cargo kani -p tessera-capi` joins
-      the Kani job; `.cargo/mutants.toml` excludes the file. Check:
+- [x] 3.2 Its proofs in `tessera-capi/src/column/proofs.rs` (design,
+      decision 2), over one word and two; `cargo kani -p
+      tessera-capi` joins the Kani job; `.cargo/mutants.toml` excludes
+      the file. Check:
       `cargo kani -p tessera-capi`, every cover satisfied; the
       harnesses fail with the readiness check dropped, with a full
       word read from its second row, and with the walk going on past a
