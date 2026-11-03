@@ -45,7 +45,7 @@ placed.
 
 ## 3. The walk of tessera-capi
 
-- [ ] 3.1 The checks and the walk of `try_fold_words` in a helper that
+- [x] 3.1 The checks and the walk of `try_fold_words` in a helper that
       builds no `anyhow` error; the error is built outside it, with the
       same text. Check: `cargo test --locked -p tessera-capi`;
       `tessera-bench --disasm` on `column_reader` and the aggregate
