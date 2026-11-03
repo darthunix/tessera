@@ -252,37 +252,39 @@ jobs:
   # is read after a refusal or a failed fold step.
   # Kani brings its own nightly. A cover that no value reaches fails the
   # job: the proof around it would hold for no value at all. A harness
-  # gets ten minutes at most, so that one that slows down fails early.
-  # The job takes about twenty minutes, so it runs on pull requests only.
+  # has a limit, ten minutes but for the walks of tessera-capi, so that
+  # one that slows down fails early. Each crate's proofs run on a runner
+  # of their own, the longest about half an hour, so the job runs on pull
+  # requests only.
   kani:
-    name: Kani proofs (ubuntu-24.04)
+    name: Kani proofs (${{ matrix.crate }})
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # A harness's limit in seconds: the walks of tessera-capi take
+        # minutes each, two to three times as long on a runner as on the
+        # machine they were measured on.
+        include:
+          - { crate: relhash, step: cargo kani -p relhash, harness-timeout: 600 }
+          - { crate: tessera-kernels, step: cargo kani -p tessera-kernels, harness-timeout: 600 }
+          - { crate: tessera-core, step: cargo kani -p tessera-core, harness-timeout: 600 }
+          - { crate: tessera-capi, step: cargo kani -p tessera-capi, harness-timeout: 1500 }
     steps:
       - uses: actions/checkout@v4
       - name: Kani and its toolchain
         run: |
           cargo install --locked kani-verifier@0.68.0
           cargo kani setup
-      - name: cargo kani -p relhash
+      # pipefail: a harness that fails or times out fails the step; without
+      # it the step took the status of tee, and only an unmet cover failed.
+      - name: ${{ matrix.step }}
+        shell: bash
         run: |
-          cargo kani --harness-timeout 600 -Z unstable-options -p relhash 2>&1 | tee kani.log
-          grep 'cover properties satisfied' kani.log |
-            awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
-      - name: cargo kani -p tessera-kernels
-        run: |
-          cargo kani --harness-timeout 600 -Z unstable-options -p tessera-kernels 2>&1 | tee kani.log
-          grep 'cover properties satisfied' kani.log |
-            awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
-      - name: cargo kani -p tessera-core
-        run: |
-          cargo kani --harness-timeout 600 -Z unstable-options -p tessera-core 2>&1 | tee kani.log
-          grep 'cover properties satisfied' kani.log |
-            awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
-      - name: cargo kani -p tessera-capi
-        run: |
-          cargo kani --harness-timeout 600 -Z unstable-options -p tessera-capi 2>&1 | tee kani.log
+          set -o pipefail
+          cargo kani --harness-timeout ${{ matrix.harness-timeout }} -Z unstable-options -p ${{ matrix.crate }} 2>&1 | tee kani.log
           grep 'cover properties satisfied' kani.log |
             awk '$2 != $4 { print "a cover no value reaches"; bad = 1 } END { exit bad }'
   # Every suite against PostgreSQL and Tessera's C built with
