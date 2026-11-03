@@ -40,7 +40,9 @@ entries out of turn on 2026-11-03, after an analysis of TPC-H with
 `batch-index-join`, in the order `deform-past-varlena`,
 `lookup-outer-compaction`, `semi-anti-lookups`, `numeric-reading`,
 `like-substring-search`, `agg-table-presize`, `tpch-q9-plan`, the last
-with the foreign keys of the schema left undeclared for now:
+with the foreign keys of the schema left undeclared for now; the same
+day he moved `agg-dependent-columns` between `agg-table-presize` and
+`tpch-q9-plan`:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `whole-word-decisions`: When and where a driver takes a word whole,
