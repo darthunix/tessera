@@ -1,0 +1,60 @@
+CREATE VIEW
+      name       | core_join_ms | node_join_ms | node_over_core 
+-----------------+--------------+--------------+----------------
+ date            |        1.634 |        0.832 |           0.51
+ four            |        0.563 |        0.316 |           0.56
+ four_5000       |        2.193 |        1.141 |           0.52
+ ordered         |        1.754 |        0.757 |           0.43
+ ordered_20k     |        6.879 |        3.229 |           0.47
+ scattered       |        2.299 |        1.474 |           0.64
+ shuffled        |        5.168 |        4.064 |           0.79
+ shuffled_20k    |       18.599 |       20.937 |           1.13
+ sparse          |        1.730 |        2.411 |           1.39
+ sparse_4        |        3.691 |        3.573 |           0.97
+ sparse_shuffled |        1.519 |        2.622 |           1.73
+ stride          |        2.774 |        3.261 |           1.18
+ text            |        4.151 |        4.543 |           1.09
+(13 rows)
+
+      name       | lookups | est_batches | keys  | est_keys | descents | est_descents | fetched | est_rows 
+-----------------+---------+-------------+-------+----------+----------+--------------+---------+----------
+ date            |     103 |         103 |  5000 |     4887 |      238 |          237 |    5000 |     4887
+ four            |      26 |          24 |  1250 |     1146 |       26 |           31 |    5000 |     4584
+ four_5000       |     103 |         103 |  5000 |     4887 |      103 |          132 |   20000 |    19548
+ ordered         |     103 |         103 |  5000 |     4887 |      238 |          237 |    5000 |     4887
+ ordered_20k     |     413 |         416 | 20000 |    19698 |      948 |          956 |   20000 |    19698
+ scattered       |     103 |         103 |  5000 |     4887 |      205 |          237 |    5000 |     4887
+ shuffled        |     103 |         103 |  5000 |     4887 |     5000 |         4866 |    5000 |     4887
+ shuffled_20k    |     413 |         416 | 20000 |    19698 |    20000 |        19615 |   20000 |    19698
+ sparse          |    2000 |        1706 |  2000 |     2173 |     2000 |         2173 |    2000 |     2173
+ sparse_4        |    2124 |        3599 |  8000 |     7913 |     2283 |         7913 |    8000 |     7913
+ sparse_shuffled |    2000 |        1706 |  2000 |     2173 |     2000 |         2173 |    2000 |     2173
+ stride          |     103 |         103 |  5000 |     4887 |     1710 |         4866 |    5000 |     4887
+ text            |     103 |         103 |  5000 |     4887 |     3141 |         4153 |    5000 |     4887
+(13 rows)
+
+CREATE VIEW
+CREATE VIEW
+ join_lookup_batch_cost | join_lookup_descent_cost | join_lookup_key_cost | join_loop_key_cost | join_loop_descent_cost | join_loop_row_cost | unit_ns 
+------------------------+--------------------------+----------------------+--------------------+------------------------+--------------------+---------
+                  0.758 |                    4.801 |                0.381 |              1.383 |                  2.994 |             0.1719 |   206.0
+(1 row)
+
+CREATE VIEW
+      name       | node_ms | node_predicted | node_error_pct | loop_ms | loop_predicted | loop_error_pct | choice | planned_ratio | planned | faster 
+-----------------+---------+----------------+----------------+---------+----------------+----------------+--------+---------------+---------+--------
+ date            |   0.832 |          0.879 |              6 |   1.634 |          1.748 |              7 | right  |          0.51 | lookup  | lookup
+ four            |   0.316 |          0.375 |             19 |   0.563 |          0.549 |             -2 | right  |          0.73 | lookup  | lookup
+ four_5000       |   1.141 |          1.497 |             31 |   2.193 |          2.196 |              0 | right  |          0.70 | lookup  | lookup
+ ordered         |   0.757 |          0.879 |             16 |   1.754 |          1.748 |              0 | right  |          0.51 | lookup  | lookup
+ ordered_20k     |   3.229 |          3.514 |              9 |   6.879 |          6.991 |              2 | right  |          0.51 | lookup  | lookup
+ scattered       |   1.474 |          0.849 |            -42 |   2.299 |          1.728 |            -25 | right  |          0.51 | lookup  | lookup
+ shuffled        |   4.064 |          5.216 |             28 |   5.168 |          4.686 |             -9 | WRONG  |          1.11 | loop    | lookup
+ shuffled_20k    |  20.937 |         20.865 |              0 |  18.599 |         18.743 |              1 | right  |          1.11 | loop    | loop
+ sparse          |   2.411 |          2.518 |              4 |   1.730 |          1.874 |              8 | right  |          1.30 | loop    | loop
+ sparse_4        |   3.573 |          3.571 |              0 |   3.691 |          3.971 |              8 | right  |          1.20 | loop    | lookup
+ sparse_shuffled |   2.622 |          2.518 |             -4 |   1.519 |          1.874 |             23 | right  |          1.30 | loop    | loop
+ stride          |   3.261 |          2.220 |            -32 |   2.774 |          2.656 |             -4 | WRONG  |          1.11 | loop    | loop
+ text            |   4.543 |          3.665 |            -19 |   4.151 |          3.539 |            -15 | right  |          1.11 | loop    | loop
+(13 rows)
+

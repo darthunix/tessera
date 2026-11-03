@@ -7,6 +7,11 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-03, index lookups by batch in the hash
+  join](2026-11-03-batch-index-join/README.md): the family indexjoin,
+  the calibration lookupcost, TPC-H serial and with two workers, Apple
+  M5 Pro, PostgreSQL master, the change `batch-index-join` against
+  `b6ddc7ea`.
 - [2026-11-03, inputs the predictor cannot
   learn](2026-11-03-bench-unlearned-inputs/README.md): the pilot of
   the forms and the runs of identical sides of every program whose

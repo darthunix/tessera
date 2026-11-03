@@ -22,7 +22,13 @@ decides. The [nodes guide](nodes.md) explains each node's planning.
 - **Parameterized paths.** A batch path is never parameterized by an outer
   row (`check_path_config` in `runtime/planner.c`), so the inner side of a
   nested loop that probes an index for each outer row, and a scan with
-  lateral references, stay the core's.
+  lateral references, stay the core's. For INNER and LEFT joins the hash
+  join looks up the keys of each outer batch in a btree index instead,
+  where the cost model finds it faster than the core's nested loop
+  ([nodes.md](nodes.md), TessHashJoin, Index lookups); SEMI and ANTI
+  joins, keys that are not an index's first column or that are an
+  expression, partial indexes and tables past `effective_cache_size`
+  keep the core's nested loop.
 
 ## Conditions and expressions
 
