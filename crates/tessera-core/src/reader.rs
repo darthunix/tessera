@@ -131,26 +131,60 @@ impl<F> WordValues<F> {
     where
         F: FnMut(usize) -> Option<V>,
     {
-        ensure!(
-            word_index < nrows.div_ceil(64),
-            "selection word is out of bounds"
-        );
+        // Each refusal builds its error in place, as `ensure!` did, so the
+        // checks compile as they did before they moved.
+        Self::checked(
+            nrows,
+            word_index,
+            selected,
+            prepared,
+            read,
+            |refusal| match refusal {
+                Refusal::OutOfBounds => anyhow::anyhow!("selection word is out of bounds"),
+                Refusal::Padding => anyhow::anyhow!("selection has set padding bits"),
+                Refusal::Unprepared => anyhow::anyhow!("selection contains unprepared rows"),
+            },
+        )
+    }
+
+    /// The checks and the building of [`Self::try_new`]: a refusal is
+    /// what `refuse` makes of its reason. It never calls `read`, so no row
+    /// is read before the checks pass. The proofs pass a `refuse` that
+    /// builds no `anyhow` error, which Kani cannot compile.
+    #[inline]
+    fn checked<E>(
+        nrows: usize,
+        word_index: usize,
+        selected: u64,
+        prepared: u64,
+        read: F,
+        refuse: impl Fn(Refusal) -> E,
+    ) -> Result<Self, E> {
+        if word_index >= nrows.div_ceil(64) {
+            return Err(refuse(Refusal::OutOfBounds));
+        }
         let base = word_index * 64;
         let selected_width = 64 - selected.leading_zeros() as usize;
-        ensure!(
-            selected_width <= nrows - base,
-            "selection has set padding bits"
-        );
-        ensure!(
-            selected & !prepared == 0,
-            "selection contains unprepared rows"
-        );
+        if selected_width > nrows - base {
+            return Err(refuse(Refusal::Padding));
+        }
+        if selected & !prepared != 0 {
+            return Err(refuse(Refusal::Unprepared));
+        }
         Ok(Self {
             base,
             remaining: selected,
             read,
         })
     }
+}
+
+/// Why [`WordValues::try_new`] refuses a word.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Refusal {
+    OutOfBounds,
+    Padding,
+    Unprepared,
 }
 
 impl<F, V> Iterator for WordValues<F>
