@@ -83,6 +83,9 @@ impl Divisor {
     }
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
