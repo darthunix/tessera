@@ -609,12 +609,15 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 			}
 		case 8:
 			{
-				/* Gathering before a request is an error. */
-				static const int counts[] = {2};
-				GatherChild *child = make_gather_child(counts, NULL, 1);
+				/* A scan that gathers without a request fails at its second batch. */
+				static const int counts[] = {2, 2};
+				GatherChild *child = make_gather_child(counts, NULL, 2);
 				TessInput  *input = tess_input_create(CurrentMemoryContext, &child->ps);
 
 				tess_input_set_gather(input, true);
+				(void) tess_input_next(input);
+				tess_input_finish(input);
+				(void) tess_input_next(input);
 				break;
 			}
 	}

@@ -1410,6 +1410,114 @@ RESET hash_mem_multiplier;
 RESET max_parallel_workers_per_gather;
 DROP TABLE jgbuild, jgprobe, jgbound;
 
+-- Gathered batches: a consumer's input copies the selected rows of sparse
+-- batches whose columns are stored values into batches of 64 of its own
+-- (runtime_input.h). jgo's filter f % 100 = 0 keeps a row in a hundred,
+-- about one a batch; jgi pairs every other of them, and x is 0 on those
+-- without a pair, so that 100 / x fails on rows a join drops.
+CREATE TABLE jgo (k int, f int, x int, n numeric, t text) WITH (autovacuum_enabled = off);
+INSERT INTO jgo SELECT g, g, CASE WHEN g % 200 = 100 THEN 0 ELSE 1 END, g / 4.0,
+    repeat('t', g % 30) FROM generate_series(1, 20000) AS g;
+CREATE TABLE jgi (k int, g int) WITH (autovacuum_enabled = off);
+INSERT INTO jgi SELECT g * 200, g % 7 FROM generate_series(1, 100) AS g;
+ANALYZE jgo, jgi;
+-- The join's outer side through a filter: about 200 batches of a row or
+-- two come to the join as 4 batches.
+SELECT join_same($$SELECT count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
+SELECT line FROM join_explain($$SELECT count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$) AS line
+WHERE line ~ 'TessHashJoin|TessAgg|Gathered Rows|Probe Rows|Input Batches';
+-- An aggregate above a join whose rounds keep a row in 200: it gathers
+-- the join's output, stored values of the outer batch and the table.
+SELECT join_same($$SELECT i.g, count(*), sum(o.n) FROM jgo o JOIN jgi i ON o.k = i.k GROUP BY i.g$$);
+SELECT line FROM join_explain($$SELECT i.g, count(*), sum(o.n) FROM jgo o JOIN jgi i ON o.k = i.k GROUP BY i.g$$) AS line
+WHERE line ~ 'TessHashJoin|TessAgg|Gathered Rows|Input Batches';
+-- 100 / x fails on the rows the join or the aggregate's FILTER drops:
+-- the copies read stored columns only, so it runs where it runs now.
+SELECT join_same($$SELECT sum(100 / o.x), count(*) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
+SELECT join_same($$SELECT sum(100 / x) FILTER (WHERE x <> 0), count(*) FROM jgo WHERE f % 100 = 0$$);
+-- A volatile function in the join's output runs once a pair.
+CREATE SEQUENCE jg_calls;
+SELECT count(*), max(c) FROM (SELECT nextval('jg_calls') AS c FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0) AS q;
+SELECT last_value FROM jg_calls;
+SET tessera.enable = off;
+SELECT count(*), max(c) FROM (SELECT nextval('jg_calls') AS c FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0) AS q;
+SELECT last_value FROM jg_calls;
+RESET tessera.enable;
+DROP SEQUENCE jg_calls;
+-- A limit right above the join turns its gathering off: it reads its
+-- outer side a batch at a time.
+SELECT line FROM join_explain($$SELECT o.k FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0 LIMIT 3$$) AS line
+WHERE line ~ 'Limit|TessHashJoin|Gathered Rows';
+-- A limit by a parameter, which each rescan computes again: without a
+-- bound, with one and without again, the join gathers on the first and
+-- the last scans only, as it does over the scans without a bound alone.
+-- The outer side's first batches have no pair.
+SELECT line FROM join_explain($$SELECT s.g, (SELECT count(*) FROM (SELECT o.k FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0 LIMIT CASE WHEN s.g = 2 THEN 1 END) AS q) FROM (VALUES (1), (2), (3)) AS s(g)$$) AS line
+WHERE line ~ 'Limit|TessHashJoin|Gathered Rows';
+SELECT line FROM join_explain($$SELECT s.g, (SELECT count(*) FROM (SELECT o.k FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0 LIMIT CASE WHEN s.g = 2 THEN 1 END) AS q) FROM (VALUES (1), (3)) AS s(g)$$) AS line
+WHERE line ~ 'Limit|TessHashJoin|Gathered Rows';
+SELECT join_same($$SELECT s.g, (SELECT count(*) FROM (SELECT o.k FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0 LIMIT CASE WHEN s.g = 2 THEN 1 END) AS q) FROM (VALUES (1), (2), (3)) AS s(g)$$);
+-- INTERSECT and EXCEPT gather both sides apart; without sorts the
+-- planner groups them in TessAgg.
+SET enable_sort = off;
+SELECT join_same($$SELECT k FROM jgo WHERE f % 100 = 0 INTERSECT SELECT k FROM jgo WHERE f % 300 = 0$$);
+SELECT join_same($$SELECT k FROM jgo WHERE f % 100 = 0 EXCEPT ALL SELECT k FROM jgo WHERE f % 300 = 0$$);
+SELECT line FROM join_explain($$SELECT k FROM jgo WHERE f % 100 = 0 INTERSECT SELECT k FROM jgo WHERE f % 300 = 0$$) AS line
+WHERE line ~ 'TessAgg|Gathered Rows|Input Batches';
+RESET enable_sort;
+-- A partitioned table's parts, through TessAppend, gathered as one stream.
+CREATE TABLE jgp (k int, f int) PARTITION BY RANGE (k);
+CREATE TABLE jgp1 PARTITION OF jgp FOR VALUES FROM (1) TO (5001) WITH (autovacuum_enabled = off);
+CREATE TABLE jgp2 PARTITION OF jgp FOR VALUES FROM (5001) TO (10001) WITH (autovacuum_enabled = off);
+CREATE TABLE jgp3 PARTITION OF jgp FOR VALUES FROM (10001) TO (20001) WITH (autovacuum_enabled = off);
+INSERT INTO jgp SELECT g, g FROM generate_series(1, 20000) AS g;
+ANALYZE jgp;
+SELECT join_same($$SELECT count(*), sum(k) FROM jgp WHERE f % 100 = 0$$);
+SELECT line FROM join_explain($$SELECT count(*), sum(k) FROM jgp WHERE f % 100 = 0$$) AS line
+WHERE line ~ 'TessAgg|TessAppend|Gathered Rows|Input Batches';
+-- An index-only scan's batches, through a filter.
+CREATE INDEX jgo_f ON jgo (f, k);
+VACUUM jgo;
+SET enable_seqscan = off;
+SET enable_bitmapscan = off;
+SELECT join_same($$SELECT count(*), sum(k) FROM jgo WHERE f > 0 AND f % 100 = 0$$);
+SELECT line FROM join_explain($$SELECT count(*), sum(k) FROM jgo WHERE f > 0 AND f % 100 = 0$$) AS line
+WHERE line ~ 'TessAgg|Index Only Scan|Gathered Rows';
+RESET enable_bitmapscan;
+RESET enable_seqscan;
+DROP INDEX jgo_f;
+-- A join's compact output, over a table with duplicate keys: four
+-- batches of 64 pairs and the last of 9, which the aggregate gathers.
+CREATE TABLE jgd (k int, v int) WITH (autovacuum_enabled = off);
+INSERT INTO jgd SELECT (g % 50) * 200, g % 5 FROM generate_series(1, 270) AS g;
+ANALYZE jgd;
+SELECT join_same($$SELECT d.v, count(*), sum(o.n) FROM jgo o JOIN jgd d ON o.k = d.k GROUP BY d.v$$);
+SELECT line FROM join_explain($$SELECT d.v, count(*), sum(o.n) FROM jgo o JOIN jgd d ON o.k = d.k GROUP BY d.v$$) AS line
+WHERE line ~ 'TessAgg|TessHashJoin|Compact Batches|Gathered Rows';
+-- An outer join's tails, and a join that spills its outer side and reads
+-- it back.
+SELECT join_same($$SELECT count(*), sum(i.k), sum(o.n) FROM jgo o RIGHT JOIN jgi i ON o.k = i.k AND o.f % 400 = 0$$);
+SET work_mem = '64kB';
+SELECT join_same($$SELECT count(*), sum(a.n), sum(length(b.t)) FROM jgo a JOIN jgo b ON a.k = b.k WHERE a.f % 100 = 0$$);
+RESET work_mem;
+-- Workers gather their own rows; with none launched the leader runs the
+-- whole plan, its own rows handed on through TessGather as its child's.
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+SET max_parallel_workers_per_gather = 2;
+SELECT join_same($$SELECT count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
+SELECT join_same($$SELECT sum(100 / o.x), count(*) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
+SET max_parallel_workers = 0;
+SELECT join_same($$SELECT sum(100 / o.x), count(*) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
+SELECT join_same($$SELECT sum(100 / x) FILTER (WHERE x <> 0), count(*) FROM jgo WHERE f % 100 = 0$$);
+RESET max_parallel_workers;
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_table_scan_size;
+RESET parallel_tuple_cost;
+RESET parallel_setup_cost;
+DROP TABLE jgo, jgi, jgp, jgd;
+
 DROP TABLE jd, jf, jdup, jsmall, jempty, jgrow, jbig, jpair, jbuild, jprobe, jhit, jmove, jref, jrefprobe, jrefgrow, jsb, jsp, jw70, jw1100, jsskew, jslong, jsouter, jsheavy;
 DROP TABLE jpr, jpl, jph, jp2, jpk, jkf, jkm, jk8, jkn, jkl, jk2, jk19, jkw, jkx, jkwide, jkx2, jkp, jk1024, jk1025, jkr;
 DROP FUNCTION jskew();

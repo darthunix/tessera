@@ -447,8 +447,9 @@ SELECT parallel_explain($$SELECT sum(a) FROM parallel_t WHERE a > 100$$);
 ----------------------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Partial Mode: Finalize
-   Input Batches: 3
+   Input Batches: 2
    Input Rows: 3
+   Gathered Rows: 2
    Kernel Calls: 0
    Computed Datums: 3
    ->  Custom Scan (TessGather) (actual rows=3.00 loops=1)
@@ -459,6 +460,7 @@ SELECT parallel_explain($$SELECT sum(a) FROM parallel_t WHERE a > 100$$);
                      Partial Mode: Partial
                      Input Batches: 81
                      Input Rows: 4200
+                     Gathered Rows: 2
                      Kernel Calls: 81
                      Computed Datums: 4200
                      ->  Parallel Custom Scan (TessFilter) on public.parallel_t (actual rows=1400.00 loops=3)
@@ -473,7 +475,7 @@ SELECT parallel_explain($$SELECT sum(a) FROM parallel_t WHERE a > 100$$);
                                  Pages: 28
                                  Deformed Datums: 5000
                                  Restarted Datums: 0
-(28 rows)
+(30 rows)
 
 -- Chains and row-wise expressions as arguments, expressions above, HAVING.
 SELECT parallel_same($$SELECT sum(a + b), max(a * 2), min(-a), sum(CASE WHEN b > 5 THEN a ELSE 0 END)

@@ -440,6 +440,7 @@ SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
    Output: (count(*))
    Input Batches: 3
    Input Rows: 85
+   Gathered Rows: 10
    Kernel Calls: 3
    ->  Custom Scan (TessFilter) on public.filter_t (actual rows=85.00 loops=1)
          Filter: (upper(filter_t.c) <> 'R150'::text)
@@ -457,7 +458,7 @@ SELECT count(*) FROM filter_t WHERE a > 100 AND upper(c) <> 'R150';
                Pages: 2
                Deformed Datums: 286
                Restarted Datums: 0
-(21 rows)
+(22 rows)
 
 -- A column the query returns is deformed for the rows served.
 EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
@@ -564,6 +565,7 @@ SELECT count(*) FROM filter_dead WHERE a > 0;
    Output: (count(*))
    Input Batches: 4
    Input Rows: 200
+   Gathered Rows: 23
    Kernel Calls: 4
    ->  Custom Scan (TessFilter) on public.filter_dead (actual rows=200.00 loops=1)
          Batch Filter: (filter_dead.a > 0)
@@ -578,7 +580,7 @@ SELECT count(*) FROM filter_dead WHERE a > 0;
                Pages: 2
                Deformed Datums: 200
                Restarted Datums: 0
-(18 rows)
+(19 rows)
 
 SELECT filter_same($$SELECT count(*), sum(a) FROM filter_dead WHERE a > 150$$);
    filter_same   
@@ -1244,6 +1246,7 @@ SELECT bit_or(a), max(c) FROM filter_t;
    Output: (bit_or(a)), (max(c))
    Input Batches: 4
    Input Rows: 200
+   Gathered Rows: 12
    Kernel Calls: 0
    Computed Datums: 400
    ->  Custom Scan (TessHeapScan) on public.filter_t (actual rows=200.00 loops=1)
@@ -1253,7 +1256,7 @@ SELECT bit_or(a), max(c) FROM filter_t;
          Pages: 2
          Deformed Datums: 400
          Restarted Datums: 0
-(13 rows)
+(14 rows)
 
 SELECT filter_same($$SELECT bit_or(a), max(c), count(a), count(*) FROM filter_t$$);
       filter_same      
@@ -1398,6 +1401,7 @@ SELECT count(*) FROM filter_two WHERE d2 > d1;
    Output: (count(*))
    Input Batches: 4
    Input Rows: 71
+   Gathered Rows: 21
    Kernel Calls: 4
    ->  Custom Scan (TessFilter) on public.filter_two (actual rows=71.00 loops=1)
          Batch Filter: (filter_two.d2 > filter_two.d1)
@@ -1412,7 +1416,7 @@ SELECT count(*) FROM filter_two WHERE d2 > d1;
                Pages: 2
                Deformed Datums: 400
                Restarted Datums: 0
-(18 rows)
+(19 rows)
 
 SELECT filter_same($$SELECT count(*) FROM filter_two WHERE d2 > d1$$);
  filter_same 
@@ -1444,6 +1448,7 @@ SELECT sum(q), sum(p), count(f) FROM filter_keep WHERE d <= date '2020-04-07';
    Output: (sum(q)), (sum(p)), (count(f))
    Input Batches: 191
    Input Rows: 9800
+   Gathered Rows: 1791
    Kernel Calls: 191
    Computed Datums: 29400
    ->  Custom Scan (TessFilter) on public.filter_keep (actual rows=9800.00 loops=1)
@@ -1460,7 +1465,7 @@ SELECT sum(q), sum(p), count(f) FROM filter_keep WHERE d <= date '2020-04-07';
                Pages: 64
                Deformed Datums: 39400
                Restarted Datums: 3973
-(20 rows)
+(21 rows)
 
 SELECT filter_same($$SELECT sum(q), sum(p), count(f) FROM filter_keep
                      WHERE d <= date '2020-04-07'$$);
@@ -1475,8 +1480,9 @@ SELECT sum(q), sum(p) FROM filter_keep WHERE d = date '2020-01-01';
 ---------------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Output: (sum(q)), (sum(p))
-   Input Batches: 100
+   Input Batches: 3
    Input Rows: 100
+   Gathered Rows: 99
    Kernel Calls: 0
    Computed Datums: 200
    ->  Custom Scan (TessFilter) on public.filter_keep (actual rows=100.00 loops=1)
@@ -1493,7 +1499,7 @@ SELECT sum(q), sum(p) FROM filter_keep WHERE d = date '2020-01-01';
                Pages: 64
                Deformed Datums: 10200
                Restarted Datums: 100
-(20 rows)
+(21 rows)
 
 SELECT filter_same($$SELECT sum(q), sum(p) FROM filter_keep
                      WHERE d = date '2020-01-01'$$);

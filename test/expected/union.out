@@ -70,6 +70,7 @@ SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
    Output: (count(*)), (sum(s.a))
    Input Batches: 29
    Input Rows: 1380
+   Gathered Rows: 82
    Kernel Calls: 58
    Computed Datums: 1380
    ->  Custom Scan (TessAppend) (actual rows=1380.00 loops=1)
@@ -111,7 +112,7 @@ SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                            Pages: 5
                            Deformed Datums: 700
                            Restarted Datums: 0
-(45 rows)
+(46 rows)
 
 SELECT union_same($$SELECT count(*), sum(a), count(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);

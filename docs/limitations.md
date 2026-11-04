@@ -101,6 +101,27 @@ those it checks.
   raises the same errors. A `CASE` guards an expression that may fail, as
   [PostgreSQL's evaluation rules](https://www.postgresql.org/docs/current/sql-expressions.html#SYNTAX-EXPRESS-EVAL)
   advise.
+- **Reading ahead of a join or an aggregate.** TessHashJoin and TessAgg
+  gather the rows of sparse batches, a filter's output a row or two a
+  batch, into batches of 64, so they read their child until 64 rows
+  have come, which after a selective filter may take thousands of rows.
+  A limit right above the join turns its gathering off, and the first
+  batch of every scan goes as it is. Elsewhere the reading goes further
+  than a batch at a time: under `EXISTS` a join may drop several batches
+  before its first pair, and a limit does not reach a join or a filter
+  below the node right under it. A data error in a row the core's plan
+  never reaches can then stop the query, as above.
+- **The calls of volatile functions.** Batch nodes evaluate a volatile
+  function (`random()`, `nextval()`, a function that writes) as often as
+  PostgreSQL promises, at every row where its value is needed, but the
+  count over a join and the order between nodes are the plan's, and
+  differ from the core's. A filter runs over a batch's rows before the
+  node above reads any of them, and over many batches before a gathering
+  join or aggregate does. The index lookup of TessHashJoin looks a
+  batch's keys up in one scan of the inner side, so a volatile condition
+  of the inner side runs once for an inner row that several outer rows
+  look up, as in the core's hash join and unlike its nested loop, where
+  it runs for each. The core's own plans differ the same way.
 
 ## Platforms
 
