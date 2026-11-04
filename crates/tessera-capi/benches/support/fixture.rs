@@ -13,7 +13,7 @@
 //! inputs ([`Fixture::inputs`]): call after call, the same words in other
 //! orders, so that it does the same work but repeats neither where its rows
 //! lie nor how many the n-th word holds, and the predictor learns none of
-//! them. The density cases (`density-8` to `density-32`) select exactly
+//! them. The density cases (`density-8` to `density-32`) select about
 //! that many rows of every word, at positions drawn so too.
 
 use super::reference::Mask;
@@ -57,9 +57,16 @@ impl FixtureValue for i64 {
 /// describes.
 pub const RING: usize = 64;
 
-/// The selected rows a word of the density cases, around the bounds from
-/// which the kernels take a word whole.
+/// The selected rows a word of the density cases, on average, around the
+/// bounds from which the kernels take a word whole.
 pub const DENSITIES: [usize; 5] = [8, 12, 16, 24, 32];
+
+/// How far the rows of a word of a density case stray from its density,
+/// either way. A word of exactly as many rows as the next one lets the
+/// predictor learn where a loop over them ends, which it does not over
+/// data; so the counts of the words take each offset of `-SPREAD..=SPREAD`
+/// in turn, starting from none, in an order drawn at random.
+pub const SPREAD: usize = 2;
 
 /// The patterns of the density cases, `density-<rows>`, in the order of
 /// [`DENSITIES`].
@@ -105,15 +112,26 @@ fn shuffle<T>(items: &mut [T], random: &mut Random) {
     }
 }
 
-/// `rows` of the `ready` rows of each word of 64, at positions drawn from
-/// `random`; every ready row of a word that has fewer.
+/// About `rows` of the `ready` rows of each word of 64, at positions drawn
+/// from `random`: the words take the counts `rows`, `rows - 1`, `rows + 1`,
+/// and so on to [`SPREAD`] either way, in turn and then in an order drawn
+/// from `random`, so that the 16 words of 1024 rows hold `rows` a word on
+/// average. A word with fewer ready rows selects them all.
 fn drawn_rows(ready: &[bool], rows: usize, random: &mut Random) -> Vec<bool> {
+    let offsets: Vec<isize> = std::iter::once(0)
+        .chain((1..=SPREAD as isize).flat_map(|offset| [-offset, offset]))
+        .collect();
+    let mut counts: Vec<_> = (0..ready.len().div_ceil(64))
+        .map(|word| rows.saturating_add_signed(offsets[word % offsets.len()]))
+        .collect();
+    shuffle(&mut counts, random);
     let mut selected = vec![false; ready.len()];
-    for start in (0..ready.len()).step_by(64) {
+    for (word, count) in counts.into_iter().enumerate() {
+        let start = word * 64;
         let end = (start + 64).min(ready.len());
         let mut candidates: Vec<_> = (start..end).filter(|&row| ready[row]).collect();
         shuffle(&mut candidates, random);
-        for &row in candidates.iter().take(rows) {
+        for &row in candidates.iter().take(count) {
             selected[row] = true;
         }
     }

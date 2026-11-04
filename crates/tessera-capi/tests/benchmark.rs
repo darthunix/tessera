@@ -845,8 +845,10 @@ fn the_cases_drawn_at_random_take_a_ring() -> Result<()> {
     Ok(())
 }
 
-/// Every word of a density case holds exactly its rows, at positions that
-/// no other input of its ring repeats.
+/// The words of a density case hold its rows on average, each word up to
+/// [`fixture::SPREAD`] more or fewer, so that the exit of a loop over a
+/// word's rows misses on 12 of its 16 words, and no input of its ring
+/// repeats where the rows of another lie.
 #[test]
 fn the_density_cases_hold_their_rows_in_every_word_anew() {
     for (rows, pattern) in fixture::DENSITIES
@@ -872,7 +874,17 @@ fn the_density_cases_hold_their_rows_in_every_word_anew() {
             let mut seen = std::collections::HashSet::new();
             for input in case.inputs() {
                 let words = input.selected.words().to_vec();
-                assert!(words.iter().all(|word| word.count_ones() as usize == rows));
+                let counts: Vec<_> = words
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .collect();
+                assert!(
+                    counts
+                        .iter()
+                        .all(|&count| count.abs_diff(rows) <= fixture::SPREAD)
+                );
+                assert_eq!(counts.iter().sum::<usize>(), rows * words.len());
+                assert_eq!(fixture::exit_misses(&input.selected), 12);
                 let distinct: std::collections::HashSet<_> = words.iter().collect();
                 assert!(distinct.len() > 1, "the words of {name} differ");
                 assert!(seen.insert(words), "an input of {name} repeats another");
