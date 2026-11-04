@@ -60,6 +60,7 @@ mod tabling_large;
 
 use anyhow::Result;
 use filtering::blocks as filter_blocks;
+use std::rc::Rc;
 use support::{fixture, reference};
 use tessera_core::ColumnReader;
 
@@ -803,14 +804,20 @@ fn column_comparisons_match_the_model_on_every_case() -> Result<()> {
 }
 
 /// The cases drawn at random, by name: each takes a ring of
-/// [`fixture::RING`] inputs, and every other case one input.
+/// [`fixture::RING`] inputs, a density case [`fixture::SELECTIONS`], and
+/// every other case one input.
 #[test]
 fn the_cases_drawn_at_random_take_a_ring() -> Result<()> {
     fn drawn<T: fixture::FixtureValue>(cases: Vec<fixture::Fixture<T>>) -> Vec<String> {
         let mut names = Vec::new();
         for case in cases {
             let (name, drawn) = (case.name.clone(), case.drawn);
-            assert_eq!(case.inputs().len(), if drawn { fixture::RING } else { 1 });
+            let count = match (case.density, drawn) {
+                (Some(_), _) => fixture::SELECTIONS,
+                (None, true) => fixture::RING,
+                (None, false) => 1,
+            };
+            assert_eq!(case.inputs().len(), count);
             if drawn {
                 names.push(name);
             }
@@ -840,7 +847,11 @@ fn the_cases_drawn_at_random_take_a_ring() -> Result<()> {
         .filter(|&(_, inputs)| inputs != 1)
         .collect();
     let mut expected = vec![(random[1].clone(), fixture::RING)];
-    expected.extend(densities.into_iter().map(|name| (name, fixture::RING)));
+    expected.extend(
+        densities
+            .into_iter()
+            .map(|name| (name, fixture::SELECTIONS)),
+    );
     assert_eq!(pairs, expected);
     Ok(())
 }
@@ -848,7 +859,9 @@ fn the_cases_drawn_at_random_take_a_ring() -> Result<()> {
 /// The words of a density case hold its rows on average, each word up to
 /// [`fixture::SPREAD`] more or fewer, so that the exit of a loop over a
 /// word's rows misses on 12 of its 16 words, and no input of its ring
-/// repeats where the rows of another lie.
+/// repeats where the rows of another lie. The inputs share their values,
+/// the smallint ones too, and the sides of a comparison take the same
+/// selection.
 #[test]
 fn the_density_cases_hold_their_rows_in_every_word_anew() {
     for (rows, pattern) in fixture::DENSITIES
@@ -866,13 +879,36 @@ fn the_density_cases_hold_their_rows_in_every_word_anew() {
             .into_iter()
             .find(|pair| pair[0].name == name)
             .expect("the pair");
-        for case in [
-            find(reading::cases()),
-            find(filtering::cases()),
-            pair.into_iter().next().unwrap(),
-        ] {
+        let pairs = comparing::inputs(pair);
+        assert!(
+            pairs
+                .iter()
+                .all(|pair| pair[0].selected.words() == pair[1].selected.words()),
+            "the sides of {name} take the same selection"
+        );
+        let reading = find(reading::cases()).inputs();
+        let small = arithmetic::smallint_inputs(&reading);
+        assert!(
+            small
+                .iter()
+                .all(|input| Rc::ptr_eq(&input.values, &small[0].values))
+        );
+        let lefts = pairs.into_iter().map(|[left, _]| left).collect();
+        for inputs in [reading, find(filtering::cases()).inputs(), lefts] {
             let mut seen = std::collections::HashSet::new();
-            for input in case.inputs() {
+            for input in &inputs {
+                assert!(
+                    Rc::ptr_eq(&input.values, &inputs[0].values),
+                    "the inputs of {name} share their values"
+                );
+                let sum = input
+                    .values
+                    .iter()
+                    .enumerate()
+                    .filter(|&(row, _)| input.selected.words()[row / 64] & (1 << (row % 64)) != 0)
+                    .map(|(_, &value)| i64::from(value))
+                    .sum::<i64>();
+                assert_eq!(input.expected, sum);
                 let words = input.selected.words().to_vec();
                 let counts: Vec<_> = words
                     .iter()
@@ -889,7 +925,7 @@ fn the_density_cases_hold_their_rows_in_every_word_anew() {
                 assert!(distinct.len() > 1, "the words of {name} differ");
                 assert!(seen.insert(words), "an input of {name} repeats another");
             }
-            assert_eq!(seen.len(), fixture::RING);
+            assert_eq!(seen.len(), fixture::SELECTIONS);
         }
     }
 }

@@ -77,7 +77,7 @@ fn first_long<T: Width>(cases: &[Fixture<T>]) -> Result<&Fixture<T>> {
 /// of the first case of 1024 rows.
 pub fn cases<T: Width>() -> Result<Vec<Fixture<T>>> {
     let mut cases = T::cases();
-    let values = first_long(&cases)?.values.clone();
+    let values = first_long(&cases)?.values.to_vec();
     cases.push(Fixture::from_values(
         values.clone(),
         "quarter",

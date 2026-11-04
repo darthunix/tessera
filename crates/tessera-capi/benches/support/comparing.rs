@@ -17,7 +17,7 @@ use tessera_core::{ColumnReader, RowMask};
 use tessera_kernels::int32::{CompareOp, compare_columns};
 
 use crate::support::{
-    fixture::{self, Fixture, RING, as_uninit},
+    fixture::{self, Fixture, RING, SELECTIONS, as_uninit},
     runner::Runner,
 };
 
@@ -57,19 +57,24 @@ pub fn cases() -> Vec<[Fixture; 2]> {
     cases
 }
 
-/// The pairs that the calls of a case take in turn: a ring of [`RING`]
-/// if its left side, the selection and its NULL flags, is drawn at random,
-/// the pair alone otherwise. The right side's NULL flags are drawn in every
-/// case, but where the selection is regular the case keeps one pair. Both
-/// sides of a pair are permuted by the same seed, so their rows stay paired.
+/// The pairs that the calls of a case take in turn: the [`SELECTIONS`]
+/// of a density case, a ring of [`RING`] if its left side, the selection
+/// and its NULL flags, is drawn at random otherwise, the pair alone if
+/// not. The right side's NULL flags are drawn in every case, but where the
+/// selection is regular the case keeps one pair. Both sides of a pair are
+/// permuted by the same seed, or take the same selection, so their rows
+/// stay paired.
 pub fn inputs(pair: [Fixture; 2]) -> Vec<[Fixture; 2]> {
     let [left, right] = pair;
-    if !left.drawn {
+    let (left, right) = if left.density.is_some() {
+        (left.selections(SELECTIONS), right.selections(SELECTIONS))
+    } else if left.drawn {
+        (left.ring(RING), right.ring(RING))
+    } else {
         return vec![[left, right]];
-    }
-    left.ring(RING)
-        .into_iter()
-        .zip(right.ring(RING))
+    };
+    left.into_iter()
+        .zip(right)
         .map(|(left, right)| [left, right])
         .collect()
 }

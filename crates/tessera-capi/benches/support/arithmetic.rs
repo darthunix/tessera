@@ -133,7 +133,7 @@ pub fn add_column<C: ColumnReader<Value = i32>>(
 }
 
 /// The smallint forms of the same operations, over a case whose values
-/// are smallints ([`smallint_case`]).
+/// are smallints ([`smallint_inputs`]).
 #[inline(never)]
 pub fn add_scalar_smallint<C: ColumnReader<Value = i32>>(
     input: &Input<'_, C>,
@@ -198,10 +198,10 @@ pub fn add_column_smallint<C: ColumnReader<Value = i32>>(
     )
 }
 
-/// A case whose values are smallints: each modulo 4096, so that `x * 7`
-/// and `x + x` stay within the range.
-pub fn smallint_case(case: &Fixture) -> Fixture {
-    case.map_values(|value| value % 4096)
+/// The inputs of a case with smallint values: each modulo 4096, so that
+/// `x * 7` and `x + x` stay within the range.
+pub fn smallint_inputs(inputs: &[Fixture]) -> Vec<Fixture> {
+    fixture::map_inputs(inputs, |value| value % 4096)
 }
 
 /// `value + SCALAR` for every selected non-NULL row, straight from the
@@ -364,7 +364,7 @@ pub fn bench(runner: &mut Runner) -> Result<()> {
             datum_reference,
             &inputs,
         )?;
-        let small: Vec<_> = inputs.iter().map(smallint_case).collect();
+        let small = smallint_inputs(&inputs);
         measure_smallint(
             runner,
             "dense",

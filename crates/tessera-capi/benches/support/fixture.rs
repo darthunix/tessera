@@ -14,12 +14,15 @@
 //! orders, so that it does the same work but repeats neither where its rows
 //! lie nor how many the n-th word holds, and the predictor learns none of
 //! them. The density cases (`density-8` to `density-32`) select about
-//! that many rows of every word, at positions drawn so too.
+//! that many rows of every word, at positions drawn anew for each of
+//! [`SELECTIONS`] inputs over one set of values
+//! ([`Fixture::selections`]).
 
 use super::reference::Mask;
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::mem::MaybeUninit;
+use std::rc::Rc;
 use tessera_capi::{DatumIntColumn, DenseIntColumn, FromDatum};
 use tessera_core::RowMaskView;
 
@@ -56,6 +59,13 @@ impl FixtureValue for i64 {
 /// the pilot of unlearned inputs, which the README of the benchmarks
 /// describes.
 pub const RING: usize = 64;
+
+/// The inputs that the calls of a density case take in turn, each a
+/// selection drawn anew over the same values: the fewest from which the
+/// predictors of both machines no longer learned where a loop over a
+/// word's rows ends, which a ring of [`RING`] taught them. The README of
+/// the benchmarks describes the probes.
+pub const SELECTIONS: usize = 4096;
 
 /// The selected rows a word of the density cases, on average, around the
 /// bounds from which the kernels take a word whole.
@@ -214,12 +224,14 @@ impl Bitmap {
     }
 }
 
-/// The inputs of one case; int4 unless a width is named.
+/// The inputs of one case; int4 unless a width is named. The values and
+/// NULL flags are shared, so that the inputs of a density case read the
+/// same memory.
 pub struct Fixture<T = i32> {
     pub name: String,
-    pub values: Vec<T>,
-    pub datums: Vec<u64>,
-    pub nulls: Vec<bool>,
+    pub values: Rc<[T]>,
+    pub datums: Rc<[u64]>,
+    pub nulls: Rc<[bool]>,
     pub selected: Bitmap,
     pub prepared: Option<Bitmap>,
     pub non_nulls: Option<Bitmap>,
@@ -227,6 +239,9 @@ pub struct Fixture<T = i32> {
     /// Whether its selection, NULL flags or values are drawn at random:
     /// its calls then take a ring of inputs ([`Self::inputs`]).
     pub drawn: bool,
+    /// The selected rows a word of a density case, on average: its calls
+    /// take selections drawn anew ([`Self::selections`]).
+    pub density: Option<usize>,
 }
 
 /// The columns of `inputs`, one for each, built by `column`.
@@ -235,6 +250,25 @@ pub fn columns<'a, T, C>(
     column: impl Fn(&'a Fixture<T>) -> Result<C>,
 ) -> Result<Vec<C>> {
     inputs.iter().map(column).collect()
+}
+
+/// [`Fixture::map_values`] over the inputs of a case, each set of values
+/// mapped once: inputs that share their values share the mapped ones.
+pub fn map_inputs<T: FixtureValue>(inputs: &[Fixture<T>], map: impl Fn(T) -> T) -> Vec<Fixture<T>> {
+    let mut mapped: Vec<Fixture<T>> = Vec::with_capacity(inputs.len());
+    for (at, input) in inputs.iter().enumerate() {
+        let shared = at
+            .checked_sub(1)
+            .filter(|&last| Rc::ptr_eq(&inputs[last].values, &input.values));
+        mapped.push(match shared {
+            Some(last) => input.with_values(
+                Rc::clone(&mapped[last].values),
+                Rc::clone(&mapped[last].datums),
+            ),
+            None => input.map_values(&map),
+        });
+    }
+    mapped
 }
 
 /// Borrow initialized values in the representation accepted by column constructors.
@@ -273,24 +307,25 @@ impl<T: FixtureValue> Fixture<T> {
     /// The same rows, masks and name with each value mapped, such as the
     /// values of a smallint kernel brought into its range.
     pub fn map_values(&self, map: impl Fn(T) -> T) -> Self {
-        let values: Vec<T> = self.values.iter().map(|&value| map(value)).collect();
-        let selected = self.selected.words();
-        let expected = values
-            .iter()
-            .enumerate()
-            .filter(|&(row, _)| selected[row / 64] & (1 << (row % 64)) != 0 && !self.nulls[row])
-            .map(|(_, &value)| value.wide())
-            .fold(0, i64::wrapping_add);
+        let values: Rc<[T]> = self.values.iter().map(|&value| map(value)).collect();
+        let datums = values.iter().map(|&value| value.datum()).collect();
+        self.with_values(values, datums)
+    }
+
+    /// The same rows, masks and name over `values` and their `datums`, with
+    /// the sum they select.
+    fn with_values(&self, values: Rc<[T]>, datums: Rc<[u64]>) -> Self {
         Self {
             name: self.name.clone(),
-            datums: values.iter().map(|&value| value.datum()).collect(),
+            expected: selected_sum(&values, &self.selected, &self.nulls),
             values,
-            nulls: self.nulls.clone(),
+            datums,
+            nulls: Rc::clone(&self.nulls),
             selected: self.selected.clone(),
             prepared: self.prepared.clone(),
             non_nulls: self.non_nulls.clone(),
-            expected,
             drawn: self.drawn,
+            density: self.density,
         }
     }
 
@@ -327,14 +362,8 @@ impl<T: FixtureValue> Fixture<T> {
                 _ => unreachable!(),
             })
             .collect();
-        let datums: Vec<_> = values.iter().map(|&value| value.datum()).collect();
-        let expected = values
-            .iter()
-            .enumerate()
-            .filter(|&(row, _)| selected[row] && !flags[row])
-            .map(|(_, &value)| value.wide())
-            // Wrapping: an int8 fixture may hold both extremes.
-            .fold(0, i64::wrapping_add);
+        let datums = values.iter().map(|&value| value.datum()).collect();
+        let selected = Bitmap::new(&selected);
         Self {
             name: format!(
                 "words/{nrows}/{pattern}/nulls-{nulls}/{}",
@@ -343,23 +372,63 @@ impl<T: FixtureValue> Fixture<T> {
             non_nulls: (nulls != "none")
                 .then(|| Bitmap::new(&flags.iter().map(|&flag| !flag).collect::<Vec<_>>())),
             prepared: partial.then(|| Bitmap::new(&ready)),
-            selected: Bitmap::new(&selected),
-            nulls: flags,
-            values,
+            expected: selected_sum(&values, &selected, &flags),
+            selected,
+            nulls: flags.into(),
+            values: values.into(),
             datums,
-            expected,
             drawn: pattern == "random" || density.is_some() || nulls == "random",
+            density: density.map(|rows| rows.parse().unwrap()),
         }
     }
 
-    /// The inputs that the calls of the case take in turn: a ring of
-    /// [`RING`] if it is drawn at random, the case alone otherwise.
+    /// The inputs that the calls of the case take in turn: the
+    /// [`SELECTIONS`] of a density case, a ring of [`RING`] if it is drawn
+    /// at random otherwise, the case alone if not.
     pub fn inputs(self) -> Vec<Self> {
-        if self.drawn {
+        if self.density.is_some() {
+            self.selections(SELECTIONS)
+        } else if self.drawn {
             self.ring(RING)
         } else {
             vec![self]
         }
+    }
+
+    /// The inputs of a density case: `self`, then `count - 1` selections
+    /// drawn as its own was, over its values, NULL flags and readiness,
+    /// which they share. Each holds the sum it selects. The draws come from
+    /// a generator apart from the one that drew `self`, so that none
+    /// repeats it; two cases of as many rows draw the same selections.
+    pub fn selections(self, count: usize) -> Vec<Self> {
+        let rows = self.density.expect("a density case");
+        let nrows = self.values.len();
+        let ready: Vec<_> = (0..nrows)
+            .map(|row| {
+                self.prepared
+                    .as_ref()
+                    .is_none_or(|prepared| prepared.words[row / 64] & (1 << (row % 64)) != 0)
+            })
+            .collect();
+        let mut random = Random::with_seed(!(nrows as u64));
+        let mut inputs = Vec::with_capacity(count);
+        for _ in 1..count {
+            let selected = Bitmap::new(&drawn_rows(&ready, rows, &mut random));
+            inputs.push(Self {
+                name: self.name.clone(),
+                values: Rc::clone(&self.values),
+                datums: Rc::clone(&self.datums),
+                nulls: Rc::clone(&self.nulls),
+                expected: selected_sum(&self.values, &selected, &self.nulls),
+                selected,
+                prepared: self.prepared.clone(),
+                non_nulls: self.non_nulls.clone(),
+                drawn: self.drawn,
+                density: self.density,
+            });
+        }
+        inputs.insert(0, self);
+        inputs
     }
 
     /// The inputs of a case that the branch predictor cannot learn: `self`,
@@ -408,6 +477,18 @@ impl<T: FixtureValue> Fixture<T> {
             non_nulls: self.non_nulls.as_ref().map(moved),
             expected: self.expected,
             drawn: self.drawn,
+            density: self.density,
         }
     }
+}
+
+/// The sum of the `values` of the `selected` rows that are not NULL.
+fn selected_sum<T: FixtureValue>(values: &[T], selected: &Bitmap, nulls: &[bool]) -> i64 {
+    values
+        .iter()
+        .enumerate()
+        .filter(|&(row, _)| selected.words[row / 64] & (1 << (row % 64)) != 0 && !nulls[row])
+        .map(|(_, &value)| value.wide())
+        // Wrapping: an int8 fixture may hold both extremes.
+        .fold(0, i64::wrapping_add)
 }
