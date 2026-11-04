@@ -221,6 +221,26 @@ SELECT pg_temp.measure_pair('part_prune_few',
     format('SELECT count(*), sum(p.v) FROM bench_part p JOIN bench_dim d ON p.k = d.id WHERE d.d1 <= %s',
            1000 * :scale),
     :repetitions);
+-- Sparse inputs, which a join's and an aggregate's input gather into
+-- batches of 64 (runtime_input.h): a filter that keeps a row in twenty
+-- of the fact table, its probe side, against a dimension filtered to
+-- one key in twenty, which the join builds; the rows of a table of text
+-- columns, two in five kept, copied before a join that pairs few of
+-- them; a numeric summed above a filter that keeps one row in a hundred;
+-- a column a subquery computes above a filter, whose batches are not
+-- stored values and go as they are.
+SELECT pg_temp.measure_pair('gather_sparse',
+    'SELECT count(*), sum(d.d1) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id WHERE f.f1 % 20 = 0 AND d.d2 < 5',
+    :repetitions);
+SELECT pg_temp.measure_pair('gather_wide_few',
+    'SELECT count(*), sum(length(m.b)), sum(length(m.e)) FROM bench_mixed m JOIN bench_dim d ON m.a = d.id WHERE m.a % 10 < 4 AND d.d2 = 0',
+    :repetitions);
+SELECT pg_temp.measure_pair('gather_numeric',
+    'SELECT sum(t.n), count(*) FROM bench_tfact t WHERE t.w = 0',
+    :repetitions);
+SELECT pg_temp.measure_pair('gather_computed',
+    'SELECT sum(x) FROM (SELECT f1 * 2 AS x FROM bench_fact WHERE f1 % 100 = 0 OFFSET 0) AS s',
+    :repetitions);
 -- The planner over four relations, where the hook sees every join order.
 SELECT pg_temp.measure_plan('plan_time',
     'SELECT count(*) FROM bench_fact f JOIN bench_dim d ON f.fk = d.id JOIN bench_dup u ON d.id = u.k JOIN bench_dim e ON u.v = e.id',
@@ -246,12 +266,14 @@ SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BU
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'filter_first', 'miss', 'dup', 'dup_text', 'two_keys', 'residual', 'rows_parent',
                   'chain', 'semi', 'anti', 'right_anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
-                  'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few']) AS name \gexec
+                  'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few',
+                  'gather_sparse', 'gather_wide_few', 'gather_numeric', 'gather_computed']) AS name \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'filter_first', 'miss', 'dup', 'two_keys', 'residual', 'rows_parent',
                   'chain', 'semi', 'anti', 'right_anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
-                  'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few']) AS name \gexec
+                  'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few',
+                  'gather_sparse', 'gather_wide_few', 'gather_numeric', 'gather_computed']) AS name \gexec
 \o
 DEALLOCATE ALL;
