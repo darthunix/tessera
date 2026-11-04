@@ -72,6 +72,8 @@ enum
 	AGG_EARLY,
 	/* Generic states past hash_mem: the rows sent to partitions on disk. */
 	AGG_SPILLED_ROWS,
+	/* The input rows copied into gathered batches. */
+	AGG_GATHERED,
 	AGG_NCOUNTERS
 };
 
@@ -427,6 +429,10 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	request.output_mode = TESS_OUTPUT_BATCH;
 	tess_input_set_request(state->input, &request);
+	/* Sparse input batches come gathered (runtime_input.h), both sides'. */
+	tess_input_set_gather(state->input, true);
+	if (state->setop >= 0)
+		tess_input_set_gather(state->side_inputs[1], true);
 	builder.parent_context = estate->es_query_cxt;
 	builder.tuple_desc = result->tts_tupleDescriptor;
 	builder.ncolumns = result->tts_tupleDescriptor->natts;
@@ -1015,6 +1021,10 @@ agg_counters(TessAggState *state, uint64 *values)
 
 		values[AGG_COMPUTED] = computed->chain_datums + computed->row_datums;
 	}
+	values[AGG_GATHERED] = state->setop >= 0 ?
+		tess_input_gathered_rows(state->side_inputs[0]) +
+		tess_input_gathered_rows(state->side_inputs[1]) :
+		tess_input_gathered_rows(state->input);
 	values[AGG_GROUPS] = state->groups;
 	values[AGG_MEMORY] = state->peak_memory;
 	values[AGG_GROWS] = state->grows;
@@ -1078,6 +1088,8 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 		return;
 	ExplainPropertyInteger("Input Batches", NULL, totals[AGG_BATCHES], es);
 	ExplainPropertyInteger("Input Rows", NULL, totals[AGG_ROWS], es);
+	if (totals[AGG_GATHERED] > 0)
+		ExplainPropertyInteger("Gathered Rows", NULL, totals[AGG_GATHERED], es);
 	ExplainPropertyInteger("Kernel Calls", NULL, totals[AGG_CALLS], es);
 	if (state->projection != NULL)
 		ExplainPropertyInteger("Computed Datums", NULL, totals[AGG_COMPUTED], es);

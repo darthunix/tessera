@@ -205,6 +205,8 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 		state->prune.keys.values = palloc_array(int64, JOIN_PRUNE_VALUES);
 	}
 	state->outer_input = tess_input_create(estate->es_query_cxt, state->outer);
+	/* The outer side's sparse batches come gathered (runtime_input.h). */
+	tess_input_set_gather(state->outer_input, true);
 	state->inner_input = tess_input_create(estate->es_query_cxt, state->inner);
 	/* Index join mode: the scan below the inner child that takes the keys. */
 	if (state->lookup_key >= 0)
@@ -401,6 +403,7 @@ join_counters(TessHashJoinState *state, uint64 *values)
 		values[JOIN_OUTPUT_REMOVED] = removed->batch_removed + removed->row_removed;
 	}
 	values[JOIN_MEMORY] = state->peak_memory;
+	values[JOIN_GATHERED] = tess_input_gathered_rows(state->outer_input);
 	if (state->lookup_scan != NULL)
 		values[JOIN_INDEX_SEARCHES] = tess_heap_lookup_searches(state->lookup_scan);
 	/*
@@ -537,6 +540,8 @@ join_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (totals[JOIN_COMPACT_BATCHES] > 0)
 		ExplainPropertyInteger("Compact Batches", NULL,
 							   totals[JOIN_COMPACT_BATCHES], es);
+	if (totals[JOIN_GATHERED] > 0)
+		ExplainPropertyInteger("Gathered Rows", NULL, totals[JOIN_GATHERED], es);
 	if (totals[JOIN_BLOOM_FILTERS] > 0)
 		ExplainPropertyInteger("Bloom Filters", NULL,
 							   totals[JOIN_BLOOM_FILTERS], es);
@@ -765,7 +770,23 @@ const CustomScanMethods tess_hash_join_scan_methods = {
 	.CreateCustomScanState = join_create_state,
 };
 
+/*
+ * A bound above the join, from a limit: the join keeps it, for its outer
+ * side may need more rows than its output, and stops gathering its outer
+ * side, which would read past the rows the limit needs. The input takes
+ * the choice at its next scan's first batch: a limit hands its bound down
+ * before its child's first batch.
+ */
+static void
+join_set_tuple_bound(CustomScanState *css, int64 tuples_needed)
+{
+	TessHashJoinState *state = (TessHashJoinState *) css;
+
+	tess_input_set_gather(state->outer_input, tuples_needed < 0);
+}
+
 const TessNode tess_hash_join_node = {
 	TESS_ABI_INITIALIZER(TESS_NODE_ABI_VERSION, TessNode),
 	.name = TESS_HASH_JOIN_NODE_NAME,
+	.set_tuple_bound = join_set_tuple_bound,
 };

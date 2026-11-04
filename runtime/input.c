@@ -114,8 +114,6 @@ tess_input_set_request(TessInput *input, const TessRequest *request)
 void
 tess_input_set_gather(TessInput *input, bool on)
 {
-	if (on && !input->has_request)
-		elog(ERROR, "Tessera input gathers only after its request is set");
 	input->gather = on;
 }
 
@@ -224,6 +222,9 @@ gather_next(TessInput *input)
 	if (input->gathered == NULL)
 	{
 		int			capacity = 64;
+
+		if (!input->has_request)
+			elog(ERROR, "Tessera input gathers only after its request is set");
 
 		if (input->max_batch_rows > 0 && input->max_batch_rows < capacity)
 			capacity = input->max_batch_rows;

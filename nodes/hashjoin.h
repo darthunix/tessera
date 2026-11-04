@@ -90,6 +90,8 @@ enum
 	JOIN_LOOKUPS,
 	JOIN_LOOKUP_KEYS,
 	JOIN_INDEX_SEARCHES,
+	/* The outer rows the input copied into gathered batches. */
+	JOIN_GATHERED,
 	JOIN_NCOUNTERS
 };
 

@@ -61,10 +61,10 @@ extern TupleTableSlot *tess_input_slot(TessInput *input);
  * its rest waits, unfinished. A scan's first batch goes as it is, so a
  * consumer that stops after it reads no further. The choice takes effect
  * at a scan's first batch, so a call during a scan sets the next one; a
- * rescan keeps it. Only after tess_input_set_request: a gathered batch
- * holds the request's columns, each a target of the child, and a read of
- * any other is an error. Its storage is the input's, valid until
- * tess_input_finish.
+ * rescan keeps it. A scan that gathers needs the request set before its
+ * second batch: a gathered batch holds the request's columns, each a
+ * target of the child, and a read of any other is an error. Its storage
+ * is the input's, valid until tess_input_finish.
  */
 extern void tess_input_set_gather(TessInput *input, bool on);
 
