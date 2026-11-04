@@ -47,6 +47,10 @@ CREATE FUNCTION tessera_test_spill_reset()
 RETURNS boolean
 AS :'spill_test', 'tessera_test_spill_reset'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_columns()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_columns'
+LANGUAGE C STRICT;
 
 SELECT tessera_test_spill_serial() AS serial \gset
 \echo :serial
@@ -64,6 +68,10 @@ SELECT tessera_test_spill_value() AS value \gset
 -- A shared file set used again: nothing of its first use is read.
 SELECT tessera_test_spill_reset() AS reset \gset
 \echo :reset
+-- The one writer and reader of chunks of columns: rows written as pairs
+-- of blocks, a value that grows the writer's values, read back as written.
+SELECT tessera_test_spill_columns() AS columns \gset
+\echo :columns
 -- The bytes a set holds, and a chunk longer than its write buffer.
 SELECT tessera_test_spill_memory() AS memory \gset
 \echo :memory
@@ -131,6 +139,10 @@ SELECT tessera_test_spill_sqlstate(45);
 -- a serial set, is a wrong call.
 SELECT tessera_test_spill_sqlstate(46);
 SELECT tessera_test_spill_sqlstate(47);
+-- A chunk of columns' pair cut short after its values is damaged data; a
+-- writer of chunks that hold no row is an internal error.
+SELECT tessera_test_spill_sqlstate(48);
+SELECT tessera_test_spill_sqlstate(49);
 -- A row read back that refers to a value outside its chunk of values.
 SELECT tessera_test_spill_sqlstate(28);
 -- What a node reads back is checked against what it wrote there, as the
@@ -206,3 +218,4 @@ DROP FUNCTION tessera_test_spill_shared_bytes(bigint);
 DROP FUNCTION tessera_test_spill_tablespace(oid);
 DROP FUNCTION tessera_test_spill_value();
 DROP FUNCTION tessera_test_spill_reset();
+DROP FUNCTION tessera_test_spill_columns();

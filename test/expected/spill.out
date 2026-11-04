@@ -46,6 +46,10 @@ CREATE FUNCTION tessera_test_spill_reset()
 RETURNS boolean
 AS :'spill_test', 'tessera_test_spill_reset'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_spill_columns()
+RETURNS boolean
+AS :'spill_test', 'tessera_test_spill_columns'
+LANGUAGE C STRICT;
 SELECT tessera_test_spill_serial() AS serial \gset
 \echo :serial
 t
@@ -67,6 +71,11 @@ t
 -- A shared file set used again: nothing of its first use is read.
 SELECT tessera_test_spill_reset() AS reset \gset
 \echo :reset
+t
+-- The one writer and reader of chunks of columns: rows written as pairs
+-- of blocks, a value that grows the writer's values, read back as written.
+SELECT tessera_test_spill_columns() AS columns \gset
+\echo :columns
 t
 -- The bytes a set holds, and a chunk longer than its write buffer.
 SELECT tessera_test_spill_memory() AS memory \gset
@@ -241,6 +250,20 @@ SELECT tessera_test_spill_sqlstate(47);
                     tessera_test_spill_sqlstate                    
 -------------------------------------------------------------------
  XX000: Tessera serial spill set has no participants to agree with
+(1 row)
+
+-- A chunk of columns' pair cut short after its values is damaged data; a
+-- writer of chunks that hold no row is an internal error.
+SELECT tessera_test_spill_sqlstate(48);
+                        tessera_test_spill_sqlstate                         
+----------------------------------------------------------------------------
+ XX001: Tessera read back the values of a chunk of columns without its rows
+(1 row)
+
+SELECT tessera_test_spill_sqlstate(49);
+                           tessera_test_spill_sqlstate                           
+---------------------------------------------------------------------------------
+ XX000: Tessera writer of a chunk of columns of 16 bytes holds no row of 1 words
 (1 row)
 
 -- A row read back that refers to a value outside its chunk of values.
@@ -447,3 +470,4 @@ DROP FUNCTION tessera_test_spill_shared_bytes(bigint);
 DROP FUNCTION tessera_test_spill_tablespace(oid);
 DROP FUNCTION tessera_test_spill_value();
 DROP FUNCTION tessera_test_spill_reset();
+DROP FUNCTION tessera_test_spill_columns();

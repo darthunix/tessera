@@ -31,6 +31,7 @@ PG_FUNCTION_INFO_V1(tessera_test_spill_shared_bytes);
 PG_FUNCTION_INFO_V1(tessera_test_spill_tablespace);
 PG_FUNCTION_INFO_V1(tessera_test_spill_value);
 PG_FUNCTION_INFO_V1(tessera_test_spill_reset);
+PG_FUNCTION_INFO_V1(tessera_test_spill_columns);
 PG_FUNCTION_INFO_V1(tessera_test_spill_injection);
 PG_FUNCTION_INFO_V1(tessera_test_spill_damage);
 PG_FUNCTION_INFO_V1(tessera_test_spill_damage_seen);
@@ -49,6 +50,10 @@ static const TessKernelOps kernels = {
 	.spill_pack = tess_spill_pack,
 	.spill_unpack = tess_spill_unpack,
 	.spill_columns_init = tess_spill_columns_init,
+	.spill_columns_append = tess_spill_columns_append,
+	.spill_columns_pair = tess_spill_columns_pair,
+	.spill_columns_check = tess_spill_columns_check,
+	.spill_columns_window = tess_spill_columns_window,
 	.spill_columns_pack = tess_spill_columns_pack,
 	.spill_columns_unpack = tess_spill_columns_unpack,
 	.spill_set_init = tess_spill_set_init,
@@ -1046,6 +1051,31 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			tess_spill_finish(spill);
 			tess_spill_agree(spill, MAX_LEN, MAX_LEN);
 			break;
+		case 48:
+			/* A chunk of columns' pair cut short: its values, then the end. */
+			{
+				TessColumnsReader columns;
+				static const bool byvals[1] = {true};
+				static const int16 typlens[1] = {8};
+
+				tess_spill_write(spill, 0, TESS_SPILL_VALUES, 0, body, 8, NULL);
+				tess_spill_finish(spill);
+				tess_columns_reader_init(&columns, &kernels, CurrentMemoryContext, 1, 1,
+										 byvals, typlens);
+				(void) tess_columns_reader_load(&columns, tess_spill_open(spill, 0, 0), 0, -1);
+			}
+			break;
+		case 49:
+			/* A writer of chunks that hold no row. */
+			{
+				TessColumnsWriter columns;
+				static const bool byvals[1] = {true};
+				static const int16 typlens[1] = {8};
+
+				tess_columns_writer_init(&columns, &kernels, CurrentMemoryContext,
+										 TESS_SPILL_COLUMNS_HEADER, 1, 1, byvals, typlens, 64);
+			}
+			break;
 		case 43:
 			/* A shared set's partition dropped before the set is finished. */
 			segment = dsm_create(sizeof(SharedFileSet), 0);
@@ -1181,6 +1211,95 @@ tessera_test_spill_value(PG_FUNCTION_ARGS)
 			elog(ERROR, "a reference into the second chunk does not name its value");
 	}
 	PG_RETURN_BOOL(true);
+}
+
+/*
+ * The runtime's one writer and one reader of chunks of columns: 200 rows
+ * of an int8 and a text, a NULL in each now and then, and one text of
+ * 20 kB that grows the writer's values past their 256 bytes; written to
+ * one partition as a pair of blocks whenever an append leaves rows, and
+ * read back by windows of 64, every value as it was written.
+ */
+Datum
+tessera_test_spill_columns(PG_FUNCTION_ARGS)
+{
+#define COLUMNS_ROWS 200
+	static const bool byvals[2] = {true, false};
+	static const int16 typlens[2] = {8, -1};
+	Datum		words[COLUMNS_ROWS];
+	Datum		texts[COLUMNS_ROWS];
+	bool		word_nulls[COLUMNS_ROWS];
+	bool		text_nulls[COLUMNS_ROWS];
+	uint64		bits[(COLUMNS_ROWS + 63) / 64] = {0};
+	TessRowMask pending = {COLUMNS_ROWS, bits};
+	TessDatumColumn columns[2] = {
+		TESS_STRUCT_INITIALIZER(TessDatumColumn),
+		TESS_STRUCT_INITIALIZER(TessDatumColumn),
+	};
+	Datum		out[2][64];
+	bool		out_nulls[2][64];
+	Datum	   *values[2] = {out[0], out[1]};
+	bool	   *nulls[2] = {out_nulls[0], out_nulls[1]};
+	TessSpill  *spill = make_spill(NULL, 0, FINGERPRINT);
+	TessColumnsWriter writer;
+	TessColumnsReader reader;
+	TessSpillReader *file;
+	uint32		pairs = 0;
+	int			row = 0;
+
+	for (int i = 0; i < COLUMNS_ROWS; i++)
+	{
+		char	   *wide = i == 100 ? psprintf("%020000d", i) : psprintf("row %d", i);
+
+		words[i] = Int64GetDatum((int64) i * 7);
+		texts[i] = PointerGetDatum(cstring_to_text(wide));
+		word_nulls[i] = i % 11 == 3;
+		text_nulls[i] = i % 13 == 5;
+		bits[i / 64] |= UINT64CONST(1) << (i % 64);
+	}
+	columns[0].values = words;
+	columns[0].isnull = word_nulls;
+	columns[1].values = texts;
+	columns[1].isnull = text_nulls;
+	columns[0].nrows = columns[1].nrows = COLUMNS_ROWS;
+	tess_columns_writer_init(&writer, &kernels, CurrentMemoryContext,
+							 TESS_SPILL_COLUMNS_HEADER +
+							 sizeof(uint64) * 16 * (tess_spill_columns_null_lanes(2) + 2),
+							 2, 2, byvals, typlens, 256);
+	while (tess_columns_writer_add(&writer, columns, &pending) >= 0 &&
+		   tess_row_mask_count(&pending) > 0)
+		tess_columns_writer_write(&writer, spill, 1, pairs++, NULL);
+	tess_columns_writer_write(&writer, spill, 1, pairs++, NULL);
+	tess_columns_writer_free(&writer);
+	tess_spill_finish(spill);
+
+	file = tess_spill_open(spill, 0, 1);
+	tess_columns_reader_init(&reader, &kernels, CurrentMemoryContext, 2, 2, byvals, typlens);
+	for (uint32 pair = 0; tess_columns_reader_load(&reader, file, pair, -1); pair++)
+		for (uint32 first = 0; first < reader.rows; first += 64)
+		{
+			uint32		count = Min(reader.rows - first, 64);
+
+			tess_columns_reader_window(&reader, first, count, values, nulls);
+			for (uint32 at = 0; at < count; at++, row++)
+			{
+				if (row >= COLUMNS_ROWS ||
+					out_nulls[0][at] != word_nulls[row] || out_nulls[1][at] != text_nulls[row] ||
+					(!word_nulls[row] && out[0][at] != words[row]) ||
+					(!text_nulls[row] &&
+					 (VARSIZE_ANY(DatumGetPointer(out[1][at])) !=
+					  VARSIZE_ANY(DatumGetPointer(texts[row])) ||
+					  memcmp(DatumGetPointer(out[1][at]), DatumGetPointer(texts[row]),
+							 VARSIZE_ANY(DatumGetPointer(texts[row]))) != 0)))
+					elog(ERROR, "row %d of a chunk of columns reads back other than written", row);
+			}
+		}
+	if (row != COLUMNS_ROWS || pairs < 2)
+		elog(ERROR, "%d rows of %u pairs read back, not %d", row, pairs, COLUMNS_ROWS);
+	tess_spill_close(file);
+	tess_spill_free(spill);
+	PG_RETURN_BOOL(true);
+#undef COLUMNS_ROWS
 }
 
 /*
