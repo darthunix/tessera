@@ -1297,6 +1297,36 @@ tessera_test_spill_columns(PG_FUNCTION_ARGS)
 	if (row != COLUMNS_ROWS || pairs < 2)
 		elog(ERROR, "%d rows of %u pairs read back, not %d", row, pairs, COLUMNS_ROWS);
 	tess_spill_close(file);
+
+	/*
+	 * A pair's buffers handed over stay the caller's, as a sort keeps a block
+	 * its rows may point into: the next load reads into new ones.
+	 */
+	file = tess_spill_open(spill, 0, 1);
+	if (!tess_columns_reader_load(&reader, file, 0, -1))
+		elog(ERROR, "the first pair of a chunk of columns is gone");
+	{
+		void	   *chunk;
+		char	   *kept;
+		bool		isnull;
+		Datum		first = tess_columns_reader_datum(&reader, 1, 0, &isnull);
+		Size		len = VARSIZE_ANY(DatumGetPointer(first));
+		char	   *copy = palloc(len);
+
+		memcpy(copy, DatumGetPointer(first), len);
+		tess_columns_reader_detach(&reader, &chunk, &kept);
+		if (reader.chunk != NULL || reader.values != NULL ||
+			!tess_columns_reader_load(&reader, file, 1, -1) ||
+			reader.values == kept || memcmp(DatumGetPointer(first), copy, len) != 0)
+			elog(ERROR, "a pair's buffers handed over are not the caller's");
+		pfree(chunk);
+		pfree(kept);
+		pfree(copy);
+	}
+	tess_columns_reader_free(&reader);
+	if (reader.chunk != NULL || reader.values != NULL)
+		elog(ERROR, "a reader freed keeps its buffers");
+	tess_spill_close(file);
 	tess_spill_free(spill);
 	PG_RETURN_BOOL(true);
 #undef COLUMNS_ROWS

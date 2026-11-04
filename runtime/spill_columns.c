@@ -188,3 +188,30 @@ tess_columns_reader_window(TessColumnsReader *reader, uint32 first, uint32 count
 															values, isnull, &status),
 					  &status);
 }
+
+void
+tess_columns_reader_detach(TessColumnsReader *reader, void **chunk, char **values)
+{
+	*chunk = reader->chunk;
+	*values = reader->values;
+	reader->chunk = NULL;
+	reader->chunk_len = 0;
+	reader->chunk_used = 0;
+	reader->values = NULL;
+	reader->values_len = 0;
+	reader->values_used = 0;
+	reader->rows = 0;
+}
+
+void
+tess_columns_reader_free(TessColumnsReader *reader)
+{
+	void	   *chunk;
+	char	   *values;
+
+	tess_columns_reader_detach(reader, &chunk, &values);
+	if (chunk != NULL)
+		pfree(chunk);
+	if (values != NULL)
+		pfree(values);
+}
