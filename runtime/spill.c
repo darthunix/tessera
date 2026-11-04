@@ -212,27 +212,6 @@ tess_spill_table_report(const TessStatus *status)
 	tess_status_report(status);
 }
 
-void
-tess_spill_columns_check_values(void *chunk, int ncolumns, const bool *byvals,
-								const int16 *typlens, const char *values, Size len)
-{
-	Size		capacity = tess_spill_columns_capacity(chunk);
-	uint32		rows = tess_spill_columns_rows(chunk);
-
-	for (int column = 0; column < ncolumns; column++)
-	{
-		const uint64 *nulls = tess_spill_columns_lane(chunk, 0) +
-			capacity * tess_spill_columns_null_lane(column);
-		const uint64 *words = tess_spill_columns_word(chunk, 0) + capacity * column;
-
-		if (byvals[column])
-			continue;
-		for (uint32 row = 0; row < rows; row++)
-			if (!tess_spill_columns_is_null(nulls[row], column))
-				(void) tess_spill_value_read(values, len, words[row], typlens[column]);
-	}
-}
-
 TessSpill *
 tess_spill_create(const TessSpillConfig *config)
 {

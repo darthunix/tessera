@@ -381,21 +381,21 @@ the upper half of every reference is 1.
 
 The two blocks are a pair: they carry one number, and the values come
 first, so that a reader has them in hand before the words that refer to
-them (`tess_spill_columns_pair` checks that a block read back is the
-one of the pair it should be). A sort and a grouping read these blocks
-from a file. Before they use a reference, they check it: the upper half
-must be 1, and the value must lie whole inside the chunk of values,
-from its byte to its end, as its type gives its length. If not, the
-query stops with the error "damaged data". Without this check a damaged
-word would make the node read memory outside the chunk. A sort and a
-grouping check every value of a block once, when they load the block,
-so that a sort's merge, which reads a key at every comparison, reads it
-unchecked. One pass checks both: the shape of the chunk and the place of
-every reference, which are the format's rules and the crate's, and
-where each value ends, which is the type's rule and Tessera's, which the
-crate asks for (`tess_spill_columns_check`).
-The grouping reads its pairs through the runtime's one reader of chunks
-of columns. The gather node gets its
+them (`tess_spill_columns_pair` checks that a block read back is the one
+of the pair it should be). A sort and a grouping read these blocks from
+a file. Before they use a reference, they check it: the upper half must
+be 1, and the value must lie whole inside the chunk of values, from its
+byte to its end, as its type gives its length. If not, the query stops
+with the error "damaged data". Without this check a damaged word would
+make the node read memory outside the chunk. A sort and a grouping check
+every value of a block once, when they load the block, so that a sort's
+merge, which reads a key at every comparison, reads it unchecked. One
+pass checks both: the shape of the chunk and the place of every
+reference, which are the format's rules and the crate's, and where each
+value ends, which is the type's rule and Tessera's, which the crate asks
+for (`tess_spill_columns_check`). The grouping reads its pairs through
+the runtime's one reader of chunks of columns, and the sort writes and
+reads its runs through it and the one writer. The gather node gets its
 chunks from another process's memory, not from a file, and does not
 check them.
 

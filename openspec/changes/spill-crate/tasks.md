@@ -257,7 +257,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       move the reading of the grouping's rows to them; the copy of 2.2
       stays before the writer. Check: `make installcheck`;
       `cargo ab measure` of `rows_text` and of the family `spill`
-- [ ] 3.11 Move the sort's runs to the writer and the reader of 3.10.
+- [x] 3.11 Move the sort's runs to the writer and the reader of 3.10.
       Check: `make installcheck`; `cargo ab measure` of `runs_text`
 - [ ] 3.12 Move the join's outer rows and the gather of workers to the
       writer and the reader of 3.10. Check: `make installcheck`; the

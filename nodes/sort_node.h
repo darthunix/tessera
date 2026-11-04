@@ -59,21 +59,13 @@ typedef struct SortRun
 	uint64		rows;
 } SortRun;
 
-/* A run being written: its chunk of columns and its block of values. */
+/* A run being written: the writer of its chunks of columns. */
 typedef struct RunWriter
 {
 	SortRun    *run;
-	char	   *chunk;
-	Size		chunk_len;
-	/* The chunk's lanes of NULL bits. */
-	int			null_lanes;
-	uint32		capacity;
-	uint32		rows;
-	char	   *values;
-	Size		values_len;
-	Size		values_used;
-	/* The columns of the rows being added (tess_spill_columns_append). */
-	TessDatumColumn *columns;
+	TessColumnsWriter columns;
+	/* The columns of the rows being added. */
+	TessDatumColumn *datums;
 } RunWriter;
 
 /* A run being merged: its reader, the block pair in memory and the next row of it. */
@@ -82,10 +74,8 @@ typedef struct MergeInput
 	SortRun    *run;
 	TessSpillReader *reader;
 	int			block;
-	/* The block's chunk of values and its bytes, and its chunk of rows. */
-	char	   *values;
-	Size		values_len;
-	void	   *chunk;
+	/* The block pair's chunk of rows and its values, read and checked. */
+	TessColumnsReader columns;
 	uint32		rows;
 	uint32		place;
 } MergeInput;

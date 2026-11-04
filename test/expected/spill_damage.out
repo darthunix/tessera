@@ -246,60 +246,60 @@ SELECT damaged(:'damage_module', NULL, 0, $$SELECT k, t FROM damage_outer ORDER 
 (1 row)
 
 SELECT damaged(:'damage_module', 'kind', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                   damaged                    
-----------------------------------------------
- XX001: TessSort run lost its block of rows 0
+                                damaged                                
+-----------------------------------------------------------------------
+ XX001: a spilled block of kind 1 where its pair has a block of kind 3
 (1 row)
 
 SELECT damaged(:'damage_module', 'number', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                    damaged                     
-------------------------------------------------
- XX001: TessSort run lost its block of values 0
+                                 damaged                                 
+-------------------------------------------------------------------------
+ XX001: a spilled block numbered 1073741824 where its pair is numbered 0
 (1 row)
 
 -- The blocks of values and of rows of a run's first block numbered as
 -- its second: each is checked against the block read, not only against
 -- the blocks of the run.
 SELECT damaged(:'damage_module', 'next', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                    damaged                     
-------------------------------------------------
- XX001: TessSort run lost its block of values 0
+                            damaged                             
+----------------------------------------------------------------
+ XX001: a spilled block numbered 1 where its pair is numbered 0
 (1 row)
 
 SELECT damaged(:'damage_module', 'next', 2, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                   damaged                    
-----------------------------------------------
- XX001: TessSort run lost its block of rows 0
+                            damaged                             
+----------------------------------------------------------------
+ XX001: a spilled block numbered 1 where its pair is numbered 0
 (1 row)
 
 SELECT damaged(:'damage_module', 'words', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                            damaged                             
-----------------------------------------------------------------
- XX001: Tessera read back a chunk of 2 columns where it wrote 3
+                                damaged                                 
+------------------------------------------------------------------------
+ XX001: a chunk of columns read back holds 2 words where 3 were written
 (1 row)
 
 SELECT damaged(:'damage_module', 'rows', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                            damaged                            
----------------------------------------------------------------
- XX001: Tessera read back a chunk of 63 rows where it wrote 64
+                                 damaged                                 
+-------------------------------------------------------------------------
+ XX001: a chunk of columns read back holds 63 rows where 64 were written
 (1 row)
 
 SELECT damaged(:'damage_module', 'value', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                       damaged                                        
+--------------------------------------------------------------------------------------
+ XX001: row 0 read back holds a value that runs past its chunk of values, in column 1
 (1 row)
 
 SELECT damaged(:'damage_module', 'ref', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                      damaged                                      
+-----------------------------------------------------------------------------------
+ XX001: row 0 read back refers to a value outside its chunk of values, in column 1
 (1 row)
 
 SELECT damaged(:'damage_module', 'zero', 1, $$SELECT k, t FROM damage_outer ORDER BY k$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                      damaged                                      
+-----------------------------------------------------------------------------------
+ XX001: row 0 read back refers to a value outside its chunk of values, in column 1
 (1 row)
 
 -- A scrollable cursor reads the one run the last merge wrote by blocks,
@@ -314,9 +314,9 @@ SELECT damaged(:'damage_module', 'rows', 1000000, $q$DO $do$DECLARE c SCROLL CUR
 
 SELECT tessera_test_spill_damage_seen() AS last_block \gset
 SELECT damaged(:'damage_module', 'rows', :last_block, $q$DO $do$DECLARE c SCROLL CURSOR FOR SELECT k, t FROM damage_outer ORDER BY k; r record; BEGIN OPEN c; FETCH LAST FROM c INTO r; FETCH ABSOLUTE 1 FROM c INTO r; END $do$$q$);
-                            damaged                            
----------------------------------------------------------------
- XX001: Tessera read back a chunk of 63 rows where it wrote 64
+                                 damaged                                 
+-------------------------------------------------------------------------
+ XX001: a chunk of columns read back holds 63 rows where 64 were written
 (1 row)
 
 -- The same block's blocks of values and of rows numbered as the next.
@@ -328,15 +328,15 @@ SELECT damaged(:'damage_module', 'next', 1000000, $q$DO $do$DECLARE c SCROLL CUR
 
 SELECT tessera_test_spill_damage_seen() AS last_block \gset
 SELECT damaged(:'damage_module', 'next', :last_block - 1, $q$DO $do$DECLARE c SCROLL CURSOR FOR SELECT k, t FROM damage_outer ORDER BY k; r record; BEGIN OPEN c; FETCH LAST FROM c INTO r; FETCH ABSOLUTE 1 FROM c INTO r; END $do$$q$);
-                    damaged                     
-------------------------------------------------
- XX001: TessSort run lost its block of values 0
+                            damaged                             
+----------------------------------------------------------------
+ XX001: a spilled block numbered 1 where its pair is numbered 0
 (1 row)
 
 SELECT damaged(:'damage_module', 'next', :last_block, $q$DO $do$DECLARE c SCROLL CURSOR FOR SELECT k, t FROM damage_outer ORDER BY k; r record; BEGIN OPEN c; FETCH LAST FROM c INTO r; FETCH ABSOLUTE 1 FROM c INTO r; END $do$$q$);
-                   damaged                    
-----------------------------------------------
- XX001: TessSort run lost its block of rows 0
+                            damaged                             
+----------------------------------------------------------------
+ XX001: a spilled block numbered 1 where its pair is numbered 0
 (1 row)
 
 -- The grouping, by hash: rows on disk, for an aggregate it has no

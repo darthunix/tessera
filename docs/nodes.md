@@ -2463,10 +2463,13 @@ word of the rows' items without the reference, which the merge compares:
 the last word goes when it holds no key's bits (an int4 key's 33 bits
 merge as one word, not two), else the reference's bits are 0. With
 by-value columns only, a column goes into its lane a run of rows at a
-time. A block holds a 128th of `work_mem`, 64 rows at least. The runs of
-the input are the partitions of one set of files, and each pass's runs
-of another: a file per run made closing and deleting them 8 % of the
-sort, and 4116 runs at 64 kB twice the core's time.
+time. A run's block pairs are written and read back through the
+runtime's one writer and one reader of chunks of columns
+(`TessColumnsWriter`, `TessColumnsReader`), which check each pair once
+as it is loaded. A block holds a 128th of `work_mem`, 64 rows at least.
+The runs of the input are the partitions of one set of files, and each
+pass's runs of another: a file per run made closing and deleting them
+8 % of the sort, and 4116 runs at 64 kB twice the core's time.
 
 After the input, the runs merge with the kernel `tess_sort_merge`
 (`tessera/sort.h`): each run's current block in memory, its key lanes

@@ -156,16 +156,6 @@ tess_spill_table_check(TessStatusCode code, const TessStatus *status)
 		tess_spill_table_report(status);
 }
 
-/*
- * Every value that a word of the first ncolumns of a chunk of columns
- * read back with its one chunk of values, of len bytes at values, refers
- * to, unless the row is NULL or the column by value (byvals), lies whole
- * in that chunk (tess_spill_value_read, by typlens); once a chunk, so
- * that a reader that reads a value many times reads it unchecked.
- */
-extern void tess_spill_columns_check_values(void *chunk, int ncolumns, const bool *byvals,
-											const int16 *typlens, const char *values,
-											Size len);
 
 /* tess_spill_value_fits of a C string and of a TOAST pointer, out of line. */
 extern bool tess_spill_value_fits_other(const char *value, Size room, int16 typlen);
@@ -447,5 +437,40 @@ extern bool tess_columns_reader_load(TessColumnsReader *reader, TessSpillReader 
 extern void tess_columns_reader_window(TessColumnsReader *reader, uint32 first,
 									   uint32 count, Datum *const *values,
 									   bool *const *isnull);
+
+/*
+ * Column column, among the first ncolumns, of row place of the reader's
+ * chunk, and whether it is NULL into *isnull: a value by reference as a
+ * pointer into the reader's values, valid until its next load. Checked
+ * whole at the load, so read unchecked here.
+ */
+static inline Datum
+tess_columns_reader_datum(const TessColumnsReader *reader, int column, uint32 place,
+						  bool *isnull)
+{
+	Size		capacity = tess_spill_columns_capacity(reader->chunk);
+	uint64		nulls = tess_spill_columns_lane(reader->chunk, 0)
+		[capacity * tess_spill_columns_null_lane(column) + place];
+	uint64		word = tess_spill_columns_word(reader->chunk, column)[place];
+
+	*isnull = tess_spill_columns_is_null(nulls, column);
+	if (*isnull)
+		return (Datum) 0;
+	if (reader->byvals[column])
+		return (Datum) word;
+	Assert(tess_spill_value_in(reader->values, reader->values_used, word) != NULL);
+	return PointerGetDatum(reader->values + tess_spill_value_byte(word));
+}
+
+/*
+ * Hand the reader's chunk and values over to the caller, who frees them
+ * when no value given out points into them any more; the next load reads
+ * into new ones. Either is NULL before a load.
+ */
+extern void tess_columns_reader_detach(TessColumnsReader *reader, void **chunk,
+									   char **values);
+
+/* Release the reader's chunk and values. */
+extern void tess_columns_reader_free(TessColumnsReader *reader);
 
 #endif							/* TESSERA_RUNTIME_SPILL_H */

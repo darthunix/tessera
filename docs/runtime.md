@@ -711,12 +711,12 @@ growing them for a row that does not fit an empty chunk; when an append
 leaves rows, the node writes the chunk out as its pair of blocks, the
 values first, under one number, and goes on. The reader reads a pair,
 checks it once (the pair's kinds and number, `tess_spill_columns_pair`;
-the chunk's words, rows and references, and where each value ends by
-its type, in one pass, `tess_spill_columns_check`), and gives windows of
-its rows as Datums (`tess_spill_columns_window`). The grouping reads its
-rows of generic aggregates through the reader; it still writes them with
-a loop of its own, which costs less than the writer's appends by
-partition.
+the chunk's words, rows and references, and where each value ends by its
+type, in one pass, `tess_spill_columns_check`), and gives windows of its
+rows as Datums (`tess_spill_columns_window`). The grouping reads its
+rows of generic aggregates through the reader, and writes them with a
+loop of its own, which costs less than the writer's appends by
+partition; the sort writes and reads its runs through both.
 
 A node that reads its spilled blocks back checks each one against what
 it wrote before it uses it: `tess_spill_expect_kind`,
@@ -725,9 +725,10 @@ block's kind, a chunk of columns' words and rows, and a block of
 values' number. `tess_spill_value_read` and `tess_spill_value_at` give
 the value a reference names only when it lies whole inside a chunk of
 values that was read, by the length its type gives
-(`tess_spill_value_of`, `tess_spill_value_fits`); a reader that reads a
-value many times checks every value of a chunk once, when it loads it,
-with `tess_spill_columns_check_values`. A call of the hash table over
+(`tess_spill_value_of`, `tess_spill_value_fits`); a reader of chunks of
+columns checks every value of a chunk once, when it loads it, so that a
+sort's merge, which reads a value at every comparison, reads it
+unchecked. A call of the hash table over
 chunks of records read back is checked with `tess_spill_table_check`,
 which reports the table's refusal of a chunk as damaged data, not as a
 wrong argument. Each failure is damaged data, SQLSTATE `XX001`.
