@@ -140,35 +140,9 @@ before it, leaving their cursors alone, since a later column starts from
 the cached offsets anyway; such reads are never counted as restarted, and
 the other rows go through the cursor.
 
-A walk forward also keeps the columns its consumers read behind it: a
-column the scan keeps is stored by every walk that passes it, rows with
-NULLs and short rows too, and a request behind the cursor finds it there
-and starts no walk. A column is kept when the walks it would save
-outweigh its stores: over a window, the rows read for it behind the
-cursor, times the attributes from the cached offsets to it, times two,
-reach the rows a walk carried to it or past it. Both counts come from
-the columns' masks, not from the rows: a row's cursor stands past a
-column when the row was read for it or for a later one. They are taken
-on one batch in four, a window being 1024 rows counted, and a scan that
-has read one column past the cached offsets counts nothing. The flags
-change only between batches, so a row's cursor tells which kept values
-the row holds, and a request picks its path once, so a scan that keeps
-nothing before the column it reads runs the plain path. TPC-H Q1 and
-Q12 keep the columns their aggregate and their later clauses read behind
-the cursor, and their walks from the tuple's start fall from 5.9 M and
-2.8 M to a few thousand; Q6 and Q14, which read such columns on 15 % and
-1 % of the rows near the cached offsets, keep none (see
-[2026-11-03-deform-past-varlena](benchmarks/2026-11-03-deform-past-varlena/README.md)).
-Each other way was measured and left: keeping every column a consumer
-asked for (Q14 paid for stores of values read on 1 % of its rows); the
-share of all reads, not of those behind the cursor (a filter's own
-column was kept, and its request took the kept path on every row); one
-share without the walk's length (a half left Q12's columns unkept, an
-eighth kept Q6's `l_discount` for nothing); the reached rows counted
-from the cursors a row at a time (the reset took 3.1 % of Q14); the
-counts on every batch (Q3, Q8 and Q21, which keep nothing, 2 % to 7 %
-slower); and the test of a kept column in the plain path of every
-value.
+A walk forward also keeps the columns its consumers read behind the
+cursor, so that they start no second walk: see "Columns a walk keeps"
+below.
 
 The cursor is the deformation of PostgreSQL's own slots reduced to one
 target and made resumable, ported from pg_batch; it relies only on
@@ -190,6 +164,188 @@ smaller guaranteed prefix of the two: a `Gather` returns the leader's rows
 in its child's slot, of the relation's descriptor, and the workers' in its
 own, of one made from the target list. Any other change of descriptor is
 an error.
+
+### Columns a walk keeps
+
+**Where the cost is.** A row of a table is a heap tuple: a header, a
+bitmap of its NULLs (`t_bits`) and a data area from `t_hoff` on, where
+the attributes lie one after another in `attnum` order. The
+fixed-width attributes before the first one of varying length have an
+offset known from the descriptor (`attcacheoff`); the descriptor's
+`firstNonCachedOffsetAttr` counts them. Past them the offset of an
+attribute is the sum of the lengths of the values before it, so, as
+PostgreSQL's documentation says of the page layout, there is no way to
+get an attribute directly except when there are only fixed-width fields
+and no NULLs. Reaching it is a walk: a step an attribute, each reading
+the value's header for its length. TPC-H's `lineitem`:
+
+```
+ attnum   1        2        3        4     5     6     7 … 10    11
+        ┌────────┬────────┬────────┬─────┬─────┬─────┬─────────┬────────┐
+        │orderkey│partkey │suppkey │lnum │ qty │price│disc…lst │shipdate│
+        │ fixed  │ fixed  │ fixed  │fixed│varln│varln│ varlena │ fixed  │
+        └────────┴────────┴────────┴─────┴─────┴─────┴─────────┴────────┘
+ offset  0        8        16       24    28    28+L5 …          ?
+        └────── attcacheoff known ──────┘└─ the lengths of the values
+                                             before it, read one by one ─┘
+```
+
+A row's cursor is what a slot keeps in `tts_nvalid` and its saved
+offset: the attributes walked and the offset after them. A request for
+a column after the cursor continues the walk; one for a column before
+it walks from the tuple's start again, a restart, which `EXPLAIN`
+counts as `Restarted Datums`. Consumers read a batch column by column,
+each for its own rows: a filter reads its column on every row, and an
+aggregate above it reads its columns on the rows the filter kept.
+
+**An example.** TPC-H Q1 reads `l_shipdate`, attribute 11, in its
+filter and `l_quantity` and `l_extendedprice`, 5 and 6, in its
+aggregate. In a batch of 8 rows (64 in the nodes), the filter keeps
+rows 0, 2, 3, 5 and 6. Without kept columns:
+
+```
+⇢ jump by attcacheoff   · walked over, value dropped   ■ value stored
+│ the row's cursor      ↻ a walk from the tuple's start again
+
+the filter reads 11 on every row:
+            attnum: 1-4  5  6  7  8  9 10 11
+   row 0            ⇢    ·  ·  ·  ·  ·  ·  ■│
+   row 1            ⇢    ·  ·  ·  ·  ·  ·  ■│
+     …     every row, every cursor at 11
+
+the aggregate reads 5 and 6 on rows 0, 2, 3, 5, 6, behind the cursor:
+   row 0     ↻      ⇢    ■  ■              ■│
+   row 1            (not read)
+   row 2     ↻      ⇢    ■  ■              ■│
+     …     five walks again
+```
+
+With 5 and 6 kept, the filter's walk stores them as it passes them, and
+the aggregate takes them without a walk:
+
+```
+            attnum: 1-4  5  6  7  8  9 10 11
+   row 0            ⇢    ■  ■  ·  ·  ·  ·  ■│
+     …     every row; rows 1, 4, 7 stored for nothing
+```
+
+**When keeping pays.** On each row a walk carries over a column, the
+two ways cost:
+
+- kept: a store on that row, read later or not;
+- not kept: on the rows read later, a walk from the cached offsets to
+  the column again.
+
+Three counts per column measure it, over a window of rows:
+
+- **reached**: the rows a walk carried to the column or past it, each
+  a store if the column is kept;
+- **behind**: the rows read for the column after a walk had carried
+  their cursor past it, each a walk again if it is not. With a filter
+  on a column to the right, `behind / reached` is the share of the rows
+  the filter keeps;
+- **distance**: the steps of that walk again, `attnum` less the
+  attributes at cached offsets: in `lineitem`, 1 for `l_quantity`, 3
+  for `l_discount`, 7 for `l_shipdate`, 8 for `l_commitdate`.
+
+A store costs about half a step of a walk, by measurement: a step reads
+a header and adds a length, a store puts a value in an array. So
+keeping costs half a step a reached row, not keeping
+`behind / reached × distance` steps, and a column is kept when
+
+```text
+behind × distance × 2 ≥ reached
+```
+
+The share alone does not decide: it says how often a row is walked
+again, the distance how far. At the same share of 15 %, Q6's
+`l_discount` comes out at 0.15 × 3 = 0.45 steps against 0.5, not kept,
+and keeping it measured no gain; Q12's `l_shipdate` at 0.15 × 7 = 1.05,
+kept, and Q12 took 11 % less time.
+
+**Counting from the masks.** A batch keeps a mask a column, the rows
+read for it, and the counts are taken from the masks, never from a row.
+A row's cursor stands past a column when the row was read for a column
+to its right, so:
+
+```
+masks after the example, row 0 on the left:
+   attnum 11:  1 1 1 1 1 1 1 1     the filter
+   attnum  5:  1 0 1 1 0 1 1 0     the aggregate
+   attnum  6:  1 0 1 1 0 1 1 0     the aggregate
+
+behind, at the request of 5:
+   rows asked              1 0 1 1 0 1 1 0
+   OR of the masks of 6…   1 1 1 1 1 1 1 1     (11 only, so far)
+   AND                     1 0 1 1 0 1 1 0  →  5
+
+reached, when the batch is reset:
+   OR of the masks of 5…   1 1 1 1 1 1 1 1  →  8
+```
+
+| attnum | behind | reached | distance | behind × distance × 2 | kept |
+|---|---|---|---|---|---|
+| 5 | 5 | 8 | 1 | 10 | yes |
+| 6 | 5 | 8 | 2 | 20 | yes |
+| 7 to 10 | 0 | 8 | 3 to 6 | 0 | no |
+| 11 | 0 | 8 | 7 | 0 | no |
+
+The filter's own column is read on every row it is reached, but never
+behind the cursor, so it is not kept: keeping it would save nothing.
+A short row whose walk stopped before a column still counts as reached:
+the counts are an estimate, not the path of a row.
+
+**The window.** The counts add up on one batch in four, and when 1024
+rows are counted, about 4096 read, each column reached in the window is
+kept or not for the next window; then they start again. A kept column
+is counted as any other, so a scan whose reads change drops it in the
+next window. The first window keeps nothing, so a scan shorter than a
+window runs as without kept columns, and a scan that has read one
+column past the cached offsets counts nothing.
+
+```
+batches:   #0  #4  #8 …  #60 │ #64 #68 … #124 │ #128 …
+counted:    ✓   ✓   ✓ …   ✓  │  ✓   ✓  …   ✓  │   ✓
+kept:      none              │ decision 1     │ decision 2
+```
+
+**The paths.** The flags change only between batches, so a row's
+cursor tells which kept values the row holds: every kept column before
+it. Every forward step past a kept column stores it, rows with NULLs and
+rows shorter than the column included, and builds with assertions check
+that a value taken behind the cursor was stored. A request picks its
+path once: one that reads a kept column or walks past one takes the
+path of kept columns, any other the plain path, whose code is the one
+before kept columns.
+
+**TPC-H.** Q1 and Q12 keep the columns their aggregate and their later
+clauses read behind the cursor, and their walks from the tuple's start
+fall from 5.9 M and 2.8 M to a few thousand, Q1 taking 0.80 of its time
+and Q12 0.80 to 0.84. Q6 and Q14, which read such columns on 15 % and
+1 % of the rows near the cached offsets, keep none (see
+[2026-11-03-deform-past-varlena](benchmarks/2026-11-03-deform-past-varlena/README.md)).
+
+**Ways measured and left.**
+
+- Keeping every column a consumer asked for: Q14 paid for stores of
+  values read on 1 % of its rows.
+- The share of all reads in place of those behind the cursor: a
+  filter's own column was kept, and its request took the path of kept
+  columns on every row; Q6 was slower.
+- One share for every column, without the distance: a half left Q12's
+  columns unkept, an eighth kept Q6's `l_discount` for nothing.
+- `reached` counted from the rows' cursors, a row at a time: the
+  increments of one counter wait for each other, and the reset took
+  3.1 % of Q14's profile.
+- The counts on every batch: Q3, Q8 and Q21, which keep nothing, took
+  2 % to 7 % longer.
+- The test of a kept column in the plain path of every value.
+
+**Known limits.** The half step a store is fitted on Q6 and Q12. A
+consumer that reads several columns behind the cursor in ascending
+order walks again once for all of them, not once each, so the rule
+overstates what not keeping costs and keeps a little more readily than
+it would need to.
 
 ## Computing columns on demand
 

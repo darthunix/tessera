@@ -99,11 +99,11 @@ struct TessHeapBatch
 
 /*
  * A column is kept when the walks its reads behind the cursor would take
- * outweigh a store on every row a walk carries past it: when the share of
- * such reads, times the attributes a walk from the cached offsets takes to
- * reach the column, is at least a half. Counted on one batch in
- * KEEP_SAMPLE, over a window of KEEP_WINDOW_ROWS rows counted, about 4096
- * rows read; the first window keeps nothing.
+ * outweigh a store on every row a walk carries past it: behind × distance
+ * × 2 ≥ reached, a store costing about half a step of a walk. Counted on
+ * one batch in KEEP_SAMPLE, over a window of KEEP_WINDOW_ROWS rows
+ * counted, about 4096 rows read; the first window keeps nothing. See
+ * "Columns a walk keeps" in docs/runtime.md.
  */
 #define KEEP_SAMPLE 4
 #define KEEP_WINDOW_ROWS 1024
@@ -687,8 +687,11 @@ count_keeping(TessHeapBatch *heap)
 	heap->first_kept = ncolumns;
 	for (int column = start; column < ncolumns; column++)
 	{
+		/* The steps of a walk from the cached offsets to the column. */
+		uint64		distance = column - start + 1;
+
 		if (heap->reached[column] > 0)
-			heap->kept[column] = heap->behind[column] * (column - start + 1) * 2 >=
+			heap->kept[column] = heap->behind[column] * distance * 2 >=
 				heap->reached[column];
 		if (heap->kept[column] && heap->first_kept == ncolumns)
 			heap->first_kept = column;
