@@ -11,6 +11,10 @@ CREATE FUNCTION tessera_test_input_forwarding()
 RETURNS boolean
 AS :'input_test', 'tessera_test_input_forwarding'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_input_gather(integer)
+RETURNS boolean
+AS :'input_test', 'tessera_test_input_gather'
+LANGUAGE C STRICT;
 CREATE FUNCTION tessera_test_input_errors(integer)
 RETURNS void
 AS :'input_test', 'tessera_test_input_errors'
@@ -21,7 +25,25 @@ t
 SELECT tessera_test_input_forwarding() AS forwarding \gset
 \echo :forwarding
 t
+-- Gathering: decimals come from the kernels.
+LOAD 'tessera_kernels';
+SELECT kind, tessera_test_input_gather(kind) FROM generate_series(0, 6) AS kind;
+ kind | tessera_test_input_gather 
+------+---------------------------
+    0 | t
+    1 | t
+    2 | t
+    3 | t
+    4 | t
+    5 | t
+    6 | t
+(7 rows)
+
 \set VERBOSITY terse
+SELECT tessera_test_input_gather(7);
+ERROR:  Tessera gathered batch has no column 2: its consumer did not request it
+SELECT tessera_test_input_gather(8);
+ERROR:  Tessera input gathers only after its request is set
 SELECT tessera_test_input_errors(0);
 ERROR:  Tessera child is not a batch node
 SELECT tessera_test_input_errors(1);
@@ -35,6 +57,7 @@ ERROR:  Tessera child returned no batch
 SELECT tessera_test_input_errors(5);
 ERROR:  Tessera input has no active batch
 \set VERBOSITY default
+DROP FUNCTION tessera_test_input_gather(integer);
 DROP FUNCTION tessera_test_input_errors(integer);
 DROP FUNCTION tessera_test_input_forwarding();
 DROP FUNCTION tessera_test_input_batches();

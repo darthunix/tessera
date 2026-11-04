@@ -44,8 +44,32 @@ extern void tess_input_set_request(TessInput *input, const TessRequest *request)
  */
 extern TessBatch *tess_input_next(TessInput *input);
 
-/* The slot that carried the active batch, or NULL. */
+/*
+ * The slot that carried the active batch, or NULL; NULL while gathering
+ * is on, so that a node that forwards its child's slot cannot gather.
+ */
 extern TupleTableSlot *tess_input_slot(TessInput *input);
+
+/*
+ * Gather sparse batches, or stop: from a scan's second batch on,
+ * tess_input_next copies the selected rows of child batches less than
+ * half full whose columns are stored values (tess_batch_values_stored)
+ * into batches of the input's own, of 64 rows or the request's smaller
+ * max_batch_rows, all selected and with stored values; the other child
+ * batches go as they are, after the rows gathered before them. A batch
+ * that does not fit gives the rows that fit, which leave its mask, and
+ * its rest waits, unfinished. A scan's first batch goes as it is, so a
+ * consumer that stops after it reads no further. The choice takes effect
+ * at a scan's first batch, so a call during a scan sets the next one; a
+ * rescan keeps it. Only after tess_input_set_request: a gathered batch
+ * holds the request's columns, each a target of the child, and a read of
+ * any other is an error. Its storage is the input's, valid until
+ * tess_input_finish.
+ */
+extern void tess_input_set_gather(TessInput *input, bool on);
+
+/* The rows the input copied into gathered batches, over its life. */
+extern uint64 tess_input_gathered_rows(TessInput *input);
 
 /* Whether the active batch has been marked consumed; error without one. */
 extern bool tess_input_finished(TessInput *input);
