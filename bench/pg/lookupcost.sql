@@ -46,6 +46,13 @@ CREATE TEMP TABLE samples
     est_keys float8,
     est_descents float8,
     est_rows float8,
+    -- The outer values the join's input copied into gathered batches,
+    -- and the planner's: the rows times the outer side's columns.
+    copied float8,
+    est_copied float8,
+    -- The planner's descents of the core's nested loop, over the child's
+    -- batches, which a gathered outer side no longer shows.
+    est_loop_descents float8,
     node_ms float8,
     outer_ms float8,
     core_ms float8,
@@ -150,6 +157,7 @@ DECLARE
     outer_ms float8;
     saved text[];
     published float8;
+    outer_columns float8;
 BEGIN
     saved := ARRAY[current_setting('tessera.join_lookup_batch_cost'),
                    current_setting('tessera.join_lookup_descent_cost'),
@@ -166,6 +174,7 @@ BEGIN
     END IF;
     estimate := node ->> 'Lookup Estimate';
     published := (pg_temp.find_node(plan -> 0 -> 'Plan', 'TessAgg') ->> 'Input Batches')::float8;
+    outer_columns := jsonb_array_length(coalesce(node -> 'Plans' -> 0 -> 'Output', '[]'::jsonb));
     node_ms := pg_temp.fastest(query, repetitions);
     outer_ms := pg_temp.fastest(outer_query, repetitions);
     PERFORM set_config('tessera.join_lookup_batch_cost', saved[1], false);
@@ -191,6 +200,9 @@ BEGIN
             published, hashed,
             pg_temp.estimate(estimate, 'batches'), pg_temp.estimate(estimate, 'keys'),
             pg_temp.estimate(estimate, 'descents'), pg_temp.estimate(estimate, 'rows'),
+            coalesce((node ->> 'Gathered Rows')::float8, 0) * outer_columns,
+            pg_temp.estimate(estimate, 'copied') * outer_columns,
+            pg_temp.estimate(estimate, 'loop_descents'),
             node_ms, outer_ms,
             pg_temp.fastest(query, repetitions), pg_temp.fastest(outer_query, repetitions));
     PERFORM set_config('tessera.enable', 'on', false);
@@ -239,6 +251,22 @@ BEGIN
         'SELECT count(o.kt) FROM bench_lookup_outer o WHERE o.id <= 5000', repetitions, 1);
     PERFORM pg_temp.sample('date', join_sql || 'l.dk = o.kd WHERE o.id <= 5000',
         'SELECT count(o.kd) FROM bench_lookup_outer o WHERE o.id <= 5000', repetitions);
+    -- Batches of a page's 64 rows of which 22, 24, 31, 32 and 33 pass the
+    -- filter, the input gathering the sparse ones, and the same keys
+    -- shuffled for the shape of 24; a page's short batch of the rest is
+    -- sparse in each.
+    PERFORM pg_temp.sample('shape_22', join_sql || 'l.id = o.k WHERE o.sel < 34',
+        'SELECT count(o.k) FROM bench_lookup_outer o WHERE o.sel < 34', repetitions);
+    PERFORM pg_temp.sample('shape_24', join_sql || 'l.id = o.k WHERE o.sel < 38',
+        'SELECT count(o.k) FROM bench_lookup_outer o WHERE o.sel < 38', repetitions);
+    PERFORM pg_temp.sample('shape_24_shuffled', join_sql || 'l.id = o.ks WHERE o.sel < 38',
+        'SELECT count(o.ks) FROM bench_lookup_outer o WHERE o.sel < 38', repetitions);
+    PERFORM pg_temp.sample('shape_31', join_sql || 'l.id = o.k WHERE o.sel < 48',
+        'SELECT count(o.k) FROM bench_lookup_outer o WHERE o.sel < 48', repetitions);
+    PERFORM pg_temp.sample('shape_32', join_sql || 'l.id = o.k WHERE o.sel < 50',
+        'SELECT count(o.k) FROM bench_lookup_outer o WHERE o.sel < 50', repetitions);
+    PERFORM pg_temp.sample('shape_33', join_sql || 'l.id = o.k WHERE o.sel < 52',
+        'SELECT count(o.k) FROM bench_lookup_outer o WHERE o.sel < 52', repetitions);
     -- The scans that give the scan model's unit.
     INSERT INTO scans VALUES
         ('SELECT count(id) FROM bench_lookup', pg_temp.fastest('SELECT count(id) FROM bench_lookup', repetitions)),
@@ -311,18 +339,21 @@ SELECT name, round((core_ms - core_outer_ms)::numeric, 3) AS core_join_ms,
 FROM samples ORDER BY name;
 -- The planner's counts against the plan's.
 SELECT name, lookups, round(est_batches::numeric) AS est_batches, keys, round(est_keys::numeric) AS est_keys,
-       descents, round(est_descents::numeric) AS est_descents, fetched, round(est_rows::numeric) AS est_rows
+       descents, round(est_descents::numeric) AS est_descents, fetched, round(est_rows::numeric) AS est_rows,
+       copied, round(est_copied::numeric) AS est_copied
 FROM samples ORDER BY name;
 -- The node's own time less the scan model's time of the rows fetched
 -- through the index (tessera.index_tuple_cost) and the hash join's model
 -- of its work over the batches' tables (the rows built, a text key
 -- hashed on both sides, the outer rows probed, the pairs and the integer
 -- each gathers, the batches the aggregate above received), fitted as
--- batch × lookups + descent × descents + key × other keys; the core's
--- nested loop's time, as key
--- × keys + descent × the same descents + row × rows fetched: keys near
--- each other in the index spare its descents too. Least squares through
--- zero over every sample.
+-- batch × lookups + descent × descents + key × other keys + copy × outer
+-- values copied into gathered batches; the core's nested loop's time, as
+-- key × keys + descent × the same descents + row × rows fetched: keys
+-- near each other in the index spare its descents too. Where the input
+-- gathered, the lookup's descents are those of the gathered batches, and
+-- the nested loop's are the planner's over the child's batches. Least
+-- squares through zero over every sample.
 CREATE TEMP VIEW own AS
 SELECT s.*,
        s.node_ms - s.outer_ms -
@@ -341,19 +372,20 @@ SELECT s.*,
         s.pairs * (current_setting('tessera.join_pair_cost')::float8 +
                    current_setting('tessera.join_gather_cost')::float8) +
         s.published * current_setting('tessera.join_batch_cost')::float8) * u.unit_ms) AS hash_ms,
-       ARRAY[s.lookups, s.descents, s.keys - s.descents] AS x,
+       ARRAY[s.lookups, s.descents, s.keys - s.descents, s.copied] AS x,
        s.core_ms - s.core_outer_ms AS loop_y,
-       ARRAY[s.keys, s.descents, s.fetched] AS loop_x
+       ARRAY[s.keys, CASE WHEN s.copied > 0 THEN s.est_loop_descents ELSE s.descents END,
+             s.fetched] AS loop_x
 FROM samples AS s, model_unit AS u;
 CREATE TEMP VIEW fit AS
 WITH a AS (
     SELECT array_agg(v ORDER BY i, j) AS a
     FROM (SELECT i, j, sum(x[i] * x[j]) AS v
-          FROM own, generate_series(1, 3) AS i, generate_series(1, 3) AS j
+          FROM own, generate_series(1, 4) AS i, generate_series(1, 4) AS j
           GROUP BY i, j) AS sums
 ), b AS (
     SELECT array_agg(v ORDER BY i) AS b
-    FROM (SELECT i, sum(x[i] * y) AS v FROM own, generate_series(1, 3) AS i GROUP BY i) AS sums
+    FROM (SELECT i, sum(x[i] * y) AS v FROM own, generate_series(1, 4) AS i GROUP BY i) AS sums
 ), la AS (
     SELECT array_agg(v ORDER BY i, j) AS a
     FROM (SELECT i, j, sum(loop_x[i] * loop_x[j]) AS v
@@ -363,24 +395,38 @@ WITH a AS (
     SELECT array_agg(v ORDER BY i) AS b
     FROM (SELECT i, sum(loop_x[i] * loop_y) AS v FROM own, generate_series(1, 3) AS i GROUP BY i) AS sums
 )
-SELECT pg_temp.solve(a.a, b.b, 3) AS c, pg_temp.solve(la.a, lb.b, 3) AS l FROM a, b, la, lb;
+SELECT pg_temp.solve(a.a, b.b, 4) AS c, pg_temp.solve(la.a, lb.b, 3) AS l FROM a, b, la, lb;
 SELECT round((f.c[1] / u.unit_ms)::numeric, 3) AS join_lookup_batch_cost,
        round((f.c[2] / u.unit_ms)::numeric, 3) AS join_lookup_descent_cost,
        round((f.c[3] / u.unit_ms)::numeric, 3) AS join_lookup_key_cost,
+       round((f.c[4] / u.unit_ms)::numeric, 4) AS join_lookup_copy_cost,
        round((f.l[1] / u.unit_ms)::numeric, 3) AS join_loop_key_cost,
        round((f.l[2] / u.unit_ms)::numeric, 3) AS join_loop_descent_cost,
        round((f.l[3] / u.unit_ms)::numeric, 4) AS join_loop_row_cost,
        round((u.unit_ms * 1e6)::numeric, 1) AS unit_ns
 FROM fit AS f, model_unit AS u;
+-- The copy's price alone, the lookup's other prices as set: least
+-- squares through zero of what the set prices leave of the node's time
+-- over the outer values copied, over the samples that copied.
+SELECT round((sum(o.copied * (o.y - u.unit_ms *
+                (o.x[1] * current_setting('tessera.join_lookup_batch_cost')::float8 +
+                 o.x[2] * current_setting('tessera.join_lookup_descent_cost')::float8 +
+                 o.x[3] * current_setting('tessera.join_lookup_key_cost')::float8))) /
+              nullif(sum(o.copied * o.copied), 0) / u.unit_ms)::numeric, 4) AS copy_cost_alone,
+       count(*) AS samples
+FROM own AS o, model_unit AS u
+WHERE o.copied > 0
+GROUP BY u.unit_ms;
 -- Each sample against the model: the node's time and the nested loop's,
 -- and whether the model chooses as the times do.
 CREATE TEMP VIEW prediction AS
 SELECT o.name, o.node_ms - o.outer_ms AS node_ms, o.loop_y AS loop_ms,
-       o.hash_ms + f.c[1] * o.x[1] + f.c[2] * o.x[2] + f.c[3] * o.x[3] AS node_predicted,
+       o.hash_ms + f.c[1] * o.x[1] + f.c[2] * o.x[2] + f.c[3] * o.x[3] + f.c[4] * o.x[4]
+           AS node_predicted,
        f.l[1] * o.loop_x[1] + f.l[2] * o.loop_x[2] + f.l[3] * o.loop_x[3] AS loop_predicted,
        o.hash_ms + f.c[1] * o.est_batches + f.c[2] * o.est_descents +
-           f.c[3] * (o.est_keys - o.est_descents) AS node_planned,
-       f.l[1] * o.est_keys + f.l[2] * o.est_descents + f.l[3] * o.est_rows AS loop_planned
+           f.c[3] * (o.est_keys - o.est_descents) + f.c[4] * o.est_copied AS node_planned,
+       f.l[1] * o.est_keys + f.l[2] * o.est_loop_descents + f.l[3] * o.est_rows AS loop_planned
 FROM own AS o, fit AS f;
 SELECT name, round(node_ms::numeric, 3) AS node_ms, round(node_predicted::numeric, 3) AS node_predicted,
        round(((node_predicted - node_ms) / node_ms * 100)::numeric) AS node_error_pct,
