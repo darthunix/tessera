@@ -237,8 +237,15 @@ TPC-H Q9's plan with Tessera on.
 
 - **What:** A way for Tessera's plan of Q9 to stop joining `lineitem`
   with `partsupp` first on the core's estimate of 2392 rows, where 6
-  million come: the foreign keys of TPC-H declared in the benchmark's
-  schema, or a guard in the node's join planner.
+  million come. Three ways: the foreign keys of TPC-H declared in the
+  benchmark's schema; a guard in the node's join planner that gives no
+  discount to a join whose estimate multiplies two equalities or more
+  and lies thousands of times below both sides; or, first and as a
+  quick gain, `tessera.join_cost_unit` lowered from 17.9 to 14 or 15, a
+  margin for the core's estimates as the index lookup's 0.8, taken by
+  measurement: all of TPC-H serial and with two workers and the family
+  `join` against 17.9, the expected outputs whose plans change read
+  through.
 - **Why:** Q9 takes 6.2 times the core's time with Tessera on (4.7 s
   against 0.75): the node's hash join of `lineitem` and `partsupp`
   costs less than the core's, which tips the join order into a nested
@@ -248,7 +255,19 @@ TPC-H Q9's plan with Tessera on.
   a transaction rolled back, 2026-11-03).
 - **Known:** The maintainer decided on 2026-11-03 not to declare the
   keys for now and put the entry last; declaring them changes every
-  TPC-H baseline.
+  TPC-H baseline. Larger statistics do not help: with a statistics
+  target of 10 000 on the four key columns, and with extended
+  statistics on both pairs, the core still estimates 2397 rows, for it
+  multiplies the two equalities as independent and uses extended
+  statistics for one table's clauses only; for a join only a foreign
+  key corrects it (`get_foreign_key_join_selectivity`). The cost unit,
+  by EXPLAIN on 2026-11-04: Q9's plan flips between 17.0 and 17.5, good
+  below; at 14 it took about 600 ms against the core's 890, and no
+  other serial plan changed; with two workers Q7 and Q10 changed, 105
+  to 102 ms and 128 to 123. The margin between the good plan and the
+  bad is 3 to 5 % of the cost, on an estimate 2 500 times too low, so
+  another scale or data may flip it again: the guard is the lasting
+  way.
 - **Depends on:** nothing.
 - **Capabilities:** costs, bench/tpch
 - **Size:** small to medium.
@@ -293,7 +312,12 @@ SEMI and ANTI joins by index lookups.
   array scan reads every row of a key: Q4 and Q21 read about 4 rows a
   key where the core reads 1.6. The lookup must stop at a key's first
   row, or the cost model must count every row.
-- **Depends on:** nothing.
+- **Depends on:** `lookup-outer-compaction`. The outer sides of Q4
+  and Q21 are sparse: Q4's orders after the filter on the date, 57 000
+  rows of 1.5 M, come about 2.5 keys a batch, and Q21's anti join reads
+  the output of a hash join that does not compact, a key a batch by the
+  cost model's count. At such counts the model gives the join to the
+  core's nested loop, semi and anti joins supported or not (2026-11-04).
 - **Capabilities:** a node's change (hash join)
 - **Size:** medium: one pull request.
 
