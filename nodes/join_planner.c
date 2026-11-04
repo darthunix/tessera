@@ -1287,13 +1287,50 @@ join_path_packs(const Path *path)
  * relation of the scan that drives it (0 where none is found), that
  * scan's rows and the rows of it a batch spans.
  */
+/*
+ * An outer side's batches with a row, and, for the gathering of its input
+ * (runtime_input.h): those at least half full, which go as they are; the
+ * rows of the others; the runs of sparse batches that a batch going as it
+ * is starts, whose first batch goes as it is too, and those runs' first
+ * rows; and the runs of two sparse batches or more, whose others' rows
+ * are copied.
+ */
 typedef struct LookupShape
 {
 	double		batches;
 	Index		relid;
 	double		tuples;
 	double		span;
+	double		passing;
+	double		sparse_rows;
+	double		firsts;
+	double		first_rows;
+	double		longer;
 } LookupShape;
+
+/* A shape of full batches, or of a batch a row, which gathering copies. */
+static void
+shape_full(LookupShape *shape, double batches)
+{
+	shape->batches = batches;
+	shape->passing = batches;
+	shape->sparse_rows = shape->firsts = shape->first_rows = shape->longer = 0;
+}
+
+static void
+shape_row_each(LookupShape *shape, double rows)
+{
+	shape->batches = rows;
+	shape->passing = shape->firsts = shape->first_rows = shape->longer = 0;
+	shape->sparse_rows = rows;
+}
+
+/* The rows a gathering input copies over a shape. */
+static double
+shape_copied(const LookupShape *shape)
+{
+	return Max(shape->sparse_rows - shape->first_rows, 0.0);
+}
 
 /*
  * The share of a relation's rows in the run its clauses select in the
@@ -1333,6 +1370,49 @@ lookup_run(PlannerInfo *root, RelOptInfo *rel)
 }
 
 /*
+ * The gathering's counts of a scan's batches of n rows over the run its
+ * clauses select, each row selected with chance p: a batch's selected
+ * rows follow the binomial law. Of the batches, those of half the
+ * capacity or more go as they are (chance q); the next batch with a row
+ * after a batch is sparse with the chance r / (q + r), r the chance of a
+ * sparse batch with a row, so a passing batch starts a run of sparse
+ * batches with that chance, and a run goes on with it. all is the batches
+ * over the run, rows the selected rows.
+ */
+static void
+shape_binomial(LookupShape *shape, double all, int n, double p, double rows)
+{
+	double		pmf = pow(1.0 - p, n);
+	double		q = 0;
+	double		dense_rows = 0;
+	double		r;
+	double		follow;
+
+	if (p >= 1.0)
+	{
+		q = n * 2 >= JOIN_LOOKUP_ROWS ? 1.0 : 0.0;
+		dense_rows = q * n;
+	}
+	else
+		for (int k = 0; k <= n; k++)
+		{
+			if (k * 2 >= JOIN_LOOKUP_ROWS)
+			{
+				q += pmf;
+				dense_rows += k * pmf;
+			}
+			pmf = pmf * (n - k) / (k + 1) * p / (1.0 - p);
+		}
+	r = Max(1.0 - q - pow(1.0 - p, n), 0.0);
+	follow = q + r > 0 ? r / (q + r) : 0;
+	shape->passing = all * q;
+	shape->sparse_rows = Max(rows - all * dense_rows, 0.0);
+	shape->firsts = shape->passing * follow;
+	shape->first_rows = r > 0 ? shape->firsts * shape->sparse_rows / (all * r) : 0;
+	shape->longer = shape->firsts * follow;
+}
+
+/*
  * The batches of an index join's outer side with a row: those of the
  * node's full scan of the table that drives it, through the filters and
  * the joins above it that keep its batches, the outer rows spread over the
@@ -1362,12 +1442,12 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	{
 		if (tess_path_node(driver) != &tess_hash_join_node)
 		{
-			shape->batches = Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0);
+			shape_full(shape, Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0));
 			return;
 		}
 		if (!join_path_packs(driver))
 		{
-			shape->batches = Max(outer->rows, 1.0);
+			shape_row_each(shape, Max(outer->rows, 1.0));
 			return;
 		}
 		driver = linitial(((const CustomPath *) driver)->custom_paths);
@@ -1375,20 +1455,31 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	scan = driver;
 	if (!IS_SIMPLE_REL(driver->parent) || driver->parent->tuples <= 0)
 	{
-		shape->batches = Max(outer->rows, 1.0);
+		shape_row_each(shape, Max(outer->rows, 1.0));
 		return;
 	}
-	/* A partitioned table's append: the batches of its partitions, summed. */
+	/*
+	 * A partitioned table's append: the batches of its partitions, summed.
+	 * An append hands its parts on with no end between them, so a part's
+	 * last run of sparse batches goes on into the next part's.
+	 */
 	if (tess_path_node(driver) == &tess_append_node)
 	{
 		double		sum = 0;
 
+		shape->passing = shape->sparse_rows = 0;
+		shape->firsts = shape->first_rows = shape->longer = 0;
 		foreach_ptr(Path, child, ((const CustomPath *) driver)->custom_paths)
 		{
 			LookupShape part;
 
 			lookup_shape(root, child, &part);
 			sum += part.batches;
+			shape->passing += part.passing;
+			shape->sparse_rows += part.sparse_rows;
+			shape->firsts += part.firsts;
+			shape->first_rows += part.first_rows;
+			shape->longer += part.longer;
 		}
 		shape->batches = Max(Min(sum, outer->rows), 1.0);
 		return;
@@ -1403,7 +1494,7 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	if (tess_path_node(scan) != &tess_heap_scan_node ||
 		((const CustomPath *) scan)->custom_paths != NIL)
 	{
-		shape->batches = Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0);
+		shape_full(shape, Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0));
 		return;
 	}
 	/* A scan's batch holds 64 rows at most and none across a page. */
@@ -1417,6 +1508,62 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	shape->relid = driver->parent->relid;
 	shape->tuples = driver->parent->tuples;
 	shape->span = run / batches;
+	shape_binomial(shape, run / batch_rows / divisor, (int) round(batch_rows),
+				   Min(rows / run, 1.0), rows / divisor);
+}
+
+/*
+ * The batches a gathering input gives over an outer side of that shape:
+ * the first; those that go as they are, and the first batch of each run
+ * of sparse batches they start; then each run's copied rows over the
+ * capacity and about half a batch for its last, short one, at least one
+ * batch, the run the child's end closes too. Never more than the
+ * child's. Simulated batch by batch on binomial batches of 34 to 64
+ * rows, by the input's rules, it comes within 1.8 % of their count.
+ */
+static double
+gathered_batches(const LookupShape *shape)
+{
+	double		runs = shape->longer + 1.0;
+	double		gathered = 1.0 + shape->passing + shape->firsts +
+		Max(runs, shape_copied(shape) / JOIN_LOOKUP_ROWS + runs / 2.0);
+
+	return Max(Min(gathered, shape->batches), 1.0);
+}
+
+/*
+ * Whether an outer path's batches hold stored values (TessBatch's
+ * values_stored), so that its input gathers them: no computed column on
+ * the way, a node that builds its batches, or one that hands on its
+ * child's, whose own then decide. A core path comes under a pack that
+ * builds them.
+ */
+static bool
+path_values_stored(const Path *path)
+{
+	const TessNode *node = tess_path_node(path);
+	List	   *children;
+
+	if (node == NULL)
+		return true;
+	foreach_ptr(Node, expr, path->pathtarget->exprs)
+	{
+		if (!IsA(expr, Var))
+			return false;
+	}
+	if (node == &tess_agg_node || node == &tess_sort_node)
+		return true;
+	children = ((const CustomPath *) path)->custom_paths;
+	if (node == &tess_append_node)
+	{
+		foreach_ptr(Path, child, children)
+		{
+			if (!path_values_stored(child))
+				return false;
+		}
+		return true;
+	}
+	return children == NIL || path_values_stored(linitial(children));
 }
 
 /*
@@ -1427,6 +1574,32 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
  * left out leaves the core's plan.
  */
 #define JOIN_LOOKUP_MARGIN 0.8
+
+/*
+ * The btree's descents for the keys of batches of a shape, each spanning
+ * span rows of the driving scan's table: a batch's keys at random over
+ * the leaves the outer keys reach, one a leaf page they fall on; where
+ * the outer key is a column of that table, in its order by c, a batch
+ * reaches at most span × L / T of its L pages, c² of that, 1 - c² of the
+ * first.
+ */
+static double
+lookup_descents(const LookupShape *shape, double batches, double span, double keys_count,
+				double leaves, double correlation, Node *outer_key)
+{
+	double		keys_batch = keys_count / batches;
+	double		per_batch = Min(keys_batch, leaves * (1.0 - pow(1.0 - 1.0 / leaves, keys_batch)));
+
+	if (shape->relid != 0 && IsA(outer_key, Var) && ((Var *) outer_key)->varno == shape->relid &&
+		shape->tuples > 0)
+	{
+		double		spanned = 1.0 + span * leaves / shape->tuples;
+		double		c2 = correlation * correlation;
+
+		per_batch = c2 * Min(keys_batch, spanned) + (1.0 - c2) * per_batch;
+	}
+	return Min(Max(batches * per_batch, batches), keys_count);
+}
 
 /*
  * An index join's cost: its time by the model of docs/costs.md (the index
@@ -1444,12 +1617,10 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
  * and the join's over the candidate pairs, at the filter's prices.
  * Nothing goes out before the first batch's table.
  *
- * The descents: a batch's keys at random over the L leaf pages the outer
- * keys reach, one a leaf page they fall on. Where the outer key is a column
- * of the driving scan's relation, in its table's order by c, a batch
- * spanning s of its T rows reaches at most s × L / T pages; c² of that,
- * 1 - c² of the first. *estimate is the counts and the two times, for
- * EXPLAIN.
+ * The lookup counts the batches its input gives, gathered where the outer
+ * side has stored values, and their copies; the descents of each count
+ * come from lookup_descents. *estimate is the counts and the two times,
+ * for EXPLAIN.
  */
 static bool
 lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
@@ -1463,9 +1634,11 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
 	double		outer_rows = Max(outer->rows, 1.0);
 	double		keys_count = Max(outer_rows * (1.0 - nullfrac), 1.0);
 	double		leaves = Max(lookup->index->pages * lookup->coverage, 1.0);
-	double		keys_batch;
-	double		per_batch;
+	double		gathered;
+	double		span;
+	double		copied;
 	double		descents;
+	double		loop_descents;
 	double		fetched;
 	double		kept;
 	double		rounds;
@@ -1480,30 +1653,40 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
 	Cost		cost;
 
 	lookup_shape(root, outer, &shape);
-	/* A batch of NULL keys only looks nothing up. */
-	shape.batches = Max(Min(shape.batches, keys_count), 1.0);
-	keys_batch = keys_count / shape.batches;
-	/* A batch's keys at random over the leaves the outer keys reach. */
-	per_batch = Min(keys_batch, leaves * (1.0 - pow(1.0 - 1.0 / leaves, keys_batch)));
-	if (shape.relid != 0 && IsA(outer_key, Var) && ((Var *) outer_key)->varno == shape.relid &&
-		shape.tuples > 0)
+	/*
+	 * The input gathers sparse outer batches with stored values: the lookup
+	 * takes the keys of a gathered batch, which spans the child batches it
+	 * took, together. The nested loop's keys come one by one, gathered or
+	 * not, so its descents stay those of the child's batches.
+	 */
+	if (path_values_stored(outer))
 	{
-		double		spanned = 1.0 + shape.span * leaves / shape.tuples;
-		double		c2 = correlation * correlation;
-
-		per_batch = c2 * Min(keys_batch, spanned) + (1.0 - c2) * per_batch;
+		gathered = gathered_batches(&shape);
+		span = shape.span * shape.batches / gathered;
+		copied = shape_copied(&shape);
 	}
-	descents = Min(Max(shape.batches * per_batch, shape.batches), keys_count);
+	else
+	{
+		gathered = shape.batches;
+		span = shape.span;
+		copied = 0;
+	}
+	/* A batch of NULL keys only looks nothing up. */
+	gathered = Max(Min(gathered, keys_count), 1.0);
+	descents = lookup_descents(&shape, gathered, span, keys_count, leaves,
+							   correlation, outer_key);
+	loop_descents = lookup_descents(&shape, Max(Min(shape.batches, keys_count), 1.0),
+									shape.span, keys_count, leaves, correlation, outer_key);
 	fetched = keys_count * lookup->key_rows;
 	/* The inner rows the relation's clauses keep, and the candidate pairs. */
 	kept = fetched * (innerrel->tuples > 0 ? Min(innerrel->rows / innerrel->tuples, 1.0) : 1.0);
 	filter = tess_scan_index_rows_time(root, innerrel, fetched) - fetched * tess_index_tuple_cost;
 	residual = kept * list_length(keys->residual) * tess_filter_clause_cost;
 	/* A batch goes out in a round for each record a key at most. */
-	rounds = Min(shape.batches * Max(lookup->key_rows, 1.0), Max(path->rows, shape.batches));
+	rounds = Min(gathered * Max(lookup->key_rows, 1.0), Max(path->rows, gathered));
 	kept_columns(joinrel, innerrel, keys, &ints, &texts, &hashed);
 	/* The inner side's work, a scan's: its cost is its time, as a child's. */
-	inner = shape.batches * tess_join_lookup_batch_cost +
+	inner = gathered * tess_join_lookup_batch_cost +
 		descents * tess_join_lookup_descent_cost +
 		(keys_count - descents) * tess_join_lookup_key_cost +
 		fetched * tess_index_tuple_cost + filter;
@@ -1513,16 +1696,19 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
 		outer_rows * (tess_join_probe_cost + hashed * tess_join_hashed_key_cost) +
 		path->rows * (tess_join_pair_cost + ints * tess_join_gather_cost +
 					  texts * tess_join_text_value_cost) +
-		rounds * tess_join_batch_cost + residual;
+		rounds * tess_join_batch_cost + residual +
+		copied * list_length(outer->pathtarget->exprs) * tess_join_lookup_copy_cost;
 	nested_loop = keys_count * tess_join_loop_key_cost +
-		descents * tess_join_loop_descent_cost + fetched * tess_join_loop_row_cost +
+		loop_descents * tess_join_loop_descent_cost + fetched * tess_join_loop_row_cost +
 		filter + residual;
-	*estimate = psprintf("batches=%.0f keys=%.0f descents=%.0f rows=%.0f time=%.0f loop=%.0f",
-						 shape.batches, keys_count, descents, fetched, inner + table, nested_loop);
+	*estimate = psprintf("batches=%.0f keys=%.0f descents=%.0f rows=%.0f time=%.0f loop=%.0f "
+						 "copied=%.0f loop_descents=%.0f",
+						 gathered, keys_count, descents, fetched, inner + table, nested_loop,
+						 copied, loop_descents);
 	if (inner + table > JOIN_LOOKUP_MARGIN * nested_loop)
 		return false;
 	cost = inner + table / tess_join_cost_unit;
-	path->startup_cost = outer->startup_cost + cost / shape.batches;
+	path->startup_cost = outer->startup_cost + cost / gathered;
 	path->total_cost = outer->total_cost + cost;
 	return true;
 }
