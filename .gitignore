@@ -19,6 +19,9 @@
 regression.diffs
 regression.out
 
+# What the Python of tools/binary-stack-usage leaves when it runs
+__pycache__/
+
 # The workflow skills OpenSpec writes for a coding agent
 # (`openspec init --tools ...`, CONTRIBUTING.md): made in each clone,
 # not kept. Codex reads its skills from .agents/, Claude Code from

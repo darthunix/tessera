@@ -221,6 +221,22 @@ jobs:
           SPECS_BASE: ${{ github.event.pull_request.base.sha }}
         run: .github/scripts/check-specs.sh
 
+  # The script that reads the stack frames of a built library, on its cases
+  # in assembly: x86_64 and aarch64, ELF and Mach-O, read by llvm-objdump,
+  # and the x86_64 ELF by GNU objdump too. It checks the script alone: no
+  # library here has a limit on its frames.
+  binary-stack-usage:
+    name: binary-stack-usage (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clang, the LLVM tools and pytest
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang llvm python3-pytest
+      - name: The script's cases
+        run: python3 -m pytest tools/binary-stack-usage
+
   # The loom model of the hash table's concurrent protocol (plan 9.5): the
   # bucket heads, the shared Bloom filter, the build phases and the shared
   # spill under every interleaving within the bounds the tests set. The
