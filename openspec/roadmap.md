@@ -2277,6 +2277,25 @@ becomes an entry, joins one, or is dropped.
   them. The walk of `tessera-capi` is proven over two words only after
   a first that is empty or full. Suggested: try them again on a later
   Kani or with a bit-vector solver such as bitwuzla.
+- **The frame of Gather's row path** (a reading of the stack frames
+  with `tools/binary-stack-usage`, 2026-11-04). `gather_exec` runs once
+  a row under row output. The compiler inlines `merge_next` into it,
+  and the arrays of that function, which only Gather Merge needs, are
+  36.35 KB of the frame's 36.75 KB, so a plain Gather reserves them too.
+  On arm64 macOS each call then saves every callee-saved register,
+  calls `___chkstk_darwin` and checks the stack guard: about 33
+  instructions around the work, some of which would stay without the
+  arrays. Not timed, and not read on Linux x86-64, where the probe may
+  be absent. Suggested: `pg_noinline` on `merge_next`, judged by an A/B
+  of a plain Gather with row output.
+- **8 KB zeroed for each batch of sort keys** (the same reading).
+  `lanes_as` and `candidates_as` in
+  `crates/tessera-kernels/src/sort.rs`, behind `sort_key_lanes` and
+  `sort_top_candidates`, start with `[[0i64; 64]; MAX_KEYS]`: a
+  `memset` of 8 KB at each call, whatever the number of keys. `WordKeys`
+  of `relhash` writes 512 bytes a key instead. A few cycles a row by an
+  estimate of the speed of `memset`; not timed. Suggested: zero only the
+  keys in use, judged by the `sort` family.
 
 ## Decided against
 
