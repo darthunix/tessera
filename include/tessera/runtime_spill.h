@@ -336,4 +336,116 @@ extern void tess_spill_free(TessSpill *spill);
  */
 extern void tess_spill_release(TessSpill *spill);
 
+/*
+ * The one writer of chunks of columns of a node: a chunk of words words,
+ * the first ncolumns of them columns of the given types and the rest the
+ * node's, and the chunk of values its rows' values by reference are
+ * copied into (tess_spill_columns_append). The node flattens an expanded
+ * value before it appends (tess_value_flatten_column), writes the chunk
+ * out as its pair of blocks when an append leaves rows, and the writer
+ * starts the chunk anew. The writer owns its chunk and its values, in the
+ * context it was made in.
+ */
+typedef struct TessColumnsWriter
+{
+	const TessKernelOps *kernels;
+	void	   *chunk;
+	Size		chunk_len;
+	char	   *values;
+	Size		values_len;
+	Size		values_used;
+	int			words;
+	int			ncolumns;
+	const bool *byvals;
+	const int16 *typlens;
+} TessColumnsWriter;
+
+/*
+ * A writer of chunks of chunk_len bytes and values of values_len bytes to
+ * start, in context; byvals and typlens, of ncolumns entries, stay the
+ * caller's for the writer's life.
+ */
+extern void tess_columns_writer_init(TessColumnsWriter *writer,
+									 const TessKernelOps *kernels, MemoryContext context,
+									 Size chunk_len, int words, int ncolumns,
+									 const bool *byvals, const int16 *typlens,
+									 Size values_len);
+
+/*
+ * Append the rows of pending, from columns (ncolumns of them, of pending's
+ * row count), in their order: the rows appended leave pending, and their
+ * count is returned. It stops when the chunk is full of rows or of values
+ * and holds rows: the node writes it out and appends the rest. A row whose
+ * values outgrow an empty chunk's values grows them.
+ */
+extern int	tess_columns_writer_add(TessColumnsWriter *writer,
+									const TessDatumColumn *columns, TessRowMask *pending);
+
+/* The rows the writer's chunk holds. */
+static inline uint32
+tess_columns_writer_rows(const TessColumnsWriter *writer)
+{
+	return tess_spill_columns_rows(writer->chunk);
+}
+
+/*
+ * Write the chunk out to the partition of spill as its pair of blocks
+ * numbered number, the values first, and start it anew; position, unless
+ * NULL, gets the place of the pair. Returns the bytes on disk.
+ */
+extern Size tess_columns_writer_write(TessColumnsWriter *writer, TessSpill *spill,
+									  int partition, uint32 number,
+									  TessSpillPosition *position);
+
+/* Release the writer's chunk and values. */
+extern void tess_columns_writer_free(TessColumnsWriter *writer);
+
+/*
+ * The one reader of chunks of columns a writer wrote: the pair of blocks
+ * at a reader of a partition, read into its chunk and values, grown as
+ * they need, and checked once, each value by its type too
+ * (tess_spill_columns_check), so that its rows are read unchecked after,
+ * by windows of Datums.
+ */
+typedef struct TessColumnsReader
+{
+	const TessKernelOps *kernels;
+	void	   *chunk;
+	Size		chunk_len;
+	Size		chunk_used;
+	char	   *values;
+	Size		values_len;
+	Size		values_used;
+	uint32		rows;
+	int			words;
+	int			ncolumns;
+	const bool *byvals;
+	const int16 *typlens;
+	MemoryContext context;
+} TessColumnsReader;
+
+/* A reader of chunks of words words, its first ncolumns columns of the given types, in context. */
+extern void tess_columns_reader_init(TessColumnsReader *reader,
+									 const TessKernelOps *kernels, MemoryContext context,
+									 int words, int ncolumns, const bool *byvals,
+									 const int16 *typlens);
+
+/*
+ * The next pair of blocks of file, numbered number, read and checked, rows
+ * rows unless -1; false at the end of the partition. A pair of other
+ * blocks, a pair cut short or a chunk that fails its check is an ERROR,
+ * SQLSTATE XX001.
+ */
+extern bool tess_columns_reader_load(TessColumnsReader *reader, TessSpillReader *file,
+									 uint32 number, int64 rows);
+
+/*
+ * The count rows from first on of the reader's chunk, each column c of its
+ * first ncolumns into values[c] and isnull[c]; a value by reference as a
+ * pointer into the reader's values, valid until its next load.
+ */
+extern void tess_columns_reader_window(TessColumnsReader *reader, uint32 first,
+									   uint32 count, Datum *const *values,
+									   bool *const *isnull);
+
 #endif							/* TESSERA_RUNTIME_SPILL_H */

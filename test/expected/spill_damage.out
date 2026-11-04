@@ -360,39 +360,39 @@ SELECT damaged(:'damage_module', NULL, 0, $$SELECT count(*), max(m) FROM (SELECT
 (1 row)
 
 SELECT damaged(:'damage_module', 'kind', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
-                     damaged                     
--------------------------------------------------
- XX001: TessAgg read a damaged partition of rows
+                                damaged                                
+-----------------------------------------------------------------------
+ XX001: a spilled block of kind 1 where its pair has a block of kind 3
 (1 row)
 
 SELECT damaged(:'damage_module', 'number', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
-                            damaged                             
-----------------------------------------------------------------
- XX001: Tessera read back spilled block 1073741824 of N written
+                                 damaged                                 
+-------------------------------------------------------------------------
+ XX001: a spilled block numbered 1073741824 where its pair is numbered 0
 (1 row)
 
 SELECT damaged(:'damage_module', 'words', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
-                            damaged                             
-----------------------------------------------------------------
- XX001: Tessera read back a chunk of 1 columns where it wrote 2
+                                damaged                                 
+------------------------------------------------------------------------
+ XX001: a chunk of columns read back holds 1 words where 2 were written
 (1 row)
 
 SELECT damaged(:'damage_module', 'value', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                       damaged                                        
+--------------------------------------------------------------------------------------
+ XX001: row 0 read back holds a value that runs past its chunk of values, in column 1
 (1 row)
 
 SELECT damaged(:'damage_module', 'ref', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                      damaged                                      
+-----------------------------------------------------------------------------------
+ XX001: row 0 read back refers to a value outside its chunk of values, in column 1
 (1 row)
 
 SELECT damaged(:'damage_module', 'zero', 1, $$SELECT count(*), max(m) FROM (SELECT k, max(t) AS m FROM damage_outer GROUP BY k) AS q$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                      damaged                                      
+-----------------------------------------------------------------------------------
+ XX001: row 0 read back refers to a value outside its chunk of values, in column 1
 (1 row)
 
 -- Records on disk, merged: a block of records read as columns.

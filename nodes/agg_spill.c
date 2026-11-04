@@ -992,19 +992,13 @@ typedef struct RowSpill
 	bool		deeper;
 } RowSpill;
 
-/* A partition being read back: the block in hand and its next row. */
+/* A partition being read back: the chunk in hand and its next row. */
 typedef struct RowReader
 {
 	TessSpillReader *file;
-	void	   *chunk;
-	Size		chunk_len;
-	/* The block's chunk of values: its room, and the bytes read into it. */
-	char	   *values;
-	Size		values_len;
-	Size		values_used;
-	uint32		rows;
+	TessColumnsReader columns;
 	uint32		next;
-	/* The batch given to group_batch: a window of the block. */
+	/* The batch given to group_batch: a window of the chunk. */
 	TessBatch	batch;
 	uint64		bits;
 	Datum	  **column_values;
@@ -1257,72 +1251,18 @@ TessBatch *
 reader_next(TessAggState *state)
 {
 	RowReader  *reader = state->reader;
-	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
 	uint32		take;
-	Size		capacity;
 
-	while (reader->next >= reader->rows)
+	while (reader->next >= reader->columns.rows)
 	{
-		TessSpillHeader header;
-
 		CHECK_FOR_INTERRUPTS();
-		if (reader->file == NULL || !tess_spill_read_header(reader->file, &header))
+		if (reader->file == NULL || !tess_columns_reader_load(&reader->columns, reader->file, 0, -1))
 			return NULL;
-		if (header.kind != TESS_SPILL_VALUES)
-			ereport(ERROR,
-					errcode(ERRCODE_DATA_CORRUPTED),
-					errmsg("TessAgg read a damaged partition of rows"));
-		/* Every block of values of rows is numbered 0. */
-		tess_spill_expect_number(&header, 1);
-		if (header.len > reader->values_len)
-		{
-			reader->values_len = Max(header.len, reader->values_len * 2);
-			reader->values = repalloc_huge(reader->values, reader->values_len);
-		}
-		tess_spill_read_body(reader->file, reader->values, header.len);
-		reader->values_used = header.len;
-		if (!tess_spill_read_header(reader->file, &header) ||
-			header.kind != TESS_SPILL_COLUMNS || header.len > reader->chunk_len)
-			ereport(ERROR,
-					errcode(ERRCODE_DATA_CORRUPTED),
-					errmsg("TessAgg read a damaged partition of rows"));
-		tess_spill_read_body(reader->file, reader->chunk, header.len);
-		tess_spill_expect_columns(reader->chunk, rows_words(state), -1);
-		/* Once a chunk, so that its rows are read as they were written. */
-		tess_spill_columns_check_values(reader->chunk, state->ncomputed,
-										state->computed_byvals, state->computed_lens,
-										reader->values, reader->values_used);
-		reader->rows = tess_spill_columns_rows(reader->chunk);
 		reader->next = 0;
 	}
-	capacity = tess_spill_columns_capacity(reader->chunk);
-	take = Min(reader->rows - reader->next, 64);
-	for (int column = 0; column < state->ncomputed; column++)
-	{
-		const uint64 *nulls = tess_spill_columns_lane(reader->chunk, 0) +
-			capacity * tess_spill_columns_null_lane(column) + reader->next;
-		const uint64 *lane = tess_spill_columns_lane(reader->chunk, 0) +
-			capacity * (null_lanes + column) + reader->next;
-
-		for (uint32 row = 0; row < take; row++)
-		{
-			bool		isnull = tess_spill_columns_is_null(nulls[row], column);
-
-			reader->column_isnull[column][row] = isnull;
-			if (isnull)
-				reader->column_values[column][row] = (Datum) 0;
-			else if (state->computed_byvals[column])
-				reader->column_values[column][row] = (Datum) lane[row];
-			else
-			{
-				/* Checked whole when the chunk was loaded. */
-				Assert(tess_spill_value_in(reader->values, reader->values_used,
-										   lane[row]) != NULL);
-				reader->column_values[column][row] =
-					PointerGetDatum(reader->values + tess_spill_value_byte(lane[row]));
-			}
-		}
-	}
+	take = Min(reader->columns.rows - reader->next, 64);
+	tess_columns_reader_window(&reader->columns, reader->next, take, reader->column_values,
+							   reader->column_isnull);
 	reader->next += take;
 	reader->bits = take == 64 ? UINT64_MAX : (UINT64CONST(1) << take) - 1;
 	reader->batch.rows.nrows = (int) take;
@@ -1354,7 +1294,7 @@ rows_next_partition(TessAggState *state)
 			if (spill->writers[part].written == 0)
 				continue;
 			reader->file = tess_spill_open(spill->file, 0, part);
-			reader->rows = 0;
+			reader->columns.rows = 0;
 			reader->next = 0;
 			/* The level below takes the next bits, the last level none. */
 			state->rows_level = spill->level + 1;
@@ -1374,13 +1314,9 @@ rows_reader_init(TessAggState *state)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 	RowReader  *reader = MemoryContextAllocZero(context, sizeof(RowReader));
-	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
 
-	reader->chunk_len = TESS_SPILL_COLUMNS_HEADER +
-		sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + rows_words(state));
-	reader->chunk = MemoryContextAlloc(context, reader->chunk_len);
-	reader->values_len = ROWS_BLOCK_VALUES;
-	reader->values = MemoryContextAlloc(context, reader->values_len);
+	tess_columns_reader_init(&reader->columns, state->kernels, context, rows_words(state),
+							 state->ncomputed, state->computed_byvals, state->computed_lens);
 	reader->column_values = MemoryContextAlloc(context, sizeof(Datum *) * state->ncomputed);
 	reader->column_isnull = MemoryContextAlloc(context, sizeof(bool *) * state->ncomputed);
 	for (int column = 0; column < state->ncomputed; column++)

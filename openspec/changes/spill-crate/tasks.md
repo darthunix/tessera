@@ -253,10 +253,10 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       it, and so do the tables in memory, whose chunks past the first
       take its length through `table_chunk_len` of `nodes/`. Check:
       `make installcheck`; the machine code
-- [ ] 3.10 Make one writer and one reader of a chunk of columns, and
-      move the grouping's rows to them; the copy of 2.2 stays before
-      the writer. Check: `make installcheck`; `cargo ab measure` of
-      `rows_text` and of the family `spill`
+- [x] 3.10 Make one writer and one reader of a chunk of columns, and
+      move the reading of the grouping's rows to them; the copy of 2.2
+      stays before the writer. Check: `make installcheck`;
+      `cargo ab measure` of `rows_text` and of the family `spill`
 - [ ] 3.11 Move the sort's runs to the writer and the reader of 3.10.
       Check: `make installcheck`; `cargo ab measure` of `runs_text`
 - [ ] 3.12 Move the join's outer rows and the gather of workers to the
@@ -334,6 +334,13 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       layout probes; `make installcheck`; the review of the places
       that the rule "References checked by the crate" of `relhash`
       lists
+- [ ] 3.28 Move the writing of the grouping's rows to the writer of
+      3.10 once it costs no more than the grouping's own loop. Appended
+      a partition at a time, a batch of about 55 rows went to its 32
+      partitions in as many calls, 21 to 28 % slower; appended to every
+      partition in one call of the crate, 8 to 16 % slower. Check:
+      `cargo ab measure` of `rows_text` and `rows_generic`;
+      `make installcheck`
 
 ## 4. The spec of the crate
 

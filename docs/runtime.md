@@ -703,6 +703,21 @@ values into a context of the writer's; `tess_spill_columns_append`
 refuses an expanded value it is given. The grouping's dictionary of
 keys copies its values the same way.
 
+A chunk of columns goes to disk through one writer and comes back
+through one reader (`TessColumnsWriter`, `TessColumnsReader`,
+`runtime/spill_columns.c`). The writer appends a batch's rows to its
+chunk and copies their values into the chunk's own chunk of values,
+growing them for a row that does not fit an empty chunk; when an append
+leaves rows, the node writes the chunk out as its pair of blocks, the
+values first, under one number, and goes on. The reader reads a pair,
+checks it once (the pair's kinds and number, `tess_spill_columns_pair`;
+the chunk's words, rows and references, and where each value ends by
+its type, in one pass, `tess_spill_columns_check`), and gives windows of
+its rows as Datums (`tess_spill_columns_window`). The grouping reads its
+rows of generic aggregates through the reader; it still writes them with
+a loop of its own, which costs less than the writer's appends by
+partition.
+
 A node that reads its spilled blocks back checks each one against what
 it wrote before it uses it: `tess_spill_expect_kind`,
 `tess_spill_expect_columns` and `tess_spill_expect_number` check a
