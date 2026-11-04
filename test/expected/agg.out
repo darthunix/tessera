@@ -515,10 +515,10 @@ SELECT count(*) FROM agg_wide WHERE a % 3 = 0;
 -----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Output: (count(*))
-   Input Batches: 7
+   Input Batches: 8
    Input Rows: 333
-   Gathered Rows: 328
-   Kernel Calls: 7
+   Gathered Rows: 323
+   Kernel Calls: 8
    ->  Custom Scan (TessFilter) on public.agg_wide (actual rows=333.00 loops=1)
          Batch Filter: ((agg_wide.a % 3) = 0)
          Rows Removed by Batch Filter: 667
@@ -548,9 +548,9 @@ SELECT sum(a) FROM agg_wide WHERE a % 3 = 0;
 -----------------------------------------------------------------------------------------
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Output: (sum(a))
-   Input Batches: 7
+   Input Batches: 8
    Input Rows: 333
-   Gathered Rows: 328
+   Gathered Rows: 323
    Kernel Calls: 6
    Computed Datums: 333
    ->  Custom Scan (TessFilter) on public.agg_wide (actual rows=333.00 loops=1)
@@ -869,7 +869,6 @@ WHERE line !~ 'Split Partitions';
    Disk Usage: N kB
    Input Batches: N
    Input Rows: 600000
-   Gathered Rows: 116544
    Kernel Calls: 22642
    Computed Datums: 1200000
    Groups: 200001
@@ -882,7 +881,7 @@ WHERE line !~ 'Split Partitions';
          Pages: 3774
          Deformed Datums: 1200000
          Restarted Datums: 0
-(20 rows)
+(19 rows)
 
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, count(*), count(v), sum(v), min(v), max(v) FROM agg_spill GROUP BY k) AS q$$);
                agg_same               
