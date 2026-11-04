@@ -206,11 +206,15 @@ one on the M5 Pro. The cases drawn at random are:
 - the density cases, `density-8`, `density-12`, `density-16`,
   `density-24` and `density-32`, of the reading cases, and so of
   `set_int32`, of the filters' cases and of the pairs of
-  `compare_int32`: exactly that many rows selected in every word, on
-  either side of the bounds from which the kernels take a word whole.
-  Every word holds as many rows, so a loop over them may exit as
-  learned, but where they lie, and the values there, change from input
-  to input.
+  `compare_int32`: that many rows selected a word on average, on either
+  side of the bounds from which the kernels take a word whole. A word
+  holds up to two rows more or fewer
+  ([`SPREAD`](support/fixture.rs)), the counts in an order drawn at
+  random, so that a loop over a word's rows ends at another count from
+  word to word, as over data. With exactly as many rows in every word
+  the predictor learned where such a loop ends: at 8 rows a word the
+  row paths missed 0 to 4 times a call on the Intel Core, where the
+  fold over `random` misses 17.
 
 The two kinds of cases are meant to be read together: a branch is judged
 against a choice made as data on the cases drawn at random, where the

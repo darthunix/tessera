@@ -132,7 +132,7 @@ pub fn cases() -> Vec<Fixture> {
     cases.push(case(1024, "all", "random", false));
     cases.push(case(1024, "random", "random", false));
     cases.push(case(1024, "all", "mixed", true));
-    // Exactly 8 to 32 rows of every word, drawn anew for each input of the
+    // About 8 to 32 rows of every word, drawn anew for each input of the
     // case's ring: on either side of the bounds of whole words.
     for pattern in fixture::density_patterns() {
         cases.push(case(1024, &pattern, "none", false));

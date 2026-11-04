@@ -93,13 +93,37 @@ state of the drivers that shapes the design.
 
 ### Cases at every density, on unlearned inputs
 
-Every word of a density case has exactly `n` selected rows, at
-positions drawn anew for each input in the form that
-`bench-unlearned-inputs` chooses, so that the branches of the row path
-miss as on data never seen. The densities are 8, 12, 16, 24 and 32
-rows a word. They are added where each family is measured: to the
-reading fixtures of both widths, to the matrices of the filters and of
-the comparisons, and to `set_int32`. The regular cases stay.
+A density case of `n` selects `n` rows a word on average: the words
+hold `n`, `n - 1`, `n + 1`, `n - 2` and `n + 2` rows in turn, the
+counts in an order drawn at random, at positions drawn anew for each
+input in the form that `bench-unlearned-inputs` chose, a ring of 64
+inputs. So the branches of the row path miss as on data never seen,
+the exit of a loop over a word's rows too: by the model of
+`bench-unlearned-inputs`, on 12 of the 16 words of 1024 rows. The
+densities are 8, 12, 16, 24 and 32 rows a word, the patterns
+`density-8` to `density-32`. They are added where each family is
+measured: to the reading fixtures of both widths, to the matrices of
+the filters and of the comparisons, and to `set_int32`. The regular
+cases stay.
+
+The first form held exactly `n` rows in every word. Its runs of
+identical sides, at `a357e036`, showed that the predictor learned
+where a loop over a word's rows ends, as the count never changed. At 8
+rows a word, which every family reads by rows today, the row paths
+missed 0 to 4 times a call on the Intel Mac: the fold 0.0
+(`compare-nKdYn6`), the aggregates and the cast at most 1
+(`compare-MAa5l8`, `compare-qYmLQC`), the filter and the comparison
+1.5 (`compare-GMAwPm`, `compare-PLmY7Q`), the hashes 1 to 4
+(`compare-oKXyrt`). The fold over `random` misses 17. Over data the
+count changes from word to word, and the exit misses on most words.
+The row path would have been measured cheaper than it is, and the
+bounds moved towards it.
+
+The maintainer chose counts within two of `n`: the exit misses nearly
+as over data, and two densities share one count at most. Counts drawn
+as a selection of `n / 64` of the rows would be closer to data, but
+they spread by 2.6 rows at 8 and by 4 at 32, so the cases of
+neighboring densities would mostly hold words of the same counts.
 
 The base of every run comes after these cases, so that `tessera-bench`
 can compare it.
