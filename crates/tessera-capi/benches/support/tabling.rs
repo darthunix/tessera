@@ -11,7 +11,10 @@
 //! where the reference builds that table, and a `probe` group, where it
 //! looks every row up. Results are checked against a model before
 //! counting. A case drawn at random takes a ring of inputs, which hold the
-//! same keys in other rows, so one table serves them all.
+//! same keys in other rows, so one table serves them all. The inputs of a
+//! density case select other rows of the same values: the table that the
+//! probes take holds the keys of every one, as a table of a join's inner
+//! side serves batches of any selection.
 
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
@@ -250,6 +253,42 @@ pub fn reference_insert(reference: &mut Reference, setup: &Setup, key_of: KeyOf<
     }
 }
 
+/// Insert into the reference the valid rows whose keys it does not hold.
+fn reference_add(reference: &mut Reference, setup: &Setup, key_of: KeyOf<'_>) {
+    for (index, &word) in setup.valid.iter().enumerate() {
+        let mut bits = word;
+        while bits != 0 {
+            let row = index * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let (null, key) = key_of(row);
+            if reference.probe(setup.hashes[row], null, key).is_none() {
+                reference.insert(setup.hashes[row], null, key);
+            }
+        }
+    }
+}
+
+/// Give the table and the reference the keys of every input that they do
+/// not hold: none for the inputs of a ring, which hold the same keys, and
+/// those of the other selections for a density case.
+fn hold_every_input<K: KeySource>(
+    table: &mut OwnedTable,
+    reference: &mut Reference,
+    setups: &mut [Setup],
+    keys: &[K],
+    key_of: &[KeyOf<'_>],
+) -> Result<()> {
+    for ((setup, keys), key_of) in setups.iter_mut().zip(keys).zip(key_of) {
+        resolve_all(table, setup, keys)?;
+        ensure!(
+            setup.pending.iter().all(|&word| word == 0),
+            "rows without room"
+        );
+        reference_add(reference, setup, *key_of);
+    }
+    Ok(())
+}
+
 /// Probe every valid row of the reference with the given hashes; the
 /// count found.
 #[inline(never)]
@@ -405,7 +444,7 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     }
     let hashes: Vec<_> = setups.iter().map(|setup| setup.hashes.clone()).collect();
     let absent: Vec<_> = setups.iter().map(|setup| setup.absent.clone()).collect();
-    // The table built from the last input holds the rows of every one.
+    hold_every_input(&mut table, &mut reference, &mut setups, &keys, key_of)?;
     for ((setup, keys), hashes) in setups.iter_mut().zip(&keys).zip(&hashes) {
         probe_all(&table, setup, keys, hashes)?;
         ensure!(
@@ -420,9 +459,8 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     }
     let period = inputs.len();
     // Two groups per case, each with the reference its operations compare
-    // with: building a table, and looking rows up in a built one. Every
-    // input holds the same keys, so the table built from any of them
-    // holds the keys of all.
+    // with: building a table, and looking rows up in a built one, which
+    // holds the keys of every input.
     let mut group = runner.group(format!("table_int32/{format}/{name}/insert"));
     group.op_turns("insert", period, |at| {
         insert_all(&mut table, &mut setups[at], black_box(&keys[at])).unwrap()
@@ -430,6 +468,7 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     group.op_turns("reference", period, |at| {
         reference_insert(&mut reference, black_box(&setups[at]), key_of[at])
     })?;
+    hold_every_input(&mut table, &mut reference, &mut setups, &keys, key_of)?;
     let mut group = runner.group(format!("table_int32/{format}/{name}/probe"));
     group.op_turns("probe_hit", period, |at| {
         probe_all(&table, &mut setups[at], black_box(&keys[at]), &hashes[at]).unwrap()

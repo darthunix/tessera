@@ -214,7 +214,9 @@ one on the M5 Pro. The cases drawn at random are:
   word to word, as over data. With exactly as many rows in every word
   the predictor learned where such a loop ends: at 8 rows a word the
   row paths missed 0 to 4 times a call on the Intel Core, where the
-  fold over `random` misses 17.
+  fold over `random` misses 17. A density case takes no ring of 64 but
+  4096 selections drawn anew over one set of values
+  ([`SELECTIONS`](support/fixture.rs)), as below.
 
 The two kinds of cases are meant to be read together: a branch is judged
 against a choice made as data on the cases drawn at random, where the
@@ -234,15 +236,35 @@ so the form showed nothing new. A ring of 16 was enough on the Intel
 Core; on the M5 Pro the fold's misses still grew by 5% from a ring of 32
 to one of 64, so the ring holds 64.
 
+The density cases need more. A loop over the few rows of a word takes a
+few branches, so the history that tells the predictor where it is spans
+many words, and it held the exits of the 1024 words of a ring of 64: at
+8 rows a word the fold missed 0.4 times a call on the Intel Core and
+none on the M5 Pro, where a predictor that has not seen the input misses
+12 ([`exit_misses`](support/fixture.rs)). Two probes measured
+`density-8` and `density-12` of `column_reader` over longer rings. A
+ring of 1024 whole inputs reached the model on the Intel Core but not on
+the M5 Pro, the fold a third of it at 8 rows, and took 13 MB, past the
+Intel Core's L3, so its cycles measured the memory. Selections drawn
+anew over one set of values missed, at 64, about as the ring of 64
+inputs, so the values play no part; at 4096 every operation missed 11.5
+to 14.1 times a call on both machines, past 80% of the model, the rule
+of the pilot. The cycles followed the misses: a miss cost about 26
+cycles on the Intel Core and 22 on the M5 Pro.
+
 A ring takes more memory than one input. The inputs that a dense int4 read
 touches in a turn take about 280 KiB, inside the Intel Core's L2 of 512 KiB;
 those of an int8 read or of a Datum read, about 540 and 590 KiB, pass it.
 `table_int32` builds one table for a ring, which the inputs share, as they
 hold the same keys: the table stays in the cache as for one input, and only
-the buffers of the rows go round, about 1 MiB. A reference, a scalar loop
-with a branch a row, may be learned over one input and not over a ring, so
-the ratio of the library to the reference of a case drawn at random is not
-that of one input.
+the buffers of the rows go round, about 1 MiB. The selections of a density case
+share their values, which stay in L1, and only their masks go round, 128 bytes
+an input, 512 KiB a turn. The table that the probes of `table_int32` take holds
+the keys of every selection, all the rows of the values, as the table of a
+join's inner side serves batches of any selection; `insert` builds it from each
+selection. A reference, a scalar loop with a branch a row, may be learned over
+one input and not over a ring, so the ratio of the library to the reference of
+a case drawn at random is not that of one input.
 
 ### Adding an operation
 

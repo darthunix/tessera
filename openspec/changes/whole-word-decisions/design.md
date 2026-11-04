@@ -96,8 +96,8 @@ state of the drivers that shapes the design.
 A density case of `n` selects `n` rows a word on average: the words
 hold `n`, `n - 1`, `n + 1`, `n - 2` and `n + 2` rows in turn, the
 counts in an order drawn at random, at positions drawn anew for each
-input in the form that `bench-unlearned-inputs` chose, a ring of 64
-inputs. So the branches of the row path miss as on data never seen,
+of 4096 inputs over one set of values. So the branches of the row path
+miss as on data never seen,
 the exit of a loop over a word's rows too: by the model of
 `bench-unlearned-inputs`, on 12 of the 16 words of 1024 rows. The
 densities are 8, 12, 16, 24 and 32 rows a word, the patterns
@@ -124,6 +124,38 @@ as over data, and two densities share one count at most. Counts drawn
 as a selection of `n / 64` of the rows would be closer to data, but
 they spread by 2.6 rows at 8 and by 4 at 32, so the cases of
 neighboring densities would mostly hold words of the same counts.
+
+Counts within two of `n` were not enough on the ring of 64 inputs that
+`bench-unlearned-inputs` chose for the cases drawn at random. In their
+runs of identical sides, at `28785e62`, the fold missed 0.4 times a
+call at 8 rows on the Intel Mac and none on the M5 Pro, 2.8 at 12 on
+both, where the model says 12; from 24 rows it missed 12 to 17. A loop
+over a few rows takes a few branches a word, so the history that tells
+the predictor where it is spans many words, and the predictor held the
+exits of the 1024 words of the ring. Two probes on `probe-density-ring`,
+a branch never merged, measured `density-8` and `density-12` of
+`column_reader` over longer rings:
+
+- whole inputs, rings of 256 and 1024, at `e36171fd`
+  (`compare-92rqnx` on the Intel Mac, `compare-tmWkj1` on the M5 Pro):
+  at 1024 the Intel Mac missed 12.6 to 13.9 times a call, the M5 Pro
+  only 4 to 9 at 8 rows. A ring of 1024 inputs takes 13 MB, past the
+  Intel Mac's L3, so its cycles measured the memory.
+- selections drawn anew over one set of values, rings of 64 to 16 384,
+  at `a90bda8f` (`compare-x8RFXs`, `compare-SLufTa`): a ring of 64
+  selections missed about as the ring of 64 inputs, so the values play no
+  part; at 4096, every operation missed 11.5 to 14.1 times a call on
+  both machines. The cycles followed the misses, about 26 cycles a miss
+  on the Intel Mac and 22 on the M5 Pro.
+
+The density cases take 4096 selections, the fewest at which every
+operation reached 80 % of the model on both machines, the rule of the
+pilot of `bench-unlearned-inputs`; the maintainer chose them over
+16 384, which miss 13.4 to 14.3 times. Their values are shared and stay
+in L1, as those of a batch being processed do; only the masks go
+round, 512 KiB read in order. `table_int32` gives the table of its
+probes the keys of every selection, all the rows of the values, as the
+table of a join's inner side serves batches of any selection.
 
 The base of every run comes after these cases, so that `tessera-bench`
 can compare it.
