@@ -1034,6 +1034,7 @@ show_message_window(TessGatherState *state)
 	state->window_bits[0] = n == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << n) - 1;
 	state->batch.rows.nrows = (int) n;
 	state->batch.rows.bits = state->window_bits;
+	state->batch.values_stored = true;
 	state->from_local = false;
 	state->worker_rows += n;
 }
@@ -1102,6 +1103,7 @@ gather_next(TessGatherState *state)
 			state->local_batch = batch;
 			state->from_local = true;
 			state->batch.rows = batch->rows;
+			state->batch.values_stored = tess_batch_values_stored(batch);
 			state->local_rows += tess_row_mask_count(&batch->rows);
 			return true;
 		}
@@ -1366,6 +1368,7 @@ merge_next(TessGatherState *state)
 	state->window_bits[0] = taken == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << taken) - 1;
 	state->batch.rows.nrows = taken;
 	state->batch.rows.bits = state->window_bits;
+	state->batch.values_stored = true;
 	state->from_local = false;
 	return true;
 }

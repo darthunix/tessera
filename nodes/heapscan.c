@@ -759,6 +759,7 @@ heap_scan_start(HeapScanState *state)
 		state->builder = tess_builder_create(&builder);
 		state->ios_batch.abi_version = TESS_BATCH_ABI_VERSION;
 		state->ios_batch.struct_size = sizeof(TessBatch);
+		state->ios_batch.values_stored = true;
 		state->ios_batch.ops = &index_only_batch_ops;
 		state->ios_batch.private_data = state;
 		return;

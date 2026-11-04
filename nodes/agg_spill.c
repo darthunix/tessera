@@ -1326,6 +1326,7 @@ rows_reader_init(TessAggState *state)
 	}
 	reader->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	reader->batch.struct_size = sizeof(TessBatch);
+	reader->batch.values_stored = true;
 	reader->batch.ops = &reader_batch_ops;
 	reader->batch.private_data = state;
 	reader->batch.table_oid = InvalidOid;

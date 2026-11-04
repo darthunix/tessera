@@ -482,6 +482,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		state->agg_isnull = palloc0_array(bool, Max(state->nvalues, 1) * AGG_GROUP_ROWS);
 		state->groups_batch.abi_version = TESS_BATCH_ABI_VERSION;
 		state->groups_batch.struct_size = sizeof(TessBatch);
+		state->groups_batch.values_stored = true;
 		state->groups_batch.table_oid = InvalidOid;
 		state->groups_batch.ops = &groups_batch_ops;
 		state->groups_batch.private_data = state;

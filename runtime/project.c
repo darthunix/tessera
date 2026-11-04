@@ -152,6 +152,8 @@ tess_projection_create(const TessProjectionConfig *config)
 	}
 	projection->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	projection->batch.struct_size = sizeof(TessBatch);
+	/* Its columns are computed on request. */
+	projection->batch.values_stored = false;
 	projection->batch.ops = &projection_ops;
 	projection->batch.private_data = projection;
 	return projection;

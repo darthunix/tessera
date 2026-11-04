@@ -54,6 +54,8 @@ start_round(TessHashJoinState *state)
 		   sizeof(uint64) * tess_row_mask_word_count(nrows));
 	state->batch.rows.nrows = nrows;
 	state->batch.rows.bits = state->probe.published_bits;
+	/* The outer columns are the outer batch's, read on request. */
+	state->batch.values_stored = tess_batch_values_stored(state->outer_batch);
 	state->current_offsets = state->probe.offsets;
 	state->current_bits = state->probe.round_bits;
 	state->probe.nulls_gathered = false;
@@ -85,6 +87,7 @@ start_null_round(TessHashJoinState *state)
 	state->null_round = true;
 	state->batch.rows.nrows = nrows;
 	state->batch.rows.bits = state->probe.published_bits;
+	state->batch.values_stored = tess_batch_values_stored(outer);
 	state->current_offsets = state->probe.offsets;
 	state->current_bits = state->probe.published_bits;
 	state->probe.nulls_gathered = false;
@@ -302,6 +305,8 @@ more:
 	state->counters[JOIN_COMPACT_BATCHES]++;
 	state->batch.rows.nrows = JOIN_COMPACT_ROWS;
 	state->batch.rows.bits = state->compact.bits;
+	/* The outer columns are copies the join made. */
+	state->batch.values_stored = true;
 	state->current_offsets = state->compact.offsets;
 	state->current_bits = state->compact.bits;
 	state->probe.nulls_gathered = false;
@@ -398,6 +403,7 @@ next_matches(TessHashJoinState *state)
 		state->null_round = state->jointype == JOIN_ANTI;
 		state->batch.rows.nrows = nrows;
 		state->batch.rows.bits = state->probe.published_bits;
+		state->batch.values_stored = tess_batch_values_stored(state->outer_batch);
 		state->current_offsets = state->probe.offsets;
 		state->current_bits = state->probe.published_bits;
 		state->probe.nulls_gathered = false;
@@ -503,6 +509,8 @@ next_tail(TessHashJoinState *state)
 		(UINT64CONST(1) << count) - 1;
 	state->batch.rows.nrows = count;
 	state->batch.rows.bits = state->tail.bits;
+	/* An inner row without a pair: records of the table, no outer columns. */
+	state->batch.values_stored = true;
 	state->current_offsets = state->tail.refs;
 	state->current_bits = state->tail.bits;
 	state->probe.nulls_gathered = false;
