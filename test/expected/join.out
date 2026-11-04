@@ -1202,10 +1202,15 @@ SELECT count(*), sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k WHERE jf.v > 90
 -- The Bloom filter: a build side of 5000 keys that about 1 % of the probe
 -- rows find, so after the first 4096 probe rows the node builds a filter
 -- and the rows it rejects skip the table.
-CREATE TABLE jbuild AS SELECT g * 100 AS k, g AS w FROM generate_series(1, 5000) AS g;
-CREATE TABLE jprobe AS
+-- No autovacuum: these tables end in empty pages. It would cut them off
+-- and, reading only part of jprobe and jhit, count a third fewer rows, and
+-- the plans of the anti joins below would change.
+CREATE TABLE jbuild WITH (autovacuum_enabled = off) AS
+SELECT g * 100 AS k, g AS w FROM generate_series(1, 5000) AS g;
+CREATE TABLE jprobe WITH (autovacuum_enabled = off) AS
 SELECT CASE WHEN g % 97 = 0 THEN NULL ELSE g END AS k, g AS v FROM generate_series(1, 20000) AS g;
-CREATE TABLE jhit AS SELECT (g % 5000 + 1) * 100 AS k, g AS v FROM generate_series(1, 20000) AS g;
+CREATE TABLE jhit WITH (autovacuum_enabled = off) AS
+SELECT (g % 5000 + 1) * 100 AS k, g AS v FROM generate_series(1, 20000) AS g;
 ANALYZE jbuild, jprobe, jhit;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
                                       join_explain                                      
@@ -1905,7 +1910,8 @@ SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k
 -- v % 10 < 3. Once each has seen 4096 rows, the filter goes behind the
 -- clauses, which then read every row, and checks only the rows they
 -- kept: it removes far fewer rows than it would first all along.
-CREATE TABLE jmove AS SELECT (g % 5000 + 1) * 100 AS k, g AS v FROM generate_series(1, 60000) AS g;
+-- No autovacuum, for the reason given at jbuild.
+CREATE TABLE jmove WITH (autovacuum_enabled = off) AS SELECT (g % 5000 + 1) * 100 AS k, g AS v FROM generate_series(1, 60000) AS g;
 ANALYZE jmove;
 SELECT line FROM join_explain($$SELECT count(*) FROM jmove JOIN (SELECT * FROM jbuild WHERE w <= 2000) AS b ON jmove.k = b.k WHERE jmove.v % 10 < 3$$) AS line
 WHERE line ~ 'Bloom Filter Below|Rows Removed by (Batch|Bloom) Filter';
@@ -2546,7 +2552,8 @@ BEGIN
             FROM jsonb_path_query_first(plan,
                 '$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin")."Plans"[0]') AS child);
 END $$;
-CREATE TABLE jkx AS SELECT 20001 + g % 10000 AS k, 10001 + g % 10000 AS k2 FROM generate_series(1, 50000) AS g;
+-- No autovacuum, for the reason given at jbuild.
+CREATE TABLE jkx WITH (autovacuum_enabled = off) AS SELECT 20001 + g % 10000 AS k, 10001 + g % 10000 AS k2 FROM generate_series(1, 50000) AS g;
 CREATE TABLE jkwide AS SELECT 1 + g % 32000 AS k FROM generate_series(1, 100000) AS g;
 -- Keys of jp2's second level, few enough that building them costs less
 -- than reading the partitions pruned (building jkx's 50 000 rows would
@@ -2857,7 +2864,7 @@ SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON lower
 -- Partitions: 0), so every match is of outer rows read back from disk.
 DO $$
 BEGIN
-    EXECUTE (SELECT format('CREATE TABLE jw70 AS SELECT NULLIF(g %% 20000, 7) AS k, %s FROM generate_series(1, 20000) AS g',
+    EXECUTE (SELECT format('CREATE TABLE jw70 WITH (autovacuum_enabled = off) AS SELECT NULLIF(g %% 20000, 7) AS k, %s FROM generate_series(1, 20000) AS g',
                            string_agg(format(CASE WHEN c % 10 = 0
                                                   THEN 'CASE WHEN g %% %1$s = 1 THEN NULL ELSE ''w'' || g * %1$s END AS c%1$s'
                                                   ELSE 'CASE WHEN g %% %1$s = 1 THEN NULL ELSE g + %1$s END AS c%1$s' END, c),
@@ -3865,7 +3872,8 @@ BEGIN
     RETURN jsonb_path_query_first(plan,
         format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessHashJoin").%I', name)::jsonpath)::text;
 END $$;
-CREATE TABLE jbig AS SELECT g % 350 + 1 AS fk, g AS v FROM generate_series(1, 20000) AS g;
+-- No autovacuum, for the reason given at jbuild.
+CREATE TABLE jbig WITH (autovacuum_enabled = off) AS SELECT g % 350 + 1 AS fk, g AS v FROM generate_series(1, 20000) AS g;
 ANALYZE jbig;
 SET max_parallel_workers_per_gather = 2;
 SET parallel_setup_cost = 0;
@@ -4473,7 +4481,8 @@ SELECT g, CASE WHEN g % 4 = 0 THEN NULL ELSE g / 7.0 END,
        CASE WHEN g % 5 = 0 THEN NULL ELSE repeat(md5(g::text), 1 + g % 60) END
 FROM generate_series(1, 20000) AS g;
 ANALYZE jref;
-CREATE TABLE jrefprobe AS SELECT g % 25000 AS k, g AS v FROM generate_series(1, 60000) AS g;
+-- No autovacuum, for the reason given at jbuild.
+CREATE TABLE jrefprobe WITH (autovacuum_enabled = off) AS SELECT g % 25000 AS k, g AS v FROM generate_series(1, 60000) AS g;
 ANALYZE jrefprobe;
 EXPLAIN (COSTS OFF) SELECT count(*), sum(jref.n), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k;
                                    QUERY PLAN                                   
