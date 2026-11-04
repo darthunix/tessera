@@ -124,6 +124,9 @@
 	X(spill_reader_body) \
 	X(spill_reader_seek) \
 	X(spill_plan) \
-	X(spill_expected)
+	X(spill_expected) \
+	X(spill_columns_pair) \
+	X(spill_columns_check) \
+	X(spill_columns_window)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

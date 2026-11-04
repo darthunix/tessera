@@ -747,6 +747,183 @@ fn at(values: &[u8], reference: u64, len: usize) -> &[u8] {
     &values[offset..offset + len]
 }
 
+/// A chunk of columns written through its entry points reads back
+/// through them: its pair of blocks checked by kind and number, the chunk
+/// checked once against its values, and windows of Datums, a varlena as a
+/// pointer to its bytes in the values. Another count of words or rows, or
+/// a word that refers past the values, is damaged data; a window past the
+/// rows or a block past the pair a wrong call.
+#[test]
+fn a_chunk_of_columns_reads_back_through_its_entry_points() {
+    use tessera_capi::c::{
+        DatumColumn, Mask, tess_spill_columns_append, tess_spill_columns_check,
+        tess_spill_columns_init, tess_spill_columns_pair, tess_spill_columns_window,
+    };
+
+    // Short varlenas: a header byte of the length, 1 + row, and row bytes.
+    let texts: Vec<Vec<u8>> = (0..5_u8)
+        .map(|row| [vec![((1 + row) << 1) | 1], vec![b'a' + row; row.into()]].concat())
+        .collect();
+    let words: Vec<u64> = (0..5).map(|row| 100 + row).collect();
+    let varlenas: Vec<u64> = texts.iter().map(|text| text.as_ptr() as u64).collect();
+    let word_nulls = [false, true, false, false, false];
+    let text_nulls = [false, false, false, true, false];
+    let column = |values: &[u64], isnull: &[bool]| DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 5,
+        ..DatumColumn::EMPTY
+    };
+    let columns = [column(&words, &word_nulls), column(&varlenas, &text_nulls)];
+    let byvals = [true, false];
+    let typlens: [i16; 2] = [8, -1];
+    let len = 16 + 8 * 5 * (1 + 2);
+    let mut chunk = vec![0_u64; len / 8];
+    let mut values = vec![0_u8; 128];
+    let mut status = Status::new();
+    let (mut used, mut appended, mut need) = (0_usize, 0, 0_usize);
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else,
+    // throughout this test.
+    unsafe {
+        let mut capacity = 0;
+        let code = tess_spill_columns_init(
+            chunk.as_mut_ptr().cast(),
+            len,
+            2,
+            &raw mut capacity,
+            &raw mut status,
+        );
+        assert_eq!((code, capacity), (Code::Ok, 5));
+        let mut word = 0b1_1111_u64;
+        let mut rows = Mask {
+            nrows: 5,
+            bits: &raw mut word,
+        };
+        let code = tess_spill_columns_append(
+            chunk.as_mut_ptr().cast(),
+            len,
+            2,
+            columns.as_ptr(),
+            byvals.as_ptr(),
+            typlens.as_ptr(),
+            &raw mut rows,
+            values.as_mut_ptr(),
+            values.len(),
+            &raw mut used,
+            &raw mut appended,
+            &raw mut need,
+            &raw mut status,
+        );
+        assert_eq!((code, appended), (Code::Ok, 5), "{}", status.message());
+    }
+    let check = |chunk: &[u64], words: i32, rows: i64, values_len: usize| {
+        let mut status = Status::new();
+        // SAFETY: a local chunk of `len` bytes, two flags and lengths, and
+        // the values, of `values_len` bytes at most.
+        let code = unsafe {
+            tess_spill_columns_check(
+                chunk.as_ptr().cast(),
+                len,
+                words,
+                rows,
+                2,
+                byvals.as_ptr(),
+                typlens.as_ptr(),
+                values.as_ptr(),
+                values_len.min(values.len()),
+                &raw mut status,
+            )
+        };
+        (code, status.sqlstate().to_owned())
+    };
+    // A window of the first `ncolumns` columns, by the flags of the chunk's.
+    let window =
+        |ncolumns: i32, first: usize, out: &mut [[u64; 4]; 3], isnull: &mut [[bool; 4]; 3]| {
+            let mut status = Status::new();
+            let outs: Vec<*mut u64> = out.iter_mut().map(|lane| lane.as_mut_ptr()).collect();
+            let nulls: Vec<*mut bool> = isnull.iter_mut().map(|lane| lane.as_mut_ptr()).collect();
+            let flags = [true, false, true];
+            // SAFETY: the chunk and values above, `ncolumns` windows of 4
+            // entries each.
+            unsafe {
+                tess_spill_columns_window(
+                    chunk.as_ptr().cast(),
+                    len,
+                    ncolumns,
+                    flags.as_ptr(),
+                    values.as_ptr(),
+                    first,
+                    4,
+                    outs.as_ptr(),
+                    nulls.as_ptr(),
+                    &raw mut status,
+                )
+            }
+        };
+    assert_eq!(check(&chunk, 2, 5, used).0, Code::Ok);
+    assert_eq!(check(&chunk, 2, -1, used).0, Code::Ok);
+    let (mut outs, mut nulls) = ([[0_u64; 4]; 3], [[true; 4]; 3]);
+    assert_eq!(window(2, 1, &mut outs, &mut nulls), Code::Ok);
+    assert_eq!(outs[0], [0, 102, 103, 104]);
+    assert_eq!(nulls[0], [true, false, false, false]);
+    let (out, isnull) = (outs[1], nulls[1]);
+    assert_eq!(isnull, [false, false, true, false]);
+    assert_eq!(out[2], 0, "a NULL is no pointer");
+    for (at, row) in [(0, 1), (1, 2), (3, 4)] {
+        let base = values.as_ptr() as u64;
+        assert!(out[at] >= base && out[at] < base + used as u64, "row {row}");
+        let start = (out[at] - base) as usize;
+        let text = &texts[row];
+        assert_eq!(&values[start..start + text.len()], &text[..], "row {row}");
+    }
+    let wrong = (Code::InvalidArgument, "XX000".to_owned());
+    let damaged = (Code::DataCorrupted, "XX001".to_owned());
+    assert_eq!(check(&chunk, 3, 5, used), damaged, "words");
+    assert_eq!(check(&chunk, 2, 4, used), damaged, "rows");
+    assert_eq!(check(&chunk, 2, 5, 8), damaged, "values cut short");
+    assert_eq!(check(&chunk, 2, -2, used), wrong, "rows below -1");
+    assert_eq!(
+        window(2, 2, &mut outs, &mut nulls),
+        Code::InvalidArgument,
+        "past the rows"
+    );
+    assert_eq!(
+        window(3, 0, &mut outs, &mut nulls),
+        Code::InvalidArgument,
+        "past the words"
+    );
+    assert_eq!(
+        window(0, 2, &mut outs, &mut nulls),
+        Code::InvalidArgument,
+        "no columns, past the rows"
+    );
+    assert_eq!(window(0, 1, &mut outs, &mut nulls), Code::Ok, "no columns");
+
+    let pair = |kind: u32, at: i32, number: u32| {
+        let header = SpillHeader {
+            kind,
+            number: 2,
+            len: 8,
+            ..SpillHeader::default()
+        };
+        let mut status = Status::new();
+        // SAFETY: a local header and status.
+        let code =
+            unsafe { tess_spill_columns_pair(&raw const header, at, number, &raw mut status) };
+        (code, status.sqlstate().to_owned())
+    };
+    assert_eq!(pair(2, 0, 2).0, Code::Ok);
+    assert_eq!(pair(3, 1, 2).0, Code::Ok);
+    assert_eq!(pair(3, 0, 2), damaged, "the rows first");
+    assert_eq!(pair(2, 0, 3), damaged, "another number");
+    assert_eq!(pair(2, 2, 2), wrong, "past the pair");
+    let mut status = Status::new();
+    // SAFETY: a null header, refused.
+    let code = unsafe { tess_spill_columns_pair(std::ptr::null(), 0, 2, &raw mut status) };
+    assert_eq!(code, Code::InvalidArgument);
+}
+
 /// The rows of Datum columns written to a chunk of columns through the
 /// entry point: a by-value column's Datums, and by-reference values copied
 /// as datumGetSize counts them (a varlena of either header, an external
@@ -1838,4 +2015,117 @@ fn the_reader_entry_points_refuse_what_no_reader_takes() {
         "{}",
         status.message()
     );
+}
+
+/// Where a value of a PostgreSQL type ends in the bytes from its start,
+/// as the C of `tess_spill_value_fits` tells (`tessera_test_spill_value`):
+/// each value that ends at the last byte is taken, and refused one byte
+/// shorter.
+#[test]
+fn a_value_ends_by_its_type() {
+    use tessera_capi::c::value_ends;
+
+    // A varlena of 16 bytes with a 4-byte header, one of 3 with a 1-byte
+    // header, a compressed one of its 8 bytes of header alone, a TOAST
+    // pointer to data on disk of 18 bytes, a C string, a fixed length.
+    let four: Vec<u8> = [&(16_u32 << 2).to_le_bytes()[..], &[7; 12]].concat();
+    let one = vec![3 << 1 | 1, 7, 7];
+    let compressed: Vec<u8> = [&(8_u32 << 2 | 0x02).to_le_bytes()[..], &[0; 4]].concat();
+    let external: Vec<u8> = [&[0x01, 18][..], &[0; 16]].concat();
+    // A pointer to data on disk of a TOAST table of 64-bit chunk ids.
+    let external8: Vec<u8> = [&[0x01, 4][..], &[0; 20]].concat();
+    let string = b"tessera\0".to_vec();
+    for (typlen, value) in [
+        (-1, &four),
+        (-1, &one),
+        (-1, &compressed),
+        (-1, &external),
+        (-1, &external8),
+        (-2, &string),
+        (8, &vec![0; 8]),
+    ] {
+        assert!(value_ends(typlen, value), "{typlen} {value:?}");
+        assert!(
+            !value_ends(typlen, &value[..value.len() - 1]),
+            "{typlen} {value:?} short"
+        );
+    }
+    // A header that says fewer bytes than a header, a compressed value of
+    // fewer than its 8 bytes of header, an external pointer of another
+    // tag, no bytes, a lone 0x01, and a length no type has.
+    let tiny = (3_u32 << 2).to_le_bytes();
+    let short_compressed: Vec<u8> = [&(7_u32 << 2 | 0x02).to_le_bytes()[..], &[0; 4]].concat();
+    let indirect: Vec<u8> = [&[0x01, 1][..], &[0; 16]].concat();
+    for (typlen, value) in [
+        (-1, &tiny[..]),
+        (-1, &short_compressed[..]),
+        (-1, &indirect[..]),
+        (-1, &[][..]),
+        (-1, &[0x01][..]),
+        (0, &[0; 8][..]),
+        (-3, &[0; 8][..]),
+    ] {
+        assert!(!value_ends(typlen, value), "{typlen} {value:?}");
+    }
+}
+
+/// A TOAST pointer to data on disk is copied by its bytes whatever its
+/// kind: one of 64-bit chunk ids, VARTAG_ONDISK_OID8, of 22 bytes, as one
+/// of 32-bit ids of 18.
+#[test]
+fn both_kinds_of_a_pointer_to_data_on_disk_append() {
+    use tessera_capi::c::{DatumColumn, Mask, tess_spill_columns_append, tess_spill_columns_init};
+
+    let pointers: [Vec<u8>; 2] = [
+        [&[0x01, 4][..], &[5; 20]].concat(),
+        [&[0x01, 18][..], &[6; 16]].concat(),
+    ];
+    let datums: Vec<u64> = pointers.iter().map(|value| value.as_ptr() as u64).collect();
+    let isnull = [false; 2];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: datums.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 2,
+        ..DatumColumn::EMPTY
+    };
+    let len = 16 + 8 * 2 * (1 + 1);
+    let mut chunk = vec![0_u64; len / 8];
+    let mut values = vec![0_u8; 64];
+    let (mut capacity, mut used, mut appended, mut need) = (0, 0_usize, 0, 0_usize);
+    let mut word = 0b11_u64;
+    let mut rows = Mask {
+        nrows: 2,
+        bits: &raw mut word,
+    };
+    let mut status = Status::new();
+    // SAFETY: local buffers of the declared sizes, aliased by nothing else.
+    let code = unsafe {
+        tess_spill_columns_init(
+            chunk.as_mut_ptr().cast(),
+            len,
+            1,
+            &raw mut capacity,
+            &raw mut status,
+        );
+        tess_spill_columns_append(
+            chunk.as_mut_ptr().cast(),
+            len,
+            1,
+            &raw const column,
+            [false].as_ptr(),
+            [-1_i16].as_ptr(),
+            &raw mut rows,
+            values.as_mut_ptr(),
+            values.len(),
+            &raw mut used,
+            &raw mut appended,
+            &raw mut need,
+            &raw mut status,
+        )
+    };
+    assert_eq!((code, appended), (Code::Ok, 2), "{}", status.message());
+    assert_eq!(used, 24 + 24);
+    assert_eq!(&values[..22], &pointers[0][..]);
+    assert_eq!(&values[24..42], &pointers[1][..]);
 }

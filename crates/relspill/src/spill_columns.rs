@@ -1,20 +1,28 @@
-//! Rows appended by partition to chunks of columns
-//! ([`crate::columns`]): a join's outer rows that wait for their
-//! partition, kept without the table's records. Each row goes to the
-//! current chunk of its hash's partition, as
-//! [`ChunkWriter::append_partitioned_columns`](relhash::ChunkWriter::append_partitioned_columns) appends records, in row order
-//! as long as the chunk has room: a row whose chunk is full stays pending
-//! while the rows after it go on. A row's place is referred to as the
-//! table refers to a record, by the chunk's number above
-//! [`PLACE_BITS`] bits of its place in the chunk.
+//! The writer and the reader of chunks of columns ([`crate::columns`]).
+//!
+//! [`append`] writes a source's rows into one chunk, their values by
+//! reference copied into the chunk's own chunk of values, and stops where
+//! the chunk or the values are full. The two are written as a [`PAIR`] of
+//! blocks, the values first. A reader checks the pair's blocks
+//! ([`check_pair`]) and the chunk read back with its values ([`check`])
+//! once, then reads windows of its rows ([`window`]) unchecked.
+//!
+//! [`append_partitioned`] appends rows by partition: a join's outer rows
+//! that wait for their partition, kept without the table's records. Each
+//! row goes to the current chunk of its hash's partition, as
+//! [`ChunkWriter::append_partitioned_columns`](relhash::ChunkWriter::append_partitioned_columns)
+//! appends records, in row order as long as the chunk has room: a row
+//! whose chunk is full stays pending while the rows after it go on. A
+//! row's place is referred to as the table refers to a record, by the
+//! chunk's number above [`PLACE_BITS`] bits of its place in the chunk.
 
 use std::ops::Range;
 
 use relhash::{MAX_PARTITIONS, Partitions, PayloadColumns, RowMask, ones};
 
-use crate::columns;
+use crate::columns::{self, Shape};
 use crate::error::ensure;
-use crate::{Error, Result, Rule};
+use crate::{BlockHeader, BlockKind, Error, Result, Rule};
 
 /// Bits of a row's place in a reference; the chunk's number is above them.
 pub const PLACE_BITS: u32 = 17;
@@ -377,6 +385,162 @@ pub fn append(
         rows: appended,
         need,
     })
+}
+
+/// The blocks a chunk of columns is written as, in this order and under
+/// one number: the chunk of its values, which may be empty, then the
+/// chunk of its rows. A reader so has the values in hand before the words
+/// that refer to them.
+pub const PAIR: [BlockKind; 2] = [BlockKind::Values, BlockKind::Columns];
+
+/// Whether `header`, read back as block `at` of the [`PAIR`] numbered
+/// `number`, is that block.
+///
+/// # Errors
+///
+/// An `at` past the pair, a wrong call; a block of another kind or
+/// another number, damaged bytes.
+pub fn check_pair(header: &BlockHeader, at: usize, number: u32) -> Result<()> {
+    let kind = *PAIR
+        .get(at)
+        .ok_or_else(|| Error::wrong_call(Rule::PairBlock).with(at))?;
+    ensure!(
+        header.kind == kind,
+        Error::damaged(Rule::PairKind)
+            .with(header.kind as u32)
+            .and(kind as u32)
+    );
+    ensure!(
+        header.number == number,
+        Error::damaged(Rule::PairNumber)
+            .with(header.number)
+            .and(number)
+    );
+    Ok(())
+}
+
+/// Where a value read back ends, which its type tells: a rule of the
+/// host's, not of the format.
+pub trait ValueEnds {
+    /// Whether the value of column `column` that starts `rest`, the bytes
+    /// of its chunk of values from its reference on, ends inside them.
+    fn ends(&self, column: usize, rest: &[u8]) -> bool;
+}
+
+/// Check a chunk of columns read back with its chunk of `values`, in one
+/// pass, so that its rows are read unchecked after: it holds `words`
+/// words and, when given, `rows` rows; and every word of a column not
+/// marked in `by_value`, which flags the chunk's first words, of a row
+/// that is not NULL, refers to its one chunk of values
+/// ([`columns::value_ref`] of chunk 0), to a byte of it or to its end,
+/// where [`append`] places an empty value, and the value there ends inside
+/// the values, as `ends` tells by the value's type.
+///
+/// # Errors
+///
+/// More columns in `by_value` than words, a wrong call; a chunk read back
+/// that is no chunk of
+/// columns, another count of words or of rows, a word that refers outside
+/// the values, or a value that runs past them, damaged bytes.
+pub fn check(
+    chunk: &[u8],
+    words: usize,
+    rows: Option<usize>,
+    by_value: &[bool],
+    values: &[u8],
+    ends: &impl ValueEnds,
+) -> Result<Shape> {
+    let values_len = values.len();
+    let shape = columns::shape(chunk).map_err(|error| {
+        let (a, b) = error.numbers();
+        Error::damaged(error.rule()).with(a).and(b)
+    })?;
+    ensure!(
+        by_value.len() <= words,
+        Error::wrong_call(Rule::ChunkColumns)
+            .with(words)
+            .and(by_value.len())
+    );
+    ensure!(
+        shape.words == words,
+        Error::damaged(Rule::ReadWords).with(shape.words).and(words)
+    );
+    if let Some(rows) = rows {
+        ensure!(
+            shape.rows == rows,
+            Error::damaged(Rule::ReadRows).with(shape.rows).and(rows)
+        );
+    }
+    let byte_mask = (1_u64 << columns::VALUE_BYTE_BITS) - 1;
+    for column in (0..by_value.len()).filter(|&column| !by_value[column]) {
+        let nulls = shape.lane_at(column / 64);
+        let lane = shape.lane_at(shape.word_lane(column));
+        // The column's lanes of its rows, taken once.
+        let (null_words, _) = chunk[nulls..nulls + 8 * shape.rows].as_chunks::<8>();
+        let (words_of, _) = chunk[lane..lane + 8 * shape.rows].as_chunks::<8>();
+        let bit = column % 64;
+        for (row, (null, word)) in null_words.iter().zip(words_of).enumerate() {
+            if u64::from_ne_bytes(*null) >> bit & 1 != 0 {
+                continue;
+            }
+            let word = u64::from_ne_bytes(*word);
+            let byte = (word & byte_mask) as usize;
+            ensure!(
+                word >> columns::VALUE_BYTE_BITS == 1 && byte <= values_len,
+                Error::damaged(Rule::ValueRef).with(row).and(column)
+            );
+            let rest = &values[byte..];
+            ensure!(
+                ends.ends(column, rest),
+                Error::damaged(Rule::ValueEnd).with(row).and(column)
+            );
+        }
+    }
+    Ok(shape)
+}
+
+/// The words of word `word` of a chunk of columns for its rows from
+/// `first` on, as many as `out` holds, into `out`, and whether each is
+/// NULL into `nulls`; a NULL's word is 0. A chunk read back is read so
+/// once [`check`] passed it.
+///
+/// # Errors
+///
+/// A wrong call: a chunk that is no chunk of columns, a word past its
+/// words, rows past its rows, or `out` and `nulls` of different lengths.
+pub fn window(
+    chunk: &[u8],
+    word: usize,
+    first: usize,
+    out: &mut [u64],
+    nulls: &mut [bool],
+) -> Result<()> {
+    let shape = columns::shape(chunk)?;
+    let count = out.len();
+    ensure!(
+        word < shape.words,
+        Error::wrong_call(Rule::ChunkColumns)
+            .with(shape.words)
+            .and(word.saturating_add(1))
+    );
+    ensure!(nulls.len() == count, Error::wrong_call(Rule::RowCounts));
+    ensure!(
+        first <= shape.rows && count <= shape.rows - first,
+        Error::wrong_call(Rule::Window)
+            .with(first.saturating_add(count))
+            .and(shape.rows)
+    );
+    let null_at = shape.lane_at(word / 64) + 8 * first;
+    let lane_at = shape.lane_at(shape.word_lane(word)) + 8 * first;
+    let (lane, _) = chunk[lane_at..lane_at + 8 * count].as_chunks::<8>();
+    let (null_lane, _) = chunk[null_at..null_at + 8 * count].as_chunks::<8>();
+    let bit = word % 64;
+    for (((word, null), from), bits) in out.iter_mut().zip(nulls).zip(lane).zip(null_lane) {
+        *null = u64::from_ne_bytes(*bits) >> bit & 1 != 0;
+        // A NULL's word is 0 whatever the chunk holds: the check skips it.
+        *word = if *null { 0 } else { u64::from_ne_bytes(*from) };
+    }
+    Ok(())
 }
 
 #[inline]
@@ -843,5 +1007,239 @@ mod tests {
             by_value: true,
         };
         assert_eq!(seen(refused(2, &bytes, 0)), wrong(Rule::ByValueBytes, 1, 0));
+    }
+
+    /// A host whose values end anywhere.
+    struct Whole;
+
+    impl ValueEnds for Whole {
+        fn ends(&self, _: usize, _: &[u8]) -> bool {
+            true
+        }
+    }
+
+    /// A batch of `nrows` rows of `ncolumns` columns, columns 1 and 65 by
+    /// reference and the others by value, a NULL in every third row of
+    /// each; and which columns are by value.
+    fn read_batch(nrows: usize, ncolumns: usize) -> (Batch, Vec<bool>) {
+        let columns = (0..ncolumns)
+            .map(|column| {
+                (0..nrows)
+                    .map(|row| match (row + column) % 3 {
+                        0 => Cell::Null,
+                        _ if column % 64 == 1 => Cell::Bytes(vec![row as u8; row % 13]),
+                        _ => Cell::Word((row * 1000 + column) as u64),
+                    })
+                    .collect()
+            })
+            .collect();
+        let batch = Batch {
+            columns,
+            by_value: false,
+        };
+        (
+            batch,
+            (0..ncolumns).map(|column| column % 64 != 1).collect(),
+        )
+    }
+
+    /// The batch appended whole to a chunk of a word past its columns, as
+    /// a sort's key, and the values it used.
+    fn written(batch: &Batch, nrows: usize) -> Result<(Vec<u8>, Vec<u8>, usize)> {
+        let words = batch.columns.len() + 1;
+        let mut chunk = vec![0_u8; columns::size(nrows, words)];
+        columns::init(&mut chunk, words)?;
+        let mut mask = mask_words(&vec![true; nrows]);
+        let mut rows = RowMask::try_new(nrows, &mut mask)?;
+        let mut values = vec![0_u8; 16 * nrows];
+        let mut used = 0;
+        let got = append(&mut chunk, batch, &mut rows, &mut values, &mut used)?;
+        ensure!(got.rows == nrows, "{got:?}");
+        values.truncate(used);
+        Ok((chunk, values, words))
+    }
+
+    /// A chunk read back, checked once, reads by windows of up to 64 rows
+    /// every word, NULL and value it was written with: a long chunk of a
+    /// few columns, whose windows cross words of rows, and a short one of
+    /// 70 columns, past the first lane of NULL bits.
+    #[test]
+    fn a_chunk_read_back_is_checked_then_read_by_windows() -> Result<()> {
+        for (nrows, ncolumns) in [(150, 3), (5, 70)] {
+            let (batch, by_value) = read_batch(nrows, ncolumns);
+            let (chunk, values, words) = written(&batch, nrows)?;
+            let shape = check(&chunk, words, Some(nrows), &by_value, &values, &Whole)?;
+            ensure!((shape.rows, shape.words) == (nrows, words));
+            check(&chunk, words, None, &by_value, &values, &Whole)?;
+            for (column, cells) in batch.columns.iter().enumerate() {
+                for first in (0..nrows).step_by(64).chain([nrows]) {
+                    let count = 64.min(nrows - first);
+                    let mut out = vec![7; count];
+                    let mut nulls = vec![true; count];
+                    window(&chunk, column, first, &mut out, &mut nulls)?;
+                    for (at, (&word, &null)) in out.iter().zip(&nulls).enumerate() {
+                        let row = first + at;
+                        let same = match &cells[row] {
+                            Cell::Null => (word, null) == (0, true),
+                            Cell::Word(value) => (word, null) == (*value, false),
+                            Cell::Bytes(value) => {
+                                let at = (word - columns::value_ref(0, 0)) as usize;
+                                !null && values[at..at + value.len()] == value[..]
+                            }
+                        };
+                        ensure!(same, "row {row} of column {column}: {word}, {null}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// A chunk read back of another count of words or of rows, or with a
+    /// word of a value that refers past the values, to another chunk, or
+    /// to nothing, is damaged bytes; a pair's block of another kind or
+    /// number too. A call past the chunk's words or rows, or past the
+    /// pair, is a wrong call.
+    #[test]
+    fn a_chunk_read_back_of_another_shape_or_reference_is_damaged() -> Result<()> {
+        let wrong = |error: Error| (error.kind(), error.rule());
+        let damaged = |rule| Err((Kind::Damaged, rule));
+        let nrows = 10;
+        let (batch, by_value) = read_batch(nrows, 3);
+        let (chunk, values, words) = written(&batch, nrows)?;
+        let len = values.len();
+        ensure!(
+            check(&chunk, words + 1, None, &by_value, &values, &Whole)
+                .map(|_| ())
+                .map_err(wrong)
+                == damaged(Rule::ReadWords)
+        );
+        ensure!(
+            check(&chunk, words, Some(nrows + 1), &by_value, &values, &Whole)
+                .map(|_| ())
+                .map_err(wrong)
+                == damaged(Rule::ReadRows)
+        );
+        for (row, cells) in batch.columns[1].iter().enumerate() {
+            let Cell::Bytes(_) = cells else { continue };
+            for word in [columns::value_ref(0, len + 8), columns::value_ref(1, 0), 0] {
+                let mut stray = chunk.clone();
+                let shape = columns::shape(&stray)?;
+                put(
+                    &mut stray,
+                    shape.lane_at(shape.word_lane(1)) + 8 * row,
+                    word,
+                );
+                ensure!(
+                    check(&stray, words, Some(nrows), &by_value, &values, &Whole)
+                        .map(|_| ())
+                        .map_err(wrong)
+                        == damaged(Rule::ValueRef),
+                    "row {row}, word {word:#x}"
+                );
+            }
+        }
+        let too_many = vec![true; words + 1];
+        ensure!(
+            check(&chunk, words, None, &too_many, &values, &Whole).map_err(wrong)
+                == Err((Kind::WrongCall, Rule::ChunkColumns))
+        );
+        // A value that runs past the values, by the host's rule.
+        struct Short;
+        impl ValueEnds for Short {
+            fn ends(&self, column: usize, rest: &[u8]) -> bool {
+                column != 1 || rest.len() > 64
+            }
+        }
+        ensure!(
+            check(&chunk, words, None, &by_value, &values, &Short)
+                .map(|_| ())
+                .map_err(wrong)
+                == damaged(Rule::ValueEnd)
+        );
+        let (mut out, mut nulls) = (vec![0; 4], vec![false; 4]);
+        for word in [words, usize::MAX] {
+            ensure!(
+                window(&chunk, word, 0, &mut out, &mut nulls).map_err(wrong)
+                    == Err((Kind::WrongCall, Rule::ChunkColumns))
+            );
+        }
+        ensure!(
+            window(&chunk, 0, nrows - 3, &mut out, &mut nulls).map_err(wrong)
+                == Err((Kind::WrongCall, Rule::Window))
+        );
+        ensure!(
+            window(&chunk, 0, 0, &mut out, &mut nulls[..3]).map_err(wrong)
+                == Err((Kind::WrongCall, Rule::RowCounts))
+        );
+        // A chunk read back that is no chunk of columns.
+        let mut foreign = chunk.clone();
+        foreign[12..16].copy_from_slice(&[0; 4]);
+        ensure!(
+            check(&foreign, words, None, &by_value, &values, &Whole)
+                .map(|_| ())
+                .map_err(wrong)
+                == damaged(Rule::ColumnsMagic)
+        );
+
+        let header = |kind, number| BlockHeader {
+            kind,
+            number,
+            partition: 0,
+            level: 0,
+            fingerprint: 0,
+            len: 8,
+            packed: 0,
+        };
+        check_pair(&header(BlockKind::Values, 3), 0, 3)?;
+        check_pair(&header(BlockKind::Columns, 3), 1, 3)?;
+        ensure!(
+            check_pair(&header(BlockKind::Columns, 3), 0, 3).map_err(wrong)
+                == Err((Kind::Damaged, Rule::PairKind))
+        );
+        ensure!(
+            check_pair(&header(BlockKind::Values, 4), 0, 3).map_err(wrong)
+                == Err((Kind::Damaged, Rule::PairNumber))
+        );
+        ensure!(
+            check_pair(&header(BlockKind::Values, 3), 2, 3).map_err(wrong)
+                == Err((Kind::WrongCall, Rule::PairBlock))
+        );
+        Ok(())
+    }
+
+    /// An empty value, which `append` places at the end of the values, is
+    /// a reference the check takes, as the last value and alone; and a
+    /// NULL row's word reads 0 though the chunk holds another.
+    #[test]
+    fn an_empty_value_reads_back_and_a_null_reads_zero() -> Result<()> {
+        let batch = Batch {
+            columns: vec![vec![
+                Cell::Bytes(b"abc".to_vec()),
+                Cell::Null,
+                Cell::Bytes(Vec::new()),
+            ]],
+            by_value: false,
+        };
+        for nrows in [3, 1] {
+            let alone = Batch {
+                columns: vec![batch.columns[0][3 - nrows..].to_vec()],
+                by_value: false,
+            };
+            let (mut chunk, values, words) = written(&alone, nrows)?;
+            check(&chunk, words, Some(nrows), &[false], &values, &Whole)?;
+            let (mut out, mut nulls) = (vec![7; nrows], vec![false; nrows]);
+            window(&chunk, 0, 0, &mut out, &mut nulls)?;
+            let last = out[nrows - 1] - columns::value_ref(0, 0);
+            ensure!(last == values.len() as u64, "{out:?} over {}", values.len());
+            if nrows == 3 {
+                let shape = columns::shape(&chunk)?;
+                put(&mut chunk, shape.lane_at(shape.word_lane(0)) + 8, 77);
+                check(&chunk, words, Some(nrows), &[false], &values, &Whole)?;
+                window(&chunk, 0, 0, &mut out, &mut nulls)?;
+                ensure!((out[1], nulls[1]) == (0, true), "{out:?}");
+            }
+        }
+        Ok(())
     }
 }

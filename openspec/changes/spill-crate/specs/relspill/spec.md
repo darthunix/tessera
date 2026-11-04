@@ -89,7 +89,9 @@ row needs.
   values holds only the first
 - **THEN** the first row is appended, the call says so, and it returns
   the bytes the second row needs
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`;
+  `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
 
 ### Requirement: The file of a set
 The crate SHALL own the whole format of the file of a set: the blocks,
@@ -250,7 +252,11 @@ or an error. It SHALL NOT panic, loop without end, or ask for more than
 its caller allows: one block within the larger of its caller's bounds,
 with its header and the slack of packing, or one page of a list, and
 never more than the file holds. A read SHALL give its caller a chunk
-only of the kind and the shape the caller expects. The promise holds for
+only of the kind and the shape the caller expects: a chunk of columns
+read back is checked by
+[`check_pair`](../../../crates/relspill/src/spill_columns.rs) and
+[`check`](../../../crates/relspill/src/spill_columns.rs) once, before
+its rows are read. The promise holds for
 a file that nobody writes while it is read. Bytes damaged into other
 bytes that pass every check read as other data, since a block has no
 checksum.
@@ -268,9 +274,18 @@ checksum.
 - **THEN** no read panics, and none asks for more than its bounds
 - **Verified by:** pending
 
-#### Scenario: A chunk of another shape
-- **WHEN** a block of another kind, or a chunk of columns of another
-  shape, is read where the caller expects a given kind and shape
+#### Scenario: A chunk of columns of another shape
+- **WHEN** a block of a chunk of columns' pair of another kind or
+  number, or a chunk of columns of another shape or with a word that
+  refers outside its values, is read where the caller expects the pair
+  it wrote
+- **THEN** the read is refused as damaged bytes
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`
+
+#### Scenario: A chunk of records of another kind
+- **WHEN** a block of another kind is read where the caller expects a
+  chunk of records
 - **THEN** the read is refused as damaged bytes
 - **Verified by:** pending
 

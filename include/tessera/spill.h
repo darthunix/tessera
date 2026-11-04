@@ -391,6 +391,46 @@ extern TessStatusCode tess_spill_columns_append(void *chunk, Size len, int ncolu
 												TessStatus *status);
 
 /*
+ * A chunk of columns is written as a pair of blocks under one number: its
+ * values (TESS_SPILL_VALUES), then its rows (TESS_SPILL_COLUMNS). Whether
+ * header, read back as block at of the pair (0 the values, 1 the rows),
+ * numbered number, is that block: one of another kind or number is
+ * damaged data (SQLSTATE XX001), an at past the pair a wrong call.
+ */
+extern TessStatusCode tess_spill_columns_pair(const TessSpillHeader *header, int at,
+											  uint32 number, TessStatus *status);
+
+/*
+ * Check the chunk of columns of len bytes at chunk, read back with its
+ * chunk of values_len bytes at values, once and in one pass, so that its
+ * rows are read unchecked after: it holds words words and, unless rows is
+ * -1, rows rows; and every word of its first ncolumns columns not by value
+ * (byvals) of a row that is not NULL refers into the values, to a byte or
+ * to their end, where an empty value lies, and the value there ends inside
+ * them by its type's length (typlens; -1 a varlena, -2 a C string, as
+ * tess_spill_value_fits tells). Any of these that fails, or a chunk that
+ * is no chunk of columns, is damaged data (SQLSTATE XX001); ncolumns past
+ * words or rows below -1 is a wrong call.
+ */
+extern TessStatusCode tess_spill_columns_check(const void *chunk, Size len, int words,
+											   int64 rows, int ncolumns, const bool *byvals,
+											   const int16 *typlens, const char *values,
+											   Size values_len, TessStatus *status);
+
+/*
+ * The words of the first ncolumns words of the chunk of columns of len
+ * bytes at chunk, checked with values by tess_spill_columns_check, for its
+ * count rows from first on: column c as Datums into out[c], a word of a
+ * column not byvals[c] of a row not NULL as a pointer to its value in
+ * values, a NULL's as 0, and whether each is NULL into isnull[c]. Words
+ * past the chunk's words or rows past its rows are a wrong call.
+ */
+extern TessStatusCode tess_spill_columns_window(const void *chunk, Size len, int ncolumns,
+												const bool *byvals, const char *values,
+												Size first, Size count, Datum *const *out,
+												bool *const *isnull, TessStatus *status);
+
+/*
  * Append the rows of pending to the chunks of their partitions, as
  * tess_table_append_partitioned_columns appends records: the partition of
  * a hash is (hash >> shift) & (npartitions - 1) and appends to chunk

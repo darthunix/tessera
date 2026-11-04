@@ -74,10 +74,11 @@ pub use sort::{
 };
 pub use spill::{
     SpillHeader, SpillLevel, SpillPlan, SpillShape, tess_spill_columns_append,
-    tess_spill_columns_append_partitioned, tess_spill_columns_init, tess_spill_columns_layout,
-    tess_spill_columns_pack, tess_spill_columns_shape, tess_spill_columns_unpack,
+    tess_spill_columns_append_partitioned, tess_spill_columns_check, tess_spill_columns_init,
+    tess_spill_columns_layout, tess_spill_columns_pack, tess_spill_columns_pair,
+    tess_spill_columns_shape, tess_spill_columns_unpack, tess_spill_columns_window,
     tess_spill_expected, tess_spill_header_read, tess_spill_header_size, tess_spill_header_write,
-    tess_spill_pack, tess_spill_plan, tess_spill_unpack,
+    tess_spill_pack, tess_spill_plan, tess_spill_unpack, value_ends,
 };
 pub use spill_set::{
     READ_BLOCK, READ_EMPTY, READ_END, READ_FOUND, READ_HEADER, READ_PAGE, READ_READY, REGION_BODY,
