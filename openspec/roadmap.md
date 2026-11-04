@@ -38,11 +38,12 @@ with Tessera on, in the order
 Q10 showed its aggregate's input row-wise. The maintainer took seven
 entries out of turn on 2026-11-03, after an analysis of TPC-H with
 `batch-index-join`, in the order `deform-past-varlena` (done),
-`lookup-outer-compaction`, `semi-anti-lookups`, `numeric-reading`,
+`gather-sparse-batches`, `semi-anti-lookups`, `numeric-reading`,
 `like-substring-search`, `agg-table-presize`, `tpch-q9-plan`, the last
 with the foreign keys of the schema left undeclared for now; the same
 day he moved `agg-dependent-columns` between `agg-table-presize` and
-`tpch-q9-plan`:
+`tpch-q9-plan`, and on 2026-11-04 widened `lookup-outer-compaction`
+into `gather-sparse-batches`:
 
 1. `spill-crate`: The spill as a crate of its own, relspill
 2. `whole-word-decisions`: When and where a driver takes a word whole,
@@ -272,31 +273,35 @@ TPC-H Q9's plan with Tessera on.
 - **Capabilities:** costs, bench/tpch
 - **Size:** small to medium.
 
-### lookup-outer-compaction
+### gather-sparse-batches
 
-The outer rows of an index lookup gathered into full batches.
+Sparse batches gathered by the input of a consumer that asks.
 
-- **What:** Before TessHashJoin looks a batch's keys up in an index,
-  the outer rows of several sparse batches are copied into one batch of
-  up to 64 keys, so that one array scan serves them.
-- **Why:** The index lookup wins where a batch's keys share the btree's
-  descents, and loses where a batch holds one or two keys: TPC-H Q5's
-  join of orders and lineitem gets 46 000 outer rows in 21 700 batches,
-  and its lookup ran 27 % slower than the core's nested loop
-  (`batch-index-join`, runs `tpch-sf1-nGKzZa` against `tpch-sf1-mVx1yP`).
-  The model now leaves such joins to the core. The analysis of
-  2026-11-03: the core's index nested loops over `lineitem` take 57,
-  46 and 121 ms of Q04, Q05 and Q07 serial, and 90 to 240 ms of
-  processor time of Q03 to Q08 with two workers; Q07's lookups, forced,
-  ran 158 ms against the nested loop's 135, their outer batches holding
-  4.6 keys each.
-- **Known:** The copies cost what compact batches cost the hash join; a
-  by-reference outer value must outlive its batch. The cost model's
-  batches would come from the copies, not the scan.
+- **What:** `TessInput` gathers the selected rows of a child's sparse
+  batches into batches of up to 64 rows for a consumer that asks for
+  it, TessHashJoin's outer side and TessAgg first; a batch full enough
+  goes as it is. The index lookup then looks up full batches of keys.
+- **Why:** A consumer pays a fixed cost a batch: TPC-H Q14's join and
+  aggregate receive 76 000 rows in 41 000 batches after its filter, and
+  spend about 45 ms of 139, nearly all of it a batch's cost (0.5 and
+  0.6 µs a batch against 27 ns a row, measured on 2026-11-04 by
+  widening the range of dates); Q06's and Q15's aggregates get 1.8 and
+  3.4 rows a batch. The index lookup gains when a batch's keys share
+  the btree's descents, and Q5's outer side comes 2.1 keys a batch,
+  Q7's 4.6: its lookup ran 27 % slower than the core's nested loop
+  (`batch-index-join`, runs `tpch-sf1-nGKzZa` against
+  `tpch-sf1-mVx1yP`), and the model now leaves such joins to the
+  core's nested loops, which take 46 and 121 ms of Q5 and Q7 serial
+  and 90 to 240 ms of processor time of Q3 to Q8 with two workers.
+- **Known:** The maintainer widened the entry, first
+  `lookup-outer-compaction`, the gathering inside the index lookup
+  only, on 2026-11-04 after the measurement of Q14. A gathered batch
+  has no slot, so a consumer that forwards its child's batch cannot
+  gather; a numeric column keeps its decimals by the heap batch's
+  reading, shared.
 - **Depends on:** nothing.
-- **Capabilities:** a node's change (hash join)
-- **Size:** medium: one pull request.
-
+- **Capabilities:** runtime (input), hash join, aggregate, costs
+- **Size:** medium to large: one pull request.
 ### semi-anti-lookups
 
 SEMI and ANTI joins by index lookups.
@@ -312,7 +317,7 @@ SEMI and ANTI joins by index lookups.
   array scan reads every row of a key: Q4 and Q21 read about 4 rows a
   key where the core reads 1.6. The lookup must stop at a key's first
   row, or the cost model must count every row.
-- **Depends on:** `lookup-outer-compaction`. The outer sides of Q4
+- **Depends on:** `gather-sparse-batches`. The outer sides of Q4
   and Q21 are sparse: Q4's orders after the filter on the date, 57 000
   rows of 1.5 M, come about 2.5 keys a batch, and Q21's anti join reads
   the output of a hash join that does not compact, a key a batch by the
