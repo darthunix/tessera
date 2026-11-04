@@ -548,6 +548,7 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 	}
 	state->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	state->batch.struct_size = sizeof(TessBatch);
+	state->batch.values_stored = true;
 	state->batch.table_oid = InvalidOid;
 	state->batch.ops = &sort_batch_ops;
 	state->batch.private_data = state;

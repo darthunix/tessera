@@ -88,6 +88,7 @@ tess_builder_create(const TessBuilderConfig *config)
 	}
 	builder->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	builder->batch.struct_size = sizeof(TessBatch);
+	builder->batch.values_stored = true;
 	builder->batch.ops = &builder_ops;
 	builder->batch.private_data = builder;
 	tess_builder_reset(builder);

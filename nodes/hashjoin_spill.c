@@ -1000,6 +1000,7 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 	spill->batch.ops = &spill_batch_ops;
 	spill->batch.private_data = spill;
 	spill->batch.rows.bits = spill->bits;
+	spill->batch.values_stored = true;
 	return spill;
 }
 

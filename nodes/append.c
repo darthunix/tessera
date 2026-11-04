@@ -677,6 +677,7 @@ append_next(TessAppendState *state)
 		state->child_batch = batch;
 		state->batch.rows = batch->rows;
 		state->batch.table_oid = batch->table_oid;
+		state->batch.values_stored = tess_batch_values_stored(batch);
 		state->batches++;
 		return true;
 	}

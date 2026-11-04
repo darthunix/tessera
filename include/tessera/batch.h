@@ -97,6 +97,14 @@ typedef struct TessBatchOps
  * consumer may only remove rows, request columns, or transfer exclusive use
  * to its parent. table_oid is InvalidOid when rows have no single table of
  * origin.
+ *
+ * values_stored is true when reading a column of the batch evaluates no
+ * expression: the values are stored, or deformed from stored tuples, so a
+ * read can fail only on a damaged value and has no side effect. A batch
+ * that computes a column on request, as a projection's does, leaves it
+ * false. The producer sets it on each batch it publishes; a reader asks
+ * tess_batch_values_stored, which takes a batch of a size without the
+ * field for false.
  */
 struct TessBatch
 {
@@ -106,9 +114,17 @@ struct TessBatch
 	Oid			table_oid;
 	const TessBatchOps *ops;
 	void	   *private_data;
+	bool		values_stored;
 };
 
 #define TESS_BATCH_MIN_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessBatch, private_data)
+
+/* Whether reading the batch's columns evaluates no expression. */
+static inline bool
+tess_batch_values_stored(const TessBatch *batch)
+{
+	return TESS_ABI_HAS_FIELD(batch, TessBatch, values_stored) && batch->values_stored;
+}
 
 #endif /* TESSERA_BATCH_H */

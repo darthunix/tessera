@@ -105,6 +105,17 @@ tessera_test_batch(PG_FUNCTION_ARGS)
 		TESS_ABI_HAS_FIELD(&short_ops, TessBatchOps, release))
 		PG_RETURN_BOOL(false);
 
+	/* values_stored: false unless set, and false in a batch of an older size. */
+	if (tess_batch_values_stored(&batch))
+		PG_RETURN_BOOL(false);
+	batch.values_stored = true;
+	if (!tess_batch_values_stored(&batch))
+		PG_RETURN_BOOL(false);
+	batch.struct_size = TESS_BATCH_MIN_SIZE;
+	if (tess_batch_values_stored(&batch))
+		PG_RETURN_BOOL(false);
+	batch.struct_size = sizeof(TessBatch);
+
 	batch.ops->get_datum_column(&batch, 0, &filter_rows,
 		TESS_COLUMN_FOR_FILTER, &filter_column);
 	if (filter_column.struct_size != sizeof(filter_column) ||

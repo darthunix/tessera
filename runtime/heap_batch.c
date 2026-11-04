@@ -535,6 +535,7 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 	}
 	heap->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	heap->batch.struct_size = sizeof(TessBatch);
+	heap->batch.values_stored = true;
 	heap->batch.ops = &heap_ops;
 	heap->batch.private_data = heap;
 	tess_heap_batch_reset(heap);

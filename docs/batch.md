@@ -43,6 +43,15 @@ the Rust mirror (`DatumColumn`) carries them too.
 filter or a later projection. It may affect preparation strategy but never the
 values returned.
 
+`values_stored`, the envelope's last field, says that reading a column
+evaluates no expression: the values are stored, or deformed from stored
+tuples, so a read can fail only on a damaged value and has no side
+effect. A batch that computes a column on request, as a projection's
+does, leaves it false, and so does any batch of a size without the
+field: a reader asks `tess_batch_values_stored()`. The producer sets it
+on each batch it publishes, by what that batch's columns read; a node
+that hands on its child's batch hands on the flag with it.
+
 The returned arrays, including pass-by-reference Datum values, remain valid
 until the batch is released. Views of several columns may be used together.
 The provider must not retain the callback's `rows` or `result` pointers. A
