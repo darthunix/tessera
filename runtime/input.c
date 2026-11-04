@@ -40,6 +40,8 @@ struct TessInput
 	bool		gathering;
 	bool		scan_started;
 	bool		child_done;
+	/* The last child batch went as it is, being full enough, or the first. */
+	bool		after_pass;
 	TessGathered *gathered;
 	bool		gathered_consumed;
 	TessBatch  *held_batch;
@@ -212,9 +214,12 @@ activate_gathered(TessInput *input)
 /*
  * The next batch while gathering: the scan's first batch as it is; then
  * a child batch at least half full, or one whose columns are not stored
- * values, as it is, after the rows gathered before it; the others' rows
- * copied into the gathered batch until it is full, a batch that does not
- * fit giving the rows that fit and holding back its rest.
+ * values, as it is, after the rows gathered before it; a sparse batch
+ * right after such a batch as it is too, since a page of more than 64
+ * rows gives a full batch and a short one, and the short one copied alone
+ * would go out alone before the next full one; the other sparse batches'
+ * rows copied into the gathered batch until it is full, a batch that
+ * does not fit giving the rows that fit and holding back its rest.
  */
 static TessBatch *
 gather_next(TessInput *input)
@@ -268,12 +273,21 @@ gather_next(TessInput *input)
 			count * 2 >= tess_gathered_capacity(gathered))
 		{
 			if (tess_gathered_rows(gathered) == 0)
+			{
+				input->after_pass = true;
 				return activate(input, batch, slot, binding);
+			}
 			input->held_batch = batch;
 			input->held_slot = slot;
 			input->held_binding = binding;
 			return activate_gathered(input);
 		}
+		if (input->after_pass && tess_gathered_rows(gathered) == 0)
+		{
+			input->after_pass = false;
+			return activate(input, batch, slot, binding);
+		}
+		input->after_pass = false;
 		taken = tess_gathered_take(gathered, batch);
 		input->gathered_rows += taken;
 		if (taken < count)
@@ -310,6 +324,7 @@ tess_input_next(TessInput *input)
 	/* A scan's first batch goes as it is, whatever the gathering. */
 	input->scan_started = true;
 	input->gathering = input->gather;
+	input->after_pass = true;
 	batch = fetch(input, &slot, &binding);
 	return batch == NULL ? NULL : activate(input, batch, slot, binding);
 }

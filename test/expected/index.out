@@ -67,7 +67,6 @@ SELECT index_explain($$SELECT count(*), sum(w) FROM index_t WHERE k < 500$$);
  Custom Scan (TessAgg) (actual rows=1.00 loops=1)
    Input Batches: 8
    Input Rows: 463
-   Gathered Rows: 15
    Kernel Calls: 16
    Computed Datums: 463
    ->  Custom Scan (TessFilter) on public.index_t (actual rows=463.00 loops=1)
@@ -87,7 +86,7 @@ SELECT index_explain($$SELECT count(*), sum(w) FROM index_t WHERE k < 500$$);
                ->  Bitmap Index Scan on index_t_k (actual rows=463.00 loops=1)
                      Index Cond: (index_t.k < 500)
                      Index Searches: N
-(23 rows)
+(22 rows)
 
 SELECT index_same($$SELECT count(*), sum(w) FROM index_t WHERE k < 500$$);
  index_same 

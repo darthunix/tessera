@@ -1422,7 +1422,7 @@ CREATE TABLE jgi (k int, g int) WITH (autovacuum_enabled = off);
 INSERT INTO jgi SELECT g * 200, g % 7 FROM generate_series(1, 100) AS g;
 ANALYZE jgo, jgi;
 -- The join's outer side through a filter: about 200 batches of a row or
--- two come to the join as 4 batches.
+-- two come to the join as 6, the first two as they are.
 SELECT join_same($$SELECT count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
 SELECT line FROM join_explain($$SELECT count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$) AS line
 WHERE line ~ 'TessHashJoin|TessAgg|Gathered Rows|Probe Rows|Input Batches';
@@ -1487,7 +1487,8 @@ RESET enable_bitmapscan;
 RESET enable_seqscan;
 DROP INDEX jgo_f;
 -- A join's compact output, over a table with duplicate keys: four
--- batches of 64 pairs and the last of 9, which the aggregate gathers.
+-- batches of 64 pairs and the last of 9, which goes as it is, right
+-- after a full one.
 CREATE TABLE jgd (k int, v int) WITH (autovacuum_enabled = off);
 INSERT INTO jgd SELECT (g % 50) * 200, g % 5 FROM generate_series(1, 270) AS g;
 ANALYZE jgd;

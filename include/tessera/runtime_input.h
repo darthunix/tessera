@@ -56,7 +56,9 @@ extern TupleTableSlot *tess_input_slot(TessInput *input);
  * half full whose columns are stored values (tess_batch_values_stored)
  * into batches of the input's own, of 64 rows or the request's smaller
  * max_batch_rows, all selected and with stored values; the other child
- * batches go as they are, after the rows gathered before them. A batch
+ * batches go as they are, after the rows gathered before them, and so
+ * does a sparse batch right after one of them, which copied alone would
+ * go out alone before the next full batch of a page's rows. A batch
  * that does not fit gives the rows that fit, which leave its mask, and
  * its rest waits, unfinished. A scan's first batch goes as it is, so a
  * consumer that stops after it reads no further. The choice takes effect

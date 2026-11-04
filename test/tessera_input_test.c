@@ -484,14 +484,18 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 	{
 		case 0:
 			{
-				/* Sparse, dense and mixed, a split, the end. */
+				/*
+				 * Sparse, dense and mixed, a split, the end; the sparse
+				 * batch right after the first and after a dense one goes
+				 * as it is.
+				 */
 				static const int counts[] = {2, 1, 3, 20, 30, 25, 40, 1};
-				static const int expected[] = {2, 64, 15, 40, 1};
+				static const int expected[] = {2, 1, 64, 14, 40, 1};
 
-				/* The gathered batches, three, answer decimals. */
+				/* The gathered batches, two, answer decimals. */
 				decimal_batches = 0;
-				PG_RETURN_BOOL(gather_case(counts, NULL, 8, 0, expected, 5, 80) &&
-							   decimal_batches == 3);
+				PG_RETURN_BOOL(gather_case(counts, NULL, 8, 0, expected, 6, 78) &&
+							   decimal_batches == 2);
 			}
 		case 1:
 			{
@@ -503,36 +507,36 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 			}
 		case 2:
 			{
-				/* 31 and 33 in turn: each 31 copied, then flushed before 33. */
+				/* 33 and 31 in turn: each 31 right after a 33 goes uncopied. */
 				static const int counts[] = {33, 31, 33, 31, 33, 31};
 				static const int expected[] = {33, 31, 33, 31, 33, 31};
 
-				PG_RETURN_BOOL(gather_case(counts, NULL, 6, 0, expected, 6, 93));
+				PG_RETURN_BOOL(gather_case(counts, NULL, 6, 0, expected, 6, 0));
 			}
 		case 3:
 			{
 				/* A batch without stored values goes as it is, after the rows gathered. */
-				static const int counts[] = {1, 5, 5, 3, 5, 5};
-				static const bool stored[] = {true, true, true, false, true, true};
-				static const int expected[] = {1, 10, 3, 10};
+				static const int counts[] = {1, 5, 5, 5, 3, 5, 5, 5};
+				static const bool stored[] = {true, true, true, true, false, true, true, true};
+				static const int expected[] = {1, 5, 10, 3, 5, 10};
 
-				PG_RETURN_BOOL(gather_case(counts, stored, 6, 0, expected, 4, 20));
+				PG_RETURN_BOOL(gather_case(counts, stored, 8, 0, expected, 6, 20));
 			}
 		case 4:
 			{
 				/* A request's 16 rows a batch: half is 8, and a split. */
-				static const int counts[] = {3, 5, 7, 7, 2, 4, 9};
-				static const int expected[] = {3, 16, 9, 9};
+				static const int counts[] = {3, 5, 7, 7, 4, 2, 9};
+				static const int expected[] = {3, 5, 16, 4, 9};
 
-				PG_RETURN_BOOL(gather_case(counts, NULL, 7, 16, expected, 4, 25));
+				PG_RETURN_BOOL(gather_case(counts, NULL, 7, 16, expected, 5, 20));
 			}
 		case 5:
 			{
 				/* A split rest fills the next batch. */
 				static const int counts[] = {4, 30, 30, 30, 10};
-				static const int expected[] = {4, 64, 36};
+				static const int expected[] = {4, 30, 64, 6};
 
-				PG_RETURN_BOOL(gather_case(counts, NULL, 5, 0, expected, 3, 100));
+				PG_RETURN_BOOL(gather_case(counts, NULL, 5, 0, expected, 4, 70));
 			}
 		case 6:
 			{
@@ -541,10 +545,10 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 				 * end and stops at the next; a rescan forgets a waiting rest
 				 * and starts with a first batch as it is.
 				 */
-				static const int counts[] = {2, 20, 30, 30, 2};
-				static const int gathered[] = {2, 64, 18};
-				static const int plain[] = {2, 20, 30, 30, 2};
-				GatherChild *child = make_gather_child(counts, NULL, 5);
+				static const int counts[] = {2, 20, 30, 30, 30, 2};
+				static const int gathered[] = {2, 20, 64, 28};
+				static const int plain[] = {2, 20, 30, 30, 30, 2};
+				GatherChild *child = make_gather_child(counts, NULL, 6);
 				TessInput  *input = gather_input(child, 0);
 				int			sizes[16];
 				int			nsizes = 0;
@@ -558,7 +562,7 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 					if (nsizes == 2)
 						tess_input_set_gather(input, false);
 				}
-				ok = sizes_are(sizes, nsizes, gathered, 3);
+				ok = sizes_are(sizes, nsizes, gathered, 4);
 				for (int scan = 0; scan < 3; scan++)
 				{
 					tess_output_clear(child->output);
@@ -570,7 +574,7 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 					{
 						tess_input_set_gather(input, true);
 						/* A rest waiting at the rescan: read up to the split. */
-						for (int index = 0; index < 2; index++)
+						for (int index = 0; index < 3; index++)
 						{
 							batch = tess_input_next(input);
 							tess_input_finish(input);
@@ -578,19 +582,19 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 						continue;
 					}
 					ok = ok && gather_read(input, child, sizes, &nsizes, NULL) &&
-						(scan == 0 ? sizes_are(sizes, nsizes, plain, 5) :
-						 sizes_are(sizes, nsizes, gathered, 3));
+						(scan == 0 ? sizes_are(sizes, nsizes, plain, 6) :
+						 sizes_are(sizes, nsizes, gathered, 4));
 				}
-				/* Over the input's life, rescans included: 82 + 64 + 82. */
-				ok = ok && tess_input_gathered_rows(input) == 228;
+				/* Over the input's life, rescans included: 92 + 64 + 92. */
+				ok = ok && tess_input_gathered_rows(input) == 248;
 				tess_output_end(child->output);
 				PG_RETURN_BOOL(ok);
 			}
 		case 7:
 			{
 				/* A column outside the request is an error of the gathered batch. */
-				static const int counts[] = {2, 2, 2};
-				GatherChild *child = make_gather_child(counts, NULL, 3);
+				static const int counts[] = {2, 2, 2, 2};
+				GatherChild *child = make_gather_child(counts, NULL, 4);
 				TessInput  *input = tess_input_create(CurrentMemoryContext, &child->ps);
 				TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
 				TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
@@ -600,8 +604,12 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 				request.filter_columns = bms_make_singleton(0);
 				tess_input_set_request(input, &request);
 				tess_input_set_gather(input, true);
-				batch = tess_input_next(input);
-				tess_input_finish(input);
+				/* The first batch and the sparse one after it go as they are. */
+				for (int index = 0; index < 2; index++)
+				{
+					batch = tess_input_next(input);
+					tess_input_finish(input);
+				}
 				batch = tess_input_next(input);
 				batch->ops->get_datum_column(batch, 1, &batch->rows,
 											 TESS_COLUMN_FOR_PROJECTION, &column);

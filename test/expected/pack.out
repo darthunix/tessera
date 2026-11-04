@@ -289,7 +289,6 @@ SELECT count(a) FROM pack_t;
    Output: (count(a))
    Input Batches: 2
    Input Rows: 50
-   Gathered Rows: 18
    Kernel Calls: 0
    Computed Datums: 50
    ->  Custom Scan (tessera_pack_sink) (actual rows=50.00 loops=1)
@@ -316,7 +315,7 @@ SELECT count(a) FROM pack_t;
                      Restarted Datums: 0
                      ->  Seq Scan on public.pack_t (actual rows=100.00 loops=1)
                            Output: a, b
-(31 rows)
+(30 rows)
 
 SELECT count(a), sum(a) FROM pack_t;
  count | sum  
