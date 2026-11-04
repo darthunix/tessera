@@ -141,8 +141,18 @@ pub fn cases() -> Vec<Fixture> {
 }
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
-    for case in cases() {
-        let inputs = case.inputs();
+    // Probe, never merged: the density cases of 8 and 12 rows over rings
+    // of 256 and 1024 inputs, beside their ring of 64, for the misses of
+    // the exit of the loop over a word's rows.
+    let mut probes = Vec::new();
+    for pattern in ["density-8", "density-12"] {
+        for size in [256, 1024] {
+            let mut probe = case(1024, pattern, "none", false);
+            probe.name = format!("words/1024/{pattern}-ring{size}/nulls-none/ready");
+            probes.push(probe.ring(size));
+        }
+    }
+    for inputs in cases().into_iter().map(Fixture::inputs).chain(probes) {
         measure_column(
             runner,
             "dense",
