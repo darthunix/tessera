@@ -218,6 +218,22 @@ rules! {
     ValueRead,
     /// A word past the mask of the rows.
     Mask,
+    /// A block past the pair a chunk of columns is written as.
+    PairBlock,
+    /// A block of a pair of another kind than its place in the pair.
+    PairKind,
+    /// A block of a pair of another number than the pair's.
+    PairNumber,
+    /// A chunk of columns read back with another count of words.
+    ReadWords,
+    /// A chunk of columns read back with another count of rows.
+    ReadRows,
+    /// A word of a row read back that refers outside its chunk of values.
+    ValueRef,
+    /// A value of a row read back that runs past its chunk of values.
+    ValueEnd,
+    /// A window of rows past a chunk's rows.
+    Window,
 
     /// A set of no partitions.
     SetPartitions,
@@ -516,6 +532,33 @@ impl fmt::Display for Error {
             Rule::ByValueBytes => write!(f, "a by-value column {a} gave bytes"),
             Rule::ValueRead => write!(f, "the source of rows cannot give column {a} of row {b}"),
             Rule::Mask => f.write_str("a word past the mask of the rows"),
+            Rule::PairBlock => write!(f, "block {a} of the pair of a chunk of columns"),
+            Rule::PairKind => write!(
+                f,
+                "a spilled block of kind {a} where its pair has a block of kind {b}"
+            ),
+            Rule::PairNumber => write!(
+                f,
+                "a spilled block numbered {a} where its pair is numbered {b}"
+            ),
+            Rule::ReadWords => write!(
+                f,
+                "a chunk of columns read back holds {a} words where {b} were written"
+            ),
+            Rule::ReadRows => write!(
+                f,
+                "a chunk of columns read back holds {a} rows where {b} were written"
+            ),
+            Rule::ValueRef => write!(
+                f,
+                "row {a} read back refers to a value outside its chunk of values, in column {b}"
+            ),
+            Rule::ValueEnd => write!(
+                f,
+                "row {a} read back holds a value that runs past its chunk of values, in \
+                 column {b}"
+            ),
+            Rule::Window => write!(f, "a window of rows to {a} of a chunk of {b} rows"),
             Rule::SetPartitions => write!(f, "a spill set of {a} partitions"),
             Rule::SetBuffer => write!(
                 f,

@@ -10,6 +10,19 @@ use std::slice;
 #[cfg(not(target_endian = "little"))]
 compile_error!("the varlena headers here are little-endian's");
 
+/// The bytes of the body of a TOAST pointer to data on disk after its
+/// 2-byte header, by its tag: VARTAG_ONDISK_OID's `varatt_external_oid`
+/// of 16 bytes, VARTAG_ONDISK_OID8's `varatt_external_oid8` of 20, as
+/// `runtime/spill.c` asserts against PostgreSQL's headers; `None` for
+/// another tag.
+pub(super) fn ondisk_body(tag: u8) -> Option<usize> {
+    match tag {
+        18 => Some(16),
+        4 => Some(20),
+        _ => None,
+    }
+}
+
 /// The bytes after a varlena's header, or `None` for a compressed or
 /// external value or a null pointer.
 ///
@@ -64,13 +77,11 @@ pub(super) unsafe fn varlena_size(pointer: *const u8) -> anyhow::Result<usize> {
     unsafe {
         let first = *pointer;
         if first == 0x01 {
-            // VARTAG_INDIRECT holds a pointer, VARTAG_ONDISK a
-            // varatt_external of 16 bytes; VARTAG_EXPANDED_RO and _RW
+            // VARTAG_INDIRECT holds a pointer; VARTAG_EXPANDED_RO and _RW
             // are 2 and 3.
             let body = match *pointer.add(1) {
                 1 => 8,
-                18 => 16,
-                tag => return Err(external_refused(tag)),
+                tag => ondisk_body(tag).ok_or_else(|| external_refused(tag))?,
             };
             Ok(2 + body)
         } else if first & 0x01 == 0x01 {

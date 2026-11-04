@@ -470,6 +470,47 @@ its lanes MUST be refused as damaged data.
   `crates/relspill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`;
   `crates/relspill/src/columns.rs::a_chunk_keeps_within_its_limits`
 
+### Requirement: The pair of a chunk of columns
+A chunk of columns written with its chunk of values SHALL be written as
+a pair of blocks under one number: its values first, a block of kind
+`TESS_SPILL_VALUES` that may be empty, then its rows, a block of kind
+`TESS_SPILL_COLUMNS`. A reader has the values in hand before the words
+that refer to them.
+
+- `tess_spill_columns_pair` SHALL refuse, as damaged data, a block read
+  as one of the pair that is of another kind or another number.
+- `tess_spill_columns_check` SHALL check a chunk read back once, so
+  that its rows are read unchecked after: its words, its rows when the
+  caller counted them, and every word of a column not by value of a row
+  not NULL, which SHALL refer into its chunk of values, to a byte or to
+  its end, where an empty value lies, and whose value SHALL end inside
+  the values by its type's length. Any of these that fails SHALL be
+  damaged data.
+- `tess_spill_columns_window` SHALL give a window of the rows of a
+  checked chunk's first columns as Datums and NULL flags, a value by
+  reference as a pointer into the values. Words or rows past the
+  chunk's SHALL be an internal error, SQLSTATE `XX000`.
+
+#### Scenario: A pair read back
+- **WHEN** rows of a column by value and of a varlena, with NULLs, are
+  appended to a chunk, and the chunk is checked with its values and
+  read by windows
+- **THEN** every word, NULL and value is the one written, a varlena a
+  pointer to its bytes in the values
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_is_checked_then_read_by_windows`;
+  `crates/tessera-capi/tests/spill.rs::a_chunk_of_columns_reads_back_through_its_entry_points`
+
+#### Scenario: A pair not as it was written
+- **WHEN** a block of the pair of another kind or number is read, or a
+  chunk of another count of words or rows, or with a word that refers
+  past its values, to another chunk, or to nothing
+- **THEN** each is damaged data, SQLSTATE `XX001`; a window past the
+  rows or a block past the pair is `XX000`
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`;
+  `crates/tessera-capi/tests/spill.rs::a_chunk_of_columns_reads_back_through_its_entry_points`
+
 ### Requirement: A set writes one temporary file
 A set of spilled blocks (`TessSpill`) SHALL write one temporary file,
 made when the set first writes to disk, in which the blocks of every

@@ -9,14 +9,14 @@ use std::slice;
 
 use anyhow::{Context, Result, bail, ensure};
 use relspill::{BlockHeader, BlockKind, Bounds, HEADER_SIZE, columns, plan};
-use tessera_kernels::spill_columns::{self, ColumnChunks, RowValues, Value};
+use tessera_kernels::spill_columns::{self, ColumnChunks, RowValues, Value, ValueEnds};
 use tessera_kernels::table::{Partitions, PayloadColumns};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
 use super::table::{slots, values};
-use super::varlena::varlena_size;
+use super::varlena::{ondisk_body, varlena_size};
 
 /// `TessSpillHeader`: what a spilled block holds.
 #[repr(C)]
@@ -703,6 +703,195 @@ pub unsafe extern "C" fn tess_spill_columns_append(
             *appended.as_mut().context("a null count appended")? =
                 c_int::try_from(done.rows).context("rows past an int")?;
             *need.as_mut().context("a null count of bytes")? = done.need;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_spill_columns_pair`: whether `header`, read back as block `at`
+/// of the pair a chunk of columns is written as (0 its values, 1 its
+/// rows), numbered `number`, is that block ([`spill_columns::check_pair`]).
+///
+/// # Safety
+///
+/// `header` must be null or readable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_spill_columns_pair(
+    header: *const SpillHeader,
+    at: c_int,
+    number: u32,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let header = header.as_ref().context("a null header")?.to_block()?;
+            let at = usize::try_from(at).context("a negative block of a pair")?;
+            spill_columns::check_pair(&header, at, number)?;
+            Ok(())
+        })
+    }
+}
+
+/// Where a value of a PostgreSQL type ends in the bytes from its start,
+/// `typlen` its type's length: a fixed length within them; a varlena by
+/// its header, read by bytes as a damaged one may lie at any byte, a
+/// compressed one holding its 8 bytes of header, an external one only a
+/// pointer to data on disk; a C string at its NUL. Little-endian headers,
+/// as `varlena.rs` reads them. The C of `tess_spill_value_fits` keeps the
+/// same rule for the readers that are not moved yet.
+pub fn value_ends(typlen: i16, rest: &[u8]) -> bool {
+    match typlen {
+        len if len > 0 => len as usize <= rest.len(),
+        -1 => match rest {
+            [] | [0x01] => false,
+            // An external value: a 2-byte header, and a tag of data on
+            // disk, the body of its pointer after it.
+            [0x01, tag, ..] => ondisk_body(*tag).is_some_and(|body| 2 + body <= rest.len()),
+            [first, ..] if first & 0x01 == 0x01 => usize::from(first >> 1) <= rest.len(),
+            _ => rest.first_chunk::<4>().is_some_and(|header| {
+                let header = u32::from_le_bytes(*header);
+                let size = (header >> 2) as usize;
+                let least = if header & 0x03 == 0x02 { 8 } else { 4 };
+                size >= least && size <= rest.len()
+            }),
+        },
+        -2 => rest.contains(&0),
+        _ => false,
+    }
+}
+
+/// The ends of values by their columns' type lengths.
+struct TypeEnds<'a> {
+    typlens: &'a [i16],
+}
+
+impl ValueEnds for TypeEnds<'_> {
+    #[inline]
+    fn ends(&self, column: usize, rest: &[u8]) -> bool {
+        self.typlens
+            .get(column)
+            .is_some_and(|&typlen| value_ends(typlen, rest))
+    }
+}
+
+/// `tess_spill_columns_check`: check the chunk of columns at `chunk`, read
+/// back with its chunk of `values_len` bytes at `values`, once, in one
+/// pass: `words` words, `rows` rows unless -1, and every word of a column
+/// not by value of the first `ncolumns` (by `byvals`) of a row not NULL a
+/// reference into the values, whose value ends inside them by its type
+/// (`typlens`, [`value_ends`]) ([`spill_columns::check`]).
+///
+/// # Safety
+///
+/// `chunk` must be valid for reads of `len` bytes, `values` for
+/// `values_len` bytes (null when 0), `byvals` and `typlens` for `ncolumns`
+/// entries; `status` as for every entry point.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
+pub unsafe extern "C" fn tess_spill_columns_check(
+    chunk: *const u8,
+    len: usize,
+    words: c_int,
+    rows: i64,
+    ncolumns: c_int,
+    byvals: *const bool,
+    typlens: *const i16,
+    values_in: *const u8,
+    values_len: usize,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            ensure!(!chunk.is_null(), "a null chunk of columns");
+            let chunk = slice::from_raw_parts(chunk, len);
+            let words = usize::try_from(words).context("a negative count of words")?;
+            let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
+            ensure!(rows >= -1, "a count of rows of {rows}");
+            let rows = usize::try_from(rows).ok();
+            let byvals = values(byvals, ncolumns, "by-value flags")?;
+            let typlens = values(typlens, ncolumns, "type lengths")?;
+            let read = if values_len == 0 {
+                &[][..]
+            } else {
+                ensure!(!values_in.is_null(), "null values");
+                slice::from_raw_parts(values_in, values_len)
+            };
+            spill_columns::check(chunk, words, rows, byvals, read, &TypeEnds { typlens })?;
+            Ok(())
+        })
+    }
+}
+
+/// `tess_spill_columns_window`: the words of the first `ncolumns` words
+/// of the chunk of columns at `chunk` for its `count` rows from `first` on,
+/// column `c` as Datums into `out[c]` and whether each is NULL into
+/// `isnull[c]` ([`spill_columns::window`]); a word of a by-reference
+/// column (not `byvals[c]`) of a row not NULL as a pointer to its value in
+/// `values`.
+///
+/// # Safety
+///
+/// `chunk` must be valid for reads of `len` bytes, read back and passed
+/// by `tess_spill_columns_check` with `values`; `byvals`, `out` and
+/// `isnull` must hold `ncolumns` entries, each of `out` and `isnull`
+/// valid for writes of `count` entries; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
+pub unsafe extern "C" fn tess_spill_columns_window(
+    chunk: *const u8,
+    len: usize,
+    ncolumns: c_int,
+    byvals: *const bool,
+    values: *const u8,
+    first: usize,
+    count: usize,
+    out: *const *mut u64,
+    isnull: *const *mut bool,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            ensure!(!chunk.is_null(), "a null chunk of columns");
+            let chunk = slice::from_raw_parts(chunk, len);
+            let ncolumns = usize::try_from(ncolumns).context("a negative column count")?;
+            let byvals = self::values(byvals, ncolumns, "by-value flags")?;
+            let outs = self::values(out, ncolumns, "windows")?;
+            let nulls = self::values(isnull, ncolumns, "windows of NULLs")?;
+            // The rows a window asks for are the chunk's, whatever columns.
+            let rows = relspill::columns::shape(chunk)?.rows;
+            ensure!(
+                first <= rows && count <= rows - first,
+                "a window of {count} rows from {first} of a chunk of {rows}"
+            );
+            // The check made every reference one into the values.
+            let base = values.expose_provenance() as u64;
+            let first_ref = relspill::columns::value_ref(0, 0);
+            for column in 0..ncolumns {
+                let (out, isnull) = if count == 0 {
+                    (&mut [][..], &mut [][..])
+                } else {
+                    ensure!(
+                        !outs[column].is_null() && !nulls[column].is_null(),
+                        "a null window of column {column}"
+                    );
+                    (
+                        slice::from_raw_parts_mut(outs[column], count),
+                        slice::from_raw_parts_mut(nulls[column], count),
+                    )
+                };
+                spill_columns::window(chunk, column, first, out, isnull)?;
+                if !byvals[column] {
+                    for (datum, &null) in out.iter_mut().zip(isnull.iter()) {
+                        if !null {
+                            *datum = base.wrapping_add(datum.wrapping_sub(first_ref));
+                        }
+                    }
+                }
+            }
             Ok(())
         })
     }
