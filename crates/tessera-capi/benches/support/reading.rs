@@ -142,17 +142,37 @@ pub fn cases() -> Vec<Fixture> {
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     // Probe, never merged: the density cases of 8 and 12 rows over rings
-    // of 256 and 1024 inputs, beside their ring of 64, for the misses of
-    // the exit of the loop over a word's rows.
-    let mut probes = Vec::new();
-    for pattern in ["density-8", "density-12"] {
-        for size in [256, 1024] {
-            let mut probe = case(1024, pattern, "none", false);
-            probe.name = format!("words/1024/{pattern}-ring{size}/nulls-none/ready");
-            probes.push(probe.ring(size));
+    // of 64 to 16 384 selections over one set of values, beside their
+    // ring of 64 inputs, for the misses of the exit of the loop over a
+    // word's rows when only the selection is drawn anew.
+    for rows in [8, 12] {
+        let base = case(1024, &format!("density-{rows}"), "none", false);
+        let dense = base.dense_column()?;
+        let datum = base.datum_column()?;
+        for size in [64, 1024, 4096, 16384] {
+            let masks = base.masks(rows, size);
+            let name = format!("words/1024/density-{rows}-masks{size}/nulls-none/ready");
+            measure_masks(
+                runner,
+                "dense",
+                &dense,
+                dense_reference,
+                &base,
+                &masks,
+                &name,
+            )?;
+            measure_masks(
+                runner,
+                "datum",
+                &datum,
+                datum_reference,
+                &base,
+                &masks,
+                &name,
+            )?;
         }
     }
-    for inputs in cases().into_iter().map(Fixture::inputs).chain(probes) {
+    for inputs in cases().into_iter().map(Fixture::inputs) {
         measure_column(
             runner,
             "dense",
@@ -195,6 +215,45 @@ fn measure_column<C: ColumnReader<Value = i32>>(
     }
     let mut group = runner.group(format!("column_reader/{format}/{}", cases[0].name));
     // Separate closures preserve static dispatch inside every measured loop.
+    group.op_each("fold", &inputs, |input| fold_sum(input).unwrap())?;
+    group.op_each("words", &inputs, |input| word_sum(input).unwrap())?;
+    group.op_each("reference", &inputs, |input| direct(input).unwrap())?;
+    Ok(())
+}
+
+/// Probe, never merged: [`measure_column`] over one column of `base`'s
+/// values, every call taking the next of `masks`.
+fn measure_masks<C: ColumnReader<Value = i32>>(
+    runner: &mut Runner,
+    format: &str,
+    column: &C,
+    direct: impl Fn(&Input<'_, C>) -> Result<i64>,
+    base: &Fixture,
+    masks: &[(fixture::Bitmap, i64)],
+    name: &str,
+) -> Result<()> {
+    let inputs: Vec<_> = masks
+        .iter()
+        .map(|(mask, _)| Input {
+            column,
+            rows: mask.view(),
+            values: &base.values,
+            datums: &base.datums,
+            nulls: &base.nulls,
+            reference_rows: mask.reference(),
+            prepared: None,
+            non_nulls: None,
+        })
+        .collect();
+    for (input, (_, expected)) in inputs.iter().zip(masks) {
+        ensure!(
+            direct(input)? == *expected,
+            "reference result differs from scalar model"
+        );
+        ensure!(fold_sum(input)? == *expected, "fold reader result differs");
+        ensure!(word_sum(input)? == *expected, "word reader result differs");
+    }
+    let mut group = runner.group(format!("column_reader/{format}/{name}"));
     group.op_each("fold", &inputs, |input| fold_sum(input).unwrap())?;
     group.op_each("words", &inputs, |input| word_sum(input).unwrap())?;
     group.op_each("reference", &inputs, |input| direct(input).unwrap())?;

@@ -410,4 +410,25 @@ impl<T: FixtureValue> Fixture<T> {
             drawn: self.drawn,
         }
     }
+
+    /// Probe, never merged: `count` selections over these values, each of
+    /// `rows` a word on average drawn as the density cases draw theirs,
+    /// with the sum of the values each selects. The case has no NULLs.
+    pub fn masks(&self, rows: usize, count: usize) -> Vec<(Bitmap, i64)> {
+        assert!(!self.nulls.contains(&true));
+        let ready = vec![true; self.values.len()];
+        (1..=count as u64)
+            .map(|seed| {
+                let selected = drawn_rows(&ready, rows, &mut Random::with_seed(seed));
+                let expected = self
+                    .values
+                    .iter()
+                    .zip(&selected)
+                    .filter(|&(_, &selected)| selected)
+                    .map(|(&value, _)| value.wide())
+                    .fold(0, i64::wrapping_add);
+                (Bitmap::new(&selected), expected)
+            })
+            .collect()
+    }
 }
