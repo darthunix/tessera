@@ -10,6 +10,7 @@
 #include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
+#include "decimal_cache.h"
 #include "heap_batch_internal.h"
 
 struct TessHeapBatch
@@ -38,20 +39,9 @@ struct TessHeapBatch
 	uint64	   *deformed;
 	/*
 	 * A numeric column's decimals, made once a batch for a consumer that
-	 * reads them (TessDatumColumn.accept_decimals): per column, allocated
-	 * at its first such request, the values with a decimal's int64 in place
-	 * of its numeric, the rows read, those that are decimals, and the scale
-	 * the batch's first decimal fixed (-1 before it).
+	 * reads them (TessDatumColumn.accept_decimals).
 	 */
-	Datum	  **decimal_values;
-	uint64	  **decimal_read;
-	uint64	  **decimal_rows;
-	int		   *decimal_scale;
-	/* The rows a request reads that the column's decimals do not have yet. */
-	uint64	   *decimal_pending;
-	/* The kernels that read them, found once, and their status. */
-	const TessKernelOps *kernels;
-	TessStatus	decimal_status;
+	TessDecimalCache decimals;
 	uint64	   *selection;
 	int			ncolumns;
 	int			capacity;
@@ -376,69 +366,6 @@ deform_cached(TessHeapBatch *heap, int column, const TessRowMask *rows,
 }
 
 /*
- * A numeric column's requested rows read as decimals by the kernels, once
- * a batch: a value of at most 18 digits at the scale of the batch's first
- * decimal goes as its int64 and its bit, any other (NULL, NaN, longer, of
- * another scale) as its numeric, so every consumer of the column's
- * decimals reads the same values without reading a numeric again. Without
- * the kernels the column goes without decimals.
- */
-static void
-decimal_column(TessHeapBatch *heap, int column, const TessRowMask *rows,
-			   TessDatumColumn *result)
-{
-	TessDatumColumn source = TESS_STRUCT_INITIALIZER(TessDatumColumn);
-	TessRowMask pending;
-	TessRowMask decimals;
-	uint64	   *read;
-	int			nwords = tess_row_mask_word_count(rows->nrows);
-
-	if (heap->kernels == NULL && (heap->kernels = tess_runtime_kernels()) == NULL)
-		return;
-	if (heap->decimal_values == NULL)
-	{
-		MemoryContext context = GetMemoryChunkContext(heap);
-
-		heap->decimal_values = MemoryContextAllocZero(context, sizeof(Datum *) * heap->ncolumns);
-		heap->decimal_read = MemoryContextAllocZero(context, sizeof(uint64 *) * heap->ncolumns);
-		heap->decimal_rows = MemoryContextAllocZero(context, sizeof(uint64 *) * heap->ncolumns);
-		heap->decimal_scale = MemoryContextAlloc(context, sizeof(int) * heap->ncolumns);
-		heap->decimal_pending = MemoryContextAllocZero(context, sizeof(uint64) * heap->nwords);
-		heap->decimal_status = (TessStatus) TESS_STRUCT_INITIALIZER(TessStatus);
-		for (int index = 0; index < heap->ncolumns; index++)
-			heap->decimal_scale[index] = -1;
-	}
-	if (heap->decimal_values[column] == NULL)
-	{
-		MemoryContext context = GetMemoryChunkContext(heap);
-
-		heap->decimal_values[column] = MemoryContextAllocZero(context,
-															  sizeof(Datum) * heap->capacity);
-		heap->decimal_read[column] = MemoryContextAllocZero(context,
-															sizeof(uint64) * heap->nwords);
-		heap->decimal_rows[column] = MemoryContextAllocZero(context,
-															sizeof(uint64) * heap->nwords);
-	}
-	read = heap->decimal_read[column];
-	pending = (TessRowMask) {rows->nrows, heap->decimal_pending};
-	for (int word = 0; word < nwords; word++)
-		pending.bits[word] = rows->bits[word] & ~read[word];
-	source.values = &heap->values[(Size) column * heap->capacity];
-	source.isnull = &heap->isnull[(Size) column * heap->capacity];
-	source.nrows = rows->nrows;
-	decimals = (TessRowMask) {rows->nrows, heap->decimal_rows[column]};
-	if (heap->kernels->decimal_read(&source, &pending, &heap->decimal_scale[column],
-							  heap->decimal_values[column], NULL, &decimals,
-							  &heap->decimal_status) != TESS_OK)
-		tess_status_report(&heap->decimal_status);
-	for (int word = 0; word < nwords; word++)
-		read[word] |= rows->bits[word];
-	result->values = heap->decimal_values[column];
-	result->decimal_rows = heap->decimal_rows[column];
-	result->decimal_scale = heap->decimal_scale[column];
-}
-
-/*
  * Count a request's rows behind their cursor: a row whose cursor a read of
  * a later column carried past this one, as the masks of the later columns
  * tell, without a look at the row. A short row whose walk stopped before
@@ -518,7 +445,10 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 		result->decimal_rows = NULL;
 		if (result->accept_decimals && heap->tuple_desc != NULL &&
 			TupleDescAttr(heap->tuple_desc, column)->atttypid == NUMERICOID)
-			decimal_column(heap, column, rows, result);
+			tess_decimal_cache_read(&heap->decimals, column,
+									&heap->values[(Size) column * heap->capacity],
+									&heap->isnull[(Size) column * heap->capacity],
+									rows, result);
 	}
 }
 
@@ -563,6 +493,7 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 	heap->ncolumns = config->ncolumns;
 	heap->capacity = config->capacity;
 	heap->nwords = tess_row_mask_word_count(config->capacity);
+	tess_decimal_cache_init(&heap->decimals, context, heap->ncolumns, heap->capacity);
 	heap->tuples = MemoryContextAlloc(context,
 									  mul_size(sizeof(HeapTupleData), config->capacity));
 	heap->cursors = MemoryContextAlloc(context,
@@ -711,15 +642,7 @@ tess_heap_batch_reset(TessHeapBatch *heap)
 	memset(heap->stored, 0, sizeof(uint64) * (Size) heap->ncolumns * heap->nwords);
 #endif
 	memset(heap->back_set, 0, sizeof(uint64) * heap->nwords);
-	if (heap->decimal_values != NULL)
-		for (int column = 0; column < heap->ncolumns; column++)
-		{
-			heap->decimal_scale[column] = -1;
-			if (heap->decimal_values[column] == NULL)
-				continue;
-			memset(heap->decimal_read[column], 0, sizeof(uint64) * heap->nwords);
-			memset(heap->decimal_rows[column], 0, sizeof(uint64) * heap->nwords);
-		}
+	tess_decimal_cache_reset(&heap->decimals);
 	heap->nrows = 0;
 	heap->sealed = false;
 	heap->batch.rows.nrows = 0;
