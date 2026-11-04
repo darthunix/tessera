@@ -63,6 +63,7 @@ extern double tess_join_lookup_key_cost;
 extern double tess_join_loop_key_cost;
 extern double tess_join_loop_descent_cost;
 extern double tess_join_loop_row_cost;
+extern double tess_join_lookup_copy_cost;
 /* The correlation of an index's order with the table's: see heapscan.c. */
 extern double tess_index_correlation(PlannerInfo *root, IndexOptInfo *index);
 /* Whether every index of a bitmap is BRIN, whose bitmap names whole pages: see heapscan.c. */

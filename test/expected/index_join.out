@@ -295,7 +295,7 @@ END $$;
 SELECT ij_estimate($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.ko WHERE o.id <= 1000$$) AS serial;
                               serial                               
 -------------------------------------------------------------------
- batches=21 keys=1000, descents within a quarter of the keys: true
+ batches=17 keys=1000, descents within a quarter of the keys: true
 (1 row)
 
 SET max_parallel_workers_per_gather = 2;
@@ -695,6 +695,92 @@ RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
+-- The lookup's count of the batches its input gathers (Lookup Estimate's
+-- batches) beside the lookups made: a scan's filter that keeps a share
+-- of each page's rows at random, from a few to most of a batch, the
+-- planner counting at random what the table holds evenly; a join's
+-- output; an append of partitions of a row each, whose rows the input
+-- gathers across the parts but for the first two, which go as they are.
+SET tessera.join_lookup_batch_cost = 0;
+SET tessera.join_lookup_descent_cost = 0;
+SET tessera.join_lookup_key_cost = 0;
+CREATE FUNCTION ij_gathered(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+    estimate text;
+BEGIN
+    EXECUTE 'EXPLAIN (VERBOSE, FORMAT JSON) ' || query INTO plan;
+    estimate := jsonb_path_query_first(plan, '$.** ? (@."Lookup Estimate" != null)."Lookup Estimate"') #>> '{}';
+    RETURN 'planned ' || coalesce((regexp_match(estimate, 'batches=([0-9]+)'))[1], 'none') ||
+           ', made ' || coalesce(ij_property(query, 'Lookups'), 'none');
+END $$;
+CREATE TABLE ij_share (id int, ko int, r int) WITH (autovacuum_enabled = off);
+INSERT INTO ij_share SELECT g, g * 3, (g * 7919) % 100 FROM generate_series(1, 6000) AS g;
+ANALYZE ij_share;
+SELECT share, ij_gathered(format($$SELECT count(*), sum(l.v) FROM ij_share o JOIN ij_inner l ON l.id = o.ko WHERE o.r < %s$$, share))
+FROM (VALUES (5), (20), (45), (55), (80)) AS s(share);
+ share |     ij_gathered     
+-------+---------------------
+     5 | planned 6, made 7
+    20 | planned 20, made 21
+    45 | planned 63, made 44
+    55 | planned 99, made 98
+    80 | planned 99, made 98
+(5 rows)
+
+SELECT share, ij_same(format($$SELECT o.id, l.v FROM ij_share o JOIN ij_inner l ON l.id = o.ko WHERE o.r < %s$$, share))
+FROM (VALUES (5), (20), (45), (55), (80)) AS s(share);
+ share |                     ij_same                      
+-------+--------------------------------------------------
+     5 | 300 rows, hash e3a548e2cd8991e0d41a42a1863fffb8
+    20 | 1200 rows, hash 4df2ac6b0f23e4aa330b30cf42c5807d
+    45 | 2700 rows, hash 2a264e045d944844ff08e186eabb9dec
+    55 | 3300 rows, hash a80d34c2dc84aa1a8e71bc5f23706f2c
+    80 | 4800 rows, hash a8828ce6248946420355487fef2d040b
+(5 rows)
+
+CREATE TABLE ij_sel (k int);
+INSERT INTO ij_sel SELECT g * 10 FROM generate_series(1, 300) AS g;
+ANALYZE ij_sel;
+SELECT ij_gathered($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_sel s ON s.k = o.id JOIN ij_inner l ON l.id = o.ko$$) AS join_output;
+    join_output    
+-------------------
+ planned 6, made 7
+(1 row)
+
+SELECT ij_same($$SELECT o.id, l.v FROM ij_outer o JOIN ij_sel s ON s.k = o.id JOIN ij_inner l ON l.id = o.ko$$);
+                     ij_same                     
+-------------------------------------------------
+ 300 rows, hash 48b5eba6f635426a949cc74db1a07ba7
+(1 row)
+
+CREATE TABLE ij_one (id int, ko int) PARTITION BY LIST (id);
+DO $$
+BEGIN
+    FOR part IN 1..64 LOOP
+        EXECUTE format('CREATE TABLE ij_one_%s PARTITION OF ij_one FOR VALUES IN (%s)', part, part);
+    END LOOP;
+END $$;
+INSERT INTO ij_one SELECT g, g * 3 FROM generate_series(1, 64) AS g;
+ANALYZE ij_one;
+SELECT ij_gathered($$SELECT count(*), sum(l.v) FROM ij_one o JOIN ij_inner l ON l.id = o.ko$$) AS parts_of_a_row;
+  parts_of_a_row   
+-------------------
+ planned 2, made 3
+(1 row)
+
+SELECT ij_same($$SELECT o.id, l.v FROM ij_one o JOIN ij_inner l ON l.id = o.ko$$);
+                    ij_same                     
+------------------------------------------------
+ 64 rows, hash 895768cf6a17796ce934dce015bb3928
+(1 row)
+
+DROP TABLE ij_sel, ij_one, ij_share;
+DROP FUNCTION ij_gathered(text);
+RESET tessera.join_lookup_batch_cost;
+RESET tessera.join_lookup_descent_cost;
+RESET tessera.join_lookup_key_cost;
 DROP TABLE ij_inner, ij_outer, ij_other, ij_parent, ij_child, ij_ci_inner, ij_skew;
 DROP COLLATION ij_ci;
 DROP FUNCTION ij_same(text);

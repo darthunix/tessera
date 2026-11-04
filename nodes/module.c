@@ -54,6 +54,7 @@ double		tess_join_lookup_key_cost = 0.40;
 double		tess_join_loop_key_cost = 1.45;
 double		tess_join_loop_descent_cost = 2.94;
 double		tess_join_loop_row_cost = 0.177;
+double		tess_join_lookup_copy_cost = 0.015;
 double		tess_join_bloom_ratio = 0.5;
 double		tess_bitmap_page_rows = 2.0;
 double		tess_index_min_correlation = 0.8;
@@ -389,6 +390,12 @@ _PG_init(void)
 							 "The core's nested loop's time for an inner row it fetches, weighed against the index lookup.",
 							 NULL,
 							 &tess_join_loop_row_cost, 0.177, 0.0, 1e10,
+							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
+	DefineCustomRealVariable("tessera.join_lookup_copy_cost",
+							 "The hash join's time to copy an outer column of a row into a gathered batch.",
+							 "The join's input copies the rows of sparse outer batches into full ones "
+							 "(runtime_input.h), whose keys the index lookup then looks up together.",
+							 &tess_join_lookup_copy_cost, 0.015, 0.0, 1e10,
 							 PGC_USERSET, GUC_EXPLAIN, NULL, NULL, NULL);
 	DefineCustomBoolVariable("tessera.batch_gather",
 							 "Gathers a parallel batch subtree's rows in batches.",
