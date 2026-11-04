@@ -1656,11 +1656,14 @@ Left by the close of `counters-on-x86-and-linux`, 2026-10-25.
   with two kinds of cores, an Intel of the 12th generation or later or
   an Arm board with big and little cores, bound and not bound to one
   kind. Correct what they show.
-- **Why:** The cell perf × AVX2 has never counted on hardware: GitHub's
-  x86-64 runners give no PMU. The choice of the core PMU on two kinds
-  of cores is tested only over written sysfs trees.
+- **Why:** The cell perf × AVX2 is not sure to count on hardware: most
+  of GitHub's x86-64 runners give no PMU, and a job cannot ask for one
+  that does. The choice of the core PMU on two kinds of cores is tested
+  only over written sysfs trees.
 - **Known:** CI runs the same code of the group on software events on
-  x86-64, and real counts on GitHub's Arm runner. A Google Cloud C4
+  x86-64, and real counts on GitHub's Arm runner. An x86-64 runner with
+  a PMU, of the image 20261018.96.1, came in 2 of 25 runs read on
+  2026-11-04, and the tests that count passed on it. A Google Cloud C4
   machine gives a guest a PMU with `--performance-monitoring-unit`;
   Hyper-V gives one only on Intel and only when asked. The README of
   the crate asks the first user with such a machine to run the tests.

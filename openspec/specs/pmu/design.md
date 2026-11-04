@@ -332,7 +332,8 @@ file.
 GitHub's Arm runner, a Neoverse N2 guest, has one core PMU,
 `armv8_pmuv3_0`, with six programmable counters and the cycle counter,
 and no NMI watchdog; its `events/` lists all four events, and its
-`kernel.perf_event_paranoid` is 4. Its x86-64 runners have no PMU.
+`kernel.perf_event_paranoid` is 4. Of its x86-64 runners most have no
+PMU, and a few have one, named `cpu`; a job cannot choose.
 
 Refused: raw codes of Intel events. The kernel already maps the
 generic ids, and the same ids then count on AMD.
@@ -444,10 +445,12 @@ thread runs, not which kind it ran on.
   first at the image's `kernel.perf_event_paranoid`, 4, and must fail
   with `ErrorKind::Permission`; then the job lowers it to 2 and runs
   them with `PMU_REQUIRE=hardware`.
-- perf on x86-64: GitHub's x86-64 runner, which has no PMU. `open`
-  must fail with `ErrorKind::NoCounters`, the software group runs with
-  `PMU_REQUIRE=software`, and the choice of events is tested over
-  written trees. No machine with a PMU checks this cell.
+- perf on x86-64: GitHub's x86-64 runner. Where it has no PMU, `open`
+  must fail with `ErrorKind::NoCounters` and the software group runs
+  with `PMU_REQUIRE=software`. Where it has one, the job runs the tests
+  with `PMU_REQUIRE=hardware`. The job cannot ask for such a machine, so
+  a given run may not count, and the choice of events is tested over
+  written trees.
 - kperf on both kinds of Mac: as root, by hand, since a Mac in CI is a
   virtual machine without kpc. The tests are built as the user, and
   only their binaries run as root, through Cargo's runner of the
