@@ -100,6 +100,9 @@ tess_input_set_request(TessInput *input, const TessRequest *request)
 {
 	MemoryContext old;
 
+	/* A gathered batch holds the old request's columns. */
+	if (input->scan_started && input->gathering)
+		elog(ERROR, "Tessera input received a request during a scan that gathers");
 	input->ops->set_request(input->request_binding, request);
 	/* A gathered batch holds the request's columns: the sets are only lent. */
 	old = MemoryContextSwitchTo(input->context);
@@ -319,12 +322,15 @@ tess_input_next(TessInput *input)
 			elog(ERROR, "Tessera input fetched a new batch before finishing the previous one");
 		forget_active(input);
 	}
-	if (input->gathering && input->scan_started)
+	if (!input->scan_started)
+	{
+		/* A scan's first batch goes as it is; the scan's choice is latched. */
+		input->scan_started = true;
+		input->gathering = input->gather;
+		input->after_pass = true;
+	}
+	else if (input->gathering)
 		return gather_next(input);
-	/* A scan's first batch goes as it is, whatever the gathering. */
-	input->scan_started = true;
-	input->gathering = input->gather;
-	input->after_pass = true;
 	batch = fetch(input, &slot, &binding);
 	return batch == NULL ? NULL : activate(input, batch, slot, binding);
 }
