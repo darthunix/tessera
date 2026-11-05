@@ -507,6 +507,101 @@ Rescan follows the node contract: the node clears its own output, finishes
 its input, calls `ExecReScan` on the child, and then `tess_input_rescan`,
 which forgets the cached slot and binding.
 
+## Gathering sparse batches
+
+A node pays a fixed cost for each batch it reads besides its cost for
+each row: the kernels' calls, the masks, the requests for columns, its
+expressions. After a selective filter, or out of a join, batches come
+with one or two rows selected, and that fixed cost is most of the
+node's time: in TPC-H Q14 the join and the aggregate above a filter
+that keeps 1 % of `lineitem` received 76 000 rows in 41 000 batches,
+and the aggregate spent 24 ms on them where it spends 4 on the same
+rows in 1 200 batches. A node that reads its input as a whole, a hash
+join's outer side or an aggregate, asks its input to gather such
+batches:
+
+```c
+tess_input_set_request(input, &request);
+tess_input_set_gather(input, true);
+```
+
+The input then copies the selected rows of sparse child batches, the
+columns of the request only, into a batch of its own of 64 rows, or of
+the request's smaller `max_batch_rows`:
+
+```
+child:  [2]    [1]    [3]   [20]  [30]  [25]         [40]   [1]
+        first  after  copy  copy  copy  11 copied,   as is  after
+        as is  first                    14 copied    after  a full
+                                        next         them   one
+input:  [2]    [1]    [3 + 20 + 30 + 11 = 64]  [14]  [40]   [1]
+```
+
+A number is a batch's selected rows. The rules, at a capacity of 64:
+
+- A scan's first batch goes as it is, so that a node that stops after
+  its first batch, under `EXISTS` say, reads no further than before.
+- A batch with half the capacity or more selected goes as it is, after
+  the rows gathered before it, and is never copied: copies stay bounded
+  by the rows of sparse batches.
+- A batch whose columns are not stored values (below) goes as it is,
+  after the rows gathered before it.
+- A sparse batch right after a batch that went as it is goes as it is
+  too. A heap scan cuts a page of more than 64 rows into a batch of 64
+  and a short one; under a filter that keeps more than half the rows,
+  the short one, copied alone, would go out alone before the next full
+  batch, the copy for nothing.
+- Any other sparse batch has its rows copied, in order, until the
+  gathered batch is full. A batch that does not fit gives the rows that
+  fit, which leave its mask, and waits, unfinished, with its rest.
+- At the child's end the gathered rows go.
+
+A copy reads every requested column of every row, before the node
+drops any: it evaluates nothing only because the input copies batches
+whose `values_stored` says their columns are stored values
+([batch.md](batch.md)). The heap batch, the builder's, TessSort's,
+TessAgg's groups and the hash join's copies are; a projection's batch,
+which computes its columns on request, is not, and goes as it is. A
+value by reference is copied into a context the next gathered batch
+resets, its length from the child's result type through the layout; a
+numeric column is copied as numerics, and the gathered batch reads its
+decimals for a consumer that asks, as the heap batch does, through the
+same cache: child batches fix their decimals' scales apart, and their
+decimals would not mix in one column. The gathered batch selects all
+its rows, has stored values and its child batches' table if they share
+one.
+
+While gathering, `tess_input_slot` returns `NULL`, so a node that
+forwards its child's slot cannot gather. The choice takes effect at a
+scan's first batch and a rescan keeps it, so that a limit, which hands
+its bound down before its child's first batch, can turn it off for the
+scan: TessHashJoin turns its outer side's gathering off under a bound
+and on without one. `tess_input_rescan` drops the gathered rows and
+forgets a waiting batch, which the child's rescan clears. A key filter
+goes to the child as before; a batch that waits keeps the rows it had.
+`tess_input_gathered_rows` counts the rows copied over the input's
+life, which nodes show as `Gathered Rows`.
+
+The input reads its child until a gathered batch fills, which after a
+selective filter may take thousands of rows. A data error in a row the
+core never reaches can then stop the query, and volatile functions run
+in another count and order than the core's: both are written in
+[limitations.md](limitations.md), as the maintainer decided.
+
+Refused ways:
+
+- A node of its own between child and consumer: a place the planner
+  must choose, a cost for every kind of parent, and the machinery of a
+  node (EXPLAIN, workers, rescans), for what a function of the input
+  does at its consumer's request, adapting to the batches that come.
+- Copying any batch: a projection's expressions would run on rows the
+  consumer drops, an aggregate's `FILTER` or a join's rows without a
+  pair, and raise their errors there.
+- Copying a full batch into the gathered rows so as to fill them: it
+  gains more on pages of 64 rows and a short one, but copies whole
+  batches, wide rows too, and its count of batches hangs on the order of
+  full and sparse batches.
+
 ## Unary nodes
 
 `TessUnary` joins the output and input sides for the common node with one
