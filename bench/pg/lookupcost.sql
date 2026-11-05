@@ -73,7 +73,11 @@ CREATE TEMP TABLE samples
     loop_rows float8,
     loop_checks float8,
     est_loop_rows float8,
-    est_checks float8
+    est_checks float8,
+    -- The planner's own ratio of the lookup's time to the loop's at the
+    -- prices set, the one its margin of 0.8 judges: its estimate taken
+    -- with the forced prices and turned back to the prices set.
+    planner_ratio float8
 );
 
 CREATE TEMP TABLE scans
@@ -299,7 +303,14 @@ BEGIN
                  ELSE (node ->> 'Build Rows')::float8 END,
             coalesce((node ->> 'Matches')::float8, 0), clauses,
             loop_rows, loop_checks,
-            pg_temp.estimate(estimate, 'loop_rows'), pg_temp.estimate(estimate, 'checks'));
+            pg_temp.estimate(estimate, 'loop_rows'), pg_temp.estimate(estimate, 'checks'),
+            (pg_temp.estimate(estimate, 'time') +
+             pg_temp.estimate(estimate, 'batches') * saved[1]::float8 +
+             pg_temp.estimate(estimate, 'descents') * saved[2]::float8 +
+             (pg_temp.estimate(estimate, 'keys') - pg_temp.estimate(estimate, 'descents')) *
+                 saved[3]::float8) /
+            (pg_temp.estimate(estimate, 'loop') -
+             pg_temp.estimate(estimate, 'keys') * (1000000 - saved[4]::float8)));
     PERFORM set_config('tessera.enable', 'on', false);
     PERFORM set_config('enable_hashjoin', 'on', false);
     PERFORM set_config('enable_mergejoin', 'on', false);
@@ -542,12 +553,13 @@ FROM own AS o, model_unit AS u
 WHERE o.copied > 0 AND o.kind = 'inner'
 GROUP BY u.unit_ms;
 -- Each sample against the model: the node's time and the nested loop's,
--- and whether the model chooses as the times do. Of a semi or anti
--- sample, the verdict: a lookup the planner takes that runs slower than
--- the loop fails; one that runs faster and the margin leaves to the loop
--- is missed.
+-- and whether the model chooses as the times do, with the prices fitted
+-- (planned) and with the prices set, the planner's (planner). Of a semi
+-- or anti sample, the verdict on the planner's choice: a lookup it takes
+-- that runs slower than the loop fails; one that runs faster and the
+-- margin leaves to the loop is missed.
 CREATE TEMP VIEW prediction AS
-SELECT o.name, o.kind, o.node_ms - o.outer_ms AS node_ms, o.loop_y AS loop_ms,
+SELECT o.name, o.kind, o.planner_ratio, o.node_ms - o.outer_ms AS node_ms, o.loop_y AS loop_ms,
        o.hash_ms + f.c[1] * o.x[1] + f.c[2] * o.x[2] + f.c[3] * o.x[3] + f.c[4] * o.x[4]
            AS node_predicted,
        f.l[1] * o.loop_x[1] + f.l[2] * o.loop_x[2] + f.l[3] * o.loop_x[3] + o.loop_fixed_ms
@@ -562,10 +574,11 @@ SELECT name, kind, round(node_ms::numeric, 3) AS node_ms,
        round(((node_predicted - node_ms) / node_ms * 100)::numeric) AS node_error_pct,
        round(loop_ms::numeric, 3) AS loop_ms, round(loop_predicted::numeric, 3) AS loop_predicted,
        round(((loop_predicted - loop_ms) / loop_ms * 100)::numeric) AS loop_error_pct,
-       choice, planned_ratio, planned, faster,
+       choice, planned_ratio, planned, round(planner_ratio::numeric, 2) AS planner_ratio,
+       planner, faster,
        CASE WHEN kind = 'inner' THEN ''
-            WHEN planned = 'lookup' AND faster = 'loop' THEN 'TAKEN SLOWER'
-            WHEN planned = 'loop' AND faster = 'lookup' THEN 'missed'
+            WHEN planner = 'lookup' AND faster = 'loop' THEN 'TAKEN SLOWER'
+            WHEN planner = 'loop' AND faster = 'lookup' THEN 'missed'
             ELSE 'right' END AS verdict
 FROM (SELECT p.*,
              CASE WHEN (node_ms < loop_ms) = (node_predicted < loop_predicted) THEN 'right' ELSE 'WRONG' END
@@ -573,6 +586,7 @@ FROM (SELECT p.*,
              -- The planner's: its counts, and the lookup within 0.8 of the loop.
              round((node_planned / loop_planned)::numeric, 2) AS planned_ratio,
              CASE WHEN node_planned <= 0.8 * loop_planned THEN 'lookup' ELSE 'loop' END AS planned,
+             CASE WHEN p.planner_ratio <= 0.8 THEN 'lookup' ELSE 'loop' END AS planner,
              CASE WHEN node_ms < loop_ms THEN 'lookup' ELSE 'loop' END AS faster
       FROM prediction AS p) AS q
 ORDER BY kind, name;

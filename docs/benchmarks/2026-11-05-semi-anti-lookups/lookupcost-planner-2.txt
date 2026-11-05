@@ -1,0 +1,129 @@
+CREATE VIEW
+       name        | core_join_ms | node_join_ms | node_over_core 
+-------------------+--------------+--------------+----------------
+ anti_all          |        2.271 |        1.413 |           0.62
+ anti_both_sides   |        2.656 |        1.720 |           0.65
+ anti_fifth        |        2.774 |        1.253 |           0.45
+ anti_none         |        3.136 |        1.108 |           0.35
+ anti_shuffled     |        6.500 |        8.151 |           1.25
+ anti_three_fifths |        2.511 |        1.346 |           0.54
+ anti_two_keys     |        3.103 |        1.895 |           0.61
+ date              |        3.080 |        1.459 |           0.47
+ four              |        0.883 |        0.465 |           0.53
+ four_5000         |        3.400 |        1.812 |           0.53
+ ordered           |        2.843 |        1.374 |           0.48
+ ordered_20k       |       11.200 |        5.762 |           0.51
+ scattered         |        5.103 |        3.126 |           0.61
+ semi_all          |        2.372 |        1.423 |           0.60
+ semi_both_sides   |        2.693 |        1.616 |           0.60
+ semi_fifth        |        2.814 |        1.232 |           0.44
+ semi_none         |        2.982 |        1.127 |           0.38
+ semi_shuffled     |        5.444 |        8.063 |           1.48
+ semi_three_fifths |        2.491 |        1.288 |           0.52
+ semi_two_keys     |        3.188 |        1.598 |           0.50
+ shape_22          |       45.506 |       26.291 |           0.58
+ shape_24          |       50.494 |       28.098 |           0.56
+ shape_24_shuffled |      140.531 |      151.315 |           1.08
+ shape_31          |       62.907 |       35.480 |           0.56
+ shape_32          |       65.346 |       37.376 |           0.57
+ shape_33          |       67.533 |       38.617 |           0.57
+ shuffled          |        8.417 |        8.962 |           1.06
+ shuffled_20k      |       36.026 |       37.761 |           1.05
+ sparse            |        4.231 |        4.068 |           0.96
+ sparse_4          |        8.058 |        6.039 |           0.75
+ sparse_shuffled   |        4.204 |        4.098 |           0.97
+ stride            |        6.634 |        6.631 |           1.00
+ text              |        8.188 |        8.405 |           1.03
+(33 rows)
+
+       name        | lookups | est_batches |  keys  | est_keys | descents | est_descents | fetched | est_rows | copied | est_copied 
+-------------------+---------+-------------+--------+----------+----------+--------------+---------+----------+--------+------------
+ date              |     103 |         102 |   5000 |     4837 |      238 |          235 |    5000 |     4837 |      0 |          0
+ four              |      26 |          25 |   1250 |     1202 |       26 |           33 |    5000 |     4808 |      0 |          0
+ four_5000         |     103 |         102 |   5000 |     4837 |      103 |          131 |   20000 |    19348 |      0 |          0
+ ordered           |     103 |         102 |   5000 |     4837 |      238 |          235 |    5000 |     4837 |      0 |          0
+ ordered_20k       |     413 |         419 |  20000 |    19851 |      948 |          964 |   20000 |    19851 |      0 |          0
+ scattered         |     103 |         102 |   5000 |     4837 |      205 |          235 |    5000 |     4837 |      0 |          0
+ shape_22          |    1590 |        1073 |  68000 |    67167 |     4523 |         6560 |   68000 |    67167 |  39447 |      66939
+ shape_24          |    1980 |        1285 |  76000 |    75073 |     5024 |         6771 |   76000 |    75073 |  39719 |      72654
+ shape_24_shuffled |    1980 |        1285 |  76000 |    75073 |    76000 |        74680 |   76000 |    75073 |  39719 |      72654
+ shape_31          |    2843 |        2816 |  96000 |    95560 |     6091 |         8303 |   96000 |    95560 |  31604 |      53430
+ shape_32          |    3092 |        3209 | 100000 |    99673 |     6521 |         8696 |  100000 |    99673 |  28910 |      42701
+ shape_33          |    3216 |        3530 | 104000 |   103580 |     6712 |         9017 |  104000 |   103580 |  25964 |      32222
+ shuffled          |     103 |         102 |   5000 |     4837 |     5000 |         4817 |    5000 |     4837 |      0 |          0
+ shuffled_20k      |     413 |         419 |  20000 |    19851 |    20000 |        19767 |   20000 |    19851 |      0 |          0
+ sparse            |      34 |          34 |   2000 |     2080 |     2000 |         2080 |    2000 |     2080 |   1998 |       2087
+ sparse_4          |     127 |         122 |   8000 |     7660 |     2164 |         5608 |    8000 |     7660 |   7993 |       7685
+ sparse_shuffled   |      34 |          34 |   2000 |     2080 |     2000 |         2069 |    2000 |     2080 |   1998 |       2087
+ stride            |     103 |         102 |   5000 |     4837 |     1710 |         4817 |    5000 |     4837 |      0 |          0
+ text              |     103 |         102 |   5000 |     4837 |     3141 |         4108 |    5000 |     4837 |      0 |          0
+(19 rows)
+
+       name        | keys | scanned | est_rows | fetched | loop_rows | est_loop_rows | matches | loop_checks | est_checks 
+-------------------+------+---------+----------+---------+-----------+---------------+---------+-------------+------------
+ anti_all          | 5000 |   20000 |    19348 |   20000 |      5000 |          4837 |       0 |        5000 |       4837
+ anti_both_sides   | 5000 |   20000 |    19348 |   20000 |     10259 |         11645 |   10287 |       10259 |      11645
+ anti_fifth        | 5000 |   20000 |    19348 |    4082 |     14804 |         14329 |       0 |        3018 |       2833
+ anti_none         | 5000 |   20000 |    19348 |       0 |     20000 |         19345 |       0 |           0 |          2
+ anti_shuffled     | 5000 |   20000 |    19348 |   12077 |      8021 |          7868 |       0 |        4879 |       4712
+ anti_three_fifths | 5000 |   20000 |    19348 |   12074 |      8158 |          7868 |       0 |        4876 |       4712
+ anti_two_keys     | 5000 |   20000 |    19348 |   20000 |     16070 |         18181 |    5000 |       16070 |      18181
+ semi_all          | 5000 |   20000 |    19348 |   20000 |      5000 |          4837 |       0 |        5000 |       4837
+ semi_both_sides   | 5000 |   20000 |    19348 |   20000 |     10259 |         11645 |   10287 |       10259 |      11645
+ semi_fifth        | 5000 |   20000 |    19348 |    4082 |     14804 |         14329 |       0 |        3018 |       2833
+ semi_none         | 5000 |   20000 |    19348 |       0 |     20000 |         19345 |       0 |           0 |          2
+ semi_shuffled     | 5000 |   20000 |    19348 |   12077 |      8021 |          7868 |       0 |        4879 |       4712
+ semi_three_fifths | 5000 |   20000 |    19348 |   12074 |      8158 |          7868 |       0 |        4876 |       4712
+ semi_two_keys     | 5000 |   20000 |    19348 |   20000 |     16070 |         18181 |    5000 |       16070 |      18181
+(14 rows)
+
+CREATE VIEW
+CREATE VIEW
+ join_lookup_batch_cost | join_lookup_descent_cost | join_lookup_key_cost | join_lookup_copy_cost | join_loop_key_cost | join_loop_descent_cost | join_loop_row_cost | unit_ns 
+------------------------+--------------------------+----------------------+-----------------------+--------------------+------------------------+--------------------+---------
+                  6.393 |                    5.525 |                0.286 |                0.2103 |              1.422 |                  4.077 |             0.1420 |   328.7
+(1 row)
+
+ copy_cost_alone | samples 
+-----------------+---------
+          0.8036 |       9
+(1 row)
+
+CREATE VIEW
+       name        | kind  | node_ms | node_predicted | node_error_pct | loop_ms | loop_predicted | loop_error_pct | choice | planned_ratio | planned | planner_ratio | planner | faster | verdict 
+-------------------+-------+---------+----------------+----------------+---------+----------------+----------------+--------+---------------+---------+---------------+---------+--------+---------
+ anti_all          | anti  |   1.413 |          2.315 |             64 |   2.271 |          2.708 |             19 | right  |          0.88 | loop    |          0.84 | loop    | lookup | missed
+ anti_both_sides   | anti  |   1.720 |          2.340 |             36 |   2.656 |          2.971 |             12 | right  |          0.79 | lookup  |          0.75 | lookup  | lookup | right
+ anti_fifth        | anti  |   1.253 |          1.768 |             41 |   2.774 |          3.165 |             14 | right  |          0.58 | lookup  |          0.53 | lookup  | lookup | right
+ anti_none         | anti  |   1.108 |          1.646 |             49 |   3.136 |          3.408 |              9 | right  |          0.50 | lookup  |          0.45 | lookup  | lookup | right
+ anti_shuffled     | anti  |   8.151 |         10.475 |             29 |   6.500 |          9.410 |             45 | right  |          1.12 | loop    |          1.16 | loop    | loop   | right
+ anti_three_fifths | anti  |   1.346 |          2.038 |             51 |   2.511 |          2.855 |             14 | right  |          0.74 | lookup  |          0.69 | lookup  | lookup | right
+ anti_two_keys     | anti  |   1.895 |          2.346 |             24 |   3.103 |          3.252 |              5 | right  |          0.72 | lookup  |          0.67 | lookup  | lookup | right
+ date              | inner |   1.459 |          1.502 |              3 |   3.080 |          2.888 |             -6 | right  |          0.53 | lookup  |          0.50 | lookup  | lookup | 
+ four              | inner |   0.465 |          0.614 |             32 |   0.883 |          0.852 |             -3 | right  |          0.75 | lookup  |          0.67 | lookup  | lookup | 
+ four_5000         | inner |   1.812 |          2.451 |             35 |   3.400 |          3.408 |              0 | right  |          0.74 | lookup  |          0.67 | lookup  | lookup | 
+ ordered           | inner |   1.374 |          1.502 |              9 |   2.843 |          2.888 |              2 | right  |          0.53 | lookup  |          0.50 | lookup  | lookup | 
+ ordered_20k       | inner |   5.762 |          6.004 |              4 |  11.200 |         11.548 |              3 | right  |          0.52 | lookup  |          0.50 | lookup  | lookup | 
+ scattered         | inner |   3.126 |          1.445 |            -54 |   5.103 |          2.844 |            -44 | right  |          0.53 | lookup  |          0.50 | lookup  | lookup | 
+ shape_22          | inner |  26.291 |         25.786 |             -2 |  45.506 |         47.957 |              5 | right  |          0.63 | lookup  |          0.53 | lookup  | lookup | 
+ shape_24          | inner |  28.098 |         28.911 |              3 |  50.494 |         52.068 |              3 | right  |          0.63 | lookup  |          0.53 | lookup  | lookup | 
+ shape_24_shuffled | inner | 151.315 |        151.115 |              0 | 140.531 |        139.486 |             -1 | right  |          1.08 | loop    |          1.09 | loop    | loop   | 
+ shape_31          | inner |  35.480 |         35.550 |              0 |  62.907 |         62.346 |             -1 | right  |          0.66 | lookup  |          0.55 | lookup  | lookup | 
+ shape_32          | inner |  37.376 |         37.345 |              0 |  65.346 |         64.402 |             -1 | right  |          0.66 | lookup  |          0.56 | lookup  | lookup | 
+ shape_33          | inner |  38.617 |         38.436 |              0 |  67.533 |         66.458 |             -2 | right  |          0.66 | lookup  |          0.56 | lookup  | lookup | 
+ shuffled          | inner |   8.962 |          9.701 |              8 |   8.417 |          9.269 |             10 | right  |          1.05 | loop    |          1.09 | loop    | loop   | 
+ shuffled_20k      | inner |  37.761 |         38.807 |              3 |  36.026 |         37.075 |              3 | right  |          1.05 | loop    |          1.09 | loop    | loop   | 
+ sparse            | inner |   4.068 |          4.003 |             -2 |   4.231 |          3.815 |            -10 | WRONG  |          1.08 | loop    |          1.09 | loop    | lookup | 
+ sparse_4          | inner |   6.039 |          5.943 |             -2 |   8.058 |         14.374 |             78 | right  |          0.83 | loop    |          0.84 | loop    | lookup | 
+ sparse_shuffled   | inner |   4.098 |          4.003 |             -2 |   4.204 |          3.815 |             -9 | WRONG  |          1.07 | loop    |          1.09 | loop    | lookup | 
+ stride            | inner |   6.631 |          4.037 |            -39 |   6.634 |          4.861 |            -27 | right  |          1.05 | loop    |          1.09 | loop    | lookup | 
+ text              | inner |   8.405 |          6.727 |            -20 |   8.188 |          6.778 |            -17 | WRONG  |          1.05 | loop    |          1.10 | loop    | loop   | 
+ semi_all          | semi  |   1.423 |          2.349 |             65 |   2.372 |          2.708 |             14 | right  |          0.89 | loop    |          0.84 | loop    | lookup | missed
+ semi_both_sides   | semi  |   1.616 |          2.363 |             46 |   2.693 |          2.971 |             10 | right  |          0.80 | lookup  |          0.74 | lookup  | lookup | right
+ semi_fifth        | semi  |   1.232 |          1.780 |             44 |   2.814 |          3.165 |             12 | right  |          0.58 | lookup  |          0.53 | lookup  | lookup | right
+ semi_none         | semi  |   1.127 |          1.612 |             43 |   2.982 |          3.408 |             14 | right  |          0.49 | lookup  |          0.45 | lookup  | lookup | right
+ semi_shuffled     | semi  |   8.063 |         10.502 |             30 |   5.444 |          9.410 |             73 | right  |          1.12 | loop    |          1.16 | loop    | loop   | right
+ semi_three_fifths | semi  |   1.288 |          2.070 |             61 |   2.491 |          2.855 |             15 | right  |          0.75 | lookup  |          0.69 | lookup  | lookup | right
+ semi_two_keys     | semi  |   1.598 |          2.346 |             47 |   3.188 |          3.252 |              2 | right  |          0.72 | lookup  |          0.66 | lookup  | lookup | right
+(33 rows)
+
