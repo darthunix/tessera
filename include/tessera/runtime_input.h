@@ -41,6 +41,9 @@ extern void tess_input_set_request(TessInput *input, const TessRequest *request)
 /*
  * Fetch the child's next batch, or NULL at the end of its input. The
  * previous batch must have been finished. The batch belongs to the child.
+ * On a core of the Greenplum family the end is kept until
+ * tess_input_rescan: asked again, the input gives NULL without running the
+ * child, which may have been squelched by then.
  */
 extern TessBatch *tess_input_next(TessInput *input);
 
@@ -79,7 +82,7 @@ extern bool tess_input_finished(TessInput *input);
 /* Mark the active batch consumed, unless a forwarding parent already did. */
 extern void tess_input_finish(TessInput *input);
 
-/* Forget cached and active pointers after the caller rescanned the child. */
+/* Forget cached and active pointers, and the end, after the caller rescanned the child. */
 extern void tess_input_rescan(TessInput *input);
 
 /*
