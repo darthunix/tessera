@@ -4,6 +4,8 @@
 
 #include "postgres.h"
 
+#include "tessera/compat.h"
+
 #include "access/htup_details.h"
 #include "access/tupdesc.h"
 #include "access/tupmacs.h"
