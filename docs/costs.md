@@ -388,6 +388,17 @@ lookup in 12 of the 26 samples of the two runs, each where it ran
 faster, and left to the nested loop four lookups that ran 3 to 21 %
 faster.
 
+The semi and anti samples, which are not fitted (pg-lookupcost-DzhUpz,
+Loy1vl): the model chose as the times did in all 14 of both runs. It
+counts a semi or anti lookup's time 4 to 53 % high and the loop's 8 to
+75 % high, so a lookup that runs in 0.58 of the loop's time where every
+row of a key passes is left to the loop at 0.84. In TPC-H at SF 1 the
+model takes no semi or anti lookup, and the lookups forced show it
+right: Q04's ran even with the core's loop, reading four rows a key
+where the loop reads about two, and Q21's anti join ran 8 ms slower in
+its own place, reading all of an order's lines (the runs of
+`docs/benchmarks/2026-11-05-semi-anti-lookups`).
+
 ## Aggregates
 
 `TessAgg` groups and aggregates a batch child's rows, the kernels folding
