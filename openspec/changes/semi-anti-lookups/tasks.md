@@ -6,7 +6,7 @@
 
 ## 2. The work
 
-- [ ] 2.1 `bench/pg/run.sh`: every start names the port, the server's
+- [x] 2.1 `bench/pg/run.sh`: every start names the port, the server's
       data directory checked before a family on both of `measure`'s
       paths. Check: `bench/pg/run.sh measure tax` after a start on
       another port; `cargo ab measure` (the path of
@@ -14,7 +14,7 @@
       another cluster, which must stop
 - [ ] 2.2 The families `tax` and `win` of `deform-past-varlena` again,
       their runs in its benchmarks. Check: the runs
-- [ ] 2.3 The model's counts kept apart, the semi and anti counts from
+- [x] 2.3 The model's counts kept apart, the semi and anti counts from
       the core's factors, `Lookup Estimate`'s new fields; INNER and
       LEFT priced as before. Check: `make installcheck`; the plans of
       `test/sql/index_join.sql` unchanged but for the estimate

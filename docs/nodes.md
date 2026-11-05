@@ -2162,7 +2162,8 @@ tables of batches with keys), and with the costs `Lookup Estimate`, the
 planner's counts and the two times of the cost model
 ([costs.md](costs.md), the index join): the batches it looks up, gathered
 where its input gathers, the keys, the lookup's descents, the rows, the
-two times, the outer values copied and the nested loop's descents.
+two times, the outer values copied, the nested loop's descents, its
+rows, and the candidate pairs checked.
 
 In this mode the join builds no table at its start and never treats an
 empty table as the end. It asks its outer child for batches of at most
