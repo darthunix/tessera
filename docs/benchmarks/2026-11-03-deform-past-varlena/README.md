@@ -82,15 +82,25 @@ without the step against with it (`kIT4AD`, `615KCv`, `1Db6Ay` against
 
 ## The families
 
-`cargo ab measure`, base `06297a9f` against `46a8957f`.
+`cargo ab measure`, base `06297a9f` against `46a8957f`, measured again
+on 2026-11-05. The runs first cited here measured another worktree's
+bench cluster: `bench/pg/run.sh` restarted its own cluster on the port
+of its last start and sent its queries to whatever listened on
+`PGPORT`, so both sides ran the same foreign build. The runs below come
+from the harness that starts the cluster on `PGPORT` and checks the
+server it reaches, at the data's scale of 1, a system process of macOS
+taking about one core.
 
-- `tax` ([`ab-tax.md`](ab-tax.md)): every case even; `limit_1`, of 4
-  microseconds, was flagged at 1.125 and measured again alone with 101
-  repetitions in three rounds at 1.000.
-- `win` ([`ab-win.md`](ab-win.md)): the three cases whose filters read
-  a text column, `wide`, `mixed` and `mixed_text`, at 7 repetitions;
-  the others read integer columns at cached offsets, which the change
-  leaves alone, and the family's 40 cases at the data's scale of 10 do
-  not fit five minutes. `mixed_text` was flagged at 1.022 and measured
-  again alone with 31 repetitions in three rounds: 1.011 by the least
-  time, 0.938 by the median, the control 1.004.
+- `tax` ([`ab-tax.md`](ab-tax.md)): `mixed_limit` was flagged at 1.033
+  and 1.067 by the median against a control of 0.966, `offset_1m` at
+  1.035; measured again alone with 101 repetitions in three rounds,
+  neither was flagged: `mixed_limit` 1.027 by the least time, 1.043 by
+  the median against a control of 1.054
+  ([`ab-tax-mixed_limit.md`](ab-tax-mixed_limit.md)), `offset_1m`
+  1.008 and 0.982 ([`ab-tax-offset_1m.md`](ab-tax-offset_1m.md)). No
+  other case was flagged.
+- `win` ([`ab-win.md`](ab-win.md)): the family's 32 cases at 7
+  repetitions; `count_all` was flagged at 1.022 by the least time and
+  measured again alone with 31 repetitions in three rounds at 1.007 and
+  1.000 ([`ab-win-count_all.md`](ab-win-count_all.md)). No other case
+  was flagged; the controls moved from 0.87 to 1.04.
