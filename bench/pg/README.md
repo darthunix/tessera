@@ -108,7 +108,12 @@ query down, and where it can, does it speed one up.
   and bigint against int, four rows a key and a LEFT join with half the
   keys missing; outer rows spread over every batch, ten rows, 1000 keys
   repeated over 20 000 rows (Memoize), 20 000 rows where the planner
-  takes a hash join, and a key one row in 100 holds.
+  takes a hash join, and a key one row in 100 holds; semi and anti joins
+  by a unique key, with half the keys missing, and over `bench_four`
+  (four rows a key, a column `r` each row takes apart of its key's
+  others, no index on it) with clauses on `r` that pass none, a fifth,
+  three fifths and all of a key's rows, the keys in order and shuffled,
+  and a clause over both sides.
 - **index** (`index.sql`): reads through the indexes of `bench_idx` (2 M
   rows per multiplier, `k` scattered over the pages, `w` of 97 values,
   a btree of `id` and a BRIN index of the day `d`, both in the order of the
@@ -176,13 +181,21 @@ query down, and where it can, does it speed one up.
   an index of it, and varies the keys of a batch (in the index's order
   and shuffled), their stride, the rows a batch holds, the rows a key
   and the key's type. Each runs with the node, its lookup forced by its
-  prices set to nothing for the plan, and with the core's nested loop
-  over the same index; each own time is the query's less its outer
-  side's alone. The summary prints both times, the planner's counts of
-  batches, keys, descents and rows against the plan's, the six fitted
-  prices, and every sample against the model with its error, the choice
-  the model makes between the two times, and the one the planner makes
-  from its own counts within the margin. The model is described in
+  prices set to nothing and the nested loop's key priced past the
+  margin, for the plan, and with the core's nested loop over the same
+  index; each own time is the query's less its outer side's alone. Semi
+  and anti samples over `bench_four` check the model and are not
+  fitted: their nested loop's rows to the first match and the pairs its
+  join filter checks come from a query that walks each key's rows in
+  the index's order, the probe's pairs from the join's `Matches`. The
+  summary prints both times, the planner's counts of batches, keys,
+  descents and rows against the plan's, and of the semi and anti
+  samples the rows read, built, to the first match and checked, the
+  fitted prices, and every sample against the model with its error, the
+  choice the model makes between the two times, the one the planner
+  makes from its own counts within the margin, and of a semi or anti
+  sample whether a lookup taken runs slower (`TAKEN SLOWER`) or one that
+  runs faster is left to the loop (`missed`). The model is described in
   [docs/costs.md](../../docs/costs.md).
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of

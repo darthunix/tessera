@@ -21,7 +21,7 @@
 - [x] 2.4 Lookups for semi and anti joins in the planner and in
       `join_begin`, and their tests. Check: `make installcheck` on
       PostgreSQL master with assertions; `make crosscheck`
-- [ ] 2.5 `lookupcost`: the rows read apart from the rows built; the
+- [x] 2.5 `lookupcost`: the rows read apart from the rows built; the
       semi and anti samples, one of two keys, each lookup forced past
       the margin, the loop's rows by a query in the index's order, the
       probe's checks by `Matches`; `indexjoin`'s semi and anti cases.
