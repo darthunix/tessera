@@ -213,7 +213,8 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		state->lookup_scan = tess_heap_lookup_scan(state->inner);
 		if (state->lookup_scan == NULL || state->lookup_key >= state->keys.nkeys ||
-			(state->jointype != JOIN_INNER && state->jointype != JOIN_LEFT))
+			(state->jointype != JOIN_INNER && state->jointype != JOIN_LEFT &&
+			 state->jointype != JOIN_SEMI && state->jointype != JOIN_ANTI))
 			elog(ERROR, "TessHashJoin received foreign plan data");
 		get_typlenbyvalalign(state->lookup_type, &state->lookup_typlen,
 							 &state->lookup_typbyval, &state->lookup_typalign);

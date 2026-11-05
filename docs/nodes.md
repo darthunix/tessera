@@ -2148,22 +2148,22 @@ describes.
 A join of a few outer rows with a large indexed table reads the whole
 inner side into its table, where the core's nested loop descends the
 index once an outer row: TPC-H keeps such loops at scale 1 (Q5 and Q7
-over `lineitem_pkey`, Q8 and Q21 over `orders_pkey`). For INNER and
-LEFT joins the node has an index lookup mode: for each outer batch of at
-most 64 rows it rescans its inner side, gives the batch's keys as one
-array to TessHeapScan in its lookup mode, and builds a table of the
-rows found before it probes the batch. EXPLAIN shows `Inner Lookups:
-per outer batch`; with `ANALYZE`, `Lookups` (the array scans), `Lookup
-Keys` (the keys given, duplicates included, NULLs not), `Index
-Searches` (the btree's descents) and `Overrun`, the most any batch's
-table took past the `hash_mem` in force when it was built, each summed
-over the participants of a parallel plan; with `VERBOSE`, `Builds` (the
-tables of batches with keys), and with the costs `Lookup Estimate`, the
-planner's counts and the two times of the cost model
-([costs.md](costs.md), the index join): the batches it looks up, gathered
-where its input gathers, the keys, the lookup's descents, the rows, the
-two times, the outer values copied, the nested loop's descents, its
-rows, and the candidate pairs checked.
+over `lineitem_pkey`, Q8 and Q21 over `orders_pkey`). For INNER, LEFT,
+SEMI and ANTI joins the node has an index lookup mode: for each outer
+batch of at most 64 rows it rescans its inner side, gives the batch's
+keys as one array to TessHeapScan in its lookup mode, and builds a
+table of the rows found before it probes the batch. EXPLAIN shows
+`Inner Lookups: per outer batch`; with `ANALYZE`, `Lookups` (the array
+scans), `Lookup Keys` (the keys given, duplicates included, NULLs not),
+`Index Searches` (the btree's descents) and `Overrun`, the most any
+batch's table took past the `hash_mem` in force when it was built, each
+summed over the participants of a parallel plan; with `VERBOSE`,
+`Builds` (the tables of batches with keys), and with the costs `Lookup
+Estimate`, the planner's counts and the two times of the cost model
+([costs.md](costs.md), the index join): the batches it looks up,
+gathered where its input gathers, the keys, the lookup's descents, the
+rows, the two times, the outer values copied, the nested loop's
+descents, its rows, and the candidate pairs checked.
 
 In this mode the join builds no table at its start and never treats an
 empty table as the end. It asks its outer child for batches of at most
@@ -2189,7 +2189,8 @@ spill. A rescan of the join forgets the batch's table whatever
 parameter changed. Under a Gather each participant looks up the keys of
 its own batches with a lookup scan of its own, not parallel-aware.
 
-The planner offers the mode for INNER and LEFT joins whose inner side
+The planner offers the mode for INNER, LEFT, SEMI and ANTI joins, those
+that keep the outer side alone, whose inner side
 passes the scan's eligibility, with a btree index (`amsearcharray`),
 not partial, not hypothetical, whose first column is a column of the
 table and the inner side of one of the join's equalities. The operator,
@@ -2211,8 +2212,12 @@ statistics gets no lookup, nor does a table past `effective_cache_size`.
 The path is then offered only where its time is within 0.8 of the
 core's nested loop's over the same keys ([costs.md](costs.md)).
 
-SEMI and ANTI joins keep the core's nested loop: it stops at the first
-match, where the mode reads every row of a key. A batch whose keys find
+A SEMI or ANTI join probes a batch's table as in the hash mode: an
+outer row stops at its first pair, and a row whose key is NULL has
+none, so an anti join returns it. The core's nested loop stops at the
+first match too, where the mode reads every row of a key; its model
+counts each side's rows to the match ([costs.md](costs.md), the index
+join). A batch whose keys find
 more rows than `hash_mem` holds is built whole; splitting its keys into
 lookups that fit is left for later.
 
@@ -2317,11 +2322,19 @@ nondeterministic collation refused, each beside an index or table the
 mode takes; a policy of the inner table; a skewed key past `hash_mem`
 whose `Overrun` stays when `work_mem` is raised during the query; no
 Bloom filter; a Gather with and without the leader and its rescan, the
-counters summed. At the default prices it checks the cost: keys of a
-batch next to each other take the lookup, keys spread over the index
-and batches of one key the core's nested loop, a table past
-`effective_cache_size` none, and the planner's counts serially and per
-participant under a Gather.
+counters summed. Semi and anti joins, the nested loop's price raised
+for the lookup to pass the margin: keys found, absent and NULL; an anti
+join made of a LEFT join; keys repeated in a batch with inner clauses
+that pass none, some and all of a key's rows, and a clause over both
+sides; a numeric key checked again; a correlated rescan; a table past
+`hash_mem`; a Gather with and without the leader; and the planner's
+rows to the first match and pairs checked beside the rows the core's
+nested loop reads, for four rows a key of which one, two and none
+pass. At the default prices it checks the cost: keys of a batch next
+to each other take the lookup, keys spread over the index and batches
+of one key the core's nested loop, a table past `effective_cache_size`
+none, and the planner's counts serially and per participant under a
+Gather.
 
 ## TessSort
 
