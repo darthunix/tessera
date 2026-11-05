@@ -9,6 +9,7 @@
 )]
 
 use std::ptr;
+use tessera_kernels::varlena;
 
 use tessera_capi::c::{
     Code, DatumColumn, Mask, Status, TextArg, tess_text_compare, tess_text_lengths, tess_text_like,
@@ -35,21 +36,21 @@ impl Strings {
 
     /// A string with a 1-byte header, as a table stores a short one.
     fn short(&mut self, text: &str) -> u64 {
-        let mut bytes = vec![(((text.len() + 1) << 1) | 1) as u8];
+        let mut bytes = vec![varlena::short_header(text.len() + 1)];
         bytes.extend_from_slice(text.as_bytes());
         self.add(&bytes)
     }
 
     /// A string with a 4-byte header.
     fn long(&mut self, text: &str) -> u64 {
-        let mut bytes = (((text.len() + 4) as u32) << 2).to_le_bytes().to_vec();
+        let mut bytes = varlena::long_header(text.len() + 4).to_vec();
         bytes.extend_from_slice(text.as_bytes());
         self.add(&bytes)
     }
 
     /// A header of a compressed value: never read in place.
     fn compressed(&mut self) -> u64 {
-        self.add(&(((12_u32) << 2) | 0b10).to_le_bytes())
+        self.add(&varlena::compressed_header(12))
     }
 }
 

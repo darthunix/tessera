@@ -11,6 +11,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use std::ptr;
 use std::slice;
+use tessera_kernels::varlena;
 
 use anyhow::Result;
 use tessera_capi::c::sort_flags::{DESCENDING, NULLABLE, NULLS_FIRST};
@@ -1051,7 +1052,7 @@ fn sum_states_accumulate_through_the_entry_point() -> Result<()> {
         .map(|&value| int32::murmurhash32(value as u32))
         .collect();
     // NaN as a short varlena: a 1-byte header of 3 bytes, the header word 0xC000.
-    let nan = [7_u8, 0x00, 0xC0, 0];
+    let nan = [varlena::short_header(3), 0x00, 0xC0, 0];
     let numerics: Vec<u64> = (0..nrows as i64)
         .map(|row| {
             if row == 5 {
@@ -1247,9 +1248,9 @@ fn sum_states_accumulate_through_the_entry_point() -> Result<()> {
 fn varlena(body: Vec<u8>, short: bool) -> Vec<u8> {
     let mut out = Vec::new();
     if short {
-        out.push((((body.len() + 1) << 1) | 1) as u8);
+        out.push(varlena::short_header(body.len() + 1));
     } else {
-        out.extend_from_slice(&(((body.len() + 4) as u32) << 2).to_ne_bytes());
+        out.extend_from_slice(&varlena::long_header(body.len() + 4));
     }
     out.extend(body);
     out

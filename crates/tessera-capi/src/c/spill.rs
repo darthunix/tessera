@@ -11,12 +11,13 @@ use anyhow::{Context, Result, bail, ensure};
 use relspill::{BlockHeader, BlockKind, Bounds, HEADER_SIZE, columns, plan};
 use tessera_kernels::spill_columns::{self, ColumnChunks, RowValues, Value, ValueEnds};
 use tessera_kernels::table::{Partitions, PayloadColumns};
+use tessera_kernels::varlena::{self, Kind};
 
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
 use super::table::{slots, values};
-use super::varlena::{ondisk_body, varlena_size};
+use super::varlena::varlena_size;
 
 /// `TessSpillHeader`: what a spilled block holds.
 #[repr(C)]
@@ -737,24 +738,28 @@ pub unsafe extern "C" fn tess_spill_columns_pair(
 /// `typlen` its type's length: a fixed length within them; a varlena by
 /// its header, read by bytes as a damaged one may lie at any byte, a
 /// compressed one holding its 8 bytes of header, an external one only a
-/// pointer to data on disk; a C string at its NUL. Little-endian headers,
-/// as `varlena.rs` reads them. The C of `tess_spill_value_fits` keeps the
+/// pointer to data on disk; a C string at its NUL. Headers in the core's
+/// layout, as [`varlena`] reads them. The C of `tess_spill_value_fits` keeps the
 /// same rule for the readers that are not moved yet.
 pub fn value_ends(typlen: i16, rest: &[u8]) -> bool {
     match typlen {
         len if len > 0 => len as usize <= rest.len(),
         -1 => match rest {
-            [] | [0x01] => false,
-            // An external value: a 2-byte header, and a tag of data on
-            // disk, the body of its pointer after it.
-            [0x01, tag, ..] => ondisk_body(*tag).is_some_and(|body| 2 + body <= rest.len()),
-            [first, ..] if first & 0x01 == 0x01 => usize::from(first >> 1) <= rest.len(),
-            _ => rest.first_chunk::<4>().is_some_and(|header| {
-                let header = u32::from_le_bytes(*header);
-                let size = (header >> 2) as usize;
-                let least = if header & 0x03 == 0x02 { 8 } else { 4 };
-                size >= least && size <= rest.len()
-            }),
+            [] => false,
+            [first, after @ ..] => match varlena::kind(*first) {
+                // An external value: its header, and a tag of data on
+                // disk, the body of its pointer after it.
+                Kind::External => after
+                    .first()
+                    .and_then(|tag| varlena::on_disk_body(*tag))
+                    .is_some_and(|body| varlena::EXTERNAL_HEADER + body <= rest.len()),
+                Kind::Short(size) => size <= rest.len(),
+                long => rest.first_chunk::<4>().is_some_and(|header| {
+                    let size = varlena::long_size(*header);
+                    let least = if long == Kind::Compressed { 8 } else { 4 };
+                    size >= least && size <= rest.len()
+                }),
+            },
         },
         -2 => rest.contains(&0),
         _ => false,

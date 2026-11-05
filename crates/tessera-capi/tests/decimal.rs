@@ -9,6 +9,7 @@
 )]
 
 use std::ptr;
+use tessera_kernels::varlena;
 
 use tessera_capi::c::{
     Code, DatumColumn, DecimalArg, Mask, Status, tess_decimal_compute, tess_decimal_filter,
@@ -50,14 +51,14 @@ impl Numerics {
     fn short(&mut self, value: i64, scale: u32) -> u64 {
         let mut out = [0; NUMERIC_MAX];
         let size = Decimal::new(value, scale).unwrap().write(&mut out);
-        let mut bytes = vec![((size - 3) << 1) as u8 | 1];
+        let mut bytes = vec![varlena::short_header(size - 3)];
         bytes.extend_from_slice(&out[4..size]);
         self.add(&bytes)
     }
 
     /// NaN, with a 4-byte header.
     fn nan(&mut self) -> u64 {
-        let mut bytes = (6_u32 << 2).to_le_bytes().to_vec();
+        let mut bytes = varlena::long_header(6).to_vec();
         bytes.extend(0xC000_u16.to_ne_bytes());
         self.add(&bytes)
     }

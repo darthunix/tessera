@@ -20,6 +20,7 @@ use tessera_kernels::table::{
     CHUNK_HEADER, KEY_SLOT, RECORD_HASH_OFFSET, RECORD_HEADER, RECORD_NEXT_OFFSET,
     RECORD_SIZE_OFFSET,
 };
+use tessera_kernels::varlena;
 
 /// The rule of a split through its entry point: past two thirds of what
 /// the limit leaves, with bits left and fewer than nine tenths of the
@@ -762,7 +763,10 @@ fn a_chunk_of_columns_reads_back_through_its_entry_points() {
 
     // Short varlenas: a header byte of the length, 1 + row, and row bytes.
     let texts: Vec<Vec<u8>> = (0..5_u8)
-        .map(|row| [vec![((1 + row) << 1) | 1], vec![b'a' + row; row.into()]].concat())
+        .map(|row| {
+            let header = varlena::short_header(usize::from(1 + row));
+            [vec![header], vec![b'a' + row; row.into()]].concat()
+        })
         .collect();
     let words: Vec<u64> = (0..5).map(|row| 100 + row).collect();
     let varlenas: Vec<u64> = texts.iter().map(|text| text.as_ptr() as u64).collect();
@@ -934,10 +938,10 @@ fn a_chunk_of_columns_reads_back_through_its_entry_points() {
 fn rows_of_datums_append_to_a_chunk_of_columns() {
     use tessera_capi::c::{DatumColumn, Mask, tess_spill_columns_append, tess_spill_columns_init};
 
-    let short: Vec<u8> = [&[(6 << 1) | 1][..], b"hello"].concat();
-    let long: Vec<u8> = [&(12_u32 << 2).to_le_bytes()[..], b"abcdefgh"].concat();
-    let external: Vec<u8> = [&[0x01, 18][..], &[7; 16]].concat();
-    let unknown: Vec<u8> = vec![0x01, 9, 0, 0];
+    let short: Vec<u8> = [&[varlena::short_header(6)][..], b"hello"].concat();
+    let long: Vec<u8> = [&varlena::long_header(12)[..], b"abcdefgh"].concat();
+    let external: Vec<u8> = [&varlena::external_header(varlena::ON_DISK)[..], &[7; 16]].concat();
+    let unknown: Vec<u8> = [&varlena::external_header(9)[..], &[0, 0]].concat();
     let text = b"tessera\0".to_vec();
     let fixed: Vec<u8> = (0..16).collect();
     let words = [11_u64, 22, 33, 44];
@@ -1083,8 +1087,8 @@ fn rows_of_datums_append_to_a_chunk_of_columns() {
         // expanded object's pointer (read-only and read-write) is not
         // copied: it means nothing outside its process. A non-NULL Datum
         // of 0 points nowhere, and a type of length -3 has no rule of size.
-        let expanded_ro: Vec<u8> = [&[0x01, 2][..], &[7; 8]].concat();
-        let expanded_rw: Vec<u8> = [&[0x01, 3][..], &[7; 8]].concat();
+        let expanded_ro: Vec<u8> = [&varlena::external_header(2)[..], &[7; 8]].concat();
+        let expanded_rw: Vec<u8> = [&varlena::external_header(3)[..], &[7; 8]].concat();
         let expanded = "an expanded object, not flattened";
         let cases = [
             (unknown.as_ptr() as u64, -1, "an external varlena of tag 9"),
@@ -1137,7 +1141,7 @@ fn a_refused_value_past_two_to_the_23_rows_reports_its_own_reason() {
     use tessera_capi::c::{DatumColumn, Mask, tess_spill_columns_append, tess_spill_columns_init};
 
     let nrows = (1_usize << 23) + 1;
-    let expanded: Vec<u8> = [&[0x01, 2][..], &[7; 8]].concat();
+    let expanded: Vec<u8> = [&varlena::external_header(2)[..], &[7; 8]].concat();
     let mut datums = vec![0_u64; nrows];
     let mut nulls = vec![false; nrows];
     datums[nrows - 1] = expanded.as_ptr() as u64;
@@ -2028,22 +2032,33 @@ fn a_value_ends_by_its_type() {
     // A varlena of 16 bytes with a 4-byte header, one of 3 with a 1-byte
     // header, a compressed one of its 8 bytes of header alone, a TOAST
     // pointer to data on disk of 18 bytes, a C string, a fixed length.
-    let four: Vec<u8> = [&(16_u32 << 2).to_le_bytes()[..], &[7; 12]].concat();
-    let one = vec![3 << 1 | 1, 7, 7];
-    let compressed: Vec<u8> = [&(8_u32 << 2 | 0x02).to_le_bytes()[..], &[0; 4]].concat();
-    let external: Vec<u8> = [&[0x01, 18][..], &[0; 16]].concat();
-    // A pointer to data on disk of a TOAST table of 64-bit chunk ids.
-    let external8: Vec<u8> = [&[0x01, 4][..], &[0; 20]].concat();
+    let four: Vec<u8> = [&varlena::long_header(16)[..], &[7; 12]].concat();
+    let one = vec![varlena::short_header(3), 7, 7];
+    let compressed: Vec<u8> = [&varlena::compressed_header(8)[..], &[0; 4]].concat();
+    let external: Vec<u8> = [&varlena::external_header(varlena::ON_DISK)[..], &[0; 16]].concat();
     let string = b"tessera\0".to_vec();
-    for (typlen, value) in [
-        (-1, &four),
-        (-1, &one),
-        (-1, &compressed),
-        (-1, &external),
-        (-1, &external8),
-        (-2, &string),
-        (8, &vec![0; 8]),
-    ] {
+    #[cfg_attr(feature = "network-varlena", allow(unused_mut))]
+    let mut values = vec![
+        (-1, four),
+        (-1, one),
+        (-1, compressed),
+        (-1, external),
+        (-2, string),
+        (8, vec![0; 8]),
+    ];
+    // A pointer to data on disk of a TOAST table of 64-bit chunk ids,
+    // which Greengage's layout lacks.
+    #[cfg(not(feature = "network-varlena"))]
+    values.push((
+        -1,
+        [
+            &varlena::external_header(varlena::ON_DISK_OID8)[..],
+            &[0; 20],
+        ]
+        .concat(),
+    ));
+    for (typlen, value) in &values {
+        let typlen = *typlen;
         assert!(value_ends(typlen, value), "{typlen} {value:?}");
         assert!(
             !value_ends(typlen, &value[..value.len() - 1]),
@@ -2053,15 +2068,16 @@ fn a_value_ends_by_its_type() {
     // A header that says fewer bytes than a header, a compressed value of
     // fewer than its 8 bytes of header, an external pointer of another
     // tag, no bytes, a lone 0x01, and a length no type has.
-    let tiny = (3_u32 << 2).to_le_bytes();
-    let short_compressed: Vec<u8> = [&(7_u32 << 2 | 0x02).to_le_bytes()[..], &[0; 4]].concat();
-    let indirect: Vec<u8> = [&[0x01, 1][..], &[0; 16]].concat();
+    let tiny = varlena::long_header(3);
+    let short_compressed: Vec<u8> = [&varlena::compressed_header(7)[..], &[0; 4]].concat();
+    let indirect: Vec<u8> = [&varlena::external_header(varlena::INDIRECT)[..], &[0; 16]].concat();
+    let lone = &varlena::external_header(varlena::INDIRECT)[..1];
     for (typlen, value) in [
         (-1, &tiny[..]),
         (-1, &short_compressed[..]),
         (-1, &indirect[..]),
         (-1, &[][..]),
-        (-1, &[0x01][..]),
+        (-1, lone),
         (0, &[0; 8][..]),
         (-3, &[0; 8][..]),
     ] {
@@ -2071,7 +2087,8 @@ fn a_value_ends_by_its_type() {
 
 /// A TOAST pointer to data on disk is copied by its bytes whatever its
 /// kind: one of 64-bit chunk ids, VARTAG_ONDISK_OID8, of 22 bytes, as one
-/// of 32-bit ids of 18.
+/// of 32-bit ids of 18. Greengage's layout has no pointer of 64-bit ids.
+#[cfg(not(feature = "network-varlena"))]
 #[test]
 fn both_kinds_of_a_pointer_to_data_on_disk_append() {
     use tessera_capi::c::{DatumColumn, Mask, tess_spill_columns_append, tess_spill_columns_init};
