@@ -18,7 +18,7 @@
       the core's factors, `Lookup Estimate`'s new fields; INNER and
       LEFT priced as before. Check: `make installcheck`; the plans of
       `test/sql/index_join.sql` unchanged but for the estimate
-- [ ] 2.4 Lookups for semi and anti joins in the planner and in
+- [x] 2.4 Lookups for semi and anti joins in the planner and in
       `join_begin`, and their tests. Check: `make installcheck` on
       PostgreSQL master with assertions; `make crosscheck`
 - [ ] 2.5 `lookupcost`: the rows read apart from the rows built; the

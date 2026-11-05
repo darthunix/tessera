@@ -388,6 +388,130 @@ RESET tessera.join_lookup_batch_cost;
 RESET tessera.join_lookup_descent_cost;
 RESET tessera.join_lookup_key_cost;
 
+-- Semi and anti joins: an outer row with a pair goes out once (SEMI) or
+-- not at all (ANTI), the probe stopping at its first pair; a row whose
+-- key is NULL has none. A lookup reads every row of a key, where the
+-- core's nested loop stops at the first that passes, so the loop's price
+-- is raised for the lookup to pass the margin: the section checks the
+-- mode's rows and plans.
+SET tessera.join_lookup_batch_cost = 0;
+SET tessera.join_lookup_descent_cost = 0;
+SET tessera.join_lookup_key_cost = 0;
+SET tessera.join_loop_key_cost = 100;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k);
+-- Keys found, absent and NULL, batch after batch; an anti join made of a
+-- LEFT join, whose inner columns are NULL.
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+SELECT ij_same($$SELECT o.id, o.k FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+SELECT ij_lookup($$SELECT o.id, l.v FROM ij_outer o LEFT JOIN ij_inner l ON l.id = o.k WHERE l.id IS NULL$$) AS left_to_anti;
+SELECT ij_same($$SELECT o.id, l.v FROM ij_outer o LEFT JOIN ij_inner l ON l.id = o.k WHERE l.id IS NULL$$);
+-- Keys repeated within a batch, two outer rows and four inner rows a
+-- key; inner clauses that pass none, some and all of a key's rows; a
+-- clause over both sides, which the probe checks candidate by candidate.
+SELECT clause,
+       ij_lookup(format($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.kd AND %s) AND o.id <= 1000$$, clause)) AS semi,
+       ij_lookup(format($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.kd AND %s) AND o.id <= 1000$$, clause)) AS anti
+FROM (VALUES ('l.w > 6'), ('l.w < 3'), ('l.w < 7'), ('l.w > o.v')) AS c(clause);
+SELECT clause,
+       ij_same(format($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.kd AND %s) AND o.id <= 1000$$, clause)) AS semi,
+       ij_same(format($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.kd AND %s) AND o.id <= 1000$$, clause)) AS anti
+FROM (VALUES ('l.w > 6'), ('l.w < 3'), ('l.w < 7'), ('l.w > o.v')) AS c(clause);
+-- A hashed key, whose equality the join checks again: numeric 1.0
+-- against 1.00, a seventh of the keys' rows rejected by another clause.
+SELECT ij_lookup($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.nk = o.kn AND l.w <> 2) AND o.id <= 1000$$) AS numeric_semi,
+       ij_lookup($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.nk = o.kn AND l.w <> 2) AND o.id <= 1000$$) AS numeric_anti;
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.nk = o.kn AND l.w <> 2) AND o.id <= 1000$$);
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.nk = o.kn AND l.w <> 2) AND o.id <= 1000$$);
+-- A correlated subquery rescanned with its parameter changed.
+SELECT ij_lookup($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$) AS semi_rescan;
+SELECT ij_same($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$);
+SELECT ij_same($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$);
+-- A batch's table past hash_mem, with a clause over both sides.
+SET hash_mem_multiplier = 1;
+SET work_mem = '1MB';
+SELECT ij_lookup($$SELECT count(*) FROM ij_outer o WHERE EXISTS (SELECT FROM ij_skew s WHERE s.k = o.k AND length(s.t) > o.v + 5) AND o.id <= 1000$$) AS skewed_semi,
+       ij_property($$SELECT count(*) FROM ij_outer o WHERE EXISTS (SELECT FROM ij_skew s WHERE s.k = o.k AND length(s.t) > o.v + 5) AND o.id <= 1000$$, 'Overrun')::int > 1024 AS past_the_limit;
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_skew s WHERE s.k = o.k AND length(s.t) > o.v + 5) AND o.id <= 1000$$);
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_skew s WHERE s.k = o.k AND length(s.t) > o.v + 5) AND o.id <= 1000$$);
+RESET work_mem;
+RESET hash_mem_multiplier;
+-- Under a Gather, the workers alone too.
+SET max_parallel_workers_per_gather = 2;
+SET parallel_setup_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
+SET parallel_tuple_cost = 0;
+SET min_parallel_table_scan_size = 0;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k);
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+SET parallel_leader_participation = off;
+SELECT ij_lookup($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$) AS workers_alone,
+       ij_property($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$, 'Lookup Keys') AS lookup_keys;
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+RESET parallel_leader_participation;
+RESET max_parallel_workers_per_gather;
+RESET parallel_setup_cost;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
+RESET parallel_tuple_cost;
+RESET min_parallel_table_scan_size;
+-- The planner's rows of the nested loop a key and its pairs checked
+-- (Lookup Estimate), beside the rows the core's nested loop reads a key:
+-- four rows a key in the index's order, of which the second passes, the
+-- last two, or none. The planner expects the passing rows anywhere among
+-- the four, the core meets them in their places. The statistics read
+-- the whole table, so that the estimates are exact.
+CREATE TABLE ij_four (k int, pos int) WITH (autovacuum_enabled = off);
+INSERT INTO ij_four SELECT g / 4, g % 4 FROM generate_series(0, 399999) AS g;
+CREATE INDEX ij_four_k ON ij_four (k);
+ALTER TABLE ij_four ALTER COLUMN k SET STATISTICS 10000, ALTER COLUMN pos SET STATISTICS 10000;
+ANALYZE ij_four;
+CREATE FUNCTION ij_first_match(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+    estimate text;
+    scan jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (VERBOSE, FORMAT JSON) ' || query INTO plan;
+    estimate := jsonb_path_query_first(plan, '$.** ? (@."Lookup Estimate" != null)."Lookup Estimate"') #>> '{}';
+    PERFORM set_config('tessera.enable', 'off', true);
+    PERFORM set_config('enable_hashjoin', 'off', true);
+    PERFORM set_config('enable_nestloop', 'on', true);
+    PERFORM set_config('enable_memoize', 'off', true);
+    PERFORM set_config('enable_bitmapscan', 'off', true);
+    PERFORM set_config('enable_seqscan', 'off', true);
+    PERFORM set_config('enable_material', 'off', true);
+    EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query INTO plan;
+    PERFORM set_config('tessera.enable', 'on', true);
+    PERFORM set_config('enable_hashjoin', 'on', true);
+    PERFORM set_config('enable_nestloop', 'off', true);
+    PERFORM set_config('enable_memoize', 'on', true);
+    PERFORM set_config('enable_bitmapscan', 'on', true);
+    PERFORM set_config('enable_seqscan', 'on', true);
+    PERFORM set_config('enable_material', 'on', true);
+    scan := jsonb_path_query_first(plan, '$.** ? (@."Node Type" == "Index Scan")');
+    RETURN format('planned %s rows and %s checks a key, the core reads %s',
+                  round((regexp_match(estimate, '(?:^| )loop_rows=([0-9]+)'))[1]::numeric /
+                        (regexp_match(estimate, '(?:^| )keys=([0-9]+)'))[1]::numeric, 2),
+                  round((regexp_match(estimate, '(?:^| )checks=([0-9]+)'))[1]::numeric /
+                        (regexp_match(estimate, '(?:^| )keys=([0-9]+)'))[1]::numeric, 2),
+                  round((scan ->> 'Actual Rows')::numeric +
+                        coalesce((scan ->> 'Rows Removed by Filter')::numeric, 0), 2));
+END $$;
+SELECT clause,
+       ij_first_match(format($$SELECT count(*) FROM ij_outer o WHERE EXISTS (SELECT FROM ij_four f WHERE f.k = o.id AND %s) AND o.id < 1000$$, clause)) AS semi,
+       ij_first_match(format($$SELECT count(*) FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_four f WHERE f.k = o.id AND %s) AND o.id < 1000$$, clause)) AS anti
+FROM (VALUES ('f.pos = 1'), ('f.pos >= 2'), ('f.pos > 3')) AS c(clause);
+DROP FUNCTION ij_first_match(text);
+DROP TABLE ij_four;
+RESET tessera.join_loop_key_cost;
+RESET tessera.join_lookup_batch_cost;
+RESET tessera.join_lookup_descent_cost;
+RESET tessera.join_lookup_key_cost;
+
 DROP TABLE ij_inner, ij_outer, ij_other, ij_parent, ij_child, ij_ci_inner, ij_skew;
 DROP COLLATION ij_ci;
 DROP FUNCTION ij_same(text);

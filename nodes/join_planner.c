@@ -2003,11 +2003,13 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	if (path != NULL)
 		add_path(joinrel, &path->path);
 	/*
-	 * An index join: INNER and LEFT, each outer batch's keys looked up in
-	 * an index of the inner table, which builds the batch's table; where
-	 * it is faster than the core's nested loop over the index.
+	 * An index join: INNER, LEFT, SEMI and ANTI, each outer batch's keys
+	 * looked up in an index of the inner table, which builds the batch's
+	 * table; where it is faster than the core's nested loop over the
+	 * index. The joins that keep the inner side need all its rows.
 	 */
-	lookup_found = (jointype == JOIN_INNER || jointype == JOIN_LEFT) &&
+	lookup_found = (jointype == JOIN_INNER || jointype == JOIN_LEFT ||
+					jointype == JOIN_SEMI || jointype == JOIN_ANTI) &&
 		find_lookup(root, innerrel, &keys, ninner, &lookup);
 	path = lookup_found ?
 		make_join_path(root, joinrel, jointype, extra, &keys,
