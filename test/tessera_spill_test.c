@@ -1275,6 +1275,10 @@ tessera_test_spill_columns(PG_FUNCTION_ARGS)
 		   tess_row_mask_count(&pending) > 0)
 		tess_columns_writer_write(&writer, spill, 1, pairs++, NULL);
 	tess_columns_writer_write(&writer, spill, 1, pairs++, NULL);
+	/* The values grown for row 100 stay for the chunks after it. */
+	if (writer.values_len < VARSIZE_ANY(DatumGetPointer(texts[100])))
+		elog(ERROR, "a writer's values grew to %zu and went back to %zu",
+			 VARSIZE_ANY(DatumGetPointer(texts[100])), writer.values_len);
 	tess_columns_writer_free(&writer);
 	tess_spill_finish(spill);
 
@@ -1288,6 +1292,9 @@ tessera_test_spill_columns(PG_FUNCTION_ARGS)
 			tess_columns_reader_window(&reader, first, count, values, nulls);
 			for (uint32 at = 0; at < count; at++, row++)
 			{
+				/* Row 100's values pass a chunk's: it goes first in a chunk of its own. */
+				if (row == 100 && first + at != 0)
+					elog(ERROR, "row 100 is row %u of a pair of %u", first + at, reader.rows);
 				if (row >= COLUMNS_ROWS ||
 					out_nulls[0][at] != word_nulls[row] || out_nulls[1][at] != text_nulls[row] ||
 					(!word_nulls[row] && out[0][at] != words[row]) ||
@@ -1327,6 +1334,44 @@ tessera_test_spill_columns(PG_FUNCTION_ARGS)
 		pfree(chunk);
 		pfree(kept);
 		pfree(copy);
+	}
+
+	/*
+	 * A chunk a writer filled in memory, shown as a worker's message is: the
+	 * window reads it where it lies, and the next load reads into the
+	 * reader's own buffers again. A writer reset holds no row.
+	 */
+	{
+		uint64		three_bits[(COLUMNS_ROWS + 63) / 64] = {UINT64CONST(0x7)};
+		TessRowMask three = {COLUMNS_ROWS, three_bits};
+
+		tess_columns_writer_init(&writer, &kernels, CurrentMemoryContext,
+								 TESS_SPILL_COLUMNS_HEADER +
+								 sizeof(uint64) * 16 * (tess_spill_columns_null_lanes(2) + 2),
+								 2, 2, byvals, typlens, 256);
+		if (tess_columns_writer_add(&writer, columns, &three) != 3)
+			elog(ERROR, "three rows were not appended to a chunk of columns");
+		tess_columns_reader_show(&reader, writer.chunk, writer.chunk_len, writer.values,
+								 writer.values_used);
+		tess_columns_reader_window(&reader, 0, 3, values, nulls);
+		for (int at = 0; at < 3; at++)
+		{
+			char	   *text = DatumGetPointer(out[1][at]);
+
+			if (reader.rows != 3 || out_nulls[0][at] || out_nulls[1][at] ||
+				out[0][at] != words[at] || text < writer.values ||
+				text >= writer.values + writer.values_used ||
+				memcmp(text, DatumGetPointer(texts[at]),
+					   VARSIZE_ANY(DatumGetPointer(texts[at]))) != 0)
+				elog(ERROR, "row %d of a chunk of columns shown reads other than written", at);
+		}
+		if (!tess_columns_reader_load(&reader, file, 2, -1) || reader.chunk == writer.chunk ||
+			reader.values == writer.values || tess_columns_writer_rows(&writer) != 3)
+			elog(ERROR, "a load after a chunk shown reads into the chunk shown");
+		tess_columns_writer_reset(&writer);
+		if (tess_columns_writer_rows(&writer) != 0 || writer.values_used != 0)
+			elog(ERROR, "a writer reset keeps its rows");
+		tess_columns_writer_free(&writer);
 	}
 	tess_columns_reader_free(&reader);
 	if (reader.chunk != NULL || reader.values != NULL)

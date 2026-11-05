@@ -12,9 +12,8 @@
 #include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
-/* Make the writer's chunk empty, of the writer's words, and its values unused. */
-static void
-writer_reset(TessColumnsWriter *writer)
+void
+tess_columns_writer_reset(TessColumnsWriter *writer)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	Size		capacity;
@@ -43,7 +42,7 @@ tess_columns_writer_init(TessColumnsWriter *writer, const TessKernelOps *kernels
 	writer->ncolumns = ncolumns;
 	writer->byvals = byvals;
 	writer->typlens = typlens;
-	writer_reset(writer);
+	tess_columns_writer_reset(writer);
 }
 
 int
@@ -93,7 +92,7 @@ tess_columns_writer_write(TessColumnsWriter *writer, TessSpill *spill, int parti
 							 writer->values_used, position);
 	bytes += tess_spill_write(spill, partition, TESS_SPILL_COLUMNS, number, writer->chunk,
 							  writer->chunk_len, NULL);
-	writer_reset(writer);
+	tess_columns_writer_reset(writer);
 	return bytes;
 }
 
@@ -154,26 +153,44 @@ tess_columns_reader_load(TessColumnsReader *reader, TessSpillReader *file, uint3
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	TessSpillHeader header;
 
+	/* Nothing to show until the pair is read and checked whole. */
 	reader->rows = 0;
+	reader->chunk = NULL;
+	reader->values = NULL;
 	if (!tess_spill_read_header(file, &header))
 		return false;
 	tess_status_check(reader->kernels->spill_columns_pair(&header, 0, number, &status),
 					  &status);
-	reader_room(reader->context, (void **) &reader->values, &reader->values_len, header.len);
-	tess_spill_read_body(file, reader->values, header.len);
+	reader_room(reader->context, (void **) &reader->own_values, &reader->own_values_len,
+				header.len);
+	tess_spill_read_body(file, reader->own_values, header.len);
 	reader->values_used = header.len;
 	reader_block(reader, file, 1, number, &header);
-	reader_room(reader->context, &reader->chunk, &reader->chunk_len, header.len);
-	tess_spill_read_body(file, reader->chunk, header.len);
+	reader_room(reader->context, &reader->own_chunk, &reader->own_chunk_len, header.len);
+	tess_spill_read_body(file, reader->own_chunk, header.len);
 	reader->chunk_used = header.len;
-	tess_status_check(reader->kernels->spill_columns_check(reader->chunk, reader->chunk_used,
+	tess_status_check(reader->kernels->spill_columns_check(reader->own_chunk,
+														   reader->chunk_used,
 														   reader->words, rows,
 														   reader->ncolumns, reader->byvals,
-														   reader->typlens, reader->values,
+														   reader->typlens, reader->own_values,
 														   reader->values_used, &status),
 					  &status);
+	reader->chunk = reader->own_chunk;
+	reader->values = reader->own_values;
 	reader->rows = tess_spill_columns_rows(reader->chunk);
 	return true;
+}
+
+void
+tess_columns_reader_show(TessColumnsReader *reader, void *chunk, Size chunk_len, char *values,
+						 Size values_len)
+{
+	reader->chunk = chunk;
+	reader->chunk_used = chunk_len;
+	reader->values = values;
+	reader->values_used = values_len;
+	reader->rows = tess_spill_columns_rows(chunk);
 }
 
 void
@@ -192,13 +209,15 @@ tess_columns_reader_window(TessColumnsReader *reader, uint32 first, uint32 count
 void
 tess_columns_reader_detach(TessColumnsReader *reader, void **chunk, char **values)
 {
-	*chunk = reader->chunk;
-	*values = reader->values;
+	*chunk = reader->own_chunk;
+	*values = reader->own_values;
+	reader->own_chunk = NULL;
+	reader->own_chunk_len = 0;
+	reader->own_values = NULL;
+	reader->own_values_len = 0;
 	reader->chunk = NULL;
-	reader->chunk_len = 0;
 	reader->chunk_used = 0;
 	reader->values = NULL;
-	reader->values_len = 0;
 	reader->values_used = 0;
 	reader->rows = 0;
 }
