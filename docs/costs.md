@@ -254,10 +254,12 @@ The two times, in the units of the scan model:
   batches' tables, of the rows the relation's clauses keep: the rows
   built, their by-reference values and hashed keys, the outer rows
   probed, the pairs and their gathered values, and the batches
-  published, a round of pairs a batch;
+  published, a round of pairs a batch; `join_lookup_copy_cost` an outer
+  value its input copied into a gathered batch;
 - the nested loop's: `join_loop_key_cost` an outer key, and
-  `join_loop_descent_cost` more for each of the descents the lookup
-  makes over the same keys, which stand for the keys far from the one
+  `join_loop_descent_cost` more for each of the descents a lookup
+  would make over the same keys in the child's batches, which stand for
+  the keys far from the one
   before in the index: keys near each other spare the nested loop's
   descents too, the pages above them already in the processor's
   caches; `join_loop_row_cost` a row fetched;
@@ -288,7 +290,23 @@ The counts follow the core's estimates and the shape of the outer side:
   aggregate or a sort gives full batches; above a join whose
   rounds may each be a batch, or where no scan is found, a batch is
   counted a row;
-- the descents: the outer keys reach L of the index's P pages, P
+- the batches the lookup makes: where the outer side's batches hold
+  stored values (no column computed on the way down), the join's input
+  gathers them ([runtime.md](runtime.md), Gathering sparse batches).
+  The count follows its rules over the batches above, their rows
+  spread at random over the run, so that a batch's rows follow the
+  binomial law: the batches at least half full and the first sparse
+  batch of each run of them they start go as they are; each run's
+  other rows go over 64, with about half a batch for its last, at least
+  one; and the first batch counts one. An append adds its parts'
+  counts, a part's last run going on into the next part. Simulated
+  batch by batch over binomial batches of 34 to 64 rows, the count
+  comes within 1.8 % of the rules'. A gathered batch spans the child
+  batches it took, so its span below is the child's times the child's
+  batches over the gathered ones; the copies are the rows of the
+  copied batches times the outer side's columns;
+- the descents, of the lookup over its batches, of the nested loop over
+  the child's: the outer keys reach L of the index's P pages, P
   times the core's selectivity, on the inner column, of the range
   between the first and the last bound of the outer key's histogram (P
   where it has none). A batch's keys at random over them descend once a
@@ -321,7 +339,14 @@ The parameters, with their defaults, in the units of the scan model:
 - `tessera.join_loop_key_cost` = 1.45: the nested loop's outer key;
 - `tessera.join_loop_descent_cost` = 2.94: what the nested loop takes
   more for a key far from the one before;
-- `tessera.join_loop_row_cost` = 0.177: the nested loop's row fetched.
+- `tessera.join_loop_row_cost` = 0.177: the nested loop's row fetched;
+- `tessera.join_lookup_copy_cost` = 0.015: an outer value copied into a
+  gathered batch, about 3 ns, an integer's store and a text's copy
+  between them. Not fitted: the calibration subtracts the time of the
+  outer side alone, whose aggregate gathers the same rows, and leaves
+  the copies to the other parameters; fitted together, the seven came
+  out as a batch of 23 and a key below nothing (pg-lookupcost-HDCBu5,
+  HI69LR, h3HzqF).
 
 Measured by `bench/pg/lookupcost` (pg-lookupcost-zQqYRs, 94qad9), the
 mean of the two runs, a unit of the scan model 0.20 µs on the machine:
@@ -486,6 +511,13 @@ the defaults are the project's and not a deployment's.
   model, which leaves the heap's pages out: keys whose rows lie on pages
   apart cost more than it counts, and the margin of 0.8 is what keeps
   such a lookup out on the samples measured.
+- The count of gathered batches takes a scan's rows as spread at
+  random over its batches. Rows in a pattern, a filter on a column
+  that repeats with the table's order, make batches all just below or
+  all just above half full: on the index join suite's table of
+  `r = (id * 7919) % 100`, kept below 45, the planner counted 63
+  gathered batches where 44 came. A pack that hands on its subquery's
+  batches is counted as full batches, gathered or not.
 - The rows are the core's estimates: a join the core expects 98 rows of
   where 319 404 come (Q9 of TPC-H) misleads every path alike.
 - The spill models count a row once the table spills, not the share on

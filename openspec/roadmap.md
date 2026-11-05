@@ -38,7 +38,7 @@ with Tessera on, in the order
 Q10 showed its aggregate's input row-wise. The maintainer took seven
 entries out of turn on 2026-11-03, after an analysis of TPC-H with
 `batch-index-join`, in the order `deform-past-varlena` (done),
-`gather-sparse-batches`, `semi-anti-lookups`, `numeric-reading`,
+`gather-sparse-batches` (done), `semi-anti-lookups`, `numeric-reading`,
 `like-substring-search`, `agg-table-presize`, `tpch-q9-plan`, the last
 with the foreign keys of the schema left undeclared for now; the same
 day he moved `agg-dependent-columns` between `agg-table-presize` and
@@ -273,35 +273,6 @@ TPC-H Q9's plan with Tessera on.
 - **Capabilities:** costs, bench/tpch
 - **Size:** small to medium.
 
-### gather-sparse-batches
-
-Sparse batches gathered by the input of a consumer that asks.
-
-- **What:** `TessInput` gathers the selected rows of a child's sparse
-  batches into batches of up to 64 rows for a consumer that asks for
-  it, TessHashJoin's outer side and TessAgg first; a batch full enough
-  goes as it is. The index lookup then looks up full batches of keys.
-- **Why:** A consumer pays a fixed cost a batch: TPC-H Q14's join and
-  aggregate receive 76 000 rows in 41 000 batches after its filter, and
-  spend about 45 ms of 139, nearly all of it a batch's cost (0.5 and
-  0.6 µs a batch against 27 ns a row, measured on 2026-11-04 by
-  widening the range of dates); Q06's and Q15's aggregates get 1.8 and
-  3.4 rows a batch. The index lookup gains when a batch's keys share
-  the btree's descents, and Q5's outer side comes 2.1 keys a batch,
-  Q7's 4.6: its lookup ran 27 % slower than the core's nested loop
-  (`batch-index-join`, runs `tpch-sf1-nGKzZa` against
-  `tpch-sf1-mVx1yP`), and the model now leaves such joins to the
-  core's nested loops, which take 46 and 121 ms of Q5 and Q7 serial
-  and 90 to 240 ms of processor time of Q3 to Q8 with two workers.
-- **Known:** The maintainer widened the entry, first
-  `lookup-outer-compaction`, the gathering inside the index lookup
-  only, on 2026-11-04 after the measurement of Q14. A gathered batch
-  has no slot, so a consumer that forwards its child's batch cannot
-  gather; a numeric column keeps its decimals by the heap batch's
-  reading, shared.
-- **Depends on:** nothing.
-- **Capabilities:** runtime (input), hash join, aggregate, costs
-- **Size:** medium to large: one pull request.
 ### semi-anti-lookups
 
 SEMI and ANTI joins by index lookups.
@@ -317,12 +288,11 @@ SEMI and ANTI joins by index lookups.
   array scan reads every row of a key: Q4 and Q21 read about 4 rows a
   key where the core reads 1.6. The lookup must stop at a key's first
   row, or the cost model must count every row.
-- **Depends on:** `gather-sparse-batches`. The outer sides of Q4
-  and Q21 are sparse: Q4's orders after the filter on the date, 57 000
-  rows of 1.5 M, come about 2.5 keys a batch, and Q21's anti join reads
-  the output of a hash join that does not compact, a key a batch by the
-  cost model's count. At such counts the model gives the join to the
-  core's nested loop, semi and anti joins supported or not (2026-11-04).
+- **Depends on:** nothing. The outer sides of Q4 and Q21 are sparse:
+  Q4's orders after the filter on the date, 57 000 rows of 1.5 M, came
+  about 2.5 keys a batch, and Q21's anti join reads the output of a
+  hash join that does not compact, a key a batch by the cost model's
+  count (2026-11-04); the join's input now gathers such batches.
 - **Capabilities:** a node's change (hash join)
 - **Size:** medium: one pull request.
 
@@ -2328,6 +2298,36 @@ becomes an entry, joins one, or is dropped.
   of `relhash` writes 512 bytes a key instead. A few cycles a row by an
   estimate of the speed of `memset`; not timed. Suggested: zero only the
   keys in use, judged by the `sort` family.
+
+- **A pack's forwarded batches in the lookup's count** (the close of
+  `gather-sparse-batches`). The index lookup's model counts the batches
+  of a TessPack that hands on its subquery's batch node's batches as
+  full ones, gathered or not, since it does not look under the
+  subquery; a filter there gives sparse ones. Suggested: the shape of
+  the subquery's path, once a query shows the lookup misjudged so.
+- **The copy's price in the lookup's calibration** (the close of
+  `gather-sparse-batches`). `bench/pg/lookupcost` takes a lookup's time
+  as the query's less its outer side's alone, whose aggregate now
+  gathers the same sparse rows; fitted together, the seven prices came
+  out as a batch of 23 and a key below nothing, and
+  `tessera.join_lookup_copy_cost` stays at its first estimate, 0.015.
+  Suggested: an outer query that gathers nothing (a count over the
+  scan's batches as they come), or the copy measured alone.
+- **Full batches copied into sparse ones** (the close of
+  `gather-sparse-batches`). An input that copies a full batch into the
+  gathered rows when it fits would gather a page of 83 rows at 55 to
+  70 % kept into a third fewer batches, by a simulation of the rules;
+  the change refused it, since it copies whole batches, wide rows too.
+  Suggested: measured on a table of narrow rows, more than 64 a page.
+- **The bench cluster's port** (found measuring
+  `gather-sparse-batches`, 2026-11-04). `bench/pg/run.sh` starts its
+  cluster by `pg_ctl restart`, which reuses the port of the last start
+  (`postmaster.opts`), and sends its queries to `PGPORT`, 5433 by
+  default: a cluster once started on another port leaves the queries to
+  whatever listens on 5433, another worktree's cluster with its own
+  build, and both sides of an A/B measure the same. Suggested: the
+  server started on `PGPORT` always, and `SHOW data_directory` checked
+  before a family runs.
 
 ## Decided against
 

@@ -1489,8 +1489,10 @@ applies `HAVING`, a `DISTINCT` or a set operation above one must not.
 the arguments as its computed columns, finds each aggregate's batch
 function, asks the child for whole batches with the arguments' columns as
 projection columns, so that a lazy provider deforms them for the surviving
-rows only, and stands on the output helper over the result slot with a
-one-row builder. The first execution reads every batch of the child: the
+rows only, has its input gather sparse batches, both inputs of a set
+operation (see [runtime.md](runtime.md), Gathering sparse batches), and
+stands on the output helper over the result slot with a one-row
+builder. The first execution reads every batch of the child: the
 batch is wrapped, each argument's computed column, a chain over the
 batch's rows or the executor's expression row by row, and the batch's
 rows go to the batch function, the wrapper is released, and the partial
@@ -1563,8 +1565,10 @@ what it counted of its spill; under a `Gather` the sum of each
 process's most), and,
 for a table that spilled, `Batches`, the most partitions of a level, and
 `Disk Usage`, the bytes written, as the core's hashed aggregate shows
-them; with `VERBOSE` too, the batches and rows read from the child, the
-batch function calls (per aggregate and batch with `GROUP BY`), the
+them; with `VERBOSE` too, the batches and rows read from the child,
+`Gathered Rows`, the rows its input copied out of sparse batches (see
+[runtime.md](runtime.md), Gathering sparse batches), when there are any,
+the batch function calls (per aggregate and batch with `GROUP BY`), the
 `Computed Datums` of the keys and the arguments, by chains and row by row
 together, and with `GROUP BY` the groups, the times the table grew, and
 for a table that spilled `Evictions`, the partitions sent to disk while
@@ -1814,7 +1818,11 @@ the planner's estimate of its rows and whether the table is shared
 At its first execution the node derives both children's requests from
 its parent's: the outer columns asked for come from the outer batches,
 the inner ones are kept in the table, and each side gives its keys
-first. It then reads every inner batch, hashes the keys in order, each
+first. Its outer input gathers sparse batches (see
+[runtime.md](runtime.md), Gathering sparse batches), unless a limit
+right above the join handed it a bound for the scan: the join keeps the
+bound for itself, for its outer side may need more rows than its output,
+and reads that side a batch at a time. It then reads every inner batch, hashes the keys in order, each
 further key folded into the first one's hash, with the NULL policy of a
 join (a NULL in any key never matches) and appends the rows as records
 to chunks with `tess_table_append`, the first chunk of 64 kB and the
@@ -2119,7 +2127,9 @@ and for a shared table `Partitions Joined Together`, the rounds, and
 `Probe Rows`, the outer
 rows probed, and `Matches`, the joined
 rows over every round, `Compact Batches`, the batches of copied
-pairs, when there are any, and `Bloom Filters`, the filters built, and
+pairs, and `Gathered Rows`, the outer rows its input copied out of
+sparse batches, each when there are any, and `Bloom Filters`, the
+filters built, and
 `Bloom Filter Below` when the outer child took the filter; with a shared table `Builds` counts the one build, and
 `Memory Usage` each participant's chunks and value blocks, and the index
 and filter of the elected one. Under a `Gather` the counters are the totals of
@@ -2150,7 +2160,9 @@ table took past the `hash_mem` in force when it was built, each summed
 over the participants of a parallel plan; with `VERBOSE`, `Builds` (the
 tables of batches with keys), and with the costs `Lookup Estimate`, the
 planner's counts and the two times of the cost model
-([costs.md](costs.md), the index join).
+([costs.md](costs.md), the index join): the batches it looks up, gathered
+where its input gathers, the keys, the lookup's descents, the rows, the
+two times, the outer values copied and the nested loop's descents.
 
 In this mode the join builds no table at its start and never treats an
 empty table as the end. It asks its outer child for batches of at most
