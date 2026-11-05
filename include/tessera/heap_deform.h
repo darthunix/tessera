@@ -58,8 +58,12 @@ tess_deform_cursor_init(TessDeformCursor *cursor)
  * Greengage 7 keeps PostgreSQL 12's descriptor, without compact attributes
  * or a guaranteed prefix: the cursor walks the attributes one by one, as
  * slot_deform_heap_tuple does there, aligning each before it reads it.
- * first_non_guaranteed_attr and support_cstring change nothing here.
- * shortcut: no cached offsets; use attcacheoff if a profile shows the walk.
+ * first_non_guaranteed_attr and support_cstring change nothing here. The
+ * heap batch caches the offsets of the fixed-width prefix itself and walks
+ * the columns past it by its own walk; it comes here for a column of the
+ * prefix passed by reference and for a value behind a row's cursor.
+ * shortcut: the walk starts at the first attribute; start it after the
+ * cached prefix if a profile shows these walks.
  */
 static pg_always_inline bool
 tess_deform_advance(TessDeformCursor *cursor, HeapTuple tuple,
