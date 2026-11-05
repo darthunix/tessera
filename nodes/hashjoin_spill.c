@@ -42,35 +42,72 @@ join_part_open(PartReader *reader, TessSpill *file, int partition, int writers)
 	reader->writers = writers;
 	reader->next = 0;
 	reader->reader = NULL;
+	reader->pairs = 0;
 	reader->open = true;
+}
+
+/* The file being read, the next writer's once one ends; NULL after the last. */
+static TessSpillReader *
+part_file(PartReader *reader)
+{
+	/* Every block read back from disk passes here: a block at a time. */
+	CHECK_FOR_INTERRUPTS();
+	while (reader->open && reader->reader == NULL)
+	{
+		if (reader->next >= reader->writers)
+		{
+			reader->open = false;
+			break;
+		}
+		reader->reader = tess_spill_open(reader->file, reader->next++, reader->partition);
+		reader->pairs = 0;
+	}
+	return reader->reader;
+}
+
+/* The file read to its end: the next writer's comes next. */
+static void
+part_file_done(PartReader *reader)
+{
+	tess_spill_close(reader->reader);
+	reader->reader = NULL;
 }
 
 /* The next block's header, from the next writer's file once one ends. */
 static bool
 part_header(PartReader *reader, TessSpillHeader *header)
 {
-	if (!reader->open)
-		return false;
-	for (;;)
+	TessSpillReader *file;
+
+	while ((file = part_file(reader)) != NULL)
 	{
-		/* Every block read back from disk passes here: a block at a time. */
-		CHECK_FOR_INTERRUPTS();
-		if (reader->reader == NULL)
-		{
-			if (reader->next >= reader->writers)
-			{
-				reader->open = false;
-				return false;
-			}
-			reader->reader = tess_spill_open(reader->file, reader->next++,
-											 reader->partition);
-			continue;
-		}
-		if (tess_spill_read_header(reader->reader, header))
+		if (tess_spill_read_header(file, header))
 			return true;
-		tess_spill_close(reader->reader);
-		reader->reader = NULL;
+		part_file_done(reader);
 	}
+	return false;
+}
+
+/*
+ * The next pair of a chunk of columns into columns, read and checked,
+ * from the next writer's file once one ends; a writer numbers the pairs
+ * of each partition from 0.
+ */
+static bool
+part_load(PartReader *reader, TessColumnsReader *columns)
+{
+	TessSpillReader *file;
+
+	while ((file = part_file(reader)) != NULL)
+	{
+		if (tess_columns_reader_load(columns, file, reader->pairs, -1))
+		{
+			reader->pairs++;
+			return true;
+		}
+		part_file_done(reader);
+	}
+	return false;
 }
 
 static void
@@ -475,20 +512,71 @@ side_write_values(TessHashJoinState *state, SpillSide *side, int partition)
 	part->value_bytes = 0;
 }
 
-/* Write chunk `index` of the partition, unless it holds no row. */
+/* Write chunk `index` of records of the partition, unless it holds no row. */
 static void
 side_write_records(TessHashJoinState *state, SpillSide *side, int partition,
 				   int index)
 {
+	Assert(!side->columnar);
 	if (!side_chunk_rows(state, side, index))
 		return;
+	write_block(state, side, partition, TESS_SPILL_RECORDS,
+				side->next_number++, side->bases[index],
+				side_chunk_used(state, side, index));
+}
+
+/* Free the values of the chunk of columns a partition fills. */
+static void
+side_free_pair_values(SpillSide *side, int partition)
+{
+	SpillPart  *part = &side->parts[partition];
+
+	if (part->pair_values == NULL)
+		return;
+	pfree(part->pair_values);
+	part->pair_values = NULL;
+	side->bytes -= part->value_len;
+	part->bytes -= part->value_len;
+	part->value_len = 0;
+	part->value_used = 0;
+}
+
+/*
+ * Write the chunk of columns a partition fills, unless it holds no row,
+ * as a pair: its values, then the chunk, numbered as the pairs of the
+ * partition written before it; its values go.
+ */
+static void
+side_write_pair(TessHashJoinState *state, SpillSide *side, int partition)
+{
+	SpillPart  *part = &side->parts[partition];
+	int			index = side->current[partition];
+	uint32		number = (uint32) part->blocks;
+
+	if (index != 0 && side_chunk_rows(state, side, index))
+	{
+		write_block(state, side, partition, TESS_SPILL_VALUES, number, part->pair_values,
+					part->value_used);
+		write_block(state, side, partition, TESS_SPILL_COLUMNS, number, side->bases[index],
+					side->lens[index]);
+	}
+	side_free_pair_values(side, partition);
+}
+
+/* Write what a partition on disk holds in memory: its values and its tail. */
+static void
+side_write_tail(TessHashJoinState *state, SpillSide *side, int partition)
+{
+	int			index = side->current[partition];
+
 	if (side->columnar)
-		write_block(state, side, partition, TESS_SPILL_COLUMNS,
-					side->next_number++, side->bases[index], side->lens[index]);
-	else
-		write_block(state, side, partition, TESS_SPILL_RECORDS,
-					side->next_number++, side->bases[index],
-					side_chunk_used(state, side, index));
+	{
+		side_write_pair(state, side, partition);
+		return;
+	}
+	side_write_values(state, side, partition);
+	if (index != 0)
+		side_write_records(state, side, partition, index);
 }
 
 /*
@@ -502,12 +590,10 @@ join_side_flush(TessHashJoinState *state, SpillSide *side, int partition)
 	int			index = side->current[partition];
 
 	Assert(!part->resident);
-	side_write_values(state, side, partition);
+	side_write_tail(state, side, partition);
 	part->queued = false;
-	if (index == 0)
-		return;
-	side_write_records(state, side, partition, index);
-	side_chunk_init(state, side, side->bases[index], side->lens[index]);
+	if (index != 0)
+		side_chunk_init(state, side, side->bases[index], side->lens[index]);
 }
 
 /*
@@ -550,11 +636,10 @@ side_evict(TessHashJoinState *state, SpillSide *side, int partition)
 
 	if (side->parts[partition].resident)
 		return;
-	side_write_values(state, side, partition);
+	side_write_tail(state, side, partition);
 	side->parts[partition].queued = false;
 	if (index == 0)
 		return;
-	side_write_records(state, side, partition, index);
 	side_free_chunk(side, partition, index);
 	side->current[partition] = 0;
 }
@@ -616,6 +701,26 @@ side_value_chunk(SpillSide *side, int partition, Size len)
 }
 
 /*
+ * Queue a partition whose values outgrew a chunk to be written, unless it
+ * is: once in the queue until the queue is emptied.
+ */
+static void
+side_queue(SpillSide *side, int partition)
+{
+	SpillPart  *part = &side->parts[partition];
+
+	if (part->queued)
+		return;
+	part->queued = true;
+	if (!part->in_queue)
+	{
+		Assert(side->nqueue < side->npartitions);
+		part->in_queue = true;
+		side->queue[side->nqueue++] = partition;
+	}
+}
+
+/*
  * Copy a by-reference value into the partition's value chunks, as
  * join_store_value does into the table's, and return its reference. A
  * partition on disk whose values outgrow a chunk is queued to be written.
@@ -652,17 +757,45 @@ side_store(SpillSide *side, int partition, Datum value, int16 typlen)
 		side->value_lens[number] = part->value_used;
 	}
 	tess_value_copy(value, expanded, side->value_bases[number] + byte, size);
-	if (!part->resident && !part->queued && part->value_bytes > side->chunk_len)
-	{
-		part->queued = true;
-		if (!part->in_queue)
-		{
-			Assert(side->nqueue < side->npartitions);
-			part->in_queue = true;
-			side->queue[side->nqueue++] = partition;
-		}
-	}
+	if (!part->resident && part->value_bytes > side->chunk_len)
+		side_queue(side, partition);
 	return JOIN_VALUE_REF(number, byte);
+}
+
+/*
+ * Copy a by-reference value into the values of the chunk of columns its
+ * partition fills, which grow as they need, and return its reference into
+ * them. A partition whose values outgrow a chunk is queued to be written.
+ */
+static uint64
+side_store_pair(SpillSide *side, int partition, Datum value, int16 typlen)
+{
+	SpillPart  *part = &side->parts[partition];
+	ExpandedObjectHeader *expanded;
+	Size		size = tess_value_size(value, typlen, &expanded);
+	Size		byte = part->value_used;
+
+	/* A reference names a byte of the first 4 GiB of a pair's values. */
+	if (MAXALIGN(size) > ((Size) 1 << TESS_SPILL_VALUE_BYTE_BITS) - byte)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("TessHashJoin keeps no more than 4 GB of values in a chunk of outer rows")));
+	if (byte + MAXALIGN(size) > part->value_len)
+	{
+		Size		len = Max(Max(side->chunk_len, part->value_len * 2), byte + MAXALIGN(size));
+
+		part->pair_values = part->pair_values == NULL ?
+			MemoryContextAllocExtended(side->context, len, MCXT_ALLOC_HUGE) :
+			repalloc_huge(part->pair_values, len);
+		side->bytes += len - part->value_len;
+		part->bytes += len - part->value_len;
+		part->value_len = len;
+	}
+	tess_value_copy(value, expanded, part->pair_values + byte, size);
+	part->value_used = byte + MAXALIGN(size);
+	if (part->value_used > side->chunk_len)
+		side_queue(side, partition);
+	return TESS_SPILL_VALUE_REF(0, byte);
 }
 
 /* Write the partitions whose values outgrew a chunk, and empty the queue. */
@@ -974,6 +1107,8 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 		side_init(state, &spill->resident, state->keys.nkeys, state->keys.outer_kinds, nstored,
 				  typlens, byvals, outer_len, false, 1);
 	spill->rows = &spill->probe;
+	tess_columns_reader_init(&spill->outer, state->kernels, spill->block_context, nstored,
+							 nstored, spill->probe.byvals, spill->probe.typlens);
 	pfree(typlens);
 	pfree(byvals);
 	spill->build_children = MemoryContextAlloc(spill->context,
@@ -984,7 +1119,6 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 										sizeof(TessDatumColumn) *
 										Max(Max(state->npayload, nstored), 1));
 	spill->values = MemoryContextAlloc(spill->context, sizeof(Datum *) * Max(nstored, 1));
-	spill->window = MemoryContextAllocZero(spill->context, sizeof(Datum *) * Max(nstored, 1));
 	spill->isnull = MemoryContextAlloc(spill->context, sizeof(bool *) * Max(nstored, 1));
 	for (int word = 0; word < nstored; word++)
 	{
@@ -1273,8 +1407,8 @@ column_append(TessHashJoinState *state, SpillSide *side, TessRowMask *pending,
 					if (side->byvals[word] || columns[word].isnull[row])
 						continue;
 					tess_spill_columns_word(base, word)[place] =
-						side_store(side, partition, columns[word].values[row],
-								   side->typlens[word]);
+						side_store_pair(side, partition, columns[word].values[row],
+										side->typlens[word]);
 				}
 			}
 		}
@@ -1485,6 +1619,7 @@ join_side_forget(SpillSide *side, int partition)
 	}
 	part->nvalues = 0;
 	part->value_current = -1;
+	side_free_pair_values(side, partition);
 	part->bytes = 0;
 }
 
@@ -1534,6 +1669,15 @@ start_joining(TessHashJoinState *state)
 	tess_spill_finish(spill->probe.file);
 }
 
+/* The outer chunk in hand goes, and so do the buffers of its reader. */
+void
+join_outer_forget(JoinSpill *spill)
+{
+	tess_columns_reader_free(&spill->outer);
+	MemoryContextReset(spill->block_context);
+	spill->block = NULL;
+}
+
 /* Forget the joined partition: its files, tails and what was read back. */
 static void
 end_partition(TessHashJoinState *state)
@@ -1562,12 +1706,10 @@ end_partition(TessHashJoinState *state)
 	for (int index = 0; index < spill->nloaded; index++)
 		spill->build.value_bases[spill->loaded_values[index]] = NULL;
 	spill->nloaded = 0;
-	spill->nblock_values = 0;
 	side_release(&spill->build, partition);
 	side_release(&spill->probe, partition);
 	MemoryContextReset(spill->part_context);
-	MemoryContextReset(spill->block_context);
-	spill->block = NULL;
+	join_outer_forget(spill);
 	MemoryContextReset(state->table_context);
 	state->table.index = NULL;
 	state->table.nchunks = 0;
@@ -1653,67 +1795,6 @@ add_loaded_values(JoinSpill *spill, const TessSpillHeader *header, void *body)
 	grow_ints(spill->context, &spill->loaded_values, &spill->loaded_slots,
 			  spill->nloaded + 1);
 	spill->loaded_values[spill->nloaded++] = number;
-}
-
-/*
- * A value chunk read back before the outer chunk it serves, or one in
- * memory of the chunk of the tail. A writer numbers its value chunks as it
- * makes them, so those of a chunk ascend.
- */
-static void
-add_block_values(JoinSpill *spill, uint32 number, char *body, Size len)
-{
-	if (spill->nblock_values > 0 && number <= spill->block_numbers[spill->nblock_values - 1])
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("TessHashJoin read back value chunk %u after chunk %u", number,
-					   spill->block_numbers[spill->nblock_values - 1]));
-	if (spill->nblock_values == spill->block_slots)
-	{
-		int			slots = Max(spill->block_slots * 2, 4);
-
-		spill->block_numbers = spill->block_numbers == NULL ?
-			MemoryContextAlloc(spill->context, sizeof(uint32) * slots) :
-			repalloc(spill->block_numbers, sizeof(uint32) * slots);
-		spill->block_bases = spill->block_bases == NULL ?
-			MemoryContextAlloc(spill->context, sizeof(char *) * slots) :
-			repalloc(spill->block_bases, sizeof(char *) * slots);
-		spill->block_lens = spill->block_lens == NULL ?
-			MemoryContextAlloc(spill->context, sizeof(Size) * slots) :
-			repalloc(spill->block_lens, sizeof(Size) * slots);
-		spill->block_slots = slots;
-	}
-	spill->block_numbers[spill->nblock_values] = number;
-	spill->block_bases[spill->nblock_values] = body;
-	spill->block_lens[spill->nblock_values] = len;
-	spill->nblock_values++;
-}
-
-/*
- * The value of typlen an outer chunk's word refers to: in one of the value
- * chunks read back before the chunk, as the writer wrote them together,
- * found among their ascending numbers by halves.
- */
-static inline const char *
-block_value(JoinSpill *spill, uint64 ref, int16 typlen)
-{
-	uint64		number = (ref >> TESS_SPILL_VALUE_BYTE_BITS) - 1;
-	int			low = 0;
-	int			high = spill->nblock_values;
-
-	while (low < high)
-	{
-		int			middle = low + (high - low) / 2;
-
-		if (spill->block_numbers[middle] < number)
-			low = middle + 1;
-		else
-			high = middle;
-	}
-	if (low == spill->nblock_values || spill->block_numbers[low] != number)
-		tess_spill_value_damaged();
-	return tess_spill_value_of(spill->block_bases[low], spill->block_lens[low],
-							   tess_spill_value_byte(ref), typlen);
 }
 
 /*
@@ -1848,7 +1929,6 @@ open_outer_rows(TessHashJoinState *state)
 	JoinSpill  *spill = state->spill;
 
 	join_part_open(&spill->reader, spill->probe.file, spill->partition, spill->writers);
-	spill->tail_read = false;
 	spill->block = NULL;
 	spill->ordinal = 0;
 }
@@ -2084,127 +2164,47 @@ next_partition(TessHashJoinState *state)
 /*
  * The next batch of the joined partition's outer rows (or of a shared
  * table's outer rows it answers itself, spill->rows): up to
- * JOIN_COMPACT_ROWS rows of the chunk of columns being read, each stored
- * column read from its lane; the chunks come from the file, each after
- * its values, and then the tail. False when none is left.
+ * JOIN_COMPACT_ROWS rows of the chunk of columns being read, a window of
+ * every stored column; the chunks come from the files as pairs with
+ * their values, through the one reader. No tail is left in memory by
+ * then: each went to disk as its level started joining, a shared table's
+ * at OUTER. False when none is left.
  */
 bool
 join_next_spilled(TessHashJoinState *state, JoinSpill *spill)
 {
-	SpillSide  *side = spill->rows;
-
 	for (;;)
 	{
-		TessSpillHeader header;
-
 		if (spill->block != NULL)
 		{
-			uint64		total = tess_spill_columns_rows(spill->block);
+			uint64		total = spill->outer.rows;
 
 			if (spill->cursor < total)
 			{
 				int			count = (int) Min(total - spill->cursor, JOIN_COMPACT_ROWS);
-				const uint64 *nulls = NULL;
-				uint64		any = 0;
 
 				spill->bits[0] = count == 64 ? ~UINT64CONST(0) :
 					(UINT64CONST(1) << count) - 1;
 				spill->batch.rows.nrows = count;
 				spill->batch_ordinal = spill->ordinal;
 				spill->ordinal += count;
-				/* A by-value word is read where it lies; a reference becomes a pointer. */
-				for (int word = 0; word < side->nwords; word++)
-				{
-					uint64	   *lane = tess_spill_columns_word(spill->block, word) +
-						spill->cursor;
-					bool	   *isnull = spill->isnull[word];
-
-					/* Each 64 words have a lane of NULL bits of their own. */
-					if (word % 64 == 0)
-					{
-						nulls = tess_spill_columns_lane(spill->block,
-														tess_spill_columns_null_lane(word)) +
-							spill->cursor;
-						any = 0;
-						for (int row = 0; row < count; row++)
-							any |= nulls[row];
-					}
-					if (tess_spill_columns_is_null(any, word))
-						for (int row = 0; row < count; row++)
-							isnull[row] = tess_spill_columns_is_null(nulls[row], word);
-					else
-						memset(isnull, 0, sizeof(bool) * count);
-					if (side->byvals[word])
-					{
-						spill->window[word] = (Datum *) lane;
-						continue;
-					}
-					spill->window[word] = spill->values[word];
-					for (int row = 0; row < count; row++)
-					{
-						uint64		ref = lane[row];
-
-						if (isnull[row])
-						{
-							spill->values[word][row] = (Datum) 0;
-							continue;
-						}
-						spill->values[word][row] =
-							PointerGetDatum(block_value(spill, ref, side->typlens[word]));
-					}
-				}
+				tess_columns_reader_window(&spill->outer, (uint32) spill->cursor, (uint32) count,
+										   spill->values, spill->isnull);
 				spill->cursor += count;
 				return true;
 			}
-			spill->block = NULL;
+			/*
+			 * The chunk and its values go before the next is read, as a
+			 * level counts what its reader holds: no more than one pair.
+			 */
+			join_outer_forget(spill);
 		}
-		/* The next chunk: the previous one and its values go. */
-		spill->nblock_values = 0;
-		MemoryContextReset(spill->block_context);
-		if (spill->reader.open)
+		if (!part_load(&spill->reader, &spill->outer))
 		{
-			while (part_header(&spill->reader, &header))
-			{
-				void	   *body = MemoryContextAllocExtended(spill->block_context,
-															  Max(header.len, 8),
-															  MCXT_ALLOC_HUGE);
-
-				part_body(&spill->reader, body, header.len);
-				if (header.kind == TESS_SPILL_VALUES)
-				{
-					add_block_values(spill, header.number, body, header.len);
-					continue;
-				}
-				tess_spill_expect_kind(&header, TESS_SPILL_COLUMNS);
-				tess_spill_expect_columns(body, side->nwords, -1);
-				spill->block = body;
-				break;
-			}
-			if (spill->block == NULL)
-				part_close(&spill->reader);
-		}
-		if (spill->block == NULL && !spill->tail_read)
-		{
-			int			index = side->current[spill->partition];
-
-			spill->tail_read = true;
-			if (index != 0 && side_chunk_rows(state, side, index))
-			{
-				SpillPart  *part = &side->parts[spill->partition];
-
-				spill->block = side->bases[index];
-				/* The tail's values are the partition's value chunks in memory. */
-				for (int chunk = 0; chunk < part->nvalues; chunk++)
-					add_block_values(spill, (uint32) part->values[chunk],
-									 side->value_bases[part->values[chunk]],
-									 side->value_lens[part->values[chunk]]);
-				state->counters[JOIN_TAILS]++;
-			}
-		}
-		if (spill->block == NULL)
+			Assert(spill->rows->current[spill->partition] == 0);
 			return false;
-		if (!side->columnar)
-			elog(ERROR, "TessHashJoin reads back outer rows in chunks of columns only");
+		}
+		spill->block = spill->outer.chunk;
 		spill->cursor = 0;
 		join_note_memory(state);
 	}
@@ -2221,7 +2221,7 @@ spill_get_column(TessBatch *batch, int column, const TessRowMask *rows,
 	if (column < 0 || column >= spill->nchild || spill->word_of[column] == 0)
 		elog(ERROR, "TessHashJoin did not keep outer column %d", column);
 	word = spill->word_of[column] - 1;
-	result->values = spill->window[word];
+	result->values = spill->values[word];
 	result->isnull = spill->isnull[word];
 	result->nrows = batch->rows.nrows;
 }

@@ -130,12 +130,6 @@ pg_noreturn extern void tess_spill_value_damaged(void);
 /* The block whose header was read is of kind. */
 extern void tess_spill_expect_kind(const TessSpillHeader *header, TessSpillKind kind);
 
-/*
- * The chunk of columns read back holds rows of words stored words, and,
- * unless rows is negative, rows rows.
- */
-extern void tess_spill_expect_columns(const void *chunk, int words, int64 rows);
-
 /* The block's number is below count, the chunks of its kind written. */
 extern void tess_spill_expect_number(const TessSpillHeader *header, uint64 count);
 

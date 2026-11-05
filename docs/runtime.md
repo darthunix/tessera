@@ -808,16 +808,15 @@ values first, under one number, and goes on. The reader reads a pair,
 checks it once (the pair's kinds and number, `tess_spill_columns_pair`;
 the chunk's words, rows and references, and where each value ends by its
 type, in one pass, `tess_spill_columns_check`), and gives windows of its
-rows as Datums (`tess_spill_columns_window`). The grouping reads its
-rows of generic aggregates through the reader, and writes them with a
-loop of its own, which costs less than the writer's appends by
-partition; the sort writes and reads its runs through both.
+rows as Datums (`tess_spill_columns_window`). The grouping and the join
+write their rows by partition with loops of their own, which cost less
+than the writer's appends by partition, and read them back through the
+reader; the sort writes and reads its runs through both.
 
 A node that reads its spilled blocks back checks each one against what
-it wrote before it uses it: `tess_spill_expect_kind`,
-`tess_spill_expect_columns` and `tess_spill_expect_number` check a
-block's kind, a chunk of columns' words and rows, and a block of
-values' number. `tess_spill_value_read` and `tess_spill_value_at` give
+it wrote before it uses it: `tess_spill_expect_kind` and
+`tess_spill_expect_number` check a block's kind and a block of values'
+number. `tess_spill_value_read` and `tess_spill_value_at` give
 the value a reference names only when it lies whole inside a chunk of
 values that was read, by the length its type gives
 (`tess_spill_value_of`, `tess_spill_value_fits`); a reader of chunks of
