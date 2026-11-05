@@ -511,6 +511,38 @@ that refer to them.
   `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`;
   `crates/tessera-capi/tests/spill.rs::a_chunk_of_columns_reads_back_through_its_entry_points`
 
+### Requirement: The writer and the reader of chunks of columns
+`TessColumnsWriter` SHALL append a batch's rows to its chunk of
+columns, their by-reference values copied into the chunk's own values,
+until the chunk is full of rows or of values. A row whose values pass
+an empty chunk's values SHALL grow them, and the writer SHALL keep them
+grown. `tess_columns_writer_write` SHALL write the chunk as its pair
+and start it anew, as `tess_columns_writer_reset` does without a write.
+`TessColumnsReader` SHALL load a pair into buffers of its own and check
+it whole (`tess_columns_reader_load`), or show a chunk that a writer of
+the query filled in memory, unchecked (`tess_columns_reader_show`). It
+SHALL give the rows by windows of Datums and one Datum at a time, a
+value by reference as a pointer into the values, valid until the next
+load or show.
+
+#### Scenario: Rows through the writer and back through the reader
+- **WHEN** rows of a column by value and of a varlena, with NULLs and
+  one value larger than a chunk's values, are appended, written as
+  pairs, loaded and read by windows
+- **THEN** every row reads back as written, the large value first in a
+  chunk of its own, and the values grown for it stay for the chunks
+  after it
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_columns`
+
+#### Scenario: A chunk shown from memory, and buffers handed over
+- **WHEN** a writer's chunk is shown through a reader and the next pair
+  loaded after it; and a loaded pair's buffers are handed over before
+  the next load
+- **THEN** the window reads the shown chunk where it lies, and the load
+  reads into the reader's own buffers; the buffers handed over keep
+  their values after the next load, and a reader freed holds none
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_columns`
+
 ### Requirement: A set writes one temporary file
 A set of spilled blocks (`TessSpill`) SHALL write one temporary file,
 made when the set first writes to disk, in which the blocks of every

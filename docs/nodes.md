@@ -2763,23 +2763,26 @@ per target, and `TessSend` keeps its child's.
 
 ### Execution
 
-`TessSend` is parallel-aware: in the leader it puts into its chunk of the
-query's shared memory a queue of 256 kB per worker, the leader its
+`TessSend` is parallel-aware: in the leader it puts into its chunk of
+the query's shared memory a queue of 256 kB per worker, the leader its
 receiver. In a worker it reads its child's batches and copies their
 selected rows into a message: a small header (the columns, the words of
 the rows' sort items, the bytes of values), a chunk of columns as the
-blocks of an external `TessSort` (`TESS_SPILL_COLUMNS`, above): a lane of
-the rows' NULL bits per 64 stored words (word w takes bit w % 64 of lane
-w / 64), a lane of words per column, a by-value Datum or a value's byte
-offset in the values, and after the chunk the by-reference values'
-bytes. The kernels append the rows (`tess_spill_columns_append`, as they
-write an external sort's runs), and the leader reads the lanes with the
-readers of `tessera/spill.h`. The rows of a message are as many as a
-quarter of the queue holds in lanes, 64 to 1024; a message is sent when
-its rows are full or its values pass half the queue, and a row whose
-values alone pass it goes in a message of its own. Rows go to no
-parent; when the leader has detached from the queue (a limit above was
-met), the worker stops.
+blocks of an external `TessSort` (`TESS_SPILL_COLUMNS`, above): a lane
+of the rows' NULL bits per 64 stored words (word w takes bit w % 64 of
+lane w / 64), a lane of words per column, a by-value Datum or a value's
+byte offset in the values, and after the chunk the by-reference values'
+bytes. The runtime's one writer of chunks of columns appends the rows
+(`TessColumnsWriter`, as it writes an external sort's runs), and the
+leader shows a message through the one reader (`TessColumnsReader`)
+without the check of a block read from disk: a worker of the query wrote
+it. The rows of a message are as many as a quarter of the queue holds in
+lanes, 64 to 1024; a message is sent when its rows are full or the next
+row's values would pass the room for values, half the queue to start. A
+first row of a message whose values alone pass that room grows it, and
+the rows after it, in that message and the next ones, take the room so
+grown. Rows go to no parent; when the leader has detached from the queue
+(a limit above was met), the worker stops.
 
 `TessGather` launches the workers as `ExecGather` does
 (`ExecInitParallelPlan` with the child's external parameters,

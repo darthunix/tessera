@@ -47,8 +47,6 @@
 /* Rows of a batch given out, and the most rows of a message. */
 #define GATHER_ROWS 64
 #define GATHER_MESSAGE_ROWS 1024
-/* The lanes of the columns' NULL bits of a message's chunk. */
-#define GATHER_MAX_NULL_LANES TESS_SPILL_COLUMNS_NULL_LANES(MaxTupleAttributeNumber)
 /* A queue per worker, as large as four of the core's tuple queues. */
 #define GATHER_QUEUE_SIZE (256 * 1024)
 
@@ -89,13 +87,9 @@ typedef struct SendShared
  */
 typedef struct MessageBuilder
 {
-	char	   *message;
-	Size		message_len;
-	void	   *chunk;
-	Size		chunk_len;
-	char	   *values;
-	Size		values_len;
-	Size		values_used;
+	/* The message's header, NULL until the first; its chunk and values the writer's. */
+	GatherHeader *header;
+	TessColumnsWriter writer;
 	TessBatch  *batch;
 	TessDatumColumn *columns;
 	TessRowMask pending;
@@ -165,8 +159,8 @@ typedef struct TessSendState
  */
 typedef struct MergeSource
 {
-	void	   *chunk;
-	const char *values;
+	/* The message in hand, shown through the reader. */
+	TessColumnsReader reader;
 	/*
 	 * Its lanes of NULL bits and of words from the first, each the
 	 * chunk's capacity of words after the one before (spill.h): a merge
@@ -206,9 +200,12 @@ typedef struct TessGatherState
 	TessInput  *local;
 	TessLayout	local_layout;
 	TessBatch  *local_batch;
-	/* The chunk of the message being given out, its values, its rows and the next. */
+	/*
+	 * The chunk of the message being given out, NULL for none, shown through
+	 * the reader with its values; its rows and the next.
+	 */
 	void	   *message;
-	const char *message_values;
+	TessColumnsReader reader;
 	uint32		message_rows;
 	uint32		next_row;
 	/* The batch given out: a window of the message, or the leader's own batch. */
@@ -391,49 +388,39 @@ chunk_bytes(void *chunk)
 /*
  * Copy the selected rows of the input's batches into the builder's
  * message, from the rows left of the batch it stopped in: true once the
- * message is full, its rows at the stride or its values past half a queue,
- * with more rows to come; false once the input is done. The kernels append
- * the rows' columns (tess_spill_columns_append), and their key words follow.
+ * message is full, its rows at the stride or its values at half a queue,
+ * with more rows to come; false once the input is done. The one writer
+ * appends the rows' columns, and their key words follow. A message's
+ * first row goes whatever its values take, and grows the values a
+ * message takes from then on.
  */
 static bool
 fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 			 MemoryContext context)
 {
-	void	   *chunk;
+	TessColumnsWriter *writer = &builder->writer;
 
-	if (builder->message == NULL)
+	if (builder->header == NULL)
 	{
-		TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-		Size		capacity;
-
-		builder->chunk_len = TESS_SPILL_COLUMNS_HEADER +
-			sizeof(uint64) * (Size) send->stride * send->nlanes;
-		builder->message_len = MAXALIGN(sizeof(GatherHeader)) + builder->chunk_len;
-		builder->message = MemoryContextAllocZero(context, builder->message_len);
-		builder->chunk = builder->message + MAXALIGN(sizeof(GatherHeader));
-		tess_status_check(send->kernels->spill_columns_init(builder->chunk, builder->chunk_len,
-															send->ncolumns + send->key_words,
-															&capacity, &status),
-						  &status);
-		if (capacity != send->stride)
-			elog(ERROR, "TessSend made a message of %zu rows, not %u", capacity, send->stride);
-		builder->values_len = 64 * 1024;
-		builder->values = MemoryContextAlloc(context, builder->values_len);
+		builder->header = MemoryContextAllocZero(context, MAXALIGN(sizeof(GatherHeader)));
+		tess_columns_writer_init(writer, send->kernels, context,
+								 TESS_SPILL_COLUMNS_HEADER +
+								 sizeof(uint64) * (Size) send->stride * send->nlanes,
+								 send->ncolumns + send->key_words, send->ncolumns,
+								 send->typbyvals, send->typlens, GATHER_QUEUE_SIZE / 2);
+		if (tess_spill_columns_capacity(writer->chunk) != send->stride)
+			elog(ERROR, "TessSend made a message of %u rows, not %u",
+				 tess_spill_columns_capacity(writer->chunk), send->stride);
 		builder->columns = MemoryContextAlloc(context,
 											  sizeof(TessDatumColumn) * send->ncolumns);
 	}
-	chunk = builder->chunk;
-	tess_spill_columns_set_rows(chunk, 0);
-	builder->values_used = 0;
+	tess_columns_writer_reset(writer);
 	if (builder->exhausted)
 		return false;
 	for (;;)
 	{
 		TessBatch  *batch = builder->batch;
 		TessDatumColumn *columns = builder->columns;
-		/* The values a message takes, past half a queue only with its first row's. */
-		Size		limit = Max(builder->values_used,
-								Min(builder->values_len, (Size) GATHER_QUEUE_SIZE / 2));
 
 		if (batch == NULL)
 		{
@@ -539,44 +526,20 @@ fill_message(TessSendState *send, MessageBuilder *builder, TessInput *input,
 			builder->batch = batch;
 			builder->selected = 0;
 		}
-		for (;;)
 		{
-			TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
-			uint32		first = tess_spill_columns_rows(chunk);
-			int			appended;
-			Size		need;
+			uint32		first = tess_columns_writer_rows(writer);
+			int			appended = tess_columns_writer_add(writer, columns, &builder->pending);
 
-			tess_status_check(send->kernels->spill_columns_append(chunk, builder->chunk_len,
-																  send->ncolumns, columns,
-																  send->typbyvals, send->typlens,
-																  &builder->pending,
-																  builder->values, limit,
-																  &builder->values_used,
-																  &appended, &need, &status),
-							  &status);
 			/* The appended rows' key words: the next of the batch's selected rows'. */
 			for (int word = 0; word < send->key_words; word++)
-				memcpy(tess_spill_columns_word(chunk, send->ncolumns + word) + first,
+				memcpy(tess_spill_columns_word(writer->chunk, send->ncolumns + word) + first,
 					   builder->key_lanes + (Size) word * builder->key_capacity + builder->selected,
 					   sizeof(uint64) * appended);
 			builder->selected += appended;
-			if (tess_spill_columns_rows(chunk) == send->stride)
+			/* Rows of the batch left: the message is full of rows or of values. */
+			if (tess_columns_writer_rows(writer) == send->stride ||
+				tess_row_mask_count(&builder->pending) > 0)
 				return true;
-			if (need == 0)
-				break;
-			/* The next row's values stop it: the message is full, or the values grow. */
-			if (tess_spill_columns_rows(chunk) > 0 &&
-				builder->values_used + need > GATHER_QUEUE_SIZE / 2)
-				return true;
-			if (builder->values_used + need > builder->values_len)
-			{
-				builder->values_len = Max(builder->values_len * 2, builder->values_used + need);
-				builder->values = repalloc_huge(builder->values, builder->values_len);
-			}
-			/* A message's first row goes whatever its values take. */
-			limit = tess_spill_columns_rows(chunk) > 0 ?
-				Min(builder->values_len, (Size) GATHER_QUEUE_SIZE / 2) :
-				builder->values_used + need;
 		}
 		tess_input_finish(input);
 		builder->batch = NULL;
@@ -589,22 +552,25 @@ static bool
 send_message(TessSendState *state)
 {
 	MessageBuilder *builder = &state->builder;
-	GatherHeader *header = (GatherHeader *) builder->message;
-	uint32		rows = tess_spill_columns_rows(builder->chunk);
-	shm_mq_iovec parts[2];
+	TessColumnsWriter *writer = &builder->writer;
+	GatherHeader *header = builder->header;
+	uint32		rows = tess_columns_writer_rows(writer);
+	shm_mq_iovec parts[3];
 	shm_mq_result result;
 
 	if (rows == 0)
 		return true;
 	header->ncolumns = state->ncolumns;
 	header->key_words = (uint32) state->key_words;
-	header->values_len = builder->values_used;
-	/* The chunk as filled, for stride rows each lane, then the values. */
-	parts[0].data = builder->message;
-	parts[0].len = builder->message_len;
-	parts[1].data = builder->values;
-	parts[1].len = builder->values_used;
-	result = shm_mq_sendv(state->queue, parts, builder->values_used > 0 ? 2 : 1, false, true);
+	header->values_len = writer->values_used;
+	/* The header, the chunk as filled, for stride rows each lane, then the values. */
+	parts[0].data = (const char *) header;
+	parts[0].len = MAXALIGN(sizeof(GatherHeader));
+	parts[1].data = writer->chunk;
+	parts[1].len = writer->chunk_len;
+	parts[2].data = writer->values;
+	parts[2].len = writer->values_used;
+	result = shm_mq_sendv(state->queue, parts, writer->values_used > 0 ? 3 : 2, false, true);
 	state->sent_messages++;
 	state->sent_rows += rows;
 	return result == SHM_MQ_SUCCESS;
@@ -782,6 +748,17 @@ static const TessBatchOps gather_batch_ops = {
 	.get_datum_column = gather_get_column,
 };
 
+/* A reader of the messages TessSend writes: their columns, then their key words. */
+static void
+message_reader_init(TessGatherState *state, TessColumnsReader *reader)
+{
+	TessSendState *send = state->send;
+
+	tess_columns_reader_init(reader, send->kernels, CurrentMemoryContext,
+							 send->ncolumns + send->key_words, send->ncolumns,
+							 send->typbyvals, send->typlens);
+}
+
 static void
 gather_begin(CustomScanState *css, EState *estate, int eflags)
 {
@@ -825,6 +802,7 @@ gather_begin(CustomScanState *css, EState *estate, int eflags)
 		state->values[column] = palloc_array(Datum, GATHER_ROWS);
 		state->isnull[column] = palloc_array(bool, GATHER_ROWS);
 	}
+	message_reader_init(state, &state->reader);
 	/* The leader's own part reads TessSend's child as a batch input. */
 	state->local = tess_input_create(estate->es_query_cxt, state->send->child);
 	state->local_layout = state->send->child_layout;
@@ -896,6 +874,8 @@ gather_launch(TessGatherState *state)
 		/* A source per worker, the leader's last; each loads when merged first. */
 		state->nsources = state->nreaders + 1;
 		state->sources = palloc0_array(MergeSource, state->nsources);
+		for (int index = 0; index < state->nsources; index++)
+			message_reader_init(state, &state->sources[index].reader);
 		state->sources[state->nreaders].done = !state->need_local;
 		state->merge_state[0] = 0;
 	}
@@ -903,11 +883,12 @@ gather_launch(TessGatherState *state)
 }
 
 /*
- * A message a worker sent, checked against the node's: its chunk of
- * columns, and its values after the chunk at *values.
+ * A message a worker sent, checked against the node's, shown through
+ * reader: its chunk of columns, and its values after the chunk. A worker
+ * of the query wrote them, so the window reads them unchecked.
  */
-static void *
-check_message(TessGatherState *state, void *data, Size nbytes, const char **values)
+static void
+show_message(TessGatherState *state, TessColumnsReader *reader, void *data, Size nbytes)
 {
 	GatherHeader *header = data;
 	char	   *chunk = (char *) data + MAXALIGN(sizeof(GatherHeader));
@@ -923,8 +904,7 @@ check_message(TessGatherState *state, void *data, Size nbytes, const char **valu
 	if (nbytes - MAXALIGN(sizeof(GatherHeader)) < len ||
 		nbytes - MAXALIGN(sizeof(GatherHeader)) - len != header->values_len)
 		elog(ERROR, "TessGather received a foreign message");
-	*values = chunk + len;
-	return chunk;
+	tess_columns_reader_show(reader, chunk, len, chunk + len, header->values_len);
 }
 
 /* The next message of a worker: true with one in hand, false when every queue is empty or gone. */
@@ -956,8 +936,9 @@ gather_receive(TessGatherState *state, bool wait)
 			if (result == SHM_MQ_WOULD_BLOCK)
 				continue;
 			state->nextreader = (index + 1) % state->nreaders;
-			state->message = check_message(state, data, nbytes, &state->message_values);
-			state->message_rows = tess_spill_columns_rows(state->message);
+			show_message(state, &state->reader, data, nbytes);
+			state->message = state->reader.chunk;
+			state->message_rows = state->reader.rows;
 			state->next_row = 0;
 			state->messages++;
 			return true;
@@ -990,45 +971,14 @@ readers_left(TessGatherState *state)
 	return false;
 }
 
-/* The next rows of the message as the batch: its columns from the chunk's lanes. */
+/* The next rows of the message as the batch: a window of its columns. */
 static void
 show_message_window(TessGatherState *state)
 {
 	uint32		n = Min(GATHER_ROWS, state->message_rows - state->next_row);
-	void	   *chunk = state->message;
-	const char *values = state->message_values;
-	/* The lanes of the columns' NULL bits: the key words have none. */
-	int			null_lanes = tess_spill_columns_null_lanes(state->ncolumns);
-	uint64		any[GATHER_MAX_NULL_LANES];
 
-	for (int lane = 0; lane < null_lanes; lane++)
-	{
-		const uint64 *nulls = tess_spill_columns_lane(chunk, lane) + state->next_row;
-
-		any[lane] = 0;
-		for (uint32 row = 0; row < n; row++)
-			any[lane] |= nulls[row];
-	}
-	for (int column = 0; column < state->ncolumns; column++)
-	{
-		const uint64 *lane = tess_spill_columns_word(chunk, column) + state->next_row;
-		const uint64 *nulls = tess_spill_columns_lane(chunk, tess_spill_columns_null_lane(column)) +
-			state->next_row;
-		bool	   *isnull = state->isnull[column];
-		Datum	   *out = state->values[column];
-
-		if (tess_spill_columns_is_null(any[tess_spill_columns_null_lane(column)], column))
-			for (uint32 row = 0; row < n; row++)
-				isnull[row] = tess_spill_columns_is_null(nulls[row], column);
-		else
-			memset(isnull, 0, sizeof(bool) * n);
-		if (state->typbyvals[column])
-			memcpy(out, lane, sizeof(Datum) * n);
-		else
-			for (uint32 row = 0; row < n; row++)
-				out[row] = isnull[row] ? (Datum) 0 :
-					PointerGetDatum(values + tess_spill_value_byte(lane[row]));
-	}
+	tess_columns_reader_window(&state->reader, state->next_row, n, state->values,
+							   state->isnull);
 	state->window_start = state->next_row;
 	state->next_row += n;
 	state->window_bits[0] = n == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << n) - 1;
@@ -1117,11 +1067,12 @@ gather_next(TessGatherState *state)
 
 /* ------------------------------------------------------------ TessGatherMerge */
 
-/* A source's rows: those of the chunk, by its lanes. */
+/* A source's rows: those of the chunk its reader shows, by its lanes. */
 static void
-source_attach(MergeSource *source, void *chunk)
+source_attach(MergeSource *source)
 {
-	source->chunk = chunk;
+	void	   *chunk = source->reader.chunk;
+
 	source->rows = tess_spill_columns_rows(chunk);
 	source->nulls = tess_spill_columns_lane(chunk, 0);
 	source->words = tess_spill_columns_word(chunk, 0);
@@ -1154,7 +1105,8 @@ merge_load(TessGatherState *state, int index)
 			source->done = true;
 			return;
 		}
-		source_attach(source, check_message(state, data, nbytes, &source->values));
+		show_message(state, &source->reader, data, nbytes);
+		source_attach(source);
 		state->messages++;
 		return;
 	}
@@ -1162,8 +1114,11 @@ merge_load(TessGatherState *state, int index)
 	(void) fill_message(send, &state->local_builder, state->local,
 						state->css.ss.ps.state->es_query_cxt);
 	remove_query_dsa(state);
-	source_attach(source, state->local_builder.chunk);
-	source->values = state->local_builder.values;
+	tess_columns_reader_show(&source->reader, state->local_builder.writer.chunk,
+							 state->local_builder.writer.chunk_len,
+							 state->local_builder.writer.values,
+							 state->local_builder.writer.values_used);
+	source_attach(source);
 	if (source->rows == 0)
 		source->done = true;
 }
@@ -1191,7 +1146,7 @@ merge_take(TessGatherState *state, int index, uint32 place, int out)
 			state->values[column][out] = (Datum) word;
 		else
 			state->values[column][out] =
-				PointerGetDatum(source->values + tess_spill_value_byte(word));
+				PointerGetDatum(source->reader.values + tess_spill_value_byte(word));
 	}
 	if (index == state->nreaders)
 		state->local_rows++;
@@ -1214,7 +1169,7 @@ source_value(TessGatherState *state, const MergeSource *source, int column, uint
 		return (Datum) 0;
 	if (state->typbyvals[column])
 		return (Datum) word;
-	return PointerGetDatum(source->values + tess_spill_value_byte(word));
+	return PointerGetDatum(source->reader.values + tess_spill_value_byte(word));
 }
 
 /*
