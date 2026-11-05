@@ -1678,9 +1678,9 @@ first_match_rows(double n, double p)
  * and the join's over the candidate pairs, at the filter's prices. A semi
  * or anti join stops at a row's first match: the nested loop reads a
  * key's rows until then, and the probe's candidate pairs are counted as
- * the loop's, which bound them (the probe checks only the candidates
- * that match every key). Nothing goes out before the first batch's
- * table.
+ * the loop's: as many where the rows pass alone of their order, fewer
+ * where the probe checks the join's other keys first. Nothing goes out
+ * before the first batch's table.
  *
  * The lookup counts the batches its input gives, gathered where the outer
  * side has stored values, and their copies; the descents of each count
@@ -1772,16 +1772,18 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	loop_filter = tess_scan_index_rows_time(root, innerrel, loop_rows) -
 		loop_rows * tess_index_tuple_cost;
 	residual = checks * list_length(keys->residual) * tess_filter_clause_cost;
+	kept_columns(joinrel, innerrel, keys, &ints, &texts, &hashed);
 	/*
 	 * A batch goes out in a round for each record a key at most; a semi or
 	 * anti batch goes out once, its rounds stepping on to a key's next
-	 * record only while the join's clauses reject a row.
+	 * record only while the join's clauses reject a row: a hashed key's
+	 * recheck, among them, rejects only another key of the same hash.
 	 */
 	if (stops)
-		rounds = gathered * (keys->residual != NIL ? Max(key_rows * share, 1.0) : 1.0);
+		rounds = gathered * (list_length(keys->residual) > hashed ?
+							 Max(key_rows * share, 1.0) : 1.0);
 	else
 		rounds = Min(gathered * Max(lookup->key_rows, 1.0), Max(path->rows, gathered));
-	kept_columns(joinrel, innerrel, keys, &ints, &texts, &hashed);
 	/* The inner side's work, a scan's: its cost is its time, as a child's. */
 	inner = gathered * tess_join_lookup_batch_cost +
 		descents * tess_join_lookup_descent_cost +

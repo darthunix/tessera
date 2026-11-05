@@ -278,9 +278,12 @@ E(m, s) = (1 - (1 - s)^m) / s        E(m, 0) = m
 
 rows a key, a row without a match reading all m, and checks the join's
 other clauses over `a` of them. The lookup still reads every row of a
-key. Its probe checks only the candidates that match every key of the
-join, in its table's order rather than the index's; they are counted as
-the loop's, which bound them. `s` is the core's own estimate of the
+key. Its probe walks a key's candidates in its table's order rather
+than the index's, and hands on to the other clauses only those that
+match every key of the join: under the independence above it checks as
+many as the loop, fewer with more keys, and they are counted as the
+loop's. A clause whose outcome follows the rows' order can make the
+count low. `s` is the core's own estimate of the
 pairs an outer row finds, `outer_match_frac × match_count` of its semi
 and anti factors (the join's clauses at an inner join's selectivity
 over the inner rows that pass their own, without the clauses an anti
@@ -289,8 +292,9 @@ approximation three ways: m is an average, the rows of a key pass alone
 of each other, and where the core raises `match_count` to one, `s`
 comes out high and the loop cheap, against the lookup. A semi or anti
 batch goes out once, its rounds stepping on to a key's next record only
-while the join's clauses reject a row: a round a batch, m × a with such
-clauses.
+while the join's clauses reject a row: a round a batch, m × a with
+clauses other than a hashed key's recheck, which rejects only another
+key of the same hash.
 
 The counts follow the core's estimates and the shape of the outer side:
 
