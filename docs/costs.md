@@ -263,9 +263,34 @@ The two times, in the units of the scan model:
   before in the index: keys near each other spare the nested loop's
   descents too, the pages above them already in the processor's
   caches; `join_loop_row_cost` a row fetched;
-- both: the relation's clauses over the rows fetched, at the filter's
-  prices (above), and the join's other clauses over the candidate
-  pairs, `filter_clause_cost` a clause.
+- both: the relation's clauses over the rows each reads, at the
+  filter's prices (above), and the join's other clauses over the
+  candidate pairs, `filter_clause_cost` a clause.
+
+A semi or anti join stops at an outer row's first match. With m the
+rows a key holds by the equality alone (below), `a` the share of the
+inner rows the relation's clauses keep, and `s` the chance of a key's
+row to pass them and the join's other conditions, the nested loop reads
+
+```
+E(m, s) = (1 - (1 - s)^m) / s        E(m, 0) = m
+```
+
+rows a key, a row without a match reading all m, and checks the join's
+other clauses over `a` of them. The lookup still reads every row of a
+key. Its probe checks only the candidates that match every key of the
+join, in its table's order rather than the index's; they are counted as
+the loop's, which bound them. `s` is the core's own estimate of the
+pairs an outer row finds, `outer_match_frac × match_count` of its semi
+and anti factors (the join's clauses at an inner join's selectivity
+over the inner rows that pass their own, without the clauses an anti
+join applies after the join), over m, and no more than `a`. It is an
+approximation three ways: m is an average, the rows of a key pass alone
+of each other, and where the core raises `match_count` to one, `s`
+comes out high and the loop cheap, against the lookup. A semi or anti
+batch goes out once, its rounds stepping on to a key's next record only
+while the join's clauses reject a row: a round a batch, m × a with such
+clauses.
 
 The counts follow the core's estimates and the shape of the outer side:
 

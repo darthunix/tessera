@@ -1647,6 +1647,22 @@ lookup_descents(const LookupShape *shape, double batches, double span, double ke
 }
 
 /*
+ * The rows read until the first of n that passes, each passing with the
+ * chance p alone, an outer row with no match reading all n: (1 - (1 -
+ * p)^n) / p, and n where p is 0; written so that a small p keeps its
+ * digits.
+ */
+static double
+first_match_rows(double n, double p)
+{
+	if (p <= 0)
+		return n;
+	if (p >= 1)
+		return Min(n, 1.0);
+	return -expm1(n * log1p(-p)) / p;
+}
+
+/*
  * An index join's cost: its time by the model of docs/costs.md (the index
  * join), the inner side's work as a scan's, the tables' at the hash
  * join's rate, as the node's hash join prices its child and its own work;
@@ -1658,9 +1674,13 @@ lookup_descents(const LookupShape *shape, double batches, double span, double ke
  * and the hash join's work over the batches' tables, of the rows the
  * relation's clauses keep. The nested loop's: its keys, the same descents
  * (the nearness of the keys in the index, which spares its descents too),
- * and its rows. Both check the relation's clauses over the rows fetched
- * and the join's over the candidate pairs, at the filter's prices.
- * Nothing goes out before the first batch's table.
+ * and its rows. Each checks the relation's clauses over the rows it reads
+ * and the join's over the candidate pairs, at the filter's prices. A semi
+ * or anti join stops at a row's first match: the nested loop reads a
+ * key's rows until then, and the probe's candidate pairs are counted as
+ * the loop's, which bound them (the probe checks only the candidates
+ * that match every key). Nothing goes out before the first batch's
+ * table.
  *
  * The lookup counts the batches its input gives, gathered where the outer
  * side has stored values, and their copies; the descents of each count
@@ -1668,7 +1688,8 @@ lookup_descents(const LookupShape *shape, double batches, double span, double ke
  * for EXPLAIN.
  */
 static bool
-lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
+lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
+			const SemiAntiJoinFactors *semifactors, const JoinLookup *lookup,
 			const JoinKeys *keys, const Path *outer, Path *path, char **estimate)
 {
 	RelOptInfo *innerrel = lookup->inner->parent;
@@ -1679,6 +1700,9 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
 	double		outer_rows = Max(outer->rows, 1.0);
 	double		keys_count = Max(outer_rows * (1.0 - nullfrac), 1.0);
 	double		leaves = Max(lookup->index->pages * lookup->coverage, 1.0);
+	double		key_rows = Max(lookup->key_rows, 1.0);
+	double		share = innerrel->tuples > 0 ? Min(innerrel->rows / innerrel->tuples, 1.0) : 1.0;
+	bool		stops = jointype == JOIN_SEMI || jointype == JOIN_ANTI;
 	double		gathered;
 	double		span;
 	double		copied;
@@ -1686,11 +1710,14 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
 	double		loop_descents;
 	double		fetched;
 	double		kept;
+	double		loop_rows;
+	double		checks;
 	double		rounds;
 	int			ints;
 	int			texts;
 	int			hashed;
 	Cost		filter;
+	Cost		loop_filter;
 	Cost		residual;
 	Cost		inner;
 	Cost		table;
@@ -1722,13 +1749,38 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
 							   correlation, outer_key);
 	loop_descents = lookup_descents(&shape, Max(Min(shape.batches, keys_count), 1.0),
 									shape.span, keys_count, leaves, correlation, outer_key);
+	/* The lookup reads every row of a key; its table takes those kept. */
 	fetched = keys_count * lookup->key_rows;
-	/* The inner rows the relation's clauses keep, and the candidate pairs. */
-	kept = fetched * (innerrel->tuples > 0 ? Min(innerrel->rows / innerrel->tuples, 1.0) : 1.0);
+	kept = fetched * share;
+	loop_rows = fetched;
+	checks = kept;
+	if (stops)
+	{
+		/*
+		 * A row's chance to pass the relation's clauses and the join's: the
+		 * pairs an outer row finds by the core's factors (the join's clauses
+		 * at an inner join's selectivity over the inner rows that pass their
+		 * own) over its key's rows, within the relation's share.
+		 */
+		double		chance = Min(semifactors->outer_match_frac * semifactors->match_count /
+								 key_rows, share);
+
+		loop_rows = keys_count * first_match_rows(key_rows, chance);
+		checks = loop_rows * share;
+	}
 	filter = tess_scan_index_rows_time(root, innerrel, fetched) - fetched * tess_index_tuple_cost;
-	residual = kept * list_length(keys->residual) * tess_filter_clause_cost;
-	/* A batch goes out in a round for each record a key at most. */
-	rounds = Min(gathered * Max(lookup->key_rows, 1.0), Max(path->rows, gathered));
+	loop_filter = tess_scan_index_rows_time(root, innerrel, loop_rows) -
+		loop_rows * tess_index_tuple_cost;
+	residual = checks * list_length(keys->residual) * tess_filter_clause_cost;
+	/*
+	 * A batch goes out in a round for each record a key at most; a semi or
+	 * anti batch goes out once, its rounds stepping on to a key's next
+	 * record only while the join's clauses reject a row.
+	 */
+	if (stops)
+		rounds = gathered * (keys->residual != NIL ? Max(key_rows * share, 1.0) : 1.0);
+	else
+		rounds = Min(gathered * Max(lookup->key_rows, 1.0), Max(path->rows, gathered));
 	kept_columns(joinrel, innerrel, keys, &ints, &texts, &hashed);
 	/* The inner side's work, a scan's: its cost is its time, as a child's. */
 	inner = gathered * tess_join_lookup_batch_cost +
@@ -1744,12 +1796,12 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
 		rounds * tess_join_batch_cost + residual +
 		copied * list_length(outer->pathtarget->exprs) * tess_join_lookup_copy_cost;
 	nested_loop = keys_count * tess_join_loop_key_cost +
-		loop_descents * tess_join_loop_descent_cost + fetched * tess_join_loop_row_cost +
-		filter + residual;
+		loop_descents * tess_join_loop_descent_cost + loop_rows * tess_join_loop_row_cost +
+		loop_filter + residual;
 	*estimate = psprintf("batches=%.0f keys=%.0f descents=%.0f rows=%.0f time=%.0f loop=%.0f "
-						 "copied=%.0f loop_descents=%.0f",
+						 "copied=%.0f loop_descents=%.0f loop_rows=%.0f checks=%.0f",
 						 gathered, keys_count, descents, fetched, inner + table, nested_loop,
-						 copied, loop_descents);
+						 copied, loop_descents, loop_rows, checks);
 	if (inner + table > JOIN_LOOKUP_MARGIN * nested_loop)
 		return false;
 	cost = inner + table / tess_join_cost_unit;
@@ -1811,7 +1863,8 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 									extra->restrictlist, NULL, hashclauses);
 	if (lookup != NULL)
 	{
-		if (!lookup_cost(root, joinrel, lookup, keys, outer, &template->jpath.path, &estimate))
+		if (!lookup_cost(root, joinrel, jointype, &extra->semifactors, lookup, keys, outer,
+						 &template->jpath.path, &estimate))
 			return NULL;
 	}
 	else
