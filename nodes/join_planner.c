@@ -184,12 +184,24 @@ key_operand(Node *node)
 	vars = pull_var_clause(node, 0);
 	if (vars == NIL)
 		return NULL;
+#if TESS_PG_MAJOR >= 16
 	foreach_node(Var, var, vars)
 	{
 		if (!bms_is_empty(var->varnullingrels))
 			return NULL;
 	}
 	return node;
+#else
+
+	/*
+	 * shortcut: before PostgreSQL 16 a Var does not say which outer joins
+	 * null it, so an expression over a column an outer join below may null
+	 * (coalesce(r.k, 0) above a LEFT JOIN) cannot be told from one that
+	 * none does: every expression key stays the core's join. Prove where
+	 * the expression is computed to take those no outer join nulls.
+	 */
+	return NULL;
+#endif
 }
 
 /*
@@ -420,6 +432,27 @@ partition_column(PlannerInfo *root, RelOptInfo *child, Var *var)
  * has steps for `column op value`, as it matches a clause to a key. NULL
  * where none is.
  */
+/*
+ * The partitions the planner's pruning left (PostgreSQL 15 keeps them as
+ * live_parts): before, the pruned ones are dummy relations.
+ */
+#if TESS_PG_MAJOR >= 15
+#define live_parts(rel) ((rel)->live_parts)
+#else
+static Bitmapset *
+live_parts(RelOptInfo *rel)
+{
+	Bitmapset  *result = NULL;
+
+	for (int part = 0; part < rel->nparts; part++)
+	{
+		if (rel->part_rels[part] != NULL && !IS_DUMMY_REL(rel->part_rels[part]))
+			result = bms_add_member(result, part);
+	}
+	return result;
+}
+#endif
+
 static PartitionScheme
 key_partitioning(PlannerInfo *root, RelOptInfo *rel, Var *column, Oid opno)
 {
@@ -437,7 +470,7 @@ key_partitioning(PlannerInfo *root, RelOptInfo *rel, Var *column, Oid opno)
 				return scheme;
 		}
 	}
-	while ((part = bms_next_member(rel->live_parts, part)) >= 0)
+	while ((part = bms_next_member(live_parts(rel), part)) >= 0)
 	{
 		RelOptInfo *child = rel->part_rels[part];
 		PartitionScheme found;
@@ -617,7 +650,7 @@ leaves_left(PlannerInfo *root, RelOptInfo *rel, List *clauses)
 
 	/* The core's pruning at planning reads the relation's own clauses. */
 	pruned.baserestrictinfo = clauses;
-	parts = bms_intersect(prune_append_rel_partitions(&pruned), rel->live_parts);
+	parts = bms_intersect(prune_append_rel_partitions(&pruned), live_parts(rel));
 	while ((part = bms_next_member(parts, part)) >= 0)
 	{
 		RelOptInfo *child = rel->part_rels[part];
@@ -657,6 +690,13 @@ expected_leaves(PlannerInfo *root, RelOptInfo *outerrel, const JoinKeys *keys,
 	List	   *bounds;
 	Relids		leaves;
 
+	/*
+	 * shortcut: before PostgreSQL 18 the node prunes by its keys nowhere
+	 * yet (prune_description), so it expects no partition pruned; port
+	 * the description as TessAppend's prune_info to prune there.
+	 */
+	if (TESS_PG_MAJOR < 18)
+		return NULL;
 	if (!enable_partition_pruning || !IS_SIMPLE_REL(outerrel) ||
 		outerrel->part_scheme == NULL ||
 		(jointype != JOIN_INNER && jointype != JOIN_SEMI && jointype != JOIN_RIGHT &&
@@ -711,7 +751,11 @@ pruned_append(PlannerInfo *root, Path *path, Relids leaves)
 		if (foreach_current_index(subpath) < append->first_partial_path)
 			pruned->first_partial_path++;
 	}
+#if TESS_PG_MAJOR >= 19
 	cost_append(pruned, root);
+#else
+	cost_append(pruned);
+#endif
 	pruned->path.rows = clamp_row_est(pruned->path.rows);
 	return &pruned->path;
 }
@@ -725,6 +769,7 @@ pruned_append(PlannerInfo *root, Path *path, Relids leaves)
  * Append adds up once a partition. The path itself where it divides
  * every partition already; NULL where a partition has no partial path.
  */
+#if TESS_PARALLEL_QUERY
 static Path *
 divided_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 {
@@ -748,6 +793,7 @@ divided_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 	return (Path *) create_append_path(root, rel, input, NIL, NULL,
 									   append->path.parallel_workers, true, -1);
 }
+#endif
 
 /*
  * A batch child with the join's key expressions among its targets, which
@@ -792,6 +838,7 @@ with_key_targets(PlannerInfo *root, Path *child, List *keys)
  * many combinations of their rows, as the core counts them for its right
  * anti join (approx_tuple_count, which it does not export).
  */
+#if TESS_PG_MAJOR >= 16
 static double
 inner_pairs(PlannerInfo *root, Relids outer, Relids inner, List *clauses, double tuples)
 {
@@ -803,6 +850,7 @@ inner_pairs(PlannerInfo *root, Relids outer, Relids inner, List *clauses, double
 		selectivity *= clause_selectivity(root, (Node *) rinfo, 0, JOIN_INNER, &sjinfo);
 	return clamp_row_est(tuples * selectivity);
 }
+#endif
 
 /*
  * The inner columns the records keep, the target's and the residual
@@ -900,7 +948,7 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 	/* Records a key: a compact batch of the pairs when there are several. */
 	if (!inner_unique && keys->inner != NIL)
 	{
-		double		distinct = estimate_num_groups(root, keys->inner, table_rows, NULL, NULL);
+		double		distinct = tess_estimate_num_groups(root, keys->inner, table_rows);
 
 		if (distinct > 0)
 			per_key = Max(1.0, table_rows / distinct);
@@ -922,6 +970,7 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 			matched = Min(rows, probe_rows);
 			pairs = rows;
 			break;
+#if TESS_PG_MAJOR >= 16
 		case JOIN_RIGHT_ANTI:
 			/*
 			 * The pairs, an inner join's, only mark their records and are
@@ -933,6 +982,7 @@ join_cost(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel, JoinType
 			matched = pairs / per_key;
 			compact = false;
 			break;
+#endif
 		default:
 			matched = compact ? rows / per_key : rows;
 			pairs = rows;
@@ -1166,6 +1216,9 @@ lookup_coverage(PlannerInfo *root, RelOptInfo *innerrel, Var *var, Node *outer_k
  * collation and a clause the table may promote into an index scan; and
  * whose most frequent key's rows for a batch fit a quarter of hash_mem,
  * of a table that fits effective_cache_size. False where none does.
+ * shortcut: none on a core of the Greenplum family, whose Motions may move
+ * the outer rows away from the inner table's; offer one there when the
+ * inner side's locus is checked to be the join's.
  */
 static bool
 find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int ninner,
@@ -1174,7 +1227,7 @@ find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int n
 	int			key = -1;
 
 	/* Pages that may come from the disk: the prices are measured in memory. */
-	if (!enable_indexscan || innerrel->reloptkind != RELOPT_BASEREL ||
+	if (TESS_MPP || !enable_indexscan || innerrel->reloptkind != RELOPT_BASEREL ||
 		innerrel->pages > (BlockNumber) effective_cache_size)
 		return false;
 	foreach_node(RestrictInfo, rinfo, keys->rinfos)
@@ -1245,8 +1298,8 @@ find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int n
 			lookup->index = index;
 			/* The core's estimate of the join clause: both sides' distinct keys. */
 			lookup->key_rows = Min(lookup_expected_rows(root, innerrel, var),
-								   clamp_row_est(clause_selectivity(root, (Node *) rinfo, 0,
-																	JOIN_INNER, NULL) *
+								   clamp_row_est(tess_clause_selectivity(root, (Node *) rinfo, 0,
+																		 JOIN_INNER, NULL) *
 												 innerrel->tuples));
 			lookup->coverage = lookup_coverage(root, innerrel, var, list_nth(keys->outer, key),
 											   family, lefttype, righttype,
@@ -1363,7 +1416,7 @@ lookup_run(PlannerInfo *root, RelOptInfo *rel)
 			 estimator != F_SCALARGESEL))
 			continue;
 		correlation = lookup_key_stats(root, column, &nullfrac);
-		share = clause_selectivity(root, (Node *) rinfo, 0, JOIN_INNER, NULL);
+		share = tess_clause_selectivity(root, (Node *) rinfo, 0, JOIN_INNER, NULL);
 		run = Min(run, share * correlation * correlation + 1.0 - correlation * correlation);
 	}
 	return run;
@@ -1860,9 +1913,26 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	foreach_node(RestrictInfo, rinfo, keys->rinfos)
 		rinfo->outer_is_left = bms_is_subset(rinfo->left_relids,
 											 outer_path->parent->relids);
+#if TESS_MPP
+	{
+		/*
+		 * The family's constructor places the Motions that bring a key's
+		 * rows together, and declines a join it cannot place.
+		 */
+		Path	   *made = create_hashjoin_path(root, joinrel, jointype, jointype, &workspace,
+												extra, priced, inner_path, shared,
+												extra->restrictlist, NULL,
+												extra->redistribution_clauses, hashclauses);
+
+		if (made == NULL || !IsA(made, HashPath))
+			return NULL;
+		template = (HashPath *) made;
+	}
+#else
 	template = create_hashjoin_path(root, joinrel, jointype, &workspace,
 									extra, priced, inner_path, shared,
 									extra->restrictlist, NULL, hashclauses);
+#endif
 	if (lookup != NULL)
 	{
 		if (!lookup_cost(root, joinrel, jointype, &extra->semifactors, lookup, keys, outer,
@@ -1909,6 +1979,7 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
  * table only, as the core does: with a table each, every participant
  * would return the records without a pair.
  */
+#if TESS_PARALLEL_QUERY
 static void
 add_partial_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *innerrel,
 					   JoinType jointype, JoinPathExtraData *extra, const JoinKeys *keys,
@@ -1951,6 +2022,7 @@ add_partial_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *inner
 	path->path.parallel_aware = true;
 	add_partial_path(joinrel, &path->path);
 }
+#endif
 
 static void
 add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
@@ -1967,7 +2039,9 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	Relids		leaves;
 
 	/*
-	 * The core offers no hash join either without PGS_HASHJOIN. The kinds
+	 * The core offers no hash join either without PGS_HASHJOIN (before
+	 * PostgreSQL 19, with enable_hashjoin off, but for a FULL join, which
+	 * only a hash join can do in an older core). The kinds
 	 * that keep the outer side, which the node probes with: each outer
 	 * row's matches are known when its batch has been probed; RIGHT and
 	 * FULL keep the inner side too, marking the table's records that find
@@ -1979,7 +2053,11 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 		 jointype != JOIN_ANTI && jointype != JOIN_LEFT &&
 		 jointype != JOIN_RIGHT && jointype != JOIN_FULL &&
 		 jointype != JOIN_RIGHT_ANTI) ||
+#if TESS_PG_MAJOR >= 19
 		(extra->pgs_mask & PGS_HASHJOIN) == 0 ||
+#else
+		(!enable_hashjoin && jointype != JOIN_FULL) ||
+#endif
 		!find_keys(root, joinrel, extra->restrictlist, outerrel, innerrel,
 				   jointype, &keys) ||
 		!target_supported(joinrel, innerrel, &keys, &ninner) ||
@@ -2018,6 +2096,7 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 					   outer_path, inner_path, false, NULL, &lookup) : NULL;
 	if (path != NULL)
 		add_path(joinrel, &path->path);
+#if TESS_PARALLEL_QUERY
 
 	/*
 	 * Under a Gather: the outer side's cheapest partial path divides the
@@ -2053,6 +2132,7 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	}
 	add_partial_join_paths(root, joinrel, innerrel, jointype, extra, &keys,
 						   outer_path, inner_path, leaves, lookup_found ? &lookup : NULL);
+#endif
 }
 
 /* The node's paths, then TessGather over the cheapest partial path, before the core gathers it. */
@@ -2132,6 +2212,11 @@ scan_has(List *scan, const Var *var)
 static Node *
 align_nullingrels(Node *node, List *scan)
 {
+#if TESS_PG_MAJOR < 16
+	/* Before PostgreSQL 16 a Var carries no nulling relations to align. */
+	(void) scan;
+	return node;
+#else
 	if (node == NULL)
 		return NULL;
 	if (IsA(node, Var))
@@ -2147,6 +2232,7 @@ align_nullingrels(Node *node, List *scan)
 		return (Node *) var;
 	}
 	return expression_tree_mutator(node, align_nullingrels, scan);
+#endif
 }
 
 /*
@@ -2194,6 +2280,14 @@ prune_clause(Oid opno, Var *outer, Param *param)
 static PartitionPruneInfo *
 prune_description(PlannerInfo *root, RelOptInfo *rel, List *children, List *clauses)
 {
+#if TESS_PG_MAJOR < 18
+	/* No pruning by the keys there yet: expected_leaves expects none. */
+	(void) root;
+	(void) rel;
+	(void) children;
+	(void) clauses;
+	return NULL;
+#else
 	int			index = make_partition_pruneinfo(root, rel, children, clauses);
 	PartitionPruneInfo *info;
 
@@ -2205,6 +2299,7 @@ prune_description(PlannerInfo *root, RelOptInfo *rel, List *children, List *clau
 		elog(ERROR, "TessHashJoin found another pruning description than its own");
 	root->partPruneInfos = list_delete_last(root->partPruneInfos);
 	return info;
+#endif
 }
 
 /*
@@ -2252,7 +2347,9 @@ write_join_prune(TessPlanWriter *writer, PlannerInfo *root, const TessPlanChild 
 		PartitionPruneInfo *range = NULL;
 
 		/* The partition key as the relation's scan sees it, below any outer join. */
+#if TESS_PG_MAJOR >= 16
 		outer_var->varnullingrels = NULL;
+#endif
 		values = prune_description(root, rel, children,
 								   list_make1(prune_clause(outer_operator(clause, outer_var),
 														   outer_var, value)));
@@ -2418,6 +2515,14 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 void
 tess_hash_join_planner_init(void)
 {
+	/*
+	 * shortcut: on a core of the Greenplum family the planner offers the
+	 * node nowhere yet: its children must be the ones the family's join
+	 * path chose, with their Motions, and the executor must squelch the
+	 * sides it leaves unread first.
+	 */
+	if (TESS_MPP)
+		return;
 	previous_set_join_pathlist_hook = set_join_pathlist_hook;
 	set_join_pathlist_hook = join_pathlist;
 }

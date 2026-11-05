@@ -87,6 +87,16 @@ pg_prevpower2_64(uint64 num)
 	return ((uint64) 1) << pg_leftmost_one_pos64(num);
 }
 
+/* The least power of two not below num, num > 0 (PostgreSQL 13). */
+static inline uint64
+pg_nextpower2_64(uint64 num)
+{
+	Assert(num > 0 && num <= PG_UINT64_MAX / 2 + 1);
+	if ((num & (num - 1)) == 0)
+		return num;
+	return ((uint64) 1) << (pg_leftmost_one_pos64(num) + 1);
+}
+
 #define TYPALIGN_DOUBLE 'd'
 /* No incremental sort: no path has this tag. */
 #define T_IncrementalSortPath T_Invalid
@@ -246,6 +256,9 @@ list_copy_head(const List *list, int n)
 
 /* ---------------------------------------------- what PostgreSQL 16 added */
 #if TESS_PG_MAJOR < 16
+
+/* No right anti join (PostgreSQL 16): no join has this kind. */
+#define JOIN_RIGHT_ANTI ((JoinType) -1)
 
 /* Grow an allocation and zero the new tail (PostgreSQL 16). */
 static inline void *
