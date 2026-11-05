@@ -393,16 +393,17 @@ RESET tessera.join_lookup_key_cost;
 -- key is NULL has none. A lookup reads every row of a key, where the
 -- core's nested loop stops at the first that passes, so the loop's price
 -- is raised for the lookup to pass the margin: the section checks the
--- mode's rows and plans.
+-- mode's rows and plans. The semi joins look up o4, four rows a key:
+-- the core makes a semi join by a unique key an inner join.
 SET tessera.join_lookup_batch_cost = 0;
 SET tessera.join_lookup_descent_cost = 0;
 SET tessera.join_lookup_key_cost = 0;
 SET tessera.join_loop_key_cost = 100;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k);
 EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k);
 -- Keys found, absent and NULL, batch after batch; an anti join made of a
 -- LEFT join, whose inner columns are NULL.
-SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k)$$);
 SELECT ij_same($$SELECT o.id, o.k FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
 SELECT ij_lookup($$SELECT o.id, l.v FROM ij_outer o LEFT JOIN ij_inner l ON l.id = o.k WHERE l.id IS NULL$$) AS left_to_anti;
 SELECT ij_same($$SELECT o.id, l.v FROM ij_outer o LEFT JOIN ij_inner l ON l.id = o.k WHERE l.id IS NULL$$);
@@ -424,8 +425,9 @@ SELECT ij_lookup($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inne
 SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.nk = o.kn AND l.w <> 2) AND o.id <= 1000$$);
 SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.nk = o.kn AND l.w <> 2) AND o.id <= 1000$$);
 -- A correlated subquery rescanned with its parameter changed.
-SELECT ij_lookup($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$) AS semi_rescan;
-SELECT ij_same($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$);
+SELECT ij_lookup($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$) AS semi_rescan,
+       ij_property($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$, 'Join Type') AS join_type;
+SELECT ij_same($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$);
 SELECT ij_same($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$);
 -- A batch's table past hash_mem, with a clause over both sides.
 SET hash_mem_multiplier = 1;
@@ -444,7 +446,9 @@ SET tessera.scan_worker_page_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k);
-SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+SELECT ij_lookup($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k)$$) AS parallel_semi,
+       ij_property($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k)$$, 'Join Type') AS join_type;
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k)$$);
 SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
 SET parallel_leader_participation = off;
 SELECT ij_lookup($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$) AS workers_alone,

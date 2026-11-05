@@ -786,23 +786,25 @@ RESET tessera.join_lookup_key_cost;
 -- key is NULL has none. A lookup reads every row of a key, where the
 -- core's nested loop stops at the first that passes, so the loop's price
 -- is raised for the lookup to pass the margin: the section checks the
--- mode's rows and plans.
+-- mode's rows and plans. The semi joins look up o4, four rows a key:
+-- the core makes a semi join by a unique key an inner join.
 SET tessera.join_lookup_batch_cost = 0;
 SET tessera.join_lookup_descent_cost = 0;
 SET tessera.join_lookup_key_cost = 0;
 SET tessera.join_loop_key_cost = 100;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k);
                       QUERY PLAN                      
 ------------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessHashJoin)
+         Join Type: Semi
          Inner Lookups: per outer batch
-         Hash Cond: (l.id = o.k)
+         Hash Cond: (o.k = l.o4)
          ->  Custom Scan (TessHeapScan) on ij_outer o
          ->  Custom Scan (TessHeapScan) on ij_inner l
-               Lookup Index: ij_inner_pkey
-               Lookup Key: id
-(8 rows)
+               Lookup Index: ij_inner_o4
+               Lookup Key: o4
+(9 rows)
 
 EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k);
                       QUERY PLAN                      
@@ -820,7 +822,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE NOT EXISTS (SELECT FRO
 
 -- Keys found, absent and NULL, batch after batch; an anti join made of a
 -- LEFT join, whose inner columns are NULL.
-SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k)$$);
                      ij_same                      
 --------------------------------------------------
  1000 rows, hash 87ac8f77098415b99b80a125f2235a6b
@@ -893,16 +895,17 @@ SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE NOT EXISTS (SELECT FROM ij_in
 (1 row)
 
 -- A correlated subquery rescanned with its parameter changed.
-SELECT ij_lookup($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$) AS semi_rescan;
-  semi_rescan  
----------------
- ij_inner_pkey
+SELECT ij_lookup($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$) AS semi_rescan,
+       ij_property($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$, 'Join Type') AS join_type;
+ semi_rescan | join_type 
+-------------+-----------
+ ij_inner_o4 | "Semi"
 (1 row)
 
-SELECT ij_same($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$);
+SELECT ij_same($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$);
                     ij_same                    
 -----------------------------------------------
- 4 rows, hash d67f93797befd3ddad3736c3b5154032
+ 4 rows, hash e8d43914db89d67577c4900b046de57a
 (1 row)
 
 SELECT ij_same($$SELECT x, (SELECT count(*) FROM ij_outer o WHERE o.id <= 700 AND NOT EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k AND l.w <> x % 7)) FROM generate_series(1, 4) AS x$$);
@@ -962,7 +965,14 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM ij_outer o WHERE NOT EXISTS (SELECT FRO
                                  Lookup Key: id
 (15 rows)
 
-SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.id = o.k)$$);
+SELECT ij_lookup($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k)$$) AS parallel_semi,
+       ij_property($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k)$$, 'Join Type') AS join_type;
+ parallel_semi | join_type 
+---------------+-----------
+ ij_inner_o4   | "Semi"
+(1 row)
+
+SELECT ij_same($$SELECT o.id FROM ij_outer o WHERE EXISTS (SELECT FROM ij_inner l WHERE l.o4 = o.k)$$);
                      ij_same                      
 --------------------------------------------------
  1000 rows, hash 87ac8f77098415b99b80a125f2235a6b
