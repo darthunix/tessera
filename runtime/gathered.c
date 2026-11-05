@@ -183,7 +183,6 @@ tess_gathered_take(TessGathered *gathered, TessBatch *child)
 		return 0;
 	/* The loop stops at the room, or at the mask's end with row -1. */
 	rest = count == room && tess_row_mask_next(&child->rows, row) >= 0;
-	old = MemoryContextSwitchTo(gathered->values_context);
 	for (int index = 0; index < gathered->ncolumns; index++)
 	{
 		TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
@@ -191,8 +190,10 @@ tess_gathered_take(TessGathered *gathered, TessBatch *child)
 		bool	   *isnull = gathered->isnull[index] + gathered->nrows;
 		int			from = -1;
 
+		/* The child reads in its caller's context; only the copies go to ours. */
 		child->ops->get_datum_column(child, gathered->columns[index], &take,
 									 gathered->purposes[index], &column);
+		old = MemoryContextSwitchTo(gathered->values_context);
 		for (int at = 0; at < count; at++)
 		{
 			from = tess_row_mask_next(&take, from);
@@ -204,8 +205,8 @@ tess_gathered_take(TessGathered *gathered, TessBatch *child)
 			else
 				values[at] = datumCopy(column.values[from], false, gathered->typlens[index]);
 		}
+		MemoryContextSwitchTo(old);
 	}
-	MemoryContextSwitchTo(old);
 	/* The rows copied leave a child batch whose rest waits. */
 	if (rest)
 		for (int word = 0; word < nwords; word++)

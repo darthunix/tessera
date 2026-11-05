@@ -372,8 +372,7 @@ make_gather_child(const int *counts, const bool *stored, int nbatches)
 static int	decimal_batches;
 
 static bool
-gather_read(TessInput *input, GatherChild *child, int *sizes, int *nsizes,
-			bool *stored_out)
+gather_read(TessInput *input, GatherChild *child, int *sizes, int *nsizes)
 {
 	int			seen = 0;
 	TessBatch  *batch;
@@ -388,8 +387,6 @@ gather_read(TessInput *input, GatherChild *child, int *sizes, int *nsizes,
 		int			row = -1;
 		const uint64 *decimals;
 
-		if (stored_out != NULL)
-			stored_out[*nsizes] = tess_batch_values_stored(batch);
 		sizes[(*nsizes)++] = tess_row_mask_count(&batch->rows);
 		batch->ops->get_datum_column(batch, 0, &batch->rows, TESS_COLUMN_FOR_FILTER, &a);
 		batch->ops->get_datum_column(batch, 1, &batch->rows, TESS_COLUMN_FOR_PROJECTION, &c);
@@ -457,7 +454,7 @@ gather_case(const int *counts, const bool *stored, int nbatches, int max_batch_r
 	int			nsizes;
 	bool		ok;
 
-	ok = gather_read(input, child, sizes, &nsizes, NULL) &&
+	ok = gather_read(input, child, sizes, &nsizes) &&
 		sizes_are(sizes, nsizes, expected, nexpected) &&
 		tess_input_gathered_rows(input) == copied &&
 		tess_input_slot(input) == NULL;
@@ -581,12 +578,40 @@ tessera_test_input_gather(PG_FUNCTION_ARGS)
 						}
 						continue;
 					}
-					ok = ok && gather_read(input, child, sizes, &nsizes, NULL) &&
+					ok = ok && gather_read(input, child, sizes, &nsizes) &&
 						(scan == 0 ? sizes_are(sizes, nsizes, plain, 6) :
 						 sizes_are(sizes, nsizes, gathered, 4));
 				}
 				/* Over the input's life, rescans included: 92 + 64 + 92. */
 				ok = ok && tess_input_gathered_rows(input) == 248;
+				/*
+				 * Turned off for a scan, then on during it: this scan goes
+				 * on without gathering, the next one gathers.
+				 */
+				tess_input_set_gather(input, false);
+				tess_output_clear(child->output);
+				child->next_batch = 0;
+				child->next_value = 1;
+				child->nexpected = 0;
+				tess_input_rescan(input);
+				nsizes = 0;
+				while ((batch = tess_input_next(input)) != NULL)
+				{
+					sizes[nsizes++] = tess_row_mask_count(&batch->rows);
+					tess_input_finish(input);
+					if (nsizes == 1)
+						tess_input_set_gather(input, true);
+				}
+				ok = ok && sizes_are(sizes, nsizes, plain, 6) &&
+					tess_input_gathered_rows(input) == 248;
+				tess_output_clear(child->output);
+				child->next_batch = 0;
+				child->next_value = 1;
+				child->nexpected = 0;
+				tess_input_rescan(input);
+				ok = ok && gather_read(input, child, sizes, &nsizes) &&
+					sizes_are(sizes, nsizes, gathered, 4) &&
+					tess_input_gathered_rows(input) == 340;
 				tess_output_end(child->output);
 				PG_RETURN_BOOL(ok);
 			}
