@@ -175,7 +175,9 @@ typedef struct HeapScanState
 	IndexScanDesc lookup_scan;
 	ScanKeyData lookup_key;
 	bool		lookup_armed;
+#if TESS_PG_MAJOR >= 18
 	IndexScanInstrumentation lookup_instrument;
+#endif
 } HeapScanState;
 
 static CustomPath *heap_scan_rows(PlannerInfo *root, Path *path);
@@ -690,6 +692,9 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 		ScanKeyEntryInitialize(&state->lookup_key, SK_SEARCHARRAY | SK_ISNULL, 1,
 							   BTEqualStrategyNumber, lthird_oid(lookup),
 							   lfourth_oid(lookup), lsecond_oid(lookup), (Datum) 0);
+#if !HEAP_INDEX_MODES
+		elog(ERROR, "TessHeapScan looks up no index on this core");
+#else
 		if ((eflags & EXEC_FLAG_EXPLAIN_ONLY) == 0)
 		{
 			LOCKMODE	lockmode = exec_rt_fetch(cscan->scan.scanrelid, estate)->rellockmode;
@@ -700,6 +705,7 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 												 &state->lookup_instrument, 1, 0,
 												 heap_scan_flags(state));
 		}
+#endif
 	}
 	state->layout = info.layout;
 	state->relation = (TessLayout) TESS_STRUCT_INITIALIZER(TessLayout);
@@ -1157,6 +1163,7 @@ next_batch(HeapScanState *state)
 		 * The rows of the keys given, in the index's order, each the tuple
 		 * where it lies; none before a call. A btree never asks to recheck.
 		 */
+#if HEAP_INDEX_MODES
 		while (limit > 0)
 		{
 			if (!state->lookup_armed ||
@@ -1171,6 +1178,7 @@ next_batch(HeapScanState *state)
 			tess_heap_batch_append_slot(state->heap, state->landing);
 			limit--;
 		}
+#endif
 	}
 	else if (state->index_plan != NULL)
 	{
@@ -1672,7 +1680,12 @@ tess_heap_lookup_scan(PlanState *inner)
 uint64
 tess_heap_lookup_searches(PlanState *scan)
 {
+#if HEAP_INDEX_MODES
 	return ((HeapScanState *) scan)->lookup_instrument.nsearches;
+#else
+	(void) scan;
+	return 0;
+#endif
 }
 
 void

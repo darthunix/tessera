@@ -181,10 +181,18 @@ tess_spill_value_damaged(void)
  * tessera-capi sizes a TOAST pointer by these tags and bodies
  * (tessera_kernels::varlena): its writer copies one, its check ends one.
  */
+#if TESS_PG_MAJOR >= 20
 StaticAssertDecl(VARTAG_INDIRECT == 1 && sizeof(varatt_indirect) == 8 &&
 				 VARTAG_ONDISK_OID == 18 && sizeof(varatt_external_oid) == 16 &&
 				 VARTAG_ONDISK_OID8 == 4 && sizeof(varatt_external_oid8) == 20,
 				 "the TOAST pointers as tessera-capi sizes them");
+#else
+/* One pointer to data on disk, of 32-bit ids; tag 20 in network order. */
+StaticAssertDecl(VARTAG_INDIRECT == 1 && sizeof(varatt_indirect) == 8 &&
+				 VARTAG_ONDISK == (TESS_NETWORK_VARLENA ? 20 : 18) &&
+				 sizeof(varatt_external) == 16,
+				 "the TOAST pointers as tessera-capi sizes them");
+#endif
 
 bool
 tess_spill_value_fits_other(const char *value, Size room, int16 typlen)

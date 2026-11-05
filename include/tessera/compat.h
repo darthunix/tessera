@@ -289,6 +289,30 @@ repalloc0(void *pointer, Size oldsize, Size size)
 /* ---------------------------------------------- what PostgreSQL 17 added */
 #if TESS_PG_MAJOR < 17
 
+#include "port/atomics.h"
+
+/*
+ * Advance an atomic to target at least, and give the latest value seen,
+ * with a full barrier even when it is left (PostgreSQL 17).
+ */
+static inline uint64
+pg_atomic_monotonic_advance_u64(volatile pg_atomic_uint64 *ptr, uint64 target)
+{
+	uint64		currval = pg_atomic_read_u64(ptr);
+
+	if (currval >= target)
+	{
+		pg_memory_barrier();
+		return currval;
+	}
+	while (currval < target)
+	{
+		if (pg_atomic_compare_exchange_u64(ptr, &currval, target))
+			return target;
+	}
+	return currval;
+}
+
 #if TESS_PG_MAJOR >= 13
 #error "foreach_ptr over the lists of PostgreSQL 13 to 16 is not written"
 #endif
