@@ -121,21 +121,21 @@ SELECT damaged(:'damage_module', 'again', 2, $$SELECT count(*), sum(length(i.t))
 -- Outer rows: a chunk of a word fewer; a word that refers past every
 -- chunk; a word of 0 its row does not mark NULL.
 SELECT damaged(:'damage_module', 'words', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
-                            damaged                             
-----------------------------------------------------------------
- XX001: Tessera read back a chunk of 1 columns where it wrote 2
+                                damaged                                 
+------------------------------------------------------------------------
+ XX001: a chunk of columns read back holds 1 words where 2 were written
 (1 row)
 
 SELECT damaged(:'damage_module', 'ref', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                      damaged                                      
+-----------------------------------------------------------------------------------
+ XX001: row 0 read back refers to a value outside its chunk of values, in column 0
 (1 row)
 
 SELECT damaged(:'damage_module', 'zero', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                      damaged                                      
+-----------------------------------------------------------------------------------
+ XX001: row 0 read back refers to a value outside its chunk of values, in column 0
 (1 row)
 
 -- The last block the join reads is a chunk of outer rows of its last
@@ -148,23 +148,23 @@ SELECT damaged(:'damage_module', 'kind', 1000000, $$SELECT count(*), sum(length(
 
 SELECT tessera_test_spill_damage_seen() AS last_block \gset
 SELECT damaged(:'damage_module', 'kind', :last_block, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
-                                 damaged                                  
---------------------------------------------------------------------------
- XX001: Tessera read back a spilled block of kind 1 where it wrote kind 3
+                                damaged                                
+-----------------------------------------------------------------------
+ XX001: a spilled block of kind 1 where its pair has a block of kind 3
 (1 row)
 
 -- An inner side of keys alone: every block of values is outer rows', a
 -- value past its chunk, and a block numbered past the one read with it.
 SELECT damaged(:'damage_module', 'value', 1, $$SELECT count(*), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
-                                  damaged                                   
-----------------------------------------------------------------------------
- XX001: Tessera row read back refers to a value outside its chunk of values
+                                       damaged                                        
+--------------------------------------------------------------------------------------
+ XX001: row 0 read back holds a value that runs past its chunk of values, in column 0
 (1 row)
 
 SELECT damaged(:'damage_module', 'number', 1, $$SELECT count(*), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
-                              damaged                               
---------------------------------------------------------------------
- XX001: TessHashJoin read back value chunk N after chunk 1073741824
+                                 damaged                                 
+-------------------------------------------------------------------------
+ XX001: a spilled block numbered 1073741824 where its pair is numbered 0
 (1 row)
 
 -- Inner records whose used mark ends no record, which the hash table
