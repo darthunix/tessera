@@ -97,7 +97,7 @@ settings for the run.
   makes a semi join by a unique key an inner join, the same lookup on
   both sides. `semi_all`, `anti_miss` and `semi_shuffled` keep the
   core's loop: `semi_all`'s lookup ran in 0.58 of the loop's time in
-  `lookupcost`, where the model counts 0.84, past the margin of 0.8.
+  `lookupcost`, where the planner counts 0.84, past the margin of 0.8.
 - `join` and `exec` passed the five minutes; the plans of their runs
   that ended (`pg-join-7SVOrp` against `pg-join-rqyjNR`, `pg-exec-CDMeIC`
   against `pg-exec-PtG68H`) are the same line for line, no lookup in
@@ -108,13 +108,25 @@ settings for the run.
 `bench/pg/lookupcost` twice on the change
 ([`lookupcost-1.txt`](lookupcost-1.txt), run `pg-lookupcost-DzhUpz`;
 [`lookupcost-2.txt`](lookupcost-2.txt), `pg-lookupcost-Loy1vl`), each
-lookup forced past the margin for its run. Of the 14 semi and anti
-samples, which are not fitted, the model chose as the times did in all
-of them in both runs: no lookup taken that ran slower, none left to the
-loop that ran faster. It counts the lookup's time 4 to 53 % high and
-the loop's 8 to 75 % high. The planner's rows to the first match came
-within 4 % of the query's count, but where a clause over both sides
-passes about half the pairs (its estimate a third): 11 645 against
-10 259, and with a second key 18 181 against 16 070. The prices fitted
-over all the inner samples together came out as a batch of 30.5 and
-25.2 and a key below nothing, as in the runs of the change before.
+lookup forced past the margin for its run. With the prices it fits, the
+model counts a semi or anti lookup's time 4 to 53 % high and the loop's
+8 to 75 % high, and chooses as the times did in all 14 semi and anti
+samples, which are not fitted. The planner's rows to the first match
+came within 4 % of the query's count, but where a clause over both
+sides passes about half the pairs (its estimate a third): 11 645
+against 10 259, and with a second key 18 181 against 16 070. The prices
+fitted over all the inner samples together came out as a batch of 30.5
+and 25.2 and a key below nothing, as in the runs of the change before.
+
+The reviews of the pull request found that those runs judged the
+choice by the prices fitted, not by the planner's. Two runs more, with
+the planner's own ratio at the prices set
+([`lookupcost-planner-1.txt`](lookupcost-planner-1.txt),
+`pg-lookupcost-BjVwUI`; [`lookupcost-planner-2.txt`](lookupcost-planner-2.txt),
+`pg-lookupcost-bEukh1`), ran while another session's virtual machine
+took eleven cores, the load average 12; their ratios come from the
+plans' estimates, not from times, and which of the two ran faster
+agrees with the runs above in every sample. The planner chose as the
+times did in 12 of the 14, taking no lookup that ran slower; it left to
+the loop `semi_all` and `anti_all`, where every row of a key passes, at
+0.84, whose lookups ran in 0.58 to 0.62 of the loop's time.

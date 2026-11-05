@@ -192,10 +192,11 @@ query down, and where it can, does it speed one up.
   descents and rows against the plan's, and of the semi and anti
   samples the rows read, built, to the first match and checked, the
   fitted prices, and every sample against the model with its error, the
-  choice the model makes between the two times, the one the planner
-  makes from its own counts within the margin, and of a semi or anti
-  sample whether a lookup taken runs slower (`TAKEN SLOWER`) or one that
-  runs faster is left to the loop (`missed`). The model is described in
+  choice the model makes between the two times, the one it makes from
+  the planner's counts within the margin at the prices fitted, the
+  planner's own ratio at the prices set, and of a semi or anti sample
+  whether the planner takes a lookup that runs slower (`TAKEN SLOWER`)
+  or leaves to the loop one that runs faster (`missed`). The model is described in
   [docs/costs.md](../../docs/costs.md).
 - **rowwise** (`rowwise.sql`): tables without clauses read under a parent
   of the core that takes rows one at a time: `bit_or` of a column and of
@@ -298,13 +299,13 @@ the server before it runs, so that the modules installed last are the ones
 measured (unless `BENCH_RESTARTED` says its caller did, as `cargo ab` does
 with `run.sh restart`), and every case's warm-up runs bring its tables back into
 the buffers. Every start and restart puts the server on `PGPORT`, and
-`measure` stops unless the server it reaches there reports the
-cluster's data directory. `setup` takes a multiplier of the base row counts (2 M narrow,
-250 k wide, 500 k mixed, 100 k dimension, 2 M fact, 100 k with duplicate
-keys), stored in the table `bench_scale`; the win and join families
-multiply their selection constants and key ranges by it, so that every case keeps its
-selectivity, while the tax family's LIMIT constants are the cases themselves
-and it runs at the base size only.
+`measure` stops unless the server it reaches there reports the cluster's
+data directory. `setup` takes a multiplier of the base row counts (2 M
+narrow, 250 k wide, 500 k mixed, 100 k dimension, 2 M fact, 100 k with
+duplicate keys), stored in the table `bench_scale`; the win and join
+families multiply their selection constants and key ranges by it, so
+that every case keeps its selectivity, while the tax family's LIMIT
+constants are the cases themselves and it runs at the base size only.
 
 ## Results
 
