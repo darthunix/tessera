@@ -396,9 +396,9 @@ each value ends, which is the type's rule and Tessera's, which the crate
 asks for (`tess_spill_columns_check`). All three read their pairs
 through the runtime's one reader of chunks of columns. The sort writes
 its runs through the one writer too; the grouping and the join write
-theirs by partition with loops of their own. The gather node gets its
-chunks from another process's memory, not from a file, and does not
-check them.
+theirs by partition with loops of their own. The gather node writes its
+messages through the one writer and gets them from another process's
+memory, not from a file: its reader shows them unchecked.
 
 **Many chunks of values.** A join's inner side keeps many chunks of
 values and numbers them 0, 1, 2, and so on. To find a value, it keeps an
