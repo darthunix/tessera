@@ -29,6 +29,19 @@ if command -v sha256sum > /dev/null; then SHA256=sha256sum; else SHA256="shasum 
 RUNS=$ROOT/target/bench-runs
 DATA=$RUNS/pgdata-bench
 export PGPORT=${PGPORT:-5433} PGHOST=/tmp PGDATABASE=postgres
+# Every start names the port the queries go to: a restart without it
+# takes the options of the last start (postmaster.opts), whatever port
+# they named, and the queries would reach another cluster on PGPORT.
+SERVER_OPTIONS="-p $PGPORT -k $PGHOST"
+
+# Stops unless the server on PGPORT runs this cluster.
+check_server() {
+    reached=$("$BIN/psql" -X -tAc 'SHOW data_directory') || exit 1
+    if [ "$(cd "$reached" 2>/dev/null && pwd -P)" != "$(cd "$DATA" && pwd -P)" ]; then
+        echo "the server on port $PGPORT runs $reached, not $DATA" >&2
+        exit 1
+    fi
+}
 
 case "$1" in
 setup)
@@ -44,13 +57,15 @@ max_parallel_workers_per_gather = 0
 autovacuum = off
 track_io_timing = off
 CONF
-    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -o "-p $PGPORT -k /tmp" -w start
+    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -o "$SERVER_OPTIONS" -w start
+    check_server
     "$BIN/psql" -X -c "CREATE EXTENSION IF NOT EXISTS tessera"
     "$BIN/psql" -X -v scale="$SCALE" -f "$HERE/setup.sql"
     ;;
 restart)
     # A bound of its own, whatever PGCTLTIMEOUT says: 30 seconds a wait.
-    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -m fast -w -t 30 restart > /dev/null
+    "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -o "$SERVER_OPTIONS" -m fast -w -t 30 \
+        restart > /dev/null
     ;;
 measure)
     FAMILY=$2
@@ -64,8 +79,10 @@ measure)
     # A caller that restarted the server itself, outside its deadline, says
     # so; a deadline must not stop a restart halfway, the server stopped.
     if [ -z "${BENCH_RESTARTED:-}" ]; then
-        "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -m fast -w restart > /dev/null
+        "$BIN/pg_ctl" -D "$DATA" -l "$RUNS/server.log" -o "$SERVER_OPTIONS" -m fast -w \
+            restart > /dev/null
     fi
+    check_server
     mkdir -p "$OUT/source"
     cp "$HERE/README.md" "$OUT/protocol.md"
     cp "$HERE/setup.sql" "$HERE/$FAMILY.sql" "$OUT/source/"
