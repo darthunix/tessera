@@ -284,7 +284,9 @@ parallel workers do not load them again in every query) and sets
 the server before it runs, so that the modules installed last are the ones
 measured (unless `BENCH_RESTARTED` says its caller did, as `cargo ab` does
 with `run.sh restart`), and every case's warm-up runs bring its tables back into
-the buffers. `setup` takes a multiplier of the base row counts (2 M narrow,
+the buffers. Every start and restart puts the server on `PGPORT`, and
+`measure` stops unless the server it reaches there reports the
+cluster's data directory. `setup` takes a multiplier of the base row counts (2 M narrow,
 250 k wide, 500 k mixed, 100 k dimension, 2 M fact, 100 k with duplicate
 keys), stored in the table `bench_scale`; the win and join families
 multiply their selection constants and key ranges by it, so that every case keeps its
