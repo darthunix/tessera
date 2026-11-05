@@ -1486,20 +1486,27 @@ WHERE line ~ 'TessAgg|Index Only Scan|Gathered Rows';
 RESET enable_bitmapscan;
 RESET enable_seqscan;
 DROP INDEX jgo_f;
--- A join's compact output, over a table with duplicate keys: four
--- batches of 64 pairs and the last of 9, which goes as it is, right
--- after a full one.
+-- A join's compact output, over a table with duplicate keys: a residual
+-- clause leaves a quarter of each batch of 64 pairs, and the aggregate
+-- gathers them, the text column's values copied out of the join's
+-- copies.
 CREATE TABLE jgd (k int, v int) WITH (autovacuum_enabled = off);
-INSERT INTO jgd SELECT (g % 50) * 200, g % 5 FROM generate_series(1, 270) AS g;
+INSERT INTO jgd SELECT (g % 50) * 200, g % 5 FROM generate_series(1, 2000) AS g;
 ANALYZE jgd;
-SELECT join_same($$SELECT d.v, count(*), sum(o.n) FROM jgo o JOIN jgd d ON o.k = d.k GROUP BY d.v$$);
-SELECT line FROM join_explain($$SELECT d.v, count(*), sum(o.n) FROM jgo o JOIN jgd d ON o.k = d.k GROUP BY d.v$$) AS line
+SET enable_sort = off;
+SELECT join_same($$SELECT d.v, count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgd d ON o.k = d.k AND (o.k / 200 + d.v) % 4 = 0 GROUP BY d.v$$);
+SELECT line FROM join_explain($$SELECT d.v, count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgd d ON o.k = d.k AND (o.k / 200 + d.v) % 4 = 0 GROUP BY d.v$$) AS line
 WHERE line ~ 'TessAgg|TessHashJoin|Compact Batches|Gathered Rows';
+RESET enable_sort;
 -- An outer join's tails, and a join that spills its outer side and reads
 -- it back.
 SELECT join_same($$SELECT count(*), sum(i.k), sum(o.n) FROM jgo o RIGHT JOIN jgi i ON o.k = i.k AND o.f % 400 = 0$$);
+SELECT line FROM join_explain($$SELECT count(*), sum(i.k), sum(o.n) FROM jgo o RIGHT JOIN jgi i ON o.k = i.k AND o.f % 400 = 0$$) AS line
+WHERE line ~ 'TessAgg|TessHashJoin|Join Type|Gathered Rows';
 SET work_mem = '64kB';
 SELECT join_same($$SELECT count(*), sum(a.n), sum(length(b.t)) FROM jgo a JOIN jgo b ON a.k = b.k WHERE a.f % 100 = 0$$);
+SELECT line FROM join_explain($$SELECT count(*), sum(a.n), sum(length(b.t)) FROM jgo a JOIN jgo b ON a.k = b.k WHERE a.f % 100 = 0$$) AS line
+WHERE line ~ 'TessAgg|TessHashJoin|Batches:|Gathered Rows';
 RESET work_mem;
 -- Workers gather their own rows; with none launched the leader runs the
 -- whole plan, its own rows handed on through TessGather as its child's.
@@ -1507,12 +1514,19 @@ SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 SET max_parallel_workers_per_gather = 2;
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
 SELECT join_same($$SELECT count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
+-- How the rows split among the participants varies: whether they gathered.
+SELECT bool_or(line ~ 'TessGather') AS parallel, bool_or(line ~ 'Gathered Rows: [1-9]') AS gathered
+FROM join_explain($$SELECT count(*), sum(o.n), sum(length(o.t)) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$) AS line;
 SELECT join_same($$SELECT sum(100 / o.x), count(*) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
 SET max_parallel_workers = 0;
 SELECT join_same($$SELECT sum(100 / o.x), count(*) FROM jgo o JOIN jgi i ON o.k = i.k WHERE o.f % 100 = 0$$);
 SELECT join_same($$SELECT sum(100 / x) FILTER (WHERE x <> 0), count(*) FROM jgo WHERE f % 100 = 0$$);
 RESET max_parallel_workers;
+RESET tessera.scan_worker_page_cost;
+RESET tessera.scan_parallel_setup_cost;
 RESET max_parallel_workers_per_gather;
 RESET min_parallel_table_scan_size;
 RESET parallel_tuple_cost;
