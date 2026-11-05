@@ -38,7 +38,8 @@ with Tessera on, in the order
 Q10 showed its aggregate's input row-wise. The maintainer took seven
 entries out of turn on 2026-11-03, after an analysis of TPC-H with
 `batch-index-join`, in the order `deform-past-varlena` (done),
-`gather-sparse-batches` (done), `semi-anti-lookups`, `numeric-reading`,
+`gather-sparse-batches` (done), `semi-anti-lookups` (done),
+`numeric-reading`,
 `like-substring-search`, `agg-table-presize`, `tpch-q9-plan`, the last
 with the foreign keys of the schema left undeclared for now; the same
 day he moved `agg-dependent-columns` between `agg-table-presize` and
@@ -100,6 +101,7 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `lookup-key-splitting`: A batch's keys split where their rows outgrow
   hash_mem
 - `lookup-heap-pages`: The heap's pages in the index lookup's cost
+- `lookup-first-row`: A lookup that reads a key's first passing row
 - `window-functions`: Batch window functions
 - `merge-join`: TessMergeJoin
 - `minimal-tuples-for-storing-parents`: Minimal tuples for a parent that
@@ -273,29 +275,6 @@ TPC-H Q9's plan with Tessera on.
 - **Capabilities:** costs, bench/tpch
 - **Size:** small to medium.
 
-### semi-anti-lookups
-
-SEMI and ANTI joins by index lookups.
-
-- **What:** TessHashJoin's index lookup mode for SEMI and ANTI joins,
-  reading a key's first row only where the join needs no more.
-- **Why:** TPC-H Q4 and Q21 test `EXISTS` and `NOT EXISTS` over
-  `lineitem_pkey` with the core's nested loop: its index scan takes 57
-  ms of Q04 serial for 57 000 lookups (114 ms of processor time with
-  two workers), its anti join 84 ms of Q21 (the analysis of
-  2026-11-03).
-- **Known:** The core's nested loop stops at the first match, where the
-  array scan reads every row of a key: Q4 and Q21 read about 4 rows a
-  key where the core reads 1.6. The lookup must stop at a key's first
-  row, or the cost model must count every row.
-- **Depends on:** nothing. The outer sides of Q4 and Q21 are sparse:
-  Q4's orders after the filter on the date, 57 000 rows of 1.5 M, came
-  about 2.5 keys a batch, and Q21's anti join reads the output of a
-  hash join that does not compact, a key a batch by the cost model's
-  count (2026-11-04); the join's input now gathers such batches.
-- **Capabilities:** a node's change (hash join)
-- **Size:** medium: one pull request.
-
 ### lookup-key-splitting
 
 A batch's keys split where their rows outgrow hash_mem.
@@ -311,6 +290,41 @@ A batch's keys split where their rows outgrow hash_mem.
 - **Depends on:** nothing.
 - **Capabilities:** a node's change (hash join), table-memory
 - **Size:** medium: one pull request.
+
+### lookup-first-row
+
+A lookup that reads a key's first passing row.
+
+- **What:** For a semi or anti join that depends on its one key alone,
+  the lookup's scan returns a key's first row that passes the inner
+  relation's clauses and skips the key's other index entries unread.
+- **Why:** A lookup reads every row of a key, where the core's nested
+  loop stops at the first match: forced to a lookup, TPC-H Q04's semi
+  join read 229 690 rows of `lineitem`, four a key, against about two
+  by the loop, and ran even with it, 0.94 to 1.06 (the close of
+  `semi-anti-lookups`, 2026-11-05).
+- **Known:**
+  - PostgreSQL master has neither `index_getnext_tid` nor
+    `index_fetch_heap`: the table access method returns rows
+    (`table_index_getnext_slot`), its call for a TID alone
+    (`tableam_index_getnext_tid`) leaves the row's fetch to the heap,
+    and asking for index tuples (`xs_want_itup`) makes the scan
+    index-only, with a virtual slot. The scan would own the heap's
+    visibility, HOT chains, pins and the killed-tuple protocol.
+  - It holds for one join key and no other condition of the join at
+    all but the key's own recheck: an anti join made of a LEFT join can
+    keep a volatile clause over no column, which a key's first row
+    fails and its second passes.
+  - The key answered last must be an owned copy, reset at each lookup
+    and rescan; clauses evaluated row by row need a cost of their own;
+    the scan's counters go through the join for workers.
+  - Q21 cannot take it: its semi and anti joins have a clause over both
+    sides. As a plain lookup its anti join ran 8 ms slower in its own
+    place, reading all of an order's lines.
+- **Depends on:** nothing.
+- **Capabilities:** a node's change (hash join), scan-heap
+- **Size:** large: a scan mode of its own beside the table access
+  method.
 
 ### lookup-heap-pages
 
@@ -2319,15 +2333,25 @@ becomes an entry, joins one, or is dropped.
   70 % kept into a third fewer batches, by a simulation of the rules;
   the change refused it, since it copies whole batches, wide rows too.
   Suggested: measured on a table of narrow rows, more than 64 a page.
-- **The bench cluster's port** (found measuring
-  `gather-sparse-batches`, 2026-11-04). `bench/pg/run.sh` starts its
-  cluster by `pg_ctl restart`, which reuses the port of the last start
-  (`postmaster.opts`), and sends its queries to `PGPORT`, 5433 by
-  default: a cluster once started on another port leaves the queries to
-  whatever listens on 5433, another worktree's cluster with its own
-  build, and both sides of an A/B measure the same. Suggested: the
-  server started on `PGPORT` always, and `SHOW data_directory` checked
-  before a family runs.
+- **Q15 slower with the base's plan** (the close of
+  `semi-anti-lookups`). Q15, which has no semi or anti join and runs
+  the base's code, came 5 to 7 % slower beyond its control in both
+  serial pairs, 3 to 6 % measured alone, and 1 to 2.5 % with both
+  sides' functions aligned at 64 bytes; a system process of macOS took
+  a core through the runs. Suggested: the runs repeated on an idle
+  machine, then the placement of the hash join's and the aggregate's
+  hot loops by `tessera-bench --disasm`.
+- **A semi or anti lookup's time counted high** (the same close).
+  `bench/pg/lookupcost` counts a semi or anti lookup's time 4 to 53 %
+  high and the loop's 8 to 75 % high; at the default prices
+  `indexjoin`'s `semi_all`, whose lookup ran in 0.58 of the loop's
+  time, is left to the loop at 0.84. Suggested: the probe of a semi or
+  anti batch, which stops at a row's first match, priced apart and
+  fitted from the semi and anti samples.
+- **The join and exec families pass five minutes** (the same close).
+  A whole A/B of `join` or `exec` passed the deadline of five minutes
+  at the data's scale of 1; the change left them untimed, their plans
+  the base's. Suggested: their cases split into groups that fit.
 
 ## Decided against
 

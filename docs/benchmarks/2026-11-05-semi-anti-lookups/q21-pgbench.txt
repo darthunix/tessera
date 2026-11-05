@@ -1,0 +1,24 @@
+number of transactions actually processed: 500
+number of failed transactions: 0 (0.000%)
+latency average = 180.120 ms
+SQL script 1: a_original.sql
+ - weight: 1 (targets 33.3% of total)
+ - 149 transactions (29.8% of total)
+ - number of transactions actually processed: 149 (tps = 1.654452)
+ - number of failed transactions: 0 (0.000%)
+ - latency average = 174.895 ms
+ - latency stddev = 12.855 ms
+SQL script 2: b_fenced.sql
+ - weight: 1 (targets 33.3% of total)
+ - 179 transactions (35.8% of total)
+ - number of transactions actually processed: 179 (tps = 1.987564)
+ - number of failed transactions: 0 (0.000%)
+ - latency average = 178.262 ms
+ - latency stddev = 18.218 ms
+SQL script 3: c_fenced_lookup.sql
+ - weight: 1 (targets 33.3% of total)
+ - 172 transactions (34.4% of total)
+ - number of transactions actually processed: 172 (tps = 1.909838)
+ - number of failed transactions: 0 (0.000%)
+ - latency average = 186.578 ms
+ - latency stddev = 14.264 ms

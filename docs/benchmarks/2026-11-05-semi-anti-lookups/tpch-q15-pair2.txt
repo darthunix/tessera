@@ -1,0 +1,8 @@
+A SF 1, schema pk, serial, work_mem 256MB, jit off, 7 pairs ABBA after 1 warm-up; 481911ee8320 at 2026-11-05 13:48:43.962474+07, PostgreSQL 20devel, AC Power
+B SF 1, schema pk, serial, work_mem 256MB, jit off, 7 pairs ABBA after 1 warm-up; 5220f5090729 at 2026-11-05 13:48:51.020781+07, PostgreSQL 20devel, AC Power
+┌──────────────────┬──────────┬──────────┬────────┬───────────────┬─────────┬──────────┬──────────┐
+│ query            ┆ on A, ms ┆ on B, ms ┆ B/A on ┆ 95 % interval ┆ B/A off ┆ on/off A ┆ on/off B │
+╞══════════════════╪══════════╪══════════╪════════╪═══════════════╪═════════╪══════════╪══════════╡
+│ Q15 top supplier ┆    102.5 ┆    108.9 ┆  1.063 ┆   1.043–1.070 ┆   1.003 ┆    0.552 ┆    0.585 │
+└──────────────────┴──────────┴──────────┴────────┴───────────────┴─────────┴──────────┴──────────┘
+geometric mean over 1 query: B/A on 1.063, B/A off 1.003 (the control: the core is the same)

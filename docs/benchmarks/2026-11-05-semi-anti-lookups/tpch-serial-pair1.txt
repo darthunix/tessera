@@ -1,0 +1,27 @@
+A SF 1, schema pk, serial, work_mem 256MB, jit off, 3 pairs ABBA after 1 warm-up; 481911ee8320 at 2026-11-05 13:02:58.284832+07, PostgreSQL 20devel, AC Power
+B SF 1, schema pk, serial, work_mem 256MB, jit off, 3 pairs ABBA after 1 warm-up; 5220f5090729 at 2026-11-05 13:06:08.561446+07, PostgreSQL 20devel, AC Power
+┌───────────────────────────────────────┬──────────┬──────────┬────────┬───────────────┬─────────┬──────────┬──────────┐
+│ query                                 ┆ on A, ms ┆ on B, ms ┆ B/A on ┆ 95 % interval ┆ B/A off ┆ on/off A ┆ on/off B │
+╞═══════════════════════════════════════╪══════════╪══════════╪════════╪═══════════════╪═════════╪══════════╪══════════╡
+│ Q01 pricing summary report            ┆    605.1 ┆    599.8 ┆  0.991 ┆   0.977–0.998 ┆   0.995 ┆    0.369 ┆    0.368 │
+│ Q02 minimum cost supplier             ┆     24.6 ┆     22.7 ┆  0.923 ┆   0.890–0.958 ┆   0.956 ┆    0.392 ┆    0.378 │
+│ Q03 shipping priority                 ┆    106.2 ┆    103.1 ┆  0.972 ┆   0.945–1.009 ┆   0.994 ┆    0.358 ┆    0.350 │
+│ Q04 order priority checking           ┆     71.0 ┆     68.3 ┆  0.962 ┆   0.934–0.968 ┆   0.981 ┆    0.801 ┆    0.785 │
+│ Q05 local supplier volume             ┆     84.2 ┆     80.9 ┆  0.960 ┆   0.952–0.975 ┆   0.985 ┆    0.732 ┆    0.714 │
+│ Q06 forecasting revenue change        ┆    140.5 ┆    140.8 ┆  1.002 ┆   0.996–1.027 ┆   1.001 ┆    0.662 ┆    0.663 │
+│ Q07 volume shipping                   ┆    146.4 ┆    140.2 ┆  0.957 ┆   0.952–0.960 ┆   1.002 ┆    0.816 ┆    0.780 │
+│ Q08 national market share             ┆    123.7 ┆    121.3 ┆  0.981 ┆   0.975–0.989 ┆   0.989 ┆    0.486 ┆    0.482 │
+│ Q09 product type profit measure       ┆    578.9 ┆    552.4 ┆  0.954 ┆   0.905–0.963 ┆   0.914 ┆    0.698 ┆    0.729 │
+│ Q10 returned item reporting           ┆    163.3 ┆    153.0 ┆  0.937 ┆   0.918–1.086 ┆   0.896 ┆    0.439 ┆    0.459 │
+│ Q11 important stock identification    ┆     24.1 ┆     20.8 ┆  0.863 ┆   0.841–0.956 ┆   0.890 ┆    0.429 ┆    0.416 │
+│ Q12 shipping modes and order priority ┆    227.3 ┆    215.1 ┆  0.946 ┆   0.937–0.996 ┆   0.925 ┆    0.460 ┆    0.471 │
+│ Q13 customer distribution             ┆    139.2 ┆    130.6 ┆  0.938 ┆   0.879–0.979 ┆   0.700 ┆    0.318 ┆    0.426 │
+│ Q14 promotion effect                  ┆    128.2 ┆    116.4 ┆  0.908 ┆   0.861–0.977 ┆   0.939 ┆    0.575 ┆    0.556 │
+│ Q15 top supplier                      ┆    119.9 ┆    119.1 ┆  0.993 ┆   0.915–1.011 ┆   0.926 ┆    0.530 ┆    0.568 │
+│ Q16 parts/supplier relationship       ┆     37.3 ┆     34.5 ┆  0.924 ┆   0.898–0.966 ┆   0.918 ┆    0.280 ┆    0.282 │
+│ Q18 large volume customer             ┆    333.8 ┆    294.7 ┆  0.883 ┆   0.865–0.894 ┆   0.888 ┆    0.325 ┆    0.323 │
+│ Q19 discounted revenue                ┆     92.8 ┆     77.0 ┆  0.830 ┆   0.789–0.858 ┆   0.931 ┆    0.233 ┆    0.208 │
+│ Q21 suppliers who kept orders waiting ┆    200.3 ┆    171.3 ┆  0.855 ┆   0.849–0.877 ┆   0.918 ┆    0.483 ┆    0.450 │
+│ Q22 global sales opportunity          ┆     41.3 ┆     33.3 ┆  0.806 ┆   0.776–0.814 ┆   0.848 ┆    0.412 ┆    0.392 │
+└───────────────────────────────────────┴──────────┴──────────┴────────┴───────────────┴─────────┴──────────┴──────────┘
+geometric mean over 20 queries: B/A on 0.928, B/A off 0.927 (the control: the core is the same)
