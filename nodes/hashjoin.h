@@ -317,8 +317,14 @@ typedef struct SpillPart
 	int		   *values;
 	int			nvalues;
 	int			value_slots;
-	/* The value chunk values are copied into, -1 for none, and its room. */
+	/*
+	 * The value chunk values are copied into, -1 for none, and its room;
+	 * on a side of columns, pair_values instead, the values of the chunk
+	 * being filled, which are written right before it as its pair, NULL
+	 * for none.
+	 */
 	int			value_current;
+	char	   *pair_values;
 	Size		value_len;
 	Size		value_used;
 	/* Bytes of the value chunks in memory, and of everything in memory. */
@@ -349,9 +355,10 @@ typedef struct SpillPart
  * records of the table's format, and the outer rows of the partitions on
  * disk while probing, as chunks of columns; a partition appends to chunk
  * current[partition], and chunk 0 is empty, with no room, for a
- * partition with no chunk yet. The by-reference values are in value
- * chunks numbered for the side, which a payload word refers to as a
- * table's does.
+ * partition with no chunk yet. The inner side's by-reference values are
+ * in value chunks numbered for the side, which a payload word refers to
+ * as a table's does; the outer side's, in the values of the chunk that
+ * refers to them.
  */
 typedef struct SpillSide
 {
@@ -441,6 +448,8 @@ typedef struct PartReader
 	int			writers;
 	int			next;
 	TessSpillReader *reader;
+	/* The pairs of a chunk of columns read of the file, which number the next. */
+	uint32		pairs;
 	bool		open;
 } PartReader;
 
@@ -527,33 +536,22 @@ typedef struct JoinSpill
 	int			nloaded;
 	int			loaded_slots;
 	/*
-	 * The value chunks read back before the outer chunk being read, the
-	 * only ones its words refer to: their numbers, bases and lengths.
-	 */
-	uint32	   *block_numbers;
-	char	  **block_bases;
-	Size	   *block_lens;
-	int			nblock_values;
-	int			block_slots;
-	/*
-	 * The outer rows of the joined partition: the file's reader, the chunk
-	 * of columns being read and the values before it, the next row of it,
-	 * and the tail once the file is done.
+	 * The outer rows of the joined partition: the file's reader, the reader
+	 * of its pairs of chunks of columns, its buffers in block_context, the
+	 * chunk in hand (the reader's, NULL for none) and its next row.
 	 */
 	PartReader	reader;
+	TessColumnsReader outer;
 	MemoryContext block_context;
 	void	   *block;
-	bool		tail_read;
 	uint64		cursor;
 	/* The batch of outer rows read back: each stored column's values. */
 	TessBatch	batch;
 	uint64		bits[1];
 	/*
-	 * Per stored word, the values of the window of a chunk read back: in
-	 * the chunk's lane for a by-value word, else in values, the pointers
-	 * of its references; and the NULL flags.
+	 * Per stored word, the values of the window of a chunk read back, a
+	 * reference as a pointer into the reader's values, and the NULL flags.
 	 */
-	Datum	  **window;
 	Datum	  **values;
 	bool	  **isnull;
 	/* The outer child's column of each stored word, and the word of each child column plus one. */
@@ -1044,6 +1042,7 @@ extern void join_side_demote(TessHashJoinState *state, SpillSide *side, int part
 extern bool join_side_send(TessHashJoinState *state, SpillSide *side, int partition);
 extern void join_side_flush(TessHashJoinState *state, SpillSide *side, int partition);
 extern void join_side_forget(SpillSide *side, int partition);
+extern void join_outer_forget(JoinSpill *spill);
 extern TessSpillShape join_spill_shape(TessHashJoinState *state);
 extern JoinSpill *join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected, int forced);
 extern void join_spill_free(TessHashJoinState *state);

@@ -284,15 +284,15 @@ SELECT tessera_test_spill_sqlstate(29);
 (1 row)
 
 SELECT tessera_test_spill_sqlstate(30);
-                  tessera_test_spill_sqlstate                   
-----------------------------------------------------------------
- XX001: Tessera read back a chunk of 3 columns where it wrote 4
+                      tessera_test_spill_sqlstate                       
+------------------------------------------------------------------------
+ XX001: a chunk of columns read back holds 3 words where 4 were written
 (1 row)
 
 SELECT tessera_test_spill_sqlstate(31);
-                 tessera_test_spill_sqlstate                 
--------------------------------------------------------------
- XX001: Tessera read back a chunk of 4 rows where it wrote 5
+                      tessera_test_spill_sqlstate                      
+-----------------------------------------------------------------------
+ XX001: a chunk of columns read back holds 4 rows where 5 were written
 (1 row)
 
 SELECT tessera_test_spill_sqlstate(32);

@@ -888,17 +888,22 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 		case 31:
 			{
 				/*
-				 * A chunk of columns of 3 words and 4 rows, where the node
-				 * wrote 4 words, or 5 rows.
+				 * The pair of a chunk of columns of 3 words and 4 rows, read
+				 * back where the node wrote 4 words, or 5 rows.
 				 */
-				void	   *columns = columns_chunk(3, 4, &len);
-				void	   *read = written_and_read(TESS_SPILL_COLUMNS, 0, columns, len,
-													&header);
+				TessColumnsReader columns;
+				static const bool byvals[4] = {true, true, true, true};
+				static const int16 typlens[4] = {8, 8, 8, 8};
+				void	   *chunk = columns_chunk(3, 4, &len);
+				int			words = which == 30 ? 4 : 3;
 
-				if (which == 30)
-					tess_spill_expect_columns(read, 4, -1);
-				else
-					tess_spill_expect_columns(read, 3, 5);
+				tess_spill_write(spill, 0, TESS_SPILL_VALUES, 0, body, 0, NULL);
+				tess_spill_write(spill, 0, TESS_SPILL_COLUMNS, 0, chunk, len, NULL);
+				tess_spill_finish(spill);
+				tess_columns_reader_init(&columns, &kernels, CurrentMemoryContext, words, words,
+										 byvals, typlens);
+				(void) tess_columns_reader_load(&columns, tess_spill_open(spill, 0, 0), 0,
+												which == 30 ? -1 : 5);
 			}
 			break;
 		case 32:
