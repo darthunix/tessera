@@ -7,8 +7,10 @@
 -- the index's order or shuffled, keys a stride apart, the rows a batch
 -- holds (all, a share), the rows a key (one and four), and the key's
 -- type. Each runs with the node, its lookup forced by its prices set to
--- nothing for the plan (the run is the same), and with the core's nested
--- loop, the core's other joins off. The node's own time is the query's
+-- nothing and the nested loop's key priced past the margin, for the plan
+-- (the run is the same), and with the core's nested loop, the core's
+-- other joins off. Semi and anti joins, which stop at a row's first
+-- match, are samples apart: they check the model, they are not fitted. The node's own time is the query's
 -- less its outer side's alone; the core's likewise. The summary fits both
 -- times over the counts of the node's plan and prints the parameters'
 -- values in the units of the scan model, a page of the full scan being
@@ -56,7 +58,22 @@ CREATE TEMP TABLE samples
     node_ms float8,
     outer_ms float8,
     core_ms float8,
-    core_outer_ms float8
+    core_outer_ms float8,
+    -- inner, or a semi or anti join, not fitted.
+    kind text,
+    -- The rows the lookup's scan read, before the inner side's clauses
+    -- (fetched is the rows built); the candidate pairs the join's other
+    -- clauses checked (Matches), and how many clauses they are.
+    scanned float8,
+    matches float8,
+    clauses integer,
+    -- The rows the core's nested loop read and the pairs its join filter
+    -- checked, to the first match of a semi or anti join, from a query
+    -- over the tables; and the planner's counts of them.
+    loop_rows float8,
+    loop_checks float8,
+    est_loop_rows float8,
+    est_checks float8
 );
 
 CREATE TEMP TABLE scans
@@ -134,7 +151,62 @@ CREATE FUNCTION pg_temp.estimate(estimate text, name text)
 RETURNS float8
 LANGUAGE sql
 AS $function$
-    SELECT (regexp_match(estimate, name || '=([-0-9.e+]+)'))[1]::float8
+    SELECT (regexp_match(estimate, '(?:^| )' || name || '=([-0-9.e+]+)'))[1]::float8
+$function$;
+
+/*
+ * The query that counts, for the outer rows of bench_lookup_outer o that
+ * where_clause keeps, the rows of bench_four f the core's nested loop
+ * reads by its index on k with key until the first that passes
+ * inner_clause and join_clause, all of a key's rows where none does, and
+ * the pairs its join filter checks, those that passed inner_clause. A
+ * btree gives a key's rows in the order of their addresses, which the
+ * samples' tables, never updated, keep.
+ */
+CREATE FUNCTION pg_temp.first_match(where_clause text, key text, inner_clause text,
+                                    join_clause text)
+RETURNS text
+LANGUAGE sql
+AS $function$
+    SELECT format($query$
+        SELECT coalesce(sum(w.rows_read), 0)::float8, coalesce(sum(w.checks), 0)::float8
+        FROM bench_lookup_outer o CROSS JOIN LATERAL (
+            SELECT count(*) FILTER (WHERE y.pos <= coalesce(y.first, y.pos)) AS rows_read,
+                   count(*) FILTER (WHERE y.ok AND y.pos <= coalesce(y.first, y.pos)) AS checks
+            FROM (SELECT x.pos, x.ok, min(x.pos) FILTER (WHERE x.pass) OVER () AS first
+                  FROM (SELECT row_number() OVER (ORDER BY f.ctid) AS pos, (%3$s) AS ok,
+                               (%3$s) AND (%4$s) AS pass
+                        FROM bench_four f WHERE f.k = %2$s) AS x) AS y) AS w
+        WHERE %1$s$query$, where_clause, key, inner_clause, join_clause)
+$function$;
+
+/*
+ * A semi and an anti sample of four rows a key: the outer rows
+ * where_clause keeps, joined to bench_four f by f.k = key, inner_clause
+ * on the inner table alone and join_clause over both sides, with clauses
+ * of them.
+ */
+CREATE FUNCTION pg_temp.semi_anti(name text, where_clause text, key text, inner_clause text,
+                                  join_clause text, clauses integer, repetitions integer)
+RETURNS void
+LANGUAGE plpgsql
+AS $function$
+DECLARE
+    outer_query text := format('SELECT count(o.id) FROM bench_lookup_outer o WHERE %s',
+                               where_clause);
+    subquery text := format('SELECT FROM bench_four f WHERE f.k = %s AND %s AND %s',
+                            key, inner_clause, join_clause);
+    counts text := pg_temp.first_match(where_clause, key, inner_clause, join_clause);
+BEGIN
+    PERFORM pg_temp.sample('semi_' || name,
+        format('SELECT count(*) FROM bench_lookup_outer o WHERE EXISTS (%s) AND %s',
+               subquery, where_clause),
+        outer_query, repetitions, kind => 'semi', first_match => counts, clauses => clauses);
+    PERFORM pg_temp.sample('anti_' || name,
+        format('SELECT count(*) FROM bench_lookup_outer o WHERE NOT EXISTS (%s) AND %s',
+               subquery, where_clause),
+        outer_query, repetitions, kind => 'anti', first_match => counts, clauses => clauses);
+END
 $function$;
 
 /*
@@ -144,7 +216,8 @@ $function$;
  * cost and timed, and its outer side alone with Tessera off.
  */
 CREATE FUNCTION pg_temp.sample(name text, query text, outer_query text, repetitions integer,
-                               hashed integer DEFAULT 0)
+                               hashed integer DEFAULT 0, kind text DEFAULT 'inner',
+                               first_match text DEFAULT NULL, clauses integer DEFAULT 0)
 RETURNS void
 LANGUAGE plpgsql
 AS $function$
@@ -158,14 +231,21 @@ DECLARE
     saved text[];
     published float8;
     outer_columns float8;
+    inner_node jsonb;
+    loop_rows float8;
+    loop_checks float8;
 BEGIN
     saved := ARRAY[current_setting('tessera.join_lookup_batch_cost'),
                    current_setting('tessera.join_lookup_descent_cost'),
-                   current_setting('tessera.join_lookup_key_cost')];
+                   current_setting('tessera.join_lookup_key_cost'),
+                   current_setting('tessera.join_loop_key_cost')];
     PERFORM set_config('tessera.enable', 'on', false);
     PERFORM set_config('tessera.join_lookup_batch_cost', '0', false);
     PERFORM set_config('tessera.join_lookup_descent_cost', '0', false);
     PERFORM set_config('tessera.join_lookup_key_cost', '0', false);
+    -- A lookup that reads many rows a key where the loop reads one can
+    -- cost more by its scan and build alone: the loop priced past it.
+    PERFORM set_config('tessera.join_loop_key_cost', '1000000', false);
     EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
         INTO plan;
     node := pg_temp.find_node(plan -> 0 -> 'Plan', 'TessHashJoin');
@@ -180,6 +260,14 @@ BEGIN
     PERFORM set_config('tessera.join_lookup_batch_cost', saved[1], false);
     PERFORM set_config('tessera.join_lookup_descent_cost', saved[2], false);
     PERFORM set_config('tessera.join_lookup_key_cost', saved[3], false);
+    PERFORM set_config('tessera.join_loop_key_cost', saved[4], false);
+    inner_node := node -> 'Plans' -> 1;
+    IF first_match IS NULL THEN
+        loop_rows := (node ->> 'Build Rows')::float8;
+        loop_checks := 0;
+    ELSE
+        EXECUTE first_match INTO loop_rows, loop_checks;
+    END IF;
 
     PERFORM set_config('tessera.enable', 'off', false);
     PERFORM set_config('enable_hashjoin', 'off', false);
@@ -204,7 +292,14 @@ BEGIN
             pg_temp.estimate(estimate, 'copied') * outer_columns,
             pg_temp.estimate(estimate, 'loop_descents'),
             node_ms, outer_ms,
-            pg_temp.fastest(query, repetitions), pg_temp.fastest(outer_query, repetitions));
+            pg_temp.fastest(query, repetitions), pg_temp.fastest(outer_query, repetitions),
+            kind,
+            CASE WHEN inner_node ->> 'Custom Plan Provider' = 'TessFilter'
+                 THEN (inner_node ->> 'Input Rows')::float8
+                 ELSE (node ->> 'Build Rows')::float8 END,
+            coalesce((node ->> 'Matches')::float8, 0), clauses,
+            loop_rows, loop_checks,
+            pg_temp.estimate(estimate, 'loop_rows'), pg_temp.estimate(estimate, 'checks'));
     PERFORM set_config('tessera.enable', 'on', false);
     PERFORM set_config('enable_hashjoin', 'on', false);
     PERFORM set_config('enable_mergejoin', 'on', false);
@@ -267,6 +362,25 @@ BEGIN
         'SELECT count(o.k) FROM bench_lookup_outer o WHERE o.sel < 50', repetitions);
     PERFORM pg_temp.sample('shape_33', join_sql || 'l.id = o.k WHERE o.sel < 52',
         'SELECT count(o.k) FROM bench_lookup_outer o WHERE o.sel < 52', repetitions);
+    -- Semi and anti joins of four rows a key, 5000 keys in the index's
+    -- order: inner clauses that pass none, a fifth, three fifths and all
+    -- of a key's rows, each row alone of the others; three fifths with
+    -- the keys shuffled; a clause over both sides that passes about half
+    -- the pairs; and a second key, one row of a key's four, which the
+    -- probe checks before the clause over both sides and the nested loop
+    -- after its index scan.
+    PERFORM pg_temp.semi_anti('none', 'o.id <= 5000', 'o.id', 'f.r < 0', 'true', 0, repetitions);
+    PERFORM pg_temp.semi_anti('fifth', 'o.id <= 5000', 'o.id', 'f.r < 200', 'true', 0,
+                              repetitions);
+    PERFORM pg_temp.semi_anti('three_fifths', 'o.id <= 5000', 'o.id', 'f.r < 600', 'true', 0,
+                              repetitions);
+    PERFORM pg_temp.semi_anti('all', 'o.id <= 5000', 'o.id', 'f.r >= 0', 'true', 0, repetitions);
+    PERFORM pg_temp.semi_anti('shuffled', 'o.id <= 5000', 'o.ks / 10', 'f.r < 600', 'true', 0,
+                              repetitions);
+    PERFORM pg_temp.semi_anti('both_sides', 'o.id <= 5000', 'o.id', 'true', 'f.r > o.sel * 10', 1,
+                              repetitions);
+    PERFORM pg_temp.semi_anti('two_keys', 'o.id <= 5000', 'o.id', 'true',
+                              'f.pos = o.id % 4 AND f.r > o.sel * 10', 1, repetitions);
     -- The scans that give the scan model's unit.
     INSERT INTO scans VALUES
         ('SELECT count(id) FROM bench_lookup', pg_temp.fastest('SELECT count(id) FROM bench_lookup', repetitions)),
@@ -337,63 +451,73 @@ SELECT name, round((core_ms - core_outer_ms)::numeric, 3) AS core_join_ms,
        round((node_ms - outer_ms)::numeric, 3) AS node_join_ms,
        round(((node_ms - outer_ms) / (core_ms - core_outer_ms))::numeric, 2) AS node_over_core
 FROM samples ORDER BY name;
--- The planner's counts against the plan's.
+-- The planner's counts against the plan's: of the semi and anti
+-- samples also the rows the lookup's scan read (scanned, against the
+-- planner's rows), the nested loop's rows and the pairs checked.
 SELECT name, lookups, round(est_batches::numeric) AS est_batches, keys, round(est_keys::numeric) AS est_keys,
        descents, round(est_descents::numeric) AS est_descents, fetched, round(est_rows::numeric) AS est_rows,
        copied, round(est_copied::numeric) AS est_copied
-FROM samples ORDER BY name;
--- The node's own time less the scan model's time of the rows fetched
--- through the index (tessera.index_tuple_cost) and the hash join's model
--- of its work over the batches' tables (the rows built, a text key
--- hashed on both sides, the outer rows probed, the pairs and the integer
--- each gathers, the batches the aggregate above received), fitted as
--- batch × lookups + descent × descents + key × other keys + copy × outer
--- values copied into gathered batches; the core's nested loop's time, as
--- key × keys + descent × the same descents + row × rows fetched: keys
--- near each other in the index spare its descents too. Where the input
--- gathered, the lookup's descents are those of the gathered batches, and
--- the nested loop's are the planner's over the child's batches. Least
--- squares through zero over every sample.
+FROM samples WHERE kind = 'inner' ORDER BY name;
+SELECT name, keys, scanned, round(est_rows::numeric) AS est_rows, fetched,
+       loop_rows, round(est_loop_rows::numeric) AS est_loop_rows,
+       matches, loop_checks, round(est_checks::numeric) AS est_checks
+FROM samples WHERE kind <> 'inner' ORDER BY name;
+-- The node's own time less the scan model's time of the rows its lookup
+-- scan read (tessera.index_tuple_cost) and the hash join's model of its
+-- work over the batches' tables (the rows built, a text key hashed on
+-- both sides, the outer rows probed, the pairs and the integer each
+-- gathers, the batches the aggregate above received, the pairs the
+-- join's other clauses checked), fitted as batch × lookups + descent ×
+-- descents + key × other keys + copy × outer values copied into
+-- gathered batches; the core's nested loop's time, as key × keys +
+-- descent × the same descents + row × rows read: keys near each other
+-- in the index spare its descents too. Where the input gathered, the
+-- lookup's descents are those of the gathered batches, and the nested
+-- loop's are the planner's over the child's batches. Least squares
+-- through zero over the inner samples; the semi and anti samples are
+-- predicted with the prices fitted, the nested loop's join filter
+-- priced as the model does (tessera.filter_clause_cost a pair).
 CREATE TEMP VIEW own AS
-SELECT s.*,
-       s.node_ms - s.outer_ms -
-       (s.fetched * (current_setting('tessera.index_tuple_cost')::float8 +
-                     current_setting('tessera.join_build_cost')::float8) +
-        (s.fetched + s.probed) * s.hashed * current_setting('tessera.join_hashed_key_cost')::float8 +
-        s.probed * current_setting('tessera.join_probe_cost')::float8 +
-        s.pairs * (current_setting('tessera.join_pair_cost')::float8 +
-                   current_setting('tessera.join_gather_cost')::float8) +
-        s.published * current_setting('tessera.join_batch_cost')::float8) * u.unit_ms AS y,
-       s.node_ms - s.outer_ms - (s.node_ms - s.outer_ms -
-       (s.fetched * (current_setting('tessera.index_tuple_cost')::float8 +
-                     current_setting('tessera.join_build_cost')::float8) +
-        (s.fetched + s.probed) * s.hashed * current_setting('tessera.join_hashed_key_cost')::float8 +
-        s.probed * current_setting('tessera.join_probe_cost')::float8 +
-        s.pairs * (current_setting('tessera.join_pair_cost')::float8 +
-                   current_setting('tessera.join_gather_cost')::float8) +
-        s.published * current_setting('tessera.join_batch_cost')::float8) * u.unit_ms) AS hash_ms,
-       ARRAY[s.lookups, s.descents, s.keys - s.descents, s.copied] AS x,
-       s.core_ms - s.core_outer_ms AS loop_y,
-       ARRAY[s.keys, CASE WHEN s.copied > 0 THEN s.est_loop_descents ELSE s.descents END,
-             s.fetched] AS loop_x
-FROM samples AS s, model_unit AS u;
+SELECT h.*, h.node_ms - h.outer_ms - h.hash_ms AS y, h.core_ms - h.core_outer_ms AS loop_y
+FROM (SELECT s.*,
+             (s.scanned * current_setting('tessera.index_tuple_cost')::float8 +
+              s.fetched * current_setting('tessera.join_build_cost')::float8 +
+              (s.fetched + s.probed) * s.hashed * current_setting('tessera.join_hashed_key_cost')::float8 +
+              s.probed * current_setting('tessera.join_probe_cost')::float8 +
+              s.pairs * (current_setting('tessera.join_pair_cost')::float8 +
+                         current_setting('tessera.join_gather_cost')::float8) +
+              s.published * current_setting('tessera.join_batch_cost')::float8 +
+              s.matches * s.clauses * current_setting('tessera.filter_clause_cost')::float8) *
+                 u.unit_ms AS hash_ms,
+             s.loop_checks * s.clauses * current_setting('tessera.filter_clause_cost')::float8 *
+                 u.unit_ms AS loop_fixed_ms,
+             s.est_checks * s.clauses * current_setting('tessera.filter_clause_cost')::float8 *
+                 u.unit_ms AS loop_planned_fixed_ms,
+             ARRAY[s.lookups, s.descents, s.keys - s.descents, s.copied] AS x,
+             ARRAY[s.keys, CASE WHEN s.copied > 0 THEN s.est_loop_descents ELSE s.descents END,
+                   s.loop_rows] AS loop_x
+      FROM samples AS s, model_unit AS u) AS h;
 CREATE TEMP VIEW fit AS
 WITH a AS (
     SELECT array_agg(v ORDER BY i, j) AS a
     FROM (SELECT i, j, sum(x[i] * x[j]) AS v
           FROM own, generate_series(1, 4) AS i, generate_series(1, 4) AS j
+          WHERE kind = 'inner'
           GROUP BY i, j) AS sums
 ), b AS (
     SELECT array_agg(v ORDER BY i) AS b
-    FROM (SELECT i, sum(x[i] * y) AS v FROM own, generate_series(1, 4) AS i GROUP BY i) AS sums
+    FROM (SELECT i, sum(x[i] * y) AS v FROM own, generate_series(1, 4) AS i
+          WHERE kind = 'inner' GROUP BY i) AS sums
 ), la AS (
     SELECT array_agg(v ORDER BY i, j) AS a
     FROM (SELECT i, j, sum(loop_x[i] * loop_x[j]) AS v
           FROM own, generate_series(1, 3) AS i, generate_series(1, 3) AS j
+          WHERE kind = 'inner'
           GROUP BY i, j) AS sums
 ), lb AS (
     SELECT array_agg(v ORDER BY i) AS b
-    FROM (SELECT i, sum(loop_x[i] * loop_y) AS v FROM own, generate_series(1, 3) AS i GROUP BY i) AS sums
+    FROM (SELECT i, sum(loop_x[i] * loop_y) AS v FROM own, generate_series(1, 3) AS i
+          WHERE kind = 'inner' GROUP BY i) AS sums
 )
 SELECT pg_temp.solve(a.a, b.b, 4) AS c, pg_temp.solve(la.a, lb.b, 3) AS l FROM a, b, la, lb;
 SELECT round((f.c[1] / u.unit_ms)::numeric, 3) AS join_lookup_batch_cost,
@@ -407,7 +531,7 @@ SELECT round((f.c[1] / u.unit_ms)::numeric, 3) AS join_lookup_batch_cost,
 FROM fit AS f, model_unit AS u;
 -- The copy's price alone, the lookup's other prices as set: least
 -- squares through zero of what the set prices leave of the node's time
--- over the outer values copied, over the samples that copied.
+-- over the outer values copied, over the inner samples that copied.
 SELECT round((sum(o.copied * (o.y - u.unit_ms *
                 (o.x[1] * current_setting('tessera.join_lookup_batch_cost')::float8 +
                  o.x[2] * current_setting('tessera.join_lookup_descent_cost')::float8 +
@@ -415,27 +539,41 @@ SELECT round((sum(o.copied * (o.y - u.unit_ms *
               nullif(sum(o.copied * o.copied), 0) / u.unit_ms)::numeric, 4) AS copy_cost_alone,
        count(*) AS samples
 FROM own AS o, model_unit AS u
-WHERE o.copied > 0
+WHERE o.copied > 0 AND o.kind = 'inner'
 GROUP BY u.unit_ms;
 -- Each sample against the model: the node's time and the nested loop's,
--- and whether the model chooses as the times do.
+-- and whether the model chooses as the times do. Of a semi or anti
+-- sample, the verdict: a lookup the planner takes that runs slower than
+-- the loop fails; one that runs faster and the margin leaves to the loop
+-- is missed.
 CREATE TEMP VIEW prediction AS
-SELECT o.name, o.node_ms - o.outer_ms AS node_ms, o.loop_y AS loop_ms,
+SELECT o.name, o.kind, o.node_ms - o.outer_ms AS node_ms, o.loop_y AS loop_ms,
        o.hash_ms + f.c[1] * o.x[1] + f.c[2] * o.x[2] + f.c[3] * o.x[3] + f.c[4] * o.x[4]
            AS node_predicted,
-       f.l[1] * o.loop_x[1] + f.l[2] * o.loop_x[2] + f.l[3] * o.loop_x[3] AS loop_predicted,
+       f.l[1] * o.loop_x[1] + f.l[2] * o.loop_x[2] + f.l[3] * o.loop_x[3] + o.loop_fixed_ms
+           AS loop_predicted,
        o.hash_ms + f.c[1] * o.est_batches + f.c[2] * o.est_descents +
            f.c[3] * (o.est_keys - o.est_descents) + f.c[4] * o.est_copied AS node_planned,
-       f.l[1] * o.est_keys + f.l[2] * o.est_loop_descents + f.l[3] * o.est_rows AS loop_planned
+       f.l[1] * o.est_keys + f.l[2] * o.est_loop_descents + f.l[3] * o.est_loop_rows +
+           o.loop_planned_fixed_ms AS loop_planned
 FROM own AS o, fit AS f;
-SELECT name, round(node_ms::numeric, 3) AS node_ms, round(node_predicted::numeric, 3) AS node_predicted,
+SELECT name, kind, round(node_ms::numeric, 3) AS node_ms,
+       round(node_predicted::numeric, 3) AS node_predicted,
        round(((node_predicted - node_ms) / node_ms * 100)::numeric) AS node_error_pct,
        round(loop_ms::numeric, 3) AS loop_ms, round(loop_predicted::numeric, 3) AS loop_predicted,
        round(((loop_predicted - loop_ms) / loop_ms * 100)::numeric) AS loop_error_pct,
-       CASE WHEN (node_ms < loop_ms) = (node_predicted < loop_predicted) THEN 'right' ELSE 'WRONG' END AS choice,
-       -- The planner's: its counts, and the lookup within 0.8 of the loop.
-       round((node_planned / loop_planned)::numeric, 2) AS planned_ratio,
-       CASE WHEN node_planned <= 0.8 * loop_planned THEN 'lookup' ELSE 'loop' END AS planned,
-       CASE WHEN node_ms < loop_ms THEN 'lookup' ELSE 'loop' END AS faster
-FROM prediction ORDER BY name;
+       choice, planned_ratio, planned, faster,
+       CASE WHEN kind = 'inner' THEN ''
+            WHEN planned = 'lookup' AND faster = 'loop' THEN 'TAKEN SLOWER'
+            WHEN planned = 'loop' AND faster = 'lookup' THEN 'missed'
+            ELSE 'right' END AS verdict
+FROM (SELECT p.*,
+             CASE WHEN (node_ms < loop_ms) = (node_predicted < loop_predicted) THEN 'right' ELSE 'WRONG' END
+                 AS choice,
+             -- The planner's: its counts, and the lookup within 0.8 of the loop.
+             round((node_planned / loop_planned)::numeric, 2) AS planned_ratio,
+             CASE WHEN node_planned <= 0.8 * loop_planned THEN 'lookup' ELSE 'loop' END AS planned,
+             CASE WHEN node_ms < loop_ms THEN 'lookup' ELSE 'loop' END AS faster
+      FROM prediction AS p) AS q
+ORDER BY kind, name;
 \o

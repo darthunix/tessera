@@ -6,8 +6,12 @@
 -- the pages, text, date, bigint against int, four rows a key, half of
 -- them missing under LEFT; then outer rows spread over every batch, ten
 -- rows, keys repeated where the core may take Memoize, 20 000 rows where
--- the planner takes a hash join today, and a key one row in 100 holds.
--- A ratio below one is the win.
+-- the planner takes a hash join today, and a key one row in 100 holds;
+-- then semi and anti joins, which the core's nested loop stops at the
+-- first match: a unique key, half of the keys past the end, and four
+-- rows a key with inner clauses that pass none, a fifth, three fifths
+-- (in order and shuffled) and all of a key's rows, and a clause over both
+-- sides. A ratio below one is the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -139,6 +143,49 @@ SELECT pg_temp.measure_pair('pk_20k',
 SELECT pg_temp.measure_pair('hot_key',
     format('SELECT count(*), sum(l.v) FROM bench_lookup_outer o JOIN bench_lookup l ON l.h = o.kh WHERE o.id <= %s',
            20000 * :scale),
+    :repetitions);
+-- EXISTS by a unique key, and NOT EXISTS with half of the keys past the
+-- end.
+SELECT pg_temp.measure_pair('semi_pk',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE EXISTS (SELECT FROM bench_lookup l WHERE l.id = o.k) AND o.id <= %s',
+           5000 * :scale),
+    :repetitions);
+SELECT pg_temp.measure_pair('anti_miss',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE NOT EXISTS (SELECT FROM bench_lookup l WHERE l.id = o.km) AND o.id <= %s',
+           5000 * :scale),
+    :repetitions);
+-- Four rows a key of bench_four, an inner clause on a column whose
+-- values the rows of a key take apart: none of a key's rows pass, so that
+-- both read all four; a fifth, three fifths, with the keys shuffled too,
+-- and all.
+SELECT pg_temp.measure_pair('anti_none',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE NOT EXISTS (SELECT FROM bench_four f WHERE f.k = o.id AND f.r < 0) AND o.id <= %s',
+           5000 * :scale),
+    :repetitions);
+SELECT pg_temp.measure_pair('semi_fifth',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE EXISTS (SELECT FROM bench_four f WHERE f.k = o.id AND f.r < 200) AND o.id <= %s',
+           5000 * :scale),
+    :repetitions);
+SELECT pg_temp.measure_pair('anti_fifth',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE NOT EXISTS (SELECT FROM bench_four f WHERE f.k = o.id AND f.r < 200) AND o.id <= %s',
+           5000 * :scale),
+    :repetitions);
+SELECT pg_temp.measure_pair('semi_three_fifths',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE EXISTS (SELECT FROM bench_four f WHERE f.k = o.id AND f.r < 600) AND o.id <= %s',
+           5000 * :scale),
+    :repetitions);
+SELECT pg_temp.measure_pair('semi_shuffled',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE EXISTS (SELECT FROM bench_four f WHERE f.k = o.ks / 10 AND f.r < 600) AND o.id <= %s',
+           5000 * :scale),
+    :repetitions);
+SELECT pg_temp.measure_pair('semi_all',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE EXISTS (SELECT FROM bench_four f WHERE f.k = o.id AND f.r >= 0) AND o.id <= %s',
+           5000 * :scale),
+    :repetitions);
+-- A clause over both sides that passes about half the pairs.
+SELECT pg_temp.measure_pair('anti_both_sides',
+    format('SELECT count(*) FROM bench_lookup_outer o WHERE NOT EXISTS (SELECT FROM bench_four f WHERE f.k = o.id AND f.r > o.sel * 10) AND o.id <= %s',
+           5000 * :scale),
     :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER

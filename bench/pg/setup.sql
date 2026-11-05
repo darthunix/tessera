@@ -181,6 +181,16 @@ SELECT g AS id, g * 10 AS k, ((g::bigint * 7919) % (200000 * :scale) + 1)::int *
        g % 100 AS sel
 FROM generate_series(1, 200000 * :scale) AS g;
 
+-- The semi and anti joins of the indexjoin and lookupcost families: four
+-- rows a key k in the index's order, pos the row's place among them, and
+-- r a value each row takes apart of the others of its key, with no
+-- index, so that a clause on it runs over the rows a key's lookup finds.
+DROP TABLE IF EXISTS bench_four;
+CREATE TABLE bench_four AS
+SELECT g / 4 AS k, g % 4 AS pos, abs(hashint4(g)) % 1000 AS r
+FROM generate_series(0, 800000 * :scale - 1) AS g;
+CREATE INDEX bench_four_k ON bench_four (k);
+
 -- The scancost family's parallel query with next to nothing to read: the
 -- workers' start and finish alone.
 DROP TABLE IF EXISTS bench_tiny;
@@ -215,6 +225,7 @@ VACUUM (ANALYZE) bench_idx;
 VACUUM (ANALYZE) bench_tiny;
 VACUUM (ANALYZE) bench_lookup;
 VACUUM (ANALYZE) bench_lookup_outer;
+VACUUM (ANALYZE) bench_four;
 
 SELECT pg_size_pretty(pg_total_relation_size('bench_narrow')) AS narrow,
        pg_size_pretty(pg_total_relation_size('bench_wide')) AS wide,
