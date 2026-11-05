@@ -130,12 +130,6 @@ pg_noreturn extern void tess_spill_value_damaged(void);
 /* The block whose header was read is of kind. */
 extern void tess_spill_expect_kind(const TessSpillHeader *header, TessSpillKind kind);
 
-/*
- * The chunk of columns read back holds rows of words stored words, and,
- * unless rows is negative, rows rows.
- */
-extern void tess_spill_expect_columns(const void *chunk, int words, int64 rows);
-
 /* The block's number is below count, the chunks of its kind written. */
 extern void tess_spill_expect_number(const TessSpillHeader *header, uint64 count);
 
@@ -366,7 +360,8 @@ extern void tess_columns_writer_init(TessColumnsWriter *writer,
  * row count), in their order: the rows appended leave pending, and their
  * count is returned. It stops when the chunk is full of rows or of values
  * and holds rows: the node writes it out and appends the rest. A row whose
- * values outgrow an empty chunk's values grows them.
+ * values outgrow an empty chunk's values grows them, for the rows after
+ * it and the chunks after it too.
  */
 extern int	tess_columns_writer_add(TessColumnsWriter *writer,
 									const TessDatumColumn *columns, TessRowMask *pending);
@@ -387,26 +382,38 @@ extern Size tess_columns_writer_write(TessColumnsWriter *writer, TessSpill *spil
 									  int partition, uint32 number,
 									  TessSpillPosition *position);
 
+/*
+ * Start the chunk anew, its rows and values dropped, as a write does: for
+ * a caller that sent them elsewhere than a set, such as a worker's
+ * message to the leader.
+ */
+extern void tess_columns_writer_reset(TessColumnsWriter *writer);
+
 /* Release the writer's chunk and values. */
 extern void tess_columns_writer_free(TessColumnsWriter *writer);
 
 /*
  * The one reader of chunks of columns a writer wrote: the pair of blocks
- * at a reader of a partition, read into its chunk and values, grown as
- * they need, and checked once, each value by its type too
+ * at a reader of a partition, read into its own chunk and values, grown
+ * as they need, and checked once, each value by its type too
  * (tess_spill_columns_check), so that its rows are read unchecked after,
- * by windows of Datums.
+ * by windows of Datums; or a chunk a writer of this query filled in
+ * memory, shown as it is (tess_columns_reader_show).
  */
 typedef struct TessColumnsReader
 {
 	const TessKernelOps *kernels;
+	/* The chunk and values the window and datum read, and the chunk's rows. */
 	void	   *chunk;
-	Size		chunk_len;
 	Size		chunk_used;
 	char	   *values;
-	Size		values_len;
 	Size		values_used;
 	uint32		rows;
+	/* The reader's own chunk and values a load reads into, and their bytes. */
+	void	   *own_chunk;
+	Size		own_chunk_len;
+	char	   *own_values;
+	Size		own_values_len;
 	int			words;
 	int			ncolumns;
 	const bool *byvals;
@@ -430,9 +437,19 @@ extern bool tess_columns_reader_load(TessColumnsReader *reader, TessSpillReader 
 									 uint32 number, int64 rows);
 
 /*
+ * Show the chunk of columns at chunk, of chunk_len bytes, and its values,
+ * of values_len bytes, through the window and the datum, unchecked: a
+ * chunk a writer of this query filled, such as a worker's message, whose
+ * shape the caller checked. They stay the caller's; the next load reads
+ * into the reader's own again.
+ */
+extern void tess_columns_reader_show(TessColumnsReader *reader, void *chunk,
+									 Size chunk_len, char *values, Size values_len);
+
+/*
  * The count rows from first on of the reader's chunk, each column c of its
  * first ncolumns into values[c] and isnull[c]; a value by reference as a
- * pointer into the reader's values, valid until its next load.
+ * pointer into the reader's values, valid until its next load or show.
  */
 extern void tess_columns_reader_window(TessColumnsReader *reader, uint32 first,
 									   uint32 count, Datum *const *values,
@@ -441,8 +458,8 @@ extern void tess_columns_reader_window(TessColumnsReader *reader, uint32 first,
 /*
  * Column column, among the first ncolumns, of row place of the reader's
  * chunk, and whether it is NULL into *isnull: a value by reference as a
- * pointer into the reader's values, valid until its next load. Checked
- * whole at the load, so read unchecked here.
+ * pointer into the reader's values, valid until its next load or show.
+ * Checked whole at the load, or shown as trusted, so read unchecked here.
  */
 static inline Datum
 tess_columns_reader_datum(const TessColumnsReader *reader, int column, uint32 place,
@@ -463,9 +480,9 @@ tess_columns_reader_datum(const TessColumnsReader *reader, int column, uint32 pl
 }
 
 /*
- * Hand the reader's chunk and values over to the caller, who frees them
- * when no value given out points into them any more; the next load reads
- * into new ones. Either is NULL before a load.
+ * Hand the reader's own chunk and values over to the caller, who frees
+ * them when no value given out points into them any more; the next load
+ * reads into new ones. Either is NULL before a load.
  */
 extern void tess_columns_reader_detach(TessColumnsReader *reader, void **chunk,
 									   char **values);

@@ -1191,7 +1191,6 @@ join_shared_resident_next(TessHashJoinState *state)
 		join_part_open(&spill->reader, spill->resident.file, 0, (int) writer + 1);
 		spill->reader.next = (int) writer;
 		spill->partition = 0;
-		spill->tail_read = true;
 		spill->block = NULL;
 		spill->ordinal = 0;
 	}
@@ -1206,9 +1205,7 @@ join_shared_resident_end(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
 
-	spill->nblock_values = 0;
-	MemoryContextReset(spill->block_context);
-	spill->block = NULL;
+	join_outer_forget(spill);
 	spill->rows = &spill->probe;
 	spill->partition = -1;
 	spill->resident_done = true;
@@ -1678,7 +1675,6 @@ join_round_next_outer(TessHashJoinState *state)
 		return false;
 	join_part_open(&spill->reader, spill->probe.file, spill->partition, (int) writer + 1);
 	spill->reader.next = (int) writer;
-	spill->tail_read = true;
 	spill->block = NULL;
 	spill->ordinal = 0;
 	return true;
@@ -1713,7 +1709,6 @@ join_shared_next_partition(TessHashJoinState *state)
 			/* The outer files come one at a time, as join_next_pass takes them. */
 			spill->partition = partition;
 			spill->reader.open = false;
-			spill->tail_read = true;
 			spill->block = NULL;
 			return true;
 		}

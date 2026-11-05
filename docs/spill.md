@@ -25,15 +25,18 @@ that every partition's tail on both sides fits in half of `hash_mem`.
 
 **Files.** Each level has two sets: the inner side's partitions, in
 chunks of records, and the outer rows written, in chunks of columns,
-each with its own fingerprint. Both sides append the same way: a row
-goes into its partition's chunk,
-then its by-reference values into the partition's value chunks, and a
-chunk that fills is written after the value chunks opened since the
-last one. A file is therefore a series of groups, value chunks and then
-the chunks of records that refer to them (a partition that went to disk
-whole makes one group of all it had); without by-reference columns,
-every chunk is a group. The outer rows are read back one chunk at a
-time, with only that chunk's values in memory.
+each with its own fingerprint. The inner side appends a row into its
+partition's chunk, then its by-reference values into the partition's
+value chunks, and a chunk that fills is written after the value chunks
+opened since the last one. Its file is therefore a series of groups,
+value chunks and then the chunks of records that refer to them (a
+partition that went to disk whole makes one group of all it had);
+without by-reference columns, every chunk is a group. The outer side
+copies a row's values into the values of its own chunk, and writes a
+chunk with its values as a pair of blocks, as a sort writes its runs.
+The outer rows are read back one pair at a time, through the runtime's
+one reader of chunks of columns, with only that chunk's values in
+memory.
 
 **Which partitions stay.** By the rule of the weights (below): while
 the build takes more than `hash_mem`, counted as the node reports it,

@@ -1999,20 +1999,22 @@ Once the inner side is read, the resident partitions make the table the
 outer batches probe. An outer row whose partition is on disk leaves the
 probe: without an inner row in its partition, or rejected by the filter
 of every inner row, it has no pair and is answered at once (a left or
-anti join returns it); otherwise it is appended to a chunk of columns
-of its partition (`tessera/spill.h`): a word for each outer column the
-node reads and each key, a lane of NULL bits for every 64 of them, a
-by-reference value copied into the partition's value chunks right
-after its row, and the rows the batch answers now leave out those
-written. When the outer child is done, each partition with outer rows
-written is joined in turn: its inner chunks and values are read back,
-with its tail, and indexed as a table of their own, and its outer rows
-come back in batches of up to 64 rows read from their chunks of
-columns, which take the same way as the outer
-child's batches, rounds, compact batches, clauses, and the rows of left
-and anti joins without a pair. A compact batch holding pairs of one
-table keeps the next from being loaded until it goes out, and a table
-with duplicates the resident one lacked turns compact mode on.
+anti join returns it); otherwise it is appended to a chunk of columns of
+its partition (`tessera/spill.h`): a word for each outer column the node
+reads and each key, a lane of NULL bits for every 64 of them, a
+by-reference value copied into the values of that chunk right after its
+row, and the rows the batch answers now leave out those written. A chunk
+that fills, or whose values pass a chunk's bytes, is written with its
+values as their pair of blocks, as the runs of an external sort are.
+When the outer child is done, each partition with outer rows written is
+joined in turn: its inner chunks and values are read back, with its
+tail, and indexed as a table of their own, and its outer rows come back
+through the runtime's one reader of chunks of columns, pair by pair, in
+batches of up to 64 rows, which take the same way as the outer child's
+batches, rounds, compact batches, clauses, and the rows of left and anti
+joins without a pair. A compact batch holding pairs of one table keeps
+the next from being loaded until it goes out, and a table with
+duplicates the resident one lacked turns compact mode on.
 
 A partition whose file is larger than what `hash_mem` leaves, and that
 holds less than nine tenths of the inner rows its level split, so that
@@ -2775,23 +2777,26 @@ per target, and `TessSend` keeps its child's.
 
 ### Execution
 
-`TessSend` is parallel-aware: in the leader it puts into its chunk of the
-query's shared memory a queue of 256 kB per worker, the leader its
+`TessSend` is parallel-aware: in the leader it puts into its chunk of
+the query's shared memory a queue of 256 kB per worker, the leader its
 receiver. In a worker it reads its child's batches and copies their
 selected rows into a message: a small header (the columns, the words of
 the rows' sort items, the bytes of values), a chunk of columns as the
-blocks of an external `TessSort` (`TESS_SPILL_COLUMNS`, above): a lane of
-the rows' NULL bits per 64 stored words (word w takes bit w % 64 of lane
-w / 64), a lane of words per column, a by-value Datum or a value's byte
-offset in the values, and after the chunk the by-reference values'
-bytes. The kernels append the rows (`tess_spill_columns_append`, as they
-write an external sort's runs), and the leader reads the lanes with the
-readers of `tessera/spill.h`. The rows of a message are as many as a
-quarter of the queue holds in lanes, 64 to 1024; a message is sent when
-its rows are full or its values pass half the queue, and a row whose
-values alone pass it goes in a message of its own. Rows go to no
-parent; when the leader has detached from the queue (a limit above was
-met), the worker stops.
+blocks of an external `TessSort` (`TESS_SPILL_COLUMNS`, above): a lane
+of the rows' NULL bits per 64 stored words (word w takes bit w % 64 of
+lane w / 64), a lane of words per column, a by-value Datum or a value's
+byte offset in the values, and after the chunk the by-reference values'
+bytes. The runtime's one writer of chunks of columns appends the rows
+(`TessColumnsWriter`, as it writes an external sort's runs), and the
+leader shows a message through the one reader (`TessColumnsReader`)
+without the check of a block read from disk: a worker of the query wrote
+it. The rows of a message are as many as a quarter of the queue holds in
+lanes, 64 to 1024; a message is sent when its rows are full or the next
+row's values would pass the room for values, half the queue to start. A
+first row of a message whose values alone pass that room grows it, and
+the rows after it, in that message and the next ones, take the room so
+grown. Rows go to no parent; when the leader has detached from the queue
+(a limit above was met), the worker stops.
 
 `TessGather` launches the workers as `ExecGather` does
 (`ExecInitParallelPlan` with the child's external parameters,

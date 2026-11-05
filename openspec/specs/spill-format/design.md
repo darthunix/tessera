@@ -382,26 +382,27 @@ the upper half of every reference is 1.
 The two blocks are a pair: they carry one number, and the values come
 first, so that a reader has them in hand before the words that refer to
 them (`tess_spill_columns_pair` checks that a block read back is the one
-of the pair it should be). A sort and a grouping read these blocks from
-a file. Before they use a reference, they check it: the upper half must
-be 1, and the value must lie whole inside the chunk of values, from its
-byte to its end, as its type gives its length. If not, the query stops
-with the error "damaged data". Without this check a damaged word would
-make the node read memory outside the chunk. A sort and a grouping check
-every value of a block once, when they load the block, so that a sort's
-merge, which reads a key at every comparison, reads it unchecked. One
-pass checks both: the shape of the chunk and the place of every
-reference, which are the format's rules and the crate's, and where each
-value ends, which is the type's rule and Tessera's, which the crate asks
-for (`tess_spill_columns_check`). The grouping reads its pairs through
-the runtime's one reader of chunks of columns, and the sort writes and
-reads its runs through it and the one writer. The gather node gets its
-chunks from another process's memory, not from a file, and does not
-check them.
+of the pair it should be). A sort, a grouping and a join's outer rows
+read these blocks from a file. Before they use a reference, they check
+it: the upper half must be 1, and the value must lie whole inside the
+chunk of values, from its byte to its end, as its type gives its length.
+If not, the query stops with the error "damaged data". Without this
+check a damaged word would make the node read memory outside the chunk.
+They check every value of a block once, when they load the block, so
+that a sort's merge, which reads a key at every comparison, reads it
+unchecked. One pass checks both: the shape of the chunk and the place of
+every reference, which are the format's rules and the crate's, and where
+each value ends, which is the type's rule and Tessera's, which the crate
+asks for (`tess_spill_columns_check`). All three read their pairs
+through the runtime's one reader of chunks of columns. The sort writes
+its runs through the one writer too; the grouping and the join write
+theirs by partition with loops of their own. The gather node writes its
+messages through the one writer and gets them from another process's
+memory, not from a file: its reader shows them unchecked.
 
-**Many chunks of values.** A join keeps many chunks of values and
-numbers them 0, 1, 2, and so on. To find a value, it keeps an array
-with the addresses of its chunks of values:
+**Many chunks of values.** A join's inner side keeps many chunks of
+values and numbers them 0, 1, 2, and so on. To find a value, it keeps an
+array with the addresses of its chunks of values:
 
 ```
  the join's array of chunks of values     chunk of values number 2
@@ -423,13 +424,9 @@ change, and they work again. A join writes a chunk of values before the
 chunks that refer to it, so a reader has the values in memory when it
 meets a reference to them.
 
-A join keeps its outer rows in chunks of columns, and in a parallel
-join each process numbers its own chunks of values, so the reader of
-another process's file has no array to use. It keeps the chunks of
-values read just before a chunk of columns, whose numbers ascend as
-their writer gave them, and finds a reference's number among them.
-Either way, the chunk must be one that was read, and the value must lie
-whole inside it.
+A join keeps its outer rows in pairs, as a sort and a grouping do: a
+reference of an outer row names the values of its own pair, never a
+chunk of the table's array.
 
 Before this, a sort and a grouping stored a bare position without a
 chunk number, where 0 was a normal position. There were two forms of

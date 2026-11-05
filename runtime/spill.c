@@ -177,21 +177,6 @@ tess_spill_expect_kind(const TessSpillHeader *header, TessSpillKind kind)
 }
 
 void
-tess_spill_expect_columns(const void *chunk, int words, int64 rows)
-{
-	if (tess_spill_columns_words(chunk) != (uint32) words)
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("Tessera read back a chunk of %u columns where it wrote %d",
-					   tess_spill_columns_words(chunk), words));
-	if (rows >= 0 && tess_spill_columns_rows(chunk) != (uint64) rows)
-		ereport(ERROR,
-				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("Tessera read back a chunk of %u rows where it wrote %lld",
-					   tess_spill_columns_rows(chunk), (long long) rows));
-}
-
-void
 tess_spill_expect_number(const TessSpillHeader *header, uint64 count)
 {
 	if (header->number >= count)
