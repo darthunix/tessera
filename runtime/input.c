@@ -31,7 +31,9 @@ struct TessInput
 	/*
 	 * Gathering (tess_input_set_gather): on for the scans to come, and for
 	 * this one, taken at its first batch; whether this scan fetched its
-	 * first batch, and saw the child's end; the
+	 * first batch, and saw the child's end, which on a core of the
+	 * Greenplum family the input gives again without running the child,
+	 * squelched by then perhaps and not to run; the
 	 * gathered batch, active with no binding and consumed by its flag; a
 	 * child batch held back, unfinished, to go after the gathered rows or
 	 * to give the rest of its rows; the rows copied over the input's life.
@@ -177,9 +179,17 @@ fetch(TessInput *input, TupleTableSlot **slot_out, TessBinding **binding_out)
 	TupleTableSlot *slot;
 	TessBatch  *batch;
 
+#if TESS_MPP
+	/* The end again, without running the child, which may be squelched by now. */
+	if (input->child_done)
+		return NULL;
+#endif
 	slot = ExecProcNode(input->child);
 	if (TupIsNull(slot))
+	{
+		input->child_done = true;
 		return NULL;
+	}
 	if (slot != input->cached_slot)
 	{
 		input->cached_slot = slot;
