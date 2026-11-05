@@ -188,9 +188,13 @@ StaticAssertDecl(VARTAG_INDIRECT == 1 && sizeof(varatt_indirect) == 8 &&
 				 VARTAG_ONDISK_OID8 == 4 && sizeof(varatt_external_oid8) == 20,
 				 "the TOAST pointers as tessera-capi sizes them");
 #else
-/* PostgreSQL 19 and 18 have the one with a 32-bit chunk id alone, by its old names. */
+/*
+ * PostgreSQL 19 and 18 have the one with a 32-bit chunk id alone, by its
+ * old names; an older core of the family tags it 20 in network byte order.
+ */
 StaticAssertDecl(VARTAG_INDIRECT == 1 && sizeof(varatt_indirect) == 8 &&
-				 VARTAG_ONDISK == 18 && sizeof(varatt_external) == 16,
+				 VARTAG_ONDISK == (TESS_NETWORK_VARLENA ? 20 : 18) &&
+				 sizeof(varatt_external) == 16,
 				 "the TOAST pointers as tessera-capi sizes them");
 #endif
 
