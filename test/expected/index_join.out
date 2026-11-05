@@ -295,7 +295,7 @@ END $$;
 SELECT ij_estimate($$SELECT count(*), sum(l.v) FROM ij_outer o JOIN ij_inner l ON l.id = o.ko WHERE o.id <= 1000$$) AS serial;
                               serial                               
 -------------------------------------------------------------------
- batches=17 keys=1000, descents within a quarter of the keys: true
+ batches=21 keys=1000, descents within a quarter of the keys: true
 (1 row)
 
 SET max_parallel_workers_per_gather = 2;
@@ -724,7 +724,7 @@ FROM (VALUES (5), (20), (45), (55), (80)) AS s(share);
 -------+---------------------
      5 | planned 6, made 7
     20 | planned 20, made 21
-    45 | planned 63, made 44
+    45 | planned 67, made 44
     55 | planned 99, made 98
     80 | planned 99, made 98
 (5 rows)

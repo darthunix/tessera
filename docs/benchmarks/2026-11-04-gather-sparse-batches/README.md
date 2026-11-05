@@ -112,5 +112,8 @@ rows in a pattern of the table's order, not at random.
   rule kept, a sparse batch right after one that went as it is going
   as it is too, 1.02; copying full batches that fit, 1.10.
 - [`simulate-count.py`](simulate-count.py): the planner's count of
-  gathered batches against the rule kept, batch by batch over binomial
-  batches of 34 to 64 rows: within 1.8 %.
+  gathered batches against the rule kept, batch by batch over pages of
+  30 to 290 rows cut into batches of 64 and a short last one: within
+  3 % where the count is 100 batches or more. A first count took
+  batches of a page's mean size: on pages of 80 rows at 70 % kept it
+  counted 11 839 batches where 19 994 came (the change's review).

@@ -1369,47 +1369,91 @@ lookup_run(PlannerInfo *root, RelOptInfo *rel)
 	return run;
 }
 
+/* A batch of n rows, each kept with chance p: its rows' binomial law. */
+typedef struct BatchLaw
+{
+	double		dense;			/* the chance of half the capacity or more */
+	double		sparse;			/* of fewer, but a row */
+	double		sparse_rows;	/* the rows of a sparse batch, times its chance */
+} BatchLaw;
+
+static BatchLaw
+batch_law(int n, double p)
+{
+	BatchLaw	law = {0, 0, 0};
+
+	for (int k = 1; k <= n; k++)
+	{
+		double		pmf;
+
+		/* In logarithms: (1 - p)^n alone underflows for p near 1. */
+		if (p <= 0.0)
+			pmf = 0.0;
+		else if (p >= 1.0)
+			pmf = k == n ? 1.0 : 0.0;
+		else
+			pmf = exp(lgamma(n + 1.0) - lgamma(k + 1.0) - lgamma(n - k + 1.0) +
+					  k * log(p) + (n - k) * log1p(-p));
+		if (k * 2 >= JOIN_LOOKUP_ROWS)
+			law.dense += pmf;
+		else
+		{
+			law.sparse += pmf;
+			law.sparse_rows += k * pmf;
+		}
+	}
+	return law;
+}
+
 /*
- * The gathering's counts of a scan's batches of n rows over the run its
- * clauses select, each row selected with chance p: a batch's selected
- * rows follow the binomial law. Of the batches, those of half the
- * capacity or more go as they are (chance q); the next batch with a row
- * after a batch is sparse with the chance r / (q + r), r the chance of a
- * sparse batch with a row, so a passing batch starts a run of sparse
- * batches with that chance, and a run goes on with it. all is the batches
- * over the run, rows the selected rows.
+ * The gathering's counts of a scan's pages of per_page rows, each row kept
+ * with chance p: a page gives batches of 64 rows and a short last one,
+ * each with its binomial law. A sparse batch goes as it is right after a
+ * dense one, the chance that the last batch with a row before it was
+ * dense, its predecessor's, the last batch of the page before for the
+ * first; such a batch starts a run of copied batches when the batch after
+ * it is sparse. pages is the pages over the run.
  */
 static void
-shape_binomial(LookupShape *shape, double all, int n, double p, double rows)
+shape_binomial(LookupShape *shape, double pages, double per_page, double p)
 {
-	double		pmf = pow(1.0 - p, n);
-	double		q = 0;
-	double		dense_rows = 0;
-	double		r;
-	double		follow;
+	int			npos = Max((int) ceil(per_page / JOIN_LOOKUP_ROWS), 1);
+	BatchLaw   *laws = palloc_array(BatchLaw, npos);
+	double	   *firsts = palloc_array(double, npos);
 
-	if (p >= 1.0)
+	shape->passing = shape->sparse_rows = 0;
+	shape->firsts = shape->first_rows = shape->longer = 0;
+	for (int pos = 0; pos < npos; pos++)
 	{
-		q = n * 2 >= JOIN_LOOKUP_ROWS ? 1.0 : 0.0;
-		dense_rows = q * n;
+		int			n = pos < npos - 1 ? JOIN_LOOKUP_ROWS :
+			Max((int) round(per_page - JOIN_LOOKUP_ROWS * (npos - 1)), 1);
+
+		laws[pos] = batch_law(n, Min(p, 1.0));
 	}
-	else
-		for (int k = 0; k <= n; k++)
-		{
-			if (k * 2 >= JOIN_LOOKUP_ROWS)
-			{
-				q += pmf;
-				dense_rows += k * pmf;
-			}
-			pmf = pmf * (n - k) / (k + 1) * p / (1.0 - p);
-		}
-	r = Max(1.0 - q - pow(1.0 - p, n), 0.0);
-	follow = q + r > 0 ? r / (q + r) : 0;
-	shape->passing = all * q;
-	shape->sparse_rows = Max(rows - all * dense_rows, 0.0);
-	shape->firsts = shape->passing * follow;
-	shape->first_rows = r > 0 ? shape->firsts * shape->sparse_rows / (all * r) : 0;
-	shape->longer = shape->firsts * follow;
+	for (int pos = 0; pos < npos; pos++)
+	{
+		const BatchLaw *law = &laws[pos];
+		const BatchLaw *before = &laws[pos > 0 ? pos - 1 : npos - 1];
+		double		after_dense = before->dense + before->sparse > 0 ?
+			before->dense / (before->dense + before->sparse) : 0;
+
+		firsts[pos] = law->sparse * after_dense;
+		shape->passing += pages * law->dense;
+		shape->sparse_rows += pages * law->sparse_rows;
+		shape->firsts += pages * firsts[pos];
+		shape->first_rows += law->sparse > 0 ?
+			pages * firsts[pos] * law->sparse_rows / law->sparse : 0;
+	}
+	for (int pos = 0; pos < npos; pos++)
+	{
+		const BatchLaw *law = &laws[pos];
+		double		sparse_next = law->dense + law->sparse > 0 ?
+			law->sparse / (law->dense + law->sparse) : 0;
+
+		shape->longer += pages * firsts[pos > 0 ? pos - 1 : npos - 1] * sparse_next;
+	}
+	pfree(laws);
+	pfree(firsts);
 }
 
 /*
@@ -1423,12 +1467,12 @@ shape_binomial(LookupShape *shape, double all, int n, double p, double rows)
  * participant's, the run and the span the whole table's.
  */
 static void
-lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
+lookup_shape(PlannerInfo *root, const Path *outer, double share, LookupShape *shape)
 {
 	const Path *driver = outer;
 	const Path *scan;
 	double		divisor = outer->parallel_workers > 0 ? tess_parallel_divisor(outer) : 1.0;
-	double		rows = Max(outer->rows * divisor, 1.0);
+	double		rows = Max(outer->rows * divisor * share, 1.0);
 	double		per_page;
 	double		batch_rows;
 	double		run;
@@ -1442,12 +1486,12 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	{
 		if (tess_path_node(driver) != &tess_hash_join_node)
 		{
-			shape_full(shape, Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0));
+			shape_full(shape, Max(outer->rows * share / JOIN_LOOKUP_ROWS, 1.0));
 			return;
 		}
 		if (!join_path_packs(driver))
 		{
-			shape_row_each(shape, Max(outer->rows, 1.0));
+			shape_row_each(shape, Max(outer->rows * share, 1.0));
 			return;
 		}
 		driver = linitial(((const CustomPath *) driver)->custom_paths);
@@ -1455,7 +1499,7 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	scan = driver;
 	if (!IS_SIMPLE_REL(driver->parent) || driver->parent->tuples <= 0)
 	{
-		shape_row_each(shape, Max(outer->rows, 1.0));
+		shape_row_each(shape, Max(outer->rows * share, 1.0));
 		return;
 	}
 	/*
@@ -1466,6 +1510,9 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	if (tess_path_node(driver) == &tess_append_node)
 	{
 		double		sum = 0;
+		/* The share of the parts' rows the joins above the append keep. */
+		double		kept = driver->rows > 0 ?
+			Min(outer->rows * share / driver->rows, 1.0) : 1.0;
 
 		shape->passing = shape->sparse_rows = 0;
 		shape->firsts = shape->first_rows = shape->longer = 0;
@@ -1473,7 +1520,7 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 		{
 			LookupShape part;
 
-			lookup_shape(root, child, &part);
+			lookup_shape(root, child, kept, &part);
 			sum += part.batches;
 			shape->passing += part.passing;
 			shape->sparse_rows += part.sparse_rows;
@@ -1481,7 +1528,7 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 			shape->first_rows += part.first_rows;
 			shape->longer += part.longer;
 		}
-		shape->batches = Max(Min(sum, outer->rows), 1.0);
+		shape->batches = Max(Min(sum, outer->rows * share), 1.0);
 		return;
 	}
 	/*
@@ -1494,7 +1541,7 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	if (tess_path_node(scan) != &tess_heap_scan_node ||
 		((const CustomPath *) scan)->custom_paths != NIL)
 	{
-		shape_full(shape, Max(outer->rows / JOIN_LOOKUP_ROWS, 1.0));
+		shape_full(shape, Max(outer->rows * share / JOIN_LOOKUP_ROWS, 1.0));
 		return;
 	}
 	/* A scan's batch holds 64 rows at most and none across a page. */
@@ -1508,8 +1555,7 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
 	shape->relid = driver->parent->relid;
 	shape->tuples = driver->parent->tuples;
 	shape->span = run / batches;
-	shape_binomial(shape, run / batch_rows / divisor, (int) round(batch_rows),
-				   Min(rows / run, 1.0), rows / divisor);
+	shape_binomial(shape, run / per_page / divisor, per_page, Min(rows / run, 1.0));
 }
 
 /*
@@ -1518,8 +1564,9 @@ lookup_shape(PlannerInfo *root, const Path *outer, LookupShape *shape)
  * of sparse batches they start; then each run's copied rows over the
  * capacity and about half a batch for its last, short one, at least one
  * batch, the run the child's end closes too. Never more than the
- * child's. Simulated batch by batch on binomial batches of 34 to 64
- * rows, by the input's rules, it comes within 1.8 % of their count.
+ * child's. Simulated batch by batch over pages of 30 to 290 rows cut
+ * into batches of 64 and a short last one, by the input's rules, it comes
+ * within 3 % of their count where it is 100 batches or more.
  */
 static double
 gathered_batches(const LookupShape *shape)
@@ -1544,15 +1591,13 @@ path_values_stored(const Path *path)
 	const TessNode *node = tess_path_node(path);
 	List	   *children;
 
-	if (node == NULL)
+	if (node == NULL || node == &tess_agg_node || node == &tess_sort_node)
 		return true;
 	foreach_ptr(Node, expr, path->pathtarget->exprs)
 	{
 		if (!IsA(expr, Var))
 			return false;
 	}
-	if (node == &tess_agg_node || node == &tess_sort_node)
-		return true;
 	children = ((const CustomPath *) path)->custom_paths;
 	if (node == &tess_append_node)
 	{
@@ -1652,7 +1697,7 @@ lookup_cost(PlannerInfo *root, RelOptInfo *joinrel, const JoinLookup *lookup,
 	Cost		nested_loop;
 	Cost		cost;
 
-	lookup_shape(root, outer, &shape);
+	lookup_shape(root, outer, 1.0, &shape);
 	/*
 	 * The input gathers sparse outer batches with stored values: the lookup
 	 * takes the keys of a gathered batch, which spans the child batches it

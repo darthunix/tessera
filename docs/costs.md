@@ -293,15 +293,18 @@ The counts follow the core's estimates and the shape of the outer side:
 - the batches the lookup makes: where the outer side's batches hold
   stored values (no column computed on the way down), the join's input
   gathers them ([runtime.md](runtime.md), Gathering sparse batches).
-  The count follows its rules over the batches above, their rows
-  spread at random over the run, so that a batch's rows follow the
-  binomial law: the batches at least half full and the first sparse
-  batch of each run of them they start go as they are; each run's
-  other rows go over 64, with about half a batch for its last, at least
-  one; and the first batch counts one. An append adds its parts'
-  counts, a part's last run going on into the next part. Simulated
-  batch by batch over binomial batches of 34 to 64 rows, the count
-  comes within 1.8 % of the rules'. A gathered batch spans the child
+  The count follows its rules over the scan's pages, each cut into
+  batches of 64 rows and a short last one, the rows spread at random
+  over the run, so that each batch's rows follow the binomial law of
+  its size: the batches at least half full and the first sparse batch
+  of each run of them they start go as they are, the chance that the
+  batch before was dense; each run's other rows go over 64, with about
+  half a batch for its last, at least one; and the first batch counts
+  one. An append adds its parts' counts, each part's rows the share of
+  them the joins above the append keep, a part's last run going on into
+  the next part. Simulated batch by batch over pages of 30 to 290 rows,
+  the count comes within 3 % of the rules' where it is 100 batches or
+  more. A gathered batch spans the child
   batches it took, so its span below is the child's times the child's
   batches over the gathered ones; the copies are the rows of the
   copied batches times the outer side's columns;
@@ -515,9 +518,11 @@ the defaults are the project's and not a deployment's.
   random over its batches. Rows in a pattern, a filter on a column
   that repeats with the table's order, make batches all just below or
   all just above half full: on the index join suite's table of
-  `r = (id * 7919) % 100`, kept below 45, the planner counted 63
+  `r = (id * 7919) % 100`, kept below 45, the planner counted 67
   gathered batches where 44 came. A pack that hands on its subquery's
-  batches is counted as full batches, gathered or not.
+  batches is counted as full batches, gathered or not. A join under a
+  limit reads its outer side a batch at a time, but its path is priced
+  before the limit is known, as if its input gathered.
 - The rows are the core's estimates: a join the core expects 98 rows of
   where 319 404 come (Q9 of TPC-H) misleads every path alike.
 - The spill models count a row once the table spills, not the share on
