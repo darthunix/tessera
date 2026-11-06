@@ -535,6 +535,17 @@ pub fn window(
     let (lane, _) = chunk[lane_at..lane_at + 8 * count].as_chunks::<8>();
     let (null_lane, _) = chunk[null_at..null_at + 8 * count].as_chunks::<8>();
     let bit = word % 64;
+    // A window of no NULL is its words as they lie.
+    let any = null_lane
+        .iter()
+        .fold(0, |any, bits| any | u64::from_ne_bytes(*bits));
+    if any >> bit & 1 == 0 {
+        for (word, from) in out.iter_mut().zip(lane) {
+            *word = u64::from_ne_bytes(*from);
+        }
+        nulls.fill(false);
+        return Ok(());
+    }
     for (((word, null), from), bits) in out.iter_mut().zip(nulls).zip(lane).zip(null_lane) {
         *null = u64::from_ne_bytes(*bits) >> bit & 1 != 0;
         // A NULL's word is 0 whatever the chunk holds: the check skips it.
@@ -1019,14 +1030,15 @@ mod tests {
     }
 
     /// A batch of `nrows` rows of `ncolumns` columns, columns 1 and 65 by
-    /// reference and the others by value, a NULL in every third row of
-    /// each; and which columns are by value.
+    /// reference and the others by value, a NULL in every third of the
+    /// first 64 rows of each, so that the windows after them have none;
+    /// and which columns are by value.
     fn read_batch(nrows: usize, ncolumns: usize) -> (Batch, Vec<bool>) {
         let columns = (0..ncolumns)
             .map(|column| {
                 (0..nrows)
                     .map(|row| match (row + column) % 3 {
-                        0 => Cell::Null,
+                        0 if row < 64 => Cell::Null,
                         _ if column % 64 == 1 => Cell::Bytes(vec![row as u8; row % 13]),
                         _ => Cell::Word((row * 1000 + column) as u64),
                     })
@@ -1061,11 +1073,12 @@ mod tests {
 
     /// A chunk read back, checked once, reads by windows of up to 64 rows
     /// every word, NULL and value it was written with: a long chunk of a
-    /// few columns, whose windows cross words of rows, and a short one of
-    /// 70 columns, past the first lane of NULL bits.
+    /// few columns, whose windows cross words of rows and the last of
+    /// which hold no NULL, and one of 70 columns, past the first lane of
+    /// NULL bits, whose last rows hold none in either lane.
     #[test]
     fn a_chunk_read_back_is_checked_then_read_by_windows() -> Result<()> {
-        for (nrows, ncolumns) in [(150, 3), (5, 70)] {
+        for (nrows, ncolumns) in [(150, 3), (70, 70)] {
             let (batch, by_value) = read_batch(nrows, ncolumns);
             let (chunk, values, words) = written(&batch, nrows)?;
             let shape = check(&chunk, words, Some(nrows), &by_value, &values, &Whole)?;
