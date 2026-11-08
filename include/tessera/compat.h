@@ -480,6 +480,9 @@ tess_rel_segments(const RelOptInfo *rel)
 		rel->cdbpolicy->numsegments : 1;
 }
 
+/* The access method of a base relation, which the family's planner keeps. */
+#define tess_rel_relam(rel) ((rel)->relam)
+
 /*
  * The flag that sends a setting to the segments: a newly started segment
  * process gets only the synchronized ones, and an extension's are not by
@@ -492,6 +495,7 @@ tess_rel_segments(const RelOptInfo *rel)
 	clause_selectivity((root), (clause), (relid), (jointype), (sjinfo), false)
 #else
 #define tess_rel_segments(rel) ((void) (rel), 1.0)
+#define tess_rel_relam(rel) ((void) (rel), InvalidOid)
 #define TESS_GUC_SYNC 0
 #define tess_clause_selectivity(root, clause, relid, jointype, sjinfo) \
 	clause_selectivity((root), (clause), (relid), (jointype), (sjinfo))
