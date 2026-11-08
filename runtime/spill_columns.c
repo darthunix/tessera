@@ -86,12 +86,17 @@ Size
 tess_columns_writer_write(TessColumnsWriter *writer, TessSpill *spill, int partition,
 						  uint32 number, TessSpillPosition *position)
 {
-	Size		bytes;
+	Size		bytes = 0;
 
-	bytes = tess_spill_write(spill, partition, TESS_SPILL_VALUES, number, writer->values,
-							 writer->values_used, position);
+	/* A chunk of no values is written as its rows alone. */
+	if (writer->values_used > 0)
+	{
+		bytes = tess_spill_write(spill, partition, TESS_SPILL_VALUES, number, writer->values,
+								 writer->values_used, position);
+		position = NULL;
+	}
 	bytes += tess_spill_write(spill, partition, TESS_SPILL_COLUMNS, number, writer->chunk,
-							  writer->chunk_len, NULL);
+							  writer->chunk_len, position);
 	tess_columns_writer_reset(writer);
 	return bytes;
 }
@@ -161,11 +166,18 @@ tess_columns_reader_load(TessColumnsReader *reader, TessSpillReader *file, uint3
 		return false;
 	tess_status_check(reader->kernels->spill_columns_pair(&header, 0, number, &status),
 					  &status);
-	reader_room(reader->context, (void **) &reader->own_values, &reader->own_values_len,
-				header.len);
-	tess_spill_read_body(file, reader->own_values, header.len);
-	reader->values_used = header.len;
-	reader_block(reader, file, 1, number, &header);
+	/* A chunk of no values comes as its rows alone. */
+	reader->values_used = 0;
+	if (header.kind == TESS_SPILL_VALUES)
+	{
+		reader_room(reader->context, (void **) &reader->own_values, &reader->own_values_len,
+					header.len);
+		tess_spill_read_body(file, reader->own_values, header.len);
+		reader->values_used = header.len;
+		reader_block(reader, file, 1, number, &header);
+	}
+	else
+		reader_room(reader->context, (void **) &reader->own_values, &reader->own_values_len, 0);
 	reader_room(reader->context, &reader->own_chunk, &reader->own_chunk_len, header.len);
 	tess_spill_read_body(file, reader->own_chunk, header.len);
 	reader->chunk_used = header.len;

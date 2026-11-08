@@ -915,7 +915,13 @@ fn a_chunk_of_columns_reads_back_through_its_entry_points() {
     };
     assert_eq!(pair(2, 0, 2).0, Code::Ok);
     assert_eq!(pair(3, 1, 2).0, Code::Ok);
-    assert_eq!(pair(3, 0, 2), damaged, "the rows first");
+    assert_eq!(
+        pair(3, 0, 2).0,
+        Code::Ok,
+        "the rows of a chunk with no values"
+    );
+    assert_eq!(pair(2, 1, 2), damaged, "the values second");
+    assert_eq!(pair(1, 0, 2), damaged, "records first");
     assert_eq!(pair(2, 0, 3), damaged, "another number");
     assert_eq!(pair(2, 2, 2), wrong, "past the pair");
     let mut status = Status::new();

@@ -473,12 +473,14 @@ its lanes MUST be refused as damaged data.
 ### Requirement: The pair of a chunk of columns
 A chunk of columns written with its chunk of values SHALL be written as
 a pair of blocks under one number: its values first, a block of kind
-`TESS_SPILL_VALUES` that may be empty, then its rows, a block of kind
+`TESS_SPILL_VALUES`, then its rows, a block of kind
 `TESS_SPILL_COLUMNS`. A reader has the values in hand before the words
-that refer to them.
+that refer to them. A chunk with no values SHALL be written as its rows
+alone, which are then the whole pair.
 
 - `tess_spill_columns_pair` SHALL refuse, as damaged data, a block read
-  as one of the pair that is of another kind or another number.
+  as one of the pair that is of another kind or another number; the
+  rows read as the first block are the pair of a chunk with no values.
 - `tess_spill_columns_check` SHALL check a chunk read back once, so
   that its rows are read unchecked after: its words, its rows when the
   caller counted them, and every word of a column not by value of a row
@@ -500,6 +502,15 @@ that refer to them.
 - **Verified by:**
   `crates/relspill/src/spill_columns.rs::a_chunk_read_back_is_checked_then_read_by_windows`;
   `crates/tessera-capi/tests/spill.rs::a_chunk_of_columns_reads_back_through_its_entry_points`
+
+#### Scenario: A chunk with no values
+- **WHEN** a writer writes a chunk whose rows have no value by
+  reference, and a reader loads it
+- **THEN** the chunk is written as its rows alone, with no block of
+  values, and loads as a pair does, every word and NULL the one written
+- **Verified by:**
+  `test/sql/spill.sql::tessera_test_spill_columns`;
+  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`
 
 #### Scenario: A pair not as it was written
 - **WHEN** a block of the pair of another kind or number is read, or a

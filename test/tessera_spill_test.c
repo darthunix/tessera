@@ -1223,7 +1223,9 @@ tessera_test_spill_value(PG_FUNCTION_ARGS)
  * of an int8 and a text, a NULL in each now and then, and one text of
  * 20 kB that grows the writer's values past their 256 bytes; written to
  * one partition as a pair of blocks whenever an append leaves rows, and
- * read back by windows of 64, every value as it was written.
+ * read back by windows of 64, every value as it was written. Five rows
+ * whose texts are all NULL go to another partition as a chunk of no
+ * values: its rows alone, which load as a pair does.
  */
 Datum
 tessera_test_spill_columns(PG_FUNCTION_ARGS)
@@ -1275,6 +1277,18 @@ tessera_test_spill_columns(PG_FUNCTION_ARGS)
 		   tess_row_mask_count(&pending) > 0)
 		tess_columns_writer_write(&writer, spill, 1, pairs++, NULL);
 	tess_columns_writer_write(&writer, spill, 1, pairs++, NULL);
+	{
+		bool		all_null[COLUMNS_ROWS];
+		uint64		five_bits[(COLUMNS_ROWS + 63) / 64] = {UINT64CONST(0x1f)};
+		TessRowMask five = {COLUMNS_ROWS, five_bits};
+
+		memset(all_null, true, sizeof(all_null));
+		columns[1].isnull = all_null;
+		if (tess_columns_writer_add(&writer, columns, &five) != 5)
+			elog(ERROR, "five rows of no values were not appended to a chunk of columns");
+		tess_columns_writer_write(&writer, spill, 2, 0, NULL);
+		columns[1].isnull = text_nulls;
+	}
 	/* The values grown for row 100 stay for the chunks after it. */
 	if (writer.values_len < VARSIZE_ANY(DatumGetPointer(texts[100])))
 		elog(ERROR, "a writer's values grew to %zu and went back to %zu",
@@ -1309,6 +1323,28 @@ tessera_test_spill_columns(PG_FUNCTION_ARGS)
 	if (row != COLUMNS_ROWS || pairs < 2)
 		elog(ERROR, "%d rows of %u pairs read back, not %d", row, pairs, COLUMNS_ROWS);
 	tess_spill_close(file);
+
+	/* The chunk of no values, its rows alone, loads as a pair does. */
+	{
+		TessSpillHeader header;
+
+		file = tess_spill_open(spill, 0, 2);
+		if (!tess_spill_read_header(file, &header) || header.kind != TESS_SPILL_COLUMNS)
+			elog(ERROR, "a chunk of no values was written with a block of values");
+		tess_spill_close(file);
+		file = tess_spill_open(spill, 0, 2);
+		if (!tess_columns_reader_load(&reader, file, 0, -1) || reader.rows != 5 ||
+			reader.values_used != 0)
+			elog(ERROR, "a chunk of no values does not load as a pair");
+		tess_columns_reader_window(&reader, 0, 5, values, nulls);
+		for (int at = 0; at < 5; at++)
+			if (!out_nulls[1][at] || out_nulls[0][at] != word_nulls[at] ||
+				(!word_nulls[at] && out[0][at] != words[at]))
+				elog(ERROR, "row %d of a chunk of no values reads back other than written", at);
+		if (tess_columns_reader_load(&reader, file, 1, -1))
+			elog(ERROR, "a chunk of no values reads back with another");
+		tess_spill_close(file);
+	}
 
 	/*
 	 * A pair's buffers handed over stay the caller's, as a sort keeps a block

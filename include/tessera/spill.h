@@ -392,9 +392,10 @@ extern TessStatusCode tess_spill_columns_append(void *chunk, Size len, int ncolu
 
 /*
  * A chunk of columns is written as a pair of blocks under one number: its
- * values (TESS_SPILL_VALUES), then its rows (TESS_SPILL_COLUMNS). Whether
- * header, read back as block at of the pair (0 the values, 1 the rows),
- * numbered number, is that block: one of another kind or number is
+ * values (TESS_SPILL_VALUES), then its rows (TESS_SPILL_COLUMNS); a chunk
+ * of no values as its rows alone. Whether header, read back as block at of
+ * the pair (0 the values, or the rows of a chunk of no values; 1 the
+ * rows), numbered number, is that block: one of another kind or number is
  * damaged data (SQLSTATE XX001), an at past the pair a wrong call.
  */
 extern TessStatusCode tess_spill_columns_pair(const TessSpillHeader *header, int at,

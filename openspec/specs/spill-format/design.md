@@ -365,9 +365,9 @@ of values they have.
 
 **One chunk of values.** A sort, the waiting rows of a grouping and the
 gather node write two things together: a chunk of values, and right
-after it the chunk of columns that refers to it. This holds even when
-the chunk of values is empty. The chunk of values has the number 0, so
-the upper half of every reference is 1.
+after it the chunk of columns that refers to it; a chunk with no values
+is written as its chunk of columns alone, as below. The chunk of values
+has the number 0, so the upper half of every reference is 1.
 
 ```
  block of values, number 0        block of columns, written next
@@ -382,23 +382,27 @@ the upper half of every reference is 1.
 The two blocks are a pair: they carry one number, and the values come
 first, so that a reader has them in hand before the words that refer to
 them (`tess_spill_columns_pair` checks that a block read back is the one
-of the pair it should be). A sort, a grouping and a join's outer rows
-read these blocks from a file. Before they use a reference, they check
-it: the upper half must be 1, and the value must lie whole inside the
-chunk of values, from its byte to its end, as its type gives its length.
-If not, the query stops with the error "damaged data". Without this
-check a damaged word would make the node read memory outside the chunk.
-They check every value of a block once, when they load the block, so
-that a sort's merge, which reads a key at every comparison, reads it
-unchecked. One pass checks both: the shape of the chunk and the place of
-every reference, which are the format's rules and the crate's, and where
-each value ends, which is the type's rule and Tessera's, which the crate
-asks for (`tess_spill_columns_check`). All three read their pairs
-through the runtime's one reader of chunks of columns. The sort writes
-its runs through the one writer too; the grouping and the join write
-theirs by partition with loops of their own. The gather node writes its
-messages through the one writer and gets them from another process's
-memory, not from a file: its reader shows them unchecked.
+of the pair it should be). A chunk with no values, such as a join's
+outer rows of an integer key, is written as its rows alone: each block
+is a read of its own, and an empty block of values before every chunk
+would double the blocks such a join reads and cost it 2 to 3 % of its
+time. A sort, a grouping and a join's outer rows read these blocks from
+a file. Before they use a reference, they check it: the upper half must
+be 1, and the value must lie whole inside the chunk of values, from its
+byte to its end, as its type gives its length. If not, the query stops
+with the error "damaged data". Without this check a damaged word would
+make the node read memory outside the chunk. They check every value of a
+block once, when they load the block, so that a sort's merge, which
+reads a key at every comparison, reads it unchecked. One pass checks
+both: the shape of the chunk and the place of every reference, which are
+the format's rules and the crate's, and where each value ends, which is
+the type's rule and Tessera's, which the crate asks for
+(`tess_spill_columns_check`). All three read their pairs through the
+runtime's one reader of chunks of columns. The sort writes its runs
+through the one writer too; the grouping and the join write theirs by
+partition with loops of their own. The gather node writes its messages
+through the one writer and gets them from another process's memory, not
+from a file: its reader shows them unchecked.
 
 **Many chunks of values.** A join's inner side keeps many chunks of
 values and numbers them 0, 1, 2, and so on. To find a value, it keeps an

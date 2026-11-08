@@ -3,9 +3,10 @@
 //! [`append`] writes a source's rows into one chunk, their values by
 //! reference copied into the chunk's own chunk of values, and stops where
 //! the chunk or the values are full. The two are written as a [`PAIR`] of
-//! blocks, the values first. A reader checks the pair's blocks
-//! ([`check_pair`]) and the chunk read back with its values ([`check`])
-//! once, then reads windows of its rows ([`window`]) unchecked.
+//! blocks, the values first, or the chunk alone when it has no values. A
+//! reader checks the pair's blocks ([`check_pair`]) and the chunk read
+//! back with its values ([`check`]) once, then reads windows of its rows
+//! ([`window`]) unchecked.
 //!
 //! [`append_partitioned`] appends rows by partition: a join's outer rows
 //! that wait for their partition, kept without the table's records. Each
@@ -388,13 +389,16 @@ pub fn append(
 }
 
 /// The blocks a chunk of columns is written as, in this order and under
-/// one number: the chunk of its values, which may be empty, then the
-/// chunk of its rows. A reader so has the values in hand before the words
-/// that refer to them.
+/// one number: the chunk of its values, then the chunk of its rows. A
+/// reader so has the values in hand before the words that refer to them.
+/// A chunk with no values is written as the chunk of its rows alone: a
+/// block of values, even an empty one, would cost a read of its own.
 pub const PAIR: [BlockKind; 2] = [BlockKind::Values, BlockKind::Columns];
 
 /// Whether `header`, read back as block `at` of the [`PAIR`] numbered
-/// `number`, is that block.
+/// `number`, is that block. The first block may be the chunk of rows of
+/// a chunk with no values, which is then the whole pair: the caller
+/// tells the two by the header's kind.
 ///
 /// # Errors
 ///
@@ -405,7 +409,7 @@ pub fn check_pair(header: &BlockHeader, at: usize, number: u32) -> Result<()> {
         .get(at)
         .ok_or_else(|| Error::wrong_call(Rule::PairBlock).with(at))?;
     ensure!(
-        header.kind == kind,
+        header.kind == kind || (at == 0 && header.kind == BlockKind::Columns),
         Error::damaged(Rule::PairKind)
             .with(header.kind as u32)
             .and(kind as u32)
@@ -1111,8 +1115,9 @@ mod tests {
     /// A chunk read back of another count of words or of rows, or with a
     /// word of a value that refers past the values, to another chunk, or
     /// to nothing, is damaged bytes; a pair's block of another kind or
-    /// number too. A call past the chunk's words or rows, or past the
-    /// pair, is a wrong call.
+    /// number too, though the rows alone are the pair of a chunk with no
+    /// values. A call past the chunk's words or rows, or past the pair, is
+    /// a wrong call.
     #[test]
     fn a_chunk_read_back_of_another_shape_or_reference_is_damaged() -> Result<()> {
         let wrong = |error: Error| (error.kind(), error.rule());
@@ -1206,9 +1211,22 @@ mod tests {
         };
         check_pair(&header(BlockKind::Values, 3), 0, 3)?;
         check_pair(&header(BlockKind::Columns, 3), 1, 3)?;
+        // A chunk with no values: its rows alone.
+        check_pair(&header(BlockKind::Columns, 3), 0, 3)?;
+        for (kind, at) in [
+            (BlockKind::Records, 0),
+            (BlockKind::Values, 1),
+            (BlockKind::Records, 1),
+        ] {
+            ensure!(
+                check_pair(&header(kind, 3), at, 3).map_err(wrong)
+                    == Err((Kind::Damaged, Rule::PairKind)),
+                "{kind:?} as block {at}"
+            );
+        }
         ensure!(
-            check_pair(&header(BlockKind::Columns, 3), 0, 3).map_err(wrong)
-                == Err((Kind::Damaged, Rule::PairKind))
+            check_pair(&header(BlockKind::Columns, 4), 0, 3).map_err(wrong)
+                == Err((Kind::Damaged, Rule::PairNumber))
         );
         ensure!(
             check_pair(&header(BlockKind::Values, 4), 0, 3).map_err(wrong)

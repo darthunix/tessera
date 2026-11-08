@@ -976,6 +976,8 @@ typedef struct RowWriter
 	Size		values_len;
 	Size		values_used;
 	uint64		written;
+	/* The pairs written: the next one's number. */
+	uint32		pairs;
 } RowWriter;
 
 /* A level of partitions: one set of files, its partitions by its plan's bits. */
@@ -998,6 +1000,8 @@ typedef struct RowReader
 	TessSpillReader *file;
 	TessColumnsReader columns;
 	uint32		next;
+	/* The pairs loaded: the next one's number. */
+	uint32		pairs;
 	/* The batch given to group_batch: a window of the chunk. */
 	TessBatch	batch;
 	uint64		bits;
@@ -1083,7 +1087,10 @@ rows_spill_create(TessAggState *state, int level, uint32 shift)
 	return spill;
 }
 
-/* Write a partition's block: its values, then its columns. */
+/*
+ * Write a partition's chunk as its pair, numbered as the pairs before it:
+ * its values, unless it has none, then its columns.
+ */
 static void
 rows_flush(TessAggState *state, RowSpill *spill, int part)
 {
@@ -1092,10 +1099,13 @@ rows_flush(TessAggState *state, RowSpill *spill, int part)
 	if (writer->rows == 0)
 		return;
 	tess_spill_columns_set_rows(writer->chunk, writer->rows);
-	state->disk_bytes += tess_spill_write(spill->file, part, TESS_SPILL_VALUES, 0,
-										  writer->values, writer->values_used, NULL);
-	state->disk_bytes += tess_spill_write(spill->file, part, TESS_SPILL_COLUMNS, 0,
+	if (writer->values_used > 0)
+		state->disk_bytes += tess_spill_write(spill->file, part, TESS_SPILL_VALUES,
+											  writer->pairs, writer->values,
+											  writer->values_used, NULL);
+	state->disk_bytes += tess_spill_write(spill->file, part, TESS_SPILL_COLUMNS, writer->pairs,
 										  writer->chunk, writer->chunk_len, NULL);
+	writer->pairs++;
 	state->spilled++;
 	writer->written += writer->rows;
 	rows_writer_reset(state, writer);
@@ -1256,8 +1266,10 @@ reader_next(TessAggState *state)
 	while (reader->next >= reader->columns.rows)
 	{
 		CHECK_FOR_INTERRUPTS();
-		if (reader->file == NULL || !tess_columns_reader_load(&reader->columns, reader->file, 0, -1))
+		if (reader->file == NULL ||
+			!tess_columns_reader_load(&reader->columns, reader->file, reader->pairs, -1))
 			return NULL;
+		reader->pairs++;
 		reader->next = 0;
 	}
 	take = Min(reader->columns.rows - reader->next, 64);
@@ -1296,6 +1308,7 @@ rows_next_partition(TessAggState *state)
 			reader->file = tess_spill_open(spill->file, 0, part);
 			reader->columns.rows = 0;
 			reader->next = 0;
+			reader->pairs = 0;
 			/* The level below takes the next bits, the last level none. */
 			state->rows_level = spill->level + 1;
 			state->rows_shift = spill->below;
