@@ -2,8 +2,10 @@
 
 #include "executor/executor.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/clauses.h"
 #include "optimizer/optimizer.h"
 #include "port/pg_bitutils.h"
+#include "utils/datum.h"
 #include "utils/expandeddatum.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -22,6 +24,8 @@ typedef struct Computed
 	TessDatumColumn *inputs;
 	int			natts;
 	int16		typlen;
+	/* A row-wise result to copy: by reference, from a subquery. */
+	bool		copy_result;
 	/* Results by physical row; done marks the rows computed row by row. */
 	Datum	   *values;
 	bool	   *isnull;
@@ -105,7 +109,12 @@ init_computed(Computed *computed, Node *expr, const TessProjectionConfig *config
 	}
 	computed->inputs = palloc_array(TessDatumColumn, natts + 1);
 	computed->natts = natts;
-	computed->typlen = get_typlen(exprType(expr));
+	{
+		bool		typbyval;
+
+		get_typlenbyval(exprType(expr), &computed->typlen, &typbyval);
+		computed->copy_result = computed->state != NULL && !typbyval && contain_subplans(expr);
+	}
 }
 
 TessProjection *
@@ -244,7 +253,10 @@ compute_chain(TessProjection *projection, Computed *computed,
  * is evaluated in the projection's per-batch memory, so a by-reference
  * result is handed out as it is, without a copy, and lives until the
  * wrapper is released; a result that is a read-write expanded object is
- * made read-only, as the executor's projection makes its results.
+ * made read-only, as the executor's projection makes its results. A
+ * subquery's result is the exception: it points into the subquery's copy
+ * of its row, which the subquery frees when it runs again for the next
+ * row (nodeSubplan.c), so it is copied into that memory.
  */
 static void
 compute_rows(TessProjection *projection, Computed *computed,
@@ -287,7 +299,15 @@ compute_rows(TessProjection *projection, Computed *computed,
 				slot->tts_isnull[computed->atts[index]] = inputs[index].isnull[row];
 			}
 			value = ExecEvalExprSwitchContext(computed->state, econtext, &isnull);
-			if (!isnull && computed->typlen == -1)
+			if (!isnull && computed->copy_result)
+			{
+				MemoryContext oldcontext = MemoryContextSwitchTo(projection->context);
+
+				/* A copy of an expanded object is flat, so read-only too. */
+				value = datumCopy(value, false, computed->typlen);
+				MemoryContextSwitchTo(oldcontext);
+			}
+			else if (!isnull && computed->typlen == -1)
 				value = MakeExpandedObjectReadOnly(value, isnull, -1);
 			computed->values[row] = isnull ? (Datum) 0 : value;
 			computed->isnull[row] = isnull;

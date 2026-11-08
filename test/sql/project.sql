@@ -57,6 +57,15 @@ RESET plan_cache_mode;
 DEALLOCATE shifted;
 SELECT o.a, (SELECT i.a + o.b FROM project_t AS i WHERE i.a > 190 ORDER BY 1 LIMIT 1) AS least
 FROM project_t AS o WHERE o.a > 197 ORDER BY 1;
+-- A subquery's result passed by reference lives only until the subquery
+-- runs again: under a sort, which takes the whole column of a batch,
+-- each row keeps its own numeric and text.
+EXPLAIN (COSTS OFF)
+SELECT o.a, (SELECT sum(i.a::bigint) FROM project_t AS i WHERE i.a < o.a) AS total
+FROM project_t AS o WHERE o.a > 190 ORDER BY 2;
+SELECT o.a, (SELECT sum(i.a::bigint) FROM project_t AS i WHERE i.a < o.a) AS total,
+    (SELECT max(i.c) FROM project_t AS i WHERE i.a > 100 AND i.a < o.a) AS top
+FROM project_t AS o WHERE o.a > 190 ORDER BY 2;
 -- A row-wise expression through a sort above, and the row-wise residual
 -- clause with a computed target.
 SELECT project_same($$SELECT c || '!' AS shout, a FROM project_t WHERE a > 190 ORDER BY 1$$);
