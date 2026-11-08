@@ -158,6 +158,42 @@ FROM project_t AS o WHERE o.a > 197 ORDER BY 1;
  200 |   191
 (3 rows)
 
+-- A subquery's result passed by reference lives only until the subquery
+-- runs again: under a sort, which takes the whole column of a batch,
+-- each row keeps its own numeric and text.
+EXPLAIN (COSTS OFF)
+SELECT o.a, (SELECT sum(i.a::bigint) FROM project_t AS i WHERE i.a < o.a) AS total
+FROM project_t AS o WHERE o.a > 190 ORDER BY 2;
+                             QUERY PLAN                              
+---------------------------------------------------------------------
+ Custom Scan (TessSort)
+   Sort Key: ((SubPlan expr_1))
+   ->  Custom Scan (TessFilter) on project_t o
+         Batch Filter: (o.a > 190)
+         ->  Custom Scan (TessHeapScan) on project_t o
+         SubPlan expr_1
+           ->  Custom Scan (TessAgg)
+                 ->  Custom Scan (TessFilter) on project_t i
+                       Batch Filter: (i.a < o.a)
+                       ->  Custom Scan (TessHeapScan) on project_t i
+(10 rows)
+
+SELECT o.a, (SELECT sum(i.a::bigint) FROM project_t AS i WHERE i.a < o.a) AS total,
+    (SELECT max(i.c) FROM project_t AS i WHERE i.a > 100 AND i.a < o.a) AS top
+FROM project_t AS o WHERE o.a > 190 ORDER BY 2;
+  a  | total | top  
+-----+-------+------
+ 191 | 15499 | r190
+ 192 | 15690 | r191
+ 193 | 15882 | r192
+ 194 | 16075 | r193
+ 195 | 16269 | r194
+ 197 | 16464 | r195
+ 198 | 16661 | r197
+ 199 | 16859 | r198
+ 200 | 17058 | r199
+(9 rows)
+
 -- A row-wise expression through a sort above, and the row-wise residual
 -- clause with a computed target.
 SELECT project_same($$SELECT c || '!' AS shout, a FROM project_t WHERE a > 190 ORDER BY 1$$);
