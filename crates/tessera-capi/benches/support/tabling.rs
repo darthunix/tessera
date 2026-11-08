@@ -386,6 +386,9 @@ pub fn check<K: KeySource>(
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in crate::reading::cases() {
+        if !runner.takes(&case.name) {
+            continue;
+        }
         let cases = case.inputs();
         let dense = fixture::columns(&cases, Fixture::dense_column)?;
         let inputs = Input::each(&dense, &cases);

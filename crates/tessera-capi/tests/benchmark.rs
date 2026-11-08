@@ -164,6 +164,37 @@ fn a_ring_is_measured_in_whole_turns() {
 }
 
 #[test]
+fn a_process_with_only_ids_builds_only_their_cases() -> Result<()> {
+    use std::collections::BTreeSet;
+    use support::runner::takes_case;
+    fn check(program: &str, names: &[String]) {
+        for name in names {
+            assert!(takes_case(None, name), "{name} without --only");
+            let only = BTreeSet::from([format!("{program}/dense/{name}/op")]);
+            let taken: Vec<_> = names
+                .iter()
+                .filter(|other| takes_case(Some(&only), other))
+                .collect();
+            assert_eq!(taken, [name], "{program}");
+        }
+    }
+    let names = |cases: Vec<fixture::Fixture>| cases.into_iter().map(|case| case.name);
+    check(
+        "column_reader",
+        &names(reading::cases()).collect::<Vec<_>>(),
+    );
+    check(
+        "filter_int32",
+        &names(filtering::cases()).collect::<Vec<_>>(),
+    );
+    let pairs = comparing::cases().into_iter().map(|[left, _]| left.name);
+    check("compare_int32", &pairs.collect::<Vec<_>>());
+    let sets = sets::cases::<i32>()?.into_iter().map(|case| case.name);
+    check("set_int32/int4", &sets.collect::<Vec<_>>());
+    Ok(())
+}
+
+#[test]
 fn initialized_views_borrow_the_original_values_without_copying() {
     fn check<T: Copy + PartialEq + std::fmt::Debug>(values: &[T]) {
         let view = fixture::as_uninit(values);

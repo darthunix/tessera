@@ -204,6 +204,9 @@ pub fn expected(fixture: &Fixture, selected: &[u64], op: CompareOp, scalar: i32)
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in cases() {
+        if !runner.takes(&case.name) {
+            continue;
+        }
         let inputs = case.inputs();
         measure_column(
             runner,

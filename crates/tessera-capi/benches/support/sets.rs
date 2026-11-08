@@ -296,6 +296,9 @@ fn measure_width<T: Width>(runner: &mut Runner) -> Result<()> {
     let cases = cases::<T>()?;
     let keys = keys(&cases)?;
     for case in cases {
+        if !runner.takes(&case.name) {
+            continue;
+        }
         let inputs = case.inputs();
         measure_column(
             runner,
