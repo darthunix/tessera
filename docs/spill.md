@@ -33,10 +33,10 @@ value chunks and then the chunks of records that refer to them (a
 partition that went to disk whole makes one group of all it had);
 without by-reference columns, every chunk is a group. The outer side
 copies a row's values into the values of its own chunk, and writes a
-chunk with its values as a pair of blocks, as a sort writes its runs.
-The outer rows are read back one pair at a time, through the runtime's
-one reader of chunks of columns, with only that chunk's values in
-memory.
+chunk with its values as a pair of blocks, as a sort writes its runs,
+and a chunk with no values as its rows alone. The outer rows are read
+back one pair at a time, through the runtime's one reader of chunks of
+columns, with only that chunk's values in memory.
 
 **Which partitions stay.** By the rule of the weights (below): while
 the build takes more than `hash_mem`, counted as the node reports it,

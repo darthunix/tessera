@@ -543,8 +543,8 @@ side_free_pair_values(SpillSide *side, int partition)
 
 /*
  * Write the chunk of columns a partition fills, unless it holds no row,
- * as a pair: its values, then the chunk, numbered as the pairs of the
- * partition written before it; its values go.
+ * as a pair: its values, unless it has none, then the chunk, numbered as
+ * the pairs of the partition written before it; its values go.
  */
 static void
 side_write_pair(TessHashJoinState *state, SpillSide *side, int partition)
@@ -555,8 +555,9 @@ side_write_pair(TessHashJoinState *state, SpillSide *side, int partition)
 
 	if (index != 0 && side_chunk_rows(state, side, index))
 	{
-		write_block(state, side, partition, TESS_SPILL_VALUES, number, part->pair_values,
-					part->value_used);
+		if (part->value_used > 0)
+			write_block(state, side, partition, TESS_SPILL_VALUES, number, part->pair_values,
+						part->value_used);
 		write_block(state, side, partition, TESS_SPILL_COLUMNS, number, side->bases[index],
 					side->lens[index]);
 	}

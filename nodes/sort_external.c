@@ -353,7 +353,7 @@ input_read(TessSortState *state, MergeInput *input, int block)
 								  input->run->block_rows[block]))
 		ereport(ERROR,
 				errcode(ERRCODE_DATA_CORRUPTED),
-				errmsg("TessSort run lost its block of values %d", block));
+				errmsg("TessSort run lost its pair %d", block));
 	input->rows = input->columns.rows;
 	input->place = 0;
 }

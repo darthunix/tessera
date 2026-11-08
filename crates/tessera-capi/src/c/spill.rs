@@ -710,7 +710,8 @@ pub unsafe extern "C" fn tess_spill_columns_append(
 
 /// `tess_spill_columns_pair`: whether `header`, read back as block `at`
 /// of the pair a chunk of columns is written as (0 its values, 1 its
-/// rows), numbered `number`, is that block ([`spill_columns::check_pair`]).
+/// rows), numbered `number`, is that block; block 0 may be the rows of a
+/// chunk with no values, the whole pair ([`spill_columns::check_pair`]).
 ///
 /// # Safety
 ///

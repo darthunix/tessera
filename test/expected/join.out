@@ -1017,13 +1017,13 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN join_many() AS m(k) ON jf.v =
          Buckets: 1024
          Memory Usage: within hash_mem
          Batches: 4
-         Disk Usage: 254 kB
+         Disk Usage: 253 kB
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 20000
          Chunks: 44
          Resident Partitions: 0
-         Spilled Chunks: 220
+         Spilled Chunks: 200
          Tail Chunks Kept: 0
          Split Partitions: 4
          Probe Rows: 1000
@@ -2047,7 +2047,7 @@ SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON 
          Build Rows: 5000
          Chunks: 9
          Resident Partitions: 0
-         Spilled Chunks: 37
+         Spilled Chunks: 33
          Tail Chunks Kept: 0
          Probe Rows: 13439
          Matches: 118
@@ -3022,7 +3022,7 @@ SELECT join_explain($$SELECT count(*), sum(jskew.w) FROM jsp JOIN jskew() AS jsk
          Build Rows: 62000
          Chunks: 50
          Resident Partitions: 0
-         Spilled Chunks: 160
+         Spilled Chunks: 159
          Tail Chunks Kept: 0
          Extra Passes: 3
          Probe Rows: 100000
@@ -3122,13 +3122,13 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jwide() AS
          Buckets: 1024
          Memory Usage: within hash_mem
          Batches: 8
-         Disk Usage: 13289 kB
+         Disk Usage: 13276 kB
          Rows Removed by Bloom Filter: 0
          Builds: 1
          Build Rows: 200000
          Chunks: 256
          Resident Partitions: 0
-         Spilled Chunks: 3479
+         Spilled Chunks: 3195
          Tail Chunks Kept: 0
          Split Partitions: 4
          Probe Rows: 100000
@@ -3220,7 +3220,7 @@ SELECT join_explain($$SELECT count(*), sum(length(w.t)) FROM jsp JOIN jlong() AS
          Buckets: 1024
          Memory Usage: within hash_mem
          Batches: 8
-         Disk Usage: 58369 kB
+         Disk Usage: 58353 kB
          Rows Removed by Bloom Filter: 0
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)
          ->  Custom Scan (TessPack) (actual rows=200000.00 loops=1)
@@ -3505,7 +3505,7 @@ WHERE line ~ 'TessHashJoin|Join Type|Disk Usage|Build Rows|Probe Rows|Matches';
 ----------------------------------------------------------------
    ->  Custom Scan (TessHashJoin) (actual rows=6117.00 loops=1)
          Join Type: Right Anti
-         Disk Usage: 1459 kB
+         Disk Usage: 1441 kB
          Build Rows: 40000
          Probe Rows: 100000
          Matches: 154013
@@ -3523,7 +3523,7 @@ WHERE line ~ 'TessHashJoin|Join Type|Disk Usage|Extra Passes|Build Rows|Matches'
 ----------------------------------------------------------------
    ->  Custom Scan (TessHashJoin) (actual rows=2000.00 loops=1)
          Join Type: Right Anti
-         Disk Usage: 359 kB
+         Disk Usage: 351 kB
          Build Rows: 62000
          Extra Passes: 37
          Matches: 240000
@@ -5418,7 +5418,7 @@ SELECT join_explain($$SELECT count(*) FROM jgprobe p JOIN jgbuild b USING (k)$$,
          Buckets: 524288
          Memory Usage: within hash_mem
          Batches: 4
-         Disk Usage: 2362 kB
+         Disk Usage: 2361 kB
          Rows Removed by Bloom Filter: 14921
          ->  Custom Scan (TessHeapScan) on jgprobe p (actual rows=600000.00 loops=1)
          ->  Custom Scan (TessHeapScan) on jgbuild b (actual rows=420000.00 loops=1)

@@ -375,8 +375,9 @@ tess_columns_writer_rows(const TessColumnsWriter *writer)
 
 /*
  * Write the chunk out to the partition of spill as its pair of blocks
- * numbered number, the values first, and start it anew; position, unless
- * NULL, gets the place of the pair. Returns the bytes on disk.
+ * numbered number, the values first, or its rows alone when it has no
+ * values, and start it anew; position, unless NULL, gets the place of the
+ * pair. Returns the bytes on disk.
  */
 extern Size tess_columns_writer_write(TessColumnsWriter *writer, TessSpill *spill,
 									  int partition, uint32 number,
@@ -429,9 +430,9 @@ extern void tess_columns_reader_init(TessColumnsReader *reader,
 
 /*
  * The next pair of blocks of file, numbered number, read and checked, rows
- * rows unless -1; false at the end of the partition. A pair of other
- * blocks, a pair cut short or a chunk that fails its check is an ERROR,
- * SQLSTATE XX001.
+ * rows unless -1, or the rows alone of a chunk of no values; false at the
+ * end of the partition. A pair of other blocks, a pair cut short or a
+ * chunk that fails its check is an ERROR, SQLSTATE XX001.
  */
 extern bool tess_columns_reader_load(TessColumnsReader *reader, TessSpillReader *file,
 									 uint32 number, int64 rows);
