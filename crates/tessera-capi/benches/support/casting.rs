@@ -138,6 +138,9 @@ pub fn check<C: ColumnReader<Value = i32>>(
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for case in reading::cases() {
+        if !runner.takes(&case.name) {
+            continue;
+        }
         let inputs = case.inputs();
         measure_column(
             runner,

@@ -116,6 +116,15 @@ impl Runner {
         }
     }
 
+    /// Whether this run takes any operation of the case `name`, whose
+    /// operation ids all hold `/{name}/` ([`takes_case`]). A bench skips the
+    /// inputs of a case not taken, so a process that measures one case does
+    /// not build and check the others; an id whose case it skipped is never
+    /// seen, and [`main`] refuses it.
+    pub fn takes(&self, name: &str) -> bool {
+        takes_case(self.only.as_ref(), name)
+    }
+
     fn run(
         &mut self,
         id: &str,
@@ -183,6 +192,13 @@ impl Runner {
             }
         }
     }
+}
+
+/// Whether the `--only` ids name an operation of the case `name`: every
+/// case without them, as in a check or a plain list.
+pub fn takes_case(only: Option<&BTreeSet<String>>, name: &str) -> bool {
+    let segment = format!("/{name}/");
+    only.is_none_or(|only| only.iter().any(|id| id.contains(&segment)))
 }
 
 /// `calls` rounded up to whole turns of a ring of `period` inputs, so that

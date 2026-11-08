@@ -267,6 +267,9 @@ impl Masks {
 
 pub fn bench(runner: &mut Runner) -> Result<()> {
     for pair in cases() {
+        if !runner.takes(&pair[0].name) {
+            continue;
+        }
         let pairs = inputs(pair);
         let sides = |side: usize| pairs.iter().map(move |pair| &pair[side]);
         measure(

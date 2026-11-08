@@ -250,7 +250,10 @@ anew over one set of values missed, at 64, about as the ring of 64
 inputs, so the values play no part; at 4096 every operation missed 11.5
 to 14.1 times a call on both machines, past 80% of the model, the rule
 of the pilot. The cycles followed the misses: a miss cost about 26
-cycles on the Intel Core and 22 on the M5 Pro.
+cycles on the Intel Core and 22 on the M5 Pro. Every process builds and
+checks the 4096 selections of each case it takes before it measures, so
+a process run with `--only` takes only the cases its ids name
+([`Runner::takes`](support/runner.rs)).
 
 A ring takes more memory than one input. The inputs that a dense int4 read
 touches in a turn take about 280 KiB, inside the Intel Core's L2 of 512 KiB;
