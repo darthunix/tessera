@@ -1,0 +1,105 @@
+DIAGNOSTIC: selected cases only; baseline=WORKTREE@f056687af5e2ff4d6343066f33c817c9bd8a5bb3, candidate=WORKTREE@f056687af5e2ff4d6343066f33c817c9bd8a5bb3
+
+hash_int32
+Per call over 10 blocks per process. FAIL: instructions +1%, or minimum cycles +10% on operations of at least 500 cycles. WARNING: minimum cycles +3% (or +4 cycles below 200). Cycle verdicts need the median to grow past the warning threshold too. MODES: process medians or blocks differ by more than 1.10x and 10 cycles. UNSTABLE: zero readings or instructions disagreeing beyond 0.1%.
+PASS hash_int32/datum/words/1024/density-12/nulls-none/ready/hash: instructions before=4601.0 after=4601.0 change=+0.00%; cycles min before=746.0 after=748.4 change=+0.32% (median 753.1/754.4, modes 1.01/1.01, 3 processes); branch misses before=4.782 after=4.870 of 326.4 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4919.0 after=4919.0; library/reference=0.935x, cycles 0.838x (informational)
+  PER ROW (1024 rows): instructions before=4.49 after=4.49; cycles min before=0.73 after=0.73; IPC before=6.17 after=6.15
+PASS hash_int32/datum/words/1024/density-12/nulls-none/ready/hash_group: instructions before=5260.4 after=5260.4 change=+0.00%; cycles min before=959.5 after=958.6 change=-0.09% (median 966.4/963.1, modes 1.01/1.01, 3 processes); branch misses before=4.926 after=5.213 of 326.4 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4919.0 after=4919.0; library/reference=1.069x, cycles 1.073x (informational)
+  PER ROW (1024 rows): instructions before=5.14 after=5.14; cycles min before=0.94 after=0.94; IPC before=5.48 after=5.49
+PASS hash_int32/datum/words/1024/density-12/nulls-none/ready/two_keys: instructions before=11170.8 after=11170.8 change=+0.00%; cycles min before=1774.6 after=1776.6 change=+0.11% (median 1786.6/1784.4, modes 1.01/1.01, 3 processes); branch misses before=10.252 after=9.934 of 800.2 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4919.0 after=4919.0; library/reference=2.271x, cycles 1.989x (informational)
+  PER ROW (1024 rows): instructions before=10.91 after=10.91; cycles min before=1.73 after=1.73; IPC before=6.29 after=6.29
+PASS hash_int32/datum/words/1024/density-16/nulls-none/ready/hash: instructions before=4724.0 after=4724.0 change=-0.00%; cycles min before=692.3 after=692.3 change=+0.01% (median 693.0/692.8, modes 1.00/1.12, 3 processes); branch misses before=0.000 after=0.000 of 311.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=6455.0 after=6455.0; library/reference=0.732x, cycles 0.607x (informational)
+  PER ROW (1024 rows): instructions before=4.61 after=4.61; cycles min before=0.68 after=0.68; IPC before=6.82 after=6.82
+  MODES before=1.00x after=1.12x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS hash_int32/datum/words/1024/density-16/nulls-none/ready/hash_group: instructions before=5764.0 after=5764.0 change=-0.00%; cycles min before=1022.3 after=1021.8 change=-0.05% (median 1025.3/1029.1, modes 1.01/1.01, 3 processes); branch misses before=0.001 after=0.001 of 311.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=6455.0 after=6455.0; library/reference=0.893x, cycles 0.896x (informational)
+  PER ROW (1024 rows): instructions before=5.63 after=5.63; cycles min before=1.00 after=1.00; IPC before=5.64 after=5.64
+PASS hash_int32/datum/words/1024/density-16/nulls-none/ready/two_keys: instructions before=12055.0 after=12055.0 change=+0.00%; cycles min before=1719.6 after=1719.2 change=-0.02% (median 1720.8/1721.3, modes 1.00/1.11, 3 processes); branch misses before=1.001 after=1.002 of 869.0 branches; cores 6,12,13,14,15,16,17
+  REFERENCE instructions before=6455.0 after=6455.0; library/reference=1.868x, cycles 1.507x (informational)
+  PER ROW (1024 rows): instructions before=11.77 after=11.77; cycles min before=1.68 after=1.68; IPC before=7.01 after=7.01
+  MODES before=1.00x after=1.11x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS hash_int32/datum/words/1024/density-24/nulls-none/ready/hash: instructions before=4724.0 after=4724.0 change=-0.00%; cycles min before=692.0 after=692.0 change=+0.00% (median 693.0/692.9, modes 1.03/1.00, 3 processes); branch misses before=0.000 after=0.000 of 311.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=9527.0 after=9527.0; library/reference=0.496x, cycles 0.434x (informational)
+  PER ROW (1024 rows): instructions before=4.61 after=4.61; cycles min before=0.68 after=0.68; IPC before=6.83 after=6.83
+PASS hash_int32/datum/words/1024/density-24/nulls-none/ready/hash_group: instructions before=5764.0 after=5764.0 change=+0.00%; cycles min before=1023.4 after=1021.2 change=-0.21% (median 1025.4/1025.1, modes 1.02/1.01, 3 processes); branch misses before=0.003 after=0.001 of 311.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=9527.0 after=9527.0; library/reference=0.605x, cycles 0.640x (informational)
+  PER ROW (1024 rows): instructions before=5.63 after=5.63; cycles min before=1.00 after=1.00; IPC before=5.63 after=5.64
+PASS hash_int32/datum/words/1024/density-24/nulls-none/ready/two_keys: instructions before=12055.0 after=12055.0 change=-0.00%; cycles min before=1719.5 after=1717.7 change=-0.11% (median 1721.7/1721.2, modes 1.02/1.48, 3 processes); branch misses before=1.001 after=1.001 of 869.0 branches; cores 0,12,13,14,15,16,17
+  REFERENCE instructions before=9527.0 after=9527.0; library/reference=1.265x, cycles 1.077x (informational)
+  PER ROW (1024 rows): instructions before=11.77 after=11.77; cycles min before=1.68 after=1.68; IPC before=7.01 after=7.02
+  MODES before=1.02x after=1.48x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS hash_int32/datum/words/1024/density-32/nulls-none/ready/hash: instructions before=4724.0 after=4724.0 change=+0.00%; cycles min before=692.1 after=692.4 change=+0.05% (median 693.0/693.2, modes 1.01/1.00, 3 processes); branch misses before=0.000 after=0.001 of 311.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=12599.0 after=12599.0; library/reference=0.375x, cycles 0.337x (informational)
+  PER ROW (1024 rows): instructions before=4.61 after=4.61; cycles min before=0.68 after=0.68; IPC before=6.83 after=6.82
+PASS hash_int32/datum/words/1024/density-32/nulls-none/ready/hash_group: instructions before=5764.0 after=5764.0 change=+0.00%; cycles min before=1022.4 after=1022.9 change=+0.05% (median 1024.9/1029.1, modes 1.01/1.01, 3 processes); branch misses before=0.167 after=1.000 of 311.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=12599.0 after=12599.0; library/reference=0.457x, cycles 0.498x (informational)
+  PER ROW (1024 rows): instructions before=5.63 after=5.63; cycles min before=1.00 after=1.00; IPC before=5.64 after=5.63
+PASS hash_int32/datum/words/1024/density-32/nulls-none/ready/two_keys: instructions before=12055.0 after=12055.0 change=+0.00%; cycles min before=1718.4 after=1717.2 change=-0.07% (median 1721.4/1721.4, modes 1.01/1.06, 3 processes); branch misses before=1.002 after=1.001 of 869.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=12599.0 after=12599.0; library/reference=0.957x, cycles 0.836x (informational)
+  PER ROW (1024 rows): instructions before=11.77 after=11.77; cycles min before=1.68 after=1.68; IPC before=7.02 after=7.02
+PASS hash_int32/datum/words/1024/density-8/nulls-none/ready/hash: instructions before=3108.0 after=3108.0 change=-0.00%; cycles min before=618.1 after=618.0 change=-0.01% (median 633.5/633.3, modes 1.05/1.04, 3 processes); branch misses before=12.749 after=12.622 of 289.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3383.0 after=3383.0; library/reference=0.919x, cycles 0.951x (informational)
+  PER ROW (1024 rows): instructions before=3.04 after=3.04; cycles min before=0.60 after=0.60; IPC before=5.03 after=5.03
+PASS hash_int32/datum/words/1024/density-8/nulls-none/ready/hash_group: instructions before=3108.0 after=3108.0 change=+0.00%; cycles min before=619.3 after=626.5 change=+1.16% (median 633.1/634.3, modes 1.03/1.03, 3 processes); branch misses before=12.672 after=12.743 of 289.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3383.0 after=3383.0; library/reference=0.919x, cycles 0.964x (informational)
+  PER ROW (1024 rows): instructions before=3.04 after=3.04; cycles min before=0.60 after=0.61; IPC before=5.02 after=4.96
+PASS hash_int32/datum/words/1024/density-8/nulls-none/ready/two_keys: instructions before=6759.0 after=6759.0 change=-0.00%; cycles min before=1356.7 after=1360.5 change=+0.28% (median 1382.1/1378.3, modes 1.05/1.03, 3 processes); branch misses before=25.661 after=25.072 of 553.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3383.0 after=3383.0; library/reference=1.998x, cycles 2.092x (informational)
+  PER ROW (1024 rows): instructions before=6.60 after=6.60; cycles min before=1.32 after=1.33; IPC before=4.98 after=4.97
+PASS hash_int32/dense/words/1024/density-12/nulls-none/ready/hash: instructions before=3857.5 after=3857.5 change=+0.00%; cycles min before=656.4 after=657.7 change=+0.20% (median 661.6/662.3, modes 1.02/1.02, 3 processes); branch misses before=5.326 after=5.333 of 331.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4588.0 after=4588.0; library/reference=0.841x, cycles 0.729x (informational)
+  PER ROW (1024 rows): instructions before=3.77 after=3.77; cycles min before=0.64 after=0.64; IPC before=5.88 after=5.87
+PASS hash_int32/dense/words/1024/density-12/nulls-none/ready/hash_group: instructions before=4527.0 after=4527.0 change=+0.00%; cycles min before=779.8 after=780.2 change=+0.05% (median 784.3/786.1, modes 1.01/1.01, 3 processes); branch misses before=5.398 after=5.421 of 320.8 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4588.0 after=4588.0; library/reference=0.987x, cycles 0.865x (informational)
+  PER ROW (1024 rows): instructions before=4.42 after=4.42; cycles min before=0.76 after=0.76; IPC before=5.81 after=5.80
+PASS hash_int32/dense/words/1024/density-12/nulls-none/ready/two_keys: instructions before=9589.4 after=9589.4 change=-0.00%; cycles min before=1575.1 after=1569.4 change=-0.36% (median 1580.4/1583.9, modes 1.01/1.01, 3 processes); branch misses before=10.811 after=10.794 of 809.4 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4588.0 after=4588.0; library/reference=2.090x, cycles 1.739x (informational)
+  PER ROW (1024 rows): instructions before=9.36 after=9.36; cycles min before=1.54 after=1.53; IPC before=6.09 after=6.11
+PASS hash_int32/dense/words/1024/density-16/nulls-none/ready/hash: instructions before=3639.0 after=3639.0 change=+0.00%; cycles min before=523.1 after=526.3 change=+0.60% (median 526.1/527.8, modes 1.01/1.02, 3 processes); branch misses before=1.000 after=1.000 of 309.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=5996.0 after=5996.0; library/reference=0.607x, cycles 0.466x (informational)
+  PER ROW (1024 rows): instructions before=3.55 after=3.55; cycles min before=0.51 after=0.51; IPC before=6.96 after=6.91
+PASS hash_int32/dense/words/1024/density-16/nulls-none/ready/hash_group: instructions before=4695.0 after=4695.0 change=+0.00%; cycles min before=716.1 after=718.5 change=+0.33% (median 718.5/720.6, modes 1.01/1.01, 3 processes); branch misses before=1.001 after=1.001 of 293.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=5996.0 after=5996.0; library/reference=0.783x, cycles 0.636x (informational)
+  PER ROW (1024 rows): instructions before=4.58 after=4.58; cycles min before=0.70 after=0.70; IPC before=6.56 after=6.53
+PASS hash_int32/dense/words/1024/density-16/nulls-none/ready/two_keys: instructions before=9738.0 after=9738.0 change=+0.00%; cycles min before=1364.9 after=1368.7 change=+0.28% (median 1372.7/1372.5, modes 1.01/1.01, 3 processes); branch misses before=2.001 after=2.001 of 865.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=5996.0 after=5996.0; library/reference=1.624x, cycles 1.211x (informational)
+  PER ROW (1024 rows): instructions before=9.51 after=9.51; cycles min before=1.33 after=1.34; IPC before=7.13 after=7.11
+PASS hash_int32/dense/words/1024/density-24/nulls-none/ready/hash: instructions before=3639.0 after=3639.0 change=+0.00%; cycles min before=523.3 after=523.6 change=+0.06% (median 526.8/526.2, modes 1.02/1.01, 3 processes); branch misses before=1.000 after=1.000 of 309.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=8812.0 after=8812.0; library/reference=0.413x, cycles 0.329x (informational)
+  PER ROW (1024 rows): instructions before=3.55 after=3.55; cycles min before=0.51 after=0.51; IPC before=6.95 after=6.95
+PASS hash_int32/dense/words/1024/density-24/nulls-none/ready/hash_group: instructions before=4695.0 after=4695.0 change=+0.00%; cycles min before=717.6 after=716.5 change=-0.15% (median 719.8/719.7, modes 1.01/1.01, 3 processes); branch misses before=1.000 after=1.001 of 293.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=8812.0 after=8812.0; library/reference=0.533x, cycles 0.450x (informational)
+  PER ROW (1024 rows): instructions before=4.58 after=4.58; cycles min before=0.70 after=0.70; IPC before=6.54 after=6.55
+PASS hash_int32/dense/words/1024/density-24/nulls-none/ready/two_keys: instructions before=9738.0 after=9738.0 change=-0.00%; cycles min before=1363.9 after=1365.4 change=+0.11% (median 1372.2/1371.8, modes 1.01/1.01, 3 processes); branch misses before=2.000 after=2.001 of 865.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=8812.0 after=8812.0; library/reference=1.105x, cycles 0.857x (informational)
+  PER ROW (1024 rows): instructions before=9.51 after=9.51; cycles min before=1.33 after=1.33; IPC before=7.14 after=7.13
+PASS hash_int32/dense/words/1024/density-32/nulls-none/ready/hash: instructions before=3639.0 after=3639.0 change=+0.00%; cycles min before=523.4 after=523.4 change=+0.00% (median 527.1/525.8, modes 1.01/1.01, 3 processes); branch misses before=1.000 after=1.000 of 309.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=11628.0 after=11628.0; library/reference=0.313x, cycles 0.254x (informational)
+  PER ROW (1024 rows): instructions before=3.55 after=3.55; cycles min before=0.51 after=0.51; IPC before=6.95 after=6.95
+PASS hash_int32/dense/words/1024/density-32/nulls-none/ready/hash_group: instructions before=4695.0 after=4695.0 change=+0.00%; cycles min before=716.8 after=717.2 change=+0.07% (median 718.9/719.8, modes 1.01/1.01, 3 processes); branch misses before=1.000 after=1.000 of 293.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=11628.0 after=11628.0; library/reference=0.404x, cycles 0.348x (informational)
+  PER ROW (1024 rows): instructions before=4.58 after=4.58; cycles min before=0.70 after=0.70; IPC before=6.55 after=6.55
+PASS hash_int32/dense/words/1024/density-32/nulls-none/ready/two_keys: instructions before=9738.0 after=9738.0 change=-0.00%; cycles min before=1367.4 after=1366.0 change=-0.10% (median 1375.6/1372.6, modes 1.01/1.01, 3 processes); branch misses before=2.003 after=2.000 of 865.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=11628.0 after=11628.0; library/reference=0.837x, cycles 0.663x (informational)
+  PER ROW (1024 rows): instructions before=9.51 after=9.51; cycles min before=1.34 after=1.33; IPC before=7.12 after=7.13
+PASS hash_int32/dense/words/1024/density-8/nulls-none/ready/hash: instructions before=3020.0 after=3020.0 change=+0.00%; cycles min before=645.5 after=648.7 change=+0.49% (median 660.7/658.3, modes 1.03/1.03, 3 processes); branch misses before=12.776 after=12.755 of 305.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3180.0 after=3180.0; library/reference=0.950x, cycles 0.989x (informational)
+  PER ROW (1024 rows): instructions before=2.95 after=2.95; cycles min before=0.63 after=0.63; IPC before=4.68 after=4.66
+PASS hash_int32/dense/words/1024/density-8/nulls-none/ready/hash_group: instructions before=3020.0 after=3020.0 change=+0.00%; cycles min before=651.1 after=649.5 change=-0.24% (median 662.3/658.8, modes 1.02/1.03, 3 processes); branch misses before=12.922 after=12.953 of 305.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3180.0 after=3180.0; library/reference=0.950x, cycles 0.991x (informational)
+  PER ROW (1024 rows): instructions before=2.95 after=2.95; cycles min before=0.64 after=0.63; IPC before=4.64 after=4.65
+PASS hash_int32/dense/words/1024/density-8/nulls-none/ready/two_keys: instructions before=6580.0 after=6580.0 change=+0.00%; cycles min before=1404.0 after=1393.7 change=-0.73% (median 1420.4/1413.8, modes 1.02/1.02, 3 processes); branch misses before=26.172 after=26.303 of 585.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3180.0 after=3180.0; library/reference=2.069x, cycles 2.126x (informational)
+  PER ROW (1024 rows): instructions before=6.43 after=6.43; cycles min before=1.37 after=1.36; IPC before=4.69 after=4.72
+PASS: 30 PASS, 0 FAIL (0 instructions, 0 cycles), 0 UNSTABLE library paths; 0 cycle warnings; 3 bistable
+
+timings.json:
+{
+  "measurement_seconds": 49.175235833,
+  "preparation_seconds": 23.404638917,
+  "total_seconds": 72.613631167
+}
