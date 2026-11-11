@@ -1,0 +1,132 @@
+DIAGNOSTIC: selected cases only; baseline=WORKTREE@57275b54a57bb494d31752c3386797397ac383cd, candidate=WORKTREE@57275b54a57bb494d31752c3386797397ac383cd
+
+aggregate_int32
+Per call over 10 blocks per process. FAIL: instructions +1%, or minimum cycles +10% on operations of at least 500 cycles. WARNING: minimum cycles +3% (or +4 cycles below 200). Cycle verdicts need the median to grow past the warning threshold too. MODES: process medians or blocks differ by more than 1.10x and 10 cycles. UNSTABLE: zero readings or instructions disagreeing beyond 0.1%.
+PASS aggregate_int32/datum/words/1024/density-12/nulls-none/ready/count: instructions before=1928.7 after=1928.7 change=+0.00%; cycles min before=349.2 after=365.9 change=+4.79% (median 431.4/439.5, modes 1.34/1.26, 3 processes); branch misses before=4.977 after=5.025 of 246.7 branches; cores 0,1,3,4,5,6,7,8,9,10,12,14,15,16,17
+  REFERENCE instructions before=3272.0 after=3272.0; library/reference=0.589x, cycles 0.525x (informational)
+  PER ROW (1024 rows): instructions before=1.88 after=1.88; cycles min before=0.34 after=0.36; IPC before=5.52 after=5.27
+  MODES before=1.34x after=1.26x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-12/nulls-none/ready/min: instructions before=4112.0 after=4112.0 change=+0.00%; cycles min before=708.6 after=710.6 change=+0.29% (median 916.9/887.0, modes 1.49/1.52, 3 processes); branch misses before=5.096 after=5.100 of 238.8 branches; cores 0,1,2,3,4,5,6,7,9,11,12,13,14,15,16,17
+  REFERENCE instructions before=3272.0 after=3272.0; library/reference=1.257x, cycles 1.020x (informational)
+  PER ROW (1024 rows): instructions before=4.02 after=4.02; cycles min before=0.69 after=0.69; IPC before=5.80 after=5.79
+  MODES before=1.49x after=1.52x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-12/nulls-none/ready/sum: instructions before=3652.1 after=3652.1 change=+0.00%; cycles min before=592.5 after=592.9 change=+0.07% (median 801.6/805.4, modes 1.51/1.52, 3 processes); branch misses before=5.161 after=5.229 of 248.0 branches; cores 0,1,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17
+  REFERENCE instructions before=3272.0 after=3272.0; library/reference=1.116x, cycles 0.851x (informational)
+  PER ROW (1024 rows): instructions before=3.57 after=3.57; cycles min before=0.58 after=0.58; IPC before=6.16 after=6.16
+  MODES before=1.51x after=1.52x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-16/nulls-none/ready/count: instructions before=1798.0 after=1798.0 change=+0.00%; cycles min before=189.7 after=190.1 change=+0.20% (median 230.8/241.3, modes 1.45/1.50, 3 processes); branch misses before=0.001 after=0.001 of 224.0 branches; cores 0,2,3,6,8,9,10,11,12,14,15,16,17
+  REFERENCE instructions before=4232.0 after=4232.0; library/reference=0.425x, cycles 0.223x (informational)
+  PER ROW (1024 rows): instructions before=1.76 after=1.76; cycles min before=0.19 after=0.19; IPC before=9.48 after=9.46
+  MODES before=1.45x after=1.50x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-16/nulls-none/ready/min: instructions before=4449.0 after=4449.0 change=-0.00%; cycles min before=698.8 after=699.5 change=+0.11% (median 951.2/850.2, modes 1.60/1.55, 3 processes); branch misses before=0.003 after=0.002 of 211.0 branches; cores 0,1,2,3,4,5,6,7,8,12,13,15,16,17
+  REFERENCE instructions before=4232.0 after=4232.0; library/reference=1.051x, cycles 0.820x (informational)
+  PER ROW (1024 rows): instructions before=4.34 after=4.34; cycles min before=0.68 after=0.68; IPC before=6.37 after=6.36
+  MODES before=1.60x after=1.55x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-16/nulls-none/ready/sum: instructions before=3726.0 after=3726.0 change=+0.00%; cycles min before=509.6 after=510.1 change=+0.11% (median 640.6/734.9, modes 1.59/1.57, 3 processes); branch misses before=0.002 after=0.003 of 226.0 branches; cores 0,1,2,4,5,6,7,9,10,12,13,15,16,17
+  REFERENCE instructions before=4232.0 after=4232.0; library/reference=0.880x, cycles 0.598x (informational)
+  PER ROW (1024 rows): instructions before=3.64 after=3.64; cycles min before=0.50 after=0.50; IPC before=7.31 after=7.30
+  MODES before=1.59x after=1.57x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-24/nulls-none/ready/count: instructions before=1798.0 after=1798.0 change=+0.00%; cycles min before=190.0 after=190.0 change=+0.02% (median 233.2/245.7, modes 1.50/1.50, 3 processes); branch misses before=0.001 after=0.001 of 224.0 branches; cores 0,2,4,6,8,9,10,12,13,14,15,16,17
+  REFERENCE instructions before=6152.0 after=6152.0; library/reference=0.292x, cycles 0.164x (informational)
+  PER ROW (1024 rows): instructions before=1.76 after=1.76; cycles min before=0.19 after=0.19; IPC before=9.46 after=9.46
+  MODES before=1.50x after=1.50x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-24/nulls-none/ready/min: instructions before=4449.0 after=4449.0 change=+0.00%; cycles min before=710.6 after=696.5 change=-1.99% (median 951.5/858.2, modes 1.48/1.61, 3 processes); branch misses before=0.001 after=0.002 of 211.0 branches; cores 1,5,7,9,10,11,12,13,14,16,17
+  REFERENCE instructions before=6152.0 after=6152.0; library/reference=0.723x, cycles 0.601x (informational)
+  PER ROW (1024 rows): instructions before=4.34 after=4.34; cycles min before=0.69 after=0.68; IPC before=6.26 after=6.39
+  MODES before=1.48x after=1.61x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-24/nulls-none/ready/sum: instructions before=3726.0 after=3726.0 change=+0.00%; cycles min before=509.7 after=509.9 change=+0.03% (median 661.7/619.5, modes 1.60/1.58, 3 processes); branch misses before=0.002 after=0.002 of 226.0 branches; cores 0,1,2,3,6,8,10,11,12,13,14,16,17
+  REFERENCE instructions before=6152.0 after=6152.0; library/reference=0.606x, cycles 0.440x (informational)
+  PER ROW (1024 rows): instructions before=3.64 after=3.64; cycles min before=0.50 after=0.50; IPC before=7.31 after=7.31
+  MODES before=1.60x after=1.58x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-32/nulls-none/ready/count: instructions before=1798.0 after=1798.0 change=+0.00%; cycles min before=190.0 after=190.1 change=+0.05% (median 222.3/226.5, modes 1.50/1.45, 3 processes); branch misses before=0.001 after=0.001 of 224.0 branches; cores 0,1,2,3,4,7,8,9,10,11,12,14,15,16,17
+  REFERENCE instructions before=8072.0 after=8072.0; library/reference=0.223x, cycles 0.128x (informational)
+  PER ROW (1024 rows): instructions before=1.76 after=1.76; cycles min before=0.19 after=0.19; IPC before=9.46 after=9.46
+  MODES before=1.50x after=1.45x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-32/nulls-none/ready/min: instructions before=4449.0 after=4449.0 change=+0.00%; cycles min before=697.8 after=697.9 change=+0.01% (median 889.5/825.3, modes 1.56/1.58, 3 processes); branch misses before=0.002 after=0.002 of 211.0 branches; cores 0,1,2,4,6,7,12,13,14,15,16,17
+  REFERENCE instructions before=8072.0 after=8072.0; library/reference=0.551x, cycles 0.470x (informational)
+  PER ROW (1024 rows): instructions before=4.34 after=4.34; cycles min before=0.68 after=0.68; IPC before=6.38 after=6.38
+  MODES before=1.56x after=1.58x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-32/nulls-none/ready/sum: instructions before=3726.0 after=3726.0 change=-0.00%; cycles min before=508.9 after=509.1 change=+0.03% (median 612.1/581.3, modes 1.59/1.53, 3 processes); branch misses before=0.002 after=0.002 of 226.0 branches; cores 2,3,4,5,6,7,8,12,13,14,15,16,17
+  REFERENCE instructions before=8072.0 after=8072.0; library/reference=0.462x, cycles 0.343x (informational)
+  PER ROW (1024 rows): instructions before=3.64 after=3.64; cycles min before=0.50 after=0.50; IPC before=7.32 after=7.32
+  MODES before=1.59x after=1.53x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-8/nulls-none/ready/count: instructions before=1579.0 after=1579.0 change=+0.00%; cycles min before=478.6 after=469.0 change=-2.00% (median 538.1/558.1, modes 1.23/1.25, 3 processes); branch misses before=13.029 after=13.233 of 222.0 branches; cores 1,4,7,8,9,10,12,13,15,17
+  REFERENCE instructions before=2312.0 after=2312.0; library/reference=0.683x, cycles 0.916x (informational)
+  PER ROW (1024 rows): instructions before=1.54 after=1.54; cycles min before=0.47 after=0.46; IPC before=3.30 after=3.37
+  MODES before=1.23x after=1.25x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-8/nulls-none/ready/min: instructions before=2504.0 after=2504.0 change=-0.00%; cycles min before=564.5 after=553.3 change=-1.99% (median 653.9/674.7, modes 1.33/1.41, 3 processes); branch misses before=13.489 after=13.499 of 223.0 branches; cores 0,1,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17
+  REFERENCE instructions before=2312.0 after=2312.0; library/reference=1.083x, cycles 1.080x (informational)
+  PER ROW (1024 rows): instructions before=2.45 after=2.45; cycles min before=0.55 after=0.54; IPC before=4.44 after=4.53
+  MODES before=1.33x after=1.41x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/datum/words/1024/density-8/nulls-none/ready/sum: instructions before=2500.0 after=2500.0 change=-0.00%; cycles min before=563.6 after=557.9 change=-1.01% (median 653.7/667.7, modes 1.33/1.33, 3 processes); branch misses before=13.486 after=13.521 of 222.0 branches; cores 0,1,2,4,6,7,9,10,12,13,14,15,16,17
+  REFERENCE instructions before=2312.0 after=2312.0; library/reference=1.081x, cycles 1.089x (informational)
+  PER ROW (1024 rows): instructions before=2.44 after=2.44; cycles min before=0.55 after=0.54; IPC before=4.44 after=4.48
+  MODES before=1.33x after=1.33x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-12/nulls-none/ready/count: instructions before=851.4 after=851.4 change=-0.00%; cycles min before=272.6 after=273.1 change=+0.19% (median 305.6/307.5, modes 1.16/1.16, 3 processes); branch misses before=4.735 after=4.937 of 206.5 branches; cores 0,1,2,3,4,5,6,7,9,10,11,12,13,14,15
+  REFERENCE instructions before=2281.0 after=2281.0; library/reference=0.373x, cycles 0.406x (informational)
+  PER ROW (1024 rows): instructions before=0.83 after=0.83; cycles min before=0.27 after=0.27; IPC before=3.12 after=3.12
+  MODES before=1.16x after=1.16x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-12/nulls-none/ready/min: instructions before=2992.6 after=2992.6 change=-0.00%; cycles min before=526.1 after=533.4 change=+1.38% (median 644.5/658.8, modes 1.47/1.43, 3 processes); branch misses before=5.028 after=5.075 of 239.2 branches; cores 0,1,2,4,6,7,9,10,12,13,14,15,16,17
+  REFERENCE instructions before=2281.0 after=2281.0; library/reference=1.312x, cycles 0.793x (informational)
+  PER ROW (1024 rows): instructions before=2.92 after=2.92; cycles min before=0.51 after=0.52; IPC before=5.69 after=5.61
+  MODES before=1.47x after=1.43x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-12/nulls-none/ready/sum: instructions before=2491.8 after=2491.8 change=+0.00%; cycles min before=420.0 after=422.6 change=+0.64% (median 532.0/545.0, modes 1.40/1.40, 3 processes); branch misses before=4.956 after=5.082 of 248.3 branches; cores 0,1,2,5,6,7,8,9,11,13,14,15,16,17
+  REFERENCE instructions before=2281.0 after=2281.0; library/reference=1.092x, cycles 0.628x (informational)
+  PER ROW (1024 rows): instructions before=2.43 after=2.43; cycles min before=0.41 after=0.41; IPC before=5.93 after=5.90
+  MODES before=1.40x after=1.40x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-16/nulls-none/ready/count: instructions before=668.0 after=668.0 change=-0.00%; cycles min before=71.8 after=72.0 change=+0.33% (median 100.4/103.5, modes 1.49/1.49, 3 processes); branch misses before=0.000 after=0.000 of 160.0 branches; cores 0,1,3,5,6,8,9,10,11,13,15,16,17
+  REFERENCE instructions before=2921.0 after=2921.0; library/reference=0.229x, cycles 0.088x (informational)
+  PER ROW (1024 rows): instructions before=0.65 after=0.65; cycles min before=0.07 after=0.07; IPC before=9.31 after=9.28
+  MODES before=1.49x after=1.49x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-16/nulls-none/ready/min: instructions before=3363.0 after=3363.0 change=-0.00%; cycles min before=467.2 after=466.2 change=-0.21% (median 620.2/653.4, modes 1.57/1.58, 3 processes); branch misses before=0.001 after=0.002 of 211.0 branches; cores 1,2,4,6,7,8,9,11,12,13,14,15,16,17
+  REFERENCE instructions before=2921.0 after=2921.0; library/reference=1.151x, cycles 0.571x (informational)
+  PER ROW (1024 rows): instructions before=3.28 after=3.28; cycles min before=0.46 after=0.46; IPC before=7.20 after=7.21
+  MODES before=1.57x after=1.58x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-16/nulls-none/ready/sum: instructions before=2688.0 after=2688.0 change=-0.00%; cycles min before=295.6 after=294.2 change=-0.45% (median 448.3/417.6, modes 1.70/1.70, 3 processes); branch misses before=0.001 after=0.001 of 226.0 branches; cores 0,1,2,3,6,7,8,9,10,11,13,14,15,16,17
+  REFERENCE instructions before=2921.0 after=2921.0; library/reference=0.920x, cycles 0.360x (informational)
+  PER ROW (1024 rows): instructions before=2.63 after=2.63; cycles min before=0.29 after=0.29; IPC before=9.09 after=9.14
+  MODES before=1.70x after=1.70x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-24/nulls-none/ready/count: instructions before=668.0 after=668.0 change=+0.00%; cycles min before=72.6 after=78.6 change=+8.27% (median 102.1/103.6, modes 1.48/1.35, 3 processes); branch misses before=0.000 after=0.000 of 160.0 branches; cores 1,2,3,4,5,6,7,9,12,14,15,16,17
+  REFERENCE instructions before=4201.0 after=4201.0; library/reference=0.159x, cycles 0.072x (informational)
+  PER ROW (1024 rows): instructions before=0.65 after=0.65; cycles min before=0.07 after=0.08; IPC before=9.20 after=8.49
+  MODES before=1.48x after=1.35x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-24/nulls-none/ready/min: instructions before=3363.0 after=3363.0 change=+0.00%; cycles min before=466.1 after=465.5 change=-0.12% (median 541.2/524.1, modes 1.58/1.58, 3 processes); branch misses before=0.001 after=0.001 of 211.0 branches; cores 0,1,2,3,4,5,6,7,9,10,11,12,13,14,15,16
+  REFERENCE instructions before=4201.0 after=4201.0; library/reference=0.801x, cycles 0.425x (informational)
+  PER ROW (1024 rows): instructions before=3.28 after=3.28; cycles min before=0.46 after=0.45; IPC before=7.22 after=7.22
+  MODES before=1.58x after=1.58x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-24/nulls-none/ready/sum: instructions before=2688.0 after=2688.0 change=-0.00%; cycles min before=294.7 after=294.0 change=-0.24% (median 347.1/365.1, modes 1.69/1.69, 3 processes); branch misses before=0.001 after=0.001 of 226.0 branches; cores 0,2,3,6,7,9,10,12,13,14,15,16,17
+  REFERENCE instructions before=4201.0 after=4201.0; library/reference=0.640x, cycles 0.269x (informational)
+  PER ROW (1024 rows): instructions before=2.63 after=2.63; cycles min before=0.29 after=0.29; IPC before=9.12 after=9.14
+  MODES before=1.69x after=1.69x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-32/nulls-none/ready/count: instructions before=668.0 after=668.0 change=-0.00%; cycles min before=86.0 after=72.2 change=-16.03% (median 102.0/97.7, modes 1.24/1.34, 3 processes); branch misses before=0.000 after=0.000 of 160.0 branches; cores 0,1,3,4,5,12,13,14,15
+  REFERENCE instructions before=5481.0 after=5481.0; library/reference=0.122x, cycles 0.053x (informational)
+  PER ROW (1024 rows): instructions before=0.65 after=0.65; cycles min before=0.08 after=0.07; IPC before=7.76 after=9.25
+  MODES before=1.24x after=1.34x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-32/nulls-none/ready/min: instructions before=3363.0 after=3363.0 change=-0.00%; cycles min before=466.8 after=465.4 change=-0.29% (median 468.2/466.6, modes 1.59/1.47, 3 processes); branch misses before=0.000 after=0.000 of 211.0 branches; cores 0,4,7,12,13,14,15,16,17
+  REFERENCE instructions before=5481.0 after=5481.0; library/reference=0.614x, cycles 0.340x (informational)
+  PER ROW (1024 rows): instructions before=3.28 after=3.28; cycles min before=0.46 after=0.45; IPC before=7.20 after=7.23
+  MODES before=1.59x after=1.47x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-32/nulls-none/ready/sum: instructions before=2688.0 after=2688.0 change=+0.00%; cycles min before=294.0 after=294.2 change=+0.10% (median 317.8/299.2, modes 1.59/1.69, 3 processes); branch misses before=0.000 after=0.001 of 226.0 branches; cores 3,4,6,8,11,12,13,14,15,16,17
+  REFERENCE instructions before=5481.0 after=5481.0; library/reference=0.490x, cycles 0.215x (informational)
+  PER ROW (1024 rows): instructions before=2.63 after=2.63; cycles min before=0.29 after=0.29; IPC before=9.14 after=9.14
+  MODES before=1.59x after=1.69x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-8/nulls-none/ready/count: instructions before=913.0 after=913.0 change=-0.00%; cycles min before=469.4 after=463.2 change=-1.33% (median 486.4/500.0, modes 1.13/1.16, 3 processes); branch misses before=11.986 after=12.869 of 223.0 branches; cores 0,1,2,5,12,13,14,15,16
+  REFERENCE instructions before=1641.0 after=1641.0; library/reference=0.556x, cycles 0.944x (informational)
+  PER ROW (1024 rows): instructions before=0.89 after=0.89; cycles min before=0.46 after=0.45; IPC before=1.94 after=1.97
+  MODES before=1.13x after=1.16x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-8/nulls-none/ready/min: instructions before=1711.0 after=1711.0 change=+0.00%; cycles min before=495.9 after=509.3 change=+2.70% (median 539.6/522.9, modes 1.25/1.23, 3 processes); branch misses before=13.330 after=12.583 of 224.0 branches; cores 0,3,4,13,15,16
+  REFERENCE instructions before=1641.0 after=1641.0; library/reference=1.043x, cycles 1.038x (informational)
+  PER ROW (1024 rows): instructions before=1.67 after=1.67; cycles min before=0.48 after=0.50; IPC before=3.45 after=3.36
+  MODES before=1.25x after=1.23x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS aggregate_int32/dense/words/1024/density-8/nulls-none/ready/sum: instructions before=1576.0 after=1576.0 change=-0.00%; cycles min before=490.1 after=477.3 change=-2.61% (median 520.2/502.3, modes 1.28/1.31, 3 processes); branch misses before=13.010 after=12.230 of 223.0 branches; cores 0,1,2,5,7,8,12,13,14,15,17
+  REFERENCE instructions before=1641.0 after=1641.0; library/reference=0.960x, cycles 0.972x (informational)
+  PER ROW (1024 rows): instructions before=1.54 after=1.54; cycles min before=0.48 after=0.47; IPC before=3.22 after=3.30
+  MODES before=1.28x after=1.31x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS: 30 PASS, 0 FAIL (0 instructions, 0 cycles), 0 UNSTABLE library paths; 0 cycle warnings; 30 bistable
+
+timings.json:
+{
+  "measurement_seconds": 27.404063208,
+  "preparation_seconds": 34.973227375,
+  "total_seconds": 62.436857041
+}
