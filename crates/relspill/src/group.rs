@@ -225,7 +225,8 @@ pub struct Host<'a> {
     pub words: &'a [Cell<u64>],
     /// The records in memory of each partition.
     pub records: &'a [u64],
-    /// The bytes of the blocks on disk of each partition.
+    /// The bytes the blocks on disk of each partition take read back,
+    /// unpacked, not those they take on disk.
     pub disk: &'a [u64],
 }
 

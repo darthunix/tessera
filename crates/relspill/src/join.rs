@@ -366,8 +366,9 @@ pub struct Host<'a> {
     /// The outer rows written of each partition, read at
     /// [`Event::Next`].
     pub outer: &'a [u64],
-    /// The bytes of the blocks of inner rows on disk of each partition,
-    /// read at [`Event::Next`].
+    /// The bytes the blocks of inner rows on disk of each partition take
+    /// read back, unpacked, which a table of them holds, not those they
+    /// take on disk; read at [`Event::Next`].
     pub disk: &'a [u64],
     /// A byte for each partition, which [`Event::BuildEnd`] sets to a
     /// [`Route`].
