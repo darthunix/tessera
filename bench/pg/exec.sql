@@ -86,15 +86,16 @@ LANGUAGE plpgsql
 AS $function$
 BEGIN
     PERFORM set_config('work_mem', memory, false);
-    INSERT INTO cases VALUES (test_name, memory, prepared);
     IF prepared THEN
         EXECUTE format('PREPARE on_%I AS %s', test_name, sql);
         EXECUTE format('PREPARE off_%I AS %s', test_name, sql);
     END IF;
-    -- run.sh measure with CASES: only the cases it matches are timed.
+    -- run.sh measure with CASES: only the cases it matches are timed and
+    -- have their plans written.
     IF test_name !~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') THEN
         RETURN;
     END IF;
+    INSERT INTO cases VALUES (test_name, memory, prepared);
     IF prepared THEN
         PERFORM pg_temp.measure(test_name, 'on', 'on_' || test_name, true, repetitions);
         PERFORM pg_temp.measure(test_name, 'off', 'off_' || test_name, true, repetitions);

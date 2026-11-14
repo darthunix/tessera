@@ -10,7 +10,7 @@
 # measure keeps the PGOPTIONS it is given, such as a statement_timeout
 # that bounds every statement of a run, and takes CASES, a regular
 # expression of the case names to time
-# (every case by default; the plans are written for all of them), and
+# (every case by default; the plans are written for those timed), and
 # REPETITIONS, the runs of each case in each mode (the family's own, 31,
 # by default): a development A/B times the cases a change touches, fewer
 # times, to stay within minutes.
