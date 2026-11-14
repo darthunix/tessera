@@ -45,7 +45,7 @@ The words used below:
 - [x] 2.5 `POSTGRES_19` in `.github/postgres.env`, its row in the
       PostgreSQL job of `ci.yml`, and the random queries' findings
       named by core. Check: CI on the pull request
-- [ ] 2.6 The documents: README, `docs/limitations.md` (the cores, and
+- [x] 2.6 The documents: README, `docs/limitations.md` (the cores, and
       UNION's grouping by the workers not chosen on 19),
       `docs/bridge.md`, `docs/nodes.md`, `CONTRIBUTING.md`. Check:
       `.github/scripts/check-specs.sh`

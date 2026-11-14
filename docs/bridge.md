@@ -24,8 +24,9 @@ The complete example is the independently built
 only public Tessera interfaces. The walkthrough below explains selected
 fragments; the linked C files contain the complete, compiled implementation.
 
-Use an installed PostgreSQL master build with server headers, PGXS, and its
-server and regression-test programs. You also need a C compiler and `make`.
+Use an installed PostgreSQL 19 or master build with server headers, PGXS,
+and its server and regression-test programs. You also need a C compiler
+and `make`.
 Choose that installation's `pg_config`, and run these commands from the
 Tessera repository root:
 

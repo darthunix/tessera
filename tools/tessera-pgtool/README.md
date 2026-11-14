@@ -133,8 +133,8 @@ use the build already installed.
 
 ## Requirements and limits
 
-- A PostgreSQL build that Tessera supports, PostgreSQL master, named by
-  `PG_CONFIG`.
+- A PostgreSQL build that Tessera supports, PostgreSQL 19 or master,
+  named by `PG_CONFIG`.
 - macOS or Linux. Connections go over a Unix socket, with no TCP and no
   TLS.
 - One machine: the tool, the build and the cluster are local.

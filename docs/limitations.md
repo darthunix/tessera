@@ -127,10 +127,13 @@ those it checks.
 
 ## Platforms
 
-- **PostgreSQL master** (20devel) only: the modules stop the build on an
-  older core. PostgreSQL 19 needs its own forms of three interfaces
-  (working plan, item 8.8); Greengage 7 is a design in the plan's section
-  7, with no code yet.
+- **PostgreSQL 19 and master** (20devel): the modules stop the build on
+  an older core. Five interfaces differ between the two, each read in two
+  ways where it is used. On 19 the node does not group a UNION by the
+  workers where master's would: 19 estimates a UNION's rows as all its
+  branches' rows, master sums their distinct groups, and the node takes
+  the core's estimate. The rows are the same. Greengage 7 is a design in
+  the plan's section 7, with no code yet.
 - **Vector kernels on AArch64** (NEON) and on x86-64 with AVX2 and
   POPCNT, chosen at run time where the processor has both; elsewhere the
   scalar kernels run, with the same results. AVX-512 is not used. The
