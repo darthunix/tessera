@@ -141,6 +141,10 @@ SELECT pg_temp.measure_pair('even_join',
 SELECT pg_temp.measure_pair('runs_text',
     'SELECT count(t) FROM (SELECT k4, t FROM bench_sort ORDER BY k4) AS s',
     '4MB', true, :repetitions);
+-- The same sort at 64kB: runs too many for one merge, merged in passes.
+SELECT pg_temp.measure_pair('runs_passes',
+    'SELECT count(t) FROM (SELECT k4, t FROM bench_sort ORDER BY k4) AS s',
+    '64kB', true, :repetitions);
 SELECT pg_temp.measure_pair('rows_text',
     'SELECT count(*), sum(s) FROM (SELECT b, sum(d) AS s FROM bench_mixed GROUP BY b) AS g',
     '4MB', true, :repetitions);
