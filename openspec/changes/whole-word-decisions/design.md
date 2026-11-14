@@ -157,6 +157,17 @@ round, 512 KiB read in order. `table_int32` gives the table of its
 probes the keys of every selection, all the rows of the values, as the
 table of a join's inner side serves batches of any selection.
 
+The sets take the density cases over the values of their case
+`shuffled`: the same values, in an order drawn at random. On x86-64 a
+step of the sets' search by halving is a branch, and over values that
+grow with the row the predictor learned the steps of the rows a
+selection takes, whatever rows it takes. At 8 rows a word over 64 and
+65 keys the Intel Mac missed 58 to 75 times a call
+(`compare-yC36rk`), where a predictor that has not seen the values
+misses about 135 by the model, 123 in the search and 12 at the exits.
+On the M5 Pro a step is a select, and the order of the values does not
+matter there.
+
 The base of every run comes after these cases, so that `tessera-bench`
 can compare it.
 
@@ -193,7 +204,9 @@ more, of the median, and the largest MODES, Intel first.
 - `hash_int64`: `compare-UFcHbG`, `compare-XIPOaz`; 1.1 and 0.6 %;
   14.9 and 1.6 %; 1.70 and 1.62.
 - `set_int32`: `compare-yC36rk`, `compare-OS3sqU`; 2.9 and 1.7 %; 22.5
-  and 5.1 %; 1.66 and 1.55.
+  and 5.1 %; 1.66 and 1.55. These runs took the density cases over
+  values in the order of the rows; they are measured again over the
+  values of `shuffled`.
 - `table_int32`: `compare-HKqNwk`, `compare-fdzWx7`; 2.4 and 7.2 %;
   9.3 and 4.7 %; 1.63 and 1.28. The 7.2 % is a fall, of
   `probe/count_rows` over dense values at 8 rows.

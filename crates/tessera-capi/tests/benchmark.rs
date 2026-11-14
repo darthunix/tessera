@@ -925,7 +925,8 @@ fn the_density_cases_hold_their_rows_in_every_word_anew() {
                 .all(|input| Rc::ptr_eq(&input.values, &small[0].values))
         );
         let lefts = pairs.into_iter().map(|[left, _]| left).collect();
-        for inputs in [reading, find(filtering::cases()).inputs(), lefts] {
+        let sets = find(sets::cases::<i32>().expect("the sets' cases")).inputs();
+        for inputs in [reading, find(filtering::cases()).inputs(), lefts, sets] {
             let mut seen = std::collections::HashSet::new();
             for input in &inputs {
                 assert!(
@@ -990,7 +991,10 @@ fn the_pairs_of_a_ring_keep_their_rows_paired() {
 /// The misses a call of the cases drawn at random by the model of a
 /// predictor that has not seen their inputs: of the fold's loop over the
 /// rows of each of 16 words in `random`, and of the 7 steps of halving of
-/// 1024 rows over 65 keys in `shuffled`.
+/// 1024 rows over 65 keys in `shuffled`. The density cases of the sets
+/// take the values of `shuffled`, so that the steps of the rows they
+/// select do not grow with the row either; the first selection of each
+/// misses 123 to 586 times by the model, from 8 rows a word to 32.
 #[test]
 fn the_cases_drawn_at_random_hold_the_models_of_their_misses() -> Result<()> {
     let reading = reading::cases();
@@ -1007,5 +1011,22 @@ fn the_cases_drawn_at_random_hold_the_models_of_their_misses() -> Result<()> {
     assert_eq!(shuffled.name, "words/1024/shuffled/nulls-none/ready");
     let keys = sets::keys(&reading)?;
     assert_eq!(fixture::halving_misses(&keys, &shuffled.values), 1351);
+    assert!(!shuffled.values.is_sorted());
+    let densities: Vec<_> = sets
+        .iter()
+        .filter(|case| case.density.is_some())
+        .map(|case| {
+            assert_eq!(case.values, shuffled.values, "{}", case.name);
+            let selected: Vec<_> = case
+                .values
+                .iter()
+                .enumerate()
+                .filter(|&(row, _)| case.selected.words()[row / 64] & (1 << (row % 64)) != 0)
+                .map(|(_, &value)| value)
+                .collect();
+            fixture::halving_misses(&keys, &selected)
+        })
+        .collect();
+    assert_eq!(densities, [123, 188, 267, 424, 586]);
     Ok(())
 }

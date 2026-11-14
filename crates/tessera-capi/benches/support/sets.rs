@@ -10,7 +10,7 @@
 //! is compared whole, and every row selected with its values in random
 //! order, so that the steps of a search by halving do not follow the rows;
 //! that case, like the reading cases drawn at random, takes a ring of
-//! inputs.
+//! inputs. The density cases of the reading cases take its values too.
 //! The kernel writes the rows found and the rows present into masks
 //! allocated once per case; the reference is an independent scalar loop
 //! over the fixture's buffers that searches the 16 keys with the standard
@@ -73,11 +73,29 @@ fn first_long<T: Width>(cases: &[Fixture<T>]) -> Result<&Fixture<T>> {
         .ok_or_else(|| anyhow::anyhow!("no case of 1024 rows"))
 }
 
-/// The reading cases of the width, then the sets' own two, of the values
-/// of the first case of 1024 rows.
+/// The reading cases of the width, their density cases over the values of
+/// `shuffled`, then the sets' own two, of the values of the first case of
+/// 1024 rows.
 pub fn cases<T: Width>() -> Result<Vec<Fixture<T>>> {
     let mut cases = T::cases();
     let values = first_long(&cases)?.values.to_vec();
+    // On x86-64 a step of the search by halving is a branch, and over values
+    // that grow with the row the predictor learns the steps of the rows a
+    // selection takes, whatever rows it takes.
+    for case in &mut cases {
+        if let Some(rows) = case.density {
+            ensure!(
+                case.name.ends_with("/nulls-none/ready") && case.values[..] == values[..],
+                "a density case of the sets is not over the values of the first case"
+            );
+            *case = Fixture::from_values(
+                fixture::shuffled(values.clone()),
+                &format!("density-{rows}"),
+                "none",
+                false,
+            );
+        }
+    }
     cases.push(Fixture::from_values(
         values.clone(),
         "quarter",
