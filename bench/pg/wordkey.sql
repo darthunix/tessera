@@ -100,10 +100,12 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order']) AS name \gexec
+FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order']) AS name \gexec
+FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

@@ -182,14 +182,16 @@ SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BU
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
                   'setop_few', 'setop_many', 'setop_known', 'setop_nested', 'setop_like', 'setop_except', 'setop_except_all',
                   'setop_intersect_text', 'setop_intersect_all', 'setop_prune_init', 'setop_prune_exec',
-                  'setop_prune_union']) AS name \gexec
+                  'setop_prune_union']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s%s', name,
               CASE name WHEN 'setop_prune_init' THEN format('(%s)', 1000000 * :scale + 1) ELSE '' END)
 FROM unnest(ARRAY['setop_count', 'setop_join', 'setop_part', 'setop_rows',
                   'setop_few', 'setop_many', 'setop_known', 'setop_nested', 'setop_like', 'setop_except', 'setop_except_all',
                   'setop_intersect_text', 'setop_intersect_all', 'setop_prune_init', 'setop_prune_exec',
-                  'setop_prune_union']) AS name \gexec
+                  'setop_prune_union']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 RESET work_mem;
 RESET plan_cache_mode;

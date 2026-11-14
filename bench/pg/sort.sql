@@ -170,14 +170,16 @@ FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_d
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
                   'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
                   'distinct_few', 'distinct_many', 'distinct_agg', 'distinct_group',
-                  'order_filter', 'order_numeric', 'order_text_c', 'order_few_text', 'topn_numeric', 'topn_text_c']) AS name \gexec
+                  'order_filter', 'order_numeric', 'order_text_c', 'order_few_text', 'topn_numeric', 'topn_text_c']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['order_int', 'order_big', 'order_few', 'order_multi', 'order_desc',
                   'order_sorted', 'order_wide', 'order_out', 'order_text_out',
                   'topn_few', 'topn_many', 'topn_reverse', 'topn_offset',
                   'distinct_few', 'distinct_many', 'distinct_agg', 'distinct_group',
-                  'order_filter', 'order_numeric', 'order_text_c', 'order_few_text', 'topn_numeric', 'topn_text_c']) AS name \gexec
+                  'order_filter', 'order_numeric', 'order_text_c', 'order_few_text', 'topn_numeric', 'topn_text_c']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;

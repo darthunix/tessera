@@ -110,10 +110,12 @@ ORDER BY test, mode DESC;
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
 FROM unnest(ARRAY['row_column', 'row_expr', 'row_wide', 'row_text', 'row_window',
-                  'row_like', 'row_like_count', 'row_first']) AS name \gexec
+                  'row_like', 'row_like_count', 'row_first']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['row_column', 'row_expr', 'row_wide', 'row_text', 'row_window',
-                  'row_like', 'row_like_count', 'row_first']) AS name \gexec
+                  'row_like', 'row_like_count', 'row_first']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 DEALLOCATE ALL;
