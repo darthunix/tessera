@@ -173,6 +173,7 @@ fn an_event_out_of_turn_is_refused_and_changes_nothing() {
         Event::Weighed {
             groups: 0,
             others: 0,
+            memory: 0,
         },
     ] {
         let before = group;
@@ -207,10 +208,21 @@ fn the_first_level_keeps_its_chunks_and_a_level_below_writes_them() {
         partition: 1,
         level: 1,
         expected: 4 << 20,
+        limit: 1 << 20,
         shift: plan.below,
     };
     let (mut level, plan) = Group::below(&params(1 << 20), &below).expect("a level");
     assert_eq!(plan.shift, below.shift);
+    // A level below plans for the memory it may take, not the whole limit.
+    let (_, small) = Group::below(
+        &params(1 << 20),
+        &Below {
+            limit: 1 << 18,
+            ..below
+        },
+    )
+    .expect("a level");
+    assert!(small.chunk_len < plan.chunk_len, "{small:?} for {plan:?}");
     let regions = Regions::of(&plan);
     assert_eq!(level.step(Event::Made, &regions.host()), Ok(Action::Done));
     assert_eq!(
@@ -390,7 +402,11 @@ fn the_input_ends_with_writes_then_gives_out_in_memory_first() {
         group.step(Event::Next, &regions.host()),
         Ok(Action::Weigh(0))
     );
-    let weighed = |groups, others| Event::Weighed { groups, others };
+    let weighed = |groups, others| Event::Weighed {
+        groups,
+        others,
+        memory: 0,
+    };
     assert_eq!(
         group.step(weighed(100, 0), &regions.host()),
         Ok(Action::Merge(0))
@@ -405,6 +421,7 @@ fn the_input_ends_with_writes_then_gives_out_in_memory_first() {
         partition: 2,
         level: 1,
         expected: 2000,
+        limit,
         shift: plan.below,
     };
     assert_eq!(
@@ -439,17 +456,20 @@ fn a_partition_weighs_what_the_others_take() {
     let weighed = Event::Weighed {
         groups,
         others: limit / 10 * 9,
+        memory: limit / 2,
     };
     let weighing = group;
+    // The level below takes what the spill's memory leaves of the limit.
     assert!(matches!(
         group.step(weighed, &regions.host()),
-        Ok(Action::Split(_))
+        Ok(Action::Split(Below { limit: l, .. })) if l == limit / 2
     ));
     // Two thirds of the limit merged, alone: past half of the limit, not
     // past the whole of it.
     let alone = Event::Weighed {
         groups: limit / 3 * 2 / (RECORD + 16),
         others: 0,
+        memory: 0,
     };
     for (split_room, splits) in [(0.5, true), (1.0, false)] {
         let (mut group, _, mut regions) = spilling_by(&Params {
@@ -705,6 +725,7 @@ impl Model {
                     let weighed = Event::Weighed {
                         groups: keys.len() as u64,
                         others,
+                        memory: self.memory(),
                     };
                     match self.top().step(weighed)? {
                         Action::Merge(partition) => partition as usize,
@@ -893,6 +914,7 @@ fn no_partition_splits_where_no_level_of_the_shape_fits() {
         partition: 1,
         level: 1,
         expected: 1000,
+        limit,
         shift: 27,
     };
     let (mut group, plan) = Group::below(&params, &below).expect("a level");
@@ -911,6 +933,7 @@ fn no_partition_splits_where_no_level_of_the_shape_fits() {
     let weighed = Event::Weighed {
         groups: limit,
         others: 0,
+        memory: 0,
     };
     assert_eq!(group.step(weighed, &regions.host()), Ok(Action::Merge(1)));
 }
@@ -926,6 +949,7 @@ fn a_partition_splits_only_with_two_bits_left_past_its_level() {
         partition: 1,
         level: 1,
         expected: 1000,
+        limit,
         shift: 30,
     };
     let (mut group, plan) = Group::below(&params, &below).expect("a level");
@@ -944,6 +968,7 @@ fn a_partition_splits_only_with_two_bits_left_past_its_level() {
     let weighed = Event::Weighed {
         groups: limit,
         others: 0,
+        memory: 0,
     };
     assert_eq!(group.step(weighed, &regions.host()), Ok(Action::Merge(1)));
 }

@@ -243,13 +243,16 @@ fn a_grouping_spills_step_by_step_by_the_entry_points() {
     let weighed = GroupEvent {
         groups: 100_000,
         others: 0,
+        memory: limit / 2,
         ..event(GROUP_WEIGHED)
     };
     let (code, split) = step(&mut machine, &mut level, weighed);
+    // The spill holds half the limit: the level below takes the rest.
     let below = GroupBelow {
         partition: 2,
         level: 1,
         expected: 600_000,
+        limit: limit - limit / 2,
         shift: start.plan.below,
         spare: 0,
     };
@@ -287,6 +290,24 @@ fn a_grouping_spills_step_by_step_by_the_entry_points() {
         step(&mut child, &mut level, full),
         (Code::Ok, kind(GROUP_FLUSH))
     );
+    // A level below that may take a quarter plans shorter chunks.
+    let quarter = GroupBelow {
+        limit: limit / 4,
+        ..below
+    };
+    let mut small = GroupAction::default();
+    // SAFETY: local arguments.
+    let code = unsafe {
+        tess_group_below(
+            child.as_mut_ptr().cast(),
+            &raw const params,
+            &raw const quarter,
+            &raw mut small,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    assert!(small.plan.chunk_len < action.plan.chunk_len, "{small:?}");
     let bad = GroupBelow { spare: 1, ..below };
     // SAFETY: local arguments.
     let code = unsafe {
@@ -476,6 +497,7 @@ fn the_group_entry_points_write_places_that_hold_nothing_yet() {
         partition: 1,
         level: 1,
         expected: 1 << 20,
+        limit: 1 << 20,
         shift: 2,
         spare: 0,
     };

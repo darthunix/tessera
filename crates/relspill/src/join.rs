@@ -854,17 +854,11 @@ impl Join {
             }
             return Ok(Action::Open { partition, pieces });
         }
-        // What the levels above leave of the limit, a quarter at least.
-        let limit = self.params.limit;
         Ok(Action::Split(Below {
             partition,
             level: self.level + 1,
             expected: host.disk[index],
-            limit: if memory < limit / 4 * 3 {
-                limit - memory
-            } else {
-                limit / 4
-            },
+            limit: plan::below_limit(self.params.limit, memory),
             shift: self.below,
         }))
     }

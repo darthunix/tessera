@@ -437,7 +437,8 @@ The first level expects twice what the table holds when it spills, or,
 if more, what the rows the planner expects would take at the bytes a
 row so far (`tess_spill_expected`). A shared table expects that for
 every participant. A level below expects the bytes of the partition it
-splits.
+splits, and plans for what the levels above hold leave of `hash_mem`, a
+quarter of it at least, in a join and in a grouping alike.
 
 The plan of a level gives the shift of a level below, the bit past its
 own, and says whether a level of the node's shape fits there. A level

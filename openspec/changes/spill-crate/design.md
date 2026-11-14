@@ -519,7 +519,10 @@ Two copies differ. The join gives a level below what is left of its
 limit, or a quarter of it; the grouping gives every level all of
 `hash_mem`. A step that moves a rule keeps what SQL sees: where copies
 differ, the machine takes each node's rule as a parameter, and a task
-of its own makes one rule, with a measurement.
+of its own makes one rule, with a measurement. So both machines give a
+level below what the spill's memory leaves of the limit, a quarter of
+it at least: the join by its measure of its spill, the grouping by
+its.
 
 Two rules of the join look alike but are not copies. The setting
 `tessera.join_spill_split_room` decides whether a partition read back
