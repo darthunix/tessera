@@ -37,7 +37,7 @@ The words used below:
       as it is, to a suite of its own, `union_parallel`, with the
       helper and the table it reads. Check: the suites on master; the
       moved lines of both expected files the same
-- [ ] 2.4 `union_parallel` first prints whether the core is master;
+- [x] 2.4 `union_parallel` first prints whether the core is master;
       `union_parallel_1.out`, its output on 19. Check: the suites on
       both cores, with the diff of the new file against the first read
       line by line: the line of the core, plans, and the partial

@@ -1,0 +1,235 @@
+CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
+-- PostgreSQL 19 estimates a UNION's rows as all its branches' rows, where
+-- master sums their distinct groups: there the workers' grouping seems to
+-- save nothing and is not chosen, the rows the same (union_parallel_1.out).
+-- The core, so that each expected file matches one alone.
+SELECT current_setting('server_version_num')::int >= 200000 AS master;
+ master 
+--------
+ f
+(1 row)
+
+-- The same result with Tessera on and off, as text.
+CREATE FUNCTION union_same(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    with_tessera text[];
+    without_tessera text[];
+    wrapped text := format('SELECT array_agg(q::text ORDER BY q::text) FROM (%s) AS q', query);
+BEGIN
+    PERFORM set_config('tessera.enable', 'on', true);
+    EXECUTE wrapped INTO with_tessera;
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE wrapped INTO without_tessera;
+    PERFORM set_config('tessera.enable', 'on', true);
+    IF with_tessera IS DISTINCT FROM without_tessera THEN
+        RETURN format('on: %s off: %s', with_tessera, without_tessera);
+    END IF;
+    RETURN 'same';
+END
+$$;
+CREATE TABLE union_b (a int, b bigint, t text);
+INSERT INTO union_b
+SELECT CASE WHEN i % 5 = 0 THEN NULL ELSE i END, i * 100, 'b' || i
+FROM generate_series(1, 700) AS i;
+ANALYZE union_b;
+SET max_parallel_workers_per_gather = 0;
+-- Under a Gather: the node's partial grouping of every participant's rows
+-- of the branches over its parallel Append, TessGather, and its grouping
+-- of their groups above; at the default costs over 200000 rows whose keys
+-- the planner knows few, read in parallel whatever their size. NULL a
+-- value of its own, two columns, a count above, the workers alone; a
+-- branch without a partial path leaves the UNION serial, as the core's.
+CREATE TABLE union_keys AS
+SELECT i % 10 AS b, CASE WHEN i % 11 = 0 THEN NULL ELSE i % 13 END AS c,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE 'v' || (i % 13) END AS t
+FROM generate_series(1, 200000) AS i;
+ANALYZE union_keys;
+SET max_parallel_workers_per_gather = 2;
+SET min_parallel_table_scan_size = 0;
+-- The node's model of a partial scan would keep so small a table serial.
+SET tessera.scan_parallel_setup_cost = 0;
+SET tessera.scan_worker_page_cost = 0;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: unnamed_subquery.c, unnamed_subquery.b
+   Group Key: unnamed_subquery.c, unnamed_subquery.b
+   ->  Custom Scan (TessAppend)
+         Output: unnamed_subquery.c, unnamed_subquery.b
+         ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.c, unnamed_subquery.b
+               Rows Kept As: forwarded batches
+               ->  Custom Scan (TessFilter) on public.union_keys
+                     Output: union_keys.c, union_keys.b
+                     Batch Filter: (union_keys.b < 5)
+                     ->  Custom Scan (TessHeapScan) on public.union_keys
+                           Output: union_keys.c, union_keys.b
+         ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.c, unnamed_subquery_1.b
+               Rows Kept As: forwarded batches
+               ->  Custom Scan (TessFilter) on public.union_keys union_keys_1
+                     Output: union_keys_1.c, union_keys_1.b
+                     Batch Filter: (union_keys_1.b > 3)
+                     ->  Custom Scan (TessHeapScan) on public.union_keys union_keys_1
+                           Output: union_keys_1.c, union_keys_1.b
+(21 rows)
+
+SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
+ union_same 
+------------
+ same
+(1 row)
+
+SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT c AS x FROM union_keys UNION SELECT b FROM union_keys WHERE c IS NULL) AS s$$);
+ union_same 
+------------
+ same
+(1 row)
+
+-- Text through dictionaries, each participant's own.
+EXPLAIN (COSTS OFF) SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: unnamed_subquery.t, unnamed_subquery.b
+   ->  Custom Scan (TessAppend)
+         ->  Custom Scan (TessPack)
+               ->  Custom Scan (TessFilter) on union_keys
+                     Batch Filter: (union_keys.b < 5)
+                     ->  Custom Scan (TessHeapScan) on union_keys
+         ->  Custom Scan (TessPack)
+               ->  Custom Scan (TessFilter) on union_keys union_keys_1
+                     Batch Filter: (union_keys_1.b > 3)
+                     ->  Custom Scan (TessHeapScan) on union_keys union_keys_1
+(11 rows)
+
+SELECT union_same($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$);
+ union_same 
+------------
+ same
+(1 row)
+
+-- Their tables sent up early, and none written to disk.
+CREATE FUNCTION union_partial(query text, name text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, VERBOSE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) %s', query)
+        INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        format('$[0]."Plan".** ? (@."Custom Plan Provider" == "TessAgg" && @."Partial Mode" == "Partial").%I',
+               name)::jsonpath)::text;
+END $$;
+SET work_mem = '64kB';
+SELECT union_same($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$);
+ union_same 
+------------
+ same
+(1 row)
+
+SELECT union_partial($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$, 'Early Emits')::int > 0 AS early,
+       union_partial($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$, 'Disk Usage') IS NULL AS no_disk;
+ early | no_disk 
+-------+---------
+       | t
+(1 row)
+
+RESET work_mem;
+DROP FUNCTION union_partial;
+-- The same as the left side of an EXCEPT.
+EXPLAIN (VERBOSE, COSTS OFF)
+(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3) EXCEPT SELECT b FROM union_keys WHERE b = 1;
+                                             QUERY PLAN                                              
+-----------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: unnamed_subquery.c
+   Group Key: unnamed_subquery.c
+   Set Operation: Except
+   ->  Custom Scan (TessPack)
+         Output: unnamed_subquery.c
+         ->  Unique
+               Output: union_keys.c
+               ->  Merge Append
+                     Sort Key: union_keys.c
+                     ->  Sort
+                           Output: union_keys.c
+                           Sort Key: union_keys.c
+                           ->  Custom Scan (TessFilter) on public.union_keys
+                                 Output: union_keys.c
+                                 Batch Filter: (union_keys.b < 5)
+                                 ->  Custom Scan (TessHeapScan) on public.union_keys
+                                       Output: union_keys.c, union_keys.b
+                     ->  Sort
+                           Output: union_keys_1.c
+                           Sort Key: union_keys_1.c
+                           ->  Custom Scan (TessFilter) on public.union_keys union_keys_1
+                                 Output: union_keys_1.c
+                                 Batch Filter: (union_keys_1.b > 3)
+                                 ->  Custom Scan (TessHeapScan) on public.union_keys union_keys_1
+                                       Output: union_keys_1.c, union_keys_1.b
+   ->  Custom Scan (TessPack)
+         Output: unnamed_subquery_2.b
+         Rows Kept As: forwarded batches
+         ->  Custom Scan (TessGather)
+               Output: union_keys_2.b
+               Workers Planned: 2
+               ->  Parallel Custom Scan (TessSend)
+                     Output: union_keys_2.b
+                     ->  Parallel Custom Scan (TessFilter) on public.union_keys union_keys_2
+                           Output: union_keys_2.b
+                           Batch Filter: (union_keys_2.b = 1)
+                           ->  Parallel Custom Scan (TessHeapScan) on public.union_keys union_keys_2
+                                 Output: union_keys_2.b
+(39 rows)
+
+SELECT union_same($$(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3)
+                   EXCEPT SELECT b FROM union_keys WHERE b = 1$$);
+ union_same 
+------------
+ same
+(1 row)
+
+SET parallel_leader_participation = off;
+SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
+ union_same 
+------------
+ same
+(1 row)
+
+RESET parallel_leader_participation;
+ALTER TABLE union_b SET (parallel_workers = 0);
+EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM union_keys UNION SELECT a FROM union_b;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: unnamed_subquery.c
+   Group Key: unnamed_subquery.c
+   ->  Custom Scan (TessAppend)
+         Output: unnamed_subquery.c
+         ->  Custom Scan (TessPack)
+               Output: unnamed_subquery.c
+               Rows Kept As: forwarded batches
+               ->  Custom Scan (TessHeapScan) on public.union_keys
+                     Output: union_keys.c
+         ->  Custom Scan (TessPack)
+               Output: unnamed_subquery_1.a
+               Rows Kept As: forwarded batches
+               ->  Custom Scan (TessHeapScan) on public.union_b
+                     Output: union_b.a
+(15 rows)
+
+ALTER TABLE union_b RESET (parallel_workers);
+SET max_parallel_workers_per_gather = 0;
+RESET min_parallel_table_scan_size;
+RESET tessera.scan_parallel_setup_cost;
+RESET tessera.scan_worker_page_cost;
+DROP TABLE union_keys;
+DROP TABLE union_b;
+DROP FUNCTION union_same(text);
+RESET max_parallel_workers_per_gather;
+DROP EXTENSION tessera;
