@@ -2,6 +2,12 @@ CREATE EXTENSION tessera;
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 
+-- PostgreSQL 19 estimates a UNION's rows as all its branches' rows, where
+-- master sums their distinct groups: there the workers' grouping seems to
+-- save nothing and is not chosen, the rows the same (union_parallel_1.out).
+-- The core, so that each expected file matches one alone.
+SELECT current_setting('server_version_num')::int >= 200000 AS master;
+
 -- The same result with Tessera on and off, as text.
 CREATE FUNCTION union_same(query text) RETURNS text
 LANGUAGE plpgsql AS $$
