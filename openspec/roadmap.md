@@ -96,6 +96,9 @@ These have no place in the queue. The maintainer places an entry when it
 is wanted; several wait for a measured case. `greengage-port` and
 `tpch-on-greengage` came down here from "Later" on 2026-10-05.
 
+- `spill-rows-writer`: the rows a node writes by partition through
+  the one writer of chunks of columns, once it costs no more; the
+  maintainer took it out of `spill-crate` on 2026-11-14
 - `numeric-keys-by-digits`: numeric keys hashed and compared by their
   digits
 - `lookup-key-splitting`: A batch's keys split where their rows outgrow
@@ -822,6 +825,34 @@ Spill of sum states instead of rows. From plan 4.23 item 4б, lines 1574,
   `tpch-indexed-schema`, `tpch-sf10`) for the measurement.
 - **Capabilities:** aggregate, spill-format, hash-table
 - **Size:** the log does not say.
+
+### spill-rows-writer
+
+The rows a node writes by partition through the one writer of chunks of
+columns. Out of the change `spill-crate`, where it was a task until
+2026-11-14.
+
+- **What:** A grouping writes the rows of its generic aggregates, and a
+  join the rows of its outer side, to the chunks of each partition by
+  loops of their own, which lay the chunks out by the crate's layout
+  through its C headers. The sort's runs and the gather write theirs
+  through the one writer of chunks of columns (`TessColumnsWriter` and
+  the kernels' append). Move the two loops to that writer once it
+  costs no more than they do.
+- **Why:** One writer of the chunks of columns, whose checks and tests
+  cover every node that writes them.
+- **Known:** Four tries, measured against the loops on `rows_text` and
+  `rows_generic`: a partition at a time, a batch of about 55 rows in
+  as many calls as the grouping's 32 partitions, was 21 to 28 % slower;
+  every partition in one call of the crate 8 to 16 % slower, and 7 to
+  15 % with the shapes checked once a call and the header helpers
+  inline. The profile gave the writer 16 % of the time, the loop 11 %;
+  the rest lay in the work for each row of the call and in a pass that
+  flattens the values first. The tries are kept on the branch
+  `spill-columns-tries`, which is not pushed.
+- **Depends on:** a writer as fast as the loops.
+- **Capabilities:** spill-format
+- **Size:** a pull request, once the writer is fast enough.
 
 ### numeric-reading
 
