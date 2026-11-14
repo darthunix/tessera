@@ -30,7 +30,7 @@ The words used below:
       the suites on both cores; `objdump -d` of the changed object
       files built against master, before and after, the same but for
       line numbers
-- [ ] 2.2 The suite `index` gains index-only scans of a GiST index, of
+- [x] 2.2 The suite `index` gains index-only scans of a GiST index, of
       a btree index over `name`, and in parallel over pages not all
       visible. Check: the suites on both cores
 - [ ] 2.3 The section of `union` on grouping under `TessGather` moves,
