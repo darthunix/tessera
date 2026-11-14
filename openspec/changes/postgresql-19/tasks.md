@@ -33,7 +33,7 @@ The words used below:
 - [x] 2.2 The suite `index` gains index-only scans of a GiST index, of
       a btree index over `name`, and in parallel over pages not all
       visible. Check: the suites on both cores
-- [ ] 2.3 The section of `union` on grouping under `TessGather` moves,
+- [x] 2.3 The section of `union` on grouping under `TessGather` moves,
       as it is, to a suite of its own, `union_parallel`, with the
       helper and the table it reads. Check: the suites on master; the
       moved lines of both expected files the same
