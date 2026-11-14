@@ -33,6 +33,11 @@
 #include "utils/wait_event.h"
 
 #include "tessera/runtime.h"
+#if PG_VERSION_NUM < 200000
+#include "access/visibilitymap.h"
+#include "storage/predicate.h"
+#include "utils/builtins.h"
+#endif
 
 #include "internal.h"
 
@@ -667,7 +672,10 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 			LOCKMODE	lockmode = exec_rt_fetch(cscan->scan.scanrelid, estate)->rellockmode;
 
 			state->lookup_index = index_open(state->lookup_index_id, lockmode);
-			state->lookup_scan = index_beginscan(rel, state->lookup_index, false,
+			state->lookup_scan = index_beginscan(rel, state->lookup_index,
+#if PG_VERSION_NUM >= 200000
+												 false,
+#endif
 												 estate->es_snapshot,
 												 &state->lookup_instrument, 1, 0,
 												 heap_scan_flags(state));
@@ -950,13 +958,20 @@ next_page(HeapScanState *state)
 static inline void
 count_heap_rows(Relation rel, bool fetched, int count)
 {
+	PgStat_TableCounts *counts;
+
 	if (count <= 0 || !pgstat_should_count_relation(rel))
 		return;
+#if PG_VERSION_NUM >= 200000
 	Assert(rel->pgstat_info->kind == PGSTAT_KIND_RELATION);
+	counts = &rel->pgstat_info->tab.counts;
+#else
+	counts = &rel->pgstat_info->counts;
+#endif
 	if (fetched)
-		rel->pgstat_info->tab.counts.tuples_fetched += count;
+		counts->tuples_fetched += count;
 	else
-		rel->pgstat_info->tab.counts.tuples_returned += count;
+		counts->tuples_returned += count;
 }
 
 /* Take up to limit visible tuples of the current page into the batch; how many. */
@@ -995,6 +1010,84 @@ give_out(HeapScanState *state, TessBatch *batch)
 	return batch;
 }
 
+#if PG_VERSION_NUM < 200000
+/*
+ * PostgreSQL 19 has no table_index_getnext_slot: the next entry's row is
+ * IndexOnlyNext's of that core (nodeIndexonlyscan.c), from the index's
+ * tuple, with the table's page read only where the visibility map does
+ * not show it all visible, and StoreIndexTuple's copy of name columns.
+ * The page's predicate lock is taken before the caller's recheck, as
+ * master's table AM takes it.
+ */
+static bool
+index_only_next(IndexOnlyScanState *ios, IndexScanDesc scan, ScanDirection direction,
+				TupleTableSlot *slot)
+{
+	ItemPointer tid;
+
+	while ((tid = index_getnext_tid(scan, direction)) != NULL)
+	{
+		bool		from_heap = false;
+
+		CHECK_FOR_INTERRUPTS();
+		/* As ExecScan before each row: the names of the last are dropped. */
+		ResetExprContext(ios->ss.ps.ps_ExprContext);
+		if (!VM_ALL_VISIBLE(scan->heapRelation, ItemPointerGetBlockNumber(tid),
+							&ios->ioss_VMBuffer))
+		{
+			InstrCountTuples2(ios, 1);
+			if (!index_fetch_heap(scan, ios->ioss_TableSlot))
+				continue;
+			ExecClearTuple(ios->ioss_TableSlot);
+			if (scan->xs_heap_continue)
+				elog(ERROR, "non-MVCC snapshots are not supported in index-only scans");
+			from_heap = true;
+		}
+		ExecClearTuple(slot);
+		if (scan->xs_hitup)
+		{
+			Assert(slot->tts_tupleDescriptor->natts == scan->xs_hitupdesc->natts);
+			heap_deform_tuple(scan->xs_hitup, scan->xs_hitupdesc,
+							  slot->tts_values, slot->tts_isnull);
+		}
+		else if (scan->xs_itup)
+		{
+			Assert(slot->tts_tupleDescriptor->natts == scan->xs_itupdesc->natts);
+			index_deform_tuple(scan->xs_itup, scan->xs_itupdesc,
+							   slot->tts_values, slot->tts_isnull);
+			/* btree's name opclass stores cstrings: each back to NAMEDATALEN. */
+			for (int i = 0; i < ios->ioss_NameCStringCount; i++)
+			{
+				int			attnum = ios->ioss_NameCStringAttNums[i];
+				Name		name;
+
+				if (slot->tts_isnull[attnum])
+					continue;
+				name = (Name) MemoryContextAlloc(ios->ss.ps.ps_ExprContext->ecxt_per_tuple_memory,
+												 NAMEDATALEN);
+				namestrcpy(name, DatumGetCString(slot->tts_values[attnum]));
+				slot->tts_values[attnum] = NameGetDatum(name);
+			}
+		}
+		else
+			elog(ERROR, "no data returned for index-only scan");
+		ExecStoreVirtualTuple(slot);
+		if (!from_heap)
+			PredicateLockPage(scan->heapRelation, ItemPointerGetBlockNumber(tid),
+							  ios->ss.ps.state->es_snapshot);
+		return true;
+	}
+	return false;
+}
+#else
+static inline bool
+index_only_next(IndexOnlyScanState *ios, IndexScanDesc scan, ScanDirection direction,
+				TupleTableSlot *slot)
+{
+	return table_index_getnext_slot(scan, direction, slot);
+}
+#endif
+
 /*
  * Index-only mode: up to limit rows of the core's index-only scan, which
  * the node drives as IndexOnlyNext does, but not through its ExecScan and
@@ -1024,11 +1117,19 @@ index_only_batch(HeapScanState *state, int limit)
 	scan = ios->ioss_ScanDesc;
 	if (scan == NULL)
 	{
-		scan = index_beginscan(ios->ss.ss_currentRelation, ios->ioss_RelationDesc, true,
+		scan = index_beginscan(ios->ss.ss_currentRelation, ios->ioss_RelationDesc,
+#if PG_VERSION_NUM >= 200000
+							   true,
+#endif
 							   estate->es_snapshot, ios->ioss_Instrument,
 							   ios->ioss_NumScanKeys, ios->ioss_NumOrderByKeys,
 							   ScanRelIsReadOnly(&ios->ss) ? SO_HINT_REL_READ_ONLY : SO_NONE);
 		ios->ioss_ScanDesc = scan;
+#if PG_VERSION_NUM < 200000
+		/* Master's index_beginscan does these for an index-only scan. */
+		scan->xs_want_itup = true;
+		ios->ioss_VMBuffer = InvalidBuffer;
+#endif
 		if (ios->ioss_NumRuntimeKeys == 0 || ios->ioss_RuntimeKeysReady)
 			index_rescan(scan, ios->ioss_ScanKeys, ios->ioss_NumScanKeys,
 						 ios->ioss_OrderByKeys, ios->ioss_NumOrderByKeys);
@@ -1039,7 +1140,7 @@ index_only_batch(HeapScanState *state, int limit)
 		InstrStartNode(ios->ss.ps.instrument);
 	while (nrows < limit)
 	{
-		if (!table_index_getnext_slot(scan, direction, slot))
+		if (!index_only_next(ios, scan, direction, slot))
 		{
 			state->exhausted = true;
 			break;
@@ -1100,8 +1201,13 @@ next_batch(HeapScanState *state)
 		while (limit > 0)
 		{
 			if (!state->lookup_armed ||
+#if PG_VERSION_NUM >= 200000
 				!table_index_getnext_slot(state->lookup_scan, ForwardScanDirection,
 										  state->landing))
+#else
+				!index_getnext_slot(state->lookup_scan, ForwardScanDirection,
+									state->landing))
+#endif
 			{
 				state->exhausted = true;
 				break;

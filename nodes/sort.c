@@ -83,20 +83,28 @@ static const TessBatchOps sort_batch_ops = {
  * abbreviate: a comparison of unsigned or signed integers, or numeric's,
  * which is a signed integer's reversed; NONE without one the node takes.
  * The comparators carry master's names (since 2026-08); PostgreSQL 15 to
- * 18 call them ssup_datum_unsigned_cmp, ssup_datum_signed_cmp and
+ * 19 call them ssup_datum_unsigned_cmp, ssup_datum_signed_cmp and
  * ssup_datum_int32_cmp, without a uint32 one, and older cores have none.
+ * Master's uint32 one serves only oid, which abbreviates no keys.
  */
 static SortAbbrev
 abbrev_order_of(SortSupport abbrev, Oid type)
 {
 	if (abbrev->abbrev_converter == NULL)
 		return SORT_ABBREV_NONE;
+#if PG_VERSION_NUM >= 200000
 	if (abbrev->comparator == ssup_datum_uint64_cmp)
 		return SORT_ABBREV_UNSIGNED;
 	if (abbrev->comparator == ssup_datum_int64_cmp)
 		return SORT_ABBREV_SIGNED;
 	if (abbrev->comparator == ssup_datum_uint32_cmp)
 		return SORT_ABBREV_UINT32;
+#else
+	if (abbrev->comparator == ssup_datum_unsigned_cmp)
+		return SORT_ABBREV_UNSIGNED;
+	if (abbrev->comparator == ssup_datum_signed_cmp)
+		return SORT_ABBREV_SIGNED;
+#endif
 	if (abbrev->comparator == ssup_datum_int32_cmp)
 		return SORT_ABBREV_INT32;
 	if (type == NUMERICOID &&

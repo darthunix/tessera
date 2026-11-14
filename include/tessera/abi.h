@@ -8,14 +8,14 @@
 #include "postgres.h"
 
 /*
- * Tessera follows PostgreSQL master (20devel) and builds against no older
- * core: PostgreSQL 19 differs in the table statistics' layout, the names
- * of the sort comparators and the interface of index-only scans. Every
- * module includes this header, so the headers of an older server stop
- * the build here rather than at the first declaration they lack.
+ * Tessera follows PostgreSQL master (20devel) and builds against 19 as
+ * well, where five interfaces differ: each is read in two ways where it is
+ * used, by PG_VERSION_NUM. Older cores differ much more. Every module
+ * includes this header, so the headers of an older server stop the build
+ * here rather than at the first declaration they lack.
  */
-#if PG_VERSION_NUM < 200000
-#error "Tessera needs PostgreSQL master (20devel)"
+#if PG_VERSION_NUM < 190000
+#error "Tessera needs PostgreSQL 19 or master (20devel)"
 #endif
 
 /*
