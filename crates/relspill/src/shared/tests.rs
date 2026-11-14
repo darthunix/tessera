@@ -1,6 +1,8 @@
 use super::*;
 use crate::Kind;
-use crate::phases::{BUILD as BUILD_PHASE, FREE, LINK as LINK_PHASE, OUTER as OUTER_PHASE};
+use crate::phases::{
+    BUILD as BUILD_PHASE, FREE, LINK as LINK_PHASE, OUTER as OUTER_PHASE, PROBE as PROBE_PHASE,
+};
 use crate::shared_spill::words_for;
 
 /// The rule of a wrong call's error, which a test expects.
@@ -198,6 +200,36 @@ fn a_late_participant_skips_the_writes_of_a_table_that_never_split() {
         ]
     );
     assert_eq!(alone(&shared, &[], FREE), [Attach, Detach, Finished]);
+}
+
+/// The machine marks the stop word only while its participant probes:
+/// before the probe it has matched no pair, and once it left it probed
+/// its share.
+#[test]
+fn a_participant_stops_only_while_it_probes() {
+    let shared = Shared::new(3, 1 << 20);
+    let host = shared.host(&[]);
+    let mut build = Build::new(&params()).expect("parameters");
+    let mut event = Event::Done;
+    let mut probed = false;
+    loop {
+        let word = core::sync::atomic::AtomicU64::new(0);
+        let marked = build.stop(&StopWord::new(&word));
+        assert_eq!((marked, StopWord::new(&word).stopped()), (probed, probed));
+        let action = build.step(event, &host).expect("a step");
+        probed = matches!(action, Action::Probe { .. });
+        event = match action {
+            Action::Attach => Event::Attached { phase: PROBE_PHASE },
+            Action::ArriveAndDetach => Event::Left { last: true },
+            Action::Free | Action::Finished => break,
+            _ => Event::Done,
+        };
+    }
+    let word = core::sync::atomic::AtomicU64::new(0);
+    assert!(
+        !build.stop(&StopWord::new(&word)) && !StopWord::new(&word).stopped(),
+        "once it left"
+    );
 }
 
 /// A machine of `params` attached to the build.
