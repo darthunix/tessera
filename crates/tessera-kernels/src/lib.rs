@@ -83,8 +83,8 @@ pub(crate) fn probe_whole() -> bool {
     *std::hint::black_box(&PROBE_WHOLE)
 }
 
-/// The value of [`probe_whole`]: false in the rows build.
-static PROBE_WHOLE: bool = false;
+/// The value of [`probe_whole`]: true in the whole build.
+static PROBE_WHOLE: bool = true;
 
 pub mod accumulate;
 pub mod calendar;
