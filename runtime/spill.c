@@ -475,6 +475,16 @@ tess_spill_finish(TessSpill *spill)
 	if (spill->buffer != NULL)
 		pfree(spill->buffer);
 	spill->buffer = NULL;
+	/* The lists are at the end of the file now, which readers take a page at a time. */
+	for (int partition = 0; partition < spill->npartitions; partition++)
+	{
+		TessSpillList *list = &spill->lists[partition];
+
+		if (list->entries != NULL)
+			pfree(list->entries);
+		list->entries = NULL;
+		list->slots = 0;
+	}
 	spill->finished = true;
 }
 
@@ -501,10 +511,10 @@ read_step(TessSpillReader *reader, const TessSpillReadStep *step)
 }
 
 /*
- * The kernels' reader checks what it reads: of the own set the list in
- * memory; of another participant's file the trailer at its end, the counts
- * and the partition's entries, a page at a time, each before what it names
- * is read. The reader's block buffer is as long as the partition's largest
+ * The kernels' reader checks what it reads, of the set's own file or of
+ * another participant's: the trailer at its end, the counts and the
+ * partition's entries, a page at a time, each before what it names is
+ * read. The reader's block buffer is as long as the partition's largest
  * block, from the start.
  */
 TessSpillReader *
@@ -512,9 +522,12 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
 	TessSpillReader *reader;
-	uint64		largest = 0;
+	TessSpillReadStep step;
 	MemoryContext old;
 	char		name[MAXPGPATH];
+	uint64		max_chunk;
+	uint64		max_values;
+	pgoff_t		size;
 
 	check_spill(spill);
 	check_partition(spill, partition);
@@ -529,10 +542,8 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 	reader->partition = partition;
 	if (participant == spill->participant)
 	{
-		TessSpillList *list = &spill->lists[partition];
-		uint64		max_values;
-
-		if (list->count == 0)
+		/* Its count stays in memory: a partition dropped since the finish is gone. */
+		if (spill->lists[partition].count == 0)
 		{
 			pfree(reader);
 			return NULL;
@@ -540,70 +551,65 @@ tess_spill_open(TessSpill *spill, int participant, int partition)
 		if (spill->shared == NULL && spill->reading[partition] > 0)
 			elog(ERROR, "Tessera serial spill file of partition %d is already being read",
 				 partition);
-		tess_spill_bounds(spill, NULL, &max_values);
-		if (spill->kernels->spill_reader_own(&reader->state, spill->npartitions,
-											 spill->level, partition, spill->fingerprint,
-											 spill->max_chunk, max_values, list->entries,
-											 list->count, &largest, &status) != TESS_OK)
-			tess_status_report(&status);
-		spill->reading[partition]++;
 		reader->file = spill->file;
 		reader->own = true;
-		reader->page = list->entries;
-		reader->page_len = (Size) list->count;
+		tess_spill_bounds(spill, &max_chunk, &max_values);
 	}
 	else
 	{
-		TessSpillReadStep step;
-		File		file;
-		pgoff_t		size;
-
 		if (!spill->agreed)
 			elog(ERROR, "Tessera spill set reads another participant's file only after their bounds are agreed");
 		/* Another participant's file, a handle of its own. */
 		file_name(spill, participant, name);
 		old = MemoryContextSwitchTo(spill->context);
-		file = FileSetOpen(&spill->shared->fs, name, O_RDONLY);
+		reader->file = FileSetOpen(&spill->shared->fs, name, O_RDONLY);
 		MemoryContextSwitchTo(old);
-		if (file <= 0)
+		if (reader->file <= 0)
 		{
 			pfree(reader);
 			return NULL;
 		}
-		reader->file = file;
-		size = FileSize(file);
-		if (size < 0)
-			ereport(ERROR,
-					errcode_for_file_access(),
-					errmsg("could not size Tessera spill file: %m"));
-		if (spill->kernels->spill_reader_file(&reader->state, spill->npartitions,
-											  spill->level, partition, spill->fingerprint,
-											  spill->agreed_chunk, spill->agreed_values,
-											  (uint64) size, &status) != TESS_OK)
-			tess_status_report(&status);
-		reader->page_len = SPILL_PAGE_ENTRIES;
-		reader->page = MemoryContextAllocZero(spill->context,
-											  sizeof(TessSpillEntry) * SPILL_PAGE_ENTRIES);
-		for (;;)
-		{
-			if (spill->kernels->spill_reader_open(&reader->state, reader->page,
-												  reader->page_len, &step,
-												  &status) != TESS_OK)
-				tess_status_report(&status);
-			if (step.kind == TESS_SPILL_READ_EMPTY)
-			{
-				FileClose(file);
-				pfree(reader->page);
-				pfree(reader);
-				return NULL;
-			}
-			if (step.kind == TESS_SPILL_READ_READY)
-				break;
-			read_step(reader, &step);
-		}
-		largest = step.largest;
+		max_chunk = spill->agreed_chunk;
+		max_values = spill->agreed_values;
 	}
-	reader->buffer_len = TYPEALIGN(8, (Size) largest);
+	size = FileSize(reader->file);
+	if (size < 0)
+		ereport(ERROR,
+				errcode_for_file_access(),
+				errmsg("could not size Tessera spill file: %m"));
+	if (spill->kernels->spill_reader_file(&reader->state, spill->npartitions,
+										  spill->level, partition, spill->fingerprint,
+										  max_chunk, max_values, (uint64) size,
+										  &status) != TESS_OK)
+		tess_status_report(&status);
+	reader->page_len = SPILL_PAGE_ENTRIES;
+	reader->page = MemoryContextAllocZero(spill->context,
+										  sizeof(TessSpillEntry) * SPILL_PAGE_ENTRIES);
+	for (;;)
+	{
+		if (spill->kernels->spill_reader_open(&reader->state, reader->page,
+											  reader->page_len, &step,
+											  &status) != TESS_OK)
+			tess_status_report(&status);
+		if (step.kind == TESS_SPILL_READ_EMPTY)
+		{
+			/* The set's own blocks, which its count in memory names, are not lost. */
+			if (reader->own)
+				ereport(ERROR,
+						errcode(ERRCODE_DATA_CORRUPTED),
+						errmsg("Tessera spill file lists no block of partition %d", partition));
+			FileClose(reader->file);
+			pfree(reader->page);
+			pfree(reader);
+			return NULL;
+		}
+		if (step.kind == TESS_SPILL_READ_READY)
+			break;
+		read_step(reader, &step);
+	}
+	if (reader->own)
+		spill->reading[partition]++;
+	reader->buffer_len = TYPEALIGN(8, (Size) step.largest);
 	reader->buffer = MemoryContextAllocExtended(spill->context, Max(reader->buffer_len, 8),
 												MCXT_ALLOC_HUGE | MCXT_ALLOC_ZERO);
 	reader->next_reader = spill->readers;
@@ -708,10 +714,8 @@ tess_spill_close(TessSpillReader *reader)
 	if (reader->own)
 		reader->spill->reading[reader->partition]--;
 	else
-	{
 		FileClose(reader->file);
-		pfree(reader->page);
-	}
+	pfree(reader->page);
 	if (reader->buffer != NULL)
 		pfree(reader->buffer);
 	pfree(reader);
