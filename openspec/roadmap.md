@@ -2137,6 +2137,16 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **Outputs of the kernels' entry points borrowed unfilled** (the
+  outside reviews of `spill-crate`, task 3.26). The spill's entry points
+  write their results to the places C hands them, which C may not have
+  filled; many entry points of the kernels and of the hash table, in
+  `crates/tessera-capi/src/c/` (the decimals, the integers, the sorts'
+  keys, the Bloom filter's words and its readiness, a table's
+  fingerprint), still take such a place as a reference first, which is
+  undefined behavior when it holds no value. CI's strict Miri runs the
+  tests of the spill alone. Suggested: write them as the spill's do,
+  and add their tests to the strict Miri of CI.
 - **The key filter's order under correlated clauses** (the close of
   `early-key-filter`, a finding of its review). A TessFilter of batch
   clauses alone compares the filter's share of all its rows with the
