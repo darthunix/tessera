@@ -1009,4 +1009,301 @@ typedef enum TessJoinLayout
 /* The size or offset for a kind, or 0 for an unknown one. */
 extern Size tess_join_layout(TessJoinLayout what);
 
+/*
+ * The machine of a grouping's spill (relspill's group): the protocol of a
+ * table of groups that outgrows its memory, which the grouping steps with
+ * what it saw. A machine is plain words, TESS_GROUP_WORDS of them, one for
+ * each level of the spill; its calls are refused as the join machine's
+ * are.
+ */
+#define TESS_GROUP_WORDS 20
+
+typedef struct TessGroupMachine
+{
+	uint64		words[TESS_GROUP_WORDS];
+} TessGroupMachine;
+
+/*
+ * What every level of a grouping's spill shares: the memory limit, every
+ * level's; the shape of its levels; the bytes a group takes merged, its
+ * record and its share of an index; the eighths of the limit past which
+ * the table is full (limit / 8 * fill bytes); the weights of the rule that
+ * sends partitions to disk; and the share of what the limit leaves a
+ * partition must pass to split.
+ */
+typedef struct TessGroupParams
+{
+	uint64		limit;
+	TessSpillShape shape;
+	uint64		merged;
+	uint64		fill;
+	double		start;
+	double		target;
+	double		spilled;
+	double		split_room;
+} TessGroupParams;
+
+/*
+ * The regions of a level a step reads: its spill words, the records in
+ * memory of each of its partitions, and the bytes of each one's blocks on
+ * disk. Before a level is made, all are empty.
+ */
+typedef struct TessGroupHost
+{
+	uint64	   *words;
+	Size		nwords;
+	const uint64 *records;
+	Size		nrecords;
+	const uint64 *disk;
+	Size		ndisk;
+} TessGroupHost;
+
+typedef enum TessGroupEventKind
+{
+	/*
+	 * The table in memory takes bytes in records groups of the estimate
+	 * the grouping expects; flag 1 spills it whatever the bytes.
+	 */
+	TESS_GROUP_INNER = 1,
+	/* The level of the last TESS_GROUP_START is made, with its words. */
+	TESS_GROUP_MADE = 2,
+	/* A partition's chunk has no room; flag 1 when it holds one. */
+	TESS_GROUP_FULL = 3,
+	/* Records went into the partitions: the memory now. */
+	TESS_GROUP_GROWN = 4,
+	/* The partition of the last TESS_GROUP_WRITE went to disk: the memory now. */
+	TESS_GROUP_SENT = 5,
+	/* The input is read. */
+	TESS_GROUP_INPUT_END = 6,
+	/* The next partition to give out, or to write at the end of the input. */
+	TESS_GROUP_NEXT = 7,
+	/*
+	 * The partition of the last TESS_GROUP_WEIGH holds about groups groups;
+	 * the other partitions in memory take others bytes.
+	 */
+	TESS_GROUP_WEIGHED = 8,
+	/*
+	 * A partial grouping's groups take memory bytes in records groups, of
+	 * rows rows read since its table started; flag 1 when they can spill.
+	 */
+	TESS_GROUP_PARTIAL = 9
+} TessGroupEventKind;
+
+typedef struct TessGroupEvent
+{
+	uint32		kind;
+	uint32		partition;
+	uint32		flag;
+	uint32		spare;
+	uint64		bytes;
+	uint64		records;
+	double		estimate;
+	uint64		memory;
+	uint64		groups;
+	uint64		others;
+	uint64		rows;
+} TessGroupEvent;
+
+typedef enum TessGroupActionKind
+{
+	TESS_GROUP_DONE = 0,
+	/* The table spills: make the level of plan, then TESS_GROUP_MADE. */
+	TESS_GROUP_START = 1,
+	/* Give the partition of the event a new chunk. */
+	TESS_GROUP_ADD_CHUNK = 2,
+	/* Write the partition's full chunk and fill it again. */
+	TESS_GROUP_FLUSH = 3,
+	/*
+	 * Write and free every chunk partition holds in memory; then
+	 * TESS_GROUP_SENT, or at the end of the input TESS_GROUP_NEXT.
+	 */
+	TESS_GROUP_WRITE = 4,
+	/* Give partition out, its records on disk merged in; then TESS_GROUP_NEXT. */
+	TESS_GROUP_MERGE = 5,
+	/* Estimate partition's groups, then TESS_GROUP_WEIGHED. */
+	TESS_GROUP_WEIGH = 6,
+	/* Split partition into the level below, its machine by tess_group_below. */
+	TESS_GROUP_SPLIT = 7,
+	/* Every partition of the level is given out. */
+	TESS_GROUP_LEVEL_DONE = 8,
+	/* The partial grouping's table is full: its groups go up, a new one starts. */
+	TESS_GROUP_EMIT = 9,
+	/* The partial grouping's table spills instead: TESS_GROUP_INNER with flag 1. */
+	TESS_GROUP_SPILL = 10
+} TessGroupActionKind;
+
+/*
+ * A level below to make: the partition of the level above it splits, its
+ * level, the bytes it expects and the first bit of the hash it takes.
+ * spare is 0.
+ */
+typedef struct TessGroupBelow
+{
+	uint32		partition;
+	uint32		level;
+	uint64		expected;
+	uint32		shift;
+	uint32		spare;
+} TessGroupBelow;
+
+typedef struct TessGroupAction
+{
+	uint32		kind;
+	uint32		partition;
+	TessSpillPlan plan;
+	TessGroupBelow below;
+} TessGroupAction;
+
+/* Make *machine the machine of a grouping whose table fits so far. */
+extern TessStatusCode tess_group_init(TessGroupMachine *machine, const TessGroupParams *params,
+									  TessStatus *status);
+
+/*
+ * Make *machine the machine of the level below a TESS_GROUP_SPLIT asked
+ * for; its plan, a TESS_GROUP_START, into *action.
+ */
+extern TessStatusCode tess_group_below(TessGroupMachine *machine,
+									   const TessGroupParams *params,
+									   const TessGroupBelow *below,
+									   TessGroupAction *action, TessStatus *status);
+
+/* Give *machine the grouping's event and its next action into *action. */
+extern TessStatusCode tess_group_step(TessGroupMachine *machine, const TessGroupHost *host,
+									  const TessGroupEvent *event, TessGroupAction *action,
+									  TessStatus *status);
+
+/* What tess_group_layout gives the size or offset of. */
+typedef enum TessGroupLayout
+{
+	TESS_GROUP_MACHINE_SIZE = 1,
+	TESS_GROUP_PARAMS_SIZE = 2,
+	TESS_GROUP_PARAMS_SPLIT_ROOM_OFFSET = 3,
+	TESS_GROUP_HOST_SIZE = 4,
+	TESS_GROUP_HOST_NDISK_OFFSET = 5,
+	TESS_GROUP_EVENT_SIZE = 6,
+	TESS_GROUP_EVENT_ROWS_OFFSET = 7,
+	TESS_GROUP_ACTION_SIZE = 8,
+	TESS_GROUP_ACTION_BELOW_OFFSET = 9,
+	TESS_GROUP_BELOW_SIZE = 10,
+	TESS_GROUP_BELOW_SHIFT_OFFSET = 11
+} TessGroupLayout;
+
+/* The size or offset for a kind, or 0 for an unknown one. */
+extern Size tess_group_layout(TessGroupLayout what);
+
+/*
+ * The machine of a table of a grouping's rows and of the level of rows it
+ * writes once frozen (relspill's Rows): TESS_ROWS_WORDS plain words. A
+ * table's machine weighs its groups after each batch and freezes it,
+ * planning the level its rows go to; kept with that level once written,
+ * it gives the level's partitions to read.
+ */
+#define TESS_ROWS_WORDS 13
+
+typedef struct TessRowsMachine
+{
+	uint64		words[TESS_ROWS_WORDS];
+} TessRowsMachine;
+
+/*
+ * What every level of rows shares: the memory limit, the shape of a level
+ * of rows, the eighths of the limit past which a table freezes, and the
+ * groups it has at least then.
+ */
+typedef struct TessRowsParams
+{
+	uint64		limit;
+	TessSpillShape shape;
+	uint64		fill;
+	uint64		least;
+} TessRowsParams;
+
+/* The rows written of each partition of a level of rows. */
+typedef struct TessRowsHost
+{
+	const uint64 *written;
+	Size		nwritten;
+} TessRowsHost;
+
+typedef enum TessRowsEventKind
+{
+	/* After a batch, the table's groups take memory bytes in records groups. */
+	TESS_ROWS_GROWN = 1,
+	/* The rows of the level the last TESS_ROWS_FREEZE planned are written. */
+	TESS_ROWS_WRITTEN = 2,
+	/* The next partition of the level to read. */
+	TESS_ROWS_NEXT = 3
+} TessRowsEventKind;
+
+typedef struct TessRowsEvent
+{
+	uint32		kind;
+	uint32		spare;
+	uint64		memory;
+	uint64		records;
+} TessRowsEvent;
+
+/*
+ * A table of a partition of rows read back: the partition, the level a
+ * freeze of it writes, its first hash bit, and whether no level fits
+ * (1, the table never freezes) or one does (0).
+ */
+typedef struct TessRowsTable
+{
+	uint32		partition;
+	uint32		level;
+	uint32		shift;
+	uint32		last;
+} TessRowsTable;
+
+typedef enum TessRowsActionKind
+{
+	TESS_ROWS_DONE = 0,
+	/*
+	 * The table takes no new group: its rows go to the partitions of a
+	 * level of plan, numbered level, which the grouping makes.
+	 */
+	TESS_ROWS_FREEZE = 1,
+	/* Read table's partition into a table of its own, its machine by tess_rows_read. */
+	TESS_ROWS_READ = 2,
+	/* Every partition of the level with rows is read. */
+	TESS_ROWS_LEVEL_DONE = 3
+} TessRowsActionKind;
+
+typedef struct TessRowsAction
+{
+	uint32		kind;
+	uint32		level;
+	TessSpillPlan plan;
+	TessRowsTable table;
+} TessRowsAction;
+
+/* Make *machine the machine of the table of a grouping's input. */
+extern TessStatusCode tess_rows_init(TessRowsMachine *machine, const TessRowsParams *params,
+									 TessStatus *status);
+
+/* Make *machine the machine of the table of the partition a TESS_ROWS_READ gave. */
+extern TessStatusCode tess_rows_read(TessRowsMachine *machine, const TessRowsParams *params,
+									 const TessRowsTable *table, TessStatus *status);
+
+/* Give *machine the grouping's event of its rows and its next action into *action. */
+extern TessStatusCode tess_rows_step(TessRowsMachine *machine, const TessRowsHost *host,
+									 const TessRowsEvent *event, TessRowsAction *action,
+									 TessStatus *status);
+
+/* What tess_rows_layout gives the size or offset of. */
+typedef enum TessRowsLayout
+{
+	TESS_ROWS_MACHINE_SIZE = 1,
+	TESS_ROWS_PARAMS_SIZE = 2,
+	TESS_ROWS_PARAMS_LEAST_OFFSET = 3,
+	TESS_ROWS_HOST_SIZE = 4,
+	TESS_ROWS_EVENT_SIZE = 5,
+	TESS_ROWS_ACTION_SIZE = 6,
+	TESS_ROWS_ACTION_TABLE_OFFSET = 7
+} TessRowsLayout;
+
+/* The size or offset for a kind, or 0 for an unknown one. */
+extern Size tess_rows_layout(TessRowsLayout what);
+
 #endif							/* TESSERA_SPILL_H */

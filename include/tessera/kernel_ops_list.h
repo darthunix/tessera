@@ -131,6 +131,12 @@
 	X(join_init) \
 	X(join_below) \
 	X(join_given) \
-	X(join_step)
+	X(join_step) \
+	X(group_init) \
+	X(group_below) \
+	X(group_step) \
+	X(rows_init) \
+	X(rows_read) \
+	X(rows_step)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

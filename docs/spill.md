@@ -168,6 +168,26 @@ into one file for a level. The rows it sets aside for a partition that
 is on disk go as chunks of columns, each after a chunk of the values it
 refers to.
 
+**The machine.** The decisions of the groups' spill are the machine of
+the crate `relspill` (its module `group`), which the node keeps for each
+level and steps: after each batch, whether the table spills and how its
+first level is planned, and, for a partial grouping, whether its table
+goes up or spills (below); what a partition whose chunk is full does;
+which partitions go to disk past seven eighths of `hash_mem`; which
+partitions write what they hold at the end of the input; and the order
+the partitions are given out in, with whether one too large splits into
+a level below, by the groups the node estimates it holds.
+
+**The rows' machine.** A grouping by a generic aggregate, whose states
+do not merge, keeps a machine of the same module (`Rows`) for its table
+of groups. After each batch it says whether the table freezes: past
+seven eighths of `hash_mem`, with a batch of groups at least, while a
+level fits in the hash bits left. A frozen table takes no new group,
+and the rows of the groups it lacks go to a level of rows the machine
+plans. The node keeps the machine with that level, and the machine
+gives its partitions with rows to read, each into a table of its own
+with a machine that may freeze it into the level below.
+
 **States, not rows.** The core's hash aggregate stops creating groups
 once full and writes the input rows of new groups; TessAgg writes a
 partition's groups whole when memory runs short, and the partition's

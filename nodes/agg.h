@@ -153,8 +153,11 @@ typedef struct TessAggState
 	 * wait in a stack, the one being written on top.
 	 */
 	bool		frozen;
-	/* The level a spill made now writes: 0 for the input, one below a partition read. */
-	int			rows_level;
+	/*
+	 * The level of rows being written, the stack of those to read, the
+	 * machine of the table (relspill's Rows), which freezes it, and what
+	 * every level of rows shares.
+	 */
 	struct RowSpill *rows_spill;
 	List	   *rows_pending;
 	struct RowReader *reader;
@@ -278,14 +281,18 @@ typedef struct TessAggState
 	Size		record_size;
 	/* The payloads of the walk's groups, for the sum and extreme states. */
 	uint8	   *walked_payloads[AGG_GROUP_ROWS];
+	TessRowsMachine rows_machine;
+	TessRowsParams rows_params;
 	/*
-	 * The hash bits the levels above rows_level took, and whether the
-	 * partition read is of the last level the bits allow: the level plan's
-	 * below and deeper of the partition's level.
+	 * The machine of the groups' spill (relspill's group), which watches a
+	 * build from its start, and what every level of it shares.
 	 */
-	uint32		rows_shift;
-	bool		rows_last;
+	TessGroupMachine machine;
+	TessGroupParams spill_params;
 } TessAggState;
+
+/* The eighths of hash_mem past which the groups spill, the rest a batch's. */
+#define AGG_SPILL_FILL 7
 
 /* Raise the error a kernel or table call stored, if it failed. */
 #define check(state, code) tess_status_check((code), &(state)->status)
@@ -320,7 +327,9 @@ extern void agg_reserve_chunks(TessAggState *state, int nchunks);
  */
 #define ROWS_PART_BITS 5
 #define ROWS_PARTS (1 << ROWS_PART_BITS)
-extern void agg_start_spill(TessAggState *state);
+extern void agg_spill_begin(TessAggState *state);
+extern void agg_spill_check(TessAggState *state, bool force);
+extern TessGroupActionKind agg_partial_check(TessAggState *state, Size memory);
 extern void agg_make_room(TessAggState *state);
 extern void agg_find_partitioned(TessAggState *state, TessRowMask *pending,
 								 TessRowMask *inserted);
@@ -328,7 +337,10 @@ extern bool agg_advance(TessAggState *state);
 extern void agg_finish_input(TessAggState *state);
 extern Size agg_spill_memory(TessAggState *state);
 extern void agg_spill_free(TessAggState *state);
-extern struct RowSpill *rows_spill_create(TessAggState *state, int level, uint32 shift);
+extern struct RowSpill *rows_spill_create(TessAggState *state, const TessRowsAction *freeze);
+extern void rows_machine_begin(TessAggState *state);
+extern TessRowsAction rows_step(TessAggState *state, TessRowsMachine *machine,
+								const uint64 *written, int nwritten, TessRowsEvent event);
 extern void rows_write(TessAggState *state, struct RowSpill *spill,
 					   const TessRowMask *rows);
 extern void rows_spill_close(TessAggState *state);

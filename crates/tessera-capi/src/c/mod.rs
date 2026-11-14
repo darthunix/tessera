@@ -24,6 +24,7 @@ mod shared_spill;
 mod sort;
 mod source;
 mod spill;
+mod spill_group;
 mod spill_join;
 mod spill_set;
 mod status;
@@ -80,6 +81,20 @@ pub use spill::{
     tess_spill_columns_shape, tess_spill_columns_unpack, tess_spill_columns_window,
     tess_spill_expected, tess_spill_header_read, tess_spill_header_size, tess_spill_header_write,
     tess_spill_pack, tess_spill_plan, tess_spill_unpack, value_ends,
+};
+pub use spill_group::{
+    GROUP_ACTION_BELOW_OFFSET, GROUP_ACTION_SIZE, GROUP_ADD_CHUNK, GROUP_BELOW_SHIFT_OFFSET,
+    GROUP_BELOW_SIZE, GROUP_DONE, GROUP_EMIT, GROUP_EVENT_ROWS_OFFSET, GROUP_EVENT_SIZE,
+    GROUP_FLUSH, GROUP_FULL, GROUP_GROWN, GROUP_HOST_NDISK_OFFSET, GROUP_HOST_SIZE, GROUP_INNER,
+    GROUP_INPUT_END, GROUP_LEVEL_DONE, GROUP_MACHINE_SIZE, GROUP_MADE, GROUP_MERGE, GROUP_NEXT,
+    GROUP_PARAMS_SIZE, GROUP_PARAMS_SPLIT_ROOM_OFFSET, GROUP_PARTIAL, GROUP_SENT, GROUP_SPILL,
+    GROUP_SPLIT, GROUP_START, GROUP_WEIGH, GROUP_WEIGHED, GROUP_WRITE, GroupAction, GroupBelow,
+    GroupEvent, GroupHost, GroupParams, ROWS_ACTION_SIZE, ROWS_ACTION_TABLE_OFFSET, ROWS_DONE,
+    ROWS_EVENT_SIZE, ROWS_FREEZE, ROWS_GROWN, ROWS_HOST_SIZE, ROWS_LEVEL_DONE, ROWS_MACHINE_SIZE,
+    ROWS_NEXT, ROWS_PARAMS_LEAST_OFFSET, ROWS_PARAMS_SIZE, ROWS_READ, ROWS_WRITTEN, RowsAction,
+    RowsEvent, RowsHost, RowsParams, RowsTable, tess_group_below, tess_group_init,
+    tess_group_layout, tess_group_step, tess_rows_init, tess_rows_layout, tess_rows_read,
+    tess_rows_step,
 };
 pub use spill_join::{
     JOIN_ACTION_BELOW_OFFSET, JOIN_ACTION_OUTER_LEN_OFFSET, JOIN_ACTION_PLAN_OFFSET,
