@@ -178,6 +178,8 @@ tess_kernels_layout_matches(void)
 		tess_shared_build_layout(TESS_SHARED_HOST_NRESIDENT_OFFSET) ==
 		offsetof(TessSharedBuildHost, nresident) &&
 		tess_shared_build_layout(TESS_SHARED_EVENT_SIZE) == sizeof(TessSharedBuildEvent) &&
+		tess_shared_build_layout(TESS_SHARED_EVENT_BYTES_OFFSET) ==
+		offsetof(TessSharedBuildEvent, bytes) &&
 		tess_shared_build_layout(TESS_SHARED_ACTION_SIZE) == sizeof(TessSharedBuildAction) &&
 		tess_shared_build_layout((TessSharedBuildLayout) 99) == 0 &&
 	/*

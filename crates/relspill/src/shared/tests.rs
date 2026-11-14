@@ -16,8 +16,10 @@ fn params() -> Params {
         start: 1.0,
         target: 0.5,
         spilled: 1.0,
+        limit: 1000,
+        max_chunks: 4,
         per_check: 0,
-        spare: 0,
+        preserve: 0,
     }
 }
 
@@ -95,6 +97,12 @@ fn alone(shared: &Shared, resident: &[u8], phase: u32) -> Vec<Action> {
             }
             Action::ArriveAndDetach => Event::Left { last: true },
             Action::Send(_) => Event::Sent { freed: true },
+            // Each partition on disk fits a round.
+            Action::Weigh(_) => Event::Weighed {
+                bytes: 100,
+                blocks: 1,
+                index: 100,
+            },
             Action::Free | Action::Finished => break,
             _ => Event::Done,
         };
@@ -148,6 +156,8 @@ fn a_table_that_split_writes_its_partitions_on_disk_and_keeps_the_others() {
             FlushEnd,
             ArriveAndWait,
             Size,
+            // The one partition on disk, weighed for its round.
+            Weigh(1),
             ArriveAndWait,
             Link,
             ArriveAndWait,
@@ -158,6 +168,7 @@ fn a_table_that_split_writes_its_partitions_on_disk_and_keeps_the_others() {
             Free
         ]
     );
+    assert!(shared.spill().together(1).expect("a partition"));
 }
 
 #[test]
@@ -338,6 +349,145 @@ fn a_late_participant_catches_up_at_the_outer_side_and_the_probe() {
     );
 }
 
+/// A machine that probed a table split into 4, partitions 1, 2 and 3 on
+/// disk, and left it: ready to go round them.
+fn walking(shared: &Shared, params: &Params) -> Build {
+    let mut build = Build::new(params).expect("parameters");
+    let resident = [1, 0, 0, 0];
+    let host = shared.host(&resident);
+    let mut event = Event::Done;
+    let mut phase = crate::phases::PROBE;
+    loop {
+        let action = build.step(event, &host).expect("a step");
+        event = match action {
+            Action::Attach => Event::Attached { phase },
+            Action::ArriveAndDetach => Event::Left { last: false },
+            Action::Finished => return build,
+            Action::ArriveAndWait => {
+                phase += 1;
+                Event::Arrived { elected: false }
+            }
+            _ => Event::Done,
+        };
+    }
+}
+
+#[test]
+fn the_partitions_on_disk_are_joined_together_alone_or_released() {
+    let shared = Shared::new(3, 1 << 20);
+    let spill = shared.spill();
+    assert_eq!(spill.split(4), Ok(4));
+    for partition in [1, 2, 3] {
+        shared.send(partition);
+    }
+    spill.add_records(2, 5).expect("records");
+    spill.add_records(3, 1).expect("records");
+    spill.set_together(1).expect("a partition");
+    let none = shared.host(&[1, 0, 0, 0]);
+    // A join that keeps no inner row: one with no outer rows goes.
+    let mut first = walking(&shared, &params());
+    let mut steps = Vec::new();
+    let mut event = Event::Next;
+    loop {
+        let action = first.step(event, &none).expect("a step");
+        steps.push(action);
+        event = match action {
+            // Partition 3 has no outer rows.
+            Action::Visit(partition) => Event::Visited {
+                outer: partition != 3,
+            },
+            Action::Walked => break,
+            _ => Event::Next,
+        };
+    }
+    // From its start, 0: partition 1 in a round, 2 alone, 3 released.
+    assert_eq!(
+        steps,
+        [
+            Action::Visit(1),
+            Action::Round(1),
+            Action::Visit(2),
+            Action::Alone(2),
+            Action::Visit(3),
+            Action::Walked
+        ]
+    );
+    // Another, which keeps its inner rows: partition 1, with no outer
+    // rows and no records, goes; 2 another took; 3, with records, is
+    // taken with no visit of its outer files.
+    let mut second = walking(
+        &shared,
+        &Params {
+            preserve: 1,
+            ..params()
+        },
+    );
+    let mut steps = Vec::new();
+    let mut event = Event::Next;
+    loop {
+        let action = second.step(event, &none).expect("a step");
+        steps.push(action);
+        event = match action {
+            Action::Visit(_) => Event::Visited { outer: false },
+            Action::Walked => break,
+            _ => Event::Next,
+        };
+    }
+    // Its start is 1.
+    assert_eq!(steps, [Action::Visit(1), Action::Alone(3), Action::Walked]);
+    assert_eq!(wrong(second.step(Event::Next, &none)), Rule::JoinEvent);
+}
+
+#[test]
+fn the_size_marks_the_partitions_a_round_joins_together() {
+    let shared = Shared::new(3, 1 << 20);
+    let spill = shared.spill();
+    assert_eq!(spill.split(4), Ok(4));
+    for partition in [0, 1, 2, 3] {
+        shared.send(partition);
+    }
+    let mut build = Build::new(&params()).expect("parameters");
+    let host = shared.host(&[0, 0, 0, 0]);
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::Attach));
+    let attached = Event::Attached {
+        phase: crate::phases::SIZE - 1,
+    };
+    // Attached at the flush, then elected for the size.
+    assert_eq!(
+        build.step(attached, &host),
+        Ok(Action::Switch { partitions: 4 })
+    );
+    let weighed = |bytes, blocks| Event::Weighed {
+        bytes,
+        blocks,
+        index: 200,
+    };
+    let mut event = Event::Done;
+    let mut seen = Vec::new();
+    loop {
+        let action = build.step(event, &host).expect("a step");
+        event = match action {
+            Action::ArriveAndWait if seen.is_empty() => Event::Arrived { elected: true },
+            Action::ArriveAndWait => break,
+            // Partition 0 fits; 1 has too many blocks; 2 passes the limit;
+            // 3 has no blocks.
+            Action::Weigh(partition) => {
+                seen.push(partition);
+                match partition {
+                    0 => weighed(800, 4),
+                    1 => weighed(100, 5),
+                    2 => weighed(801, 1),
+                    _ => weighed(0, 0),
+                }
+            }
+            _ => Event::Done,
+        };
+    }
+    assert_eq!(seen, [0, 1, 2, 3]);
+    let together: Vec<bool> = (0..4).map(|p| spill.together(p).expect("p")).collect();
+    assert_eq!(together, [true, false, false, false]);
+}
+
 #[test]
 fn a_level_of_one_partition_is_a_level() {
     let shared = Shared::new(0, 1000);
@@ -403,7 +553,7 @@ fn the_machine_refuses_what_is_no_step() -> Result<()> {
             ..params()
         },
         Params {
-            spare: 1,
+            preserve: 2,
             ..params()
         },
     ];
@@ -462,6 +612,8 @@ fn the_machine_refuses_what_is_no_step() -> Result<()> {
             switched: 2,
             ..built
         },
+        Build { walk: 2, ..built },
+        Build { spare: 1, ..built },
         Build {
             params: Params {
                 target: f64::INFINITY,

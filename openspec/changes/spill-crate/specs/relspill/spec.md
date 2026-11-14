@@ -215,11 +215,16 @@ region SHALL be freed once, and the participants SHALL agree on one
 split.
 
 #### Scenario: Participants that attach at any phase
-- **WHEN** a loom model runs two or three participants over a build
-  that spills, each attaching at any phase
+- **WHEN** loom models run two or three participants that attach at
+  any phase of a build, of a build that spills or of a round, and two
+  that go round the partitions on disk of a table that split
 - **THEN** every key is found, every partition on disk is joined once,
   and every region is freed once
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/loom.rs::three_participants_attach_at_any_phase`;
+  `crates/relspill/src/loom.rs::participants_write_every_partition_another_sent_to_disk`;
+  `crates/relspill/src/loom.rs::three_participants_join_a_round_at_any_phase`;
+  `crates/relspill/src/loom.rs::participants_take_each_partition_alone_once_and_join_the_rounds`
 
 #### Scenario: Participants that send partitions to disk as they build
 - **WHEN** a loom model runs two participants that append to a table
@@ -253,13 +258,18 @@ split.
   is freed
 - **THEN** the machine tells it that it has no work, and the rounds of
   the others go on
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/shared/tests.rs::a_late_participant_skips_the_writes_of_a_table_that_never_split`;
+  `crates/relspill/src/loom.rs::participants_take_each_partition_alone_once_and_join_the_rounds`
 
 #### Scenario: A partition taken alone
 - **WHEN** one participant takes a whole partition on disk
 - **THEN** it joins the partition through its join machine, in pieces
   if it does not fit, and no other participant joins it
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/shared/tests.rs::the_partitions_on_disk_are_joined_together_alone_or_released`;
+  `crates/relspill/src/loom.rs::participants_take_each_partition_alone_once_and_join_the_rounds`;
+  `test/sql/join.sql::-- spec: relspill/A partition taken alone`
 
 ### Requirement: Bounds of a block by its kind
 A writer and a reader of a set SHALL take a bound for each kind of

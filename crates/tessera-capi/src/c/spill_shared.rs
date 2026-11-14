@@ -23,8 +23,10 @@ pub struct SharedBuildParams {
     pub start: f64,
     pub target: f64,
     pub spilled: f64,
+    pub limit: u64,
+    pub max_chunks: u64,
     pub per_check: u32,
-    pub spare: u32,
+    pub preserve: u32,
 }
 
 impl SharedBuildParams {
@@ -33,8 +35,10 @@ impl SharedBuildParams {
             start: self.start,
             target: self.target,
             spilled: self.spilled,
+            limit: self.limit,
+            max_chunks: self.max_chunks,
             per_check: self.per_check,
-            spare: self.spare,
+            preserve: self.preserve,
         }
     }
 }
@@ -56,8 +60,10 @@ pub struct SharedBuildHost {
 /// `value` is the phase of [`SHARED_ATTACHED`] and the partitions of
 /// [`SHARED_PLANNED`]; `flag` whether the barrier elected the participant
 /// ([`SHARED_ARRIVED`]), found it the last ([`SHARED_LEFT`]), whether a
-/// batch's count passed the budget ([`SHARED_BATCH`]) and whether a send
-/// freed bytes ([`SHARED_SENT`]).
+/// batch's count passed the budget ([`SHARED_BATCH`]), whether a send
+/// freed bytes ([`SHARED_SENT`]) and whether a partition has outer rows
+/// ([`SHARED_VISITED`]); `bytes`, `blocks` and `index` those of
+/// [`SHARED_WEIGHED`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SharedBuildEvent {
@@ -65,6 +71,9 @@ pub struct SharedBuildEvent {
     pub flag: u32,
     pub value: u32,
     pub spare: u32,
+    pub bytes: u64,
+    pub blocks: u64,
+    pub index: u64,
 }
 
 /// `TessSharedBuildEventKind`, of a [`SharedBuildEvent`].
@@ -75,11 +84,16 @@ pub const SHARED_LEFT: u32 = 4;
 pub const SHARED_BATCH: u32 = 5;
 pub const SHARED_SENT: u32 = 6;
 pub const SHARED_PLANNED: u32 = 7;
+pub const SHARED_WEIGHED: u32 = 8;
+pub const SHARED_NEXT: u32 = 9;
+pub const SHARED_VISITED: u32 = 10;
 
 /// `TessSharedBuildAction`: what a participant does next; see
 /// [`Action`]. `partition` is that of [`SHARED_WRITE`], [`SHARED_KEEP`],
-/// [`SHARED_DEMOTE`] and [`SHARED_SEND`], and the partitions of
-/// [`SHARED_SWITCH`]; `flag` whether the table split ([`SHARED_PROBE`]).
+/// [`SHARED_DEMOTE`], [`SHARED_SEND`], [`SHARED_WEIGH`],
+/// [`SHARED_VISIT`], [`SHARED_ROUND`] and [`SHARED_ALONE`], and the
+/// partitions of [`SHARED_SWITCH`]; `flag` whether the table split
+/// ([`SHARED_PROBE`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SharedBuildAction {
@@ -109,6 +123,11 @@ pub const SHARED_FINISHED: u32 = 15;
 pub const SHARED_DEMOTE: u32 = 16;
 pub const SHARED_SEND: u32 = 17;
 pub const SHARED_SWITCH: u32 = 18;
+pub const SHARED_WEIGH: u32 = 19;
+pub const SHARED_VISIT: u32 = 20;
+pub const SHARED_ROUND: u32 = 21;
+pub const SHARED_ALONE: u32 = 22;
+pub const SHARED_WALKED: u32 = 23;
 
 impl SharedBuildEvent {
     fn event(&self) -> Result<Event> {
@@ -132,6 +151,13 @@ impl SharedBuildEvent {
             SHARED_PLANNED => Event::Planned {
                 partitions: self.value,
             },
+            SHARED_WEIGHED => Event::Weighed {
+                bytes: self.bytes,
+                blocks: self.blocks,
+                index: self.index,
+            },
+            SHARED_NEXT => Event::Next,
+            SHARED_VISITED => Event::Visited { outer: flag },
             kind => bail!("a shared build event of kind {kind}"),
         })
     }
@@ -159,6 +185,11 @@ impl SharedBuildAction {
             Action::Finished => (SHARED_FINISHED, 0, false),
             Action::Demote(partition) => (SHARED_DEMOTE, partition, false),
             Action::Send(partition) => (SHARED_SEND, partition, false),
+            Action::Weigh(partition) => (SHARED_WEIGH, partition, false),
+            Action::Visit(partition) => (SHARED_VISIT, partition, false),
+            Action::Round(partition) => (SHARED_ROUND, partition, false),
+            Action::Alone(partition) => (SHARED_ALONE, partition, false),
+            Action::Walked => (SHARED_WALKED, 0, false),
         };
         Self {
             kind,
@@ -293,6 +324,7 @@ pub const SHARED_HOST_SIZE: c_int = 4;
 pub const SHARED_HOST_NRESIDENT_OFFSET: c_int = 5;
 pub const SHARED_EVENT_SIZE: c_int = 6;
 pub const SHARED_ACTION_SIZE: c_int = 7;
+pub const SHARED_EVENT_BYTES_OFFSET: c_int = 8;
 
 /// `tess_shared_build_layout`: the size or offset of a
 /// `TessSharedBuildLayout` for the C side's mirrors to check; 0 for
@@ -307,6 +339,7 @@ pub extern "C" fn tess_shared_build_layout(what: c_int) -> usize {
         SHARED_HOST_NRESIDENT_OFFSET => offset_of!(SharedBuildHost, nresident),
         SHARED_EVENT_SIZE => size_of::<SharedBuildEvent>(),
         SHARED_ACTION_SIZE => size_of::<SharedBuildAction>(),
+        SHARED_EVENT_BYTES_OFFSET => offset_of!(SharedBuildEvent, bytes),
         _ => 0,
     }
 }

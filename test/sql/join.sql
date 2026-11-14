@@ -1105,6 +1105,7 @@ SELECT join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON js
        join_property($$SELECT count(*), sum(jsskew.w) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$, 'Spilled Chunks')::int > 0 AS spilled;
 SELECT join_same($$SELECT count(*), sum(jsskew.w), sum(jsp.k) FROM jsp JOIN jsskew ON jsp.k = jsskew.k$$);
 SELECT join_same($$SELECT jsp.s, jsskew.w FROM jsp JOIN jsskew ON jsp.k = jsskew.k WHERE jsp.s LIKE '%07'$$);
+-- spec: relspill/A partition taken alone
 -- One key held by 2000 inner rows of 1 kB of text, among 2000 rows of
 -- other keys: its partition has few records but some 2 MB of values,
 -- past the room of a participant. The one that takes it alone splits

@@ -709,8 +709,10 @@ fn spill_participant(
         start: 1.0,
         target: 1.0,
         spilled: 0.0,
+        limit: 1000,
+        max_chunks: 4,
         per_check: 1,
-        spare: 0,
+        preserve: 0,
     };
     let partitions = spill.partitions() as usize;
     let mut machine = Machine::new(&params).unwrap();
@@ -772,6 +774,16 @@ fn spill_participant(
                 switched = true;
             }
             Step::Split => panic!("a table split from the start split again"),
+            Step::Weigh(_) => {
+                event = Event::Weighed {
+                    bytes: 1,
+                    blocks: 1,
+                    index: 1,
+                }
+            }
+            Step::Visit(_) | Step::Round(_) | Step::Alone(_) | Step::Walked => {
+                panic!("{action:?} in the build")
+            }
             Step::Outer => assert!(switched, "the outer side before its level"),
             Step::Demote(partition) => {
                 write(&mut resident, &mut held, partition);
@@ -862,8 +874,10 @@ fn splitting_participant(
         start: 1.0,
         target: 1.0,
         spilled: 0.0,
+        limit: 1000,
+        max_chunks: 4,
         per_check: 1,
-        spare: 0,
+        preserve: 0,
     };
     let mut machine = Machine::new(&params).unwrap();
     let start = machine.next(Event::Done, counters, spill, &[]).unwrap();
@@ -926,5 +940,121 @@ fn participants_past_the_budget_split_once_their_filter_is_published() {
             levels.iter().all(|&level| level == partitions),
             "{levels:?} of {partitions}"
         );
+    });
+}
+
+/// A participant that probes a table split into 4, partitions 1, 2 and 3
+/// on disk, leaves it, and goes round the partitions as its machine says:
+/// the partitions it joins in a round and those it takes alone.
+fn walking_participant(
+    spill: &LoomSpill,
+    counters: &Counters<LoomCounterWords>,
+    barrier: &LoomBarrier,
+) -> (Vec<u32>, Vec<u32>) {
+    use crate::shared::{Action as Step, Build as Machine, Event, Params};
+
+    let params = Params {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        limit: 1000,
+        max_chunks: 4,
+        per_check: 1,
+        preserve: 0,
+    };
+    let resident = [1_u8, 0, 0, 0];
+    let mut machine = Machine::new(&params).unwrap();
+    let (mut rounds, mut alone) = (Vec::new(), Vec::new());
+    let mut probed = false;
+    let mut event = Event::Done;
+    loop {
+        event = match machine.next(event, counters, spill, &resident).unwrap() {
+            Step::Attach => Event::Attached {
+                phase: barrier.attach(),
+            },
+            Step::ArriveAndDetach => Event::Left {
+                last: barrier.detach(true),
+            },
+            // Left the table: round the partitions on disk; one that came
+            // after the last left has no work.
+            Step::Free | Step::Finished if probed => Event::Next,
+            Step::Free | Step::Finished => return (rounds, alone),
+            Step::Detach => {
+                barrier.detach(false);
+                Event::Done
+            }
+            Step::Visit(_) => Event::Visited { outer: true },
+            Step::Round(partition) => {
+                rounds.push(partition);
+                Event::Next
+            }
+            Step::Alone(partition) => {
+                alone.push(partition);
+                Event::Next
+            }
+            Step::Walked => return (rounds, alone),
+            Step::Probe { .. } => {
+                probed = true;
+                Event::Done
+            }
+            Step::Switch { .. } | Step::Demote(_) => Event::Done,
+            step => panic!("{step:?} at the probe"),
+        };
+    }
+}
+
+/// Two participants probe a split table and go round its partitions on
+/// disk from starts of their own: in every order of their steps, each
+/// that probed joins the round of partition 1, and partitions 2 and 3 are
+/// each taken alone by one of them exactly.
+#[test]
+fn participants_take_each_partition_alone_once_and_join_the_rounds() {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.max_branches = 100_000;
+    model.check(|| {
+        let spill = Arc::new(loom_spill(4, 1000));
+        spill.split(4).unwrap();
+        for partition in [1, 2, 3] {
+            spill.add_bytes(1, Some(partition)).unwrap();
+            let any = Weights {
+                start: 0.0,
+                target: 0.0,
+                spilled: 1.0,
+                reserve: 0,
+                resident: 0.0,
+                per_check: 0,
+            };
+            assert_eq!(
+                spill.evict(&any, Memory::Counted, None, 0).unwrap(),
+                Some(partition)
+            );
+            spill.add_bytes(-1, Some(partition)).unwrap();
+        }
+        spill.set_together(1).unwrap();
+        let counters = Arc::new(Counters::over(LoomCounterWords(core::array::from_fn(
+            |_| AtomicU64::new(0),
+        ))));
+        let barrier = Arc::new(LoomBarrier::new(None));
+        barrier.state.lock().unwrap().phase = phases::PROBE;
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let (spill, counters, barrier) = (spill.clone(), counters.clone(), barrier.clone());
+                thread::spawn(move || walking_participant(&spill, &counters, &barrier))
+            })
+            .collect();
+        let walked: Vec<(Vec<u32>, Vec<u32>)> =
+            threads.into_iter().map(|t| t.join().unwrap()).collect();
+        // Each that probed joins the round; one that came after the last
+        // left the table joins nothing.
+        for (rounds, alone) in &walked {
+            assert!(
+                rounds == &[1] || rounds.is_empty() && alone.is_empty(),
+                "{walked:?}"
+            );
+        }
+        let mut alone: Vec<u32> = walked.iter().flat_map(|(_, alone)| alone.clone()).collect();
+        alone.sort_unstable();
+        assert_eq!(alone, [2, 3], "each alone once: {walked:?}");
     });
 }

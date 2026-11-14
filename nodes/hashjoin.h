@@ -266,8 +266,7 @@ typedef struct JoinShared
 typedef struct JoinRound
 {
 	Barrier		barrier;
-	/* Set by SIZE: whether the participants load it together, its records, chunks and value chunks. */
-	bool		together;
+	/* Set by SIZE: its records, chunks and value chunks. */
 	uint64		records;
 	int			nchunks;
 	int			nvalues;
@@ -486,13 +485,10 @@ typedef struct JoinSpill
 	bool		resident_done;
 	SpillSide  *rows;
 	/*
-	 * A shared table's partitions on disk, visited from start on, spread
-	 * over the participants: the visited count; a round's chunks as this
-	 * participant links them (an empty chunk for the others'), and the
-	 * bases of its value chunks.
+	 * A shared table's round: its chunks as this participant links them
+	 * (an empty chunk for the others'), and the bases of its value
+	 * chunks.
 	 */
-	int			start;
-	int			visited;
 	void	  **round_bases;
 	Size	   *round_lens;
 	char	  **round_values;
