@@ -30,7 +30,7 @@ pub(super) type Pairs = Vec<(u32, u32)>;
 /// The inner id of an outer row given out without one.
 pub(super) const NONE: u32 = u32::MAX;
 
-/// The kinds of a join as the outer rows go out.
+/// The kinds of a join as its rows go out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Kind {
     /// Every pair.
@@ -41,17 +41,31 @@ pub(super) enum Kind {
     Anti,
     /// Every pair, and an outer row without one.
     Left,
+    /// Every pair, and an inner row without one.
+    Right,
+    /// Every pair, and a row of either side without one.
+    Full,
 }
 
 impl Kind {
     /// Whether the outer rows without a pair go out.
     pub(super) fn unmatched(self) -> bool {
-        matches!(self, Kind::Anti | Kind::Left)
+        matches!(self, Kind::Anti | Kind::Left | Kind::Full)
+    }
+
+    /// Whether the inner rows without a pair go out.
+    pub(super) fn preserved(self) -> bool {
+        matches!(self, Kind::Right | Kind::Full)
+    }
+
+    /// Whether the pairs go out.
+    fn pairs(self) -> bool {
+        matches!(self, Kind::Inner | Kind::Left | Kind::Right | Kind::Full)
     }
 }
 
 /// What a model ran, by [`Ran`]'s indexes.
-pub(super) type Counts = [usize; 12];
+pub(super) type Counts = [usize; 13];
 
 /// The indexes of [`Counts`].
 pub(super) struct Ran;
@@ -71,21 +85,42 @@ impl Ran {
     /// Partitions read in pieces, and the pieces.
     pub(super) const PIECED: usize = 10;
     pub(super) const PIECES: usize = 11;
+    /// Tails given out.
+    pub(super) const TAILS: usize = 12;
 }
 
-/// What a join in memory of `kind` gives.
-pub(super) fn joined(kind: Kind, inner: &[Row], outer: &[Row], out: &mut Pairs) {
+/// What a join in memory of `kind` gives, its inner rows without a pair
+/// aside.
+fn probed(kind: Kind, inner: &[Row], outer: &[Row], out: &mut Pairs) {
     for o in outer {
         let mut matched = false;
         for i in inner.iter().filter(|i| i.key == o.key) {
             matched = true;
-            if matches!(kind, Kind::Inner | Kind::Left) {
+            if kind.pairs() {
                 out.push((i.id, o.id));
             }
         }
         if (kind == Kind::Semi && matched) || (kind.unmatched() && !matched) {
             out.push((NONE, o.id));
         }
+    }
+}
+
+/// The inner rows of `table` that no row of `outer` pairs with, as a
+/// join gives them out: its tail.
+fn tail(table: &[Row], outer: &[Row], out: &mut Pairs) {
+    for i in table {
+        if !outer.iter().any(|o| o.key == i.key) {
+            out.push((i.id, NONE));
+        }
+    }
+}
+
+/// What a join in memory of `kind` gives.
+pub(super) fn joined(kind: Kind, inner: &[Row], outer: &[Row], out: &mut Pairs) {
+    probed(kind, inner, outer, out);
+    if kind.preserved() {
+        tail(inner, outer, out);
     }
 }
 
@@ -453,9 +488,11 @@ impl Model {
     }
 
     /// Outer rows through the top level's routes: probing the table in
-    /// memory, written, or with no pair.
+    /// memory, written, or with no pair. Then the table of the partitions
+    /// in memory ends.
     fn probe(&mut self, rows: &[Row]) -> Result<()> {
         let kind = self.kind;
+        let mut probing = Vec::new();
         for &row in rows {
             let level = self.top();
             let partition = level.partition(row.key);
@@ -465,9 +502,40 @@ impl Model {
             if route == Route::Write as u8 {
                 self.append(Side::Outer, row)?;
             } else {
-                joined(kind, &table, &[row], &mut self.pairs);
+                probed(kind, &table, &[row], &mut self.pairs);
+                probing.push(row);
             }
         }
+        let level = self.top();
+        let table: Vec<Row> = (0..level.on_disk.len())
+            .filter(|&partition| !level.on_disk[partition])
+            .flat_map(|partition| level.inner.chunks[partition].concat())
+            .collect();
+        self.end_table(&table, &probing)
+    }
+
+    /// The table in memory ends, `outer` rows having probed it: output
+    /// held first, then, for a join that gives out its inner rows without
+    /// a pair, the table's tail, once.
+    fn end_table(&mut self, table: &[Row], outer: &[Row]) -> Result<()> {
+        assert_eq!(
+            self.top().step(Event::TableEnd { held: true })?,
+            Action::Hold
+        );
+        let mut tails = 0;
+        loop {
+            match self.top().step(Event::TableEnd { held: false })? {
+                Action::Done => break,
+                Action::Tail => {
+                    tail(table, outer, &mut self.pairs);
+                    tails += 1;
+                    assert_eq!(self.top().step(Event::TailEnd)?, Action::Done);
+                }
+                action => panic!("{action:?} at the end of a table"),
+            }
+        }
+        assert!(tails <= 1, "{tails} tails of a table");
+        self.ran[Ran::TAILS] += tails;
         Ok(())
     }
 
@@ -478,7 +546,7 @@ impl Model {
             let mut matched = false;
             for i in table.iter().filter(|i| i.key == o.key) {
                 matched = true;
-                if matches!(self.kind, Kind::Inner | Kind::Left) {
+                if self.kind.pairs() {
                     self.pairs.push((i.id, o.id));
                 }
             }
@@ -533,6 +601,7 @@ impl Model {
             let table = rows_of(&piece);
             loaded.extend_from_slice(&table);
             self.pass(&table, outer, &mut marks);
+            self.end_table(&table, outer)?;
             match self.top().step(Event::PassEnd)? {
                 Action::NextPiece => continue,
                 Action::FinalPass => {
@@ -546,6 +615,7 @@ impl Model {
                             self.pairs.push((NONE, o.id));
                         }
                     }
+                    self.end_table(&[], outer)?;
                     assert_eq!(self.top().step(Event::PassEnd)?, Action::Done);
                     break;
                 }
@@ -594,6 +664,8 @@ impl Model {
 
     /// Join the partitions on disk of the top level as its machine says.
     fn join(&mut self) -> Result<()> {
+        // The table of the partitions in memory ended before them.
+        self.end_table(&[], &[])?;
         loop {
             let memory = self.memory();
             let action = self.top().step(Event::Next { memory })?;
@@ -617,8 +689,9 @@ impl Model {
                     self.ran[Ran::RELEASED] += 1;
                 }
                 Action::Open { pieces: false, .. } => {
-                    joined(self.kind, &inner, &outer, &mut self.pairs);
+                    probed(self.kind, &inner, &outer, &mut self.pairs);
                     self.ran[Ran::OPENED] += 1;
+                    self.end_table(&inner, &outer)?;
                 }
                 Action::Open { pieces: true, .. } => {
                     self.ran[Ran::OPENED] += 1;
@@ -639,6 +712,8 @@ impl Model {
                     self.end_outer()?;
                     self.join()?;
                     let level = self.levels.pop().expect("the level below");
+                    // The partition the level below joined has no table here.
+                    self.end_table(&[], &[])?;
                     assert!(
                         level
                             .inner
@@ -666,6 +741,7 @@ impl Model {
         batch: usize,
     ) -> Result<(Pairs, Counts)> {
         assert_eq!(params.unmatched_outer != 0, kind.unmatched());
+        assert_eq!(params.preserve_inner != 0, kind.preserved());
         let mut model = Self {
             params: *params,
             record: params.shape.record as u64,
@@ -674,7 +750,7 @@ impl Model {
             table: Vec::new(),
             levels: Vec::new(),
             pairs: Vec::new(),
-            ran: [0; 12],
+            ran: [0; 13],
         };
         let mut join = Some(Join::new(params)?);
         for rows in inner.chunks(batch) {

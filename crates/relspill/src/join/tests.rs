@@ -312,6 +312,13 @@ fn the_build_ends_with_where_the_outer_rows_go() {
         join.step(outer(true), &mut regions.host()),
         Ok(Action::Flush)
     );
+    // The outer rows end after the table they probed.
+    assert_eq!(
+        wrong(join.step(Event::OuterEnd, &mut regions.host())),
+        Rule::JoinEvent
+    );
+    let end = Event::TableEnd { held: false };
+    assert_eq!(join.step(end, &mut regions.host()), Ok(Action::Done));
     assert_eq!(
         join.step(Event::OuterEnd, &mut regions.host()),
         Ok(Action::Done)
@@ -420,6 +427,13 @@ fn a_shared_level_takes_the_partitions_given() {
             pieces: false
         })
     );
+    // No partition comes before the last one's table ends.
+    assert_eq!(
+        wrong(join.step(take(7), &mut regions.host())),
+        Rule::JoinEvent
+    );
+    let end = Event::TableEnd { held: false };
+    assert_eq!(join.step(end, &mut regions.host()), Ok(Action::Done));
     assert_eq!(
         wrong(join.step(take(16), &mut regions.host())),
         Rule::Partition
@@ -651,10 +665,19 @@ fn joining(params: &Params) -> (Join, Regions) {
         join.step(Event::BuildEnd, &mut regions.host()),
         Ok(Action::Done)
     );
-    assert_eq!(
-        join.step(Event::OuterEnd, &mut regions.host()),
-        Ok(Action::Done)
-    );
+    // The table in memory ends, after its tail when the join keeps its
+    // inner rows.
+    let end = Event::TableEnd { held: false };
+    if params.preserve_inner != 0 {
+        assert_eq!(join.step(end, &mut regions.host()), Ok(Action::Tail));
+        assert_eq!(
+            join.step(Event::TailEnd, &mut regions.host()),
+            Ok(Action::Done)
+        );
+    }
+    for event in [end, Event::OuterEnd] {
+        assert_eq!(join.step(event, &mut regions.host()), Ok(Action::Done));
+    }
     (join, regions)
 }
 
@@ -691,7 +714,11 @@ fn joining_below(params: &Params, below: &Below) -> (Join, Regions) {
         };
         assert_eq!(join.step(sent, &mut regions.host()), Ok(Action::Done));
     }
-    for event in [Event::BuildEnd, Event::OuterEnd] {
+    for event in [
+        Event::BuildEnd,
+        Event::TableEnd { held: false },
+        Event::OuterEnd,
+    ] {
         assert_eq!(join.step(event, &mut regions.host()), Ok(Action::Done));
     }
     (join, regions)
@@ -864,12 +891,25 @@ fn a_partition_too_large_to_split_is_joined_in_pieces() {
     // at the next block of records.
     assert_eq!(step(records(1)), Ok(Action::Load));
     assert_eq!(step(records(1000)), Ok(Action::Carry));
+    // The piece's table goes after its tail, the join's inner rows kept.
+    let end = Event::TableEnd { held: false };
+    assert_eq!(
+        step(Event::PassEnd),
+        Err(Error::wrong_call(Rule::JoinEvent).with(PASS).and(13))
+    );
+    assert_eq!(step(Event::TableEnd { held: true }), Ok(Action::Hold));
+    assert_eq!(step(end), Ok(Action::Tail));
+    assert_eq!(step(Event::TailEnd), Ok(Action::Done));
+    assert_eq!(step(end), Ok(Action::Done));
     assert_eq!(step(Event::PassEnd), Ok(Action::NextPiece));
     // More memory in use leaves a smaller room.
     let memory = 2 * room / 3;
     assert_eq!(step(Event::Piece { memory }), Ok(Action::Done));
     assert_eq!(step(records(1000)), Ok(Action::Load));
     assert_eq!(step(Event::FileEnd), Ok(Action::Done));
+    assert_eq!(step(end), Ok(Action::Tail));
+    assert_eq!(step(Event::TailEnd), Ok(Action::Done));
+    assert_eq!(step(end), Ok(Action::Done));
     // The file is done, and no outer row goes out without a pair.
     assert_eq!(step(Event::PassEnd), Ok(Action::Done));
     // Partition 2: no inner row to give out; 3 whole.
@@ -914,6 +954,8 @@ fn a_piece_ends_where_a_group_of_values_starts() {
     // Records after records are the rest of the group.
     assert_eq!(step(block(false, 100)), Ok(Action::Load));
     assert_eq!(step(block(true, 100)), Ok(Action::Carry));
+    let end = Event::TableEnd { held: false };
+    assert_eq!(step(end), Ok(Action::Done));
     assert_eq!(step(Event::PassEnd), Ok(Action::NextPiece));
     assert_eq!(step(Event::Piece { memory: 1 << 20 }), Ok(Action::Done));
     assert_eq!(step(block(true, 100)), Ok(Action::Load));
@@ -921,7 +963,10 @@ fn a_piece_ends_where_a_group_of_values_starts() {
     assert_eq!(step(block(true, 100)), Ok(Action::Load));
     assert_eq!(step(block(false, 100)), Ok(Action::Load));
     assert_eq!(step(Event::FileEnd), Ok(Action::Done));
+    assert_eq!(step(end), Ok(Action::Done));
     assert_eq!(step(Event::PassEnd), Ok(Action::FinalPass));
+    // The last pass has no table: its end gives no tail.
+    assert_eq!(step(end), Ok(Action::Done));
     assert_eq!(step(Event::PassEnd), Ok(Action::Done));
     // Partitions 2 and 3: no outer row.
     assert_eq!(step(next), Ok(Action::Release(2)));
@@ -983,6 +1028,7 @@ fn ran_as(
 ) -> Result<Counts> {
     let params = Params {
         unmatched_outer: u32::from(kind.unmatched()),
+        preserve_inner: u32::from(kind.preserved()),
         ..*params
     };
     let (inner, outer) = (rows(inner), rows(outer));
@@ -1000,11 +1046,13 @@ fn ran(params: &Params, inner: &[u32], outer: &[u32], batch: usize) -> Result<Co
     ran_as(params, JoinKind::Inner, false, inner, outer, batch)
 }
 
-const KINDS: [JoinKind; 4] = [
+const KINDS: [JoinKind; 6] = [
     JoinKind::Inner,
     JoinKind::Semi,
     JoinKind::Anti,
     JoinKind::Left,
+    JoinKind::Right,
+    JoinKind::Full,
 ];
 
 #[test]
@@ -1016,7 +1064,7 @@ fn a_join_through_the_machine_gives_the_pairs_of_one_in_memory() {
         1_usize..64,
         (0.5_f64..=1.0, 0.5_f64..=1.0, 0.0_f64..=1.0, 0.0_f64..0.5),
         (0.0_f64..2.0, 0.0_f64..=1.0),
-        (0_usize..4, any::<bool>()),
+        (0_usize..6, any::<bool>()),
     );
     property(
         strategy,
@@ -1087,7 +1135,8 @@ fn a_join_that_spills_runs_every_path() -> Result<()> {
 fn one_key_too_large_is_joined_in_pieces() -> Result<()> {
     // One key no level below splits, with values or not: in pieces, the
     // outer rows read once a piece and, for the rows without a pair, once
-    // more; each join kind gives what it gives in memory.
+    // more, and the inner rows without a pair given out after each piece;
+    // each join kind gives what it gives in memory.
     let one = vec![7; 3000];
     let outer = [7, 7, 8, 9, 7];
     for kind in KINDS {
@@ -1095,6 +1144,10 @@ fn one_key_too_large_is_joined_in_pieces() -> Result<()> {
             let ran = ran_as(&params(16 * 1024), kind, values, &one, &outer, 50)?;
             assert!(ran[Ran::SPLIT] == 0 && ran[Ran::PIECED] > 0, "{ran:?}");
             assert!(ran[Ran::PIECES] > 2, "{ran:?}");
+            // A tail for each piece and for the table in memory.
+            if kind.preserved() {
+                assert!(ran[Ran::TAILS] > ran[Ran::PIECES], "{ran:?}");
+            }
         }
     }
     Ok(())

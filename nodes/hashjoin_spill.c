@@ -2536,6 +2536,37 @@ tail_first(TessHashJoinState *state)
 }
 
 /*
+ * The outer rows of the table in memory are read: whether it may go now,
+ * as the level's machine says. False while output the node holds refers to
+ * it, or, for RIGHT and FULL, until its records without a pair went out:
+ * the caller gives them out, and reports their end (join_spill_tail_end).
+ */
+static bool
+table_end(TessHashJoinState *state)
+{
+	TessJoinAction action;
+
+	action = spill_step(state, state->spill, (TessJoinEvent) {
+		.kind = TESS_JOIN_TABLE_END,
+		.flag = state->holding,
+	});
+	if (action.kind == TESS_JOIN_TAIL)
+	{
+		state->tail.request = true;
+		state->tail.machine = true;
+	}
+	return action.kind == TESS_JOIN_DONE;
+}
+
+/* The tail a level's machine asked for went out. */
+void
+join_spill_tail_end(TessHashJoinState *state)
+{
+	state->tail.machine = false;
+	(void) spill_step(state, state->spill, (TessJoinEvent) {.kind = TESS_JOIN_TAIL_END});
+}
+
+/*
  * The next outer batch: the outer child's, while it has one, then those
  * of the partitions on disk, each joined in turn. The rows to answer are
  * the batch's selected ones, until the table sends some to disk.
@@ -2590,9 +2621,9 @@ join_outer_next(TessHashJoinState *state)
 				state->active_bits[0] = spill->parent->bits[0];
 				return batch;
 			}
-			/* The resident table goes: not while a compact batch holds its pairs. */
+			/* The resident table goes as its machine says, when nothing waits on it. */
 			spill->child_done = true;
-			if (state->holding || tail_first(state))
+			if (!table_end(state))
 				return NULL;
 			start_joining(state);
 		}
@@ -2617,8 +2648,12 @@ join_outer_next(TessHashJoinState *state)
 		if (state->parallel.round_partition >= 0 && !state->round_departed &&
 			join_round_next_outer(state))
 			continue;
-		/* RIGHT and FULL: the table's records without a pair before it goes. */
-		if (state->holding || tail_first(state))
+		/*
+		 * The table goes when nothing waits on it: a round's as its shared
+		 * build says, the others as their level's machine says.
+		 */
+		if (state->parallel.round_partition >= 0 ?
+			state->holding || tail_first(state) : !table_end(state))
 			return NULL;
 		if (spill->partition >= 0 && spill->partition < spill->npartitions &&
 			join_next_pass(state))

@@ -27,7 +27,10 @@ rows end, the node asks it for the partitions on disk one at a time, and
 it answers which to release, which to join whole or in pieces, and
 which to split into a level below, with that level's limit. A partition
 in pieces is read block by block, and the machine says where a piece
-ends and which passes over the outer rows follow. A shared table's level has
+ends and which passes over the outer rows follow. Before a table in
+memory goes, the node reports it, and the machine holds it while output
+that refers to it waits, and has a RIGHT or FULL join give out the
+table's inner rows without a pair first. A shared table's level has
 a machine too, which decides whether a partition one participant takes
 alone splits. The node does the work for each row and the reading and
 writing.

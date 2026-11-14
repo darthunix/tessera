@@ -282,7 +282,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       rows. Check: the property test; the cases of pieces, of skew and
       of a partition without values (2.16); `make installcheck`;
       `cargo ab measure` of a join read in pieces
-- [ ] 3.16 Add the tails of RIGHT and FULL joins and the output held
+- [x] 3.16 Add the tails of RIGHT and FULL joins and the output held
       across calls; the decisions of C go. Check: the property test;
       the cases of tails and of early stops; `make installcheck`;
       `make crosscheck`

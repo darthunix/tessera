@@ -638,6 +638,8 @@ typedef struct JoinTail
 	 */
 	bool		table_done;
 	bool		request;
+	/* The request is the spill machine's, which hears of the tail's end. */
+	bool		machine;
 	/* Where the walk stands: the kernels' cursor (tess_table_next_unmarked). */
 	uint64		cursor;
 	uint32		refs[JOIN_COMPACT_ROWS];
@@ -1080,6 +1082,7 @@ extern bool join_spill_key_hashes(TessBatch *batch, int key, TessDatumColumn *re
 extern void join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values,
 							 const Size *lens, int nvalues);
 extern bool join_tail_turn(TessHashJoinState *state);
+extern void join_spill_tail_end(TessHashJoinState *state);
 
 /* The shared build and rounds of a parallel join (hashjoin_shared.c). */
 extern void join_build_shared(TessHashJoinState *state);
