@@ -233,8 +233,28 @@ SELECT index_same($$SELECT count(*), sum(k) FROM index_i WHERE k < (SELECT 6000)
 RESET tessera.index_min_rows;
 -- Nothing found.
 SELECT index_same($$SELECT count(*), max(k) FROM index_i WHERE k < 0$$);
-RESET enable_bitmapscan;
 DROP TABLE index_i;
+-- Rows an index gives in other forms: a GiST index's as heap tuples, a
+-- btree's over name as C strings, which the scan copies back to the type's
+-- 64 bytes, each in memory of its row.
+CREATE TABLE index_g AS
+SELECT g AS id, point(g % 100, g / 100) AS p, ('n' || (g % 500))::name AS n
+FROM generate_series(1, 20000) AS g;
+CREATE INDEX index_g_p ON index_g USING gist (p);
+CREATE INDEX index_g_n ON index_g (n);
+VACUUM ANALYZE index_g;
+-- The planner guesses the box's rows few.
+SET tessera.index_min_rows = 0;
+EXPLAIN (COSTS OFF) SELECT p FROM index_g WHERE p <@ box '((10,10),(60,150))';
+SELECT index_same($$SELECT p FROM index_g WHERE p <@ box '((10,10),(60,150))'$$);
+RESET tessera.index_min_rows;
+EXPLAIN (COSTS OFF) SELECT n FROM index_g WHERE n > 'n4';
+SELECT index_same($$SELECT n FROM index_g WHERE n > 'n4'$$);
+SELECT index_same($$SELECT count(*), max(n) FROM index_g WHERE n > 'n4'$$);
+-- Each name whole, its 64 bytes: text and comparisons stop at its end.
+SELECT bool_and(record_image_eq(ROW(n), ROW(n::text::name))), count(*) FROM index_g WHERE n > 'n4';
+DROP TABLE index_g;
+RESET enable_bitmapscan;
 
 -- BRIN: its bitmap names whole ranges of pages (lossy), every row of which
 -- the filter rechecks in batches, dates too. minmax, minmax-multi and bloom
@@ -353,6 +373,15 @@ SET parallel_leader_participation = off;
 SELECT index_same($$SELECT count(*), sum(k) FROM index_r WHERE k < 9000$$);
 SELECT index_same($$SELECT count(*), sum(w) FROM index_r WHERE id < 3000$$);
 RESET parallel_leader_participation;
+-- The participants read the table's pages the visibility map does not
+-- show all visible: rows updated after the vacuum, and their new places.
+CREATE TABLE index_v WITH (autovacuum_enabled = off) AS SELECT * FROM index_r;
+CREATE INDEX index_v_k ON index_v (k);
+VACUUM ANALYZE index_v;
+UPDATE index_v SET w = w + 1 WHERE id % 5000 = 0;
+EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM index_v WHERE k < 9000;
+SELECT index_same($$SELECT count(*), sum(k) FROM index_v WHERE k < 9000$$);
+DROP TABLE index_v;
 SET enable_material = off;
 EXPLAIN (COSTS OFF)
 SELECT x, n FROM (SELECT count(*) AS n FROM index_r WHERE k < 9000) AS ss RIGHT JOIN (VALUES (1), (2)) AS v(x) ON true;
