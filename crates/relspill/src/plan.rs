@@ -66,13 +66,16 @@ pub struct Shape {
     /// The partitions to start from and the most, powers of two, the
     /// first no larger; the same for a node of a fixed count.
     pub min_partitions: u32,
+    /// The most partitions; see `min_partitions`.
     pub max_partitions: u32,
     /// The chunks: the limit shared among `share` times the partitions, no
     /// longer than `max_chunk`, and no shorter than `min_chunk` nor than a
     /// chunk's header, [`relhash::CHUNK_HEADER`], and [`LEAST_RECORDS`]
     /// records of `record` bytes, which win over `max_chunk`.
     pub share: usize,
+    /// The shortest chunk; see `share`.
     pub min_chunk: usize,
+    /// The longest chunk; see `share`.
     pub max_chunk: usize,
     /// The bytes of a record of the level's chunks; 0 for chunks that hold
     /// no records.

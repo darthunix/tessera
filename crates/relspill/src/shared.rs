@@ -115,30 +115,58 @@ pub enum Event {
     /// The host starts the participant, or the action given is done.
     Done,
     /// The barrier's attach returned `phase`.
-    Attached { phase: u32 },
+    Attached {
+        /// The phase the barrier is in.
+        phase: u32,
+    },
     /// The barrier's arrive-and-wait returned; `elected` when it chose this
     /// participant.
-    Arrived { elected: bool },
+    Arrived {
+        /// Whether the barrier chose this participant.
+        elected: bool,
+    },
     /// The barrier's arrive-and-detach returned; `last` when this
     /// participant was the last attached.
-    Left { last: bool },
+    Left {
+        /// Whether this participant was the last attached.
+        last: bool,
+    },
     /// A batch of this participant's build went in; `over` when its count
     /// of the table's chunks passed their budget.
-    Batch { over: bool },
+    Batch {
+        /// Whether the count of the table's chunks passed their budget.
+        over: bool,
+    },
     /// The level of the last [`Action::Split`] is planned, of `partitions`,
     /// and what every participant reads once it sees the split is
     /// published.
-    Planned { partitions: u32 },
+    Planned {
+        /// The partitions of the level planned.
+        partitions: u32,
+    },
     /// The partition of the last [`Action::Weigh`] wrote `bytes` in
     /// `blocks` of every participant, and its index takes `index` bytes.
-    Weighed { bytes: u64, blocks: u64, index: u64 },
+    Weighed {
+        /// The bytes every participant wrote of the partition.
+        bytes: u64,
+        /// The blocks they wrote of it.
+        blocks: u64,
+        /// The bytes of its index.
+        index: u64,
+    },
     /// The participant asks for its next partition on disk.
     Next,
     /// The partition of the last [`Action::Visit`] has outer rows, or not.
-    Visited { outer: bool },
+    Visited {
+        /// Whether any participant wrote outer rows of the partition.
+        outer: bool,
+    },
     /// The partition of the last [`Action::Send`] went to disk from here;
     /// `freed` when this participant's bytes of it in memory went down.
-    Sent { freed: bool },
+    Sent {
+        /// Whether this participant's bytes of it in memory went down.
+        freed: bool,
+    },
 }
 
 /// What a participant does next.
@@ -163,7 +191,10 @@ pub enum Action {
     Split,
     /// The table split into `partitions`: make this participant's level of
     /// them and move its chunks into it, then [`Event::Done`].
-    Switch { partitions: u32 },
+    Switch {
+        /// The partitions of the level.
+        partitions: u32,
+    },
     /// Write this participant's chunks of the partition to disk, then
     /// [`Event::Done`].
     Write(u32),
@@ -182,7 +213,10 @@ pub enum Action {
     /// to the partitions' files, then [`Event::Done`].
     Outer,
     /// Probe, `split` when the table has partitions; then [`Event::Done`].
-    Probe { split: bool },
+    Probe {
+        /// Whether the table has partitions.
+        split: bool,
+    },
     /// Free the table, as the last to leave; then nothing is left.
     Free,
     /// Nothing is left to do.
@@ -212,8 +246,11 @@ pub enum Action {
 /// in memory; empty before the split.
 #[derive(Debug)]
 pub struct Host<'a> {
+    /// The build's counters.
     pub counters: &'a [AtomicU64; COUNTER_WORDS],
+    /// The table's spill words.
     pub spill: &'a [AtomicU64],
+    /// This participant's byte for each partition it keeps in memory.
     pub resident: &'a [u8],
 }
 

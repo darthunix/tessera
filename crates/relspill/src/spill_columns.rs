@@ -230,7 +230,9 @@ fn value_of(source: &impl RowValues, column: usize, row: usize) -> Result<Value<
 /// next row takes, 0 once every row went.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Appended {
+    /// The rows appended.
     pub rows: usize,
+    /// The bytes of values the next row takes; 0 once every row went.
     pub need: usize,
 }
 

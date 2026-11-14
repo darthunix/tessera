@@ -134,16 +134,20 @@ pub struct Params {
     /// [`Weights`] names them: `start`, `target`, `spilled` and
     /// `resident`;
     pub start: f64,
+    /// see `start`;
     pub target: f64,
+    /// see `start`;
     pub spilled: f64,
+    /// see `start`;
     pub resident: f64,
     /// and the share of the outer tail that each partition on disk keeps
     /// in reserve: its chunk of outer rows, its chunk of values when they
     /// keep values, and the page of its file.
     pub tail: f64,
     /// The weights of the rule that splits a partition on disk into a
-    /// level below, as [`SplitWeights`] names them.
+    /// level below, as [`SplitWeights`] names them: `room`;
     pub split_room: f64,
+    /// and `key`.
     pub split_key: f64,
 }
 
@@ -155,9 +159,13 @@ pub enum Event {
     /// expects; with the batch, its index and the chunks it may add, it
     /// would take `needed`.
     Inner {
+        /// The bytes the table takes.
         held: u64,
+        /// Its rows.
         rows: u64,
+        /// The rows the host expects.
         estimate: f64,
+        /// The bytes it would take with the batch.
         needed: u64,
     },
     /// The level of the last [`Action::Start`] is made, with its spill
@@ -167,15 +175,26 @@ pub enum Event {
     /// values passed a chunk; `tail` when it holds a chunk of rows in
     /// memory.
     Full {
+        /// The side of the partition.
         side: Side,
+        /// The partition.
         partition: u32,
+        /// Whether it holds a chunk of rows in memory.
         tail: bool,
     },
     /// Rows went into the partitions: the host's memory now.
-    Grown { memory: u64 },
+    Grown {
+        /// The bytes the host holds.
+        memory: u64,
+    },
     /// The partition of the last [`Action::Demote`] or [`Action::Evict`]
     /// went to disk: whether that freed memory, and the memory now.
-    Sent { freed: bool, memory: u64 },
+    Sent {
+        /// Whether its bytes in memory went down.
+        freed: bool,
+        /// The bytes the host holds.
+        memory: u64,
+    },
     /// The inner rows are read.
     BuildEnd,
     /// The outer rows are read.
@@ -183,16 +202,32 @@ pub enum Event {
     /// The host asks for the next partition on disk: the one it took is
     /// done, or none was taken yet. `memory` is what its spill holds, the
     /// levels above included, besides a partition it would join.
-    Next { memory: u64 },
+    Next {
+        /// The bytes the spill holds, as said above.
+        memory: u64,
+    },
     /// A participant of a shared build took `partition` to join alone:
     /// whether it splits, with `memory` as for [`Event::Next`].
-    Take { partition: u32, memory: u64 },
+    Take {
+        /// The partition taken.
+        partition: u32,
+        /// The bytes the spill holds.
+        memory: u64,
+    },
     /// The host starts the next piece of a partition read in pieces:
     /// `memory` as for [`Event::Next`], the last piece dropped.
-    Piece { memory: u64 },
+    Piece {
+        /// The bytes the spill holds.
+        memory: u64,
+    },
     /// The header of the partition's next block of inner rows, a block of
     /// values or of records, of `len` bytes: whether it joins the piece.
-    Block { values: bool, len: u64 },
+    Block {
+        /// Whether it is a block of values.
+        values: bool,
+        /// Its bytes.
+        len: u64,
+    },
     /// The partition's inner rows on disk are all read.
     FileEnd,
     /// A pass over the partition's outer rows ended.
@@ -201,7 +236,10 @@ pub enum Event {
     /// of the partitions in memory, a partition's or a piece's. `held`
     /// when the host still holds output of that table that has not gone
     /// out, such as pairs it copied, which refer to it.
-    TableEnd { held: bool },
+    TableEnd {
+        /// Whether output of the table is still held.
+        held: bool,
+    },
     /// The tail of the last [`Action::Tail`] went out.
     TailEnd,
 }
@@ -242,7 +280,12 @@ pub enum Action {
     /// outer rows probing it: whole, then ask for the next; or, with
     /// `pieces`, a piece at a time ([`Event::Piece`]), its outer rows read
     /// once a piece.
-    Open { partition: u32, pieces: bool },
+    Open {
+        /// The partition to join.
+        partition: u32,
+        /// Whether it is joined a piece at a time.
+        pieces: bool,
+    },
     /// Read the block into the piece, and its header's next.
     Load,
     /// The piece ends before this block, which the next piece starts
@@ -316,12 +359,15 @@ pub struct Host<'a> {
     /// them, whose bytes the host counts by partition
     /// ([`LocalSpill::add_bytes`]); none while the table fits.
     pub words: &'a [Cell<u64>],
-    /// The inner rows of each partition, and of the level.
+    /// The inner rows of each partition.
     pub rows: &'a [u64],
+    /// The inner rows of the level.
     pub total: u64,
-    /// The outer rows written of each partition, and the bytes of the
-    /// blocks of inner rows on disk of each: read at [`Event::Next`].
+    /// The outer rows written of each partition, read at
+    /// [`Event::Next`].
     pub outer: &'a [u64],
+    /// The bytes of the blocks of inner rows on disk of each partition,
+    /// read at [`Event::Next`].
     pub disk: &'a [u64],
     /// A byte for each partition, which [`Event::BuildEnd`] sets to a
     /// [`Route`].

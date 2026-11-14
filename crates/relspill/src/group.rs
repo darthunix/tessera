@@ -83,7 +83,9 @@ pub struct Params {
     /// The weights of the rule that sends partitions to disk, as
     /// [`Weights`] names them: `start`, `target` and `spilled`;
     pub start: f64,
+    /// see `start`;
     pub target: f64,
+    /// see `start`;
     pub spilled: f64,
     /// and the share of what the limit leaves a partition read back must
     /// pass to split ([`SplitWeights::room`]).
@@ -97,9 +99,13 @@ pub enum Event {
     /// `estimate` the host expects; with `force`, the host spills
     /// whatever the bytes.
     Inner {
+        /// The bytes the table takes.
         bytes: u64,
+        /// Its groups.
         records: u64,
+        /// The groups the host expects.
         estimate: f64,
+        /// Whether the host spills whatever the bytes.
         force: bool,
     },
     /// The level of the last [`Action::Start`] or of [`Group::below`] is
@@ -107,21 +113,36 @@ pub enum Event {
     Made,
     /// A partition's chunk has no room for its next record; `tail` when
     /// it holds one.
-    Full { partition: u32, tail: bool },
+    Full {
+        /// The partition.
+        partition: u32,
+        /// Whether its chunk holds a record.
+        tail: bool,
+    },
     /// A partial grouping weighs its table before a batch: its groups
     /// take `memory` bytes in `records` groups, of `rows` rows read since
     /// the table started; `spills` when the groups can go to disk.
     Partial {
+        /// The bytes the groups take.
         memory: u64,
+        /// The groups.
         records: u64,
+        /// The rows read since the table started.
         rows: u64,
+        /// Whether the groups can go to disk.
         spills: bool,
     },
     /// Records went into the partitions: the host's memory now.
-    Grown { memory: u64 },
+    Grown {
+        /// The bytes the host holds.
+        memory: u64,
+    },
     /// The partition of the last [`Action::Write`] went to disk, and the
     /// host's memory now.
-    Sent { memory: u64 },
+    Sent {
+        /// The bytes the host holds.
+        memory: u64,
+    },
     /// The input is read.
     InputEnd,
     /// The host asks for the next partition to give out: the one it gave
@@ -132,8 +153,11 @@ pub enum Event {
     /// `others` bytes, and the spill `memory` bytes in all, which a level
     /// below plans against.
     Weighed {
+        /// The groups the partition holds, about.
         groups: u64,
+        /// The bytes the other partitions in memory take.
         others: u64,
+        /// The bytes the spill takes in all.
         memory: u64,
     },
 }
@@ -199,9 +223,9 @@ pub struct Host<'a> {
     /// them, whose bytes the host counts by partition
     /// ([`LocalSpill::add_bytes`]); none while the table fits.
     pub words: &'a [Cell<u64>],
-    /// The records in memory of each partition, and the bytes of its
-    /// blocks on disk.
+    /// The records in memory of each partition.
     pub records: &'a [u64],
+    /// The bytes of the blocks on disk of each partition.
     pub disk: &'a [u64],
 }
 
@@ -680,7 +704,12 @@ pub struct RowsParams {
 pub enum RowsEvent {
     /// After a batch, the table's groups take `memory` bytes in `records`
     /// groups.
-    Grown { memory: u64, records: u64 },
+    Grown {
+        /// The bytes the groups take.
+        memory: u64,
+        /// The groups.
+        records: u64,
+    },
     /// The rows of the level the last [`RowsAction::Freeze`] planned are
     /// all written.
     Written,
@@ -696,7 +725,12 @@ pub enum RowsAction {
     /// The table takes no new group: the rows of the groups it lacks go
     /// to the partitions of a level of `plan`, numbered `level`, which the
     /// host makes.
-    Freeze { plan: Plan, level: u32 },
+    Freeze {
+        /// The plan of the level.
+        plan: Plan,
+        /// Its number.
+        level: u32,
+    },
     /// Read this partition's rows into a table of their own, whose machine
     /// is [`Rows::read`] of it.
     Read(Table),
@@ -721,6 +755,7 @@ pub struct Table {
 /// each partition of the level, read at [`RowsEvent::Next`].
 #[derive(Debug)]
 pub struct RowsHost<'a> {
+    /// The rows written of each partition.
     pub written: &'a [u64],
 }
 

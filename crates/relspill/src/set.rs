@@ -88,7 +88,9 @@ pub const MIN_LIST: usize = 16;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Entry {
+    /// Where the block's header starts in the file.
     pub offset: u64,
+    /// The bytes the block takes in the file, header included.
     pub stored: u64,
 }
 
@@ -120,9 +122,13 @@ pub enum Region {
 /// file at byte `at`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Range {
+    /// The region the bytes are in.
     pub region: Region,
+    /// Where they start in it.
     pub start: usize,
+    /// How many there are.
     pub len: usize,
+    /// Where in the file they go.
     pub at: u64,
 }
 
@@ -166,8 +172,11 @@ pub enum Step {
     /// them. A block written starts at `offset` in the file and takes
     /// `stored` bytes, header included; a finish gives 0 for both.
     Done {
+        /// The ranges to write, if any.
         ranges: Ranges,
+        /// Where the block written starts in the file.
         offset: u64,
+        /// The bytes it takes, header included.
         stored: u64,
     },
     /// The scratch region must hold this many bytes. Nothing changed.
@@ -181,9 +190,13 @@ pub enum Step {
 /// `partition`, and its bytes as they lie in memory.
 #[derive(Clone, Copy, Debug)]
 pub struct Block<'a> {
+    /// The kind of its chunk.
     pub kind: BlockKind,
+    /// The chunk's number in its table.
     pub number: u32,
+    /// The partition it goes to.
     pub partition: u32,
+    /// The chunk's bytes as they lie in memory.
     pub body: &'a [u8],
 }
 

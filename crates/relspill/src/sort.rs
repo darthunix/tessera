@@ -112,9 +112,19 @@ pub enum Event {
     /// A batch went in: its rows in memory take `memory` bytes, there are
     /// `rows` of them, and the sort may take `limit` bytes now, which the
     /// host may change from one batch to the next.
-    Grown { memory: u64, rows: u64, limit: u64 },
+    Grown {
+        /// The bytes the rows in memory take.
+        memory: u64,
+        /// The rows in memory.
+        rows: u64,
+        /// The bytes the sort may take now.
+        limit: u64,
+    },
     /// The input ended, `rows` rows left in memory.
-    InputEnd { rows: u64 },
+    InputEnd {
+        /// The rows left in memory.
+        rows: u64,
+    },
     /// The host asks for the next step of the merge.
     Next,
     /// The output is read again from its start.
@@ -135,18 +145,27 @@ pub enum Action {
     /// Merge `count` runs of the pass from `first` into a new run at
     /// `place`, after the pass's runs written before it, and free them.
     Merge {
+        /// The first run merged.
         first: u32,
+        /// The runs merged.
         count: u32,
+        /// Where the new run goes.
         place: Place,
     },
     /// Run `run` of the pass goes on as it is, after the pass's runs
     /// written before it.
-    Keep { run: u32 },
+    Keep {
+        /// The run kept.
+        run: u32,
+    },
     /// The pass ends: the runs it wrote and kept are the runs.
     PassEnd,
     /// The set being written ends, and the last merge reads the `runs`
     /// runs from their start; one run is read by blocks.
-    Read { runs: u32 },
+    Read {
+        /// The runs the last merge reads.
+        runs: u32,
+    },
 }
 
 const ROWS: u32 = 1;

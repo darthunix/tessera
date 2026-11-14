@@ -54,14 +54,27 @@ pub struct ReadConfig {
 pub enum ReadStep {
     /// Read `len` bytes of the file at byte `at` into the page, from its
     /// start, and call again.
-    Page { at: u64, len: usize },
+    Page {
+        /// Where the bytes start in the file.
+        at: u64,
+        /// How many to read.
+        len: usize,
+    },
     /// Read `len` bytes of the file at byte `at` into the block buffer,
     /// from its start, and call again.
-    Block { at: u64, len: usize },
+    Block {
+        /// Where the bytes start in the file.
+        at: u64,
+        /// How many to read.
+        len: usize,
+    },
     /// The partition has no block in the file.
     Empty,
     /// The open is done; the block buffer must hold `largest` bytes.
-    Ready { largest: u64 },
+    Ready {
+        /// The bytes of the partition's largest block, header included.
+        largest: u64,
+    },
     /// The next block's header, checked; its body waits in the block
     /// buffer for [`Reader::body`].
     Header(BlockHeader),
