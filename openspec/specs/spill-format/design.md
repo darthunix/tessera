@@ -528,9 +528,10 @@ finished writing, any participant can read its file. A reader cannot
 see the memory of the writer, where the lists of blocks are, but the
 end of the file holds them, as the end of every set's file does.
 
-A reader of a shared file first reads the trailer at the end of the
-file. The trailer says where the lists start. The reader then reads the
-list of the partition it needs, and then the blocks of that list.
+A reader of a finished set's file, its own or another participant's,
+first reads the trailer at the end of the file. The trailer says where
+the lists start. The reader then reads the list of the partition it
+needs, and then the blocks of that list.
 
 `temp_file_limit` applies to the files of a shared set too. PostgreSQL
 counts it for each process separately, and the lists and the trailer
@@ -576,11 +577,15 @@ A set first only writes, and then only reads.
    starts at the first block of the partition. Its buffer is as large
    as the largest block of the partition. For a partition without
    blocks there is no reader. The reader of `relspill` reads no byte
-   itself: of the caller's own set it takes the list in memory; of
-   another participant's file it asks for the trailer, then for the
-   counts of the lists, then for the partition's entries, a page of 256
-   at a time, and checks each part before it asks for the bytes it
-   names. `runtime/spill.c` reads what it asks for.
+   itself: of the set's own file, as of another participant's, it asks
+   for the trailer, then for the counts of the lists, then for the
+   partition's entries, a page of 256 at a time, and checks each part
+   before it asks for the bytes it names. `runtime/spill.c` reads what
+   it asks for. The set frees its lists at its finish, so that a
+   finished set keeps a page for each reader and no list; it keeps the
+   count of each partition, so that a partition dropped since the
+   finish opens as no reader, though the end of the file still lists
+   its blocks.
 4. `tess_spill_read_header` reads the next block of the partition, the
    header and the body together, with one read. Then it checks the
    block:
