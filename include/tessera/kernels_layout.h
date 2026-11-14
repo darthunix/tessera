@@ -135,6 +135,20 @@ tess_kernels_layout_matches(void)
 		tess_join_layout(TESS_JOIN_ACTION_OUTER_LEN_OFFSET) ==
 		offsetof(TessJoinAction, outer_len) &&
 		tess_join_layout((TessJoinLayout) 99) == 0 &&
+	/* The machine of a grouping's spill and what a step of it takes and gives. */
+		tess_group_layout(TESS_GROUP_MACHINE_SIZE) == sizeof(TessGroupMachine) &&
+		tess_group_layout(TESS_GROUP_PARAMS_SIZE) == sizeof(TessGroupParams) &&
+		tess_group_layout(TESS_GROUP_PARAMS_SPLIT_ROOM_OFFSET) ==
+		offsetof(TessGroupParams, split_room) &&
+		tess_group_layout(TESS_GROUP_HOST_SIZE) == sizeof(TessGroupHost) &&
+		tess_group_layout(TESS_GROUP_HOST_NDISK_OFFSET) == offsetof(TessGroupHost, ndisk) &&
+		tess_group_layout(TESS_GROUP_EVENT_SIZE) == sizeof(TessGroupEvent) &&
+		tess_group_layout(TESS_GROUP_EVENT_OTHERS_OFFSET) == offsetof(TessGroupEvent, others) &&
+		tess_group_layout(TESS_GROUP_ACTION_SIZE) == sizeof(TessGroupAction) &&
+		tess_group_layout(TESS_GROUP_ACTION_BELOW_OFFSET) == offsetof(TessGroupAction, below) &&
+		tess_group_layout(TESS_GROUP_BELOW_SIZE) == sizeof(TessGroupBelow) &&
+		tess_group_layout(TESS_GROUP_BELOW_SHIFT_OFFSET) == offsetof(TessGroupBelow, shift) &&
+		tess_group_layout((TessGroupLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of
 	 * tessera/spill.h take it: the row count, the capacity and the stored

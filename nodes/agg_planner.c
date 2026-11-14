@@ -614,7 +614,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	double		rows = child->rows;
 	double		width = 0;
 	double		entry = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
-	double		limit = (double) tess_hash_memory_limit() / 8 * 7;
+	double		limit = (double) tess_hash_memory_limit() * AGG_SPILL_FILL;
 	int			naggs = 0;
 	int			ncolumns = 0;
 	int			nsums = sum_states(tlist);
