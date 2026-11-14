@@ -2379,8 +2379,8 @@ pub unsafe extern "C" fn tess_build_take_chunk(
     unsafe {
         guard(status, || {
             let counters = build_counters(counters)?;
-            let number = number.as_mut().context("a null result")?;
-            *number = counters.take_chunk()?;
+            let number = output(number, "result")?;
+            number.write(counters.take_chunk()?);
             Ok(())
         })
     }
@@ -2427,14 +2427,19 @@ pub unsafe extern "C" fn tess_build_totals(
     unsafe {
         guard(status, || {
             let counters = build_counters(counters)?;
-            let records = records.as_mut().context("a null result")?;
-            let null_columns = null_columns.as_mut().context("a null result")?;
-            let chunks = chunks.as_mut().context("a null result")?;
-            *records = counters.total_records();
-            *null_columns = counters.nulls();
-            *chunks = counters.total_chunks();
-            if let Some(duplicates) = duplicates.as_mut() {
-                *duplicates = counters.total_duplicates();
+            let records = output(records, "result")?;
+            let null_columns = output(null_columns, "result")?;
+            let chunks = output(chunks, "result")?;
+            let duplicates = if duplicates.is_null() {
+                None
+            } else {
+                Some(output(duplicates, "result")?)
+            };
+            records.write(counters.total_records());
+            null_columns.write(counters.nulls());
+            chunks.write(counters.total_chunks());
+            if let Some(duplicates) = duplicates {
+                duplicates.write(counters.total_duplicates());
             }
             Ok(())
         })
@@ -2463,8 +2468,8 @@ pub unsafe extern "C" fn tess_build_step(
         guard(status, || {
             let participant = participant.as_mut().context("a null participant")?;
             let counters = build_counters(counters)?;
-            let action = action.as_mut().context("a null action")?;
-            *action = participant.step(&counters, reply)? as u32;
+            let action = output(action, "action")?;
+            action.write(participant.step(&counters, reply)? as u32);
             Ok(())
         })
     }
@@ -2512,8 +2517,8 @@ pub unsafe extern "C" fn tess_build_stopped(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let any = any.as_mut().context("a null result")?;
-            *any = stop_word(stopped)?.stopped();
+            let any = output(any, "result")?;
+            any.write(stop_word(stopped)?.stopped());
             Ok(())
         })
     }

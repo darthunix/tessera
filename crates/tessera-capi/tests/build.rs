@@ -495,3 +495,82 @@ fn the_shared_build_entry_points_write_places_that_hold_nothing_yet() {
     // SAFETY: written whole by the step.
     assert_eq!(unsafe { action.assume_init() }.kind, SHARED_ATTACH);
 }
+
+/// The entry points of a build's counters write their results to places
+/// C has not filled yet: no value is read or borrowed there, which
+/// strict Miri checks.
+#[test]
+fn the_build_counters_write_places_that_hold_nothing_yet() {
+    use relspill::phases::Participant;
+    use tessera_capi::c::{
+        tess_build_counters_init, tess_build_report, tess_build_step, tess_build_stopped,
+        tess_build_take_chunk, tess_build_totals,
+    };
+
+    let mut counters = [0_u64; 4];
+    let mut status = Status::new();
+    // SAFETY: local counters, places valid for a write, and a local
+    // status, as in every call of this test.
+    unsafe {
+        assert_eq!(
+            tess_build_counters_init(counters.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_build_report(counters.as_mut_ptr(), 3, 0, &raw mut status),
+            Code::Ok
+        );
+        let mut number = MaybeUninit::<u64>::uninit();
+        assert_eq!(
+            tess_build_take_chunk(counters.as_mut_ptr(), number.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(number.assume_init(), 0);
+        let (mut records, mut nulls, mut chunks, mut duplicates) = (
+            MaybeUninit::<u64>::uninit(),
+            MaybeUninit::<u64>::uninit(),
+            MaybeUninit::<u64>::uninit(),
+            MaybeUninit::<u64>::uninit(),
+        );
+        assert_eq!(
+            tess_build_totals(
+                counters.as_mut_ptr(),
+                records.as_mut_ptr(),
+                nulls.as_mut_ptr(),
+                chunks.as_mut_ptr(),
+                duplicates.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(
+            (
+                records.assume_init(),
+                nulls.assume_init(),
+                chunks.assume_init(),
+                duplicates.assume_init()
+            ),
+            (3, 0, 1, 0)
+        );
+        let mut participant = Participant::new();
+        let mut action = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_build_step(
+                &raw mut participant,
+                counters.as_mut_ptr(),
+                0,
+                action.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        let _ = action.assume_init();
+        let mut stopped = 0_u64;
+        let mut any = MaybeUninit::<bool>::uninit();
+        assert_eq!(
+            tess_build_stopped(&raw mut stopped, any.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert!(!any.assume_init());
+    }
+}
