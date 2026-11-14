@@ -415,12 +415,12 @@ jobs:
           cargo miri test --locked -p relhash
           cargo miri test --locked -p relspill --test records
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
-            --test spill --test join --test group --test smallint \
+            --test spill --test join --test group --test runs --test smallint \
             --test date_bound
           # The spill's entry points write places C has not filled yet: no
           # value may be read or borrowed there.
           MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
-            cargo miri test --locked -p tessera-capi --test join --test group --test spill
+            cargo miri test --locked -p tessera-capi --test join --test group --test runs --test spill
       # A target whose bytes run from the most significant: the packing
       # narrows values by their low bytes, which lie last there. The
       # property tests of the spill words, of the columns appended by
@@ -442,7 +442,9 @@ jobs:
             --skip a_join_that_spills_runs_every_path \
             --skip a_grouping_through_the_machine_gives_the_groups_of_one_in_memory \
             --skip a_grouping_that_spills_writes_and_splits \
-            --skip rows_through_frozen_tables_give_the_groups_of_one_in_memory
+            --skip rows_through_frozen_tables_give_the_groups_of_one_in_memory \
+            --skip a_sort_through_its_runs_gives_the_rows_of_one_in_memory \
+            --skip a_sort_that_spills_runs_every_path
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)

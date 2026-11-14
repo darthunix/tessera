@@ -137,6 +137,8 @@
 	X(group_step) \
 	X(rows_init) \
 	X(rows_read) \
-	X(rows_step)
+	X(rows_step) \
+	X(runs_init) \
+	X(runs_step)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

@@ -255,7 +255,9 @@ typedef struct TessSortState
 	int			ext_words;
 	uint32		block_rows;
 	Size		block_values;
-	int			fan_in;
+	/* The machine of the runs (relspill's sort::Runs), and what it is made of. */
+	TessRunsMachine runs_machine;
+	TessRunsParams runs_params;
 	RunSet	   *writing;
 	uint32		merge_state[TESS_SORT_MERGE_STATE_WORDS];
 	int			merge_passes;
@@ -312,9 +314,11 @@ sort_topn_heap_bytes(const TessSortState *state, double capacity)
 }
 extern int sort_run_words(TessSortState *state);
 extern void sort_set_finish(TessSortState *state);
-extern void sort_spill_run(TessSortState *state);
+extern void sort_spill_run(TessSortState *state, const TessRunsPlace *place);
 extern void sort_plan_external(TessSortState *state);
-extern void sort_merge_runs(TessSortState *state);
+extern void sort_runs_begin(TessSortState *state);
+extern TessRunsAction sort_runs_step(TessSortState *state, TessRunsEvent event);
+extern void sort_merge_runs(TessSortState *state, TessRunsAction action);
 extern void sort_restart_merge(TessSortState *state);
 extern void sort_free_external(TessSortState *state);
 extern void sort_show_block_of(TessSortState *state, uint64 place);

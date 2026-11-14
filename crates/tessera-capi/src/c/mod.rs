@@ -27,6 +27,7 @@ mod spill;
 mod spill_group;
 mod spill_join;
 mod spill_set;
+mod spill_sort;
 mod status;
 mod table;
 mod text;
@@ -115,6 +116,13 @@ pub use spill_set::{
     tess_spill_reader_file, tess_spill_reader_next, tess_spill_reader_open, tess_spill_reader_own,
     tess_spill_reader_seek, tess_spill_set_drop, tess_spill_set_finish, tess_spill_set_init,
     tess_spill_set_layout, tess_spill_set_stats, tess_spill_set_write, tess_spill_set_written,
+};
+pub use spill_sort::{
+    RUNS_ACTION_PLACE_OFFSET, RUNS_ACTION_SIZE, RUNS_BLOCKS_SIZE, RUNS_DONE,
+    RUNS_EVENT_LIMIT_OFFSET, RUNS_EVENT_SIZE, RUNS_GROWN, RUNS_INPUT_END, RUNS_KEEP,
+    RUNS_MACHINE_SIZE, RUNS_MERGE, RUNS_NEXT, RUNS_PARAMS_BACKWARD_OFFSET, RUNS_PARAMS_SIZE,
+    RUNS_PASS, RUNS_PASS_END, RUNS_READ, RUNS_RESCAN, RUNS_RUN, RunsAction, RunsBlocks, RunsEvent,
+    RunsParams, RunsPlace, tess_runs_init, tess_runs_layout, tess_runs_step,
 };
 pub use status::{Code, MESSAGE_SIZE, Status};
 pub use table::{

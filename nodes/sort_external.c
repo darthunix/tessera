@@ -46,16 +46,14 @@ run_chunk_len(TessSortState *state)
 		(tess_spill_columns_null_lanes(sort_run_words(state)) + sort_run_words(state));
 }
 
-/* A run of no blocks yet, the next partition of the set being written. */
+/* A run of no blocks yet, at the place the runs' machine gave it. */
 static SortRun *
-run_create(TessSortState *state)
+run_create(TessSortState *state, const TessRunsPlace *place)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
 	SortRun    *run = MemoryContextAllocZero(context, sizeof(SortRun));
 
-	if (state->writing != NULL && state->writing->used == SORT_SET_RUNS)
-		sort_set_finish(state);
-	if (state->writing == NULL)
+	if (place->create)
 	{
 		TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
 		RunSet	   *set = MemoryContextAllocZero(context, sizeof(RunSet));
@@ -67,9 +65,15 @@ run_create(TessSortState *state)
 		config.fingerprint = ((uint64) state->ncolumns << 32) | (uint64) state->ext_words;
 		config.max_chunk = run_chunk_len(state);
 		config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_work_memory_limit());
+		sort_set_finish(state);
 		set->file = tess_spill_create(&config);
 		state->writing = set;
 	}
+	/* A set's runs one after another, as many as its file has partitions. */
+	if (state->writing == NULL || place->partition != (uint32) state->writing->used ||
+		place->partition >= SORT_SET_RUNS)
+		elog(ERROR, "TessSort run placed at partition %u of a set of %d",
+			 place->partition, state->writing == NULL ? -1 : state->writing->used);
 	run->set = state->writing;
 	run->partition = state->writing->used++;
 	run->set->alive++;
@@ -209,12 +213,12 @@ writer_add(TessSortState *state, RunWriter *writer, int n, Datum *const *values,
 }
 
 /*
- * The rows in memory go to a run, sorted, and memory is freed for the
- * next: their items with every key's bit for NULL, the reference in the
- * last word's low bits left out of the run's lanes.
+ * The rows in memory go to a run at place, sorted, and memory is freed
+ * for the next: their items with every key's bit for NULL, the reference
+ * in the last word's low bits left out of the run's lanes.
  */
 void
-sort_spill_run(TessSortState *state)
+sort_spill_run(TessSortState *state, const TessRunsPlace *place)
 {
 	uint64		count = tess_rows_count(state->rows);
 	uint32	   *refs;
@@ -236,7 +240,7 @@ sort_spill_run(TessSortState *state)
 	if (state->generic >= 0)
 		sort_ties(state, &items, words, refs, count, false);
 	sort_note_memory(state, mul_size(count, sizeof(uint32) + sizeof(uint64) * words));
-	writer_start(state, &writer, run_create(state));
+	writer_start(state, &writer, run_create(state, place));
 	for (uint64 first = 0; first < count; first += SORT_ROWS)
 	{
 		int			n = (int) Min((uint64) SORT_ROWS, count - first);
@@ -276,8 +280,8 @@ void
 sort_plan_external(TessSortState *state)
 {
 	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessRunsBlocks blocks;
 	Size		row_bytes;
-	Size		block_bytes;
 
 	for (int key = 0; key < state->nkernel; key++)
 	{
@@ -296,22 +300,51 @@ sort_plan_external(TessSortState *state)
 													 &state->ext_words, &status),
 					  &status);
 	/*
-	 * A merge holds a block pair of each run it takes, rows and values, and
-	 * briefly the pairs a batch put out points into: blocks of a 128th of
-	 * work_mem, 64 rows to 256 kB, so that a work_mem of 4 MB merges 64
-	 * runs at once, and a merge of 6 runs at least, as the core's (a small
-	 * work_mem is passed then), up to TESS_SORT_MAX_MERGE_RUNS. Blocks of
-	 * a 64th and two pairs each took a pass more for 44 runs.
+	 * The blocks and the runs a merge reads are the runs' machine's: a
+	 * block of a 128th of work_mem, so that a work_mem of 4 MB merges 64
+	 * runs at once.
 	 */
 	row_bytes = sizeof(uint64) *
 		(tess_spill_columns_null_lanes(sort_run_words(state)) + sort_run_words(state));
-	block_bytes = Min(tess_work_memory_limit() / 128, (Size) 256 * 1024);
-	state->block_rows = (uint32) Max(block_bytes / row_bytes, (Size) SORT_ROWS);
-	state->block_values = Max(block_bytes, (Size) 4096);
-	block_bytes = Max(block_bytes, (Size) state->block_rows * row_bytes);
-	state->fan_in = (int) (tess_work_memory_limit() / (2 * block_bytes));
-	state->fan_in = Max(state->fan_in, 6);
-	state->fan_in = Min(state->fan_in, TESS_SORT_MAX_MERGE_RUNS);
+	state->runs_params = (TessRunsParams) {
+		.limit = tess_work_memory_limit(),
+		.row = row_bytes,
+		.item = sizeof(uint32) + sizeof(uint64) * (Size) state->item_words,
+		.chunk = state->rows_config.chunk_len,
+		.set_runs = SORT_SET_RUNS,
+		.max_merge = TESS_SORT_MAX_MERGE_RUNS,
+		.batch_rows = SORT_ROWS,
+		.backward = (state->eflags & EXEC_FLAG_BACKWARD) != 0,
+	};
+	tess_status_check(state->kernels->runs_init(&state->runs_machine, &state->runs_params,
+											   &blocks, &status),
+					  &status);
+	state->block_rows = blocks.rows;
+	state->block_values = blocks.values;
+}
+
+/* A new input: the runs' machine before it. */
+void
+sort_runs_begin(TessSortState *state)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessRunsBlocks blocks;
+
+	tess_status_check(state->kernels->runs_init(&state->runs_machine, &state->runs_params,
+											   &blocks, &status),
+					  &status);
+}
+
+/* Step the runs' machine with event. */
+TessRunsAction
+sort_runs_step(TessSortState *state, TessRunsEvent event)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessRunsAction action;
+
+	tess_status_check(state->kernels->runs_step(&state->runs_machine, &event, &action, &status),
+					  &status);
+	return action;
 }
 
 /* Blocks rows put out may point into, freed now that those rows are done with. */
@@ -595,9 +628,9 @@ merge_rows(TessSortState *state, MergeInput *inputs, int ninputs, uint32 *tree, 
 	return taken;
 }
 
-/* Merge the runs from `first`, `count` of them, into one run, and free them. */
+/* Merge count runs into one run, and free them. */
 static void
-merge_pass(TessSortState *state, int first, int count, RunWriter *writer)
+merge_pass(TessSortState *state, SortRun **runs, int count, RunWriter *writer)
 {
 	MergeInput *inputs = palloc0_array(MergeInput, count);
 	Datum	  **values = state->values;
@@ -609,7 +642,7 @@ merge_pass(TessSortState *state, int first, int count, RunWriter *writer)
 	for (int row = 0; row < SORT_ROWS; row++)
 		pointers[row] = keys[row];
 	for (int input = 0; input < count; input++)
-		input_open(state, &inputs[input], state->runs[first + input]);
+		input_open(state, &inputs[input], runs[input]);
 	for (;;)
 	{
 		int			n = merge_rows(state, inputs, count, tree, SORT_ROWS, values, nulls, keys);
@@ -623,59 +656,68 @@ merge_pass(TessSortState *state, int first, int count, RunWriter *writer)
 	for (int input = 0; input < count; input++)
 	{
 		input_close(&inputs[input]);
-		run_free(state->runs[first + input]);
+		run_free(runs[input]);
 	}
 	pfree(inputs);
 }
 
 /*
- * After the input: the runs merge, fan_in at a time, into longer runs
- * until one merge takes them all; for a scan backward, into one run, read
- * by blocks. Then the last merge's inputs open.
+ * After the input: the runs merge, pass after pass, as the runs' machine
+ * says from action on, into longer runs until one merge takes them all;
+ * for a scan backward, into one run, read by blocks. Then the last
+ * merge's inputs open.
  */
 void
-sort_merge_runs(TessSortState *state)
+sort_merge_runs(TessSortState *state, TessRunsAction action)
 {
-	bool		one = (state->eflags & EXEC_FLAG_BACKWARD) != 0;
+	SortRun   **pass = NULL;
+	int			npass = 0;
 
-	while (state->nruns > (one ? 1 : state->fan_in))
+	for (;; action = sort_runs_step(state, (TessRunsEvent) {.kind = TESS_RUNS_NEXT}))
 	{
-		int			nold = state->nruns;
-		SortRun   **old = palloc_array(SortRun *, nold);
-		int			done = 0;
+		RunWriter	writer;
 
-		memcpy(old, state->runs, sizeof(SortRun *) * nold);
-		state->nruns = 0;
-		while (done < nold)
+		switch (action.kind)
 		{
-			int			count = Min(state->fan_in, nold - done);
-			RunWriter	writer;
-
-			/* A run left alone goes on as it is. */
-			if (count == 1)
-			{
-				state->runs[state->nruns++] = old[done++];
+			case TESS_RUNS_PASS:
+				sort_set_finish(state);
+				npass = state->nruns;
+				pass = palloc_array(SortRun *, Max(npass, 1));
+				memcpy(pass, state->runs, sizeof(SortRun *) * npass);
+				state->nruns = 0;
 				continue;
-			}
-			writer_start(state, &writer, run_create(state));
-			/* merge_pass reads its runs from state->runs: put them there for it. */
-			{
-				SortRun   **saved = state->runs;
-				int			nsaved = state->nruns;
-
-				state->runs = old;
-				merge_pass(state, done, count, &writer);
-				state->runs = saved;
-				state->nruns = nsaved;
-			}
-			writer_finish(state, &writer);
-			done += count;
+			case TESS_RUNS_MERGE:
+				if (pass == NULL || action.count > (uint32) npass ||
+					action.first > (uint32) npass - action.count ||
+					action.count > TESS_SORT_MAX_MERGE_RUNS)
+					elog(ERROR, "TessSort merges runs %u to %u of %d",
+						 action.first, action.first + action.count, npass);
+				writer_start(state, &writer, run_create(state, &action.place));
+				merge_pass(state, &pass[action.first], (int) action.count, &writer);
+				writer_finish(state, &writer);
+				continue;
+			case TESS_RUNS_KEEP:
+				if (pass == NULL || action.first >= (uint32) npass)
+					elog(ERROR, "TessSort keeps run %u of %d", action.first, npass);
+				state->runs[state->nruns++] = pass[action.first];
+				continue;
+			case TESS_RUNS_PASS_END:
+				if (pass != NULL)
+					pfree(pass);
+				pass = NULL;
+				state->merge_passes++;
+				continue;
+			case TESS_RUNS_READ:
+				break;
+			default:
+				elog(ERROR, "TessSort runs' action %u after the input", action.kind);
 		}
-		pfree(old);
-		/* The pass's runs are read by the next. */
-		sort_set_finish(state);
-		state->merge_passes++;
+		break;
 	}
+	sort_set_finish(state);
+	if ((int) action.runs != state->nruns ||
+		(action.runs > 1 && action.runs > TESS_SORT_MAX_MERGE_RUNS))
+		elog(ERROR, "TessSort reads %u runs of %d", action.runs, state->nruns);
 	state->single = state->nruns == 1;
 	if (state->single)
 	{
@@ -697,6 +739,10 @@ sort_merge_runs(TessSortState *state)
 void
 sort_restart_merge(TessSortState *state)
 {
+	TessRunsAction action = sort_runs_step(state, (TessRunsEvent) {.kind = TESS_RUNS_RESCAN});
+
+	if (action.kind != TESS_RUNS_READ || (int) action.runs != state->nruns)
+		elog(ERROR, "TessSort rescans %u runs of %d", action.runs, state->nruns);
 	free_retired(state);
 	if (state->single)
 	{
