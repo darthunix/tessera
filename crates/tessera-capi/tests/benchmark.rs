@@ -926,6 +926,12 @@ fn the_density_cases_hold_their_rows_in_every_word_anew() {
         );
         let lefts = pairs.into_iter().map(|[left, _]| left).collect();
         let sets = find(sets::cases::<i32>().expect("the sets' cases")).inputs();
+        assert!(
+            sets.iter()
+                .zip(&reading)
+                .all(|(set, read)| set.selected.words() == read.selected.words()),
+            "the sets take the selections of {name} over other values"
+        );
         for inputs in [reading, find(filtering::cases()).inputs(), lefts, sets] {
             let mut seen = std::collections::HashSet::new();
             for input in &inputs {
