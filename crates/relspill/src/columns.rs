@@ -91,8 +91,11 @@ fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
 /// The shape of a chunk: its rows, its capacity and its stored words.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Shape {
+    /// The rows the chunk holds.
     pub rows: usize,
+    /// The rows it has room for.
     pub capacity: usize,
+    /// The words each row stores.
     pub words: usize,
 }
 

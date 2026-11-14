@@ -27,6 +27,7 @@
 // All memory comes to the crate as safe slices its host makes, so the
 // compiler alone keeps it sound, its loom models included.
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("relspill needs a target whose pointers are 64 bits wide");
@@ -88,6 +89,7 @@ impl BlockKind {
 /// The header of a block: which chunk follows and what it belongs to.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockHeader {
+    /// The kind of the chunk that follows.
     pub kind: BlockKind,
     /// The chunk's number in its table, records and values each numbered
     /// on their own: a value reference names the value chunk by it.

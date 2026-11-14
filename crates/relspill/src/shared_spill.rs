@@ -245,7 +245,9 @@ pub struct Weights {
 /// partitions have them all.
 #[derive(Clone, Copy, Debug)]
 pub struct Records<'a> {
+    /// The records of each partition.
     pub each: &'a [u64],
+    /// The records of the whole level.
     pub total: u64,
 }
 
@@ -268,11 +270,13 @@ pub struct Partition {
     /// Its size once in memory, as the node estimates it: a grouping's
     /// groups with their index, a join's file.
     pub size: u64,
-    /// The memory in use besides it, and the limit.
+    /// The memory in use besides it.
     pub used: u64,
+    /// The limit of the memory.
     pub limit: u64,
-    /// Its rows, and those of its level.
+    /// Its rows.
     pub rows: u64,
+    /// The rows of its level.
     pub level_rows: u64,
     /// The hash bits its level's partitions take, from bit 0.
     pub bits: u32,
@@ -303,7 +307,12 @@ pub enum Memory {
     Counted,
     /// The bytes a process measures, against its limit; a limit of
     /// `u64::MAX` leaves the rule of the records alone.
-    Measured { bytes: u64, limit: u64 },
+    Measured {
+        /// The bytes the process holds.
+        bytes: u64,
+        /// Its limit.
+        limit: u64,
+    },
 }
 
 impl<W: Words> Spill<W> {
