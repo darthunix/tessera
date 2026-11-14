@@ -13,7 +13,7 @@ REGRESS = agg batch binding bridge builder coverage expr filter forward function
 	heap_deform index index_join input interrupt_loops interrupts join kernel_ops kernels kernels_module \
 	limit modules node output pack parallel plan planner project project_provider request \
 	row_mask rows settings shared_stats sort source spill spill_damage table transfer types \
-	union unary
+	union union_parallel unary
 # The suites use ICU collations, which need a UTF-8 database, and expect
 # the plans of a database whose collation is not C (where a LIKE prefix
 # makes no index range): a temporary instance takes the environment's
