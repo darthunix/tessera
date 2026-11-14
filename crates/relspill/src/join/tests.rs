@@ -2,6 +2,7 @@ use core::cell::Cell;
 
 use proptest::prelude::*;
 
+use super::model::{Counts, Model, Ran, Regions, Row, hash, pairs};
 use super::*;
 use crate::Kind;
 use crate::set::tests::property;
@@ -29,55 +30,15 @@ fn params(limit: u64) -> Params {
         },
         outer_words: 2,
         outer_values: 0,
-        spare: 0,
+        preserve_inner: 0,
         page: 512,
         start: 1.0,
         target: 1.0,
         spilled: 0.0,
         resident: 0.25,
         tail: 1.0,
-    }
-}
-
-/// A host's regions for a level of `partitions`, or for none.
-struct Regions {
-    words: Vec<Cell<u64>>,
-    rows: Vec<u64>,
-    total: u64,
-    routes: Vec<u8>,
-}
-
-impl Regions {
-    fn none() -> Self {
-        Self {
-            words: Vec::new(),
-            rows: Vec::new(),
-            total: 0,
-            routes: Vec::new(),
-        }
-    }
-
-    fn of(start: &Start) -> Self {
-        let partitions = start.plan.partitions as usize;
-        Self {
-            words: (0..start.plan.words).map(|_| Cell::new(0)).collect(),
-            rows: vec![0; partitions],
-            total: 0,
-            routes: vec![u8::MAX; partitions],
-        }
-    }
-
-    fn host(&mut self) -> Host<'_> {
-        Host {
-            words: &self.words,
-            rows: &self.rows,
-            total: self.total,
-            routes: &mut self.routes,
-        }
-    }
-
-    fn spill(&self) -> LocalSpill<'_> {
-        LocalSpill::new(&self.words).expect("the level's words")
+        split_room: 2.0 / 3.0,
+        split_key: 0.9,
     }
 }
 
@@ -318,9 +279,10 @@ fn the_build_ends_with_where_the_outer_rows_go() {
     let mut short = Regions {
         words: regions.words.clone(),
         rows: regions.rows.clone(),
-        total: regions.total,
         routes: vec![0; 2],
+        ..Regions::of(&start)
     };
+    short.total = regions.total;
     let before = join;
     assert_eq!(
         wrong(join.step(Event::BuildEnd, &mut short.host())),
@@ -391,24 +353,35 @@ fn few_rows_left_in_memory_go_to_disk_at_the_end() {
 #[test]
 fn a_level_below_is_planned_from_its_bits() {
     let limit = 1 << 20;
-    let (join, start) =
-        Join::below(&params(limit), 1, 4.0 * limit as f64, limit / 2, 2).expect("a level below");
+    let below = Below {
+        partition: 3,
+        level: 1,
+        expected: 4 * limit,
+        limit: limit / 2,
+        shift: 2,
+    };
+    let (join, start) = Join::below(&params(limit), &below).expect("a level below");
     assert_eq!((join.level(), start.plan.shift), (1, 2));
     assert_eq!(join.phase, PLANNED);
-    assert_eq!(
-        wrong(Join::below(&params(limit), 0, 0.0, limit, 2)),
-        Rule::JoinLevel
+    let planned = plan::plan(
+        &params(limit).shape,
+        &Level {
+            expected: (4 * limit) as f64,
+            shift: 2,
+            ..Level::first(limit as usize / 2)
+        },
     );
-    assert_eq!(
-        wrong(Join::below(&params(limit), 1, 0.0, limit, 40)),
-        Rule::PlanBits
-    );
+    assert_eq!(Ok(start.plan), planned);
+    let first = Below { level: 0, ..below };
+    assert_eq!(wrong(Join::below(&params(limit), &first)), Rule::JoinLevel);
+    let past = Below { shift: 40, ..below };
+    assert_eq!(wrong(Join::below(&params(limit), &past)), Rule::PlanBits);
 }
 
 #[test]
 fn a_shared_level_takes_the_partitions_given() {
     let limit = 1 << 20;
-    let start = Join::given(&params(limit), 16).expect("a level");
+    let (mut join, start) = Join::given(&params(limit), 16).expect("a level");
     assert_eq!((start.plan.partitions, start.plan.shift), (16, 0));
     let planned = plan::plan(
         &params(limit).shape,
@@ -419,6 +392,33 @@ fn a_shared_level_takes_the_partitions_given() {
     );
     assert_eq!(Ok(start.plan), planned);
     assert_eq!(wrong(Join::given(&params(limit), 3)), Rule::GivenPartitions);
+    // A partition a participant takes alone splits, or is joined whole.
+    let mut regions = Regions::of(&start);
+    regions.rows[5] = 1000;
+    regions.rows[6] = 1000;
+    regions.total = 100_000;
+    regions.disk[5] = 900_000;
+    regions.disk[6] = 1000;
+    let take = |partition| Event::Take {
+        partition,
+        memory: 0,
+    };
+    let Ok(Action::Split(below)) = join.step(take(5), &mut regions.host()) else {
+        panic!("a split");
+    };
+    assert_eq!(
+        (below.partition, below.level, below.expected),
+        (5, 1, 900_000)
+    );
+    assert_eq!(below.shift, start.plan.below);
+    assert_eq!(join.step(take(6), &mut regions.host()), Ok(Action::Open(6)));
+    assert_eq!(
+        wrong(join.step(take(16), &mut regions.host())),
+        Rule::Partition
+    );
+    // The shared build decides the rest.
+    let next = Event::Next { memory: 0 };
+    assert_eq!(wrong(join.step(next, &mut regions.host())), Rule::JoinEvent);
 }
 
 #[test]
@@ -427,7 +427,14 @@ fn parameters_are_checked() {
     assert!(Join::new(&good).is_ok());
     for bad in [
         Params { limit: 0, ..good },
-        Params { spare: 1, ..good },
+        Params {
+            preserve_inner: 2,
+            ..good
+        },
+        Params {
+            split_key: -0.5,
+            ..good
+        },
         Params {
             start: f64::NAN,
             ..good
@@ -591,366 +598,260 @@ fn a_level_weighs_the_rows_its_host_counts_for_it() {
     );
 }
 
-/// A row of a side: its key and its number among the side's rows.
-#[derive(Clone, Copy, Debug)]
-struct Row {
-    key: u32,
-    id: u32,
-}
-
-/// The hash of a key, which picks its partition.
-fn hash(key: u32) -> u32 {
-    key.wrapping_mul(0x9e37_79b1).rotate_left(7)
-}
-
-/// A side of a level in the test's host: each partition's chunks in
-/// memory, the last one its tail, and its file, a list of blocks.
-#[derive(Default)]
-struct Held {
-    chunks: Vec<Vec<Vec<Row>>>,
-    files: Vec<Vec<Vec<Row>>>,
-}
-
-/// The host of a join in the test: memory is a count of bytes, a file is
-/// a vector of blocks, and the rows of a chunk are as many as its bytes
-/// hold.
-struct Model {
-    join: Join,
-    record: u64,
-    chunk_len: u64,
-    outer_len: u64,
-    shift: u32,
-    table: Vec<Row>,
-    regions: Regions,
-    inner: Held,
-    outer: Held,
-    memory: u64,
-    on_disk: Vec<bool>,
-    pairs: Pairs,
-    ran: Ran,
-}
-
-impl Model {
-    fn partition(&self, key: u32) -> usize {
-        ((hash(key) >> self.shift) as usize) & (self.regions.rows.len() - 1)
-    }
-
-    fn step(&mut self, event: Event) -> Result<Action> {
-        let mut host = self.regions.host();
-        self.join.step(event, &mut host)
-    }
-
-    /// Count a chunk of `len` bytes of a partition of the inner side, or
-    /// take it back.
-    fn count(&mut self, partition: usize, len: u64, add: bool) -> Result<()> {
-        let delta = if add { len as i64 } else { -(len as i64) };
-        self.memory = self.memory.wrapping_add_signed(delta);
-        self.regions
+/// A machine whose level joins: its build ended with partitions 1, 2 and
+/// 3 on disk, of 2000, 0 and 300 inner rows, and its outer rows ended.
+fn joining(params: &Params) -> (Join, Regions) {
+    let mut join = Join::new(params).expect("parameters");
+    let inner = Event::Inner {
+        held: params.limit,
+        rows: 1000,
+        estimate: 1000.0,
+        needed: params.limit + 1,
+    };
+    let Ok(Action::Start(start)) = join.step(inner, &mut Regions::none().host()) else {
+        panic!("a start");
+    };
+    assert_eq!(start.plan.partitions, 4);
+    let mut regions = Regions::of(&start);
+    assert_eq!(
+        join.step(Event::Made, &mut regions.host()),
+        Ok(Action::Done)
+    );
+    regions.rows = vec![5000, 2000, 0, 300];
+    regions.total = 7300;
+    for partition in [1, 2, 3] {
+        regions
             .spill()
-            .add_bytes(delta, Some(partition as u32))?;
-        Ok(())
-    }
-
-    /// A row into its partition of a side, a chunk at a time.
-    fn append(&mut self, side: Side, row: Row) -> Result<()> {
-        let partition = self.partition(row.key);
-        let (len, per) = match side {
-            Side::Inner => (self.chunk_len, self.chunk_len / self.record),
-            Side::Outer => (self.outer_len, self.outer_len / 24),
-        };
-        let held = match side {
-            Side::Inner => &self.inner,
-            Side::Outer => &self.outer,
-        };
-        let tail = held.chunks[partition].last().map(Vec::len);
-        if tail.is_none_or(|rows| rows as u64 >= per) {
-            let event = Event::Full {
-                side,
-                partition: partition as u32,
-                tail: tail.is_some(),
-            };
-            match self.step(event)? {
-                Action::AddChunk => {
-                    self.side(side).chunks[partition].push(Vec::new());
-                    if side == Side::Inner {
-                        self.count(partition, len, true)?;
-                    } else {
-                        self.memory += len;
-                    }
-                }
-                Action::Flush => {
-                    self.ran[2] += 1;
-                    let side = self.side(side);
-                    let rows = core::mem::take(side.chunks[partition].last_mut().expect("a tail"));
-                    side.files[partition].push(rows);
-                }
-                action => panic!("{action:?} for a full partition"),
-            }
-        }
-        self.side(side).chunks[partition]
-            .last_mut()
-            .expect("a chunk")
-            .push(row);
-        if side == Side::Inner {
-            self.regions.rows[partition] += 1;
-            self.regions.total += 1;
-        }
-        Ok(())
-    }
-
-    fn side(&mut self, side: Side) -> &mut Held {
-        match side {
-            Side::Inner => &mut self.inner,
-            Side::Outer => &mut self.outer,
-        }
-    }
-
-    /// Send partitions to disk as the machine says, from `event` on.
-    fn send(&mut self, event: Event, limited: bool) -> Result<()> {
-        let mut action = self.step(event)?;
-        loop {
-            let (partition, demote) = match action {
-                Action::Done => {
-                    if limited {
-                        self.check_memory();
-                    }
-                    return Ok(());
-                }
-                Action::Demote(partition) => (partition as usize, true),
-                Action::Evict(partition) => (partition as usize, false),
-                action => panic!("{action:?} while sending"),
-            };
-            // A partition goes to disk once, and only one there is evicted.
-            assert_eq!(self.on_disk[partition], !demote);
-            let before = self.memory;
-            let chunks = core::mem::take(&mut self.inner.chunks[partition]);
-            let count = chunks.len();
-            for (index, rows) in chunks.into_iter().enumerate() {
-                if !rows.is_empty() {
-                    self.inner.files[partition].push(rows);
-                }
-                // A partition sent keeps its last chunk, emptied, as its tail.
-                if demote && index + 1 == count {
-                    self.inner.chunks[partition].push(Vec::new());
-                } else {
-                    self.count(partition, self.chunk_len, false)?;
-                }
-            }
-            self.on_disk[partition] = true;
-            self.ran[usize::from(!demote)] += 1;
-            let freed = self.memory < before || demote;
-            action = self.step(Event::Sent {
-                freed,
-                memory: self.memory,
-            })?;
-        }
-    }
-
-    /// Past a check, the memory fits, or what is left is the tails of
-    /// partitions on disk, which the rule weighs as nothing.
-    fn check_memory(&self) {
-        let on_disk = self.on_disk.iter().filter(|&&on| on).count() as u64;
-        let held = self.memory as f64 + self.join.reserve as f64 * on_disk as f64;
-        let resident: u64 = (0..self.on_disk.len())
-            .filter(|&partition| !self.on_disk[partition])
-            .map(|partition| self.inner.chunks[partition].len() as u64)
-            .sum();
-        let params = self.join.params;
-        assert!(
-            held <= params.start.max(params.target) * params.limit as f64 || resident == 0,
-            "{held} bytes past the limit with {resident} chunks in memory"
+            .add_bytes(4 << 20, Some(partition))
+            .expect("bytes");
+        let grown = Event::Grown { memory: 4 << 20 };
+        assert_eq!(
+            join.step(grown, &mut regions.host()),
+            Ok(Action::Demote(partition))
         );
-    }
-
-    /// Move the table into the level the machine started.
-    fn start(&mut self, start: Start) -> Result<()> {
-        let partitions = start.plan.partitions as usize;
-        self.regions = Regions::of(&start);
-        self.chunk_len = start.plan.chunk_len as u64;
-        self.outer_len = start.outer_len as u64;
-        self.shift = start.plan.shift;
-        self.inner = Held {
-            chunks: vec![Vec::new(); partitions],
-            files: vec![Vec::new(); partitions],
-        };
-        self.outer = Held {
-            chunks: vec![Vec::new(); partitions],
-            files: vec![Vec::new(); partitions],
-        };
-        self.on_disk = vec![false; partitions];
-        assert_eq!(self.step(Event::Made)?, Action::Done);
-        self.memory = 0;
-        for row in core::mem::take(&mut self.table) {
-            self.append(Side::Inner, row)?;
-        }
-        self.send(
-            Event::Grown {
-                memory: self.memory,
-            },
-            true,
-        )
-    }
-
-    /// Join `inner` and `outer` through the machine; the partitions on
-    /// disk are joined whole, as the host decides for now.
-    fn run(params: &Params, inner: &[Row], outer: &[Row], batch: usize) -> Result<(Pairs, Ran)> {
-        let mut model = Self {
-            join: Join::new(params)?,
-            record: params.shape.record as u64,
-            chunk_len: 0,
-            outer_len: 0,
-            shift: 0,
-            table: Vec::new(),
-            regions: Regions::none(),
-            inner: Held::default(),
-            outer: Held::default(),
+        regions
+            .spill()
+            .add_bytes(-(4 << 20), Some(partition))
+            .expect("bytes");
+        let sent = Event::Sent {
+            freed: true,
             memory: 0,
-            on_disk: Vec::new(),
-            pairs: Vec::new(),
-            ran: [0; 6],
         };
-        let mut spilled = false;
-        for rows in inner.chunks(batch) {
-            if !spilled {
-                let held = model.table.len() as u64 * model.record;
-                let event = Event::Inner {
-                    held,
-                    rows: model.table.len() as u64,
-                    estimate: inner.len() as f64,
-                    needed: held + 2 * rows.len() as u64 * model.record,
-                };
-                match model.step(event)? {
-                    Action::Done => {
-                        model.table.extend_from_slice(rows);
-                        continue;
-                    }
-                    Action::Start(start) => {
-                        model.start(start)?;
-                        spilled = true;
-                    }
-                    action => panic!("{action:?} before a batch"),
-                }
-            }
-            for &row in rows {
-                model.append(Side::Inner, row)?;
-            }
-            model.send(
-                Event::Grown {
-                    memory: model.memory,
-                },
-                true,
-            )?;
-        }
-        if !spilled {
-            pairs(&model.table, outer, &mut model.pairs);
-            return Ok((model.pairs, model.ran));
-        }
-        model.send(Event::BuildEnd, false)?;
-        // Every inner row is in memory or on disk, once.
-        let mut kept: Vec<u32> = (model.inner.chunks.iter().flatten())
-            .chain(model.inner.files.iter().flatten())
-            .flatten()
-            .map(|row| row.id)
-            .collect();
-        kept.sort_unstable();
-        assert!(kept.iter().copied().eq(0..inner.len() as u32));
-        // The routes were set, every one.
-        let routes = model.regions.routes.clone();
-        for (partition, &route) in routes.iter().enumerate() {
-            let expected = if !model.on_disk[partition] {
-                Route::Probe
-            } else if model.regions.rows[partition] == 0 {
-                Route::Answer
-            } else {
-                Route::Write
-            };
-            assert_eq!(route, expected as u8);
-        }
-        for &row in outer {
-            let partition = model.partition(row.key);
-            model.ran[3 + usize::from(routes[partition])] += 1;
-            if routes[partition] == Route::Probe as u8 {
-                let table: Vec<Row> = model.inner.chunks[partition].concat();
-                pairs(&table, &[row], &mut model.pairs);
-            } else if routes[partition] == Route::Write as u8 {
-                model.append(Side::Outer, row)?;
-            }
-        }
-        assert_eq!(model.step(Event::OuterEnd)?, Action::Done);
-        for (partition, &route) in routes.iter().enumerate() {
-            if route != Route::Write as u8 {
-                continue;
-            }
-            let inner: Vec<Row> = model.inner.files[partition]
-                .concat()
-                .into_iter()
-                .chain(model.inner.chunks[partition].concat())
-                .collect();
-            let outer: Vec<Row> = model.outer.files[partition]
-                .concat()
-                .into_iter()
-                .chain(model.outer.chunks[partition].concat())
-                .collect();
-            pairs(&inner, &outer, &mut model.pairs);
-        }
-        Ok((model.pairs, model.ran))
+        assert_eq!(join.step(sent, &mut regions.host()), Ok(Action::Done));
     }
+    assert_eq!(
+        join.step(Event::BuildEnd, &mut regions.host()),
+        Ok(Action::Done)
+    );
+    assert_eq!(
+        join.step(Event::OuterEnd, &mut regions.host()),
+        Ok(Action::Done)
+    );
+    (join, regions)
 }
 
-/// The pairs of a join, the ids of an inner row and an outer row.
-type Pairs = Vec<(u32, u32)>;
-
-/// What a model ran: demotions, evictions, flushes, and outer rows
-/// probed, written and answered.
-type Ran = [usize; 6];
-
-/// The pairs of a join in memory.
-fn pairs(inner: &[Row], outer: &[Row], out: &mut Pairs) {
-    for o in outer {
-        for i in inner {
-            if i.key == o.key {
-                out.push((i.id, o.id));
-            }
-        }
+/// The machine of a level below, made, its partitions 1, 2 and 3 sent to
+/// disk, its build and its outer rows ended.
+fn joining_below(params: &Params, below: &Below) -> (Join, Regions) {
+    let (mut join, start) = Join::below(params, below).expect("a level below");
+    let mut regions = Regions::of(&start);
+    assert_eq!(
+        join.step(Event::Made, &mut regions.host()),
+        Ok(Action::Done)
+    );
+    regions.rows[0] = 5000;
+    regions.rows[1] = 2000;
+    regions.rows[3] = 300;
+    regions.total = 7300;
+    for partition in [1, 2, 3] {
+        regions
+            .spill()
+            .add_bytes(4 << 20, Some(partition))
+            .expect("bytes");
+        let grown = Event::Grown { memory: 4 << 20 };
+        assert_eq!(
+            join.step(grown, &mut regions.host()),
+            Ok(Action::Demote(partition))
+        );
+        regions
+            .spill()
+            .add_bytes(-(4 << 20), Some(partition))
+            .expect("bytes");
+        let sent = Event::Sent {
+            freed: true,
+            memory: 0,
+        };
+        assert_eq!(join.step(sent, &mut regions.host()), Ok(Action::Done));
     }
+    for event in [Event::BuildEnd, Event::OuterEnd] {
+        assert_eq!(join.step(event, &mut regions.host()), Ok(Action::Done));
+    }
+    (join, regions)
 }
 
-fn rows(keys: &[u32]) -> Vec<Row> {
-    keys.iter()
-        .enumerate()
-        .map(|(id, &key)| Row { key, id: id as u32 })
-        .collect()
+/// The next partition of a level that joins, its partition 1 of `size`
+/// bytes on disk with outer rows, past `memory`: the level below it splits
+/// into, or none.
+fn split_of(join: &mut Join, regions: &mut Regions, size: u64, memory: u64) -> Option<Below> {
+    regions.outer = vec![0; regions.rows.len()];
+    regions.outer[1] = 100;
+    regions.disk = vec![0; regions.rows.len()];
+    regions.disk[1] = size;
+    match join.step(Event::Next { memory }, &mut regions.host()) {
+        Ok(Action::Split(below)) => Some(below),
+        Ok(Action::Release(_) | Action::LevelDone) | Err(_) => panic!("no partition 1"),
+        Ok(_) => None,
+    }
 }
 
 #[test]
-fn a_join_through_the_machine_gives_the_pairs_of_one_in_memory() {
-    let strategy = (
-        prop::collection::vec(0_u32..400, 0..1500),
-        prop::collection::vec(0_u32..500, 0..300),
-        8_u64..200,
-        1_usize..64,
-        (0.5_f64..=1.0, 0.5_f64..=1.0, 0.0_f64..=1.0, 0.0_f64..0.5),
+fn a_split_weighs_a_chunk_of_outer_rows_and_the_join_s_limit() {
+    let limit = 1 << 20;
+    let params = params(limit);
+    // Between two thirds of the limit with and without a chunk of outer
+    // rows and its values: it splits, the chunk counted.
+    let (mut join, mut regions) = joining(&params);
+    let size = 2 * (limit - join.outer_len) / 3;
+    assert!(split_of(&mut join, &mut regions, size, 0).is_some());
+    // A level below of a quarter of the limit weighs the join's limit:
+    // the same partition, past two thirds of the quarter, does not split.
+    let below = Below {
+        partition: 1,
+        level: 1,
+        expected: 4 << 20,
+        limit: limit / 4,
+        shift: 2,
+    };
+    let (mut level, mut regions) = joining_below(&params, &below);
+    let size = limit / 2;
+    assert!(size > 2 * (limit / 4) / 3);
+    assert_eq!(split_of(&mut level, &mut regions, size, 0), None);
+    // Larger, it splits into the level below that one.
+    let (mut level, mut regions) = joining_below(&params, &below);
+    let deeper = split_of(&mut level, &mut regions, 2 * limit, 0).expect("a split");
+    assert_eq!((deeper.level, deeper.shift), (2, level.below));
+}
+
+#[test]
+fn a_level_below_has_a_quarter_from_three_quarters_of_the_limit_in_use() {
+    // A limit that four does not divide, so that a quarter of it is not
+    // what three quarters leave.
+    let limit = (1 << 20) + 3;
+    let level = Below {
+        partition: 1,
+        level: 1,
+        expected: 1000,
+        limit,
+        shift: 2,
+    };
+    let memory = limit / 4 * 3;
+    let (mut join, mut regions) = joining_below(&params(limit), &level);
+    let below = split_of(&mut join, &mut regions, 600_000, memory).expect("a split");
+    assert_eq!(below.limit, limit / 4);
+    let (mut join, mut regions) = joining_below(&params(limit), &level);
+    let below = split_of(&mut join, &mut regions, 600_000, memory - 1).expect("a split");
+    assert_eq!(below.limit, limit - (memory - 1));
+}
+
+#[test]
+fn a_partition_taken_alone_weighs_the_memory_in_use() {
+    let limit = 1 << 20;
+    let (mut join, start) = Join::given(&params(limit), 4).expect("a level");
+    let mut regions = Regions::of(&start);
+    regions.rows = vec![1000; 4];
+    regions.total = 100_000;
+    regions.disk = vec![400_000; 4];
+    let take = |partition, memory| Event::Take { partition, memory };
+    // Past what 600 000 bytes in use leave, not what nothing leaves.
+    let Ok(Action::Split(_)) = join.step(take(1, 600_000), &mut regions.host()) else {
+        panic!("a split");
+    };
+    let whole = join.step(take(2, 0), &mut regions.host());
+    assert!(!matches!(whole, Ok(Action::Split(_))), "{whole:?}");
+}
+
+#[test]
+fn partitions_on_disk_are_released_joined_or_split() {
+    let limit = 1 << 20;
+    let (mut join, mut regions) = joining(&params(limit));
+    // Partition 1 larger than two thirds of what is left, 3 smaller.
+    regions.outer = vec![0, 100, 0, 0];
+    regions.disk = vec![0, 800_000, 0, 1000];
+    let next = |memory| Event::Next { memory };
+    let memory = 10_000;
+    let used = memory + 2 * join.outer_len;
+    assert!(800_000.0 > 2.0 / 3.0 * (limit - used) as f64);
+    let split = Below {
+        partition: 1,
+        level: 1,
+        expected: 800_000,
+        limit: limit - memory,
+        shift: join.below,
+    };
+    assert_eq!(
+        join.step(next(memory), &mut regions.host()),
+        Ok(Action::Split(split))
     );
-    property(
-        strategy,
-        |(inner, outer, kib, batch, (start, target, spilled, resident))| {
-            let params = Params {
-                start,
-                target,
-                spilled,
-                resident,
-                ..params(kib * 1024)
-            };
-            let (inner, outer) = (rows(&inner), rows(&outer));
-            let (mut got, _) = Model::run(&params, &inner, &outer, batch)?;
-            let mut expected = Vec::new();
-            pairs(&inner, &outer, &mut expected);
-            got.sort_unstable();
-            expected.sort_unstable();
-            assert_eq!(got, expected);
-            Ok(())
-        },
+    // No outer row, and no inner row to give out alone: nothing to join.
+    assert_eq!(
+        join.step(next(memory), &mut regions.host()),
+        Ok(Action::Release(2))
     );
+    assert_eq!(
+        join.step(next(memory), &mut regions.host()),
+        Ok(Action::Release(3))
+    );
+    assert_eq!(
+        join.step(next(memory), &mut regions.host()),
+        Ok(Action::LevelDone)
+    );
+    assert_eq!(
+        wrong(join.step(next(memory), &mut regions.host())),
+        Rule::JoinEvent
+    );
+}
+
+#[test]
+fn a_partition_too_large_to_split_is_joined_whole() {
+    let limit = 1 << 20;
+    // Preserved inner rows keep partition 3 though it has no outer row.
+    let params = Params {
+        preserve_inner: 1,
+        ..params(limit)
+    };
+    let (mut join, mut regions) = joining(&params);
+    regions.outer = vec![0, 100, 0, 0];
+    regions.disk = vec![0, 800_000, 0, 1000];
+    // One key: partition 1 holds more than nine tenths of its level's rows.
+    regions.rows = vec![0, 7000, 0, 300];
+    regions.total = 7300;
+    let before = join;
+    let mut short = Regions {
+        words: regions.words.clone(),
+        disk: vec![0; 3],
+        ..Regions::of(&Start {
+            plan: plan::plan(&params.shape, &Level::first(limit as usize)).expect("plan"),
+            outer_len: 0,
+        })
+    };
+    short.rows = regions.rows.clone();
+    short.outer = regions.outer.clone();
+    let next = Event::Next { memory: 0 };
+    assert_eq!(wrong(join.step(next, &mut short.host())), Rule::JoinDisk);
+    assert_eq!(join, before);
+    assert_eq!(join.step(next, &mut regions.host()), Ok(Action::Open(1)));
+    // Partition 2: no inner row to give out.
+    assert_eq!(join.step(next, &mut regions.host()), Ok(Action::Release(2)));
+    assert_eq!(join.step(next, &mut regions.host()), Ok(Action::Open(3)));
+    // With most of the limit in use, a level below has a quarter of it.
+    let (mut again, mut regions) = joining(&params);
+    regions.outer = vec![0, 100, 0, 0];
+    regions.disk = vec![0, 300_000, 0, 0];
+    let memory = limit / 4 * 3 + 1;
+    let Ok(Action::Split(below)) = again.step(Event::Next { memory }, &mut regions.host()) else {
+        panic!("a split");
+    };
+    assert_eq!(below.limit, limit / 4);
 }
 
 /// `count` rows of `keys` keys whose hashes fall into `partition` of
@@ -963,10 +864,18 @@ fn keys_of(partition: u32, keys: usize, count: usize) -> Vec<u32> {
     (0..count).map(|row| of[row % keys]).collect()
 }
 
-/// Join through the machine, check the pairs, and give what ran.
-fn ran(params: &Params, inner: &[u32], outer: &[u32]) -> Result<Ran> {
+fn rows(keys: &[u32]) -> Vec<Row> {
+    keys.iter()
+        .enumerate()
+        .map(|(id, &key)| Row { key, id: id as u32 })
+        .collect()
+}
+
+/// Join through the machine, `batch` inner rows at a time, check the
+/// pairs against a join in memory, and give what ran.
+fn ran(params: &Params, inner: &[u32], outer: &[u32], batch: usize) -> Result<Counts> {
     let (inner, outer) = (rows(inner), rows(outer));
-    let (mut got, ran) = Model::run(params, &inner, &outer, 50)?;
+    let (mut got, ran) = Model::run(params, &inner, &outer, batch)?;
     let mut expected = Vec::new();
     pairs(&inner, &outer, &mut expected);
     got.sort_unstable();
@@ -976,23 +885,75 @@ fn ran(params: &Params, inner: &[u32], outer: &[u32]) -> Result<Ran> {
 }
 
 #[test]
+fn a_join_through_the_machine_gives_the_pairs_of_one_in_memory() {
+    let strategy = (
+        prop::collection::vec(0_u32..400, 0..1500),
+        prop::collection::vec(0_u32..500, 0..300),
+        8_u64..200,
+        1_usize..64,
+        (0.5_f64..=1.0, 0.5_f64..=1.0, 0.0_f64..=1.0, 0.0_f64..0.5),
+        (0.0_f64..2.0, 0.0_f64..=1.0),
+    );
+    property(
+        strategy,
+        |(inner, outer, kib, batch, (start, target, spilled, resident), (room, key))| {
+            let params = Params {
+                start,
+                target,
+                spilled,
+                resident,
+                split_room: room,
+                split_key: key,
+                ..params(kib * 1024)
+            };
+            ran(&params, &inner, &outer, batch)?;
+            Ok(())
+        },
+    );
+}
+
+#[test]
 fn a_join_that_spills_runs_every_path() -> Result<()> {
     let outer: Vec<u32> = (0..2000).collect();
-    // Little memory: every partition on disk, their tails sent again.
+    // Little memory: every partition on disk, their tails sent again, and
+    // the partitions split into levels below, some of them released.
     let spread: Vec<u32> = (0..6000).map(|row| row * 7 % 300).collect();
     let little = Params {
         spilled: 1.0,
         ..params(8 * 1024)
     };
-    let [demoted, evicted, flushed, _, written, _] = ran(&little, &spread, &outer)?;
-    assert!(demoted > 0 && evicted > 0 && flushed > 0 && written > 0);
+    let ran_little = ran(&little, &spread, &outer, 50)?;
+    // Levels below levels below.
+    assert!(ran_little[Ran::DEEPEST] > 2, "{ran_little:?}");
+    for what in [
+        Ran::DEMOTED,
+        Ran::EVICTED,
+        Ran::FLUSHED,
+        Ran::WRITTEN,
+        Ran::SPLIT,
+        Ran::OPENED,
+    ] {
+        assert!(ran_little[what] > 0, "{what} in {ran_little:?}");
+    }
     // One partition large, one in memory: probed and written.
     let two = [keys_of(0, 100, 3000), keys_of(1, 50, 1500)].concat();
-    let [demoted, _, _, probed, written, _] = ran(&params(100 * 1024), &two, &outer)?;
-    assert!(demoted > 0 && probed > 0 && written > 0);
-    // Few rows left in memory: the empty partitions go too, answered.
+    let ran_two = ran(&params(100 * 1024), &two, &outer, 50)?;
+    for what in [Ran::DEMOTED, Ran::PROBED, Ran::WRITTEN, Ran::OPENED] {
+        assert!(ran_two[what] > 0, "{what} in {ran_two:?}");
+    }
+    // Few rows left in memory: the empty partitions go too, answered and
+    // released.
     let few = [keys_of(0, 100, 3000), keys_of(3, 20, 500)].concat();
-    let [_, _, _, _, written, answered] = ran(&params(100 * 1024), &few, &outer)?;
-    assert!(written > 0 && answered > 0);
+    let ran_few = ran(&params(100 * 1024), &few, &outer, 50)?;
+    for what in [Ran::WRITTEN, Ran::ANSWERED, Ran::RELEASED] {
+        assert!(ran_few[what] > 0, "{what} in {ran_few:?}");
+    }
+    // One key: no level below splits it, so it is joined whole.
+    let one = vec![7; 3000];
+    let ran_one = ran(&params(16 * 1024), &one, &[7, 7, 8], 50)?;
+    assert!(
+        ran_one[Ran::OPENED] > 0 && ran_one[Ran::SPLIT] == 0,
+        "{ran_one:?}"
+    );
     Ok(())
 }

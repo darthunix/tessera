@@ -330,8 +330,7 @@ typedef struct SpillPart
 	/* Bytes of the value chunks in memory, and of everything in memory. */
 	Size		value_bytes;
 	Size		bytes;
-	/* Bytes of the blocks written, and the blocks of records among them. */
-	uint64		disk_bytes;
+	/* The blocks of records written. */
 	uint64		blocks;
 	bool		resident;
 	/* A block of the partition went to disk. */
@@ -394,8 +393,12 @@ typedef struct SpillSide
 	int			value_slots;
 	int			npartitions;
 	SpillPart  *parts;
-	/* The rows of each partition, which the appends count. */
+	/*
+	 * The rows of each partition, which the appends count, and the bytes of
+	 * its blocks written, as they take read back.
+	 */
 	uint64	   *rows;
+	uint64	   *disk_bytes;
 	TessSpill  *file;
 	uint64		fingerprint;
 	uint32		next_number;
@@ -578,10 +581,10 @@ typedef struct JoinSpill
 	uint32		below;
 	/*
 	 * The level's machine (relspill's join): the first level's is the
-	 * node's, a level below keeps its own; a shared table's level has
-	 * none, its shared build deciding. Where the outer rows of each
-	 * partition go, a TessJoinRoute each, which the machine sets at the
-	 * end of the build.
+	 * node's, a level below keeps its own, and so does a shared table's
+	 * level, whose shared build decides all but whether a partition taken
+	 * alone splits. Where the outer rows of each partition go, a
+	 * TessJoinRoute each, which the machine sets at the end of the build.
 	 */
 	TessJoinMachine *machine;
 	TessJoinMachine own;
@@ -1052,7 +1055,8 @@ extern void join_insert_spill(TessHashJoinState *state, TessBatch *batch);
 extern uint64 join_matched_word(const JoinSpill *spill, int count);
 extern bool join_next_pass(TessHashJoinState *state);
 extern bool join_next_spilled(TessHashJoinState *state, JoinSpill *spill);
-extern bool join_open_partition(TessHashJoinState *state, int partition);
+extern bool join_open_partition(TessHashJoinState *state, int partition, const TessJoinBelow *below);
+extern bool join_take_partition(TessHashJoinState *state, int partition);
 extern void join_outer_finish(TessHashJoinState *state, TessBatch *batch);
 extern TessBatch *join_outer_next(TessHashJoinState *state);
 extern void join_part_open(PartReader *reader, TessSpill *file, int partition, int writers);

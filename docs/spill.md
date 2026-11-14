@@ -22,8 +22,13 @@ level and steps with what it saw: a batch of inner rows about to go in,
 a full chunk, the memory after a batch, the end of each side. The
 machine answers what to do: start the first level, give a partition a
 chunk or write what it holds, send a partition to disk, and, at the end
-of the build, where the outer rows of each partition go. The node does
-the work for each row and the reading and writing.
+of the build, where the outer rows of each partition go. Once the outer
+rows end, the node asks it for the partitions on disk one at a time, and
+it answers which to release, which to join whole and which to split
+into a level below, with that level's limit. A shared table's level has
+a machine too, which decides whether a partition one participant takes
+alone splits. The node does the work for each row and the reading and
+writing.
 
 **Partitions and bits.** A partition is `(hash >> shift) &
 (npartitions - 1)` of the 32-bit hash the table stores; the buckets take

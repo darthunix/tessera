@@ -128,6 +128,9 @@ tess_kernels_layout_matches(void)
 		tess_join_layout(TESS_JOIN_EVENT_MEMORY_OFFSET) == offsetof(TessJoinEvent, memory) &&
 		tess_join_layout(TESS_JOIN_ACTION_SIZE) == sizeof(TessJoinAction) &&
 		tess_join_layout(TESS_JOIN_ACTION_PLAN_OFFSET) == offsetof(TessJoinAction, plan) &&
+		tess_join_layout(TESS_JOIN_ACTION_BELOW_OFFSET) == offsetof(TessJoinAction, below) &&
+		tess_join_layout(TESS_JOIN_BELOW_SIZE) == sizeof(TessJoinBelow) &&
+		tess_join_layout(TESS_JOIN_BELOW_SHIFT_OFFSET) == offsetof(TessJoinBelow, shift) &&
 		tess_join_layout((TessJoinLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of

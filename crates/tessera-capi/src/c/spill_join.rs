@@ -8,7 +8,7 @@ use std::ffi::c_int;
 use std::mem::{offset_of, size_of};
 
 use anyhow::{Context, Result, bail, ensure};
-use relspill::join::{Action, Event, Host, Join, Params, Side, Start};
+use relspill::join::{Action, Below, Event, Host, Join, Params, Side, Start};
 use relspill::plan::Shape;
 
 use super::shared_spill::check_spill_words;
@@ -25,13 +25,15 @@ pub struct JoinParams {
     pub shape: SpillShape,
     pub outer_words: u64,
     pub outer_values: u32,
-    pub spare: u32,
+    pub preserve_inner: u32,
     pub page: u64,
     pub start: f64,
     pub target: f64,
     pub spilled: f64,
     pub resident: f64,
     pub tail: f64,
+    pub split_room: f64,
+    pub split_key: f64,
 }
 
 impl JoinParams {
@@ -50,13 +52,15 @@ impl JoinParams {
             },
             outer_words: self.outer_words,
             outer_values: self.outer_values,
-            spare: self.spare,
+            preserve_inner: self.preserve_inner,
             page: self.page,
             start: self.start,
             target: self.target,
             spilled: self.spilled,
             resident: self.resident,
             tail: self.tail,
+            split_room: self.split_room,
+            split_key: self.split_key,
         }
     }
 }
@@ -70,14 +74,18 @@ pub struct JoinHost {
     pub rows: *const u64,
     pub nrows: usize,
     pub total: u64,
+    pub outer: *const u64,
+    pub nouter: usize,
+    pub disk: *const u64,
+    pub ndisk: usize,
     pub routes: *mut u8,
     pub nroutes: usize,
 }
 
-/// `TessJoinEvent`: a step of the join; see [`Event`]. `flag` is the
-/// tail of [`JOIN_FULL`] and the bytes freed of [`JOIN_SENT`]; `memory`
-/// the bytes needed of [`JOIN_INNER`] and the memory of [`JOIN_GROWN`]
-/// and [`JOIN_SENT`].
+/// `TessJoinEvent`: a step of the join; see [`Event`]. `partition` is
+/// that of [`JOIN_FULL`] and [`JOIN_TAKE`]; `flag` the tail of
+/// [`JOIN_FULL`] and the bytes freed of [`JOIN_SENT`]; `memory` the bytes
+/// needed of [`JOIN_INNER`] and the memory of the others.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JoinEvent {
@@ -99,10 +107,41 @@ pub const JOIN_GROWN: u32 = 4;
 pub const JOIN_SENT: u32 = 5;
 pub const JOIN_BUILD_END: u32 = 6;
 pub const JOIN_OUTER_END: u32 = 7;
+pub const JOIN_NEXT: u32 = 8;
+pub const JOIN_TAKE: u32 = 9;
+
+/// `TessJoinBelow`: a level below to make; see [`Below`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JoinBelow {
+    pub partition: u32,
+    pub level: u32,
+    pub expected: u64,
+    pub limit: u64,
+    pub shift: u32,
+    pub spare: u32,
+}
+
+impl JoinBelow {
+    fn below(&self) -> Result<Below> {
+        ensure!(
+            self.spare == 0,
+            "a level below with a spare word of {}",
+            self.spare
+        );
+        Ok(Below {
+            partition: self.partition,
+            level: self.level,
+            expected: self.expected,
+            limit: self.limit,
+            shift: self.shift,
+        })
+    }
+}
 
 /// `TessJoinAction`: what the join does next; see [`Action`]. The plan
-/// and `outer_len` are those of [`JOIN_START`], `partition` that of
-/// [`JOIN_DEMOTE`] and [`JOIN_EVICT`].
+/// and `outer_len` are those of [`JOIN_START`], `partition` that of the
+/// actions on a partition, and `below` that of [`JOIN_SPLIT`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JoinAction {
@@ -110,6 +149,7 @@ pub struct JoinAction {
     pub partition: u32,
     pub outer_len: usize,
     pub plan: SpillPlan,
+    pub below: JoinBelow,
 }
 
 /// `TessJoinActionKind`, of a [`JoinAction`].
@@ -119,6 +159,10 @@ pub const JOIN_ADD_CHUNK: u32 = 2;
 pub const JOIN_FLUSH: u32 = 3;
 pub const JOIN_DEMOTE: u32 = 4;
 pub const JOIN_EVICT: u32 = 5;
+pub const JOIN_RELEASE: u32 = 6;
+pub const JOIN_OPEN: u32 = 7;
+pub const JOIN_SPLIT: u32 = 8;
+pub const JOIN_LEVEL_DONE: u32 = 9;
 
 impl JoinEvent {
     fn event(&self) -> Result<Event> {
@@ -153,6 +197,13 @@ impl JoinEvent {
             },
             JOIN_BUILD_END => Event::BuildEnd,
             JOIN_OUTER_END => Event::OuterEnd,
+            JOIN_NEXT => Event::Next {
+                memory: self.memory,
+            },
+            JOIN_TAKE => Event::Take {
+                partition: self.partition,
+                memory: self.memory,
+            },
             kind => bail!("a join event of kind {kind}"),
         })
     }
@@ -173,6 +224,7 @@ impl JoinAction {
                 below: plan.below,
                 deeper: plan.deeper,
             },
+            below: JoinBelow::default(),
         }
     }
 
@@ -184,6 +236,24 @@ impl JoinAction {
             Action::Flush => (JOIN_FLUSH, 0),
             Action::Demote(partition) => (JOIN_DEMOTE, partition),
             Action::Evict(partition) => (JOIN_EVICT, partition),
+            Action::Release(partition) => (JOIN_RELEASE, partition),
+            Action::Open(partition) => (JOIN_OPEN, partition),
+            Action::LevelDone => (JOIN_LEVEL_DONE, 0),
+            Action::Split(below) => {
+                return Self {
+                    kind: JOIN_SPLIT,
+                    partition: below.partition,
+                    below: JoinBelow {
+                        partition: below.partition,
+                        level: below.level,
+                        expected: below.expected,
+                        limit: below.limit,
+                        shift: below.shift,
+                        spare: 0,
+                    },
+                    ..Self::default()
+                };
+            }
         };
         Self {
             kind,
@@ -229,22 +299,49 @@ pub unsafe extern "C" fn tess_join_init(
     }
 }
 
-/// `tess_join_below`: make `*machine` the machine of level `level` below
-/// the first, which splits a partition of `expected` bytes within `limit`
-/// from hash bit `shift`, and the level to make into `*action`.
+/// `tess_join_below`: make `*machine` the machine of the level below
+/// that a `TESS_JOIN_SPLIT` asked for, and the level to make into
+/// `*action`.
+///
+/// # Safety
+///
+/// As for [`tess_join_init`]; `below` null or readable; `action` null or
+/// writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_join_below(
+    machine: *mut Join,
+    params: *const JoinParams,
+    below: *const JoinBelow,
+    action: *mut JoinAction,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let machine = machine_at(machine)?;
+            let params = params.as_ref().context("null join parameters")?;
+            let below = below.as_ref().context("a null level below")?.below()?;
+            let out = action.as_mut().context("a null join action")?;
+            let (join, start) = Join::below(&params.params(), &below)?;
+            *machine = join;
+            *out = JoinAction::start(&start);
+            Ok(())
+        })
+    }
+}
+
+/// `tess_join_given`: make `*machine` the machine of the level of a
+/// build several processes share, whose `partitions` one of them
+/// planned, and that level into `*action`, a `TESS_JOIN_START`.
 ///
 /// # Safety
 ///
 /// As for [`tess_join_init`]; `action` null or writable.
 #[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
-pub unsafe extern "C" fn tess_join_below(
+pub unsafe extern "C" fn tess_join_given(
     machine: *mut Join,
     params: *const JoinParams,
-    level: u32,
-    expected: f64,
-    limit: u64,
-    shift: u32,
+    partitions: u32,
     action: *mut JoinAction,
     status: *mut Status,
 ) -> Code {
@@ -254,35 +351,9 @@ pub unsafe extern "C" fn tess_join_below(
             let machine = machine_at(machine)?;
             let params = params.as_ref().context("null join parameters")?;
             let out = action.as_mut().context("a null join action")?;
-            let (join, start) = Join::below(&params.params(), level, expected, limit, shift)?;
+            let (join, start) = Join::given(&params.params(), partitions)?;
             *machine = join;
             *out = JoinAction::start(&start);
-            Ok(())
-        })
-    }
-}
-
-/// `tess_join_given`: the level of a build several processes share,
-/// whose `partitions` one of them planned, into `*action`, a
-/// `TESS_JOIN_START`.
-///
-/// # Safety
-///
-/// `params` null or readable; `action` null or writable; `status` as for
-/// every entry point.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn tess_join_given(
-    params: *const JoinParams,
-    partitions: u32,
-    action: *mut JoinAction,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let params = params.as_ref().context("null join parameters")?;
-            let out = action.as_mut().context("a null join action")?;
-            *out = JoinAction::start(&Join::given(&params.params(), partitions)?);
             Ok(())
         })
     }
@@ -295,11 +366,11 @@ pub unsafe extern "C" fn tess_join_given(
 ///
 /// `machine` as for [`machine_at`]; `host` null or readable, its words
 /// refused as [`check_spill_words`] says or valid for reads and writes of
-/// `nwords` words this thread alone reaches, its `rows` null or valid for
-/// reads of `nrows` and its `routes` null or valid for writes of
-/// `nroutes` bytes, neither overlapping the words; `event` null or
-/// readable; `action` null or writable; `status` as for every entry
-/// point.
+/// `nwords` words this thread alone reaches, its `rows`, `outer` and
+/// `disk` null or valid for reads of their counts of words, and its
+/// `routes` null or valid for writes of `nroutes` bytes, none of them
+/// overlapping the words or the routes; `event` null or readable;
+/// `action` null or writable; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_join_step(
     machine: *mut Join,
@@ -324,11 +395,19 @@ pub unsafe extern "C" fn tess_join_step(
                 std::slice::from_raw_parts(host.words.cast::<Cell<u64>>(), host.nwords)
             };
             let rows = values(host.rows, host.nrows, "rows of a join's partitions")?;
+            let outer = values(host.outer, host.nouter, "outer rows of a join's partitions")?;
+            let disk = values(
+                host.disk,
+                host.ndisk,
+                "bytes on disk of a join's partitions",
+            )?;
             let routes = slots(host.routes, host.nroutes, "routes of a join's outer rows")?;
             let mut host = Host {
                 words,
                 rows,
                 total: host.total,
+                outer,
+                disk,
                 routes,
             };
             *out = JoinAction::of(machine.step(event, &mut host)?);
@@ -348,6 +427,9 @@ pub const JOIN_EVENT_SIZE: c_int = 6;
 pub const JOIN_EVENT_MEMORY_OFFSET: c_int = 7;
 pub const JOIN_ACTION_SIZE: c_int = 8;
 pub const JOIN_ACTION_PLAN_OFFSET: c_int = 9;
+pub const JOIN_ACTION_BELOW_OFFSET: c_int = 10;
+pub const JOIN_BELOW_SIZE: c_int = 11;
+pub const JOIN_BELOW_SHIFT_OFFSET: c_int = 12;
 
 /// `tess_join_layout`: the size or offset of a `TessJoinLayout` for the C
 /// side's mirrors to check; 0 for another code.
@@ -363,6 +445,9 @@ pub extern "C" fn tess_join_layout(what: c_int) -> usize {
         JOIN_EVENT_MEMORY_OFFSET => offset_of!(JoinEvent, memory),
         JOIN_ACTION_SIZE => size_of::<JoinAction>(),
         JOIN_ACTION_PLAN_OFFSET => offset_of!(JoinAction, plan),
+        JOIN_ACTION_BELOW_OFFSET => offset_of!(JoinAction, below),
+        JOIN_BELOW_SIZE => size_of::<JoinBelow>(),
+        JOIN_BELOW_SHIFT_OFFSET => offset_of!(JoinBelow, shift),
         _ => 0,
     }
 }
