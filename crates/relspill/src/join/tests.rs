@@ -387,6 +387,38 @@ fn a_level_below_is_planned_from_its_bits() {
     assert_eq!(wrong(Join::below(&params(limit), &past)), Rule::PlanBits);
 }
 
+/// A level whose chunks of outer rows are as long as a word holds weighs
+/// a partition taken alone without passing the word: the sums saturate.
+#[test]
+fn a_level_of_the_longest_chunks_weighs_without_passing_a_word() {
+    let params = Params {
+        limit: u64::MAX,
+        shape: Shape {
+            reserve: 0,
+            min_partitions: 4,
+            max_partitions: 4,
+            share: 1,
+            min_chunk: 1 << 63,
+            max_chunk: usize::MAX,
+            record: 40,
+        },
+        ..params(1 << 20)
+    };
+    let (mut join, start) = Join::given(&params, 4).expect("a level");
+    assert!(start.outer_len > usize::MAX / 2, "{start:?}");
+    let mut regions = Regions::of(&start);
+    regions.rows[0] = 1;
+    regions.total = 1;
+    let take = join.step(
+        Event::Take {
+            partition: 0,
+            memory: 0,
+        },
+        &mut regions.host(),
+    );
+    assert!(take.is_ok(), "{take:?}");
+}
+
 #[test]
 fn a_shared_level_takes_the_partitions_given() {
     let limit = 1 << 20;

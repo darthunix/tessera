@@ -749,9 +749,9 @@ impl Join {
         let outer_len = plan
             .chunk_len
             .max(columns::HEADER + 8 * LEAST_OUTER_ROWS * columns::lanes(words));
-        let mut tail = outer_len as u64 + self.params.page;
+        let mut tail = (outer_len as u64).saturating_add(self.params.page);
         if self.params.outer_values != 0 {
-            tail += outer_len as u64;
+            tail = tail.saturating_add(outer_len as u64);
         }
         self.limit = limit;
         self.chunk_len = plan.chunk_len as u64;
@@ -871,7 +871,7 @@ impl Join {
     /// so not one key; whole or in pieces otherwise.
     fn take(&mut self, host: &Host<'_>, partition: u32, memory: u64) -> Result<Action> {
         let index = partition as usize;
-        let used = memory.saturating_add(2 * self.outer_len);
+        let used = memory.saturating_add(self.outer_len.saturating_mul(2));
         let split = self.deeper != 0
             && splits(
                 &SplitWeights {
@@ -913,7 +913,7 @@ impl Join {
     /// limit leaves besides `memory` and a chunk of outer rows and its
     /// values, the rest for the piece's index.
     fn room_of(&self, memory: u64) -> u64 {
-        let used = memory.saturating_add(2 * self.outer_len);
+        let used = memory.saturating_add(self.outer_len.saturating_mul(2));
         self.params.limit.saturating_sub(used) / 3 * 2
     }
 
