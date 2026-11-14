@@ -1,0 +1,738 @@
+pub mod relspill
+pub mod relspill::columns
+pub struct relspill::columns::Shape
+pub relspill::columns::Shape::capacity: usize
+pub relspill::columns::Shape::rows: usize
+pub relspill::columns::Shape::words: usize
+impl relspill::columns::Shape
+pub fn relspill::columns::Shape::lane_at(&self, lane: usize) -> usize
+pub fn relspill::columns::Shape::word_lane(&self, word: usize) -> usize
+pub const relspill::columns::CAPACITY_AT: usize
+pub const relspill::columns::HEADER: usize
+pub const relspill::columns::MAX_ROWS: usize
+pub const relspill::columns::MAX_WORDS: usize
+pub const relspill::columns::ROWS_AT: usize
+pub const relspill::columns::VALUE_BYTE_BITS: u32
+pub const relspill::columns::WORDS_AT: usize
+pub fn relspill::columns::capacity(len: usize, words: usize) -> usize
+pub fn relspill::columns::init(chunk: &mut [u8], words: usize) -> relspill::Result<usize>
+pub fn relspill::columns::lanes(words: usize) -> usize
+pub fn relspill::columns::null_lanes(words: usize) -> usize
+pub fn relspill::columns::pack(chunk: &[u8], out: &mut [u8]) -> relspill::Result<(usize, usize)>
+pub fn relspill::columns::pack_bound(rows: usize, words: usize) -> usize
+pub fn relspill::columns::pack_slack(words: usize) -> usize
+pub fn relspill::columns::set_rows(chunk: &mut [u8], rows: usize)
+pub fn relspill::columns::shape(chunk: &[u8]) -> relspill::Result<relspill::columns::Shape>
+pub fn relspill::columns::size(capacity: usize, words: usize) -> usize
+pub fn relspill::columns::unpack(packed: &[u8], out: &mut [u8]) -> relspill::Result<()>
+pub fn relspill::columns::value_ref(chunk: u32, byte: usize) -> u64
+pub mod relspill::group
+pub enum relspill::group::Action
+pub relspill::group::Action::AddChunk
+pub relspill::group::Action::Done
+pub relspill::group::Action::Emit
+pub relspill::group::Action::Flush
+pub relspill::group::Action::LevelDone
+pub relspill::group::Action::Merge(u32)
+pub relspill::group::Action::Spill
+pub relspill::group::Action::Split(relspill::group::Below)
+pub relspill::group::Action::Start(relspill::plan::Plan)
+pub relspill::group::Action::Weigh(u32)
+pub relspill::group::Action::Write(u32)
+pub enum relspill::group::Event
+pub relspill::group::Event::Full
+pub relspill::group::Event::Full::partition: u32
+pub relspill::group::Event::Full::tail: bool
+pub relspill::group::Event::Grown
+pub relspill::group::Event::Grown::memory: u64
+pub relspill::group::Event::Inner
+pub relspill::group::Event::Inner::bytes: u64
+pub relspill::group::Event::Inner::estimate: f64
+pub relspill::group::Event::Inner::force: bool
+pub relspill::group::Event::Inner::records: u64
+pub relspill::group::Event::InputEnd
+pub relspill::group::Event::Made
+pub relspill::group::Event::Next
+pub relspill::group::Event::Partial
+pub relspill::group::Event::Partial::memory: u64
+pub relspill::group::Event::Partial::records: u64
+pub relspill::group::Event::Partial::rows: u64
+pub relspill::group::Event::Partial::spills: bool
+pub relspill::group::Event::Sent
+pub relspill::group::Event::Sent::memory: u64
+pub relspill::group::Event::Weighed
+pub relspill::group::Event::Weighed::groups: u64
+pub relspill::group::Event::Weighed::memory: u64
+pub relspill::group::Event::Weighed::others: u64
+pub enum relspill::group::RowsAction
+pub relspill::group::RowsAction::Done
+pub relspill::group::RowsAction::Freeze
+pub relspill::group::RowsAction::Freeze::level: u32
+pub relspill::group::RowsAction::Freeze::plan: relspill::plan::Plan
+pub relspill::group::RowsAction::LevelDone
+pub relspill::group::RowsAction::Read(relspill::group::Table)
+pub enum relspill::group::RowsEvent
+pub relspill::group::RowsEvent::Grown
+pub relspill::group::RowsEvent::Grown::memory: u64
+pub relspill::group::RowsEvent::Grown::records: u64
+pub relspill::group::RowsEvent::Next
+pub relspill::group::RowsEvent::Written
+pub struct relspill::group::Below
+pub relspill::group::Below::expected: u64
+pub relspill::group::Below::level: u32
+pub relspill::group::Below::limit: u64
+pub relspill::group::Below::partition: u32
+pub relspill::group::Below::shift: u32
+#[repr(C)] pub struct relspill::group::Group
+impl relspill::group::Group
+pub fn relspill::group::Group::below(params: &relspill::group::Params, below: &relspill::group::Below) -> relspill::Result<(Self, relspill::plan::Plan)>
+pub fn relspill::group::Group::level(&self) -> u32
+pub fn relspill::group::Group::new(params: &relspill::group::Params) -> relspill::Result<Self>
+pub fn relspill::group::Group::step(&mut self, event: relspill::group::Event, host: &relspill::group::Host<'_>) -> relspill::Result<relspill::group::Action>
+pub struct relspill::group::Host<'a>
+pub relspill::group::Host::disk: &'a [u64]
+pub relspill::group::Host::records: &'a [u64]
+pub relspill::group::Host::words: &'a [core::cell::Cell<u64>]
+#[repr(C)] pub struct relspill::group::Params
+pub relspill::group::Params::fill: u64
+pub relspill::group::Params::limit: u64
+pub relspill::group::Params::merged: u64
+pub relspill::group::Params::shape: relspill::plan::Shape
+pub relspill::group::Params::spilled: f64
+pub relspill::group::Params::split_room: f64
+pub relspill::group::Params::start: f64
+pub relspill::group::Params::target: f64
+#[repr(C)] pub struct relspill::group::Rows
+impl relspill::group::Rows
+pub fn relspill::group::Rows::new(params: &relspill::group::RowsParams) -> relspill::Result<Self>
+pub fn relspill::group::Rows::read(params: &relspill::group::RowsParams, table: &relspill::group::Table) -> relspill::Result<Self>
+pub fn relspill::group::Rows::step(&mut self, event: relspill::group::RowsEvent, host: &relspill::group::RowsHost<'_>) -> relspill::Result<relspill::group::RowsAction>
+pub struct relspill::group::RowsHost<'a>
+pub relspill::group::RowsHost::written: &'a [u64]
+#[repr(C)] pub struct relspill::group::RowsParams
+pub relspill::group::RowsParams::fill: u64
+pub relspill::group::RowsParams::least: u64
+pub relspill::group::RowsParams::limit: u64
+pub relspill::group::RowsParams::shape: relspill::plan::Shape
+pub struct relspill::group::Table
+pub relspill::group::Table::last: bool
+pub relspill::group::Table::level: u32
+pub relspill::group::Table::partition: u32
+pub relspill::group::Table::shift: u32
+pub const relspill::group::GROUP_WORDS: usize
+pub const relspill::group::ROWS_WORDS: usize
+pub mod relspill::join
+pub enum relspill::join::Action
+pub relspill::join::Action::AddChunk
+pub relspill::join::Action::Carry
+pub relspill::join::Action::Demote(u32)
+pub relspill::join::Action::Done
+pub relspill::join::Action::Evict(u32)
+pub relspill::join::Action::FinalPass
+pub relspill::join::Action::Flush
+pub relspill::join::Action::Hold
+pub relspill::join::Action::LevelDone
+pub relspill::join::Action::Load
+pub relspill::join::Action::NextPiece
+pub relspill::join::Action::Open
+pub relspill::join::Action::Open::partition: u32
+pub relspill::join::Action::Open::pieces: bool
+pub relspill::join::Action::Release(u32)
+pub relspill::join::Action::Split(relspill::join::Below)
+pub relspill::join::Action::Start(relspill::join::Start)
+pub relspill::join::Action::Tail
+pub enum relspill::join::Event
+pub relspill::join::Event::Block
+pub relspill::join::Event::Block::len: u64
+pub relspill::join::Event::Block::values: bool
+pub relspill::join::Event::BuildEnd
+pub relspill::join::Event::FileEnd
+pub relspill::join::Event::Full
+pub relspill::join::Event::Full::partition: u32
+pub relspill::join::Event::Full::side: relspill::join::Side
+pub relspill::join::Event::Full::tail: bool
+pub relspill::join::Event::Grown
+pub relspill::join::Event::Grown::memory: u64
+pub relspill::join::Event::Inner
+pub relspill::join::Event::Inner::estimate: f64
+pub relspill::join::Event::Inner::held: u64
+pub relspill::join::Event::Inner::needed: u64
+pub relspill::join::Event::Inner::rows: u64
+pub relspill::join::Event::Made
+pub relspill::join::Event::Next
+pub relspill::join::Event::Next::memory: u64
+pub relspill::join::Event::OuterEnd
+pub relspill::join::Event::PassEnd
+pub relspill::join::Event::Piece
+pub relspill::join::Event::Piece::memory: u64
+pub relspill::join::Event::Sent
+pub relspill::join::Event::Sent::freed: bool
+pub relspill::join::Event::Sent::memory: u64
+pub relspill::join::Event::TableEnd
+pub relspill::join::Event::TableEnd::held: bool
+pub relspill::join::Event::TailEnd
+pub relspill::join::Event::Take
+pub relspill::join::Event::Take::memory: u64
+pub relspill::join::Event::Take::partition: u32
+#[repr(u8)] pub enum relspill::join::Route
+pub relspill::join::Route::Answer = 2
+pub relspill::join::Route::Probe = 0
+pub relspill::join::Route::Write = 1
+pub enum relspill::join::Side
+pub relspill::join::Side::Inner
+pub relspill::join::Side::Outer
+pub struct relspill::join::Below
+pub relspill::join::Below::expected: u64
+pub relspill::join::Below::level: u32
+pub relspill::join::Below::limit: u64
+pub relspill::join::Below::partition: u32
+pub relspill::join::Below::shift: u32
+pub struct relspill::join::Host<'a>
+pub relspill::join::Host::disk: &'a [u64]
+pub relspill::join::Host::outer: &'a [u64]
+pub relspill::join::Host::routes: &'a mut [u8]
+pub relspill::join::Host::rows: &'a [u64]
+pub relspill::join::Host::total: u64
+pub relspill::join::Host::words: &'a [core::cell::Cell<u64>]
+#[repr(C)] pub struct relspill::join::Join
+impl relspill::join::Join
+pub fn relspill::join::Join::below(params: &relspill::join::Params, below: &relspill::join::Below) -> relspill::Result<(Self, relspill::join::Start)>
+pub fn relspill::join::Join::given(params: &relspill::join::Params, partitions: u32) -> relspill::Result<(Self, relspill::join::Start)>
+pub fn relspill::join::Join::level(&self) -> u32
+pub fn relspill::join::Join::new(params: &relspill::join::Params) -> relspill::Result<Self>
+pub fn relspill::join::Join::step(&mut self, event: relspill::join::Event, host: &mut relspill::join::Host<'_>) -> relspill::Result<relspill::join::Action>
+#[repr(C)] pub struct relspill::join::Params
+pub relspill::join::Params::limit: u64
+pub relspill::join::Params::outer_values: u32
+pub relspill::join::Params::outer_words: u64
+pub relspill::join::Params::page: u64
+pub relspill::join::Params::preserve_inner: u32
+pub relspill::join::Params::resident: f64
+pub relspill::join::Params::shape: relspill::plan::Shape
+pub relspill::join::Params::spare: u32
+pub relspill::join::Params::spilled: f64
+pub relspill::join::Params::split_key: f64
+pub relspill::join::Params::split_room: f64
+pub relspill::join::Params::start: f64
+pub relspill::join::Params::tail: f64
+pub relspill::join::Params::target: f64
+pub relspill::join::Params::unmatched_outer: u32
+pub struct relspill::join::Start
+pub relspill::join::Start::outer_len: usize
+pub relspill::join::Start::plan: relspill::plan::Plan
+pub const relspill::join::JOIN_WORDS: usize
+pub const relspill::join::LEAST_OUTER_ROWS: usize
+pub mod relspill::phases
+#[repr(u32)] pub enum relspill::phases::Action
+pub relspill::phases::Action::Allocate = 13
+pub relspill::phases::Action::ArriveAndDetach = 7
+pub relspill::phases::Action::ArriveAndWait = 2
+pub relspill::phases::Action::Attach = 1
+pub relspill::phases::Action::Build = 3
+pub relspill::phases::Action::Detach = 8
+pub relspill::phases::Action::Done = 10
+pub relspill::phases::Action::Flush = 11
+pub relspill::phases::Action::Free = 9
+pub relspill::phases::Action::Link = 5
+pub relspill::phases::Action::Load = 14
+pub relspill::phases::Action::Outer = 12
+pub relspill::phases::Action::Probe = 6
+pub relspill::phases::Action::Size = 4
+pub struct relspill::phases::Counters<W>
+impl<'a> relspill::phases::Counters<&'a [core::sync::atomic::Atomic<u64>; 4]>
+pub fn relspill::phases::Counters<&'a [core::sync::atomic::Atomic<u64>; 4]>::new(words: &'a [core::sync::atomic::AtomicU64; 4]) -> Self
+impl<W: relspill::phases::sealed::CounterWords> relspill::phases::Counters<W>
+pub fn relspill::phases::Counters<W>::add_duplicates(&self, duplicates: u64) -> relspill::Result<()>
+pub fn relspill::phases::Counters<W>::init(&self)
+pub fn relspill::phases::Counters<W>::nulls(&self) -> u64
+pub fn relspill::phases::Counters<W>::report(&self, records: u64, null_columns: u64) -> relspill::Result<()>
+pub fn relspill::phases::Counters<W>::take_chunk(&self) -> relspill::Result<u64>
+pub fn relspill::phases::Counters<W>::total_chunks(&self) -> u64
+pub fn relspill::phases::Counters<W>::total_duplicates(&self) -> u64
+pub fn relspill::phases::Counters<W>::total_records(&self) -> u64
+#[repr(C)] pub struct relspill::phases::Participant
+impl relspill::phases::Participant
+pub fn relspill::phases::Participant::new() -> Self
+pub fn relspill::phases::Participant::phase(&self) -> u32
+pub fn relspill::phases::Participant::round_step(&mut self, reply: u32) -> relspill::Result<relspill::phases::Action>
+pub fn relspill::phases::Participant::step(&mut self, counters: &relspill::phases::SharedCounters<'_>, reply: u32) -> relspill::Result<relspill::phases::Action>
+pub fn relspill::phases::Participant::stop(&self, word: &relspill::phases::StopWord<'_>) -> bool
+pub struct relspill::phases::StopWord<'a>(_)
+impl<'a> relspill::phases::StopWord<'a>
+pub fn relspill::phases::StopWord<'a>::new(word: &'a core::sync::atomic::AtomicU64) -> Self
+pub fn relspill::phases::StopWord<'a>::stopped(&self) -> bool
+pub const relspill::phases::BUILD: u32
+pub const relspill::phases::COUNTER_WORDS: usize
+pub const relspill::phases::FLUSH: u32
+pub const relspill::phases::FREE: u32
+pub const relspill::phases::LINK: u32
+pub const relspill::phases::OUTER: u32
+pub const relspill::phases::PROBE: u32
+pub const relspill::phases::ROUND_ALLOCATE: u32
+pub const relspill::phases::ROUND_ELECT: u32
+pub const relspill::phases::ROUND_FREE: u32
+pub const relspill::phases::ROUND_LOAD: u32
+pub const relspill::phases::ROUND_PROBE: u32
+pub const relspill::phases::SIZE: u32
+pub type relspill::phases::SharedCounters<'a> = relspill::phases::Counters<&'a [core::sync::atomic::AtomicU64; 4]>
+pub mod relspill::plan
+pub struct relspill::plan::Level
+pub relspill::plan::Level::at_least: u32
+pub relspill::plan::Level::expected: f64
+pub relspill::plan::Level::limit: usize
+pub relspill::plan::Level::partitions: u32
+pub relspill::plan::Level::shift: u32
+impl relspill::plan::Level
+pub const fn relspill::plan::Level::first(limit: usize) -> Self
+pub struct relspill::plan::Plan
+pub relspill::plan::Plan::below: u32
+pub relspill::plan::Plan::chunk_len: usize
+pub relspill::plan::Plan::deeper: bool
+pub relspill::plan::Plan::partitions: u32
+pub relspill::plan::Plan::shift: u32
+pub relspill::plan::Plan::words: usize
+#[repr(C)] pub struct relspill::plan::Shape
+pub relspill::plan::Shape::max_chunk: usize
+pub relspill::plan::Shape::max_partitions: u32
+pub relspill::plan::Shape::min_chunk: usize
+pub relspill::plan::Shape::min_partitions: u32
+pub relspill::plan::Shape::record: usize
+pub relspill::plan::Shape::reserve: usize
+pub relspill::plan::Shape::share: usize
+pub const relspill::plan::LEAST_RECORDS: usize
+pub fn relspill::plan::expected(held: f64, rows: f64, estimate: f64, participants: u32) -> f64
+pub fn relspill::plan::plan(shape: &relspill::plan::Shape, level: &relspill::plan::Level) -> relspill::Result<relspill::plan::Plan>
+pub mod relspill::set
+pub enum relspill::set::ReadStep
+pub relspill::set::ReadStep::Block
+pub relspill::set::ReadStep::Block::at: u64
+pub relspill::set::ReadStep::Block::len: usize
+pub relspill::set::ReadStep::Empty
+pub relspill::set::ReadStep::End
+pub relspill::set::ReadStep::Found
+pub relspill::set::ReadStep::Header(relspill::BlockHeader)
+pub relspill::set::ReadStep::Page
+pub relspill::set::ReadStep::Page::at: u64
+pub relspill::set::ReadStep::Page::len: usize
+pub relspill::set::ReadStep::Ready
+pub relspill::set::ReadStep::Ready::largest: u64
+pub enum relspill::set::Region
+pub relspill::set::Region::Body
+pub relspill::set::Region::Buffer
+pub relspill::set::Region::List(u32)
+pub relspill::set::Region::Scratch
+pub enum relspill::set::Step
+pub relspill::set::Step::Again(relspill::set::Ranges)
+pub relspill::set::Step::Done
+pub relspill::set::Step::Done::offset: u64
+pub relspill::set::Step::Done::ranges: relspill::set::Ranges
+pub relspill::set::Step::Done::stored: u64
+pub relspill::set::Step::List(usize)
+pub relspill::set::Step::Scratch(usize)
+pub struct relspill::set::Block<'a>
+pub relspill::set::Block::body: &'a [u8]
+pub relspill::set::Block::kind: relspill::BlockKind
+pub relspill::set::Block::number: u32
+pub relspill::set::Block::partition: u32
+pub struct relspill::set::Config
+pub relspill::set::Config::bounds: relspill::Bounds
+pub relspill::set::Config::buffer_len: usize
+pub relspill::set::Config::fingerprint: u64
+pub relspill::set::Config::level: u32
+pub relspill::set::Config::partitions: u32
+pub relspill::set::Config::shared: bool
+#[repr(C)] pub struct relspill::set::Entry
+pub relspill::set::Entry::offset: u64
+pub relspill::set::Entry::stored: u64
+pub struct relspill::set::Range
+pub relspill::set::Range::at: u64
+pub relspill::set::Range::len: usize
+pub relspill::set::Range::region: relspill::set::Region
+pub relspill::set::Range::start: usize
+pub struct relspill::set::Ranges
+impl relspill::set::Ranges
+pub fn relspill::set::Ranges::as_slice(&self) -> &[relspill::set::Range]
+pub struct relspill::set::ReadConfig
+pub relspill::set::ReadConfig::bounds: relspill::Bounds
+pub relspill::set::ReadConfig::fingerprint: u64
+pub relspill::set::ReadConfig::level: u32
+pub relspill::set::ReadConfig::partition: u32
+pub relspill::set::ReadConfig::partitions: u32
+#[repr(C)] pub struct relspill::set::Reader
+impl relspill::set::Reader
+pub fn relspill::set::Reader::body(&mut self, block: &[u8], out: &mut [u8]) -> relspill::Result<()>
+pub fn relspill::set::Reader::count(&self) -> u64
+pub fn relspill::set::Reader::file(config: relspill::set::ReadConfig, file_len: u64) -> relspill::Result<Self>
+pub fn relspill::set::Reader::largest(&self) -> u64
+pub fn relspill::set::Reader::next(&mut self, page: &[relspill::set::Entry], block: &[u8]) -> relspill::Result<relspill::set::ReadStep>
+pub fn relspill::set::Reader::open(&mut self, page: &[relspill::set::Entry]) -> relspill::Result<relspill::set::ReadStep>
+pub fn relspill::set::Reader::seek(&mut self, page: &[relspill::set::Entry], offset: u64) -> relspill::Result<relspill::set::ReadStep>
+#[repr(C)] pub struct relspill::set::Writer
+impl relspill::set::Writer
+pub fn relspill::set::Writer::blocks(&self) -> u64
+pub fn relspill::set::Writer::bytes(&self) -> u64
+pub fn relspill::set::Writer::drop_list(&mut self, lists: &mut impl relspill::set::Lists, partition: u32) -> relspill::Result<()>
+pub fn relspill::set::Writer::failed(&mut self)
+pub fn relspill::set::Writer::files(&self) -> u32
+pub fn relspill::set::Writer::finish(&mut self, buffer: &mut [u8], lists: &mut impl relspill::set::Lists) -> relspill::Result<relspill::set::Step>
+pub fn relspill::set::Writer::is_finished(&self) -> bool
+pub fn relspill::set::Writer::new(config: relspill::set::Config) -> relspill::Result<Self>
+pub fn relspill::set::Writer::partitions(&self) -> u32
+pub fn relspill::set::Writer::read_bounds(&self) -> relspill::Bounds
+pub fn relspill::set::Writer::reset(&mut self, lists: &mut impl relspill::set::Lists) -> relspill::Result<()>
+pub fn relspill::set::Writer::write(&mut self, buffer: &mut [u8], scratch: &mut [u8], lists: &mut impl relspill::set::Lists, block: relspill::set::Block<'_>) -> relspill::Result<relspill::set::Step>
+pub fn relspill::set::Writer::written(&mut self) -> relspill::Result<()>
+pub const relspill::set::ENTRY_SIZE: usize
+pub const relspill::set::MAX_RANGES: usize
+pub const relspill::set::MIN_BUFFER: usize
+pub const relspill::set::MIN_LIST: usize
+pub const relspill::set::READER_WORDS: usize
+pub const relspill::set::TRAILER_MAGIC: u64
+pub const relspill::set::TRAILER_SIZE: usize
+pub const relspill::set::WRITER_WORDS: usize
+pub trait relspill::set::Lists
+pub fn relspill::set::Lists::list(&mut self, partition: usize) -> (&mut [relspill::set::Entry], &mut u64)
+pub mod relspill::shared
+pub enum relspill::shared::Action
+pub relspill::shared::Action::Alone(u32)
+pub relspill::shared::Action::ArriveAndDetach
+pub relspill::shared::Action::ArriveAndWait
+pub relspill::shared::Action::Attach
+pub relspill::shared::Action::Build
+pub relspill::shared::Action::Demote(u32)
+pub relspill::shared::Action::Detach
+pub relspill::shared::Action::Done
+pub relspill::shared::Action::Finished
+pub relspill::shared::Action::FlushEnd
+pub relspill::shared::Action::Free
+pub relspill::shared::Action::Keep(u32)
+pub relspill::shared::Action::Link
+pub relspill::shared::Action::Outer
+pub relspill::shared::Action::Probe
+pub relspill::shared::Action::Probe::split: bool
+pub relspill::shared::Action::Round(u32)
+pub relspill::shared::Action::Send(u32)
+pub relspill::shared::Action::Size
+pub relspill::shared::Action::Split
+pub relspill::shared::Action::Switch
+pub relspill::shared::Action::Switch::partitions: u32
+pub relspill::shared::Action::Visit(u32)
+pub relspill::shared::Action::Walked
+pub relspill::shared::Action::Weigh(u32)
+pub relspill::shared::Action::Write(u32)
+pub enum relspill::shared::Event
+pub relspill::shared::Event::Arrived
+pub relspill::shared::Event::Arrived::elected: bool
+pub relspill::shared::Event::Attached
+pub relspill::shared::Event::Attached::phase: u32
+pub relspill::shared::Event::Batch
+pub relspill::shared::Event::Batch::over: bool
+pub relspill::shared::Event::Done
+pub relspill::shared::Event::Left
+pub relspill::shared::Event::Left::last: bool
+pub relspill::shared::Event::Next
+pub relspill::shared::Event::Planned
+pub relspill::shared::Event::Planned::partitions: u32
+pub relspill::shared::Event::Sent
+pub relspill::shared::Event::Sent::freed: bool
+pub relspill::shared::Event::Visited
+pub relspill::shared::Event::Visited::outer: bool
+pub relspill::shared::Event::Weighed
+pub relspill::shared::Event::Weighed::blocks: u64
+pub relspill::shared::Event::Weighed::bytes: u64
+pub relspill::shared::Event::Weighed::index: u64
+#[repr(C)] pub struct relspill::shared::Build
+impl relspill::shared::Build
+pub fn relspill::shared::Build::new(params: &relspill::shared::Params) -> relspill::Result<Self>
+pub fn relspill::shared::Build::phase(&self) -> u32
+pub fn relspill::shared::Build::step(&mut self, event: relspill::shared::Event, host: &relspill::shared::Host<'_>) -> relspill::Result<relspill::shared::Action>
+pub fn relspill::shared::Build::stop(&self, word: &relspill::phases::StopWord<'_>) -> bool
+pub struct relspill::shared::Host<'a>
+pub relspill::shared::Host::counters: &'a [core::sync::atomic::AtomicU64; 4]
+pub relspill::shared::Host::resident: &'a [u8]
+pub relspill::shared::Host::spill: &'a [core::sync::atomic::AtomicU64]
+#[repr(C)] pub struct relspill::shared::Params
+pub relspill::shared::Params::limit: u64
+pub relspill::shared::Params::max_chunks: u64
+pub relspill::shared::Params::per_check: u32
+pub relspill::shared::Params::preserve: u32
+pub relspill::shared::Params::spilled: f64
+pub relspill::shared::Params::start: f64
+pub relspill::shared::Params::target: f64
+pub const relspill::shared::BUILD_WORDS: usize
+pub mod relspill::shared_spill
+pub enum relspill::shared_spill::Memory
+pub relspill::shared_spill::Memory::Counted
+pub relspill::shared_spill::Memory::Measured
+pub relspill::shared_spill::Memory::Measured::bytes: u64
+pub relspill::shared_spill::Memory::Measured::limit: u64
+pub struct relspill::shared_spill::Partition
+pub relspill::shared_spill::Partition::bits: u32
+pub relspill::shared_spill::Partition::level_rows: u64
+pub relspill::shared_spill::Partition::limit: u64
+pub relspill::shared_spill::Partition::rows: u64
+pub relspill::shared_spill::Partition::size: u64
+pub relspill::shared_spill::Partition::used: u64
+pub struct relspill::shared_spill::Records<'a>
+pub relspill::shared_spill::Records::each: &'a [u64]
+pub relspill::shared_spill::Records::total: u64
+pub struct relspill::shared_spill::Spill<W>
+impl<'a> relspill::shared_spill::Spill<&'a [core::cell::Cell<u64>]>
+pub fn relspill::shared_spill::Spill<&'a [core::cell::Cell<u64>]>::new(words: &'a [core::cell::Cell<u64>]) -> relspill::Result<Self>
+impl<'a> relspill::shared_spill::Spill<&'a [core::sync::atomic::Atomic<u64>]>
+pub fn relspill::shared_spill::Spill<&'a [core::sync::atomic::Atomic<u64>]>::new(words: &'a [core::sync::atomic::AtomicU64]) -> relspill::Result<Self>
+impl<W: relspill::shared_spill::sealed::Words> relspill::shared_spill::Spill<W>
+pub fn relspill::shared_spill::Spill<W>::add_bytes(&self, delta: i64, partition: core::option::Option<u32>) -> relspill::Result<bool>
+pub fn relspill::shared_spill::Spill<W>::add_records(&self, partition: u32, records: u64) -> relspill::Result<()>
+pub fn relspill::shared_spill::Spill<W>::alone(&self, partition: u32) -> relspill::Result<bool>
+pub fn relspill::shared_spill::Spill<W>::bytes(&self) -> u64
+pub fn relspill::shared_spill::Spill<W>::evict(&self, weights: &relspill::shared_spill::Weights, memory: relspill::shared_spill::Memory, records: core::option::Option<relspill::shared_spill::Records<'_>>, evicted: u32) -> relspill::Result<core::option::Option<u32>>
+pub fn relspill::shared_spill::Spill<W>::evictions(&self) -> u64
+pub fn relspill::shared_spill::Spill<W>::init(&self, budget: u64)
+pub fn relspill::shared_spill::Spill<W>::on_disk(&self, partition: u32) -> relspill::Result<bool>
+pub fn relspill::shared_spill::Spill<W>::partitions(&self) -> u32
+pub fn relspill::shared_spill::Spill<W>::records(&self, partition: u32) -> relspill::Result<u64>
+pub fn relspill::shared_spill::Spill<W>::set_together(&self, partition: u32) -> relspill::Result<()>
+pub fn relspill::shared_spill::Spill<W>::split(&self, partitions: u32) -> relspill::Result<u32>
+pub fn relspill::shared_spill::Spill<W>::start(&self) -> u32
+pub fn relspill::shared_spill::Spill<W>::take_alone(&self, partition: u32) -> relspill::Result<bool>
+pub fn relspill::shared_spill::Spill<W>::take_file(&self, partition: u32, outer: bool) -> relspill::Result<u32>
+pub fn relspill::shared_spill::Spill<W>::together(&self, partition: u32) -> relspill::Result<bool>
+pub struct relspill::shared_spill::SplitWeights
+pub relspill::shared_spill::SplitWeights::key: f64
+pub relspill::shared_spill::SplitWeights::room: f64
+pub struct relspill::shared_spill::Weights
+pub relspill::shared_spill::Weights::per_check: u32
+pub relspill::shared_spill::Weights::reserve: u64
+pub relspill::shared_spill::Weights::resident: f64
+pub relspill::shared_spill::Weights::spilled: f64
+pub relspill::shared_spill::Weights::start: f64
+pub relspill::shared_spill::Weights::target: f64
+pub fn relspill::shared_spill::check_words(nwords: usize) -> relspill::Result<()>
+pub fn relspill::shared_spill::splits(weights: &relspill::shared_spill::SplitWeights, partition: &relspill::shared_spill::Partition) -> relspill::Result<bool>
+pub fn relspill::shared_spill::words_for(partitions: usize) -> relspill::Result<usize>
+pub type relspill::shared_spill::LocalSpill<'a> = relspill::shared_spill::Spill<&'a [core::cell::Cell<u64>]>
+pub type relspill::shared_spill::SharedSpill<'a> = relspill::shared_spill::Spill<&'a [core::sync::atomic::AtomicU64]>
+pub mod relspill::sort
+pub enum relspill::sort::Action
+pub relspill::sort::Action::Done
+pub relspill::sort::Action::Keep
+pub relspill::sort::Action::Keep::run: u32
+pub relspill::sort::Action::Merge
+pub relspill::sort::Action::Merge::count: u32
+pub relspill::sort::Action::Merge::first: u32
+pub relspill::sort::Action::Merge::place: relspill::sort::Place
+pub relspill::sort::Action::Pass
+pub relspill::sort::Action::PassEnd
+pub relspill::sort::Action::Read
+pub relspill::sort::Action::Read::runs: u32
+pub relspill::sort::Action::Run(relspill::sort::Place)
+pub enum relspill::sort::Event
+pub relspill::sort::Event::Grown
+pub relspill::sort::Event::Grown::limit: u64
+pub relspill::sort::Event::Grown::memory: u64
+pub relspill::sort::Event::Grown::rows: u64
+pub relspill::sort::Event::InputEnd
+pub relspill::sort::Event::InputEnd::rows: u64
+pub relspill::sort::Event::Next
+pub relspill::sort::Event::Rescan
+pub struct relspill::sort::Blocks
+pub relspill::sort::Blocks::fan_in: u32
+pub relspill::sort::Blocks::rows: u32
+pub relspill::sort::Blocks::values: u64
+#[repr(C)] pub struct relspill::sort::Params
+pub relspill::sort::Params::backward: u32
+pub relspill::sort::Params::batch_rows: u32
+pub relspill::sort::Params::chunk: u64
+pub relspill::sort::Params::item: u64
+pub relspill::sort::Params::limit: u64
+pub relspill::sort::Params::max_merge: u32
+pub relspill::sort::Params::row: u64
+pub relspill::sort::Params::set_runs: u32
+pub struct relspill::sort::Place
+pub relspill::sort::Place::create: bool
+pub relspill::sort::Place::partition: u32
+#[repr(C)] pub struct relspill::sort::Runs
+impl relspill::sort::Runs
+pub fn relspill::sort::Runs::new(params: &relspill::sort::Params) -> relspill::Result<(Self, relspill::sort::Blocks)>
+pub fn relspill::sort::Runs::step(&mut self, event: relspill::sort::Event) -> relspill::Result<relspill::sort::Action>
+pub const relspill::sort::MIN_MERGE: u32
+pub const relspill::sort::RUNS_WORDS: usize
+pub mod relspill::spill_columns
+pub enum relspill::spill_columns::Value<'a>
+pub relspill::spill_columns::Value::Bytes(&'a [u8])
+pub relspill::spill_columns::Value::Null
+pub relspill::spill_columns::Value::Word(u64)
+pub struct relspill::spill_columns::Appended
+pub relspill::spill_columns::Appended::need: usize
+pub relspill::spill_columns::Appended::rows: usize
+pub const relspill::spill_columns::PAIR: [relspill::BlockKind; 2]
+pub const relspill::spill_columns::PLACE_BITS: u32
+pub trait relspill::spill_columns::ColumnChunks
+pub fn relspill::spill_columns::ColumnChunks::chunk(&mut self, index: usize) -> core::option::Option<&mut [u8]>
+impl relspill::spill_columns::ColumnChunks for [alloc::vec::Vec<u8>]
+pub fn [alloc::vec::Vec<u8>]::chunk(&mut self, index: usize) -> core::option::Option<&mut [u8]>
+pub trait relspill::spill_columns::RowValues
+pub fn relspill::spill_columns::RowValues::by_value(&self) -> bool
+pub fn relspill::spill_columns::RowValues::ncolumns(&self) -> usize
+pub fn relspill::spill_columns::RowValues::value(&self, column: usize, row: usize) -> core::option::Option<relspill::spill_columns::Value<'_>>
+pub trait relspill::spill_columns::ValueEnds
+pub fn relspill::spill_columns::ValueEnds::ends(&self, column: usize, rest: &[u8]) -> bool
+pub fn relspill::spill_columns::append(chunk: &mut [u8], source: &impl relspill::spill_columns::RowValues, rows: &mut relhash::row_mask::RowMask<'_>, values: &mut [u8], used: &mut usize) -> relspill::Result<relspill::spill_columns::Appended>
+pub fn relspill::spill_columns::append_partitioned<C: relspill::spill_columns::ColumnChunks + ?core::marker::Sized>(chunks: &mut C, partitions: &relhash::table::chunks::Partitions<'_>, hashes: &[u32], columns: &relhash::table::record::PayloadColumns<'_>, pending: &mut relhash::row_mask::RowMask<'_>, offsets: &mut [u32], rows: &mut [u64]) -> relspill::Result<usize>
+pub fn relspill::spill_columns::check(chunk: &[u8], words: usize, rows: core::option::Option<usize>, by_value: &[bool], values: &[u8], ends: &impl relspill::spill_columns::ValueEnds) -> relspill::Result<relspill::columns::Shape>
+pub fn relspill::spill_columns::check_pair(header: &relspill::BlockHeader, at: usize, number: u32) -> relspill::Result<()>
+pub fn relspill::spill_columns::window(chunk: &[u8], word: usize, first: usize, out: &mut [u64], nulls: &mut [bool]) -> relspill::Result<()>
+#[repr(u32)] pub enum relspill::BlockKind
+pub relspill::BlockKind::Columns = 3
+pub relspill::BlockKind::Records = 1
+pub relspill::BlockKind::Values = 2
+pub enum relspill::Kind
+pub relspill::Kind::Damaged
+pub relspill::Kind::WrongCall
+#[non_exhaustive] #[repr(u8)] pub enum relspill::Rule
+pub relspill::Rule::AttachPhase
+pub relspill::Rule::BlockKind
+pub relspill::Rule::BlockLength
+pub relspill::Rule::BlockLevel
+pub relspill::Rule::BlockPartition
+pub relspill::Rule::BlockStored
+pub relspill::Rule::BodyLength
+pub relspill::Rule::BodyNotRead
+pub relspill::Rule::BodyRead
+pub relspill::Rule::BuildCount
+pub relspill::Rule::ByValueBytes
+pub relspill::Rule::ChunkColumns
+pub relspill::Rule::ChunkNumber
+pub relspill::Rule::ChunkRead
+pub relspill::Rule::ChunkWidth
+pub relspill::Rule::ColumnsBlock
+pub relspill::Rule::ColumnsChunk
+pub relspill::Rule::ColumnsCounts
+pub relspill::Rule::ColumnsFill
+pub relspill::Rule::ColumnsLaneEnd
+pub relspill::Rule::ColumnsLimits
+pub relspill::Rule::ColumnsMagic
+pub relspill::Rule::ColumnsRoom
+pub relspill::Rule::ColumnsShape
+pub relspill::Rule::ColumnsTail
+pub relspill::Rule::ColumnsWords
+pub relspill::Rule::CounterBelow
+pub relspill::Rule::CounterPast
+pub relspill::Rule::Descriptors
+pub relspill::Rule::DiskCounts
+pub relspill::Rule::EntryLength
+pub relspill::Rule::EntryPlace
+pub relspill::Rule::Expected
+pub relspill::Rule::FileFingerprint
+pub relspill::Rule::FileNumber
+pub relspill::Rule::Fingerprint
+pub relspill::Rule::FinishPending
+pub relspill::Rule::GivenPartitions
+pub relspill::Rule::Header
+pub relspill::Rule::JoinOuter
+pub relspill::Rule::JoinRoutes
+pub relspill::Rule::LaneCode
+pub relspill::Rule::LaneCodes
+pub relspill::Rule::LaneEnd
+pub relspill::Rule::LaneWidth
+pub relspill::Rule::LeastChunk
+pub relspill::Rule::Level
+pub relspill::Rule::LevelBelow
+pub relspill::Rule::ListCounts
+pub relspill::Rule::ListsRoom
+pub relspill::Rule::MachineEvent
+pub relspill::Rule::MachineParams
+pub relspill::Rule::MachineState
+pub relspill::Rule::Magic
+pub relspill::Rule::Mask
+pub relspill::Rule::NextLane
+pub relspill::Rule::PackedCounts
+pub relspill::Rule::PackedFill
+pub relspill::Rule::PackedHeader
+pub relspill::Rule::PackedLength
+pub relspill::Rule::PackedRecords
+pub relspill::Rule::PackedTail
+pub relspill::Rule::PairBlock
+pub relspill::Rule::PairKind
+pub relspill::Rule::PairNumber
+pub relspill::Rule::Partition
+pub relspill::Rule::PartitionBits
+pub relspill::Rule::PartitionRecords
+pub relspill::Rule::PartitionRows
+pub relspill::Rule::Partitions
+pub relspill::Rule::PlanBits
+pub relspill::Rule::PlanPartitions
+pub relspill::Rule::ReadRows
+pub relspill::Rule::ReadWords
+pub relspill::Rule::ReaderPage
+pub relspill::Rule::ReaderRead
+pub relspill::Rule::ReaderState
+pub relspill::Rule::RecordCounts
+pub relspill::Rule::RecordLength
+pub relspill::Rule::ResidentFlags
+pub relspill::Rule::RowCounts
+pub relspill::Rule::SeekPosition
+pub relspill::Rule::SetBuffer
+pub relspill::Rule::SetDrop
+pub relspill::Rule::SetFailed
+pub relspill::Rule::SetFinished
+pub relspill::Rule::SetList
+pub relspill::Rule::SetOutstanding
+pub relspill::Rule::SetPartition
+pub relspill::Rule::SetPartitions
+pub relspill::Rule::SetPending
+pub relspill::Rule::SetState
+pub relspill::Rule::SetWritten
+pub relspill::Rule::Share
+pub relspill::Rule::SpillPartitions
+pub relspill::Rule::SpillWords
+pub relspill::Rule::SplitLevel
+pub relspill::Rule::State
+pub relspill::Rule::Trailer
+pub relspill::Rule::TrailerLists
+pub relspill::Rule::TrailerMagic
+pub relspill::Rule::TrailerPartitions
+pub relspill::Rule::UsedMark
+pub relspill::Rule::ValueEnd
+pub relspill::Rule::ValueRead
+pub relspill::Rule::ValueRef
+pub relspill::Rule::ValuesLength
+pub relspill::Rule::ValuesUsed
+pub relspill::Rule::Version
+pub relspill::Rule::Window
+pub struct relspill::BlockHeader
+pub relspill::BlockHeader::fingerprint: u64
+pub relspill::BlockHeader::kind: relspill::BlockKind
+pub relspill::BlockHeader::len: u64
+pub relspill::BlockHeader::level: u32
+pub relspill::BlockHeader::number: u32
+pub relspill::BlockHeader::packed: u32
+pub relspill::BlockHeader::partition: u32
+impl relspill::BlockHeader
+pub fn relspill::BlockHeader::read(bytes: &[u8], fingerprint: u64, bounds: relspill::Bounds) -> relspill::Result<Self>
+pub fn relspill::BlockHeader::write(&self, out: &mut [u8], bounds: relspill::Bounds) -> relspill::Result<()>
+#[repr(C)] pub struct relspill::Bounds
+pub relspill::Bounds::chunk: u64
+pub relspill::Bounds::values: u64
+impl relspill::Bounds
+pub const fn relspill::Bounds::all(len: u64) -> Self
+pub fn relspill::Bounds::largest(&self) -> u64
+pub const fn relspill::Bounds::of(&self, kind: relspill::BlockKind) -> u64
+pub struct relspill::Error(_)
+impl relspill::Error
+pub fn relspill::Error::kind(self) -> relspill::Kind
+pub fn relspill::Error::numbers(self) -> (u32, u32)
+pub fn relspill::Error::rule(self) -> relspill::Rule
+impl core::error::Error for relspill::Error
+impl core::fmt::Debug for relspill::Error
+pub fn relspill::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for relspill::Error
+pub fn relspill::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub const relspill::HEADER_SIZE: usize
+pub const relspill::MAGIC: u64
+pub const relspill::MAX_LEVEL: u32
+pub const relspill::VERSION: u32
+pub fn relspill::pack(chunk: &[u8], out: &mut [u8]) -> core::option::Option<usize>
+pub fn relspill::unpack(packed: &[u8], chunk: &mut [u8]) -> relspill::Result<()>
+pub type relspill::Result<T, E> = core::result::Result<T, E>
