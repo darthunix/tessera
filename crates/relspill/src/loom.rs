@@ -682,3 +682,379 @@ fn three_participants_join_a_round_at_any_phase() {
 fn probing_before_every_file_is_loaded_misses_keys() {
     round(2, &[&[1], &[2]], Some(phases::ROUND_LOAD), 2);
 }
+
+/// What one participant of a split table did with each partition at the
+/// flush: written, kept in memory, or not seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flushed {
+    Unseen,
+    Written,
+    Kept,
+}
+
+/// A participant of a shared build over the machine of
+/// [`crate::shared`]: it appends `bytes` to each partition of a table
+/// split from the start, sends and demotes as its machine says, and at
+/// the flush writes or keeps each partition. Its own flags of the
+/// partitions it keeps in memory, and what it did at the flush.
+fn spill_participant(
+    spill: &LoomSpill,
+    counters: &Counters<LoomCounterWords>,
+    barrier: &LoomBarrier,
+    bytes: u64,
+) -> (Vec<Flushed>, bool) {
+    use crate::shared::{Action as Step, Build as Machine, Event, Params};
+
+    let params = Params {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        limit: 1000,
+        max_chunks: 4,
+        per_check: 1,
+        preserve: 0,
+    };
+    let partitions = spill.partitions() as usize;
+    let mut machine = Machine::new(&params).unwrap();
+    let mut resident = vec![1_u8; partitions];
+    let mut held = vec![0_u64; partitions];
+    let mut flushed = vec![Flushed::Unseen; partitions];
+    let mut built = false;
+    let mut switched = false;
+    // Write what this participant holds of a partition: it keeps none of
+    // it in memory any more.
+    let write = |resident: &mut [u8], held: &mut [u64], partition: u32| {
+        let index = partition as usize;
+        resident[index] = 0;
+        let bytes = core::mem::take(&mut held[index]);
+        if bytes > 0 {
+            spill.add_bytes(-(bytes as i64), Some(partition)).unwrap();
+        }
+        bytes > 0
+    };
+    let mut event = Event::Done;
+    loop {
+        let action = machine.next(event, counters, spill, &resident).unwrap();
+        event = Event::Done;
+        match action {
+            Step::Attach => {
+                event = Event::Attached {
+                    phase: barrier.attach(),
+                }
+            }
+            Step::ArriveAndWait => {
+                event = Event::Arrived {
+                    elected: barrier.arrive_and_wait(),
+                }
+            }
+            Step::ArriveAndDetach => {
+                event = Event::Left {
+                    last: barrier.detach(true),
+                }
+            }
+            Step::Detach => {
+                barrier.detach(false);
+            }
+            Step::Build => {
+                // One batch into every partition still in memory here,
+                // then the check of the spill.
+                built = true;
+                for partition in 0..partitions {
+                    if resident[partition] != 0 {
+                        spill
+                            .add_bytes(bytes as i64, Some(partition as u32))
+                            .unwrap();
+                        held[partition] += bytes;
+                    }
+                }
+                event = Event::Batch { over: false };
+            }
+            Step::Switch { partitions: count } => {
+                assert_eq!(count as usize, partitions);
+                switched = true;
+            }
+            Step::Split => panic!("a table split from the start split again"),
+            Step::Weigh(_) => {
+                event = Event::Weighed {
+                    bytes: 1,
+                    blocks: 1,
+                    index: 1,
+                }
+            }
+            Step::Visit(_) | Step::Round(_) | Step::Alone(_) | Step::Walked => {
+                panic!("{action:?} in the build")
+            }
+            Step::Outer => assert!(switched, "the outer side before its level"),
+            Step::Demote(partition) => {
+                write(&mut resident, &mut held, partition);
+            }
+            Step::Send(partition) => {
+                let freed = write(&mut resident, &mut held, partition);
+                event = Event::Sent { freed };
+            }
+            Step::Write(partition) => {
+                assert!(switched, "a flush before its level");
+                assert_eq!(resident[partition as usize], 0, "{partition} kept on disk");
+                flushed[partition as usize] = Flushed::Written;
+            }
+            Step::Keep(partition) => {
+                assert!(!spill.on_disk(partition).unwrap(), "{partition} kept");
+                flushed[partition as usize] = Flushed::Kept;
+            }
+            Step::Done | Step::FlushEnd | Step::Size | Step::Link | Step::Probe { .. } => {}
+            Step::Free | Step::Finished => return (flushed, built),
+        }
+    }
+}
+
+/// Two participants append to a table split into two partitions past
+/// its budget: in every order of their steps, a partition one sends to
+/// disk the other writes too, at its next batch or at its catch-up, and
+/// at the flush both write exactly the partitions on disk and keep the
+/// others.
+#[test]
+fn participants_write_every_partition_another_sent_to_disk() {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.max_branches = 100_000;
+    model.check(|| {
+        let spill = Arc::new(loom_spill(2, 25));
+        spill.split(2).unwrap();
+        let counters = Arc::new(Counters::over(LoomCounterWords(core::array::from_fn(
+            |_| AtomicU64::new(0),
+        ))));
+        let barrier = Arc::new(LoomBarrier::new(None));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let (spill, counters, barrier) = (spill.clone(), counters.clone(), barrier.clone());
+                thread::spawn(move || spill_participant(&spill, &counters, &barrier, 10))
+            })
+            .collect();
+        let ran: Vec<(Vec<Flushed>, bool)> =
+            threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let flushed: Vec<&Vec<Flushed>> = ran.iter().map(|(flushed, _)| flushed).collect();
+        // One that attached past the flush, when the other went through
+        // it alone, saw none of it.
+        let expected: Vec<Flushed> = (0..2)
+            .map(|partition| match spill.on_disk(partition).unwrap() {
+                true => Flushed::Written,
+                false => Flushed::Kept,
+            })
+            .collect();
+        for seen in &flushed {
+            let late = seen.iter().all(|f| *f == Flushed::Unseen);
+            assert!(late || **seen == expected, "{flushed:?} for {expected:?}");
+        }
+        assert!(
+            flushed.iter().any(|seen| seen[0] != Flushed::Unseen),
+            "one went through the flush"
+        );
+        // Both batches past the budget: one partition went to disk.
+        if ran.iter().all(|(_, built)| *built) {
+            assert!(spill.evictions() > 0, "the budget sent one to disk");
+        }
+    });
+}
+
+/// A participant that appends `bytes` to a table not split yet, past its
+/// budget, and splits it as its machine says into `wanted` partitions:
+/// it publishes its filter (a flag here) before it reports the plan, and
+/// when it makes its level the filter must be there, its own or
+/// another's. The partitions it made its level of, 0 for none.
+fn splitting_participant(
+    spill: &LoomSpill,
+    counters: &Counters<LoomCounterWords>,
+    filter: &::loom::sync::atomic::AtomicBool,
+    bytes: i64,
+    wanted: u32,
+) -> u32 {
+    use crate::shared::{Action as Step, Build as Machine, Event, Params};
+
+    let params = Params {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        limit: 1000,
+        max_chunks: 4,
+        per_check: 1,
+        preserve: 0,
+    };
+    let mut machine = Machine::new(&params).unwrap();
+    let start = machine.next(Event::Done, counters, spill, &[]).unwrap();
+    assert_eq!(start, Step::Attach);
+    let attached = Event::Attached {
+        phase: phases::BUILD,
+    };
+    let build = machine.next(attached, counters, spill, &[]).unwrap();
+    assert_eq!(build, Step::Build);
+    let over = spill.add_bytes(bytes, None).unwrap();
+    let mut event = Event::Batch { over };
+    loop {
+        let resident = vec![1_u8; spill.partitions() as usize];
+        match machine.next(event, counters, spill, &resident).unwrap() {
+            Step::Split => {
+                filter.store(true, Ordering::Relaxed);
+                event = Event::Planned { partitions: wanted };
+            }
+            Step::Switch { partitions } => {
+                assert!(
+                    filter.load(Ordering::Relaxed),
+                    "a split seen without its filter"
+                );
+                return partitions;
+            }
+            Step::Done => return 0,
+            step => panic!("{step:?} after a batch"),
+        }
+    }
+}
+
+/// Two participants pass a table's budget at once, each by its own
+/// count: in every order of their steps, both ask to split, one split
+/// holds, both make their levels of it, and neither sees the split before
+/// a filter is published.
+#[test]
+fn participants_past_the_budget_split_once_their_filter_is_published() {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(3);
+    model.check(|| {
+        let spill = Arc::new(loom_spill(8, 100));
+        let counters = Arc::new(Counters::over(LoomCounterWords(core::array::from_fn(
+            |_| AtomicU64::new(0),
+        ))));
+        let filter = Arc::new(::loom::sync::atomic::AtomicBool::new(false));
+        let threads: Vec<_> = [4_u32, 8]
+            .into_iter()
+            .map(|wanted| {
+                let (spill, counters, filter) = (spill.clone(), counters.clone(), filter.clone());
+                thread::spawn(move || {
+                    splitting_participant(&spill, &counters, &filter, 110, wanted)
+                })
+            })
+            .collect();
+        let levels: Vec<u32> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let partitions = spill.partitions();
+        assert!(partitions == 4 || partitions == 8, "{partitions}");
+        // Each passed the budget alone: both split, one split holds.
+        assert!(
+            levels.iter().all(|&level| level == partitions),
+            "{levels:?} of {partitions}"
+        );
+    });
+}
+
+/// A participant that probes a table split into 4, partitions 1, 2 and 3
+/// on disk, leaves it, and goes round the partitions as its machine says:
+/// the partitions it joins in a round and those it takes alone.
+fn walking_participant(
+    spill: &LoomSpill,
+    counters: &Counters<LoomCounterWords>,
+    barrier: &LoomBarrier,
+) -> (Vec<u32>, Vec<u32>) {
+    use crate::shared::{Action as Step, Build as Machine, Event, Params};
+
+    let params = Params {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        limit: 1000,
+        max_chunks: 4,
+        per_check: 1,
+        preserve: 0,
+    };
+    let resident = [1_u8, 0, 0, 0];
+    let mut machine = Machine::new(&params).unwrap();
+    let (mut rounds, mut alone) = (Vec::new(), Vec::new());
+    let mut probed = false;
+    let mut event = Event::Done;
+    loop {
+        event = match machine.next(event, counters, spill, &resident).unwrap() {
+            Step::Attach => Event::Attached {
+                phase: barrier.attach(),
+            },
+            Step::ArriveAndDetach => Event::Left {
+                last: barrier.detach(true),
+            },
+            // Left the table: round the partitions on disk; one that came
+            // after the last left has no work.
+            Step::Free | Step::Finished if probed => Event::Next,
+            Step::Free | Step::Finished => return (rounds, alone),
+            Step::Detach => {
+                barrier.detach(false);
+                Event::Done
+            }
+            Step::Visit(_) => Event::Visited { outer: true },
+            Step::Round(partition) => {
+                rounds.push(partition);
+                Event::Next
+            }
+            Step::Alone(partition) => {
+                alone.push(partition);
+                Event::Next
+            }
+            Step::Walked => return (rounds, alone),
+            Step::Probe { .. } => {
+                probed = true;
+                Event::Done
+            }
+            Step::Switch { .. } | Step::Demote(_) => Event::Done,
+            step => panic!("{step:?} at the probe"),
+        };
+    }
+}
+
+/// Two participants probe a split table and go round its partitions on
+/// disk from starts of their own: in every order of their steps, each
+/// that probed joins the round of partition 1, and partitions 2 and 3 are
+/// each taken alone by one of them exactly.
+#[test]
+fn participants_take_each_partition_alone_once_and_join_the_rounds() {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.max_branches = 100_000;
+    model.check(|| {
+        let spill = Arc::new(loom_spill(4, 1000));
+        spill.split(4).unwrap();
+        for partition in [1, 2, 3] {
+            spill.add_bytes(1, Some(partition)).unwrap();
+            let any = Weights {
+                start: 0.0,
+                target: 0.0,
+                spilled: 1.0,
+                reserve: 0,
+                resident: 0.0,
+                per_check: 0,
+            };
+            assert_eq!(
+                spill.evict(&any, Memory::Counted, None, 0).unwrap(),
+                Some(partition)
+            );
+            spill.add_bytes(-1, Some(partition)).unwrap();
+        }
+        spill.set_together(1).unwrap();
+        let counters = Arc::new(Counters::over(LoomCounterWords(core::array::from_fn(
+            |_| AtomicU64::new(0),
+        ))));
+        let barrier = Arc::new(LoomBarrier::new(None));
+        barrier.state.lock().unwrap().phase = phases::PROBE;
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let (spill, counters, barrier) = (spill.clone(), counters.clone(), barrier.clone());
+                thread::spawn(move || walking_participant(&spill, &counters, &barrier))
+            })
+            .collect();
+        let walked: Vec<(Vec<u32>, Vec<u32>)> =
+            threads.into_iter().map(|t| t.join().unwrap()).collect();
+        // Each that probed joins the round; one that came after the last
+        // left the table joins nothing.
+        for (rounds, alone) in &walked {
+            assert!(
+                rounds == &[1] || rounds.is_empty() && alone.is_empty(),
+                "{walked:?}"
+            );
+        }
+        let mut alone: Vec<u32> = walked.iter().flat_map(|(_, alone)| alone.clone()).collect();
+        alone.sort_unstable();
+        assert_eq!(alone, [2, 3], "each alone once: {walked:?}");
+    });
+}

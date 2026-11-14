@@ -4701,6 +4701,7 @@ SELECT join_same($$SELECT jsp.s, jsskew.w FROM jsp JOIN jsskew ON jsp.k = jsskew
  180000 rows, hash ed669e9f0bc82792f00f220274071704
 (1 row)
 
+-- spec: relspill/A partition taken alone
 -- One key held by 2000 inner rows of 1 kB of text, among 2000 rows of
 -- other keys: its partition has few records but some 2 MB of values,
 -- past the room of a participant. The one that takes it alone splits

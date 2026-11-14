@@ -299,16 +299,16 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       test against a sort in memory; `make installcheck`;
       `cargo ab measure` of `runs_text` and of sorts that merge in
       several passes
-- [ ] 3.20 Write the machine of a build by several processes: its
+- [x] 3.20 Write the machine of a build by several processes: its
       phases from `phases.rs`, with what C decides about writing to
       disk. Check: the loom models, old and new; `make rust-loom`; the
       parallel tests of the suite `join`; `cargo ab measure` of a
       shared join without a spill
-- [ ] 3.21 Add the agreement on a split, the publishing of the filter
+- [x] 3.21 Add the agreement on a split, the publishing of the filter
       before it, and the catch-up of a participant that attaches late.
       Check: a loom model of each; `make rust-loom`; the parallel tests
       of the suite `join`
-- [ ] 3.22 Add the rounds, the partitions taken alone, which go to the
+- [x] 3.22 Add the rounds, the partitions taken alone, which go to the
       join's machine, and the frees. Check: loom models of the
       hand-overs; `make rust-loom`; `make crosscheck` with workers;
       `cargo ab measure` of the rounds of a parallel join

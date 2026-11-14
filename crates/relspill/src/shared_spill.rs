@@ -55,6 +55,9 @@ pub(super) use sealed::Words;
 const ON_DISK: u64 = 1;
 /// The flag of a partition one participant takes whole.
 const ALONE: u64 = 2;
+/// The flag of a partition on disk that every participant joins
+/// together, in a round, rather than one alone.
+const TOGETHER: u64 = 4;
 
 // The words before the partitions': the partitions in force (0 while the
 // table is whole), the bytes of chunks in memory of every participant,
@@ -74,7 +77,7 @@ enum Field {
     Bytes,
     /// Its records, in memory or on disk.
     Records,
-    /// [`ON_DISK`] and [`ALONE`].
+    /// [`ON_DISK`], [`ALONE`] and [`TOGETHER`].
     Flags,
     /// The next file of its inner rows to take.
     NextInner,
@@ -577,6 +580,21 @@ impl<W: Words> Spill<W> {
             .fetch_or(self.part(partition, Field::Flags), ALONE)
             & ALONE
             == 0)
+    }
+
+    /// Mark a partition one that every participant joins together, in a
+    /// round: as the participant that sized the table decided.
+    pub fn set_together(&self, partition: u32) -> Result<()> {
+        self.check_partition(partition)?;
+        self.words
+            .fetch_or(self.part(partition, Field::Flags), TOGETHER);
+        Ok(())
+    }
+
+    /// Whether every participant joins the partition together.
+    pub fn together(&self, partition: u32) -> Result<bool> {
+        self.check_partition(partition)?;
+        Ok(self.words.load(self.part(partition, Field::Flags)) & TOGETHER != 0)
     }
 
     /// Whether one participant took the partition whole.

@@ -27,6 +27,7 @@ mod spill;
 mod spill_group;
 mod spill_join;
 mod spill_set;
+mod spill_shared;
 mod spill_sort;
 mod status;
 mod table;
@@ -116,6 +117,18 @@ pub use spill_set::{
     tess_spill_reader_file, tess_spill_reader_next, tess_spill_reader_open, tess_spill_reader_own,
     tess_spill_reader_seek, tess_spill_set_drop, tess_spill_set_finish, tess_spill_set_init,
     tess_spill_set_layout, tess_spill_set_stats, tess_spill_set_write, tess_spill_set_written,
+};
+pub use spill_shared::{
+    SHARED_ACTION_SIZE, SHARED_ALONE, SHARED_ARRIVE_AND_DETACH, SHARED_ARRIVE_AND_WAIT,
+    SHARED_ARRIVED, SHARED_ATTACH, SHARED_ATTACHED, SHARED_BATCH, SHARED_BUILD, SHARED_DEMOTE,
+    SHARED_DETACH, SHARED_DONE, SHARED_EVENT_BYTES_OFFSET, SHARED_EVENT_SIZE, SHARED_FINISHED,
+    SHARED_FLUSH_END, SHARED_FREE, SHARED_HOST_NRESIDENT_OFFSET, SHARED_HOST_SIZE, SHARED_KEEP,
+    SHARED_LEFT, SHARED_LINK, SHARED_MACHINE_SIZE, SHARED_NEXT, SHARED_NOTHING, SHARED_OUTER,
+    SHARED_PARAMS_PER_CHECK_OFFSET, SHARED_PARAMS_SIZE, SHARED_PLANNED, SHARED_PROBE, SHARED_ROUND,
+    SHARED_SEND, SHARED_SENT, SHARED_SIZE, SHARED_SPLIT, SHARED_SWITCH, SHARED_VISIT,
+    SHARED_VISITED, SHARED_WALKED, SHARED_WEIGH, SHARED_WEIGHED, SHARED_WRITE, SharedBuildAction,
+    SharedBuildEvent, SharedBuildHost, SharedBuildParams, tess_shared_build_init,
+    tess_shared_build_layout, tess_shared_build_step, tess_shared_build_stop,
 };
 pub use spill_sort::{
     RUNS_ACTION_PLACE_OFFSET, RUNS_ACTION_SIZE, RUNS_BLOCKS_SIZE, RUNS_DONE,

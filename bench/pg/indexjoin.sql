@@ -205,9 +205,11 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['pk', 'pk_shuffled', 'scattered', 'text_key', 'date_key', 'cross_type', 'four', 'left_miss', 'sparse', 'few', 'repeated', 'pk_20k', 'hot_key', 'semi_pk', 'anti_miss', 'anti_none', 'semi_fifth', 'anti_fifth', 'semi_three_fifths', 'semi_shuffled', 'semi_all', 'anti_both_sides']) AS name \gexec
+FROM unnest(ARRAY['pk', 'pk_shuffled', 'scattered', 'text_key', 'date_key', 'cross_type', 'four', 'left_miss', 'sparse', 'few', 'repeated', 'pk_20k', 'hot_key', 'semi_pk', 'anti_miss', 'anti_none', 'semi_fifth', 'anti_fifth', 'semi_three_fifths', 'semi_shuffled', 'semi_all', 'anti_both_sides']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['pk', 'pk_shuffled', 'scattered', 'text_key', 'date_key', 'cross_type', 'four', 'left_miss', 'sparse', 'few', 'repeated', 'pk_20k', 'hot_key', 'semi_pk', 'anti_miss', 'anti_none', 'semi_fifth', 'anti_fifth', 'semi_three_fifths', 'semi_shuffled', 'semi_all', 'anti_both_sides']) AS name \gexec
+FROM unnest(ARRAY['pk', 'pk_shuffled', 'scattered', 'text_key', 'date_key', 'cross_type', 'four', 'left_miss', 'sparse', 'few', 'repeated', 'pk_20k', 'hot_key', 'semi_pk', 'anti_miss', 'anti_none', 'semi_fifth', 'anti_fifth', 'semi_three_fifths', 'semi_shuffled', 'semi_all', 'anti_both_sides']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 DEALLOCATE ALL;

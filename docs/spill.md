@@ -115,6 +115,26 @@ writes its own chunks of it to its own files of the table's
 `SharedFileSet`. The chunk lists are each participant's
 own, so none is unlinked from a list others add to.
 
+**The build's machine.** Each participant steps a machine of the crate
+`relspill` (its module `shared`) through the build's phases: it says
+when to attach, arrive and wait at the build's barrier, and what to do
+in each phase. After each batch: a table without a level whose chunks
+passed the budget splits, the node planning the level and publishing the
+filter before the machine splits the words, so the first split holds and
+no participant sees it without the filter; a participant that sees the
+split makes its level of it; then the partitions others sent to disk
+that this participant still keeps are written, and the partition to send
+while the chunks pass the budget. A participant that attaches after the
+build to a table that split makes its level and writes what went to disk
+before the work of `FLUSH`, `OUTER` or the probe, whichever it reaches
+first. At `FLUSH` the machine names each partition to write or to give
+to the table, and `FLUSH` and `OUTER` have work only when the table
+split. At `SIZE` the elected participant's machine weighs each partition
+on disk for its round, and after the probe the machine takes the
+participant round the partitions on disk, naming each one to join in its
+round, to join alone, or to pass, as one with nothing to join is. The
+barrier's waits stay the node's.
+
 After the inner side (`FLUSH`), each participant writes its tails of
 the partitions on disk and hands its chunks of the others to the table,
 which is indexed for them alone. Then (`OUTER`) every participant writes
@@ -129,26 +149,26 @@ participant then reads such files one at a time as it takes them
 the build (the last one frees the table).
 
 Then each participant goes round the partitions on disk from a start of
-its own (`tess_table_spill_start`), so that they spread. A partition
+its own, which the spill words spread over the participants. A partition
 whose blocks and index fit in one participant's `hash_mem`, as the
-elected participant of `SIZE` decides from the bytes and blocks every
-participant wrote, is a round, as the core's batches are: the
-participants that come elect one, which makes its index in shared
-memory; all load its inner files, one at a time as they take them, each
-block into a block of shared memory, a chunk of records numbered by the
-round's counter and linked at once; all probe it with its outer files,
-taken the same way, and leave without waiting, the last one freeing it.
-One that comes while the round probes probes with the outer files still
-left, and one that comes once the round is freed goes on to the next
-partition.
-A larger partition, a skewed key's, is taken whole by one participant
-(`tess_table_spill_take_alone`) and joined from every participant's
-files as a serial table joins its partitions, splitting or in pieces
-by what every participant's blocks of it take read back, values too;
-the others meanwhile take the rounds and the other partitions, so a skew
-holds up one participant, not all. A participant that releases its set leaves its files for
-the others (`tess_spill_release`); the set deletes them when the last
-participant detaches, or at a rescan.
+machine of the elected participant of `SIZE` decides from the bytes and
+blocks every participant wrote and marks in the spill words, is a round,
+as the core's batches are: the participants that come elect one, which
+makes its index in shared memory; all load its inner files, one at a
+time as they take them, each block into a block of shared memory, a
+chunk of records numbered by the round's counter and linked at once; all
+probe it with its outer files, taken the same way, and leave without
+waiting, the last one freeing it. One that comes while the round probes
+probes with the outer files still left, and one that comes once the
+round is freed goes on to the next partition. A larger partition, a
+skewed key's, is taken whole by one participant, the first whose machine
+takes it in the spill words, and joined from every participant's files
+as a serial table joins its partitions, splitting or in pieces by what
+every participant's blocks of it take read back, values too; the others
+meanwhile take the rounds and the other partitions, so a skew holds up
+one participant, not all. A participant that releases its set leaves its
+files for the others (`tess_spill_release`); the set deletes them when
+the last participant detaches, or at a rescan.
 
 There is no skew table as the core's hash join keeps (the inner rows of
 the outer side's most common keys held in memory, so that their outer

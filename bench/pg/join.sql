@@ -267,13 +267,15 @@ FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'filter_first', 'miss', 'dup', 'dup_text', 'two_keys', 'residual', 'rows_parent',
                   'chain', 'semi', 'anti', 'right_anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
                   'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few',
-                  'gather_sparse', 'gather_wide_few', 'gather_numeric', 'gather_computed']) AS name \gexec
+                  'gather_sparse', 'gather_wide_few', 'gather_numeric', 'gather_computed']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
 FROM unnest(ARRAY['fk_count', 'fk_inner_col', 'fk_outer_col', 'int8', 'mixed',
                   'selective', 'filter_first', 'miss', 'dup', 'two_keys', 'residual', 'rows_parent',
                   'chain', 'semi', 'anti', 'right_anti', 'left_nulls', 'left_dup', 'full_join', 'right_join',
                   'merge_forced', 'merge_sorted', 'part_prune', 'part_prune_few',
-                  'gather_sparse', 'gather_wide_few', 'gather_numeric', 'gather_computed']) AS name \gexec
+                  'gather_sparse', 'gather_wide_few', 'gather_numeric', 'gather_computed']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 DEALLOCATE ALL;

@@ -204,8 +204,9 @@ again.
 
 ### Requirement: A build by several processes and its rounds
 The crate SHALL provide a state machine for a hash table that several
-processes build together and that may spill, with its phases and its
-rounds over the partitions on disk. A participant MAY attach at any
+processes build together and that may spill,
+[`Build`](../../../crates/relspill/src/shared.rs), with its phases and
+its rounds over the partitions on disk. A participant MAY attach at any
 phase of the build, or to a round in progress, and MAY leave early. A
 participant that comes after the in-memory part of the build is freed
 SHALL find no work. Each partition on disk SHALL be joined once, by one
@@ -214,30 +215,61 @@ region SHALL be freed once, and the participants SHALL agree on one
 split.
 
 #### Scenario: Participants that attach at any phase
-- **WHEN** a loom model runs two or three participants over a build
-  that spills, each attaching at any phase
+- **WHEN** loom models run two or three participants that attach at
+  any phase of a build, of a build that spills or of a round, and two
+  that go round the partitions on disk of a table that split
 - **THEN** every key is found, every partition on disk is joined once,
   and every region is freed once
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/loom.rs::three_participants_attach_at_any_phase`;
+  `crates/relspill/src/loom.rs::participants_write_every_partition_another_sent_to_disk`;
+  `crates/relspill/src/loom.rs::three_participants_join_a_round_at_any_phase`;
+  `crates/relspill/src/loom.rs::participants_take_each_partition_alone_once_and_join_the_rounds`
+
+#### Scenario: Participants that send partitions to disk as they build
+- **WHEN** a loom model runs two participants that append to a table
+  split past its budget, each attaching at any phase
+- **THEN** a partition one sends to disk the other writes too, and at
+  the flush each writes the partitions on disk and keeps the others
+- **Verified by:**
+  `crates/relspill/src/loom.rs::participants_write_every_partition_another_sent_to_disk`;
+  `crates/relspill/src/shared/tests.rs::a_batch_writes_what_others_sent_then_sends_the_largest`
+
+#### Scenario: Participants that pass the budget at once
+- **WHEN** a loom model runs two participants whose counts each pass
+  the budget of a table not split yet
+- **THEN** one split holds, both make their levels of it, and neither
+  sees the split before what it reads of it is published
+- **Verified by:**
+  `crates/relspill/src/loom.rs::participants_past_the_budget_split_once_their_filter_is_published`;
+  `crates/relspill/src/shared/tests.rs::a_table_past_its_budget_splits_once_its_plan_is_published`
 
 #### Scenario: A participant that attaches after the split
 - **WHEN** a participant attaches after the others agreed on a split
 - **THEN** it takes the level the others made before it reads the
   table
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/shared/tests.rs::a_late_participant_catches_up_at_the_flush`;
+  `crates/relspill/src/shared/tests.rs::a_late_participant_catches_up_at_the_outer_side_and_the_probe`;
+  `crates/relspill/src/loom.rs::participants_write_every_partition_another_sent_to_disk`
 
 #### Scenario: A participant that comes after the build
 - **WHEN** a participant attaches after the in-memory part of the build
   is freed
 - **THEN** the machine tells it that it has no work, and the rounds of
   the others go on
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/shared/tests.rs::a_late_participant_skips_the_writes_of_a_table_that_never_split`;
+  `crates/relspill/src/loom.rs::participants_take_each_partition_alone_once_and_join_the_rounds`
 
 #### Scenario: A partition taken alone
 - **WHEN** one participant takes a whole partition on disk
 - **THEN** it joins the partition through its join machine, in pieces
   if it does not fit, and no other participant joins it
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/shared/tests.rs::the_partitions_on_disk_are_joined_together_alone_or_released`;
+  `crates/relspill/src/loom.rs::participants_take_each_partition_alone_once_and_join_the_rounds`;
+  `test/sql/join.sql::-- spec: relspill/A partition taken alone`
 
 ### Requirement: Bounds of a block by its kind
 A writer and a reader of a set SHALL take a bound for each kind of

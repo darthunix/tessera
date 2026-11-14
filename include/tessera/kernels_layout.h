@@ -169,6 +169,19 @@ tess_kernels_layout_matches(void)
 		tess_runs_layout(TESS_RUNS_ACTION_PLACE_OFFSET) == offsetof(TessRunsAction, place) &&
 		tess_runs_layout(TESS_RUNS_EVENT_LIMIT_OFFSET) == offsetof(TessRunsEvent, limit) &&
 		tess_runs_layout((TessRunsLayout) 99) == 0 &&
+	/* The machine of a shared build and what a step of it takes and gives. */
+		tess_shared_build_layout(TESS_SHARED_MACHINE_SIZE) == sizeof(TessSharedBuildMachine) &&
+		tess_shared_build_layout(TESS_SHARED_PARAMS_SIZE) == sizeof(TessSharedBuildParams) &&
+		tess_shared_build_layout(TESS_SHARED_PARAMS_PER_CHECK_OFFSET) ==
+		offsetof(TessSharedBuildParams, per_check) &&
+		tess_shared_build_layout(TESS_SHARED_HOST_SIZE) == sizeof(TessSharedBuildHost) &&
+		tess_shared_build_layout(TESS_SHARED_HOST_NRESIDENT_OFFSET) ==
+		offsetof(TessSharedBuildHost, nresident) &&
+		tess_shared_build_layout(TESS_SHARED_EVENT_SIZE) == sizeof(TessSharedBuildEvent) &&
+		tess_shared_build_layout(TESS_SHARED_EVENT_BYTES_OFFSET) ==
+		offsetof(TessSharedBuildEvent, bytes) &&
+		tess_shared_build_layout(TESS_SHARED_ACTION_SIZE) == sizeof(TessSharedBuildAction) &&
+		tess_shared_build_layout((TessSharedBuildLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of
 	 * tessera/spill.h take it: the row count, the capacity and the stored

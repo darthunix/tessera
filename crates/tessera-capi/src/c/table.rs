@@ -2319,7 +2319,7 @@ unsafe fn build_counters<'a>(counters: *mut u64) -> Result<SharedCounters<'a>> {
 /// writes for `'a`, cleared before any participant attached to the
 /// table, and reached only through stop words, here or in other
 /// processes.
-unsafe fn stop_word<'a>(word: *mut u64) -> Result<StopWord<'a>> {
+pub(super) unsafe fn stop_word<'a>(word: *mut u64) -> Result<StopWord<'a>> {
     check_aligned(word, "a stop word")?;
     // SAFETY: the caller's contract; an `AtomicU64` has the size and
     // alignment of a `u64`.
