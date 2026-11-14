@@ -416,6 +416,10 @@ jobs:
           cargo miri test --locked -p relspill --test records
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
             --test spill --test join --test smallint --test date_bound
+          # The machines' entry points write places C has not filled yet:
+          # no value may be read or borrowed there.
+          MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
+            cargo miri test --locked -p tessera-capi --test join
       # A target whose bytes run from the most significant: the packing
       # narrows values by their low bytes, which lie last there. The
       # property tests of the spill words, of the columns appended by

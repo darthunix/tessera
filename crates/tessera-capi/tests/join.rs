@@ -768,3 +768,76 @@ fn the_join_layout_is_its_types() {
     }
     assert_eq!(size_of::<JoinParams>(), 8 * 18);
 }
+
+#[test]
+fn the_join_entry_points_write_places_that_hold_nothing_yet() {
+    use std::mem::MaybeUninit;
+
+    let params = params(1 << 20);
+    let mut machine = MaybeUninit::<Machine>::uninit();
+    let mut action = MaybeUninit::<JoinAction>::uninit();
+    let mut status = Status::new();
+    // SAFETY: places valid for writes, which the entry points write whole.
+    let code = unsafe {
+        tess_join_init(
+            machine.as_mut_ptr().cast(),
+            &raw const params,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let mut none = Level::none();
+    let host = none.host();
+    let inner = JoinEvent {
+        memory: (1 << 20) + 1,
+        ..event(JOIN_INNER)
+    };
+    // SAFETY: the machine is made; the action a place valid for a write.
+    let code = unsafe {
+        tess_join_step(
+            machine.as_mut_ptr().cast(),
+            &raw const host,
+            &raw const inner,
+            action.as_mut_ptr(),
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    // SAFETY: written whole by the step.
+    assert_eq!(unsafe { action.assume_init() }.kind, JOIN_START);
+    let below = JoinBelow {
+        partition: 1,
+        level: 1,
+        expected: 1 << 20,
+        limit: 1 << 19,
+        shift: 2,
+        spare: 0,
+    };
+    let mut other = MaybeUninit::<Machine>::uninit();
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_join_below(
+            other.as_mut_ptr().cast(),
+            &raw const params,
+            &raw const below,
+            action.as_mut_ptr(),
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let mut shared = MaybeUninit::<Machine>::uninit();
+    let mut given = MaybeUninit::<JoinAction>::uninit();
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_join_given(
+            shared.as_mut_ptr().cast(),
+            &raw const params,
+            4,
+            given.as_mut_ptr(),
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    // SAFETY: written whole by the call.
+    assert_eq!(unsafe { given.assume_init() }.plan.partitions, 4);
+}

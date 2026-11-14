@@ -319,13 +319,21 @@ unsafe fn machine_at<'a>(machine: *mut Join) -> Result<&'a mut Join> {
     unsafe { machine.as_mut() }.context("a null join's machine")
 }
 
+/// A place the call writes its result to, which may hold no value yet: it
+/// is checked, and written whole, never read or borrowed.
+fn output<T>(place: *mut T, what: &str) -> Result<*mut T> {
+    ensure!(!place.is_null(), "a null {what}");
+    ensure!(place.is_aligned(), "{what} not aligned");
+    Ok(place)
+}
+
 /// `tess_join_init`: make `*machine` the machine of a join whose table
 /// fits so far, for `params`.
 ///
 /// # Safety
 ///
-/// `machine` as for [`machine_at`]; `params` null or readable; `status`
-/// as for every entry point.
+/// `machine` null or valid for a write of a machine, whatever it holds
+/// before; `params` null or readable; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_join_init(
     machine: *mut Join,
@@ -335,9 +343,9 @@ pub unsafe extern "C" fn tess_join_init(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let machine = machine_at(machine)?;
+            let machine = output(machine, "join's machine")?;
             let params = params.as_ref().context("null join parameters")?;
-            *machine = Join::new(&params.params())?;
+            machine.write(Join::new(&params.params())?);
             Ok(())
         })
     }
@@ -350,7 +358,7 @@ pub unsafe extern "C" fn tess_join_init(
 /// # Safety
 ///
 /// As for [`tess_join_init`]; `below` null or readable; `action` null or
-/// writable.
+/// valid for a write, whatever it holds before.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_join_below(
     machine: *mut Join,
@@ -362,13 +370,13 @@ pub unsafe extern "C" fn tess_join_below(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let machine = machine_at(machine)?;
+            let machine = output(machine, "join's machine")?;
             let params = params.as_ref().context("null join parameters")?;
             let below = below.as_ref().context("a null level below")?.below()?;
-            let out = action.as_mut().context("a null join action")?;
+            let out = output(action, "join action")?;
             let (join, start) = Join::below(&params.params(), &below)?;
-            *machine = join;
-            *out = JoinAction::start(&start);
+            machine.write(join);
+            out.write(JoinAction::start(&start));
             Ok(())
         })
     }
@@ -380,7 +388,8 @@ pub unsafe extern "C" fn tess_join_below(
 ///
 /// # Safety
 ///
-/// As for [`tess_join_init`]; `action` null or writable.
+/// As for [`tess_join_init`]; `action` null or valid for a write, whatever
+/// it holds before.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_join_given(
     machine: *mut Join,
@@ -392,12 +401,12 @@ pub unsafe extern "C" fn tess_join_given(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let machine = machine_at(machine)?;
+            let machine = output(machine, "join's machine")?;
             let params = params.as_ref().context("null join parameters")?;
-            let out = action.as_mut().context("a null join action")?;
+            let out = output(action, "join action")?;
             let (join, start) = Join::given(&params.params(), partitions)?;
-            *machine = join;
-            *out = JoinAction::start(&start);
+            machine.write(join);
+            out.write(JoinAction::start(&start));
             Ok(())
         })
     }
@@ -414,7 +423,8 @@ pub unsafe extern "C" fn tess_join_given(
 /// `disk` null or valid for reads of their counts of words, and its
 /// `routes` null or valid for writes of `nroutes` bytes, none of them
 /// overlapping the words or the routes; `event` null or readable;
-/// `action` null or writable; `status` as for every entry point.
+/// `action` null or valid for a write, whatever it holds before; `status`
+/// as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_join_step(
     machine: *mut Join,
@@ -429,7 +439,7 @@ pub unsafe extern "C" fn tess_join_step(
             let machine = machine_at(machine)?;
             let host = host.as_ref().context("a null join host")?;
             let event = event.as_ref().context("a null join event")?.event()?;
-            let out = action.as_mut().context("a null join action")?;
+            let out = output(action, "join action")?;
             let words: &[Cell<u64>] = if host.nwords == 0 {
                 &[]
             } else {
@@ -454,7 +464,7 @@ pub unsafe extern "C" fn tess_join_step(
                 disk,
                 routes,
             };
-            *out = JoinAction::of(machine.step(event, &mut host)?);
+            out.write(JoinAction::of(machine.step(event, &mut host)?));
             Ok(())
         })
     }
