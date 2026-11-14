@@ -682,3 +682,159 @@ fn three_participants_join_a_round_at_any_phase() {
 fn probing_before_every_file_is_loaded_misses_keys() {
     round(2, &[&[1], &[2]], Some(phases::ROUND_LOAD), 2);
 }
+
+/// What one participant of a split table did with each partition at the
+/// flush: written, kept in memory, or not seen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Flushed {
+    Unseen,
+    Written,
+    Kept,
+}
+
+/// A participant of a shared build over the machine of
+/// [`crate::shared`]: it appends `bytes` to each partition of a table
+/// split from the start, sends and demotes as its machine says, and at
+/// the flush writes or keeps each partition. Its own flags of the
+/// partitions it keeps in memory, and what it did at the flush.
+fn spill_participant(
+    spill: &LoomSpill,
+    counters: &Counters<LoomCounterWords>,
+    barrier: &LoomBarrier,
+    bytes: u64,
+) -> (Vec<Flushed>, bool) {
+    use crate::shared::{Action as Step, Build as Machine, Event, Params};
+
+    let params = Params {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        per_check: 1,
+        spare: 0,
+    };
+    let partitions = spill.partitions() as usize;
+    let mut machine = Machine::new(&params).unwrap();
+    let mut resident = vec![1_u8; partitions];
+    let mut held = vec![0_u64; partitions];
+    let mut flushed = vec![Flushed::Unseen; partitions];
+    let mut built = false;
+    // Write what this participant holds of a partition: it keeps none of
+    // it in memory any more.
+    let write = |resident: &mut [u8], held: &mut [u64], partition: u32| {
+        let index = partition as usize;
+        resident[index] = 0;
+        let bytes = core::mem::take(&mut held[index]);
+        if bytes > 0 {
+            spill.add_bytes(-(bytes as i64), Some(partition)).unwrap();
+        }
+        bytes > 0
+    };
+    let mut event = Event::Done;
+    loop {
+        let action = machine.next(event, counters, spill, &resident).unwrap();
+        event = Event::Done;
+        match action {
+            Step::Attach => {
+                event = Event::Attached {
+                    phase: barrier.attach(),
+                }
+            }
+            Step::ArriveAndWait => {
+                event = Event::Arrived {
+                    elected: barrier.arrive_and_wait(),
+                }
+            }
+            Step::ArriveAndDetach => {
+                event = Event::Left {
+                    last: barrier.detach(true),
+                }
+            }
+            Step::Detach => {
+                barrier.detach(false);
+            }
+            Step::Build => {
+                // One batch into every partition still in memory here,
+                // then the check of the spill.
+                built = true;
+                for partition in 0..partitions {
+                    if resident[partition] != 0 {
+                        spill
+                            .add_bytes(bytes as i64, Some(partition as u32))
+                            .unwrap();
+                        held[partition] += bytes;
+                    }
+                }
+                event = Event::Batch { evict: true };
+            }
+            // The catch-up before the flush.
+            Step::Flush => event = Event::Batch { evict: false },
+            Step::Outer => {}
+            Step::Demote(partition) => {
+                write(&mut resident, &mut held, partition);
+            }
+            Step::Send(partition) => {
+                let freed = write(&mut resident, &mut held, partition);
+                event = Event::Sent { freed };
+            }
+            Step::Write(partition) => {
+                assert_eq!(resident[partition as usize], 0, "{partition} kept on disk");
+                flushed[partition as usize] = Flushed::Written;
+            }
+            Step::Keep(partition) => {
+                assert!(!spill.on_disk(partition).unwrap(), "{partition} kept");
+                flushed[partition as usize] = Flushed::Kept;
+            }
+            Step::Done | Step::FlushEnd | Step::Size | Step::Link | Step::Probe { .. } => {}
+            Step::Free | Step::Finished => return (flushed, built),
+        }
+    }
+}
+
+/// Two participants append to a table split into two partitions past
+/// its budget: in every order of their steps, a partition one sends to
+/// disk the other writes too, at its next batch or at its catch-up, and
+/// at the flush both write exactly the partitions on disk and keep the
+/// others.
+#[test]
+fn participants_write_every_partition_another_sent_to_disk() {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(2);
+    model.max_branches = 100_000;
+    model.check(|| {
+        let spill = Arc::new(loom_spill(2, 25));
+        spill.split(2).unwrap();
+        let counters = Arc::new(Counters::over(LoomCounterWords(core::array::from_fn(
+            |_| AtomicU64::new(0),
+        ))));
+        let barrier = Arc::new(LoomBarrier::new(None));
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let (spill, counters, barrier) = (spill.clone(), counters.clone(), barrier.clone());
+                thread::spawn(move || spill_participant(&spill, &counters, &barrier, 10))
+            })
+            .collect();
+        let ran: Vec<(Vec<Flushed>, bool)> =
+            threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let flushed: Vec<&Vec<Flushed>> = ran.iter().map(|(flushed, _)| flushed).collect();
+        // One that attached past the flush, when the other went through
+        // it alone, saw none of it.
+        let expected: Vec<Flushed> = (0..2)
+            .map(|partition| match spill.on_disk(partition).unwrap() {
+                true => Flushed::Written,
+                false => Flushed::Kept,
+            })
+            .collect();
+        for seen in &flushed {
+            let late = seen.iter().all(|f| *f == Flushed::Unseen);
+            assert!(late || **seen == expected, "{flushed:?} for {expected:?}");
+        }
+        assert!(
+            flushed.iter().any(|seen| seen[0] != Flushed::Unseen),
+            "one went through the flush"
+        );
+        // Both batches past the budget: one partition went to disk.
+        if ran.iter().all(|(_, built)| *built) {
+            assert!(spill.evictions() > 0, "the budget sent one to disk");
+        }
+    });
+}
