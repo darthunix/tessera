@@ -230,11 +230,23 @@ split.
   `crates/relspill/src/loom.rs::participants_write_every_partition_another_sent_to_disk`;
   `crates/relspill/src/shared/tests.rs::a_batch_writes_what_others_sent_then_sends_the_largest`
 
+#### Scenario: Participants that pass the budget at once
+- **WHEN** a loom model runs two participants whose counts each pass
+  the budget of a table not split yet
+- **THEN** one split holds, both make their levels of it, and neither
+  sees the split before what it reads of it is published
+- **Verified by:**
+  `crates/relspill/src/loom.rs::participants_past_the_budget_split_once_their_filter_is_published`;
+  `crates/relspill/src/shared/tests.rs::a_table_past_its_budget_splits_once_its_plan_is_published`
+
 #### Scenario: A participant that attaches after the split
 - **WHEN** a participant attaches after the others agreed on a split
 - **THEN** it takes the level the others made before it reads the
   table
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/shared/tests.rs::a_late_participant_catches_up_at_the_flush`;
+  `crates/relspill/src/shared/tests.rs::a_late_participant_catches_up_at_the_outer_side_and_the_probe`;
+  `crates/relspill/src/loom.rs::participants_write_every_partition_another_sent_to_disk`
 
 #### Scenario: A participant that comes after the build
 - **WHEN** a participant attaches after the in-memory part of the build

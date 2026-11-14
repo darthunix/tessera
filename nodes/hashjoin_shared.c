@@ -12,12 +12,12 @@
 #include "hashjoin.h"
 
 static void make_rounds(TessHashJoinState *state);
-static void shared_check(TessHashJoinState *state);
+static void shared_batch(TessHashJoinState *state);
 static bool shared_has_outer(JoinSpill *spill, int partition);
 static void shared_outer(TessHashJoinState *state);
 static void shared_probe_start(TessHashJoinState *state, uint64 records);
 
-static void shared_join(TessHashJoinState *state);
+static void shared_switch(TessHashJoinState *state, uint32 partitions);
 
 /*
  * The query's dynamic shared memory, where a shared build keeps its
@@ -251,7 +251,7 @@ build_shared_inner(TessHashJoinState *state)
 				join_insert_spill(state, batch);
 			else
 				insert_shared_batch(state, batch);
-			shared_check(state);
+			shared_batch(state);
 		}
 		tess_input_finish(state->inner_input);
 	}
@@ -609,7 +609,7 @@ join_build_shared(TessHashJoinState *state)
 		{
 			case TESS_SHARED_ATTACH:
 				event.kind = TESS_SHARED_ATTACHED;
-				event.phase = BarrierAttach(&state->parallel.shared->build);
+				event.value = BarrierAttach(&state->parallel.shared->build);
 				break;
 			case TESS_SHARED_ARRIVE_AND_WAIT:
 				event.kind = TESS_SHARED_ARRIVED;
@@ -620,9 +620,12 @@ join_build_shared(TessHashJoinState *state)
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_BUILD);
 				build_shared_inner(state);
 				break;
-			case TESS_SHARED_FLUSH:
-				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_FLUSH);
-				shared_join(state);
+			case TESS_SHARED_SWITCH:
+				/* Late: this participant's level, before its first phase's work. */
+				shared_switch(state, action.partition);
+				break;
+			case TESS_SHARED_DEMOTE:
+				join_side_demote(state, &state->spill->build, (int) action.partition);
 				break;
 			case TESS_SHARED_WRITE:
 			case TESS_SHARED_KEEP:
@@ -652,14 +655,12 @@ join_build_shared(TessHashJoinState *state)
 					uint64		nchunks;
 
 					/*
-					 * A participant that attaches only now, after the
-					 * table split, takes the table's level first: the
-					 * switch forgets this participant's value chunks, so
-					 * it comes before the attach, which reads every
-					 * participant's from the table.
+					 * A participant that attached only now, after the
+					 * table split, took the table's level as its machine
+					 * caught up: the switch forgets this participant's
+					 * value chunks, so it came before the attach, which
+					 * reads every participant's from the table.
 					 */
-					if (split)
-						shared_join(state);
 					attach_shared_table(state);
 					share_marks(state, state->parallel.shared->marks, state->parallel.shared->nchunks);
 					/* The whole table's rows and duplicates, every link done. */
@@ -809,15 +810,16 @@ side_share(TessHashJoinState *state, SpillSide *side, const char *prefix, bool m
 }
 
 /*
- * The first participant past the budget: the partitions of the join's
- * level plan, for the inner side it expects (twice what the participants
- * hold, or the planner's estimate if more), each about half of one
- * participant's hash_mem, since a partition on disk is joined by one, and
- * two per participant at least; a filter of every inner row, within an
- * eighth of the budget, published before the split, so that whoever sees
- * the split finds it.
+ * A participant past the budget, before the table split: the partitions
+ * of the join's level plan, for the inner side it expects (twice what the
+ * participants hold, or the planner's estimate if more), each about half
+ * of one participant's hash_mem, since a partition on disk is joined by
+ * one, and two per participant at least; and a filter of every inner row,
+ * within an eighth of the budget, published (the first one published
+ * holds) before the machine splits the table, so that whoever sees the
+ * split finds it. The partitions planned.
  */
-static void
+static uint32
 shared_split(TessHashJoinState *state)
 {
 	JoinShared *shared = state->parallel.shared;
@@ -834,7 +836,6 @@ shared_split(TessHashJoinState *state)
 	TessSpillPlan plan;
 	uint64		rows = Max((uint64) state->inner_rows * participants,
 						   state->build_rows * 2 * participants);
-	uint32		in_force;
 	Size		nwords;
 	dsa_pointer filter;
 
@@ -862,9 +863,7 @@ shared_split(TessHashJoinState *state)
 		dsa_free(area, filter);
 	else
 		state->counters[JOIN_BLOOM_FILTERS]++;
-	check(state, state->kernels->table_spill_split(join_shared_words(state), shared->spill_nwords,
-												   true, plan.partitions, &in_force,
-												   &state->status));
+	return plan.partitions;
 }
 
 /*
@@ -874,14 +873,19 @@ shared_split(TessHashJoinState *state)
  * copied into the partitions' value chunks, then freed.
  */
 static void
-shared_switch(TessHashJoinState *state)
+shared_switch(TessHashJoinState *state, uint32 partitions)
 {
 	JoinShared *shared = state->parallel.shared;
 	dsa_area   *area = join_query_dsa(state);
 	JoinSpill  *spill;
 	dsa_pointer block;
 
-	spill = join_spill_given(state, join_shared_partitions(state));
+	if (state->spill != NULL)
+		elog(ERROR, "TessHashJoin switched to its shared table's level twice");
+	if (partitions != join_shared_partitions(state))
+		elog(ERROR, "TessHashJoin switched to %u partitions of a table split into %u",
+			 partitions, join_shared_partitions(state));
+	spill = join_spill_given(state, partitions);
 	spill->shared = true;
 	spill->writers = shared->participants;
 	side_share(state, &spill->build, "tjb", true);
@@ -931,75 +935,56 @@ shared_switch(TessHashJoinState *state)
 }
 
 /*
- * A batch into a table that split, or a catch-up with one, as this
- * participant's machine says: the partitions others sent to disk go
- * there from here too; then, with evict, while the chunks pass the
- * budget, the largest goes and this participant writes its chunks of
- * it, as many as tessera.join_shared_spill_evictions a check (one),
- * since the others write theirs of it at their next batch.
+ * After a batch of the inner side, as this participant's machine says:
+ * past the budget with no level, the table splits, its plan and filter
+ * published first; once it split, this participant makes its level of
+ * it; then the partitions others sent to disk go there from here too,
+ * and while the chunks pass the budget the largest goes and this
+ * participant writes its chunks of it, as many as
+ * tessera.join_shared_spill_evictions a check (one), since the others
+ * write theirs of it at their next batch.
  */
 static void
-shared_spill_check(TessHashJoinState *state, bool evict)
+shared_batch(TessHashJoinState *state)
 {
-	SpillSide  *side = &state->spill->build;
 	TessSharedBuildAction action;
 
 	/* Once a batch at least, as the eviction checked before every pick. */
 	CHECK_FOR_INTERRUPTS();
 	action = shared_step(state, (TessSharedBuildEvent) {
 		.kind = TESS_SHARED_BATCH,
-		.flag = evict ? 1 : 0,
+		.flag = state->parallel.spill_over ? 1 : 0,
 	});
-
 	for (;;)
 	{
-		bool		freed;
+		TessSharedBuildEvent event = {.kind = TESS_SHARED_DONE};
 
 		switch (action.kind)
 		{
 			case TESS_SHARED_NOTHING:
 				return;
+			case TESS_SHARED_SPLIT:
+				event.kind = TESS_SHARED_PLANNED;
+				event.value = shared_split(state);
+				break;
+			case TESS_SHARED_SWITCH:
+				shared_switch(state, action.partition);
+				break;
 			case TESS_SHARED_DEMOTE:
-				join_side_demote(state, side, (int) action.partition);
-				action = shared_step(state, (TessSharedBuildEvent) {.kind = TESS_SHARED_DONE});
+				join_side_demote(state, &state->spill->build, (int) action.partition);
 				break;
 			case TESS_SHARED_SEND:
 				CHECK_FOR_INTERRUPTS();
-				freed = join_side_send(state, side, (int) action.partition);
-				action = shared_step(state, (TessSharedBuildEvent) {
-					.kind = TESS_SHARED_SENT,
-					.flag = freed ? 1 : 0,
-				});
+				event.kind = TESS_SHARED_SENT;
+				event.flag = join_side_send(state, &state->spill->build,
+											(int) action.partition) ? 1 : 0;
 				break;
 			default:
-				elog(ERROR, "TessHashJoin got shared build action %u in a check of its spill",
+				elog(ERROR, "TessHashJoin got shared build action %u after a batch",
 					 action.kind);
 		}
+		action = shared_step(state, event);
 	}
-}
-
-/* After a batch of the inner side: split, switch or send partitions to disk as needed. */
-static void
-shared_check(TessHashJoinState *state)
-{
-	if (state->spill == NULL)
-	{
-		if (state->parallel.spill_over && join_shared_partitions(state) == 0)
-			shared_split(state);
-		if (join_shared_partitions(state) > 0)
-			shared_switch(state);
-	}
-	if (state->spill != NULL)
-		shared_spill_check(state, true);
-}
-
-/* A participant of a table that spilled, one that joined late too: its level, as decided. */
-static void
-shared_join(TessHashJoinState *state)
-{
-	if (state->spill == NULL)
-		shared_switch(state);
-	shared_spill_check(state, false);
 }
 
 /* Advance the bounds of a set's files by this participant's, once they are written. */
@@ -1111,8 +1096,10 @@ shared_outer(TessHashJoinState *state)
 	bool		answer = state->jointype == JOIN_LEFT || state->jointype == JOIN_ANTI;
 	JoinSpill  *spill;
 
-	/* The machine gives the outer side to a table that split only. */
-	shared_join(state);
+	/*
+	 * The machine gives the outer side to a table that split only, once
+	 * this participant has its level of it.
+	 */
 	/* Past the build's barrier, the keys are every participant's. */
 	join_prune_outer(state);
 	spill = state->spill;

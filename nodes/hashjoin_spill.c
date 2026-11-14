@@ -913,7 +913,7 @@ side_full(TessHashJoinState *state, SpillSide *side, int partition)
 
 /*
  * Send the inner side's partitions to disk as the level's machine says (a
- * shared table's participants decide in shared_spill_check): while building,
+ * shared table's participants decide in shared_batch): while building,
  * against the memory the node reports, so that what it keeps is what it
  * says; at the end of the build, by the share of the rows in memory alone,
  * after which the machine sets where the outer rows of each partition go.

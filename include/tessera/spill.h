@@ -1434,10 +1434,12 @@ extern Size tess_runs_layout(TessRunsLayout what);
  * The machine of one participant of a build by several processes
  * (relspill's shared::Build): TESS_SHARED_BUILD_WORDS plain words the
  * participant keeps. It steps the build's phases (TessBuildAction's) and
- * says what the participant writes to disk: while it appends to a table
- * that split, the partitions others sent to disk and the largest to
- * send; at the flush, each partition to write or to keep; and whether
- * the flush and the outer side have work at all.
+ * says what the participant does with the spill: when the table splits,
+ * its plan published before the split; when this participant makes its
+ * level of it, after a batch or, late, before its first phase's work;
+ * the partitions others sent to disk and the largest to send; at the
+ * flush, each partition to write or to keep; and whether the flush and
+ * the outer side have work at all.
  */
 #define TESS_SHARED_BUILD_WORDS 10
 
@@ -1486,20 +1488,24 @@ typedef enum TessSharedBuildEventKind
 	TESS_SHARED_ARRIVED = 3,
 	/* BarrierArriveAndDetach returned; flag 1 for the last. */
 	TESS_SHARED_LEFT = 4,
-	/*
-	 * A batch went into a table that split, or the participant caught up
-	 * with one; flag 1 sends partitions while the chunks pass the budget.
-	 */
+	/* A batch went in; flag 1 when this participant's count passed the budget. */
 	TESS_SHARED_BATCH = 5,
 	/* The partition of the last TESS_SHARED_SEND went; flag 1 when bytes were freed. */
-	TESS_SHARED_SENT = 6
+	TESS_SHARED_SENT = 6,
+	/*
+	 * The level of the last TESS_SHARED_SPLIT is planned, of value
+	 * partitions, and what every participant reads once it sees the split
+	 * is published.
+	 */
+	TESS_SHARED_PLANNED = 7
 } TessSharedBuildEventKind;
 
+/* value: the phase of TESS_SHARED_ATTACHED, the partitions of TESS_SHARED_PLANNED. */
 typedef struct TessSharedBuildEvent
 {
 	uint32		kind;
 	uint32		flag;
-	uint32		phase;
+	uint32		value;
 	uint32		spare;
 } TessSharedBuildEvent;
 
@@ -1515,10 +1521,13 @@ typedef enum TessSharedBuildActionKind
 	TESS_SHARED_ARRIVE_AND_DETACH = 3,
 	/* BarrierDetach, then TESS_SHARED_DONE. */
 	TESS_SHARED_DETACH = 4,
-	/* Append this participant's share, a TESS_SHARED_BATCH after each batch of a split table. */
+	/* Append this participant's share, a TESS_SHARED_BATCH after each batch. */
 	TESS_SHARED_BUILD = 5,
-	/* The table split: catch up with its level; the partitions follow. */
-	TESS_SHARED_FLUSH = 6,
+	/*
+	 * The table passed its budget with no level: plan it, publish what the
+	 * others read once they see the split, then TESS_SHARED_PLANNED.
+	 */
+	TESS_SHARED_SPLIT = 6,
 	/* Write this participant's chunks of partition to disk. */
 	TESS_SHARED_WRITE = 7,
 	/* Give this participant's chunks of partition to the table in memory. */
@@ -1540,7 +1549,9 @@ typedef enum TessSharedBuildActionKind
 	/* Partition went to disk from another: write what is kept of it here. */
 	TESS_SHARED_DEMOTE = 16,
 	/* Send partition to disk, then TESS_SHARED_SENT. */
-	TESS_SHARED_SEND = 17
+	TESS_SHARED_SEND = 17,
+	/* The table split into partition partitions: make this participant's level of them. */
+	TESS_SHARED_SWITCH = 18
 } TessSharedBuildActionKind;
 
 typedef struct TessSharedBuildAction

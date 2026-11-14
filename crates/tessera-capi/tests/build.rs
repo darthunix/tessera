@@ -13,13 +13,14 @@ use std::mem::{MaybeUninit, offset_of, size_of};
 use tessera_capi::c::{
     Code, SHARED_ACTION_SIZE, SHARED_ARRIVE_AND_DETACH, SHARED_ARRIVE_AND_WAIT, SHARED_ARRIVED,
     SHARED_ATTACH, SHARED_ATTACHED, SHARED_BATCH, SHARED_BUILD, SHARED_DEMOTE, SHARED_DONE,
-    SHARED_EVENT_SIZE, SHARED_FLUSH, SHARED_FLUSH_END, SHARED_FREE, SHARED_HOST_NRESIDENT_OFFSET,
+    SHARED_EVENT_SIZE, SHARED_FLUSH_END, SHARED_FREE, SHARED_HOST_NRESIDENT_OFFSET,
     SHARED_HOST_SIZE, SHARED_KEEP, SHARED_LEFT, SHARED_LINK, SHARED_MACHINE_SIZE, SHARED_NOTHING,
-    SHARED_OUTER, SHARED_PARAMS_PER_CHECK_OFFSET, SHARED_PARAMS_SIZE, SHARED_PROBE, SHARED_SEND,
-    SHARED_SENT, SHARED_SIZE, SHARED_WRITE, SharedBuildAction, SharedBuildEvent, SharedBuildHost,
-    SharedBuildParams, SpillWeights, Status, tess_shared_build_init, tess_shared_build_layout,
-    tess_shared_build_step, tess_shared_build_stop, tess_table_spill_add_bytes,
-    tess_table_spill_evict, tess_table_spill_init, tess_table_spill_split, tess_table_spill_words,
+    SHARED_OUTER, SHARED_PARAMS_PER_CHECK_OFFSET, SHARED_PARAMS_SIZE, SHARED_PLANNED, SHARED_PROBE,
+    SHARED_SEND, SHARED_SENT, SHARED_SIZE, SHARED_SPLIT, SHARED_SWITCH, SHARED_WRITE,
+    SharedBuildAction, SharedBuildEvent, SharedBuildHost, SharedBuildParams, SpillWeights, Status,
+    tess_shared_build_init, tess_shared_build_layout, tess_shared_build_step,
+    tess_shared_build_stop, tess_table_spill_add_bytes, tess_table_spill_evict,
+    tess_table_spill_init, tess_table_spill_split, tess_table_spill_words,
 };
 
 /// The words of a machine.
@@ -201,7 +202,7 @@ fn a_participant_alone_builds_a_table_that_splits_by_the_entry_points() {
         (Code::Ok, action(SHARED_ATTACH, 0))
     );
     let attached = SharedBuildEvent {
-        phase: 0,
+        value: 0,
         ..event(SHARED_ATTACHED, 0)
     };
     assert_eq!(
@@ -218,6 +219,10 @@ fn a_participant_alone_builds_a_table_that_splits_by_the_entry_points() {
     let batch = event(SHARED_BATCH, 1);
     assert_eq!(
         step(&mut machine, &host, batch),
+        (Code::Ok, action(SHARED_SWITCH, 4))
+    );
+    assert_eq!(
+        step(&mut machine, &host, done),
         (Code::Ok, action(SHARED_DEMOTE, 1))
     );
     assert_eq!(
@@ -233,8 +238,7 @@ fn a_participant_alone_builds_a_table_that_splits_by_the_entry_points() {
     let arrived = event(SHARED_ARRIVED, 1);
     let expected = [
         (done, action(SHARED_ARRIVE_AND_WAIT, 0)),
-        (arrived, action(SHARED_FLUSH, 0)),
-        (done, action(SHARED_KEEP, 0)),
+        (arrived, action(SHARED_KEEP, 0)),
         (done, action(SHARED_WRITE, 1)),
         (done, action(SHARED_KEEP, 2)),
         (done, action(SHARED_WRITE, 3)),
@@ -263,6 +267,42 @@ fn a_participant_alone_builds_a_table_that_splits_by_the_entry_points() {
             "{event:?}"
         );
     }
+}
+
+#[test]
+fn a_table_splits_by_the_entry_points_once_its_plan_is_published() {
+    let mut shared = Shared::new(0, 1000);
+    let mut machine = Machine::default();
+    assert_eq!(init(&mut machine, &params()), Code::Ok);
+    let none = shared.host(&[]);
+    let done = event(SHARED_DONE, 0);
+    assert_eq!(step(&mut machine, &none, done).1, action(SHARED_ATTACH, 0));
+    let attached = event(SHARED_ATTACHED, 0);
+    assert_eq!(
+        step(&mut machine, &none, attached).1,
+        action(SHARED_BUILD, 0)
+    );
+    assert_eq!(
+        step(&mut machine, &none, event(SHARED_BATCH, 0)),
+        (Code::Ok, action(SHARED_NOTHING, 0))
+    );
+    assert_eq!(
+        step(&mut machine, &none, event(SHARED_BATCH, 1)),
+        (Code::Ok, action(SHARED_SPLIT, 0))
+    );
+    let planned = SharedBuildEvent {
+        value: 4,
+        ..event(SHARED_PLANNED, 0)
+    };
+    assert_eq!(
+        step(&mut machine, &none, planned),
+        (Code::Ok, action(SHARED_SWITCH, 4))
+    );
+    let host = shared.host(&[1, 1, 1, 1]);
+    assert_eq!(
+        step(&mut machine, &host, done),
+        (Code::Ok, action(SHARED_NOTHING, 0))
+    );
 }
 
 #[test]
