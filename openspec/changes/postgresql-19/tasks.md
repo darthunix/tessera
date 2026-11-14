@@ -42,7 +42,7 @@ The words used below:
       both cores, with the diff of the new file against the first read
       line by line: the line of the core, plans, and the partial
       grouping's early emits only; every `union_same` "same"
-- [ ] 2.5 `POSTGRES_19` in `.github/postgres.env`, its row in the
+- [x] 2.5 `POSTGRES_19` in `.github/postgres.env`, its row in the
       PostgreSQL job of `ci.yml`, and the random queries' findings
       named by core. Check: CI on the pull request
 - [ ] 2.6 The documents: README, `docs/limitations.md` (the cores, and

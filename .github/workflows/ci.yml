@@ -442,6 +442,10 @@ jobs:
           - { os: ubuntu-24.04, postgres: MASTER, rust_profile: release }
           - { os: macos-15, postgres: MASTER, rust_profile: release }
           - { os: ubuntu-24.04, postgres: MASTER, rust_profile: debug }
+          # PostgreSQL 19 on the target platform: the code differs from
+          # master's in five places only, so macOS and the debug kernels
+          # stay on master.
+          - { os: ubuntu-24.04, postgres: "19", rust_profile: release }
     runs-on: ${{ matrix.os }}
     env:
       # The temporary instance's locale (test/Makefile).
@@ -500,7 +504,8 @@ jobs:
         if: always() && matrix.os == 'ubuntu-24.04' && matrix.rust_profile == 'release'
         uses: actions/upload-artifact@v4
         with:
-          name: crosscheck-findings
+          # One name a core: two uploads of one name fail.
+          name: crosscheck-findings-${{ matrix.postgres }}
           path: target/bench-runs/crosscheck
           if-no-files-found: ignore
       - name: Differences and the server's log
