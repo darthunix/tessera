@@ -1,11 +1,11 @@
 # table-memory Specification
 
 ## Purpose
-The memory a join's or a grouping's hash table in memory takes, as
-seen from SQL: the length of its chunks, what EXPLAIN's Memory Usage
-of the node counts, how a serial build keeps its index within
-`hash_mem`, how large a grouping's first index is, and the error at
-the most chunks.
+The memory a join's or a grouping's hash table in memory takes, as seen
+from SQL: the length of its chunks, what EXPLAIN's Memory Usage of the
+node counts, what a spill counts and may hold past `hash_mem`, how a
+serial build keeps its index within `hash_mem`, how large a grouping's
+first index is, and the error at the most chunks.
 
 ## Requirements
 
@@ -68,6 +68,47 @@ each process's most, which need not have come at the same time.
 - **THEN** Memory Usage counts the first index of each set
 - **Verified by:**
   `test/sql/agg.sql::spec: table-memory/DISTINCT over no rows`
+
+### Requirement: What a spill counts and holds past the limit
+A `TessHashJoin` or a `TessAgg` that spills SHALL count in the memory it
+decides by, and in its Memory Usage, every region its spill holds, each
+by its capacity and once: the chunks and the tails of its partitions;
+the write buffer and the block lists of each set it writes; a block and
+a page of a block list for each open reader; for a partition a join
+reads in pieces, the marks of its outer rows that matched and the block
+that starts its next piece; and the writers of a grouping's rows while
+their level is written. A finished set SHALL keep no block list in
+memory: it reads its lists from the end of its file. Past `hash_mem` a
+spill MAY hold only what no send, split or piece lowers: the tail chunk
+of each partition, a write buffer, a block and a page for each reader,
+and the marks of matched rows, which grow with a partition's outer
+rows. When PostgreSQL cannot give it the memory it asks for, the query
+SHALL fail with PostgreSQL's out-of-memory error, SQLSTATE 53200.
+
+#### Scenario: A set's memory as it writes, finishes and is read
+- **WHEN** a serial set packs a chunk longer than its write buffer, is
+  finished, and a reader of the chunk's partition opens and closes
+- **THEN** the set counts its buffer, the chunk packed aside and the
+  partition's list while it writes, nothing once finished, and a block
+  and a page of the list while the reader is open
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_memory`
+
+#### Scenario: A spill past the limit
+- **WHEN** a RIGHT join at `work_mem` = 64 kB, whose chunks hold a few
+  records each, splits its partitions into levels below
+- **THEN** it splits 22 partitions and joins them in 2 extra passes,
+  its finished levels keeping no list and nothing packed aside, its
+  Memory Usage is over `hash_mem`, and its rows are the core's
+- **Verified by:**
+  `test/sql/join.sql::spec: table-memory/A spill past the limit`
+
+#### Scenario: Memory that runs out
+- **WHEN** PostgreSQL cannot give a spill the memory it asks for
+- **THEN** the query fails with SQLSTATE 53200
+- **Verified by:** review only — no test makes the server run out of
+  memory at a chosen allocation; every region of a spill comes from a
+  memory context of PostgreSQL, which raises this error, and the crate
+  allocates nothing
 
 ### Requirement: A serial build keeps its index within the limit
 A `TessHashJoin` that builds its table in one process SHALL start to

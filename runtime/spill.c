@@ -7,9 +7,9 @@
  * lays the blocks of every partition out one after another in the set's
  * write buffer, so that the file is written in large pieces however small
  * the blocks; it keeps, per partition, where each of its blocks starts
- * and the bytes it takes, and at the finish of a shared set it lays that
- * list and a trailer out at the end of the file, for the other
- * participants to read. This file writes the ranges the writer names and
+ * and the bytes it takes, and at the finish it lays those lists and a
+ * trailer out at the end of the file, from which every reader takes
+ * them, a page at a time. This file writes the ranges the writer names and
  * gives it the memory it asks for. A block is a header, laid out and
  * checked by the kernels, and a chunk of the node's table; a reader reads
  * a block whole with one read. This is the only
@@ -34,7 +34,7 @@
 /* The write buffer when the config gives none. */
 #define SPILL_DEFAULT_BUFFER (64 * 1024)
 
-/* Entries of another participant's list a reader reads at a time. */
+/* Entries of a partition's list a reader reads at a time. */
 #define SPILL_PAGE_ENTRIES 256
 
 struct TessSpill
@@ -61,8 +61,9 @@ struct TessSpill
 	/* The write buffer, until the set finishes. */
 	char	   *buffer;
 	Size		buffer_len;
-	/* This participant's blocks by partition, the writer's lists. */
+	/* This participant's blocks by partition, the writer's lists, and their bytes. */
 	TessSpillList *lists;
+	Size		list_bytes;
 	/* This participant's readers of each partition: a serial one has one at a time, as ever. */
 	int		   *reading;
 	bool		finished;
@@ -82,7 +83,7 @@ struct TessSpillReader
 	int			partition;
 	/* The kernels' reader of the partition, which checks what it reads. */
 	TessSpillReadState state;
-	/* The page of entries: the own list, or a page of another's file. */
+	/* The page of the partition's list the reader read last. */
 	TessSpillEntry *page;
 	Size		page_len;
 	/* The block just read, header and stored body, until its body is taken. */
@@ -351,6 +352,7 @@ grow_list(TessSpill *spill, int partition, uint64 slots)
 	if (old > 0)
 		memset((char *) list->entries + old, 0, bytes - old);
 	list->slots = slots;
+	spill->list_bytes += bytes - old;
 }
 
 /* The set's buffer for packing aside, of at least len bytes, as the writer asked. */
@@ -452,7 +454,7 @@ tess_spill_write(TessSpill *spill, int partition, TessSpillKind kind,
 	return (Size) step.stored;
 }
 
-/* What the buffer holds, then a shared set's lists and trailer, for the others. */
+/* What the buffer holds, then the set's lists and trailer, for its readers. */
 void
 tess_spill_finish(TessSpill *spill)
 {
@@ -475,6 +477,11 @@ tess_spill_finish(TessSpill *spill)
 	if (spill->buffer != NULL)
 		pfree(spill->buffer);
 	spill->buffer = NULL;
+	/* Nothing is packed aside after the writes. */
+	if (spill->scratch != NULL)
+		pfree(spill->scratch);
+	spill->scratch = NULL;
+	spill->scratch_len = 0;
 	/* The lists are at the end of the file now, which readers take a page at a time. */
 	for (int partition = 0; partition < spill->npartitions; partition++)
 	{
@@ -485,6 +492,7 @@ tess_spill_finish(TessSpill *spill)
 		list->entries = NULL;
 		list->slots = 0;
 	}
+	spill->list_bytes = 0;
 	spill->finished = true;
 }
 
@@ -750,6 +758,7 @@ tess_spill_drop(TessSpill *spill, int partition)
 		tess_status_report(&status);
 	if (list->entries != NULL)
 		pfree(list->entries);
+	spill->list_bytes -= (Size) list->slots * sizeof(TessSpillEntry);
 	list->entries = NULL;
 	list->slots = 0;
 }
@@ -809,9 +818,9 @@ tess_spill_memory(const TessSpill *spill)
 	if (spill == NULL)
 		return 0;
 	bytes = spill->buffer != NULL ? spill->buffer_len : 0;
-	bytes += spill->scratch_len;
+	bytes += spill->scratch_len + spill->list_bytes;
 	for (TessSpillReader *reader = spill->readers; reader != NULL; reader = reader->next_reader)
-		bytes += reader->buffer_len;
+		bytes += reader->buffer_len + sizeof(TessSpillEntry) * reader->page_len;
 	return bytes;
 }
 

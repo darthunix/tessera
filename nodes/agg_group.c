@@ -53,6 +53,8 @@ note_memory_alive(TessAggState *state, Size alive)
 
 	if (state->has_distinct)
 		memory += agg_distinct_bytes(state);
+	if (state->row_spill)
+		memory += rows_spill_memory(state);
 	state->peak_memory = Max(state->peak_memory, memory + alive);
 }
 
@@ -192,12 +194,17 @@ reserve_rows(TessAggState *state, int nrows)
 	state->capacity = nrows;
 }
 
-/* The bytes the groups take: the table, the states, the keys' dictionaries. */
+/*
+ * The bytes the groups take: the table, the states, the keys'
+ * dictionaries, and the levels of their rows on disk.
+ */
 static Size
 groups_memory(TessAggState *state)
 {
 	Size		bytes = state->table_bytes;
 
+	if (state->row_spill)
+		bytes += rows_spill_memory(state);
 	if (state->has_generic)
 		bytes += MemoryContextMemAllocated(state->generic_agg->curaggcontext->ecxt_per_tuple_memory,
 										   true);
