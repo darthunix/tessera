@@ -339,14 +339,6 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       layout probes; `make installcheck`; the review of the places
       that the rule "References checked by the crate" of `relhash`
       lists
-- [ ] 3.28 Move the writing of the grouping's rows and of the join's
-      outer rows to the writer of 3.10 once it costs no more than the
-      nodes' own loops by partition. Appended a partition at a time, a
-      batch of about 55 rows went to the grouping's 32 partitions in as
-      many calls, 21 to 28 % slower; appended to every partition in one
-      call of the crate, 8 to 16 % slower. Check: `cargo ab measure` of
-      `rows_text`, `rows_generic` and the cases of `join` that spill;
-      `make installcheck`
 
 ## 4. The spec of the crate
 
