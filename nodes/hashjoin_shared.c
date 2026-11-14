@@ -537,6 +537,7 @@ join_build_shared(TessHashJoinState *state)
 	state->parallel.own_bytes = 0;
 	state->parallel.appended = 0;
 	state->parallel.participating = true;
+	join_spill_begin(state);
 	/* This build's filter: decided again by this participant's batches. */
 	join_take_back_bloom(state);
 	state->bloom.bits = NULL;
@@ -817,7 +818,7 @@ shared_switch(TessHashJoinState *state)
 	JoinSpill  *spill;
 	dsa_pointer block;
 
-	spill = join_spill_create(state, NULL, 0, (int) join_shared_partitions(state));
+	spill = join_spill_given(state, join_shared_partitions(state));
 	spill->shared = true;
 	spill->writers = shared->participants;
 	side_share(state, &spill->build, "tjb", true);
@@ -987,7 +988,7 @@ shared_flush(TessHashJoinState *state)
 
 			join_side_flush(state, side, partition);
 			join_side_forget(side, partition);
-			pg_atomic_fetch_add_u64(&stats[0], part->disk_bytes);
+			pg_atomic_fetch_add_u64(&stats[0], side->disk_bytes[partition]);
 			pg_atomic_fetch_add_u64(&stats[1], part->blocks);
 			continue;
 		}
@@ -1156,7 +1157,7 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 														 &state->status));
 		spill->build.rows[partition] = rows;
 		/* Every participant's blocks, values too, as read back: one that joins it alone splits or takes pieces by them. */
-		spill->build.parts[partition].disk_bytes = pg_atomic_read_u64(&join_part_stats(state, partition)[0]);
+		spill->build.disk_bytes[partition] = pg_atomic_read_u64(&join_part_stats(state, partition)[0]);
 	}
 	state->build_rows = state->parallel.shared->resident_rows;
 }
@@ -1720,7 +1721,7 @@ join_shared_next_partition(TessHashJoinState *state)
 			continue;
 		state->counters[JOIN_ALONE]++;
 		spill->probe.rows[partition] = 1;
-		return join_open_partition(state, partition);
+		return join_take_partition(state, partition);
 	}
 	spill->partition = spill->npartitions;
 	return false;

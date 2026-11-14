@@ -16,6 +16,25 @@ policies is in [nodes.md](nodes.md).
 TessHashJoin spills a table of its own ([nodes.md](nodes.md),
 "Spilling"), and a shared one (below).
 
+**The machine.** The decisions of a table of its own are the machine of
+the crate `relspill` (its module `join`), which the node keeps for each
+level and steps with what it saw: a batch of inner rows about to go in,
+a full chunk, the memory after a batch, the end of each side. The
+machine answers what to do: start the first level, give a partition a
+chunk or write what it holds, send a partition to disk, and, at the end
+of the build, where the outer rows of each partition go. Once the outer
+rows end, the node asks it for the partitions on disk one at a time, and
+it answers which to release, which to join whole or in pieces, and
+which to split into a level below, with that level's limit. A partition
+in pieces is read block by block, and the machine says where a piece
+ends and which passes over the outer rows follow. Before a table in
+memory goes, the node reports it, and the machine holds it while output
+that refers to it waits, and has a RIGHT or FULL join give out the
+table's inner rows without a pair first. A shared table's level has
+a machine too, which decides whether a partition one participant takes
+alone splits. The node does the work for each row and the reading and
+writing.
+
 **Partitions and bits.** A partition is `(hash >> shift) &
 (npartitions - 1)` of the 32-bit hash the table stores; the buckets take
 its high bits, the first level of partitions its low ones from bit 0,
@@ -34,9 +53,12 @@ partition that went to disk whole makes one group of all it had);
 without by-reference columns, every chunk is a group. The outer side
 copies a row's values into the values of its own chunk, and writes a
 chunk with its values as a pair of blocks, as a sort writes its runs,
-and a chunk with no values as its rows alone. The outer rows are read
-back one pair at a time, through the runtime's one reader of chunks of
-columns, with only that chunk's values in memory.
+and a chunk with no values as its rows alone. A key a word does not
+hold, such as a text, is kept as the 64-bit hash the table keys by, a
+word of its own: its value is not copied, and a batch read back is not
+hashed again. The outer rows are read back one pair at a time, through
+the runtime's one reader of chunks of columns, with only that chunk's
+values in memory.
 
 **Which partitions stay.** By the rule of the weights (below): while
 the build takes more than `hash_mem`, counted as the node reports it,

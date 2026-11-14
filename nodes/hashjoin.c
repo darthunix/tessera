@@ -40,9 +40,11 @@
 
 /*
  * Replace the values of a key a word does not hold by their 64-bit hashes
- * for the rows, NULL kept.
+ * for the rows, NULL kept. Called once a key of a batch, it is compiled
+ * apart from the loop over the keys, whose registers its loop over the
+ * rows would otherwise share.
  */
-static void
+static pg_noinline void
 hash_key_column(TessHashJoinState *state, int key, const TessRowMask *rows,
 				TessDatumColumn *column)
 {
@@ -99,9 +101,14 @@ join_batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 		TessDatumColumn *keys = &state->keys.key_columns[key];
 		const TessRowMask *rows = key == 0 ? &batch->rows : valid;
 
-		join_child_column(batch, columns[key], rows, TESS_COLUMN_FOR_FILTER, keys);
-		if (OidIsValid(state->keys.hashers[key].fn_oid))
-			hash_key_column(state, key, rows, keys);
+		/* A batch read back keeps the hash of a key a word does not hold. */
+		if (!OidIsValid(state->keys.hashers[key].fn_oid) ||
+			!join_spill_key_hashes(batch, key, keys))
+		{
+			join_child_column(batch, columns[key], rows, TESS_COLUMN_FOR_FILTER, keys);
+			if (OidIsValid(state->keys.hashers[key].fn_oid))
+				hash_key_column(state, key, rows, keys);
+		}
 		if (key == 0)
 			check(state, tess_key_hash(state->kernels, kinds[key]) (keys, NULL, &batch->rows,
 													  nulls,
@@ -734,19 +741,17 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 
 	/*
 	 * A batch adds a chunk of records and one of values at most, and the
-	 * index comes once the build is read: room for both chunks and for
-	 * the index of every record with this batch's selected rows, before
-	 * they go in; a row with a NULL key, which makes no record, is counted
-	 * too. The index is a check here, not memory taken: the count takes it
-	 * when it is made.
+	 * index comes once the build is read: the spill's machine weighs both
+	 * chunks and the index of every record with this batch's selected rows
+	 * against hash_mem, before they go in; a row with a NULL key, which
+	 * makes no record, is counted too. The index is a check here, not
+	 * memory taken: the count takes it when it is made.
 	 */
-	if (state->spill == NULL && state->lookup_key < 0 &&
-		state->table_bytes + state->values.bytes +
-		2 * join_table_chunk_len(state) +
-		join_index_bytes(state, state->build_rows +
-						 (uint64) tess_row_mask_count(&batch->rows)) >
-		tess_hash_memory_limit())
-		join_start_spill(state);
+	if (state->spill == NULL && state->lookup_key < 0)
+		join_spill_check(state, state->table_bytes + state->values.bytes +
+						 2 * join_table_chunk_len(state) +
+						 join_index_bytes(state, state->build_rows +
+										  (uint64) tess_row_mask_count(&batch->rows)));
 	if (state->spill != NULL)
 	{
 		join_insert_spill(state, batch);
@@ -883,6 +888,7 @@ static void
 build_table(TessHashJoinState *state)
 {
 	join_spill_free(state);
+	join_spill_begin(state);
 	create_table(state);
 	/* Another table, maybe with other duplicates: decide compact mode again. */
 	state->compact_decided = false;

@@ -54,7 +54,9 @@ use crate::{Error, Result, Rule};
 pub const LEAST_RECORDS: usize = 4;
 
 /// What every level of one node's spill shares: the bounds of its
-/// partitions and of its chunks.
+/// partitions and of its chunks. Its layout is fixed, as part of a
+/// join's [`Params`](crate::join::Params).
+#[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Shape {
     /// What each partition keeps in memory at the least, in bytes: a level

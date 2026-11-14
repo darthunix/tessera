@@ -118,6 +118,23 @@ tess_kernels_layout_matches(void)
 		tess_spill_set_layout(TESS_SPILL_SET_PLAN_DEEPER_OFFSET) ==
 		offsetof(TessSpillPlan, deeper) &&
 		tess_spill_set_layout((TessSpillSetLayout) 99) == 0 &&
+	/* The machine of a join's spill and what a step of it takes and gives. */
+		tess_join_layout(TESS_JOIN_MACHINE_SIZE) == sizeof(TessJoinMachine) &&
+		tess_join_layout(TESS_JOIN_PARAMS_SIZE) == sizeof(TessJoinParams) &&
+		tess_join_layout(TESS_JOIN_PARAMS_TAIL_OFFSET) == offsetof(TessJoinParams, tail) &&
+		tess_join_layout(TESS_JOIN_HOST_SIZE) == sizeof(TessJoinHost) &&
+		tess_join_layout(TESS_JOIN_HOST_NROUTES_OFFSET) == offsetof(TessJoinHost, nroutes) &&
+		tess_join_layout(TESS_JOIN_EVENT_SIZE) == sizeof(TessJoinEvent) &&
+		tess_join_layout(TESS_JOIN_EVENT_MEMORY_OFFSET) == offsetof(TessJoinEvent, memory) &&
+		tess_join_layout(TESS_JOIN_ACTION_SIZE) == sizeof(TessJoinAction) &&
+		tess_join_layout(TESS_JOIN_ACTION_PLAN_OFFSET) == offsetof(TessJoinAction, plan) &&
+		tess_join_layout(TESS_JOIN_ACTION_BELOW_OFFSET) == offsetof(TessJoinAction, below) &&
+		tess_join_layout(TESS_JOIN_BELOW_SIZE) == sizeof(TessJoinBelow) &&
+		tess_join_layout(TESS_JOIN_BELOW_SHIFT_OFFSET) == offsetof(TessJoinBelow, shift) &&
+		tess_join_layout(TESS_JOIN_EVENT_LEN_OFFSET) == offsetof(TessJoinEvent, len) &&
+		tess_join_layout(TESS_JOIN_ACTION_OUTER_LEN_OFFSET) ==
+		offsetof(TessJoinAction, outer_len) &&
+		tess_join_layout((TessJoinLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of
 	 * tessera/spill.h take it: the row count, the capacity and the stored

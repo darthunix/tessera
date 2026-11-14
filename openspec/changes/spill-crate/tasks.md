@@ -266,7 +266,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       messages through the writer and shows them through the reader.
       Check: `make installcheck`; the parallel tests of the suite
       `join`; `cargo ab measure` of the cases of `join` that spill
-- [ ] 3.13 Write the machine of the join's spill, its build: the spill
+- [x] 3.13 Write the machine of the join's spill, its build: the spill
       at level 0 and the partitions sent to disk; the node still
       decides the rest. An outer row keeps a hashed key on disk as the
       64-bit hash the table keys by, a word of 8 bytes, not as its
@@ -275,14 +275,14 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       machine's property test against a join in memory; the tests of
       2.7; `make installcheck`; `make crosscheck`; `cargo ab measure`
       of the family `spill`
-- [ ] 3.14 Add to the join's machine the partitions on disk, joined
+- [x] 3.14 Add to the join's machine the partitions on disk, joined
       whole or split into a level below. Check: the property test; the
       cases of nested levels; `make installcheck`; `make crosscheck`
-- [ ] 3.15 Add the pieces and their passes, with the marks of matched
+- [x] 3.15 Add the pieces and their passes, with the marks of matched
       rows. Check: the property test; the cases of pieces, of skew and
       of a partition without values (2.16); `make installcheck`;
       `cargo ab measure` of a join read in pieces
-- [ ] 3.16 Add the tails of RIGHT and FULL joins and the output held
+- [x] 3.16 Add the tails of RIGHT and FULL joins and the output held
       across calls; the decisions of C go. Check: the property test;
       the cases of tails and of early stops; `make installcheck`;
       `make crosscheck`

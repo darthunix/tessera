@@ -552,6 +552,8 @@ join_next_output(TessHashJoinState *state)
 				if (!state->tail.request)
 					return false;
 				state->tail.request = false;
+				if (state->tail.machine)
+					join_spill_tail_end(state);
 				continue;
 			}
 		}
