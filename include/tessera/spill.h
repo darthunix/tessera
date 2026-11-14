@@ -766,7 +766,8 @@ typedef struct TessJoinParams
  * The regions of a level a step reads: the level's spill words, nwords of
  * them, whose bytes the join counts by partition; the inner rows of each
  * of its nrows partitions, and of the level; the outer rows written of
- * each, and the bytes of the inner side's blocks on disk of each; and a
+ * each, and the bytes the inner side's blocks on disk of each take read
+ * back, unpacked, not on disk; and a
  * byte for each of its nroutes partitions, which the end of the build
  * sets to a TessJoinRoute. Before a level is made, all are empty.
  */
@@ -1033,8 +1034,9 @@ typedef struct TessGroupParams
 
 /*
  * The regions of a level a step reads: its spill words, the records in
- * memory of each of its partitions, and the bytes of each one's blocks on
- * disk. Before a level is made, all are empty.
+ * memory of each of its partitions, and the bytes each one's blocks on
+ * disk take read back, unpacked, not on disk. Before a level is made, all
+ * are empty.
  */
 typedef struct TessGroupHost
 {
