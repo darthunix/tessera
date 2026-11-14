@@ -667,8 +667,9 @@ SELECT EXISTS (SELECT FROM join_explain($$SELECT count(*), sum(length(w.t)), md5
                WHERE line ~ 'Spilled Chunks: [1-9]') AS spilled;
 SELECT join_same($$SELECT count(*), sum(length(w.t)), md5(string_agg(md5(w.t), ',' ORDER BY w.n, jsp.s)) FROM jsp JOIN (SELECT k, n, CASE WHEN n % 997 = 0 THEN repeat(t, 2000) ELSE t END AS t FROM jsb OFFSET 0) AS w ON jsp.k = w.k$$);
 -- A hashed key that is an expression its child computes, such as
--- lower(t), goes to disk by its own type: the bytes of the text, not the
--- address of a value its batch frees; it is hashed again when read back.
+-- lower(t), goes to disk as the 64-bit hash the table keys by, not the
+-- address of a value its batch frees: a batch read back is not hashed
+-- again.
 SELECT join_explain($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, false);
 SELECT join_same($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);
 SELECT join_same($$SELECT count(*), count(jsb.n) FROM jsp LEFT JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$);

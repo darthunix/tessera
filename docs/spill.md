@@ -34,9 +34,12 @@ partition that went to disk whole makes one group of all it had);
 without by-reference columns, every chunk is a group. The outer side
 copies a row's values into the values of its own chunk, and writes a
 chunk with its values as a pair of blocks, as a sort writes its runs,
-and a chunk with no values as its rows alone. The outer rows are read
-back one pair at a time, through the runtime's one reader of chunks of
-columns, with only that chunk's values in memory.
+and a chunk with no values as its rows alone. A key a word does not
+hold, such as a text, is kept as the 64-bit hash the table keys by, a
+word of its own: its value is not copied, and a batch read back is not
+hashed again. The outer rows are read back one pair at a time, through
+the runtime's one reader of chunks of columns, with only that chunk's
+values in memory.
 
 **Which partitions stay.** By the rule of the weights (below): while
 the build takes more than `hash_mem`, counted as the node reports it,

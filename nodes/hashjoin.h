@@ -554,10 +554,15 @@ typedef struct JoinSpill
 	 */
 	Datum	  **values;
 	bool	  **isnull;
-	/* The outer child's column of each stored word, and the word of each child column plus one. */
+	/*
+	 * The outer child's column of each stored word, or, for the hash of
+	 * key k, -(k + 1); the word of each child column plus one; and the
+	 * word of each key plus one, its column's or its hash's.
+	 */
 	int		   *stored;
 	int		   *word_of;
 	int			nchild;
+	int			key_words[TESS_TABLE_MAX_KEYS];
 	/*
 	 * Appending a batch's rows to a side: the inner child's column of each
 	 * payload word of the inner side, the rows of a batch room is kept for,
@@ -1049,6 +1054,7 @@ extern void join_spill_free(TessHashJoinState *state);
 extern Size join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident);
 extern Size join_index_bytes(TessHashJoinState *state, uint64 rows);
 extern void join_spill_outer(TessHashJoinState *state, TessBatch *batch, TessRowMask *valid);
+extern bool join_spill_key_hashes(TessBatch *batch, int key, TessDatumColumn *result);
 extern void join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values,
 							 const Size *lens, int nvalues);
 extern void join_start_spill(TessHashJoinState *state);
