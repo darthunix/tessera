@@ -322,6 +322,9 @@ rules! {
     JoinOuter,
     /// Bytes on disk for another number of partitions.
     JoinDisk,
+    /// Flags of the partitions a participant keeps in memory, for another
+    /// number of partitions.
+    ResidentFlags,
 }
 
 impl Error {
@@ -666,6 +669,12 @@ impl fmt::Display for Error {
             Rule::JoinRoutes => write!(f, "{a} routes of outer rows for {b} partitions"),
             Rule::JoinOuter => write!(f, "{a} counts of outer rows for {b} partitions"),
             Rule::JoinDisk => write!(f, "{a} counts of bytes on disk for {b} partitions"),
+            Rule::ResidentFlags => {
+                write!(
+                    f,
+                    "{a} flags of partitions kept in memory for {b} partitions"
+                )
+            }
         }
     }
 }

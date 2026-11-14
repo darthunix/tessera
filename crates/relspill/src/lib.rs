@@ -41,6 +41,7 @@ mod pack;
 pub mod phases;
 pub mod plan;
 pub mod set;
+pub mod shared;
 pub mod shared_spill;
 pub mod sort;
 pub mod spill_columns;

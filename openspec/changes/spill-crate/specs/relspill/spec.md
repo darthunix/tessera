@@ -204,8 +204,9 @@ again.
 
 ### Requirement: A build by several processes and its rounds
 The crate SHALL provide a state machine for a hash table that several
-processes build together and that may spill, with its phases and its
-rounds over the partitions on disk. A participant MAY attach at any
+processes build together and that may spill,
+[`Build`](../../../crates/relspill/src/shared.rs), with its phases and
+its rounds over the partitions on disk. A participant MAY attach at any
 phase of the build, or to a round in progress, and MAY leave early. A
 participant that comes after the in-memory part of the build is freed
 SHALL find no work. Each partition on disk SHALL be joined once, by one
@@ -219,6 +220,15 @@ split.
 - **THEN** every key is found, every partition on disk is joined once,
   and every region is freed once
 - **Verified by:** pending
+
+#### Scenario: Participants that send partitions to disk as they build
+- **WHEN** a loom model runs two participants that append to a table
+  split past its budget, each attaching at any phase
+- **THEN** a partition one sends to disk the other writes too, and at
+  the flush each writes the partitions on disk and keeps the others
+- **Verified by:**
+  `crates/relspill/src/loom.rs::participants_write_every_partition_another_sent_to_disk`;
+  `crates/relspill/src/shared/tests.rs::a_batch_writes_what_others_sent_then_sends_the_largest`
 
 #### Scenario: A participant that attaches after the split
 - **WHEN** a participant attaches after the others agreed on a split

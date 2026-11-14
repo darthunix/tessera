@@ -1,0 +1,381 @@
+use super::*;
+use crate::Kind;
+use crate::phases::{BUILD as BUILD_PHASE, FREE, LINK as LINK_PHASE, OUTER as OUTER_PHASE};
+use crate::shared_spill::words_for;
+
+/// The rule of a wrong call's error, which a test expects.
+#[track_caller]
+fn wrong<T: core::fmt::Debug>(result: Result<T>) -> Rule {
+    let error = result.expect_err("a wrong call");
+    assert_eq!(error.kind(), Kind::WrongCall, "{error:?}");
+    error.rule()
+}
+
+fn params() -> Params {
+    Params {
+        start: 1.0,
+        target: 0.5,
+        spilled: 1.0,
+        per_check: 0,
+        spare: 0,
+    }
+}
+
+/// Weights that send any partition with bytes.
+fn any_bytes() -> Weights {
+    Weights {
+        start: 0.0,
+        target: 0.0,
+        spilled: 1.0,
+        reserve: 0,
+        resident: 0.0,
+        per_check: 0,
+    }
+}
+
+/// The words a build shares: its counters, `records` appended so far,
+/// and the spill words of a table of up to 16 partitions, of `budget`
+/// bytes.
+struct Shared {
+    counters: [AtomicU64; COUNTER_WORDS],
+    spill: Vec<AtomicU64>,
+}
+
+impl Shared {
+    fn new(records: u64, budget: u64) -> Self {
+        let shared = Self {
+            counters: [records, 0, 0, 0].map(AtomicU64::new),
+            spill: (0..words_for(16).expect("words"))
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+        };
+        shared.spill().init(budget);
+        shared
+    }
+
+    fn spill(&self) -> SharedSpill<'_> {
+        SharedSpill::new(&self.spill).expect("spill words")
+    }
+
+    fn host<'a>(&'a self, resident: &'a [u8]) -> Host<'a> {
+        Host {
+            counters: &self.counters,
+            spill: &self.spill,
+            resident,
+        }
+    }
+
+    /// Another participant sends `partition` to disk.
+    fn send(&self, partition: u32) {
+        let spill = self.spill();
+        spill.add_bytes(1, Some(partition)).expect("bytes");
+        assert_eq!(
+            spill.evict(&any_bytes(), Memory::Counted, None, 0),
+            Ok(Some(partition))
+        );
+        spill.add_bytes(-1, Some(partition)).expect("bytes");
+    }
+}
+
+/// The actions of a participant alone at the barrier, attached at
+/// `phase`, until nothing is left: the barrier elects it every time.
+fn alone(shared: &Shared, resident: &[u8], phase: u32) -> Vec<Action> {
+    let mut build = Build::new(&params()).expect("parameters");
+    let mut actions = Vec::new();
+    let mut phase = phase;
+    let mut event = Event::Done;
+    loop {
+        let action = build.step(event, &shared.host(resident)).expect("a step");
+        actions.push(action);
+        event = match action {
+            Action::Attach => Event::Attached { phase },
+            Action::ArriveAndWait => {
+                phase += 1;
+                Event::Arrived { elected: true }
+            }
+            Action::ArriveAndDetach => Event::Left { last: true },
+            Action::Send(_) => Event::Sent { freed: true },
+            Action::Free | Action::Finished => break,
+            _ => Event::Done,
+        };
+    }
+    actions
+}
+
+#[test]
+fn a_table_that_never_split_writes_nothing() {
+    use Action::*;
+    let shared = Shared::new(3, 1 << 20);
+    assert_eq!(
+        alone(&shared, &[], BUILD_PHASE),
+        [
+            Attach,
+            Build,
+            ArriveAndWait,
+            // The flush and the outer side have nothing to write.
+            ArriveAndWait,
+            Size,
+            ArriveAndWait,
+            Link,
+            ArriveAndWait,
+            ArriveAndWait,
+            Probe { split: false },
+            ArriveAndDetach,
+            Free
+        ]
+    );
+}
+
+#[test]
+fn a_table_that_split_writes_its_partitions_on_disk_and_keeps_the_others() {
+    use Action::*;
+    let shared = Shared::new(3, 1 << 20);
+    assert_eq!(shared.spill().split(4), Ok(4));
+    shared.send(1);
+    assert_eq!(
+        alone(&shared, &[1, 0, 1, 1], BUILD_PHASE),
+        [
+            Attach,
+            Build,
+            ArriveAndWait,
+            Flush,
+            Keep(0),
+            Write(1),
+            Keep(2),
+            Keep(3),
+            FlushEnd,
+            ArriveAndWait,
+            Size,
+            ArriveAndWait,
+            Link,
+            ArriveAndWait,
+            Outer,
+            ArriveAndWait,
+            Probe { split: true },
+            ArriveAndDetach,
+            Free
+        ]
+    );
+}
+
+#[test]
+fn a_late_participant_skips_the_writes_of_a_table_that_never_split() {
+    use Action::*;
+    let shared = Shared::new(3, 1 << 20);
+    assert_eq!(
+        alone(&shared, &[], LINK_PHASE),
+        [
+            Attach,
+            Link,
+            ArriveAndWait,
+            ArriveAndWait,
+            Probe { split: false },
+            ArriveAndDetach,
+            Free
+        ]
+    );
+    assert_eq!(
+        alone(&shared, &[], OUTER_PHASE),
+        [
+            Attach,
+            ArriveAndWait,
+            Probe { split: false },
+            ArriveAndDetach,
+            Free
+        ]
+    );
+    assert_eq!(alone(&shared, &[], FREE), [Attach, Detach, Finished]);
+}
+
+/// A machine of `params` attached to the build.
+fn building(shared: &Shared, params: &Params) -> Build {
+    let mut build = Build::new(params).expect("parameters");
+    let host = shared.host(&[]);
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::Attach));
+    let attached = Event::Attached { phase: BUILD_PHASE };
+    assert_eq!(build.step(attached, &host), Ok(Action::Build));
+    build
+}
+
+#[test]
+fn a_batch_writes_what_others_sent_then_sends_the_largest() {
+    let shared = Shared::new(0, 1000);
+    let mut build = building(&shared, &params());
+    let spill = shared.spill();
+    assert_eq!(spill.split(4), Ok(4));
+    shared.send(2);
+    // This one keeps 0, 2 and 3 in memory; 3 and 0 pass the budget.
+    spill.add_bytes(800, Some(3)).expect("bytes");
+    spill.add_bytes(300, Some(0)).expect("bytes");
+    let resident = [1, 0, 1, 1];
+    let host = shared.host(&resident);
+    let batch = Event::Batch { evict: true };
+    assert_eq!(build.step(batch, &host), Ok(Action::Demote(2)));
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::Send(3)));
+    spill.add_bytes(-800, Some(3)).expect("bytes");
+    // 300 of 1000, under the target of half: the check is over.
+    assert_eq!(
+        build.step(Event::Sent { freed: true }, &host),
+        Ok(Action::Done)
+    );
+    // A batch with nothing new sends nothing.
+    let resident = [1, 0, 0, 0];
+    let host = shared.host(&resident);
+    assert_eq!(build.step(batch, &host), Ok(Action::Done));
+    // A send that freed nothing ends the check.
+    spill.add_bytes(2000, Some(0)).expect("bytes");
+    assert_eq!(build.step(batch, &host), Ok(Action::Send(0)));
+    assert_eq!(
+        build.step(Event::Sent { freed: false }, &host),
+        Ok(Action::Done)
+    );
+    // A partition sent since the last batch is found by the next one's
+    // scan from the first partition again.
+    spill.add_bytes(-2300, Some(0)).expect("bytes");
+    shared.send(3);
+    let host = shared.host(&[0, 0, 0, 1]);
+    assert_eq!(build.step(batch, &host), Ok(Action::Demote(3)));
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::Done));
+    // The build ends: the flush comes next.
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::ArriveAndWait));
+}
+
+#[test]
+fn a_check_sends_as_many_as_its_weights_allow() {
+    let shared = Shared::new(0, 1000);
+    let mut build = building(
+        &shared,
+        &Params {
+            per_check: 1,
+            ..params()
+        },
+    );
+    let spill = shared.spill();
+    assert_eq!(spill.split(2), Ok(2));
+    spill.add_bytes(1500, Some(0)).expect("bytes");
+    spill.add_bytes(1400, Some(1)).expect("bytes");
+    let host = shared.host(&[1, 1]);
+    let batch = Event::Batch { evict: true };
+    assert_eq!(build.step(batch, &host), Ok(Action::Send(0)));
+    spill.add_bytes(-1500, Some(0)).expect("bytes");
+    // One a check: the other waits for the next batch.
+    assert_eq!(
+        build.step(Event::Sent { freed: true }, &host),
+        Ok(Action::Done)
+    );
+    // Catching up sends nothing.
+    let host = shared.host(&[0, 1]);
+    let catch = Event::Batch { evict: false };
+    assert_eq!(build.step(catch, &host), Ok(Action::Done));
+    assert_eq!(build.step(batch, &host), Ok(Action::Send(1)));
+}
+
+#[test]
+fn a_late_participant_catches_up_at_the_flush() {
+    let shared = Shared::new(3, 1000);
+    assert_eq!(shared.spill().split(2), Ok(2));
+    shared.send(1);
+    let mut build = Build::new(&params()).expect("parameters");
+    let resident = [1, 1];
+    let host = shared.host(&resident);
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::Attach));
+    let attached = Event::Attached {
+        phase: crate::phases::FLUSH,
+    };
+    assert_eq!(build.step(attached, &host), Ok(Action::Flush));
+    // Its catch-up writes what went to disk, and sends nothing, past the
+    // budget though the chunks are.
+    shared.spill().add_bytes(1500, Some(0)).expect("bytes");
+    let catch = Event::Batch { evict: true };
+    assert_eq!(build.step(catch, &host), Ok(Action::Demote(1)));
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::Done));
+    let host = shared.host(&[1, 0]);
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::Keep(0)));
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::Write(1)));
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::FlushEnd));
+    assert_eq!(build.step(Event::Done, &host), Ok(Action::ArriveAndWait));
+}
+
+#[test]
+fn the_machine_refuses_what_is_no_step() -> Result<()> {
+    let bad = [
+        Params {
+            start: f64::NAN,
+            ..params()
+        },
+        Params {
+            spilled: -1.0,
+            ..params()
+        },
+        Params {
+            spare: 1,
+            ..params()
+        },
+    ];
+    for params in bad {
+        assert_eq!(wrong(Build::new(&params)), Rule::JoinParams, "{params:?}");
+    }
+    let shared = Shared::new(0, 1000);
+    let host = shared.host(&[]);
+    let mut build = Build::new(&params())?;
+    let made = build;
+    // Before its first step, only the start.
+    for event in [
+        Event::Attached { phase: 0 },
+        Event::Arrived { elected: true },
+        Event::Left { last: true },
+        Event::Sent { freed: true },
+    ] {
+        assert_eq!(
+            wrong(build.step(event, &host)),
+            Rule::JoinEvent,
+            "{event:?}"
+        );
+        assert_eq!(build, made);
+    }
+    let mut build = building(&shared, &params());
+    let built = build;
+    // A batch before the table split, and an attach past the last phase.
+    assert_eq!(
+        wrong(build.step(Event::Batch { evict: true }, &host)),
+        Rule::JoinEvent
+    );
+    assert_eq!(build, built);
+    let mut late = Build::new(&params())?;
+    assert_eq!(late.step(Event::Done, &host)?, Action::Attach);
+    let before = late;
+    let past = Event::Attached { phase: FREE + 1 };
+    assert_eq!(wrong(late.step(past, &host)), Rule::AttachPhase);
+    assert_eq!(late, before);
+    // Flags of another number of partitions than the table's.
+    assert_eq!(shared.spill().split(4), Ok(4));
+    let short = shared.host(&[1, 1]);
+    assert_eq!(
+        wrong(build.step(Event::Batch { evict: true }, &short)),
+        Rule::ResidentFlags
+    );
+    assert_eq!(build, built);
+    // Words that are no machine.
+    for mut broken in [
+        Build { given: 99, ..built },
+        Build { stage: 7, ..built },
+        Build { evict: 2, ..built },
+        Build { spare: 1, ..built },
+        Build {
+            params: Params {
+                target: f64::INFINITY,
+                ..params()
+            },
+            ..built
+        },
+    ] {
+        let before = broken;
+        assert_eq!(
+            wrong(broken.step(Event::Done, &host)),
+            Rule::JoinState,
+            "{before:?}"
+        );
+        assert_eq!(broken, before);
+    }
+    Ok(())
+}
