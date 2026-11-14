@@ -275,7 +275,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       machine's property test against a join in memory; the tests of
       2.7; `make installcheck`; `make crosscheck`; `cargo ab measure`
       of the family `spill`
-- [ ] 3.14 Add to the join's machine the partitions on disk, joined
+- [x] 3.14 Add to the join's machine the partitions on disk, joined
       whole or split into a level below. Check: the property test; the
       cases of nested levels; `make installcheck`; `make crosscheck`
 - [ ] 3.15 Add the pieces and their passes, with the marks of matched

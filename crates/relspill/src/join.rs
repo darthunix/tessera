@@ -10,12 +10,13 @@
 //! machine answers with the [`Action`] the host does next.
 //!
 //! ```text
-//!   Fits ──Inner──> Planned ──Made──> Building ──BuildEnd──> Probing ──OuterEnd──> Joining
-//!     │ (fits: Done)                   │    ^                    │
-//!     │                                │    │ Sent               │ Full (outer)
-//!     │                         Grown, │    │                    │
-//!     │                         Full   v    │
-//!     │                               Sending
+//!   Fits ──Inner──> Planned ──Made──> Building ──BuildEnd──> Probing ──OuterEnd──> Joining ──> Done
+//!     │ (fits: Done)                   │    ^                    │                     │
+//!     │                                │    │ Sent               │ Full (outer)        │ Next
+//!     │                         Grown, │    │                    │                     │
+//!     │                         Full   v    │                                          v
+//!     │                               Sending                     a partition released, joined
+//!                                                                 whole, or split into a level below
 //! ```
 //!
 //! - **Fits.** The table is in memory. Before each batch of inner rows the
@@ -41,8 +42,16 @@
 //! - **Probing.** The outer rows of the partitions on disk are written by
 //!   their partitions, a chunk at a time ([`Event::Full`] of the outer
 //!   side), until [`Event::OuterEnd`].
-//! - **Joining.** The partitions on disk are joined, one at a time; the
-//!   host decides how.
+//! - **Joining.** The host writes what each partition on disk still holds
+//!   in memory and frees the partitions in memory, which the outer rows
+//!   probed. Then it asks for the partitions on disk one at a time
+//!   ([`Event::Next`]). One with no outer row, and no inner row the join
+//!   gives out alone, is released ([`Action::Release`]). One too large
+//!   for what the levels above leave of the limit, and much smaller than
+//!   its level, so not one key, splits into a level below
+//!   ([`Action::Split`]); the others are joined whole
+//!   ([`Action::Open`]). When none is left, the level is done
+//!   ([`Action::LevelDone`]).
 //!
 //! An event that the machine's phase does not take is a wrong call
 //! ([`Rule::JoinEvent`]), and the machine stays as it was. The machine
@@ -52,7 +61,10 @@
 //! makes it once for each partition, as the routes of the outer rows.
 //!
 //! A level below, which splits a partition of a level too large, is a
-//! machine of its own ([`Join::below`]), which starts planned.
+//! machine of its own ([`Join::below`]), which starts planned: the host
+//! makes it, splits the partition's inner rows into it, probes it with
+//! the partition's outer rows, and joins its partitions; then it asks
+//! the level above for its next partition.
 //!
 //! The machine holds no memory: it is plain data, which the host keeps
 //! where it likes, and every region it reads comes in a [`Host`] at each
@@ -63,7 +75,7 @@ use core::cell::Cell;
 use crate::columns;
 use crate::error::ensure;
 use crate::plan::{self, Level, Plan, Shape};
-use crate::shared_spill::{LocalSpill, Memory, Records, Weights};
+use crate::shared_spill::{LocalSpill, Memory, Partition, Records, SplitWeights, Weights, splits};
 use crate::{Error, Result, Rule};
 
 /// The least outer rows a chunk of them holds, however wide they are.
@@ -88,8 +100,10 @@ pub struct Params {
     /// 1 when an outer row keeps values by reference, 0 when it keeps none:
     /// a partition on disk then holds a chunk of them beside its tail.
     pub outer_values: u32,
-    /// Zero.
-    pub spare: u32,
+    /// 1 when the join gives out the inner rows without a pair, as a RIGHT
+    /// or a FULL join does, 0 otherwise: a partition with inner rows and
+    /// no outer row is joined then, not released.
+    pub preserve_inner: u32,
     /// The bytes of the buffer a file of outer rows keeps.
     pub page: u64,
     /// The weights of the rule that sends partitions to disk, as
@@ -103,6 +117,10 @@ pub struct Params {
     /// in reserve: its chunk of outer rows, its chunk of values when they
     /// keep values, and the page of its file.
     pub tail: f64,
+    /// The weights of the rule that splits a partition on disk into a
+    /// level below, as [`SplitWeights`] names them.
+    pub split_room: f64,
+    pub split_key: f64,
 }
 
 /// A step of the host: what it saw.
@@ -138,6 +156,13 @@ pub enum Event {
     BuildEnd,
     /// The outer rows are read.
     OuterEnd,
+    /// The host asks for the next partition on disk: the one it took is
+    /// done, or none was taken yet. `memory` is what its spill holds, the
+    /// levels above included, besides a partition it would join.
+    Next { memory: u64 },
+    /// A participant of a shared build took `partition` to join alone:
+    /// whether it splits, with `memory` as for [`Event::Next`].
+    Take { partition: u32, memory: u64 },
 }
 
 /// The side of a join a partition's rows are of.
@@ -169,6 +194,34 @@ pub enum Action {
     /// This partition, on disk, writes what it holds in memory and frees
     /// it; then report [`Event::Sent`].
     Evict(u32),
+    /// This partition has nothing to join: free it and its files, then ask
+    /// for the next.
+    Release(u32),
+    /// Join this partition, its inner rows read back as a table and its
+    /// outer rows probing it; then ask for the next.
+    Open(u32),
+    /// Split a partition into a level below: make it, its machine by
+    /// [`Join::below`].
+    Split(Below),
+    /// Every partition of the level is done.
+    LevelDone,
+}
+
+/// A level below to make, which splits a partition of the level above.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Below {
+    /// The partition of the level above that it splits.
+    pub partition: u32,
+    /// Its level, one past the level above's.
+    pub level: u32,
+    /// The bytes it expects: the partition's on disk, where all of it is
+    /// once its level joins.
+    pub expected: u64,
+    /// The memory it may take: what the levels above leave of the limit,
+    /// a quarter of it at least.
+    pub limit: u64,
+    /// The first hash bit it takes, past those of the levels above.
+    pub shift: u32,
 }
 
 /// A level to make.
@@ -205,6 +258,10 @@ pub struct Host<'a> {
     /// The inner rows of each partition, and of the level.
     pub rows: &'a [u64],
     pub total: u64,
+    /// The outer rows written of each partition, and the bytes of the
+    /// blocks of inner rows on disk of each: read at [`Event::Next`].
+    pub outer: &'a [u64],
+    pub disk: &'a [u64],
     /// A byte for each partition, which [`Event::BuildEnd`] sets to a
     /// [`Route`].
     pub routes: &'a mut [u8],
@@ -219,6 +276,8 @@ const SENDING: u32 = 4;
 const ENDING: u32 = 5;
 const PROBING: u32 = 6;
 const JOINING: u32 = 7;
+const DONE: u32 = 8;
+const SHARED: u32 = 9;
 
 /// The machine of one level of a join's spill.
 ///
@@ -245,14 +304,15 @@ pub struct Join {
     deeper: u32,
     /// The partitions the current check sent to disk.
     evicted: u32,
-    spare: u32,
+    /// The next partition to join.
+    cursor: u32,
 }
 
 // Its size is part of the mirror a host keeps: words of 8 bytes.
 const _: () = assert!(size_of::<Join>() == 8 * JOIN_WORDS);
 
 /// Words of 8 bytes a [`Join`] takes.
-pub const JOIN_WORDS: usize = 24;
+pub const JOIN_WORDS: usize = 26;
 
 impl Join {
     /// The machine of a join whose table fits so far.
@@ -277,39 +337,39 @@ impl Join {
             below: 0,
             deeper: 0,
             evicted: 0,
-            spare: 0,
+            cursor: 0,
         })
     }
 
-    /// The machine of the level `level` below the first, which splits a
-    /// partition of `expected` bytes within `limit`, from the hash bit
-    /// `shift`, and the level to make; it waits for [`Event::Made`].
+    /// The machine of a level below that [`Action::Split`] asked for, and
+    /// the level to make; it waits for [`Event::Made`].
     ///
     /// The wrong calls of [`Join::new`], a level 0, and those of
     /// [`plan::plan`].
-    pub fn below(
-        params: &Params,
-        level: u32,
-        expected: f64,
-        limit: u64,
-        shift: u32,
-    ) -> Result<(Self, Start)> {
-        ensure!(level > 0, Error::wrong_call(Rule::JoinLevel).with(level));
+    pub fn below(params: &Params, below: &Below) -> Result<(Self, Start)> {
+        ensure!(
+            below.level > 0,
+            Error::wrong_call(Rule::JoinLevel).with(below.level)
+        );
         let mut join = Self::new(params)?;
-        let start = join.plan_level(level, expected, limit, shift)?;
+        let start =
+            join.plan_level(below.level, below.expected as f64, below.limit, below.shift)?;
         Ok((join, start))
     }
 
     /// The first level of a build that several processes share, whose
     /// `partitions` one of them planned: the level each of the others
-    /// makes, with its chunks of outer rows. The shared build decides the
-    /// rest of the level.
+    /// makes, with its chunks of outer rows, and its machine. The shared
+    /// build decides the level, but for whether a partition a participant
+    /// takes alone splits ([`Event::Take`]).
     ///
     /// The wrong calls of [`Join::new`] and those of [`plan::plan`] for
     /// given partitions.
-    pub fn given(params: &Params, partitions: u32) -> Result<Start> {
+    pub fn given(params: &Params, partitions: u32) -> Result<(Self, Start)> {
         let mut join = Self::new(params)?;
-        join.plan_given(0, 0.0, params.limit, 0, partitions)
+        let start = join.plan_given(0, 0.0, params.limit, 0, partitions)?;
+        join.phase = SHARED;
+        Ok((join, start))
     }
 
     /// The level: 0 for the first.
@@ -413,7 +473,19 @@ impl Join {
             }
             (PROBING, Event::OuterEnd) => {
                 self.phase = JOINING;
+                self.cursor = 0;
                 Ok(Action::Done)
+            }
+            (JOINING, Event::Next { memory }) => self.next(host, memory),
+            (SHARED, Event::Take { partition, memory }) => {
+                self.counts(host)?;
+                ensure!(
+                    partition < self.partitions,
+                    Error::wrong_call(Rule::Partition)
+                        .with(partition)
+                        .and(self.partitions)
+                );
+                self.take(host, partition, memory)
             }
             _ => Err(Error::wrong_call(Rule::JoinEvent)
                 .with(phase)
@@ -424,7 +496,7 @@ impl Join {
     /// The phase, checked.
     fn phase(&self) -> Result<u32> {
         ensure!(
-            (FITS..=JOINING).contains(&self.phase),
+            (FITS..=SHARED).contains(&self.phase),
             Error::wrong_call(Rule::JoinState).with(self.phase)
         );
         Ok(self.phase)
@@ -540,6 +612,92 @@ impl Join {
         }
     }
 
+    /// The next partition on disk from the cursor: released, split or
+    /// joined whole; or the end of the level. `memory` is what the spill
+    /// holds besides a partition to join.
+    fn next(&mut self, host: &Host<'_>, memory: u64) -> Result<Action> {
+        let spill = self.spill(host)?;
+        self.counts(host)?;
+        let mut cursor = self.cursor;
+        while cursor < self.partitions {
+            let partition = cursor;
+            let index = partition as usize;
+            cursor += 1;
+            // The partitions in memory went as the level started joining.
+            if !spill.on_disk(partition)? {
+                continue;
+            }
+            let action = if host.outer[index] == 0
+                && (self.params.preserve_inner == 0 || host.rows[index] == 0)
+            {
+                Action::Release(partition)
+            } else {
+                self.take(host, partition, memory)?
+            };
+            self.cursor = cursor;
+            return Ok(action);
+        }
+        self.cursor = cursor;
+        self.phase = DONE;
+        Ok(Action::LevelDone)
+    }
+
+    /// Refuse counts of rows, outer rows or bytes on disk for another
+    /// number of partitions than the level's.
+    fn counts(&self, host: &Host<'_>) -> Result<()> {
+        let partitions = self.partitions as usize;
+        for (what, len) in [
+            (Rule::RecordCounts, host.rows.len()),
+            (Rule::JoinOuter, host.outer.len()),
+            (Rule::JoinDisk, host.disk.len()),
+        ] {
+            ensure!(
+                len == partitions,
+                Error::wrong_call(what).with(len).and(partitions)
+            );
+        }
+        Ok(())
+    }
+
+    /// A partition on disk to join: split into a level below when it is
+    /// larger than `room` of what the limit leaves besides `memory`, a
+    /// chunk of outer rows and its values, and holds fewer than `key` of
+    /// its level's rows, so not one key; whole otherwise.
+    fn take(&self, host: &Host<'_>, partition: u32, memory: u64) -> Result<Action> {
+        let index = partition as usize;
+        let used = memory.saturating_add(2 * self.outer_len);
+        let split = splits(
+            &SplitWeights {
+                room: self.params.split_room,
+                key: self.params.split_key,
+            },
+            &Partition {
+                size: host.disk[index],
+                used,
+                limit: self.params.limit,
+                rows: host.rows[index],
+                level_rows: host.total,
+                bits: self.below,
+            },
+        )?;
+        if !split {
+            return Ok(Action::Open(partition));
+        }
+        // What the levels above leave of the limit, a quarter at least.
+        let limit = self.params.limit;
+        Ok(Action::Split(Below {
+            partition,
+            level: self.level + 1,
+            expected: host.disk[index],
+            limit: if memory < limit / 4 * 3 {
+                limit - memory
+            } else {
+                limit / 4
+            },
+            shift: self.below,
+        }))
+    }
+
     /// The end of the build: where each partition's outer rows go.
     fn route(&mut self, host: &mut Host<'_>) -> Result<Action> {
         let spill = self.spill(host)?;
@@ -583,10 +741,12 @@ fn check(params: &Params) -> Result<()> {
         params.spilled,
         params.resident,
         params.tail,
+        params.split_room,
+        params.split_key,
     ];
     ensure!(
         params.limit > 0
-            && params.spare == 0
+            && params.preserve_inner <= 1
             && weights
                 .iter()
                 .all(|weight| weight.is_finite() && *weight >= 0.0),
@@ -615,8 +775,12 @@ fn code(event: &Event) -> u32 {
         Event::Sent { .. } => 5,
         Event::BuildEnd => 6,
         Event::OuterEnd => 7,
+        Event::Next { .. } => 8,
+        Event::Take { .. } => 9,
     }
 }
 
+#[cfg(test)]
+mod model;
 #[cfg(test)]
 mod tests;

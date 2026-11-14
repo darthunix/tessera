@@ -736,7 +736,7 @@ extern Size tess_spill_set_layout(TessSpillSetLayout what);
  * was: an event the machine's phase does not take, a partition past the
  * level's, regions that are not the level's, and a null argument.
  */
-#define TESS_JOIN_WORDS 24
+#define TESS_JOIN_WORDS 26
 
 typedef struct TessJoinMachine
 {
@@ -747,10 +747,12 @@ typedef struct TessJoinMachine
  * What every level of a join's spill shares: the memory limit, the shape
  * of its levels' inner side, the words an outer row stores in a chunk of
  * columns besides its NULL bits, whether the outer rows keep values by
- * reference (1) or not (0), the bytes of a file's buffer, and the weights
- * of the rule that sends partitions to disk (TessSpillWeights), with the
- * share of the outer tail of a partition on disk counted in reserve.
- * spare is 0.
+ * reference (1) or not (0), whether the join gives out the inner rows
+ * without a pair (1, RIGHT and FULL) or not (0), the bytes of a file's
+ * buffer, the weights of the rule that sends partitions to disk
+ * (TessSpillWeights), with the share of the outer tail of a partition on
+ * disk counted in reserve, and those of the rule that splits a partition
+ * into a level below (tess_table_spill_splits).
  */
 typedef struct TessJoinParams
 {
@@ -758,21 +760,24 @@ typedef struct TessJoinParams
 	TessSpillShape shape;
 	uint64		outer_words;
 	uint32		outer_values;
-	uint32		spare;
+	uint32		preserve_inner;
 	uint64		page;
 	double		start;
 	double		target;
 	double		spilled;
 	double		resident;
 	double		tail;
+	double		split_room;
+	double		split_key;
 } TessJoinParams;
 
 /*
  * The regions of a level a step reads: the level's spill words, nwords of
  * them, whose bytes the join counts by partition; the inner rows of each
- * of its nrows partitions, and of the level; and a byte for each of its
- * nroutes partitions, which the end of the build sets to a
- * TessJoinRoute. Before a level is made, all are empty.
+ * of its nrows partitions, and of the level; the outer rows written of
+ * each, and the bytes of the inner side's blocks on disk of each; and a
+ * byte for each of its nroutes partitions, which the end of the build
+ * sets to a TessJoinRoute. Before a level is made, all are empty.
  */
 typedef struct TessJoinHost
 {
@@ -781,6 +786,10 @@ typedef struct TessJoinHost
 	const uint64 *rows;
 	Size		nrows;
 	uint64		total;
+	const uint64 *outer;
+	Size		nouter;
+	const uint64 *disk;
+	Size		ndisk;
 	uint8	   *routes;
 	Size		nroutes;
 } TessJoinHost;
@@ -820,7 +829,17 @@ typedef enum TessJoinEventKind
 	/* The inner rows are read. */
 	TESS_JOIN_BUILD_END = 6,
 	/* The outer rows are read. */
-	TESS_JOIN_OUTER_END = 7
+	TESS_JOIN_OUTER_END = 7,
+	/*
+	 * The join asks for the next partition on disk; memory is what its
+	 * spill holds, the levels above included.
+	 */
+	TESS_JOIN_NEXT = 8,
+	/*
+	 * A participant of a shared build took partition to join alone;
+	 * memory as for TESS_JOIN_NEXT.
+	 */
+	TESS_JOIN_TAKE = 9
 } TessJoinEventKind;
 
 typedef struct TessJoinEvent
@@ -854,8 +873,31 @@ typedef enum TessJoinActionKind
 	 */
 	TESS_JOIN_DEMOTE = 4,
 	/* Partition, on disk, writes and frees what it holds; then TESS_JOIN_SENT. */
-	TESS_JOIN_EVICT = 5
+	TESS_JOIN_EVICT = 5,
+	/* Partition has nothing to join: free it and its files, then TESS_JOIN_NEXT. */
+	TESS_JOIN_RELEASE = 6,
+	/* Join partition whole, then TESS_JOIN_NEXT. */
+	TESS_JOIN_OPEN = 7,
+	/* Split partition into the level below, its machine by tess_join_below. */
+	TESS_JOIN_SPLIT = 8,
+	/* Every partition of the level is done. */
+	TESS_JOIN_LEVEL_DONE = 9
 } TessJoinActionKind;
+
+/*
+ * A level below to make: the partition of the level above it splits, its
+ * level, the bytes it expects, the memory it may take, and the first bit
+ * of the hash it takes. spare is 0.
+ */
+typedef struct TessJoinBelow
+{
+	uint32		partition;
+	uint32		level;
+	uint64		expected;
+	uint64		limit;
+	uint32		shift;
+	uint32		spare;
+} TessJoinBelow;
 
 typedef struct TessJoinAction
 {
@@ -863,6 +905,7 @@ typedef struct TessJoinAction
 	uint32		partition;
 	Size		outer_len;
 	TessSpillPlan plan;
+	TessJoinBelow below;
 } TessJoinAction;
 
 /* Make *machine the machine of a join whose table fits so far. */
@@ -870,21 +913,23 @@ extern TessStatusCode tess_join_init(TessJoinMachine *machine, const TessJoinPar
 									 TessStatus *status);
 
 /*
- * Make *machine the machine of level level below the first, which splits a
- * partition of expected bytes within limit from hash bit shift; the level
- * to make, a TESS_JOIN_START, into *action.
+ * Make *machine the machine of the level below a TESS_JOIN_SPLIT asked
+ * for; the level to make, a TESS_JOIN_START, into *action.
  */
 extern TessStatusCode tess_join_below(TessJoinMachine *machine, const TessJoinParams *params,
-									  uint32 level, double expected, uint64 limit,
-									  uint32 shift, TessJoinAction *action,
+									  const TessJoinBelow *below, TessJoinAction *action,
 									  TessStatus *status);
 
 /*
- * The level of a build several processes share, whose partitions one of
- * them planned: a TESS_JOIN_START into *action.
+ * Make *machine the machine of the level of a build several processes
+ * share, whose partitions one of them planned; the level to make, a
+ * TESS_JOIN_START, into *action. The shared build decides the level, but
+ * for whether a partition a participant takes alone splits
+ * (TESS_JOIN_TAKE).
  */
-extern TessStatusCode tess_join_given(const TessJoinParams *params, uint32 partitions,
-									  TessJoinAction *action, TessStatus *status);
+extern TessStatusCode tess_join_given(TessJoinMachine *machine, const TessJoinParams *params,
+									  uint32 partitions, TessJoinAction *action,
+									  TessStatus *status);
 
 /* Give *machine the join's event and its next action into *action. */
 extern TessStatusCode tess_join_step(TessJoinMachine *machine, const TessJoinHost *host,
@@ -902,7 +947,10 @@ typedef enum TessJoinLayout
 	TESS_JOIN_EVENT_SIZE = 6,
 	TESS_JOIN_EVENT_MEMORY_OFFSET = 7,
 	TESS_JOIN_ACTION_SIZE = 8,
-	TESS_JOIN_ACTION_PLAN_OFFSET = 9
+	TESS_JOIN_ACTION_PLAN_OFFSET = 9,
+	TESS_JOIN_ACTION_BELOW_OFFSET = 10,
+	TESS_JOIN_BELOW_SIZE = 11,
+	TESS_JOIN_BELOW_SHIFT_OFFSET = 12
 } TessJoinLayout;
 
 /* The size or offset for a kind, or 0 for an unknown one. */

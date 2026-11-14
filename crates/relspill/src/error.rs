@@ -309,13 +309,17 @@ rules! {
     JoinState,
     /// An event the phase of a join's machine does not take.
     JoinEvent,
-    /// The parameters of a join's spill: a limit of 0, a spare word set,
-    /// or a weight below zero or not finite.
+    /// The parameters of a join's spill: a limit of 0, a flag neither 0
+    /// nor 1, or a weight below zero or not finite.
     JoinParams,
     /// A level below the first numbered 0.
     JoinLevel,
     /// Routes of the outer rows for another number of partitions.
     JoinRoutes,
+    /// Counts of outer rows for another number of partitions.
+    JoinOuter,
+    /// Bytes on disk for another number of partitions.
+    JoinDisk,
 }
 
 impl Error {
@@ -653,11 +657,13 @@ impl fmt::Display for Error {
             Rule::JoinState => write!(f, "a join's spill machine in phase {a}, which is none"),
             Rule::JoinEvent => write!(f, "a join's spill machine in phase {a} takes no event {b}"),
             Rule::JoinParams => f.write_str(
-                "a join's spill of no memory, a spare word set, or a weight below zero or not \
-                 finite",
+                "a join's spill of no memory, a flag neither 0 nor 1, or a weight below zero or \
+                 not finite",
             ),
             Rule::JoinLevel => write!(f, "a level below the first numbered {a}"),
             Rule::JoinRoutes => write!(f, "{a} routes of outer rows for {b} partitions"),
+            Rule::JoinOuter => write!(f, "{a} counts of outer rows for {b} partitions"),
+            Rule::JoinDisk => write!(f, "{a} counts of bytes on disk for {b} partitions"),
         }
     }
 }
