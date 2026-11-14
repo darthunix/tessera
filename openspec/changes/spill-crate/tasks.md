@@ -323,7 +323,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 - [x] 3.24 Make one rule for the limit of a level below, for the join
       and the grouping, if a measurement shows no loss. Check:
       `cargo ab measure` of the family `spill`; `make installcheck`
-- [ ] 3.25 Review the whole public API and settle it, and keep its
+- [x] 3.25 Review the whole public API and settle it, and keep its
       snapshot diffed in CI, as for `relhash`; among it the reader of
       a set's own list in memory, which no node calls since a
       finished set reads its lists from its file. Check:

@@ -56,7 +56,9 @@ so that each rule is written, tested and proven once.
 ### A small surface
 The public API grows only for a reason the change gives, so that what
 callers rely on, and what must be proven, stays small.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::diff -u
+  openspec/changes/spill-crate/public-api.txt target/relspill-public-api.txt`
 
 ### No cost to Tessera
 A hot loop of Tessera compiles no longer through the crate's API than
