@@ -83,7 +83,10 @@ Before pushing, run what CI runs. `PG_CONFIG` names a PostgreSQL master
 build with assertions and a UTF-8 locale (CI uses `C.UTF-8`). CI builds
 it with `--enable-injection-points` too: the suite `spill_damage`
 damages through them what a node reads back from its files, and on a
-build without them it passes having checked nothing.
+build without them it passes having checked nothing. CI runs the suites
+on PostgreSQL 19 as well, at the revision `.github/postgres.env` names:
+a change that reads an interface of the core runs them on 19 before
+pushing.
 
 ```sh
 make rust-check                  # format, Clippy, debug and release tests
@@ -366,7 +369,8 @@ when:
 
 ## Accepted limits
 
-- PostgreSQL master is the supported core; Greengage 7 is planned.
+- PostgreSQL 19 and master are the supported cores; Greengage 7 is
+  planned.
 - The ABI does not tie a PostgreSQL type to one physical format of a
   column.
 - For now `tessera-bench` counts on macOS, on Apple silicon and on

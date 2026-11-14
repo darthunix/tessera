@@ -555,11 +555,13 @@ direction, up to the batch's size or a limit's bound: the table AM finds
 the next index entry, reads the table's page only where the visibility
 map does not show it all visible, takes the page's predicate lock and
 fills the slot from the index tuple; a lossy index's condition is
-rechecked on the slot, as there. A builder copies the slot's columns, the
-index's, into a batch, by-reference values too, since the index tuples
-live only until the scan leaves their page; the batch given out is the
-node's own, whose column n, the relation's attribute n + 1, is the
-index's column that holds it (the index's targets that are the
+rechecked on the slot, as there. PostgreSQL 19 has no
+`table_index_getnext_slot`: there the node runs the same steps as 19's
+`IndexOnlyNext` does, in a copy of its loop. A builder copies the slot's
+columns, the index's, into a batch, by-reference values too, since the
+index tuples live only until the scan leaves their page; the batch given
+out is the node's own, whose column n, the relation's attribute n + 1,
+is the index's column that holds it (the index's targets that are the
 relation's columns and that the index returns). The child's
 instrumentation counts the rows a batch at a time, so `EXPLAIN ANALYZE`
 shows them and the core's `Heap Fetches` under the node. A rescan passes
@@ -624,7 +626,8 @@ an index scan of that key (`index_beginscan`, the snapshot
 type, as SQL values (a date stays a date, a text a text,
 `tess_heap_lookup`); the node puts the array into the key as an array
 key (`SK_SEARCHARRAY`), rescans the index (`index_rescan`), and fills
-its batches from the index fetch (`table_index_getnext_slot`), each row
+its batches from the index fetch (`table_index_getnext_slot`, on
+PostgreSQL 19 `index_getnext_slot`), each row
 the tuple where it lies on its pinned page
 (`tess_heap_batch_append_slot`), as its index mode does. A btree sorts
 the array, drops its duplicates and NULLs at each rescan and walks its
