@@ -13,7 +13,6 @@
 
 static void make_rounds(TessHashJoinState *state);
 static void shared_check(TessHashJoinState *state);
-static void shared_flush(TessHashJoinState *state);
 static bool shared_has_outer(JoinSpill *spill, int partition);
 static void shared_outer(TessHashJoinState *state);
 static void shared_probe_start(TessHashJoinState *state, uint64 records);
@@ -510,14 +509,67 @@ join_free_shared_table(TessHashJoinState *state)
 }
 
 /*
+ * Step this participant's machine of the build with event: the build's
+ * counters and the table's spill words, and, once the table split, the
+ * partitions this participant keeps in memory.
+ */
+static TessSharedBuildAction
+shared_step(TessHashJoinState *state, TessSharedBuildEvent event)
+{
+	JoinShared *shared = state->parallel.shared;
+	uint8		resident[JOIN_SPILL_MAX_PARTITIONS];
+	TessSharedBuildHost host = {
+		.counters = shared->counters,
+		.spill = join_shared_words(state),
+		.nspill = shared->spill_nwords,
+	};
+	TessSharedBuildAction action;
+	JoinSpill  *level = state->spill;
+
+	while (level != NULL && level->parent != NULL)
+		level = level->parent;
+	if (level != NULL && level->shared && level->npartitions <= JOIN_SPILL_MAX_PARTITIONS)
+	{
+		for (int partition = 0; partition < level->npartitions; partition++)
+			resident[partition] = level->build.parts[partition].resident ? 1 : 0;
+		host.resident = resident;
+		host.nresident = level->npartitions;
+	}
+	check(state, state->kernels->shared_build_step(&state->parallel.build_machine, &host,
+												   &event, &action, &state->status));
+	/* A partition the machine names is one of the table's level. */
+	if ((action.kind == TESS_SHARED_WRITE || action.kind == TESS_SHARED_KEEP ||
+		 action.kind == TESS_SHARED_DEMOTE || action.kind == TESS_SHARED_SEND) &&
+		(level == NULL || action.partition >= (uint32) level->npartitions))
+		elog(ERROR, "TessHashJoin's shared build named partition %u of %d",
+			 action.partition, level == NULL ? 0 : level->npartitions);
+	return action;
+}
+
+static void shared_flush_partition(TessHashJoinState *state, int partition, bool write);
+static void shared_flush_end(TessHashJoinState *state);
+
+/*
  * Step through the shared build's phases until probing starts: the node
- * performs each action the participant returns, and the build barrier's
+ * performs each action its machine returns, and the build barrier's
  * waits stay here, since they may raise an error.
  */
 void
 join_build_shared(TessHashJoinState *state)
 {
-	uint32		reply = 0;
+	/*
+	 * The weights a shared table gives the rule that sends its partitions
+	 * to disk (docs/spill.md, "Weights"): it counts its chunks, not a
+	 * participant's tails; its participants send one partition a check,
+	 * since the others write theirs of it at their next batch.
+	 */
+	TessSharedBuildParams params = {
+		.start = tess_join_spill_start,
+		.target = tess_join_spill_target,
+		.spilled = tess_join_spill_spilled_weight,
+		.per_check = (uint32) tess_join_shared_spill_evictions,
+	};
+	TessSharedBuildEvent event = {.kind = TESS_SHARED_DONE};
 
 	state->compact_decided = false;
 	join_reset_values(state);
@@ -529,7 +581,6 @@ join_build_shared(TessHashJoinState *state)
 	state->parallel.round_partition = -1;
 	join_reset_prune_keys(state);
 	state->parallel.spill_words = NULL;
-	state->parallel.spill_seen = 0;
 	state->parallel.spill_over = false;
 	state->parallel.own_base = NULL;
 	state->parallel.own_len = 0;
@@ -547,46 +598,56 @@ join_build_shared(TessHashJoinState *state)
 	state->bloom.ready = false;
 	state->sample_rows = 0;
 	state->sample_found = 0;
+	check(state, state->kernels->shared_build_init(&state->parallel.build_machine, &params,
+												   &state->status));
 	for (;;)
 	{
-		uint32		action;
+		TessSharedBuildAction action = shared_step(state, event);
 
-		check(state, state->kernels->build_step(&state->parallel.participant,
-												state->parallel.shared->counters, reply,
-												&action, &state->status));
-		reply = 0;
-		switch (action)
+		event = (TessSharedBuildEvent) {.kind = TESS_SHARED_DONE};
+		switch (action.kind)
 		{
-			case TESS_BUILD_ATTACH:
-				reply = BarrierAttach(&state->parallel.shared->build);
+			case TESS_SHARED_ATTACH:
+				event.kind = TESS_SHARED_ATTACHED;
+				event.phase = BarrierAttach(&state->parallel.shared->build);
 				break;
-			case TESS_BUILD_ARRIVE_AND_WAIT:
-				reply = BarrierArriveAndWait(&state->parallel.shared->build,
-											 PG_WAIT_EXTENSION) ? 1 : 0;
+			case TESS_SHARED_ARRIVE_AND_WAIT:
+				event.kind = TESS_SHARED_ARRIVED;
+				event.flag = BarrierArriveAndWait(&state->parallel.shared->build,
+												  PG_WAIT_EXTENSION) ? 1 : 0;
 				break;
-			case TESS_BUILD_DO_BUILD:
+			case TESS_SHARED_BUILD:
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_BUILD);
 				build_shared_inner(state);
 				break;
-			case TESS_BUILD_DO_FLUSH:
+			case TESS_SHARED_FLUSH:
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_FLUSH);
-				shared_flush(state);
+				shared_join(state);
 				break;
-			case TESS_BUILD_DO_OUTER:
+			case TESS_SHARED_WRITE:
+			case TESS_SHARED_KEEP:
+				shared_flush_partition(state, (int) action.partition,
+									   action.kind == TESS_SHARED_WRITE);
+				break;
+			case TESS_SHARED_FLUSH_END:
+				shared_flush_end(state);
+				break;
+			case TESS_SHARED_OUTER:
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_OUTER);
 				shared_outer(state);
 				break;
-			case TESS_BUILD_DO_SIZE:
+			case TESS_SHARED_SIZE:
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_SIZE);
 				size_shared_table(state);
 				break;
-			case TESS_BUILD_DO_LINK:
+			case TESS_SHARED_LINK:
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_LINK);
 				link_own_chunks(state);
 				break;
-			case TESS_BUILD_DO_PROBE:
+			case TESS_SHARED_PROBE:
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_PROBE);
 				{
+					bool		split = action.flag != 0;
 					uint64		records;
 					uint64		nchunks;
 
@@ -597,7 +658,7 @@ join_build_shared(TessHashJoinState *state)
 					 * it comes before the attach, which reads every
 					 * participant's from the table.
 					 */
-					if (join_shared_partitions(state) > 0)
+					if (split)
 						shared_join(state);
 					attach_shared_table(state);
 					share_marks(state, state->parallel.shared->marks, state->parallel.shared->nchunks);
@@ -610,15 +671,15 @@ join_build_shared(TessHashJoinState *state)
 															  &state->status));
 					state->build_rows = records;
 					state->parallel.chain_table = true;
-					if (join_shared_partitions(state) > 0)
+					if (split)
 						shared_probe_start(state, records);
 					state->built = true;
 					return;
 				}
-			case TESS_BUILD_DETACH:
+			case TESS_SHARED_DETACH:
 				BarrierDetach(&state->parallel.shared->build);
 				break;
-			case TESS_BUILD_DONE:
+			case TESS_SHARED_FINISHED:
 				/* Attached after the last one left: nothing is left to probe. */
 				state->parallel.participating = false;
 				state->build_rows = 0;
@@ -626,7 +687,7 @@ join_build_shared(TessHashJoinState *state)
 				state->done = true;
 				return;
 			default:
-				elog(ERROR, "TessHashJoin got build action %u out of order", action);
+				elog(ERROR, "TessHashJoin got shared build action %u out of order", action.kind);
 		}
 	}
 }
@@ -639,8 +700,6 @@ join_build_shared(TessHashJoinState *state)
 bool
 join_leave_shared(TessHashJoinState *state, bool keep)
 {
-	uint32		reply = 0;
-
 	if (state->table_free_owed)
 	{
 		state->table_free_owed = false;
@@ -655,38 +714,42 @@ join_leave_shared(TessHashJoinState *state, bool keep)
 	 * leave frees: the child holds them no more from here.
 	 */
 	join_take_back_bloom(state);
-	for (;;)
 	{
-		uint32		action;
+		TessSharedBuildEvent event = {.kind = TESS_SHARED_DONE};
 
-		check(state, state->kernels->build_step(&state->parallel.participant,
-												state->parallel.shared->counters, reply,
-												&action, &state->status));
-		reply = 0;
-		switch (action)
+		for (;;)
 		{
-			case TESS_BUILD_ARRIVE_AND_DETACH:
-				reply = BarrierArriveAndDetach(&state->parallel.shared->build) ? 1 : 0;
-				break;
-			case TESS_BUILD_DO_FREE:
-				state->parallel.participating = false;
-				if (keep)
-				{
-					state->table_free_owed = true;
+			TessSharedBuildAction action = shared_step(state, event);
+
+			switch (action.kind)
+			{
+				case TESS_SHARED_ARRIVE_AND_DETACH:
+					event = (TessSharedBuildEvent) {
+						.kind = TESS_SHARED_LEFT,
+						.flag = BarrierArriveAndDetach(&state->parallel.shared->build) ? 1 : 0,
+					};
+					break;
+				case TESS_SHARED_FREE:
+					state->parallel.participating = false;
+					if (keep)
+					{
+						state->table_free_owed = true;
+						return true;
+					}
+					join_free_shared_table(state);
+					state->parallel.chain_table = false;
 					return true;
-				}
-				join_free_shared_table(state);
-				state->parallel.chain_table = false;
-				return true;
-			case TESS_BUILD_DONE:
-				state->parallel.participating = false;
-				state->parallel.chain_table = false;
-				state->table.index = NULL;
-				state->table.index_len = 0;
-				state->table.nchunks = 0;
-				return false;
-			default:
-				elog(ERROR, "TessHashJoin got build action %u out of order", action);
+				case TESS_SHARED_FINISHED:
+					state->parallel.participating = false;
+					state->parallel.chain_table = false;
+					state->table.index = NULL;
+					state->table.index_len = 0;
+					state->table.nchunks = 0;
+					return false;
+				default:
+					elog(ERROR, "TessHashJoin got shared build action %u out of order",
+						 action.kind);
+			}
 		}
 	}
 }
@@ -865,47 +928,53 @@ shared_switch(TessHashJoinState *state)
 	state->parallel.own_len = 0;
 	state->parallel.own_bytes = 0;
 	spill->total_rows = state->build_rows;
-	state->parallel.spill_seen = 0;
 }
 
 /*
- * Write this participant's chunks of the partitions others sent to disk;
- * then, when evict is set and the chunks pass the budget, send the
- * largest partition to disk and write this participant's chunks of it:
- * as many as tessera.join_shared_spill_evictions a call (one), since the
- * others write theirs of it at their next batch.
+ * A batch into a table that split, or a catch-up with one, as this
+ * participant's machine says: the partitions others sent to disk go
+ * there from here too; then, with evict, while the chunks pass the
+ * budget, the largest goes and this participant writes its chunks of
+ * it, as many as tessera.join_shared_spill_evictions a check (one),
+ * since the others write theirs of it at their next batch.
  */
 static void
-shared_sync(TessHashJoinState *state, bool evict)
+shared_spill_check(TessHashJoinState *state, bool evict)
 {
-	JoinSpill  *spill = state->spill;
-	SpillSide  *side = &spill->build;
-	uint64		evictions;
-	int32		partition;
-	TessSpillWeights weights = join_spill_weights(state);
+	SpillSide  *side = &state->spill->build;
+	TessSharedBuildAction action;
 
-	check(state, state->kernels->table_spill_evictions(join_shared_words(state),
-													   state->parallel.shared->spill_nwords,
-													   &evictions, &state->status));
-	if (evictions != state->parallel.spill_seen)
+	/* Once a batch at least, as the eviction checked before every pick. */
+	CHECK_FOR_INTERRUPTS();
+	action = shared_step(state, (TessSharedBuildEvent) {
+		.kind = TESS_SHARED_BATCH,
+		.flag = evict ? 1 : 0,
+	});
+
+	for (;;)
 	{
-		state->parallel.spill_seen = evictions;
-		for (partition = 0; partition < spill->npartitions; partition++)
-			if (side->parts[partition].resident && join_shared_on_disk(state, partition))
-				join_side_demote(state, side, partition);
-	}
-	if (!evict)
-		return;
-	/* The words' count as of now, which the others' writes lowered. */
-	for (uint32 evicted = 0;; evicted++)
-	{
-		CHECK_FOR_INTERRUPTS();
-		check(state, state->kernels->table_spill_evict(join_shared_words(state),
-													   state->parallel.shared->spill_nwords,
-													   true, &weights, 0, 0, NULL, 0, 0, evicted,
-													   &partition, &state->status));
-		if (partition < 0 || !join_side_send(state, side, partition))
-			break;
+		bool		freed;
+
+		switch (action.kind)
+		{
+			case TESS_SHARED_NOTHING:
+				return;
+			case TESS_SHARED_DEMOTE:
+				join_side_demote(state, side, (int) action.partition);
+				action = shared_step(state, (TessSharedBuildEvent) {.kind = TESS_SHARED_DONE});
+				break;
+			case TESS_SHARED_SEND:
+				CHECK_FOR_INTERRUPTS();
+				freed = join_side_send(state, side, (int) action.partition);
+				action = shared_step(state, (TessSharedBuildEvent) {
+					.kind = TESS_SHARED_SENT,
+					.flag = freed ? 1 : 0,
+				});
+				break;
+			default:
+				elog(ERROR, "TessHashJoin got shared build action %u in a check of its spill",
+					 action.kind);
+		}
 	}
 }
 
@@ -921,7 +990,7 @@ shared_check(TessHashJoinState *state)
 			shared_switch(state);
 	}
 	if (state->spill != NULL)
-		shared_sync(state, true);
+		shared_spill_check(state, true);
 }
 
 /* A participant of a table that spilled, one that joined late too: its level, as decided. */
@@ -930,7 +999,7 @@ shared_join(TessHashJoinState *state)
 {
 	if (state->spill == NULL)
 		shared_switch(state);
-	shared_sync(state, false);
+	shared_spill_check(state, false);
 }
 
 /* Advance the bounds of a set's files by this participant's, once they are written. */
@@ -956,69 +1025,72 @@ agree_bounds(TessHashJoinState *state, TessSpill *file, JoinSpillSet set)
 }
 
 /*
- * FLUSH: this participant counts its records by partition, writes its
- * chunks of the partitions on disk, the tails too, and hands those of the
- * partitions in memory, with their values, to the table's lists.
+ * FLUSH, a partition as the machine says: this participant counts its
+ * records of it, and writes its chunks of it, the tail too, when it is on
+ * disk, or hands them, with their values, to the table's lists.
  */
 static void
-shared_flush(TessHashJoinState *state)
+shared_flush_partition(TessHashJoinState *state, int partition, bool write)
 {
 	dsa_area   *area = join_query_dsa(state);
-	JoinSpill  *spill;
-	SpillSide  *side;
+	JoinSpill  *spill = state->spill;
+	SpillSide  *side = &spill->build;
+	SpillPart  *part = &side->parts[partition];
 
-	if (join_shared_partitions(state) == 0)
-		return;
-	shared_join(state);
-	spill = state->spill;
-	side = &spill->build;
-	for (int partition = 0; partition < spill->npartitions; partition++)
+	tess_loop_turn("shared flush");
+	/* The catch-up wrote every partition on disk this one kept. */
+	if (write == part->resident)
+		elog(ERROR, "TessHashJoin's shared partition %d kept in memory and on disk", partition);
+	if (side->rows[partition] > 0)
+		check(state, state->kernels->table_spill_records(join_shared_words(state),
+														 state->parallel.shared->spill_nwords,
+														 partition, side->rows[partition],
+														 NULL, &state->status));
+	if (write)
 	{
-		SpillPart  *part = &side->parts[partition];
+		pg_atomic_uint64 *stats = join_part_stats(state, partition);
 
-		tess_loop_turn("shared flush");
-		if (side->rows[partition] > 0)
-			check(state, state->kernels->table_spill_records(join_shared_words(state),
-															 state->parallel.shared->spill_nwords,
-															 partition, side->rows[partition],
-															 NULL, &state->status));
-		if (!part->resident)
-		{
-			pg_atomic_uint64 *stats = join_part_stats(state, partition);
-
-			join_side_flush(state, side, partition);
-			join_side_forget(side, partition);
-			pg_atomic_fetch_add_u64(&stats[0], side->disk_bytes[partition]);
-			pg_atomic_fetch_add_u64(&stats[1], part->blocks);
-			continue;
-		}
-		for (int chunk = 0; chunk < part->nchunks; chunk++)
-		{
-			int			index = part->chunks[chunk];
-			JoinChunk  *header = dsa_get_address(area, side->pointers[index]);
-
-			header->next = *join_own_list(state, false);
-			*join_own_list(state, false) = side->pointers[index];
-			side->pointers[index] = InvalidDsaPointer;
-			side->bases[index] = NULL;
-		}
-		for (int value = 0; value < part->nvalues; value++)
-		{
-			int			number = part->values[value];
-			JoinChunk  *header = dsa_get_address(area, side->value_pointers[number]);
-
-			header->next = *join_own_list(state, true);
-			*join_own_list(state, true) = side->value_pointers[number];
-			side->value_pointers[number] = InvalidDsaPointer;
-			side->value_bases[number] = NULL;
-		}
-		side->bytes -= part->bytes;
-		part->bytes = 0;
-		part->nchunks = 0;
-		part->nvalues = 0;
-		part->value_current = -1;
-		side->current[partition] = 0;
+		join_side_flush(state, side, partition);
+		join_side_forget(side, partition);
+		pg_atomic_fetch_add_u64(&stats[0], side->disk_bytes[partition]);
+		pg_atomic_fetch_add_u64(&stats[1], part->blocks);
+		return;
 	}
+	for (int chunk = 0; chunk < part->nchunks; chunk++)
+	{
+		int			index = part->chunks[chunk];
+		JoinChunk  *header = dsa_get_address(area, side->pointers[index]);
+
+		header->next = *join_own_list(state, false);
+		*join_own_list(state, false) = side->pointers[index];
+		side->pointers[index] = InvalidDsaPointer;
+		side->bases[index] = NULL;
+	}
+	for (int value = 0; value < part->nvalues; value++)
+	{
+		int			number = part->values[value];
+		JoinChunk  *header = dsa_get_address(area, side->value_pointers[number]);
+
+		header->next = *join_own_list(state, true);
+		*join_own_list(state, true) = side->value_pointers[number];
+		side->value_pointers[number] = InvalidDsaPointer;
+		side->value_bases[number] = NULL;
+	}
+	side->bytes -= part->bytes;
+	part->bytes = 0;
+	part->nchunks = 0;
+	part->nvalues = 0;
+	part->value_current = -1;
+	side->current[partition] = 0;
+}
+
+/* FLUSH, every partition written or kept: this participant's files are finished. */
+static void
+shared_flush_end(TessHashJoinState *state)
+{
+	JoinSpill  *spill = state->spill;
+	SpillSide  *side = &spill->build;
+
 	join_side_compact(side);
 	tess_spill_finish(side->file);
 	publish_bounds(state, side->file, JOIN_SET_BUILD);
@@ -1039,8 +1111,7 @@ shared_outer(TessHashJoinState *state)
 	bool		answer = state->jointype == JOIN_LEFT || state->jointype == JOIN_ANTI;
 	JoinSpill  *spill;
 
-	if (join_shared_partitions(state) == 0)
-		return;
+	/* The machine gives the outer side to a table that split only. */
 	shared_join(state);
 	/* Past the build's barrier, the keys are every participant's. */
 	join_prune_outer(state);
@@ -1619,9 +1690,9 @@ join_stop_shared(TessHashJoinState *state)
 												&round_of(state, state->parallel.round_partition)->stopped,
 												&state->status));
 	if (state->parallel.participating)
-		check(state, state->kernels->build_stop(&state->parallel.participant,
-												&state->parallel.shared->stopped,
-												&state->status));
+		check(state, state->kernels->shared_build_stop(&state->parallel.build_machine,
+													   &state->parallel.shared->stopped,
+													   &state->status));
 }
 
 /*

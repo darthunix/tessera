@@ -643,7 +643,7 @@ init_shared(TessHashJoinState *state, int participants, dsm_segment *segment)
 	state->parallel.shared->prune_min = PG_INT64_MAX;
 	state->parallel.shared->prune_max = PG_INT64_MIN;
 	state->parallel.shared->prune_nvalues = 0;
-	memset(&state->parallel.participant, 0, sizeof(state->parallel.participant));
+	memset(&state->parallel.build_machine, 0, sizeof(state->parallel.build_machine));
 	state->parallel.participating = false;
 }
 
