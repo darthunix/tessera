@@ -443,7 +443,7 @@ impl<W: Words> Spill<W> {
         records: Option<Records<'_>>,
         evicted: u32,
     ) -> Result<Option<(u32, bool)>> {
-        let partitions = self.partitions();
+        let partitions = self.partitions_in_room()?;
         if let Some(records) = records {
             ensure!(
                 records.each.len() == partitions as usize,
@@ -566,11 +566,12 @@ impl<W: Words> Spill<W> {
     /// or a file number past a `u32`, after the count of files moved past
     /// it: the spill words are then to be dropped.
     pub fn take_file(&self, partition: u32, outer: bool) -> Result<u32> {
+        let partitions = self.partitions_in_room()?;
         ensure!(
-            partition <= self.partitions(),
+            partition <= partitions,
             Error::wrong_call(Rule::Partition)
                 .with(partition)
-                .and(self.partitions())
+                .and(partitions)
         );
         let field = if outer {
             Field::NextOuter
@@ -654,13 +655,29 @@ impl<W: Words> Spill<W> {
     }
 
     fn check_partition(&self, partition: u32) -> Result<()> {
+        let partitions = self.partitions_in_room()?;
         ensure!(
-            partition < self.partitions(),
+            partition < partitions,
             Error::wrong_call(Rule::Partition)
                 .with(partition)
-                .and(self.partitions())
+                .and(partitions)
         );
         Ok(())
+    }
+
+    /// The partitions in force, within the room of the words: a count
+    /// past it, which words another host sized or damaged hold, is no
+    /// spill's state.
+    fn partitions_in_room(&self) -> Result<u32> {
+        // The whole word: a count past a `u32` is no count.
+        let word = self.words.load(PARTITIONS);
+        ensure!(
+            word <= self.words.capacity() as u64,
+            Error::wrong_call(Rule::Partitions)
+                .with(word)
+                .and(self.words.capacity())
+        );
+        Ok(word as u32)
     }
 }
 
@@ -728,6 +745,27 @@ mod tests {
         let spill = SharedSpill::new(words).unwrap();
         spill.init(budget);
         spill
+    }
+
+    /// Words whose count of partitions passes their room, which another
+    /// host sized for more or which are damaged, are refused by every
+    /// call that reads a partition, never read past.
+    #[test]
+    fn a_count_of_partitions_past_the_words_is_refused() {
+        let mut words = Vec::new();
+        spill(&mut words, 1, 100);
+        words[PARTITIONS].store(4, core::sync::atomic::Ordering::Relaxed);
+        let spill = SharedSpill::new(&words).unwrap();
+        assert_eq!(refused(spill.on_disk(3)), Rule::Partitions);
+        // Nor a count past a `u32` that would truncate into the room.
+        words[PARTITIONS].store((1 << 32) | 1, core::sync::atomic::Ordering::Relaxed);
+        assert_eq!(refused(spill.on_disk(0)), Rule::Partitions);
+        assert_eq!(refused(spill.add_bytes(1, Some(0))), Rule::Partitions);
+        assert_eq!(refused(spill.take_file(4, false)), Rule::Partitions);
+        assert_eq!(
+            refused(spill.evict(&JOIN, Memory::Counted, None, 0)),
+            Rule::Partitions
+        );
     }
 
     /// A process's own state of four partitions with the bytes given.
