@@ -201,8 +201,8 @@ pub unsafe extern "C" fn tess_spill_set_init(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let writer = writer_at(writer)?;
-            *writer = Writer::new(Config {
+            let writer = output(writer, "writer")?;
+            writer.write(Writer::new(Config {
                 partitions: u32::try_from(npartitions).context("negative partitions")?,
                 level,
                 fingerprint,
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn tess_spill_set_init(
                 },
                 buffer_len,
                 shared,
-            })?;
+            })?);
             Ok(())
         })
     }
@@ -565,13 +565,13 @@ pub unsafe extern "C" fn tess_spill_reader_file(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let out = reader_at(reader)?;
+            let out = output(reader, "reader")?;
             let bounds = Bounds {
                 chunk: max_chunk,
                 values: max_values,
             };
             let config = read_config(npartitions, level, partition, fingerprint, bounds)?;
-            *out = Reader::file(config, file_len)?;
+            out.write(Reader::file(config, file_len)?);
             Ok(())
         })
     }

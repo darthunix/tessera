@@ -2336,3 +2336,54 @@ fn a_reader_refused_its_output_stays_as_it_was() {
         assert_eq!(reader, before);
     }
 }
+
+/// A set's writer and a reader of its file are made into places that
+/// hold nothing yet: no value is read or borrowed there, which strict
+/// Miri checks.
+#[test]
+fn a_writer_and_a_reader_are_made_in_places_that_hold_nothing_yet() {
+    use relspill::set::{Reader, Writer};
+    use std::mem::MaybeUninit;
+    use tessera_capi::c::{tess_spill_reader_file, tess_spill_set_init};
+
+    let mut status = Status::new();
+    let mut writer = MaybeUninit::<Writer>::uninit();
+    let mut reader = MaybeUninit::<Reader>::uninit();
+    // SAFETY: places valid for a write, and a local status.
+    unsafe {
+        assert_eq!(
+            tess_spill_set_init(
+                writer.as_mut_ptr(),
+                2,
+                0,
+                7,
+                1024,
+                1024,
+                4096,
+                false,
+                &raw mut status
+            ),
+            Code::Ok,
+            "{}",
+            status.message()
+        );
+        assert!(!writer.assume_init().is_finished());
+        assert_eq!(
+            tess_spill_reader_file(
+                reader.as_mut_ptr(),
+                2,
+                0,
+                0,
+                7,
+                1024,
+                1024,
+                64,
+                &raw mut status
+            ),
+            Code::Ok,
+            "{}",
+            status.message()
+        );
+        let _ = reader.assume_init();
+    }
+}
