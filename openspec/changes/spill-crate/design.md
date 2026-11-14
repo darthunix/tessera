@@ -70,7 +70,7 @@ or one participant takes a partition alone.
 - **Set.** The temporary file of a level: the blocks of all its
   partitions, in the order they were written, and a block list for
   each partition. A shared set is one such file for each participant,
-  which the others read. The end of such a file, the trailer, says
+  which the others read. The end of every set's file, the trailer, says
   where its block lists are.
 - **Spill words.** The numbers a spill keeps for each partition (its
   bytes, its records, its flags) and its memory budget. When several
@@ -318,8 +318,7 @@ participant, read by the others. The crate takes over everything that
   packs a block into the buffer, or beside it, and keeps the block list
   of each partition. A call that writes returns the ranges to write:
   the buffer when it is full, and a block larger than the buffer on its
-  own. At the end of a shared set it returns the block lists and the
-  trailer.
+  own. At the end of a set it returns the block lists and the trailer.
 - **Reading.** For its own set, the crate gives the position and the
   length of each block from its lists. For another participant's file,
   the host gives the length of the file. The crate asks first for the

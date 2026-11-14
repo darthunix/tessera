@@ -471,8 +471,8 @@ extern TessStatusCode tess_spill_columns_unpack(const void *packed, Size len,
 /*
  * The writer of a set's file (crates/relspill, set): it lays the blocks
  * of every partition out in a write buffer, keeps a list of each
- * partition's blocks, and at the finish of a shared set the lists and the
- * trailer after the blocks, and writes nothing itself. Each call returns
+ * partition's blocks, and at the finish the lists and the trailer after
+ * the blocks, and writes nothing itself. Each call returns
  * a step: the ranges of the buffer, the scratch region, the block's body
  * or a list to write to the file, in order, and where; or the bytes of
  * scratch or the entries of a list it needs first. The caller writes the
@@ -553,8 +553,8 @@ typedef struct TessSpillStep
  * level, its headers carrying fingerprint, its chunks of records and of
  * columns of at most max_chunk body bytes and its chunks of values of at
  * most max_values, through a write buffer of buffer_len bytes, a multiple
- * of 8 of at least TESS_SPILL_HEADER_SIZE + 64; a shared set's finish
- * writes its lists and trailer.
+ * of 8 of at least TESS_SPILL_HEADER_SIZE + 64; a shared set drops no
+ * partition before its finish.
  */
 extern TessStatusCode tess_spill_set_init(TessSpillWriter *writer, int npartitions,
 										  uint32 level, uint64 fingerprint,
@@ -581,8 +581,8 @@ extern TessStatusCode tess_spill_set_written(TessSpillWriter *writer,
 											 TessStatus *status);
 
 /*
- * A step of finishing the set: what the buffer holds and, for a shared set
- * that wrote a block, the lists and the trailer. Once the step that is
+ * A step of finishing the set: what the buffer holds and, for a set that
+ * wrote a block, the lists and the trailer. Once the step that is
  * done is written and reported, the set takes no more blocks and needs its
  * buffer no more.
  */
@@ -610,10 +610,11 @@ extern TessStatusCode tess_spill_set_stats(const TessSpillWriter *writer,
 
 /*
  * The reader of a partition of a set (crates/relspill, set): it reads no
- * byte itself. Of the caller's own set it takes the partition's list in
- * memory; of another participant's file the file's length, and its open
- * asks for the trailer, the counts and the partition's entries, a page
- * at a time, each checked before what it names is asked for. Each step
+ * byte itself. Of a finished set's file, the caller's own or another
+ * participant's, it takes the file's length, and its open asks for the
+ * trailer, the counts and the partition's entries, a page at a time,
+ * each checked before what it names is asked for; tess_spill_reader_own
+ * takes instead a list the caller keeps in memory. Each step
  * asks for bytes of the file to read into the page or into the block
  * buffer, from their starts, after which the caller calls again; or says
  * what it found. The reader's words are the caller's, made by

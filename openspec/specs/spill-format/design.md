@@ -516,16 +516,17 @@ A **serial** set belongs to one process. Its file is a normal temporary
 file of PostgreSQL. It lies in the temporary tablespaces of the query,
 and `temp_file_limit` applies to it. The file is deleted when the set
 is freed. After an error, PostgreSQL deletes it when it releases the
-resources of the query. The lists of blocks stay in memory.
+resources of the query. The lists of blocks stay in memory while the
+set is written. When it is finished, the set writes the lists at the
+end of its file, and then a trailer that says where the lists start.
+The spec draws the end of such a file and the trailer
+([spec.md](spec.md), "A set writes one temporary file").
 
 A **shared** set belongs to a parallel query. Each participant writes
 its own file, named `<name>.<participant>`. When a participant has
-finished writing, any participant can read its file. But a reader
-cannot see the memory of the writer, where the lists of blocks are. So
-when a participant finishes a shared set, it writes the lists at the
-end of its file, and then a trailer that says where the lists start.
-The spec draws the end of such a file and the trailer
-([spec.md](spec.md), "A shared set").
+finished writing, any participant can read its file. A reader cannot
+see the memory of the writer, where the lists of blocks are, but the
+end of the file holds them, as the end of every set's file does.
 
 A reader of a shared file first reads the trailer at the end of the
 file. The trailer says where the lists start. The reader then reads the
@@ -569,8 +570,8 @@ A set first only writes, and then only reads.
    If a chunk of records fits in the buffer, it is packed directly into
    the buffer. The call returns the number of bytes the block takes in
    the file. It can also return where the block starts.
-2. `tess_spill_finish` ends the writing. A shared set writes its lists
-   and its trailer at this moment.
+2. `tess_spill_finish` ends the writing. A set that wrote a block
+   writes its lists and its trailer at this moment.
 3. `tess_spill_open` creates a reader for one partition. The reader
    starts at the first block of the partition. Its buffer is as large
    as the largest block of the partition. For a partition without
