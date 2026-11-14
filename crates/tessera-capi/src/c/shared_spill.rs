@@ -20,7 +20,7 @@ use tessera_kernels::table::bloom;
 
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
-use super::table::values;
+use super::table::{output, values};
 
 /// Refuse words in shared memory, named `what`, that are null or not
 /// aligned to 8, before a slice or a reference is made of them.
@@ -127,7 +127,8 @@ pub unsafe extern "C" fn tess_table_spill_words(
     unsafe {
         guard(status, || {
             let capacity = usize::try_from(capacity).context("a negative capacity")?;
-            *nwords.as_mut().context("a null word count")? = words_for(capacity)?;
+            let nwords = output(nwords, "word count")?;
+            nwords.write(words_for(capacity)?);
             Ok(())
         })
     }
@@ -179,12 +180,12 @@ pub unsafe extern "C" fn tess_table_spill_split(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let in_force = in_force.as_mut().context("a null partition count")?;
-            *in_force = if shared {
+            let in_force = output(in_force, "partition count")?;
+            in_force.write(if shared {
                 spill(words, nwords)?.split(partitions)?
             } else {
                 local(words, nwords)?.split(partitions)?
-            };
+            });
             Ok(())
         })
     }
@@ -206,8 +207,8 @@ pub unsafe extern "C" fn tess_table_spill_partitions(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            *partitions.as_mut().context("a null partition count")? =
-                spill(words, nwords)?.partitions();
+            let partitions = output(partitions, "partition count")?;
+            partitions.write(spill(words, nwords)?.partitions());
             Ok(())
         })
     }
@@ -233,12 +234,12 @@ pub unsafe extern "C" fn tess_table_spill_add_bytes(
     unsafe {
         guard(status, || {
             let partition = partition_of(partition);
-            let over = over.as_mut().context("a null flag")?;
-            *over = if shared {
+            let over = output(over, "flag")?;
+            over.write(if shared {
                 spill(words, nwords)?.add_bytes(delta, partition)?
             } else {
                 local(words, nwords)?.add_bytes(delta, partition)?
-            };
+            });
             Ok(())
         })
     }
@@ -280,7 +281,7 @@ pub unsafe extern "C" fn tess_table_spill_evict(
                 each: core::slice::from_raw_parts(records, nrecords),
                 total: total_records,
             });
-            let partition = partition.as_mut().context("a null partition")?;
+            let partition = output(partition, "partition")?;
             let marked = if shared {
                 spill(words, nwords)?.evict(&weights, Memory::Counted, records, evicted)?
             } else {
@@ -290,7 +291,7 @@ pub unsafe extern "C" fn tess_table_spill_evict(
                 };
                 local(words, nwords)?.evict(&weights, memory, records, evicted)?
             };
-            *partition = marked.map_or(-1, |partition| partition as i32);
+            partition.write(marked.map_or(-1, |partition| partition as i32));
             Ok(())
         })
     }
@@ -335,8 +336,8 @@ pub unsafe extern "C" fn tess_table_spill_splits(
                 level_rows,
                 bits,
             };
-            let split = split.as_mut().context("a null flag")?;
-            *split = splits(&SplitWeights { room, key }, &partition)?;
+            let split = output(split, "flag")?;
+            split.write(splits(&SplitWeights { room, key }, &partition)?);
             Ok(())
         })
     }
@@ -358,7 +359,8 @@ pub unsafe extern "C" fn tess_table_spill_evictions(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            *evictions.as_mut().context("a null count")? = spill(words, nwords)?.evictions();
+            let evictions = output(evictions, "count")?;
+            evictions.write(spill(words, nwords)?.evictions());
             Ok(())
         })
     }
@@ -384,10 +386,10 @@ pub unsafe extern "C" fn tess_table_spill_flags(
     unsafe {
         guard(status, || {
             let spill = spill(words, nwords)?;
-            let on_disk = on_disk.as_mut().context("a null flag")?;
-            let alone = alone.as_mut().context("a null flag")?;
-            *on_disk = spill.on_disk(partition)?;
-            *alone = spill.alone(partition)?;
+            let on_disk = output(on_disk, "flag")?;
+            let alone = output(alone, "flag")?;
+            on_disk.write(spill.on_disk(partition)?);
+            alone.write(spill.alone(partition)?);
             Ok(())
         })
     }
@@ -414,12 +416,19 @@ pub unsafe extern "C" fn tess_table_spill_records(
     unsafe {
         guard(status, || {
             let spill = spill(words, nwords)?;
+            // Checked before the records are added, so that a refused
+            // place adds none.
+            let out = if records.is_null() {
+                None
+            } else {
+                Some(output(records, "count of records")?)
+            };
             if added > 0 {
                 spill.add_records(partition, added)?;
             }
             let held = spill.records(partition)?;
-            if let Some(records) = records.as_mut() {
-                *records = held;
+            if let Some(out) = out {
+                out.write(held);
             }
             Ok(())
         })
@@ -443,8 +452,8 @@ pub unsafe extern "C" fn tess_table_spill_start(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let partition = partition.as_mut().context("a null partition")?;
-            *partition = spill(words, nwords)?.start();
+            let partition = output(partition, "partition")?;
+            partition.write(spill(words, nwords)?.start());
             Ok(())
         })
     }
@@ -470,8 +479,8 @@ pub unsafe extern "C" fn tess_table_spill_take_file(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let file = file.as_mut().context("a null file")?;
-            *file = spill(words, nwords)?.take_file(partition, outer)?;
+            let file = output(file, "file")?;
+            file.write(spill(words, nwords)?.take_file(partition, outer)?);
             Ok(())
         })
     }
@@ -495,8 +504,8 @@ pub unsafe extern "C" fn tess_table_spill_take_alone(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let taken = taken.as_mut().context("a null flag")?;
-            *taken = spill(words, nwords)?.take_alone(partition)?;
+            let taken = output(taken, "flag")?;
+            taken.write(spill(words, nwords)?.take_alone(partition)?);
             Ok(())
         })
     }
@@ -521,8 +530,8 @@ pub unsafe extern "C" fn tess_round_step(
     unsafe {
         guard(status, || {
             let participant = participant.as_mut().context("a null participant")?;
-            let action = action.as_mut().context("a null action")?;
-            *action = participant.round_step(reply)? as u32;
+            let action = output(action, "action")?;
+            action.write(participant.round_step(reply)? as u32);
             Ok(())
         })
     }
