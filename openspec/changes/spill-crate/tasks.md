@@ -304,7 +304,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       disk. Check: the loom models, old and new; `make rust-loom`; the
       parallel tests of the suite `join`; `cargo ab measure` of a
       shared join without a spill
-- [ ] 3.21 Add the agreement on a split, the publishing of the filter
+- [x] 3.21 Add the agreement on a split, the publishing of the filter
       before it, and the catch-up of a participant that attaches late.
       Check: a loom model of each; `make rust-loom`; the parallel tests
       of the suite `join`

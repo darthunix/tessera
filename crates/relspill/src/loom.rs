@@ -718,6 +718,7 @@ fn spill_participant(
     let mut held = vec![0_u64; partitions];
     let mut flushed = vec![Flushed::Unseen; partitions];
     let mut built = false;
+    let mut switched = false;
     // Write what this participant holds of a partition: it keeps none of
     // it in memory any more.
     let write = |resident: &mut [u8], held: &mut [u64], partition: u32| {
@@ -764,11 +765,14 @@ fn spill_participant(
                         held[partition] += bytes;
                     }
                 }
-                event = Event::Batch { evict: true };
+                event = Event::Batch { over: false };
             }
-            // The catch-up before the flush.
-            Step::Flush => event = Event::Batch { evict: false },
-            Step::Outer => {}
+            Step::Switch { partitions: count } => {
+                assert_eq!(count as usize, partitions);
+                switched = true;
+            }
+            Step::Split => panic!("a table split from the start split again"),
+            Step::Outer => assert!(switched, "the outer side before its level"),
             Step::Demote(partition) => {
                 write(&mut resident, &mut held, partition);
             }
@@ -777,6 +781,7 @@ fn spill_participant(
                 event = Event::Sent { freed };
             }
             Step::Write(partition) => {
+                assert!(switched, "a flush before its level");
                 assert_eq!(resident[partition as usize], 0, "{partition} kept on disk");
                 flushed[partition as usize] = Flushed::Written;
             }
@@ -836,5 +841,90 @@ fn participants_write_every_partition_another_sent_to_disk() {
         if ran.iter().all(|(_, built)| *built) {
             assert!(spill.evictions() > 0, "the budget sent one to disk");
         }
+    });
+}
+
+/// A participant that appends `bytes` to a table not split yet, past its
+/// budget, and splits it as its machine says into `wanted` partitions:
+/// it publishes its filter (a flag here) before it reports the plan, and
+/// when it makes its level the filter must be there, its own or
+/// another's. The partitions it made its level of, 0 for none.
+fn splitting_participant(
+    spill: &LoomSpill,
+    counters: &Counters<LoomCounterWords>,
+    filter: &::loom::sync::atomic::AtomicBool,
+    bytes: i64,
+    wanted: u32,
+) -> u32 {
+    use crate::shared::{Action as Step, Build as Machine, Event, Params};
+
+    let params = Params {
+        start: 1.0,
+        target: 1.0,
+        spilled: 0.0,
+        per_check: 1,
+        spare: 0,
+    };
+    let mut machine = Machine::new(&params).unwrap();
+    let start = machine.next(Event::Done, counters, spill, &[]).unwrap();
+    assert_eq!(start, Step::Attach);
+    let attached = Event::Attached {
+        phase: phases::BUILD,
+    };
+    let build = machine.next(attached, counters, spill, &[]).unwrap();
+    assert_eq!(build, Step::Build);
+    let over = spill.add_bytes(bytes, None).unwrap();
+    let mut event = Event::Batch { over };
+    loop {
+        let resident = vec![1_u8; spill.partitions() as usize];
+        match machine.next(event, counters, spill, &resident).unwrap() {
+            Step::Split => {
+                filter.store(true, Ordering::Relaxed);
+                event = Event::Planned { partitions: wanted };
+            }
+            Step::Switch { partitions } => {
+                assert!(
+                    filter.load(Ordering::Relaxed),
+                    "a split seen without its filter"
+                );
+                return partitions;
+            }
+            Step::Done => return 0,
+            step => panic!("{step:?} after a batch"),
+        }
+    }
+}
+
+/// Two participants pass a table's budget at once, each by its own
+/// count: in every order of their steps, both ask to split, one split
+/// holds, both make their levels of it, and neither sees the split before
+/// a filter is published.
+#[test]
+fn participants_past_the_budget_split_once_their_filter_is_published() {
+    let mut model = ::loom::model::Builder::new();
+    model.preemption_bound = Some(3);
+    model.check(|| {
+        let spill = Arc::new(loom_spill(8, 100));
+        let counters = Arc::new(Counters::over(LoomCounterWords(core::array::from_fn(
+            |_| AtomicU64::new(0),
+        ))));
+        let filter = Arc::new(::loom::sync::atomic::AtomicBool::new(false));
+        let threads: Vec<_> = [4_u32, 8]
+            .into_iter()
+            .map(|wanted| {
+                let (spill, counters, filter) = (spill.clone(), counters.clone(), filter.clone());
+                thread::spawn(move || {
+                    splitting_participant(&spill, &counters, &filter, 110, wanted)
+                })
+            })
+            .collect();
+        let levels: Vec<u32> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let partitions = spill.partitions();
+        assert!(partitions == 4 || partitions == 8, "{partitions}");
+        // Each passed the budget alone: both split, one split holds.
+        assert!(
+            levels.iter().all(|&level| level == partitions),
+            "{levels:?} of {partitions}"
+        );
     });
 }

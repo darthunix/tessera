@@ -10,13 +10,26 @@
 //! probe. This machine steps them and adds what a participant decides
 //! about the disk:
 //!
-//! - **While it appends.** After each batch of a table that split, the
-//!   host reports it ([`Event::Batch`]). A partition another participant
-//!   sent to disk goes to disk here too: the machine names each one this
-//!   participant still keeps in memory ([`Action::Demote`]). Then, while
-//!   the table's chunks take more than their budget, the largest
-//!   partition goes, by the rule of [`crate::shared_spill::Spill::evict`]
-//!   over the words every participant shares ([`Action::Send`]).
+//! - **While it appends.** After each batch the host reports it
+//!   ([`Event::Batch`]). A table without a level whose chunks passed their
+//!   budget splits: the machine asks the host for the level's plan and
+//!   for what every participant reads once it sees the split, the host's
+//!   filter of every inner row ([`Action::Split`]); only once they are
+//!   published ([`Event::Planned`]) does it split the words, so the first
+//!   split holds and no participant sees one without them. A participant
+//!   that sees the split makes its own level of it ([`Action::Switch`]).
+//!   Then, after each batch, a partition another participant sent to disk
+//!   goes to disk here too: the machine names each one this participant
+//!   still keeps in memory ([`Action::Demote`]); and while the table's
+//!   chunks take more than their budget, the largest partition goes, by
+//!   the rule of [`crate::shared_spill::Spill::evict`] over the words
+//!   every participant shares ([`Action::Send`]).
+//! - **A late participant.** One that attaches after the build, to a
+//!   table that split, catches up before the work of the flush, of the
+//!   outer side and of the probe, whichever it reaches first: it makes
+//!   its level and writes what went to disk, as after a batch, but sends
+//!   nothing, since the chunks no longer grow. The index's size and its
+//!   links touch no partition, and need no level.
 //! - **At the flush.** A table that never split has nothing to write,
 //!   and the participant goes on at once. One that split writes its
 //!   chunks of each partition on disk ([`Action::Write`]) and gives those
@@ -29,9 +42,10 @@
 //!
 //! ```text
 //!   Attach ──> Build ──> Flush ──> Size ──> Link ──> Outer ──> Probe ──> Leave
-//!               │  ^      │  ^                                   │
-//!         Batch v  │ Done  v  │ Done                             v
-//!             Demote, Send  Write, Keep                       Free, Finished
+//!               │  ^      │  ^                      │  ^      │  ^      │
+//!         Batch v  │ Done  v  │ Done                 v  │      v  │      v
+//!       Split, Switch,     Switch, Demote,        Switch,   Switch,   Free,
+//!       Demote, Send       Write, Keep            Demote    Demote    Finished
 //! ```
 //!
 //! The barriers are the host's: an action [`Action::Attach`],
@@ -82,13 +96,13 @@ pub enum Event {
     /// The barrier's arrive-and-detach returned; `last` when this
     /// participant was the last attached.
     Left { last: bool },
-    /// A batch of this participant's build went into a table that split,
-    /// or the participant caught up with one: the partitions others sent to
-    /// disk go there here too, and with `evict`, in the build only, the
-    /// largest go while the table's chunks pass their budget; a catch-up
-    /// at the flush, the outer side or the probe sends none, since the
-    /// chunks no longer grow.
-    Batch { evict: bool },
+    /// A batch of this participant's build went in; `over` when its count
+    /// of the table's chunks passed their budget.
+    Batch { over: bool },
+    /// The level of the last [`Action::Split`] is planned, of `partitions`,
+    /// and what every participant reads once it sees the split is
+    /// published.
+    Planned { partitions: u32 },
     /// The partition of the last [`Action::Send`] went to disk from here;
     /// `freed` when this participant's bytes of it in memory went down.
     Sent { freed: bool },
@@ -108,11 +122,15 @@ pub enum Action {
     /// Detach from the barrier without arriving, then [`Event::Done`].
     Detach,
     /// Append this participant's share of the inner side, reporting each
-    /// batch of a table that split; then [`Event::Done`].
+    /// batch; then [`Event::Done`].
     Build,
-    /// The table split: catch up with its level, then [`Event::Done`];
-    /// the partitions follow.
-    Flush,
+    /// The table passed its budget with no level: plan its level, publish
+    /// what every participant reads once it sees the split, then
+    /// [`Event::Planned`].
+    Split,
+    /// The table split into `partitions`: make this participant's level of
+    /// them and move its chunks into it, then [`Event::Done`].
+    Switch { partitions: u32 },
     /// Write this participant's chunks of the partition to disk, then
     /// [`Event::Done`].
     Write(u32),
@@ -161,7 +179,7 @@ const ARRIVE: u32 = 2;
 const LEAVE: u32 = 3;
 const DETACH: u32 = 4;
 const BUILD: u32 = 5;
-const FLUSH: u32 = 6;
+const SPLIT: u32 = 6;
 const WRITE: u32 = 7;
 const FLUSH_END: u32 = 8;
 const SIZE: u32 = 9;
@@ -171,6 +189,7 @@ const PROBE: u32 = 12;
 const FINISHED: u32 = 13;
 const DEMOTE: u32 = 14;
 const SEND: u32 = 15;
+const SWITCH: u32 = 16;
 
 // Where a batch's check of the spill stands.
 const SETTLED: u32 = 0;
@@ -187,7 +206,9 @@ const SENDING: u32 = 2;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Build {
     participant: Participant,
-    /// The action given last, and the work a check of the spill came in.
+    /// The action given last, and the work a check of the spill came in:
+    /// the build, the flush (as [`Action::Write`]'s code), the outer side or
+    /// the probe.
     given: u32,
     work: u32,
     /// The check of the spill: its stage, and whether it sends after it
@@ -197,9 +218,8 @@ pub struct Build {
     evict: u32,
     cursor: u32,
     evicted: u32,
-    /// 0: the words are whole, with no byte of padding a host would hold
-    /// unwritten.
-    spare: u32,
+    /// Whether this participant made its level of the table's split.
+    switched: u32,
     /// The evictions of the table this participant has seen.
     seen: u64,
     params: Params,
@@ -226,7 +246,7 @@ impl Build {
             evict: 0,
             cursor: 0,
             evicted: 0,
-            spare: 0,
+            switched: 0,
             seen: 0,
             params: *params,
         })
@@ -244,8 +264,10 @@ impl Build {
     /// words of no size [`crate::shared_spill::words_for`] gives
     /// ([`Rule::SpillWords`]); flags of partitions kept in memory for
     /// another number of partitions than the table's
-    /// ([`Rule::ResidentFlags`]); and those of the phases
-    /// ([`Participant::step`]). The machine is then as it was.
+    /// ([`Rule::ResidentFlags`]); a split into a count of partitions the
+    /// words do not take ([`crate::shared_spill::Spill::split`]); and those
+    /// of the phases ([`Participant::step`]). The machine is then as it
+    /// was.
     pub fn step(&mut self, event: Event, host: &Host<'_>) -> Result<Action> {
         let counters = SharedCounters::new(host.counters);
         let spill = SharedSpill::new(host.spill)?;
@@ -293,51 +315,44 @@ impl Build {
                     _ => 0,
                 };
                 let action = phases(self, reply)?;
-                self.enter(action, counters, spill)
+                self.enter(action, counters, spill, resident)
             }
             (ARRIVE, Event::Arrived { elected }) => {
                 let action = phases(self, u32::from(elected))?;
-                self.enter(action, counters, spill)
+                self.enter(action, counters, spill, resident)
             }
             (LEAVE, Event::Left { last }) => {
                 let action = phases(self, u32::from(last))?;
-                self.enter(action, counters, spill)
+                self.enter(action, counters, spill, resident)
             }
-            (BUILD | FLUSH | OUTER | PROBE, Event::Batch { evict }) => {
-                ensure!(
-                    spill.partitions() > 0,
-                    Error::wrong_call(Rule::JoinEvent)
-                        .with(self.given)
-                        .and(event_code(&event))
-                );
-                self.work = self.given;
-                self.evict = u32::from(evict && self.given == BUILD);
-                self.stage = DEMOTING;
-                self.cursor = 0;
-                let evictions = spill.evictions();
-                if evictions == self.seen {
-                    // Nothing went to disk since the last check.
-                    self.cursor = spill.partitions();
+            (BUILD, Event::Batch { over }) => {
+                self.work = BUILD;
+                if self.switched != 0 {
+                    return self.check_spill(spill, resident, true);
                 }
-                self.seen = evictions;
-                self.demote(spill, resident)
+                if spill.partitions() > 0 {
+                    return Ok(self.switch(spill.partitions()));
+                }
+                Ok(if over { Action::Split } else { Action::Done })
             }
+            (SPLIT, Event::Planned { partitions }) => {
+                // The first split holds: this one's, or another's.
+                let in_force = spill.split(partitions)?;
+                Ok(self.switch(in_force))
+            }
+            (SWITCH, Event::Done) => self.check_spill(spill, resident, self.work == BUILD),
             (DEMOTE, Event::Done) => self.demote(spill, resident),
             (SEND, Event::Sent { freed }) => {
                 if !freed {
-                    return Ok(self.settle());
+                    return self.settle(spill);
                 }
                 self.evicted += 1;
                 self.send(spill)
             }
-            (FLUSH, Event::Done) => {
-                self.cursor = 0;
-                self.flush(spill)
-            }
             (WRITE, Event::Done) => self.flush(spill),
             (BUILD | FLUSH_END | SIZE | LINK | OUTER | PROBE, Event::Done) => {
                 let action = phases(self, 0)?;
-                self.enter(action, counters, spill)
+                self.enter(action, counters, spill, resident)
             }
             (given, event) => Err(Error::wrong_call(Rule::JoinEvent)
                 .with(given)
@@ -349,10 +364,10 @@ impl Build {
     /// and parameters it was made of.
     fn check(&self) -> Result<()> {
         ensure!(
-            self.given <= SEND
+            self.given <= SWITCH
                 && self.stage <= SENDING
                 && self.evict <= 1
-                && self.spare == 0
+                && self.switched <= 1
                 && counted(&self.params),
             Error::wrong_call(Rule::JoinState).with(self.given)
         );
@@ -360,12 +375,14 @@ impl Build {
     }
 
     /// The first action of what the phases ask for: the work of the flush
-    /// and of the outer side only for a table that split.
+    /// and of the outer side only for a table that split, after the
+    /// catch-up, as the probe of such a table.
     fn enter<C: CounterWords, S: Words>(
         &mut self,
         action: phases::Action,
         counters: &Counters<C>,
         spill: &Spill<S>,
+        resident: &[u8],
     ) -> Result<Action> {
         let split = spill.partitions() > 0;
         Ok(match action {
@@ -378,18 +395,60 @@ impl Build {
             phases::Action::Build => Action::Build,
             phases::Action::Size => Action::Size,
             phases::Action::Link => Action::Link,
+            phases::Action::Probe if split => return self.catch_up(PROBE, spill, resident),
             phases::Action::Probe => Action::Probe { split },
-            phases::Action::Flush if split => Action::Flush,
-            phases::Action::Outer if split => Action::Outer,
+            phases::Action::Flush if split => return self.catch_up(WRITE, spill, resident),
+            phases::Action::Outer if split => return self.catch_up(OUTER, spill, resident),
             // Nothing to write: the phase's work is done at once.
             phases::Action::Flush | phases::Action::Outer => {
                 let action = self.participant.next(counters, 0)?;
-                return self.enter(action, counters, spill);
+                return self.enter(action, counters, spill, resident);
             }
             phases::Action::Allocate | phases::Action::Load => {
                 return Err(Error::wrong_call(Rule::JoinState).with(self.given));
             }
         })
+    }
+
+    /// Before the work of a phase of a table that split: this
+    /// participant's level first, if it has none, then what went to disk.
+    fn catch_up<S: Words>(
+        &mut self,
+        work: u32,
+        spill: &Spill<S>,
+        resident: &[u8],
+    ) -> Result<Action> {
+        self.work = work;
+        if self.switched == 0 {
+            return Ok(self.switch(spill.partitions()));
+        }
+        self.check_spill(spill, resident, false)
+    }
+
+    /// This participant's level of the split, of `partitions`.
+    fn switch(&mut self, partitions: u32) -> Action {
+        self.switched = 1;
+        Action::Switch { partitions }
+    }
+
+    /// A check of the spill: what went to disk since the last one, then,
+    /// with `evict`, the sends.
+    fn check_spill<S: Words>(
+        &mut self,
+        spill: &Spill<S>,
+        resident: &[u8],
+        evict: bool,
+    ) -> Result<Action> {
+        self.stage = DEMOTING;
+        self.evict = u32::from(evict);
+        self.cursor = 0;
+        let evictions = spill.evictions();
+        if evictions == self.seen {
+            // Nothing went to disk since the last check.
+            self.cursor = spill.partitions();
+        }
+        self.seen = evictions;
+        self.demote(spill, resident)
     }
 
     /// The next partition on disk that this participant keeps in memory;
@@ -410,7 +469,7 @@ impl Build {
             }
         }
         if self.evict == 0 {
-            return Ok(self.settle());
+            return self.settle(spill);
         }
         self.stage = SENDING;
         self.evicted = 0;
@@ -427,19 +486,26 @@ impl Build {
             resident: 0.0,
             per_check: self.params.per_check,
         };
-        Ok(
-            match spill.evict(&weights, Memory::Counted, None, self.evicted)? {
-                Some(partition) => Action::Send(partition),
-                None => self.settle(),
-            },
-        )
+        match spill.evict(&weights, Memory::Counted, None, self.evicted)? {
+            Some(partition) => Ok(Action::Send(partition)),
+            None => self.settle(spill),
+        }
     }
 
-    /// The check of the spill is over: the work it came in goes on.
-    fn settle(&mut self) -> Action {
+    /// The check of the spill is over: the work it came in goes on, or
+    /// that of the phase it caught up before begins.
+    fn settle<S: Words>(&mut self, spill: &Spill<S>) -> Result<Action> {
         self.stage = SETTLED;
         self.evict = 0;
-        Action::Done
+        Ok(match self.work {
+            WRITE => {
+                self.cursor = 0;
+                return self.flush(spill);
+            }
+            OUTER => Action::Outer,
+            PROBE => Action::Probe { split: true },
+            _ => Action::Done,
+        })
     }
 
     /// The next partition of the flush, written or kept; then the end.
@@ -474,7 +540,8 @@ fn code(action: Action) -> u32 {
         Action::ArriveAndDetach => LEAVE,
         Action::Detach => DETACH,
         Action::Build => BUILD,
-        Action::Flush => FLUSH,
+        Action::Split => SPLIT,
+        Action::Switch { .. } => SWITCH,
         Action::Write(_) | Action::Keep(_) => WRITE,
         Action::FlushEnd => FLUSH_END,
         Action::Size => SIZE,
@@ -497,6 +564,7 @@ fn event_code(event: &Event) -> u32 {
         Event::Left { .. } => 4,
         Event::Batch { .. } => 5,
         Event::Sent { .. } => 6,
+        Event::Planned { .. } => 7,
     }
 }
 

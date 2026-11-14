@@ -118,12 +118,18 @@ own, so none is unlinked from a list others add to.
 **The build's machine.** Each participant steps a machine of the crate
 `relspill` (its module `shared`) through the build's phases: it says
 when to attach, arrive and wait at the build's barrier, and what to do
-in each phase; after each batch of a table that split, which partitions
-others sent to disk this participant still keeps and must write, and
-which partition to send while the chunks pass the budget; at `FLUSH`,
-each partition to write or to give to the table; and whether `FLUSH` and
-`OUTER` have work at all, which they have only when the table split. The
-barrier's waits stay the node's.
+in each phase. After each batch: a table without a level whose chunks
+passed the budget splits, the node planning the level and publishing the
+filter before the machine splits the words, so the first split holds and
+no participant sees it without the filter; a participant that sees the
+split makes its level of it; then the partitions others sent to disk
+that this participant still keeps are written, and the partition to send
+while the chunks pass the budget. A participant that attaches after the
+build to a table that split makes its level and writes what went to disk
+before the work of `FLUSH`, `OUTER` or the probe, whichever it reaches
+first. At `FLUSH` the machine names each partition to write or to give
+to the table, and `FLUSH` and `OUTER` have work only when the table
+split. The barrier's waits stay the node's.
 
 After the inner side (`FLUSH`), each participant writes its tails of
 the partitions on disk and hands its chunks of the others to the table,

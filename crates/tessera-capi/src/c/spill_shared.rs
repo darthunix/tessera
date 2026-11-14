@@ -53,16 +53,17 @@ pub struct SharedBuildHost {
 }
 
 /// `TessSharedBuildEvent`: a step of a participant; see [`Event`].
-/// `phase` is that of [`SHARED_ATTACHED`]; `flag` whether the barrier
-/// elected the participant ([`SHARED_ARRIVED`]), found it the last
-/// ([`SHARED_LEFT`]), whether a batch sends ([`SHARED_BATCH`]) and
-/// whether a send freed bytes ([`SHARED_SENT`]).
+/// `value` is the phase of [`SHARED_ATTACHED`] and the partitions of
+/// [`SHARED_PLANNED`]; `flag` whether the barrier elected the participant
+/// ([`SHARED_ARRIVED`]), found it the last ([`SHARED_LEFT`]), whether a
+/// batch's count passed the budget ([`SHARED_BATCH`]) and whether a send
+/// freed bytes ([`SHARED_SENT`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SharedBuildEvent {
     pub kind: u32,
     pub flag: u32,
-    pub phase: u32,
+    pub value: u32,
     pub spare: u32,
 }
 
@@ -73,11 +74,12 @@ pub const SHARED_ARRIVED: u32 = 3;
 pub const SHARED_LEFT: u32 = 4;
 pub const SHARED_BATCH: u32 = 5;
 pub const SHARED_SENT: u32 = 6;
+pub const SHARED_PLANNED: u32 = 7;
 
 /// `TessSharedBuildAction`: what a participant does next; see
 /// [`Action`]. `partition` is that of [`SHARED_WRITE`], [`SHARED_KEEP`],
-/// [`SHARED_DEMOTE`] and [`SHARED_SEND`]; `flag` whether the table split
-/// ([`SHARED_PROBE`]).
+/// [`SHARED_DEMOTE`] and [`SHARED_SEND`], and the partitions of
+/// [`SHARED_SWITCH`]; `flag` whether the table split ([`SHARED_PROBE`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SharedBuildAction {
@@ -94,7 +96,7 @@ pub const SHARED_ARRIVE_AND_WAIT: u32 = 2;
 pub const SHARED_ARRIVE_AND_DETACH: u32 = 3;
 pub const SHARED_DETACH: u32 = 4;
 pub const SHARED_BUILD: u32 = 5;
-pub const SHARED_FLUSH: u32 = 6;
+pub const SHARED_SPLIT: u32 = 6;
 pub const SHARED_WRITE: u32 = 7;
 pub const SHARED_KEEP: u32 = 8;
 pub const SHARED_FLUSH_END: u32 = 9;
@@ -106,6 +108,7 @@ pub const SHARED_FREE: u32 = 14;
 pub const SHARED_FINISHED: u32 = 15;
 pub const SHARED_DEMOTE: u32 = 16;
 pub const SHARED_SEND: u32 = 17;
+pub const SHARED_SWITCH: u32 = 18;
 
 impl SharedBuildEvent {
     fn event(&self) -> Result<Event> {
@@ -121,11 +124,14 @@ impl SharedBuildEvent {
         };
         Ok(match self.kind {
             SHARED_DONE => Event::Done,
-            SHARED_ATTACHED => Event::Attached { phase: self.phase },
+            SHARED_ATTACHED => Event::Attached { phase: self.value },
             SHARED_ARRIVED => Event::Arrived { elected: flag },
             SHARED_LEFT => Event::Left { last: flag },
-            SHARED_BATCH => Event::Batch { evict: flag },
+            SHARED_BATCH => Event::Batch { over: flag },
             SHARED_SENT => Event::Sent { freed: flag },
+            SHARED_PLANNED => Event::Planned {
+                partitions: self.value,
+            },
             kind => bail!("a shared build event of kind {kind}"),
         })
     }
@@ -140,7 +146,8 @@ impl SharedBuildAction {
             Action::ArriveAndDetach => (SHARED_ARRIVE_AND_DETACH, 0, false),
             Action::Detach => (SHARED_DETACH, 0, false),
             Action::Build => (SHARED_BUILD, 0, false),
-            Action::Flush => (SHARED_FLUSH, 0, false),
+            Action::Split => (SHARED_SPLIT, 0, false),
+            Action::Switch { partitions } => (SHARED_SWITCH, partitions, false),
             Action::Write(partition) => (SHARED_WRITE, partition, false),
             Action::Keep(partition) => (SHARED_KEEP, partition, false),
             Action::FlushEnd => (SHARED_FLUSH_END, 0, false),
