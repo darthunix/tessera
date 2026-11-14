@@ -50,7 +50,7 @@
 //!   ([`Action::LevelDone`]).
 //!
 //! An event that the machine's phase does not take is a wrong call
-//! ([`Rule::JoinEvent`]), and the machine stays as it was. The machine
+//! ([`Rule::MachineEvent`]), and the machine stays as it was. The machine
 //! does nothing for each row, holds no memory and allocates nothing: it
 //! is plain data the host keeps, and every region it reads comes in a
 //! [`Host`] at each step.
@@ -245,7 +245,7 @@ const DONE: u32 = 8;
 /// It is plain data of a fixed layout, [`GROUP_WORDS`] words of 8 bytes,
 /// so that a host in another language keeps it in memory of its own; a
 /// step checks what it reads, and memory that is no machine is a wrong
-/// call ([`Rule::JoinState`]).
+/// call ([`Rule::MachineState`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Group {
@@ -282,7 +282,7 @@ impl Group {
     /// The machine of a grouping whose table fits so far.
     ///
     /// A wrong call: a limit of 0, or a weight below zero or not finite
-    /// ([`Rule::JoinParams`]); and a shape that no level can be planned by
+    /// ([`Rule::MachineParams`]); and a shape that no level can be planned by
     /// ([`plan::plan`]). Any `fill` is eighths: 0 makes any table with a
     /// group full, 8 or more one past the limit.
     pub fn new(params: &Params) -> Result<Self> {
@@ -312,7 +312,7 @@ impl Group {
     pub fn below(params: &Params, below: &Below) -> Result<(Self, Plan)> {
         ensure!(
             below.level > 0,
-            Error::wrong_call(Rule::JoinLevel).with(below.level)
+            Error::wrong_call(Rule::LevelBelow).with(below.level)
         );
         let mut group = Self::new(params)?;
         let plan =
@@ -327,12 +327,12 @@ impl Group {
 
     /// Take the host's event and give its next action.
     ///
-    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
-    /// event its phase does not take ([`Rule::JoinEvent`]); a partition
+    /// A wrong call: memory that is no machine ([`Rule::MachineState`]); an
+    /// event its phase does not take ([`Rule::MachineEvent`]); a partition
     /// past the level's ([`Rule::Partition`]); spill words that are not
     /// the level's ([`Rule::SpillWords`]); counts of records or bytes on
     /// disk for another number of partitions ([`Rule::RecordCounts`],
-    /// [`Rule::JoinDisk`]); and those of [`plan::plan`] for the level to
+    /// [`Rule::DiskCounts`]); and those of [`plan::plan`] for the level to
     /// start. The machine is then as it was, though a refused
     /// [`Event::Made`] may have cleared the words.
     pub fn step(&mut self, event: Event, host: &Host<'_>) -> Result<Action> {
@@ -429,7 +429,7 @@ impl Group {
                     memory,
                 },
             ) => self.weigh(host, groups, others, memory),
-            _ => Err(Error::wrong_call(Rule::JoinEvent)
+            _ => Err(Error::wrong_call(Rule::MachineEvent)
                 .with(phase)
                 .and(code(&event))),
         }
@@ -439,7 +439,7 @@ impl Group {
     fn phase(&self) -> Result<u32> {
         ensure!(
             (FITS..=DONE).contains(&self.phase),
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         Ok(self.phase)
     }
@@ -472,7 +472,7 @@ impl Group {
         let partitions = self.partitions as usize;
         for (what, len) in [
             (Rule::RecordCounts, host.records.len()),
-            (Rule::JoinDisk, host.disk.len()),
+            (Rule::DiskCounts, host.disk.len()),
         ] {
             ensure!(
                 len == partitions,
@@ -593,7 +593,7 @@ impl Group {
         // The partition the cursor passed last, Weigh's.
         ensure!(
             (1..=self.partitions).contains(&self.cursor),
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         let partition = self.cursor - 1;
         let index = partition as usize;
@@ -622,7 +622,7 @@ impl Group {
                 level: self
                     .level
                     .checked_add(1)
-                    .ok_or(Error::wrong_call(Rule::JoinState).with(self.phase))?,
+                    .ok_or(Error::wrong_call(Rule::MachineState).with(self.phase))?,
                 expected: host.disk[index].saturating_add(spill.held(partition)?),
                 limit: plan::below_limit(self.params.limit, memory),
                 shift: self.below,
@@ -648,7 +648,7 @@ fn check(params: &Params) -> Result<()> {
             && weights
                 .iter()
                 .all(|weight| weight.is_finite() && *weight >= 0.0),
-        Error::wrong_call(Rule::JoinParams)
+        Error::wrong_call(Rule::MachineParams)
     );
     plan::plan(
         &params.shape,
@@ -657,7 +657,7 @@ fn check(params: &Params) -> Result<()> {
     Ok(())
 }
 
-/// The number of an event in a [`Rule::JoinEvent`].
+/// The number of an event in a [`Rule::MachineEvent`].
 fn code(event: &Event) -> u32 {
     match event {
         Event::Inner { .. } => 1,
@@ -803,10 +803,10 @@ impl Rows {
     /// The machine of the table of a grouping's input, whose rows go to
     /// the first level once frozen.
     ///
-    /// A wrong call: a limit of 0 ([`Rule::JoinParams`]), and a shape no
+    /// A wrong call: a limit of 0 ([`Rule::MachineParams`]), and a shape no
     /// level can be planned by ([`plan::plan`]).
     pub fn new(params: &RowsParams) -> Result<Self> {
-        ensure!(params.limit > 0, Error::wrong_call(Rule::JoinParams));
+        ensure!(params.limit > 0, Error::wrong_call(Rule::MachineParams));
         plan::plan(
             &params.shape,
             &Level::first(usize::try_from(params.limit).unwrap_or(usize::MAX)),
@@ -839,8 +839,8 @@ impl Rows {
 
     /// Take the host's event and give its next action.
     ///
-    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
-    /// event its phase does not take ([`Rule::JoinEvent`]); counts of
+    /// A wrong call: memory that is no machine ([`Rule::MachineState`]); an
+    /// event its phase does not take ([`Rule::MachineEvent`]); counts of
     /// rows for another number of partitions ([`Rule::PartitionRows`]);
     /// and those of [`plan::plan`] for the level to freeze into. The
     /// machine is then as it was.
@@ -854,7 +854,7 @@ impl Rows {
     fn take(&mut self, event: RowsEvent, host: &RowsHost<'_>) -> Result<RowsAction> {
         ensure!(
             (ROWS_TABLE..=ROWS_DONE).contains(&self.phase),
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         match (self.phase, event) {
             (ROWS_TABLE, RowsEvent::Grown { memory, records }) => {
@@ -899,7 +899,7 @@ impl Rows {
                         let level = self
                             .level
                             .checked_add(1)
-                            .ok_or(Error::wrong_call(Rule::JoinState).with(self.phase))?;
+                            .ok_or(Error::wrong_call(Rule::MachineState).with(self.phase))?;
                         return Ok(RowsAction::Read(Table {
                             partition,
                             level,
@@ -912,7 +912,7 @@ impl Rows {
                 Ok(RowsAction::LevelDone)
             }
             (phase, event) => {
-                Err(Error::wrong_call(Rule::JoinEvent)
+                Err(Error::wrong_call(Rule::MachineEvent)
                     .with(phase)
                     .and(match event {
                         RowsEvent::Grown { .. } => 1,

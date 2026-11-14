@@ -177,13 +177,16 @@ fn an_event_out_of_turn_is_refused_and_changes_nothing() {
         },
     ] {
         let before = group;
-        assert_eq!(wrong(group.step(event, &regions.host())), Rule::JoinEvent);
+        assert_eq!(
+            wrong(group.step(event, &regions.host())),
+            Rule::MachineEvent
+        );
         assert_eq!(group, before);
     }
     let mut none = Group { phase: 0, ..group };
     assert_eq!(
         wrong(none.step(Event::InputEnd, &regions.host())),
-        Rule::JoinState
+        Rule::MachineState
     );
     let full = Event::Full {
         partition: 64,
@@ -233,7 +236,7 @@ fn the_first_level_keeps_its_chunks_and_a_level_below_writes_them() {
     let first = Below { level: 0, ..below };
     assert_eq!(
         wrong(Group::below(&params(1 << 20), &first)),
-        Rule::JoinLevel
+        Rule::LevelBelow
     );
 }
 
@@ -370,7 +373,7 @@ fn a_partial_grouping_sends_its_table_up_or_spills_it() {
     let refused = group
         .step(partial(full, 1001, 2000, true), &regions.host())
         .expect_err("a wrong call");
-    assert_eq!(refused.rule(), Rule::JoinEvent);
+    assert_eq!(refused.rule(), Rule::MachineEvent);
     // The phase, building, and the event, a partial one.
     assert_eq!(refused.numbers(), (3, 9));
 }
@@ -434,7 +437,7 @@ fn the_input_ends_with_writes_then_gives_out_in_memory_first() {
     );
     assert_eq!(
         wrong(group.step(Event::Next, &regions.host())),
-        Rule::JoinEvent
+        Rule::MachineEvent
     );
 }
 
@@ -510,7 +513,10 @@ fn a_partition_weighs_what_the_others_take() {
     ];
     for mut group in broken {
         let before = group;
-        assert_eq!(wrong(group.step(weighed, &regions.host())), Rule::JoinState);
+        assert_eq!(
+            wrong(group.step(weighed, &regions.host())),
+            Rule::MachineState
+        );
         assert_eq!(group, before);
     }
 }
@@ -551,7 +557,7 @@ fn parameters_are_checked() {
             ..good
         },
     ] {
-        assert_eq!(wrong(Group::new(&bad)), Rule::JoinParams);
+        assert_eq!(wrong(Group::new(&bad)), Rule::MachineParams);
     }
 }
 
@@ -1006,9 +1012,9 @@ fn a_table_of_rows_freezes_past_its_fill_with_groups_enough() {
     assert_eq!((plan.partitions, plan.shift), (32, 0));
     assert_eq!(
         wrong(rows.step(grown(fill + 1, 64), &none)),
-        Rule::JoinEvent
+        Rule::MachineEvent
     );
-    assert_eq!(wrong(rows.step(RowsEvent::Next, &none)), Rule::JoinEvent);
+    assert_eq!(wrong(rows.step(RowsEvent::Next, &none)), Rule::MachineEvent);
     assert_eq!(rows.step(RowsEvent::Written, &none), Ok(RowsAction::Done));
     // The partitions with rows in turn, each a table one level below.
     let mut written = vec![0; 32];
@@ -1033,7 +1039,7 @@ fn a_table_of_rows_freezes_past_its_fill_with_groups_enough() {
     assert_eq!(rows.step(RowsEvent::Next, &host), Ok(read(3)));
     assert_eq!(rows.step(RowsEvent::Next, &host), Ok(read(17)));
     assert_eq!(rows.step(RowsEvent::Next, &host), Ok(RowsAction::LevelDone));
-    assert_eq!(wrong(rows.step(RowsEvent::Next, &host)), Rule::JoinEvent);
+    assert_eq!(wrong(rows.step(RowsEvent::Next, &host)), Rule::MachineEvent);
 }
 
 #[test]
@@ -1077,7 +1083,10 @@ fn a_partition_read_at_the_last_bits_is_last() {
         level: u32::MAX,
         ..reading
     };
-    assert_eq!(wrong(deepest.step(RowsEvent::Next, &host)), Rule::JoinState);
+    assert_eq!(
+        wrong(deepest.step(RowsEvent::Next, &host)),
+        Rule::MachineState
+    );
     assert_eq!(deepest.cursor, reading.cursor);
 }
 
@@ -1113,7 +1122,7 @@ fn the_table_of_the_last_level_never_freezes() {
     };
     assert_eq!((plan.shift, plan.below), (10, 15));
     let bad = RowsParams { limit: 0, ..params };
-    assert_eq!(wrong(Rows::new(&bad)), Rule::JoinParams);
+    assert_eq!(wrong(Rows::new(&bad)), Rule::MachineParams);
 }
 
 /// A table of the rows model: each key's count, and whether it takes no

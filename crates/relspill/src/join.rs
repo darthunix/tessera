@@ -71,7 +71,7 @@
 //!   once more, without a table ([`Action::FinalPass`]).
 //!
 //! An event that the machine's phase does not take is a wrong call
-//! ([`Rule::JoinEvent`]), and the machine stays as it was. The machine
+//! ([`Rule::MachineEvent`]), and the machine stays as it was. The machine
 //! decides by the numbers the host gives: its memory, its bytes and its
 //! rows. It does nothing for each row: the host puts the rows into their
 //! partitions, and where a decision is made for each row, the machine
@@ -407,7 +407,7 @@ const TAIL_GIVEN: u32 = 32;
 /// It is plain data of a fixed layout, [`JOIN_WORDS`] words of 8 bytes,
 /// so that a host in another language keeps it in memory of its own; a
 /// step checks what it reads, and memory that is no machine is a wrong
-/// call ([`Rule::JoinState`]).
+/// call ([`Rule::MachineState`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Join {
@@ -450,7 +450,7 @@ impl Join {
     /// The machine of a join whose table fits so far.
     ///
     /// A wrong call: a limit of 0 or weights below zero or not finite
-    /// ([`Rule::JoinParams`]); outer rows of more words than a chunk of
+    /// ([`Rule::MachineParams`]); outer rows of more words than a chunk of
     /// columns stores ([`Rule::ColumnsWords`]); and a shape that no level
     /// can be planned by ([`plan::plan`]).
     pub fn new(params: &Params) -> Result<Self> {
@@ -487,7 +487,7 @@ impl Join {
     pub fn below(params: &Params, below: &Below) -> Result<(Self, Start)> {
         ensure!(
             below.level > 0,
-            Error::wrong_call(Rule::JoinLevel).with(below.level)
+            Error::wrong_call(Rule::LevelBelow).with(below.level)
         );
         let mut join = Self::new(params)?;
         let start =
@@ -517,8 +517,8 @@ impl Join {
 
     /// Take the host's event and give its next action.
     ///
-    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
-    /// event its phase does not take ([`Rule::JoinEvent`]); a partition
+    /// A wrong call: memory that is no machine ([`Rule::MachineState`]); an
+    /// event its phase does not take ([`Rule::MachineEvent`]); a partition
     /// past the level's ([`Rule::Partition`]); spill words that are not
     /// the level's ([`Rule::SpillWords`]); counts of rows or routes for
     /// another number of partitions ([`Rule::RecordCounts`],
@@ -692,7 +692,7 @@ impl Join {
                 self.phase = self.home;
                 Ok(Action::Done)
             }
-            _ => Err(Error::wrong_call(Rule::JoinEvent)
+            _ => Err(Error::wrong_call(Rule::MachineEvent)
                 .with(phase)
                 .and(code(&event))),
         }
@@ -702,7 +702,7 @@ impl Join {
     fn phase(&self) -> Result<u32> {
         ensure!(
             (FITS..=TAIL).contains(&self.phase),
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         Ok(self.phase)
     }
@@ -854,7 +854,7 @@ impl Join {
         for (what, len) in [
             (Rule::RecordCounts, host.rows.len()),
             (Rule::JoinOuter, host.outer.len()),
-            (Rule::JoinDisk, host.disk.len()),
+            (Rule::DiskCounts, host.disk.len()),
         ] {
             ensure!(
                 len == partitions,
@@ -973,7 +973,7 @@ fn check(params: &Params) -> Result<()> {
             && weights
                 .iter()
                 .all(|weight| weight.is_finite() && *weight >= 0.0),
-        Error::wrong_call(Rule::JoinParams)
+        Error::wrong_call(Rule::MachineParams)
     );
     ensure!(
         params.outer_words <= columns::MAX_WORDS as u64,
@@ -988,7 +988,7 @@ fn check(params: &Params) -> Result<()> {
     Ok(())
 }
 
-/// The number of an event in a [`Rule::JoinEvent`].
+/// The number of an event in a [`Rule::MachineEvent`].
 fn code(event: &Event) -> u32 {
     match event {
         Event::Inner { .. } => 1,

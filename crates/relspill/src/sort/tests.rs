@@ -472,12 +472,12 @@ fn the_runs_refuse_what_is_no_step() -> Result<()> {
         },
     ];
     for params in bad {
-        assert_eq!(wrong(Runs::new(&params)), Rule::JoinParams, "{params:?}");
+        assert_eq!(wrong(Runs::new(&params)), Rule::MachineParams, "{params:?}");
     }
     let (mut machine, _) = Runs::new(&good)?;
     let made = machine;
     for event in [Event::Next, Event::Rescan] {
-        assert_eq!(wrong(machine.step(event)), Rule::JoinEvent, "{event:?}");
+        assert_eq!(wrong(machine.step(event)), Rule::MachineEvent, "{event:?}");
         assert_eq!(machine, made);
     }
     // A sort that wrote no run is done at its end.
@@ -494,7 +494,7 @@ fn the_runs_refuse_what_is_no_step() -> Result<()> {
         Event::Rescan,
         Event::InputEnd { rows: 0 },
     ] {
-        assert_eq!(wrong(machine.step(event)), Rule::JoinEvent, "{event:?}");
+        assert_eq!(wrong(machine.step(event)), Rule::MachineEvent, "{event:?}");
         assert_eq!(machine, done);
     }
     // Words that are no machine.
@@ -517,7 +517,7 @@ fn the_runs_refuse_what_is_no_step() -> Result<()> {
     ];
     for mut machine in broken {
         let before = machine;
-        assert_eq!(wrong(machine.step(grown)), Rule::JoinState, "{before:?}");
+        assert_eq!(wrong(machine.step(grown)), Rule::MachineState, "{before:?}");
         assert_eq!(machine, before);
     }
     // A run past what a u32 counts.
@@ -525,7 +525,7 @@ fn the_runs_refuse_what_is_no_step() -> Result<()> {
         runs: u32::MAX,
         ..made
     };
-    assert_eq!(wrong(full.step(grown)), Rule::JoinState);
+    assert_eq!(wrong(full.step(grown)), Rule::MachineState);
     assert_eq!(full.runs, u32::MAX);
     // A run kept past what a u32 counts.
     let mut kept = Runs {
@@ -536,11 +536,11 @@ fn the_runs_refuse_what_is_no_step() -> Result<()> {
         ..made
     };
     let before = kept;
-    assert_eq!(wrong(kept.step(Event::Next)), Rule::JoinState);
+    assert_eq!(wrong(kept.step(Event::Next)), Rule::MachineState);
     assert_eq!(kept, before);
     // At the end of the input too, the phase as it was.
     let end = Event::InputEnd { rows: 1 };
-    assert_eq!(wrong(full.step(end)), Rule::JoinState);
+    assert_eq!(wrong(full.step(end)), Rule::MachineState);
     assert_eq!(
         full,
         Runs {
