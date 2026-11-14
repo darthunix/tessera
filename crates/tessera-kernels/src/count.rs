@@ -10,7 +10,7 @@
 //! non-NULL bits of a dense block with a population count; otherwise it
 //! reads through [`ColumnReader::try_fold_selected`].
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use crate::BULK_MIN_ROWS;
@@ -58,6 +58,12 @@ pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usiz
 /// the tail and refused words through the word iterator's bulk fold.
 #[inline(never)]
 fn count_bulk<C: ColumnReader>(simd: Simd, column: &C, rows: &RowMaskView<'_>) -> Result<usize> {
+    // As the row path does: whole words alone would miss rows that the
+    // shorter side lacks and the selection does not take.
+    ensure!(
+        column.nrows() == rows.nrows(),
+        "column and selection row counts differ"
+    );
     let mut count = 0;
     // The two shapes of the loop of the aggregates, which says why.
     #[cfg(target_arch = "x86_64")]

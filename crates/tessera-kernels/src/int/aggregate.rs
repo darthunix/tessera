@@ -1,7 +1,7 @@
 //! The drivers of the aggregates over selected integer values: the least
 //! and the greatest of both widths, and the loop the int4 sum shares.
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use super::IntLane;
@@ -97,6 +97,12 @@ fn aggregate_bulk<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     mut fold: impl FnMut(B, Option<T>) -> B,
     mut block: impl for<'a> FnMut(B, T::Aggregates, WordBlock<'a, T>, u64) -> B,
 ) -> Result<B> {
+    // As the row path does: whole words alone would miss rows that the
+    // shorter side lacks and the selection does not take.
+    ensure!(
+        column.nrows() == rows.nrows(),
+        "column and selection row counts differ"
+    );
     let mut acc = init;
     // On x86-64 one test for empty and single-row words, told apart inside:
     // a `continue` for empty words became a loop of its own, and every
