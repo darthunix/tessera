@@ -143,7 +143,7 @@ tess_kernels_layout_matches(void)
 		tess_group_layout(TESS_GROUP_HOST_SIZE) == sizeof(TessGroupHost) &&
 		tess_group_layout(TESS_GROUP_HOST_NDISK_OFFSET) == offsetof(TessGroupHost, ndisk) &&
 		tess_group_layout(TESS_GROUP_EVENT_SIZE) == sizeof(TessGroupEvent) &&
-		tess_group_layout(TESS_GROUP_EVENT_OTHERS_OFFSET) == offsetof(TessGroupEvent, others) &&
+		tess_group_layout(TESS_GROUP_EVENT_ROWS_OFFSET) == offsetof(TessGroupEvent, rows) &&
 		tess_group_layout(TESS_GROUP_ACTION_SIZE) == sizeof(TessGroupAction) &&
 		tess_group_layout(TESS_GROUP_ACTION_BELOW_OFFSET) == offsetof(TessGroupAction, below) &&
 		tess_group_layout(TESS_GROUP_BELOW_SIZE) == sizeof(TessGroupBelow) &&
