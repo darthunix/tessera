@@ -266,6 +266,16 @@ SELECT tessera_test_spill_sqlstate(49);
  XX000: Tessera writer of a chunk of columns of 16 bytes holds no row of 1 words
 (1 row)
 
+-- A TOAST pointer of 64-bit chunk ids read back: master's core has them;
+-- PostgreSQL 19's has none, and there it is damaged data.
+SELECT split_part(tessera_test_spill_sqlstate(50), ':', 1) =
+       CASE WHEN current_setting('server_version_num')::int >= 200000
+            THEN 'no error' ELSE 'XX001' END AS as_its_core;
+ as_its_core 
+-------------
+ t
+(1 row)
+
 -- A row read back that refers to a value outside its chunk of values.
 SELECT tessera_test_spill_sqlstate(28);
                         tessera_test_spill_sqlstate                         

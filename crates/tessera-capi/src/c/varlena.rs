@@ -12,16 +12,16 @@ compile_error!("the varlena headers here are little-endian's");
 
 /// The bytes of the body of a TOAST pointer to data on disk after its
 /// 2-byte header, by its tag: VARTAG_ONDISK_OID's `varatt_external_oid`
-/// of 16 bytes, VARTAG_ONDISK_OID8's `varatt_external_oid8` of 20, as
+/// of 16 bytes and, where the core has pointers of 64-bit chunk ids
+/// (`oid8`), VARTAG_ONDISK_OID8's `varatt_external_oid8` of 20, as
 /// `runtime/spill.c` asserts against PostgreSQL's headers; `None` for
-/// another tag. PostgreSQL 19 has tag 18 alone: there tag 4 is no
-/// pointer, and a damaged value that bears it passes as 22 bytes, of
-/// which the core then sizes 2 (`VARTAG_SIZE` gives 0, or stops at its
-/// assertion in a build with them), so no read leaves what was checked.
-pub(super) fn ondisk_body(tag: u8) -> Option<usize> {
+/// another tag. PostgreSQL 19 has tag 18 alone: there a value of tag 4 is
+/// no pointer, and its core would read it as a short varlena whose length
+/// is below its header's.
+pub(super) fn ondisk_body(tag: u8, oid8: bool) -> Option<usize> {
     match tag {
         18 => Some(16),
-        4 => Some(20),
+        4 if oid8 => Some(20),
         _ => None,
     }
 }
@@ -84,7 +84,9 @@ pub(super) unsafe fn varlena_size(pointer: *const u8) -> anyhow::Result<usize> {
             // are 2 and 3.
             let body = match *pointer.add(1) {
                 1 => 8,
-                tag => ondisk_body(tag).ok_or_else(|| external_refused(tag))?,
+                // A value of this process, which its core made: master's
+                // tags take every one either core makes.
+                tag => ondisk_body(tag, true).ok_or_else(|| external_refused(tag))?,
             };
             Ok(2 + body)
         } else if first & 0x01 == 0x01 {

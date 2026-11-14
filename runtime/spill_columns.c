@@ -12,6 +12,17 @@
 #include "tessera/kernel_ops.h"
 #include "tessera/runtime.h"
 
+/*
+ * Whether the core has TOAST pointers of 64-bit chunk ids, tag 4: master
+ * does; PostgreSQL 19 has none, and would read a value of that tag read
+ * back from a damaged file as a short varlena below its header's length.
+ */
+#if PG_VERSION_NUM >= 200000
+#define TOAST_OID8 true
+#else
+#define TOAST_OID8 false
+#endif
+
 void
 tess_columns_writer_reset(TessColumnsWriter *writer)
 {
@@ -186,7 +197,8 @@ tess_columns_reader_load(TessColumnsReader *reader, TessSpillReader *file, uint3
 														   reader->words, rows,
 														   reader->ncolumns, reader->byvals,
 														   reader->typlens, reader->own_values,
-														   reader->values_used, &status),
+														   reader->values_used, TOAST_OID8,
+														   &status),
 					  &status);
 	reader->chunk = reader->own_chunk;
 	reader->values = reader->own_values;

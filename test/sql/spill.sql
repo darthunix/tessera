@@ -143,6 +143,11 @@ SELECT tessera_test_spill_sqlstate(47);
 -- writer of chunks that hold no row is an internal error.
 SELECT tessera_test_spill_sqlstate(48);
 SELECT tessera_test_spill_sqlstate(49);
+-- A TOAST pointer of 64-bit chunk ids read back: master's core has them;
+-- PostgreSQL 19's has none, and there it is damaged data.
+SELECT split_part(tessera_test_spill_sqlstate(50), ':', 1) =
+       CASE WHEN current_setting('server_version_num')::int >= 200000
+            THEN 'no error' ELSE 'XX001' END AS as_its_core;
 -- A row read back that refers to a value outside its chunk of values.
 SELECT tessera_test_spill_sqlstate(28);
 -- What a node reads back is checked against what it wrote there, as the

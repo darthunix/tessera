@@ -738,17 +738,19 @@ pub unsafe extern "C" fn tess_spill_columns_pair(
 /// `typlen` its type's length: a fixed length within them; a varlena by
 /// its header, read by bytes as a damaged one may lie at any byte, a
 /// compressed one holding its 8 bytes of header, an external one only a
-/// pointer to data on disk; a C string at its NUL. Little-endian headers,
-/// as `varlena.rs` reads them. The C of `tess_spill_value_fits` keeps the
-/// same rule for the readers that are not moved yet.
-pub fn value_ends(typlen: i16, rest: &[u8]) -> bool {
+/// pointer to data on disk, by a tag the core has (`oid8` where it has
+/// pointers of 64-bit chunk ids, tag 4); a C string at its NUL.
+/// Little-endian headers, as `varlena.rs` reads them. The C of
+/// `tess_spill_value_fits` keeps the same rule for the readers that are
+/// not moved yet.
+pub fn value_ends(typlen: i16, rest: &[u8], oid8: bool) -> bool {
     match typlen {
         len if len > 0 => len as usize <= rest.len(),
         -1 => match rest {
             [] | [0x01] => false,
             // An external value: a 2-byte header, and a tag of data on
             // disk, the body of its pointer after it.
-            [0x01, tag, ..] => ondisk_body(*tag).is_some_and(|body| 2 + body <= rest.len()),
+            [0x01, tag, ..] => ondisk_body(*tag, oid8).is_some_and(|body| 2 + body <= rest.len()),
             [first, ..] if first & 0x01 == 0x01 => usize::from(first >> 1) <= rest.len(),
             _ => rest.first_chunk::<4>().is_some_and(|header| {
                 let header = u32::from_le_bytes(*header);
@@ -762,9 +764,11 @@ pub fn value_ends(typlen: i16, rest: &[u8]) -> bool {
     }
 }
 
-/// The ends of values by their columns' type lengths.
+/// The ends of values by their columns' type lengths, and whether the
+/// core has TOAST pointers of 64-bit chunk ids.
 struct TypeEnds<'a> {
     typlens: &'a [i16],
+    oid8: bool,
 }
 
 impl ValueEnds for TypeEnds<'_> {
@@ -772,7 +776,7 @@ impl ValueEnds for TypeEnds<'_> {
     fn ends(&self, column: usize, rest: &[u8]) -> bool {
         self.typlens
             .get(column)
-            .is_some_and(|&typlen| value_ends(typlen, rest))
+            .is_some_and(|&typlen| value_ends(typlen, rest, self.oid8))
     }
 }
 
@@ -781,7 +785,8 @@ impl ValueEnds for TypeEnds<'_> {
 /// pass: `words` words, `rows` rows unless -1, and every word of a column
 /// not by value of the first `ncolumns` (by `byvals`) of a row not NULL a
 /// reference into the values, whose value ends inside them by its type
-/// (`typlens`, [`value_ends`]) ([`spill_columns::check`]).
+/// (`typlens`, [`value_ends`]) and, a TOAST pointer, by a tag the core
+/// has (`toast_oid8`) ([`spill_columns::check`]).
 ///
 /// # Safety
 ///
@@ -800,6 +805,7 @@ pub unsafe extern "C" fn tess_spill_columns_check(
     typlens: *const i16,
     values_in: *const u8,
     values_len: usize,
+    toast_oid8: bool,
     status: *mut Status,
 ) -> Code {
     // SAFETY: the caller's contract.
@@ -819,7 +825,11 @@ pub unsafe extern "C" fn tess_spill_columns_check(
                 ensure!(!values_in.is_null(), "null values");
                 slice::from_raw_parts(values_in, values_len)
             };
-            spill_columns::check(chunk, words, rows, byvals, read, &TypeEnds { typlens })?;
+            let ends = TypeEnds {
+                typlens,
+                oid8: toast_oid8,
+            };
+            spill_columns::check(chunk, words, rows, byvals, read, &ends)?;
             Ok(())
         })
     }

@@ -409,14 +409,17 @@ extern TessStatusCode tess_spill_columns_pair(const TessSpillHeader *header, int
  * (byvals) of a row that is not NULL refers into the values, to a byte or
  * to their end, where an empty value lies, and the value there ends inside
  * them by its type's length (typlens; -1 a varlena, -2 a C string, as
- * tess_spill_value_fits tells). Any of these that fails, or a chunk that
- * is no chunk of columns, is damaged data (SQLSTATE XX001); ncolumns past
- * words or rows below -1 is a wrong call.
+ * tess_spill_value_fits tells), a TOAST pointer to data on disk by a tag
+ * the core has: toast_oid8 where it has pointers of 64-bit chunk ids, tag
+ * 4, beside tag 18. Any of these that fails, or a chunk that is no chunk
+ * of columns, is damaged data (SQLSTATE XX001); ncolumns past words or
+ * rows below -1 is a wrong call.
  */
 extern TessStatusCode tess_spill_columns_check(const void *chunk, Size len, int words,
 											   int64 rows, int ncolumns, const bool *byvals,
 											   const int16 *typlens, const char *values,
-											   Size values_len, TessStatus *status);
+											   Size values_len, bool toast_oid8,
+											   TessStatus *status);
 
 /*
  * The words of the first ncolumns words of the chunk of columns of len
