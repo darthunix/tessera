@@ -42,6 +42,7 @@ pub mod phases;
 pub mod plan;
 pub mod set;
 pub mod shared_spill;
+pub mod sort;
 pub mod spill_columns;
 use error::ensure;
 pub use error::{Error, Kind, Result, Rule};

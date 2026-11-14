@@ -177,7 +177,8 @@ give the groups that a grouping in memory gives, at any memory limit.
   `crates/tessera-capi/tests/group.rs::a_grouping_s_rows_freeze_and_are_read_by_the_entry_points`
 
 ### Requirement: The runs of a sort
-The crate SHALL provide a state machine for an external sort: it says
+The crate SHALL provide a state machine for an external sort,
+[`Runs`](../../../crates/relspill/src/sort.rs): it says
 when a run goes to disk, which sets hold the runs, and which passes
 merge them. With a host that does what its actions say, the machine
 SHALL give every item once, each no greater than the next by the host's
@@ -190,13 +191,16 @@ again.
   a random memory limit
 - **THEN** the items are those given, each once, and each is no
   greater than the next
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/sort/tests.rs::a_sort_through_its_runs_gives_the_rows_of_one_in_memory`;
+  `crates/tessera-capi/tests/runs.rs::a_sort_spills_its_runs_step_by_step_by_the_entry_points`
 
 #### Scenario: A sort read again
 - **WHEN** the host asks to read the sorted items again from the start
 - **THEN** the machine reads its runs again, and the items come in the
   same order
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/sort/tests.rs::passes_merge_until_one_merge_reads_every_run`
 
 ### Requirement: A build by several processes and its rounds
 The crate SHALL provide a state machine for a hash table that several
