@@ -119,7 +119,8 @@ the bytes they point to.
   `crates/relspill/src/set.rs::a_shared_set_drops_no_partition_before_its_finish`
 
 ### Requirement: The spill of a join
-The crate SHALL provide a state machine for the spill of a hash join.
+The crate SHALL provide a state machine for the spill of a hash join,
+[`Join`](../../../crates/relspill/src/join.rs).
 A build that goes over its memory limit sends partitions to disk. The
 partitions kept in memory are probed first. Then each partition on disk
 is split into a level below, joined whole, or joined in pieces over
@@ -135,7 +136,8 @@ a match, in a RIGHT or FULL join, once.
   a random memory limit, with the files and the memory kept by the test
 - **THEN** the pairs equal those of a join in memory, each as many
   times, and the files are empty at the end
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/join/tests.rs::a_join_through_the_machine_gives_the_pairs_of_one_in_memory`
 
 #### Scenario: A partition joined in pieces
 - **WHEN** a partition read back does not fit in the room left, and its
@@ -316,7 +318,8 @@ host can report its own reason.
 - **THEN** it returns a wrong call, and its next step goes as if the
   event had not come
 - **Verified by:**
-  `crates/relspill/src/phases.rs::an_attach_past_the_last_phase_is_an_error`
+  `crates/relspill/src/phases.rs::an_attach_past_the_last_phase_is_an_error`;
+  `crates/relspill/src/join/tests.rs::an_event_out_of_turn_is_refused_and_changes_nothing`
 
 #### Scenario: A source of the host that cannot give
 - **WHEN** a source of chunks cannot give a chunk, or a source of rows
