@@ -513,16 +513,22 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 * Generic states past hash_mem: the table freezes, new groups' rows go
 	 * to disk; in partial mode the groups go out instead (agg_group_drain).
 	 */
-	if (state->row_spill && !state->partial && !state->has_distinct && !state->frozen &&
-		!state->rows_last)
+	if (state->row_spill && !state->partial && !state->has_distinct && !state->frozen)
 	{
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+		TessRowsAction action;
 
-		if (groups_overflow(state, AGG_GROUP_ROWS, &stats))
+		/* Past seven eighths with a batch of groups at least, as the table's machine says. */
+		check(state, state->kernels->table_stats(&state->table, &stats, &state->status));
+		action = rows_step(state, &state->rows_machine, NULL, 0, (TessRowsEvent) {
+			.kind = TESS_ROWS_GROWN,
+			.memory = groups_memory(state),
+			.records = stats.records,
+		});
+		if (action.kind == TESS_ROWS_FREEZE)
 		{
 			state->frozen = true;
-			state->rows_spill = rows_spill_create(state, state->rows_level,
-												  state->rows_shift);
+			state->rows_spill = rows_spill_create(state, &action);
 		}
 	}
 	if (state->spill != NULL)
@@ -551,9 +557,7 @@ agg_group_drain(TessAggState *state)
 	agg_spill_free(state);
 	agg_spill_begin(state);
 	rows_spill_free(state);
-	state->rows_level = 0;
-	state->rows_shift = 0;
-	state->rows_last = false;
+	rows_machine_begin(state);
 	for (int key = 0; key < state->nkeys; key++)
 		ndicts += state->dicts[key] != NULL;
 	for (int key = 0; key < state->nkeys; key++)

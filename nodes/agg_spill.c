@@ -1054,18 +1054,18 @@ typedef struct RowWriter
 	uint32		pairs;
 } RowWriter;
 
-/* A level of partitions: one set of files, its partitions by its plan's bits. */
+/*
+ * A level of partitions: one set of files, its partitions by the bits of
+ * its plan from shift, and the machine of the table that froze into it,
+ * which gives its partitions to read.
+ */
 typedef struct RowSpill
 {
 	TessSpill  *file;
 	int			level;
 	RowWriter	writers[ROWS_PARTS];
-	/* Reading: the next partition to read. */
-	int			next;
-	/* The level plan's bits: its own from shift, a level below's from below. */
 	uint32		shift;
-	uint32		below;
-	bool		deeper;
+	TessRowsMachine machine;
 } RowSpill;
 
 /* A partition being read back: the chunk in hand and its next row. */
@@ -1104,20 +1104,17 @@ rows_writer_reset(TessAggState *state, RowWriter *writer)
 }
 
 /*
- * A level of partitions by the hash bits from shift, their files not made
- * until written: by the level plan, ROWS_PARTS partitions, each keeping a
+ * The shape of a level of rows: ROWS_PARTS partitions, each keeping a
  * chunk of ROWS_BLOCK_ROWS rows and a chunk of their values.
  */
-RowSpill *
-rows_spill_create(TessAggState *state, int level, uint32 shift)
+static TessSpillShape
+rows_shape(TessAggState *state)
 {
-	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
-	RowSpill   *spill = MemoryContextAllocZero(context, sizeof(RowSpill));
 	int			null_lanes = tess_spill_columns_null_lanes(rows_words(state));
 	Size		rows_len = TESS_SPILL_COLUMNS_HEADER +
 		sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + rows_words(state));
-	TessSpillShape shape = {
+
+	return (TessSpillShape) {
 		.reserve = rows_len + ROWS_BLOCK_VALUES,
 		.share = 1,
 		.min_chunk = rows_len,
@@ -1125,28 +1122,60 @@ rows_spill_create(TessAggState *state, int level, uint32 shift)
 		.min_partitions = ROWS_PARTS,
 		.max_partitions = ROWS_PARTS,
 	};
-	TessSpillLevel at = {
-		.limit = tess_hash_memory_limit(),
-		.shift = shift,
-	};
-	TessSpillPlan plan;
-	Size		chunk_len;
+}
 
-	check(state, state->kernels->spill_plan(&shape, &at, &plan, &state->status));
-	chunk_len = plan.chunk_len;
+/*
+ * A build starts: the machine of the table of the input, which freezes it
+ * past seven eighths of hash_mem with a batch of groups at least.
+ */
+void
+rows_machine_begin(TessAggState *state)
+{
+	state->rows_params = (TessRowsParams) {
+		.limit = tess_hash_memory_limit(),
+		.shape = rows_shape(state),
+		.fill = AGG_SPILL_FILL,
+		.least = AGG_GROUP_ROWS,
+	};
+	check(state, state->kernels->rows_init(&state->rows_machine, &state->rows_params,
+										   &state->status));
+}
+
+/* Step a machine of rows with event, the rows written of nwritten partitions. */
+TessRowsAction
+rows_step(TessAggState *state, TessRowsMachine *machine, const uint64 *written, int nwritten,
+		  TessRowsEvent event)
+{
+	TessRowsHost host = {.written = written, .nwritten = (Size) nwritten};
+	TessRowsAction action;
+
+	check(state, state->kernels->rows_step(machine, &host, &event, &action, &state->status));
+	return action;
+}
+
+/*
+ * The level of rows the table's machine froze it into, its files not made
+ * until written, the machine kept with it.
+ */
+RowSpill *
+rows_spill_create(TessAggState *state, const TessRowsAction *freeze)
+{
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+	TessSpillConfig config = TESS_STRUCT_INITIALIZER(TessSpillConfig);
+	RowSpill   *spill = MemoryContextAllocZero(context, sizeof(RowSpill));
+	Size		chunk_len = freeze->plan.chunk_len;
 
 	config.parent_context = context;
 	config.kernels = state->kernels;
-	config.npartitions = plan.partitions;
-	config.level = (uint32) level;
+	config.npartitions = freeze->plan.partitions;
+	config.level = freeze->level;
 	config.fingerprint = (uint64) rows_words(state);
 	config.max_chunk = chunk_len;
 	config.buffer_len = TESS_SPILL_BUFFER_LEN(tess_hash_memory_limit());
 	spill->file = tess_spill_create(&config);
-	spill->level = level;
-	spill->shift = plan.shift;
-	spill->below = plan.below;
-	spill->deeper = plan.deeper;
+	spill->level = (int) freeze->level;
+	spill->shift = freeze->plan.shift;
+	spill->machine = state->rows_machine;
 	for (int part = 0; part < ROWS_PARTS; part++)
 	{
 		RowWriter  *writer = &spill->writers[part];
@@ -1269,7 +1298,8 @@ rows_spill_close(TessAggState *state)
 	for (int part = 0; part < ROWS_PARTS; part++)
 		rows_flush(state, spill, part);
 	tess_spill_finish(spill->file);
-	spill->next = 0;
+	(void) rows_step(state, &spill->machine, NULL, 0,
+					 (TessRowsEvent) {.kind = TESS_ROWS_WRITTEN});
 	state->rows_pending = lcons(spill, state->rows_pending);
 	state->rows_spill = NULL;
 }
@@ -1358,8 +1388,9 @@ reader_next(TessAggState *state)
 
 /*
  * Open the next partition to read, depth first: the last level written
- * first; false when none is left. Its groups start in a table of their
- * own, and a partition too large again spills into a level below.
+ * first, its partitions as its machine gives them; false when none is
+ * left. Its groups start in a table of their own, whose machine may
+ * freeze it again into a level below.
  */
 bool
 rows_next_partition(TessAggState *state)
@@ -1372,21 +1403,21 @@ rows_next_partition(TessAggState *state)
 	while (state->rows_pending != NIL)
 	{
 		RowSpill   *spill = linitial(state->rows_pending);
+		uint64		written[ROWS_PARTS];
+		TessRowsAction action;
 
-		while (spill->next < ROWS_PARTS)
+		for (int part = 0; part < ROWS_PARTS; part++)
+			written[part] = spill->writers[part].written;
+		action = rows_step(state, &spill->machine, written, ROWS_PARTS,
+						   (TessRowsEvent) {.kind = TESS_ROWS_NEXT});
+		if (action.kind == TESS_ROWS_READ)
 		{
-			int			part = spill->next++;
-
-			if (spill->writers[part].written == 0)
-				continue;
-			reader->file = tess_spill_open(spill->file, 0, part);
+			reader->file = tess_spill_open(spill->file, 0, (int) action.table.partition);
 			reader->columns.rows = 0;
 			reader->next = 0;
 			reader->pairs = 0;
-			/* The level below takes the next bits, the last level none. */
-			state->rows_level = spill->level + 1;
-			state->rows_shift = spill->below;
-			state->rows_last = !spill->deeper;
+			check(state, state->kernels->rows_read(&state->rows_machine, &state->rows_params,
+												   &action.table, &state->status));
 			return true;
 		}
 		state->rows_pending = list_delete_first(state->rows_pending);

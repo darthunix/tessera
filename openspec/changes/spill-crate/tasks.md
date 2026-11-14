@@ -290,7 +290,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       and make the node step it. Check: the property test against a
       grouping in memory; `make installcheck`; `cargo ab measure` of
       the family `spill`
-- [ ] 3.18 Add the rows of generic aggregates to the grouping's
+- [x] 3.18 Add the rows of generic aggregates to the grouping's
       machine, composed with its groups. Check: the property test; the
       cases of both spills and of keys numbered by a dictionary;
       `make installcheck`

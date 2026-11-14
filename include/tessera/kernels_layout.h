@@ -149,6 +149,15 @@ tess_kernels_layout_matches(void)
 		tess_group_layout(TESS_GROUP_BELOW_SIZE) == sizeof(TessGroupBelow) &&
 		tess_group_layout(TESS_GROUP_BELOW_SHIFT_OFFSET) == offsetof(TessGroupBelow, shift) &&
 		tess_group_layout((TessGroupLayout) 99) == 0 &&
+	/* The machine of a grouping's rows and what a step of it takes and gives. */
+		tess_rows_layout(TESS_ROWS_MACHINE_SIZE) == sizeof(TessRowsMachine) &&
+		tess_rows_layout(TESS_ROWS_PARAMS_SIZE) == sizeof(TessRowsParams) &&
+		tess_rows_layout(TESS_ROWS_PARAMS_LEAST_OFFSET) == offsetof(TessRowsParams, least) &&
+		tess_rows_layout(TESS_ROWS_HOST_SIZE) == sizeof(TessRowsHost) &&
+		tess_rows_layout(TESS_ROWS_EVENT_SIZE) == sizeof(TessRowsEvent) &&
+		tess_rows_layout(TESS_ROWS_ACTION_SIZE) == sizeof(TessRowsAction) &&
+		tess_rows_layout(TESS_ROWS_ACTION_TABLE_OFFSET) == offsetof(TessRowsAction, table) &&
+		tess_rows_layout((TessRowsLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of
 	 * tessera/spill.h take it: the row count, the capacity and the stored
