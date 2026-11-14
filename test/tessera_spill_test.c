@@ -62,7 +62,6 @@ static const TessKernelOps kernels = {
 	.spill_set_finish = tess_spill_set_finish,
 	.spill_set_drop = tess_spill_set_drop,
 	.spill_set_stats = tess_spill_set_stats,
-	.spill_reader_own = tess_spill_reader_own,
 	.spill_reader_file = tess_spill_reader_file,
 	.spill_reader_open = tess_spill_reader_open,
 	.spill_reader_next = tess_spill_reader_next,

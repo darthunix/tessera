@@ -613,12 +613,11 @@ extern TessStatusCode tess_spill_set_stats(const TessSpillWriter *writer,
  * byte itself. Of a finished set's file, the caller's own or another
  * participant's, it takes the file's length, and its open asks for the
  * trailer, the counts and the partition's entries, a page at a time,
- * each checked before what it names is asked for; tess_spill_reader_own
- * takes instead a list the caller keeps in memory. Each step
- * asks for bytes of the file to read into the page or into the block
- * buffer, from their starts, after which the caller calls again; or says
- * what it found. The reader's words are the caller's, made by
- * tess_spill_reader_own or tess_spill_reader_file.
+ * each checked before what it names is asked for. Each step asks for
+ * bytes of the file to read into the page or into the block buffer, from
+ * their starts, after which the caller calls again; or says what it
+ * found. The reader's words are the caller's, made by
+ * tess_spill_reader_file.
  */
 #define TESS_SPILL_READER_WORDS 28
 
@@ -656,21 +655,9 @@ typedef struct TessSpillReadStep
 } TessSpillReadStep;
 
 /*
- * A reader of a partition of the caller's own set, whose list is the count
- * entries at entries, its blocks within max_chunk and max_values as
- * tess_spill_set_init takes them; *largest gets the bytes of its largest
- * block.
- */
-extern TessStatusCode tess_spill_reader_own(TessSpillReadState *reader, int npartitions,
-											uint32 level, int partition,
-											uint64 fingerprint, uint64 max_chunk,
-											uint64 max_values,
-											const TessSpillEntry *entries, uint64 count,
-											uint64 *largest, TessStatus *status);
-
-/*
- * A reader of a partition of another participant's file of file_len
- * bytes, with the bounds of tess_spill_reader_own.
+ * A reader of a partition of a finished set's file of file_len bytes, the
+ * caller's own or another participant's, its blocks within max_chunk and
+ * max_values as tess_spill_set_init takes them.
  */
 extern TessStatusCode tess_spill_reader_file(TessSpillReadState *reader, int npartitions,
 											 uint32 level, int partition,

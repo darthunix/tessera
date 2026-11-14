@@ -117,7 +117,6 @@
 	X(spill_set_finish) \
 	X(spill_set_drop) \
 	X(spill_set_stats) \
-	X(spill_reader_own) \
 	X(spill_reader_file) \
 	X(spill_reader_open) \
 	X(spill_reader_next) \

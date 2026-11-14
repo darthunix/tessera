@@ -217,7 +217,6 @@ tess_spill_create(const TessSpillConfig *config)
 		config->kernels->spill_set_finish == NULL ||
 		config->kernels->spill_set_drop == NULL ||
 		config->kernels->spill_set_stats == NULL ||
-		config->kernels->spill_reader_own == NULL ||
 		config->kernels->spill_reader_file == NULL ||
 		config->kernels->spill_reader_open == NULL ||
 		config->kernels->spill_reader_next == NULL ||
