@@ -14,16 +14,16 @@ use std::mem::{MaybeUninit, offset_of, size_of};
 use tessera_capi::c::{
     Code, SHARED_ACTION_SIZE, SHARED_ALONE, SHARED_ARRIVE_AND_DETACH, SHARED_ARRIVE_AND_WAIT,
     SHARED_ARRIVED, SHARED_ATTACH, SHARED_ATTACHED, SHARED_BATCH, SHARED_BUILD, SHARED_DEMOTE,
-    SHARED_DONE, SHARED_EVENT_BYTES_OFFSET, SHARED_EVENT_SIZE, SHARED_FLUSH_END, SHARED_FREE,
-    SHARED_HOST_NRESIDENT_OFFSET, SHARED_HOST_SIZE, SHARED_KEEP, SHARED_LEFT, SHARED_LINK,
-    SHARED_MACHINE_SIZE, SHARED_NEXT, SHARED_NOTHING, SHARED_OUTER, SHARED_PARAMS_PER_CHECK_OFFSET,
-    SHARED_PARAMS_SIZE, SHARED_PLANNED, SHARED_PROBE, SHARED_ROUND, SHARED_SEND, SHARED_SENT,
-    SHARED_SIZE, SHARED_SPLIT, SHARED_SWITCH, SHARED_VISIT, SHARED_VISITED, SHARED_WALKED,
-    SHARED_WEIGH, SHARED_WEIGHED, SHARED_WRITE, SharedBuildAction, SharedBuildEvent,
-    SharedBuildHost, SharedBuildParams, SpillWeights, Status, tess_shared_build_init,
-    tess_shared_build_layout, tess_shared_build_step, tess_shared_build_stop,
-    tess_table_spill_add_bytes, tess_table_spill_evict, tess_table_spill_init,
-    tess_table_spill_split, tess_table_spill_words,
+    SHARED_DONE, SHARED_EVENT_BYTES_OFFSET, SHARED_EVENT_SIZE, SHARED_FINISHED, SHARED_FLUSH_END,
+    SHARED_FREE, SHARED_HOST_NRESIDENT_OFFSET, SHARED_HOST_SIZE, SHARED_KEEP, SHARED_LEFT,
+    SHARED_LINK, SHARED_MACHINE_SIZE, SHARED_NEXT, SHARED_NOTHING, SHARED_OUTER,
+    SHARED_PARAMS_PER_CHECK_OFFSET, SHARED_PARAMS_SIZE, SHARED_PLANNED, SHARED_PROBE, SHARED_ROUND,
+    SHARED_SEND, SHARED_SENT, SHARED_SIZE, SHARED_SPLIT, SHARED_SWITCH, SHARED_VISIT,
+    SHARED_VISITED, SHARED_WALKED, SHARED_WEIGH, SHARED_WEIGHED, SHARED_WRITE, SharedBuildAction,
+    SharedBuildEvent, SharedBuildHost, SharedBuildParams, SpillWeights, Status,
+    tess_shared_build_init, tess_shared_build_layout, tess_shared_build_step,
+    tess_shared_build_stop, tess_table_spill_add_bytes, tess_table_spill_evict,
+    tess_table_spill_init, tess_table_spill_split, tess_table_spill_words,
 };
 
 /// The words of a machine.
@@ -326,6 +326,60 @@ fn a_table_splits_by_the_entry_points_once_its_plan_is_published() {
         step(&mut machine, &host, done),
         (Code::Ok, action(SHARED_NOTHING, 0))
     );
+}
+
+/// A participant the barriers never elect, of a table that never splits:
+/// it sizes nothing, frees nothing, and marks the stop word only while it
+/// probes.
+#[test]
+fn a_participant_not_elected_neither_sizes_nor_frees_and_stops_while_probing() {
+    let mut shared = Shared::new(3, 1 << 20);
+    let mut machine = Machine::default();
+    assert_eq!(init(&mut machine, &params()), Code::Ok);
+    let host = shared.host(&[]);
+    let (done, waited) = (event(SHARED_DONE, 0), event(SHARED_ARRIVED, 0));
+    let wait = action(SHARED_ARRIVE_AND_WAIT, 0);
+    let stop = |machine: &Machine| {
+        let mut word = 0_u64;
+        let mut status = Status::new();
+        // SAFETY: a local machine, word and status.
+        let code = unsafe {
+            tess_shared_build_stop(machine.as_ptr().cast(), &raw mut word, &raw mut status)
+        };
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        word != 0
+    };
+    let expected = [
+        (done, action(SHARED_ATTACH, 0)),
+        (event(SHARED_ATTACHED, 0), action(SHARED_BUILD, 0)),
+        (event(SHARED_BATCH, 0), action(SHARED_NOTHING, 0)),
+        (done, wait),
+        // The flush, the size, the links and the outer side.
+        (waited, wait),
+        (waited, wait),
+        (waited, action(SHARED_LINK, 0)),
+        (done, wait),
+        (waited, wait),
+        (waited, action(SHARED_PROBE, 0)),
+    ];
+    for (event, action) in expected {
+        assert!(!stop(&machine), "{event:?}");
+        assert_eq!(
+            step(&mut machine, &host, event),
+            (Code::Ok, action),
+            "{event:?}"
+        );
+    }
+    assert!(stop(&machine), "while it probes");
+    assert_eq!(
+        step(&mut machine, &host, done),
+        (Code::Ok, action(SHARED_ARRIVE_AND_DETACH, 0))
+    );
+    assert_eq!(
+        step(&mut machine, &host, event(SHARED_LEFT, 0)),
+        (Code::Ok, action(SHARED_FINISHED, 0))
+    );
+    assert!(!stop(&machine), "once it left");
 }
 
 #[test]
