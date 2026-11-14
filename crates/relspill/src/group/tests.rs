@@ -807,3 +807,267 @@ fn a_partition_splits_only_with_two_bits_left_past_its_level() {
     };
     assert_eq!(group.step(weighed, &regions.host()), Ok(Action::Merge(1)));
 }
+
+fn rows_params(limit: u64) -> RowsParams {
+    RowsParams {
+        limit,
+        shape: Shape {
+            reserve: 2048 + 1024,
+            min_partitions: 32,
+            max_partitions: 32,
+            share: 1,
+            min_chunk: 2048,
+            max_chunk: 2048,
+            record: 0,
+        },
+        fill: 0.875,
+        least: 64,
+    }
+}
+
+#[test]
+fn a_table_of_rows_freezes_past_its_fill_with_groups_enough() {
+    let limit = 1 << 20;
+    let mut rows = Rows::new(&rows_params(limit)).expect("parameters");
+    let none = RowsHost { written: &[] };
+    let fill = (0.875 * limit as f64) as u64;
+    let grown = |memory, records| RowsEvent::Grown { memory, records };
+    assert_eq!(rows.step(grown(fill, 1000), &none), Ok(RowsAction::Done));
+    // Too few groups: a table of them frozen would freeze again below.
+    assert_eq!(rows.step(grown(fill + 1, 63), &none), Ok(RowsAction::Done));
+    let Ok(RowsAction::Freeze { plan, level: 0 }) = rows.step(grown(fill + 1, 64), &none) else {
+        panic!("a freeze");
+    };
+    assert_eq!((plan.partitions, plan.shift), (32, 0));
+    assert_eq!(
+        wrong(rows.step(grown(fill + 1, 64), &none)),
+        Rule::JoinEvent
+    );
+    assert_eq!(wrong(rows.step(RowsEvent::Next, &none)), Rule::JoinEvent);
+    assert_eq!(rows.step(RowsEvent::Written, &none), Ok(RowsAction::Done));
+    // The partitions with rows in turn, each a table one level below.
+    let mut written = vec![0; 32];
+    written[3] = 10;
+    written[17] = 5;
+    let host = RowsHost { written: &written };
+    let read = |partition| {
+        RowsAction::Read(Table {
+            partition,
+            level: 1,
+            shift: plan.below,
+            last: !plan.deeper,
+        })
+    };
+    let short = RowsHost {
+        written: &written[..31],
+    };
+    assert_eq!(
+        wrong(rows.step(RowsEvent::Next, &short)),
+        Rule::PartitionRows
+    );
+    assert_eq!(rows.step(RowsEvent::Next, &host), Ok(read(3)));
+    assert_eq!(rows.step(RowsEvent::Next, &host), Ok(read(17)));
+    assert_eq!(rows.step(RowsEvent::Next, &host), Ok(RowsAction::LevelDone));
+    assert_eq!(wrong(rows.step(RowsEvent::Next, &host)), Rule::JoinEvent);
+}
+
+#[test]
+fn a_partition_read_at_the_last_bits_is_last() {
+    // Five bits of 32 partitions from bit 27: no level fits below.
+    let limit = 1 << 20;
+    let params = rows_params(limit);
+    let table = Table {
+        partition: 3,
+        level: 5,
+        shift: 27,
+        last: false,
+    };
+    let mut rows = Rows::read(&params, &table).expect("a table");
+    let none = RowsHost { written: &[] };
+    let grown = RowsEvent::Grown {
+        memory: limit,
+        records: 10_000,
+    };
+    let Ok(RowsAction::Freeze { plan, level: 5 }) = rows.step(grown, &none) else {
+        panic!("a freeze");
+    };
+    assert!(!plan.deeper && plan.below == 32, "{plan:?}");
+    assert_eq!(rows.step(RowsEvent::Written, &none), Ok(RowsAction::Done));
+    let mut written = vec![0; 32];
+    written[7] = 1;
+    let host = RowsHost { written: &written };
+    let last = Table {
+        partition: 7,
+        level: 6,
+        shift: 32,
+        last: true,
+    };
+    let reading = rows;
+    assert_eq!(
+        rows.step(RowsEvent::Next, &host),
+        Ok(RowsAction::Read(last))
+    );
+    // A level with none below it is no machine.
+    let mut deepest = Rows {
+        level: u32::MAX,
+        ..reading
+    };
+    assert_eq!(wrong(deepest.step(RowsEvent::Next, &host)), Rule::JoinState);
+    assert_eq!(deepest.cursor, reading.cursor);
+}
+
+#[test]
+fn the_table_of_the_last_level_never_freezes() {
+    let limit = 1 << 20;
+    let params = rows_params(limit);
+    let table = Table {
+        partition: 3,
+        level: 6,
+        shift: 30,
+        last: true,
+    };
+    let mut rows = Rows::read(&params, &table).expect("a table");
+    let none = RowsHost { written: &[] };
+    let grown = RowsEvent::Grown {
+        memory: limit,
+        records: 10_000,
+    };
+    assert_eq!(rows.step(grown, &none), Ok(RowsAction::Done));
+    // One that may freeze plans its level from its own bits.
+    let mut deeper = Rows::read(
+        &params,
+        &Table {
+            last: false,
+            shift: 10,
+            ..table
+        },
+    )
+    .expect("a table");
+    let Ok(RowsAction::Freeze { plan, level: 6 }) = deeper.step(grown, &none) else {
+        panic!("a freeze");
+    };
+    assert_eq!((plan.shift, plan.below), (10, 15));
+    let bad = RowsParams {
+        fill: f64::NAN,
+        ..params
+    };
+    assert_eq!(wrong(Rows::new(&bad)), Rule::JoinParams);
+}
+
+/// A table of the rows model: each key's count, and whether it takes no
+/// new key.
+struct RowsTable {
+    machine: Rows,
+    counts: BTreeMap<u32, u64>,
+    frozen: Option<Plan>,
+    /// The rows of the keys it lacks, by partition, once frozen.
+    written: Vec<Vec<u32>>,
+}
+
+/// Count `keys` through tables of rows that freeze past the limit, a
+/// key's every row in one table: the counts, and the most levels.
+fn count_rows(
+    params: &RowsParams,
+    keys: Vec<u32>,
+    batch: usize,
+) -> Result<(BTreeMap<u32, u64>, u32)> {
+    let mut counts = BTreeMap::new();
+    let mut deepest = 0;
+    // The levels to read, the last written on top: each with its machine
+    // and its partitions' rows.
+    let mut pending: Vec<(Rows, Vec<Vec<u32>>)> = Vec::new();
+    let mut tables = vec![(Rows::new(params)?, keys)];
+    while let Some((machine, rows)) = tables.pop() {
+        let mut table = RowsTable {
+            machine,
+            counts: BTreeMap::new(),
+            frozen: None,
+            written: Vec::new(),
+        };
+        for chunk in rows.chunks(batch) {
+            for &key in chunk {
+                if let Some(count) = table.counts.get_mut(&key) {
+                    *count += 1;
+                } else if let Some(plan) = &table.frozen {
+                    let partition =
+                        (hash(key) >> plan.shift) as usize & (plan.partitions as usize - 1);
+                    table.written[partition].push(key);
+                } else {
+                    table.counts.insert(key, 1);
+                }
+            }
+            if table.frozen.is_none() {
+                let grown = RowsEvent::Grown {
+                    memory: table.counts.len() as u64 * RECORD,
+                    records: table.counts.len() as u64,
+                };
+                if let RowsAction::Freeze { plan, .. } =
+                    table.machine.step(grown, &RowsHost { written: &[] })?
+                {
+                    table.written = vec![Vec::new(); plan.partitions as usize];
+                    table.frozen = Some(plan);
+                }
+            }
+        }
+        for (key, count) in table.counts {
+            assert!(
+                counts.insert(key, count).is_none(),
+                "key {key} in two tables"
+            );
+        }
+        if table.frozen.is_some() {
+            assert_eq!(
+                table
+                    .machine
+                    .step(RowsEvent::Written, &RowsHost { written: &[] })?,
+                RowsAction::Done
+            );
+            pending.push((table.machine, table.written));
+        }
+        // The next table: the next partition of the last level written.
+        while let Some((machine, written)) = pending.last_mut() {
+            let lens: Vec<u64> = written.iter().map(|rows| rows.len() as u64).collect();
+            match machine.step(RowsEvent::Next, &RowsHost { written: &lens })? {
+                RowsAction::Read(table) => {
+                    deepest = deepest.max(table.level);
+                    let rows = core::mem::take(&mut written[table.partition as usize]);
+                    tables.push((Rows::read(params, &table)?, rows));
+                    break;
+                }
+                RowsAction::LevelDone => {
+                    assert!(written.iter().all(Vec::is_empty), "rows left unread");
+                    pending.pop();
+                }
+                action => panic!("{action:?} for the next partition"),
+            }
+        }
+    }
+    Ok((counts, deepest))
+}
+
+#[test]
+fn rows_through_frozen_tables_give_the_groups_of_one_in_memory() {
+    let strategy = (
+        prop::collection::vec(0_u32..5000, 0..6000),
+        2_u64..64,
+        1_usize..200,
+    );
+    property(strategy, |(keys, kib, batch)| {
+        let mut expected = BTreeMap::new();
+        for &key in &keys {
+            *expected.entry(key).or_insert(0_u64) += 1;
+        }
+        let (got, _) = count_rows(&rows_params(kib * 1024), keys, batch)?;
+        assert_eq!(got, expected);
+        Ok(())
+    });
+}
+
+#[test]
+fn rows_freeze_level_under_level() -> Result<()> {
+    let keys: Vec<u32> = (0..50_000).map(|row| row * 7919 % 40_000).collect();
+    let (counts, deepest) = count_rows(&rows_params(2 * 1024), keys, 64)?;
+    assert_eq!(counts.len(), 40_000);
+    assert!(deepest > 1, "{deepest} levels");
+    Ok(())
+}

@@ -150,7 +150,9 @@ a match, in a RIGHT or FULL join, once.
 
 ### Requirement: The spill of a grouping
 The crate SHALL provide a state machine for the spill of a grouping,
-[`Group`](../../../crates/relspill/src/group.rs).
+[`Group`](../../../crates/relspill/src/group.rs), and one for the
+rows of its generic aggregates,
+[`Rows`](../../../crates/relspill/src/group.rs).
 Groups are sent to disk by partition and merged when they are read
 back. A partition that does not fit is split into a level below. The
 rows of aggregates that cannot merge their states are kept on disk and
@@ -164,6 +166,15 @@ give the groups that a grouping in memory gives, at any memory limit.
   memory
 - **Verified by:**
   `crates/relspill/src/group/tests.rs::a_grouping_through_the_machine_gives_the_groups_of_one_in_memory`
+
+#### Scenario: Rows of generic aggregates under any memory limit
+- **WHEN** a property test counts random rows through frozen tables
+  and their levels of rows under a random memory limit
+- **THEN** the groups and their counts equal those of a grouping in
+  memory
+- **Verified by:**
+  `crates/relspill/src/group/tests.rs::rows_through_frozen_tables_give_the_groups_of_one_in_memory`;
+  `crates/tessera-capi/tests/group.rs::a_grouping_s_rows_freeze_and_are_read_by_the_entry_points`
 
 ### Requirement: The runs of a sort
 The crate SHALL provide a state machine for an external sort: it says
