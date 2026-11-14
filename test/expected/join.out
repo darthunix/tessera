@@ -2849,8 +2849,9 @@ SELECT join_same($$SELECT count(*), sum(length(w.t)), md5(string_agg(md5(w.t), '
 (1 row)
 
 -- A hashed key that is an expression its child computes, such as
--- lower(t), goes to disk by its own type: the bytes of the text, not the
--- address of a value its batch frees; it is hashed again when read back.
+-- lower(t), goes to disk as the 64-bit hash the table keys by, not the
+-- address of a value its batch frees: a batch read back is not hashed
+-- again.
 SELECT join_explain($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp.s) = lower('p' || jsb.n)$$, false);
                                  join_explain                                  
 -------------------------------------------------------------------------------
@@ -2861,7 +2862,7 @@ SELECT join_explain($$SELECT count(*), sum(jsb.n) FROM jsp JOIN jsb ON lower(jsp
          Buckets: 32768
          Memory Usage: within hash_mem
          Batches: 4
-         Disk Usage: 1237 kB
+         Disk Usage: 949 kB
          Rows Removed by Join Filter: 0
          Rows Removed by Bloom Filter: 45119
          ->  Custom Scan (TessHeapScan) on jsp (actual rows=100000.00 loops=1)

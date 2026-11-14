@@ -40,9 +40,11 @@
 
 /*
  * Replace the values of a key a word does not hold by their 64-bit hashes
- * for the rows, NULL kept.
+ * for the rows, NULL kept. Called once a key of a batch, it is compiled
+ * apart from the loop over the keys, whose registers its loop over the
+ * rows would otherwise share.
  */
-static void
+static pg_noinline void
 hash_key_column(TessHashJoinState *state, int key, const TessRowMask *rows,
 				TessDatumColumn *column)
 {
@@ -99,9 +101,14 @@ join_batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns,
 		TessDatumColumn *keys = &state->keys.key_columns[key];
 		const TessRowMask *rows = key == 0 ? &batch->rows : valid;
 
-		join_child_column(batch, columns[key], rows, TESS_COLUMN_FOR_FILTER, keys);
-		if (OidIsValid(state->keys.hashers[key].fn_oid))
-			hash_key_column(state, key, rows, keys);
+		/* A batch read back keeps the hash of a key a word does not hold. */
+		if (!OidIsValid(state->keys.hashers[key].fn_oid) ||
+			!join_spill_key_hashes(batch, key, keys))
+		{
+			join_child_column(batch, columns[key], rows, TESS_COLUMN_FOR_FILTER, keys);
+			if (OidIsValid(state->keys.hashers[key].fn_oid))
+				hash_key_column(state, key, rows, keys);
+		}
 		if (key == 0)
 			check(state, tess_key_hash(state->kernels, kinds[key]) (keys, NULL, &batch->rows,
 													  nulls,

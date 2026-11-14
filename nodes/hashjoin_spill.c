@@ -1079,19 +1079,31 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 		spill->word_of[child] = ++nstored;
 	}
 	/*
-	 * A key no column asked for, such as an expression the child computes,
-	 * by its own type: a hashed key of text is a pointer into the child's
-	 * batch, its value copied like any column's and hashed again when read.
+	 * Each key: one a word does not hold, such as a text, by the 64-bit
+	 * hash the table keys by, a word of its own, so that its value is not
+	 * copied and a batch read back is not hashed again; a word key by its
+	 * column, by its own type when no column asked for it, such as an
+	 * expression the child computes.
 	 */
 	for (int key = 0; key < state->keys.nkeys; key++)
 	{
 		int			child = state->keys.outer_keys[key];
 
-		if (spill->word_of[child] != 0)
+		if (OidIsValid(state->keys.hashers[key].fn_oid))
+		{
+			spill->stored[nstored] = -(key + 1);
+			typlens[nstored] = sizeof(int64);
+			byvals[nstored] = true;
+			spill->key_words[key] = ++nstored;
 			continue;
-		spill->stored[nstored] = child;
-		outer_column_type(state, child, &typlens[nstored], &byvals[nstored]);
-		spill->word_of[child] = ++nstored;
+		}
+		if (spill->word_of[child] == 0)
+		{
+			spill->stored[nstored] = child;
+			outer_column_type(state, child, &typlens[nstored], &byvals[nstored]);
+			spill->word_of[child] = ++nstored;
+		}
+		spill->key_words[key] = spill->word_of[child];
 	}
 	/* What tess_spill_columns_append_partitioned takes; no plan reaches it. */
 	if (nstored > 2048)
@@ -1447,8 +1459,18 @@ join_side_append(TessHashJoinState *state, SpillSide *side, TessBatch *batch,
 	spill_reserve(state);
 	before.bits = spill->before_bits;
 	for (int word = 0; word < side->nwords; word++)
-		join_child_column(batch, children[word], pending, TESS_COLUMN_FOR_PROJECTION,
-					 &columns[word]);
+	{
+		/*
+		 * The hash of a key, as the batch's keys hold it; a row with a NULL
+		 * key keeps what the words of its later keys held, since a read
+		 * stops at its first NULL key.
+		 */
+		if (children[word] < 0)
+			columns[word] = state->keys.key_columns[-children[word] - 1];
+		else
+			join_child_column(batch, children[word], pending, TESS_COLUMN_FOR_PROJECTION,
+							  &columns[word]);
+	}
 	if (side->columnar)
 	{
 		column_append(state, side, pending, columns, byref);
@@ -2225,6 +2247,27 @@ spill_get_column(TessBatch *batch, int column, const TessRowMask *rows,
 	result->values = spill->values[word];
 	result->isnull = spill->isnull[word];
 	result->nrows = batch->rows.nrows;
+}
+
+/*
+ * The 64-bit hashes of key key, one a word does not hold, of a batch of
+ * outer rows read back, into result: false for another batch.
+ */
+bool
+join_spill_key_hashes(TessBatch *batch, int key, TessDatumColumn *result)
+{
+	JoinSpill  *spill;
+	int			word;
+
+	if (batch->ops != &spill_batch_ops)
+		return false;
+	spill = (JoinSpill *) batch->private_data;
+	word = spill->key_words[key] - 1;
+	*result = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	result->values = spill->values[word];
+	result->isnull = spill->isnull[word];
+	result->nrows = batch->rows.nrows;
+	return true;
 }
 
 /*
