@@ -329,6 +329,8 @@ passes a share `room` of what `hash_mem` leaves besides the rest of the
 spill, two bits of the hash are left for the level below, and, with a
 share `key`, the partition holds fewer than that share of its level's
 rows (more is one key, which no split parts, and is joined in pieces).
+The level below plans for what the levels above hold leave of
+`hash_mem`, a quarter of it at least, in both nodes.
 
 | weight | grouping | hash join |
 |---|---|---|

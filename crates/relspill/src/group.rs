@@ -44,8 +44,9 @@
 //!   nothing ([`Action::Merge`]); then those with records on disk, which
 //!   the machine weighs by the groups the host estimates they hold
 //!   ([`Action::Weigh`], [`Event::Weighed`]): one too large for what the
-//!   limit leaves splits into a level below ([`Action::Split`]), the
-//!   others merge. When none is left, the level is done
+//!   limit leaves splits into a level below ([`Action::Split`]), planned
+//!   for what the spill's memory leaves of the limit, a quarter of it at
+//!   least, as a join's level below is; the others merge. When none is left, the level is done
 //!   ([`Action::LevelDone`]).
 //!
 //! An event that the machine's phase does not take is a wrong call
@@ -128,8 +129,13 @@ pub enum Event {
     Next,
     /// The partition of the last [`Action::Weigh`] holds about `groups`
     /// groups; the other partitions in memory, of every level, take
-    /// `others` bytes.
-    Weighed { groups: u64, others: u64 },
+    /// `others` bytes, and the spill `memory` bytes in all, which a level
+    /// below plans against.
+    Weighed {
+        groups: u64,
+        others: u64,
+        memory: u64,
+    },
 }
 
 /// What the host does next.
@@ -179,6 +185,9 @@ pub struct Below {
     pub level: u32,
     /// The bytes it expects: the partition's on disk and in memory.
     pub expected: u64,
+    /// The memory it may take: what the spill's memory leaves of the
+    /// limit, a quarter of it at least.
+    pub limit: u64,
     /// The first hash bit it takes, past those of the levels above.
     pub shift: u32,
 }
@@ -282,7 +291,8 @@ impl Group {
             Error::wrong_call(Rule::JoinLevel).with(below.level)
         );
         let mut group = Self::new(params)?;
-        let plan = group.plan_level(below.level, below.expected as f64, below.shift)?;
+        let plan =
+            group.plan_level(below.level, below.expected as f64, below.limit, below.shift)?;
         Ok((group, plan))
     }
 
@@ -327,7 +337,12 @@ impl Group {
                 let counted = estimate >= 0.0;
                 ensure!(counted, Error::wrong_call(Rule::Expected));
                 let expected = plan::expected(bytes as f64, records as f64, estimate, 1);
-                Ok(Action::Start(self.plan_level(0, expected, 0)?))
+                Ok(Action::Start(self.plan_level(
+                    0,
+                    expected,
+                    self.params.limit,
+                    0,
+                )?))
             }
             (
                 FITS,
@@ -382,7 +397,14 @@ impl Group {
             }
             (FLUSHING, Event::Next) => self.flush(host),
             (GIVING, Event::Next) => self.next(host),
-            (WEIGHING, Event::Weighed { groups, others }) => self.weigh(host, groups, others),
+            (
+                WEIGHING,
+                Event::Weighed {
+                    groups,
+                    others,
+                    memory,
+                },
+            ) => self.weigh(host, groups, others, memory),
             _ => Err(Error::wrong_call(Rule::JoinEvent)
                 .with(phase)
                 .and(code(&event))),
@@ -436,15 +458,14 @@ impl Group {
         Ok(())
     }
 
-    /// Plan level `level` of `expected` bytes from hash bit `shift`: every
-    /// level has the whole limit. The machine waits for the level to be
-    /// made.
-    fn plan_level(&mut self, level: u32, expected: f64, shift: u32) -> Result<Plan> {
+    /// Plan level `level` of `expected` bytes within `limit` from hash bit
+    /// `shift`. The machine waits for the level to be made.
+    fn plan_level(&mut self, level: u32, expected: f64, limit: u64, shift: u32) -> Result<Plan> {
         let plan = plan::plan(
             &self.params.shape,
             &Level {
                 expected,
-                limit: usize::try_from(self.params.limit).unwrap_or(usize::MAX),
+                limit: usize::try_from(limit).unwrap_or(usize::MAX),
                 shift,
                 at_least: 0,
                 partitions: 0,
@@ -540,8 +561,9 @@ impl Group {
     /// The partition weighed: split into a level below when one of the
     /// level's shape fits in the bits left and what its `groups` take
     /// merged passes `split_room` of what the limit leaves besides
-    /// `others`; merged otherwise.
-    fn weigh(&mut self, host: &Host<'_>, groups: u64, others: u64) -> Result<Action> {
+    /// `others`, planned for what the spill's `memory` leaves of the
+    /// limit; merged otherwise.
+    fn weigh(&mut self, host: &Host<'_>, groups: u64, others: u64, memory: u64) -> Result<Action> {
         let spill = self.spill(host)?;
         self.counts(host)?;
         // The partition the cursor passed last, Weigh's.
@@ -578,6 +600,7 @@ impl Group {
                     .checked_add(1)
                     .ok_or(Error::wrong_call(Rule::JoinState).with(self.phase))?,
                 expected: host.disk[index].saturating_add(spill.held(partition)?),
+                limit: plan::below_limit(self.params.limit, memory),
                 shift: self.below,
             })
         } else {

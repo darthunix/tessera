@@ -320,7 +320,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       memory runs out; the specs that show a changed plan change with
       it. Check: `make installcheck`, with every changed plan read;
       `cargo ab measure` of the family `spill`
-- [ ] 3.24 Make one rule for the limit of a level below, for the join
+- [x] 3.24 Make one rule for the limit of a level below, for the join
       and the grouping, if a measurement shows no loss. Check:
       `cargo ab measure` of the family `spill`; `make installcheck`
 - [ ] 3.25 Review the whole public API and settle it, and keep its

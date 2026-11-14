@@ -1080,7 +1080,8 @@ typedef enum TessGroupEventKind
 	TESS_GROUP_NEXT = 7,
 	/*
 	 * The partition of the last TESS_GROUP_WEIGH holds about groups groups;
-	 * the other partitions in memory take others bytes.
+	 * the other partitions in memory take others bytes, and the spill
+	 * memory bytes in all, which a level below plans against.
 	 */
 	TESS_GROUP_WEIGHED = 8,
 	/*
@@ -1135,14 +1136,15 @@ typedef enum TessGroupActionKind
 
 /*
  * A level below to make: the partition of the level above it splits, its
- * level, the bytes it expects and the first bit of the hash it takes.
- * spare is 0.
+ * level, the bytes it expects, the memory it may take, and the first bit
+ * of the hash it takes. spare is 0.
  */
 typedef struct TessGroupBelow
 {
 	uint32		partition;
 	uint32		level;
 	uint64		expected;
+	uint64		limit;
 	uint32		shift;
 	uint32		spare;
 } TessGroupBelow;

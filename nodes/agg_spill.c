@@ -1024,6 +1024,7 @@ agg_advance(TessAggState *state)
 				.kind = TESS_GROUP_WEIGHED,
 				.groups = part_groups(spill, partition),
 				.others = others,
+				.memory = agg_spill_memory(state),
 			});
 			if (action.kind == TESS_GROUP_SPLIT)
 			{
