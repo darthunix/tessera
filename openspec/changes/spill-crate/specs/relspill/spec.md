@@ -149,7 +149,8 @@ a match, in a RIGHT or FULL join, once.
   `crates/relspill/src/join/tests.rs::a_piece_ends_where_a_group_of_values_starts`
 
 ### Requirement: The spill of a grouping
-The crate SHALL provide a state machine for the spill of a grouping.
+The crate SHALL provide a state machine for the spill of a grouping,
+[`Group`](../../../crates/relspill/src/group.rs).
 Groups are sent to disk by partition and merged when they are read
 back. A partition that does not fit is split into a level below. The
 rows of aggregates that cannot merge their states are kept on disk and
@@ -161,7 +162,8 @@ give the groups that a grouping in memory gives, at any memory limit.
   a random memory limit
 - **THEN** the groups and their states equal those of a grouping in
   memory
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/group/tests.rs::a_grouping_through_the_machine_gives_the_groups_of_one_in_memory`
 
 ### Requirement: The runs of a sort
 The crate SHALL provide a state machine for an external sort: it says
