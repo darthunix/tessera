@@ -2092,3 +2092,186 @@ fn both_kinds_of_a_pointer_to_data_on_disk_append() {
     assert_eq!(&values[..22], &pointers[0][..]);
     assert_eq!(&values[24..42], &pointers[1][..]);
 }
+
+/// The entry points of the spill words, of a level's plan and of the
+/// packing of records write their results to places C has not filled
+/// yet: no value is read or borrowed there, which strict Miri checks.
+#[test]
+fn the_spill_words_and_plans_write_places_that_hold_nothing_yet() {
+    use std::mem::MaybeUninit;
+
+    let mut status = Status::new();
+    let mut nwords = MaybeUninit::<usize>::uninit();
+    // SAFETY: a place valid for a write, and a local status, as in every
+    // call of this test.
+    unsafe {
+        assert_eq!(
+            tess_table_spill_words(4, nwords.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        let mut words = vec![0_u64; nwords.assume_init()];
+        let (w, n) = (words.as_mut_ptr(), words.len());
+        assert_eq!(
+            tess_table_spill_init(w, n, true, 1000, &raw mut status),
+            Code::Ok
+        );
+        let mut over = MaybeUninit::<bool>::uninit();
+        assert_eq!(
+            tess_table_spill_add_bytes(w, n, true, 10, -1, over.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert!(!over.assume_init());
+        let mut in_force = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_table_spill_split(w, n, true, 4, in_force.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(in_force.assume_init(), 4);
+        let mut partitions = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_table_spill_partitions(w, n, partitions.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(partitions.assume_init(), 4);
+        let mut chosen = MaybeUninit::<i32>::uninit();
+        let weights = SpillWeights {
+            start: 0.0,
+            target: 0.0,
+            spilled: 1.0,
+            reserve: 0,
+            resident: 0.0,
+            per_check: 0,
+        };
+        assert_eq!(
+            tess_table_spill_add_bytes(w, n, true, 5, 2, over.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_table_spill_evict(
+                w,
+                n,
+                true,
+                &raw const weights,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                chosen.as_mut_ptr(),
+                &raw mut status,
+            ),
+            Code::Ok
+        );
+        assert_eq!(chosen.assume_init(), 2);
+        let mut evictions = MaybeUninit::<u64>::uninit();
+        assert_eq!(
+            tess_table_spill_evictions(w, n, evictions.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(evictions.assume_init(), 1);
+        let (mut on_disk, mut alone) = (MaybeUninit::<bool>::uninit(), MaybeUninit::uninit());
+        assert_eq!(
+            tess_table_spill_flags(
+                w,
+                n,
+                2,
+                on_disk.as_mut_ptr(),
+                alone.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!((on_disk.assume_init(), alone.assume_init()), (true, false));
+        let mut held = MaybeUninit::<u64>::uninit();
+        assert_eq!(
+            tess_table_spill_records(w, n, 2, 3, held.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(held.assume_init(), 3);
+        let mut start = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_table_spill_start(w, n, start.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(start.assume_init(), 0);
+        let mut file = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_table_spill_take_file(w, n, 2, false, file.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(file.assume_init(), 0);
+        let mut taken = MaybeUninit::<bool>::uninit();
+        assert_eq!(
+            tess_table_spill_take_alone(w, n, 2, taken.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert!(taken.assume_init());
+        let mut split = MaybeUninit::<bool>::uninit();
+        assert_eq!(
+            tess_table_spill_splits(
+                0.5,
+                0.0,
+                900,
+                0,
+                1000,
+                1,
+                10,
+                4,
+                split.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert!(split.assume_init());
+
+        // A level's plan.
+        let shape = SpillShape {
+            reserve: 0,
+            share: 1,
+            min_chunk: 8,
+            max_chunk: 128,
+            record: 0,
+            min_partitions: 1,
+            max_partitions: 1,
+        };
+        let level = SpillLevel {
+            limit: 128,
+            ..SpillLevel::default()
+        };
+        let mut plan = MaybeUninit::<SpillPlan>::uninit();
+        assert_eq!(
+            tess_spill_plan(
+                &raw const shape,
+                &raw const level,
+                plan.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(plan.assume_init().partitions, 1);
+
+        // A chunk of records packed, and its header read back.
+        let original = records(100, RECORD_HEADER + KEY_SLOT, |record, lane| {
+            if lane == RECORD_HEADER / 4 {
+                record as u32
+            } else {
+                0
+            }
+        });
+        let mut out = vec![0_u8; original.len()];
+        let mut packed = MaybeUninit::<usize>::uninit();
+        assert_eq!(
+            tess_spill_pack(
+                original.as_ptr(),
+                original.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                packed.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert!(packed.assume_init() > 0);
+    }
+}
