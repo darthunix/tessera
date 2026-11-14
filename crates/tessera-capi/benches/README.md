@@ -216,7 +216,14 @@ one on the M5 Pro. The cases drawn at random are:
   row paths missed 0 to 4 times a call on the Intel Core, where the
   fold over `random` misses 17. A density case takes no ring of 64 but
   4096 selections drawn anew over one set of values
-  ([`SELECTIONS`](support/fixture.rs)), as below.
+  ([`SELECTIONS`](support/fixture.rs)), as below. `set_int32` takes
+  them over the values of `shuffled`: on x86-64 a step of its search by
+  halving is a branch, and over values that grow with the row the
+  predictor learned the steps of the rows a selection takes. At 8 rows
+  a word over 64 and 65 keys the Intel Core missed 58 to 75 times a
+  call there, where the model says about 135
+  ([`halving_misses`](support/fixture.rs) and
+  [`exit_misses`](support/fixture.rs)).
 
 The two kinds of cases are meant to be read together: a branch is judged
 against a choice made as data on the cases drawn at random, where the
