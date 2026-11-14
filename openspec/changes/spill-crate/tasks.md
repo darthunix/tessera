@@ -329,7 +329,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       finished set reads its lists from its file. Check:
       `make rust-check`; the diff of the snapshot; the review of the
       API in the pull request
-- [ ] 3.26 Have outside reviews read the crate, as in 2.1, and fix the
+- [x] 3.26 Have outside reviews read the crate, as in 2.1, and fix the
       accepted findings. Check: the review of the list in the pull
       request
 - [x] 3.27 Give C the names of a chunk's used mark and of a record's
