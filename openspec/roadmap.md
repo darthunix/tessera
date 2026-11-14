@@ -1810,7 +1810,13 @@ arguments. From the review of 2026-11-01.
 - **Known:** The spill's part is task 2.5 of `spill-crate`. Random
   pointers are not fuzzed: a false length is the caller's undefined
   behavior, not a fault of a kernel. Under Miri the vector code is cut
-  out, so it checks the scalar paths.
+  out, so it checks the scalar paths. Most entry points make a Rust
+  reference of an output that C hands over unset, a variable on its
+  stack: undefined behavior, which Miri shows only with
+  `-Zmiri-recursive-validation` and a test that hands it unset too.
+  The spill machines and the set write theirs whole through the
+  pointer (`spill-crate`); the others are to be swept so, and their
+  tests run with that flag.
 - **Depends on:** nothing.
 - **Capabilities:** kernel-abi
 - **Size:** small for Miri, medium for the fuzz target.

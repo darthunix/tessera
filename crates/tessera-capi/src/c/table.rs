@@ -350,6 +350,16 @@ pub(super) unsafe fn values<'a, T>(pointer: *const T, nrows: usize, what: &str) 
     Ok(unsafe { slice::from_raw_parts(pointer, nrows) })
 }
 
+/// A place a call writes its result to, which may hold no value yet, as
+/// C's variables on its stack do: it is checked for null and alignment,
+/// and the caller writes it whole through the pointer, never reading or
+/// borrowing it first.
+pub(super) fn output<T>(place: *mut T, what: &str) -> Result<*mut T> {
+    ensure!(!place.is_null(), "a null {what}");
+    ensure!(place.is_aligned(), "{what} not aligned");
+    Ok(place)
+}
+
 /// `nrows` slots at `pointer`, empty when there are none.
 ///
 /// # Safety

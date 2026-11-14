@@ -1324,7 +1324,8 @@ impl CSet {
         use tessera_capi::c::{SpillStep, tess_spill_set_write};
 
         let mut status = Status::new();
-        let mut step = SpillStep::default();
+        // A step that holds nothing before the call, as C's does.
+        let mut step = std::mem::MaybeUninit::<SpillStep>::uninit();
         // SAFETY: the set's regions and lists, each list's entries the
         // vector's, and a local body, step and status.
         let code = unsafe {
@@ -1341,9 +1342,15 @@ impl CSet {
                 3,
                 body.as_ptr(),
                 body.len(),
-                &raw mut step,
+                step.as_mut_ptr(),
                 &raw mut status,
             )
+        };
+        // SAFETY: a call that succeeds writes the step whole.
+        let step = if code == Code::Ok {
+            unsafe { step.assume_init() }
+        } else {
+            SpillStep::default()
         };
         (code, status, step)
     }
@@ -1365,7 +1372,7 @@ impl CSet {
 
         loop {
             let mut status = Status::new();
-            let mut step = SpillStep::default();
+            let mut step = std::mem::MaybeUninit::<SpillStep>::uninit();
             // SAFETY: as for `call`.
             let code = unsafe {
                 tess_spill_set_finish(
@@ -1374,11 +1381,13 @@ impl CSet {
                     self.buffer.len(),
                     self.lists.as_mut_ptr(),
                     self.lists.len() as i32,
-                    &raw mut step,
+                    step.as_mut_ptr(),
                     &raw mut status,
                 )
             };
             assert_eq!(code, Code::Ok, "{}", status.message());
+            // SAFETY: written whole by the call that succeeded.
+            let step = unsafe { step.assume_init() };
             if self.serve(&step, 0, &[]) {
                 return;
             }
@@ -1390,21 +1399,33 @@ impl CSet {
     fn stats(&self) -> (u64, u64, i32, u64) {
         use tessera_capi::c::tess_spill_set_stats;
 
-        let (mut blocks, mut bytes, mut files, mut values) = (0, 0, 0, 0);
+        use std::mem::MaybeUninit;
+
+        // Counts that hold nothing before the call, as C's do.
+        let (mut blocks, mut bytes) = (MaybeUninit::uninit(), MaybeUninit::uninit());
+        let (mut files, mut values) = (MaybeUninit::uninit(), MaybeUninit::uninit());
         let mut status = Status::new();
         // SAFETY: the set's writer and local outputs.
         let code = unsafe {
             tess_spill_set_stats(
                 &raw const self.writer,
-                &raw mut blocks,
-                &raw mut bytes,
-                &raw mut files,
-                &raw mut values,
+                blocks.as_mut_ptr(),
+                bytes.as_mut_ptr(),
+                files.as_mut_ptr(),
+                values.as_mut_ptr(),
                 &raw mut status,
             )
         };
         assert_eq!(code, Code::Ok, "{}", status.message());
-        (blocks, bytes, files, values)
+        // SAFETY: written whole by the call that succeeded.
+        unsafe {
+            (
+                blocks.assume_init(),
+                bytes.assume_init(),
+                files.assume_init(),
+                values.assume_init(),
+            )
+        }
     }
 }
 
