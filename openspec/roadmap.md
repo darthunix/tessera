@@ -68,8 +68,7 @@ into `gather-sparse-batches`:
     keys and dates
 13. `tpch-sf10`: TPC-H step 10: SF10
 14. `backward-scan-mark-restore`: Backward scan and mark/restore
-15. `postgresql-19`: PostgreSQL 19 support
-16. `pg-duckdb-comparison`: Comparison with pg_duckdb
+15. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -751,31 +750,6 @@ Backward scan and mark/restore. From plan 8.9, lines 6457–6475.
 - **Capabilities:** sort, scan-index, scan-heap, node-contract
 - **Size:** medium — up to three separate steps, each optional.
 
-### postgresql-19
-
-PostgreSQL 19 support. From plan 8.8 and 4.33, lines 2555–2568, 6441–6445.
-
-- **What:** Make the modules build and pass on REL_19_STABLE beside
-  master. Three places differ: the layout of the table counters, the
-  names of the abbreviated-key comparators, and the index-only scan by
-  batches (about 60 lines of a copy of core 19 code). The branches go to
-  `compat.h` as designed in 7.1, a row for 19 goes to CI, and the
-  version check in `abi.h` drops to 190000.
-- **Why:** pg_duckdb supports PostgreSQL 14–18 and its main builds with
-  REL_19_STABLE; Tessera builds only with 20devel, so the comparison
-  needs a common version (line 6441–6442).
-- **Known:** The maintainer's decision 2026-10-01: only master now, 19
-  together with 8.8 (line 2563–2564). With temporary replacements of the
-  first two places and without the index suite, 40 of 41 suites passed
-  against 19 beta 3; one parallel plan in `union` differs under 19 (line
-  2562–2563). Lesson recorded: a lower version is proven by a build, not
-  by a search for names (line 2574). Checked in the code: `abi.h` stops
-  the build below 200000.
-- **Depends on:** nothing in code; it introduces `compat.h`, which step
-  7.1 of `greengage-port` also needs.
-- **Capabilities:** bridge-api, scan-index, sort, ci
-- **Size:** medium.
-
 ### pg-duckdb-comparison
 
 Comparison with pg_duckdb. From plan 8.8, lines 6434–6456; step 11 of 8.1.
@@ -799,7 +773,8 @@ Comparison with pg_duckdb. From plan 8.8, lines 6434–6456; step 11 of 8.1.
   Citus columnar, ParadeDB, pgpro_tam, pg_deltax) read their own
   columnar copy and belong in a separate "after conversion" table (line
   6453–6456).
-- **Depends on:** `tpch-sf10` (stable SF1 and SF10), `postgresql-19`.
+- **Depends on:** `tpch-sf10` (stable SF1 and SF10). Tessera builds on
+  PostgreSQL 19, which pg_duckdb builds with too.
 - **Capabilities:** bench, tools
 - **Size:** medium.
 
@@ -1215,8 +1190,9 @@ Greengage 7 port. From plan 7.1–7.10, lines 6013–6141.
   `tessera_limit`, a module removed in 4.32; the checks speak of 30
   suites where there are 42 now.
 - **Depends on:** the log treats 7.1 as doable in parallel with section
-  8 (line 2798). `postgresql-19` is in the queue and creates `compat.h`
-  first.
+  8 (line 2798). There is no `compat.h` yet: PostgreSQL 19's five
+  differences from master are branches where they are used, each with
+  one user; 7.1 creates the header.
 - **Capabilities:** greengage, bridge-api, scan-heap, aggregate,
   node-contract, planner-coverage
 - **Size:** large — a series; steps 7.1–7.4 are the first milestone
