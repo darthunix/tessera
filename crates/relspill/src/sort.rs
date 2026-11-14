@@ -41,7 +41,7 @@
 //! The machine gives each run its set and partition ([`Place`]).
 //!
 //! An event that the machine's phase does not take is a wrong call
-//! ([`Rule::JoinEvent`]), and the machine stays as it was. The machine
+//! ([`Rule::MachineEvent`]), and the machine stays as it was. The machine
 //! does nothing for each row, holds no memory and allocates nothing: it
 //! is plain data the host keeps.
 
@@ -182,7 +182,7 @@ const DONE: u32 = 6;
 /// new one ([`Runs::new`]). It is plain data of a fixed layout,
 /// [`RUNS_WORDS`] words of 8 bytes.
 /// Any bytes may be given to [`Runs::step`]: those that are no machine
-/// are a wrong call ([`Rule::JoinState`]).
+/// are a wrong call ([`Rule::MachineState`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Runs {
@@ -211,11 +211,11 @@ impl Runs {
     /// The machine of a sort's runs, before its input, and the blocks of
     /// its runs.
     ///
-    /// A wrong call ([`Rule::JoinParams`]): a limit, a row's bytes, a
+    /// A wrong call ([`Rule::MachineParams`]): a limit, a row's bytes, a
     /// set's runs or a batch of 0; a merge of fewer than 2 runs; or a
     /// `backward` neither 0 nor 1.
     pub fn new(params: &Params) -> Result<(Self, Blocks)> {
-        ensure!(counted(params), Error::wrong_call(Rule::JoinParams));
+        ensure!(counted(params), Error::wrong_call(Rule::MachineParams));
         let blocks = blocks(params);
         Ok((
             Self {
@@ -235,9 +235,9 @@ impl Runs {
 
     /// Take the host's event and give its next action.
     ///
-    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
-    /// event its phase does not take ([`Rule::JoinEvent`]); and more runs
-    /// than a `u32` counts ([`Rule::JoinState`]). The machine is then as
+    /// A wrong call: memory that is no machine ([`Rule::MachineState`]); an
+    /// event its phase does not take ([`Rule::MachineEvent`]); and more runs
+    /// than a `u32` counts ([`Rule::MachineState`]). The machine is then as
     /// it was.
     pub fn step(&mut self, event: Event) -> Result<Action> {
         self.check()?;
@@ -290,7 +290,7 @@ impl Runs {
                     self.runs = self
                         .runs
                         .checked_add(1)
-                        .ok_or(Error::wrong_call(Rule::JoinState).with(self.phase))?;
+                        .ok_or(Error::wrong_call(Rule::MachineState).with(self.phase))?;
                     return Ok(Action::Keep { run: first });
                 }
                 let place = self.place()?;
@@ -302,7 +302,7 @@ impl Runs {
             }
             (READING, Event::Rescan) => Ok(Action::Read { runs: self.runs }),
             (phase, event) => {
-                Err(Error::wrong_call(Rule::JoinEvent)
+                Err(Error::wrong_call(Rule::MachineEvent)
                     .with(phase)
                     .and(match event {
                         Event::Grown { .. } => 1,
@@ -325,7 +325,7 @@ impl Runs {
                 && self.open <= 1
                 && self.used <= params.set_runs
                 && self.done <= self.pass_runs,
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         Ok(())
     }
@@ -341,7 +341,7 @@ impl Runs {
         self.runs = self
             .runs
             .checked_add(1)
-            .ok_or(Error::wrong_call(Rule::JoinState).with(self.phase))?;
+            .ok_or(Error::wrong_call(Rule::MachineState).with(self.phase))?;
         let create = self.open == 0 || self.used == self.params.set_runs;
         if create {
             self.open = 1;
