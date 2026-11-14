@@ -515,16 +515,15 @@ typedef struct JoinSpill
 	/*
 	 * A partition too large for memory is joined in pieces, each a run of
 	 * whole groups of its file (values, then the chunks that refer to
-	 * them), and its outer rows read once per piece: the file's reader,
-	 * whether the pieces are done, a group's first value chunk read ahead
-	 * for the next piece, and, for left, semi and anti joins, a bit per
-	 * outer row of the partition, in the order read, set once it has a
-	 * pair; a last pass without a table answers left and anti joins' rows
-	 * without one. Each batch of outer rows starts at an ordinal.
+	 * them), as the machine says, and its outer rows read once per piece:
+	 * the file's reader, a group's first block read ahead for the next
+	 * piece, and, for left, semi and anti joins, a bit per outer row of the
+	 * partition, in the order read, set once it has a pair; a last pass
+	 * without a table answers left and anti joins' rows without one. Each
+	 * batch of outer rows starts at an ordinal.
 	 */
 	bool		multipass;
 	PartReader	build_reader;
-	bool		pieces_done;
 	bool		final_pass;
 	void	   *carried;
 	TessSpillHeader carried_header;
@@ -1055,7 +1054,8 @@ extern void join_insert_spill(TessHashJoinState *state, TessBatch *batch);
 extern uint64 join_matched_word(const JoinSpill *spill, int count);
 extern bool join_next_pass(TessHashJoinState *state);
 extern bool join_next_spilled(TessHashJoinState *state, JoinSpill *spill);
-extern bool join_open_partition(TessHashJoinState *state, int partition, const TessJoinBelow *below);
+extern bool join_open_partition(TessHashJoinState *state, int partition, const TessJoinBelow *below,
+								bool pieces);
 extern bool join_take_partition(TessHashJoinState *state, int partition);
 extern void join_outer_finish(TessHashJoinState *state, TessBatch *batch);
 extern TessBatch *join_outer_next(TessHashJoinState *state);

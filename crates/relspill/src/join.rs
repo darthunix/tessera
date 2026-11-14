@@ -16,7 +16,8 @@
 //!     │                         Grown, │    │                    │                     │
 //!     │                         Full   v    │                                          v
 //!     │                               Sending                     a partition released, joined
-//!                                                                 whole, or split into a level below
+//!                                                                 whole or in pieces, or split into a
+//!                                                                 level below
 //! ```
 //!
 //! - **Fits.** The table is in memory. Before each batch of inner rows the
@@ -49,9 +50,19 @@
 //!   gives out alone, is released ([`Action::Release`]). One too large
 //!   for what the levels above leave of the limit, and much smaller than
 //!   its level, so not one key, splits into a level below
-//!   ([`Action::Split`]); the others are joined whole
-//!   ([`Action::Open`]). When none is left, the level is done
-//!   ([`Action::LevelDone`]).
+//!   ([`Action::Split`]); the others are joined ([`Action::Open`]): whole,
+//!   or, past two thirds of what the limit leaves, in pieces. When none
+//!   is left, the level is done ([`Action::LevelDone`]).
+//! - **Pieces.** A partition joined in pieces is read a piece at a time
+//!   ([`Event::Piece`]): the host reports the header of each block of its
+//!   inner rows ([`Event::Block`]), and the machine says whether the
+//!   block joins the piece or starts the next ([`Action::Carry`]). A
+//!   piece ends past its room, where a group of blocks ends: values
+//!   followed by the records that refer to them, so that no record is
+//!   read apart from its values. After each piece the host reads the
+//!   partition's outer rows ([`Event::PassEnd`]), and marks those with a
+//!   pair; a join that gives out its outer rows without a pair reads them
+//!   once more, without a table ([`Action::FinalPass`]).
 //!
 //! An event that the machine's phase does not take is a wrong call
 //! ([`Rule::JoinEvent`]), and the machine stays as it was. The machine
@@ -104,6 +115,13 @@ pub struct Params {
     /// or a FULL join does, 0 otherwise: a partition with inner rows and
     /// no outer row is joined then, not released.
     pub preserve_inner: u32,
+    /// 1 when the join gives out the outer rows without a pair, as a LEFT,
+    /// a FULL or an ANTI join does, 0 otherwise: a partition read in
+    /// pieces ends with a pass of its outer rows without a table, which
+    /// gives out those no piece paired.
+    pub unmatched_outer: u32,
+    /// Zero.
+    pub spare: u32,
     /// The bytes of the buffer a file of outer rows keeps.
     pub page: u64,
     /// The weights of the rule that sends partitions to disk, as
@@ -163,6 +181,16 @@ pub enum Event {
     /// A participant of a shared build took `partition` to join alone:
     /// whether it splits, with `memory` as for [`Event::Next`].
     Take { partition: u32, memory: u64 },
+    /// The host starts the next piece of a partition read in pieces:
+    /// `memory` as for [`Event::Next`], the last piece dropped.
+    Piece { memory: u64 },
+    /// The header of the partition's next block of inner rows, a block of
+    /// values or of records, of `len` bytes: whether it joins the piece.
+    Block { values: bool, len: u64 },
+    /// The partition's inner rows on disk are all read.
+    FileEnd,
+    /// A pass over the partition's outer rows ended.
+    PassEnd,
 }
 
 /// The side of a join a partition's rows are of.
@@ -198,8 +226,22 @@ pub enum Action {
     /// for the next.
     Release(u32),
     /// Join this partition, its inner rows read back as a table and its
-    /// outer rows probing it; then ask for the next.
-    Open(u32),
+    /// outer rows probing it: whole, then ask for the next; or, with
+    /// `pieces`, a piece at a time ([`Event::Piece`]), its outer rows read
+    /// once a piece.
+    Open { partition: u32, pieces: bool },
+    /// Read the block into the piece, and its header's next.
+    Load,
+    /// The piece ends before this block, which the next piece starts
+    /// with: probe the piece with the partition's outer rows, then report
+    /// [`Event::PassEnd`].
+    Carry,
+    /// Drop the piece and start the next ([`Event::Piece`]).
+    NextPiece,
+    /// Drop the piece and read the partition's outer rows once more,
+    /// without a table: those no piece paired go out. Then report
+    /// [`Event::PassEnd`].
+    FinalPass,
     /// Split a partition into a level below: make it, its machine by
     /// [`Join::below`].
     Split(Below),
@@ -278,6 +320,17 @@ const PROBING: u32 = 6;
 const JOINING: u32 = 7;
 const DONE: u32 = 8;
 const SHARED: u32 = 9;
+const OPENED: u32 = 10;
+const LOADING: u32 = 11;
+const PASS: u32 = 12;
+
+/// The flags of a partition read in pieces: its file is read to the end;
+/// its last pass, without a table, runs; the piece's last block is one of
+/// records; the piece has a block of values.
+const FILE_DONE: u32 = 1;
+const FINAL: u32 = 2;
+const RECORDS: u32 = 4;
+const VALUES: u32 = 8;
 
 /// The machine of one level of a join's spill.
 ///
@@ -306,13 +359,22 @@ pub struct Join {
     evicted: u32,
     /// The next partition to join.
     cursor: u32,
+    /// A partition read in pieces: the bytes a piece may take, and those
+    /// it took; the partition, the phase its level goes back to after it,
+    /// and its flags.
+    room: u64,
+    loaded: u64,
+    current: u32,
+    home: u32,
+    flags: u32,
+    spare: u32,
 }
 
 // Its size is part of the mirror a host keeps: words of 8 bytes.
 const _: () = assert!(size_of::<Join>() == 8 * JOIN_WORDS);
 
 /// Words of 8 bytes a [`Join`] takes.
-pub const JOIN_WORDS: usize = 26;
+pub const JOIN_WORDS: usize = 31;
 
 impl Join {
     /// The machine of a join whose table fits so far.
@@ -338,6 +400,12 @@ impl Join {
             deeper: 0,
             evicted: 0,
             cursor: 0,
+            room: 0,
+            loaded: 0,
+            current: 0,
+            home: 0,
+            flags: 0,
+            spare: 0,
         })
     }
 
@@ -487,6 +555,49 @@ impl Join {
                 );
                 self.take(host, partition, memory)
             }
+            (OPENED, Event::Piece { memory }) => {
+                self.room = self.room_of(memory);
+                self.loaded = 0;
+                self.flags &= !(RECORDS | VALUES);
+                self.phase = LOADING;
+                Ok(Action::Done)
+            }
+            (LOADING, Event::Block { values, len }) => {
+                // A group of blocks, values and the records that refer to
+                // them, ends where values follow records: a piece ends
+                // there, or at any block of records while it has no values.
+                if self.flags & RECORDS != 0
+                    && self.loaded >= self.room
+                    && (values || self.flags & VALUES == 0)
+                {
+                    self.phase = PASS;
+                    return Ok(Action::Carry);
+                }
+                self.loaded = self.loaded.saturating_add(len);
+                self.flags = if values {
+                    (self.flags & !RECORDS) | VALUES
+                } else {
+                    self.flags | RECORDS
+                };
+                Ok(Action::Load)
+            }
+            (LOADING, Event::FileEnd) => {
+                self.flags |= FILE_DONE;
+                self.phase = PASS;
+                Ok(Action::Done)
+            }
+            (PASS, Event::PassEnd) => {
+                if self.flags & FILE_DONE == 0 {
+                    self.phase = OPENED;
+                    return Ok(Action::NextPiece);
+                }
+                if self.params.unmatched_outer != 0 && self.flags & FINAL == 0 {
+                    self.flags |= FINAL;
+                    return Ok(Action::FinalPass);
+                }
+                self.phase = self.home;
+                Ok(Action::Done)
+            }
             _ => Err(Error::wrong_call(Rule::JoinEvent)
                 .with(phase)
                 .and(code(&event))),
@@ -496,7 +607,7 @@ impl Join {
     /// The phase, checked.
     fn phase(&self) -> Result<u32> {
         ensure!(
-            (FITS..=SHARED).contains(&self.phase),
+            (FITS..=PASS).contains(&self.phase),
             Error::wrong_call(Rule::JoinState).with(self.phase)
         );
         Ok(self.phase)
@@ -663,7 +774,7 @@ impl Join {
     /// larger than `room` of what the limit leaves besides `memory`, a
     /// chunk of outer rows and its values, and holds fewer than `key` of
     /// its level's rows, so not one key; whole otherwise.
-    fn take(&self, host: &Host<'_>, partition: u32, memory: u64) -> Result<Action> {
+    fn take(&mut self, host: &Host<'_>, partition: u32, memory: u64) -> Result<Action> {
         let index = partition as usize;
         let used = memory.saturating_add(2 * self.outer_len);
         let split = splits(
@@ -681,7 +792,15 @@ impl Join {
             },
         )?;
         if !split {
-            return Ok(Action::Open(partition));
+            // A file larger than the room of a piece is read in pieces.
+            let pieces = host.disk[index] > self.room_of(memory);
+            if pieces {
+                self.home = self.phase;
+                self.phase = OPENED;
+                self.current = partition;
+                self.flags = 0;
+            }
+            return Ok(Action::Open { partition, pieces });
         }
         // What the levels above leave of the limit, a quarter at least.
         let limit = self.params.limit;
@@ -696,6 +815,14 @@ impl Join {
             },
             shift: self.below,
         }))
+    }
+
+    /// The bytes a piece of a partition may take: two thirds of what the
+    /// limit leaves besides `memory` and a chunk of outer rows and its
+    /// values, the rest for the piece's index.
+    fn room_of(&self, memory: u64) -> u64 {
+        let used = memory.saturating_add(2 * self.outer_len);
+        self.params.limit.saturating_sub(used) / 3 * 2
     }
 
     /// The end of the build: where each partition's outer rows go.
@@ -747,6 +874,8 @@ fn check(params: &Params) -> Result<()> {
     ensure!(
         params.limit > 0
             && params.preserve_inner <= 1
+            && params.unmatched_outer <= 1
+            && params.spare == 0
             && weights
                 .iter()
                 .all(|weight| weight.is_finite() && *weight >= 0.0),
@@ -777,6 +906,10 @@ fn code(event: &Event) -> u32 {
         Event::OuterEnd => 7,
         Event::Next { .. } => 8,
         Event::Take { .. } => 9,
+        Event::Piece { .. } => 10,
+        Event::Block { .. } => 11,
+        Event::FileEnd => 12,
+        Event::PassEnd => 13,
     }
 }
 

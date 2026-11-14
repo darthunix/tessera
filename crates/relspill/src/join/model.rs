@@ -23,11 +23,35 @@ pub(super) fn hash(key: u32) -> u32 {
 /// its lane of NULL bits.
 const OUTER_ROW: u64 = 24;
 
-/// The pairs of a join, the ids of an inner row and an outer row.
+/// What a join gives: pairs of the ids of an inner row and an outer row,
+/// [`NONE`] for the inner row of an outer row given out alone.
 pub(super) type Pairs = Vec<(u32, u32)>;
 
+/// The inner id of an outer row given out without one.
+pub(super) const NONE: u32 = u32::MAX;
+
+/// The kinds of a join as the outer rows go out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Kind {
+    /// Every pair.
+    Inner,
+    /// An outer row with a pair, once.
+    Semi,
+    /// An outer row without a pair.
+    Anti,
+    /// Every pair, and an outer row without one.
+    Left,
+}
+
+impl Kind {
+    /// Whether the outer rows without a pair go out.
+    pub(super) fn unmatched(self) -> bool {
+        matches!(self, Kind::Anti | Kind::Left)
+    }
+}
+
 /// What a model ran, by [`Ran`]'s indexes.
-pub(super) type Counts = [usize; 10];
+pub(super) type Counts = [usize; 12];
 
 /// The indexes of [`Counts`].
 pub(super) struct Ran;
@@ -44,17 +68,55 @@ impl Ran {
     pub(super) const SPLIT: usize = 8;
     /// The most levels at once, not a count of actions.
     pub(super) const DEEPEST: usize = 9;
+    /// Partitions read in pieces, and the pieces.
+    pub(super) const PIECED: usize = 10;
+    pub(super) const PIECES: usize = 11;
 }
 
-/// The pairs of a join in memory.
-pub(super) fn pairs(inner: &[Row], outer: &[Row], out: &mut Pairs) {
+/// What a join in memory of `kind` gives.
+pub(super) fn joined(kind: Kind, inner: &[Row], outer: &[Row], out: &mut Pairs) {
     for o in outer {
-        for i in inner {
-            if i.key == o.key {
+        let mut matched = false;
+        for i in inner.iter().filter(|i| i.key == o.key) {
+            matched = true;
+            if matches!(kind, Kind::Inner | Kind::Left) {
                 out.push((i.id, o.id));
             }
         }
+        if (kind == Kind::Semi && matched) || (kind.unmatched() && !matched) {
+            out.push((NONE, o.id));
+        }
     }
+}
+
+/// A block of a file: rows, or the values of the rows of the blocks
+/// after it, of so many bytes.
+#[derive(Clone, Debug)]
+enum Block {
+    Rows(Vec<Row>),
+    Values(u64),
+}
+
+impl Block {
+    fn len(&self, record: u64) -> u64 {
+        match self {
+            Block::Rows(rows) => rows.len() as u64 * record,
+            Block::Values(len) => *len,
+        }
+    }
+}
+
+/// The rows of blocks.
+fn rows_of(blocks: &[Block]) -> Vec<Row> {
+    blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Rows(rows) => Some(rows.as_slice()),
+            Block::Values(_) => None,
+        })
+        .flatten()
+        .copied()
+        .collect()
 }
 
 /// A host's regions for a level, or for none.
@@ -112,7 +174,7 @@ impl Regions {
 #[derive(Default)]
 struct Held {
     chunks: Vec<Vec<Vec<Row>>>,
-    files: Vec<Vec<Vec<Row>>>,
+    files: Vec<Vec<Block>>,
 }
 
 impl Held {
@@ -181,15 +243,33 @@ impl Level {
         Ok(())
     }
 
-    /// Write a block of a side's partition to its file.
-    fn write(&mut self, side: Side, partition: usize, rows: Vec<Row>, record: u64) {
-        if rows.is_empty() {
+    /// Write chunks of a side's partition to its file: of the inner side,
+    /// when its rows keep values, as a group, a block of their values
+    /// before the blocks of their rows.
+    fn write(
+        &mut self,
+        side: Side,
+        partition: usize,
+        chunks: Vec<Vec<Row>>,
+        record: u64,
+        values: bool,
+    ) {
+        let chunks: Vec<Vec<Row>> = chunks.into_iter().filter(|rows| !rows.is_empty()).collect();
+        if chunks.is_empty() {
             return;
         }
-        if side == Side::Inner {
-            self.regions.disk[partition] += rows.len() as u64 * record;
+        let mut blocks = Vec::new();
+        if side == Side::Inner && values {
+            blocks.push(Block::Values(
+                8 * chunks.iter().map(Vec::len).sum::<usize>() as u64,
+            ));
         }
-        self.side(side).files[partition].push(rows);
+        blocks.extend(chunks.into_iter().map(Block::Rows));
+        if side == Side::Inner {
+            self.regions.disk[partition] +=
+                blocks.iter().map(|block| block.len(record)).sum::<u64>();
+        }
+        self.side(side).files[partition].extend(blocks);
     }
 }
 
@@ -197,6 +277,9 @@ impl Level {
 pub(super) struct Model {
     params: Params,
     record: u64,
+    kind: Kind,
+    /// The inner rows keep values by reference.
+    values: bool,
     /// The table while it fits, then the levels of the spill, the first
     /// at the bottom.
     table: Vec<Row>,
@@ -218,7 +301,7 @@ impl Model {
     /// A row into its partition of a side of the top level, a chunk at a
     /// time.
     fn append(&mut self, side: Side, row: Row) -> Result<()> {
-        let record = self.record;
+        let (record, values) = (self.record, self.values);
         let level = self.top();
         let partition = level.partition(row.key);
         let (len, per) = match side {
@@ -247,7 +330,7 @@ impl Model {
                             .last_mut()
                             .expect("a tail"),
                     );
-                    level.write(side, partition, rows, record);
+                    level.write(side, partition, vec![rows], record, values);
                     self.ran[Ran::FLUSHED] += 1;
                 }
                 action => panic!("{action:?} for a full partition"),
@@ -284,16 +367,16 @@ impl Model {
                 Action::Evict(partition) => (partition as usize, false),
                 action => panic!("{action:?} while sending"),
             };
-            let record = self.record;
+            let (record, values) = (self.record, self.values);
             let level = self.top();
             // A partition goes to disk once, and only one there is evicted.
             assert_eq!(level.on_disk[partition], !demote);
             let before = level.memory;
             let chunks = core::mem::take(&mut level.inner.chunks[partition]);
             let count = chunks.len();
-            for (index, rows) in chunks.into_iter().enumerate() {
-                level.write(Side::Inner, partition, rows, record);
-                // A partition sent keeps its last chunk, emptied, as its tail.
+            level.write(Side::Inner, partition, chunks, record, values);
+            // A partition sent keeps its last chunk, emptied, as its tail.
+            for index in 0..count {
                 if demote && index + 1 == count {
                     level.inner.chunks[partition].push(Vec::new());
                 } else {
@@ -348,9 +431,8 @@ impl Model {
     fn end_build(&mut self, rows: &[u32]) -> Result<()> {
         self.send(Event::BuildEnd, false)?;
         let level = self.top();
-        let mut kept: Vec<u32> = (level.inner.chunks.iter().flatten())
-            .chain(level.inner.files.iter().flatten())
-            .flatten()
+        let mut kept: Vec<u32> = (level.inner.chunks.iter().flatten().flatten().copied())
+            .chain(level.inner.files.iter().flat_map(|file| rows_of(file)))
             .map(|row| row.id)
             .collect();
         kept.sort_unstable();
@@ -370,36 +452,134 @@ impl Model {
         Ok(())
     }
 
-    /// Outer rows through the top level's routes.
+    /// Outer rows through the top level's routes: probing the table in
+    /// memory, written, or with no pair.
     fn probe(&mut self, rows: &[Row]) -> Result<()> {
+        let kind = self.kind;
         for &row in rows {
             let level = self.top();
             let partition = level.partition(row.key);
             let route = level.regions.routes[partition];
             let table: Vec<Row> = level.inner.chunks[partition].concat();
             self.ran[Ran::PROBED + usize::from(route)] += 1;
-            if route == Route::Probe as u8 {
-                pairs(&table, &[row], &mut self.pairs);
-            } else if route == Route::Write as u8 {
+            if route == Route::Write as u8 {
                 self.append(Side::Outer, row)?;
+            } else {
+                joined(kind, &table, &[row], &mut self.pairs);
             }
         }
+        Ok(())
+    }
+
+    /// A pass of a piece over a partition's outer rows, which marks those
+    /// with a pair: pairs, and a semi join's rows at their first pair.
+    fn pass(&mut self, table: &[Row], outer: &[Row], marks: &mut [bool]) {
+        for (o, mark) in outer.iter().zip(marks) {
+            let mut matched = false;
+            for i in table.iter().filter(|i| i.key == o.key) {
+                matched = true;
+                if matches!(self.kind, Kind::Inner | Kind::Left) {
+                    self.pairs.push((i.id, o.id));
+                }
+            }
+            if self.kind == Kind::Semi && matched && !*mark {
+                self.pairs.push((NONE, o.id));
+            }
+            *mark |= matched;
+        }
+    }
+
+    /// A partition read in pieces, as its machine says: each piece a
+    /// pass over the outer rows, then, for the rows without a pair, a pass
+    /// without a table.
+    fn pieces(&mut self, blocks: Vec<Block>, outer: &[Row]) -> Result<()> {
+        let (record, values) = (self.record, self.values);
+        let all = rows_of(&blocks);
+        let mut marks = vec![false; outer.len()];
+        let mut loaded: Vec<Row> = Vec::new();
+        let mut blocks = blocks.into_iter();
+        let mut carried = None;
+        self.ran[Ran::PIECED] += 1;
+        loop {
+            let memory = self.memory();
+            assert_eq!(self.top().step(Event::Piece { memory })?, Action::Done);
+            let mut piece = Vec::new();
+            loop {
+                let Some(block) = carried.take().or_else(|| blocks.next()) else {
+                    assert_eq!(self.top().step(Event::FileEnd)?, Action::Done);
+                    break;
+                };
+                let event = Event::Block {
+                    values: matches!(block, Block::Values(_)),
+                    len: block.len(record),
+                };
+                match self.top().step(event)? {
+                    Action::Load => piece.push(block),
+                    Action::Carry => {
+                        carried = Some(block);
+                        break;
+                    }
+                    action => panic!("{action:?} for a block"),
+                }
+            }
+            // A piece holds whole groups: the values its rows refer to.
+            if values && let Some(first) = piece.first() {
+                assert!(
+                    matches!(first, Block::Values(_)),
+                    "a piece without its values"
+                );
+            }
+            self.ran[Ran::PIECES] += 1;
+            let table = rows_of(&piece);
+            loaded.extend_from_slice(&table);
+            self.pass(&table, outer, &mut marks);
+            match self.top().step(Event::PassEnd)? {
+                Action::NextPiece => continue,
+                Action::FinalPass => {
+                    assert!(
+                        self.kind.unmatched(),
+                        "a last pass of a {:?} join",
+                        self.kind
+                    );
+                    for (o, &mark) in outer.iter().zip(&marks) {
+                        if !mark {
+                            self.pairs.push((NONE, o.id));
+                        }
+                    }
+                    assert_eq!(self.top().step(Event::PassEnd)?, Action::Done);
+                    break;
+                }
+                Action::Done => {
+                    assert!(
+                        !self.kind.unmatched(),
+                        "no last pass of a {:?} join",
+                        self.kind
+                    );
+                    break;
+                }
+                action => panic!("{action:?} past a pass"),
+            }
+        }
+        // Each inner row in one piece, once.
+        assert!(carried.is_none() && blocks.next().is_none());
+        assert_eq!(loaded.len(), all.len());
         Ok(())
     }
 
     /// The end of the top level's outer rows: what each partition on disk
     /// holds in memory is written, and the partitions in memory go.
     fn end_outer(&mut self) -> Result<()> {
-        let record = self.record;
+        let (record, values) = (self.record, self.values);
         let level = self.top();
         assert_eq!(level.step(Event::OuterEnd)?, Action::Done);
         for partition in 0..level.on_disk.len() {
             for side in [Side::Inner, Side::Outer] {
                 let chunks = core::mem::take(&mut level.side(side).chunks[partition]);
-                for rows in chunks {
-                    if level.on_disk[partition] {
-                        level.write(side, partition, rows, record);
-                    }
+                let count = chunks.len();
+                if level.on_disk[partition] {
+                    level.write(side, partition, chunks, record, values);
+                }
+                for _ in 0..count {
                     if side == Side::Inner {
                         let len = level.chunk_len;
                         level.count(partition, len, false)?;
@@ -419,14 +599,15 @@ impl Model {
             let action = self.top().step(Event::Next { memory })?;
             let partition = match action {
                 Action::LevelDone => return Ok(()),
-                Action::Release(partition) | Action::Open(partition) => partition as usize,
+                Action::Release(partition) | Action::Open { partition, .. } => partition as usize,
                 Action::Split(below) => below.partition as usize,
                 action => panic!("{action:?} for the next partition"),
             };
             let level = self.top();
             assert!(level.on_disk[partition], "partition {partition} in memory");
-            let inner: Vec<Row> = core::mem::take(&mut level.inner.files[partition]).concat();
-            let outer: Vec<Row> = core::mem::take(&mut level.outer.files[partition]).concat();
+            let blocks = core::mem::take(&mut level.inner.files[partition]);
+            let inner = rows_of(&blocks);
+            let outer = rows_of(&core::mem::take(&mut level.outer.files[partition]));
             assert_eq!(inner.len() as u64, level.regions.rows[partition]);
             assert_eq!(outer.len() as u64, level.regions.outer[partition]);
             match action {
@@ -435,9 +616,13 @@ impl Model {
                     assert!(outer.is_empty());
                     self.ran[Ran::RELEASED] += 1;
                 }
-                Action::Open(_) => {
-                    pairs(&inner, &outer, &mut self.pairs);
+                Action::Open { pieces: false, .. } => {
+                    joined(self.kind, &inner, &outer, &mut self.pairs);
                     self.ran[Ran::OPENED] += 1;
+                }
+                Action::Open { pieces: true, .. } => {
+                    self.ran[Ran::OPENED] += 1;
+                    self.pieces(blocks, &outer)?;
                 }
                 Action::Split(below) => {
                     self.ran[Ran::SPLIT] += 1;
@@ -469,21 +654,27 @@ impl Model {
         }
     }
 
-    /// Join `inner` and `outer` through the machine, `batch` inner rows
-    /// at a time: the pairs, and what ran.
+    /// Join `inner` and `outer` through the machine as a join of `kind`,
+    /// `batch` inner rows at a time, whose inner rows keep `values` by
+    /// reference: what it gives, and what ran.
     pub(super) fn run(
         params: &Params,
+        kind: Kind,
+        values: bool,
         inner: &[Row],
         outer: &[Row],
         batch: usize,
     ) -> Result<(Pairs, Counts)> {
+        assert_eq!(params.unmatched_outer != 0, kind.unmatched());
         let mut model = Self {
             params: *params,
             record: params.shape.record as u64,
+            kind,
+            values,
             table: Vec::new(),
             levels: Vec::new(),
             pairs: Vec::new(),
-            ran: [0; 10],
+            ran: [0; 12],
         };
         let mut join = Some(Join::new(params)?);
         for rows in inner.chunks(batch) {
@@ -512,7 +703,7 @@ impl Model {
             model.build(rows)?;
         }
         if join.is_some() {
-            pairs(&model.table, outer, &mut model.pairs);
+            joined(kind, &model.table, outer, &mut model.pairs);
             return Ok((model.pairs, model.ran));
         }
         let ids: Vec<u32> = inner.iter().map(|row| row.id).collect();

@@ -24,8 +24,10 @@ machine answers what to do: start the first level, give a partition a
 chunk or write what it holds, send a partition to disk, and, at the end
 of the build, where the outer rows of each partition go. Once the outer
 rows end, the node asks it for the partitions on disk one at a time, and
-it answers which to release, which to join whole and which to split
-into a level below, with that level's limit. A shared table's level has
+it answers which to release, which to join whole or in pieces, and
+which to split into a level below, with that level's limit. A partition
+in pieces is read block by block, and the machine says where a piece
+ends and which passes over the outer rows follow. A shared table's level has
 a machine too, which decides whether a partition one participant takes
 alone splits. The node does the work for each row and the reading and
 writing.

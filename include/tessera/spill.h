@@ -736,7 +736,7 @@ extern Size tess_spill_set_layout(TessSpillSetLayout what);
  * was: an event the machine's phase does not take, a partition past the
  * level's, regions that are not the level's, and a null argument.
  */
-#define TESS_JOIN_WORDS 26
+#define TESS_JOIN_WORDS 31
 
 typedef struct TessJoinMachine
 {
@@ -748,8 +748,9 @@ typedef struct TessJoinMachine
  * of its levels' inner side, the words an outer row stores in a chunk of
  * columns besides its NULL bits, whether the outer rows keep values by
  * reference (1) or not (0), whether the join gives out the inner rows
- * without a pair (1, RIGHT and FULL) or not (0), the bytes of a file's
- * buffer, the weights of the rule that sends partitions to disk
+ * without a pair (1, RIGHT and FULL) or not (0), whether it gives out the
+ * outer rows without a pair (1, LEFT, FULL and ANTI) or not (0), a spare
+ * word of 0, the bytes of a file's buffer, the weights of the rule that sends partitions to disk
  * (TessSpillWeights), with the share of the outer tail of a partition on
  * disk counted in reserve, and those of the rule that splits a partition
  * into a level below (tess_table_spill_splits).
@@ -761,6 +762,8 @@ typedef struct TessJoinParams
 	uint64		outer_words;
 	uint32		outer_values;
 	uint32		preserve_inner;
+	uint32		unmatched_outer;
+	uint32		spare;
 	uint64		page;
 	double		start;
 	double		target;
@@ -839,7 +842,18 @@ typedef enum TessJoinEventKind
 	 * A participant of a shared build took partition to join alone;
 	 * memory as for TESS_JOIN_NEXT.
 	 */
-	TESS_JOIN_TAKE = 9
+	TESS_JOIN_TAKE = 9,
+	/* The join starts the next piece of a partition; memory as for TESS_JOIN_NEXT. */
+	TESS_JOIN_PIECE = 10,
+	/*
+	 * The header of the partition's next block of inner rows: flag 1 for a
+	 * block of values, of len bytes.
+	 */
+	TESS_JOIN_BLOCK = 11,
+	/* The partition's inner rows on disk are all read. */
+	TESS_JOIN_FILE_END = 12,
+	/* A pass over the partition's outer rows ended. */
+	TESS_JOIN_PASS_END = 13
 } TessJoinEventKind;
 
 typedef struct TessJoinEvent
@@ -852,6 +866,7 @@ typedef struct TessJoinEvent
 	uint64		rows;
 	double		estimate;
 	uint64		memory;
+	uint64		len;
 } TessJoinEvent;
 
 typedef enum TessJoinActionKind
@@ -876,12 +891,31 @@ typedef enum TessJoinActionKind
 	TESS_JOIN_EVICT = 5,
 	/* Partition has nothing to join: free it and its files, then TESS_JOIN_NEXT. */
 	TESS_JOIN_RELEASE = 6,
-	/* Join partition whole, then TESS_JOIN_NEXT. */
+	/*
+	 * Join partition: whole, then TESS_JOIN_NEXT; or, with pieces, a piece
+	 * at a time, each from TESS_JOIN_PIECE.
+	 */
 	TESS_JOIN_OPEN = 7,
 	/* Split partition into the level below, its machine by tess_join_below. */
 	TESS_JOIN_SPLIT = 8,
 	/* Every partition of the level is done. */
-	TESS_JOIN_LEVEL_DONE = 9
+	TESS_JOIN_LEVEL_DONE = 9,
+	/* Read the block into the piece. */
+	TESS_JOIN_LOAD = 10,
+	/*
+	 * The piece ends before the block, which the next piece starts with:
+	 * probe the piece with the partition's outer rows, then
+	 * TESS_JOIN_PASS_END.
+	 */
+	TESS_JOIN_CARRY = 11,
+	/* Drop the piece and start the next with TESS_JOIN_PIECE. */
+	TESS_JOIN_NEXT_PIECE = 12,
+	/*
+	 * Drop the piece and read the partition's outer rows once more,
+	 * without a table, giving out those no piece paired; then
+	 * TESS_JOIN_PASS_END.
+	 */
+	TESS_JOIN_FINAL_PASS = 13
 } TessJoinActionKind;
 
 /*
@@ -903,6 +937,8 @@ typedef struct TessJoinAction
 {
 	uint32		kind;
 	uint32		partition;
+	uint32		pieces;
+	uint32		spare;
 	Size		outer_len;
 	TessSpillPlan plan;
 	TessJoinBelow below;
@@ -950,7 +986,9 @@ typedef enum TessJoinLayout
 	TESS_JOIN_ACTION_PLAN_OFFSET = 9,
 	TESS_JOIN_ACTION_BELOW_OFFSET = 10,
 	TESS_JOIN_BELOW_SIZE = 11,
-	TESS_JOIN_BELOW_SHIFT_OFFSET = 12
+	TESS_JOIN_BELOW_SHIFT_OFFSET = 12,
+	TESS_JOIN_EVENT_LEN_OFFSET = 13,
+	TESS_JOIN_ACTION_OUTER_LEN_OFFSET = 14
 } TessJoinLayout;
 
 /* The size or offset for a kind, or 0 for an unknown one. */

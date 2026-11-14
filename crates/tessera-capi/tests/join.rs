@@ -11,19 +11,21 @@
 use std::mem::{offset_of, size_of};
 
 use tessera_capi::c::{
-    Code, JOIN_ACTION_BELOW_OFFSET, JOIN_ACTION_PLAN_OFFSET, JOIN_ACTION_SIZE, JOIN_ADD_CHUNK,
-    JOIN_BELOW_SHIFT_OFFSET, JOIN_BELOW_SIZE, JOIN_BUILD_END, JOIN_DEMOTE, JOIN_DONE,
-    JOIN_EVENT_MEMORY_OFFSET, JOIN_EVENT_SIZE, JOIN_EVICT, JOIN_FLUSH, JOIN_FULL, JOIN_GROWN,
-    JOIN_HOST_NROUTES_OFFSET, JOIN_HOST_SIZE, JOIN_INNER, JOIN_LEVEL_DONE, JOIN_MACHINE_SIZE,
-    JOIN_MADE, JOIN_NEXT, JOIN_OPEN, JOIN_OUTER_END, JOIN_PARAMS_SIZE, JOIN_PARAMS_TAIL_OFFSET,
-    JOIN_RELEASE, JOIN_SENT, JOIN_SPLIT, JOIN_START, JOIN_TAKE, JoinAction, JoinBelow, JoinEvent,
-    JoinHost, JoinParams, SpillLevel, SpillPlan, SpillShape, Status, tess_join_below,
+    Code, JOIN_ACTION_BELOW_OFFSET, JOIN_ACTION_OUTER_LEN_OFFSET, JOIN_ACTION_PLAN_OFFSET,
+    JOIN_ACTION_SIZE, JOIN_ADD_CHUNK, JOIN_BELOW_SHIFT_OFFSET, JOIN_BELOW_SIZE, JOIN_BLOCK,
+    JOIN_BUILD_END, JOIN_CARRY, JOIN_DEMOTE, JOIN_DONE, JOIN_EVENT_LEN_OFFSET,
+    JOIN_EVENT_MEMORY_OFFSET, JOIN_EVENT_SIZE, JOIN_EVICT, JOIN_FILE_END, JOIN_FINAL_PASS,
+    JOIN_FLUSH, JOIN_FULL, JOIN_GROWN, JOIN_HOST_NROUTES_OFFSET, JOIN_HOST_SIZE, JOIN_INNER,
+    JOIN_LEVEL_DONE, JOIN_LOAD, JOIN_MACHINE_SIZE, JOIN_MADE, JOIN_NEXT, JOIN_NEXT_PIECE,
+    JOIN_OPEN, JOIN_OUTER_END, JOIN_PARAMS_SIZE, JOIN_PARAMS_TAIL_OFFSET, JOIN_PASS_END,
+    JOIN_PIECE, JOIN_RELEASE, JOIN_SENT, JOIN_SPLIT, JOIN_START, JOIN_TAKE, JoinAction, JoinBelow,
+    JoinEvent, JoinHost, JoinParams, SpillLevel, SpillPlan, SpillShape, Status, tess_join_below,
     tess_join_given, tess_join_init, tess_join_layout, tess_join_step, tess_spill_expected,
     tess_spill_plan, tess_table_spill_add_bytes,
 };
 
 /// The words of a machine.
-type Machine = [u64; 26];
+type Machine = [u64; 31];
 
 fn params(limit: u64) -> JoinParams {
     JoinParams {
@@ -40,6 +42,8 @@ fn params(limit: u64) -> JoinParams {
         outer_words: 2,
         outer_values: 1,
         preserve_inner: 0,
+        unmatched_outer: 0,
+        spare: 0,
         page: 512,
         start: 1.0,
         target: 1.0,
@@ -182,7 +186,7 @@ fn first_plan(params: &JoinParams, expected: f64) -> SpillPlan {
 #[test]
 fn a_join_steps_through_its_build_by_the_entry_points() {
     let params = params(1 << 20);
-    let mut machine: Machine = [0; 26];
+    let mut machine: Machine = [0; 31];
     assert_eq!(init(&mut machine, &params), Code::Ok);
     let mut none = Level::none();
     // A batch that fits; then one past the limit.
@@ -294,7 +298,7 @@ fn the_tail_of_a_partition_on_disk_is_evicted_when_it_weighs() {
         spilled: 1.0,
         ..params(1 << 20)
     };
-    let mut machine: Machine = [0; 26];
+    let mut machine: Machine = [0; 31];
     assert_eq!(init(&mut machine, &params), Code::Ok);
     let past = JoinEvent {
         memory: (1 << 20) + 1,
@@ -367,7 +371,7 @@ fn the_tail_of_a_partition_on_disk_is_evicted_when_it_weighs() {
 #[test]
 fn a_level_weighs_the_rows_its_host_counts() {
     let params = params(1 << 20);
-    let mut machine: Machine = [0; 26];
+    let mut machine: Machine = [0; 31];
     assert_eq!(init(&mut machine, &params), Code::Ok);
     let past = JoinEvent {
         memory: (1 << 20) + 1,
@@ -405,10 +409,77 @@ fn a_level_weighs_the_rows_its_host_counts() {
 }
 
 #[test]
+fn a_partition_is_joined_in_pieces_through_the_entry_points() {
+    // A left join, whose rows without a pair go out in a last pass.
+    let params = JoinParams {
+        unmatched_outer: 1,
+        ..params(1 << 20)
+    };
+    let mut machine: Machine = [0; 31];
+    let mut status = Status::new();
+    let mut action = JoinAction::default();
+    // SAFETY: local arguments.
+    let code = unsafe {
+        tess_join_given(
+            machine.as_mut_ptr().cast(),
+            &raw const params,
+            4,
+            &raw mut action,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    let mut level = Level::of(&action.plan);
+    level.rows[1] = 7000;
+    level.total = 7000;
+    level.disk[1] = 4 << 20;
+    let take = JoinEvent {
+        partition: 1,
+        ..event(JOIN_TAKE)
+    };
+    let open = JoinAction {
+        partition: 1,
+        pieces: 1,
+        ..kind(JOIN_OPEN)
+    };
+    assert_eq!(step(&mut machine, &mut level, take), (Code::Ok, open));
+    let block = |values: bool, len| JoinEvent {
+        flag: u32::from(values),
+        len,
+        ..event(JOIN_BLOCK)
+    };
+    let piece = JoinEvent {
+        memory: 1 << 20,
+        ..event(JOIN_PIECE)
+    };
+    let steps = [
+        (piece, JOIN_DONE),
+        (block(true, 100), JOIN_LOAD),
+        (block(false, 100), JOIN_LOAD),
+        (block(true, 100), JOIN_CARRY),
+        (event(JOIN_PASS_END), JOIN_NEXT_PIECE),
+        (piece, JOIN_DONE),
+        (block(true, 100), JOIN_LOAD),
+        (event(JOIN_FILE_END), JOIN_DONE),
+        (event(JOIN_PASS_END), JOIN_FINAL_PASS),
+        (event(JOIN_PASS_END), JOIN_DONE),
+    ];
+    for (event, expected) in steps {
+        assert_eq!(
+            step(&mut machine, &mut level, event),
+            (Code::Ok, kind(expected)),
+            "{event:?}"
+        );
+    }
+    // The shared build takes its next partition again.
+    assert_eq!(step(&mut machine, &mut level, take).1.kind, JOIN_OPEN);
+}
+
+#[test]
 fn a_level_below_is_planned_through_its_entry_point() {
     let params = params(1 << 20);
     let below = |level: u32, shift: u32| {
-        let mut machine: Machine = [0; 26];
+        let mut machine: Machine = [0; 31];
         let mut status = Status::new();
         let mut action = JoinAction::default();
         let below = JoinBelow {
@@ -451,7 +522,7 @@ fn a_level_below_is_planned_through_its_entry_point() {
 fn a_shared_level_is_planned_through_its_entry_point() {
     let params = params(1 << 20);
     let given = |partitions: u32| {
-        let mut machine: Machine = [0; 26];
+        let mut machine: Machine = [0; 31];
         let mut status = Status::new();
         let mut action = JoinAction::default();
         // SAFETY: local arguments.
@@ -535,7 +606,7 @@ fn a_shared_level_is_planned_through_its_entry_point() {
 
 #[test]
 fn the_join_entry_points_refuse_what_is_no_step() {
-    let mut machine: Machine = [0; 26];
+    let mut machine: Machine = [0; 31];
     let mut none = Level::none();
     // Zeroed words are no machine.
     assert_eq!(
@@ -647,10 +718,15 @@ fn the_join_layout_is_its_types() {
         (JOIN_ACTION_BELOW_OFFSET, offset_of!(JoinAction, below)),
         (JOIN_BELOW_SIZE, size_of::<JoinBelow>()),
         (JOIN_BELOW_SHIFT_OFFSET, offset_of!(JoinBelow, shift)),
+        (JOIN_EVENT_LEN_OFFSET, offset_of!(JoinEvent, len)),
+        (
+            JOIN_ACTION_OUTER_LEN_OFFSET,
+            offset_of!(JoinAction, outer_len),
+        ),
         (99, 0),
     ];
     for (what, size) in sizes {
         assert_eq!(tess_join_layout(what), size, "{what}");
     }
-    assert_eq!(size_of::<JoinParams>(), 8 * 17);
+    assert_eq!(size_of::<JoinParams>(), 8 * 18);
 }
