@@ -576,8 +576,6 @@ typedef struct JoinSpill
 	uint64	   *before_bits;
 	uint8	  **payloads;
 	TessDatumColumn *columns;
-	/* The level plan's first bit of a level below; the level's own is shift. */
-	uint32		below;
 	/*
 	 * The level's machine (relspill's join): the first level's is the
 	 * node's, a level below keeps its own, and so does a shared table's

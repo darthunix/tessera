@@ -1165,7 +1165,6 @@ spill_create(TessHashJoinState *state, JoinSpill *parent, const TessJoinAction *
 												 TESS_CHUNK_CONTEXT_SIZES);
 	spill->npartitions = npartitions;
 	spill->shift = start->plan.shift;
-	spill->below = start->plan.below;
 	spill->partition = -1;
 	/* A level's own files; a shared table's first level reads every participant's. */
 	spill->writers = 1;
