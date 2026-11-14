@@ -4,8 +4,10 @@
 //! every partition, one after another in the order they were written,
 //! and a block list for each partition, an [`Entry`] for each of its
 //! blocks. A shared set is one such file for each participant of a
-//! query. At its end, after its blocks, it holds its lists and a
-//! trailer, so that the other participants can read it:
+//! query. At its end, after its blocks, every set holds its lists and a
+//! trailer, so that a reader takes a list a page at a time from the
+//! file, its own set's or another participant's, and no list need stay
+//! in memory once its set is finished:
 //!
 //! ```text
 //!  ┌────────┬───┬──────────────────┬───────────────────┬──────────┐
@@ -60,13 +62,13 @@ mod reader;
 
 pub use reader::{READER_WORDS, ReadConfig, ReadStep, Reader};
 
-/// The first word of a shared set's trailer.
+/// The first word of a set's trailer.
 pub const TRAILER_MAGIC: u64 = 0x5445_5353_5452_4149;
 
-/// Bytes of a shared set's trailer.
+/// Bytes of a set's trailer.
 pub const TRAILER_SIZE: usize = 32;
 
-/// Bytes of an [`Entry`] in a list, and at the end of a shared file.
+/// Bytes of an [`Entry`] in a list, and at the end of a file.
 pub const ENTRY_SIZE: usize = 16;
 
 /// The shortest write buffer: a block's header and the shortest chunk of
@@ -82,7 +84,7 @@ pub const MIN_LIST: usize = 16;
 /// Where a block lies in the file of its set: where its header starts,
 /// and the bytes it takes, header included. A partition's block list is
 /// an array of these in the order its blocks were written, and the end of
-/// a shared file holds them as they lie in memory.
+/// a file holds them as they lie in memory.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Entry {
@@ -200,8 +202,9 @@ pub struct Config {
     /// Bytes of the write buffer: a multiple of 8, at least
     /// [`MIN_BUFFER`].
     pub buffer_len: usize,
-    /// Whether the set is a participant's of a shared set, whose finish
-    /// writes the lists and the trailer.
+    /// Whether the set is a participant's of a shared set, which drops no
+    /// partition before it is finished, since the others read its lists
+    /// from its file.
     pub shared: bool,
 }
 
@@ -696,8 +699,8 @@ impl Writer {
     }
 
     /// Finish the set: a step at a time, write what the buffer holds and,
-    /// for a shared set that wrote a block, the lists and the trailer
-    /// after the blocks. The last step is [`Step::Done`]; after it the
+    /// for a set that wrote a block, the lists and the trailer after the
+    /// blocks. The last step is [`Step::Done`]; after it the
     /// set takes no more blocks, and a finished set's finish is done at
     /// once. Between the steps the caller changes neither the buffer nor
     /// the lists.
@@ -749,7 +752,7 @@ impl Writer {
         if self.buffered > 0 {
             return Ok(self.flush());
         }
-        if self.shared == 0 || self.end == 0 {
+        if self.end == 0 {
             self.phase = FINISHED;
             return Ok(done);
         }
@@ -1110,8 +1113,8 @@ pub(crate) mod tests {
 
     /// Check the file of a set against the blocks written to it, in
     /// order: each partition's list names its blocks in their order, and
-    /// each block reads back as written; a shared set ends with its lists
-    /// and its trailer.
+    /// each block reads back as written; a set that wrote a block ends
+    /// with its lists and its trailer.
     fn check_file(host: &Host, config: Config, written: &[Owned]) -> Result<()> {
         let partitions = config.partitions as usize;
         // A reader takes the longest body of values written as its bound.
@@ -1172,7 +1175,7 @@ pub(crate) mod tests {
         }
         ensure!(end == blocks, "blocks end at {end}, take {blocks} bytes");
         ensure!(host.writer.bytes() == blocks && host.writer.blocks() == written.len() as u64);
-        if !config.shared || written.is_empty() {
+        if written.is_empty() {
             ensure!(
                 host.file.len() as u64 == blocks,
                 "a file of {}",
@@ -1299,7 +1302,7 @@ pub(crate) mod tests {
 
     /// Every block of every partition, written through a buffer of any
     /// length, lies in the file where its list says and reads back as it
-    /// was written; a shared set ends with its lists and its trailer.
+    /// was written; the set ends with its lists and its trailer.
     #[test]
     fn a_set_written_in_memory_reads_back() {
         let case =

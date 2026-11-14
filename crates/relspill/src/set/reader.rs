@@ -8,10 +8,11 @@
 //! from their starts, after which the caller makes the call again; or
 //! what the reader found.
 //!
-//! For the caller's own set the page is the partition's block list in
-//! memory ([`Reader::own`]), and only blocks are read. For another
-//! participant's file of a shared set the caller gives the file's length
-//! ([`Reader::file`]), and [`Reader::open`] asks first for the trailer at
+//! For the caller's own set the page may be the partition's block list
+//! in memory ([`Reader::own`]), and only blocks are read. For a finished
+//! set's file, the caller's own or another participant's of a shared
+//! set, the caller gives the file's length ([`Reader::file`]), and
+//! [`Reader::open`] asks first for the trailer at
 //! the end of the file, then for the counts of the lists, then for the
 //! partition's entries, a page at a time. It checks each part before it
 //! asks for the bytes it names: the trailer before the counts, the
@@ -203,8 +204,9 @@ impl Reader {
         Ok(reader)
     }
 
-    /// A reader of a partition of another participant's file, of
-    /// `file_len` bytes; [`Self::open`] reads its lists.
+    /// A reader of a partition of a finished set's file, the caller's
+    /// own or another participant's, of `file_len` bytes; [`Self::open`]
+    /// reads its lists.
     ///
     /// # Errors
     ///
@@ -956,9 +958,9 @@ mod tests {
     }
 
     /// Every partition of a set reads back in the order its blocks were
-    /// written: through its own list, and, for a shared set, from the
-    /// file as another participant reads it, a page of 2 to 9 entries at
-    /// a time; a seek goes to each block by its place.
+    /// written: through its own list, and from the file as a reader of
+    /// the finished set reads it, a page of 2 to 9 entries at a time; a
+    /// seek goes to each block by its place.
     #[test]
     fn a_set_reads_back_by_its_lists_and_from_its_file() {
         // Up to 12 partitions, so that a page of two entries reads the
@@ -996,7 +998,7 @@ mod tests {
                     block: vec![0; MAX_LEN as usize],
                 };
                 read_partition(&mut own, &ours, &places[partition as usize])?;
-                if !shared || written.is_empty() {
+                if written.is_empty() {
                     continue;
                 }
                 let mut other = Back {
