@@ -158,6 +158,17 @@ tess_kernels_layout_matches(void)
 		tess_rows_layout(TESS_ROWS_ACTION_SIZE) == sizeof(TessRowsAction) &&
 		tess_rows_layout(TESS_ROWS_ACTION_TABLE_OFFSET) == offsetof(TessRowsAction, table) &&
 		tess_rows_layout((TessRowsLayout) 99) == 0 &&
+	/* The machine of a sort's runs and what a step of it takes and gives. */
+		tess_runs_layout(TESS_RUNS_MACHINE_SIZE) == sizeof(TessRunsMachine) &&
+		tess_runs_layout(TESS_RUNS_PARAMS_SIZE) == sizeof(TessRunsParams) &&
+		tess_runs_layout(TESS_RUNS_PARAMS_BACKWARD_OFFSET) ==
+		offsetof(TessRunsParams, backward) &&
+		tess_runs_layout(TESS_RUNS_BLOCKS_SIZE) == sizeof(TessRunsBlocks) &&
+		tess_runs_layout(TESS_RUNS_EVENT_SIZE) == sizeof(TessRunsEvent) &&
+		tess_runs_layout(TESS_RUNS_ACTION_SIZE) == sizeof(TessRunsAction) &&
+		tess_runs_layout(TESS_RUNS_ACTION_PLACE_OFFSET) == offsetof(TessRunsAction, place) &&
+		tess_runs_layout(TESS_RUNS_EVENT_LIMIT_OFFSET) == offsetof(TessRunsEvent, limit) &&
+		tess_runs_layout((TessRunsLayout) 99) == 0 &&
 	/*
 	 * The header of a chunk of columns as the inline readers of
 	 * tessera/spill.h take it: the row count, the capacity and the stored

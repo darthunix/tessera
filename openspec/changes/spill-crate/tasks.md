@@ -294,7 +294,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       machine, composed with its groups. Check: the property test; the
       cases of both spills and of keys numbered by a dictionary;
       `make installcheck`
-- [ ] 3.19 Write the machine of the sort's runs, with a rescan and a
+- [x] 3.19 Write the machine of the sort's runs, with a rescan and a
       scan backward, and make the node step it. Check: the property
       test against a sort in memory; `make installcheck`;
       `cargo ab measure` of `runs_text` and of sorts that merge in

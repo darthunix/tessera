@@ -1306,4 +1306,128 @@ typedef enum TessRowsLayout
 /* The size or offset for a kind, or 0 for an unknown one. */
 extern Size tess_rows_layout(TessRowsLayout what);
 
+/*
+ * The machine of a sort's runs (relspill's sort::Runs): TESS_RUNS_WORDS
+ * plain words. It says when the rows in memory go to disk as a run, which
+ * set and partition each run takes, which runs each pass of the merge
+ * merges, and how many runs the last merge reads.
+ */
+#define TESS_RUNS_WORDS 10
+
+typedef struct TessRunsMachine
+{
+	uint64		words[TESS_RUNS_WORDS];
+} TessRunsMachine;
+
+/*
+ * What a sort's runs share: the memory limit at its start, by which its
+ * blocks are planned; the bytes of a row in a run's block, what sorting a
+ * row in memory takes besides it, and a chunk of rows in memory; the runs
+ * a set holds; the most runs a merge reads (2 at least); the rows a block
+ * holds at least; and 1 when the output is read backward too, else 0.
+ */
+typedef struct TessRunsParams
+{
+	uint64		limit;
+	uint64		row;
+	uint64		item;
+	uint64		chunk;
+	uint32		set_runs;
+	uint32		max_merge;
+	uint32		batch_rows;
+	uint32		backward;
+} TessRunsParams;
+
+/* The rows and bytes of values of a run's block, and the runs a merge reads. */
+typedef struct TessRunsBlocks
+{
+	uint32		rows;
+	uint32		fan_in;
+	uint64		values;
+} TessRunsBlocks;
+
+typedef enum TessRunsEventKind
+{
+	/*
+	 * After a batch, the rows in memory take memory bytes, rows of them,
+	 * and the sort may take limit bytes now.
+	 */
+	TESS_RUNS_GROWN = 1,
+	/* The input ended, rows rows in memory. */
+	TESS_RUNS_INPUT_END = 2,
+	/* The next step of the merge. */
+	TESS_RUNS_NEXT = 3,
+	/* The output is read again from its start. */
+	TESS_RUNS_RESCAN = 4
+} TessRunsEventKind;
+
+typedef struct TessRunsEvent
+{
+	uint32		kind;
+	uint32		spare;
+	uint64		memory;
+	uint64		rows;
+	uint64		limit;
+} TessRunsEvent;
+
+/*
+ * Where a run is written: a new set (1), the one being written ending
+ * first, or the set being written (0); and its partition of the set.
+ */
+typedef struct TessRunsPlace
+{
+	uint32		create;
+	uint32		partition;
+} TessRunsPlace;
+
+typedef enum TessRunsActionKind
+{
+	TESS_RUNS_DONE = 0,
+	/* Sort the rows in memory and write them as a run at place. */
+	TESS_RUNS_RUN = 1,
+	/* A pass starts: the set being written ends, the runs are the pass's. */
+	TESS_RUNS_PASS = 2,
+	/* Merge count runs of the pass from first into a new run at place. */
+	TESS_RUNS_MERGE = 3,
+	/* Run first of the pass goes on as it is. */
+	TESS_RUNS_KEEP = 4,
+	/* The pass ends: the runs it wrote and kept are the runs. */
+	TESS_RUNS_PASS_END = 5,
+	/* The set being written ends; the last merge reads runs runs, one by blocks. */
+	TESS_RUNS_READ = 6
+} TessRunsActionKind;
+
+typedef struct TessRunsAction
+{
+	uint32		kind;
+	uint32		first;
+	uint32		count;
+	uint32		runs;
+	TessRunsPlace place;
+} TessRunsAction;
+
+/* Make *machine the machine of a sort's runs, and *blocks their blocks. */
+extern TessStatusCode tess_runs_init(TessRunsMachine *machine, const TessRunsParams *params,
+									 TessRunsBlocks *blocks, TessStatus *status);
+
+/* Give *machine the sort's event and its next action into *action. */
+extern TessStatusCode tess_runs_step(TessRunsMachine *machine, const TessRunsEvent *event,
+									 TessRunsAction *action, TessStatus *status);
+
+/* What tess_runs_layout gives the size or offset of. */
+typedef enum TessRunsLayout
+{
+	TESS_RUNS_MACHINE_SIZE = 1,
+	TESS_RUNS_PARAMS_SIZE = 2,
+	TESS_RUNS_PARAMS_BACKWARD_OFFSET = 3,
+	TESS_RUNS_BLOCKS_SIZE = 4,
+	TESS_RUNS_EVENT_SIZE = 5,
+	TESS_RUNS_ACTION_SIZE = 6,
+	TESS_RUNS_ACTION_PLACE_OFFSET = 7,
+	TESS_RUNS_EVENT_LIMIT_OFFSET = 8
+} TessRunsLayout;
+
+/* The size or offset for a kind, or 0 for an unknown one. */
+extern Size tess_runs_layout(TessRunsLayout what);
+
 #endif							/* TESSERA_SPILL_H */

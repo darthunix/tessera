@@ -2518,6 +2518,12 @@ may scan backward (`EXEC_FLAG_BACKWARD`) merges into one run instead,
 whose blocks are read by their positions, a window within one block, in
 either direction. A rescan without a changed parameter starts the last
 merge again over the runs on disk; a changed one reads the child anew.
+When a run goes to disk, the set and partition each run takes, the
+blocks and the runs a merge reads, and which runs each pass merges are
+the decisions of the machine of the crate `relspill` (its module
+`sort`), which the node steps after each batch, at the end of its input,
+through the passes and at a rescan; the merge of the rows stays the
+node's and the kernels'.
 `EXPLAIN ANALYZE` shows `Sort Method: external merge` and the disk
 written, `VERBOSE` the runs and the passes. At a `work_mem` of 4 MB, 2 M rows sort in 0.35
 to 0.55 of the core's time (an int4 key and column 81 ms against 203,
