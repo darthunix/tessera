@@ -92,6 +92,11 @@ fn get<const W: usize>(packed: &[u8], len: usize, lane: usize, records: &mut [u8
     }
 }
 
+/// The lanes one pass over a chunk's records weighs: a record of more is
+/// weighed in as many passes, so that packing takes no memory of its own
+/// for any length of record.
+const PASS_LANES: usize = 64;
+
 /// Pack a chunk of records into `out`: the packed length, or `None` when
 /// the chunk is not one packing takes or would not get shorter, and then
 /// `out` holds nothing of use. `out` needs at most `chunk.len()` bytes.
@@ -104,61 +109,72 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Option<usize> {
     if out.len() < codes_end || codes_end >= chunk.len() {
         return None;
     }
-    // One pass over the records in order: every lane's bits, and whether
-    // it differs from the first record's.
-    let first: Vec<u32> = (0..lanes).map(|lane| word(records, lane * 4)).collect();
-    let mut bits = vec![0_u32; lanes];
-    let mut differ = vec![0_u32; lanes];
-    for record in records.chunks_exact(len) {
-        for ((value, (bits, differ)), first) in record
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .zip(bits.iter_mut().zip(differ.iter_mut()))
-            .zip(&first)
-        {
-            let value = u32::from_ne_bytes(*value);
-            *bits |= value;
-            *differ |= value ^ first;
-        }
-    }
-    // Records of one length only.
-    if differ[LEN_AT / 4] != 0 {
-        return None;
-    }
-    out[..4].copy_from_slice(&(count as u32).to_ne_bytes());
-    out[4..8].copy_from_slice(&(len as u32).to_ne_bytes());
-    out[8..codes_end].fill(0);
+    let mut first = [0_u32; PASS_LANES];
+    let mut bits = [0_u32; PASS_LANES];
+    let mut differ = [0_u32; PASS_LANES];
     let mut at = codes_end;
-    for lane in 0..lanes {
-        let code = match (bits[lane], differ[lane]) {
-            _ if lane == NEXT_LANE => ZERO,
-            (0, _) => ZERO,
-            (_, 0) => CONSTANT,
-            (0..=0xff, _) => BYTE,
-            (0..=0xffff, _) => HALF,
-            _ => WORD,
-        };
-        out[8 + lane] = code;
-        let need = match code {
-            ZERO => 0,
-            CONSTANT => 4,
-            BYTE => count,
-            HALF => 2 * count,
-            _ => 4 * count,
-        };
-        if at + need >= chunk.len() || at + need > out.len() {
-            return None;
+    for from in (0..lanes).step_by(PASS_LANES) {
+        let lanes = PASS_LANES.min(lanes - from);
+        // One pass over the records in order: the lanes' bits, and
+        // whether each differs from the first record's.
+        for (lane, first) in first[..lanes].iter_mut().enumerate() {
+            *first = word(records, (from + lane) * 4);
         }
-        let place = &mut out[at..at + need];
-        match code {
-            ZERO => {}
-            CONSTANT => place.copy_from_slice(&first[lane].to_ne_bytes()),
-            BYTE => put::<1>(records, len, lane, place),
-            HALF => put::<2>(records, len, lane, place),
-            _ => put::<4>(records, len, lane, place),
+        bits[..lanes].fill(0);
+        differ[..lanes].fill(0);
+        for record in records.chunks_exact(len) {
+            for ((value, (bits, differ)), first) in record[from * 4..(from + lanes) * 4]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(bits.iter_mut().zip(differ.iter_mut()))
+                .zip(&first)
+            {
+                let value = u32::from_ne_bytes(*value);
+                *bits |= value;
+                *differ |= value ^ first;
+            }
         }
-        at += need;
+        if from == 0 {
+            // Records of one length only.
+            if differ[LEN_AT / 4] != 0 {
+                return None;
+            }
+            out[..4].copy_from_slice(&(count as u32).to_ne_bytes());
+            out[4..8].copy_from_slice(&(len as u32).to_ne_bytes());
+            out[8..codes_end].fill(0);
+        }
+        for index in 0..lanes {
+            let lane = from + index;
+            let code = match (bits[index], differ[index]) {
+                _ if lane == NEXT_LANE => ZERO,
+                (0, _) => ZERO,
+                (_, 0) => CONSTANT,
+                (0..=0xff, _) => BYTE,
+                (0..=0xffff, _) => HALF,
+                _ => WORD,
+            };
+            out[8 + lane] = code;
+            let need = match code {
+                ZERO => 0,
+                CONSTANT => 4,
+                BYTE => count,
+                HALF => 2 * count,
+                _ => 4 * count,
+            };
+            if at + need >= chunk.len() || at + need > out.len() {
+                return None;
+            }
+            let place = &mut out[at..at + need];
+            match code {
+                ZERO => {}
+                CONSTANT => place.copy_from_slice(&first[index].to_ne_bytes()),
+                BYTE => put::<1>(records, len, lane, place),
+                HALF => put::<2>(records, len, lane, place),
+                _ => put::<4>(records, len, lane, place),
+            }
+            at += need;
+        }
     }
     let end = at.next_multiple_of(8);
     if end >= chunk.len() || end > out.len() {
@@ -299,6 +315,24 @@ mod tests {
         });
         let packed = round_trip(&original);
         assert!(packed <= 8 + 12 + 12 * 1000 + 8, "{packed} bytes");
+    }
+
+    #[test]
+    fn a_record_wider_than_a_pass_packs_lane_by_lane() {
+        // 76 lanes: the codes on both sides of the pass's 64 follow the
+        // values of their lanes.
+        let original = chunk(200, 304, |record, lane| match lane {
+            63 => (record % 200) as u32,
+            64 => 42,
+            65 => (record * 100) as u32,
+            70 => record as u32 * 7919,
+            _ => 0,
+        });
+        round_trip(&original);
+        let mut out = vec![0_u8; original.len()];
+        pack(&original, &mut out).expect("packs");
+        assert_eq!(out[8 + 63..8 + 66], [BYTE, CONSTANT, HALF]);
+        assert_eq!((out[8 + 62], out[8 + 70]), (ZERO, WORD));
     }
 
     #[test]
