@@ -33,6 +33,7 @@ compile_error!("relspill needs a target whose pointers are 64 bits wide");
 
 pub mod columns;
 mod error;
+pub mod group;
 pub mod join;
 #[cfg(all(test, loom))]
 mod loom;

@@ -393,6 +393,12 @@ impl<W: Words> Spill<W> {
         self.words.load(self.part(partition, Field::Bytes))
     }
 
+    /// The bytes of a partition's chunks in memory.
+    pub(crate) fn held(&self, partition: u32) -> Result<u64> {
+        self.check_partition(partition)?;
+        Ok(self.words.load(self.part(partition, Field::Bytes)))
+    }
+
     /// The next partition to send to disk, marked so, or `None`; `evicted`
     /// counts those the check sent so far. While the memory and the
     /// reserve of the partitions on disk pass `start` of the limit at a
