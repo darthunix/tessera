@@ -697,20 +697,6 @@ append_batch(TessSortState *state, TessBatch *batch)
 
 
 
-/*
- * Whether the rows in memory, what sorting them takes and a chunk more,
- * which the next batch may need, pass work_mem.
- */
-static bool
-rows_full(TessSortState *state)
-{
-	uint64		count = tess_rows_count(state->rows);
-	Size		bytes = tess_rows_memory(state->rows) +
-		(Size) count * (sizeof(uint32) + sizeof(uint64) * state->item_words) +
-		state->rows_config.chunk_len;
-
-	return bytes > tess_work_memory_limit();
-}
 
 
 
@@ -739,6 +725,7 @@ sort_rows(TessSortState *state)
 	TessSortKey keys[TESS_TABLE_MAX_KEYS];
 
 	state->topn = sort_choose_topn(state);
+	sort_runs_begin(state);
 	state->used_bound = state->topn ? state->bound : -1;
 	if (state->topn)
 	{
@@ -788,21 +775,40 @@ sort_rows(TessSortState *state)
 		else if (rows > 0)
 			append_batch(state, batch);
 		tess_input_finish(state->input);
-		/* Past work_mem: the rows so far go to a run, sorted. */
-		if (!state->topn && rows > 0 && rows_full(state))
+		/* Past work_mem, as the runs' machine says: the rows so far go to a run, sorted. */
+		if (!state->topn && rows > 0)
 		{
-			state->external = true;
-			sort_spill_run(state);
+			TessRunsAction action = sort_runs_step(state, (TessRunsEvent) {
+				.kind = TESS_RUNS_GROWN,
+				.memory = tess_rows_memory(state->rows),
+				.rows = tess_rows_count(state->rows),
+				.limit = tess_work_memory_limit(),
+			});
+
+			if (action.kind == TESS_RUNS_RUN)
+			{
+				state->external = true;
+				sort_spill_run(state, &action.place);
+			}
 		}
 		CHECK_FOR_INTERRUPTS();
 	}
 	estate->es_direction = direction;
 	if (state->external)
 	{
-		sort_spill_run(state);
+		TessRunsAction action = sort_runs_step(state, (TessRunsEvent) {
+			.kind = TESS_RUNS_INPUT_END,
+			.rows = tess_rows_count(state->rows),
+		});
+
+		/* The rows left: a last run. */
+		if (action.kind == TESS_RUNS_RUN)
+		{
+			sort_spill_run(state, &action.place);
+			action = sort_runs_step(state, (TessRunsEvent) {.kind = TESS_RUNS_NEXT});
+		}
 		free_ties(state);
-		sort_set_finish(state);
-		sort_merge_runs(state);
+		sort_merge_runs(state, action);
 		sort_note_memory(state, (Size) Max(state->ninputs, 1) *
 					(state->block_values + sizeof(uint64) * state->block_rows *
 					 (tess_spill_columns_null_lanes(sort_run_words(state)) + sort_run_words(state))));
