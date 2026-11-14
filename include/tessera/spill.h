@@ -1438,10 +1438,12 @@ extern Size tess_runs_layout(TessRunsLayout what);
  * its plan published before the split; when this participant makes its
  * level of it, after a batch or, late, before its first phase's work;
  * the partitions others sent to disk and the largest to send; at the
- * flush, each partition to write or to keep; and whether the flush and
- * the outer side have work at all.
+ * flush, each partition to write or to keep; whether the flush and the
+ * outer side have work at all; at the index, which partitions on disk
+ * the participants join together; and after the build, the walk of the
+ * partitions on disk, each joined in a round, alone or not at all.
  */
-#define TESS_SHARED_BUILD_WORDS 10
+#define TESS_SHARED_BUILD_WORDS 14
 
 typedef struct TessSharedBuildMachine
 {
@@ -1450,16 +1452,22 @@ typedef struct TessSharedBuildMachine
 
 /*
  * What every participant of a build shares: the weights of the rule that
- * sends the table's partitions to disk (as TessSpillWeights's), the most
- * partitions one check sends (0 for any), and a spare word of 0.
+ * sends the table's partitions to disk (as TessSpillWeights's); the bytes
+ * one participant may take, which a partition on disk joined together
+ * must fit with its index, and the most blocks it may have; the most
+ * partitions one check sends (0 for any); and preserve 1 when the join
+ * keeps its inner rows without a pair, so that a partition with no outer
+ * rows is joined still, else 0.
  */
 typedef struct TessSharedBuildParams
 {
 	double		start;
 	double		target;
 	double		spilled;
+	uint64		limit;
+	uint64		max_chunks;
 	uint32		per_check;
-	uint32		spare;
+	uint32		preserve;
 } TessSharedBuildParams;
 
 /*
@@ -1497,16 +1505,32 @@ typedef enum TessSharedBuildEventKind
 	 * partitions, and what every participant reads once it sees the split
 	 * is published.
 	 */
-	TESS_SHARED_PLANNED = 7
+	TESS_SHARED_PLANNED = 7,
+	/*
+	 * The partition of the last TESS_SHARED_WEIGH wrote bytes in blocks of
+	 * every participant, and its index takes index bytes.
+	 */
+	TESS_SHARED_WEIGHED = 8,
+	/* The participant left the build, or the last round or partition is joined. */
+	TESS_SHARED_NEXT = 9,
+	/* The partition of the last TESS_SHARED_VISIT has outer rows: flag 1, or not. */
+	TESS_SHARED_VISITED = 10
 } TessSharedBuildEventKind;
 
-/* value: the phase of TESS_SHARED_ATTACHED, the partitions of TESS_SHARED_PLANNED. */
+/*
+ * value: the phase of TESS_SHARED_ATTACHED, the partitions of
+ * TESS_SHARED_PLANNED; bytes, blocks and index: those of
+ * TESS_SHARED_WEIGHED.
+ */
 typedef struct TessSharedBuildEvent
 {
 	uint32		kind;
 	uint32		flag;
 	uint32		value;
 	uint32		spare;
+	uint64		bytes;
+	uint64		blocks;
+	uint64		index;
 } TessSharedBuildEvent;
 
 typedef enum TessSharedBuildActionKind
@@ -1551,7 +1575,17 @@ typedef enum TessSharedBuildActionKind
 	/* Send partition to disk, then TESS_SHARED_SENT. */
 	TESS_SHARED_SEND = 17,
 	/* The table split into partition partitions: make this participant's level of them. */
-	TESS_SHARED_SWITCH = 18
+	TESS_SHARED_SWITCH = 18,
+	/* Weigh partition on disk for its round, as the elected one, then TESS_SHARED_WEIGHED. */
+	TESS_SHARED_WEIGH = 19,
+	/* Find whether partition on disk has outer rows, then TESS_SHARED_VISITED. */
+	TESS_SHARED_VISIT = 20,
+	/* Take part in the round of partition, then TESS_SHARED_NEXT. */
+	TESS_SHARED_ROUND = 21,
+	/* Join partition alone, as no other participant does, then TESS_SHARED_NEXT. */
+	TESS_SHARED_ALONE = 22,
+	/* Every partition on disk is visited. */
+	TESS_SHARED_WALKED = 23
 } TessSharedBuildActionKind;
 
 typedef struct TessSharedBuildAction
@@ -1587,7 +1621,8 @@ typedef enum TessSharedBuildLayout
 	TESS_SHARED_HOST_SIZE = 4,
 	TESS_SHARED_HOST_NRESIDENT_OFFSET = 5,
 	TESS_SHARED_EVENT_SIZE = 6,
-	TESS_SHARED_ACTION_SIZE = 7
+	TESS_SHARED_ACTION_SIZE = 7,
+	TESS_SHARED_EVENT_BYTES_OFFSET = 8
 } TessSharedBuildLayout;
 
 /* The size or offset for a kind, or 0 for an unknown one. */

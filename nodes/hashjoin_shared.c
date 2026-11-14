@@ -539,7 +539,9 @@ shared_step(TessHashJoinState *state, TessSharedBuildEvent event)
 												   &event, &action, &state->status));
 	/* A partition the machine names is one of the table's level. */
 	if ((action.kind == TESS_SHARED_WRITE || action.kind == TESS_SHARED_KEEP ||
-		 action.kind == TESS_SHARED_DEMOTE || action.kind == TESS_SHARED_SEND) &&
+		 action.kind == TESS_SHARED_DEMOTE || action.kind == TESS_SHARED_SEND ||
+		 action.kind == TESS_SHARED_WEIGH || action.kind == TESS_SHARED_VISIT ||
+		 action.kind == TESS_SHARED_ROUND || action.kind == TESS_SHARED_ALONE) &&
 		(level == NULL || action.partition >= (uint32) level->npartitions))
 		elog(ERROR, "TessHashJoin's shared build named partition %u of %d",
 			 action.partition, level == NULL ? 0 : level->npartitions);
@@ -548,6 +550,7 @@ shared_step(TessHashJoinState *state, TessSharedBuildEvent event)
 
 static void shared_flush_partition(TessHashJoinState *state, int partition, bool write);
 static void shared_flush_end(TessHashJoinState *state);
+static TessSharedBuildEvent shared_weigh(TessHashJoinState *state, int partition);
 
 /*
  * Step through the shared build's phases until probing starts: the node
@@ -561,13 +564,18 @@ join_build_shared(TessHashJoinState *state)
 	 * The weights a shared table gives the rule that sends its partitions
 	 * to disk (docs/spill.md, "Weights"): it counts its chunks, not a
 	 * participant's tails; its participants send one partition a check,
-	 * since the others write theirs of it at their next batch.
+	 * since the others write theirs of it at their next batch. A partition
+	 * on disk is joined by every participant together when its blocks
+	 * and index fit one participant's hash_mem and its round's directory.
 	 */
 	TessSharedBuildParams params = {
 		.start = tess_join_spill_start,
 		.target = tess_join_spill_target,
 		.spilled = tess_join_spill_spilled_weight,
+		.limit = tess_hash_memory_limit(),
+		.max_chunks = TESS_TABLE_MAX_CHUNKS,
 		.per_check = (uint32) tess_join_shared_spill_evictions,
+		.preserve = state->preserve_inner ? 1 : 0,
 	};
 	TessSharedBuildEvent event = {.kind = TESS_SHARED_DONE};
 
@@ -642,6 +650,9 @@ join_build_shared(TessHashJoinState *state)
 			case TESS_SHARED_SIZE:
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_SIZE);
 				size_shared_table(state);
+				break;
+			case TESS_SHARED_WEIGH:
+				event = shared_weigh(state, (int) action.partition);
 				break;
 			case TESS_SHARED_LINK:
 				Assert(BarrierPhase(&state->parallel.shared->build) == TESS_BUILD_LINK);
@@ -1196,10 +1207,6 @@ shared_probe_start(TessHashJoinState *state, uint64 records)
 	spill->build.values_written = state->parallel.shared->next_value_chunk;
 	spill->total_rows = records;
 	spill->input_rows = records;
-	check(state, state->kernels->table_spill_start(join_shared_words(state),
-												   state->parallel.shared->spill_nwords,
-												   (uint32 *) &spill->start, &state->status));
-	spill->visited = 0;
 	for (int partition = 0; partition < spill->npartitions; partition++)
 	{
 		uint64		rows;
@@ -1353,17 +1360,16 @@ round_release(dsa_area *area, JoinRound *round)
 }
 
 /*
- * SIZE of a table that spilled: a round per partition. One on disk whose
- * blocks and index fit in one participant's hash_mem is loaded by every
- * participant together; a larger one is joined by one alone, which may
- * split it or take it in pieces.
+ * SIZE of a table that spilled: a round per partition, which the machine
+ * of the build weighs (shared_weigh). One on disk whose blocks and index
+ * fit in one participant's hash_mem is loaded by every participant
+ * together; a larger one is joined by one alone, which may split it or
+ * take it in pieces.
  */
 static void
 make_rounds(TessHashJoinState *state)
 {
 	dsa_area   *area = join_query_dsa(state);
-	Size		limit = tess_hash_memory_limit();
-	Size		payload_size = sizeof(uint64) * (1 + state->npayload);
 	int			npartitions = (int) join_shared_partitions(state);
 	JoinRound  *rounds;
 
@@ -1375,10 +1381,7 @@ make_rounds(TessHashJoinState *state)
 	for (int partition = 0; partition < npartitions; partition++)
 	{
 		JoinRound  *round = &rounds[partition];
-		pg_atomic_uint64 *stats = join_part_stats(state, partition);
-		uint64		bytes = pg_atomic_read_u64(&stats[0]);
-		uint64		blocks = pg_atomic_read_u64(&stats[1]);
-		Size		size;
+		uint64		blocks = pg_atomic_read_u64(&join_part_stats(state, partition)[1]);
 
 		BarrierInit(&round->barrier, 0);
 		pg_atomic_init_u32(&round->next_chunk, 0);
@@ -1391,14 +1394,30 @@ make_rounds(TessHashJoinState *state)
 														 state->parallel.shared->spill_nwords,
 														 partition, 0, &round->records,
 														 &state->status));
-		check(state, state->kernels->table_size(state->keys.nkeys, payload_size,
-												Max(round->records, JOIN_INITIAL_ROWS),
-												&size, &state->status));
 		round->nchunks = (int) Min(blocks, (uint64) INT_MAX);
 		round->nvalues = (int) state->parallel.shared->next_value_chunk;
-		round->together = blocks > 0 && blocks <= TESS_TABLE_MAX_CHUNKS &&
-			(double) bytes + size <= (double) limit;
 	}
+}
+
+/*
+ * What the machine of the build weighs a partition on disk by: the bytes
+ * and blocks every participant wrote of it, and the index of its records.
+ */
+static TessSharedBuildEvent
+shared_weigh(TessHashJoinState *state, int partition)
+{
+	pg_atomic_uint64 *stats = join_part_stats(state, partition);
+	Size		index;
+
+	check(state, state->kernels->table_size(state->keys.nkeys, sizeof(uint64) * (1 + state->npayload),
+											Max(round_of(state, partition)->records, JOIN_INITIAL_ROWS),
+											&index, &state->status));
+	return (TessSharedBuildEvent) {
+		.kind = TESS_SHARED_WEIGHED,
+		.bytes = pg_atomic_read_u64(&stats[0]),
+		.blocks = pg_atomic_read_u64(&stats[1]),
+		.index = index,
+	};
 }
 
 /* Free every round's memory and the rounds, at a rescan. */
@@ -1741,47 +1760,47 @@ join_round_next_outer(TessHashJoinState *state)
 
 
 /*
- * The next partition on disk of a shared table, from this participant's
- * start round the circle: a round it takes part in, or one it joins alone.
- * False when it visited every one.
+ * The next partition on disk of a shared table, as the machine of the
+ * build walks them from this participant's start: a round it takes part
+ * in, or one it joins alone. False when it visited every one.
  */
 bool
 join_shared_next_partition(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
+	TessSharedBuildEvent event = {.kind = TESS_SHARED_NEXT};
 
-	while (spill->visited < spill->npartitions)
+	for (;;)
 	{
-		int			partition = (spill->start + spill->visited++) % spill->npartitions;
-		bool		taken;
+		TessSharedBuildAction action = shared_step(state, event);
+		int			partition = (int) action.partition;
 
-		if (spill->build.parts[partition].resident)
-			continue;
-		/* RIGHT and FULL return a partition's inner rows without outer ones too. */
-		if ((!state->preserve_inner || spill->build.rows[partition] == 0) &&
-			!shared_has_outer(spill, partition))
-			continue;
-		if (round_of(state, partition)->together)
+		event = (TessSharedBuildEvent) {.kind = TESS_SHARED_NEXT};
+		switch (action.kind)
 		{
-			if (!round_join(state, partition))
-				continue;
-			/* The outer files come one at a time, as join_next_pass takes them. */
-			spill->partition = partition;
-			spill->reader.open = false;
-			spill->block = NULL;
-			return true;
+			case TESS_SHARED_VISIT:
+				event.kind = TESS_SHARED_VISITED;
+				event.flag = shared_has_outer(spill, partition) ? 1 : 0;
+				break;
+			case TESS_SHARED_ROUND:
+				/* Freed before this participant came: the next one. */
+				if (!round_join(state, partition))
+					break;
+				/* The outer files come one at a time, as join_next_pass takes them. */
+				spill->partition = partition;
+				spill->reader.open = false;
+				spill->block = NULL;
+				return true;
+			case TESS_SHARED_ALONE:
+				state->counters[JOIN_ALONE]++;
+				spill->probe.rows[partition] = 1;
+				return join_take_partition(state, partition);
+			case TESS_SHARED_WALKED:
+				spill->partition = spill->npartitions;
+				return false;
+			default:
+				elog(ERROR, "TessHashJoin got shared build action %u out of order", action.kind);
 		}
-		check(state, state->kernels->table_spill_take_alone(join_shared_words(state),
-															state->parallel.shared->spill_nwords,
-															partition, &taken,
-															&state->status));
-		if (!taken)
-			continue;
-		state->counters[JOIN_ALONE]++;
-		spill->probe.rows[partition] = 1;
-		return join_take_partition(state, partition);
 	}
-	spill->partition = spill->npartitions;
-	return false;
 }
 

@@ -308,7 +308,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       before it, and the catch-up of a participant that attaches late.
       Check: a loom model of each; `make rust-loom`; the parallel tests
       of the suite `join`
-- [ ] 3.22 Add the rounds, the partitions taken alone, which go to the
+- [x] 3.22 Add the rounds, the partitions taken alone, which go to the
       join's machine, and the frees. Check: loom models of the
       hand-overs; `make rust-loom`; `make crosscheck` with workers;
       `cargo ab measure` of the rounds of a parallel join

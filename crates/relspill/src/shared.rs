@@ -37,8 +37,24 @@
 //! - **At the outer side.** Only a table that split writes its outer rows
 //!   to the partitions' files ([`Action::Outer`]); one that never split
 //!   goes on at once.
+//! - **At the size.** The participant the barrier elects to size the
+//!   table of one that split weighs each partition on disk
+//!   ([`Action::Weigh`], [`Event::Weighed`]): one whose blocks and index
+//!   fit one participant's limit is joined in a round by every
+//!   participant together; a larger one is joined by one participant
+//!   alone, which may split it or read it in pieces. The machine marks
+//!   the first kind in the words every participant shares.
 //! - **At the probe.** The probe knows whether the table split
 //!   ([`Action::Probe`]).
+//! - **Round the partitions on disk.** Once it left the table in memory,
+//!   a participant asks for its next partition ([`Event::Next`]) and the
+//!   machine goes round them from a start of this participant's own, so
+//!   that the participants spread: a partition with no outer rows, whose
+//!   inner rows no join keeps, is released; one of a round is joined with
+//!   the others ([`Action::Round`]); any other one participant takes
+//!   whole ([`Action::Alone`]), and its host joins it through its join's
+//!   machine ([`crate::join`]), as a serial join joins a partition read
+//!   back. Then none is left ([`Action::Walked`]).
 //!
 //! ```text
 //!   Attach ──> Build ──> Flush ──> Size ──> Link ──> Outer ──> Probe ──> Leave
@@ -46,6 +62,9 @@
 //!         Batch v  │ Done  v  │ Done                 v  │      v  │      v
 //!       Split, Switch,     Switch, Demote,        Switch,   Switch,   Free,
 //!       Demote, Send       Write, Keep            Demote    Demote    Finished
+//!                                    Weigh                               │
+//!                                                                  Next  v
+//!                                                    Visit, Round, Alone, Walked
 //! ```
 //!
 //! The barriers are the host's: an action [`Action::Attach`],
@@ -77,10 +96,17 @@ pub struct Params {
     pub target: f64,
     /// The weight of a partition's bytes in memory once it went to disk.
     pub spilled: f64,
+    /// The bytes one participant may take, which a partition on disk
+    /// joined together must fit with its index;
+    pub limit: u64,
+    /// and the most blocks it may have, which its round's directory holds.
+    pub max_chunks: u64,
     /// The most partitions one check sends, 0 for any.
     pub per_check: u32,
-    /// 0.
-    pub spare: u32,
+    /// 1 when the join keeps its inner rows without a pair, a RIGHT or a
+    /// FULL join, so that a partition with no outer rows is joined still;
+    /// else 0.
+    pub preserve: u32,
 }
 
 /// What the host of a participant reports.
@@ -103,6 +129,13 @@ pub enum Event {
     /// and what every participant reads once it sees the split is
     /// published.
     Planned { partitions: u32 },
+    /// The partition of the last [`Action::Weigh`] wrote `bytes` in
+    /// `blocks` of every participant, and its index takes `index` bytes.
+    Weighed { bytes: u64, blocks: u64, index: u64 },
+    /// The participant asks for its next partition on disk.
+    Next,
+    /// The partition of the last [`Action::Visit`] has outer rows, or not.
+    Visited { outer: bool },
     /// The partition of the last [`Action::Send`] went to disk from here;
     /// `freed` when this participant's bytes of it in memory went down.
     Sent { freed: bool },
@@ -159,6 +192,18 @@ pub enum Action {
     Demote(u32),
     /// Send the partition to disk, then [`Event::Sent`].
     Send(u32),
+    /// Weigh the partition on disk for its round, then [`Event::Weighed`].
+    Weigh(u32),
+    /// Find whether the partition on disk has outer rows, then
+    /// [`Event::Visited`].
+    Visit(u32),
+    /// Take part in the partition's round, then [`Event::Next`].
+    Round(u32),
+    /// Join the partition alone, as no other participant does, then
+    /// [`Event::Next`].
+    Alone(u32),
+    /// Every partition on disk is visited.
+    Walked,
 }
 
 /// The regions a step reads: the build's counters and the table's spill
@@ -190,6 +235,10 @@ const FINISHED: u32 = 13;
 const DEMOTE: u32 = 14;
 const SEND: u32 = 15;
 const SWITCH: u32 = 16;
+const WEIGH: u32 = 17;
+const VISIT: u32 = 18;
+const JOINED: u32 = 19;
+const WALKED: u32 = 20;
 
 // Where a batch's check of the spill stands.
 const SETTLED: u32 = 0;
@@ -220,6 +269,15 @@ pub struct Build {
     evicted: u32,
     /// Whether this participant made its level of the table's split.
     switched: u32,
+    /// Round the partitions on disk: whether this participant may go round
+    /// them, having probed a table that split, its start, and the
+    /// partitions it visited.
+    walk: u32,
+    start: u32,
+    visited: u32,
+    /// 0: the words are whole, with no byte of padding a host would hold
+    /// unwritten.
+    spare: u32,
     /// The evictions of the table this participant has seen.
     seen: u64,
     params: Params,
@@ -229,13 +287,13 @@ pub struct Build {
 const _: () = assert!(size_of::<Build>() == 8 * BUILD_WORDS);
 
 /// Words of 8 bytes a [`Build`] takes.
-pub const BUILD_WORDS: usize = 10;
+pub const BUILD_WORDS: usize = 14;
 
 impl Build {
     /// The machine of a participant that has not attached yet.
     ///
-    /// A wrong call: a weight below zero or not finite, or a spare word
-    /// set ([`Rule::JoinParams`]).
+    /// A wrong call: a weight below zero or not finite, or a `preserve`
+    /// neither 0 nor 1 ([`Rule::JoinParams`]).
     pub fn new(params: &Params) -> Result<Self> {
         ensure!(counted(params), Error::wrong_call(Rule::JoinParams));
         Ok(Self {
@@ -247,6 +305,10 @@ impl Build {
             cursor: 0,
             evicted: 0,
             switched: 0,
+            walk: 0,
+            start: 0,
+            visited: 0,
+            spare: 0,
             seen: 0,
             params: *params,
         })
@@ -350,6 +412,42 @@ impl Build {
                 self.send(spill)
             }
             (WRITE, Event::Done) => self.flush(spill),
+            (SIZE, Event::Done) if spill.partitions() > 0 => {
+                self.cursor = 0;
+                match self.weigh(spill)? {
+                    Some(action) => Ok(action),
+                    None => {
+                        let action = phases(self, 0)?;
+                        self.enter(action, counters, spill, resident)
+                    }
+                }
+            }
+            (
+                WEIGH,
+                Event::Weighed {
+                    bytes,
+                    blocks,
+                    index,
+                },
+            ) => {
+                let partition = self
+                    .cursor
+                    .checked_sub(1)
+                    .ok_or(Error::wrong_call(Rule::JoinState).with(self.given))?;
+                let fits = (bytes as f64) + (index as f64) <= self.params.limit as f64;
+                if blocks > 0 && blocks <= self.params.max_chunks && fits {
+                    spill.set_together(partition)?;
+                }
+                match self.weigh(spill)? {
+                    Some(action) => Ok(action),
+                    None => {
+                        let action = phases(self, 0)?;
+                        self.enter(action, counters, spill, resident)
+                    }
+                }
+            }
+            (FINISHED | JOINED, Event::Next) if self.walk != 0 => self.walk(spill),
+            (VISIT, Event::Visited { outer }) => self.visited_one(spill, outer),
             (BUILD | FLUSH_END | SIZE | LINK | OUTER | PROBE, Event::Done) => {
                 let action = phases(self, 0)?;
                 self.enter(action, counters, spill, resident)
@@ -364,10 +462,12 @@ impl Build {
     /// and parameters it was made of.
     fn check(&self) -> Result<()> {
         ensure!(
-            self.given <= SWITCH
+            self.given <= WALKED
                 && self.stage <= SENDING
                 && self.evict <= 1
                 && self.switched <= 1
+                && self.walk <= 1
+                && self.spare == 0
                 && counted(&self.params),
             Error::wrong_call(Rule::JoinState).with(self.given)
         );
@@ -503,9 +603,73 @@ impl Build {
                 return self.flush(spill);
             }
             OUTER => Action::Outer,
-            PROBE => Action::Probe { split: true },
+            PROBE => {
+                // Its own start round the partitions on disk, once a build.
+                self.walk = 1;
+                self.start = spill.start();
+                self.visited = 0;
+                Action::Probe { split: true }
+            }
             _ => Action::Done,
         })
+    }
+
+    /// The next partition on disk to weigh, from the cursor; `None` past
+    /// the last.
+    fn weigh<S: Words>(&mut self, spill: &Spill<S>) -> Result<Option<Action>> {
+        while self.cursor < spill.partitions() {
+            let partition = self.cursor;
+            self.cursor += 1;
+            if spill.on_disk(partition)? {
+                return Ok(Some(Action::Weigh(partition)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// The next partition on disk round the circle from this
+    /// participant's start: one to visit, or one to join that a join
+    /// keeping its inner rows joins with no visit; none past the last.
+    fn walk<S: Words>(&mut self, spill: &Spill<S>) -> Result<Action> {
+        let partitions = spill.partitions();
+        while self.visited < partitions {
+            let at = (u64::from(self.start) + u64::from(self.visited)) % u64::from(partitions);
+            self.visited += 1;
+            let partition = at as u32;
+            if !spill.on_disk(partition)? {
+                continue;
+            }
+            self.cursor = partition;
+            // A join that keeps its inner rows joins one with records,
+            // outer rows or none, so their files need no visit.
+            if self.params.preserve == 0 || spill.records(partition)? == 0 {
+                return Ok(Action::Visit(partition));
+            }
+            if let Some(action) = self.join_one(spill, partition)? {
+                return Ok(action);
+            }
+        }
+        Ok(Action::Walked)
+    }
+
+    /// The partition visited: released when it has no outer rows, as no
+    /// inner row of it is kept, else joined or left to another.
+    fn visited_one<S: Words>(&mut self, spill: &Spill<S>, outer: bool) -> Result<Action> {
+        if outer && let Some(action) = self.join_one(spill, self.cursor)? {
+            return Ok(action);
+        }
+        self.walk(spill)
+    }
+
+    /// A partition to join: in its round, taken alone, or `None` when
+    /// another took it.
+    fn join_one<S: Words>(&self, spill: &Spill<S>, partition: u32) -> Result<Option<Action>> {
+        if spill.together(partition)? {
+            return Ok(Some(Action::Round(partition)));
+        }
+        Ok(spill
+            .take_alone(partition)?
+            .then_some(Action::Alone(partition)))
     }
 
     /// The next partition of the flush, written or kept; then the end.
@@ -524,12 +688,12 @@ impl Build {
 }
 
 /// Whether `params` are those of a build: weights not below zero and
-/// finite, and the spare word 0.
+/// finite, and a `preserve` of 0 or 1.
 fn counted(params: &Params) -> bool {
     [params.start, params.target, params.spilled]
         .iter()
         .all(|weight| weight.is_finite() && *weight >= 0.0)
-        && params.spare == 0
+        && params.preserve <= 1
 }
 
 /// The code by which the machine remembers the action it gave.
@@ -542,6 +706,10 @@ fn code(action: Action) -> u32 {
         Action::Build => BUILD,
         Action::Split => SPLIT,
         Action::Switch { .. } => SWITCH,
+        Action::Weigh(_) => WEIGH,
+        Action::Visit(_) => VISIT,
+        Action::Round(_) | Action::Alone(_) => JOINED,
+        Action::Walked => WALKED,
         Action::Write(_) | Action::Keep(_) => WRITE,
         Action::FlushEnd => FLUSH_END,
         Action::Size => SIZE,
@@ -565,6 +733,9 @@ fn event_code(event: &Event) -> u32 {
         Event::Batch { .. } => 5,
         Event::Sent { .. } => 6,
         Event::Planned { .. } => 7,
+        Event::Weighed { .. } => 8,
+        Event::Next => 9,
+        Event::Visited { .. } => 10,
     }
 }
 

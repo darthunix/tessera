@@ -1,6 +1,7 @@
 //! The machine of a build by several processes through its C entry
-//! points: a participant alone through a table that split, the checks of
-//! its spill, the refusals and the layout of the mirrors.
+//! points: a participant alone through a table that split and the walk of
+//! its partitions on disk, the checks of its spill, the refusals and the
+//! layout of the mirrors.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -11,28 +12,32 @@
 use std::mem::{MaybeUninit, offset_of, size_of};
 
 use tessera_capi::c::{
-    Code, SHARED_ACTION_SIZE, SHARED_ARRIVE_AND_DETACH, SHARED_ARRIVE_AND_WAIT, SHARED_ARRIVED,
-    SHARED_ATTACH, SHARED_ATTACHED, SHARED_BATCH, SHARED_BUILD, SHARED_DEMOTE, SHARED_DONE,
-    SHARED_EVENT_SIZE, SHARED_FLUSH_END, SHARED_FREE, SHARED_HOST_NRESIDENT_OFFSET,
-    SHARED_HOST_SIZE, SHARED_KEEP, SHARED_LEFT, SHARED_LINK, SHARED_MACHINE_SIZE, SHARED_NOTHING,
-    SHARED_OUTER, SHARED_PARAMS_PER_CHECK_OFFSET, SHARED_PARAMS_SIZE, SHARED_PLANNED, SHARED_PROBE,
-    SHARED_SEND, SHARED_SENT, SHARED_SIZE, SHARED_SPLIT, SHARED_SWITCH, SHARED_WRITE,
-    SharedBuildAction, SharedBuildEvent, SharedBuildHost, SharedBuildParams, SpillWeights, Status,
-    tess_shared_build_init, tess_shared_build_layout, tess_shared_build_step,
-    tess_shared_build_stop, tess_table_spill_add_bytes, tess_table_spill_evict,
-    tess_table_spill_init, tess_table_spill_split, tess_table_spill_words,
+    Code, SHARED_ACTION_SIZE, SHARED_ALONE, SHARED_ARRIVE_AND_DETACH, SHARED_ARRIVE_AND_WAIT,
+    SHARED_ARRIVED, SHARED_ATTACH, SHARED_ATTACHED, SHARED_BATCH, SHARED_BUILD, SHARED_DEMOTE,
+    SHARED_DONE, SHARED_EVENT_BYTES_OFFSET, SHARED_EVENT_SIZE, SHARED_FLUSH_END, SHARED_FREE,
+    SHARED_HOST_NRESIDENT_OFFSET, SHARED_HOST_SIZE, SHARED_KEEP, SHARED_LEFT, SHARED_LINK,
+    SHARED_MACHINE_SIZE, SHARED_NEXT, SHARED_NOTHING, SHARED_OUTER, SHARED_PARAMS_PER_CHECK_OFFSET,
+    SHARED_PARAMS_SIZE, SHARED_PLANNED, SHARED_PROBE, SHARED_ROUND, SHARED_SEND, SHARED_SENT,
+    SHARED_SIZE, SHARED_SPLIT, SHARED_SWITCH, SHARED_VISIT, SHARED_VISITED, SHARED_WALKED,
+    SHARED_WEIGH, SHARED_WEIGHED, SHARED_WRITE, SharedBuildAction, SharedBuildEvent,
+    SharedBuildHost, SharedBuildParams, SpillWeights, Status, tess_shared_build_init,
+    tess_shared_build_layout, tess_shared_build_step, tess_shared_build_stop,
+    tess_table_spill_add_bytes, tess_table_spill_evict, tess_table_spill_init,
+    tess_table_spill_split, tess_table_spill_words,
 };
 
 /// The words of a machine.
-type Machine = [u64; 10];
+type Machine = [u64; 14];
 
 fn params() -> SharedBuildParams {
     SharedBuildParams {
         start: 1.0,
         target: 0.5,
         spilled: 1.0,
+        limit: 1000,
+        max_chunks: 4,
         per_check: 0,
-        spare: 0,
+        preserve: 0,
     }
 }
 
@@ -182,6 +187,15 @@ fn event(kind: u32, flag: u32) -> SharedBuildEvent {
     }
 }
 
+fn weighed(bytes: u64, blocks: u64, index: u64) -> SharedBuildEvent {
+    SharedBuildEvent {
+        bytes,
+        blocks,
+        index,
+        ..event(SHARED_WEIGHED, 0)
+    }
+}
+
 fn action(kind: u32, partition: u32) -> SharedBuildAction {
     SharedBuildAction {
         kind,
@@ -245,7 +259,10 @@ fn a_participant_alone_builds_a_table_that_splits_by_the_entry_points() {
         (done, action(SHARED_FLUSH_END, 0)),
         (done, action(SHARED_ARRIVE_AND_WAIT, 0)),
         (arrived, action(SHARED_SIZE, 0)),
-        (done, action(SHARED_ARRIVE_AND_WAIT, 0)),
+        (done, action(SHARED_WEIGH, 1)),
+        // Partition 1 fits the limit with its index; 3 does not.
+        (weighed(500, 1, 400), action(SHARED_WEIGH, 3)),
+        (weighed(700, 2, 400), action(SHARED_ARRIVE_AND_WAIT, 0)),
         (arrived, action(SHARED_LINK, 0)),
         (done, action(SHARED_ARRIVE_AND_WAIT, 0)),
         (arrived, action(SHARED_OUTER, 0)),
@@ -259,6 +276,12 @@ fn a_participant_alone_builds_a_table_that_splits_by_the_entry_points() {
         ),
         (done, action(SHARED_ARRIVE_AND_DETACH, 0)),
         (event(SHARED_LEFT, 1), action(SHARED_FREE, 0)),
+        // The walk from partition 0: 1 joined in its round, 3 alone.
+        (event(SHARED_NEXT, 0), action(SHARED_VISIT, 1)),
+        (event(SHARED_VISITED, 1), action(SHARED_ROUND, 1)),
+        (event(SHARED_NEXT, 0), action(SHARED_VISIT, 3)),
+        (event(SHARED_VISITED, 1), action(SHARED_ALONE, 3)),
+        (event(SHARED_NEXT, 0), action(SHARED_WALKED, 0)),
     ];
     for (event, action) in expected {
         assert_eq!(
@@ -310,7 +333,7 @@ fn the_shared_build_entry_points_refuse_what_is_no_step() {
     let mut shared = Shared::new(0, 1000);
     let mut machine = Machine::default();
     let bad = SharedBuildParams {
-        spare: 1,
+        preserve: 2,
         ..params()
     };
     assert_eq!(init(&mut machine, &bad), Code::InvalidArgument);
@@ -346,7 +369,7 @@ fn the_shared_build_entry_points_refuse_what_is_no_step() {
         Code::InvalidArgument
     );
     assert_eq!(machine, made);
-    let mut garbage = [u64::MAX; 10];
+    let mut garbage = [u64::MAX; 14];
     assert_eq!(
         step(&mut garbage, &host, event(SHARED_DONE, 0)).0,
         Code::InvalidArgument
@@ -374,6 +397,10 @@ fn the_shared_build_layout_is_its_types() {
             offset_of!(SharedBuildHost, nresident),
         ),
         (SHARED_EVENT_SIZE, size_of::<SharedBuildEvent>()),
+        (
+            SHARED_EVENT_BYTES_OFFSET,
+            offset_of!(SharedBuildEvent, bytes),
+        ),
         (SHARED_ACTION_SIZE, size_of::<SharedBuildAction>()),
         (99, 0),
     ];
