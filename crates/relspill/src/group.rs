@@ -585,5 +585,245 @@ fn code(event: &Event) -> u32 {
     }
 }
 
+/// What every level of a grouping's rows shares, given once: the rows of
+/// the groups a table of aggregates whose states cannot merge lacks, once
+/// it takes no new group.
+///
+/// It is plain data of a fixed layout; every bit pattern is a value,
+/// which [`Rows::new`] checks.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowsParams {
+    /// The memory the grouping may take, in bytes.
+    pub limit: u64,
+    /// The shape of a level of rows ([`crate::plan`]): its fixed
+    /// partitions and its chunks of rows.
+    pub shape: Shape,
+    /// The share of the limit past which a table takes no new group,
+    pub fill: f64,
+    /// once it has this many groups at least: fewer would freeze every
+    /// table read back again, level after level.
+    pub least: u64,
+}
+
+/// A step of the host of a grouping's rows: what it saw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowsEvent {
+    /// After a batch, the table's groups take `memory` bytes in `records`
+    /// groups.
+    Grown { memory: u64, records: u64 },
+    /// The rows of the level the last [`RowsAction::Freeze`] planned are
+    /// all written.
+    Written,
+    /// The host asks for the level's next partition to read.
+    Next,
+}
+
+/// What the host of a grouping's rows does next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowsAction {
+    /// Nothing more: the step's event is done.
+    Done,
+    /// The table takes no new group: the rows of the groups it lacks go
+    /// to the partitions of a level of `plan`, numbered `level`, which the
+    /// host makes.
+    Freeze { plan: Plan, level: u32 },
+    /// Read this partition's rows into a table of their own, whose machine
+    /// is [`Rows::read`] of it.
+    Read(Table),
+    /// Every partition of the level with rows is read.
+    LevelDone,
+}
+
+/// A table of a partition of rows read back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Table {
+    /// The partition read.
+    pub partition: u32,
+    /// The level a freeze of it writes, one past the partition's.
+    pub level: u32,
+    /// The first hash bit that level takes, past the partition's level's.
+    pub shift: u32,
+    /// No level fits in the bits left: the table never freezes.
+    pub last: bool,
+}
+
+/// The regions of the host a step of [`Rows`] reads: the rows written of
+/// each partition of the level, read at [`RowsEvent::Next`].
+#[derive(Debug)]
+pub struct RowsHost<'a> {
+    pub written: &'a [u64],
+}
+
+const ROWS_TABLE: u32 = 1;
+const ROWS_WRITING: u32 = 2;
+const ROWS_READING: u32 = 3;
+const ROWS_DONE: u32 = 4;
+
+/// The machine of a table of a grouping's rows and of the level of rows
+/// it writes once frozen.
+///
+/// It is plain data of a fixed layout, [`ROWS_WORDS`] words of 8 bytes.
+/// A table's machine weighs the table after each batch
+/// ([`RowsEvent::Grown`]): past `fill` of the limit, with `least` groups
+/// at least, and while bits are left, it freezes the table and plans the
+/// level its rows go to ([`RowsAction::Freeze`]). Once the level's rows
+/// are written ([`RowsEvent::Written`]), the host keeps the machine with
+/// the level, and asks it for the partitions to read
+/// ([`RowsEvent::Next`]): each with rows, in turn, and then the level is
+/// done. The host reads the last level written first.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rows {
+    params: RowsParams,
+    phase: u32,
+    /// The level a freeze writes, and its first hash bit; whether no
+    /// level fits; the planned level's partitions, the first bit of a
+    /// level below it and whether one fits; the next partition to read.
+    level: u32,
+    shift: u32,
+    last: u32,
+    partitions: u32,
+    below: u32,
+    deeper: u32,
+    cursor: u32,
+}
+
+// Its size is part of the mirror a host keeps: words of 8 bytes.
+const _: () = assert!(size_of::<Rows>() == 8 * ROWS_WORDS);
+
+/// Words of 8 bytes a [`Rows`] takes.
+pub const ROWS_WORDS: usize = 13;
+
+impl Rows {
+    /// The machine of the table of a grouping's input, whose rows go to
+    /// the first level once frozen.
+    ///
+    /// A wrong call: a limit of 0 or a share below zero or not finite
+    /// ([`Rule::JoinParams`]), and a shape no level can be planned by
+    /// ([`plan::plan`]).
+    pub fn new(params: &RowsParams) -> Result<Self> {
+        let counted = params.fill.is_finite() && params.fill >= 0.0;
+        ensure!(
+            params.limit > 0 && counted,
+            Error::wrong_call(Rule::JoinParams)
+        );
+        plan::plan(
+            &params.shape,
+            &Level::first(usize::try_from(params.limit).unwrap_or(usize::MAX)),
+        )?;
+        Ok(Self {
+            params: *params,
+            phase: ROWS_TABLE,
+            level: 0,
+            shift: 0,
+            last: 0,
+            partitions: 0,
+            below: 0,
+            deeper: 0,
+            cursor: 0,
+        })
+    }
+
+    /// The machine of the table of a partition read back
+    /// ([`RowsAction::Read`]).
+    ///
+    /// The wrong calls of [`Rows::new`].
+    pub fn read(params: &RowsParams, table: &Table) -> Result<Self> {
+        Ok(Self {
+            level: table.level,
+            shift: table.shift,
+            last: u32::from(table.last),
+            ..Self::new(params)?
+        })
+    }
+
+    /// Take the host's event and give its next action.
+    ///
+    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
+    /// event its phase does not take ([`Rule::JoinEvent`]); counts of
+    /// rows for another number of partitions ([`Rule::PartitionRows`]);
+    /// and those of [`plan::plan`] for the level to freeze into. The
+    /// machine is then as it was.
+    pub fn step(&mut self, event: RowsEvent, host: &RowsHost<'_>) -> Result<RowsAction> {
+        let mut next = *self;
+        let action = next.take(event, host)?;
+        *self = next;
+        Ok(action)
+    }
+
+    fn take(&mut self, event: RowsEvent, host: &RowsHost<'_>) -> Result<RowsAction> {
+        ensure!(
+            (ROWS_TABLE..=ROWS_DONE).contains(&self.phase),
+            Error::wrong_call(Rule::JoinState).with(self.phase)
+        );
+        match (self.phase, event) {
+            (ROWS_TABLE, RowsEvent::Grown { memory, records }) => {
+                if self.last != 0
+                    || memory as f64 <= self.params.fill * self.params.limit as f64
+                    || records < self.params.least
+                {
+                    return Ok(RowsAction::Done);
+                }
+                let plan = plan::plan(
+                    &self.params.shape,
+                    &Level {
+                        shift: self.shift,
+                        ..Level::first(usize::try_from(self.params.limit).unwrap_or(usize::MAX))
+                    },
+                )?;
+                self.partitions = plan.partitions;
+                self.below = plan.below;
+                self.deeper = u32::from(plan.deeper);
+                self.phase = ROWS_WRITING;
+                Ok(RowsAction::Freeze {
+                    plan,
+                    level: self.level,
+                })
+            }
+            (ROWS_WRITING, RowsEvent::Written) => {
+                self.cursor = 0;
+                self.phase = ROWS_READING;
+                Ok(RowsAction::Done)
+            }
+            (ROWS_READING, RowsEvent::Next) => {
+                ensure!(
+                    host.written.len() == self.partitions as usize,
+                    Error::wrong_call(Rule::PartitionRows)
+                        .with(host.written.len())
+                        .and(self.partitions)
+                );
+                while self.cursor < self.partitions {
+                    let partition = self.cursor;
+                    self.cursor += 1;
+                    if host.written[partition as usize] > 0 {
+                        let level = self
+                            .level
+                            .checked_add(1)
+                            .ok_or(Error::wrong_call(Rule::JoinState).with(self.phase))?;
+                        return Ok(RowsAction::Read(Table {
+                            partition,
+                            level,
+                            shift: self.below,
+                            last: self.deeper == 0,
+                        }));
+                    }
+                }
+                self.phase = ROWS_DONE;
+                Ok(RowsAction::LevelDone)
+            }
+            (phase, event) => {
+                Err(Error::wrong_call(Rule::JoinEvent)
+                    .with(phase)
+                    .and(match event {
+                        RowsEvent::Grown { .. } => 1,
+                        RowsEvent::Written => 2,
+                        RowsEvent::Next => 3,
+                    }))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests;
