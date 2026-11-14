@@ -562,8 +562,10 @@ impl Join {
                 if !freed {
                     return self.route(host);
                 }
-                // The end weighs the rows alone: no share of the limit, so no count.
-                self.send(host, None, 0)
+                // The end weighs no memory, but its shares still go from
+                // start to target: a start of 0 sends a partition whatever
+                // the memory, and a target of more stops.
+                self.send(host, None, self.evicted + 1)
             }
             (PROBING, Event::OuterEnd) if ended => {
                 self.phase = JOINING;
@@ -816,27 +818,29 @@ impl Join {
         Ok(())
     }
 
-    /// A partition on disk to join: split into a level below when it is
-    /// larger than `room` of what the limit leaves besides `memory`, a
-    /// chunk of outer rows and its values, and holds fewer than `key` of
-    /// its level's rows, so not one key; whole otherwise.
+    /// A partition on disk to join: split into a level below when one of
+    /// the level's shape fits in the bits left, it is larger than `room`
+    /// of what the limit leaves besides `memory`, a chunk of outer rows
+    /// and its values, and it holds fewer than `key` of its level's rows,
+    /// so not one key; whole or in pieces otherwise.
     fn take(&mut self, host: &Host<'_>, partition: u32, memory: u64) -> Result<Action> {
         let index = partition as usize;
         let used = memory.saturating_add(2 * self.outer_len);
-        let split = splits(
-            &SplitWeights {
-                room: self.params.split_room,
-                key: self.params.split_key,
-            },
-            &Partition {
-                size: host.disk[index],
-                used,
-                limit: self.params.limit,
-                rows: host.rows[index],
-                level_rows: host.total,
-                bits: self.below,
-            },
-        )?;
+        let split = self.deeper != 0
+            && splits(
+                &SplitWeights {
+                    room: self.params.split_room,
+                    key: self.params.split_key,
+                },
+                &Partition {
+                    size: host.disk[index],
+                    used,
+                    limit: self.params.limit,
+                    rows: host.rows[index],
+                    level_rows: host.total,
+                    bits: self.below,
+                },
+            )?;
         if !split {
             // A file larger than the room of a piece is read in pieces.
             let pieces = host.disk[index] > self.room_of(memory);

@@ -998,6 +998,41 @@ fn a_piece_ends_only_where_the_records_of_a_group_end() {
     assert_eq!(step(block(true, 1)), Ok(Action::Carry));
 }
 
+#[test]
+fn a_piece_of_a_level_below_has_the_room_of_the_join() {
+    let limit = 1 << 20;
+    let mut params = params(limit);
+    params.shape.min_partitions = 8;
+    // A level below with no bits for another: no split, and a quarter
+    // of the join's limit.
+    let level = Below {
+        partition: 1,
+        level: 1,
+        expected: 1000,
+        limit: limit / 4,
+        shift: 27,
+    };
+    let (mut join, mut regions) = joining_below(&params, &level);
+    assert_eq!(join.deeper, 0);
+    regions.outer[1] = 100;
+    regions.disk[1] = 4 << 20;
+    let Ok(Action::Open { pieces: true, .. }) =
+        join.step(Event::Next { memory: 0 }, &mut regions.host())
+    else {
+        panic!("pieces");
+    };
+    // Past two thirds of the level's limit, short of the join's.
+    let size = limit / 2;
+    assert!(size + 1 < (limit - 2 * join.outer_len) / 3 * 2);
+    assert!(size > level.limit / 3 * 2);
+    let mut step = |event| join.step(event, &mut regions.host());
+    let block = |values, len| Event::Block { values, len };
+    assert_eq!(step(Event::Piece { memory: 0 }), Ok(Action::Done));
+    assert_eq!(step(block(true, 1)), Ok(Action::Load));
+    assert_eq!(step(block(false, size)), Ok(Action::Load));
+    assert_eq!(step(block(true, 1)), Ok(Action::Load));
+}
+
 /// `count` rows of `keys` keys whose hashes fall into `partition` of
 /// any level of up to 64 partitions.
 fn keys_of(partition: u32, keys: usize, count: usize) -> Vec<u32> {
@@ -1151,4 +1186,94 @@ fn one_key_too_large_is_joined_in_pieces() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[test]
+fn the_end_of_the_build_goes_from_start_to_target_too() {
+    // A start of 0 sends a partition whatever the memory; the target of 1
+    // stops the next.
+    let params = Params {
+        start: 0.0,
+        target: 1.0,
+        resident: 0.0,
+        ..params(1 << 20)
+    };
+    let (mut join, _, mut regions) = spilling_with(&params);
+    for (partition, bytes) in [(0, 300_000), (1, 200_000), (2, 100_000)] {
+        regions
+            .spill()
+            .add_bytes(bytes, Some(partition))
+            .expect("bytes");
+        regions.rows[partition as usize] = 1000;
+    }
+    regions.total = 3000;
+    let grown = Event::Grown { memory: 600_000 };
+    assert_eq!(join.step(grown, &mut regions.host()), Ok(Action::Demote(0)));
+    assert_eq!(sent(&mut join, &mut regions, 0, 300_000, 0), Action::Done);
+    assert_eq!(
+        join.step(Event::BuildEnd, &mut regions.host()),
+        Ok(Action::Demote(1))
+    );
+    assert_eq!(sent(&mut join, &mut regions, 1, 200_000, 0), Action::Done);
+    assert_eq!(regions.routes, [1, 1, 0, 0]);
+}
+
+#[test]
+fn no_partition_splits_where_no_level_of_the_shape_fits() {
+    // Eight partitions at the least: three bits, of which two are left.
+    let limit = 1 << 20;
+    let mut params = params(limit);
+    params.shape.min_partitions = 8;
+    let level = Below {
+        partition: 1,
+        level: 1,
+        expected: 1000,
+        limit,
+        shift: 27,
+    };
+    let (mut join, mut regions) = joining_below(&params, &level);
+    assert_eq!((join.below, join.deeper), (30, 0));
+    let next = split_of(&mut join, &mut regions, 2 * limit, 0);
+    assert_eq!(next, None);
+}
+
+#[test]
+fn a_partition_is_read_in_pieces_past_what_the_memory_in_use_leaves() {
+    let limit = 1 << 20;
+    let memory = 300_000;
+    let opened = |size, shared| {
+        let params = params(limit);
+        let (mut join, mut regions) = if shared {
+            let (join, start) = Join::given(&params, 4).expect("a level");
+            (join, Regions::of(&start))
+        } else {
+            joining(&params)
+        };
+        // One key: no split.
+        regions.rows = vec![0, 7000, 0, 300];
+        regions.total = 7300;
+        regions.outer = vec![0, 10, 0, 0];
+        regions.disk = vec![0, size, 0, 0];
+        let event = if shared {
+            Event::Take {
+                partition: 1,
+                memory,
+            }
+        } else {
+            Event::Next { memory }
+        };
+        let room = (limit - memory - 2 * join.outer_len) / 3 * 2;
+        (join.step(event, &mut regions.host()), room)
+    };
+    for shared in [false, true] {
+        let (_, room) = opened(0, shared);
+        let open = |pieces| {
+            Ok(Action::Open {
+                partition: 1,
+                pieces,
+            })
+        };
+        assert_eq!(opened(room, shared).0, open(false), "{shared}");
+        assert_eq!(opened(room + 1, shared).0, open(true), "{shared}");
+    }
 }
