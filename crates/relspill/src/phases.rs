@@ -388,7 +388,11 @@ impl Participant {
                 self.enter(counters)
             }
             State::Arriving => {
-                self.phase += 1;
+                // Words that are no participant's may hold any phase.
+                self.phase = self
+                    .phase
+                    .checked_add(1)
+                    .ok_or(Error::wrong_call(Rule::State))?;
                 self.elected = u32::from(reply != 0);
                 self.enter(counters)
             }
@@ -453,7 +457,11 @@ impl Participant {
                 self.enter_round()
             }
             State::Arriving => {
-                self.phase += 1;
+                // Words that are no participant's may hold any phase.
+                self.phase = self
+                    .phase
+                    .checked_add(1)
+                    .ok_or(Error::wrong_call(Rule::State))?;
                 self.elected = u32::from(reply != 0);
                 self.enter_round()
             }
@@ -561,6 +569,29 @@ mod tests {
                 Free
             ]
         );
+    }
+
+    /// Words that are no participant's, arriving past the last phase a
+    /// word holds, are a wrong call, not a phase past it.
+    #[test]
+    fn a_participant_arriving_past_the_last_phase_is_refused() {
+        let words = counter_words(0);
+        let counters = SharedCounters::new(&words);
+        let mut participant = Participant {
+            phase: u32::MAX,
+            state: State::Arriving as u32,
+            elected: 0,
+        };
+        let before = participant;
+        assert_eq!(
+            participant.next(&counters, 0).map_err(|error| error.rule()),
+            Err(Rule::State)
+        );
+        assert_eq!(
+            participant.round_step(0).map_err(|error| error.rule()),
+            Err(Rule::State)
+        );
+        assert_eq!(participant, before);
     }
 
     /// A stop word in this process.

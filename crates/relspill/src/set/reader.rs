@@ -287,10 +287,16 @@ impl Reader {
             return Ok(());
         }
         // The partition's entries lie inside the lists.
-        let first = self.lists_at + 8 * partitions + ENTRY_SIZE as u64 * self.before;
+        // Words that are no reader's may hold any counts: summed checked.
+        let first = (ENTRY_SIZE as u64)
+            .checked_mul(self.before)
+            .and_then(|before| before.checked_add(8 * partitions))
+            .and_then(|lists| lists.checked_add(self.lists_at));
         ensure!(
-            self.before + self.count <= self.most
-                && self.entries_at == first
+            self.before
+                .checked_add(self.count)
+                .is_some_and(|end| end <= self.most)
+                && first == Some(self.entries_at)
                 && (self.phase != ENTRIES || self.cursor <= self.count),
             refuse
         );
@@ -1254,6 +1260,24 @@ mod tests {
             block: Vec::new(),
         };
         ensure!(empty.open()?.is_none(), "partition 0 has no blocks");
+        Ok(())
+    }
+
+    /// Words that are no reader's, counts summed past a word among them,
+    /// are refused before any read.
+    #[test]
+    fn a_reader_of_counts_past_a_word_is_refused() -> Result<()> {
+        // A file of 56 bytes: one entry, the count of one partition and
+        // the trailer; the words of a reader ready at that entry, but of
+        // a count of blocks that no word sums with the blocks before.
+        let mut forged = Reader::file(read_config(1, 0), 56)?;
+        forged.phase = READY;
+        forged.lists_at = 0;
+        forged.entries_at = 24;
+        (forged.before, forged.total, forged.most) = (1, 1, 1);
+        forged.count = u64::MAX;
+        let page = [Entry::default(); 2];
+        ensure!(forged.next(&page, &[]).map_err(Error::rule) == Err(Rule::ReaderState));
         Ok(())
     }
 
