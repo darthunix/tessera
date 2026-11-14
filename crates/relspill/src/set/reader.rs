@@ -8,11 +8,9 @@
 //! from their starts, after which the caller makes the call again; or
 //! what the reader found.
 //!
-//! For the caller's own set the page may be the partition's block list
-//! in memory ([`Reader::own`]), and only blocks are read. For a finished
-//! set's file, the caller's own or another participant's of a shared
-//! set, the caller gives the file's length ([`Reader::file`]), and
-//! [`Reader::open`] asks first for the trailer at
+//! For a finished set's file, the caller's own or another participant's
+//! of a shared set, the caller gives the file's length
+//! ([`Reader::file`]), and [`Reader::open`] asks first for the trailer at
 //! the end of the file, then for the counts of the lists, then for the
 //! partition's entries, a page at a time. It checks each part before it
 //! asks for the bytes it names: the trailer before the counts, the
@@ -147,7 +145,8 @@ pub struct Reader {
     level: u32,
     partition: u32,
     phase: u32,
-    own: u32,
+    /// Kept 0.
+    spare: u32,
     asked: u32,
     body_kind: u32,
     body_packed: u32,
@@ -192,31 +191,6 @@ impl Reader {
         }
     }
 
-    /// A reader of a partition of the caller's own set, whose block list
-    /// is `entries`: the page of every later call. Each entry's length is
-    /// checked, and that each lies before the next.
-    ///
-    /// # Errors
-    ///
-    /// A wrong call for a config no set has; damaged bytes for an entry
-    /// shorter than a header, longer than the longest block, or running
-    /// into the next.
-    pub fn own(config: ReadConfig, entries: &[Entry]) -> Result<Self> {
-        check_config(&config)?;
-        // Checked as an open checks a file's entries, then ready.
-        let mut reader = Self::made(config, ENTRIES);
-        reader.own = 1;
-        reader.count = entries.len() as u64;
-        reader.page_count = reader.count;
-        reader.lists_at = u64::MAX;
-        for (index, entry) in entries.iter().enumerate() {
-            let end = entries.get(index + 1).map_or(u64::MAX, |next| next.offset);
-            reader.check_entry(entry, end)?;
-        }
-        reader.phase = if reader.count == 0 { EMPTY } else { READY };
-        Ok(reader)
-    }
-
     /// A reader of a partition of a finished set's file, the caller's
     /// own or another participant's, of `file_len` bytes; [`Self::open`]
     /// reads its lists.
@@ -251,7 +225,7 @@ impl Reader {
                 && self.partitions > 0
                 && self.partition < self.partitions
                 && self.level < MAX_LEVEL
-                && self.own <= 1
+                && self.spare == 0
                 && self.asked <= BLOCK
                 && self.next <= self.count
                 && self.total <= self.most
@@ -276,13 +250,6 @@ impl Reader {
                         .is_some_and(|end| end <= self.lists_at)),
             refuse
         );
-        if self.own == 1 {
-            ensure!(
-                self.phase >= READY && self.asked != PAGE && self.lists_at == u64::MAX,
-                refuse
-            );
-            return Ok(());
-        }
         if self.phase == TRAILER {
             ensure!(
                 self.asked == NOTHING
@@ -596,8 +563,8 @@ impl Reader {
         self.ask(PAGE, at, ENTRY_SIZE as u64 * take)
     }
 
-    /// A step of reading the next block: `page` is the page (the list,
-    /// for the caller's own set) and `block` the block buffer, each
+    /// A step of reading the next block: `page` is the page and `block`
+    /// the block buffer, each
     /// holding what the last step asked for. Its last step is
     /// [`ReadStep::Header`], or [`ReadStep::End`] past the last block.
     ///
@@ -616,7 +583,7 @@ impl Reader {
             Error::wrong_call(Rule::ReaderState)
         );
         ensure!(
-            self.own == 1 || !page.is_empty(),
+            !page.is_empty(),
             Error::wrong_call(Rule::ReaderPage).with(page.len())
         );
         if self.asked == BLOCK {
@@ -630,10 +597,6 @@ impl Reader {
             return Ok(ReadStep::End);
         }
         let Some(entry) = self.entry(page, self.next) else {
-            ensure!(
-                self.own == 0,
-                Error::wrong_call(Rule::ReaderPage).with(page.len())
-            );
             return Ok(self.ask_page(page, self.next));
         };
         ensure!(
@@ -761,13 +724,9 @@ impl Reader {
             self.phase = self.seek_from;
             return Err(Error::wrong_call(Rule::ReaderState));
         }
-        // The own list is the page whole; a file's page holds an entry.
+        // A page holds an entry.
         ensure!(
-            if self.own == 1 {
-                page.len() as u64 >= self.count
-            } else {
-                !page.is_empty()
-            },
+            !page.is_empty(),
             Error::wrong_call(Rule::ReaderPage).with(page.len())
         );
         if self.phase != SEEK {
@@ -926,6 +885,18 @@ mod tests {
             }
         }
 
+        /// The steps of the next block served until its header: the
+        /// reader then waits for the body to be taken.
+        fn header(&mut self) -> Result<()> {
+            loop {
+                let step = self.reader.next(&self.page, &self.block)?;
+                if matches!(step, ReadStep::Header(_)) {
+                    return Ok(());
+                }
+                ensure!(self.serve(step)?, "{step:?} before a header");
+            }
+        }
+
         fn seek(&mut self, offset: u64) -> Result<(), Error> {
             loop {
                 let step = self.reader.seek(&self.page, offset)?;
@@ -970,10 +941,9 @@ mod tests {
         Ok(())
     }
 
-    /// Every partition of a set reads back in the order its blocks were
-    /// written: through its own list, and from the file as a reader of
-    /// the finished set reads it, a page of 2 to 9 entries at a time; a
-    /// seek goes to each block by its place.
+    /// Every partition of a set reads back from its file in the order its
+    /// blocks were written, a page of 2 to 9 entries at a time; a seek
+    /// goes to each block by its place.
     #[test]
     fn a_set_reads_back_by_its_lists_and_from_its_file() {
         // Up to 12 partitions, so that a page of two entries reads the
@@ -1002,15 +972,6 @@ mod tests {
                     .iter()
                     .filter(|block| block.partition == partition)
                     .collect();
-                let (entries, count) = &host.lists[partition as usize];
-                let list = &entries[..*count as usize];
-                let mut own = Back {
-                    reader: Reader::own(config(partition), list)?,
-                    file: &host.file,
-                    page: list.to_vec(),
-                    block: vec![0; MAX_LEN as usize],
-                };
-                read_partition(&mut own, &ours, &places[partition as usize])?;
                 if written.is_empty() {
                     continue;
                 }
@@ -1304,27 +1265,29 @@ mod tests {
             assert_eq!(error.kind(), Kind::WrongCall, "{error}");
             error.rule()
         };
-        let (host, file) = shared_file()?;
-        let list = &host.lists[0].0[..host.lists[0].1 as usize];
+        let (_, file) = shared_file()?;
         assert_eq!(
-            Reader::own(read_config(3, 3), list).map_err(Error::rule),
+            Reader::file(read_config(3, 3), file.len() as u64).map_err(Error::rule),
             Err(Rule::SetPartition)
         );
-        let mut back = Back {
-            reader: Reader::own(read_config(3, 0), list)?,
-            file: &file,
-            page: list.to_vec(),
-            block: vec![0; 128],
+        // Partition 0 of the file, opened, a page of two entries.
+        let opened = || -> Result<Back<'_>> {
+            let mut back = Back {
+                reader: Reader::file(read_config(3, 0), file.len() as u64)?,
+                file: &file,
+                page: vec![Entry::default(); 2],
+                block: Vec::new(),
+            };
+            ensure!(back.open()? == Some(()), "partition 0 has blocks");
+            Ok(back)
         };
+        let mut back = opened()?;
         let mut out = vec![0; 16];
         assert_eq!(
             back.reader.body(&back.block, &mut out).map_err(Error::rule),
             Err(Rule::BodyRead)
         );
-        let step = back.reader.next(&back.page, &back.block)?;
-        back.serve(step)?;
-        let header = back.reader.next(&back.page, &back.block)?;
-        ensure!(matches!(header, ReadStep::Header(_)), "{header:?}");
+        back.header()?;
         assert_eq!(
             wrong(back.reader.next(&back.page, &back.block)),
             Rule::BodyNotRead
@@ -1339,10 +1302,18 @@ mod tests {
         back.reader.body(&back.block, &mut out)?;
         assert_eq!(wrong(back.reader.seek(&back.page, 3)), Rule::SeekPosition);
         // A block asked for into a buffer too short for it.
-        let mut reader = Reader::own(read_config(3, 0), list)?;
-        let step = reader.next(list, &[])?;
-        ensure!(matches!(step, ReadStep::Block { .. }), "{step:?}");
-        assert_eq!(wrong(reader.next(list, &[0; 8])), Rule::ReaderRead);
+        let mut back = opened()?;
+        loop {
+            let step = back.reader.next(&back.page, &back.block)?;
+            if matches!(step, ReadStep::Block { .. }) {
+                break;
+            }
+            ensure!(back.serve(step)?, "{step:?} before a block");
+        }
+        assert_eq!(
+            wrong(back.reader.next(&back.page, &[0; 8])),
+            Rule::ReaderRead
+        );
         // A page too short to read a file's trailer into, and a zeroed
         // reader.
         let mut reader = Reader::file(read_config(3, 0), file.len() as u64)?;
@@ -1352,24 +1323,13 @@ mod tests {
             Rule::ReaderState
         );
 
-        // A refused seek leaves a body waiting, and a seek with a list
-        // shorter than the reader's leaves it as it was.
-        let mut back = Back {
-            reader: Reader::own(read_config(3, 0), list)?,
-            file: &file,
-            page: list.to_vec(),
-            block: vec![0; 128],
-        };
-        let step = back.reader.next(&back.page, &back.block)?;
-        back.serve(step)?;
-        let header = back.reader.next(&back.page, &back.block)?;
-        ensure!(matches!(header, ReadStep::Header(_)), "{header:?}");
-        assert_eq!(wrong(back.reader.seek(&back.page, 1)), Rule::SeekPosition);
+        // A refused seek leaves a body waiting, and a seek with an empty
+        // page leaves it as it was.
+        let mut back = opened()?;
+        back.header()?;
+        assert_eq!(back.seek(1).map_err(Error::rule), Err(Rule::SeekPosition));
         back.reader.body(&back.block, &mut out)?;
-        assert_eq!(
-            wrong(back.reader.seek(&back.page[..1], 1)),
-            Rule::ReaderPage
-        );
+        assert_eq!(wrong(back.reader.seek(&[], 1)), Rule::ReaderPage);
         ensure!(
             back.next()?.is_some(),
             "the second block after a refused seek"

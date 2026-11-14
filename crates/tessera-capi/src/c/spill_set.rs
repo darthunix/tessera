@@ -540,53 +540,10 @@ fn read_config(
     })
 }
 
-/// `tess_spill_reader_own`: make `*reader` a reader of `partition` of the
-/// caller's own set, whose list is the `count` entries at `entries`
-/// ([`Reader::own`]), its blocks within `max_chunk` and `max_values` as
-/// [`tess_spill_set_init`] takes them; `*largest` gets the bytes of its
-/// largest block.
-///
-/// # Safety
-///
-/// `reader` as for [`tess_spill_set_init`]; `entries` must point to
-/// `count` entries when `count` is positive, unchanged while the reader
-/// reads; `largest` must be writable; `status` as for every entry point.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
-pub unsafe extern "C" fn tess_spill_reader_own(
-    reader: *mut Reader,
-    npartitions: c_int,
-    level: u32,
-    partition: c_int,
-    fingerprint: u64,
-    max_chunk: u64,
-    max_values: u64,
-    entries: *const Entry,
-    count: u64,
-    largest: *mut u64,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let out = reader_at(reader)?;
-            let bounds = Bounds {
-                chunk: max_chunk,
-                values: max_values,
-            };
-            let config = read_config(npartitions, level, partition, fingerprint, bounds)?;
-            let list = page_at(entries, usize::try_from(count)?)?;
-            let made = Reader::own(config, list)?;
-            output(largest, "largest")?.write(made.largest());
-            *out = made;
-            Ok(())
-        })
-    }
-}
-
-/// `tess_spill_reader_file`: make `*reader` a reader of `partition` of
-/// another participant's file of `file_len` bytes ([`Reader::file`]),
-/// with the bounds of [`tess_spill_reader_own`].
+/// `tess_spill_reader_file`: make `*reader` a reader of `partition` of a
+/// finished set's file of `file_len` bytes, the caller's own or another
+/// participant's ([`Reader::file`]), its blocks within `max_chunk` and
+/// `max_values` as [`tess_spill_set_init`] takes them.
 ///
 /// # Safety
 ///

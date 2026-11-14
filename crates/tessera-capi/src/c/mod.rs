@@ -114,9 +114,9 @@ pub use spill_set::{
     READ_BLOCK, READ_EMPTY, READ_END, READ_FOUND, READ_HEADER, READ_PAGE, READ_READY, REGION_BODY,
     REGION_BUFFER, REGION_LIST, REGION_SCRATCH, STEP_AGAIN, STEP_DONE, STEP_LIST, STEP_SCRATCH,
     SpillList, SpillRange, SpillReadStep, SpillStep, tess_spill_reader_body,
-    tess_spill_reader_file, tess_spill_reader_next, tess_spill_reader_open, tess_spill_reader_own,
-    tess_spill_reader_seek, tess_spill_set_drop, tess_spill_set_finish, tess_spill_set_init,
-    tess_spill_set_layout, tess_spill_set_stats, tess_spill_set_write, tess_spill_set_written,
+    tess_spill_reader_file, tess_spill_reader_next, tess_spill_reader_open, tess_spill_reader_seek,
+    tess_spill_set_drop, tess_spill_set_finish, tess_spill_set_init, tess_spill_set_layout,
+    tess_spill_set_stats, tess_spill_set_write, tess_spill_set_written,
 };
 pub use spill_shared::{
     SHARED_ACTION_SIZE, SHARED_ALONE, SHARED_ARRIVE_AND_DETACH, SHARED_ARRIVE_AND_WAIT,
