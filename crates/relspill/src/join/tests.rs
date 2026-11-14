@@ -154,7 +154,7 @@ fn an_event_out_of_turn_is_refused_and_changes_nothing() {
         let before = join;
         assert_eq!(
             wrong(join.step(event, &mut regions.host())),
-            Rule::JoinEvent
+            Rule::MachineEvent
         );
         assert_eq!(join, before);
     }
@@ -162,12 +162,12 @@ fn an_event_out_of_turn_is_refused_and_changes_nothing() {
     let mut none = Join { phase: 0, ..join };
     assert_eq!(
         wrong(none.step(Event::BuildEnd, &mut regions.host())),
-        Rule::JoinState
+        Rule::MachineState
     );
     let mut fits = Join::new(&params(1 << 20)).expect("parameters");
     assert_eq!(
         wrong(fits.step(Event::BuildEnd, &mut Regions::none().host())),
-        Rule::JoinEvent
+        Rule::MachineEvent
     );
 }
 
@@ -315,7 +315,7 @@ fn the_build_ends_with_where_the_outer_rows_go() {
     // The outer rows end after the table they probed.
     assert_eq!(
         wrong(join.step(Event::OuterEnd, &mut regions.host())),
-        Rule::JoinEvent
+        Rule::MachineEvent
     );
     let end = Event::TableEnd { held: false };
     assert_eq!(join.step(end, &mut regions.host()), Ok(Action::Done));
@@ -325,7 +325,7 @@ fn the_build_ends_with_where_the_outer_rows_go() {
     );
     assert_eq!(
         wrong(join.step(outer(true), &mut regions.host())),
-        Rule::JoinEvent
+        Rule::MachineEvent
     );
 }
 
@@ -382,9 +382,41 @@ fn a_level_below_is_planned_from_its_bits() {
     );
     assert_eq!(Ok(start.plan), planned);
     let first = Below { level: 0, ..below };
-    assert_eq!(wrong(Join::below(&params(limit), &first)), Rule::JoinLevel);
+    assert_eq!(wrong(Join::below(&params(limit), &first)), Rule::LevelBelow);
     let past = Below { shift: 40, ..below };
     assert_eq!(wrong(Join::below(&params(limit), &past)), Rule::PlanBits);
+}
+
+/// A level whose chunks of outer rows are as long as a word holds weighs
+/// a partition taken alone without passing the word: the sums saturate.
+#[test]
+fn a_level_of_the_longest_chunks_weighs_without_passing_a_word() {
+    let params = Params {
+        limit: u64::MAX,
+        shape: Shape {
+            reserve: 0,
+            min_partitions: 4,
+            max_partitions: 4,
+            share: 1,
+            min_chunk: 1 << 63,
+            max_chunk: usize::MAX,
+            record: 40,
+        },
+        ..params(1 << 20)
+    };
+    let (mut join, start) = Join::given(&params, 4).expect("a level");
+    assert!(start.outer_len > usize::MAX / 2, "{start:?}");
+    let mut regions = Regions::of(&start);
+    regions.rows[0] = 1;
+    regions.total = 1;
+    let take = join.step(
+        Event::Take {
+            partition: 0,
+            memory: 0,
+        },
+        &mut regions.host(),
+    );
+    assert!(take.is_ok(), "{take:?}");
 }
 
 #[test]
@@ -430,7 +462,7 @@ fn a_shared_level_takes_the_partitions_given() {
     // No partition comes before the last one's table ends.
     assert_eq!(
         wrong(join.step(take(7), &mut regions.host())),
-        Rule::JoinEvent
+        Rule::MachineEvent
     );
     let end = Event::TableEnd { held: false };
     assert_eq!(join.step(end, &mut regions.host()), Ok(Action::Done));
@@ -440,7 +472,10 @@ fn a_shared_level_takes_the_partitions_given() {
     );
     // The shared build decides the rest.
     let next = Event::Next { memory: 0 };
-    assert_eq!(wrong(join.step(next, &mut regions.host())), Rule::JoinEvent);
+    assert_eq!(
+        wrong(join.step(next, &mut regions.host())),
+        Rule::MachineEvent
+    );
 }
 
 #[test]
@@ -467,7 +502,7 @@ fn parameters_are_checked() {
             ..good
         },
     ] {
-        assert_eq!(wrong(Join::new(&bad)), Rule::JoinParams);
+        assert_eq!(wrong(Join::new(&bad)), Rule::MachineParams);
     }
     let wide = Params {
         outer_words: columns::MAX_WORDS as u64 + 1,
@@ -842,7 +877,7 @@ fn partitions_on_disk_are_released_joined_or_split() {
     );
     assert_eq!(
         wrong(join.step(next(memory), &mut regions.host())),
-        Rule::JoinEvent
+        Rule::MachineEvent
     );
 }
 
@@ -872,7 +907,7 @@ fn a_partition_too_large_to_split_is_joined_in_pieces() {
     short.rows = regions.rows.clone();
     short.outer = regions.outer.clone();
     let next = Event::Next { memory: 0 };
-    assert_eq!(wrong(join.step(next, &mut short.host())), Rule::JoinDisk);
+    assert_eq!(wrong(join.step(next, &mut short.host())), Rule::DiskCounts);
     assert_eq!(join, before);
     // Larger than two thirds of what the limit leaves: in pieces.
     let room = (limit - 2 * join.outer_len) / 3 * 2;
@@ -882,7 +917,10 @@ fn a_partition_too_large_to_split_is_joined_in_pieces() {
         pieces: true,
     };
     assert_eq!(join.step(next, &mut regions.host()), Ok(open));
-    assert_eq!(wrong(join.step(next, &mut regions.host())), Rule::JoinEvent);
+    assert_eq!(
+        wrong(join.step(next, &mut regions.host())),
+        Rule::MachineEvent
+    );
     let mut step = |event| join.step(event, &mut regions.host());
     let records = |len| Event::Block { values: false, len };
     assert_eq!(step(Event::Piece { memory: 0 }), Ok(Action::Done));
@@ -895,7 +933,7 @@ fn a_partition_too_large_to_split_is_joined_in_pieces() {
     let end = Event::TableEnd { held: false };
     assert_eq!(
         step(Event::PassEnd),
-        Err(Error::wrong_call(Rule::JoinEvent).with(PASS).and(13))
+        Err(Error::wrong_call(Rule::MachineEvent).with(PASS).and(13))
     );
     assert_eq!(step(Event::TableEnd { held: true }), Ok(Action::Hold));
     assert_eq!(step(end), Ok(Action::Tail));

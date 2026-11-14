@@ -71,7 +71,7 @@
 //!   once more, without a table ([`Action::FinalPass`]).
 //!
 //! An event that the machine's phase does not take is a wrong call
-//! ([`Rule::JoinEvent`]), and the machine stays as it was. The machine
+//! ([`Rule::MachineEvent`]), and the machine stays as it was. The machine
 //! decides by the numbers the host gives: its memory, its bytes and its
 //! rows. It does nothing for each row: the host puts the rows into their
 //! partitions, and where a decision is made for each row, the machine
@@ -134,16 +134,20 @@ pub struct Params {
     /// [`Weights`] names them: `start`, `target`, `spilled` and
     /// `resident`;
     pub start: f64,
+    /// see `start`;
     pub target: f64,
+    /// see `start`;
     pub spilled: f64,
+    /// see `start`;
     pub resident: f64,
     /// and the share of the outer tail that each partition on disk keeps
     /// in reserve: its chunk of outer rows, its chunk of values when they
     /// keep values, and the page of its file.
     pub tail: f64,
     /// The weights of the rule that splits a partition on disk into a
-    /// level below, as [`SplitWeights`] names them.
+    /// level below, as [`SplitWeights`] names them: `room`;
     pub split_room: f64,
+    /// and `key`.
     pub split_key: f64,
 }
 
@@ -155,9 +159,13 @@ pub enum Event {
     /// expects; with the batch, its index and the chunks it may add, it
     /// would take `needed`.
     Inner {
+        /// The bytes the table takes.
         held: u64,
+        /// Its rows.
         rows: u64,
+        /// The rows the host expects.
         estimate: f64,
+        /// The bytes it would take with the batch.
         needed: u64,
     },
     /// The level of the last [`Action::Start`] is made, with its spill
@@ -167,15 +175,26 @@ pub enum Event {
     /// values passed a chunk; `tail` when it holds a chunk of rows in
     /// memory.
     Full {
+        /// The side of the partition.
         side: Side,
+        /// The partition.
         partition: u32,
+        /// Whether it holds a chunk of rows in memory.
         tail: bool,
     },
     /// Rows went into the partitions: the host's memory now.
-    Grown { memory: u64 },
+    Grown {
+        /// The bytes the host holds.
+        memory: u64,
+    },
     /// The partition of the last [`Action::Demote`] or [`Action::Evict`]
     /// went to disk: whether that freed memory, and the memory now.
-    Sent { freed: bool, memory: u64 },
+    Sent {
+        /// Whether its bytes in memory went down.
+        freed: bool,
+        /// The bytes the host holds.
+        memory: u64,
+    },
     /// The inner rows are read.
     BuildEnd,
     /// The outer rows are read.
@@ -183,16 +202,32 @@ pub enum Event {
     /// The host asks for the next partition on disk: the one it took is
     /// done, or none was taken yet. `memory` is what its spill holds, the
     /// levels above included, besides a partition it would join.
-    Next { memory: u64 },
+    Next {
+        /// The bytes the spill holds, as said above.
+        memory: u64,
+    },
     /// A participant of a shared build took `partition` to join alone:
     /// whether it splits, with `memory` as for [`Event::Next`].
-    Take { partition: u32, memory: u64 },
+    Take {
+        /// The partition taken.
+        partition: u32,
+        /// The bytes the spill holds.
+        memory: u64,
+    },
     /// The host starts the next piece of a partition read in pieces:
     /// `memory` as for [`Event::Next`], the last piece dropped.
-    Piece { memory: u64 },
+    Piece {
+        /// The bytes the spill holds.
+        memory: u64,
+    },
     /// The header of the partition's next block of inner rows, a block of
     /// values or of records, of `len` bytes: whether it joins the piece.
-    Block { values: bool, len: u64 },
+    Block {
+        /// Whether it is a block of values.
+        values: bool,
+        /// Its bytes.
+        len: u64,
+    },
     /// The partition's inner rows on disk are all read.
     FileEnd,
     /// A pass over the partition's outer rows ended.
@@ -201,7 +236,10 @@ pub enum Event {
     /// of the partitions in memory, a partition's or a piece's. `held`
     /// when the host still holds output of that table that has not gone
     /// out, such as pairs it copied, which refer to it.
-    TableEnd { held: bool },
+    TableEnd {
+        /// Whether output of the table is still held.
+        held: bool,
+    },
     /// The tail of the last [`Action::Tail`] went out.
     TailEnd,
 }
@@ -242,7 +280,12 @@ pub enum Action {
     /// outer rows probing it: whole, then ask for the next; or, with
     /// `pieces`, a piece at a time ([`Event::Piece`]), its outer rows read
     /// once a piece.
-    Open { partition: u32, pieces: bool },
+    Open {
+        /// The partition to join.
+        partition: u32,
+        /// Whether it is joined a piece at a time.
+        pieces: bool,
+    },
     /// Read the block into the piece, and its header's next.
     Load,
     /// The piece ends before this block, which the next piece starts
@@ -316,12 +359,16 @@ pub struct Host<'a> {
     /// them, whose bytes the host counts by partition
     /// ([`LocalSpill::add_bytes`]); none while the table fits.
     pub words: &'a [Cell<u64>],
-    /// The inner rows of each partition, and of the level.
+    /// The inner rows of each partition.
     pub rows: &'a [u64],
+    /// The inner rows of the level.
     pub total: u64,
-    /// The outer rows written of each partition, and the bytes of the
-    /// blocks of inner rows on disk of each: read at [`Event::Next`].
+    /// The outer rows written of each partition, read at
+    /// [`Event::Next`].
     pub outer: &'a [u64],
+    /// The bytes the blocks of inner rows on disk of each partition take
+    /// read back, unpacked, which a table of them holds, not those they
+    /// take on disk; read at [`Event::Next`].
     pub disk: &'a [u64],
     /// A byte for each partition, which [`Event::BuildEnd`] sets to a
     /// [`Route`].
@@ -361,7 +408,7 @@ const TAIL_GIVEN: u32 = 32;
 /// It is plain data of a fixed layout, [`JOIN_WORDS`] words of 8 bytes,
 /// so that a host in another language keeps it in memory of its own; a
 /// step checks what it reads, and memory that is no machine is a wrong
-/// call ([`Rule::JoinState`]).
+/// call ([`Rule::MachineState`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Join {
@@ -404,7 +451,7 @@ impl Join {
     /// The machine of a join whose table fits so far.
     ///
     /// A wrong call: a limit of 0 or weights below zero or not finite
-    /// ([`Rule::JoinParams`]); outer rows of more words than a chunk of
+    /// ([`Rule::MachineParams`]); outer rows of more words than a chunk of
     /// columns stores ([`Rule::ColumnsWords`]); and a shape that no level
     /// can be planned by ([`plan::plan`]).
     pub fn new(params: &Params) -> Result<Self> {
@@ -441,7 +488,7 @@ impl Join {
     pub fn below(params: &Params, below: &Below) -> Result<(Self, Start)> {
         ensure!(
             below.level > 0,
-            Error::wrong_call(Rule::JoinLevel).with(below.level)
+            Error::wrong_call(Rule::LevelBelow).with(below.level)
         );
         let mut join = Self::new(params)?;
         let start =
@@ -471,8 +518,8 @@ impl Join {
 
     /// Take the host's event and give its next action.
     ///
-    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
-    /// event its phase does not take ([`Rule::JoinEvent`]); a partition
+    /// A wrong call: memory that is no machine ([`Rule::MachineState`]); an
+    /// event its phase does not take ([`Rule::MachineEvent`]); a partition
     /// past the level's ([`Rule::Partition`]); spill words that are not
     /// the level's ([`Rule::SpillWords`]); counts of rows or routes for
     /// another number of partitions ([`Rule::RecordCounts`],
@@ -646,7 +693,7 @@ impl Join {
                 self.phase = self.home;
                 Ok(Action::Done)
             }
-            _ => Err(Error::wrong_call(Rule::JoinEvent)
+            _ => Err(Error::wrong_call(Rule::MachineEvent)
                 .with(phase)
                 .and(code(&event))),
         }
@@ -656,7 +703,7 @@ impl Join {
     fn phase(&self) -> Result<u32> {
         ensure!(
             (FITS..=TAIL).contains(&self.phase),
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         Ok(self.phase)
     }
@@ -703,9 +750,9 @@ impl Join {
         let outer_len = plan
             .chunk_len
             .max(columns::HEADER + 8 * LEAST_OUTER_ROWS * columns::lanes(words));
-        let mut tail = outer_len as u64 + self.params.page;
+        let mut tail = (outer_len as u64).saturating_add(self.params.page);
         if self.params.outer_values != 0 {
-            tail += outer_len as u64;
+            tail = tail.saturating_add(outer_len as u64);
         }
         self.limit = limit;
         self.chunk_len = plan.chunk_len as u64;
@@ -808,7 +855,7 @@ impl Join {
         for (what, len) in [
             (Rule::RecordCounts, host.rows.len()),
             (Rule::JoinOuter, host.outer.len()),
-            (Rule::JoinDisk, host.disk.len()),
+            (Rule::DiskCounts, host.disk.len()),
         ] {
             ensure!(
                 len == partitions,
@@ -825,7 +872,7 @@ impl Join {
     /// so not one key; whole or in pieces otherwise.
     fn take(&mut self, host: &Host<'_>, partition: u32, memory: u64) -> Result<Action> {
         let index = partition as usize;
-        let used = memory.saturating_add(2 * self.outer_len);
+        let used = memory.saturating_add(self.outer_len.saturating_mul(2));
         let split = self.deeper != 0
             && splits(
                 &SplitWeights {
@@ -854,17 +901,11 @@ impl Join {
             }
             return Ok(Action::Open { partition, pieces });
         }
-        // What the levels above leave of the limit, a quarter at least.
-        let limit = self.params.limit;
         Ok(Action::Split(Below {
             partition,
             level: self.level + 1,
             expected: host.disk[index],
-            limit: if memory < limit / 4 * 3 {
-                limit - memory
-            } else {
-                limit / 4
-            },
+            limit: plan::below_limit(self.params.limit, memory),
             shift: self.below,
         }))
     }
@@ -873,7 +914,7 @@ impl Join {
     /// limit leaves besides `memory` and a chunk of outer rows and its
     /// values, the rest for the piece's index.
     fn room_of(&self, memory: u64) -> u64 {
-        let used = memory.saturating_add(2 * self.outer_len);
+        let used = memory.saturating_add(self.outer_len.saturating_mul(2));
         self.params.limit.saturating_sub(used) / 3 * 2
     }
 
@@ -933,7 +974,7 @@ fn check(params: &Params) -> Result<()> {
             && weights
                 .iter()
                 .all(|weight| weight.is_finite() && *weight >= 0.0),
-        Error::wrong_call(Rule::JoinParams)
+        Error::wrong_call(Rule::MachineParams)
     );
     ensure!(
         params.outer_words <= columns::MAX_WORDS as u64,
@@ -948,7 +989,7 @@ fn check(params: &Params) -> Result<()> {
     Ok(())
 }
 
-/// The number of an event in a [`Rule::JoinEvent`].
+/// The number of an event in a [`Rule::MachineEvent`].
 fn code(event: &Event) -> u32 {
     match event {
         Event::Inner { .. } => 1,

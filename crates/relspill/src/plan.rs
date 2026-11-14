@@ -66,13 +66,16 @@ pub struct Shape {
     /// The partitions to start from and the most, powers of two, the
     /// first no larger; the same for a node of a fixed count.
     pub min_partitions: u32,
+    /// The most partitions; see `min_partitions`.
     pub max_partitions: u32,
     /// The chunks: the limit shared among `share` times the partitions, no
     /// longer than `max_chunk`, and no shorter than `min_chunk` nor than a
     /// chunk's header, [`relhash::CHUNK_HEADER`], and [`LEAST_RECORDS`]
     /// records of `record` bytes, which win over `max_chunk`.
     pub share: usize,
+    /// The shortest chunk; see `share`.
     pub min_chunk: usize,
+    /// The longest chunk; see `share`.
     pub max_chunk: usize,
     /// The bytes of a record of the level's chunks; 0 for chunks that hold
     /// no records.
@@ -182,6 +185,18 @@ pub fn expected(held: f64, rows: f64, estimate: f64, participants: u32) -> f64 {
     expected * f64::from(participants)
 }
 
+/// The memory a level below may take, which splits a partition of the
+/// levels above while they hold `held` bytes: what they leave of
+/// `limit`, a quarter of it at least, so that a level below never plans
+/// for memory the levels above keep, nor for almost none.
+pub(crate) fn below_limit(limit: u64, held: u64) -> u64 {
+    if held < limit / 4 * 3 {
+        limit - held
+    } else {
+        limit / 4
+    }
+}
+
 /// Whether `partitions`, a power of two, fit in the hash after `shift`
 /// bits, the first of them a bit of the hash.
 fn fits(partitions: u32, shift: u32) -> bool {
@@ -261,6 +276,21 @@ mod tests {
     fn wrong(error: Error) -> Rule {
         assert_eq!(error.kind(), crate::Kind::WrongCall, "{error}");
         error.rule()
+    }
+
+    /// A level below takes what the levels above leave of the limit, a
+    /// quarter of it at least.
+    #[test]
+    fn a_level_below_takes_what_the_levels_above_leave() {
+        let limit = 1000;
+        let taken: Vec<u64> = [0, 500, 749, 750, 900, 5000]
+            .into_iter()
+            .map(|held| below_limit(limit, held))
+            .collect();
+        assert_eq!(taken, [1000, 500, 251, 250, 250, 250]);
+        // Three quarters of a limit no multiple of four take its quarter.
+        assert_eq!(below_limit(1001, 750), 250);
+        assert_eq!(below_limit(u64::MAX, u64::MAX), u64::MAX / 4);
     }
 
     /// A level's partitions and chunk length, as the old rules gave them.

@@ -70,7 +70,7 @@ or one participant takes a partition alone.
 - **Set.** The temporary file of a level: the blocks of all its
   partitions, in the order they were written, and a block list for
   each partition. A shared set is one such file for each participant,
-  which the others read. The end of such a file, the trailer, says
+  which the others read. The end of every set's file, the trailer, says
   where its block lists are.
 - **Spill words.** The numbers a spill keeps for each partition (its
   bytes, its records, its flags) and its memory budget. When several
@@ -318,14 +318,12 @@ participant, read by the others. The crate takes over everything that
   packs a block into the buffer, or beside it, and keeps the block list
   of each partition. A call that writes returns the ranges to write:
   the buffer when it is full, and a block larger than the buffer on its
-  own. At the end of a shared set it returns the block lists and the
-  trailer.
-- **Reading.** For its own set, the crate gives the position and the
-  length of each block from its lists. For another participant's file,
-  the host gives the length of the file. The crate asks first for the
-  trailer at the end of the file, then for the counts, then for the
-  entries of one partition, a page at a time. It checks each part
-  before it asks for the next. These are the checks C makes today, now
+  own. At the end of a set it returns the block lists and the trailer.
+- **Reading.** For a finished set's file, its own or another
+  participant's, the host gives the length of the file. The crate asks
+  first for the trailer at the end of the file, then for the counts,
+  then for the entries of one partition, a page at a time. It checks
+  each part before it asks for the next. These are the checks C makes today, now
   in one place with the checks of a block's header. The host reads each
   range and hands the bytes back.
 - **What C keeps.** `runtime/spill.c` keeps its calls of `fd.c` and
@@ -521,7 +519,10 @@ Two copies differ. The join gives a level below what is left of its
 limit, or a quarter of it; the grouping gives every level all of
 `hash_mem`. A step that moves a rule keeps what SQL sees: where copies
 differ, the machine takes each node's rule as a parameter, and a task
-of its own makes one rule, with a measurement.
+of its own makes one rule, with a measurement. So both machines give a
+level below what the spill's memory leaves of the limit, a quarter of
+it at least: the join by its measure of its spill, the grouping by
+its.
 
 Two rules of the join look alike but are not copies. The setting
 `tessera.join_spill_split_room` decides whether a partition read back

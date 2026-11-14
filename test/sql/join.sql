@@ -251,8 +251,7 @@ SELECT join_explain($$SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id$$);
 -- Rounds: every match of a key with three records counts.
 SELECT join_explain($$SELECT sum(jdup.w) FROM jf JOIN jdup ON jf.fk = jdup.k$$);
 -- An inner side the planner thinks small: the table goes past hash_mem
--- and spills; at a hash_mem this small the tails of its partitions do
--- not fit either, and the memory goes over it.
+-- and spills.
 CREATE FUNCTION join_many() RETURNS SETOF int LANGUAGE sql ROWS 10
 AS 'SELECT generate_series(1, 20000)';
 SET work_mem = '64kB';
@@ -771,8 +770,9 @@ SELECT join_same($$SELECT count(*), count(jsp.s), count(jskew.w), sum(jskew.w) F
 SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp RIGHT JOIN jwide() AS w ON jsp.k = w.k$$);
 SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(w.t)) FROM jsp RIGHT JOIN jwide() AS w ON jsp.k = w.k$$);
 SELECT join_same($$SELECT count(*), count(jsp.s), count(w.t), sum(length(w.t)) FROM jsp FULL JOIN jwide() AS w ON jsp.k = w.k$$);
+-- spec: table-memory/A spill past the limit
 -- At 64kB: more partitions and levels, chunks of a few records, each with
--- its own marks.
+-- its own marks; the memory goes over hash_mem.
 SET work_mem = '64kB';
 SELECT join_explain($$SELECT count(*), count(jsp.s), sum(length(jsb.t)) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);
 SELECT join_same($$SELECT count(*), count(jsp.s), sum(length(jsb.t)), sum(jsb.n) FROM jsp RIGHT JOIN jsb ON jsp.k = jsb.k$$);

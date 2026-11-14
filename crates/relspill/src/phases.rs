@@ -62,12 +62,23 @@ pub(super) mod order {
     pub(in super::super) const RELAXED: Ordering = Ordering::Relaxed;
 }
 
+/// The phases of a build by several processes, in its barrier's
+/// numbering. In the first, every participant appends its share of the
+/// inner side.
 pub const BUILD: u32 = 0;
+/// Each writes its tails of the partitions on disk and gives its chunks
+/// of the others to the table in memory.
 pub const FLUSH: u32 = 1;
+/// The participant the barrier elects makes the index.
 pub const SIZE: u32 = 2;
+/// Each links its own chunks into the index.
 pub const LINK: u32 = 3;
+/// Each writes its share of the outer side of a table that split.
 pub const OUTER: u32 = 4;
+/// Each probes the table, and leaves without waiting.
 pub const PROBE: u32 = 5;
+/// The last to leave frees the table; one that attaches now has nothing
+/// to do.
 pub const FREE: u32 = 6;
 
 /// The phases of a round over one partition a shared table spilled, in its
@@ -78,9 +89,14 @@ pub const FREE: u32 = 6;
 /// since they return rows; the last to leave frees it. One that attaches
 /// once the round is freed has nothing to do there.
 pub const ROUND_ELECT: u32 = 0;
+/// The elected participant makes the partition's index.
 pub const ROUND_ALLOCATE: u32 = 1;
+/// Each loads its share of the inner files and links what it loads.
 pub const ROUND_LOAD: u32 = 2;
+/// Each probes with its share of the outer files, and leaves without
+/// waiting.
 pub const ROUND_PROBE: u32 = 3;
+/// The last to leave frees the round.
 pub const ROUND_FREE: u32 = 4;
 
 /// What a participant does next.
@@ -372,7 +388,11 @@ impl Participant {
                 self.enter(counters)
             }
             State::Arriving => {
-                self.phase += 1;
+                // Words that are no participant's may hold any phase.
+                self.phase = self
+                    .phase
+                    .checked_add(1)
+                    .ok_or(Error::wrong_call(Rule::State))?;
                 self.elected = u32::from(reply != 0);
                 self.enter(counters)
             }
@@ -437,7 +457,11 @@ impl Participant {
                 self.enter_round()
             }
             State::Arriving => {
-                self.phase += 1;
+                // Words that are no participant's may hold any phase.
+                self.phase = self
+                    .phase
+                    .checked_add(1)
+                    .ok_or(Error::wrong_call(Rule::State))?;
                 self.elected = u32::from(reply != 0);
                 self.enter_round()
             }
@@ -545,6 +569,29 @@ mod tests {
                 Free
             ]
         );
+    }
+
+    /// Words that are no participant's, arriving past the last phase a
+    /// word holds, are a wrong call, not a phase past it.
+    #[test]
+    fn a_participant_arriving_past_the_last_phase_is_refused() {
+        let words = counter_words(0);
+        let counters = SharedCounters::new(&words);
+        let mut participant = Participant {
+            phase: u32::MAX,
+            state: State::Arriving as u32,
+            elected: 0,
+        };
+        let before = participant;
+        assert_eq!(
+            participant.next(&counters, 0).map_err(|error| error.rule()),
+            Err(Rule::State)
+        );
+        assert_eq!(
+            participant.round_step(0).map_err(|error| error.rule()),
+            Err(Rule::State)
+        );
+        assert_eq!(participant, before);
     }
 
     /// A stop word in this process.

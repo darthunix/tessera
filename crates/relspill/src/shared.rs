@@ -71,7 +71,7 @@
 //! [`Action::ArriveAndWait`], [`Action::ArriveAndDetach`] or
 //! [`Action::Detach`] asks the host to do that at its barrier and to
 //! report what it returned. An event that the action before it does not
-//! take is a wrong call ([`Rule::JoinEvent`]), and the machine stays as
+//! take is a wrong call ([`Rule::MachineEvent`]), and the machine stays as
 //! it was. The machine allocates nothing; the words it shares with the
 //! other participants come in a [`Host`] at each step, and its own words
 //! the host keeps for it.
@@ -115,30 +115,58 @@ pub enum Event {
     /// The host starts the participant, or the action given is done.
     Done,
     /// The barrier's attach returned `phase`.
-    Attached { phase: u32 },
+    Attached {
+        /// The phase the barrier is in.
+        phase: u32,
+    },
     /// The barrier's arrive-and-wait returned; `elected` when it chose this
     /// participant.
-    Arrived { elected: bool },
+    Arrived {
+        /// Whether the barrier chose this participant.
+        elected: bool,
+    },
     /// The barrier's arrive-and-detach returned; `last` when this
     /// participant was the last attached.
-    Left { last: bool },
+    Left {
+        /// Whether this participant was the last attached.
+        last: bool,
+    },
     /// A batch of this participant's build went in; `over` when its count
     /// of the table's chunks passed their budget.
-    Batch { over: bool },
+    Batch {
+        /// Whether the count of the table's chunks passed their budget.
+        over: bool,
+    },
     /// The level of the last [`Action::Split`] is planned, of `partitions`,
     /// and what every participant reads once it sees the split is
     /// published.
-    Planned { partitions: u32 },
+    Planned {
+        /// The partitions of the level planned.
+        partitions: u32,
+    },
     /// The partition of the last [`Action::Weigh`] wrote `bytes` in
     /// `blocks` of every participant, and its index takes `index` bytes.
-    Weighed { bytes: u64, blocks: u64, index: u64 },
+    Weighed {
+        /// The bytes every participant wrote of the partition.
+        bytes: u64,
+        /// The blocks they wrote of it.
+        blocks: u64,
+        /// The bytes of its index.
+        index: u64,
+    },
     /// The participant asks for its next partition on disk.
     Next,
     /// The partition of the last [`Action::Visit`] has outer rows, or not.
-    Visited { outer: bool },
+    Visited {
+        /// Whether any participant wrote outer rows of the partition.
+        outer: bool,
+    },
     /// The partition of the last [`Action::Send`] went to disk from here;
     /// `freed` when this participant's bytes of it in memory went down.
-    Sent { freed: bool },
+    Sent {
+        /// Whether this participant's bytes of it in memory went down.
+        freed: bool,
+    },
 }
 
 /// What a participant does next.
@@ -163,7 +191,10 @@ pub enum Action {
     Split,
     /// The table split into `partitions`: make this participant's level of
     /// them and move its chunks into it, then [`Event::Done`].
-    Switch { partitions: u32 },
+    Switch {
+        /// The partitions of the level.
+        partitions: u32,
+    },
     /// Write this participant's chunks of the partition to disk, then
     /// [`Event::Done`].
     Write(u32),
@@ -182,7 +213,10 @@ pub enum Action {
     /// to the partitions' files, then [`Event::Done`].
     Outer,
     /// Probe, `split` when the table has partitions; then [`Event::Done`].
-    Probe { split: bool },
+    Probe {
+        /// Whether the table has partitions.
+        split: bool,
+    },
     /// Free the table, as the last to leave; then nothing is left.
     Free,
     /// Nothing is left to do.
@@ -212,8 +246,11 @@ pub enum Action {
 /// in memory; empty before the split.
 #[derive(Debug)]
 pub struct Host<'a> {
+    /// The build's counters.
     pub counters: &'a [AtomicU64; COUNTER_WORDS],
+    /// The table's spill words.
     pub spill: &'a [AtomicU64],
+    /// This participant's byte for each partition it keeps in memory.
     pub resident: &'a [u8],
 }
 
@@ -250,7 +287,7 @@ const SENDING: u32 = 2;
 /// It is plain data of a fixed layout, [`BUILD_WORDS`] words of 8 bytes,
 /// which the participant keeps in its own memory. Any bytes may be given
 /// to [`Build::step`]: those that are no machine are a wrong call
-/// ([`Rule::JoinState`]).
+/// ([`Rule::MachineState`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Build {
@@ -293,9 +330,9 @@ impl Build {
     /// The machine of a participant that has not attached yet.
     ///
     /// A wrong call: a weight below zero or not finite, or a `preserve`
-    /// neither 0 nor 1 ([`Rule::JoinParams`]).
+    /// neither 0 nor 1 ([`Rule::MachineParams`]).
     pub fn new(params: &Params) -> Result<Self> {
-        ensure!(counted(params), Error::wrong_call(Rule::JoinParams));
+        ensure!(counted(params), Error::wrong_call(Rule::MachineParams));
         Ok(Self {
             participant: Participant::new(),
             given: NONE,
@@ -321,8 +358,8 @@ impl Build {
 
     /// Take the host's event and give the next action.
     ///
-    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
-    /// event the last action does not take ([`Rule::JoinEvent`]); spill
+    /// A wrong call: memory that is no machine ([`Rule::MachineState`]); an
+    /// event the last action does not take ([`Rule::MachineEvent`]); spill
     /// words of no size [`crate::shared_spill::words_for`] gives
     /// ([`Rule::SpillWords`]); flags of partitions kept in memory for
     /// another number of partitions than the table's
@@ -433,7 +470,7 @@ impl Build {
                 let partition = self
                     .cursor
                     .checked_sub(1)
-                    .ok_or(Error::wrong_call(Rule::JoinState).with(self.given))?;
+                    .ok_or(Error::wrong_call(Rule::MachineState).with(self.given))?;
                 let fits = (bytes as f64) + (index as f64) <= self.params.limit as f64;
                 if blocks > 0 && blocks <= self.params.max_chunks && fits {
                     spill.set_together(partition)?;
@@ -452,7 +489,7 @@ impl Build {
                 let action = phases(self, 0)?;
                 self.enter(action, counters, spill, resident)
             }
-            (given, event) => Err(Error::wrong_call(Rule::JoinEvent)
+            (given, event) => Err(Error::wrong_call(Rule::MachineEvent)
                 .with(given)
                 .and(event_code(&event))),
         }
@@ -469,7 +506,7 @@ impl Build {
                 && self.walk <= 1
                 && self.spare == 0
                 && counted(&self.params),
-            Error::wrong_call(Rule::JoinState).with(self.given)
+            Error::wrong_call(Rule::MachineState).with(self.given)
         );
         Ok(())
     }
@@ -505,7 +542,7 @@ impl Build {
                 return self.enter(action, counters, spill, resident);
             }
             phases::Action::Allocate | phases::Action::Load => {
-                return Err(Error::wrong_call(Rule::JoinState).with(self.given));
+                return Err(Error::wrong_call(Rule::MachineState).with(self.given));
             }
         })
     }
@@ -723,7 +760,7 @@ fn code(action: Action) -> u32 {
     }
 }
 
-/// The number of an event in a [`Rule::JoinEvent`].
+/// The number of an event in a [`Rule::MachineEvent`].
 fn event_code(event: &Event) -> u32 {
     match event {
         Event::Done => 1,

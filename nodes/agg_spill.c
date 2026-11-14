@@ -1024,6 +1024,7 @@ agg_advance(TessAggState *state)
 				.kind = TESS_GROUP_WEIGHED,
 				.groups = part_groups(spill, partition),
 				.others = others,
+				.memory = agg_spill_memory(state),
 			});
 			if (action.kind == TESS_GROUP_SPLIT)
 			{
@@ -1329,7 +1330,18 @@ rows_spill_close(TessAggState *state)
 	if (spill == NULL)
 		return;
 	for (int part = 0; part < ROWS_PARTS; part++)
+	{
+		RowWriter  *writer = &spill->writers[part];
+
 		rows_flush(state, spill, part);
+		/* The writer's blocks go with the writes; its count of rows stays. */
+		pfree(writer->chunk);
+		pfree(writer->values);
+		writer->chunk = NULL;
+		writer->values = NULL;
+		writer->chunk_len = 0;
+		writer->values_len = 0;
+	}
 	tess_spill_finish(spill->file);
 	(void) rows_step(state, &spill->machine, NULL, 0,
 					 (TessRowsEvent) {.kind = TESS_ROWS_WRITTEN});
@@ -1342,11 +1354,34 @@ rows_spill_free_one(RowSpill *spill)
 {
 	for (int part = 0; part < ROWS_PARTS; part++)
 	{
-		pfree(spill->writers[part].chunk);
-		pfree(spill->writers[part].values);
+		if (spill->writers[part].chunk != NULL)
+			pfree(spill->writers[part].chunk);
+		if (spill->writers[part].values != NULL)
+			pfree(spill->writers[part].values);
 	}
 	tess_spill_free(spill->file);
 	pfree(spill);
+}
+
+/*
+ * The memory of the levels of rows: the writers of the level being
+ * written, each by its capacity, and every level's file.
+ */
+Size
+rows_spill_memory(TessAggState *state)
+{
+	Size		bytes = 0;
+
+	if (state->rows_spill != NULL)
+	{
+		for (int part = 0; part < ROWS_PARTS; part++)
+			bytes += state->rows_spill->writers[part].chunk_len +
+				state->rows_spill->writers[part].values_len;
+		bytes += tess_spill_memory(state->rows_spill->file);
+	}
+	foreach_ptr(RowSpill, spill, state->rows_pending)
+		bytes += tess_spill_memory(spill->file);
+	return bytes;
 }
 
 /* Forget every level of partitions and the partition being read. */

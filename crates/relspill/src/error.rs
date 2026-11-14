@@ -305,23 +305,23 @@ rules! {
     /// A seek to a byte where no block of the partition starts.
     SeekPosition,
 
-    /// Memory that is no machine of a spill: of a join, a grouping or a
-    /// sort, whose rules first named the join's.
-    JoinState,
+    /// Memory that is no machine of a spill: of a join, a grouping, a
+    /// sort or a build by several processes.
+    MachineState,
     /// An event the phase of a spill's machine does not take.
-    JoinEvent,
+    MachineEvent,
     /// The parameters of a spill's machine: a limit of 0, a flag neither
     /// 0 nor 1, a spare word set, a count of 0 where one is needed, or a
     /// weight below zero or not finite.
-    JoinParams,
+    MachineParams,
     /// A level below the first numbered 0.
-    JoinLevel,
+    LevelBelow,
     /// Routes of the outer rows for another number of partitions.
     JoinRoutes,
     /// Counts of outer rows for another number of partitions.
     JoinOuter,
     /// Bytes on disk for another number of partitions.
-    JoinDisk,
+    DiskCounts,
     /// Flags of the partitions a participant keeps in memory, for another
     /// number of partitions.
     ResidentFlags,
@@ -659,16 +659,16 @@ impl fmt::Display for Error {
                 f,
                 "a spill set finished where a step left a block of partition {a} undone"
             ),
-            Rule::JoinState => write!(f, "a spill's machine in phase {a}, which is none"),
-            Rule::JoinEvent => write!(f, "a spill's machine in phase {a} takes no event {b}"),
-            Rule::JoinParams => f.write_str(
+            Rule::MachineState => write!(f, "a spill's machine in phase {a}, which is none"),
+            Rule::MachineEvent => write!(f, "a spill's machine in phase {a} takes no event {b}"),
+            Rule::MachineParams => f.write_str(
                 "a spill's machine of no memory, a flag neither 0 nor 1, a spare word set, a \
                  count of 0 where one is needed, or a weight below zero or not finite",
             ),
-            Rule::JoinLevel => write!(f, "a level below the first numbered {a}"),
+            Rule::LevelBelow => write!(f, "a level below the first numbered {a}"),
             Rule::JoinRoutes => write!(f, "{a} routes of outer rows for {b} partitions"),
             Rule::JoinOuter => write!(f, "{a} counts of outer rows for {b} partitions"),
-            Rule::JoinDisk => write!(f, "{a} counts of bytes on disk for {b} partitions"),
+            Rule::DiskCounts => write!(f, "{a} counts of bytes on disk for {b} partitions"),
             Rule::ResidentFlags => {
                 write!(
                     f,

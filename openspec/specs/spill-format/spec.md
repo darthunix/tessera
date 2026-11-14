@@ -481,13 +481,14 @@ alone, which are then the whole pair.
 - `tess_spill_columns_pair` SHALL refuse, as damaged data, a block read
   as one of the pair that is of another kind or another number; the
   rows read as the first block are the pair of a chunk with no values.
-- `tess_spill_columns_check` SHALL check a chunk read back once, so
-  that its rows are read unchecked after: its words, its rows when the
-  caller counted them, and every word of a column not by value of a row
-  not NULL, which SHALL refer into its chunk of values, to a byte or to
-  its end, where an empty value lies, and whose value SHALL end inside
-  the values by its type's length. Any of these that fails SHALL be
-  damaged data.
+- `tess_spill_columns_check` SHALL check a chunk read back once, so that
+  its rows are read unchecked after: its words, its rows when the caller
+  counted them, and every word of a column not by value of a row not
+  NULL, which SHALL refer into its chunk of values, to a byte aligned to
+  8, where every writer places a value so that its pointer serves any
+  type, or to its end, where an empty value lies, and whose value SHALL
+  end inside the values by its type's length. Any of these that fails
+  SHALL be damaged data.
 - `tess_spill_columns_window` SHALL give a window of the rows of a
   checked chunk's first columns as Datums and NULL flags, a value by
   reference as a pointer into the values. Words or rows past the
@@ -515,7 +516,8 @@ alone, which are then the whole pair.
 #### Scenario: A pair not as it was written
 - **WHEN** a block of the pair of another kind or number is read, or a
   chunk of another count of words or rows, or with a word that refers
-  past its values, to another chunk, or to nothing
+  past its values, to another chunk, to nothing, or to a byte not
+  aligned to 8
 - **THEN** each is damaged data, SQLSTATE `XX001`; a window past the
   rows or a block past the pair is `XX000`
 - **Verified by:**
@@ -559,13 +561,32 @@ A set of spilled blocks (`TessSpill`) SHALL write one temporary file,
 made when the set first writes to disk, in which the blocks of every
 partition follow one another, and SHALL keep for each partition the list
 of its blocks. `tess_spill_write` SHALL return the bytes the block takes
-in the file, the header and the stored body. After `tess_spill_finish`
-the set only reads: a partition's blocks MUST read back in the order
-they were written, and a partition without blocks opens as no reader. A
-serial set's file is a temporary file of PostgreSQL, made in the
-session's temporary tablespaces: `temp_file_limit` applies to it, and it
-MUST be gone when the set is freed and, after an ERROR, when the query's
-resources are released.
+in the file, the header and the stored body. After the blocks of a set
+that wrote any, `tess_spill_finish` SHALL write the lists of the blocks:
+a count of blocks for each partition (8 bytes each), then for each block
+of each partition where it starts and the bytes it takes (8 bytes each),
+then a trailer of four words of 8 bytes: a magic (the number
+0x5445535354524149), where the lists start, the number of partitions and
+the fingerprint. After `tess_spill_finish` the set only reads: a
+partition's blocks MUST read back in the order they were written, and a
+partition without blocks opens as no reader. A serial set's file is a
+temporary file of PostgreSQL, made in the session's temporary
+tablespaces: `temp_file_limit` applies to it, and it MUST be gone when
+the set is freed and, after an ERROR, when the query's resources are
+released.
+
+```
+ ┌────────┬─────┬─────────────────┬────────────────────┬─────────────┐
+ │ blocks │  …  │ blocks in each  │ for each block of  │ trailer     │
+ │        │     │ partition,      │ each partition:    │             │
+ │        │     │ 8 bytes each    │ start, bytes taken │ 32 bytes    │
+ └────────┴─────┴─────────────────┴────────────────────┴─────────────┘
+
+ the trailer, words of 8 bytes
+ ┌───────┬───────────────────────┬────────────┬─────────────┐
+ │ magic │ where the lists start │ partitions │ fingerprint │
+ └───────┴───────────────────────┴────────────┴─────────────┘
+```
 
 #### Scenario: Blocks of several partitions through one file
 - **WHEN** blocks of records and values, among them an empty one and one
@@ -574,7 +595,8 @@ resources are released.
 - **THEN** each partition gives its blocks in order with the bytes
   written, a partition without blocks gives no reader, and the counts of
   blocks, bytes and partitions with blocks match what was written
-- **Verified by:** `test/sql/spill.sql::tessera_test_spill_serial`
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_serial`;
+  `crates/relspill/src/set.rs::a_set_written_in_memory_reads_back`
 
 #### Scenario: Misuse of a set is an error
 - **WHEN** a block is written after the finish, to a partition that does
@@ -607,14 +629,10 @@ resources are released.
 
 ### Requirement: A shared set
 In a shared set every participant SHALL write a file of its own in the
-query's shared file set, named `<name>.<participant>`.
-`tess_spill_finish` SHALL write after the blocks the lists of the
-blocks: a count of blocks for each partition (8 bytes each), then for
-each block of each partition where it starts and the bytes it takes (8
-bytes each), then a trailer of four words of 8 bytes: a magic (the
-number 0x5445535354524149), where the lists start, the number of
-partitions and the fingerprint. Once a participant has finished its set,
-any participant MUST be able to open that participant's file and read a
+query's shared file set, named `<name>.<participant>`, which ends with
+its lists and its trailer as every set's file does. Once a participant
+has finished its set, any participant MUST be able to open that
+participant's file and read a
 partition's blocks from it, each reader at a position of its own. A file
 without a valid trailer, with the fingerprint of another set than the
 reader's, or whose lists do not fill exactly the bytes between the
@@ -643,19 +661,6 @@ all to every participant's set through `tess_spill_agree`, and a set
 MUST refuse to open another participant's file before that call. Bounds
 below those of the blocks a participant wrote, and an agreement of a
 serial set, MUST be refused as a misuse.
-
-```
- ┌────────┬─────┬─────────────────┬────────────────────┬─────────────┐
- │ blocks │  …  │ blocks in each  │ for each block of  │ trailer     │
- │        │     │ partition,      │ each partition:    │             │
- │        │     │ 8 bytes each    │ start, bytes taken │ 32 bytes    │
- └────────┴─────┴─────────────────┴────────────────────┴─────────────┘
-
- the trailer, words of 8 bytes
- ┌───────┬───────────────────────┬────────────┬─────────────┐
- │ magic │ where the lists start │ partitions │ fingerprint │
- └───────┴───────────────────────┴────────────┴─────────────┘
-```
 
 #### Scenario: A participant reads another's file
 - **WHEN** two participants write blocks to a shared set and a third

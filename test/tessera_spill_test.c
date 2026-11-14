@@ -62,7 +62,6 @@ static const TessKernelOps kernels = {
 	.spill_set_finish = tess_spill_set_finish,
 	.spill_set_drop = tess_spill_set_drop,
 	.spill_set_stats = tess_spill_set_stats,
-	.spill_reader_own = tess_spill_reader_own,
 	.spill_reader_file = tess_spill_reader_file,
 	.spill_reader_open = tess_spill_reader_open,
 	.spill_reader_next = tess_spill_reader_next,
@@ -590,14 +589,17 @@ tessera_test_spill_memory(PG_FUNCTION_ARGS)
 		elog(ERROR, "a new set holds %zu bytes", empty);
 	stored = tess_spill_write(spill, 2, TESS_SPILL_RECORDS, 0, chunk, len, NULL);
 	written = tess_spill_memory(spill);
-	if (written < empty + len)
+	/* The buffer, the chunk packed aside and the list of its partition. */
+	if (written <= empty + len)
 		elog(ERROR, "a set that packed a long chunk holds %zu bytes", written);
 	tess_spill_finish(spill);
 	finished = tess_spill_memory(spill);
-	if (finished != written - empty)
+	/* The buffer, the chunk packed aside and the list go at the finish. */
+	if (finished != 0)
 		elog(ERROR, "a finished set holds %zu bytes of %zu", finished, written);
+	/* A reader holds its block and a page of the list. */
 	reader = tess_spill_open(spill, 0, 2);
-	if (tess_spill_memory(spill) != finished + TYPEALIGN(8, stored))
+	if (tess_spill_memory(spill) <= finished + TYPEALIGN(8, stored))
 		elog(ERROR, "a set with a reader holds %zu bytes", tess_spill_memory(spill));
 	if (!tess_spill_read_header(reader, &header) || header.len != len ||
 		header.packed == 0)

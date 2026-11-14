@@ -312,7 +312,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       join's machine, and the frees. Check: loom models of the
       hand-overs; `make rust-loom`; `make crosscheck` with workers;
       `cargo ab measure` of the rounds of a parallel join
-- [ ] 3.23 Make the measure of memory count the block lists, the marks
+- [x] 3.23 Make the measure of memory count the block lists, the marks
       of matched rows of a join read in pieces, the block it reads
       ahead, and the writers and buffers of the grouping's spill of
       rows, which only grow, each by its capacity and once, with a
@@ -320,14 +320,16 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       memory runs out; the specs that show a changed plan change with
       it. Check: `make installcheck`, with every changed plan read;
       `cargo ab measure` of the family `spill`
-- [ ] 3.24 Make one rule for the limit of a level below, for the join
+- [x] 3.24 Make one rule for the limit of a level below, for the join
       and the grouping, if a measurement shows no loss. Check:
       `cargo ab measure` of the family `spill`; `make installcheck`
-- [ ] 3.25 Review the whole public API and settle it, and keep its
-      snapshot diffed in CI, as for `relhash`. Check:
+- [x] 3.25 Review the whole public API and settle it, and keep its
+      snapshot diffed in CI, as for `relhash`; among it the reader of
+      a set's own list in memory, which no node calls since a
+      finished set reads its lists from its file. Check:
       `make rust-check`; the diff of the snapshot; the review of the
       API in the pull request
-- [ ] 3.26 Have outside reviews read the crate, as in 2.1, and fix the
+- [x] 3.26 Have outside reviews read the crate, as in 2.1, and fix the
       accepted findings. Check: the review of the list in the pull
       request
 - [x] 3.27 Give C the names of a chunk's used mark and of a record's
@@ -337,14 +339,6 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       layout probes; `make installcheck`; the review of the places
       that the rule "References checked by the crate" of `relhash`
       lists
-- [ ] 3.28 Move the writing of the grouping's rows and of the join's
-      outer rows to the writer of 3.10 once it costs no more than the
-      nodes' own loops by partition. Appended a partition at a time, a
-      batch of about 55 rows went to the grouping's 32 partitions in as
-      many calls, 21 to 28 % slower; appended to every partition in one
-      call of the crate, 8 to 16 % slower. Check: `cargo ab measure` of
-      `rows_text`, `rows_generic` and the cases of `join` that spill;
-      `make installcheck`
 
 ## 4. The spec of the crate
 

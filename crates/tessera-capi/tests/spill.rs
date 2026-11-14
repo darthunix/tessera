@@ -1577,17 +1577,16 @@ fn read_step(
     }
 }
 
-/// A set's partitions read back through the reader's entry points: the
-/// own list, and the file as another participant reads it with a page of
-/// two entries; a seek to a block by its place; each block's header and
-/// body as written.
+/// A set's partitions read back through the reader's entry points, from
+/// the file with a page of two entries; a seek to a block by its place;
+/// each block's header and body as written.
 #[test]
 fn a_set_reads_back_through_its_entry_points() {
     use relspill::set::{Entry, Reader};
     use tessera_capi::c::{
         READ_END, READ_FOUND, READ_HEADER, READ_READY, SpillReadStep, tess_spill_reader_body,
         tess_spill_reader_file, tess_spill_reader_next, tess_spill_reader_open,
-        tess_spill_reader_own, tess_spill_reader_seek,
+        tess_spill_reader_seek,
     };
 
     let mut set = CSet::new(2, 256);
@@ -1600,7 +1599,6 @@ fn a_set_reads_back_through_its_entry_points() {
     let chunk = records(64, 40, |record, lane| (record * 7 + lane) as u32);
     set.write(0, 1, &chunk);
     set.finish();
-    let list = &set.entries[1][..set.lists[1].count as usize];
 
     // Each block of a reader, by its entry points, then a seek to the
     // second and its block again.
@@ -1670,95 +1668,58 @@ fn a_set_reads_back_through_its_entry_points() {
     // The readers take the longest values written as their bound.
     let values = set.stats().3;
     assert_eq!(values, 400);
-    let mut own = Reader::default();
-    let mut largest = 0;
-    let mut status = Status::new();
-    // SAFETY: a local reader, the set's list, a local output.
-    let code = unsafe {
-        tess_spill_reader_own(
-            &raw mut own,
-            2,
-            1,
-            1,
-            77,
-            1 << 20,
-            values,
-            list.as_ptr(),
-            list.len() as u64,
-            &raw mut largest,
-            &raw mut status,
-        )
-    };
-    assert_eq!(code, Code::Ok, "{}", status.message());
-    let mut page = list.to_vec();
-    let mut block = vec![0_u8; largest as usize];
-    assert_eq!(read_all(&mut own, &mut page, &mut block), [16, 400, 24]);
-    seek(&mut own, &mut page, &mut block, places[1]);
-    assert_eq!(read_all(&mut own, &mut page, &mut block), [400, 24]);
-
-    let mut other = Reader::default();
-    // SAFETY: a local reader.
-    let code = unsafe {
-        tess_spill_reader_file(
-            &raw mut other,
-            2,
-            1,
-            1,
-            77,
-            1 << 20,
-            values,
-            set.file.len() as u64,
-            &raw mut status,
-        )
-    };
-    assert_eq!(code, Code::Ok, "{}", status.message());
-    let mut page = vec![Entry::default(); 2];
-    let mut block = Vec::new();
-    loop {
-        let mut step = SpillReadStep::default();
-        // SAFETY: the reader and page of this test.
+    // A reader of a partition of the file, opened, a page of two entries.
+    let open = |partition| {
+        let mut reader = Reader::default();
+        let mut status = Status::new();
+        // SAFETY: a local reader.
         let code = unsafe {
-            tess_spill_reader_open(
-                &raw mut other,
-                page.as_ptr(),
-                page.len(),
-                &raw mut step,
+            tess_spill_reader_file(
+                &raw mut reader,
+                2,
+                1,
+                partition,
+                77,
+                1 << 20,
+                values,
+                set.file.len() as u64,
                 &raw mut status,
             )
         };
         assert_eq!(code, Code::Ok, "{}", status.message());
-        if step.kind == READ_READY {
-            block = vec![0; step.largest as usize];
-            break;
+        let mut page = vec![Entry::default(); 2];
+        let mut block = Vec::new();
+        loop {
+            let mut step = SpillReadStep::default();
+            // SAFETY: the reader and page of this test.
+            let code = unsafe {
+                tess_spill_reader_open(
+                    &raw mut reader,
+                    page.as_ptr(),
+                    page.len(),
+                    &raw mut step,
+                    &raw mut status,
+                )
+            };
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            if step.kind == READ_READY {
+                block = vec![0; step.largest as usize];
+                break;
+            }
+            assert!(read_step(&step, &set.file, &mut page, &mut block));
         }
-        assert!(read_step(&step, &set.file, &mut page, &mut block));
-    }
+        (reader, page, block)
+    };
+    let (mut other, mut page, mut block) = open(1);
     assert_eq!(read_all(&mut other, &mut page, &mut block), [16, 400, 24]);
+    seek(&mut other, &mut page, &mut block, places[1]);
+    assert_eq!(read_all(&mut other, &mut page, &mut block), [400, 24]);
     seek(&mut other, &mut page, &mut block, places[2]);
     assert_eq!(read_all(&mut other, &mut page, &mut block), [24]);
 
     // The chunk of records reads back unpacked, its links cleared.
-    let list = &set.entries[0][..set.lists[0].count as usize];
-    let mut records = Reader::default();
-    // SAFETY: a local reader, the set's list, a local output.
-    let code = unsafe {
-        tess_spill_reader_own(
-            &raw mut records,
-            2,
-            1,
-            0,
-            77,
-            1 << 20,
-            values,
-            list.as_ptr(),
-            list.len() as u64,
-            &raw mut largest,
-            &raw mut status,
-        )
-    };
-    assert_eq!(code, Code::Ok, "{}", status.message());
-    let mut page = list.to_vec();
-    let mut block = vec![0_u8; largest as usize];
+    let (mut records, mut page, mut block) = open(0);
+    let mut status = Status::new();
     let mut step = SpillReadStep::default();
     loop {
         // SAFETY: the reader, page and block of this test.
@@ -1803,15 +1764,14 @@ fn a_set_reads_back_through_its_entry_points() {
 
 /// Each kind of block keeps to its own bound through the entry points: a
 /// chunk of values longer than the chunk bound is written and read back,
-/// one past the values bound is refused by the writer, and readers of the
-/// own list and of the file take a block past the values they are given
-/// as damaged data.
+/// one past the values bound is refused by the writer, and a reader of
+/// the file takes a block past the values it is given as damaged data.
 #[test]
 fn the_entry_points_keep_each_kind_to_its_bound() {
     use relspill::set::{Entry, Reader};
     use tessera_capi::c::{
         READ_HEADER, READ_READY, SpillReadStep, tess_spill_reader_file, tess_spill_reader_next,
-        tess_spill_reader_open, tess_spill_reader_own,
+        tess_spill_reader_open,
     };
 
     let mut set = CSet::bounded(1, 256, 512, 2048);
@@ -1832,7 +1792,6 @@ fn the_entry_points_keep_each_kind_to_its_bound() {
     );
     set.finish();
     assert_eq!(set.stats().3, 1024);
-    let list = set.entries[0][..set.lists[0].count as usize].to_vec();
 
     // The first block's header, or the code that refused it.
     let header = |reader: &mut Reader, page: &mut Vec<Entry>, block: &mut Vec<u8>| loop {
@@ -1861,30 +1820,7 @@ fn the_entry_points_keep_each_kind_to_its_bound() {
         } else {
             (Code::DataCorrupted, 0)
         };
-        let mut own = Reader::default();
-        let mut largest = 0;
         let mut status = Status::new();
-        // SAFETY: a local reader, the set's list, a local output.
-        let code = unsafe {
-            tess_spill_reader_own(
-                &raw mut own,
-                1,
-                1,
-                0,
-                77,
-                512,
-                values,
-                list.as_ptr(),
-                list.len() as u64,
-                &raw mut largest,
-                &raw mut status,
-            )
-        };
-        assert_eq!(code, Code::Ok, "{}", status.message());
-        let mut page = list.clone();
-        let mut block = vec![0_u8; largest as usize];
-        assert_eq!(header(&mut own, &mut page, &mut block), expected);
-
         let mut other = Reader::default();
         // SAFETY: a local reader.
         let code = unsafe {
@@ -2155,4 +2091,299 @@ fn both_kinds_of_a_pointer_to_data_on_disk_append() {
     assert_eq!(used, 24 + 24);
     assert_eq!(&values[..22], &pointers[0][..]);
     assert_eq!(&values[24..42], &pointers[1][..]);
+}
+
+/// The entry points of the spill words, of a level's plan and of the
+/// packing of records write their results to places C has not filled
+/// yet: no value is read or borrowed there, which strict Miri checks.
+#[test]
+fn the_spill_words_and_plans_write_places_that_hold_nothing_yet() {
+    use std::mem::MaybeUninit;
+
+    let mut status = Status::new();
+    let mut nwords = MaybeUninit::<usize>::uninit();
+    // SAFETY: a place valid for a write, and a local status, as in every
+    // call of this test.
+    unsafe {
+        assert_eq!(
+            tess_table_spill_words(4, nwords.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        let mut words = vec![0_u64; nwords.assume_init()];
+        let (w, n) = (words.as_mut_ptr(), words.len());
+        assert_eq!(
+            tess_table_spill_init(w, n, true, 1000, &raw mut status),
+            Code::Ok
+        );
+        let mut over = MaybeUninit::<bool>::uninit();
+        assert_eq!(
+            tess_table_spill_add_bytes(w, n, true, 10, -1, over.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert!(!over.assume_init());
+        let mut in_force = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_table_spill_split(w, n, true, 4, in_force.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(in_force.assume_init(), 4);
+        let mut partitions = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_table_spill_partitions(w, n, partitions.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(partitions.assume_init(), 4);
+        let mut chosen = MaybeUninit::<i32>::uninit();
+        let weights = SpillWeights {
+            start: 0.0,
+            target: 0.0,
+            spilled: 1.0,
+            reserve: 0,
+            resident: 0.0,
+            per_check: 0,
+        };
+        assert_eq!(
+            tess_table_spill_add_bytes(w, n, true, 5, 2, over.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(
+            tess_table_spill_evict(
+                w,
+                n,
+                true,
+                &raw const weights,
+                0,
+                0,
+                std::ptr::null(),
+                0,
+                0,
+                0,
+                chosen.as_mut_ptr(),
+                &raw mut status,
+            ),
+            Code::Ok
+        );
+        assert_eq!(chosen.assume_init(), 2);
+        let mut evictions = MaybeUninit::<u64>::uninit();
+        assert_eq!(
+            tess_table_spill_evictions(w, n, evictions.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(evictions.assume_init(), 1);
+        let (mut on_disk, mut alone) = (MaybeUninit::<bool>::uninit(), MaybeUninit::uninit());
+        assert_eq!(
+            tess_table_spill_flags(
+                w,
+                n,
+                2,
+                on_disk.as_mut_ptr(),
+                alone.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!((on_disk.assume_init(), alone.assume_init()), (true, false));
+        let mut held = MaybeUninit::<u64>::uninit();
+        assert_eq!(
+            tess_table_spill_records(w, n, 2, 3, held.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(held.assume_init(), 3);
+        let mut start = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_table_spill_start(w, n, start.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(start.assume_init(), 0);
+        let mut file = MaybeUninit::<u32>::uninit();
+        assert_eq!(
+            tess_table_spill_take_file(w, n, 2, false, file.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert_eq!(file.assume_init(), 0);
+        let mut taken = MaybeUninit::<bool>::uninit();
+        assert_eq!(
+            tess_table_spill_take_alone(w, n, 2, taken.as_mut_ptr(), &raw mut status),
+            Code::Ok
+        );
+        assert!(taken.assume_init());
+        let mut split = MaybeUninit::<bool>::uninit();
+        assert_eq!(
+            tess_table_spill_splits(
+                0.5,
+                0.0,
+                900,
+                0,
+                1000,
+                1,
+                10,
+                4,
+                split.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert!(split.assume_init());
+
+        // A level's plan.
+        let shape = SpillShape {
+            reserve: 0,
+            share: 1,
+            min_chunk: 8,
+            max_chunk: 128,
+            record: 0,
+            min_partitions: 1,
+            max_partitions: 1,
+        };
+        let level = SpillLevel {
+            limit: 128,
+            ..SpillLevel::default()
+        };
+        let mut plan = MaybeUninit::<SpillPlan>::uninit();
+        assert_eq!(
+            tess_spill_plan(
+                &raw const shape,
+                &raw const level,
+                plan.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert_eq!(plan.assume_init().partitions, 1);
+
+        // A chunk of records packed, and its header read back.
+        let original = records(100, RECORD_HEADER + KEY_SLOT, |record, lane| {
+            if lane == RECORD_HEADER / 4 {
+                record as u32
+            } else {
+                0
+            }
+        });
+        let mut out = vec![0_u8; original.len()];
+        let mut packed = MaybeUninit::<usize>::uninit();
+        assert_eq!(
+            tess_spill_pack(
+                original.as_ptr(),
+                original.len(),
+                out.as_mut_ptr(),
+                out.len(),
+                packed.as_mut_ptr(),
+                &raw mut status
+            ),
+            Code::Ok
+        );
+        assert!(packed.assume_init() > 0);
+    }
+}
+
+/// A step of a reader whose output is no place is refused before the
+/// reader moves: open, next and seek leave it as it was.
+#[test]
+fn a_reader_refused_its_output_stays_as_it_was() {
+    use relspill::set::{Entry, ReadConfig, Reader};
+    use tessera_capi::c::{tess_spill_reader_next, tess_spill_reader_open, tess_spill_reader_seek};
+
+    let config = ReadConfig {
+        partitions: 1,
+        level: 0,
+        partition: 0,
+        fingerprint: 0,
+        bounds: relspill::Bounds::all(128),
+    };
+    let mut reader = Reader::file(config, 40).unwrap();
+    let before = reader;
+    let page = [Entry::default(); 2];
+    let block = [0_u8; 8];
+    let mut status = Status::new();
+    // SAFETY: a local reader, page and block; a null output, which the
+    // entry points refuse.
+    unsafe {
+        assert_eq!(
+            tess_spill_reader_open(
+                &raw mut reader,
+                page.as_ptr(),
+                page.len(),
+                std::ptr::null_mut(),
+                &raw mut status
+            ),
+            Code::InvalidArgument
+        );
+        assert_eq!(reader, before);
+        assert_eq!(
+            tess_spill_reader_next(
+                &raw mut reader,
+                page.as_ptr(),
+                page.len(),
+                block.as_ptr(),
+                block.len(),
+                std::ptr::null_mut(),
+                &raw mut status
+            ),
+            Code::InvalidArgument
+        );
+        assert_eq!(reader, before);
+        assert_eq!(
+            tess_spill_reader_seek(
+                &raw mut reader,
+                page.as_ptr(),
+                page.len(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut status
+            ),
+            Code::InvalidArgument
+        );
+        assert_eq!(reader, before);
+    }
+}
+
+/// A set's writer and a reader of its file are made into places that
+/// hold nothing yet: no value is read or borrowed there, which strict
+/// Miri checks.
+#[test]
+fn a_writer_and_a_reader_are_made_in_places_that_hold_nothing_yet() {
+    use relspill::set::{Reader, Writer};
+    use std::mem::MaybeUninit;
+    use tessera_capi::c::{tess_spill_reader_file, tess_spill_set_init};
+
+    let mut status = Status::new();
+    let mut writer = MaybeUninit::<Writer>::uninit();
+    let mut reader = MaybeUninit::<Reader>::uninit();
+    // SAFETY: places valid for a write, and a local status.
+    unsafe {
+        assert_eq!(
+            tess_spill_set_init(
+                writer.as_mut_ptr(),
+                2,
+                0,
+                7,
+                1024,
+                1024,
+                4096,
+                false,
+                &raw mut status
+            ),
+            Code::Ok,
+            "{}",
+            status.message()
+        );
+        assert!(!writer.assume_init().is_finished());
+        assert_eq!(
+            tess_spill_reader_file(
+                reader.as_mut_ptr(),
+                2,
+                0,
+                0,
+                7,
+                1024,
+                1024,
+                64,
+                &raw mut status
+            ),
+            Code::Ok,
+            "{}",
+            status.message()
+        );
+        let _ = reader.assume_init();
+    }
 }

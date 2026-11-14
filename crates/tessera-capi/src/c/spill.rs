@@ -15,7 +15,7 @@ use tessera_kernels::table::{Partitions, PayloadColumns};
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
-use super::table::{slots, values};
+use super::table::{output, slots, values};
 use super::varlena::{ondisk_body, varlena_size};
 
 /// `TessSpillHeader`: what a spilled block holds.
@@ -121,6 +121,7 @@ pub unsafe extern "C" fn tess_spill_header_read(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
+            let header = output(header, "spill header")?;
             let bytes = slice::from_raw_parts(
                 (!bytes.is_null())
                     .then_some(bytes)
@@ -128,7 +129,7 @@ pub unsafe extern "C" fn tess_spill_header_read(
                 len,
             );
             let block = BlockHeader::read(bytes, fingerprint, Bounds::all(max_len))?;
-            *header.as_mut().context("a null spill header")? = SpillHeader::from_block(block);
+            header.write(SpillHeader::from_block(block));
             Ok(())
         })
     }
@@ -165,7 +166,8 @@ pub unsafe extern "C" fn tess_spill_pack(
                 (!out.is_null()).then_some(out).context("a null buffer")?,
                 capacity,
             );
-            *packed.as_mut().context("a null length")? = relspill::pack(chunk, out).unwrap_or(0);
+            let packed = output(packed, "length")?;
+            packed.write(relspill::pack(chunk, out).unwrap_or(0));
             Ok(())
         })
     }
@@ -304,7 +306,7 @@ pub unsafe extern "C" fn tess_spill_plan(
         guard(status, || {
             let shape = shape.as_ref().context("a null shape of a spill")?;
             let level = level.as_ref().context("a null level of a spill")?;
-            let out = plan.as_mut().context("a null plan of a level")?;
+            let out = output(plan, "plan of a level")?;
             let got = plan::plan(
                 &plan::Shape {
                     reserve: shape.reserve,
@@ -323,14 +325,14 @@ pub unsafe extern "C" fn tess_spill_plan(
                     partitions: level.partitions,
                 },
             )?;
-            *out = SpillPlan {
+            out.write(SpillPlan {
                 chunk_len: got.chunk_len,
                 words: got.words,
                 partitions: got.partitions,
                 shift: got.shift,
                 below: got.below,
                 deeper: got.deeper,
-            };
+            });
             Ok(())
         })
     }
@@ -373,7 +375,8 @@ pub unsafe extern "C" fn tess_spill_columns_init(
                 len,
             );
             let words = usize::try_from(words).context("a negative word count")?;
-            *capacity.as_mut().context("a null capacity")? = columns::init(chunk, words)?;
+            let capacity = output(capacity, "capacity")?;
+            capacity.write(columns::init(chunk, words)?);
             Ok(())
         })
     }
@@ -698,11 +701,12 @@ pub unsafe extern "C" fn tess_spill_columns_append(
             let used = values_used
                 .as_mut()
                 .context("a null count of values used")?;
+            let appended = output(appended, "count appended")?;
+            let need = output(need, "count of bytes")?;
             let done = spill_columns::append(chunk, &source, &mut rows, values_out, used)
                 .map_err(|error| source.reason(error))?;
-            *appended.as_mut().context("a null count appended")? =
-                c_int::try_from(done.rows).context("rows past an int")?;
-            *need.as_mut().context("a null count of bytes")? = done.need;
+            appended.write(c_int::try_from(done.rows).context("rows past an int")?);
+            need.write(done.need);
             Ok(())
         })
     }
@@ -931,9 +935,11 @@ pub unsafe extern "C" fn tess_spill_columns_pack(
                 (!out.is_null()).then_some(out).context("a null buffer")?,
                 capacity,
             );
+            let packed = output(packed, "length")?;
+            let unpacked = output(unpacked, "length")?;
             let (bytes, len) = columns::pack(chunk, out)?;
-            *packed.as_mut().context("a null length")? = bytes;
-            *unpacked.as_mut().context("a null length")? = len;
+            packed.write(bytes);
+            unpacked.write(len);
             Ok(())
         })
     }

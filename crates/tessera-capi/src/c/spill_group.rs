@@ -71,7 +71,7 @@ pub struct GroupHost {
 /// and `flag`, the tail, are those of [`GROUP_FULL`], `flag` the force of
 /// [`GROUP_INNER`]; `bytes`, `records` and `estimate` those of
 /// [`GROUP_INNER`]; `memory` that of [`GROUP_GROWN`] and [`GROUP_SENT`];
-/// `groups` and `others` those of [`GROUP_WEIGHED`]; `memory`,
+/// `groups`, `others` and `memory` those of [`GROUP_WEIGHED`]; `memory`,
 /// `records`, `rows` and `flag`, whether the groups can spill, those of
 /// [`GROUP_PARTIAL`].
 #[repr(C)]
@@ -108,6 +108,7 @@ pub struct GroupBelow {
     pub partition: u32,
     pub level: u32,
     pub expected: u64,
+    pub limit: u64,
     pub shift: u32,
     pub spare: u32,
 }
@@ -172,6 +173,7 @@ impl GroupEvent {
             GROUP_WEIGHED => Event::Weighed {
                 groups: self.groups,
                 others: self.others,
+                memory: self.memory,
             },
             GROUP_PARTIAL => Event::Partial {
                 memory: self.memory,
@@ -215,6 +217,7 @@ impl GroupAction {
                         partition: below.partition,
                         level: below.level,
                         expected: below.expected,
+                        limit: below.limit,
                         shift: below.shift,
                         spare: 0,
                     },
@@ -311,6 +314,7 @@ pub unsafe extern "C" fn tess_group_below(
                     partition: below.partition,
                     level: below.level,
                     expected: below.expected,
+                    limit: below.limit,
                     shift: below.shift,
                 },
             )?;

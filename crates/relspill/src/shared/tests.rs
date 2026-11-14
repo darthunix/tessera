@@ -467,7 +467,7 @@ fn the_partitions_on_disk_are_joined_together_alone_or_released() {
     }
     // Its start is 1.
     assert_eq!(steps, [Action::Visit(1), Action::Alone(3), Action::Walked]);
-    assert_eq!(wrong(second.step(Event::Next, &none)), Rule::JoinEvent);
+    assert_eq!(wrong(second.step(Event::Next, &none)), Rule::MachineEvent);
 }
 
 #[test]
@@ -590,7 +590,11 @@ fn the_machine_refuses_what_is_no_step() -> Result<()> {
         },
     ];
     for params in bad {
-        assert_eq!(wrong(Build::new(&params)), Rule::JoinParams, "{params:?}");
+        assert_eq!(
+            wrong(Build::new(&params)),
+            Rule::MachineParams,
+            "{params:?}"
+        );
     }
     let shared = Shared::new(0, 1000);
     let host = shared.host(&[]);
@@ -605,7 +609,7 @@ fn the_machine_refuses_what_is_no_step() -> Result<()> {
     ] {
         assert_eq!(
             wrong(build.step(event, &host)),
-            Rule::JoinEvent,
+            Rule::MachineEvent,
             "{event:?}"
         );
         assert_eq!(build, made);
@@ -615,7 +619,7 @@ fn the_machine_refuses_what_is_no_step() -> Result<()> {
     // A plan no split asked for, and an attach past the last phase.
     assert_eq!(
         wrong(build.step(Event::Planned { partitions: 4 }, &host)),
-        Rule::JoinEvent
+        Rule::MachineEvent
     );
     assert_eq!(build, built);
     let mut late = Build::new(&params())?;
@@ -657,7 +661,7 @@ fn the_machine_refuses_what_is_no_step() -> Result<()> {
         let before = broken;
         assert_eq!(
             wrong(broken.step(Event::Done, &host)),
-            Rule::JoinState,
+            Rule::MachineState,
             "{before:?}"
         );
         assert_eq!(broken, before);

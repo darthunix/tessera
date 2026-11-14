@@ -44,12 +44,13 @@
 //!   nothing ([`Action::Merge`]); then those with records on disk, which
 //!   the machine weighs by the groups the host estimates they hold
 //!   ([`Action::Weigh`], [`Event::Weighed`]): one too large for what the
-//!   limit leaves splits into a level below ([`Action::Split`]), the
-//!   others merge. When none is left, the level is done
+//!   limit leaves splits into a level below ([`Action::Split`]), planned
+//!   for what the spill's memory leaves of the limit, a quarter of it at
+//!   least, as a join's level below is; the others merge. When none is left, the level is done
 //!   ([`Action::LevelDone`]).
 //!
 //! An event that the machine's phase does not take is a wrong call
-//! ([`Rule::JoinEvent`]), and the machine stays as it was. The machine
+//! ([`Rule::MachineEvent`]), and the machine stays as it was. The machine
 //! does nothing for each row, holds no memory and allocates nothing: it
 //! is plain data the host keeps, and every region it reads comes in a
 //! [`Host`] at each step.
@@ -82,7 +83,9 @@ pub struct Params {
     /// The weights of the rule that sends partitions to disk, as
     /// [`Weights`] names them: `start`, `target` and `spilled`;
     pub start: f64,
+    /// see `start`;
     pub target: f64,
+    /// see `start`;
     pub spilled: f64,
     /// and the share of what the limit leaves a partition read back must
     /// pass to split ([`SplitWeights::room`]).
@@ -96,9 +99,13 @@ pub enum Event {
     /// `estimate` the host expects; with `force`, the host spills
     /// whatever the bytes.
     Inner {
+        /// The bytes the table takes.
         bytes: u64,
+        /// Its groups.
         records: u64,
+        /// The groups the host expects.
         estimate: f64,
+        /// Whether the host spills whatever the bytes.
         force: bool,
     },
     /// The level of the last [`Action::Start`] or of [`Group::below`] is
@@ -106,21 +113,36 @@ pub enum Event {
     Made,
     /// A partition's chunk has no room for its next record; `tail` when
     /// it holds one.
-    Full { partition: u32, tail: bool },
+    Full {
+        /// The partition.
+        partition: u32,
+        /// Whether its chunk holds a record.
+        tail: bool,
+    },
     /// A partial grouping weighs its table before a batch: its groups
     /// take `memory` bytes in `records` groups, of `rows` rows read since
     /// the table started; `spills` when the groups can go to disk.
     Partial {
+        /// The bytes the groups take.
         memory: u64,
+        /// The groups.
         records: u64,
+        /// The rows read since the table started.
         rows: u64,
+        /// Whether the groups can go to disk.
         spills: bool,
     },
     /// Records went into the partitions: the host's memory now.
-    Grown { memory: u64 },
+    Grown {
+        /// The bytes the host holds.
+        memory: u64,
+    },
     /// The partition of the last [`Action::Write`] went to disk, and the
     /// host's memory now.
-    Sent { memory: u64 },
+    Sent {
+        /// The bytes the host holds.
+        memory: u64,
+    },
     /// The input is read.
     InputEnd,
     /// The host asks for the next partition to give out: the one it gave
@@ -128,8 +150,16 @@ pub enum Event {
     Next,
     /// The partition of the last [`Action::Weigh`] holds about `groups`
     /// groups; the other partitions in memory, of every level, take
-    /// `others` bytes.
-    Weighed { groups: u64, others: u64 },
+    /// `others` bytes, and the spill `memory` bytes in all, which a level
+    /// below plans against.
+    Weighed {
+        /// The groups the partition holds, about.
+        groups: u64,
+        /// The bytes the other partitions in memory take.
+        others: u64,
+        /// The bytes the spill takes in all.
+        memory: u64,
+    },
 }
 
 /// What the host does next.
@@ -179,6 +209,9 @@ pub struct Below {
     pub level: u32,
     /// The bytes it expects: the partition's on disk and in memory.
     pub expected: u64,
+    /// The memory it may take: what the spill's memory leaves of the
+    /// limit, a quarter of it at least.
+    pub limit: u64,
     /// The first hash bit it takes, past those of the levels above.
     pub shift: u32,
 }
@@ -190,9 +223,10 @@ pub struct Host<'a> {
     /// them, whose bytes the host counts by partition
     /// ([`LocalSpill::add_bytes`]); none while the table fits.
     pub words: &'a [Cell<u64>],
-    /// The records in memory of each partition, and the bytes of its
-    /// blocks on disk.
+    /// The records in memory of each partition.
     pub records: &'a [u64],
+    /// The bytes the blocks on disk of each partition take read back,
+    /// unpacked, not those they take on disk.
     pub disk: &'a [u64],
 }
 
@@ -212,7 +246,7 @@ const DONE: u32 = 8;
 /// It is plain data of a fixed layout, [`GROUP_WORDS`] words of 8 bytes,
 /// so that a host in another language keeps it in memory of its own; a
 /// step checks what it reads, and memory that is no machine is a wrong
-/// call ([`Rule::JoinState`]).
+/// call ([`Rule::MachineState`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Group {
@@ -249,7 +283,7 @@ impl Group {
     /// The machine of a grouping whose table fits so far.
     ///
     /// A wrong call: a limit of 0, or a weight below zero or not finite
-    /// ([`Rule::JoinParams`]); and a shape that no level can be planned by
+    /// ([`Rule::MachineParams`]); and a shape that no level can be planned by
     /// ([`plan::plan`]). Any `fill` is eighths: 0 makes any table with a
     /// group full, 8 or more one past the limit.
     pub fn new(params: &Params) -> Result<Self> {
@@ -279,10 +313,11 @@ impl Group {
     pub fn below(params: &Params, below: &Below) -> Result<(Self, Plan)> {
         ensure!(
             below.level > 0,
-            Error::wrong_call(Rule::JoinLevel).with(below.level)
+            Error::wrong_call(Rule::LevelBelow).with(below.level)
         );
         let mut group = Self::new(params)?;
-        let plan = group.plan_level(below.level, below.expected as f64, below.shift)?;
+        let plan =
+            group.plan_level(below.level, below.expected as f64, below.limit, below.shift)?;
         Ok((group, plan))
     }
 
@@ -293,12 +328,12 @@ impl Group {
 
     /// Take the host's event and give its next action.
     ///
-    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
-    /// event its phase does not take ([`Rule::JoinEvent`]); a partition
+    /// A wrong call: memory that is no machine ([`Rule::MachineState`]); an
+    /// event its phase does not take ([`Rule::MachineEvent`]); a partition
     /// past the level's ([`Rule::Partition`]); spill words that are not
     /// the level's ([`Rule::SpillWords`]); counts of records or bytes on
     /// disk for another number of partitions ([`Rule::RecordCounts`],
-    /// [`Rule::JoinDisk`]); and those of [`plan::plan`] for the level to
+    /// [`Rule::DiskCounts`]); and those of [`plan::plan`] for the level to
     /// start. The machine is then as it was, though a refused
     /// [`Event::Made`] may have cleared the words.
     pub fn step(&mut self, event: Event, host: &Host<'_>) -> Result<Action> {
@@ -327,7 +362,12 @@ impl Group {
                 let counted = estimate >= 0.0;
                 ensure!(counted, Error::wrong_call(Rule::Expected));
                 let expected = plan::expected(bytes as f64, records as f64, estimate, 1);
-                Ok(Action::Start(self.plan_level(0, expected, 0)?))
+                Ok(Action::Start(self.plan_level(
+                    0,
+                    expected,
+                    self.params.limit,
+                    0,
+                )?))
             }
             (
                 FITS,
@@ -382,8 +422,15 @@ impl Group {
             }
             (FLUSHING, Event::Next) => self.flush(host),
             (GIVING, Event::Next) => self.next(host),
-            (WEIGHING, Event::Weighed { groups, others }) => self.weigh(host, groups, others),
-            _ => Err(Error::wrong_call(Rule::JoinEvent)
+            (
+                WEIGHING,
+                Event::Weighed {
+                    groups,
+                    others,
+                    memory,
+                },
+            ) => self.weigh(host, groups, others, memory),
+            _ => Err(Error::wrong_call(Rule::MachineEvent)
                 .with(phase)
                 .and(code(&event))),
         }
@@ -393,7 +440,7 @@ impl Group {
     fn phase(&self) -> Result<u32> {
         ensure!(
             (FITS..=DONE).contains(&self.phase),
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         Ok(self.phase)
     }
@@ -426,7 +473,7 @@ impl Group {
         let partitions = self.partitions as usize;
         for (what, len) in [
             (Rule::RecordCounts, host.records.len()),
-            (Rule::JoinDisk, host.disk.len()),
+            (Rule::DiskCounts, host.disk.len()),
         ] {
             ensure!(
                 len == partitions,
@@ -436,15 +483,14 @@ impl Group {
         Ok(())
     }
 
-    /// Plan level `level` of `expected` bytes from hash bit `shift`: every
-    /// level has the whole limit. The machine waits for the level to be
-    /// made.
-    fn plan_level(&mut self, level: u32, expected: f64, shift: u32) -> Result<Plan> {
+    /// Plan level `level` of `expected` bytes within `limit` from hash bit
+    /// `shift`. The machine waits for the level to be made.
+    fn plan_level(&mut self, level: u32, expected: f64, limit: u64, shift: u32) -> Result<Plan> {
         let plan = plan::plan(
             &self.params.shape,
             &Level {
                 expected,
-                limit: usize::try_from(self.params.limit).unwrap_or(usize::MAX),
+                limit: usize::try_from(limit).unwrap_or(usize::MAX),
                 shift,
                 at_least: 0,
                 partitions: 0,
@@ -540,14 +586,15 @@ impl Group {
     /// The partition weighed: split into a level below when one of the
     /// level's shape fits in the bits left and what its `groups` take
     /// merged passes `split_room` of what the limit leaves besides
-    /// `others`; merged otherwise.
-    fn weigh(&mut self, host: &Host<'_>, groups: u64, others: u64) -> Result<Action> {
+    /// `others`, planned for what the spill's `memory` leaves of the
+    /// limit; merged otherwise.
+    fn weigh(&mut self, host: &Host<'_>, groups: u64, others: u64, memory: u64) -> Result<Action> {
         let spill = self.spill(host)?;
         self.counts(host)?;
         // The partition the cursor passed last, Weigh's.
         ensure!(
             (1..=self.partitions).contains(&self.cursor),
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         let partition = self.cursor - 1;
         let index = partition as usize;
@@ -576,8 +623,9 @@ impl Group {
                 level: self
                     .level
                     .checked_add(1)
-                    .ok_or(Error::wrong_call(Rule::JoinState).with(self.phase))?,
+                    .ok_or(Error::wrong_call(Rule::MachineState).with(self.phase))?,
                 expected: host.disk[index].saturating_add(spill.held(partition)?),
+                limit: plan::below_limit(self.params.limit, memory),
                 shift: self.below,
             })
         } else {
@@ -601,7 +649,7 @@ fn check(params: &Params) -> Result<()> {
             && weights
                 .iter()
                 .all(|weight| weight.is_finite() && *weight >= 0.0),
-        Error::wrong_call(Rule::JoinParams)
+        Error::wrong_call(Rule::MachineParams)
     );
     plan::plan(
         &params.shape,
@@ -610,7 +658,7 @@ fn check(params: &Params) -> Result<()> {
     Ok(())
 }
 
-/// The number of an event in a [`Rule::JoinEvent`].
+/// The number of an event in a [`Rule::MachineEvent`].
 fn code(event: &Event) -> u32 {
     match event {
         Event::Inner { .. } => 1,
@@ -657,7 +705,12 @@ pub struct RowsParams {
 pub enum RowsEvent {
     /// After a batch, the table's groups take `memory` bytes in `records`
     /// groups.
-    Grown { memory: u64, records: u64 },
+    Grown {
+        /// The bytes the groups take.
+        memory: u64,
+        /// The groups.
+        records: u64,
+    },
     /// The rows of the level the last [`RowsAction::Freeze`] planned are
     /// all written.
     Written,
@@ -673,7 +726,12 @@ pub enum RowsAction {
     /// The table takes no new group: the rows of the groups it lacks go
     /// to the partitions of a level of `plan`, numbered `level`, which the
     /// host makes.
-    Freeze { plan: Plan, level: u32 },
+    Freeze {
+        /// The plan of the level.
+        plan: Plan,
+        /// Its number.
+        level: u32,
+    },
     /// Read this partition's rows into a table of their own, whose machine
     /// is [`Rows::read`] of it.
     Read(Table),
@@ -698,6 +756,7 @@ pub struct Table {
 /// each partition of the level, read at [`RowsEvent::Next`].
 #[derive(Debug)]
 pub struct RowsHost<'a> {
+    /// The rows written of each partition.
     pub written: &'a [u64],
 }
 
@@ -745,10 +804,10 @@ impl Rows {
     /// The machine of the table of a grouping's input, whose rows go to
     /// the first level once frozen.
     ///
-    /// A wrong call: a limit of 0 ([`Rule::JoinParams`]), and a shape no
+    /// A wrong call: a limit of 0 ([`Rule::MachineParams`]), and a shape no
     /// level can be planned by ([`plan::plan`]).
     pub fn new(params: &RowsParams) -> Result<Self> {
-        ensure!(params.limit > 0, Error::wrong_call(Rule::JoinParams));
+        ensure!(params.limit > 0, Error::wrong_call(Rule::MachineParams));
         plan::plan(
             &params.shape,
             &Level::first(usize::try_from(params.limit).unwrap_or(usize::MAX)),
@@ -781,8 +840,8 @@ impl Rows {
 
     /// Take the host's event and give its next action.
     ///
-    /// A wrong call: memory that is no machine ([`Rule::JoinState`]); an
-    /// event its phase does not take ([`Rule::JoinEvent`]); counts of
+    /// A wrong call: memory that is no machine ([`Rule::MachineState`]); an
+    /// event its phase does not take ([`Rule::MachineEvent`]); counts of
     /// rows for another number of partitions ([`Rule::PartitionRows`]);
     /// and those of [`plan::plan`] for the level to freeze into. The
     /// machine is then as it was.
@@ -796,7 +855,7 @@ impl Rows {
     fn take(&mut self, event: RowsEvent, host: &RowsHost<'_>) -> Result<RowsAction> {
         ensure!(
             (ROWS_TABLE..=ROWS_DONE).contains(&self.phase),
-            Error::wrong_call(Rule::JoinState).with(self.phase)
+            Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         match (self.phase, event) {
             (ROWS_TABLE, RowsEvent::Grown { memory, records }) => {
@@ -841,7 +900,7 @@ impl Rows {
                         let level = self
                             .level
                             .checked_add(1)
-                            .ok_or(Error::wrong_call(Rule::JoinState).with(self.phase))?;
+                            .ok_or(Error::wrong_call(Rule::MachineState).with(self.phase))?;
                         return Ok(RowsAction::Read(Table {
                             partition,
                             level,
@@ -854,7 +913,7 @@ impl Rows {
                 Ok(RowsAction::LevelDone)
             }
             (phase, event) => {
-                Err(Error::wrong_call(Rule::JoinEvent)
+                Err(Error::wrong_call(Rule::MachineEvent)
                     .with(phase)
                     .and(match event {
                         RowsEvent::Grown { .. } => 1,

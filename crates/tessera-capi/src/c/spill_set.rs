@@ -201,8 +201,8 @@ pub unsafe extern "C" fn tess_spill_set_init(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let writer = writer_at(writer)?;
-            *writer = Writer::new(Config {
+            let writer = output(writer, "writer")?;
+            writer.write(Writer::new(Config {
                 partitions: u32::try_from(npartitions).context("negative partitions")?,
                 level,
                 fingerprint,
@@ -212,7 +212,7 @@ pub unsafe extern "C" fn tess_spill_set_init(
                 },
                 buffer_len,
                 shared,
-            })?;
+            })?);
             Ok(())
         })
     }
@@ -513,14 +513,15 @@ unsafe fn page_at<'a>(entries: *const Entry, len: usize) -> Result<&'a [Entry]> 
     unsafe { values(entries, len, "page") }
 }
 
-/// Write `step` to `*out`, checked for null and alignment.
+/// Write `step` to `out`, a place [`output`] checked before the step,
+/// so that a refused place leaves the reader as it was.
 ///
 /// # Safety
 ///
-/// `out` must be null or writable.
+/// `out` must be writable.
 unsafe fn put_step(out: *mut SpillReadStep, step: ReadStep) -> Result<()> {
     // SAFETY: the caller's contract.
-    unsafe { output(out, "step")?.write(SpillReadStep::from_step(step)) };
+    unsafe { out.write(SpillReadStep::from_step(step)) };
     Ok(())
 }
 
@@ -540,53 +541,10 @@ fn read_config(
     })
 }
 
-/// `tess_spill_reader_own`: make `*reader` a reader of `partition` of the
-/// caller's own set, whose list is the `count` entries at `entries`
-/// ([`Reader::own`]), its blocks within `max_chunk` and `max_values` as
-/// [`tess_spill_set_init`] takes them; `*largest` gets the bytes of its
-/// largest block.
-///
-/// # Safety
-///
-/// `reader` as for [`tess_spill_set_init`]; `entries` must point to
-/// `count` entries when `count` is positive, unchanged while the reader
-/// reads; `largest` must be writable; `status` as for every entry point.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments, reason = "the scalars of a C entry point")]
-pub unsafe extern "C" fn tess_spill_reader_own(
-    reader: *mut Reader,
-    npartitions: c_int,
-    level: u32,
-    partition: c_int,
-    fingerprint: u64,
-    max_chunk: u64,
-    max_values: u64,
-    entries: *const Entry,
-    count: u64,
-    largest: *mut u64,
-    status: *mut Status,
-) -> Code {
-    // SAFETY: the caller's contract.
-    unsafe {
-        guard(status, || {
-            let out = reader_at(reader)?;
-            let bounds = Bounds {
-                chunk: max_chunk,
-                values: max_values,
-            };
-            let config = read_config(npartitions, level, partition, fingerprint, bounds)?;
-            let list = page_at(entries, usize::try_from(count)?)?;
-            let made = Reader::own(config, list)?;
-            output(largest, "largest")?.write(made.largest());
-            *out = made;
-            Ok(())
-        })
-    }
-}
-
-/// `tess_spill_reader_file`: make `*reader` a reader of `partition` of
-/// another participant's file of `file_len` bytes ([`Reader::file`]),
-/// with the bounds of [`tess_spill_reader_own`].
+/// `tess_spill_reader_file`: make `*reader` a reader of `partition` of a
+/// finished set's file of `file_len` bytes, the caller's own or another
+/// participant's ([`Reader::file`]), its blocks within `max_chunk` and
+/// `max_values` as [`tess_spill_set_init`] takes them.
 ///
 /// # Safety
 ///
@@ -607,13 +565,13 @@ pub unsafe extern "C" fn tess_spill_reader_file(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let out = reader_at(reader)?;
+            let out = output(reader, "reader")?;
             let bounds = Bounds {
                 chunk: max_chunk,
                 values: max_values,
             };
             let config = read_config(npartitions, level, partition, fingerprint, bounds)?;
-            *out = Reader::file(config, file_len)?;
+            out.write(Reader::file(config, file_len)?);
             Ok(())
         })
     }
@@ -640,6 +598,7 @@ pub unsafe extern "C" fn tess_spill_reader_open(
     unsafe {
         guard(status, || {
             let reader = reader_at(reader)?;
+            let step = output(step, "step")?;
             let found = reader.open(page_at(page, page_len)?)?;
             put_step(step, found)
         })
@@ -647,8 +606,8 @@ pub unsafe extern "C" fn tess_spill_reader_open(
 }
 
 /// `tess_spill_reader_next`: a step of reading the next block into
-/// `*step` ([`Reader::next`]); the page (the list, of the own set) and
-/// the block buffer hold what the last step asked for.
+/// `*step` ([`Reader::next`]); the page and the block buffer hold what
+/// the last step asked for.
 ///
 /// # Safety
 ///
@@ -668,6 +627,7 @@ pub unsafe extern "C" fn tess_spill_reader_next(
     unsafe {
         guard(status, || {
             let reader = reader_at(reader)?;
+            let step = output(step, "step")?;
             let found =
                 reader.next(page_at(page, page_len)?, values(block, block_len, "block")?)?;
             put_step(step, found)
@@ -724,6 +684,7 @@ pub unsafe extern "C" fn tess_spill_reader_seek(
     unsafe {
         guard(status, || {
             let reader = reader_at(reader)?;
+            let step = output(step, "step")?;
             let found = reader.seek(page_at(page, page_len)?, offset)?;
             put_step(step, found)
         })
