@@ -160,6 +160,81 @@ table of a join's inner side serves batches of any selection.
 The base of every run comes after these cases, so that `tessera-bench`
 can compare it.
 
+Their noise was measured at `57275b54`: every program with density
+cases ran against itself on both machines, `tessera-bench --base
+WORKTREE --filter /density-`. Between identical sides every change is
+noise. No run failed and none was unstable. The Intel Mac gave no
+warning; the M5 Pro warned twice, on `table_int32` over Datum at 16
+rows, by +3.3 % on `probe/count_rows` and +4.6 % on
+`probe/reference_count`. For each program: its runs, then the largest
+change of the minimum cycles over the operations of 500 cycles or
+more, of the median, and the largest MODES, Intel first.
+
+- `column_reader`: `compare-bWb3mB`, `compare-LvwaWf`; 1.1 and 2.9 %;
+  5.1 and 1.4 %; 1.46 and 1.28.
+- `filter_int32`: `compare-m1G5Rb`, `compare-bfrSk1`; 1.0 and 1.1 %;
+  3.4 and 0.3 %; 1.72 and 1.03.
+- `filter_int64`: `compare-kpvo63`, `compare-eoFaRr`; 1.8 and 2.6 %;
+  1.5 and 0.5 %; 1.49 and 1.05.
+- `compare_int32`: `compare-pGHhrV`, `compare-6AxMjz`; 1.7 and 1.8 %;
+  11.8 and 0.7 %; 1.68 and 1.76.
+- `aggregate_int32`: `compare-EYORno`, `compare-8KJHcj`; 0.6 and
+  3.7 %; 8.2 and 2.5 %; 1.92 and 1.43.
+- `aggregate_int64`: `compare-DQLA2V`, `compare-gXUtrI`; 1.6 and
+  3.6 %; 3.8 and 1.1 %; 1.92 and 1.87.
+- `arith_int32`: `compare-6YzBdN`, `compare-gGyYjF`; 3.0 and 3.9 %;
+  17.0 and 2.1 %; 2.11 and 1.22.
+- `arith_int64`: `compare-y53ZOE`, `compare-WndOBc`; 1.2 and 3.1 %;
+  12.8 and 2.7 %; 1.91 and 1.11.
+- `cast_int32`: `compare-1BBN9E`, `compare-WxbCsD`; 3.1 and 0.8 %; 6.6
+  and 0.9 %; 1.83 and 1.10.
+- `hash_int32`: `compare-YumjSG`, `compare-s2Cop6`; 1.1 and 0.8 %; 2.4
+  and 0.7 %; 1.72 and 1.45.
+- `hash_int64`: `compare-UFcHbG`, `compare-XIPOaz`; 1.1 and 0.6 %;
+  14.9 and 1.6 %; 1.70 and 1.62.
+- `set_int32`: `compare-yC36rk`, `compare-OS3sqU`; 2.9 and 1.7 %; 22.5
+  and 5.1 %; 1.66 and 1.55.
+- `table_int32`: `compare-HKqNwk`, `compare-fdzWx7`; 2.4 and 7.2 %;
+  9.3 and 4.7 %; 1.63 and 1.28. The 7.2 % is a fall, of
+  `probe/count_rows` over dense values at 8 rows.
+
+On the Intel Mac the processes of an operation ran at levels up to 2.1
+times apart, so its medians moved by up to 22.5 % while its minimum
+moved by 3.1 % at most.
+
+At 8 rows every operation missed 13.5 times a call or more on the
+Intel Mac and 11.3 or more on the M5 Pro, against the 12 of the model:
+the cases reach it. The filters, the comparisons, the aggregates, the
+arithmetic, the cast and the hashes decide on the first word. From 16
+rows they take every word whole and miss 2 times a call at most; at 12
+they take one path or the other by the input and miss 4.4 times or
+more. Some operations read every word by its rows and miss 11 to 17
+times at every density: `column_reader`, the checked `mul`, `div` and
+`mod` of `arith_int64` with a scalar, and `count_rows` and
+`reference_count` of `table_int32`.
+
+Two sets before these are kept and explained:
+
+- At `f056687a` each process built and checked the selections of every
+  case of its program, not only of those it measured. Three runs on the
+  Intel Mac took longer than five minutes: `set_int32` 750 s
+  (`compare-3igWXl`), `table_int32` 563 (`compare-iL24ue`) and
+  `arith_int32` 459 (`compare-iPDd61`); `set_int32` took 321 s on the
+  M5 Pro. Since `57275b54` a process builds only the cases that its
+  `--only` ids name. `set_int32` still took 308 s on the Intel Mac
+  (`compare-yC36rk`), so its runs take one width at a time.
+- At `57275b54` the first set on the M5 Pro failed once and warned
+  twice. The failure was `add_column` of `arith_int32` over Datum at 8
+  rows, +11.8 % on the minimum (`compare-H6tUt0`). The M5 Pro has one
+  cluster of its fastest cores, 12 to 17, and two of slower cores, 0
+  to 11. The processes of that set moved between them all through the
+  run: 22 378 of its 38 400 blocks started and ended on cores 12 to 17
+  and 4151 on cores 0 to 11. In the operation that failed, a block on
+  cores 0 to 11 took 1162 cycles a call at the median, one on 12 to 17
+  913. In the set above, 38 272 blocks of 38 400 ran on 12 to 17, as
+  in the sets before. Both sets ran on mains power; why the processes
+  of the first moved is not known.
+
 ### Each path measured on its own
 
 A driver that takes a word whole at a density cannot show what its
@@ -324,6 +399,12 @@ Mac are the maintainer's commands, and the M5 Pro's are relayed.
   cost in question; the code before AVX2 cannot be compared.
 - [A form moves the code of AArch64] → The M5 Pro's counters, and a
   form for each architecture.
+- [A process of the M5 Pro moves to its slower cores, where a block
+  costs up to 1.5 times more cycles] → A report names the cores of each
+  operation; a run whose cores leave 12 to 17 is read with that in
+  mind. The runner sets no class of quality of service, which would
+  keep a process on the fastest cores; whether it should is the
+  maintainer's to decide.
 - [Many runs: every program, two machines, two runs] → The candidates
   of one family share their runs; filters keep each run under five
   minutes.

@@ -31,7 +31,7 @@ The words used below:
 
 ## 2. The bounds
 
-- [ ] 2.1 Cases of 8, 12, 16, 24 and 32 selected rows a word, at
+- [x] 2.1 Cases of 8, 12, 16, 24 and 32 selected rows a word, at
       positions drawn anew in the form of `bench-unlearned-inputs`, in
       the reading fixtures of both widths, the matrices of the filters
       and of the comparisons, and `set_int32`. Check: `cargo test
