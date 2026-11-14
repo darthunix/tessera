@@ -513,14 +513,15 @@ unsafe fn page_at<'a>(entries: *const Entry, len: usize) -> Result<&'a [Entry]> 
     unsafe { values(entries, len, "page") }
 }
 
-/// Write `step` to `*out`, checked for null and alignment.
+/// Write `step` to `out`, a place [`output`] checked before the step,
+/// so that a refused place leaves the reader as it was.
 ///
 /// # Safety
 ///
-/// `out` must be null or writable.
+/// `out` must be writable.
 unsafe fn put_step(out: *mut SpillReadStep, step: ReadStep) -> Result<()> {
     // SAFETY: the caller's contract.
-    unsafe { output(out, "step")?.write(SpillReadStep::from_step(step)) };
+    unsafe { out.write(SpillReadStep::from_step(step)) };
     Ok(())
 }
 
@@ -597,6 +598,7 @@ pub unsafe extern "C" fn tess_spill_reader_open(
     unsafe {
         guard(status, || {
             let reader = reader_at(reader)?;
+            let step = output(step, "step")?;
             let found = reader.open(page_at(page, page_len)?)?;
             put_step(step, found)
         })
@@ -604,8 +606,8 @@ pub unsafe extern "C" fn tess_spill_reader_open(
 }
 
 /// `tess_spill_reader_next`: a step of reading the next block into
-/// `*step` ([`Reader::next`]); the page (the list, of the own set) and
-/// the block buffer hold what the last step asked for.
+/// `*step` ([`Reader::next`]); the page and the block buffer hold what
+/// the last step asked for.
 ///
 /// # Safety
 ///
@@ -625,6 +627,7 @@ pub unsafe extern "C" fn tess_spill_reader_next(
     unsafe {
         guard(status, || {
             let reader = reader_at(reader)?;
+            let step = output(step, "step")?;
             let found =
                 reader.next(page_at(page, page_len)?, values(block, block_len, "block")?)?;
             put_step(step, found)
@@ -681,6 +684,7 @@ pub unsafe extern "C" fn tess_spill_reader_seek(
     unsafe {
         guard(status, || {
             let reader = reader_at(reader)?;
+            let step = output(step, "step")?;
             let found = reader.seek(page_at(page, page_len)?, offset)?;
             put_step(step, found)
         })

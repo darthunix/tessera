@@ -2275,3 +2275,64 @@ fn the_spill_words_and_plans_write_places_that_hold_nothing_yet() {
         assert!(packed.assume_init() > 0);
     }
 }
+
+/// A step of a reader whose output is no place is refused before the
+/// reader moves: open, next and seek leave it as it was.
+#[test]
+fn a_reader_refused_its_output_stays_as_it_was() {
+    use relspill::set::{Entry, ReadConfig, Reader};
+    use tessera_capi::c::{tess_spill_reader_next, tess_spill_reader_open, tess_spill_reader_seek};
+
+    let config = ReadConfig {
+        partitions: 1,
+        level: 0,
+        partition: 0,
+        fingerprint: 0,
+        bounds: relspill::Bounds::all(128),
+    };
+    let mut reader = Reader::file(config, 40).unwrap();
+    let before = reader;
+    let page = [Entry::default(); 2];
+    let block = [0_u8; 8];
+    let mut status = Status::new();
+    // SAFETY: a local reader, page and block; a null output, which the
+    // entry points refuse.
+    unsafe {
+        assert_eq!(
+            tess_spill_reader_open(
+                &raw mut reader,
+                page.as_ptr(),
+                page.len(),
+                std::ptr::null_mut(),
+                &raw mut status
+            ),
+            Code::InvalidArgument
+        );
+        assert_eq!(reader, before);
+        assert_eq!(
+            tess_spill_reader_next(
+                &raw mut reader,
+                page.as_ptr(),
+                page.len(),
+                block.as_ptr(),
+                block.len(),
+                std::ptr::null_mut(),
+                &raw mut status
+            ),
+            Code::InvalidArgument
+        );
+        assert_eq!(reader, before);
+        assert_eq!(
+            tess_spill_reader_seek(
+                &raw mut reader,
+                page.as_ptr(),
+                page.len(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut status
+            ),
+            Code::InvalidArgument
+        );
+        assert_eq!(reader, before);
+    }
+}
