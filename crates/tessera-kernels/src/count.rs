@@ -13,7 +13,6 @@
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
-use crate::BULK_MIN_ROWS;
 use crate::simd::{Simd, Token, Vectors};
 
 /// Count the selected non-NULL rows.
@@ -38,11 +37,9 @@ pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usiz
     let simd = Simd::get();
     let bulk = simd.is_some()
         && rows.nrows() >= 64
-        && rows.get_word(0).is_some_and(|selected| {
-            (selected == u64::MAX
-                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                && column.word_block(0).is_some()
-        });
+        && rows
+            .get_word(0)
+            .is_some_and(|_| crate::probe_whole() && column.word_block(0).is_some());
     if let Some(simd) = simd
         && bulk
     {

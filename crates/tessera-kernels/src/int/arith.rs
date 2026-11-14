@@ -13,7 +13,6 @@ use anyhow::{Context, Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use super::{IntLane, Range, Side};
-use crate::BULK_MIN_ROWS;
 use crate::ops::{ArithOp, ArithmeticError};
 use crate::simd::Token;
 
@@ -209,11 +208,9 @@ where
     let set = T::Arith::get();
     let whole_words = nrows >= 64
         && match set {
-            Some(set) => rows.get_word(0).is_some_and(|selected| {
-                (selected == u64::MAX
-                    || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                    && operands.blocks(set, 0).is_some()
-            }),
+            Some(set) => rows
+                .get_word(0)
+                .is_some_and(|_| crate::probe_whole() && operands.blocks(set, 0).is_some()),
             None => false,
         };
     // The operation is chosen once; each arm's function, the width's own

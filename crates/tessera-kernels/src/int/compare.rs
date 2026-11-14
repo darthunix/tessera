@@ -4,7 +4,6 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask};
 
 use super::{IntLane, Side};
-use crate::BULK_MIN_ROWS;
 use crate::ops::CompareOp;
 use crate::simd::Token;
 
@@ -53,11 +52,7 @@ where
     // Whether both readers expose the first word; its non-NULL rows are the
     // loop's to find.
     let whole_words = set.is_some() && nrows >= 64 && {
-        let selected = rows.as_view().word(0);
-        (selected == u64::MAX
-            || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-            && left.word_block(0).is_some()
-            && right.word_block(0).is_some()
+        crate::probe_whole() && left.word_block(0).is_some() && right.word_block(0).is_some()
     };
     if let Some(set) = set
         && whole_words

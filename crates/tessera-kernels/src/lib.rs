@@ -66,7 +66,25 @@
 /// and `max`, the arithmetic by a constant, the compare of Datum columns
 /// and the sets of 16 and 64 keys, by up to 2.5 times the cycles (the
 /// `eighth` cases, compare-KyEXSY to compare-tw1q3k), so x86-64 keeps 12.
+#[allow(dead_code, reason = "the probe decides by probe_whole")]
 pub(crate) const BULK_MIN_ROWS: u32 = 12;
+
+/// Whether a driver takes words whole, in place of its whole decision: the
+/// test of a word's rows, the shortcut of a full word and the sets' bound
+/// of keys. This build is a probe of the change `whole-word-decisions`, on
+/// a branch never merged: the rows build says false and the whole build
+/// true, and `black_box` hides the value from the compiler, so that both
+/// paths stay compiled as they are and only the value differs. A word is
+/// still taken whole only where the reader gives its block. The value is
+/// read through a reference that `black_box` hides, so that both builds
+/// have the same machine code and differ only in the byte of the static.
+#[inline(always)]
+pub(crate) fn probe_whole() -> bool {
+    *std::hint::black_box(&PROBE_WHOLE)
+}
+
+/// The value of [`probe_whole`]: false in the rows build.
+static PROBE_WHOLE: bool = false;
 
 pub mod accumulate;
 pub mod calendar;

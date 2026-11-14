@@ -5,7 +5,6 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask};
 
 use super::IntLane;
-use crate::BULK_MIN_ROWS;
 use crate::ops::CompareOp;
 use crate::simd::Token;
 
@@ -55,7 +54,7 @@ fn filter_with<T: IntLane, C: ColumnReader<Value = T>>(
             let set = T::Compares::get();
             let bulk = set.is_some()
                 && index < nrows / 64
-                && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
+                && crate::probe_whole()
                 && column.word_block(index).is_some();
             return if let Some(set) = set
                 && bulk

@@ -15,7 +15,6 @@
 use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
-use crate::BULK_MIN_ROWS;
 use crate::simd::{self, Simd, Token, Vectors};
 
 /// At most this many keys are compared all at a row; more are searched.
@@ -157,14 +156,13 @@ where
         "the column and masks of a set call have different row counts"
     );
     let simd = Simd::get();
-    let whole_words = simd.is_some() && set.keys.len() <= T::WORD_KEYS;
+    let whole_words = simd.is_some() && crate::probe_whole();
     for word in 0..nrows.div_ceil(64) {
         let selected = rows.word(word);
         // Every word counts its rows, with the set's instruction: x86-64
         // without POPCNT spends about seventeen.
         let whole = if let Some(simd) = simd
             && whole_words
-            && (selected == u64::MAX || simd.count_bits(selected) >= BULK_MIN_ROWS as usize)
             && let Some(block) = column.word_block(word)
         {
             Some(T::block_hits(simd, block, set.keys))

@@ -7,7 +7,6 @@ use anyhow::{Context, Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
 use super::{IntLane, Side};
-use crate::BULK_MIN_ROWS;
 use crate::int32::hash::NULL_KEY;
 use crate::int32::{NullKeys, hash_combine, murmurhash32};
 use crate::simd::{Token, Vectors};
@@ -113,12 +112,7 @@ where
     let set = T::Hashes::get();
     let whole_words = nrows >= 64
         && match set {
-            Some(set) => {
-                let selected = selection.word(valid, 0);
-                (selected == u64::MAX
-                    || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                    && block(set, column, 0).is_some()
-            }
+            Some(set) => crate::probe_whole() && block(set, column, 0).is_some(),
             None => false,
         };
     if let Some(set) = set

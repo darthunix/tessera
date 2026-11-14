@@ -5,7 +5,6 @@ use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use super::IntLane;
-use crate::BULK_MIN_ROWS;
 use crate::simd::{Token, Vectors};
 
 /// The driver of [`crate::int32::min`] and [`crate::int64::min`].
@@ -72,11 +71,9 @@ pub(crate) fn aggregate<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     let set = T::Aggregates::get();
     let bulk = set.is_some()
         && rows.nrows() >= 64
-        && rows.get_word(0).is_some_and(|selected| {
-            (selected == u64::MAX
-                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                && column.word_block(0).is_some()
-        });
+        && rows
+            .get_word(0)
+            .is_some_and(|_| crate::probe_whole() && column.word_block(0).is_some());
     if let Some(set) = set
         && bulk
     {
