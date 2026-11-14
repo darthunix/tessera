@@ -334,6 +334,7 @@ join_rescan(CustomScanState *css)
 	/* RIGHT and FULL: a table kept for the next scan has no pair yet. */
 	state->tail.on = false;
 	state->tail.request = false;
+	state->tail.machine = false;
 	state->tail.table_done = false;
 	/* A shared table's go with it: the build starts anew. */
 	if (state->marks_shared)

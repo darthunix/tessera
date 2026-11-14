@@ -15,13 +15,14 @@ use tessera_capi::c::{
     JOIN_ACTION_SIZE, JOIN_ADD_CHUNK, JOIN_BELOW_SHIFT_OFFSET, JOIN_BELOW_SIZE, JOIN_BLOCK,
     JOIN_BUILD_END, JOIN_CARRY, JOIN_DEMOTE, JOIN_DONE, JOIN_EVENT_LEN_OFFSET,
     JOIN_EVENT_MEMORY_OFFSET, JOIN_EVENT_SIZE, JOIN_EVICT, JOIN_FILE_END, JOIN_FINAL_PASS,
-    JOIN_FLUSH, JOIN_FULL, JOIN_GROWN, JOIN_HOST_NROUTES_OFFSET, JOIN_HOST_SIZE, JOIN_INNER,
-    JOIN_LEVEL_DONE, JOIN_LOAD, JOIN_MACHINE_SIZE, JOIN_MADE, JOIN_NEXT, JOIN_NEXT_PIECE,
-    JOIN_OPEN, JOIN_OUTER_END, JOIN_PARAMS_SIZE, JOIN_PARAMS_TAIL_OFFSET, JOIN_PASS_END,
-    JOIN_PIECE, JOIN_RELEASE, JOIN_SENT, JOIN_SPLIT, JOIN_START, JOIN_TAKE, JoinAction, JoinBelow,
-    JoinEvent, JoinHost, JoinParams, SpillLevel, SpillPlan, SpillShape, Status, tess_join_below,
-    tess_join_given, tess_join_init, tess_join_layout, tess_join_step, tess_spill_expected,
-    tess_spill_plan, tess_table_spill_add_bytes,
+    JOIN_FLUSH, JOIN_FULL, JOIN_GROWN, JOIN_HOLD, JOIN_HOST_NROUTES_OFFSET, JOIN_HOST_SIZE,
+    JOIN_INNER, JOIN_LEVEL_DONE, JOIN_LOAD, JOIN_MACHINE_SIZE, JOIN_MADE, JOIN_NEXT,
+    JOIN_NEXT_PIECE, JOIN_OPEN, JOIN_OUTER_END, JOIN_PARAMS_SIZE, JOIN_PARAMS_TAIL_OFFSET,
+    JOIN_PASS_END, JOIN_PIECE, JOIN_RELEASE, JOIN_SENT, JOIN_SPLIT, JOIN_START, JOIN_TABLE_END,
+    JOIN_TAIL, JOIN_TAIL_END, JOIN_TAKE, JoinAction, JoinBelow, JoinEvent, JoinHost, JoinParams,
+    SpillLevel, SpillPlan, SpillShape, Status, tess_join_below, tess_join_given, tess_join_init,
+    tess_join_layout, tess_join_step, tess_spill_expected, tess_spill_plan,
+    tess_table_spill_add_bytes,
 };
 
 /// The words of a machine.
@@ -270,10 +271,21 @@ fn a_join_steps_through_its_build_by_the_entry_points() {
         step(&mut machine, &mut level, full(1, 1, false)),
         (Code::Ok, kind(JOIN_ADD_CHUNK))
     );
+    // The table in memory ends, once the output held went out.
+    let held = JoinEvent {
+        flag: 1,
+        ..event(JOIN_TABLE_END)
+    };
     assert_eq!(
-        step(&mut machine, &mut level, event(JOIN_OUTER_END)),
-        (Code::Ok, kind(JOIN_DONE))
+        step(&mut machine, &mut level, held),
+        (Code::Ok, kind(JOIN_HOLD))
     );
+    for event in [event(JOIN_TABLE_END), event(JOIN_OUTER_END)] {
+        assert_eq!(
+            step(&mut machine, &mut level, event),
+            (Code::Ok, kind(JOIN_DONE))
+        );
+    }
     // Partition 1 on disk, with outer rows: joined whole; then the end.
     level.outer[1] = 10;
     level.disk[1] = 1000;
@@ -286,6 +298,15 @@ fn a_join_steps_through_its_build_by_the_entry_points() {
         ..kind(JOIN_OPEN)
     };
     assert_eq!(step(&mut machine, &mut level, next), (Code::Ok, open));
+    // Not before its table ends.
+    assert_eq!(
+        step(&mut machine, &mut level, next).0,
+        Code::InvalidArgument
+    );
+    assert_eq!(
+        step(&mut machine, &mut level, event(JOIN_TABLE_END)),
+        (Code::Ok, kind(JOIN_DONE))
+    );
     assert_eq!(
         step(&mut machine, &mut level, next),
         (Code::Ok, kind(JOIN_LEVEL_DONE))
@@ -348,7 +369,11 @@ fn the_tail_of_a_partition_on_disk_is_evicted_when_it_weighs() {
         (Code::Ok, kind(JOIN_DONE))
     );
     // No outer row came for it: it is released, and the level is done.
-    for event in [event(JOIN_BUILD_END), event(JOIN_OUTER_END)] {
+    for event in [
+        event(JOIN_BUILD_END),
+        event(JOIN_TABLE_END),
+        event(JOIN_OUTER_END),
+    ] {
         assert_eq!(
             step(&mut machine, &mut level, event),
             (Code::Ok, kind(JOIN_DONE))
@@ -410,9 +435,11 @@ fn a_level_weighs_the_rows_its_host_counts() {
 
 #[test]
 fn a_partition_is_joined_in_pieces_through_the_entry_points() {
-    // A left join, whose rows without a pair go out in a last pass.
+    // A full join: its inner rows without a pair go out after each piece,
+    // its outer rows without one in a last pass.
     let params = JoinParams {
         unmatched_outer: 1,
+        preserve_inner: 1,
         ..params(1 << 20)
     };
     let mut machine: Machine = [0; 31];
@@ -457,11 +484,18 @@ fn a_partition_is_joined_in_pieces_through_the_entry_points() {
         (block(true, 100), JOIN_LOAD),
         (block(false, 100), JOIN_LOAD),
         (block(true, 100), JOIN_CARRY),
+        (event(JOIN_TABLE_END), JOIN_TAIL),
+        (event(JOIN_TAIL_END), JOIN_DONE),
+        (event(JOIN_TABLE_END), JOIN_DONE),
         (event(JOIN_PASS_END), JOIN_NEXT_PIECE),
         (piece, JOIN_DONE),
         (block(true, 100), JOIN_LOAD),
         (event(JOIN_FILE_END), JOIN_DONE),
+        (event(JOIN_TABLE_END), JOIN_TAIL),
+        (event(JOIN_TAIL_END), JOIN_DONE),
+        (event(JOIN_TABLE_END), JOIN_DONE),
         (event(JOIN_PASS_END), JOIN_FINAL_PASS),
+        (event(JOIN_TABLE_END), JOIN_DONE),
         (event(JOIN_PASS_END), JOIN_DONE),
     ];
     for (event, expected) in steps {
@@ -588,6 +622,10 @@ fn a_shared_level_is_planned_through_its_entry_point() {
         ..kind(JOIN_OPEN)
     };
     assert_eq!(step(&mut machine, &mut level, take(2)), (Code::Ok, open));
+    assert_eq!(
+        step(&mut machine, &mut level, event(JOIN_TABLE_END)),
+        (Code::Ok, kind(JOIN_DONE))
+    );
     let (code, split) = step(&mut machine, &mut level, take(3));
     assert_eq!(
         (code, split.kind, split.partition),

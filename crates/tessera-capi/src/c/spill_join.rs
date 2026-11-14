@@ -88,8 +88,8 @@ pub struct JoinHost {
 
 /// `TessJoinEvent`: a step of the join; see [`Event`]. `partition` is
 /// that of [`JOIN_FULL`] and [`JOIN_TAKE`]; `flag` the tail of
-/// [`JOIN_FULL`], the bytes freed of [`JOIN_SENT`] and the values of
-/// [`JOIN_BLOCK`]; `memory` the bytes needed of [`JOIN_INNER`] and the
+/// [`JOIN_FULL`], the bytes freed of [`JOIN_SENT`], the values of
+/// [`JOIN_BLOCK`] and the output held of [`JOIN_TABLE_END`]; `memory` the bytes needed of [`JOIN_INNER`] and the
 /// memory of the others; `len` the bytes of [`JOIN_BLOCK`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -119,6 +119,8 @@ pub const JOIN_PIECE: u32 = 10;
 pub const JOIN_BLOCK: u32 = 11;
 pub const JOIN_FILE_END: u32 = 12;
 pub const JOIN_PASS_END: u32 = 13;
+pub const JOIN_TABLE_END: u32 = 14;
+pub const JOIN_TAIL_END: u32 = 15;
 
 /// `TessJoinBelow`: a level below to make; see [`Below`].
 #[repr(C)]
@@ -180,6 +182,8 @@ pub const JOIN_LOAD: u32 = 10;
 pub const JOIN_CARRY: u32 = 11;
 pub const JOIN_NEXT_PIECE: u32 = 12;
 pub const JOIN_FINAL_PASS: u32 = 13;
+pub const JOIN_HOLD: u32 = 14;
+pub const JOIN_TAIL: u32 = 15;
 
 impl JoinEvent {
     fn event(&self) -> Result<Event> {
@@ -230,6 +234,8 @@ impl JoinEvent {
             },
             JOIN_FILE_END => Event::FileEnd,
             JOIN_PASS_END => Event::PassEnd,
+            JOIN_TABLE_END => Event::TableEnd { held: flag },
+            JOIN_TAIL_END => Event::TailEnd,
             kind => bail!("a join event of kind {kind}"),
         })
     }
@@ -275,6 +281,8 @@ impl JoinAction {
             Action::Carry => (JOIN_CARRY, 0),
             Action::NextPiece => (JOIN_NEXT_PIECE, 0),
             Action::FinalPass => (JOIN_FINAL_PASS, 0),
+            Action::Hold => (JOIN_HOLD, 0),
+            Action::Tail => (JOIN_TAIL, 0),
             Action::Split(below) => {
                 return Self {
                     kind: JOIN_SPLIT,

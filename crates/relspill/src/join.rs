@@ -53,6 +53,12 @@
 //!   ([`Action::Split`]); the others are joined ([`Action::Open`]): whole,
 //!   or, past two thirds of what the limit leaves, in pieces. When none
 //!   is left, the level is done ([`Action::LevelDone`]).
+//! - **Tables.** Before the table in memory goes, the level's table of
+//!   the partitions in memory, a partition's or a piece's, the host
+//!   reports that its outer rows are read ([`Event::TableEnd`]). Output
+//!   it still holds that refers to the table goes out first
+//!   ([`Action::Hold`]); then a join that gives out its inner rows
+//!   without a pair gives out the table's ([`Action::Tail`]), once.
 //! - **Pieces.** A partition joined in pieces is read a piece at a time
 //!   ([`Event::Piece`]): the host reports the header of each block of its
 //!   inner rows ([`Event::Block`]), and the machine says whether the
@@ -191,6 +197,13 @@ pub enum Event {
     FileEnd,
     /// A pass over the partition's outer rows ended.
     PassEnd,
+    /// The outer rows of the table in memory are read: the level's table
+    /// of the partitions in memory, a partition's or a piece's. `held`
+    /// when the host still holds output of that table that has not gone
+    /// out, such as pairs it copied, which refer to it.
+    TableEnd { held: bool },
+    /// The tail of the last [`Action::Tail`] went out.
+    TailEnd,
 }
 
 /// The side of a join a partition's rows are of.
@@ -242,6 +255,12 @@ pub enum Action {
     /// without a table: those no piece paired go out. Then report
     /// [`Event::PassEnd`].
     FinalPass,
+    /// The table may not go yet: give out the output held, then report
+    /// the end of the table again.
+    Hold,
+    /// Give out the table's inner rows without a pair, its tail, then
+    /// report [`Event::TailEnd`] and the end of the table again.
+    Tail,
     /// Split a partition into a level below: make it, its machine by
     /// [`Join::below`].
     Split(Below),
@@ -323,14 +342,19 @@ const SHARED: u32 = 9;
 const OPENED: u32 = 10;
 const LOADING: u32 = 11;
 const PASS: u32 = 12;
+const TAIL: u32 = 13;
 
 /// The flags of a partition read in pieces: its file is read to the end;
 /// its last pass, without a table, runs; the piece's last block is one of
-/// records; the piece has a block of values.
+/// records; the piece has a block of values. And those of the table in
+/// memory: there is one, whose outer rows the host reads; its tail went
+/// out.
 const FILE_DONE: u32 = 1;
 const FINAL: u32 = 2;
 const RECORDS: u32 = 4;
 const VALUES: u32 = 8;
+const TABLE: u32 = 16;
+const TAIL_GIVEN: u32 = 32;
 
 /// The machine of one level of a join's spill.
 ///
@@ -361,13 +385,13 @@ pub struct Join {
     cursor: u32,
     /// A partition read in pieces: the bytes a piece may take, and those
     /// it took; the partition, the phase its level goes back to after it,
-    /// and its flags.
+    /// the flags, and the phase a tail goes back to.
     room: u64,
     loaded: u64,
     current: u32,
     home: u32,
     flags: u32,
-    spare: u32,
+    back: u32,
 }
 
 // Its size is part of the mirror a host keeps: words of 8 bytes.
@@ -405,7 +429,7 @@ impl Join {
             current: 0,
             home: 0,
             flags: 0,
-            spare: 0,
+            back: 0,
         })
     }
 
@@ -457,6 +481,8 @@ impl Join {
     /// [`Event::Made`] may have cleared the words.
     pub fn step(&mut self, event: Event, host: &mut Host<'_>) -> Result<Action> {
         let phase = self.phase()?;
+        // No table goes, nor does another come, before its end is reported.
+        let ended = self.flags & TABLE == 0;
         match (phase, event) {
             (
                 FITS,
@@ -539,13 +565,13 @@ impl Join {
                 // The end weighs the rows alone: no share of the limit, so no count.
                 self.send(host, None, 0)
             }
-            (PROBING, Event::OuterEnd) => {
+            (PROBING, Event::OuterEnd) if ended => {
                 self.phase = JOINING;
                 self.cursor = 0;
                 Ok(Action::Done)
             }
-            (JOINING, Event::Next { memory }) => self.next(host, memory),
-            (SHARED, Event::Take { partition, memory }) => {
+            (JOINING, Event::Next { memory }) if ended => self.next(host, memory),
+            (SHARED, Event::Take { partition, memory }) if ended => {
                 self.counts(host)?;
                 ensure!(
                     partition < self.partitions,
@@ -571,6 +597,7 @@ impl Join {
                     && (values || self.flags & VALUES == 0)
                 {
                     self.phase = PASS;
+                    self.flags |= TABLE;
                     return Ok(Action::Carry);
                 }
                 self.loaded = self.loaded.saturating_add(len);
@@ -582,11 +609,30 @@ impl Join {
                 Ok(Action::Load)
             }
             (LOADING, Event::FileEnd) => {
-                self.flags |= FILE_DONE;
+                self.flags |= FILE_DONE | TABLE;
                 self.phase = PASS;
                 Ok(Action::Done)
             }
-            (PASS, Event::PassEnd) => {
+            (PROBING | JOINING | SHARED | PASS | DONE, Event::TableEnd { held }) => {
+                if held {
+                    return Ok(Action::Hold);
+                }
+                // A join that gives out its inner rows without a pair gives
+                // out those of each table before the table goes.
+                if self.flags & (TABLE | TAIL_GIVEN) == TABLE && self.params.preserve_inner != 0 {
+                    self.back = phase;
+                    self.phase = TAIL;
+                    return Ok(Action::Tail);
+                }
+                self.flags &= !(TABLE | TAIL_GIVEN);
+                Ok(Action::Done)
+            }
+            (TAIL, Event::TailEnd) => {
+                self.flags |= TAIL_GIVEN;
+                self.phase = self.back;
+                Ok(Action::Done)
+            }
+            (PASS, Event::PassEnd) if ended => {
                 if self.flags & FILE_DONE == 0 {
                     self.phase = OPENED;
                     return Ok(Action::NextPiece);
@@ -607,7 +653,7 @@ impl Join {
     /// The phase, checked.
     fn phase(&self) -> Result<u32> {
         ensure!(
-            (FITS..=PASS).contains(&self.phase),
+            (FITS..=TAIL).contains(&self.phase),
             Error::wrong_call(Rule::JoinState).with(self.phase)
         );
         Ok(self.phase)
@@ -799,6 +845,8 @@ impl Join {
                 self.phase = OPENED;
                 self.current = partition;
                 self.flags = 0;
+            } else {
+                self.flags = TABLE;
             }
             return Ok(Action::Open { partition, pieces });
         }
@@ -844,6 +892,8 @@ impl Join {
                 Route::Write
             } as u8;
         }
+        // The partitions in memory make the table the outer rows probe.
+        self.flags = TABLE;
         self.phase = PROBING;
         Ok(Action::Done)
     }
@@ -910,6 +960,8 @@ fn code(event: &Event) -> u32 {
         Event::Block { .. } => 11,
         Event::FileEnd => 12,
         Event::PassEnd => 13,
+        Event::TableEnd { .. } => 14,
+        Event::TailEnd => 15,
     }
 }
 

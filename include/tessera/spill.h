@@ -853,7 +853,15 @@ typedef enum TessJoinEventKind
 	/* The partition's inner rows on disk are all read. */
 	TESS_JOIN_FILE_END = 12,
 	/* A pass over the partition's outer rows ended. */
-	TESS_JOIN_PASS_END = 13
+	TESS_JOIN_PASS_END = 13,
+	/*
+	 * The outer rows of the table in memory are read: the level's table of
+	 * the partitions in memory, a partition's or a piece's; flag 1 when the
+	 * join still holds output that refers to the table.
+	 */
+	TESS_JOIN_TABLE_END = 14,
+	/* The tail of the last TESS_JOIN_TAIL went out. */
+	TESS_JOIN_TAIL_END = 15
 } TessJoinEventKind;
 
 typedef struct TessJoinEvent
@@ -915,7 +923,14 @@ typedef enum TessJoinActionKind
 	 * without a table, giving out those no piece paired; then
 	 * TESS_JOIN_PASS_END.
 	 */
-	TESS_JOIN_FINAL_PASS = 13
+	TESS_JOIN_FINAL_PASS = 13,
+	/* The table may not go yet: give out the output held, then TESS_JOIN_TABLE_END again. */
+	TESS_JOIN_HOLD = 14,
+	/*
+	 * Give out the table's inner rows without a pair, then
+	 * TESS_JOIN_TAIL_END and TESS_JOIN_TABLE_END again.
+	 */
+	TESS_JOIN_TAIL = 15
 } TessJoinActionKind;
 
 /*
