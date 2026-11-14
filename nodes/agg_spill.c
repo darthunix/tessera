@@ -97,8 +97,6 @@ typedef struct AggSpill
 	/* The empty chunks of the two first slots. */
 	uint64		source_empty[1];
 	uint64		empty[1];
-	/* The level plan's first bit of a level below; the level's own is shift. */
-	uint32		below;
 } AggSpill;
 
 static bool agg_evict(TessAggState *state, Size extra);
@@ -260,7 +258,6 @@ agg_spill_create(TessAggState *state, AggSpill *parent, const TessSpillPlan *pla
 	spill->parent = parent;
 	spill->level = parent == NULL ? 0 : parent->level + 1;
 	spill->shift = plan->shift;
-	spill->below = plan->below;
 	spill->npartitions = npartitions;
 	spill->partition = -1;
 	spill->context = AllocSetContextCreate(context, "TessAgg spill",
@@ -268,8 +265,15 @@ agg_spill_create(TessAggState *state, AggSpill *parent, const TessSpillPlan *pla
 	spill->block_context = AllocSetContextCreate(spill->context,
 												 "TessAgg spilled block",
 												 TESS_CHUNK_CONTEXT_SIZES);
+	/*
+	 * The parts and the counts their machine reads in one allocation, the
+	 * size the parts took when they held the counts: the memory a check
+	 * weighs is the same.
+	 */
 	spill->parts = MemoryContextAllocZero(spill->context,
-										  sizeof(AggPart) * npartitions);
+										  (sizeof(AggPart) + 2 * sizeof(uint64)) * npartitions);
+	spill->records = (uint64 *) (spill->parts + npartitions);
+	spill->disk = spill->records + npartitions;
 	{
 		MemoryContext old = MemoryContextSwitchTo(spill->context);
 
@@ -277,8 +281,6 @@ agg_spill_create(TessAggState *state, AggSpill *parent, const TessSpillPlan *pla
 			initHyperLogLog(&spill->parts[partition].groups, AGG_GROUPS_WIDTH);
 		MemoryContextSwitchTo(old);
 	}
-	spill->records = MemoryContextAllocZero(spill->context, sizeof(uint64) * npartitions);
-	spill->disk = MemoryContextAllocZero(spill->context, sizeof(uint64) * npartitions);
 	spill->bases = MemoryContextAlloc(spill->context,
 									  sizeof(void *) * (npartitions + 2));
 	spill->lens = MemoryContextAlloc(spill->context, sizeof(Size) * (npartitions + 2));
