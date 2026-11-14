@@ -741,19 +741,17 @@ insert_batch(TessHashJoinState *state, TessBatch *batch)
 
 	/*
 	 * A batch adds a chunk of records and one of values at most, and the
-	 * index comes once the build is read: room for both chunks and for
-	 * the index of every record with this batch's selected rows, before
-	 * they go in; a row with a NULL key, which makes no record, is counted
-	 * too. The index is a check here, not memory taken: the count takes it
-	 * when it is made.
+	 * index comes once the build is read: the spill's machine weighs both
+	 * chunks and the index of every record with this batch's selected rows
+	 * against hash_mem, before they go in; a row with a NULL key, which
+	 * makes no record, is counted too. The index is a check here, not
+	 * memory taken: the count takes it when it is made.
 	 */
-	if (state->spill == NULL && state->lookup_key < 0 &&
-		state->table_bytes + state->values.bytes +
-		2 * join_table_chunk_len(state) +
-		join_index_bytes(state, state->build_rows +
-						 (uint64) tess_row_mask_count(&batch->rows)) >
-		tess_hash_memory_limit())
-		join_start_spill(state);
+	if (state->spill == NULL && state->lookup_key < 0)
+		join_spill_check(state, state->table_bytes + state->values.bytes +
+						 2 * join_table_chunk_len(state) +
+						 join_index_bytes(state, state->build_rows +
+										  (uint64) tess_row_mask_count(&batch->rows)));
 	if (state->spill != NULL)
 	{
 		join_insert_spill(state, batch);
@@ -890,6 +888,7 @@ static void
 build_table(TessHashJoinState *state)
 {
 	join_spill_free(state);
+	join_spill_begin(state);
 	create_table(state);
 	/* Another table, maybe with other duplicates: decide compact mode again. */
 	state->compact_decided = false;

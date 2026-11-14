@@ -576,6 +576,16 @@ typedef struct JoinSpill
 	TessDatumColumn *columns;
 	/* The level plan's first bit of a level below; the level's own is shift. */
 	uint32		below;
+	/*
+	 * The level's machine (relspill's join): the first level's is the
+	 * node's, a level below keeps its own; a shared table's level has
+	 * none, its shared build deciding. Where the outer rows of each
+	 * partition go, a TessJoinRoute each, which the machine sets at the
+	 * end of the build.
+	 */
+	TessJoinMachine *machine;
+	TessJoinMachine own;
+	uint8	   *routes;
 } JoinSpill;
 
 /* Which child a column of the scan tuple comes from. */
@@ -978,6 +988,12 @@ typedef struct TessHashJoinState
 
 	JoinParallel parallel;
 	JoinValues values;
+	/*
+	 * The machine of the spill (relspill's join), which watches a build
+	 * from its start, and what every level of it shares.
+	 */
+	TessJoinMachine machine;
+	TessJoinParams spill_params;
 	int			mark_chunks;
 	/* table_chunk_len, once a build asks for it: 0 until then. */
 	Size		chunk_len;
@@ -1049,7 +1065,9 @@ extern void join_side_flush(TessHashJoinState *state, SpillSide *side, int parti
 extern void join_side_forget(SpillSide *side, int partition);
 extern void join_outer_forget(JoinSpill *spill);
 extern TessSpillShape join_spill_shape(TessHashJoinState *state);
-extern JoinSpill *join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected, int forced);
+extern void join_spill_begin(TessHashJoinState *state);
+extern void join_spill_check(TessHashJoinState *state, uint64 needed);
+extern JoinSpill *join_spill_given(TessHashJoinState *state, uint32 partitions);
 extern void join_spill_free(TessHashJoinState *state);
 extern Size join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident);
 extern Size join_index_bytes(TessHashJoinState *state, uint64 rows);
@@ -1057,7 +1075,6 @@ extern void join_spill_outer(TessHashJoinState *state, TessBatch *batch, TessRow
 extern bool join_spill_key_hashes(TessBatch *batch, int key, TessDatumColumn *result);
 extern void join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *values,
 							 const Size *lens, int nvalues);
-extern void join_start_spill(TessHashJoinState *state);
 extern bool join_tail_turn(TessHashJoinState *state);
 
 /* The shared build and rounds of a parallel join (hashjoin_shared.c). */

@@ -537,6 +537,7 @@ join_build_shared(TessHashJoinState *state)
 	state->parallel.own_bytes = 0;
 	state->parallel.appended = 0;
 	state->parallel.participating = true;
+	join_spill_begin(state);
 	/* This build's filter: decided again by this participant's batches. */
 	join_take_back_bloom(state);
 	state->bloom.bits = NULL;
@@ -817,7 +818,7 @@ shared_switch(TessHashJoinState *state)
 	JoinSpill  *spill;
 	dsa_pointer block;
 
-	spill = join_spill_create(state, NULL, 0, (int) join_shared_partitions(state));
+	spill = join_spill_given(state, join_shared_partitions(state));
 	spill->shared = true;
 	spill->writers = shared->participants;
 	side_share(state, &spill->build, "tjb", true);

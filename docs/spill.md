@@ -16,6 +16,15 @@ policies is in [nodes.md](nodes.md).
 TessHashJoin spills a table of its own ([nodes.md](nodes.md),
 "Spilling"), and a shared one (below).
 
+**The machine.** The decisions of a table of its own are the machine of
+the crate `relspill` (its module `join`), which the node keeps for each
+level and steps with what it saw: a batch of inner rows about to go in,
+a full chunk, the memory after a batch, the end of each side. The
+machine answers what to do: start the first level, give a partition a
+chunk or write what it holds, send a partition to disk, and, at the end
+of the build, where the outer rows of each partition go. The node does
+the work for each row and the reading and writing.
+
 **Partitions and bits.** A partition is `(hash >> shift) &
 (npartitions - 1)` of the 32-bit hash the table stores; the buckets take
 its high bits, the first level of partitions its low ones from bit 0,

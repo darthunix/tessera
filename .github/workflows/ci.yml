@@ -415,12 +415,13 @@ jobs:
           cargo miri test --locked -p relhash
           cargo miri test --locked -p relspill --test records
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
-            --test spill --test smallint --test date_bound
+            --test spill --test join --test smallint --test date_bound
       # A target whose bytes run from the most significant: the packing
       # narrows values by their low bytes, which lie last there. The
       # property tests of the spill words, of the columns appended by
-      # partition and of a set's file, and the threads counting a build,
-      # take minutes under Miri there: they are left out.
+      # partition, of a set's file and of a join's machine, and the
+      # threads counting a build, take minutes under Miri there: they are
+      # left out.
       - name: The spill's tests on a big-endian target
         run: |
           cargo miri test --locked -p relspill --target s390x-unknown-linux-gnu -- \
@@ -431,7 +432,9 @@ jobs:
             --skip participants_count_a_build_at_once \
             --skip a_set_written_in_memory_reads_back \
             --skip a_set_cut_by_a_failed_write_takes_only_a_reset \
-            --skip a_set_reads_back_by_its_lists_and_from_its_file
+            --skip a_set_reads_back_by_its_lists_and_from_its_file \
+            --skip a_join_through_the_machine_gives_the_pairs_of_one_in_memory \
+            --skip a_join_that_spills_runs_every_path
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)
