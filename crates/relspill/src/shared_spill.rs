@@ -476,11 +476,12 @@ impl<W: Words> Spill<W> {
                 Some(records) => records.each[partition as usize],
                 None => self.words.load(self.part(partition, Field::Records)),
             };
-            total += count;
+            // Each count fits its word, not their sum.
+            total = total.saturating_add(count);
             if spilled {
                 on_disk += 1;
             } else {
-                resident += count;
+                resident = resident.saturating_add(count);
                 first_resident.get_or_insert(partition);
             }
         }
@@ -745,6 +746,18 @@ mod tests {
         let spill = SharedSpill::new(words).unwrap();
         spill.init(budget);
         spill
+    }
+
+    /// Counts of records that each fit their word, but not their sum,
+    /// leave the choice of a partition to send unbroken.
+    #[test]
+    fn counts_of_records_past_a_word_in_all_choose_still() {
+        let mut words = Vec::new();
+        let spill = spill(&mut words, 2, 100);
+        assert_eq!(spill.split(2), Ok(2));
+        spill.add_records(0, u64::MAX).unwrap();
+        spill.add_records(1, 1).unwrap();
+        assert_eq!(spill.evict(&JOIN, Memory::Counted, None, 0), Ok(None));
     }
 
     /// Words whose count of partitions passes their room, which another
