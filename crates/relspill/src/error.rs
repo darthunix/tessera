@@ -304,6 +304,18 @@ rules! {
     BodyLength,
     /// A seek to a byte where no block of the partition starts.
     SeekPosition,
+
+    /// Memory that is no machine of a join's spill.
+    JoinState,
+    /// An event the phase of a join's machine does not take.
+    JoinEvent,
+    /// The parameters of a join's spill: a limit of 0, a spare word set,
+    /// or a weight below zero or not finite.
+    JoinParams,
+    /// A level below the first numbered 0.
+    JoinLevel,
+    /// Routes of the outer rows for another number of partitions.
+    JoinRoutes,
 }
 
 impl Error {
@@ -638,6 +650,14 @@ impl fmt::Display for Error {
                 f,
                 "a spill set finished where a step left a block of partition {a} undone"
             ),
+            Rule::JoinState => write!(f, "a join's spill machine in phase {a}, which is none"),
+            Rule::JoinEvent => write!(f, "a join's spill machine in phase {a} takes no event {b}"),
+            Rule::JoinParams => f.write_str(
+                "a join's spill of no memory, a spare word set, or a weight below zero or not \
+                 finite",
+            ),
+            Rule::JoinLevel => write!(f, "a level below the first numbered {a}"),
+            Rule::JoinRoutes => write!(f, "{a} routes of outer rows for {b} partitions"),
         }
     }
 }

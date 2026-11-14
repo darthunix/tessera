@@ -411,6 +411,20 @@ impl<W: Words> Spill<W> {
         records: Option<Records<'_>>,
         evicted: u32,
     ) -> Result<Option<u32>> {
+        Ok(self
+            .pick(weights, memory, records, evicted)?
+            .map(|(partition, _)| partition))
+    }
+
+    /// [`Spill::evict`], with whether the partition was on disk already
+    /// when it was chosen.
+    pub(crate) fn pick(
+        &self,
+        weights: &Weights,
+        memory: Memory,
+        records: Option<Records<'_>>,
+        evicted: u32,
+    ) -> Result<Option<(u32, bool)>> {
         let partitions = self.partitions();
         if let Some(records) = records {
             ensure!(
@@ -474,15 +488,15 @@ impl<W: Words> Spill<W> {
 
     /// Mark a partition on disk, chosen while it was there or not: its
     /// number, or `None` when another participant marked it since.
-    fn mark(&self, partition: u32, spilled: bool) -> Option<u32> {
+    fn mark(&self, partition: u32, spilled: bool) -> Option<(u32, bool)> {
         let before = self
             .words
             .fetch_or(self.part(partition, Field::Flags), ON_DISK);
         if before & ON_DISK == 0 {
             self.words.fetch_add(EVICTIONS, 1);
-            return Some(partition);
+            return Some((partition, false));
         }
-        spilled.then_some(partition)
+        spilled.then_some((partition, true))
     }
 
     /// The partitions sent to disk so far: a participant that saw fewer
