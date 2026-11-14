@@ -832,6 +832,7 @@ fn a_chunk_of_columns_reads_back_through_its_entry_points() {
                 typlens.as_ptr(),
                 values.as_ptr(),
                 values_len.min(values.len()),
+                true,
                 &raw mut status,
             )
         };
@@ -2050,12 +2051,16 @@ fn a_value_ends_by_its_type() {
         (-2, &string),
         (8, &vec![0; 8]),
     ] {
-        assert!(value_ends(typlen, value), "{typlen} {value:?}");
+        assert!(value_ends(typlen, value, true), "{typlen} {value:?}");
         assert!(
-            !value_ends(typlen, &value[..value.len() - 1]),
+            !value_ends(typlen, &value[..value.len() - 1], true),
             "{typlen} {value:?} short"
         );
     }
+    // A core without pointers of 64-bit chunk ids, PostgreSQL 19, takes
+    // those of 32-bit ids alone: there tag 4 is no pointer.
+    assert!(value_ends(-1, &external, false));
+    assert!(!value_ends(-1, &external8, false));
     // A header that says fewer bytes than a header, a compressed value of
     // fewer than its 8 bytes of header, an external pointer of another
     // tag, no bytes, a lone 0x01, and a length no type has.
@@ -2071,7 +2076,7 @@ fn a_value_ends_by_its_type() {
         (0, &[0; 8][..]),
         (-3, &[0; 8][..]),
     ] {
-        assert!(!value_ends(typlen, value), "{typlen} {value:?}");
+        assert!(!value_ends(typlen, value, true), "{typlen} {value:?}");
     }
 }
 

@@ -1086,6 +1086,49 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 										 TESS_SPILL_COLUMNS_HEADER, 1, 1, byvals, typlens, 64);
 			}
 			break;
+		case 50:
+
+			/*
+			 * A TOAST pointer of 64-bit chunk ids, tag 4, in a chunk of
+			 * columns read back: master's core has such pointers, and the
+			 * reader takes it; PostgreSQL 19's has none, and there it is
+			 * damaged data.
+			 */
+			{
+				static const bool byvals[1] = {false};
+				static const int16 typlens[1] = {-1};
+				char		pointer[22] = {0x01, 4};
+				Datum		value = PointerGetDatum(pointer);
+				bool		isnull = false;
+				uint64		bit = 1;
+				TessRowMask one = {1, &bit};
+				TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+				TessColumnsWriter writer;
+				TessColumnsReader columns;
+				TessSpillReader *file;
+
+				column.values = &value;
+				column.isnull = &isnull;
+				column.nrows = 1;
+				tess_columns_writer_init(&writer, &kernels, CurrentMemoryContext,
+										 TESS_SPILL_COLUMNS_HEADER +
+										 sizeof(uint64) * 16 * (tess_spill_columns_null_lanes(1) + 1),
+										 1, 1, byvals, typlens, 64);
+				if (tess_columns_writer_add(&writer, &column, &one) != 1)
+					elog(ERROR, "a TOAST pointer was not appended to a chunk of columns");
+				tess_columns_writer_write(&writer, spill, 0, 0, NULL);
+				tess_columns_writer_free(&writer);
+				tess_spill_finish(spill);
+				tess_columns_reader_init(&columns, &kernels, CurrentMemoryContext, 1, 1,
+										 byvals, typlens);
+				file = tess_spill_open(spill, 0, 0);
+				if (!tess_columns_reader_load(&columns, file, 0, -1) || columns.rows != 1)
+					elog(ERROR, "a chunk of a TOAST pointer read back without its row");
+				tess_columns_reader_free(&columns);
+				tess_spill_close(file);
+				tess_spill_free(spill);
+			}
+			break;
 		case 43:
 			/* A shared set's partition dropped before the set is finished. */
 			segment = dsm_create(sizeof(SharedFileSet), 0);
