@@ -438,16 +438,18 @@ pub trait ValueEnds {
 /// words and, when given, `rows` rows; and every word of a column not
 /// marked in `by_value`, which flags the chunk's first words, of a row
 /// that is not NULL, refers to its one chunk of values
-/// ([`columns::value_ref`] of chunk 0), to a byte of it or to its end,
-/// where [`append`] places an empty value, and the value there ends inside
-/// the values, as `ends` tells by the value's type.
+/// ([`columns::value_ref`] of chunk 0), to a byte of it aligned to 8, as
+/// [`append`] places values, or to its end, where it places an empty
+/// value, and the value there ends inside the values, as `ends` tells by
+/// the value's type.
 ///
 /// # Errors
 ///
 /// More columns in `by_value` than words, a wrong call; a chunk read back
 /// that is no chunk of
 /// columns, another count of words or of rows, a word that refers outside
-/// the values, or a value that runs past them, damaged bytes.
+/// the values or to a byte not aligned to 8, or a value that runs past
+/// them, damaged bytes.
 pub fn check(
     chunk: &[u8],
     words: usize,
@@ -491,8 +493,12 @@ pub fn check(
             }
             let word = u64::from_ne_bytes(*word);
             let byte = (word & byte_mask) as usize;
+            // Every writer places a value at a byte aligned to 8, so that
+            // its pointer serves any type.
             ensure!(
-                word >> columns::VALUE_BYTE_BITS == 1 && byte <= values_len,
+                word >> columns::VALUE_BYTE_BITS == 1
+                    && byte <= values_len
+                    && byte.is_multiple_of(8),
                 Error::damaged(Rule::ValueRef).with(row).and(column)
             );
             let rest = &values[byte..];
@@ -1115,8 +1121,8 @@ mod tests {
     }
 
     /// A chunk read back of another count of words or of rows, or with a
-    /// word of a value that refers past the values, to another chunk, or
-    /// to nothing, is damaged bytes; a pair's block of another kind or
+    /// word of a value that refers past the values, to another chunk, to
+    /// nothing, or to a byte not aligned to 8, is damaged bytes; a pair's block of another kind or
     /// number too, though the rows alone are the pair of a chunk with no
     /// values. A call past the chunk's words or rows, or past the pair, is
     /// a wrong call.
@@ -1142,7 +1148,12 @@ mod tests {
         );
         for (row, cells) in batch.columns[1].iter().enumerate() {
             let Cell::Bytes(_) = cells else { continue };
-            for word in [columns::value_ref(0, len + 8), columns::value_ref(1, 0), 0] {
+            for word in [
+                columns::value_ref(0, len + 8),
+                columns::value_ref(1, 0),
+                0,
+                columns::value_ref(0, 1),
+            ] {
                 let mut stray = chunk.clone();
                 let shape = columns::shape(&stray)?;
                 put(

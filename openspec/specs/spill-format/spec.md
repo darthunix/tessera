@@ -481,13 +481,14 @@ alone, which are then the whole pair.
 - `tess_spill_columns_pair` SHALL refuse, as damaged data, a block read
   as one of the pair that is of another kind or another number; the
   rows read as the first block are the pair of a chunk with no values.
-- `tess_spill_columns_check` SHALL check a chunk read back once, so
-  that its rows are read unchecked after: its words, its rows when the
-  caller counted them, and every word of a column not by value of a row
-  not NULL, which SHALL refer into its chunk of values, to a byte or to
-  its end, where an empty value lies, and whose value SHALL end inside
-  the values by its type's length. Any of these that fails SHALL be
-  damaged data.
+- `tess_spill_columns_check` SHALL check a chunk read back once, so that
+  its rows are read unchecked after: its words, its rows when the caller
+  counted them, and every word of a column not by value of a row not
+  NULL, which SHALL refer into its chunk of values, to a byte aligned to
+  8, where every writer places a value so that its pointer serves any
+  type, or to its end, where an empty value lies, and whose value SHALL
+  end inside the values by its type's length. Any of these that fails
+  SHALL be damaged data.
 - `tess_spill_columns_window` SHALL give a window of the rows of a
   checked chunk's first columns as Datums and NULL flags, a value by
   reference as a pointer into the values. Words or rows past the
@@ -515,7 +516,8 @@ alone, which are then the whole pair.
 #### Scenario: A pair not as it was written
 - **WHEN** a block of the pair of another kind or number is read, or a
   chunk of another count of words or rows, or with a word that refers
-  past its values, to another chunk, or to nothing
+  past its values, to another chunk, to nothing, or to a byte not
+  aligned to 8
 - **THEN** each is damaged data, SQLSTATE `XX001`; a window past the
   rows or a block past the pair is `XX000`
 - **Verified by:**
