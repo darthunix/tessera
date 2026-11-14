@@ -112,10 +112,12 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['any_text_few', 'any_text_col', 'any_text_agg', 'any_numeric', 'any_distinct', 'any_union', 'any_join_text', 'any_join_numeric', 'any_join_two', 'any_join_semi']) AS name \gexec
+FROM unnest(ARRAY['any_text_few', 'any_text_col', 'any_text_agg', 'any_numeric', 'any_distinct', 'any_union', 'any_join_text', 'any_join_numeric', 'any_join_two', 'any_join_semi']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['any_text_few', 'any_text_col', 'any_text_agg', 'any_numeric', 'any_distinct', 'any_union', 'any_join_text', 'any_join_numeric', 'any_join_two', 'any_join_semi']) AS name \gexec
+FROM unnest(ARRAY['any_text_few', 'any_text_col', 'any_text_agg', 'any_numeric', 'any_distinct', 'any_union', 'any_join_text', 'any_join_numeric', 'any_join_two', 'any_join_semi']) AS name
+WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 RESET work_mem;
 DEALLOCATE ALL;
