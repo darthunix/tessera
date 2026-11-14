@@ -14,7 +14,7 @@ use relspill::plan::Shape;
 use super::shared_spill::check_spill_words;
 use super::spill::{SpillPlan, SpillShape};
 use super::status::{Code, Status, guard};
-use super::table::{slots, values};
+use super::table::{output, slots, values};
 
 /// `TessJoinParams`: what every level of a join's spill shares; see
 /// [`Params`].
@@ -317,14 +317,6 @@ unsafe fn machine_at<'a>(machine: *mut Join) -> Result<&'a mut Join> {
     // SAFETY: the caller's contract; any bytes are a machine, whose steps
     // check them.
     unsafe { machine.as_mut() }.context("a null join's machine")
-}
-
-/// A place the call writes its result to, which may hold no value yet: it
-/// is checked, and written whole, never read or borrowed.
-fn output<T>(place: *mut T, what: &str) -> Result<*mut T> {
-    ensure!(!place.is_null(), "a null {what}");
-    ensure!(place.is_aligned(), "{what} not aligned");
-    Ok(place)
 }
 
 /// `tess_join_init`: make `*machine` the machine of a join whose table

@@ -14,7 +14,7 @@ use relspill::{BlockKind, Bounds};
 
 use super::spill::{SpillHeader, SpillLevel, SpillPlan, SpillShape};
 use super::status::{Code, Status, guard};
-use super::table::{slots, values};
+use super::table::{output, slots, values};
 
 /// `TessSpillList`: a partition's block list as C keeps it, `slots`
 /// entries at `entries`, of which the first `count` are its blocks.
@@ -266,15 +266,14 @@ pub unsafe extern "C" fn tess_spill_set_write(
                 partition: u32::try_from(partition).context("a negative partition")?,
                 body: values(body, len, "body")?,
             };
-            ensure!(step.is_aligned(), "a step not aligned to 8");
-            let out = step.as_mut().context("a null step")?;
+            let out = output(step, "step")?;
             let result = writer.write(
                 slots(buffer, buffer_len, "buffer")?,
                 slots(scratch, scratch_len, "scratch")?,
                 &mut lists,
                 block,
             )?;
-            *out = SpillStep::from_step(result);
+            out.write(SpillStep::from_step(result));
             Ok(())
         })
     }
@@ -313,10 +312,9 @@ pub unsafe extern "C" fn tess_spill_set_finish(
         guard(status, || {
             let writer = writer_at(writer)?;
             let mut lists = raw_lists(writer, lists, nlists)?;
-            ensure!(step.is_aligned(), "a step not aligned to 8");
-            let out = step.as_mut().context("a null step")?;
+            let out = output(step, "step")?;
             let result = writer.finish(slots(buffer, buffer_len, "buffer")?, &mut lists)?;
-            *out = SpillStep::from_step(result);
+            out.write(SpillStep::from_step(result));
             Ok(())
         })
     }
@@ -370,17 +368,18 @@ pub unsafe extern "C" fn tess_spill_set_stats(
         guard(status, || {
             ensure!(writer.is_aligned(), "a writer not aligned to 8");
             let writer = writer.as_ref().context("a null writer")?;
-            if let Some(blocks) = blocks.as_mut() {
-                *blocks = writer.blocks();
+            let files_written = c_int::try_from(writer.files()).context("files past an int")?;
+            if !blocks.is_null() {
+                output(blocks, "count of blocks")?.write(writer.blocks());
             }
-            if let Some(bytes) = bytes.as_mut() {
-                *bytes = writer.bytes();
+            if !bytes.is_null() {
+                output(bytes, "count of bytes")?.write(writer.bytes());
             }
-            if let Some(files) = files.as_mut() {
-                *files = c_int::try_from(writer.files()).context("files past an int")?;
+            if !files.is_null() {
+                output(files, "count of files")?.write(files_written);
             }
-            if let Some(values) = values.as_mut() {
-                *values = writer.read_bounds().values;
+            if !values.is_null() {
+                output(values, "longest values")?.write(writer.read_bounds().values);
             }
             Ok(())
         })
@@ -520,10 +519,8 @@ unsafe fn page_at<'a>(entries: *const Entry, len: usize) -> Result<&'a [Entry]> 
 ///
 /// `out` must be null or writable.
 unsafe fn put_step(out: *mut SpillReadStep, step: ReadStep) -> Result<()> {
-    ensure!(out.is_aligned(), "a step not aligned to 8");
     // SAFETY: the caller's contract.
-    let out = unsafe { out.as_mut() }.context("a null step")?;
-    *out = SpillReadStep::from_step(step);
+    unsafe { output(out, "step")?.write(SpillReadStep::from_step(step)) };
     Ok(())
 }
 
@@ -580,8 +577,7 @@ pub unsafe extern "C" fn tess_spill_reader_own(
             let config = read_config(npartitions, level, partition, fingerprint, bounds)?;
             let list = page_at(entries, usize::try_from(count)?)?;
             let made = Reader::own(config, list)?;
-            ensure!(largest.is_aligned(), "a largest not aligned to 8");
-            *largest.as_mut().context("a null largest")? = made.largest();
+            output(largest, "largest")?.write(made.largest());
             *out = made;
             Ok(())
         })
