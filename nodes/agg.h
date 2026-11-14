@@ -344,6 +344,7 @@ extern TessRowsAction rows_step(TessAggState *state, TessRowsMachine *machine,
 extern void rows_write(TessAggState *state, struct RowSpill *spill,
 					   const TessRowMask *rows);
 extern void rows_spill_close(TessAggState *state);
+extern Size rows_spill_memory(TessAggState *state);
 extern void rows_spill_free(TessAggState *state);
 extern TessBatch *reader_next(TessAggState *state);
 extern bool rows_next_partition(TessAggState *state);

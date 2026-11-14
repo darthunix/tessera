@@ -835,7 +835,10 @@ join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident)
 		*resident = rows;
 	/*
 	 * The levels above keep the tails of their partitions to come; every
-	 * set keeps its write buffer while it writes, and its readers a block.
+	 * set keeps its write buffer and its lists while it writes, and its
+	 * readers a block and a page of a list; a partition read in pieces
+	 * keeps the marks of its outer rows that matched, and the block that
+	 * starts its next piece.
 	 */
 	for (JoinSpill *level = spill; level != NULL; level = level->parent)
 	{
@@ -843,7 +846,9 @@ join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident)
 			sizeof(uint64) * level->bloom_words +
 			MemoryContextMemAllocated(level->part_context, true) +
 			MemoryContextMemAllocated(level->block_context, true) +
-			tess_spill_memory(level->build.file) + tess_spill_memory(level->probe.file);
+			tess_spill_memory(level->build.file) + tess_spill_memory(level->probe.file) +
+			(level->matched_rows != NULL ? sizeof(uint64) * level->matched_words : 0) +
+			(level->carried != NULL ? Max(level->carried_header.len, 8) : 0);
 	}
 	return bytes + (spill->indexed || rows == 0 ? 0 : join_index_bytes(state, rows));
 }

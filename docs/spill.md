@@ -96,7 +96,12 @@ rows without one.
 
 **Memory.** The spill's contexts use small blocks, so that a chunk of a
 few kB or more takes a block of its own size; `Memory Usage` counts the
-tables, the chunks, the values and the filter of every level.
+tables, the chunks, the values and the filter of every level; of its
+files, the write buffers and the block lists of those it writes, and a
+block and a page of a list for each reader; and for a partition read
+in pieces, the marks of its outer rows that matched and the block that
+starts its next piece. A finished file keeps no list in memory: its end
+holds them, and a reader takes a page at a time.
 
 **A shared table.** Under a `Gather` the participants build one table in
 the query's shared memory, and its budget is every participant's
@@ -273,7 +278,9 @@ makes the dictionary anew.
 
 **Memory.** The first index takes at most a quarter of `hash_mem`, a
 chunk an eighth; the node acts at seven eighths, the rest left for a
-batch's growth, and counts its files' buffers, a page each.
+batch's growth, and counts its files: the write buffers and the lists
+of those it writes, a block and a page for each reader, and the writers
+of its rows while their level is written, which go when it is.
 
 ## The weights
 
