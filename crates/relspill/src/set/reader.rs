@@ -714,8 +714,9 @@ impl Reader {
     ///
     /// # Errors
     ///
-    /// A wrong call when the reader is not open, or no block of the
-    /// partition starts at `offset`.
+    /// A wrong call when the reader is not open, a seek to another offset
+    /// is under way, or no block of the partition starts at `offset`; the
+    /// reader is then as it was.
     pub fn seek(&mut self, page: &[Entry], offset: u64) -> Result<ReadStep> {
         self.check_state()?;
         ensure!(
@@ -725,11 +726,12 @@ impl Reader {
         let position = Error::wrong_call(Rule::SeekPosition)
             .with(self.partition)
             .and(offset);
-        if self.phase == SEEK && self.seek_to != offset {
-            // Another seek before this one found its block.
-            self.phase = self.seek_from;
-            return Err(Error::wrong_call(Rule::ReaderState));
-        }
+        // Another seek before this one found its block: refused, and the
+        // one under way goes on.
+        ensure!(
+            self.phase != SEEK || self.seek_to == offset,
+            Error::wrong_call(Rule::ReaderState)
+        );
         // A page holds an entry.
         ensure!(
             !page.is_empty(),
@@ -1278,6 +1280,47 @@ mod tests {
         forged.count = u64::MAX;
         let page = [Entry::default(); 2];
         ensure!(forged.next(&page, &[]).map_err(Error::rule) == Err(Rule::ReaderState));
+        Ok(())
+    }
+
+    /// A seek to another offset while one asks for a page is refused and
+    /// changes nothing: the one under way then finds its block.
+    #[test]
+    fn a_seek_under_way_survives_another_refused() -> Result<()> {
+        let mut host = Host::new(config(1, 512, false))?;
+        let mut places = Vec::new();
+        for number in 0..4 {
+            let place = host
+                .write(&Owned {
+                    kind: BlockKind::Values,
+                    number,
+                    partition: 0,
+                    body: vec![number as u8; 16],
+                })?
+                .context("a write cut")?;
+            places.push(place.offset);
+        }
+        ensure!(host.finish()?);
+        let file = host.file.clone();
+        let mut back = Back {
+            reader: Reader::file(read_config(1, 0), file.len() as u64)?,
+            file: &file,
+            page: vec![Entry::default(); 2],
+            block: Vec::new(),
+        };
+        ensure!(back.open()? == Some(()));
+        let step = back.reader.seek(&back.page, places[0])?;
+        ensure!(matches!(step, ReadStep::Page { .. }), "{step:?}");
+        let before = back.reader;
+        ensure!(
+            back.reader.seek(&back.page, places[1]).map_err(Error::rule) == Err(Rule::ReaderState)
+        );
+        ensure!(back.reader == before, "a refused seek changed the reader");
+        // The page asked for, then the seek under way.
+        ensure!(back.serve(step)?);
+        back.seek(places[0])?;
+        let (header, _) = back.next()?.context("the block sought")?;
+        ensure!(header.number == 0);
         Ok(())
     }
 
