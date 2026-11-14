@@ -441,7 +441,8 @@ jobs:
             --skip a_join_through_the_machine_gives_the_pairs_of_one_in_memory \
             --skip a_join_that_spills_runs_every_path \
             --skip a_grouping_through_the_machine_gives_the_groups_of_one_in_memory \
-            --skip a_grouping_that_spills_writes_and_splits
+            --skip a_grouping_that_spills_writes_and_splits \
+            --skip rows_through_frozen_tables_give_the_groups_of_one_in_memory
 
   postgres:
     name: PostgreSQL ${{ matrix.postgres }} (${{ matrix.os }}, ${{ matrix.rust_profile }} kernels)

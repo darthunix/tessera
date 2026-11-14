@@ -8,7 +8,7 @@ use std::ffi::c_int;
 use std::mem::{offset_of, size_of};
 
 use anyhow::{Context, Result, bail, ensure};
-use relspill::group::{Action, Below, Event, Group, Host, Params};
+use relspill::group::{Action, Below, Event, Group, Host, Params, Rows, Table};
 use relspill::plan::{Plan, Shape};
 
 use super::shared_spill::check_spill_words;
@@ -392,6 +392,258 @@ pub extern "C" fn tess_group_layout(what: c_int) -> usize {
         GROUP_ACTION_BELOW_OFFSET => offset_of!(GroupAction, below),
         GROUP_BELOW_SIZE => size_of::<GroupBelow>(),
         GROUP_BELOW_SHIFT_OFFSET => offset_of!(GroupBelow, shift),
+        _ => 0,
+    }
+}
+
+/// `TessRowsParams`: what every level of a grouping's rows shares; see
+/// [`RowsParams`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RowsParams {
+    pub limit: u64,
+    pub shape: SpillShape,
+    pub fill: f64,
+    pub least: u64,
+}
+
+impl RowsParams {
+    fn params(&self) -> relspill::group::RowsParams {
+        let shape = &self.shape;
+        relspill::group::RowsParams {
+            limit: self.limit,
+            shape: Shape {
+                reserve: shape.reserve,
+                min_partitions: shape.min_partitions,
+                max_partitions: shape.max_partitions,
+                share: shape.share,
+                min_chunk: shape.min_chunk,
+                max_chunk: shape.max_chunk,
+                record: shape.record,
+            },
+            fill: self.fill,
+            least: self.least,
+        }
+    }
+}
+
+/// `TessRowsHost`: the rows written of each partition of a level of
+/// rows; see [`RowsHost`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RowsHost {
+    pub written: *const u64,
+    pub nwritten: usize,
+}
+
+/// `TessRowsEvent`: a step of a grouping's rows; see [`RowsEvent`].
+/// `memory` and `records` are those of [`ROWS_GROWN`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RowsEvent {
+    pub kind: u32,
+    pub spare: u32,
+    pub memory: u64,
+    pub records: u64,
+}
+
+/// `TessRowsEventKind`, of a [`RowsEvent`].
+pub const ROWS_GROWN: u32 = 1;
+pub const ROWS_WRITTEN: u32 = 2;
+pub const ROWS_NEXT: u32 = 3;
+
+/// `TessRowsTable`: a table of a partition of rows read back; see
+/// [`Table`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowsTable {
+    pub partition: u32,
+    pub level: u32,
+    pub shift: u32,
+    pub last: u32,
+}
+
+/// `TessRowsAction`: what a grouping's rows do next; see [`RowsAction`].
+/// The plan and `level` are those of [`ROWS_FREEZE`], `table` that of
+/// [`ROWS_READ`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RowsAction {
+    pub kind: u32,
+    pub level: u32,
+    pub plan: SpillPlan,
+    pub table: RowsTable,
+}
+
+/// `TessRowsActionKind`, of a [`RowsAction`].
+pub const ROWS_DONE: u32 = 0;
+pub const ROWS_FREEZE: u32 = 1;
+pub const ROWS_READ: u32 = 2;
+pub const ROWS_LEVEL_DONE: u32 = 3;
+
+impl RowsAction {
+    fn of(action: relspill::group::RowsAction) -> Self {
+        use relspill::group::RowsAction as Rust;
+        match action {
+            Rust::Done => Self::default(),
+            Rust::Freeze { plan, level } => Self {
+                kind: ROWS_FREEZE,
+                level,
+                plan: spill_plan(&plan),
+                ..Self::default()
+            },
+            Rust::Read(table) => Self {
+                kind: ROWS_READ,
+                table: RowsTable {
+                    partition: table.partition,
+                    level: table.level,
+                    shift: table.shift,
+                    last: u32::from(table.last),
+                },
+                ..Self::default()
+            },
+            Rust::LevelDone => Self {
+                kind: ROWS_LEVEL_DONE,
+                ..Self::default()
+            },
+        }
+    }
+}
+
+/// `tess_rows_init`: make `*machine` the machine of the table of a
+/// grouping's input, whose rows go to the first level once frozen.
+///
+/// # Safety
+///
+/// `machine` null or valid for a write of a machine, whatever it holds
+/// before; `params` null or readable; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_rows_init(
+    machine: *mut Rows,
+    params: *const RowsParams,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let machine = output(machine, "rows' machine")?;
+            let params = params.as_ref().context("null rows parameters")?;
+            machine.write(Rows::new(&params.params())?);
+            Ok(())
+        })
+    }
+}
+
+/// `tess_rows_read`: make `*machine` the machine of the table of the
+/// partition a `TESS_ROWS_READ` gave.
+///
+/// # Safety
+///
+/// As for [`tess_rows_init`]; `table` null or readable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_rows_read(
+    machine: *mut Rows,
+    params: *const RowsParams,
+    table: *const RowsTable,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let machine = output(machine, "rows' machine")?;
+            let params = params.as_ref().context("null rows parameters")?;
+            let table = table.as_ref().context("a null table of rows")?;
+            let last = match table.last {
+                0 => false,
+                1 => true,
+                last => bail!("a table of rows whose last is {last}"),
+            };
+            let table = Table {
+                partition: table.partition,
+                level: table.level,
+                shift: table.shift,
+                last,
+            };
+            machine.write(Rows::read(&params.params(), &table)?);
+            Ok(())
+        })
+    }
+}
+
+/// `tess_rows_step`: give `*machine` the grouping's `event` of its rows,
+/// with the regions of `host`, and its next action into `*action`.
+///
+/// # Safety
+///
+/// `machine` null or a machine this process alone uses; `host` null or
+/// readable, its `written` null or valid for reads of `nwritten` words;
+/// `event` null or readable; `action` null or valid for a write, whatever
+/// it holds before; `status` as for every entry point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_rows_step(
+    machine: *mut Rows,
+    host: *const RowsHost,
+    event: *const RowsEvent,
+    action: *mut RowsAction,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            ensure!(machine.is_aligned(), "a rows' machine not aligned to 8");
+            // SAFETY: any bytes are a machine, whose steps check them.
+            let machine = machine.as_mut().context("a null rows' machine")?;
+            let host = host.as_ref().context("a null rows host")?;
+            let event = event.as_ref().context("a null rows event")?;
+            ensure!(
+                event.spare == 0,
+                "a rows event with a spare word of {}",
+                event.spare
+            );
+            let event = match event.kind {
+                ROWS_GROWN => relspill::group::RowsEvent::Grown {
+                    memory: event.memory,
+                    records: event.records,
+                },
+                ROWS_WRITTEN => relspill::group::RowsEvent::Written,
+                ROWS_NEXT => relspill::group::RowsEvent::Next,
+                kind => bail!("a rows event of kind {kind}"),
+            };
+            let out = output(action, "rows action")?;
+            let written = values(
+                host.written,
+                host.nwritten,
+                "rows written of the partitions",
+            )?;
+            let host = relspill::group::RowsHost { written };
+            out.write(RowsAction::of(machine.step(event, &host)?));
+            Ok(())
+        })
+    }
+}
+
+/// `TessRowsLayout`: what [`tess_rows_layout`] gives the size or offset
+/// of.
+pub const ROWS_MACHINE_SIZE: c_int = 1;
+pub const ROWS_PARAMS_SIZE: c_int = 2;
+pub const ROWS_PARAMS_LEAST_OFFSET: c_int = 3;
+pub const ROWS_HOST_SIZE: c_int = 4;
+pub const ROWS_EVENT_SIZE: c_int = 5;
+pub const ROWS_ACTION_SIZE: c_int = 6;
+pub const ROWS_ACTION_TABLE_OFFSET: c_int = 7;
+
+/// `tess_rows_layout`: the size or offset of a `TessRowsLayout` for the
+/// C side's mirrors to check; 0 for another code.
+#[unsafe(no_mangle)]
+pub extern "C" fn tess_rows_layout(what: c_int) -> usize {
+    match what {
+        ROWS_MACHINE_SIZE => size_of::<Rows>(),
+        ROWS_PARAMS_SIZE => size_of::<RowsParams>(),
+        ROWS_PARAMS_LEAST_OFFSET => offset_of!(RowsParams, least),
+        ROWS_HOST_SIZE => size_of::<RowsHost>(),
+        ROWS_EVENT_SIZE => size_of::<RowsEvent>(),
+        ROWS_ACTION_SIZE => size_of::<RowsAction>(),
+        ROWS_ACTION_TABLE_OFFSET => offset_of!(RowsAction, table),
         _ => 0,
     }
 }
