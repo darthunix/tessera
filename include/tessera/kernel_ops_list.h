@@ -139,6 +139,9 @@
 	X(rows_read) \
 	X(rows_step) \
 	X(runs_init) \
-	X(runs_step)
+	X(runs_step) \
+	X(shared_build_init) \
+	X(shared_build_step) \
+	X(shared_build_stop)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

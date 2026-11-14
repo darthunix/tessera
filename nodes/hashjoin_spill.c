@@ -849,27 +849,6 @@ join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident)
 }
 
 /*
- * The weights a shared table gives the rule that sends its partitions to
- * disk (docs/spill.md, "Weights"): it counts its chunks, not a
- * participant's tails, and its records only once built; its participants
- * send one partition a check, since the others write theirs of it at
- * their next batch.
- */
-TessSpillWeights
-join_spill_weights(TessHashJoinState *state)
-{
-	TessSpillWeights weights = {
-		.start = tess_join_spill_start,
-		.target = tess_join_spill_target,
-		.spilled = tess_join_spill_spilled_weight,
-		.per_check = (uint32) tess_join_shared_spill_evictions,
-	};
-
-	Assert(state->spill->shared);
-	return weights;
-}
-
-/*
  * Step the machine of a level, or the first one's before its level is
  * made (spill NULL), with event: its action.
  */
@@ -934,7 +913,7 @@ side_full(TessHashJoinState *state, SpillSide *side, int partition)
 
 /*
  * Send the inner side's partitions to disk as the level's machine says (a
- * shared table's participants decide in shared_sync): while building,
+ * shared table's participants decide in shared_spill_check): while building,
  * against the memory the node reports, so that what it keeps is what it
  * says; at the end of the build, by the share of the rows in memory alone,
  * after which the machine sets where the outer rows of each partition go.

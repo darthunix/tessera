@@ -299,7 +299,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       test against a sort in memory; `make installcheck`;
       `cargo ab measure` of `runs_text` and of sorts that merge in
       several passes
-- [ ] 3.20 Write the machine of a build by several processes: its
+- [x] 3.20 Write the machine of a build by several processes: its
       phases from `phases.rs`, with what C decides about writing to
       disk. Check: the loom models, old and new; `make rust-loom`; the
       parallel tests of the suite `join`; `cargo ab measure` of a

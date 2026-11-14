@@ -774,7 +774,8 @@ typedef struct JoinParallel
 	Size		shared_budget;
 	/* The query's shared memory, kept for leaving after the Gather let go of it. */
 	dsa_area   *area;
-	TessBuildParticipant participant;
+	/* This participant's machine of the build (relspill's shared::Build). */
+	TessSharedBuildMachine build_machine;
 	bool		participating;
 	void	   *own_base;
 	Size		own_len;
@@ -785,13 +786,11 @@ typedef struct JoinParallel
 	uint64		appended;
 	/*
 	 * A shared table that spills: the words of its spilling, mapped here;
-	 * this participant's number in the files' names, the partitions sent
-	 * to disk it saw, and whether the chunks passed the budget before the
-	 * table was split.
+	 * this participant's number in the files' names, and whether the
+	 * chunks passed the budget before the table was split.
 	 */
 	uint64	   *spill_words;
 	int			spill_participant;
-	uint64		spill_seen;
 	bool		spill_over;
 	/*
 	 * The table probed is shared, the build's or a round's, whose chains are
@@ -1015,7 +1014,6 @@ spill_partition(const JoinSpill *spill, uint32 hash)
 }
 
 /* The executor (hashjoin.c): the table, its values and marks, the build and the probe. */
-extern TessSpillWeights join_spill_weights(TessHashJoinState *state);
 
 extern bool join_append_rows(TessHashJoinState *state, const TessTableRef *table, int chunk, TessRowMask *pending);
 extern void join_batch_keys(TessHashJoinState *state, TessBatch *batch, const int *columns, const TessTableKeyKind *kinds, TessRowMask *valid);
