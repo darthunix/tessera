@@ -33,6 +33,7 @@ static const TessBatchOps spill_batch_ops = {
 
 static void split_table(TessHashJoinState *state);
 static Size spill_room(TessHashJoinState *state);
+static void side_full(TessHashJoinState *state, SpillSide *side, int partition);
 
 void
 join_part_open(PartReader *reader, TessSpill *file, int partition, int writers)
@@ -808,8 +809,10 @@ side_flush_queue(TessHashJoinState *state, SpillSide *side)
 		SpillPart  *part = &side->parts[side->queue[index]];
 
 		part->in_queue = false;
+		/* Its values went in after a row of its chunk: it holds one. */
+		Assert(!part->queued || side->current[side->queue[index]] != 0);
 		if (part->queued)
-			join_side_flush(state, side, side->queue[index]);
+			side_full(state, side, side->queue[index]);
 	}
 	side->nqueue = 0;
 }
@@ -846,73 +849,124 @@ join_spill_memory(TessHashJoinState *state, JoinSpill *spill, uint64 *resident)
 }
 
 /*
- * The weights a spilling join gives the rule that sends its partitions to
- * disk (docs/spill.md, "Weights"). Its own spill reserves room for the
- * outer side's tails of the partitions on disk, which come once the
- * probing starts: a chunk of records, one of values when the outer side
- * keeps a by-reference column, and a file's buffer each; a resident
- * partition writes no outer row. The tails stay: the chunk size bounds
- * them, and writing them sooner would write chunks of a few rows. A shared
- * table counts its chunks, not a participant's tails, and its records only
- * once built; its participants send one partition a check, since the
- * others write theirs of it at their next batch.
+ * The weights a shared table gives the rule that sends its partitions to
+ * disk (docs/spill.md, "Weights"): it counts its chunks, not a
+ * participant's tails, and its records only once built; its participants
+ * send one partition a check, since the others write theirs of it at
+ * their next batch.
  */
 TessSpillWeights
 join_spill_weights(TessHashJoinState *state)
 {
-	JoinSpill  *spill = state->spill;
 	TessSpillWeights weights = {
 		.start = tess_join_spill_start,
 		.target = tess_join_spill_target,
 		.spilled = tess_join_spill_spilled_weight,
+		.per_check = (uint32) tess_join_shared_spill_evictions,
 	};
 
-	if (spill->shared)
-	{
-		weights.per_check = (uint32) tess_join_shared_spill_evictions;
-		return weights;
-	}
-	weights.reserve = spill->probe.chunk_len + BLCKSZ;
-	for (int word = 0; word < spill->probe.nwords; word++)
-		if (!spill->probe.byvals[word])
-		{
-			weights.reserve += spill->probe.chunk_len;
-			break;
-		}
-	weights.reserve = (uint64) (weights.reserve * tess_join_spill_tail_weight);
-	weights.resident = tess_join_spill_resident_share;
+	Assert(state->spill->shared);
 	return weights;
 }
 
 /*
- * Send the inner side's partitions to disk as the rule says (the shared
- * table's participants decide in shared_sync): against the memory the
- * node reports, so that what it keeps is what it says, or, without a
- * limit, by the share of the rows in memory alone.
+ * Step the machine of a level, or the first one's before its level is
+ * made (spill NULL), with event: its action.
+ */
+static TessJoinAction
+spill_step(TessHashJoinState *state, JoinSpill *spill, TessJoinEvent event)
+{
+	TessJoinHost host = {0};
+	TessJoinAction action;
+	TessJoinMachine *machine = &state->machine;
+
+	if (spill != NULL)
+	{
+		Assert(spill->machine != NULL);
+		machine = spill->machine;
+		host.words = spill->build.spill_words;
+		host.nwords = spill->build.spill_nwords;
+		host.rows = spill->build.rows;
+		host.nrows = spill->npartitions;
+		host.total = spill->total_rows;
+		host.routes = spill->routes;
+		host.nroutes = spill->npartitions;
+	}
+	check(state, state->kernels->join_step(machine, &host, &event, &action, &state->status));
+	return action;
+}
+
+/*
+ * A partition of a side whose chunk is full, or whose values outgrew a
+ * chunk: as the level's machine says, it takes a new chunk or writes what
+ * it holds. A shared table's level keeps the rule of its participants'
+ * build: one in memory, or without a chunk, takes a new chunk.
  */
 static void
-evict_partitions(TessHashJoinState *state, bool limited)
+side_full(TessHashJoinState *state, SpillSide *side, int partition)
+{
+	JoinSpill  *spill = state->spill;
+	bool		tail = side->current[partition] != 0;
+	bool		add;
+
+	if (spill->machine == NULL)
+		add = side->parts[partition].resident || !tail;
+	else
+		add = spill_step(state, spill, (TessJoinEvent) {
+			.kind = TESS_JOIN_FULL,
+			.side = side == &spill->build ? 0 : 1,
+			.partition = (uint32) partition,
+			.flag = tail,
+		}).kind == TESS_JOIN_ADD_CHUNK;
+	if (add)
+		side_add_chunk(state, side, partition);
+	else
+		join_side_flush(state, side, partition);
+}
+
+/*
+ * Send the inner side's partitions to disk as the level's machine says (a
+ * shared table's participants decide in shared_sync): while building,
+ * against the memory the node reports, so that what it keeps is what it
+ * says; at the end of the build, by the share of the rows in memory alone,
+ * after which the machine sets where the outer rows of each partition go.
+ */
+static void
+evict_partitions(TessHashJoinState *state, bool building)
 {
 	JoinSpill  *spill = state->spill;
 	SpillSide  *side = &spill->build;
-	TessSpillWeights weights = join_spill_weights(state);
+	TessJoinEvent event = {
+		.kind = building ? TESS_JOIN_GROWN : TESS_JOIN_BUILD_END,
+		.memory = building ? join_memory(state) : 0,
+	};
 
 	Assert(!spill->shared);
-	for (uint32 evicted = 0;; evicted++)
+	for (;;)
 	{
-		int32		partition;
+		TessJoinAction action;
+		bool		freed = true;
 
 		CHECK_FOR_INTERRUPTS();
-		check(state, state->kernels->table_spill_evict(side->spill_words, side->spill_nwords,
-													   false, &weights,
-													   limited ? join_memory(state) : 0,
-													   limited ? tess_hash_memory_limit() :
-													   PG_UINT64_MAX,
-													   side->rows, (Size) spill->npartitions,
-													   spill->total_rows, evicted, &partition,
-													   &state->status));
-		if (partition < 0 || !join_side_send(state, side, partition))
+		action = spill_step(state, spill, event);
+		if (action.kind == TESS_JOIN_DONE)
 			break;
+		if (action.kind == TESS_JOIN_DEMOTE)
+			join_side_demote(state, side, (int) action.partition);
+		else
+		{
+			Size		held = side->parts[action.partition].bytes;
+
+			Assert(action.kind == TESS_JOIN_EVICT);
+			side_evict(state, side, (int) action.partition);
+			join_side_compact(side);
+			freed = side->parts[action.partition].bytes < held;
+		}
+		event = (TessJoinEvent) {
+			.kind = TESS_JOIN_SENT,
+			.flag = freed,
+			.memory = building ? join_memory(state) : 0,
+		};
 	}
 }
 
@@ -966,43 +1020,124 @@ join_spill_shape(TessHashJoinState *state)
 }
 
 /*
- * A level of partitions by the level plan (tess_spill_plan), for an inner
- * side of expected bytes, as the current one, by the hash bits the level
- * above leaves; with forced partitions, those a shared table's every
- * participant took.
+ * The words a level keeps of an outer row, each once: the columns of the
+ * outer child the node reads, those asked for, by their types; then each
+ * key, one a word does not hold, such as a text, by the 64-bit hash the
+ * table keys by, a word of its own, so that its value is not copied and
+ * a batch read back is not hashed again; a word key by its column, by its
+ * own type when no column asked for it, such as an expression the child
+ * computes. Into stored, the child's column of each word, -(k + 1) for
+ * the hash of key k; word_of, the word of each of the nchild child columns
+ * plus one, zeroed; key_words, the word of each key plus one; and the
+ * words' types. Their count.
  */
-JoinSpill *
-join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
-			 int forced)
+static int
+outer_layout(TessHashJoinState *state, int *stored, int *word_of, int *key_words,
+			 int16 *typlens, bool *byvals)
+{
+	int			nstored = 0;
+
+	for (int index = 0; index < state->compact.nouter; index++)
+	{
+		int			scan = state->compact.outer_columns[index];
+		int			child = state->child_columns[scan];
+
+		if (word_of[child] != 0)
+			continue;
+		stored[nstored] = child;
+		typlens[nstored] = state->typlens[scan];
+		byvals[nstored] = state->typbyvals[scan];
+		word_of[child] = ++nstored;
+	}
+	for (int key = 0; key < state->keys.nkeys; key++)
+	{
+		int			child = state->keys.outer_keys[key];
+
+		if (OidIsValid(state->keys.hashers[key].fn_oid))
+		{
+			stored[nstored] = -(key + 1);
+			typlens[nstored] = sizeof(int64);
+			byvals[nstored] = true;
+			key_words[key] = ++nstored;
+			continue;
+		}
+		if (word_of[child] == 0)
+		{
+			stored[nstored] = child;
+			outer_column_type(state, child, &typlens[nstored], &byvals[nstored]);
+			word_of[child] = ++nstored;
+		}
+		key_words[key] = word_of[child];
+	}
+	return nstored;
+}
+
+/* The outer child's columns an outer row is read from: one past the last. */
+static int
+outer_children(TessHashJoinState *state)
+{
+	int			nchild = 0;
+
+	for (int key = 0; key < state->keys.nkeys; key++)
+		nchild = Max(nchild, state->keys.outer_keys[key] + 1);
+	for (int index = 0; index < state->compact.nouter; index++)
+		nchild = Max(nchild, state->child_columns[state->compact.outer_columns[index]] + 1);
+	return nchild;
+}
+
+/*
+ * A build starts: the machine of the join's spill, whose table fits so
+ * far, with what every level shares: hash_mem, the shape of the levels,
+ * the outer rows a level keeps and the weights of the settings.
+ */
+void
+join_spill_begin(TessHashJoinState *state)
+{
+	int			nwords = state->keys.nkeys + state->compact.nouter;
+	int		   *stored = palloc(sizeof(int) * Max(nwords, 1));
+	int		   *word_of = palloc0(sizeof(int) * Max(outer_children(state), 1));
+	int			key_words[TESS_TABLE_MAX_KEYS];
+	int16	   *typlens = palloc(sizeof(int16) * Max(nwords, 1));
+	bool	   *byvals = palloc(sizeof(bool) * Max(nwords, 1));
+	TessJoinParams *params = &state->spill_params;
+	int			nstored = outer_layout(state, stored, word_of, key_words, typlens, byvals);
+
+	*params = (TessJoinParams) {
+		.limit = tess_hash_memory_limit(),
+		.shape = join_spill_shape(state),
+		.outer_words = (uint64) nstored,
+		.page = BLCKSZ,
+		.start = tess_join_spill_start,
+		.target = tess_join_spill_target,
+		.spilled = tess_join_spill_spilled_weight,
+		.resident = tess_join_spill_resident_share,
+		.tail = tess_join_spill_tail_weight,
+	};
+	for (int word = 0; word < nstored; word++)
+		params->outer_values |= !byvals[word];
+	pfree(stored);
+	pfree(word_of);
+	pfree(typlens);
+	pfree(byvals);
+	check(state, state->kernels->join_init(&state->machine, params, &state->status));
+}
+
+/*
+ * A level of partitions by the plan of start, a TESS_JOIN_START, below
+ * parent or the first; its machine, when it has one, is the caller's to
+ * set and to tell it is made (level_made).
+ */
+static JoinSpill *
+spill_create(TessHashJoinState *state, JoinSpill *parent, const TessJoinAction *start)
 {
 	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-	TessSpillShape shape = join_spill_shape(state);
-	TessSpillLevel at = {
-		.expected = expected,
-		.limit = tess_hash_memory_limit(),
-		.shift = parent == NULL ? 0 : parent->below,
-		.partitions = (uint32) forced,
-	};
-	TessSpillPlan plan;
-	Size		chunk_len;
-	Size		outer_len;
-	int			npartitions;
+	Size		chunk_len = start->plan.chunk_len;
+	int			npartitions = (int) start->plan.partitions;
 	JoinSpill  *spill;
 	int16	   *typlens;
 	bool	   *byvals;
-	int			nchild = 0;
-	int			nstored = 0;
-
-	/* A level below has what the levels above leave, a quarter at least. */
-	if (parent != NULL)
-	{
-		Size		used = join_spill_memory(state, parent, NULL);
-
-		at.limit = used < at.limit / 4 * 3 ? at.limit - used : at.limit / 4;
-	}
-	check(state, state->kernels->spill_plan(&shape, &at, &plan, &state->status));
-	npartitions = (int) plan.partitions;
-	chunk_len = plan.chunk_len;
+	int			nchild = outer_children(state);
+	int			nstored;
 
 	spill = MemoryContextAllocZero(context, sizeof(JoinSpill));
 	state->spill = spill;
@@ -1017,8 +1152,8 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 												 "TessHashJoin outer block",
 												 TESS_CHUNK_CONTEXT_SIZES);
 	spill->npartitions = npartitions;
-	spill->shift = plan.shift;
-	spill->below = plan.below;
+	spill->shift = start->plan.shift;
+	spill->below = start->plan.below;
 	spill->partition = -1;
 	/* A level's own files; a shared table's first level reads every participant's. */
 	spill->writers = 1;
@@ -1035,90 +1170,28 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 	}
 	side_init(state, &spill->build, state->keys.nkeys, state->keys.inner_kinds, state->npayload, typlens,
 			  byvals, chunk_len, true, npartitions);
-	/* A level of its own counts its partitions' bytes in words of its own. */
-	if (forced == 0)
-	{
-		SpillSide  *build = &spill->build;
-		uint32		in_force;
 
-		build->spill_nwords = plan.words;
-		build->spill_words = MemoryContextAlloc(build->context,
-												sizeof(uint64) * build->spill_nwords);
-		build->kernels = state->kernels;
-		check(state, state->kernels->table_spill_init(build->spill_words, build->spill_nwords,
-													  false, 0, &state->status));
-		check(state, state->kernels->table_spill_split(build->spill_words, build->spill_nwords,
-													   false, (uint32) npartitions, &in_force,
-													   &state->status));
-	}
-
-	/*
-	 * The outer side: the columns of the outer child the node reads, the
-	 * keys and the columns asked for, each once.
-	 */
-	for (int key = 0; key < state->keys.nkeys; key++)
-		nchild = Max(nchild, state->keys.outer_keys[key] + 1);
-	for (int index = 0; index < state->compact.nouter; index++)
-		nchild = Max(nchild, state->child_columns[state->compact.outer_columns[index]] + 1);
+	/* The outer side: the words of outer_layout, in chunks the plan sized. */
 	spill->nchild = nchild;
 	spill->word_of = MemoryContextAllocZero(spill->context, sizeof(int) * Max(nchild, 1));
 	spill->stored = MemoryContextAlloc(spill->context,
 									   sizeof(int) * (state->keys.nkeys + state->compact.nouter));
 	typlens = repalloc(typlens, sizeof(int16) * (state->keys.nkeys + state->compact.nouter));
 	byvals = repalloc(byvals, sizeof(bool) * (state->keys.nkeys + state->compact.nouter));
-	for (int index = 0; index < state->compact.nouter; index++)
-	{
-		int			scan = state->compact.outer_columns[index];
-		int			child = state->child_columns[scan];
-
-		if (spill->word_of[child] != 0)
-			continue;
-		spill->stored[nstored] = child;
-		typlens[nstored] = state->typlens[scan];
-		byvals[nstored] = state->typbyvals[scan];
-		spill->word_of[child] = ++nstored;
-	}
-	/*
-	 * Each key: one a word does not hold, such as a text, by the 64-bit
-	 * hash the table keys by, a word of its own, so that its value is not
-	 * copied and a batch read back is not hashed again; a word key by its
-	 * column, by its own type when no column asked for it, such as an
-	 * expression the child computes.
-	 */
-	for (int key = 0; key < state->keys.nkeys; key++)
-	{
-		int			child = state->keys.outer_keys[key];
-
-		if (OidIsValid(state->keys.hashers[key].fn_oid))
-		{
-			spill->stored[nstored] = -(key + 1);
-			typlens[nstored] = sizeof(int64);
-			byvals[nstored] = true;
-			spill->key_words[key] = ++nstored;
-			continue;
-		}
-		if (spill->word_of[child] == 0)
-		{
-			spill->stored[nstored] = child;
-			outer_column_type(state, child, &typlens[nstored], &byvals[nstored]);
-			spill->word_of[child] = ++nstored;
-		}
-		spill->key_words[key] = spill->word_of[child];
-	}
+	nstored = outer_layout(state, spill->stored, spill->word_of, spill->key_words, typlens,
+						   byvals);
+	Assert((uint64) nstored == state->spill_params.outer_words);
 	/* What tess_spill_columns_append_partitioned takes; no plan reaches it. */
 	if (nstored > 2048)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("TessHashJoin cannot spill more than 2048 outer columns")));
-	/* A chunk of outer rows holds four at least, however wide they are. */
-	outer_len = Max(chunk_len, TESS_SPILL_COLUMNS_HEADER +
-					sizeof(uint64) * 4 * ((Size) tess_spill_columns_null_lanes(nstored) + nstored));
 	side_init(state, &spill->probe, state->keys.nkeys, state->keys.outer_kinds, nstored, typlens, byvals,
-			  outer_len, false, npartitions);
+			  start->outer_len, false, npartitions);
 	/* The outer rows a shared table answers: one partition of their own. */
 	if (state->parallel.shared != NULL && parent == NULL)
 		side_init(state, &spill->resident, state->keys.nkeys, state->keys.outer_kinds, nstored,
-				  typlens, byvals, outer_len, false, 1);
+				  typlens, byvals, start->outer_len, false, 1);
 	spill->rows = &spill->probe;
 	tess_columns_reader_init(&spill->outer, state->kernels, spill->block_context, nstored,
 							 nstored, spill->probe.byvals, spill->probe.typlens);
@@ -1152,21 +1225,87 @@ join_spill_create(TessHashJoinState *state, JoinSpill *parent, double expected,
 }
 
 /*
- * The table outgrew hash_mem: the first level of partitions, for twice
- * what was read, or what the planner expects if more; a Bloom filter of
- * every inner row, and the table built so far moved into the partitions.
+ * A level its machine started is made: the words that count its
+ * partitions' bytes and where the outer rows of each go, which the
+ * machine then takes.
+ */
+static void
+level_made(TessHashJoinState *state, JoinSpill *spill, TessJoinMachine *machine,
+		   const TessJoinAction *start)
+{
+	SpillSide  *build = &spill->build;
+
+	spill->machine = machine;
+	build->spill_nwords = start->plan.words;
+	build->spill_words = MemoryContextAllocZero(build->context,
+												sizeof(uint64) * build->spill_nwords);
+	build->kernels = state->kernels;
+	spill->routes = MemoryContextAllocZero(spill->context, Max(spill->npartitions, 1));
+	(void) spill_step(state, spill, (TessJoinEvent) {.kind = TESS_JOIN_MADE});
+}
+
+/*
+ * A level below parent, which splits a partition of expected bytes: it
+ * has what the levels above leave of hash_mem, a quarter at least.
+ */
+static JoinSpill *
+spill_below(TessHashJoinState *state, JoinSpill *parent, double expected)
+{
+	TessJoinMachine machine;
+	TessJoinAction start;
+	Size		limit = tess_hash_memory_limit();
+	Size		used = join_spill_memory(state, parent, NULL);
+	JoinSpill  *spill;
+
+	limit = used < limit / 4 * 3 ? limit - used : limit / 4;
+	check(state, state->kernels->join_below(&machine, &state->spill_params, parent->level + 1,
+											expected, limit, parent->below, &start,
+											&state->status));
+	spill = spill_create(state, parent, &start);
+	spill->own = machine;
+	level_made(state, spill, &spill->own, &start);
+	return spill;
+}
+
+/*
+ * A shared table's first level, whose partitions the participant that
+ * split the table planned: the shared build decides the rest of it.
+ */
+JoinSpill *
+join_spill_given(TessHashJoinState *state, uint32 partitions)
+{
+	TessJoinAction start;
+
+	check(state, state->kernels->join_given(&state->spill_params, partitions, &start,
+											&state->status));
+	return spill_create(state, NULL, &start);
+}
+
+/*
+ * Before an inner batch goes into the table in memory: past hash_mem with
+ * needed bytes, as the machine decides, the first level of partitions,
+ * for twice what was read, or what the planner expects if more; a Bloom
+ * filter of every inner row, and the table built so far moved into the
+ * partitions.
  */
 void
-join_start_spill(TessHashJoinState *state)
+join_spill_check(TessHashJoinState *state, uint64 needed)
 {
-	double		bytes = (double) state->table_bytes + state->values.bytes;
+	TessJoinAction start;
 	JoinSpill  *spill;
 	uint64		expected_rows;
 
-	spill = join_spill_create(state, NULL,
-							  state->kernels->spill_expected(bytes, (double) state->build_rows,
-															 state->inner_rows, 1),
-							  0);
+	start = spill_step(state, NULL, (TessJoinEvent) {
+		.kind = TESS_JOIN_INNER,
+		.held = state->table_bytes + state->values.bytes,
+		.rows = state->build_rows,
+		.estimate = state->inner_rows,
+		.memory = needed,
+	});
+	if (start.kind != TESS_JOIN_START)
+		return;
+	spill = spill_create(state, NULL, &start);
+	level_made(state, spill, &state->machine, &start);
 
 	/* A filter of every inner row, sized for the rows expected. */
 	state->counters[JOIN_BLOOM_FILTERS]++;
@@ -1298,12 +1437,7 @@ join_split_chunk(TessHashJoinState *state, void *base, Size len, char *const *va
 			}
 		}
 		if (full >= 0)
-		{
-			if (side->parts[full].resident || side->current[full] == 0)
-				side_add_chunk(state, side, full);
-			else
-				join_side_flush(state, side, full);
-		}
+			side_full(state, side, full);
 		else if (count == 0)
 			break;
 		/* The records split so far refer to their copies: values may go. */
@@ -1346,9 +1480,8 @@ split_table(TessHashJoinState *state)
 }
 
 /*
- * Make room for the rows still pending: a partition whose chunk is full,
- * or that has none, gets a new one while resident or without a tail, and
- * writes its tail otherwise.
+ * Make room for the rows still pending: each partition whose chunk is
+ * full, or that has none, once (side_full).
  */
 static void
 make_chunks(TessHashJoinState *state, SpillSide *side, const TessRowMask *pending,
@@ -1366,10 +1499,7 @@ make_chunks(TessHashJoinState *state, SpillSide *side, const TessRowMask *pendin
 		if (part->stamp == spill->stamp)
 			continue;
 		part->stamp = spill->stamp;
-		if (part->resident || side->current[partition] == 0)
-			side_add_chunk(state, side, partition);
-		else
-			join_side_flush(state, side, partition);
+		side_full(state, side, partition);
 	}
 }
 
@@ -1570,9 +1700,9 @@ join_finish_spill_build(TessHashJoinState *state)
 	uint64		rows = 0;
 
 	/*
-	 * Resident partitions holding less than a quarter of the inner rows go
-	 * to disk too: probing them would cost every outer batch the whole
-	 * probe for the few rows of theirs, more than writing them saves.
+	 * Resident partitions holding too few of the inner rows go to disk too:
+	 * probing them would cost every outer batch the whole probe for the few
+	 * rows of theirs, more than writing them saves.
 	 */
 	evict_partitions(state, false);
 
@@ -1666,6 +1796,8 @@ start_joining(TessHashJoinState *state)
 
 	spill->joining = true;
 	spill->partition = -1;
+	if (spill->machine != NULL)
+		(void) spill_step(state, spill, (TessJoinEvent) {.kind = TESS_JOIN_OUTER_END});
 	/* Every outer row is written or answered: the filter's work is done. */
 	if (spill->bloom != NULL)
 		pfree(spill->bloom);
@@ -2006,7 +2138,7 @@ start_level(TessHashJoinState *state, int partition)
 	JoinSpill  *spill;
 	bool		records = false;
 
-	spill = join_spill_create(state, parent, (double) part->disk_bytes + part->bytes, 0);
+	spill = spill_below(state, parent, (double) part->disk_bytes + part->bytes);
 	spill->input_rows = from->rows[partition];
 	spill->total_rows = from->rows[partition];
 	state->counters[JOIN_SPLITS]++;
@@ -2272,11 +2404,11 @@ join_spill_key_hashes(TessBatch *batch, int key, TessDatumColumn *result)
 
 /*
  * An outer batch, while the table spills: the valid rows of the
- * partitions on disk leave the batch's probe. Those of a partition with
- * no inner row, and those the filter of every inner row rejects, have no
- * pair and stay to be answered now; the others are written as records of
- * their partitions, leave the rows to answer and come back when their
- * partition is joined.
+ * partitions on disk leave the batch's probe, by the routes the level's
+ * machine set. Those of a partition with no inner row, and those the
+ * filter of every inner row rejects, have no pair and stay to be answered
+ * now; the others are written as rows of their partitions, leave the rows
+ * to answer and come back when their partition is joined.
  */
 void
 join_spill_outer(TessHashJoinState *state, TessBatch *batch, TessRowMask *valid)
@@ -2298,13 +2430,14 @@ join_spill_outer(TessHashJoinState *state, TessBatch *batch, TessRowMask *valid)
 		while (bits != 0)
 		{
 			int			bit = pg_rightmost_one_pos64(bits);
-			int			partition = spill_partition(spill, state->probe.hashes[word * 64 + bit]);
+			uint8		route = spill->routes[spill_partition(spill,
+															  state->probe.hashes[word * 64 + bit])];
 
 			bits &= bits - 1;
-			if (spill->build.parts[partition].resident)
+			if (route == TESS_JOIN_ROUTE_PROBE)
 				continue;
 			out |= UINT64CONST(1) << bit;
-			if (spill->build.rows[partition] > 0)
+			if (route == TESS_JOIN_ROUTE_WRITE)
 				written |= UINT64CONST(1) << bit;
 		}
 		valid->bits[word] &= ~out;

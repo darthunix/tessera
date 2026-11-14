@@ -127,6 +127,10 @@
 	X(spill_expected) \
 	X(spill_columns_pair) \
 	X(spill_columns_check) \
-	X(spill_columns_window)
+	X(spill_columns_window) \
+	X(join_init) \
+	X(join_below) \
+	X(join_given) \
+	X(join_step)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

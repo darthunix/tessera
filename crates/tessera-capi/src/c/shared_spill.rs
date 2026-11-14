@@ -34,7 +34,7 @@ pub(super) fn check_aligned(words: *mut u64, what: &str) -> anyhow::Result<()> {
 
 /// Refuse spill words that are null, misaligned, or of a count that is
 /// no spill's, before a slice is made of them.
-fn check_spill_words(words: *mut u64, nwords: usize) -> anyhow::Result<()> {
+pub(super) fn check_spill_words(words: *mut u64, nwords: usize) -> anyhow::Result<()> {
     check_aligned(words, "a spill's words")?;
     Ok(check_words(nwords)?)
 }

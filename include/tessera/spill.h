@@ -726,4 +726,186 @@ typedef enum TessSpillSetLayout
 /* The size or offset for a kind, or 0 for an unknown one. */
 extern Size tess_spill_set_layout(TessSpillSetLayout what);
 
+/*
+ * The machine of a join's spill (relspill's join): the protocol of a
+ * table that outgrows its memory, which the join steps with what it saw
+ * and which answers with what the join does next. A machine is plain
+ * words, TESS_JOIN_WORDS of them, which the join keeps for each level of
+ * its spill; a step checks them, and words that are no machine are
+ * refused. The calls are refused, SQLSTATE XX000, with the machine as it
+ * was: an event the machine's phase does not take, a partition past the
+ * level's, regions that are not the level's, and a null argument.
+ */
+#define TESS_JOIN_WORDS 24
+
+typedef struct TessJoinMachine
+{
+	uint64		words[TESS_JOIN_WORDS];
+} TessJoinMachine;
+
+/*
+ * What every level of a join's spill shares: the memory limit, the shape
+ * of its levels' inner side, the words an outer row stores in a chunk of
+ * columns besides its NULL bits, whether the outer rows keep values by
+ * reference (1) or not (0), the bytes of a file's buffer, and the weights
+ * of the rule that sends partitions to disk (TessSpillWeights), with the
+ * share of the outer tail of a partition on disk counted in reserve.
+ * spare is 0.
+ */
+typedef struct TessJoinParams
+{
+	uint64		limit;
+	TessSpillShape shape;
+	uint64		outer_words;
+	uint32		outer_values;
+	uint32		spare;
+	uint64		page;
+	double		start;
+	double		target;
+	double		spilled;
+	double		resident;
+	double		tail;
+} TessJoinParams;
+
+/*
+ * The regions of a level a step reads: the level's spill words, nwords of
+ * them, whose bytes the join counts by partition; the inner rows of each
+ * of its nrows partitions, and of the level; and a byte for each of its
+ * nroutes partitions, which the end of the build sets to a
+ * TessJoinRoute. Before a level is made, all are empty.
+ */
+typedef struct TessJoinHost
+{
+	uint64	   *words;
+	Size		nwords;
+	const uint64 *rows;
+	Size		nrows;
+	uint64		total;
+	uint8	   *routes;
+	Size		nroutes;
+} TessJoinHost;
+
+typedef enum TessJoinRoute
+{
+	/* In memory: the outer rows probe the table now. */
+	TESS_JOIN_ROUTE_PROBE = 0,
+	/* On disk: the outer rows are written by their partition. */
+	TESS_JOIN_ROUTE_WRITE = 1,
+	/* On disk without an inner row: the outer rows have no pair. */
+	TESS_JOIN_ROUTE_ANSWER = 2
+} TessJoinRoute;
+
+typedef enum TessJoinEventKind
+{
+	/*
+	 * A batch of inner rows is about to go into the table in memory, which
+	 * holds held bytes in rows rows of the estimate the join expects; with
+	 * the batch it would take memory bytes.
+	 */
+	TESS_JOIN_INNER = 1,
+	/* The level of the last TESS_JOIN_START is made, with its words. */
+	TESS_JOIN_MADE = 2,
+	/*
+	 * A partition of side (0 inner, 1 outer) has no room for its next row,
+	 * or its values passed a chunk; flag 1 when it holds a chunk of rows.
+	 */
+	TESS_JOIN_FULL = 3,
+	/* Rows went into the partitions: the join's memory now. */
+	TESS_JOIN_GROWN = 4,
+	/*
+	 * The partition of the last TESS_JOIN_DEMOTE or TESS_JOIN_EVICT went
+	 * to disk: flag 1 when that freed memory; the memory now.
+	 */
+	TESS_JOIN_SENT = 5,
+	/* The inner rows are read. */
+	TESS_JOIN_BUILD_END = 6,
+	/* The outer rows are read. */
+	TESS_JOIN_OUTER_END = 7
+} TessJoinEventKind;
+
+typedef struct TessJoinEvent
+{
+	uint32		kind;
+	uint32		side;
+	uint32		partition;
+	uint32		flag;
+	uint64		held;
+	uint64		rows;
+	double		estimate;
+	uint64		memory;
+} TessJoinEvent;
+
+typedef enum TessJoinActionKind
+{
+	/* Nothing more: the event is done. */
+	TESS_JOIN_DONE = 0,
+	/*
+	 * The table spills: make the level of plan, with chunks of outer rows
+	 * of outer_len bytes, then report TESS_JOIN_MADE.
+	 */
+	TESS_JOIN_START = 1,
+	/* Give the partition of the event a new chunk. */
+	TESS_JOIN_ADD_CHUNK = 2,
+	/* Write what the partition of the event holds; its chunk takes the next rows. */
+	TESS_JOIN_FLUSH = 3,
+	/*
+	 * Send partition, in memory, to disk, keeping its last chunk, emptied,
+	 * as its tail; then report TESS_JOIN_SENT.
+	 */
+	TESS_JOIN_DEMOTE = 4,
+	/* Partition, on disk, writes and frees what it holds; then TESS_JOIN_SENT. */
+	TESS_JOIN_EVICT = 5
+} TessJoinActionKind;
+
+typedef struct TessJoinAction
+{
+	uint32		kind;
+	uint32		partition;
+	Size		outer_len;
+	TessSpillPlan plan;
+} TessJoinAction;
+
+/* Make *machine the machine of a join whose table fits so far. */
+extern TessStatusCode tess_join_init(TessJoinMachine *machine, const TessJoinParams *params,
+									 TessStatus *status);
+
+/*
+ * Make *machine the machine of level level below the first, which splits a
+ * partition of expected bytes within limit from hash bit shift; the level
+ * to make, a TESS_JOIN_START, into *action.
+ */
+extern TessStatusCode tess_join_below(TessJoinMachine *machine, const TessJoinParams *params,
+									  uint32 level, double expected, uint64 limit,
+									  uint32 shift, TessJoinAction *action,
+									  TessStatus *status);
+
+/*
+ * The level of a build several processes share, whose partitions one of
+ * them planned: a TESS_JOIN_START into *action.
+ */
+extern TessStatusCode tess_join_given(const TessJoinParams *params, uint32 partitions,
+									  TessJoinAction *action, TessStatus *status);
+
+/* Give *machine the join's event and its next action into *action. */
+extern TessStatusCode tess_join_step(TessJoinMachine *machine, const TessJoinHost *host,
+									 const TessJoinEvent *event, TessJoinAction *action,
+									 TessStatus *status);
+
+/* What tess_join_layout gives the size or offset of. */
+typedef enum TessJoinLayout
+{
+	TESS_JOIN_MACHINE_SIZE = 1,
+	TESS_JOIN_PARAMS_SIZE = 2,
+	TESS_JOIN_PARAMS_TAIL_OFFSET = 3,
+	TESS_JOIN_HOST_SIZE = 4,
+	TESS_JOIN_HOST_NROUTES_OFFSET = 5,
+	TESS_JOIN_EVENT_SIZE = 6,
+	TESS_JOIN_EVENT_MEMORY_OFFSET = 7,
+	TESS_JOIN_ACTION_SIZE = 8,
+	TESS_JOIN_ACTION_PLAN_OFFSET = 9
+} TessJoinLayout;
+
+/* The size or offset for a kind, or 0 for an unknown one. */
+extern Size tess_join_layout(TessJoinLayout what);
+
 #endif							/* TESSERA_SPILL_H */

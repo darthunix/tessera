@@ -266,7 +266,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       messages through the writer and shows them through the reader.
       Check: `make installcheck`; the parallel tests of the suite
       `join`; `cargo ab measure` of the cases of `join` that spill
-- [ ] 3.13 Write the machine of the join's spill, its build: the spill
+- [x] 3.13 Write the machine of the join's spill, its build: the spill
       at level 0 and the partitions sent to disk; the node still
       decides the rest. An outer row keeps a hashed key on disk as the
       64-bit hash the table keys by, a word of 8 bytes, not as its
