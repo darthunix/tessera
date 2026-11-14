@@ -221,7 +221,7 @@ one on the M5 Pro. The cases drawn at random are:
   halving is a branch, and over values that grow with the row the
   predictor learned the steps of the rows a selection takes. At 8 rows
   a word over 64 and 65 keys the Intel Core missed 58 to 75 times a
-  call there, where the model says about 135
+  call there, where the model says about 144
   ([`halving_misses`](support/fixture.rs) and
   [`exit_misses`](support/fixture.rs)).
 

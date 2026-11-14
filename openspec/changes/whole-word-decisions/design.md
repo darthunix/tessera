@@ -164,7 +164,7 @@ grow with the row the predictor learned the steps of the rows a
 selection takes, whatever rows it takes. At 8 rows a word over 64 and
 65 keys the Intel Mac missed 58 to 75 times a call
 (`compare-yC36rk`), where a predictor that has not seen the values
-misses about 135 by the model, 123 in the search and 12 at the exits.
+misses about 144 by the model, 132 in the search and 12 at the exits.
 On the M5 Pro a step is a select, and the order of the values does not
 matter there.
 
