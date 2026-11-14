@@ -150,10 +150,17 @@ tess_spill_value_damaged(void)
  * tessera-capi sizes a TOAST pointer by these tags and bodies (ondisk_body,
  * varlena_size): its writer copies one, its check ends one.
  */
+#if PG_VERSION_NUM >= 200000
 StaticAssertDecl(VARTAG_INDIRECT == 1 && sizeof(varatt_indirect) == 8 &&
 				 VARTAG_ONDISK_OID == 18 && sizeof(varatt_external_oid) == 16 &&
 				 VARTAG_ONDISK_OID8 == 4 && sizeof(varatt_external_oid8) == 20,
 				 "the TOAST pointers as tessera-capi sizes them");
+#else
+/* PostgreSQL 19 has the one with a 32-bit chunk id alone, by its old names. */
+StaticAssertDecl(VARTAG_INDIRECT == 1 && sizeof(varatt_indirect) == 8 &&
+				 VARTAG_ONDISK == 18 && sizeof(varatt_external) == 16,
+				 "the TOAST pointers as tessera-capi sizes them");
+#endif
 
 bool
 tess_spill_value_fits_other(const char *value, Size room, int16 typlen)

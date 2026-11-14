@@ -14,7 +14,10 @@ compile_error!("the varlena headers here are little-endian's");
 /// 2-byte header, by its tag: VARTAG_ONDISK_OID's `varatt_external_oid`
 /// of 16 bytes, VARTAG_ONDISK_OID8's `varatt_external_oid8` of 20, as
 /// `runtime/spill.c` asserts against PostgreSQL's headers; `None` for
-/// another tag.
+/// another tag. PostgreSQL 19 has tag 18 alone: there tag 4 is no
+/// pointer, and a damaged value that bears it passes as 22 bytes, of
+/// which the core then sizes 2 (`VARTAG_SIZE` gives 0, or stops at its
+/// assertion in a build with them), so no read leaves what was checked.
 pub(super) fn ondisk_body(tag: u8) -> Option<usize> {
     match tag {
         18 => Some(16),

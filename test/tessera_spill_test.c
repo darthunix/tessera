@@ -18,6 +18,11 @@
 
 #include "injection_library.h"
 
+/* PostgreSQL 19 names a TOAST pointer to data on disk VARTAG_ONDISK. */
+#if PG_VERSION_NUM < 200000
+#define VARTAG_ONDISK_OID VARTAG_ONDISK
+#endif
+
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_spill_serial);

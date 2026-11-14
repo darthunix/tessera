@@ -24,7 +24,7 @@ The words used below:
 
 ## 2. The work
 
-- [ ] 2.1 The five places read 19's interfaces under `PG_VERSION_NUM
+- [x] 2.1 The five places read 19's interfaces under `PG_VERSION_NUM
       < 200000`; `abi.h` stops the build below 19 and says so; the
       comments of `sort.c` and of the Rust TOAST check name 19. Check:
       the suites on both cores; `objdump -d` of the changed object
