@@ -507,9 +507,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 	 * partial mode they go out instead (agg_group_drain).
 	 */
 	if (state->spill == NULL && (!state->partial || state->partial_spill) &&
-		!state->has_distinct && !state->row_spill &&
-		state->table_bytes > tess_hash_memory_limit() / 8 * 7)
-		agg_start_spill(state);
+		!state->has_distinct && !state->row_spill)
+		agg_spill_check(state, false);
 	/*
 	 * Generic states past hash_mem: the table freezes, new groups' rows go
 	 * to disk; in partial mode the groups go out instead (agg_group_drain).
@@ -550,6 +549,7 @@ agg_group_drain(TessAggState *state)
 	int			ndicts = 0;
 
 	agg_spill_free(state);
+	agg_spill_begin(state);
 	rows_spill_free(state);
 	state->rows_level = 0;
 	state->rows_shift = 0;
@@ -589,7 +589,7 @@ agg_group_drain(TessAggState *state)
 			if (!state->row_spill && stats.records * 2 > state->rows - state->emit_rows)
 			{
 				state->partial_spill = true;
-				agg_start_spill(state);
+				agg_spill_check(state, true);
 				continue;
 			}
 			state->emit_rows = state->rows;

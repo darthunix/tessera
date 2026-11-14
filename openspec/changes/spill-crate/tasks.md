@@ -286,7 +286,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       across calls; the decisions of C go. Check: the property test;
       the cases of tails and of early stops; `make installcheck`;
       `make crosscheck`
-- [ ] 3.17 Write the machine of the grouping's spill, for its groups,
+- [x] 3.17 Write the machine of the grouping's spill, for its groups,
       and make the node step it. Check: the property test against a
       grouping in memory; `make installcheck`; `cargo ab measure` of
       the family `spill`

@@ -285,7 +285,16 @@ typedef struct TessAggState
 	 */
 	uint32		rows_shift;
 	bool		rows_last;
+	/*
+	 * The machine of the groups' spill (relspill's group), which watches a
+	 * build from its start, and what every level of it shares.
+	 */
+	TessGroupMachine machine;
+	TessGroupParams spill_params;
 } TessAggState;
+
+/* The share of hash_mem past which the groups spill, the rest a batch's. */
+#define AGG_SPILL_FILL 0.875
 
 /* Raise the error a kernel or table call stored, if it failed. */
 #define check(state, code) tess_status_check((code), &(state)->status)
@@ -320,7 +329,8 @@ extern void agg_reserve_chunks(TessAggState *state, int nchunks);
  */
 #define ROWS_PART_BITS 5
 #define ROWS_PARTS (1 << ROWS_PART_BITS)
-extern void agg_start_spill(TessAggState *state);
+extern void agg_spill_begin(TessAggState *state);
+extern void agg_spill_check(TessAggState *state, bool force);
 extern void agg_make_room(TessAggState *state);
 extern void agg_find_partitioned(TessAggState *state, TessRowMask *pending,
 								 TessRowMask *inserted);
