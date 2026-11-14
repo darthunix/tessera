@@ -2,7 +2,7 @@ use core::cell::Cell;
 
 use proptest::prelude::*;
 
-use super::model::{Counts, Model, Ran, Regions, Row, hash, pairs};
+use super::model::{Counts, Kind as JoinKind, Model, Ran, Regions, Row, hash, joined};
 use super::*;
 use crate::Kind;
 use crate::set::tests::property;
@@ -31,6 +31,8 @@ fn params(limit: u64) -> Params {
         outer_words: 2,
         outer_values: 0,
         preserve_inner: 0,
+        unmatched_outer: 0,
+        spare: 0,
         page: 512,
         start: 1.0,
         target: 1.0,
@@ -411,7 +413,13 @@ fn a_shared_level_takes_the_partitions_given() {
         (5, 1, 900_000)
     );
     assert_eq!(below.shift, start.plan.below);
-    assert_eq!(join.step(take(6), &mut regions.host()), Ok(Action::Open(6)));
+    assert_eq!(
+        join.step(take(6), &mut regions.host()),
+        Ok(Action::Open {
+            partition: 6,
+            pieces: false
+        })
+    );
     assert_eq!(
         wrong(join.step(take(16), &mut regions.host())),
         Rule::Partition
@@ -812,7 +820,7 @@ fn partitions_on_disk_are_released_joined_or_split() {
 }
 
 #[test]
-fn a_partition_too_large_to_split_is_joined_whole() {
+fn a_partition_too_large_to_split_is_joined_in_pieces() {
     let limit = 1 << 20;
     // Preserved inner rows keep partition 3 though it has no outer row.
     let params = Params {
@@ -839,10 +847,38 @@ fn a_partition_too_large_to_split_is_joined_whole() {
     let next = Event::Next { memory: 0 };
     assert_eq!(wrong(join.step(next, &mut short.host())), Rule::JoinDisk);
     assert_eq!(join, before);
-    assert_eq!(join.step(next, &mut regions.host()), Ok(Action::Open(1)));
-    // Partition 2: no inner row to give out.
+    // Larger than two thirds of what the limit leaves: in pieces.
+    let room = (limit - 2 * join.outer_len) / 3 * 2;
+    assert!(800_000 > room);
+    let open = Action::Open {
+        partition: 1,
+        pieces: true,
+    };
+    assert_eq!(join.step(next, &mut regions.host()), Ok(open));
+    assert_eq!(wrong(join.step(next, &mut regions.host())), Rule::JoinEvent);
+    let mut step = |event| join.step(event, &mut regions.host());
+    let records = |len| Event::Block { values: false, len };
+    assert_eq!(step(Event::Piece { memory: 0 }), Ok(Action::Done));
+    assert_eq!(step(records(room - 1)), Ok(Action::Load));
+    // Below the room the piece goes on; past it, without values, it ends
+    // at the next block of records.
+    assert_eq!(step(records(1)), Ok(Action::Load));
+    assert_eq!(step(records(1000)), Ok(Action::Carry));
+    assert_eq!(step(Event::PassEnd), Ok(Action::NextPiece));
+    // More memory in use leaves a smaller room.
+    let memory = 2 * room / 3;
+    assert_eq!(step(Event::Piece { memory }), Ok(Action::Done));
+    assert_eq!(step(records(1000)), Ok(Action::Load));
+    assert_eq!(step(Event::FileEnd), Ok(Action::Done));
+    // The file is done, and no outer row goes out without a pair.
+    assert_eq!(step(Event::PassEnd), Ok(Action::Done));
+    // Partition 2: no inner row to give out; 3 whole.
     assert_eq!(join.step(next, &mut regions.host()), Ok(Action::Release(2)));
-    assert_eq!(join.step(next, &mut regions.host()), Ok(Action::Open(3)));
+    let whole = Action::Open {
+        partition: 3,
+        pieces: false,
+    };
+    assert_eq!(join.step(next, &mut regions.host()), Ok(whole));
     // With most of the limit in use, a level below has a quarter of it.
     let (mut again, mut regions) = joining(&params);
     regions.outer = vec![0, 100, 0, 0];
@@ -852,6 +888,69 @@ fn a_partition_too_large_to_split_is_joined_whole() {
         panic!("a split");
     };
     assert_eq!(below.limit, limit / 4);
+}
+
+#[test]
+fn a_piece_ends_where_a_group_of_values_starts() {
+    // A left join: its rows without a pair go out in a last pass.
+    let params = Params {
+        unmatched_outer: 1,
+        ..params(1 << 20)
+    };
+    let (mut join, mut regions) = joining(&params);
+    regions.outer = vec![0, 100, 0, 0];
+    regions.disk = vec![0, 4 << 20, 0, 0];
+    regions.rows = vec![0, 7000, 0, 300];
+    let next = Event::Next { memory: 0 };
+    let Ok(Action::Open { pieces: true, .. }) = join.step(next, &mut regions.host()) else {
+        panic!("pieces");
+    };
+    let mut step = |event| join.step(event, &mut regions.host());
+    let block = |values, len| Event::Block { values, len };
+    assert_eq!(step(Event::Piece { memory: 1 << 20 }), Ok(Action::Done));
+    // No room at all: still one group, its values and its records.
+    assert_eq!(step(block(true, 100)), Ok(Action::Load));
+    assert_eq!(step(block(false, 100)), Ok(Action::Load));
+    // Records after records are the rest of the group.
+    assert_eq!(step(block(false, 100)), Ok(Action::Load));
+    assert_eq!(step(block(true, 100)), Ok(Action::Carry));
+    assert_eq!(step(Event::PassEnd), Ok(Action::NextPiece));
+    assert_eq!(step(Event::Piece { memory: 1 << 20 }), Ok(Action::Done));
+    assert_eq!(step(block(true, 100)), Ok(Action::Load));
+    // Values after values: one group still, records not yet come.
+    assert_eq!(step(block(true, 100)), Ok(Action::Load));
+    assert_eq!(step(block(false, 100)), Ok(Action::Load));
+    assert_eq!(step(Event::FileEnd), Ok(Action::Done));
+    assert_eq!(step(Event::PassEnd), Ok(Action::FinalPass));
+    assert_eq!(step(Event::PassEnd), Ok(Action::Done));
+    // Partitions 2 and 3: no outer row.
+    assert_eq!(step(next), Ok(Action::Release(2)));
+    assert_eq!(step(next), Ok(Action::Release(3)));
+    assert_eq!(step(next), Ok(Action::LevelDone));
+}
+
+#[test]
+fn a_piece_ends_only_where_the_records_of_a_group_end() {
+    let (mut join, mut regions) = joining(&params(1 << 20));
+    regions.outer = vec![0, 100, 0, 0];
+    regions.disk = vec![0, 4 << 20, 0, 0];
+    regions.rows = vec![0, 7000, 0, 300];
+    let Ok(Action::Open { pieces: true, .. }) =
+        join.step(Event::Next { memory: 0 }, &mut regions.host())
+    else {
+        panic!("pieces");
+    };
+    let mut step = |event| join.step(event, &mut regions.host());
+    let block = |values, len| Event::Block { values, len };
+    assert_eq!(step(Event::Piece { memory: 0 }), Ok(Action::Done));
+    assert_eq!(step(block(true, 1)), Ok(Action::Load));
+    assert_eq!(step(block(false, 1)), Ok(Action::Load));
+    // The next group's values fill the room: a group holds several
+    // blocks of values, and records have not come since.
+    assert_eq!(step(block(true, u64::MAX / 2)), Ok(Action::Load));
+    assert_eq!(step(block(true, 1)), Ok(Action::Load));
+    assert_eq!(step(block(false, 1)), Ok(Action::Load));
+    assert_eq!(step(block(true, 1)), Ok(Action::Carry));
 }
 
 /// `count` rows of `keys` keys whose hashes fall into `partition` of
@@ -871,18 +970,42 @@ fn rows(keys: &[u32]) -> Vec<Row> {
         .collect()
 }
 
-/// Join through the machine, `batch` inner rows at a time, check the
-/// pairs against a join in memory, and give what ran.
-fn ran(params: &Params, inner: &[u32], outer: &[u32], batch: usize) -> Result<Counts> {
+/// Join through the machine as a join of `kind`, `batch` inner rows at a
+/// time, whose inner rows keep `values` or not, check what it gives
+/// against a join in memory, and give what ran.
+fn ran_as(
+    params: &Params,
+    kind: JoinKind,
+    values: bool,
+    inner: &[u32],
+    outer: &[u32],
+    batch: usize,
+) -> Result<Counts> {
+    let params = Params {
+        unmatched_outer: u32::from(kind.unmatched()),
+        ..*params
+    };
     let (inner, outer) = (rows(inner), rows(outer));
-    let (mut got, ran) = Model::run(params, &inner, &outer, batch)?;
+    let (mut got, ran) = Model::run(&params, kind, values, &inner, &outer, batch)?;
     let mut expected = Vec::new();
-    pairs(&inner, &outer, &mut expected);
+    joined(kind, &inner, &outer, &mut expected);
     got.sort_unstable();
     expected.sort_unstable();
-    assert_eq!(got, expected);
+    assert_eq!(got, expected, "{kind:?}");
     Ok(ran)
 }
+
+/// [`ran_as`] an inner join of rows without values.
+fn ran(params: &Params, inner: &[u32], outer: &[u32], batch: usize) -> Result<Counts> {
+    ran_as(params, JoinKind::Inner, false, inner, outer, batch)
+}
+
+const KINDS: [JoinKind; 4] = [
+    JoinKind::Inner,
+    JoinKind::Semi,
+    JoinKind::Anti,
+    JoinKind::Left,
+];
 
 #[test]
 fn a_join_through_the_machine_gives_the_pairs_of_one_in_memory() {
@@ -893,10 +1016,19 @@ fn a_join_through_the_machine_gives_the_pairs_of_one_in_memory() {
         1_usize..64,
         (0.5_f64..=1.0, 0.5_f64..=1.0, 0.0_f64..=1.0, 0.0_f64..0.5),
         (0.0_f64..2.0, 0.0_f64..=1.0),
+        (0_usize..4, any::<bool>()),
     );
     property(
         strategy,
-        |(inner, outer, kib, batch, (start, target, spilled, resident), (room, key))| {
+        |(
+            inner,
+            outer,
+            kib,
+            batch,
+            (start, target, spilled, resident),
+            (room, key),
+            (kind, values),
+        )| {
             let params = Params {
                 start,
                 target,
@@ -906,7 +1038,7 @@ fn a_join_through_the_machine_gives_the_pairs_of_one_in_memory() {
                 split_key: key,
                 ..params(kib * 1024)
             };
-            ran(&params, &inner, &outer, batch)?;
+            ran_as(&params, KINDS[kind], values, &inner, &outer, batch)?;
             Ok(())
         },
     );
@@ -948,12 +1080,22 @@ fn a_join_that_spills_runs_every_path() -> Result<()> {
     for what in [Ran::WRITTEN, Ran::ANSWERED, Ran::RELEASED] {
         assert!(ran_few[what] > 0, "{what} in {ran_few:?}");
     }
-    // One key: no level below splits it, so it is joined whole.
+    Ok(())
+}
+
+#[test]
+fn one_key_too_large_is_joined_in_pieces() -> Result<()> {
+    // One key no level below splits, with values or not: in pieces, the
+    // outer rows read once a piece and, for the rows without a pair, once
+    // more; each join kind gives what it gives in memory.
     let one = vec![7; 3000];
-    let ran_one = ran(&params(16 * 1024), &one, &[7, 7, 8], 50)?;
-    assert!(
-        ran_one[Ran::OPENED] > 0 && ran_one[Ran::SPLIT] == 0,
-        "{ran_one:?}"
-    );
+    let outer = [7, 7, 8, 9, 7];
+    for kind in KINDS {
+        for values in [false, true] {
+            let ran = ran_as(&params(16 * 1024), kind, values, &one, &outer, 50)?;
+            assert!(ran[Ran::SPLIT] == 0 && ran[Ran::PIECED] > 0, "{ran:?}");
+            assert!(ran[Ran::PIECES] > 2, "{ran:?}");
+        }
+    }
     Ok(())
 }

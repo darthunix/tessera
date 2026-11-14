@@ -278,7 +278,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 - [x] 3.14 Add to the join's machine the partitions on disk, joined
       whole or split into a level below. Check: the property test; the
       cases of nested levels; `make installcheck`; `make crosscheck`
-- [ ] 3.15 Add the pieces and their passes, with the marks of matched
+- [x] 3.15 Add the pieces and their passes, with the marks of matched
       rows. Check: the property test; the cases of pieces, of skew and
       of a partition without values (2.16); `make installcheck`;
       `cargo ab measure` of a join read in pieces

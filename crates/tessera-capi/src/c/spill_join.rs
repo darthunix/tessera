@@ -26,6 +26,8 @@ pub struct JoinParams {
     pub outer_words: u64,
     pub outer_values: u32,
     pub preserve_inner: u32,
+    pub unmatched_outer: u32,
+    pub spare: u32,
     pub page: u64,
     pub start: f64,
     pub target: f64,
@@ -53,6 +55,8 @@ impl JoinParams {
             outer_words: self.outer_words,
             outer_values: self.outer_values,
             preserve_inner: self.preserve_inner,
+            unmatched_outer: self.unmatched_outer,
+            spare: self.spare,
             page: self.page,
             start: self.start,
             target: self.target,
@@ -84,8 +88,9 @@ pub struct JoinHost {
 
 /// `TessJoinEvent`: a step of the join; see [`Event`]. `partition` is
 /// that of [`JOIN_FULL`] and [`JOIN_TAKE`]; `flag` the tail of
-/// [`JOIN_FULL`] and the bytes freed of [`JOIN_SENT`]; `memory` the bytes
-/// needed of [`JOIN_INNER`] and the memory of the others.
+/// [`JOIN_FULL`], the bytes freed of [`JOIN_SENT`] and the values of
+/// [`JOIN_BLOCK`]; `memory` the bytes needed of [`JOIN_INNER`] and the
+/// memory of the others; `len` the bytes of [`JOIN_BLOCK`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JoinEvent {
@@ -97,6 +102,7 @@ pub struct JoinEvent {
     pub rows: u64,
     pub estimate: f64,
     pub memory: u64,
+    pub len: u64,
 }
 
 /// `TessJoinEventKind`, of a [`JoinEvent`].
@@ -109,6 +115,10 @@ pub const JOIN_BUILD_END: u32 = 6;
 pub const JOIN_OUTER_END: u32 = 7;
 pub const JOIN_NEXT: u32 = 8;
 pub const JOIN_TAKE: u32 = 9;
+pub const JOIN_PIECE: u32 = 10;
+pub const JOIN_BLOCK: u32 = 11;
+pub const JOIN_FILE_END: u32 = 12;
+pub const JOIN_PASS_END: u32 = 13;
 
 /// `TessJoinBelow`: a level below to make; see [`Below`].
 #[repr(C)]
@@ -141,12 +151,15 @@ impl JoinBelow {
 
 /// `TessJoinAction`: what the join does next; see [`Action`]. The plan
 /// and `outer_len` are those of [`JOIN_START`], `partition` that of the
-/// actions on a partition, and `below` that of [`JOIN_SPLIT`].
+/// actions on a partition, `pieces` that of [`JOIN_OPEN`], and `below`
+/// that of [`JOIN_SPLIT`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct JoinAction {
     pub kind: u32,
     pub partition: u32,
+    pub pieces: u32,
+    pub spare: u32,
     pub outer_len: usize,
     pub plan: SpillPlan,
     pub below: JoinBelow,
@@ -163,6 +176,10 @@ pub const JOIN_RELEASE: u32 = 6;
 pub const JOIN_OPEN: u32 = 7;
 pub const JOIN_SPLIT: u32 = 8;
 pub const JOIN_LEVEL_DONE: u32 = 9;
+pub const JOIN_LOAD: u32 = 10;
+pub const JOIN_CARRY: u32 = 11;
+pub const JOIN_NEXT_PIECE: u32 = 12;
+pub const JOIN_FINAL_PASS: u32 = 13;
 
 impl JoinEvent {
     fn event(&self) -> Result<Event> {
@@ -204,6 +221,15 @@ impl JoinEvent {
                 partition: self.partition,
                 memory: self.memory,
             },
+            JOIN_PIECE => Event::Piece {
+                memory: self.memory,
+            },
+            JOIN_BLOCK => Event::Block {
+                values: flag,
+                len: self.len,
+            },
+            JOIN_FILE_END => Event::FileEnd,
+            JOIN_PASS_END => Event::PassEnd,
             kind => bail!("a join event of kind {kind}"),
         })
     }
@@ -214,7 +240,6 @@ impl JoinAction {
         let plan = &start.plan;
         Self {
             kind: JOIN_START,
-            partition: 0,
             outer_len: start.outer_len,
             plan: SpillPlan {
                 chunk_len: plan.chunk_len,
@@ -224,7 +249,7 @@ impl JoinAction {
                 below: plan.below,
                 deeper: plan.deeper,
             },
-            below: JoinBelow::default(),
+            ..Self::default()
         }
     }
 
@@ -237,8 +262,19 @@ impl JoinAction {
             Action::Demote(partition) => (JOIN_DEMOTE, partition),
             Action::Evict(partition) => (JOIN_EVICT, partition),
             Action::Release(partition) => (JOIN_RELEASE, partition),
-            Action::Open(partition) => (JOIN_OPEN, partition),
+            Action::Open { partition, pieces } => {
+                return Self {
+                    kind: JOIN_OPEN,
+                    partition,
+                    pieces: u32::from(pieces),
+                    ..Self::default()
+                };
+            }
             Action::LevelDone => (JOIN_LEVEL_DONE, 0),
+            Action::Load => (JOIN_LOAD, 0),
+            Action::Carry => (JOIN_CARRY, 0),
+            Action::NextPiece => (JOIN_NEXT_PIECE, 0),
+            Action::FinalPass => (JOIN_FINAL_PASS, 0),
             Action::Split(below) => {
                 return Self {
                     kind: JOIN_SPLIT,
@@ -430,6 +466,8 @@ pub const JOIN_ACTION_PLAN_OFFSET: c_int = 9;
 pub const JOIN_ACTION_BELOW_OFFSET: c_int = 10;
 pub const JOIN_BELOW_SIZE: c_int = 11;
 pub const JOIN_BELOW_SHIFT_OFFSET: c_int = 12;
+pub const JOIN_EVENT_LEN_OFFSET: c_int = 13;
+pub const JOIN_ACTION_OUTER_LEN_OFFSET: c_int = 14;
 
 /// `tess_join_layout`: the size or offset of a `TessJoinLayout` for the C
 /// side's mirrors to check; 0 for another code.
@@ -448,6 +486,8 @@ pub extern "C" fn tess_join_layout(what: c_int) -> usize {
         JOIN_ACTION_BELOW_OFFSET => offset_of!(JoinAction, below),
         JOIN_BELOW_SIZE => size_of::<JoinBelow>(),
         JOIN_BELOW_SHIFT_OFFSET => offset_of!(JoinBelow, shift),
+        JOIN_EVENT_LEN_OFFSET => offset_of!(JoinEvent, len),
+        JOIN_ACTION_OUTER_LEN_OFFSET => offset_of!(JoinAction, outer_len),
         _ => 0,
     }
 }

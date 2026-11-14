@@ -32,7 +32,6 @@ static const TessBatchOps spill_batch_ops = {
  */
 
 static void split_table(TessHashJoinState *state);
-static Size spill_room(TessHashJoinState *state);
 static void side_full(TessHashJoinState *state, SpillSide *side, int partition);
 
 void
@@ -1122,6 +1121,7 @@ join_spill_begin(TessHashJoinState *state)
 		.resident = tess_join_spill_resident_share,
 		.tail = tess_join_spill_tail_weight,
 		.preserve_inner = state->preserve_inner,
+		.unmatched_outer = state->jointype == JOIN_LEFT || state->jointype == JOIN_ANTI,
 		.split_room = tess_join_spill_split_room,
 		.split_key = tess_join_spill_split_key_share,
 	};
@@ -1893,26 +1893,6 @@ add_loaded_chunk(TessHashJoinState *state, void *base, Size len)
 	state->table.nchunks++;
 }
 
-/* The rest of spilling and a chunk of outer rows with its values: what a partition's table may not take. */
-static Size
-spill_used(TessHashJoinState *state)
-{
-	return join_spill_memory(state, state->spill, NULL) + 2 * state->spill->probe.chunk_len;
-}
-
-/*
- * The bytes a piece of a partition's table may take: what hash_mem leaves
- * besides spill_used, two thirds of it, the rest for the index.
- */
-static Size
-spill_room(TessHashJoinState *state)
-{
-	Size		limit = tess_hash_memory_limit();
-	Size		used = spill_used(state);
-
-	return used >= limit ? 0 : (limit - used) / 3 * 2;
-}
-
 /* Forget the table of a piece, and the values read for it. */
 static void
 drop_piece(TessHashJoinState *state)
@@ -1963,11 +1943,30 @@ add_loaded_values(JoinSpill *spill, const TessSpillHeader *header, void *body)
 }
 
 /*
- * The joined partition's next piece: its blocks read back, as many whole
- * groups as room allows (all of them when it does), and once the file is
- * done its tail, indexed as a table of its own.
+ * Whether the block of header joins the piece of a partition read in
+ * pieces, as the machine says (TESS_JOIN_CARRY when it starts the next):
+ * a piece ends past its room, where a group of blocks ends, values and
+ * the records that refer to them, so that no record is read apart from
+ * its values. A partition joined whole takes every block.
  */
+static bool
+piece_takes(TessHashJoinState *state, bool whole, const TessSpillHeader *header)
+{
+	if (whole)
+		return true;
+	return spill_step(state, state->spill, (TessJoinEvent) {
+		.kind = TESS_JOIN_BLOCK,
+		.flag = header->kind == TESS_SPILL_VALUES,
+		.len = header->len,
+	}).kind == TESS_JOIN_LOAD;
+}
 
+/*
+ * The joined partition's next piece: its blocks read back, as many whole
+ * groups as its machine allows (all of them for a partition joined
+ * whole), and once the file is done its tail, indexed as a table of its
+ * own.
+ */
 static void
 load_piece(TessHashJoinState *state, int partition, bool whole)
 {
@@ -1977,35 +1976,34 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 	TessSpillHeader header;
 	uint64		buckets = state->counters[JOIN_BUCKETS];
 	Size		record = side->record_size;
-	Size		loaded = 0;
-	bool		records = false;
 	uint64		rows = 0;
-	Size		room;
-	bool		values = false;
 	int			nread;
 
 	drop_piece(state);
-	room = whole ? SIZE_MAX : spill_room(state);
+	if (!whole)
+		(void) spill_step(state, spill, (TessJoinEvent) {
+			.kind = TESS_JOIN_PIECE,
+			.memory = join_spill_memory(state, spill, NULL),
+		});
 	if (spill->carried != NULL)
 	{
 		void	   *body = MemoryContextAllocExtended(spill->part_context,
 													  Max(spill->carried_header.len, 8),
 													  MCXT_ALLOC_HUGE);
+		bool		taken PG_USED_FOR_ASSERTS_ONLY;
 
+		/* The block the last piece left starts this one. */
+		taken = piece_takes(state, whole, &spill->carried_header);
+		Assert(taken);
 		memcpy(body, spill->carried, spill->carried_header.len);
 		pfree(spill->carried);
 		spill->carried = NULL;
-		loaded += spill->carried_header.len;
 		if (spill->carried_header.kind == TESS_SPILL_VALUES)
-		{
 			add_loaded_values(spill, &spill->carried_header, body);
-			values = true;
-		}
 		else
 		{
 			add_loaded_chunk(state, body, spill->carried_header.len);
 			rows += (spill->carried_header.len - TESS_TABLE_CHUNK_HEADER) / record;
-			records = true;
 		}
 	}
 	while (part_header(&spill->build_reader, &header))
@@ -2014,18 +2012,7 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 
 		if (header.kind != TESS_SPILL_VALUES)
 			tess_spill_expect_kind(&header, TESS_SPILL_RECORDS);
-
-		/*
-		 * A group ends where values follow records: the piece may end
-		 * there. Records refer only to the values written before them with
-		 * them, so while the piece has no values, records refer to none,
-		 * and it may end at any chunk, as for a partition whose values are
-		 * all NULL. Records after values may be the rest of their group: a
-		 * partition in memory goes to disk with all its chunks after its
-		 * values.
-		 */
-		if (records && loaded >= room &&
-			(header.kind == TESS_SPILL_VALUES || !values))
+		if (!piece_takes(state, whole, &header))
 		{
 			spill->carried = MemoryContextAllocExtended(spill->context,
 														Max(header.len, 8),
@@ -2037,24 +2024,21 @@ load_piece(TessHashJoinState *state, int partition, bool whole)
 		body = MemoryContextAllocExtended(spill->part_context, Max(header.len, 8),
 										  MCXT_ALLOC_HUGE);
 		part_body(&spill->build_reader, body, header.len);
-		loaded += header.len;
 		if (header.kind == TESS_SPILL_VALUES)
 		{
 			add_loaded_values(spill, &header, body);
-			records = false;
-			values = true;
 			continue;
 		}
 		add_loaded_chunk(state, body, header.len);
 		rows += (header.len - TESS_TABLE_CHUNK_HEADER) / record;
-		records = true;
 	}
 	nread = state->table.nchunks;
 	if (spill->carried == NULL)
 	{
 		/* The file is done: the tail goes with the last piece. */
 		part_close(&spill->build_reader);
-		spill->pieces_done = true;
+		if (!whole)
+			(void) spill_step(state, spill, (TessJoinEvent) {.kind = TESS_JOIN_FILE_END});
 		for (int chunk = 0; chunk < part->nchunks; chunk++)
 		{
 			int			index = part->chunks[chunk];
@@ -2099,24 +2083,25 @@ open_outer_rows(TessHashJoinState *state)
 }
 
 /*
- * The next pass over the joined partition's outer rows: with its next
- * piece, then, for a left or anti join, the last one without a table.
- * False when the partition is done.
+ * The next pass over the joined partition's outer rows, as its machine
+ * says: with its next piece, then, for a left or anti join, the last one
+ * without a table. False when the partition is done.
  */
 bool
 join_next_pass(TessHashJoinState *state)
 {
 	JoinSpill  *spill = state->spill;
+	TessJoinAction action;
 
 	/* A round's outer rows: the next file this participant takes. */
 	if (state->parallel.round_partition >= 0)
 		return join_round_next_outer(state);
 	if (!spill->multipass)
 		return false;
-	if (!spill->pieces_done)
+	action = spill_step(state, spill, (TessJoinEvent) {.kind = TESS_JOIN_PASS_END});
+	if (action.kind == TESS_JOIN_NEXT_PIECE)
 		load_piece(state, spill->partition, false);
-	else if ((state->jointype == JOIN_LEFT || state->jointype == JOIN_ANTI) &&
-			 !spill->final_pass)
+	else if (action.kind == TESS_JOIN_FINAL_PASS)
 	{
 		drop_piece(state);
 		spill->final_pass = true;
@@ -2247,18 +2232,18 @@ pop_level(TessHashJoinState *state)
 }
 
 /*
- * Load a partition on disk to join: split into the level below its
- * machine asked for, below, or joined in pieces when too large, whole
- * otherwise; its outer rows read from their first.
+ * Load a partition on disk to join, as its machine said: split into the
+ * level below, below, or joined in pieces, or whole; its outer rows read
+ * from their first.
  */
 bool
-join_open_partition(TessHashJoinState *state, int partition, const TessJoinBelow *below)
+join_open_partition(TessHashJoinState *state, int partition, const TessJoinBelow *below,
+					bool pieces)
 {
 	JoinSpill  *spill = state->spill;
 
 	spill->partition = partition;
 	join_part_open(&spill->build_reader, spill->build.file, partition, spill->writers);
-	spill->pieces_done = false;
 	if (below != NULL)
 	{
 		/*
@@ -2271,8 +2256,8 @@ join_open_partition(TessHashJoinState *state, int partition, const TessJoinBelow
 		join_note_memory(state);
 		return true;
 	}
-	/* The file larger than the room: pieces, and passes over the outer rows. */
-	spill->multipass = spill->build.disk_bytes[partition] > spill_room(state);
+	/* Pieces, and passes over the outer rows. */
+	spill->multipass = pieces;
 	if (spill->multipass && state->jointype != JOIN_INNER)
 	{
 		spill->matched_words = Max((spill->probe.rows[partition] + 63) / 64, 1);
@@ -2300,7 +2285,8 @@ join_take_partition(TessHashJoinState *state, int partition)
 		.memory = join_spill_memory(state, spill, NULL),
 	});
 	return join_open_partition(state, partition,
-							   action.kind == TESS_JOIN_SPLIT ? &action.below : NULL);
+							   action.kind == TESS_JOIN_SPLIT ? &action.below : NULL,
+							   action.pieces != 0);
 }
 
 /*
@@ -2333,9 +2319,9 @@ next_partition(TessHashJoinState *state)
 				side_release(&spill->probe, partition);
 				continue;
 			case TESS_JOIN_OPEN:
-				return join_open_partition(state, partition, NULL);
+				return join_open_partition(state, partition, NULL, action.pieces != 0);
 			case TESS_JOIN_SPLIT:
-				return join_open_partition(state, partition, &action.below);
+				return join_open_partition(state, partition, &action.below, false);
 			default:
 				Assert(action.kind == TESS_JOIN_LEVEL_DONE);
 				spill->partition = spill->npartitions;

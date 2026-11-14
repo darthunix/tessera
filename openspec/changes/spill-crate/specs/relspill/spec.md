@@ -144,7 +144,9 @@ a match, in a RIGHT or FULL join, once.
   hash has no bits left or its keys do not split
 - **THEN** it is joined in pieces: each matching pair comes once, and
   an outer row without a match comes once, after the last piece
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/join/tests.rs::one_key_too_large_is_joined_in_pieces`;
+  `crates/relspill/src/join/tests.rs::a_piece_ends_where_a_group_of_values_starts`
 
 ### Requirement: The spill of a grouping
 The crate SHALL provide a state machine for the spill of a grouping.
