@@ -12,17 +12,17 @@ use std::mem::{offset_of, size_of};
 
 use tessera_capi::c::{
     Code, GROUP_ACTION_BELOW_OFFSET, GROUP_ACTION_SIZE, GROUP_ADD_CHUNK, GROUP_BELOW_SHIFT_OFFSET,
-    GROUP_BELOW_SIZE, GROUP_DONE, GROUP_EVENT_OTHERS_OFFSET, GROUP_EVENT_SIZE, GROUP_FLUSH,
-    GROUP_FULL, GROUP_GROWN, GROUP_HOST_NDISK_OFFSET, GROUP_HOST_SIZE, GROUP_INNER,
+    GROUP_BELOW_SIZE, GROUP_DONE, GROUP_EMIT, GROUP_EVENT_ROWS_OFFSET, GROUP_EVENT_SIZE,
+    GROUP_FLUSH, GROUP_FULL, GROUP_GROWN, GROUP_HOST_NDISK_OFFSET, GROUP_HOST_SIZE, GROUP_INNER,
     GROUP_INPUT_END, GROUP_LEVEL_DONE, GROUP_MACHINE_SIZE, GROUP_MADE, GROUP_MERGE, GROUP_NEXT,
-    GROUP_PARAMS_SIZE, GROUP_PARAMS_SPLIT_ROOM_OFFSET, GROUP_SENT, GROUP_SPLIT, GROUP_START,
-    GROUP_WEIGH, GROUP_WEIGHED, GROUP_WRITE, GroupAction, GroupBelow, GroupEvent, GroupHost,
-    GroupParams, ROWS_ACTION_SIZE, ROWS_ACTION_TABLE_OFFSET, ROWS_DONE, ROWS_EVENT_SIZE,
-    ROWS_FREEZE, ROWS_GROWN, ROWS_HOST_SIZE, ROWS_LEVEL_DONE, ROWS_MACHINE_SIZE, ROWS_NEXT,
-    ROWS_PARAMS_LEAST_OFFSET, ROWS_PARAMS_SIZE, ROWS_READ, ROWS_WRITTEN, RowsAction, RowsEvent,
-    RowsHost, RowsParams, RowsTable, SpillLevel, SpillPlan, SpillShape, Status, tess_group_below,
-    tess_group_init, tess_group_layout, tess_group_step, tess_rows_init, tess_rows_layout,
-    tess_rows_read, tess_rows_step, tess_spill_expected, tess_spill_plan,
+    GROUP_PARAMS_SIZE, GROUP_PARAMS_SPLIT_ROOM_OFFSET, GROUP_PARTIAL, GROUP_SENT, GROUP_SPILL,
+    GROUP_SPLIT, GROUP_START, GROUP_WEIGH, GROUP_WEIGHED, GROUP_WRITE, GroupAction, GroupBelow,
+    GroupEvent, GroupHost, GroupParams, ROWS_ACTION_SIZE, ROWS_ACTION_TABLE_OFFSET, ROWS_DONE,
+    ROWS_EVENT_SIZE, ROWS_FREEZE, ROWS_GROWN, ROWS_HOST_SIZE, ROWS_LEVEL_DONE, ROWS_MACHINE_SIZE,
+    ROWS_NEXT, ROWS_PARAMS_LEAST_OFFSET, ROWS_PARAMS_SIZE, ROWS_READ, ROWS_WRITTEN, RowsAction,
+    RowsEvent, RowsHost, RowsParams, RowsTable, SpillLevel, SpillPlan, SpillShape, Status,
+    tess_group_below, tess_group_init, tess_group_layout, tess_group_step, tess_rows_init,
+    tess_rows_layout, tess_rows_read, tess_rows_step, tess_spill_expected, tess_spill_plan,
     tess_table_spill_add_bytes,
 };
 
@@ -45,7 +45,7 @@ fn params(limit: u64) -> GroupParams {
             max_partitions: 64,
         },
         merged: 48,
-        fill: 0.875,
+        fill: 7,
         start: 0.875,
         target: 0.5,
         spilled: 1.0,
@@ -302,6 +302,31 @@ fn a_grouping_spills_step_by_step_by_the_entry_points() {
 }
 
 #[test]
+fn a_partial_grouping_is_weighed_by_the_entry_points() {
+    let mut machine = Machine::default();
+    assert_eq!(init(&mut machine, &params(1 << 20)), Code::Ok);
+    let mut none = Level::none();
+    let partial = |records, flag| GroupEvent {
+        memory: (1 << 20) / 8 * 7 + 1,
+        records,
+        rows: 2000,
+        flag,
+        ..event(GROUP_PARTIAL)
+    };
+    for (event, action) in [
+        (partial(0, 1), GROUP_DONE),
+        (partial(1000, 1), GROUP_EMIT),
+        (partial(1001, 0), GROUP_EMIT),
+        (partial(1001, 1), GROUP_SPILL),
+    ] {
+        assert_eq!(
+            step(&mut machine, &mut none, event),
+            (Code::Ok, kind(action))
+        );
+    }
+}
+
+#[test]
 fn the_group_entry_points_refuse_what_is_no_step() {
     let mut machine: Machine = [0; 20];
     let mut none = Level::none();
@@ -399,7 +424,7 @@ fn the_group_layout_is_its_types() {
         (GROUP_HOST_SIZE, size_of::<GroupHost>()),
         (GROUP_HOST_NDISK_OFFSET, offset_of!(GroupHost, ndisk)),
         (GROUP_EVENT_SIZE, size_of::<GroupEvent>()),
-        (GROUP_EVENT_OTHERS_OFFSET, offset_of!(GroupEvent, others)),
+        (GROUP_EVENT_ROWS_OFFSET, offset_of!(GroupEvent, rows)),
         (GROUP_ACTION_SIZE, size_of::<GroupAction>()),
         (GROUP_ACTION_BELOW_OFFSET, offset_of!(GroupAction, below)),
         (GROUP_BELOW_SIZE, size_of::<GroupBelow>()),
@@ -480,7 +505,7 @@ fn rows_params(limit: u64) -> RowsParams {
             min_partitions: 4,
             max_partitions: 4,
         },
-        fill: 0.875,
+        fill: 7,
         least: 64,
     }
 }
@@ -621,11 +646,6 @@ fn the_rows_entry_points_refuse_what_is_no_step() {
     }
     let zero = RowsParams { limit: 0, ..params };
     assert_eq!(rows_init(&mut machine, &zero), Code::InvalidArgument);
-    let nan = RowsParams {
-        fill: f64::NAN,
-        ..params
-    };
-    assert_eq!(rows_init(&mut machine, &nan), Code::InvalidArgument);
     let table = RowsTable {
         partition: 0,
         level: 1,

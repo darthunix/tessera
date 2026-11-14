@@ -30,7 +30,7 @@ fn params(limit: u64) -> Params {
             record: RECORD as usize,
         },
         merged: RECORD + 16,
-        fill: 0.875,
+        fill: 7,
         start: 0.875,
         target: 0.5,
         spilled: 1.0,
@@ -78,7 +78,13 @@ impl Regions {
 
 /// A machine past its limit, its first level made.
 fn spilling(limit: u64) -> (Group, Plan, Regions) {
-    let mut group = Group::new(&params(limit)).expect("parameters");
+    spilling_by(&params(limit))
+}
+
+/// A machine of `params` past its limit, its first level made.
+fn spilling_by(params: &Params) -> (Group, Plan, Regions) {
+    let limit = params.limit;
+    let mut group = Group::new(params).expect("parameters");
     let inner = Event::Inner {
         bytes: limit,
         records: 1000,
@@ -104,7 +110,7 @@ fn a_table_spills_past_its_fill_or_when_asked() {
         estimate: 1000.0,
         force,
     };
-    let fill = (0.875 * limit as f64) as u64;
+    let fill = limit / 8 * 7;
     assert_eq!(
         group.step(inner(fill, false), &Regions::none().host()),
         Ok(Action::Done)
@@ -251,6 +257,113 @@ fn the_largest_partitions_go_from_start_to_target() {
 }
 
 #[test]
+fn a_partition_on_disk_weighs_its_new_bytes_by_spilled() {
+    let limit = 1 << 20;
+    for (spilled, largest) in [(1.0, 1), (0.5, 0), (0.0, 0)] {
+        let (mut group, _, regions) = spilling_by(&Params {
+            spilled,
+            ..params(limit)
+        });
+        let spill = regions.spill();
+        spill.add_bytes(300_000, Some(0)).expect("bytes");
+        spill.add_bytes(700_000, Some(1)).expect("bytes");
+        let grown = |memory| Event::Grown { memory };
+        assert_eq!(
+            group.step(grown(1_000_000), &regions.host()),
+            Ok(Action::Write(1))
+        );
+        spill.add_bytes(-700_000, Some(1)).expect("bytes");
+        let sent = Event::Sent { memory: 300_000 };
+        assert_eq!(group.step(sent, &regions.host()), Ok(Action::Done));
+        // New records of partition 1, which is on disk: they weigh by
+        // `spilled` against partition 0's.
+        spill.add_bytes(400_000, Some(1)).expect("bytes");
+        assert_eq!(
+            group.step(grown(950_000), &regions.host()),
+            Ok(Action::Write(largest)),
+            "{spilled}"
+        );
+    }
+}
+
+#[test]
+fn a_table_is_full_past_whole_eighths_of_its_limit() {
+    // A limit that eight does not divide: seven of its whole eighths,
+    // 917 504 bytes, not seven eighths of it, 917 510.
+    let limit = (1 << 20) + 7;
+    let inner = |bytes| Event::Inner {
+        bytes,
+        records: 100,
+        estimate: 100.0,
+        force: false,
+    };
+    let none = Regions::none();
+    let mut group = Group::new(&params(limit)).expect("parameters");
+    assert_eq!(group.step(inner(917_504), &none.host()), Ok(Action::Done));
+    assert!(matches!(
+        group.step(inner(917_505), &none.host()),
+        Ok(Action::Start(_))
+    ));
+    let mut rows = Rows::new(&rows_params(limit)).expect("parameters");
+    let rows_host = RowsHost { written: &[] };
+    let grown = |memory| RowsEvent::Grown {
+        memory,
+        records: 64,
+    };
+    assert_eq!(rows.step(grown(917_504), &rows_host), Ok(RowsAction::Done));
+    assert!(matches!(
+        rows.step(grown(917_505), &rows_host),
+        Ok(RowsAction::Freeze { .. })
+    ));
+}
+
+#[test]
+fn a_partial_grouping_sends_its_table_up_or_spills_it() {
+    let limit = 1 << 20;
+    let full = limit / 8 * 7 + 1;
+    let partial = |memory, records, rows, spills| Event::Partial {
+        memory,
+        records,
+        rows,
+        spills,
+    };
+    let none = Regions::none();
+    let mut group = Group::new(&params(limit)).expect("parameters");
+    let fits = group;
+    for (event, action) in [
+        // Not full, or full with no group: it reads on.
+        (partial(full - 1, 1000, 1000, true), Action::Done),
+        (partial(full, 0, 1000, true), Action::Done),
+        // Groups of two rows each at least: up.
+        (partial(full, 1000, 2000, true), Action::Emit),
+        // More groups than half the rows: they spill, if they can.
+        (partial(full, 1001, 2000, true), Action::Spill),
+        (partial(full, 1001, 2000, false), Action::Emit),
+    ] {
+        assert_eq!(group.step(event, &none.host()), Ok(action), "{event:?}");
+        assert_eq!(group, fits);
+    }
+    // The spill is the host's to ask for.
+    let forced = Event::Inner {
+        bytes: full,
+        records: 1001,
+        estimate: 1001.0,
+        force: true,
+    };
+    let Ok(Action::Start(plan)) = group.step(forced, &none.host()) else {
+        panic!("a start");
+    };
+    let regions = Regions::of(&plan);
+    assert_eq!(group.step(Event::Made, &regions.host()), Ok(Action::Done));
+    let refused = group
+        .step(partial(full, 1001, 2000, true), &regions.host())
+        .expect_err("a wrong call");
+    assert_eq!(refused.rule(), Rule::JoinEvent);
+    // The phase, building, and the event, a partial one.
+    assert_eq!(refused.numbers(), (3, 9));
+}
+
+#[test]
 fn the_input_ends_with_writes_then_gives_out_in_memory_first() {
     let limit = 1 << 20;
     let (mut group, plan, mut regions) = spilling(limit);
@@ -332,6 +445,33 @@ fn a_partition_weighs_what_the_others_take() {
         group.step(weighed, &regions.host()),
         Ok(Action::Split(_))
     ));
+    // Two thirds of the limit merged, alone: past half of the limit, not
+    // past the whole of it.
+    let alone = Event::Weighed {
+        groups: limit / 3 * 2 / (RECORD + 16),
+        others: 0,
+    };
+    for (split_room, splits) in [(0.5, true), (1.0, false)] {
+        let (mut group, _, mut regions) = spilling_by(&Params {
+            split_room,
+            ..params(limit)
+        });
+        regions.disk = vec![1000, 0, 0, 0];
+        assert_eq!(
+            group.step(Event::InputEnd, &regions.host()),
+            Ok(Action::Done)
+        );
+        assert_eq!(
+            group.step(Event::Next, &regions.host()),
+            Ok(Action::Weigh(0))
+        );
+        let action = group.step(alone, &regions.host());
+        assert_eq!(
+            matches!(action, Ok(Action::Split(_))),
+            splits,
+            "{split_room}: {action:?}"
+        );
+    }
     // Words that are no machine: a cursor at no partition weighed, a
     // level with none below it.
     let broken = [
@@ -383,7 +523,7 @@ fn parameters_are_checked() {
     for bad in [
         Params { limit: 0, ..good },
         Params {
-            fill: f64::NAN,
+            start: f64::NAN,
             ..good
         },
         Params {
@@ -820,7 +960,7 @@ fn rows_params(limit: u64) -> RowsParams {
             max_chunk: 2048,
             record: 0,
         },
-        fill: 0.875,
+        fill: 7,
         least: 64,
     }
 }
@@ -830,7 +970,7 @@ fn a_table_of_rows_freezes_past_its_fill_with_groups_enough() {
     let limit = 1 << 20;
     let mut rows = Rows::new(&rows_params(limit)).expect("parameters");
     let none = RowsHost { written: &[] };
-    let fill = (0.875 * limit as f64) as u64;
+    let fill = limit / 8 * 7;
     let grown = |memory, records| RowsEvent::Grown { memory, records };
     assert_eq!(rows.step(grown(fill, 1000), &none), Ok(RowsAction::Done));
     // Too few groups: a table of them frozen would freeze again below.
@@ -947,10 +1087,7 @@ fn the_table_of_the_last_level_never_freezes() {
         panic!("a freeze");
     };
     assert_eq!((plan.shift, plan.below), (10, 15));
-    let bad = RowsParams {
-        fill: f64::NAN,
-        ..params
-    };
+    let bad = RowsParams { limit: 0, ..params };
     assert_eq!(wrong(Rows::new(&bad)), Rule::JoinParams);
 }
 

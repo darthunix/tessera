@@ -1026,16 +1026,17 @@ typedef struct TessGroupMachine
 /*
  * What every level of a grouping's spill shares: the memory limit, every
  * level's; the shape of its levels; the bytes a group takes merged, its
- * record and its share of an index; the share of the limit past which the
- * table spills; the weights of the rule that sends partitions to disk; and
- * the share of what the limit leaves a partition must pass to split.
+ * record and its share of an index; the eighths of the limit past which
+ * the table is full (limit / 8 * fill bytes); the weights of the rule that
+ * sends partitions to disk; and the share of what the limit leaves a
+ * partition must pass to split.
  */
 typedef struct TessGroupParams
 {
 	uint64		limit;
 	TessSpillShape shape;
 	uint64		merged;
-	double		fill;
+	uint64		fill;
 	double		start;
 	double		target;
 	double		spilled;
@@ -1080,7 +1081,12 @@ typedef enum TessGroupEventKind
 	 * The partition of the last TESS_GROUP_WEIGH holds about groups groups;
 	 * the other partitions in memory take others bytes.
 	 */
-	TESS_GROUP_WEIGHED = 8
+	TESS_GROUP_WEIGHED = 8,
+	/*
+	 * A partial grouping's groups take memory bytes in records groups, of
+	 * rows rows read since its table started; flag 1 when they can spill.
+	 */
+	TESS_GROUP_PARTIAL = 9
 } TessGroupEventKind;
 
 typedef struct TessGroupEvent
@@ -1095,6 +1101,7 @@ typedef struct TessGroupEvent
 	uint64		memory;
 	uint64		groups;
 	uint64		others;
+	uint64		rows;
 } TessGroupEvent;
 
 typedef enum TessGroupActionKind
@@ -1118,7 +1125,11 @@ typedef enum TessGroupActionKind
 	/* Split partition into the level below, its machine by tess_group_below. */
 	TESS_GROUP_SPLIT = 7,
 	/* Every partition of the level is given out. */
-	TESS_GROUP_LEVEL_DONE = 8
+	TESS_GROUP_LEVEL_DONE = 8,
+	/* The partial grouping's table is full: its groups go up, a new one starts. */
+	TESS_GROUP_EMIT = 9,
+	/* The partial grouping's table spills instead: TESS_GROUP_INNER with flag 1. */
+	TESS_GROUP_SPILL = 10
 } TessGroupActionKind;
 
 /*
@@ -1170,7 +1181,7 @@ typedef enum TessGroupLayout
 	TESS_GROUP_HOST_SIZE = 4,
 	TESS_GROUP_HOST_NDISK_OFFSET = 5,
 	TESS_GROUP_EVENT_SIZE = 6,
-	TESS_GROUP_EVENT_OTHERS_OFFSET = 7,
+	TESS_GROUP_EVENT_ROWS_OFFSET = 7,
 	TESS_GROUP_ACTION_SIZE = 8,
 	TESS_GROUP_ACTION_BELOW_OFFSET = 9,
 	TESS_GROUP_BELOW_SIZE = 10,
@@ -1196,14 +1207,14 @@ typedef struct TessRowsMachine
 
 /*
  * What every level of rows shares: the memory limit, the shape of a level
- * of rows, the share of the limit past which a table freezes, and the
+ * of rows, the eighths of the limit past which a table freezes, and the
  * groups it has at least then.
  */
 typedef struct TessRowsParams
 {
 	uint64		limit;
 	TessSpillShape shape;
-	double		fill;
+	uint64		fill;
 	uint64		least;
 } TessRowsParams;
 

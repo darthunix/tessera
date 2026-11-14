@@ -487,6 +487,37 @@ agg_table_from_parts(TessAggState *state, AggSpill *spill, uint64 capacity)
 }
 
 /*
+ * A partial grouping's table before a batch, the groups taking memory
+ * bytes, as its machine weighs it: TESS_GROUP_DONE to read on,
+ * TESS_GROUP_EMIT to send the groups up, TESS_GROUP_SPILL once they went
+ * into partitions instead. Sum states spill no state (their records
+ * merge a word an aggregate), nor do keys through a dictionary (their
+ * records hold numbers of a dictionary the next table makes anew): they
+ * go up still.
+ */
+TessGroupActionKind
+agg_partial_check(TessAggState *state, Size memory)
+{
+	TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+	TessGroupAction action;
+
+	check(state, state->kernels->table_stats(&state->table, &stats, &state->status));
+	action = group_step(state, NULL, (TessGroupEvent) {
+		.kind = TESS_GROUP_PARTIAL,
+		.flag = !state->row_spill,
+		.memory = memory,
+		.records = stats.records,
+		.rows = state->rows - state->emit_rows,
+	});
+	if (action.kind == TESS_GROUP_SPILL)
+	{
+		state->partial_spill = true;
+		agg_spill_check(state, true);
+	}
+	return (TessGroupActionKind) action.kind;
+}
+
+/*
  * After a batch: past seven eighths of hash_mem, as the machine decides,
  * or at once with force, the first level of partitions, for twice the
  * groups so far or the planner's if more, and the records so far split

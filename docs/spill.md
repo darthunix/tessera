@@ -171,11 +171,12 @@ refers to.
 **The machine.** The decisions of the groups' spill are the machine of
 the crate `relspill` (its module `group`), which the node keeps for each
 level and steps: after each batch, whether the table spills and how its
-first level is planned; what a partition whose chunk is full does; which
-partitions go to disk past seven eighths of `hash_mem`; which partitions
-write what they hold at the end of the input; and the order the
-partitions are given out in, with whether one too large splits into a
-level below, by the groups the node estimates it holds.
+first level is planned, and, for a partial grouping, whether its table
+goes up or spills (below); what a partition whose chunk is full does;
+which partitions go to disk past seven eighths of `hash_mem`; which
+partitions write what they hold at the end of the input; and the order
+the partitions are given out in, with whether one too large splits into
+a level below, by the groups the node estimates it holds.
 
 **The rows' machine.** A grouping by a generic aggregate, whose states
 do not merge, keeps a machine of the same module (`Rows`) for its table

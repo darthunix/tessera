@@ -24,7 +24,7 @@ pub struct GroupParams {
     pub limit: u64,
     pub shape: SpillShape,
     pub merged: u64,
-    pub fill: f64,
+    pub fill: u64,
     pub start: f64,
     pub target: f64,
     pub spilled: f64,
@@ -71,7 +71,9 @@ pub struct GroupHost {
 /// and `flag`, the tail, are those of [`GROUP_FULL`], `flag` the force of
 /// [`GROUP_INNER`]; `bytes`, `records` and `estimate` those of
 /// [`GROUP_INNER`]; `memory` that of [`GROUP_GROWN`] and [`GROUP_SENT`];
-/// `groups` and `others` those of [`GROUP_WEIGHED`].
+/// `groups` and `others` those of [`GROUP_WEIGHED`]; `memory`,
+/// `records`, `rows` and `flag`, whether the groups can spill, those of
+/// [`GROUP_PARTIAL`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GroupEvent {
@@ -85,6 +87,7 @@ pub struct GroupEvent {
     pub memory: u64,
     pub groups: u64,
     pub others: u64,
+    pub rows: u64,
 }
 
 /// `TessGroupEventKind`, of a [`GroupEvent`].
@@ -96,6 +99,7 @@ pub const GROUP_SENT: u32 = 5;
 pub const GROUP_INPUT_END: u32 = 6;
 pub const GROUP_NEXT: u32 = 7;
 pub const GROUP_WEIGHED: u32 = 8;
+pub const GROUP_PARTIAL: u32 = 9;
 
 /// `TessGroupBelow`: a level below to make; see [`Below`].
 #[repr(C)]
@@ -130,6 +134,8 @@ pub const GROUP_MERGE: u32 = 5;
 pub const GROUP_WEIGH: u32 = 6;
 pub const GROUP_SPLIT: u32 = 7;
 pub const GROUP_LEVEL_DONE: u32 = 8;
+pub const GROUP_EMIT: u32 = 9;
+pub const GROUP_SPILL: u32 = 10;
 
 impl GroupEvent {
     fn event(&self) -> Result<Event> {
@@ -166,6 +172,12 @@ impl GroupEvent {
             GROUP_WEIGHED => Event::Weighed {
                 groups: self.groups,
                 others: self.others,
+            },
+            GROUP_PARTIAL => Event::Partial {
+                memory: self.memory,
+                records: self.records,
+                rows: self.rows,
+                spills: flag,
             },
             kind => bail!("a grouping event of kind {kind}"),
         })
@@ -216,6 +228,8 @@ impl GroupAction {
             Action::Merge(partition) => (GROUP_MERGE, partition),
             Action::Weigh(partition) => (GROUP_WEIGH, partition),
             Action::LevelDone => (GROUP_LEVEL_DONE, 0),
+            Action::Emit => (GROUP_EMIT, 0),
+            Action::Spill => (GROUP_SPILL, 0),
         };
         Self {
             kind,
@@ -370,7 +384,7 @@ pub const GROUP_PARAMS_SPLIT_ROOM_OFFSET: c_int = 3;
 pub const GROUP_HOST_SIZE: c_int = 4;
 pub const GROUP_HOST_NDISK_OFFSET: c_int = 5;
 pub const GROUP_EVENT_SIZE: c_int = 6;
-pub const GROUP_EVENT_OTHERS_OFFSET: c_int = 7;
+pub const GROUP_EVENT_ROWS_OFFSET: c_int = 7;
 pub const GROUP_ACTION_SIZE: c_int = 8;
 pub const GROUP_ACTION_BELOW_OFFSET: c_int = 9;
 pub const GROUP_BELOW_SIZE: c_int = 10;
@@ -387,7 +401,7 @@ pub extern "C" fn tess_group_layout(what: c_int) -> usize {
         GROUP_HOST_SIZE => size_of::<GroupHost>(),
         GROUP_HOST_NDISK_OFFSET => offset_of!(GroupHost, ndisk),
         GROUP_EVENT_SIZE => size_of::<GroupEvent>(),
-        GROUP_EVENT_OTHERS_OFFSET => offset_of!(GroupEvent, others),
+        GROUP_EVENT_ROWS_OFFSET => offset_of!(GroupEvent, rows),
         GROUP_ACTION_SIZE => size_of::<GroupAction>(),
         GROUP_ACTION_BELOW_OFFSET => offset_of!(GroupAction, below),
         GROUP_BELOW_SIZE => size_of::<GroupBelow>(),
@@ -403,7 +417,7 @@ pub extern "C" fn tess_group_layout(what: c_int) -> usize {
 pub struct RowsParams {
     pub limit: u64,
     pub shape: SpillShape,
-    pub fill: f64,
+    pub fill: u64,
     pub least: u64,
 }
 

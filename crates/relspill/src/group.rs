@@ -19,10 +19,12 @@
 //! ```
 //!
 //! - **Fits.** After each batch the host reports the bytes its table
-//!   takes ([`Event::Inner`]): past a share of the limit, `fill`, the
-//!   machine plans the first level ([`Action::Start`]). The host may ask
-//!   for the spill on its own, as a partial grouping does that would
-//!   otherwise send its groups up.
+//!   takes ([`Event::Inner`]): past `fill` eighths of the limit, the
+//!   machine plans the first level ([`Action::Start`]). A partial
+//!   grouping, whose groups may go up unfinished, weighs its table first
+//!   ([`Event::Partial`]): full, it sends it up ([`Action::Emit`]), or,
+//!   when sending it up would fold too few rows, it spills instead
+//!   ([`Action::Spill`]) and asks for the first level itself.
 //! - **Planned.** The host makes the level and reports it
 //!   ([`Event::Made`]), then moves its records into the partitions.
 //! - **Building.** A partition whose chunk is full takes another
@@ -74,8 +76,9 @@ pub struct Params {
     /// The bytes a group takes merged: its record and its share of the
     /// index.
     pub merged: u64,
-    /// The share of the limit past which the table spills.
-    pub fill: f64,
+    /// The eighths of the limit past which the table is full: past
+    /// `limit / 8 * fill` bytes, counted in whole eighths.
+    pub fill: u64,
     /// The weights of the rule that sends partitions to disk, as
     /// [`Weights`] names them: `start`, `target` and `spilled`;
     pub start: f64,
@@ -104,6 +107,15 @@ pub enum Event {
     /// A partition's chunk has no room for its next record; `tail` when
     /// it holds one.
     Full { partition: u32, tail: bool },
+    /// A partial grouping weighs its table before a batch: its groups
+    /// take `memory` bytes in `records` groups, of `rows` rows read since
+    /// the table started; `spills` when the groups can go to disk.
+    Partial {
+        memory: u64,
+        records: u64,
+        rows: u64,
+        spills: bool,
+    },
     /// Records went into the partitions: the host's memory now.
     Grown { memory: u64 },
     /// The partition of the last [`Action::Write`] went to disk, and the
@@ -149,6 +161,13 @@ pub enum Action {
     Split(Below),
     /// Every partition of the level is given out.
     LevelDone,
+    /// The partial grouping's table is full: its groups go up as they
+    /// are, and a new table starts.
+    Emit,
+    /// The partial grouping's table is full of groups of few rows each:
+    /// it spills instead, and the host reports [`Event::Inner`] with
+    /// `force`.
+    Spill,
 }
 
 /// A level below to make, which splits a partition of the level above.
@@ -229,9 +248,10 @@ pub const GROUP_WORDS: usize = 20;
 impl Group {
     /// The machine of a grouping whose table fits so far.
     ///
-    /// A wrong call: a limit of 0, or a share or weight below zero or not
-    /// finite ([`Rule::JoinParams`]); and a shape that no level can be
-    /// planned by ([`plan::plan`]).
+    /// A wrong call: a limit of 0, or a weight below zero or not finite
+    /// ([`Rule::JoinParams`]); and a shape that no level can be planned by
+    /// ([`plan::plan`]). Any `fill` is eighths: 0 makes any table with a
+    /// group full, 8 or more one past the limit.
     pub fn new(params: &Params) -> Result<Self> {
         check(params)?;
         Ok(Self {
@@ -300,7 +320,7 @@ impl Group {
                     force,
                 },
             ) => {
-                if !force && bytes as f64 <= self.params.fill * self.params.limit as f64 {
+                if !force && !full(self.params.limit, self.params.fill, bytes) {
                     return Ok(Action::Done);
                 }
                 // Not below zero, and not a number refused too.
@@ -309,6 +329,26 @@ impl Group {
                 let expected = plan::expected(bytes as f64, records as f64, estimate, 1);
                 Ok(Action::Start(self.plan_level(0, expected, 0)?))
             }
+            (
+                FITS,
+                Event::Partial {
+                    memory,
+                    records,
+                    rows,
+                    spills,
+                },
+            ) => Ok(
+                // An empty table sent up would come back as it went, forever.
+                if !full(self.params.limit, self.params.fill, memory) || records == 0 {
+                    Action::Done
+                } else if spills && records.saturating_mul(2) > rows {
+                    // More groups than half the rows: sent up, it would
+                    // fold nothing.
+                    Action::Spill
+                } else {
+                    Action::Emit
+                },
+            ),
             (PLANNED, Event::Made) => {
                 ensure!(
                     host.words.len() as u64 == self.words,
@@ -551,7 +591,6 @@ impl Group {
 /// Refuse parameters no level can be planned by.
 fn check(params: &Params) -> Result<()> {
     let weights = [
-        params.fill,
         params.start,
         params.target,
         params.spilled,
@@ -582,7 +621,13 @@ fn code(event: &Event) -> u32 {
         Event::InputEnd => 6,
         Event::Next => 7,
         Event::Weighed { .. } => 8,
+        Event::Partial { .. } => 9,
     }
+}
+
+/// Whether `bytes` pass `fill` eighths of `limit`.
+fn full(limit: u64, fill: u64, bytes: u64) -> bool {
+    bytes > (limit / 8).saturating_mul(fill)
 }
 
 /// What every level of a grouping's rows shares, given once: the rows of
@@ -599,8 +644,9 @@ pub struct RowsParams {
     /// The shape of a level of rows ([`crate::plan`]): its fixed
     /// partitions and its chunks of rows.
     pub shape: Shape,
-    /// The share of the limit past which a table takes no new group,
-    pub fill: f64,
+    /// The eighths of the limit past which a table takes no new group,
+    /// as [`Params::fill`],
+    pub fill: u64,
     /// once it has this many groups at least: fewer would freeze every
     /// table read back again, level after level.
     pub least: u64,
@@ -665,7 +711,7 @@ const ROWS_DONE: u32 = 4;
 ///
 /// It is plain data of a fixed layout, [`ROWS_WORDS`] words of 8 bytes.
 /// A table's machine weighs the table after each batch
-/// ([`RowsEvent::Grown`]): past `fill` of the limit, with `least` groups
+/// ([`RowsEvent::Grown`]): past `fill` eighths of the limit, with `least` groups
 /// at least, and while bits are left, it freezes the table and plans the
 /// level its rows go to ([`RowsAction::Freeze`]). Once the level's rows
 /// are written ([`RowsEvent::Written`]), the host keeps the machine with
@@ -699,15 +745,10 @@ impl Rows {
     /// The machine of the table of a grouping's input, whose rows go to
     /// the first level once frozen.
     ///
-    /// A wrong call: a limit of 0 or a share below zero or not finite
-    /// ([`Rule::JoinParams`]), and a shape no level can be planned by
-    /// ([`plan::plan`]).
+    /// A wrong call: a limit of 0 ([`Rule::JoinParams`]), and a shape no
+    /// level can be planned by ([`plan::plan`]).
     pub fn new(params: &RowsParams) -> Result<Self> {
-        let counted = params.fill.is_finite() && params.fill >= 0.0;
-        ensure!(
-            params.limit > 0 && counted,
-            Error::wrong_call(Rule::JoinParams)
-        );
+        ensure!(params.limit > 0, Error::wrong_call(Rule::JoinParams));
         plan::plan(
             &params.shape,
             &Level::first(usize::try_from(params.limit).unwrap_or(usize::MAX)),
@@ -760,7 +801,7 @@ impl Rows {
         match (self.phase, event) {
             (ROWS_TABLE, RowsEvent::Grown { memory, records }) => {
                 if self.last != 0
-                    || memory as f64 <= self.params.fill * self.params.limit as f64
+                    || !full(self.params.limit, self.params.fill, memory)
                     || records < self.params.least
                 {
                     return Ok(RowsAction::Done);
