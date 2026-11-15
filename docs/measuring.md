@@ -75,6 +75,41 @@ run to the person it works for. On Linux `pmu` already counts, and the
 runs of `tessera-bench` there are planned; a run will go differently
 there. CI checks correctness, not speed.
 
+## Counts or times
+
+A count of instructions repeats where a time wanders, so an A/B by
+counts takes seconds instead of minutes. But it shows whether the work
+grew, not whether it got slower, and the same saving pays differently
+on different processors. One change of the deform of tuples cut the
+instructions of TPC-H Q12 by 19 %. Its time fell by 16–20 % on an
+Apple M5 Pro, and by 2.5 % on a Neoverse-N2. So the choice follows
+what a change touches, not the family:
+
+- **Counts** (`cargo ab measure --counters`): the kernels, the
+  expressions, the deform of tuples, the code inside a node, while the
+  plan stays the same.
+- **Counts and disk**: a spill's format, encoding or partitioning. The
+  report's `disk` column gives the volume a case writes beside its
+  instructions.
+- **Times**:
+  - the I/O of a spill: the size and number of its writes, the reads
+    ahead, the number of its files;
+  - the layout of a hash table, prefetching, and any other change that
+    trades instructions for memory;
+  - SIMD and branches: a count sees how many instructions there are,
+    not how wide they are or how often a branch is mispredicted;
+  - costs, gates and planning, which change plans. The report marks a
+    case `plan differs` when its nodes, their relations, indexes, join
+    types or workers changed, but not every change of a plan, such as
+    a filter's or a sort key's;
+  - Tessera on against off, and the calibrations;
+  - every claim of speed.
+
+The cycles pg_pmu counts are no cheaper way to time. On GitHub's Linux
+runners they spread as much as times did: 0.5–1 % on a serial query,
+up to 14 % on the worst one. Only with parallel workers was their
+spread smaller than time's.
+
 ## Machine code before counters
 
 On macOS a run with counters costs a person's time under `sudo`. Before
@@ -110,12 +145,10 @@ asking for one:
   the instruction once its tables are in the buffers, and a case with
   parallel workers within a fraction of a percent; macOS counts the
   kernel as well, so there count serial cases on a server that has
-  settled since its restart. Counts do not replace times where the cost
-  is not in the instructions: stalls on memory, the width of SIMD, the
-  I/O of a spill, a change that trades instructions for memory. Nor do
-  they compare Tessera with the core: EXPLAIN ANALYZE counts the rows of
-  every node, which the core pays a row and a batch node a batch. A
-  change that claims speed is timed as well.
+  settled since its restart. Which changes counts can judge is said
+  under "Counts or times". They never compare Tessera with the core:
+  EXPLAIN ANALYZE counts the rows of every node, which the core pays a
+  row and a batch node a batch.
 - **More cycles with fewer instructions** is first compared with a run
   of three repeats, then with the address of the loop's head. A function
   moved by 16 bytes against a 64-byte line has cost 5 %: build both
