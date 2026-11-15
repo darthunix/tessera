@@ -41,7 +41,7 @@ CREATE TEMP TABLE timings
     test text,
     mode text,
     run integer,
-    milliseconds numeric
+    reading numeric
 );
 
 CREATE TEMP TABLE cases
@@ -55,7 +55,7 @@ CREATE TEMP TABLE cases
  * A prepared statement without parameters is planned at its first
  * execution and cached, so the mode set here decides its plan for good:
  * every statement is prepared twice, once per mode. An unprepared case
- * runs its text each time, planning included.
+ * is a query whose planning alone is read, planned anew each time.
  */
 CREATE FUNCTION pg_temp.measure(test_name text, mode text, statement text,
                                 prepared boolean, repetitions integer)
@@ -63,16 +63,20 @@ RETURNS void
 LANGUAGE plpgsql
 AS $function$
 DECLARE
-    command text := CASE WHEN prepared THEN format('EXECUTE %I', statement)
-                         ELSE statement END;
+    value numeric;
 BEGIN
     PERFORM set_config('tessera.enable', mode, false);
-    FOR warmup IN 1..5 LOOP
-        PERFORM pg_temp.reading(command);
-    END LOOP;
-    FOR sample IN 1..repetitions LOOP
-        INSERT INTO timings
-        VALUES (test_name, mode, sample, pg_temp.reading(command));
+    -- Five warm-ups, then the samples. A statement not prepared is a query
+    -- whose planning alone is read.
+    FOR sample IN -4..repetitions LOOP
+        IF prepared THEN
+            value := pg_temp.reading(format('EXECUTE %I', statement));
+        ELSE
+            value := pg_temp.plan_reading(statement, 1);
+        END IF;
+        IF sample > 0 THEN
+            INSERT INTO timings VALUES (test_name, mode, sample, value);
+        END IF;
     END LOOP;
 END
 $function$;
@@ -153,7 +157,7 @@ SELECT pg_temp.measure_pair('rows_generic',
 -- Planning alone: EXPLAIN of thirty aggregates of expressions and a
 -- filter, planned every time.
 SELECT pg_temp.measure_pair('plan_exprs',
-    'EXPLAIN SELECT ' || string_agg(format('sum(a * %s + %s), max(a - %s)', i, i, i), ', ') ||
+    'SELECT ' || string_agg(format('sum(a * %s + %s), max(a - %s)', i, i, i), ', ') ||
     ' FROM bench_tiny WHERE a % 7 <> 3 AND a + 1 > 2',
     '4MB', false, :repetitions)
 FROM generate_series(1, 15) AS i;
@@ -163,10 +167,10 @@ RESET work_mem;
 
 \o summary.txt
 SELECT test, mode, count(*) AS runs,
-       round(min(milliseconds), 3) AS min_ms,
-       round(percentile_disc(0.5) WITHIN GROUP (ORDER BY milliseconds), 3) AS median_ms,
-       round(percentile_disc(0.1) WITHIN GROUP (ORDER BY milliseconds), 3) AS p10_ms,
-       round(percentile_disc(0.9) WITHIN GROUP (ORDER BY milliseconds), 3) AS p90_ms
+       round(min(reading), 3) AS min,
+       round(percentile_disc(0.5) WITHIN GROUP (ORDER BY reading), 3) AS median,
+       round(percentile_disc(0.1) WITHIN GROUP (ORDER BY reading), 3) AS p10,
+       round(percentile_disc(0.9) WITHIN GROUP (ORDER BY reading), 3) AS p90
 FROM timings
 GROUP BY test, mode
 ORDER BY test, mode DESC;

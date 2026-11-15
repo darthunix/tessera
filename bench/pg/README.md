@@ -248,8 +248,8 @@ query down, and where it can, does it speed one up.
 
 ## Rules
 
-Wall time is the metric: the backend's performance counters need root and
-PostgreSQL does not run as root. To make time trustworthy, every case is
+Wall time is the metric unless counts are asked for (below). To make time
+trustworthy, every case is
 executed five times as a warm-up and then 31 times, each timed with
 `clock_timestamp()` around `EXECUTE`; the report gives the minimum, the
 median and the 10th and 90th percentiles, and the on/off ratio of the
@@ -263,6 +263,39 @@ recorded; nothing is retried or discarded, and a bad run is kept and
 explained. The plans of both modes are recorded with `EXPLAIN (ANALYZE,
 VERBOSE)`, which the batch nodes' counters need, and checked by eye: the
 on plan must contain the batch nodes, the off plan must not.
+
+**Counts instead of times.** With `METRIC=instructions` a reading is the
+number of instructions the processor spent on a case's execution, which
+[pg_pmu](https://github.com/darthunix/pg_pmu) counts in
+`EXPLAIN (ANALYZE, PMU, TIMING off, BUFFERS off)`, parallel workers
+included. A planning case reads the instructions of its planning, and its
+query then runs once as well. Both kinds of reading are taken by
+`reading.sql`, which every family that times includes.
+
+- pg_pmu must be installed in the PostgreSQL build. The server preloads it
+  only for such a run: `run.sh` puts `shared_preload_libraries` on the
+  command line of every start and restart, so a run that times loads
+  nothing more. `measure` refuses to count on a server without pg_pmu,
+  and to time on one with it, which a caller's restart may leave.
+- A count pg_pmu did not print is an error, and so is a system that
+  cannot count: `run.sh` then prints the error and pg_pmu's hint, such
+  as the setting `kernel.perf_event_paranoid` of Linux.
+- Linux counts the user space of the backend and its workers. Once the
+  tables are in the buffers, the count of a serial case repeats to the
+  instruction, and with parallel workers within a fraction of a percent.
+  macOS counts the kernel too: right after a restart its counts move by
+  up to a few percent, and with parallel workers by several percent, so
+  there it counts serial cases of a settled server.
+- After the five warm-ups, three runs are enough: `REPETITIONS` is 3 by
+  default.
+- Counts tell whether a change made the work larger, not whether it made
+  it slower. Stalls on memory, SIMD and the I/O of a spill are seen by
+  time only.
+- A ratio of Tessera on to off means nothing by counts. EXPLAIN ANALYZE
+  counts the rows of every node, which the core pays a row and the batch
+  nodes a batch.
+- The calibrations (`scancost`, `joincost`, `lookupcost`) take times of
+  their own and refuse to count.
 
 ## Running
 
@@ -278,6 +311,8 @@ CASES='^ix_' REPETITIONS=11 bench/pg/run.sh measure index
                                # only the cases the pattern matches, 11 runs each
 bench/pg/run.sh stop           # stop and delete the cluster
 SHARED_BUFFERS=4GB bench/pg/run.sh setup 10   # ten times the rows, larger buffers
+METRIC=instructions bench/pg/run.sh measure tax
+                               # counts of instructions instead of times
 ```
 
 `CASES`, a regular expression of case names, times only the cases it
@@ -311,10 +346,11 @@ constants are the cases themselves and it runs at the base size only.
 
 Each measurement gets a directory under `target/bench-runs/` (ignored by
 git) with `protocol.md` (this file's rules at the time), `source/` (the SQL
-that ran), `source.txt` (the revision, the number of workers, the data multiplier and
-`shared_buffers`, the working tree's status and the hashes of the installed
-libraries and `postgres`), `power.txt`,
-`timings.csv` (every sample), `summary.txt` (the table) and `plans.txt`.
+that ran), `source.txt` (the revision, the metric, the number of
+workers, the data multiplier and `shared_buffers`, the working tree's
+status and the hashes of the installed libraries and `postgres`),
+`power.txt`,
+`timings.csv` (every reading), `summary.txt` (the table) and `plans.txt`.
 Write `comparison.md` by hand: what was measured, the table with ratios,
 observations, and what the numbers mean for the tolerance of the family;
 the tolerance itself is set from data, never in advance.

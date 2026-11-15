@@ -26,7 +26,7 @@ CREATE TEMP TABLE timings
     test text,
     mode text,
     run integer,
-    milliseconds numeric
+    reading numeric
 );
 
 /*
@@ -243,10 +243,10 @@ SELECT pg_temp.measure_plan('plan_time',
 
 \o summary.txt
 SELECT test, mode, count(*) AS runs,
-       round(min(milliseconds), 3) AS min_ms,
-       round(percentile_disc(0.5) WITHIN GROUP (ORDER BY milliseconds), 3) AS median_ms,
-       round(percentile_disc(0.1) WITHIN GROUP (ORDER BY milliseconds), 3) AS p10_ms,
-       round(percentile_disc(0.9) WITHIN GROUP (ORDER BY milliseconds), 3) AS p90_ms
+       round(min(reading), 3) AS min,
+       round(percentile_disc(0.5) WITHIN GROUP (ORDER BY reading), 3) AS median,
+       round(percentile_disc(0.1) WITHIN GROUP (ORDER BY reading), 3) AS p10,
+       round(percentile_disc(0.9) WITHIN GROUP (ORDER BY reading), 3) AS p90
 FROM timings
 GROUP BY test, mode
 ORDER BY test, mode DESC;

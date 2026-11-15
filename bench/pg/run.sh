@@ -13,7 +13,10 @@
 # (every case by default; the plans are written for those timed), and
 # REPETITIONS, the runs of each case in each mode (the family's own, 31,
 # by default): a development A/B times the cases a change touches, fewer
-# times, to stay within minutes.
+# times, to stay within minutes. METRIC=instructions makes every command
+# count instead of time: a reading is then the instructions pg_pmu counts
+# in a case's execution, the server preloads pg_pmu besides Tessera, and
+# REPETITIONS is 3 by default.
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 HERE=$ROOT/bench/pg
@@ -33,6 +36,26 @@ export PGPORT=${PGPORT:-5433} PGHOST=/tmp PGDATABASE=postgres
 # takes the options of the last start (postmaster.opts), whatever port
 # they named, and the queries would reach another cluster on PGPORT.
 SERVER_OPTIONS="-p $PGPORT -k $PGHOST"
+# The modules the server preloads: postgresql.conf lists them, and a run
+# that counts lists them on the command line with pg_pmu.
+PRELOAD='tessera, tessera_nodes, tessera_kernels'
+METRIC=${METRIC:-time}
+case $METRIC in
+time) ;;
+instructions)
+    if [ "$1" != stop ] && [ ! -f "$LIB/pg_pmu$DLSUFFIX" ]; then
+        echo "METRIC=instructions needs pg_pmu in $LIB:" \
+            "https://github.com/darthunix/pg_pmu" >&2
+        exit 1
+    fi
+    # Over the list of postgresql.conf: a run that times loads no pg_pmu.
+    SERVER_OPTIONS="$SERVER_OPTIONS -c shared_preload_libraries='$PRELOAD, pg_pmu'"
+    ;;
+*)
+    echo "METRIC is time or instructions, not $METRIC" >&2
+    exit 2
+    ;;
+esac
 
 # Stops unless the server on PGPORT runs this cluster.
 check_server() {
@@ -50,7 +73,7 @@ setup)
     rm -rf "$DATA"
     "$BIN/initdb" -D "$DATA" -A trust > "$RUNS/initdb.log" 2>&1
     cat >> "$DATA/postgresql.conf" <<CONF
-shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels'
+shared_preload_libraries = '$PRELOAD'
 shared_buffers = ${SHARED_BUFFERS:-2GB}
 jit = off
 max_parallel_workers_per_gather = 0
@@ -70,6 +93,17 @@ restart)
 measure)
     FAMILY=$2
     WORKERS=${3:-0}
+    if [ ! -f "$HERE/$FAMILY.sql" ]; then
+        echo "bench/pg has no family $FAMILY" >&2
+        exit 2
+    fi
+    if [ "$METRIC" = instructions ]; then
+        if ! grep -q 'pg_temp\.\(plan_\)\{0,1\}reading' "$HERE/$FAMILY.sql"; then
+            echo "the family $FAMILY takes times of its own: it cannot count" >&2
+            exit 2
+        fi
+        REPETITIONS=${REPETITIONS:-3}
+    fi
     ID=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 6)
     if [ "$WORKERS" -gt 0 ]; then
         OUT=$RUNS/pg-$FAMILY-w$WORKERS-$ID
@@ -83,11 +117,26 @@ measure)
             restart > /dev/null
     fi
     check_server
+    # A server restarted by the caller must load pg_pmu for counts, and
+    # nothing more for times.
+    preloaded=$("$BIN/psql" -X -tAc 'SHOW shared_preload_libraries')
+    case "$METRIC $preloaded" in
+    "instructions "*pg_pmu*) ;;
+    instructions*)
+        echo "the server preloads no pg_pmu: restart it with METRIC=instructions" >&2
+        exit 1
+        ;;
+    *pg_pmu*)
+        echo "the server preloads pg_pmu: restart it without METRIC to time" >&2
+        exit 1
+        ;;
+    esac
     mkdir -p "$OUT/source"
     cp "$HERE/README.md" "$OUT/protocol.md"
     cp "$HERE/setup.sql" "$HERE/reading.sql" "$HERE/$FAMILY.sql" "$OUT/source/"
     {
         echo "HEAD $(git -C "$ROOT" rev-parse HEAD)"
+        echo "metric $METRIC"
         echo "workers $WORKERS"
         echo "cases ${CASES:-all}"
         echo "repetitions ${REPETITIONS:-default}"
@@ -102,10 +151,15 @@ measure)
     { pmset -g batt 2>/dev/null | head -2; date; } > "$OUT/power.txt"
     # A query whose psql is gone, stopped by a deadline, ends within a
     # second instead of running on.
-    (cd "$OUT" && PGOPTIONS="${PGOPTIONS:-} -c bench.cases=${CASES:-} \
+    (cd "$OUT" && PGOPTIONS="${PGOPTIONS:-} -c bench.cases=${CASES:-} -c bench.metric=$METRIC \
         -c client_connection_check_interval=1000" "$BIN/psql" -X \
         -v workers="$WORKERS" ${REPETITIONS:+-v repetitions="$REPETITIONS"} \
-        -f "$HERE/$FAMILY.sql" > run.log 2>&1)
+        -f "$HERE/$FAMILY.sql" > run.log 2>&1) || {
+        # Such as a system that cannot count: pg_pmu's error and its hint.
+        grep -E '(ERROR|DETAIL|HINT):' "$OUT/run.log" | head -5 >&2
+        echo "the family $FAMILY failed: $OUT/run.log" >&2
+        exit 1
+    }
     cat "$OUT/summary.txt"
     echo "results: $OUT"
     ;;

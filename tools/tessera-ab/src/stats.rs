@@ -9,8 +9,10 @@ use anyhow::{Context, Result, bail};
 /// The mode a family times with Tessera off: the control of mode `on`.
 pub const CONTROL: &str = "off";
 
-/// The milliseconds of each case and mode of one run, as its
-/// `timings.csv` (`test,mode,run,milliseconds`) lists them.
+/// The readings of each case and mode of one run, as its `timings.csv`
+/// (`test,mode,run,reading`) lists them: times in milliseconds, or the
+/// counts of instructions of a run with `METRIC=instructions`. A file of
+/// a calibration names the column `milliseconds`.
 pub type Timings = BTreeMap<(String, String), Vec<f64>>;
 
 /// A run's timings, and how many readings it left out: a time not above
@@ -36,7 +38,8 @@ pub fn parse(csv: &str) -> Result<Run> {
             .position(|column| *column == name)
             .with_context(|| format!("timings.csv has no column {name}"))
     };
-    let (test, mode, milliseconds) = (column("test")?, column("mode")?, column("milliseconds")?);
+    let reading = column("reading").or_else(|_| column("milliseconds"))?;
+    let (test, mode) = (column("test")?, column("mode")?);
     let mut run = Run::default();
     for line in lines.filter(|line| !line.is_empty()) {
         let fields: Vec<&str> = line.split(',').collect();
@@ -46,9 +49,9 @@ pub fn parse(csv: &str) -> Result<Run> {
                 .copied()
                 .with_context(|| format!("a short line of timings.csv: {line}"))
         };
-        let value: f64 = field(milliseconds)?
+        let value: f64 = field(reading)?
             .parse()
-            .with_context(|| format!("not a time: {line}"))?;
+            .with_context(|| format!("not a reading: {line}"))?;
         if value <= 0.0 {
             run.dropped += 1;
             continue;
@@ -237,6 +240,9 @@ mod tests {
         assert_eq!(run.dropped, 1, "a reading of a clock stepped back");
         assert!(parse("test,mode,run\n").is_err());
         assert!(parse("test,mode,run,milliseconds\nsum,on,1,fast\n").is_err());
+        // The families' column, in any place: a time or a count.
+        let counts = parse("reading,test,mode,run\n3000000,sum,on,1\n")?;
+        assert_eq!(counts.timings[&("sum".into(), "on".into())], [3e6]);
         Ok(())
     }
 
