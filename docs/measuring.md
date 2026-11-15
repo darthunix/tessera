@@ -51,6 +51,10 @@ test and a line in its README.
   [bench/pg/README.md](../bench/pg/README.md).
 - **Did a change make queries slower?** `cargo ab measure --base REF`,
   described in [tools/tessera-ab](../tools/tessera-ab/README.md).
+- **Did a change make queries do more work?** The same with
+  `--counters`: the instructions of every case, which
+  [pg_pmu](https://github.com/darthunix/pg_pmu) counts, in one round a
+  side and three readings a case.
 - **Does a cut of a file only move lines?** `cargo ab moved`, described
   in the same place.
 - **Did the machine code of a loop change?**
@@ -101,6 +105,17 @@ asking for one:
   cannot learn; the regular cases show a call whose branches it knows.
   The [benchmarks' README](../crates/tessera-capi/benches/README.md)
   lists both kinds and where the inputs of a ring lie.
+- **Counts of a family.** `cargo ab measure --counters` flags a case
+  whose instructions move past 1 %. On Linux a serial case repeats to
+  the instruction once its tables are in the buffers, and a case with
+  parallel workers within a fraction of a percent; macOS counts the
+  kernel as well, so there count serial cases on a server that has
+  settled since its restart. Counts do not replace times where the cost
+  is not in the instructions: stalls on memory, the width of SIMD, the
+  I/O of a spill, a change that trades instructions for memory. Nor do
+  they compare Tessera with the core: EXPLAIN ANALYZE counts the rows of
+  every node, which the core pays a row and a batch node a batch. A
+  change that claims speed is timed as well.
 - **More cycles with fewer instructions** is first compared with a run
   of three repeats, then with the address of the loop's head. A function
   moved by 16 bytes against a 64-byte line has cost 5 %: build both
