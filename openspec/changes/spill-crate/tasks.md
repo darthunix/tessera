@@ -397,7 +397,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 
 ## 7. The close
 
-- [ ] 7.1 Write the design of `relspill` for a caller of the crate.
+- [x] 7.1 Write the design of `relspill` for a caller of the crate.
       Check: `.github/scripts/check-specs.sh`
 - [ ] 7.2 Run the fuzz targets for an hour each. Check: the run, with
       no finding
