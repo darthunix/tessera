@@ -788,6 +788,9 @@ impl Reader {
     }
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use anyhow::{Context, Result, bail, ensure};

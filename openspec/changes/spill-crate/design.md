@@ -857,6 +857,13 @@ from another: the review of a change to a module that reads a file
 looks for one. A point names, when they exist, the proof and the rows
 of the damage matrix that cover it.
 
+A proof under a point is one of `crates/relspill/src/proofs.rs` or of
+the module `proofs` of the module it checks, which `cargo kani -p
+relspill` runs. Kani, a model checker, runs the crate's own check over
+bytes that may hold any value, and shows for each value that what the
+check passes keeps the reads after it inside their bytes and that
+nothing panics or overflows.
+
 The words of a spill that the participants share, and the block lists
 a host keeps for a writer, are the host's memory too, but they hold no
 bytes of a file and are no trust point: the crate checks each where it
@@ -869,6 +876,9 @@ reads it, as the documentation of the words and of the writer says.
     the kind and the fingerprint, then every length its kind allows,
     within the bound of its kind, and the level.
   - Error: damaged, from `Magic` to `Level`.
+  - Proof: `a_header_that_passes_has_the_lengths_of_its_kind`, and
+    `a_header_written_reads_back_as_it_was` for the writer, which
+    refuses what the reader would.
 - **`trailer`**: the four words at the end of a set's file.
   - Decides an address: where the lists start, and so where every read
     of the lists goes; and the length of a loop, the entries the lists
@@ -878,6 +888,7 @@ reads it, as the documentation of the words and of the writer says.
     that fill whole entries after their counts.
   - Error: damaged, `Trailer`, `TrailerMagic`, `TrailerPartitions`,
     `TrailerLists`, `FileFingerprint` or `ListsRoom`.
+  - Proof: `a_trailer_that_passes_puts_the_lists_before_it`.
 - **`list-counts`**: the count of blocks of each partition, the first
   part of the lists.
   - Decides an address and the length of a loop: where the partition's

@@ -20,7 +20,8 @@
 #    trust point of the crate's design and every point is marked; every
 #    function of the layer is known to this script; no word is read
 #    from bytes outside the layer, and no module imports the layer's
-#    functions. The tests and the loom models are not searched.
+#    functions. The tests, the proofs and the loom models are not
+#    searched.
 # Run from the root of the repository.
 set -eu
 
@@ -196,7 +197,7 @@ git ls-files -- "$spill/*.rs" | perl -e '
     my %marked;
     for my $file (@files) {
         next if $file eq $layer
-            || $file =~ m{^\Q$crate\E/(loom\.rs|testing\.rs|.*/tests\.rs|join/model\.rs)$};
+            || $file =~ m{^\Q$crate\E/(loom\.rs|testing\.rs|(?:.*/)?proofs\.rs|.*/tests\.rs|join/model\.rs)$};
         open(my $in, "<", $file) or die "$file: $!";
         my @lines = <$in>;
         my $tests = 0;

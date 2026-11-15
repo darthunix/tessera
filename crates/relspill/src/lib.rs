@@ -31,6 +31,8 @@ mod loom;
 mod pack;
 pub mod phases;
 pub mod plan;
+#[cfg(kani)]
+mod proofs;
 mod read;
 pub mod set;
 pub mod shared;
