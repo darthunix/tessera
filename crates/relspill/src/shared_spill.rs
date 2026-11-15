@@ -273,7 +273,9 @@ impl<'a> LocalSpill<'a> {
 }
 
 /// The weights of the rule that sends partitions to disk
-/// ([`Spill::evict`]): each node's rule is a set of their values.
+/// ([`Spill::evict`]): each node's rule is a set of their values. The
+/// shares are numbers not below zero and finite: with another, the rule
+/// still ends without a panic, but its choices mean nothing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Weights {
     /// The share of the limit the memory, with the reserve, must pass for
@@ -738,6 +740,9 @@ impl<W: Words> Spill<W> {
     }
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
@@ -935,6 +940,36 @@ mod tests {
             ..GROUPING
         };
         assert_eq!(evict(&left_out, 90, 0), Some(2), "on disk, left out");
+    }
+
+    #[test]
+    fn shares_of_no_number_infinite_or_below_zero_still_end_the_rule() {
+        let mut words = Vec::new();
+        let spill = local(&mut words, [40, 30, 20, 10]);
+        assert_eq!(
+            spill.evict(&GROUPING, measured(100, 100), None, 0).unwrap(),
+            Some(0),
+            "one on disk"
+        );
+        for share in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let weights = Weights {
+                start: share,
+                target: share,
+                spilled: share,
+                reserve: u64::MAX,
+                resident: share,
+                per_check: 0,
+            };
+            for memory in [
+                Memory::Counted,
+                measured(u64::MAX, 1),
+                measured(0, u64::MAX),
+            ] {
+                for evicted in [0, 1] {
+                    assert!(spill.evict(&weights, memory, None, evicted).is_ok());
+                }
+            }
+        }
     }
 
     #[test]

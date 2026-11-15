@@ -365,7 +365,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       the trust points in the design of `relspill`, and make the script
       of trust points check the crate, failing also on a read that goes
       around the layer. Check: the script in CI
-- [ ] 6.2 Kani proofs, one family a pull request: the checks of a
+- [x] 6.2 Kani proofs, one family a pull request: the checks of a
       header and a trailer; the lists; the bounds of unpacking records;
       those of columns; the arithmetic of a level and of the rule that
       picks a partition to send to disk. Each family names, in the list

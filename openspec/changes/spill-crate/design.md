@@ -864,6 +864,29 @@ bytes that may hold any value, and shows for each value that what the
 check passes keeps the reads after it inside their bytes and that
 nothing panics or overflows.
 
+Two families of proofs cover no trust point, as their numbers come from
+the host, not from a file. The plan of a level, for any shape and any
+level: `a_level_plans_partitions_of_its_shape`,
+`a_plan_sizes_the_partitions_given` and
+`a_level_below_takes_what_is_left_a_quarter_at_least`. The rule that
+doubles the partitions weighs the bytes a level expects, a float, by
+their count; the solver of bits takes that product for a count of any
+power of two in more than five minutes, and for counts it knows in
+seconds. So the rule is proved whole for the shapes that start from one
+partition, which try every count, and from four, as the joins and
+groupings of the nodes do:
+`a_level_from_one_partition_plans_the_first_that_does_not_double` and
+`a_level_from_four_partitions_plans_the_first_that_does_not_double`.
+The rule that sends a partition to disk, over the words of four
+partitions that hold any values and any memory, is the one its
+documentation gives, computed in the proof beside it:
+`a_grouping_sends_what_the_rule_says` and
+`a_join_sends_what_the_rule_says`, with the weights the nodes' settings
+give by default, the join's with no share of the rows in memory too, as
+a shared join's takes them. The solver takes the rule with weights of
+any value in half an hour, past what a proof may take in CI, so the
+weights are the nodes'.
+
 The words of a spill that the participants share, and the block lists
 a host keeps for a writer, are the host's memory too, but they hold no
 bytes of a file and are no trust point: the crate checks each where it

@@ -268,6 +268,9 @@ fn chunk_len(shape: &Shape, limit: usize, partitions: u32) -> Result<usize> {
     Ok((limit / parts).min(shape.max_chunk).max(least) & !7)
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use super::*;
