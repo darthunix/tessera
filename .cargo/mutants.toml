@@ -117,6 +117,38 @@ exclude_globs = [
 #   same mask, so it rejects no key added, and lets a few more absent ones
 #   through.
 # - The owning table's blocks not freed leak: no answer changes.
+# relspill's, judged by its own tests (each place named, since the same
+# operators elsewhere in these functions matter):
+# - Code of a big-endian target alone: on a little-endian one `low` is
+#   0, and its subtraction never runs.
+# - An | between bits that never meet, which ^ gives alike: the
+#   constants of a join's flags, each a bit of its own; a row's place in
+#   a chunk, below 2^17 under the chunk's number; and a reference to a
+#   value, whose byte value_ref documents as below 2^32 under its
+#   chunk's number. The one byte past them, an empty value at the end of
+#   exactly 4 GiB of values, is a fault under "Not placed" of the
+#   roadmap; a test of it takes 4 GiB, past what a mutant's test may.
+# - An arm gone whose fall-through does the same: a lane of no bytes, or
+#   of records' equal values, copied by the arm for 4 bytes a record
+#   into an empty place or the first record's value (pack); a lane of
+#   columns of width 0, read into no bytes (columns::pack); a block left
+#   packed in the scratch region, packed again into the same bytes.
+# - A check another one already makes: an `out` of the codes alone,
+#   refused at the length's lane; a buffer that is empty, which the two
+#   other conditions of a block that fits refuse; a body larger than the
+#   buffer, never empty; a mask's word past its words, which a RowMask
+#   never has; an entry past a page, which no call looks up; a page's
+#   last end at the lists, which the check of an entry's length makes
+#   the same as at its block's largest; a table of no partitions, whose
+#   size finds none to weigh, and whose cursor, which that arm sets to
+#   0, nothing reads, so it goes on as the general arm does.
+# - A window of no NULL read through the loop that takes NULLs: the same
+#   words and flags, more slowly.
+# - Steps that differ only in how they are cut, which no promise fixes:
+#   the counts of the lists read in pages of fewer words, in more steps
+#   (Reader::open); a list without blocks given a range of no bytes in a
+#   finish, the same file. And the code of an event that a refusal
+#   carries in its numbers, which are for people.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -175,6 +207,24 @@ exclude_re = [
     "calendar\\.rs:.*reference::",
     "replace <impl Drop for Block>::drop with \\(\\)$",
     "<impl Token for Avx2>::get( -> Option<Self> with None)?$",
+    "relspill/src/lib\\.rs:196:5: replace low -> usize with 0$",
+    "relspill/src/lib\\.rs:197:11: replace - with [+/] in low$",
+    "relspill/src/join\\.rs:(647:41|672:41|682:40|687:39): replace \\| with \\^ in Join::step$",
+    "relspill/src/columns\\.rs:74:49: replace \\| with \\^ in value_ref$",
+    "relspill/src/spill_columns\\.rs:146:51: replace \\| with \\^ in append_partitioned$",
+    "relspill/src/pack\\.rs:18[45]:17: delete match arm (ZERO|CONSTANT) in pack$",
+    "relspill/src/columns\\.rs:326:13: delete match arm 0 in pack$",
+    "relspill/src/set\\.rs:515:13: delete match arm FROM_SCRATCH \\| FROM_BODY in Writer::write$",
+    "relspill/src/pack\\.rs:124:18: replace < with <= in pack$",
+    "relspill/src/set\\.rs:(538:33|635:25): replace > with >= in Writer::write$",
+    "relspill/src/spill_columns\\.rs:50:5: replace masked -> Result<\\(\\)> with Ok\\(\\(\\)\\)$",
+    "relspill/src/set/reader\\.rs:553:34: replace < with <= in Reader::entry$",
+    "relspill/src/set/reader\\.rs:568:(29: replace \\+ with \\*|44: replace == with !=) in Reader::took_page$",
+    "relspill/src/shared\\.rs:472:(36: replace match guard spill\\.partitions\\(\\) > 0 with true|55: replace > with >=) in Build::take$",
+    "relspill/src/spill_columns\\.rs:561:19: replace & with \\| in window$",
+    "relspill/src/set/reader\\.rs:435:31: replace \\* with \\+ in Reader::open$",
+    "relspill/src/set\\.rs:824:26: replace > with >= in Writer::finish$",
+    "relspill/src/shared\\.rs:785:5: replace event_code -> u32 with [01]$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

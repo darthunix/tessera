@@ -253,6 +253,23 @@ fn the_first_level_keeps_its_chunks_and_a_level_below_writes_them() {
     );
 }
 
+/// A machine tells its level: 0 for the first, and the level a split
+/// asked for for one below it.
+#[test]
+fn a_machine_tells_its_level() {
+    let (group, plan, _) = spilling(1 << 20);
+    assert_eq!(group.level(), 0);
+    let below = Below {
+        partition: 1,
+        level: 2,
+        expected: 4 << 20,
+        limit: 1 << 20,
+        shift: plan.below,
+    };
+    let (level, _) = Group::below(&params(1 << 20), &below).expect("a level");
+    assert_eq!(level.level(), 2);
+}
+
 #[test]
 fn the_largest_partitions_go_from_start_to_target() {
     let limit = 1 << 20;
@@ -547,6 +564,39 @@ fn a_refused_end_of_input_leaves_the_machine_building() {
     assert_eq!(
         wrong(group.step(Event::InputEnd, &short.host())),
         Rule::SpillWords
+    );
+    assert_eq!(group, building);
+    assert_eq!(
+        group.step(Event::InputEnd, &regions.host()),
+        Ok(Action::Done)
+    );
+}
+
+/// Counts of records or of bytes on disk for another number of
+/// partitions than the level's are refused, and the machine is as it
+/// was.
+#[test]
+fn counts_for_another_number_of_partitions_are_refused() {
+    let (mut group, plan, regions) = spilling(1 << 20);
+    let building = group;
+    let partitions = plan.partitions as usize;
+    let records = Regions {
+        words: regions.words.clone(),
+        records: vec![0; partitions + 1],
+        disk: regions.disk.clone(),
+    };
+    assert_eq!(
+        wrong(group.step(Event::InputEnd, &records.host())),
+        Rule::RecordCounts
+    );
+    let disk = Regions {
+        words: regions.words.clone(),
+        records: regions.records.clone(),
+        disk: vec![0; partitions + 1],
+    };
+    assert_eq!(
+        wrong(group.step(Event::InputEnd, &disk.host())),
+        Rule::DiskCounts
     );
     assert_eq!(group, building);
     assert_eq!(

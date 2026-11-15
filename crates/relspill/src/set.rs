@@ -903,7 +903,7 @@ impl Writer {
 pub(crate) mod tests {
     use std::panic::Location;
 
-    use anyhow::{Context, Result, ensure};
+    use anyhow::{Context, Result, bail, ensure};
     use proptest::prelude::*;
     use proptest::test_runner::{FileFailurePersistence, TestCaseError, TestRunner};
     use relhash::{CHUNK_HEADER, RECORD_SIZE_OFFSET};
@@ -1538,6 +1538,123 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// A block goes into what the buffer has left when it fits there, to
+    /// its last byte, and asks for no scratch region: values, a chunk of
+    /// records packed, a chunk of columns packed. A chunk of columns that
+    /// does not fit what is left, but fits an empty buffer, waits for a
+    /// step that writes the buffer.
+    #[test]
+    fn a_block_goes_into_what_the_buffer_has_left_when_it_fits() -> Result<()> {
+        const BUFFER: usize = 256;
+        // The first step of `block` after a block of values of `first`
+        // bytes, and where that one ends.
+        let first_step = |first: usize, block: &Owned| -> Result<(Step, u64)> {
+            let mut host = Host::new(config(2, BUFFER, false))?;
+            let place = host.write(&values(first))?.context("a write cut")?;
+            Ok((quiet(|| host.try_write(block))?, place.stored))
+        };
+        let placed = |(step, end): (Step, u64)| {
+            matches!(step, Step::Done { ranges, offset, .. }
+                if ranges.as_slice().is_empty() && offset == end)
+        };
+        let flushed = |(step, end): (Step, u64)| {
+            step == Step::Again(Ranges::one(Range {
+                region: Region::Buffer,
+                start: 0,
+                len: end as usize,
+                at: 0,
+            }))
+        };
+        let chunk = Owned {
+            kind: BlockKind::Columns,
+            number: 3,
+            partition: 1,
+            body: columns_chunk(4, 1, 7),
+        };
+        // The bytes the chunk may take packed, and the values before it
+        // that leave exactly those and a header.
+        let room = chunk.body.len() + columns::pack_slack(1);
+        let exact = BUFFER - 2 * HEADER_SIZE - room;
+        ensure!(
+            placed(first_step(8, &chunk)?),
+            "a chunk of columns that fits"
+        );
+        ensure!(
+            placed(first_step(exact, &chunk)?),
+            "a chunk to the last byte"
+        );
+        ensure!(flushed(first_step(exact + 8, &chunk)?), "a chunk past it");
+        ensure!(
+            placed(first_step(8, &values(BUFFER - 2 * HEADER_SIZE - 8))?),
+            "values to the last byte"
+        );
+        let packs = Owned {
+            kind: BlockKind::Records,
+            number: 4,
+            partition: 1,
+            body: records(3, 40, 7),
+        };
+        ensure!(stored_body(&packs)?.0.len() < packs.body.len());
+        ensure!(placed(first_step(8, &packs)?), "records that pack and fit");
+        Ok(())
+    }
+
+    /// A finish writes what the buffer holds, then the counts, as many as
+    /// the buffer holds a step, then the lists that hold blocks, three at
+    /// most a step, and the trailer, each where the last ended: a list
+    /// without blocks takes no range.
+    #[test]
+    fn a_finish_writes_the_counts_and_the_lists_that_hold_blocks_in_steps() -> Result<()> {
+        // More partitions than the buffer holds counts.
+        let partitions = 17;
+        let config = config(partitions, MIN_BUFFER, false);
+        let mut host = Host::new(config)?;
+        ensure!(host.writer.partitions() == partitions);
+        let written = [0, 2, 3, 16].map(|partition| Owned {
+            partition,
+            ..values(8)
+        });
+        for block in &written {
+            host.write(block)?;
+        }
+        let mut steps = Vec::new();
+        loop {
+            let step = quiet(|| host.writer.finish(&mut host.buffer, &mut host.lists))?;
+            steps.push(step);
+            if host.serve(step, 0, &[])? == Some(true) {
+                break;
+            }
+        }
+        // Every range lies in its region: the counts in the buffer, which
+        // holds fewer than the partitions, the entries in their lists;
+        // the trailer last.
+        let mut counts = 0;
+        for step in &steps {
+            let (Step::Again(ranges) | Step::Done { ranges, .. }) = step else {
+                bail!("{step:?} in a finish");
+            };
+            for range in ranges.as_slice() {
+                let region = match range.region {
+                    Region::Buffer => MIN_BUFFER,
+                    Region::List(partition) => {
+                        ENTRY_SIZE * host.lists[partition as usize].1 as usize
+                    }
+                    region => bail!("{region:?} in a finish"),
+                };
+                ensure!(range.start + range.len <= region, "{range:?}");
+                counts += usize::from(range.region == Region::Buffer);
+            }
+        }
+        // The buffer's blocks, the counts in two steps at least, and the
+        // trailer.
+        ensure!(counts >= 4, "{steps:#?}");
+        let Some(Step::Done { ranges, .. }) = steps.last() else {
+            bail!("a finish that is not done");
+        };
+        ensure!(ranges.as_slice().last().map(|range| range.len) == Some(TRAILER_SIZE));
+        check_file(&host, config, &written)
+    }
+
     /// A block of a partition whose list is full asks for a list twice as
     /// long, of 16 entries at least, and the set is as it was.
     #[test]
@@ -1560,12 +1677,14 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    /// A shared set drops no partition before it is finished; a serial
-    /// set does, and a dropped partition no longer counts.
+    /// A shared set drops no partition before it is finished, reset or
+    /// not; a serial set does, and a dropped partition no longer counts.
     #[test]
     fn a_shared_set_drops_no_partition_before_its_finish() -> Result<()> {
         for shared in [true, false] {
             let mut host = Host::new(config(2, 256, shared))?;
+            host.write(&values(16))?;
+            host.writer.reset(&mut host.lists)?;
             host.write(&values(16))?;
             ensure!(host.writer.files() == 1);
             let before = host.writer;
@@ -1574,6 +1693,9 @@ pub(crate) mod tests {
                 ensure!(dropped == Err(Error::wrong_call(Rule::SetDrop).with(1)));
                 ensure!(host.writer == before && host.lists[1].1 == 1);
                 ensure!(host.finish()?);
+                // A partition without blocks, dropped, counted none.
+                host.writer.drop_list(&mut host.lists, 0)?;
+                ensure!(host.writer.files() == 1);
                 host.writer.drop_list(&mut host.lists, 1)?;
             } else {
                 dropped?;

@@ -617,6 +617,33 @@ mod tests {
         );
     }
 
+    /// A participant's phase is the barrier's from its attach on, and once
+    /// done it stays done: a step after the last has nothing left to do.
+    #[test]
+    fn a_participant_follows_the_barriers_phase_and_stays_done() {
+        let words = counter_words(0);
+        let counters = SharedCounters::new(&words);
+        let mut participant = Participant::new();
+        let (mut reply, mut phase) = (0, BUILD);
+        loop {
+            let action = quiet(|| participant.next(&counters, reply)).unwrap();
+            if action != Action::Attach {
+                assert_eq!(participant.phase(), phase, "{action:?}");
+            }
+            reply = match action {
+                Action::Attach => phase,
+                Action::ArriveAndWait => {
+                    phase += 1;
+                    1
+                }
+                Action::ArriveAndDetach => 1,
+                Action::Free => break,
+                _ => 0,
+            };
+        }
+        assert_eq!(quiet(|| participant.next(&counters, 0)), Ok(Action::Done));
+    }
+
     /// Words that are no participant's, arriving past the last phase a
     /// word holds, are a wrong call, not a phase past it.
     #[test]
@@ -915,6 +942,10 @@ mod tests {
             (crate::Kind::WrongCall, Rule::BuildCount, RECORDS as u32)
         );
         assert_eq!(
+            error.to_string(),
+            "the records of a build cannot take 1 more"
+        );
+        assert_eq!(
             (counters.total_records(), counters.nulls()),
             (u64::MAX, 0b01),
             "the counters unchanged"
@@ -926,6 +957,10 @@ mod tests {
         assert_eq!(
             (error.kind(), error.rule(), error.numbers().0),
             (crate::Kind::WrongCall, Rule::BuildCount, DUPLICATES as u32)
+        );
+        assert_eq!(
+            error.to_string(),
+            "the duplicates of a build cannot take 1 more"
         );
         assert_eq!(counters.total_duplicates(), u64::MAX);
         counters.words.store(CHUNKS, u64::MAX - 1);

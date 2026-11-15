@@ -900,6 +900,30 @@ fn partitions_on_disk_are_released_joined_or_split() {
     );
 }
 
+/// A partition joined whole makes a table: the next partition is
+/// refused until that table's end, and comes after it.
+#[test]
+fn the_next_partition_waits_for_the_end_of_the_table() {
+    let (mut join, mut regions) = joining(&params(1 << 20));
+    regions.outer = vec![0, 100, 0, 0];
+    regions.disk = vec![0, 1000, 0, 1000];
+    let next = Event::Next { memory: 0 };
+    let whole = Action::Open {
+        partition: 1,
+        pieces: false,
+    };
+    assert_eq!(join.step(next, &mut regions.host()), Ok(whole));
+    let before = join;
+    assert_eq!(
+        wrong(join.step(next, &mut regions.host())),
+        Rule::MachineEvent
+    );
+    assert_eq!(join, before);
+    let end = Event::TableEnd { held: false };
+    assert_eq!(join.step(end, &mut regions.host()), Ok(Action::Done));
+    assert_eq!(join.step(next, &mut regions.host()), Ok(Action::Release(2)));
+}
+
 #[test]
 fn a_partition_too_large_to_split_is_joined_in_pieces() {
     let limit = 1 << 20;
@@ -1052,6 +1076,30 @@ fn a_piece_ends_only_where_the_records_of_a_group_end() {
     assert_eq!(step(block(true, u64::MAX / 2)), Ok(Action::Load));
     assert_eq!(step(block(true, 1)), Ok(Action::Load));
     assert_eq!(step(block(false, 1)), Ok(Action::Load));
+    assert_eq!(step(block(true, 1)), Ok(Action::Carry));
+}
+
+/// A group's values may come in several blocks: the records after the
+/// last of them, past the room, are still that group's, and the piece
+/// ends where the next group's values start.
+#[test]
+fn records_after_several_blocks_of_values_stay_in_their_piece() {
+    let (mut join, mut regions) = joining(&params(1 << 20));
+    regions.outer = vec![0, 100, 0, 0];
+    regions.disk = vec![0, 4 << 20, 0, 0];
+    regions.rows = vec![0, 7000, 0, 300];
+    let Ok(Action::Open { pieces: true, .. }) =
+        join.step(Event::Next { memory: 0 }, &mut regions.host())
+    else {
+        panic!("pieces");
+    };
+    let mut step = |event| join.step(event, &mut regions.host());
+    let block = |values, len| Event::Block { values, len };
+    // No room at all.
+    assert_eq!(step(Event::Piece { memory: 1 << 20 }), Ok(Action::Done));
+    for values in [true, true, false, false] {
+        assert_eq!(step(block(values, 1)), Ok(Action::Load), "{values}");
+    }
     assert_eq!(step(block(true, 1)), Ok(Action::Carry));
 }
 

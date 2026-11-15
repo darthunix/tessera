@@ -204,6 +204,40 @@ fn a_late_participant_skips_the_writes_of_a_table_that_never_split() {
     assert_eq!(alone(&shared, &[], FREE), [Attach, Detach, Finished]);
 }
 
+/// The machine's phase is its barrier's from the attach on, and a
+/// participant that probed a table that never split has no partitions on
+/// disk to go round: it may not ask for one.
+#[test]
+fn the_phase_is_the_barriers_and_a_whole_table_has_no_partitions_to_go_round() {
+    let shared = Shared::new(3, 1 << 20);
+    let host = shared.host(&[]);
+    let mut build = Build::new(&params()).expect("parameters");
+    let mut phase = BUILD_PHASE;
+    let mut event = Event::Done;
+    loop {
+        let action = quiet(|| build.step(event, &host)).expect("a step");
+        if action != Action::Attach {
+            assert_eq!(build.phase(), phase, "{action:?}");
+        }
+        event = match action {
+            Action::Attach => Event::Attached { phase },
+            Action::ArriveAndWait => {
+                phase += 1;
+                Event::Arrived { elected: true }
+            }
+            Action::ArriveAndDetach => Event::Left { last: true },
+            Action::Free => break,
+            _ => Event::Done,
+        };
+    }
+    let before = build;
+    assert_eq!(
+        wrong(quiet(|| build.step(Event::Next, &host))),
+        Rule::MachineEvent
+    );
+    assert_eq!(build, before);
+}
+
 /// The machine marks the stop word only while its participant probes:
 /// before the probe it has matched no pair, and once it left it probed
 /// its share.

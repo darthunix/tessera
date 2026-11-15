@@ -384,7 +384,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       build; `#![forbid(unsafe_code)]` checked in CI; the script of
       trust points; the snapshot of the public API. Check:
       `.github/scripts/check-specs.sh` with no rule pending
-- [ ] 6.7 Every mutant of the crate caught by the crate's own tests, or
+- [x] 6.7 Every mutant of the crate caught by the crate's own tests, or
       listed in `.cargo/mutants.toml` with its reason. Check: a run of
       the mutants workflow for `relspill`
 - [ ] 6.8 Probes of the contract's forecast, on branches that are never

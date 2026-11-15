@@ -651,6 +651,43 @@ mod tests {
         Ok(())
     }
 
+    /// However many words a row stores, the rows a chunk's bytes hold
+    /// pack into the 32 bits a block's header keeps for its packed length.
+    #[test]
+    fn the_rows_a_chunk_holds_pack_into_32_bits_for_any_words() {
+        for words in 0..=2 * MAX_WORDS + 128 {
+            let rows = capacity(usize::MAX / 2, words);
+            assert!(
+                pack_bound(rows, words) <= u32::MAX as usize,
+                "{words} words"
+            );
+        }
+    }
+
+    /// A chunk holds at most 2^17 - 1 rows, however long its bytes, so
+    /// that a row's place fits the 17 bits a reference gives it.
+    #[test]
+    fn the_places_of_a_chunk_fit_17_bits() -> Result<()> {
+        let mut chunk = vec![0_u8; size(1 << 17, 1)];
+        assert_eq!(quiet(|| init(&mut chunk, 1))?, (1 << 17) - 1);
+        assert_eq!(MAX_ROWS, (1 << 17) - 1);
+        Ok(())
+    }
+
+    /// A chunk without rows packs to its slack alone: the count word and a
+    /// descriptor of 16 bytes for each lane.
+    #[test]
+    fn a_chunk_without_rows_packs_to_its_slack() -> Result<()> {
+        for words in [0, 1, 64, 65] {
+            let empty = chunk_of(1, words, &[]);
+            let mut out = vec![0_u8; pack_bound(0, words)];
+            let (packed, _) = quiet(|| pack(&empty, &mut out))?;
+            assert_eq!(packed, pack_slack(words), "{words} words");
+            assert_eq!(packed, 8 + 16 * lanes(words), "{words} words");
+        }
+        Ok(())
+    }
+
     #[test]
     fn a_chunk_keeps_within_its_limits() -> Result<()> {
         // The most words a row, and one more.

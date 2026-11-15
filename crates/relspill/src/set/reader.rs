@@ -1193,7 +1193,9 @@ mod tests {
     }
 
     /// A file laid out as the spec draws it, by hand: two blocks of
-    /// partition 1, the counts, the entries and the trailer, read back.
+    /// partition 1, the counts, the entries and the trailer, read back
+    /// with the bounds of the longer body, which a block passes by its
+    /// header. Partition 0 has none.
     #[test]
     fn a_file_laid_out_by_hand_reads_back() -> Result<()> {
         let mut file = Vec::new();
@@ -1225,25 +1227,127 @@ mod tests {
         for word in [TRAILER_MAGIC, lists, 2, FINGERPRINT] {
             file.extend_from_slice(&word.to_ne_bytes());
         }
+        let config = |partition| ReadConfig {
+            bounds: Bounds::all(16),
+            ..read_config(2, partition)
+        };
         let mut back = Back {
-            reader: Reader::file(read_config(2, 1), file.len() as u64)?,
+            reader: Reader::file(config(1), file.len() as u64)?,
             file: &file,
             page: vec![Entry::default(); 2],
             block: Vec::new(),
         };
         ensure!(back.open()? == Some(()));
+        ensure!((back.reader.count(), back.reader.largest()) == (2, entries[0].stored));
         let (first, body) = back.next()?.context("the first block")?;
         ensure!(first.number == 4 && body == vec![1; 16]);
         let (second, body) = back.next()?.context("the second block")?;
         ensure!(second.number == 5 && body == vec![2; 8]);
         ensure!(back.next()?.is_none());
         let mut empty = Back {
-            reader: Reader::file(read_config(2, 0), file.len() as u64)?,
+            reader: Reader::file(config(0), file.len() as u64)?,
             file: &file,
             page: vec![Entry::default(); 2],
             block: Vec::new(),
         };
         ensure!(empty.open()?.is_none(), "partition 0 has no blocks");
+        ensure!(empty.reader.count() == 0 && empty.next()?.is_none());
+        Ok(())
+    }
+
+    /// An open asks for the trailer, then for the counts of the lists, and
+    /// then for the partition's entries, each in order and none past the
+    /// page, until it has read them all.
+    #[test]
+    fn an_open_reads_the_counts_and_the_entries_a_page_at_a_time() -> Result<()> {
+        let mut host = Host::new(config(7, 512, false))?;
+        for partition in [0, 1, 1, 1, 1, 3] {
+            host.write(&Owned {
+                kind: BlockKind::Values,
+                number: 1,
+                partition,
+                body: vec![1; 16],
+            })?;
+        }
+        ensure!(host.finish()?);
+        let file = &host.file;
+        let lists = host.writer.bytes();
+        // Partition 1's entries, after the counts and partition 0's entry.
+        let entries = lists + 8 * 7 + ENTRY_SIZE as u64;
+        let mut reader = Reader::file(read_config(7, 1), file.len() as u64)?;
+        let mut page = vec![Entry::default(); 3];
+        let mut steps = Vec::new();
+        loop {
+            let step = quiet(|| reader.open(&page))?;
+            steps.push(step);
+            let ReadStep::Page { at, len } = step else {
+                break;
+            };
+            fill(&mut page, &file[at as usize..at as usize + len]);
+        }
+        let trailer = file.len() as u64 - TRAILER_SIZE as u64;
+        ensure!(
+            steps.first()
+                == Some(&ReadStep::Page {
+                    at: trailer,
+                    len: TRAILER_SIZE
+                })
+        );
+        ensure!(
+            steps.last()
+                == Some(&ReadStep::Ready {
+                    largest: (HEADER_SIZE + 16) as u64
+                })
+        );
+        // The counts, then partition 1's four entries, each read where the
+        // one before ended.
+        let mut next = lists;
+        for step in &steps[1..steps.len() - 1] {
+            let ReadStep::Page { at, len } = *step else {
+                bail!("{step:?} in an open");
+            };
+            ensure!(len <= page.len() * ENTRY_SIZE, "{step:?}");
+            if next == lists + 8 * 7 {
+                next = entries;
+            }
+            ensure!(at == next, "{step:?} for {next}");
+            next += len as u64;
+        }
+        ensure!(next == entries + 4 * ENTRY_SIZE as u64, "{steps:?}");
+        Ok(())
+    }
+
+    /// An entry read again after the open is checked again: one that now
+    /// runs into the next block of its partition is damaged bytes, before
+    /// its block is asked for.
+    #[test]
+    fn an_entry_read_again_that_no_longer_holds_is_damaged() -> Result<()> {
+        let mut host = Host::new(config(1, 512, false))?;
+        for len in [16, 16, 200] {
+            host.write(&Owned {
+                kind: BlockKind::Values,
+                number: len,
+                partition: 0,
+                body: vec![1; len as usize],
+            })?;
+        }
+        ensure!(host.finish()?);
+        // The first block's entry, past the one count, runs into the
+        // second block; it is no longer than the largest block.
+        let entries = host.writer.bytes() as usize + 8;
+        let mut damaged = host.file.clone();
+        put(&mut damaged, entries + 8, host.lists[0].0[0].stored + 8);
+        let mut back = Back {
+            reader: Reader::file(read_config(1, 0), host.file.len() as u64)?,
+            file: &host.file,
+            page: vec![Entry::default(); 2],
+            block: Vec::new(),
+        };
+        ensure!(back.open()? == Some(()));
+        // The page that holds the first entry is read again.
+        back.file = &damaged;
+        let error = back.next().err().map(Error::rule);
+        ensure!(error == Some(Rule::EntryPlace), "{error:?}");
         Ok(())
     }
 
@@ -1275,9 +1379,9 @@ mod tests {
         );
     }
 
-    /// Words of a partition with no blocks that say a page was asked for
-    /// are no reader's: an empty partition asks for nothing after its
-    /// open.
+    /// Words of a partition with no blocks that say a page was asked for,
+    /// or that count a block whose entry lies out of its place, are no
+    /// reader's: an empty partition asks for nothing after its open.
     #[test]
     fn an_empty_reader_that_asked_a_page_is_refused() -> Result<()> {
         let mut forged = Reader {
@@ -1294,6 +1398,20 @@ mod tests {
         let page = [Entry::default(); 2];
         ensure!(forged.next(&page, &[]).map_err(Error::rule) == Err(Rule::ReaderState));
         ensure!(forged == before);
+        // A file of 56 bytes, its lists at 0: one count, one entry and the
+        // trailer. The entry lies at 8, not at 16 where the words say.
+        let mut counting = Reader {
+            file_len: 56,
+            most: 1,
+            total: 1,
+            count: 1,
+            asked: NOTHING,
+            asked_len: 0,
+            ..before
+        };
+        let before = counting;
+        ensure!(counting.next(&page, &[]).map_err(Error::rule) == Err(Rule::ReaderState));
+        ensure!(counting == before);
         Ok(())
     }
 

@@ -2113,6 +2113,16 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **An empty value at the end of 4 GiB of values** (the mutants of
+  `spill-crate`, task 6.7). `spill_columns::append` takes a chunk of
+  values of up to 4 GiB, `1 << 32` bytes, and places an empty value at
+  the values' end; at the end of a chunk of exactly 4 GiB that is byte
+  2^32, which `columns::value_ref` documents as no byte it names: its
+  reference is the one of byte 0. `check` documents a reference to the
+  values' end for an empty value, so the two documents disagree there.
+  Suggested: take values of fewer than 4 GiB, a change of `append`'s
+  limit that the maintainer decides; no node writes a chunk of values
+  of that size.
 - **A set of any count of partitions** (the fuzz targets of
   `spill-crate`, task 6.4). `Writer::new` and a reader's `ReadConfig`
   take any count of partitions above 0, up to `u32::MAX`, and a reset

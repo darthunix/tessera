@@ -473,6 +473,14 @@ mod tests {
         Ok(())
     }
 
+    /// The largest bound is the larger of a chunk's and the values'.
+    #[test]
+    fn the_largest_bound_is_the_larger_of_the_two() {
+        for (chunk, values) in [(4096, 1 << 16), (1 << 16, 4096)] {
+            assert_eq!(Bounds { chunk, values }.largest(), 1 << 16);
+        }
+    }
+
     #[test]
     fn a_columns_header_keeps_its_lengths() -> Result<()> {
         let columns = BlockHeader {

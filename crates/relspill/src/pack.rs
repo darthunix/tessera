@@ -89,7 +89,8 @@ const PASS_LANES: usize = 64;
 
 /// Pack a chunk of records into `out`: the packed length, or `None` when
 /// the chunk is not one packing takes or would not get shorter, and then
-/// `out` holds nothing of use. `out` needs at most `chunk.len()` bytes.
+/// `out` holds nothing of use. `out` needs at most `chunk.len()` bytes;
+/// one shorter than the packed body gives `None` too.
 ///
 /// Packing takes a chunk whose used mark counts the whole chunk, then one
 /// record or more, all of one length. The packed body sees the records as
@@ -475,6 +476,47 @@ mod tests {
             (record * 1_000_003 + lane) as u32 | 0x8000_0000
         });
         assert_eq!(pack(&dense, &mut out), None, "nothing to gain");
+        // A used mark with less than a record after it.
+        let mut short = [0_u8; 16];
+        short[..USED_MARK].copy_from_slice(&16_u64.to_ne_bytes());
+        assert_eq!(pack(&short, &mut out), None, "no whole record");
+        // Three records of 32 bytes and a tail of 8 that is no record.
+        let mut ragged = chunk(3, 32, |_, _| 1);
+        ragged.extend_from_slice(&[0_u8; 8]);
+        let total = ragged.len() as u64;
+        ragged[..USED_MARK].copy_from_slice(&total.to_ne_bytes());
+        assert_eq!(pack(&ragged, &mut out), None, "a record cut short");
+    }
+
+    /// The shortest chunk packing takes, a used mark and one record of a
+    /// single key slot, packs when its lanes take fewer bytes.
+    #[test]
+    fn a_chunk_of_one_shortest_record_packs() {
+        let original = chunk(1, MIN_RECORD, |_, lane| u32::from(lane == KEY) * 7);
+        assert_eq!(original.len(), USED_MARK + MIN_RECORD);
+        // The counts, the codes, then the length and the key, each once.
+        assert_eq!(round_trip(&original), 8 + 8 + 4 + 4);
+    }
+
+    /// A body packs into `out` of exactly its length, and into a shorter
+    /// `out` not at all, whether it misses room for the codes or a lane.
+    #[test]
+    fn a_body_packs_into_out_of_its_length_and_no_less() {
+        // Lanes that end on a multiple of 8: the length once, a byte a key.
+        let original = chunk(4, MIN_RECORD, |record, lane| match lane {
+            KEY => record as u32 + 1,
+            _ => 0,
+        });
+        let mut room = vec![0_u8; original.len()];
+        let packed = pack(&original, &mut room).expect("packs");
+        assert_eq!(packed, 8 + 8 + 4 + 4);
+        let mut exact = vec![0_u8; packed];
+        assert_eq!(pack(&original, &mut exact), Some(packed));
+        assert_eq!(exact, room[..packed]);
+        for short in 0..packed {
+            let mut out = vec![0_u8; short];
+            assert_eq!(pack(&original, &mut out), None, "{short} bytes");
+        }
     }
 
     #[test]

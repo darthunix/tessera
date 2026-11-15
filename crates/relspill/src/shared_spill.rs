@@ -1081,13 +1081,30 @@ mod tests {
         assert_eq!(refused(words_for(65537)), Rule::SpillPartitions);
     }
 
-    /// A total equal to the budget does not pass it; one byte more does.
+    /// A total equal to the budget does not pass it; one byte more does,
+    /// and a partition's bytes pass it with the total, not by their own.
     #[test]
     fn a_total_equal_to_the_budget_is_not_over() {
         let mut words = Vec::new();
         let spill = spill(&mut words, 4, 100);
         assert!(!quiet(|| spill.add_bytes(100, None)).unwrap());
         assert!(quiet(|| spill.add_bytes(1, None)).unwrap());
+        quiet(|| spill.split(4)).unwrap();
+        assert!(quiet(|| spill.add_bytes(1, Some(0))).unwrap());
+        assert!(quiet(|| spill.add_bytes(-1, Some(0))).unwrap());
+    }
+
+    /// Init clears every word of the spill, the slot of the partitions
+    /// kept in memory too, and sets the budget: words left by another
+    /// table read as a new one.
+    #[test]
+    fn init_clears_every_word_and_sets_the_budget() {
+        let words = vec![Cell::new(u64::MAX); words_for(2).unwrap()];
+        let spill = LocalSpill::new(&words).unwrap();
+        quiet(|| spill.init(100));
+        let mut clear = vec![0; words.len()];
+        clear[BUDGET] = 100;
+        assert_eq!(values(&words), clear);
     }
 
     #[test]
@@ -1303,6 +1320,7 @@ mod tests {
             "the resident rows"
         );
         assert_eq!(refused(quiet(|| spill.take_file(5, true))), Rule::Partition);
+        assert!(!quiet(|| spill.alone(3)).unwrap(), "not taken yet");
         assert!(quiet(|| spill.take_alone(3)).unwrap());
         assert!(!quiet(|| spill.take_alone(3)).unwrap());
         assert!(quiet(|| spill.alone(3)).unwrap());
@@ -1333,6 +1351,13 @@ mod tests {
             Rule::CounterBelow,
             "a partition's bytes, while the table's total still covers them"
         );
+        // Neither covers 70: refused, and neither moves.
+        let before = (quiet(|| spill.bytes()), quiet(|| spill.held(1)));
+        assert_eq!(
+            refused(quiet(|| spill.add_bytes(-70, Some(1)))),
+            Rule::CounterBelow
+        );
+        assert_eq!((quiet(|| spill.bytes()), quiet(|| spill.held(1))), before);
     }
 
     /// A call through a partition answers as one of no partition does, and
