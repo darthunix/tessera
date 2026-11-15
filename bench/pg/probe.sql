@@ -70,26 +70,26 @@ $function$;
 
 -- The small table: any difference between the modes is the batch nodes'
 -- own fixed cost, counters and callbacks included.
-DROP TABLE IF EXISTS bench_tiny;
-CREATE TABLE bench_tiny AS SELECT g AS a FROM generate_series(1, 5000) AS g;
-VACUUM (ANALYZE) bench_tiny;
+DROP TABLE IF EXISTS bench_probe_tiny;
+CREATE TABLE bench_probe_tiny AS SELECT g AS a FROM generate_series(1, 5000) AS g;
+VACUUM (ANALYZE) bench_probe_tiny;
 SET tessera.enable = off;
-SELECT count(*) FROM bench_tiny;
+SELECT count(*) FROM bench_probe_tiny;
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
 SET min_parallel_table_scan_size = 0;
 SET max_parallel_workers_per_gather = 0;
 SELECT pg_temp.measure_pair('tiny_serial',
-    'SELECT count(*) FROM bench_tiny WHERE a > 0', :repetitions);
+    'SELECT count(*) FROM bench_probe_tiny WHERE a > 0', :repetitions);
 SET max_parallel_workers_per_gather = 1;
 SELECT pg_temp.measure_pair('tiny_w1',
-    'SELECT count(*) FROM bench_tiny WHERE a > 0', :repetitions);
+    'SELECT count(*) FROM bench_probe_tiny WHERE a > 0', :repetitions);
 SET max_parallel_workers_per_gather = 2;
 SELECT pg_temp.measure_pair('tiny_w2',
-    'SELECT count(*) FROM bench_tiny WHERE a > 0', :repetitions);
+    'SELECT count(*) FROM bench_probe_tiny WHERE a > 0', :repetitions);
 SET parallel_leader_participation = off;
 SELECT pg_temp.measure_pair('tiny_w2_noleader',
-    'SELECT count(*) FROM bench_tiny WHERE a > 0', :repetitions);
+    'SELECT count(*) FROM bench_probe_tiny WHERE a > 0', :repetitions);
 RESET parallel_leader_participation;
 RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
@@ -172,4 +172,4 @@ EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_coun
 \o
 
 ALTER TABLE bench_narrow RESET (parallel_workers);
-DROP TABLE bench_tiny;
+DROP TABLE bench_probe_tiny;
