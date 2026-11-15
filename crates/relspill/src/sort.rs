@@ -34,11 +34,69 @@
 //! - **Reading.** The last merge reads the runs left
 //!   ([`Action::Read`]). A rescan reads them again ([`Event::Rescan`]).
 //!
+//! The host below keeps a run as the count of its rows: it writes a run
+//! past the limit, then merges its runs in passes of six at most, until
+//! one merge reads them all.
+//!
+//! ```
+//! use relspill::sort::{Action, Event, Params, Runs};
+//!
+//! // A sort of 1 MiB, of rows of 64 bytes and items of 16 to sort them,
+//! // chunks of 64 KiB, sets of 8 runs, merges of 6 runs at most.
+//! let params = Params {
+//!     limit: 1 << 20,
+//!     row: 64,
+//!     item: 16,
+//!     chunk: 64 << 10,
+//!     set_runs: 8,
+//!     max_merge: 6,
+//!     batch_rows: 1000,
+//!     backward: 0,
+//! };
+//! let (mut runs, _blocks) = Runs::new(&params)?;
+//! let mut written: Vec<u64> = Vec::new();
+//! let mut held = 0;
+//! for _ in 0..200 {
+//!     // A batch of 1000 rows went in.
+//!     held += 1000;
+//!     let grown = Event::Grown { memory: held * 64, rows: held, limit: params.limit };
+//!     if let Action::Run(_place) = runs.step(grown)? {
+//!         // Sort the rows and write them as a run at its place.
+//!         written.push(held);
+//!         held = 0;
+//!     }
+//! }
+//! let mut pass = Vec::new();
+//! let mut action = runs.step(Event::InputEnd { rows: held })?;
+//! let read = loop {
+//!     match action {
+//!         Action::Run(_) => written.push(std::mem::take(&mut held)),
+//!         Action::Pass => pass = std::mem::take(&mut written),
+//!         Action::Merge { first, count, .. } => {
+//!             written.push(pass[first as usize..][..count as usize].iter().sum())
+//!         }
+//!         Action::Keep { run } => written.push(pass[run as usize]),
+//!         Action::PassEnd => {}
+//!         Action::Read { runs } => break runs,
+//!         Action::Done => unreachable!("a sort that wrote runs reads them"),
+//!     }
+//!     action = runs.step(Event::Next)?;
+//! };
+//! assert!(read <= 6 && read as usize == written.len());
+//! assert_eq!(written.iter().sum::<u64>(), 200_000);
+//! # Ok::<(), relspill::Error>(())
+//! ```
+//!
 //! The runs go into sets: a set is one file of the host's, which holds
 //! up to `set_runs` runs, each a partition of it. The runs of the input go
 //! into one set until it is full, those of each pass into others, so a
 //! set never holds runs of two passes and can go once its runs are read.
 //! The machine gives each run its set and partition ([`Place`]).
+//!
+//! An action the host cannot do, a write or a read of its files that
+//! fails, has no event: the machine takes no report of it. The host then
+//! ends the spill: it does not report the action done, drops the
+//! machine's words and its files, and makes a new machine if it goes on.
 //!
 //! An event that the machine's phase does not take is a wrong call
 //! ([`Rule::MachineEvent`]), and the machine stays as it was. The machine

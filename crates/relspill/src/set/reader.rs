@@ -51,7 +51,11 @@ pub struct ReadConfig {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReadStep {
     /// Read `len` bytes of the file at byte `at` into the page, from its
-    /// start, and call again.
+    /// start, and call again. `len` is at most the page's bytes,
+    /// `page.len()` times [`ENTRY_SIZE`]. The page takes the bytes as they
+    /// lie in the file: words of 8 bytes in the machine's order, two to an
+    /// [`Entry`], its `offset` then its `stored`. The trailer and the counts
+    /// of the lists are read into it the same way, a word after another.
     Page {
         /// Where the bytes start in the file.
         at: u64,
@@ -68,7 +72,10 @@ pub enum ReadStep {
     },
     /// The partition has no block in the file.
     Empty,
-    /// The open is done; the block buffer must hold `largest` bytes.
+    /// The open is done; the block buffer must hold `largest` bytes. These
+    /// are never more than the larger of the reader's two bounds plus a
+    /// header and [`columns::pack_slack`] of [`columns::MAX_WORDS`], so a
+    /// host can make the buffer before the open.
     Ready {
         /// The bytes of the partition's largest block, header included.
         largest: u64,
@@ -106,6 +113,11 @@ fn block_slack() -> u64 {
 /// keeps where it likes, such as in memory it shares with C. Every call
 /// checks them first, so that a reader the caller changed is a wrong
 /// call, never a read out of place.
+///
+/// The page and the block buffer are the reader's from its first step
+/// until it is dropped: the host keeps one of each for each reader, and
+/// changes their bytes only to read what a step asks into them. A reader
+/// takes no report of a read the host could not do: the host drops it.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Reader {

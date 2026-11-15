@@ -5,12 +5,41 @@
 //!
 //! A participant is a state machine that never waits itself: each step
 //! returns an action, and the caller performs it and passes the result of
-//! a barrier operation to the next step. The barrier is PostgreSQL's
-//! `Barrier`, whose `BarrierAttach` returns the phase and whose
-//! `BarrierArriveAndWait` elects one participant for the next phase; its
-//! waits may raise an error, so they stay on the C side of the node, and
-//! this module decides only what to do next. The loom model in `loom.rs`
-//! runs these steps with a model of that barrier.
+//! a barrier operation to the next step. The barrier is the host's, such
+//! as PostgreSQL's `Barrier`, whose waits may raise an error, so they stay
+//! with the host, and this module decides only what to do next. The
+//! crate's tests run these steps under loom, a checker of the orders of
+//! the threads' steps within a bound of preemptions, with a model of that
+//! barrier.
+//!
+//! # The host's barrier
+//!
+//! The steps take of the host's barrier what PostgreSQL's gives:
+//!
+//! - an attach ([`Action::Attach`]) answers the phase the barrier is in;
+//! - an arrive and wait ([`Action::ArriveAndWait`]) returns once every
+//!   participant attached has arrived, moves the phase up by one, and
+//!   elects one of them, which it answers 1, the others 0;
+//! - an arrive and detach ([`Action::ArriveAndDetach`]) never waits, and
+//!   answers 1 to the one that leaves with no participant attached after
+//!   it, 0 to the others; when it leaves no participant attached, or
+//!   every one still attached has arrived, it moves the phase up by one,
+//!   so that the free of the last to leave is a phase of its own;
+//! - a detach ([`Action::Detach`]) leaves without arriving, and moves the
+//!   phase up only when every participant still attached has arrived;
+//! - what a participant wrote before it arrived or detached, every
+//!   participant sees once its wait returns, one that attaches later sees
+//!   once its attach answers, and the last to leave once it detached.
+//!
+//! So the counters and the stop word take relaxed atomics: a participant
+//! reads a total only after the barrier that ends the phase it counts,
+//! [`Counters::total_records`] after the build and
+//! [`Counters::total_duplicates`] after the links, and the stop word only
+//! as the last to leave.
+//!
+//! No reply reports an action the host could not do: a participant whose
+//! work fails ends the whole parallel query, and never arrives at the
+//! barrier as if its work were done.
 //!
 //! The phases, in the barrier's own numbering:
 //!
@@ -376,6 +405,12 @@ impl Participant {
     /// phase [`Action::Attach`] returned, whether [`Action::ArriveAndWait`]
     /// elected this participant or [`Action::ArriveAndDetach`] found it
     /// the last (1 or 0), and is ignored after any other action.
+    ///
+    /// # Errors
+    ///
+    /// A wrong call, the participant then as it was: a participant in no
+    /// state a step makes ([`Rule::State`]), or an attach that answers a
+    /// phase past the last ([`Rule::AttachPhase`]).
     pub fn step(&mut self, counters: &SharedCounters<'_>, reply: u32) -> Result<Action> {
         self.next(counters, reply)
     }

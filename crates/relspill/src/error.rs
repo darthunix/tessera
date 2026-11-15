@@ -73,7 +73,8 @@ pub enum Kind {
 macro_rules! rules {
     ($($(#[$doc:meta])* $rule:ident,)*) => {
         /// The rule an [`Error`] names. The message of each is in the
-        /// [`Display`](fmt::Display) of the error.
+        /// [`Display`](fmt::Display) of the error. A later version may add
+        /// rules, so a `match` over them keeps an arm for any other.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
         #[repr(u8)]
         #[non_exhaustive]

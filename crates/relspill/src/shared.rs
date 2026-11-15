@@ -75,6 +75,13 @@
 //! it was. The machine allocates nothing; the words it shares with the
 //! other participants come in a [`Host`] at each step, and its own words
 //! the host keeps for it.
+//!
+//! An action the host cannot do, a write or a read of its files that
+//! fails, has no event: the machine takes no report of it. The host then
+//! ends the spill, and never arrives at a barrier as if the action were
+//! done, since the other participants would go on with a partition this
+//! one did not write: a parallel query whose participant fails ends as a
+//! whole.
 
 use core::sync::atomic::AtomicU64;
 
@@ -187,7 +194,12 @@ pub enum Action {
     Build,
     /// The table passed its budget with no level: plan its level, publish
     /// what every participant reads once it sees the split, then
-    /// [`Event::Planned`].
+    /// [`Event::Planned`]. Several participants may be asked at once: the
+    /// host keeps one publication, such as the first under a lock of its
+    /// own, so that every participant reads the same one, as the first
+    /// split of the words holds. The split is a release of the words, and
+    /// a participant that sees it reads them with an acquire, so it sees
+    /// whole what was published before.
     Split,
     /// The table split into `partitions`: make this participant's level of
     /// them and move its chunks into it, then [`Event::Done`].
@@ -244,6 +256,10 @@ pub enum Action {
 /// words, which every participant shares, and one byte for each partition
 /// of a table that split, not 0 when this participant keeps the partition
 /// in memory; empty before the split.
+///
+/// The machine keeps no reference to them: each step is given them anew,
+/// and between steps the host may move them, as long as they hold what
+/// the participants made of them.
 #[derive(Debug)]
 pub struct Host<'a> {
     /// The build's counters.

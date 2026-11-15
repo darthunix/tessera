@@ -215,6 +215,11 @@ pub trait RowValues {
     /// cannot tell its bytes: the append then fails with
     /// [`Rule::ValueRead`], which names the column and the row, and a
     /// source that must say why gives its own error for them.
+    ///
+    /// For a source with columns by reference, [`append`] asks for a
+    /// row's values twice, to weigh their bytes and then to copy them:
+    /// both calls must give the same value. A source whose second value is
+    /// longer than its first may make the append panic.
     fn value(&self, column: usize, row: usize) -> Option<Value<'_>>;
 }
 

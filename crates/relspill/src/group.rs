@@ -49,6 +49,11 @@
 //!   least, as a join's level below is; the others merge. When none is left, the level is done
 //!   ([`Action::LevelDone`]).
 //!
+//! An action the host cannot do, a write or a read of its files that
+//! fails, has no event: the machine takes no report of it. The host then
+//! ends the spill: it does not report the action done, drops the
+//! machine's words and its files, and makes a new machine if it goes on.
+//!
 //! An event that the machine's phase does not take is a wrong call
 //! ([`Rule::MachineEvent`]), and the machine stays as it was. The machine
 //! does nothing for each row, holds no memory and allocates nothing: it
@@ -217,6 +222,11 @@ pub struct Below {
 }
 
 /// The regions of the host a step reads.
+///
+/// The machine keeps no reference to them: each step is given them anew,
+/// and between steps the host may move or replace them, as long as they
+/// hold what they stand for then: the level's words with the bytes the
+/// host counted into them, and the counts of its partitions.
 #[derive(Debug)]
 pub struct Host<'a> {
     /// The level's spill words, [`Plan::words`](crate::plan::Plan) of

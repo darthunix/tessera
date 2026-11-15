@@ -18,11 +18,22 @@
 //! After the build, each partition on disk is a round of its own: its
 //! participants take the files of its inner rows, then of its outer rows,
 //! one at a time from a counter, and a partition too large for one
-//! participant's memory is taken whole by one of them. The loom model in
-//! `loom.rs` checks the races.
+//! participant's memory is taken whole by one of them. The crate's tests
+//! check the races under loom, a checker of the orders of the threads'
+//! steps, within a bound of preemptions.
 //!
 //! The words come to the crate as slices: its host attaches the memory
 //! they lie in, and owns the unsafe code that makes a slice of it.
+//!
+//! # The order of memory
+//!
+//! A shared spill reads its words with acquire loads and changes them
+//! with release stores and acquire-release read-modify-writes. So a
+//! participant that sees the partitions in force sees what the one that
+//! split wrote before its split, and one that sees a partition's flag on
+//! disk, or a count of evictions, sees what the one that marked it wrote
+//! before. The bytes of the partitions' files are the host's: only its
+//! barrier orders their writes before their reads.
 
 use core::cell::Cell;
 use core::sync::atomic::AtomicU64;
@@ -204,6 +215,19 @@ impl Words for &[Cell<u64>] {
 /// number is the partitions in force counts the outer files of the
 /// partitions kept in memory. A flag of 4 marks a partition that every
 /// participant joins together, in a round ([`Spill::set_together`]).
+///
+/// # Errors
+///
+/// A call that reads or changes a partition's words refuses, as a wrong
+/// call, words whose partitions in force pass their room
+/// ([`Rule::Partitions`]), which no spill made, and a partition past
+/// those in force ([`Rule::Partition`]); [`Spill::take_file`] takes one
+/// more, for the partitions kept in memory. A count that would pass
+/// 2^64 - 1 or go below zero is refused ([`Rule::CounterPast`],
+/// [`Rule::CounterBelow`], [`Rule::PartitionRecords`]), and leaves the
+/// words as they were. A file number past a `u32`
+/// ([`Rule::FileNumber`]) is refused after its count moved: the words
+/// are then to be dropped.
 #[derive(Debug)]
 pub struct Spill<W> {
     words: W,
@@ -366,7 +390,9 @@ impl<W: Words> Spill<W> {
     }
 
     /// Split the table into `partitions`, a power of two, unless another
-    /// participant did: the partitions in force are returned.
+    /// participant did: the partitions in force are returned. A count that
+    /// is no power of two, or past the words' room, is a wrong call
+    /// ([`Rule::Partitions`]).
     pub fn split(&self, partitions: u32) -> Result<u32> {
         ensure!(
             partitions.is_power_of_two() && partitions as usize <= self.words.capacity(),

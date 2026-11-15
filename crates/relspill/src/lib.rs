@@ -53,8 +53,9 @@ pub const MAX_LEVEL: u32 = 32;
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockKind {
-    /// A chunk of a `relhash` table's records, its used mark of 8 bytes
-    /// first: a body of 8 bytes at least. It is stored as it is, with a
+    /// A chunk of a `relhash` table's records, its used mark first, the 8
+    /// bytes ([`relhash::CHUNK_HEADER`]) that count the chunk's bytes in
+    /// use: a body of 8 bytes at least. It is stored as it is, with a
     /// packed length of 0, or as [`pack`] packs it, with a packed length
     /// that is a multiple of 8, at least 16 and below the body length.
     Records = 1,

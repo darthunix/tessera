@@ -88,8 +88,9 @@ pub struct Level {
     /// The bytes the level is expected to hold: [`expected`] for the first
     /// level, the bytes of the partition it splits for a level below.
     pub expected: f64,
-    /// The memory the level may take: `hash_mem`, or what the levels above
-    /// leave of it.
+    /// The memory the level may take: the host's limit of a hash table,
+    /// such as PostgreSQL's `hash_mem`, or what the levels above leave of
+    /// it.
     pub limit: usize,
     /// The hash bits the levels above took: 0 for the first level, the
     /// [`Plan::below`] of the level above for a level below it.

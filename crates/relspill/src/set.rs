@@ -4,9 +4,11 @@
 //! every partition, one after another in the order they were written,
 //! and a block list for each partition, an [`Entry`] for each of its
 //! blocks. A shared set is one such file for each participant of a
-//! query. At its end, after its blocks, every set holds its lists and a
-//! trailer, so that a reader takes a list a page at a time from the
-//! file, its own set's or another participant's, and no list need stay
+//! query, each of the processes that spill one table together
+//! ([`crate::shared`]). At its end, after its blocks, every set holds
+//! its lists and a trailer, so that a reader takes a list a page at a
+//! time from the file, its own set's or another participant's, and no
+//! list need stay
 //! in memory once its set is finished:
 //!
 //! ```text
@@ -114,7 +116,10 @@ pub enum Region {
     Scratch,
     /// The body of the block the call writes, as the caller gave it.
     Body,
-    /// The region of a partition's block list, its entries as bytes.
+    /// The region of a partition's block list, its entries as bytes as
+    /// they lie in memory: bytes `16 i` and `16 i + 8` are entry `i`'s
+    /// `offset` and `stored`, each a word in the machine's order. A host
+    /// that keeps the list as [`Entry`]s writes them so.
     List(u32),
 }
 

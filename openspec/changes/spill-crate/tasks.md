@@ -353,7 +353,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 - [x] 5.1 Write the README as the crate's front page, with an example
       of a spill over files kept in memory. Check:
       `cargo test -p relspill --doc`
-- [ ] 5.2 Read the documentation whole, as on docs.rs, and add what a
+- [x] 5.2 Read the documentation whole, as on docs.rs, and add what a
       caller who reads only it would miss: the actions and their
       failures, the order of memory at a barrier, the bounds of a read.
       Check: `cargo doc -p relspill` with every warning an error; the

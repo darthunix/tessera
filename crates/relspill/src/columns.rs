@@ -8,7 +8,8 @@
 //! first the lanes of the rows' NULL bits, one for every 64 stored words
 //! and one at least ([`null_lanes`]), then a lane for each stored word.
 //! Bit `w % 64` of lane `w / 64` of a row is set when its word `w` is
-//! NULL. A row's word is a by-value Datum, the reference of a
+//! NULL. A row's word is one of three: a by-value Datum (a word of 8
+//! bytes that holds a value of 8 bytes or fewer), the reference of a
 //! by-reference value ([`value_ref`]), or 0 for a NULL. The rows fill
 //! the lanes from the first place on.
 //!
@@ -216,7 +217,12 @@ pub fn shape(chunk: &[u8]) -> Result<Shape> {
     Ok(shape)
 }
 
-/// Set the row count of a chunk whose shape was read.
+/// Set the row count of a chunk whose shape was read, stored as a `u32`.
+///
+/// # Panics
+///
+/// When `chunk` holds fewer than the 4 bytes of the row count, which no
+/// chunk whose shape was read does.
 pub fn set_rows(chunk: &mut [u8], rows: usize) {
     put_u32(chunk, ROWS_AT, rows as u32);
 }
