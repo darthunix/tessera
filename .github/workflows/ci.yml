@@ -101,6 +101,10 @@ jobs:
           key: relspill
       - name: The crate's tests alone
         run: cargo test --locked -p relspill
+      # The same tests, each call of the crate their hosts make counted
+      # by the allocator of alloc-count.
+      - name: The crate's calls, their allocations counted
+        run: RUSTFLAGS="--cfg count_allocations" cargo test --locked -p relspill --lib
       # Without its feature alloc, core alone builds the crate, so a file
       # or an allocation in its code fails to build.
       - name: The crate with core alone

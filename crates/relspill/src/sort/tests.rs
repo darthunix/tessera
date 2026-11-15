@@ -3,6 +3,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::Kind;
 use crate::set::tests::property;
+use crate::testing::quiet;
 
 /// The rule of a wrong call's error, which a test expects.
 #[track_caller]
@@ -105,7 +106,7 @@ fn sort_through(params: &Params, keys: &[u32], batch: usize) -> Result<(Vec<u32>
             rows: count,
             limit: params.limit,
         };
-        match machine.step(grown)? {
+        match quiet(|| machine.step(grown))? {
             Action::Done => {
                 let bytes = count * (params.row + params.item) + params.chunk;
                 assert!(bytes <= params.limit, "{bytes} past {}", params.limit);
@@ -117,7 +118,7 @@ fn sort_through(params: &Params, keys: &[u32], batch: usize) -> Result<(Vec<u32>
     let end = Event::InputEnd {
         rows: memory.len() as u64,
     };
-    let mut action = machine.step(end)?;
+    let mut action = quiet(|| machine.step(end))?;
     if action == Action::Done {
         assert_eq!(host.ran.runs, 0, "runs left unread");
         memory.sort_unstable();
@@ -174,7 +175,7 @@ fn sort_through(params: &Params, keys: &[u32], batch: usize) -> Result<(Vec<u32>
             }
             Action::Done => panic!("done before the runs are read"),
         }
-        action = machine.step(Event::Next)?;
+        action = quiet(|| machine.step(Event::Next))?;
     }
 }
 

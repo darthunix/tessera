@@ -6,6 +6,7 @@ use proptest::prelude::*;
 use super::*;
 use crate::Kind;
 use crate::set::tests::property;
+use crate::testing::quiet;
 
 /// The rule of a wrong call's error, which a test expects.
 #[track_caller]
@@ -597,7 +598,8 @@ impl ModelLevel {
     }
 
     fn step(&mut self, event: Event) -> Result<Action> {
-        self.group.step(event, &self.regions.host())
+        let host = self.regions.host();
+        quiet(|| self.group.step(event, &host))
     }
 
     /// Write and free every chunk of a partition.

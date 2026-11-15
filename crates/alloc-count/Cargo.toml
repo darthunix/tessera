@@ -1,0 +1,11 @@
+[package]
+name = "alloc-count"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The system's allocator, counting each thread's allocations, for tests that show a call allocates nothing"
+publish = false
+
+[lints]
+workspace = true

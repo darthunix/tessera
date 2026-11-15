@@ -4,6 +4,7 @@ use crate::phases::{
     BUILD as BUILD_PHASE, FREE, LINK as LINK_PHASE, OUTER as OUTER_PHASE, PROBE as PROBE_PHASE,
 };
 use crate::shared_spill::words_for;
+use crate::testing::quiet;
 
 /// The rule of a wrong call's error, which a test expects.
 #[track_caller]
@@ -89,7 +90,8 @@ fn alone(shared: &Shared, resident: &[u8], phase: u32) -> Vec<Action> {
     let mut phase = phase;
     let mut event = Event::Done;
     loop {
-        let action = build.step(event, &shared.host(resident)).expect("a step");
+        let host = shared.host(resident);
+        let action = quiet(|| build.step(event, &host)).expect("a step");
         actions.push(action);
         event = match action {
             Action::Attach => Event::Attached { phase },
@@ -216,7 +218,7 @@ fn a_participant_stops_only_while_it_probes() {
         let word = core::sync::atomic::AtomicU64::new(0);
         let marked = build.stop(&StopWord::new(&word));
         assert_eq!((marked, StopWord::new(&word).stopped()), (probed, probed));
-        let action = build.step(event, &host).expect("a step");
+        let action = quiet(|| build.step(event, &host)).expect("a step");
         probed = matches!(action, Action::Probe { .. });
         event = match action {
             Action::Attach => Event::Attached { phase: PROBE_PHASE },

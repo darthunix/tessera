@@ -743,6 +743,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::testing::quiet;
 
     /// The rule of a wrong call, which every refusal here is.
     fn wrong(error: Error) -> Rule {
@@ -800,7 +801,7 @@ mod tests {
     fn spill(words: &mut Vec<AtomicU64>, capacity: usize, budget: u64) -> SharedSpill<'_> {
         *words = atomics(words_for(capacity).unwrap());
         let spill = SharedSpill::new(words).unwrap();
-        spill.init(budget);
+        quiet(|| spill.init(budget));
         spill
     }
 
@@ -810,10 +811,13 @@ mod tests {
     fn counts_of_records_past_a_word_in_all_choose_still() {
         let mut words = Vec::new();
         let spill = spill(&mut words, 2, 100);
-        assert_eq!(spill.split(2), Ok(2));
-        spill.add_records(0, u64::MAX).unwrap();
-        spill.add_records(1, 1).unwrap();
-        assert_eq!(spill.evict(&JOIN, Memory::Counted, None, 0), Ok(None));
+        assert_eq!(quiet(|| spill.split(2)), Ok(2));
+        quiet(|| spill.add_records(0, u64::MAX)).unwrap();
+        quiet(|| spill.add_records(1, 1)).unwrap();
+        assert_eq!(
+            quiet(|| spill.evict(&JOIN, Memory::Counted, None, 0)),
+            Ok(None)
+        );
     }
 
     /// Words whose count of partitions passes their room, which another
@@ -825,14 +829,20 @@ mod tests {
         spill(&mut words, 1, 100);
         words[PARTITIONS].store(4, core::sync::atomic::Ordering::Relaxed);
         let spill = SharedSpill::new(&words).unwrap();
-        assert_eq!(refused(spill.on_disk(3)), Rule::Partitions);
+        assert_eq!(refused(quiet(|| spill.on_disk(3))), Rule::Partitions);
         // Nor a count past a `u32` that would truncate into the room.
         words[PARTITIONS].store((1 << 32) | 1, core::sync::atomic::Ordering::Relaxed);
-        assert_eq!(refused(spill.on_disk(0)), Rule::Partitions);
-        assert_eq!(refused(spill.add_bytes(1, Some(0))), Rule::Partitions);
-        assert_eq!(refused(spill.take_file(4, false)), Rule::Partitions);
+        assert_eq!(refused(quiet(|| spill.on_disk(0))), Rule::Partitions);
         assert_eq!(
-            refused(spill.evict(&JOIN, Memory::Counted, None, 0)),
+            refused(quiet(|| spill.add_bytes(1, Some(0)))),
+            Rule::Partitions
+        );
+        assert_eq!(
+            refused(quiet(|| spill.take_file(4, false))),
+            Rule::Partitions
+        );
+        assert_eq!(
+            refused(quiet(|| spill.evict(&JOIN, Memory::Counted, None, 0))),
             Rule::Partitions
         );
     }
@@ -841,10 +851,10 @@ mod tests {
     fn local(words: &mut Vec<Cell<u64>>, bytes: [i64; 4]) -> LocalSpill<'_> {
         *words = vec![Cell::new(0); words_for(4).unwrap()];
         let spill = LocalSpill::new(words).unwrap();
-        spill.init(0);
-        spill.split(4).unwrap();
+        quiet(|| spill.init(0));
+        quiet(|| spill.split(4)).unwrap();
         for (partition, bytes) in (0..).zip(bytes) {
-            spill.add_bytes(bytes, Some(partition)).unwrap();
+            quiet(|| spill.add_bytes(bytes, Some(partition))).unwrap();
         }
         spill
     }
@@ -862,18 +872,22 @@ mod tests {
     fn the_first_split_holds_and_the_largest_partition_goes_to_disk() {
         let mut words = Vec::new();
         let spill = spill(&mut words, 16, 100);
-        assert_eq!(spill.partitions(), 0);
-        assert!(!spill.add_bytes(80, None).unwrap());
-        assert!(spill.add_bytes(40, None).unwrap());
+        assert_eq!(quiet(|| spill.partitions()), 0);
+        assert!(!quiet(|| spill.add_bytes(80, None)).unwrap());
+        assert!(quiet(|| spill.add_bytes(40, None)).unwrap());
         assert_eq!(
-            refused(spill.split(3)),
+            refused(quiet(|| spill.split(3))),
             Rule::Partitions,
             "not a power of two"
         );
-        assert_eq!(spill.split(4).unwrap(), 4);
-        assert_eq!(spill.split(8).unwrap(), 4, "the first split holds");
-        spill.add_bytes(10, Some(1)).unwrap();
-        spill.add_bytes(30, Some(2)).unwrap();
+        assert_eq!(quiet(|| spill.split(4)).unwrap(), 4);
+        assert_eq!(
+            quiet(|| spill.split(8)).unwrap(),
+            4,
+            "the first split holds"
+        );
+        quiet(|| spill.add_bytes(10, Some(1))).unwrap();
+        quiet(|| spill.add_bytes(30, Some(2))).unwrap();
         let evict = |evicted| {
             spill
                 .evict(&SHARED, Memory::Counted, None, evicted)
@@ -881,14 +895,14 @@ mod tests {
         };
         assert_eq!(evict(1), None, "one a check");
         assert_eq!(evict(0), Some(2));
-        assert!(spill.on_disk(2).unwrap());
+        assert!(quiet(|| spill.on_disk(2)).unwrap());
         assert_eq!(evict(0), Some(1), "then the next largest");
-        assert_eq!(spill.evictions(), 2);
+        assert_eq!(quiet(|| spill.evictions()), 2);
         assert_eq!(evict(0), None, "no bytes left in memory");
-        assert!(spill.add_bytes(-30, Some(2)).is_ok());
-        assert_eq!(spill.bytes(), 80 + 40 + 10);
+        assert!(quiet(|| spill.add_bytes(-30, Some(2))).is_ok());
+        assert_eq!(quiet(|| spill.bytes()), 80 + 40 + 10);
         assert_eq!(
-            refused(spill.on_disk(4)),
+            refused(quiet(|| spill.on_disk(4))),
             Rule::Partition,
             "past the partitions"
         );
@@ -905,17 +919,17 @@ mod tests {
         };
         assert_eq!(evict(&GROUPING, 87, 0), None, "below seven eighths");
         assert_eq!(evict(&GROUPING, 88, 0), Some(0));
-        spill.add_bytes(-40, Some(0)).unwrap();
+        quiet(|| spill.add_bytes(-40, Some(0))).unwrap();
         assert_eq!(evict(&GROUPING, 50, 1), None, "down to half");
         assert_eq!(evict(&GROUPING, 51, 1), Some(1));
-        spill.add_bytes(-30, Some(1)).unwrap();
-        spill.add_bytes(50, Some(0)).unwrap();
+        quiet(|| spill.add_bytes(-30, Some(1))).unwrap();
+        quiet(|| spill.add_bytes(50, Some(0))).unwrap();
         assert_eq!(
             evict(&GROUPING, 90, 0),
             Some(0),
             "on disk, and largest again"
         );
-        assert_eq!(spill.evictions(), 2, "counted once");
+        assert_eq!(quiet(|| spill.evictions()), 2, "counted once");
         let left_out = Weights {
             spilled: 0.0,
             ..GROUPING
@@ -950,7 +964,12 @@ mod tests {
             ..records
         };
         assert_eq!(
-            refused(spill.evict(&JOIN, measured(0, 100), Some(short), 0)),
+            refused(quiet(|| spill.evict(
+                &JOIN,
+                measured(0, 100),
+                Some(short),
+                0
+            ))),
             Rule::RecordCounts,
             "a count for each partition"
         );
@@ -968,7 +987,7 @@ mod tests {
                 .unwrap()
         };
         assert_eq!(
-            spill.evict(&JOIN, measured(101, 100), None, 0).unwrap(),
+            quiet(|| spill.evict(&JOIN, measured(101, 100), None, 0)).unwrap(),
             Some(0)
         );
         assert_eq!(evict(20), None, "half of the rows split so far");
@@ -987,13 +1006,13 @@ mod tests {
         };
         assert_eq!(rule([20, 0, 0, 0], 100), None, "nothing on disk");
         assert_eq!(
-            spill.evict(&JOIN, measured(101, 100), None, 0).unwrap(),
+            quiet(|| spill.evict(&JOIN, measured(101, 100), None, 0)).unwrap(),
             None,
             "no bytes"
         );
         let spill = local(&mut words, [10, 0, 0, 0]);
         assert_eq!(
-            spill.evict(&JOIN, measured(101, 100), None, 0).unwrap(),
+            quiet(|| spill.evict(&JOIN, measured(101, 100), None, 0)).unwrap(),
             Some(0)
         );
         let rule = |each: [u64; 4], total| {
@@ -1006,11 +1025,11 @@ mod tests {
         assert_eq!(rule([75, 25, 0, 0], 100), None, "a quarter exactly");
         assert_eq!(rule([76, 24, 0, 0], 100), Some(1), "under a quarter");
         // The words' own records, as a shared table counts them.
-        spill.add_records(0, 80).unwrap();
-        spill.add_records(2, 10).unwrap();
-        spill.add_records(3, 10).unwrap();
+        quiet(|| spill.add_records(0, 80)).unwrap();
+        quiet(|| spill.add_records(2, 10)).unwrap();
+        quiet(|| spill.add_records(3, 10)).unwrap();
         assert_eq!(
-            spill.evict(&JOIN, measured(0, u64::MAX), None, 0).unwrap(),
+            quiet(|| spill.evict(&JOIN, measured(0, u64::MAX), None, 0)).unwrap(),
             Some(2),
             "20 of 100 of the words' records"
         );
@@ -1032,8 +1051,8 @@ mod tests {
     fn a_total_equal_to_the_budget_is_not_over() {
         let mut words = Vec::new();
         let spill = spill(&mut words, 4, 100);
-        assert!(!spill.add_bytes(100, None).unwrap());
-        assert!(spill.add_bytes(1, None).unwrap());
+        assert!(!quiet(|| spill.add_bytes(100, None)).unwrap());
+        assert!(quiet(|| spill.add_bytes(1, None)).unwrap());
     }
 
     #[test]
@@ -1203,22 +1222,29 @@ mod tests {
     fn counts_past_their_words_are_refused() {
         let mut words = Vec::new();
         let spill = spill(&mut words, 4, u64::MAX);
-        spill.split(4).unwrap();
-        spill.add_bytes(i64::MAX, Some(0)).unwrap();
-        spill.add_bytes(i64::MAX, Some(1)).unwrap();
-        spill.add_bytes(1, Some(2)).unwrap();
+        quiet(|| spill.split(4)).unwrap();
+        quiet(|| spill.add_bytes(i64::MAX, Some(0))).unwrap();
+        quiet(|| spill.add_bytes(i64::MAX, Some(1))).unwrap();
+        quiet(|| spill.add_bytes(1, Some(2))).unwrap();
         assert_eq!(
-            refused(spill.add_bytes(1, Some(2))),
+            refused(quiet(|| spill.add_bytes(1, Some(2)))),
             Rule::CounterPast,
             "the total"
         );
-        spill.add_records(0, u64::MAX).unwrap();
-        assert_eq!(refused(spill.add_records(0, 1)), Rule::PartitionRecords);
-        spill
-            .words
-            .store(spill.part(1, Field::NextInner), u64::from(u32::MAX));
-        assert_eq!(spill.take_file(1, false).unwrap(), u32::MAX);
-        assert_eq!(refused(spill.take_file(1, false)), Rule::FileNumber);
+        quiet(|| spill.add_records(0, u64::MAX)).unwrap();
+        assert_eq!(
+            refused(quiet(|| spill.add_records(0, 1))),
+            Rule::PartitionRecords
+        );
+        spill.words.store(
+            quiet(|| spill.part(1, Field::NextInner)),
+            u64::from(u32::MAX),
+        );
+        assert_eq!(quiet(|| spill.take_file(1, false)).unwrap(), u32::MAX);
+        assert_eq!(
+            refused(quiet(|| spill.take_file(1, false))),
+            Rule::FileNumber
+        );
 
         let many = words_for(MAX_PARTITIONS).unwrap() + PART_WORDS;
         assert_eq!(refused(SharedSpill::new(&atomics(many))), Rule::SpillWords);
@@ -1232,18 +1258,22 @@ mod tests {
     fn files_and_partitions_are_taken_once() {
         let mut words = Vec::new();
         let spill = spill(&mut words, 4, 0);
-        spill.split(4).unwrap();
-        assert_eq!(spill.take_file(1, false).unwrap(), 0);
-        assert_eq!(spill.take_file(1, false).unwrap(), 1);
-        assert_eq!(spill.take_file(1, true).unwrap(), 0);
-        assert_eq!(spill.take_file(4, true).unwrap(), 0, "the resident rows");
-        assert_eq!(refused(spill.take_file(5, true)), Rule::Partition);
-        assert!(spill.take_alone(3).unwrap());
-        assert!(!spill.take_alone(3).unwrap());
-        assert!(spill.alone(3).unwrap());
-        spill.add_records(0, 7).unwrap();
-        assert_eq!(spill.records(0).unwrap(), 7);
-        let starts: Vec<u32> = (0..5).map(|_| spill.start()).collect();
+        quiet(|| spill.split(4)).unwrap();
+        assert_eq!(quiet(|| spill.take_file(1, false)).unwrap(), 0);
+        assert_eq!(quiet(|| spill.take_file(1, false)).unwrap(), 1);
+        assert_eq!(quiet(|| spill.take_file(1, true)).unwrap(), 0);
+        assert_eq!(
+            quiet(|| spill.take_file(4, true)).unwrap(),
+            0,
+            "the resident rows"
+        );
+        assert_eq!(refused(quiet(|| spill.take_file(5, true))), Rule::Partition);
+        assert!(quiet(|| spill.take_alone(3)).unwrap());
+        assert!(!quiet(|| spill.take_alone(3)).unwrap());
+        assert!(quiet(|| spill.alone(3)).unwrap());
+        quiet(|| spill.add_records(0, 7)).unwrap();
+        assert_eq!(quiet(|| spill.records(0)).unwrap(), 7);
+        let starts: Vec<u32> = (0..5).map(|_| quiet(|| spill.start())).collect();
         assert_eq!(starts, [0, 1, 2, 3, 0]);
     }
 
@@ -1251,17 +1281,20 @@ mod tests {
     fn a_counter_never_goes_below_zero() {
         let mut words = Vec::new();
         let spill = spill(&mut words, 4, 100);
-        spill.add_bytes(10, None).unwrap();
-        assert!(spill.add_bytes(-10, None).is_ok(), "down to zero");
-        assert_eq!(spill.bytes(), 0);
-        spill.add_bytes(10, None).unwrap();
-        assert_eq!(refused(spill.add_bytes(-20, None)), Rule::CounterBelow);
-        let spill = self::spill(&mut words, 4, 100);
-        spill.split(4).unwrap();
-        spill.add_bytes(50, Some(0)).unwrap();
-        spill.add_bytes(10, Some(1)).unwrap();
+        quiet(|| spill.add_bytes(10, None)).unwrap();
+        assert!(quiet(|| spill.add_bytes(-10, None)).is_ok(), "down to zero");
+        assert_eq!(quiet(|| spill.bytes()), 0);
+        quiet(|| spill.add_bytes(10, None)).unwrap();
         assert_eq!(
-            refused(spill.add_bytes(-20, Some(1))),
+            refused(quiet(|| spill.add_bytes(-20, None))),
+            Rule::CounterBelow
+        );
+        let spill = self::spill(&mut words, 4, 100);
+        quiet(|| spill.split(4)).unwrap();
+        quiet(|| spill.add_bytes(50, Some(0))).unwrap();
+        quiet(|| spill.add_bytes(10, Some(1))).unwrap();
+        assert_eq!(
+            refused(quiet(|| spill.add_bytes(-20, Some(1)))),
             Rule::CounterBelow,
             "a partition's bytes, while the table's total still covers them"
         );
@@ -1275,26 +1308,39 @@ mod tests {
     fn a_refused_second_count_gives_the_first_its_part_back() {
         let mut words = Vec::new();
         let spill = spill(&mut words, 4, 100);
-        spill.split(4).unwrap();
-        let held = |partition| spill.bytes_of(partition);
+        quiet(|| spill.split(4)).unwrap();
+        let held = |partition| quiet(|| spill.bytes_of(partition));
         assert!(
-            !spill.add_bytes(100, Some(0)).unwrap(),
+            !quiet(|| spill.add_bytes(100, Some(0))).unwrap(),
             "equal to the budget"
         );
-        assert!(spill.add_bytes(1, Some(0)).unwrap());
-        assert!(!spill.add_bytes(-1, Some(0)).unwrap(), "equal again");
+        assert!(quiet(|| spill.add_bytes(1, Some(0))).unwrap());
+        assert!(
+            !quiet(|| spill.add_bytes(-1, Some(0))).unwrap(),
+            "equal again"
+        );
         // A wrong call: the total's bytes taken away as of no partition.
-        spill.add_bytes(-100, None).unwrap();
-        assert_eq!(refused(spill.add_bytes(-10, Some(0))), Rule::CounterBelow);
-        assert_eq!((held(0), spill.bytes()), (100, 0), "partition 0 given back");
-        // An addition the partition refuses gives the total back.
-        spill.add_bytes(i64::MAX, Some(1)).unwrap();
-        spill.add_bytes(i64::MAX - 5, Some(1)).unwrap();
-        spill.add_bytes(-i64::MAX, None).unwrap();
-        let (part, total) = (held(1), spill.bytes());
-        assert_eq!(refused(spill.add_bytes(10, Some(1))), Rule::CounterPast);
+        quiet(|| spill.add_bytes(-100, None)).unwrap();
         assert_eq!(
-            (held(1), spill.bytes()),
+            refused(quiet(|| spill.add_bytes(-10, Some(0)))),
+            Rule::CounterBelow
+        );
+        assert_eq!(
+            (held(0), quiet(|| spill.bytes())),
+            (100, 0),
+            "partition 0 given back"
+        );
+        // An addition the partition refuses gives the total back.
+        quiet(|| spill.add_bytes(i64::MAX, Some(1))).unwrap();
+        quiet(|| spill.add_bytes(i64::MAX - 5, Some(1))).unwrap();
+        quiet(|| spill.add_bytes(-i64::MAX, None)).unwrap();
+        let (part, total) = (held(1), quiet(|| spill.bytes()));
+        assert_eq!(
+            refused(quiet(|| spill.add_bytes(10, Some(1)))),
+            Rule::CounterPast
+        );
+        assert_eq!(
+            (held(1), quiet(|| spill.bytes())),
             (part, total),
             "the total given back"
         );
@@ -1307,23 +1353,29 @@ mod tests {
     #[test]
     fn a_refused_update_leaves_the_words_as_they_were() {
         fn check<W: Words>(spill: &Spill<W>) {
-            spill.split(4).unwrap();
-            spill.add_bytes(10, Some(1)).unwrap();
-            spill.add_bytes(i64::MAX, Some(0)).unwrap();
-            spill.add_bytes(i64::MAX - 10, None).unwrap();
-            spill.add_records(2, u64::MAX - 1).unwrap();
+            quiet(|| spill.split(4)).unwrap();
+            quiet(|| spill.add_bytes(10, Some(1))).unwrap();
+            quiet(|| spill.add_bytes(i64::MAX, Some(0))).unwrap();
+            quiet(|| spill.add_bytes(i64::MAX - 10, None)).unwrap();
+            quiet(|| spill.add_records(2, u64::MAX - 1)).unwrap();
             let before: Vec<u64> = (0..words_for(4).unwrap())
                 .map(|index| spill.words.load(index))
                 .collect();
             let refused = |result: Result<bool>| result.map_err(wrong);
             assert_eq!(
-                refused(spill.add_bytes(-11, Some(1))),
+                refused(quiet(|| spill.add_bytes(-11, Some(1)))),
                 Err(Rule::CounterBelow)
             );
-            assert_eq!(refused(spill.add_bytes(2, Some(3))), Err(Rule::CounterPast));
-            assert_eq!(refused(spill.add_bytes(-1, Some(5))), Err(Rule::Partition));
             assert_eq!(
-                spill.add_records(2, 2).map_err(wrong),
+                refused(quiet(|| spill.add_bytes(2, Some(3)))),
+                Err(Rule::CounterPast)
+            );
+            assert_eq!(
+                refused(quiet(|| spill.add_bytes(-1, Some(5)))),
+                Err(Rule::Partition)
+            );
+            assert_eq!(
+                quiet(|| spill.add_records(2, 2)).map_err(wrong),
                 Err(Rule::PartitionRecords)
             );
             let after: Vec<u64> = (0..words_for(4).unwrap())
@@ -1335,7 +1387,7 @@ mod tests {
         check(&spill(&mut words, 4, u64::MAX));
         let own = vec![Cell::new(0); words_for(4).unwrap()];
         let spill = LocalSpill::new(&own).unwrap();
-        spill.init(u64::MAX);
+        quiet(|| spill.init(u64::MAX));
         check(&spill);
     }
 }

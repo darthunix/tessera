@@ -804,6 +804,7 @@ mod tests {
     use super::*;
     use crate::Kind;
     use crate::set::MIN_BUFFER;
+    use crate::testing::quiet;
 
     fn read_config(partitions: u32, partition: u32) -> ReadConfig {
         ReadConfig {
@@ -873,7 +874,7 @@ mod tests {
         /// for a partition without blocks.
         fn open(&mut self) -> Result<Option<()>, Error> {
             loop {
-                let step = self.reader.open(&self.page)?;
+                let step = quiet(|| self.reader.open(&self.page))?;
                 match step {
                     ReadStep::Empty => return Ok(None),
                     ReadStep::Ready { largest } => {
@@ -890,12 +891,12 @@ mod tests {
         /// The next block's header and body, or `None` at the end.
         fn next(&mut self) -> Result<Option<(BlockHeader, Vec<u8>)>, Error> {
             loop {
-                let step = self.reader.next(&self.page, &self.block)?;
+                let step = quiet(|| self.reader.next(&self.page, &self.block))?;
                 match step {
                     ReadStep::End => return Ok(None),
                     ReadStep::Header(header) => {
                         let mut body = vec![0; header.len as usize];
-                        self.reader.body(&self.block, &mut body)?;
+                        quiet(|| self.reader.body(&self.block, &mut body))?;
                         return Ok(Some((header, body)));
                     }
                     _ => {
@@ -909,7 +910,7 @@ mod tests {
         /// reader then waits for the body to be taken.
         fn header(&mut self) -> Result<()> {
             loop {
-                let step = self.reader.next(&self.page, &self.block)?;
+                let step = quiet(|| self.reader.next(&self.page, &self.block))?;
                 if matches!(step, ReadStep::Header(_)) {
                     return Ok(());
                 }
@@ -919,7 +920,7 @@ mod tests {
 
         fn seek(&mut self, offset: u64) -> Result<(), Error> {
             loop {
-                let step = self.reader.seek(&self.page, offset)?;
+                let step = quiet(|| self.reader.seek(&self.page, offset))?;
                 if step == ReadStep::Found {
                     return Ok(());
                 }

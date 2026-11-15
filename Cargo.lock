@@ -12,6 +12,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "alloc-count"
+version = "0.1.0"
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -940,6 +944,7 @@ dependencies = [
 name = "relspill"
 version = "0.1.0"
 dependencies = [
+ "alloc-count",
  "anyhow",
  "loom",
  "proptest",

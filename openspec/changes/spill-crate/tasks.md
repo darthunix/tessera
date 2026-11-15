@@ -376,7 +376,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 - [ ] 6.4 Fuzz targets: any bytes as a file; any events and numbers
       given to a machine. Check: the fuzz workflow, a minute a target
       on a pull request, and an hour a target before the close
-- [ ] 6.5 Tests that no call of the crate allocates memory, under a
+- [x] 6.5 Tests that no call of the crate allocates memory, under a
       counting allocator. Check: `make rust-check`
 - [ ] 6.6 The checks of the contract, for every rule still pending: the
       crate packaged with `relhash` alone; built as `no_std` without

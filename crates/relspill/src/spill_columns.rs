@@ -594,6 +594,7 @@ mod tests {
 
     use super::*;
     use crate::Kind;
+    use crate::testing::quiet;
 
     /// Run `test` on the cases of `strategy`, and fail with the smallest
     /// failing case, which `spill_columns.proptest-regressions` beside
@@ -731,7 +732,7 @@ mod tests {
                 let mut rows = RowMask::try_new(nrows, &mut mask)?;
                 let mut values = vec![0_u8; budget];
                 let mut used = 0;
-                let got = append(&mut chunk, &batch, &mut rows, &mut values, &mut used)?;
+                let got = quiet(|| append(&mut chunk, &batch, &mut rows, &mut values, &mut used))?;
                 // The model: the selected rows in order while the chunk has
                 // room and their bytes fit.
                 let (mut place, mut bytes, mut need) = (before, 0, 0);
@@ -820,18 +821,21 @@ mod tests {
         let mut pending = RowMask::try_new(nrows, &mut words).unwrap();
         let mut offsets = vec![0_u32; nrows];
         let mut rows = [0_u64; 4];
-        let appended = append_partitioned(
-            chunks.as_mut_slice(),
-            &Partitions {
-                shift: 2,
-                chunks: &[0, 1, 2, 3],
-            },
-            &hashes,
-            &payload,
-            &mut pending,
-            &mut offsets,
-            &mut rows,
-        )
+        let partitions = Partitions {
+            shift: 2,
+            chunks: &[0, 1, 2, 3],
+        };
+        let appended = quiet(|| {
+            append_partitioned(
+                chunks.as_mut_slice(),
+                &partitions,
+                &hashes,
+                &payload,
+                &mut pending,
+                &mut offsets,
+                &mut rows,
+            )
+        })
         .unwrap();
         assert_eq!(rows, [0, 10, 25, 25]);
         assert_eq!(appended, 60);
@@ -879,18 +883,21 @@ mod tests {
             let mut pending = RowMask::try_new(nrows, &mut words).unwrap();
             let mut offsets = vec![0_u32; nrows];
             let mut rows = [0_u64];
-            let appended = append_partitioned(
-                chunks.as_mut_slice(),
-                &Partitions {
-                    shift: 0,
-                    chunks: &[0],
-                },
-                &[0; 5],
-                &payload,
-                &mut pending,
-                &mut offsets,
-                &mut rows,
-            )
+            let partitions = Partitions {
+                shift: 0,
+                chunks: &[0],
+            };
+            let appended = quiet(|| {
+                append_partitioned(
+                    chunks.as_mut_slice(),
+                    &partitions,
+                    &[0; 5],
+                    &payload,
+                    &mut pending,
+                    &mut offsets,
+                    &mut rows,
+                )
+            })
             .unwrap();
             assert_eq!(appended, nrows);
             for place in 0..nrows {
@@ -1083,7 +1090,7 @@ mod tests {
         let mut rows = RowMask::try_new(nrows, &mut mask)?;
         let mut values = vec![0_u8; 16 * nrows];
         let mut used = 0;
-        let got = append(&mut chunk, batch, &mut rows, &mut values, &mut used)?;
+        let got = quiet(|| append(&mut chunk, batch, &mut rows, &mut values, &mut used))?;
         ensure!(got.rows == nrows, "{got:?}");
         values.truncate(used);
         Ok((chunk, values, words))
@@ -1099,15 +1106,15 @@ mod tests {
         for (nrows, ncolumns) in [(150, 3), (70, 70)] {
             let (batch, by_value) = read_batch(nrows, ncolumns);
             let (chunk, values, words) = written(&batch, nrows)?;
-            let shape = check(&chunk, words, Some(nrows), &by_value, &values, &Whole)?;
+            let shape = quiet(|| check(&chunk, words, Some(nrows), &by_value, &values, &Whole))?;
             ensure!((shape.rows, shape.words) == (nrows, words));
-            check(&chunk, words, None, &by_value, &values, &Whole)?;
+            quiet(|| check(&chunk, words, None, &by_value, &values, &Whole))?;
             for (column, cells) in batch.columns.iter().enumerate() {
                 for first in (0..nrows).step_by(64).chain([nrows]) {
                     let count = 64.min(nrows - first);
                     let mut out = vec![7; count];
                     let mut nulls = vec![true; count];
-                    window(&chunk, column, first, &mut out, &mut nulls)?;
+                    quiet(|| window(&chunk, column, first, &mut out, &mut nulls))?;
                     for (at, (&word, &null)) in out.iter().zip(&nulls).enumerate() {
                         let row = first + at;
                         let same = match &cells[row] {
@@ -1141,13 +1148,13 @@ mod tests {
         let (chunk, values, words) = written(&batch, nrows)?;
         let len = values.len();
         ensure!(
-            check(&chunk, words + 1, None, &by_value, &values, &Whole)
+            quiet(|| check(&chunk, words + 1, None, &by_value, &values, &Whole))
                 .map(|_| ())
                 .map_err(wrong)
                 == damaged(Rule::ReadWords)
         );
         ensure!(
-            check(&chunk, words, Some(nrows + 1), &by_value, &values, &Whole)
+            quiet(|| check(&chunk, words, Some(nrows + 1), &by_value, &values, &Whole))
                 .map(|_| ())
                 .map_err(wrong)
                 == damaged(Rule::ReadRows)
@@ -1168,7 +1175,7 @@ mod tests {
                     word,
                 );
                 ensure!(
-                    check(&stray, words, Some(nrows), &by_value, &values, &Whole)
+                    quiet(|| check(&stray, words, Some(nrows), &by_value, &values, &Whole))
                         .map(|_| ())
                         .map_err(wrong)
                         == damaged(Rule::ValueRef),
@@ -1178,7 +1185,7 @@ mod tests {
         }
         let too_many = vec![true; words + 1];
         ensure!(
-            check(&chunk, words, None, &too_many, &values, &Whole).map_err(wrong)
+            quiet(|| check(&chunk, words, None, &too_many, &values, &Whole)).map_err(wrong)
                 == Err((Kind::WrongCall, Rule::ChunkColumns))
         );
         // A value that runs past the values, by the host's rule.
@@ -1189,7 +1196,7 @@ mod tests {
             }
         }
         ensure!(
-            check(&chunk, words, None, &by_value, &values, &Short)
+            quiet(|| check(&chunk, words, None, &by_value, &values, &Short))
                 .map(|_| ())
                 .map_err(wrong)
                 == damaged(Rule::ValueEnd)
@@ -1197,23 +1204,23 @@ mod tests {
         let (mut out, mut nulls) = (vec![0; 4], vec![false; 4]);
         for word in [words, usize::MAX] {
             ensure!(
-                window(&chunk, word, 0, &mut out, &mut nulls).map_err(wrong)
+                quiet(|| window(&chunk, word, 0, &mut out, &mut nulls)).map_err(wrong)
                     == Err((Kind::WrongCall, Rule::ChunkColumns))
             );
         }
         ensure!(
-            window(&chunk, 0, nrows - 3, &mut out, &mut nulls).map_err(wrong)
+            quiet(|| window(&chunk, 0, nrows - 3, &mut out, &mut nulls)).map_err(wrong)
                 == Err((Kind::WrongCall, Rule::Window))
         );
         ensure!(
-            window(&chunk, 0, 0, &mut out, &mut nulls[..3]).map_err(wrong)
+            quiet(|| window(&chunk, 0, 0, &mut out, &mut nulls[..3])).map_err(wrong)
                 == Err((Kind::WrongCall, Rule::RowCounts))
         );
         // A chunk read back that is no chunk of columns.
         let mut foreign = chunk.clone();
         foreign[12..16].copy_from_slice(&[0; 4]);
         ensure!(
-            check(&foreign, words, None, &by_value, &values, &Whole)
+            quiet(|| check(&foreign, words, None, &by_value, &values, &Whole))
                 .map(|_| ())
                 .map_err(wrong)
                 == damaged(Rule::ColumnsMagic)
@@ -1228,31 +1235,31 @@ mod tests {
             len: 8,
             packed: 0,
         };
-        check_pair(&header(BlockKind::Values, 3), 0, 3)?;
-        check_pair(&header(BlockKind::Columns, 3), 1, 3)?;
+        quiet(|| check_pair(&header(BlockKind::Values, 3), 0, 3))?;
+        quiet(|| check_pair(&header(BlockKind::Columns, 3), 1, 3))?;
         // A chunk with no values: its rows alone.
-        check_pair(&header(BlockKind::Columns, 3), 0, 3)?;
+        quiet(|| check_pair(&header(BlockKind::Columns, 3), 0, 3))?;
         for (kind, at) in [
             (BlockKind::Records, 0),
             (BlockKind::Values, 1),
             (BlockKind::Records, 1),
         ] {
             ensure!(
-                check_pair(&header(kind, 3), at, 3).map_err(wrong)
+                quiet(|| check_pair(&header(kind, 3), at, 3)).map_err(wrong)
                     == Err((Kind::Damaged, Rule::PairKind)),
                 "{kind:?} as block {at}"
             );
         }
         ensure!(
-            check_pair(&header(BlockKind::Columns, 4), 0, 3).map_err(wrong)
+            quiet(|| check_pair(&header(BlockKind::Columns, 4), 0, 3)).map_err(wrong)
                 == Err((Kind::Damaged, Rule::PairNumber))
         );
         ensure!(
-            check_pair(&header(BlockKind::Values, 4), 0, 3).map_err(wrong)
+            quiet(|| check_pair(&header(BlockKind::Values, 4), 0, 3)).map_err(wrong)
                 == Err((Kind::Damaged, Rule::PairNumber))
         );
         ensure!(
-            check_pair(&header(BlockKind::Values, 3), 2, 3).map_err(wrong)
+            quiet(|| check_pair(&header(BlockKind::Values, 3), 2, 3)).map_err(wrong)
                 == Err((Kind::WrongCall, Rule::PairBlock))
         );
         Ok(())
@@ -1277,16 +1284,16 @@ mod tests {
                 by_value: false,
             };
             let (mut chunk, values, words) = written(&alone, nrows)?;
-            check(&chunk, words, Some(nrows), &[false], &values, &Whole)?;
+            quiet(|| check(&chunk, words, Some(nrows), &[false], &values, &Whole))?;
             let (mut out, mut nulls) = (vec![7; nrows], vec![false; nrows]);
-            window(&chunk, 0, 0, &mut out, &mut nulls)?;
+            quiet(|| window(&chunk, 0, 0, &mut out, &mut nulls))?;
             let last = out[nrows - 1] - columns::value_ref(0, 0);
             ensure!(last == values.len() as u64, "{out:?} over {}", values.len());
             if nrows == 3 {
                 let shape = columns::shape(&chunk)?;
                 put(&mut chunk, shape.lane_at(shape.word_lane(0)) + 8, 77);
-                check(&chunk, words, Some(nrows), &[false], &values, &Whole)?;
-                window(&chunk, 0, 0, &mut out, &mut nulls)?;
+                quiet(|| check(&chunk, words, Some(nrows), &[false], &values, &Whole))?;
+                quiet(|| window(&chunk, 0, 0, &mut out, &mut nulls))?;
                 ensure!((out[1], nulls[1]) == (0, true), "{out:?}");
             }
         }

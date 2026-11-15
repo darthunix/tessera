@@ -271,6 +271,7 @@ fn chunk_len(shape: &Shape, limit: usize, partitions: u32) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::quiet;
 
     /// The rule of a wrong call, which every refusal here is.
     fn wrong(error: Error) -> Rule {
@@ -434,11 +435,12 @@ mod tests {
                 for shift in [0, 5, 10, 20, 25, 27, 28, 29, 30] {
                     for record in [24, 40, 4096, 70_000] {
                         let level = level(expected, limit, shift, 0);
-                        let got = plan(&shape(MIN_CHUNK + PAGE, 8, record), &level)?;
+                        let grouping_shape = shape(MIN_CHUNK + PAGE, 8, record);
+                        let got = quiet(|| plan(&grouping_shape, &level))?;
                         assert_eq!(old(got), grouping(expected, limit, shift, record));
                         same_rest(got, shift)?;
                         let join_shape = shape(join_reserve, 16, record);
-                        let got = plan(&join_shape, &level)?;
+                        let got = quiet(|| plan(&join_shape, &level))?;
                         assert_eq!(old(got), join(expected, limit, shift, 0, record));
                         same_rest(got, shift)?;
                         if shift == 0 {

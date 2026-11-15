@@ -89,11 +89,20 @@ row needs.
   `.github/workflows/ci.yml::cargo check --locked -p relspill
   --no-default-features`
 
-#### Scenario: Every call under a counting allocator
-- **WHEN** every call of the crate runs under an allocator that counts
-  allocations
-- **THEN** the count does not change
-- **Verified by:** pending
+#### Scenario: Calls under a counting allocator
+- **WHEN** the hosts of the tests step every machine, write and read
+  sets and append rows, and the tests of each module check and read
+  chunks of columns, lay out headers, change the words of a spill and
+  plan levels, the calls of the crate they make under an allocator that
+  counts each thread's allocations; and packing runs alone under it
+- **THEN** none of these calls allocates, and an allocation in one is
+  seen
+- **Verified by:**
+  `.github/workflows/ci.yml::RUSTFLAGS="--cfg count_allocations" cargo
+  test --locked -p relspill --lib`;
+  `crates/relspill/src/testing.rs::a call of the crate took memory`;
+  `crates/relspill/src/testing.rs::an_allocation_of_a_call_is_seen`;
+  `crates/relspill/tests/alloc.rs::packing_allocates_nothing`
 
 #### Scenario: A full block list
 - **WHEN** a block is written to a partition whose block list has no

@@ -6,6 +6,7 @@
 use core::cell::Cell;
 
 use super::*;
+use crate::testing::quiet;
 
 /// A row of a side: its key and its number among the side's rows.
 #[derive(Clone, Copy, Debug)]
@@ -257,7 +258,7 @@ impl Level {
 
     fn step(&mut self, event: Event) -> Result<Action> {
         let mut host = self.regions.host();
-        self.join.step(event, &mut host)
+        quiet(|| self.join.step(event, &mut host))
     }
 
     fn side(&mut self, side: Side) -> &mut Held {
@@ -272,9 +273,8 @@ impl Level {
     fn count(&mut self, partition: usize, len: u64, add: bool) -> Result<()> {
         let delta = if add { len as i64 } else { -(len as i64) };
         self.memory = self.memory.wrapping_add_signed(delta);
-        self.regions
-            .spill()
-            .add_bytes(delta, Some(partition as u32))?;
+        let spill = self.regions.spill();
+        quiet(|| spill.add_bytes(delta, Some(partition as u32)))?;
         Ok(())
     }
 
@@ -752,7 +752,7 @@ impl Model {
             pairs: Vec::new(),
             ran: [0; 13],
         };
-        let mut join = Some(Join::new(params)?);
+        let mut join = Some(quiet(|| Join::new(params))?);
         for rows in inner.chunks(batch) {
             if let Some(machine) = join.as_mut() {
                 let held = model.table.len() as u64 * model.record;

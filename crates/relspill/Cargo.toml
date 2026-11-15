@@ -30,5 +30,11 @@ proptest.workspace = true
 [target.'cfg(loom)'.dependencies]
 loom = "0.7"
 
+# With --cfg count_allocations the tests count each thread's allocations
+# through it, and check that no call of the crate allocates; without it,
+# as in the crate's package alone, they run the same calls uncounted.
+[target.'cfg(count_allocations)'.dev-dependencies]
+alloc-count = { path = "../alloc-count" }
+
 [lints]
 workspace = true

@@ -36,6 +36,8 @@ pub mod shared;
 pub mod shared_spill;
 pub mod sort;
 pub mod spill_columns;
+#[cfg(test)]
+pub(crate) mod testing;
 use error::ensure;
 pub use error::{Error, Kind, Result, Rule};
 pub use pack::{pack, unpack};
@@ -317,6 +319,7 @@ impl BlockHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::quiet;
 
     const BOUNDS: Bounds = Bounds::all(1 << 20);
 
@@ -335,9 +338,9 @@ mod tests {
     #[test]
     fn a_header_reads_back_as_written() -> Result<()> {
         let mut bytes = [0_u8; HEADER_SIZE];
-        header().write(&mut bytes, BOUNDS)?;
+        quiet(|| header().write(&mut bytes, BOUNDS))?;
         assert_eq!(
-            BlockHeader::read(&bytes, header().fingerprint, BOUNDS)?,
+            quiet(|| BlockHeader::read(&bytes, header().fingerprint, BOUNDS))?,
             header()
         );
         let values = BlockHeader {
@@ -345,9 +348,9 @@ mod tests {
             len: 0,
             ..header()
         };
-        values.write(&mut bytes, BOUNDS)?;
+        quiet(|| values.write(&mut bytes, BOUNDS))?;
         assert_eq!(
-            BlockHeader::read(&bytes, values.fingerprint, BOUNDS)?,
+            quiet(|| BlockHeader::read(&bytes, values.fingerprint, BOUNDS))?,
             values
         );
         Ok(())
@@ -356,7 +359,7 @@ mod tests {
     #[test]
     fn every_damaged_field_is_refused() -> Result<()> {
         let mut good = [0_u8; HEADER_SIZE];
-        header().write(&mut good, BOUNDS)?;
+        quiet(|| header().write(&mut good, BOUNDS))?;
         let fingerprint = header().fingerprint;
         let cases: [(&str, usize, u64, usize, Rule); 9] = [
             ("magic", MAGIC_AT, 1, 8, Rule::Magic),
@@ -383,7 +386,7 @@ mod tests {
                 put_u64(&mut bytes, at, value);
             }
             // A damaged field is damaged data, not a misuse of the call.
-            let error = BlockHeader::read(&bytes, fingerprint, BOUNDS)
+            let error = quiet(|| BlockHeader::read(&bytes, fingerprint, BOUNDS))
                 .expect_err(&format!("{name} accepted"));
             assert_eq!(
                 (error.kind(), error.rule()),
@@ -392,13 +395,13 @@ mod tests {
             );
         }
         // A buffer shorter than a header is the caller's misuse.
-        let short = BlockHeader::read(&good[..HEADER_SIZE - 1], fingerprint, BOUNDS)
+        let short = quiet(|| BlockHeader::read(&good[..HEADER_SIZE - 1], fingerprint, BOUNDS))
             .expect_err("a short buffer accepted");
         assert_eq!(
             (short.kind(), short.rule()),
             (Kind::WrongCall, Rule::Header)
         );
-        let foreign = BlockHeader::read(&good, fingerprint + 1, BOUNDS)
+        let foreign = quiet(|| BlockHeader::read(&good, fingerprint + 1, BOUNDS))
             .expect_err("another table's block accepted");
         assert_eq!(
             (foreign.kind(), foreign.rule()),
@@ -413,11 +416,11 @@ mod tests {
         let refused = |result: Result<()>| result.map_err(|error| (error.kind(), error.rule()));
         let empty_records = BlockHeader { len: 0, ..header() };
         assert_eq!(
-            refused(empty_records.write(&mut bytes, BOUNDS)),
+            refused(quiet(|| empty_records.write(&mut bytes, BOUNDS))),
             Err((Kind::WrongCall, Rule::UsedMark))
         );
         assert_eq!(
-            refused(header().write(&mut bytes, Bounds::all(1024))),
+            refused(quiet(|| header().write(&mut bytes, Bounds::all(1024)))),
             Err((Kind::WrongCall, Rule::BlockLength))
         );
         let packed_values = BlockHeader {
@@ -426,7 +429,7 @@ mod tests {
             ..header()
         };
         assert_eq!(
-            refused(packed_values.write(&mut bytes, BOUNDS)),
+            refused(quiet(|| packed_values.write(&mut bytes, BOUNDS))),
             Err((Kind::WrongCall, Rule::PackedRecords))
         );
         let packed = BlockHeader {
@@ -435,7 +438,9 @@ mod tests {
         };
         assert!(packed.write(&mut bytes, BOUNDS).is_ok());
         assert_eq!(
-            refused(header().write(&mut bytes[..HEADER_SIZE - 1], BOUNDS)),
+            refused(quiet(
+                || header().write(&mut bytes[..HEADER_SIZE - 1], BOUNDS)
+            )),
             Err((Kind::WrongCall, Rule::Header))
         );
     }
@@ -454,7 +459,7 @@ mod tests {
         };
         long_values.write(&mut bytes, bounds)?;
         assert_eq!(
-            BlockHeader::read(&bytes, long_values.fingerprint, bounds)?,
+            quiet(|| BlockHeader::read(&bytes, long_values.fingerprint, bounds))?,
             long_values
         );
         let mut refused = |kind, len| {
@@ -464,7 +469,7 @@ mod tests {
                 ..header()
             };
             let written = header.write(&mut bytes, Bounds::all(len));
-            let read = BlockHeader::read(&bytes, header.fingerprint, bounds);
+            let read = quiet(|| BlockHeader::read(&bytes, header.fingerprint, bounds));
             (
                 written.is_ok(),
                 read.map_err(|error| (error.kind(), error.rule())),
@@ -487,7 +492,7 @@ mod tests {
         let mut good = [0_u8; HEADER_SIZE];
         columns.write(&mut good, BOUNDS)?;
         assert_eq!(
-            BlockHeader::read(&good, columns.fingerprint, BOUNDS)?,
+            quiet(|| BlockHeader::read(&good, columns.fingerprint, BOUNDS))?,
             columns
         );
         // A body shorter than a chunk's header, no packed length, and a
@@ -512,7 +517,7 @@ mod tests {
             let mut bytes = good;
             put_u64(&mut bytes, LEN_AT, len);
             put_u32(&mut bytes, PACKED_AT, packed);
-            let error = BlockHeader::read(&bytes, columns.fingerprint, BOUNDS)
+            let error = quiet(|| BlockHeader::read(&bytes, columns.fingerprint, BOUNDS))
                 .expect_err(&format!("{name} read"));
             assert_eq!(
                 (error.kind(), error.rule()),
@@ -546,7 +551,7 @@ mod tests {
             };
             last.write(&mut bytes, Bounds::all(good.len))?;
             assert_eq!(
-                BlockHeader::read(&bytes, good.fingerprint, Bounds::all(good.len))?,
+                quiet(|| BlockHeader::read(&bytes, good.fingerprint, Bounds::all(good.len)))?,
                 last
             );
             // One level more, on writing and on reading.
@@ -560,7 +565,7 @@ mod tests {
             );
             let mut damaged = bytes;
             put_u32(&mut damaged, LEVEL_AT, MAX_LEVEL);
-            let error = BlockHeader::read(&damaged, good.fingerprint, BOUNDS)
+            let error = quiet(|| BlockHeader::read(&damaged, good.fingerprint, BOUNDS))
                 .expect_err(&format!("{name} read past the last level"));
             assert_eq!((error.kind(), error.rule()), (Kind::Damaged, Rule::Level));
             // A body longer than the reader accepts.
@@ -569,8 +574,9 @@ mod tests {
                     .is_err(),
                 "{name}"
             );
-            let error = BlockHeader::read(&bytes, good.fingerprint, Bounds::all(good.len - 8))
-                .expect_err(&format!("{name} read past the limit"));
+            let error =
+                quiet(|| BlockHeader::read(&bytes, good.fingerprint, Bounds::all(good.len - 8)))
+                    .expect_err(&format!("{name} read past the limit"));
             assert_eq!(
                 (error.kind(), error.rule()),
                 (Kind::Damaged, Rule::BlockLength)

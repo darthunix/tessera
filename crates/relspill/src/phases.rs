@@ -544,6 +544,7 @@ impl Participant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::quiet;
 
     /// The rule of a wrong call, which every refusal here is.
     fn wrong(error: Error) -> Rule {
@@ -572,7 +573,7 @@ mod tests {
         let mut reply = 0;
         let mut phase = attach_at;
         loop {
-            let action = participant.next(&counters, reply).unwrap();
+            let action = quiet(|| participant.next(&counters, reply)).unwrap();
             actions.push(action);
             reply = match action {
                 Action::Attach => phase,
@@ -581,7 +582,7 @@ mod tests {
                     1
                 }
                 Action::Build => {
-                    counters.report(records, 0).unwrap();
+                    quiet(|| counters.report(records, 0)).unwrap();
                     0
                 }
                 Action::ArriveAndDetach => 1,
@@ -629,11 +630,11 @@ mod tests {
         };
         let before = participant;
         assert_eq!(
-            participant.next(&counters, 0).map_err(|error| error.rule()),
+            quiet(|| participant.next(&counters, 0)).map_err(|error| error.rule()),
             Err(Rule::State)
         );
         assert_eq!(
-            participant.round_step(0).map_err(|error| error.rule()),
+            quiet(|| participant.round_step(0)).map_err(|error| error.rule()),
             Err(Rule::State)
         );
         assert_eq!(participant, before);
@@ -665,7 +666,7 @@ mod tests {
             let word = Word::default();
             let marked = participant.stop_in(&word);
             assert_eq!((marked, word.stopped()), (probed, probed));
-            let action = participant.next(&counters, reply).unwrap();
+            let action = quiet(|| participant.next(&counters, reply)).unwrap();
             probed = action == Action::Probe;
             reply = match action {
                 Action::Attach => PROBE,
@@ -770,16 +771,17 @@ mod tests {
     fn participants_count_a_build_at_once() {
         let words = counter_words(u64::MAX);
         let counters = SharedCounters::new(&words);
-        counters.init();
+        quiet(|| counters.init());
         let numbers: Vec<u64> = std::thread::scope(|scope| {
             let threads: Vec<_> = (0..3_u64)
                 .map(|participant| {
                     let counters = &counters;
                     scope.spawn(move || {
-                        let numbers: Vec<u64> =
-                            (0..50).map(|_| counters.take_chunk().unwrap()).collect();
-                        counters.report(10 + participant, 1 << participant).unwrap();
-                        counters.add_duplicates(participant).unwrap();
+                        let numbers: Vec<u64> = (0..50)
+                            .map(|_| quiet(|| counters.take_chunk()).unwrap())
+                            .collect();
+                        quiet(|| counters.report(10 + participant, 1 << participant)).unwrap();
+                        quiet(|| counters.add_duplicates(participant)).unwrap();
                         numbers
                     })
                 })
@@ -805,7 +807,7 @@ mod tests {
         let mut reply = 0;
         let mut phase = attach_at;
         loop {
-            let action = participant.round_step(reply).unwrap();
+            let action = quiet(|| participant.round_step(reply)).unwrap();
             actions.push(action);
             reply = match action {
                 Action::Attach => phase,
@@ -869,28 +871,31 @@ mod tests {
         let words = counter_words(0);
         let counters = SharedCounters::new(&words);
         let mut build = Participant::new();
-        assert_eq!(build.next(&counters, 0).unwrap(), Action::Attach);
+        assert_eq!(quiet(|| build.next(&counters, 0)).unwrap(), Action::Attach);
         let refused = |result: Result<Action>| result.map_err(wrong);
         let before = build;
         assert_eq!(
-            refused(build.next(&counters, FREE + 1)),
+            refused(quiet(|| build.next(&counters, FREE + 1))),
             Err(Rule::AttachPhase)
         );
         assert_eq!(
-            refused(build.next(&counters, u32::MAX)),
+            refused(quiet(|| build.next(&counters, u32::MAX))),
             Err(Rule::AttachPhase)
         );
         // A refused reply leaves the participant as it was, so its next
         // step goes as if the reply had not come.
         assert_eq!(build, before);
         let mut round = Participant::new();
-        assert_eq!(round.round_step(0).unwrap(), Action::Attach);
+        assert_eq!(quiet(|| round.round_step(0)).unwrap(), Action::Attach);
         let before = round;
         assert_eq!(
-            refused(round.round_step(ROUND_FREE + 1)),
+            refused(quiet(|| round.round_step(ROUND_FREE + 1))),
             Err(Rule::AttachPhase)
         );
-        assert_eq!(refused(round.round_step(u32::MAX)), Err(Rule::AttachPhase));
+        assert_eq!(
+            refused(quiet(|| round.round_step(u32::MAX))),
+            Err(Rule::AttachPhase)
+        );
         assert_eq!(round, before);
     }
 
@@ -900,8 +905,8 @@ mod tests {
     fn counts_past_their_words_are_refused() {
         let words = counter_words(0);
         let counters = SharedCounters::new(&words);
-        counters.init();
-        counters.report(u64::MAX, 0b01).unwrap();
+        quiet(|| counters.init());
+        quiet(|| counters.report(u64::MAX, 0b01)).unwrap();
         let error = counters
             .report(1, 0b10)
             .expect_err("records past their word");
@@ -914,7 +919,7 @@ mod tests {
             (u64::MAX, 0b01),
             "the counters unchanged"
         );
-        counters.add_duplicates(u64::MAX).unwrap();
+        quiet(|| counters.add_duplicates(u64::MAX)).unwrap();
         let error = counters
             .add_duplicates(1)
             .expect_err("duplicates past their word");
@@ -924,8 +929,8 @@ mod tests {
         );
         assert_eq!(counters.total_duplicates(), u64::MAX);
         counters.words.store(CHUNKS, u64::MAX - 1);
-        assert_eq!(counters.take_chunk().unwrap(), u64::MAX - 1);
-        let error = counters.take_chunk().expect_err("a chunk past its word");
+        assert_eq!(quiet(|| counters.take_chunk()).unwrap(), u64::MAX - 1);
+        let error = quiet(|| counters.take_chunk()).expect_err("a chunk past its word");
         assert_eq!(
             (error.kind(), error.rule(), error.numbers().0),
             (crate::Kind::WrongCall, Rule::BuildCount, CHUNKS as u32)

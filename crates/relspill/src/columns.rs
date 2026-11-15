@@ -426,11 +426,12 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
 mod tests {
     use super::*;
     use crate::Kind;
+    use crate::testing::quiet;
 
     fn chunk_of(capacity: usize, words: usize, rows: &[Vec<u64>]) -> Vec<u8> {
         let mut chunk = vec![0_u8; size(capacity, words)];
-        init(&mut chunk, words).unwrap();
-        let shape = shape(&chunk).unwrap();
+        quiet(|| init(&mut chunk, words)).unwrap();
+        let shape = quiet(|| shape(&chunk)).unwrap();
         for (row, lanes) in rows.iter().enumerate() {
             for (lane, value) in lanes.iter().enumerate() {
                 let at = shape.lane_at(lane) + 8 * row;
@@ -444,11 +445,11 @@ mod tests {
     fn round_trip(capacity: usize, words: usize, rows: &[Vec<u64>]) -> (usize, Vec<u8>) {
         let chunk = chunk_of(capacity, words, rows);
         let mut out = vec![0_u8; pack_bound(rows.len(), words)];
-        let (packed, len) = pack(&chunk, &mut out).unwrap();
+        let (packed, len) = quiet(|| pack(&chunk, &mut out)).unwrap();
         assert!(packed.is_multiple_of(8));
         let mut back = vec![0_u8; len];
-        unpack(&out[..packed], &mut back).unwrap();
-        let shape = shape(&back).unwrap();
+        quiet(|| unpack(&out[..packed], &mut back)).unwrap();
+        let shape = quiet(|| shape(&back)).unwrap();
         assert_eq!(
             shape,
             Shape {
@@ -523,7 +524,7 @@ mod tests {
             })
             .collect();
         let (_, back) = round_trip(60, words, &rows);
-        let shape = shape(&back).unwrap();
+        let shape = quiet(|| shape(&back)).unwrap();
         assert_eq!(shape.word_lane(0), 3);
         assert_eq!(size(4, words), HEADER + 8 * 4 * 133);
     }
@@ -533,13 +534,13 @@ mod tests {
         let mut chunk = chunk_of(4, 1, &[vec![0, 1]]);
         let mut out = vec![0_u8; pack_bound(4, 1)];
         chunk[MAGIC_AT] ^= 1;
-        let error = pack(&chunk, &mut out).expect_err("a foreign chunk packed");
+        let error = quiet(|| pack(&chunk, &mut out)).expect_err("a foreign chunk packed");
         assert_eq!(
             (error.kind(), error.rule()),
             (Kind::WrongCall, Rule::ColumnsMagic)
         );
         let chunk = chunk_of(4, 1, &[vec![0, 1], vec![0, 300]]);
-        let (packed, len) = pack(&chunk, &mut out).unwrap();
+        let (packed, len) = quiet(|| pack(&chunk, &mut out)).unwrap();
         let mut back = vec![0_u8; len];
         // Bytes read back that fail their checks are damaged data, and
         // each names the rule it broke.
@@ -549,28 +550,37 @@ mod tests {
             error.rule()
         };
         assert_eq!(
-            refused(unpack(&out[..packed - 8], &mut back)),
+            refused(quiet(|| unpack(&out[..packed - 8], &mut back))),
             Rule::ColumnsLaneEnd
         );
         assert_eq!(
-            refused(unpack(&out[..packed], &mut back[..len - 8])),
+            refused(quiet(|| unpack(&out[..packed], &mut back[..len - 8]))),
             Rule::ColumnsFill
         );
-        assert_eq!(refused(unpack(&out[..8], &mut back)), Rule::Descriptors);
-        assert_eq!(refused(unpack(&out[..4], &mut back)), Rule::ColumnsCounts);
+        assert_eq!(
+            refused(quiet(|| unpack(&out[..8], &mut back))),
+            Rule::Descriptors
+        );
+        assert_eq!(
+            refused(quiet(|| unpack(&out[..4], &mut back))),
+            Rule::ColumnsCounts
+        );
         let mut bad = out[..packed].to_vec();
         bad[8] = 3;
-        assert_eq!(refused(unpack(&bad, &mut back)), Rule::LaneWidth);
+        assert_eq!(refused(quiet(|| unpack(&bad, &mut back))), Rule::LaneWidth);
         // Bytes past the last lane.
         let mut long = out[..packed].to_vec();
         long.extend_from_slice(&[0_u8; 8]);
-        assert_eq!(refused(unpack(&long, &mut back)), Rule::ColumnsTail);
-        let error = init(&mut [0_u8; 8], 1).expect_err("a chunk shorter than its header");
+        assert_eq!(
+            refused(quiet(|| unpack(&long, &mut back))),
+            Rule::ColumnsTail
+        );
+        let error = quiet(|| init(&mut [0_u8; 8], 1)).expect_err("a chunk shorter than its header");
         assert_eq!(
             (error.kind(), error.rule()),
             (Kind::WrongCall, Rule::ColumnsChunk)
         );
-        assert_eq!(init(&mut [0_u8; HEADER], 3).unwrap(), 0);
+        assert_eq!(quiet(|| init(&mut [0_u8; HEADER], 3)).unwrap(), 0);
     }
 
     #[test]
@@ -579,7 +589,7 @@ mod tests {
         // differences 0 and 1.
         let chunk = chunk_of(2, 1, &[vec![0, u64::MAX], vec![0, 0]]);
         let mut out = vec![0xff_u8; pack_bound(2, 1)];
-        let (packed, _) = pack(&chunk, &mut out)?;
+        let (packed, _) = quiet(|| pack(&chunk, &mut out))?;
         // The counts, a descriptor for the lane of NULL bits and one for
         // the word's lane, then the word's lane in 8 bytes.
         assert_eq!(packed, 8 + 2 * 16 + 8);
@@ -590,7 +600,7 @@ mod tests {
         // A chunk without rows: no width and no least value.
         let empty = chunk_of(2, 1, &[]);
         let mut out = vec![0xff_u8; pack_bound(0, 1)];
-        let (packed, _) = pack(&empty, &mut out)?;
+        let (packed, _) = quiet(|| pack(&empty, &mut out))?;
         assert_eq!(packed, 8 + 2 * 16);
         assert_eq!(out[8..40], [0_u8; 32]);
         Ok(())
@@ -600,7 +610,7 @@ mod tests {
     fn a_chunk_keeps_within_its_limits() -> Result<()> {
         // The most words a row, and one more.
         let mut widest = vec![0_u8; size(1, MAX_WORDS)];
-        assert_eq!(init(&mut widest, MAX_WORDS)?, 1);
+        assert_eq!(quiet(|| init(&mut widest, MAX_WORDS))?, 1);
         let rule = |result: Result<usize>| {
             result.map_err(|error| {
                 assert_eq!(error.kind(), Kind::WrongCall, "{error}");
@@ -608,19 +618,19 @@ mod tests {
             })
         };
         assert_eq!(
-            rule(init(&mut widest, MAX_WORDS + 1)),
+            rule(quiet(|| init(&mut widest, MAX_WORDS + 1))),
             Err(Rule::ColumnsWords)
         );
         // A length that is no multiple of 8.
         assert_eq!(
-            rule(init(&mut [0_u8; HEADER + 12], 1)),
+            rule(quiet(|| init(&mut [0_u8; HEADER + 12], 1))),
             Err(Rule::ColumnsChunk)
         );
         // Bytes for more rows than a chunk holds: the capacity stops at
         // the most rows.
         let mut longest = vec![0_u8; size(MAX_ROWS + 5, 1)];
-        assert_eq!(init(&mut longest, 1)?, MAX_ROWS);
-        assert_eq!(shape(&longest)?.capacity, MAX_ROWS);
+        assert_eq!(quiet(|| init(&mut longest, 1))?, MAX_ROWS);
+        assert_eq!(quiet(|| shape(&longest))?.capacity, MAX_ROWS);
         assert_eq!(capacity(size(MAX_ROWS, 1), 1), MAX_ROWS);
         // However long the bytes, a chunk holds no more rows than pack
         // into the 32 bits a block's header keeps for the packed length.
@@ -644,7 +654,8 @@ mod tests {
             body
         };
         let refused = |rows: usize| {
-            let error = unpack(&body(rows), &mut [0_u8; HEADER]).expect_err("unpacked");
+            let packed = body(rows);
+            let error = quiet(|| unpack(&packed, &mut [0_u8; HEADER])).expect_err("unpacked");
             assert_eq!(error.kind(), Kind::Damaged);
             error.rule()
         };
@@ -653,9 +664,9 @@ mod tests {
         // A chunk with a byte past a length of 8s is not packed.
         let mut chunk = chunk_of(2, 1, &[vec![0, 1]]);
         let mut out = vec![0_u8; pack_bound(2, 1)];
-        assert!(pack(&chunk, &mut out).is_ok());
+        assert!(quiet(|| pack(&chunk, &mut out)).is_ok());
         chunk.push(0);
-        let error = pack(&chunk, &mut out).expect_err("an odd length packed");
+        let error = quiet(|| pack(&chunk, &mut out)).expect_err("an odd length packed");
         assert_eq!(
             (error.kind(), error.rule()),
             (Kind::WrongCall, Rule::ColumnsChunk)

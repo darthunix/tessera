@@ -33,7 +33,13 @@ test, a fuzzer, a proof or a model runs the whole crate in memory.
 ### No memory allocated
 A call of the crate allocates nothing, even when it fails, so that the
 memory of a spill is counted where its host counts memory.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::cargo check --locked -p relspill
+  --no-default-features`;
+  `.github/workflows/ci.yml::RUSTFLAGS="--cfg count_allocations" cargo
+  test --locked -p relspill --lib`;
+  `crates/relspill/src/testing.rs::a call of the crate took memory`;
+  `crates/relspill/tests/alloc.rs::packing_allocates_nothing`
 
 ### One way to bytes read back
 Every read of bytes that came from a file goes through one layer, so

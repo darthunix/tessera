@@ -906,6 +906,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::Kind;
+    use crate::testing::quiet;
 
     /// Run `test` on the cases of `strategy`, and fail with the smallest
     /// failing case, which `set.proptest-regressions` beside this file
@@ -989,7 +990,7 @@ pub(crate) mod tests {
     impl Host {
         pub(crate) fn new(config: Config) -> Result<Self> {
             Ok(Self {
-                writer: Writer::new(config)?,
+                writer: quiet(|| Writer::new(config))?,
                 buffer: vec![0; config.buffer_len],
                 scratch: Vec::new(),
                 lists: vec![(Vec::new(), 0); config.partitions as usize],
@@ -1053,7 +1054,7 @@ pub(crate) mod tests {
                 return Ok(None);
             }
             if !ranges.as_slice().is_empty() {
-                self.writer.written()?;
+                quiet(|| self.writer.written())?;
             }
             Ok(Some(done))
         }
@@ -1062,12 +1063,14 @@ pub(crate) mod tests {
         /// was cut.
         pub(crate) fn write(&mut self, block: &Owned) -> Result<Option<Entry>> {
             loop {
-                let step = self.writer.write(
-                    &mut self.buffer,
-                    &mut self.scratch,
-                    &mut self.lists,
-                    block.block(),
-                )?;
+                let step = quiet(|| {
+                    self.writer.write(
+                        &mut self.buffer,
+                        &mut self.scratch,
+                        &mut self.lists,
+                        block.block(),
+                    )
+                })?;
                 let place = match step {
                     Step::Done { offset, stored, .. } => Some(Entry { offset, stored }),
                     _ => None,
@@ -1083,7 +1086,7 @@ pub(crate) mod tests {
         /// Finish the set: false when a write was cut.
         pub(crate) fn finish(&mut self) -> Result<bool> {
             loop {
-                let step = self.writer.finish(&mut self.buffer, &mut self.lists)?;
+                let step = quiet(|| self.writer.finish(&mut self.buffer, &mut self.lists))?;
                 match self.serve(step, 0, &[])? {
                     None => return Ok(false),
                     Some(true) => return Ok(true),
