@@ -16,8 +16,8 @@
 # the proofs by Kani (the table's table/proofs.rs, the float casts'
 # float/proofs.rs, the date bound's calendar/proofs.rs, the word walks'
 # reader/proofs.rs and column/proofs.rs, the sort key's sort/proofs.rs,
-# the divisors' int32/divisor/proofs.rs and int64/divisor/proofs.rs),
-# built only under Kani.
+# the divisors' int32/divisor/proofs.rs and int64/divisor/proofs.rs, and
+# every proofs.rs of relspill), built only under Kani.
 exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
@@ -25,6 +25,8 @@ exclude_globs = [
     "**/loom.rs",
     "crates/relhash/src/table/loom/**",
     "crates/relhash/src/table/proofs.rs",
+    "crates/relspill/src/**/proofs.rs",
+    "crates/relspill/src/proofs.rs",
     "crates/tessera-capi/src/column/proofs.rs",
     "crates/tessera-core/src/reader/proofs.rs",
     "crates/tessera-kernels/src/calendar/proofs.rs",
