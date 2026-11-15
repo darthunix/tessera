@@ -23,14 +23,6 @@ SET hash_mem_multiplier = 2;
 SELECT scale FROM bench_scale \gset
 
 \ir reading.sql
-
-CREATE TEMP TABLE timings
-(
-    test text,
-    mode text,
-    run integer,
-    reading numeric
-);
 CREATE TEMP TABLE cases
 (
     test text,

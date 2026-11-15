@@ -36,14 +36,6 @@ VACUUM (ANALYZE) bench_skew;
 
 \ir reading.sql
 
-CREATE TEMP TABLE timings
-(
-    test text,
-    mode text,
-    run integer,
-    reading numeric
-);
-
 CREATE TEMP TABLE cases
 (
     test text,

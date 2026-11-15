@@ -21,14 +21,6 @@ SELECT scale FROM bench_scale \gset
 
 \ir reading.sql
 
-CREATE TEMP TABLE timings
-(
-    test text,
-    mode text,
-    run integer,
-    reading numeric
-);
-
 /*
  * A prepared statement without parameters is planned at its first
  * execution and cached, so the mode set here decides its plan for good:

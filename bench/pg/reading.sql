@@ -1,9 +1,20 @@
 -- One reading of a case, the same for every family that times its
 -- cases, so that what a reading is lives in one place. A family includes
--- this file and records what these functions return: a time in
--- milliseconds or, when run.sh measures with METRIC=instructions (the
--- setting bench.metric), the instructions the processor spent, which
--- pg_pmu counts in EXPLAIN ANALYZE, parallel workers included.
+-- this file and records what these functions return in the table
+-- `timings` it creates: a time in milliseconds or, when run.sh measures
+-- with METRIC=instructions (the setting bench.metric), the instructions
+-- the processor spent, which pg_pmu counts in EXPLAIN ANALYZE, parallel
+-- workers included.
+
+-- The readings of a run, one row a reading of a case in a mode, which the
+-- family writes to timings.csv.
+CREATE TEMP TABLE timings
+(
+    test text,
+    mode text,
+    run integer,
+    reading numeric
+);
 
 -- Whether the run counts instructions instead of timing.
 CREATE FUNCTION pg_temp.counting()
