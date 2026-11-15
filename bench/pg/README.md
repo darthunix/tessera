@@ -291,6 +291,18 @@ query then runs once as well. Both kinds of reading are taken by
 - Counts tell whether a change made the work larger, not whether it made
   it slower. Stalls on memory, SIMD and the I/O of a spill are seen by
   time only.
+- Each count also records, from the same EXPLAIN, the kB its plan's
+  nodes report written to disk (`Disk Usage`, which the batch nodes and
+  the core's hash aggregate print, the core's sort and hash join do
+  not) and the shape of its plan: the type of each node, or the batch
+  node's name, with its strategy, partial mode, join type and planned
+  workers, the relation it scans and the index it uses. A spill's
+  change is read by the pair: the instructions of its work and the
+  volume it writes. With parallel workers the volume moves from run to
+  run, as the rows reach the workers in another way. A comparison of
+  two revisions by counts holds only where their plans have one shape,
+  since the count of rows per node costs a row-wise node more than a
+  batch node.
 - A ratio of Tessera on to off means nothing by counts. EXPLAIN ANALYZE
   counts the rows of every node, which the core pays a row and the batch
   nodes a batch.
@@ -350,7 +362,8 @@ that ran), `source.txt` (the revision, the metric, the number of
 workers, the data multiplier and `shared_buffers`, the working tree's
 status and the hashes of the installed libraries and `postgres`),
 `power.txt`,
-`timings.csv` (every reading), `summary.txt` (the table) and `plans.txt`.
+`timings.csv` (every reading; with counts also its disk and plan shape),
+`summary.txt` (the table) and `plans.txt`.
 Write `comparison.md` by hand: what was measured, the table with ratios,
 observations, and what the numbers mean for the tolerance of the family;
 the tolerance itself is set from data, never in advance.
