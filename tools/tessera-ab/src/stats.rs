@@ -185,8 +185,20 @@ pub fn compare(base: &[Timings], candidate: &[Timings], threshold: f64) -> Vec<R
     rows
 }
 
-/// The rows as a Markdown table.
-pub fn table(rows: &[Row]) -> String {
+/// What the readings of a table are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unit {
+    Milliseconds,
+    /// Shown in millions.
+    Instructions,
+}
+
+/// The rows as a Markdown table, the readings in `unit`.
+pub fn table(rows: &[Row], unit: Unit) -> String {
+    let (label, scale) = match unit {
+        Unit::Milliseconds => ("ms", 1.),
+        Unit::Instructions => ("M instructions", 1e-6),
+    };
     let modes: BTreeSet<&str> = rows.iter().map(|row| row.mode.as_str()).collect();
     let show_mode = modes.len() > 1 || modes.first().is_some_and(|mode| *mode != "on");
     let mut out = String::new();
@@ -194,7 +206,7 @@ pub fn table(rows: &[Row]) -> String {
     let mode_rule = if show_mode { "---|" } else { "" };
     let _ = writeln!(
         out,
-        "| case |{mode_header} base, ms | candidate, ms | min | median | control | |"
+        "| case |{mode_header} base, {label} | candidate, {label} | min | median | control | |"
     );
     let _ = writeln!(out, "|---|{mode_rule}---:|---:|---:|---:|---:|---|");
     for row in rows {
@@ -214,7 +226,11 @@ pub fn table(rows: &[Row]) -> String {
         let _ = writeln!(
             out,
             "| {} |{mode} {:.3} | {:.3} | {:.3} | {:.3} | {control} | {verdict} |",
-            row.case, row.base.median, row.candidate.median, row.min, row.median
+            row.case,
+            row.base.median * scale,
+            row.candidate.median * scale,
+            row.min,
+            row.median
         );
     }
     out
@@ -281,6 +297,20 @@ mod tests {
         let slower = [run(&[("p", "2", &[5.5])])];
         let rows = compare(&base, &slower, 0.02);
         assert_eq!((rows[0].control, rows[0].verdict), (None, Verdict::Slower));
-        assert!(table(&rows).contains("| p | 2 |"));
+        assert!(table(&rows, Unit::Milliseconds).contains("| p | 2 |"));
+    }
+
+    #[test]
+    fn a_table_of_counts_shows_millions_of_instructions() {
+        let base = [run(&[("a", "on", &[3_000_000.]), ("a", "off", &[9e6])])];
+        let candidate = [run(&[("a", "on", &[3_150_000.]), ("a", "off", &[9e6])])];
+        let rows = compare(&base, &candidate, 0.01);
+        assert_eq!(rows[0].verdict, Verdict::Slower);
+        let table = table(&rows, Unit::Instructions);
+        assert!(table.contains("base, M instructions"), "{table}");
+        assert!(
+            table.contains("| a | 3.000 | 3.150 | 1.050 | 1.050 | 1.000 |"),
+            "{table}"
+        );
     }
 }

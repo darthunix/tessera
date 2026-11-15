@@ -41,17 +41,24 @@ pub struct Options {
     /// Parallel workers for both modes (run.sh's workers).
     #[arg(long, value_name = "N", default_value = "0")]
     pub workers: usize,
-    /// Runs of each side per family, alternating base and candidate.
-    #[arg(long, value_name = "N", default_value = "2")]
-    pub rounds: NonZeroUsize,
+    /// Runs of each side per family, alternating base and candidate: 2 by
+    /// default, 1 with --counters.
+    #[arg(long, value_name = "N")]
+    pub rounds: Option<NonZeroUsize>,
     /// COPT for both builds, such as -falign-functions=64: does a change
     /// in time go with the code's place?
     #[arg(long, value_name = "FLAGS")]
     pub copt: Option<String>,
     /// The move, in percent, a case must make by its minimum and by its
-    /// median beyond the control's to be flagged.
-    #[arg(long, value_name = "PERCENT", default_value = "2")]
-    pub threshold: f64,
+    /// median beyond the control's to be flagged: 2 by default, 1 with
+    /// --counters.
+    #[arg(long, value_name = "PERCENT")]
+    pub threshold: Option<f64>,
+    /// Compare the instructions pg_pmu counts in each case instead of its
+    /// time (run.sh's METRIC=instructions): pg_pmu must be installed in
+    /// the PostgreSQL build.
+    #[arg(long)]
+    pub counters: bool,
     /// Seconds for the run's steps, its builds included: the tool checks
     /// the deadline before each step and between its phases, and stops the
     /// step under way, a make or a run.sh, with every process it started,
@@ -59,6 +66,25 @@ pub struct Options {
     /// before each run and the work between steps are outside it (README).
     #[arg(long, value_name = "SECONDS")]
     pub deadline: Option<NonZeroU64>,
+}
+
+impl Options {
+    /// The rounds a side: counts repeat, so one round is enough for them.
+    #[must_use]
+    pub fn rounds(&self) -> NonZeroUsize {
+        self.rounds.unwrap_or(if self.counters {
+            NonZeroUsize::MIN
+        } else {
+            NonZeroUsize::MIN.saturating_add(1)
+        })
+    }
+
+    /// The threshold in percent: a count moves less than a time.
+    #[must_use]
+    pub fn threshold(&self) -> f64 {
+        self.threshold
+            .unwrap_or(if self.counters { 1. } else { 2. })
+    }
 }
 
 /// Fail when the deadline, if any, has passed.
@@ -78,7 +104,7 @@ const LIBRARIES: [(&str, &str); 3] = [
 
 pub fn run(repo: &Path, options: &Options) -> Result<u8> {
     ensure!(
-        options.threshold > 0. && options.threshold < 100.,
+        options.threshold() > 0. && options.threshold() < 100.,
         "--threshold is a percent between 0 and 100"
     );
     let deadline = options
@@ -136,9 +162,9 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
     let sides = [("base", &base), ("candidate", &candidate)];
     let mut measured: BTreeMap<&str, [Vec<PathBuf>; 2]> = BTreeMap::new();
     for family in &options.family {
-        for round in 1..=options.rounds.get() {
+        for round in 1..=options.rounds().get() {
             for (index, (side, snapshot)) in sides.iter().enumerate() {
-                println!("{family}: {side}, round {round} of {}", options.rounds);
+                println!("{family}: {side}, round {round} of {}", options.rounds());
                 install_tessera_with(
                     &snapshot.directory,
                     &pg,
@@ -203,6 +229,28 @@ fn cached(snapshot: Snapshot, builds: &Path, variables: &[String]) -> Result<Sna
     })
 }
 
+/// A call of run.sh with the variables the options set, and only those:
+/// one the tool's own environment holds, such as an exported METRIC,
+/// would change what is measured behind the report's back.
+fn run_sh(repo: &Path, pg: &Pg, options: &Options) -> Command {
+    let mut command = Command::new(repo.join("bench/pg/run.sh"));
+    command.current_dir(repo).env("PG_CONFIG", &pg.pg_config);
+    for (name, value) in [
+        ("CASES", options.cases.clone()),
+        ("REPETITIONS", options.repetitions.map(|n| n.to_string())),
+        (
+            "METRIC",
+            options.counters.then(|| "instructions".to_owned()),
+        ),
+    ] {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
+}
+
 /// One run of a family: run.sh's results directory. Its output goes to
 /// `log` with the extensions `out` and `err`.
 fn measure(
@@ -213,25 +261,14 @@ fn measure(
     log: &Path,
     deadline: Option<Instant>,
 ) -> Result<PathBuf> {
-    let mut command = Command::new(repo.join("bench/pg/run.sh"));
-    command
-        .current_dir(repo)
-        .env("PG_CONFIG", &pg.pg_config)
-        .args(["measure", family, &options.workers.to_string()]);
-    if let Some(cases) = &options.cases {
-        command.env("CASES", cases);
-    }
-    if let Some(repetitions) = options.repetitions {
-        command.env("REPETITIONS", repetitions.to_string());
-    }
+    let mut command = run_sh(repo, pg, options);
+    command.args(["measure", family, &options.workers.to_string()]);
     let (out, err) = (log.with_extension("out"), log.with_extension("err"));
     // The server restarts outside the deadline, so that a deadline never
     // stops it halfway, stopped; a restart starts only within it, and
     // pg_ctl waits half a minute at most for the stop and for the start.
     within(deadline, "before the server's restart")?;
-    let restart = Command::new(repo.join("bench/pg/run.sh"))
-        .current_dir(repo)
-        .env("PG_CONFIG", &pg.pg_config)
+    let restart = run_sh(repo, pg, options)
         .arg("restart")
         .stdout(File::create(log.with_extension("restart"))?)
         .stderr(File::create(log.with_extension("restart-err"))?)
@@ -296,7 +333,7 @@ fn report(
     measured: &BTreeMap<&str, [Vec<PathBuf>; 2]>,
 ) -> Result<Report> {
     let mut text = String::new();
-    let threshold = options.threshold / 100.;
+    let threshold = options.threshold() / 100.;
     let power = if cfg!(target_os = "macos") {
         let batt = tessera_pgtool::snapshot::output(Command::new("pmset").args(["-g", "batt"]))
             .map(|out| {
@@ -318,27 +355,48 @@ fn report(
     )?;
     writeln!(
         text,
-        "PostgreSQL {} ({}); {} round(s) a side, base and candidate alternating; cases {}; \
-         repetitions {}; workers {}; COPT {}{power}.\n",
+        "PostgreSQL {} ({}); {}; {} round(s) a side, base and candidate alternating; \
+         cases {}; repetitions {}; workers {}; COPT {}{power}.\n",
         pg.major(),
         pg.pg_config.display(),
-        options.rounds,
+        if options.counters {
+            "instructions counted by pg_pmu"
+        } else {
+            "times"
+        },
+        options.rounds(),
         options.cases.as_deref().unwrap_or("all"),
-        options
-            .repetitions
-            .map_or_else(|| "the family's".to_owned(), |n| n.to_string()),
+        options.repetitions.map_or_else(
+            || if options.counters {
+                "3"
+            } else {
+                "the family's"
+            }
+            .to_owned(),
+            |n| n.to_string()
+        ),
         options.workers,
         options.copt.as_deref().unwrap_or("none"),
     )?;
+    let what = if options.counters {
+        "count of instructions"
+    } else {
+        "time"
+    };
     writeln!(
         text,
-        "Each ratio is the candidate's time over the base's; below 1 is faster. `min` \
-         compares the least time of any run, `median` the mean of the runs' medians, \
+        "Each ratio is the candidate's {what} over the base's; below 1 is less. `min` \
+         compares the least {what} of any run, `median` the mean of the runs' medians, \
          `control` the medians of mode off, without Tessera, which move with the machine, \
          not with the change. A case is flagged when it moves past {}% by its minimum \
          and by its median beyond the control.\n",
-        options.threshold
+        options.threshold()
     )?;
+    let unit = if options.counters {
+        stats::Unit::Instructions
+    } else {
+        stats::Unit::Milliseconds
+    };
     let mut slower = false;
     for (family, [base_runs, candidate_runs]) in measured {
         let read = |runs: &[PathBuf]| -> Result<Vec<stats::Run>> {
@@ -352,7 +410,7 @@ fn report(
         };
         let rows = stats::compare(&timings(&base), &timings(&candidate), threshold);
         slower |= rows.iter().any(|row| row.verdict == Verdict::Slower);
-        writeln!(text, "## {family}\n\n{}", stats::table(&rows))?;
+        writeln!(text, "## {family}\n\n{}", stats::table(&rows, unit))?;
         let dropped: usize = base.iter().chain(&candidate).map(|run| run.dropped).sum();
         if dropped > 0 {
             writeln!(
@@ -375,7 +433,12 @@ fn report(
         )?;
     }
     if slower {
-        let hint = if options.copt.is_some() {
+        let hint = if options.counters {
+            "A count does not move with the code's place: a flagged case runs more \
+             instructions. Compare the machine code of the functions it runs \
+             (tessera-bench --disasm --module nodes --function NAME); a change that trades \
+             instructions for memory is judged by time."
+        } else if options.copt.is_some() {
             "Both sides were built with the same COPT: if it aligns the functions \
              (-falign-functions=64), a flagged case is the change rather than the code's \
              place; look at the machine code of the functions it runs."
@@ -441,7 +504,7 @@ mod tests {
             &run,
             &format!(
                 "#!/bin/sh\n[ \"$1\" = restart ] && sleep {restart}\n\
-                 echo \"$1${{BENCH_RESTARTED:+ restarted}}\" >> \"$0.calls\"\n"
+                 echo \"$1${{BENCH_RESTARTED:+ restarted}}${{METRIC:+ $METRIC}}\" >> \"$0.calls\"\n"
             ),
         )?;
         Ok((repo, run.with_extension("sh.calls")))
@@ -461,6 +524,108 @@ mod tests {
         let ahead = Instant::now() + Duration::from_secs(30);
         assert!(measure(repo.path(), &pg, "win", &options, &log, Some(ahead)).is_err());
         assert_eq!(fs::read_to_string(&calls)?, "restart\nmeasure restarted\n");
+        Ok(())
+    }
+
+    #[test]
+    fn counters_ask_run_sh_for_counts_in_one_round_at_one_percent() -> Result<()> {
+        let times = Cli::try_parse_from(["ab", "--base", "HEAD", "--family", "win"])?.options;
+        assert_eq!((times.rounds().get(), times.threshold()), (2, 2.));
+        let counts =
+            Cli::try_parse_from(["ab", "--base", "HEAD", "--family", "win", "--counters"])?.options;
+        assert_eq!((counts.rounds().get(), counts.threshold()), (1, 1.));
+        let given = Cli::try_parse_from([
+            "ab",
+            "--base",
+            "HEAD",
+            "--family",
+            "win",
+            "--counters",
+            "--rounds",
+            "3",
+            "--threshold",
+            "0.5",
+        ])?
+        .options;
+        assert_eq!((given.rounds().get(), given.threshold()), (3, 0.5));
+        // The restart and the measurement both count.
+        let (repo, calls) = repository("0")?;
+        let log = repo.path().join("log");
+        let ahead = Instant::now() + Duration::from_secs(30);
+        assert!(measure(repo.path(), &pg(), "win", &counts, &log, Some(ahead)).is_err());
+        assert_eq!(
+            fs::read_to_string(&calls)?,
+            "restart instructions\nmeasure restarted instructions\n"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn run_sh_gets_only_the_variables_the_options_set() -> Result<()> {
+        let envs = |args: &[&str]| -> Result<Vec<(String, Option<String>)>> {
+            let options = Cli::try_parse_from(
+                ["ab", "--base", "HEAD", "--family", "win"]
+                    .iter()
+                    .chain(args),
+            )?
+            .options;
+            let command = run_sh(Path::new("/repo"), &pg(), &options);
+            Ok(command
+                .get_envs()
+                .filter(|(name, _)| *name != "PG_CONFIG")
+                .map(|(name, value)| {
+                    (
+                        name.to_string_lossy().into_owned(),
+                        value.map(|value| value.to_string_lossy().into_owned()),
+                    )
+                })
+                .collect())
+        };
+        // Unset whatever the tool's environment holds.
+        let none = [("CASES", None), ("METRIC", None), ("REPETITIONS", None)]
+            .map(|(name, value): (&str, Option<String>)| (name.to_owned(), value));
+        assert_eq!(envs(&[])?, none);
+        assert_eq!(
+            envs(&["--counters", "--cases", "^a$", "--repetitions", "5"])?,
+            [
+                ("CASES".to_owned(), Some("^a$".to_owned())),
+                ("METRIC".to_owned(), Some("instructions".to_owned())),
+                ("REPETITIONS".to_owned(), Some("5".to_owned())),
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn a_restart_for_counts_preloads_pg_pmu() -> Result<()> {
+        let directory = tempfile::tempdir()?;
+        let bin = directory.path();
+        script(
+            &bin.join("pg_config"),
+            &format!("#!/bin/sh\necho '{}'\n", bin.display()),
+        )?;
+        script(
+            &bin.join("pg_ctl"),
+            "#!/bin/sh\necho \"$@\" > \"$0.args\"\n",
+        )?;
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let restart = || {
+            Command::new(repo.join("bench/pg/run.sh"))
+                .arg("restart")
+                .env("PG_CONFIG", bin.join("pg_config"))
+                .env("METRIC", "instructions")
+                .status()
+        };
+        assert!(!restart()?.success(), "a restart without pg_pmu installed");
+        fs::write(bin.join(format!("pg_pmu{}", Pg::dlsuffix())), "")?;
+        assert!(restart()?.success());
+        let args = fs::read_to_string(bin.join("pg_ctl.args"))?;
+        assert!(
+            args.contains(
+                "-c shared_preload_libraries='tessera, tessera_nodes, tessera_kernels, pg_pmu'"
+            ),
+            "{args}"
+        );
         Ok(())
     }
 

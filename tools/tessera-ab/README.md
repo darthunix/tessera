@@ -4,9 +4,9 @@ A tool that compares two revisions of Tessera for a change that should not
 move anything: a refactoring, a file cut in pieces, a helper shared by
 several nodes. It does two things:
 
-- **`measure`** times [bench/pg](../../bench/pg/README.md) families with
-  the base and the candidate installed in turn, and compares every case
-  with the control without Tessera;
+- **`measure`** times [bench/pg](../../bench/pg/README.md) families, or
+  counts their instructions, with the base and the candidate installed
+  in turn, and compares every case with the control without Tessera;
 - **`moved`** checks that a cut only moved lines between files.
 
 The machine code of the same pair is the third check, in another tool:
@@ -109,6 +109,34 @@ counts) gets a row per mode, without a control.
 The tool exits 0 when nothing is slower, 1 when a case is, 2 on an error.
 The candidate stays installed.
 
+### Counts instead of times
+
+`--counters` compares the instructions each case runs instead of its
+time (`run.sh`'s `METRIC=instructions`), as
+[pg_pmu](https://github.com/darthunix/pg_pmu) counts them in
+`EXPLAIN ANALYZE`. pg_pmu must be installed into the PostgreSQL build;
+the bench cluster needs nothing more, since `run.sh` preloads pg_pmu on
+the command line of the restart.
+
+```sh
+cargo ab measure --base main --family anyagg --counters
+```
+
+On Linux the count of a serial case repeats to the instruction, so one
+round a side and three readings a case are enough (`--rounds 1` and
+`REPETITIONS` 3 by default), and a case is flagged past 1 %
+(`--threshold`). A family then takes seconds a side instead of minutes.
+The control without Tessera should stay at 1.000: if it moves, that
+machine's counts are not settled, as on macOS, which counts the kernel
+too ([bench/pg/README.md](../../bench/pg/README.md#rules)).
+
+Counts tell whether the change made the work larger. They do not see
+stalls on memory, the width of SIMD or the I/O of a spill: a change
+that trades instructions for memory traffic, or a candidate whose times
+are in doubt, is measured by time as well. A count does not move with
+the code's place, so `--copt=-falign-functions=64` does not apply to
+it.
+
 ### A flagged case
 
 1. Measure it again, alone and longer, to tell it from noise:
@@ -186,5 +214,7 @@ with a `build.txt` naming its side and revision.
 ## Tests
 
 `cargo test -p tessera-ab` checks the parsing of `timings.csv`, a side's
-summary, the verdicts against the control, and `moved` on small files. A
-measurement needs PostgreSQL and is run by hand.
+summary, the verdicts against the control, the table of counts, that
+`--counters` reaches `run.sh` and its restart, which then preloads
+pg_pmu, and `moved` on small files. A measurement needs PostgreSQL and
+is run by hand.
