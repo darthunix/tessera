@@ -3,20 +3,23 @@
 ## Purpose
 The C API over the hash table of the crate `relhash`, and what joins,
 groupings and sorts keep beside the table: the forms of their keys,
-the status of an error, the merge of groups read back, and the steps
-and words of a build by several processes. When a node builds a table,
-how large it makes its chunks and when it spills belong to the node's
-own capability.
+the status of an error, the merge of groups read back, and the C calls
+over the steps and the words of a build by several processes, which the
+crate `relspill` decides. When a node builds a table, how large it
+makes its chunks and when it spills belong to the node's own
+capability.
 
 The table itself, its index, chunks and records, its partitions, its
 Bloom filter and its marks, and what each of its calls promises, is in
-the spec of [relhash](../relhash/spec.md). The requirements here start
-with the C calls over it, the used mark of a chunk and a lookup in
-place, then the SQL types of a key and the status of an error. Then the
-merge of groups read back. Last, a build by several processes: its
-counters, its phases, its rounds over partitions on disk, the words of
-its spill, the partitions it sends to disk, and the partitions of a
-level. [design.md](design.md) explains the whole and the reasons.
+the spec of [relhash](../relhash/spec.md); the phases of a build by
+several processes, its rounds over partitions on disk, the words of its
+spill, the partitions it sends to disk and the plan of a level are in
+the spec of [relspill](../relspill/spec.md). The requirements here
+start with the C calls over the table, the used mark of a chunk and a
+lookup in place, then the SQL types of a key and the status of an
+error. Then the merge of groups read back. Last, the C calls over the
+spill of the crate `relspill`. [design.md](design.md) explains the
+whole and the reasons.
 
 ## Requirements
 
@@ -361,429 +364,93 @@ out of a regrow, which links every record of every chunk it is given.
   `crates/tessera-kernels/src/accumulate.rs::a_merged_count_past_the_int8_range_fails`;
   `crates/tessera-capi/tests/table.rs::a_merge_that_cannot_be_done_fails`
 
-### Requirement: The counters of a shared build
-The participants of a shared build SHALL count it in four words of
-memory they all map, aligned to 8, cleared by
-`tess_build_counters_init` before any participant attaches:
+### Requirement: The C API over the spill of the crate
+Each call of `tessera/table.h` over a build by several processes or over
+the words of a spill SHALL do what the calls of the crate `relspill` do,
+as the requirement of the spec of `relspill` named here says, and SHALL
+return the crate's error as a status, as "The status of an error" says:
 
-```
- byte  0             8             16            24            32
-       ┌─────────────┬─────────────┬─────────────┬─────────────┐
-       │ records     │ NULL        │ chunks      │ duplicates  │
-       │ appended    │ columns, a  │ numbered    │ the links   │
-       │             │ bit a word  │             │ found       │
-       └─────────────┴─────────────┴─────────────┴─────────────┘
-```
+- `tess_build_counters_init`, which clears the counters before any
+  participant attaches, `tess_build_take_chunk`, `tess_build_report`,
+  `tess_build_add_duplicates` and `tess_build_totals`, which reads the
+  duplicates only when asked for; `tess_build_step`, `tess_build_stop`
+  and `tess_build_stopped`: "The phases of a shared build";
+- `tess_round_step`, `tess_table_spill_records`,
+  `tess_table_spill_start`, `tess_table_spill_take_file`,
+  `tess_table_spill_take_alone` and `tess_table_spill_flags`, which
+  reads whether a partition is on disk and whether one took it whole:
+  "The rounds over a partition on disk";
+- `tess_table_spill_words`, `tess_table_spill_init`, which clears the
+  words and sets the budget in bytes, `tess_table_spill_partitions`,
+  `tess_table_spill_split` and `tess_table_spill_add_bytes`, which adds
+  bytes of no partition for a negative one: "The words of a spill";
+- `tess_table_spill_evict`, `tess_table_spill_evictions` and
+  `tess_table_spill_splits`: "Sending partitions to disk".
 
-`tess_build_take_chunk` SHALL give each call a chunk number no other
-call of the build gets, from 0 up. `tess_build_report` SHALL add a
-participant's records to word 0 and set its bits of NULL columns in
-word 1. `tess_build_add_duplicates` SHALL add to word 3, and
-`tess_build_totals` SHALL read the four, the duplicates only when asked
-for. A count that would pass 2^64 - 1 SHALL be refused, and so SHALL
-counters that are null or not aligned to 8; a call SHALL check every
-output before it writes any.
+Beside them the C API SHALL check what the crate leaves to its caller.
+Counters, words of a spill and stop words that are null or not aligned
+to 8, words of a spill of another count than `tess_table_spill_words`
+gives, and weights that are negative or not finite SHALL be refused,
+and a call SHALL check every output before it writes any. A participant
+is three 4-byte words of the caller's memory, zeroed before its first
+step. A step's reply SHALL be the phase the barrier's attach gave,
+after an attach; 1 when the barrier elected the participant or found
+it the last to leave, else 0, after a wait or a leave. A participant
+that leaves a shared table, or a round over a partition, while it
+probes SHALL first mark the word their participants share with
+`tess_build_stop`, and the last participant to leave SHALL read it with
+`tess_build_stopped` and, when it is marked, return no record without a
+mark.
 
-#### Scenario: One participant
+#### Scenario: A build alone through C
 - **WHEN** one participant numbers two chunks, reports three records
-  with the NULL bits 0x5, and adds two duplicates
-- **THEN** the chunks are 0 and 1, and the totals are three records,
-  0x5, two chunks and two duplicates
-- **Verified by:**
-  `test/tessera_table_test.c::build_alone`
+  with the NULL bits 0x5, adds two duplicates, and steps from its attach
+  at the first phase to the free
+- **THEN** the chunks are 0 and 1, the totals are three records, 0x5,
+  two chunks and two duplicates, and its actions are those of a
+  participant alone
+- **Verified by:** `test/tessera_table_test.c::build_alone`
 
-#### Scenario: Several participants
-- **WHEN** three participants number chunks, report records and NULL
-  bits, and add duplicates at once
-- **THEN** no number is given twice, the records and the duplicates are
-  their sums, and the NULL bits their OR
-- **Verified by:**
-  `crates/relspill/src/phases.rs::participants_count_a_build_at_once`;
-  `crates/relspill/src/loom.rs::three_participants_attach_at_any_phase`
-
-#### Scenario: Wrong counters and outputs
-- **WHEN** a call gets null or misaligned counters, a null output, or a
-  count that passes 2^64 - 1
-- **THEN** it fails, SQLSTATE `XX000`, and no output and no counter has
+#### Scenario: Wrong words and outputs
+- **WHEN** a call gets counters or words of a spill that are null or
+  misaligned, a null output, weights that are not finite, or a phase or
+  a state no step knows
+- **THEN** it fails, SQLSTATE `XX000`, and no output and no word has
   changed
 - **Verified by:**
   `crates/tessera-capi/tests/table.rs::the_build_counters_refuse_null_and_misaligned_words`;
   `crates/tessera-capi/tests/table.rs::outputs_are_checked_before_anything_changes`;
-  `crates/relspill/src/phases.rs::counts_past_their_words_are_refused`
-
-### Requirement: The phases of a shared build
-A participant of a shared build SHALL step through these phases, which
-PostgreSQL's barrier separates, with `tess_build_step`, and never wait
-itself: each step returns an action, the caller does it, and the
-barrier's answer goes into the next step.
-
-```
- 0 BUILD   each participant appends its share of the inner rows
- 1 FLUSH   each writes its chunks of the partitions on disk
- 2 SIZE    the elected one makes the index; the others wait
- 3 LINK    each links its own chunks into the index
- 4 OUTER   each writes its share of the outer rows on disk
- 5 PROBE   each probes, then leaves
- 6 FREE    the last to leave frees the table
-```
-
-The participant is three 4-byte words of the caller's memory, zeroed
-before its first step. A step's reply SHALL be the phase the barrier's
-attach gave, after an attach; 1 when the barrier elected the participant
-or found it the last to leave, else 0, after a wait or a leave. A
-participant that attaches late SHALL join the phase the others are in:
-at BUILD it appends what is left, at FLUSH and OUTER it writes its
-share, at SIZE it waits, at LINK it links its own chunks, none, at PROBE
-it probes, and at FREE it leaves at once. A participant in no known
-state, or a phase past FREE after an attach, SHALL be refused.
-
-Over a shared table, the last participant to leave walks the records
-without a mark, as "The marks of RIGHT and FULL joins" of the spec of
-`relhash` says. A participant that leaves while it probes, its share of
-the outer side not done, SHALL first mark a word that the participants
-of the table, or of the round over a partition, share, with
-`tess_build_stop`, which SHALL mark it only while the participant
-probes. The last participant to leave SHALL read the word with
-`tess_build_stopped` and, when it is marked, return no record without a
-mark: the pairs of the rows left unprobed were never marked, and a
-participant stops so only when its plan wants no more rows.
-
-#### Scenario: A participant alone
-- **WHEN** one participant attaches at BUILD and is elected at SIZE and
-  last at its leave
-- **THEN** its actions are attach, build, wait, flush, wait, size,
-  wait, link, wait, outer, wait, probe, leave and free
-- **Verified by:**
-  `crates/relspill/src/phases.rs::a_participant_alone_builds_flushes_sizes_links_and_probes`;
-  `test/tessera_table_test.c::build_alone`
-
-#### Scenario: A participant that attaches late
-- **WHEN** a participant attaches at each phase from FLUSH to FREE
-- **THEN** it does that phase's work, or waits at SIZE, or leaves at
-  FREE, and then the phases after it
-- **Verified by:**
-  `crates/relspill/src/phases.rs::a_late_participant_joins_the_phase_the_others_are_in`
-
-#### Scenario: A state or a phase unknown
-- **WHEN** a participant holds a state no step makes, or an attach
-  answers a phase past FREE
-- **THEN** the step fails, SQLSTATE `XX000`
-- **Verified by:**
-  `crates/relspill/src/phases.rs::an_unknown_state_is_an_error`;
-  `crates/relspill/src/phases.rs::an_attach_past_the_last_phase_is_an_error`;
+  `crates/tessera-capi/tests/spill.rs::the_spill_words_refuse_null_and_misaligned_words`;
+  `crates/tessera-capi/tests/spill.rs::weights_that_are_not_finite_are_refused`;
   `crates/tessera-capi/tests/table.rs::a_step_refuses_a_phase_or_a_state_it_does_not_know`
 
-#### Scenario: A participant that stops while it probes
-- **WHEN** one of two or three participants of a shared table stops
-  while it probes, in every order of their steps; when the model marks
-  the word only after that participant left; when a participant asks to
-  stop before it probes or after it left; and when a worker under the
-  core's `Gather` stops at the `LIMIT` of a RIGHT join
-- **THEN** the last participant to leave sees the mark, and with the
-  late mark the model reports a last one that missed it; out of the
-  probe nothing is marked; the join returns no row without a pair where
-  every inner row has one
+#### Scenario: The words through C
+- **WHEN** the entry points choose partitions by weights, answer
+  whether partitions split by room, bits and keys, and count the
+  records of a partition past the split
+- **THEN** they answer as the crate does, and the partition past the
+  split is refused
 - **Verified by:**
-  `crates/relspill/src/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
-  `crates/relspill/src/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
-  `crates/relspill/src/phases.rs::a_participant_stops_only_while_it_probes`;
+  `crates/tessera-capi/tests/spill.rs::the_spill_entry_points_choose_by_the_weights`;
+  `crates/tessera-capi/tests/spill.rs::the_split_entry_point_weighs_room_bits_and_keys`;
+  `crates/tessera-capi/tests/spill.rs::the_records_refuse_a_partition_past_the_split`
+
+#### Scenario: A stop through C and under a node
+- **WHEN** a participant asks to stop before it probes, while it probes
+  and after it left; and a worker under the core's `Gather` stops at the
+  `LIMIT` of a RIGHT join
+- **THEN** only the stop while it probes is marked, and the join returns
+  no row without a pair where every inner row has one
+- **Verified by:**
   `crates/tessera-capi/tests/table.rs::a_participant_marks_its_stop_only_while_it_probes`;
   `test/sql/join.sql::worker that has its share stops while it probes`
 
-### Requirement: The rounds over a partition on disk
-After a shared build that spilled, each partition on disk SHALL be a
-round of its own, with a barrier of its own and these phases, stepped
-by `tess_round_step` as a build is:
-
-```
- 0 ELECT      all wait
- 1 ALLOCATE   the elected one makes the partition's index
- 2 LOAD       each loads the files it takes, and links them
- 3 PROBE      each probes, then leaves
- 4 FREE       the last to leave frees the partition
-```
-
-A participant that attaches late SHALL load the files still left at
-LOAD, probe at PROBE, and leave at once at FREE. Each file of a
-partition SHALL be taken by one participant. A round's state or phase
-outside these SHALL be refused.
-
-`tess_table_spill_records` SHALL add to a partition's records and read
-them. `tess_table_spill_start` SHALL give each participant the
-partition to start its rounds at, spread over the partitions.
-`tess_table_spill_take_file` SHALL give each number of a partition's
-inner or outer files to one call, and `tess_table_spill_take_alone`
-SHALL take a partition whole for one participant only.
-`tess_table_spill_flags` SHALL read whether a partition is on disk and
-whether one took it whole. A partition past the partitions in force
-SHALL be refused, by a count of records also when it adds none and
-reads none, and so SHALL records past 2^64 - 1 and a file number past
-2^32 - 1.
-
-#### Scenario: Rounds of several participants
-- **WHEN** two or three participants join a round at any phase, load
-  its files and probe it
-- **THEN** every file is loaded once, every key is found, and the round
-  is freed once
-- **Verified by:**
-  `crates/relspill/src/loom.rs::two_participants_load_a_partition_and_probe_it`;
-  `crates/relspill/src/loom.rs::three_participants_join_a_round_at_any_phase`
-
-#### Scenario: A round alone and late
-- **WHEN** one participant attaches at ELECT, at ALLOCATE, at LOAD, at
-  PROBE and at FREE
-- **THEN** its actions follow the phases from the one it attached at
-- **Verified by:**
-  `crates/relspill/src/phases.rs::a_round_elects_allocates_loads_probes_and_frees`
-
-#### Scenario: Taken once
-- **WHEN** two participants take the files of a partition, and take it
-  whole, at once, and participants ask where to start their rounds
-- **THEN** each file goes to one of them, the partition to one, and the
-  starts go round the partitions; a partition past those in force, by a
-  count of records too that adds none and reads none, or a file number
-  past 2^32 - 1, is refused
-- **Verified by:**
-  `crates/relspill/src/loom.rs::files_and_a_whole_partition_go_to_one_participant_each`;
-  `crates/relspill/src/shared_spill.rs::files_and_partitions_are_taken_once`;
-  `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`;
-  `crates/tessera-capi/tests/spill.rs::the_records_refuse_a_partition_past_the_split`
-
-### Requirement: The words of a spill
-A table that spills SHALL keep its decisions in words: a process's own
-spill in its own memory, a shared table's in memory every participant
-maps, aligned to 8. `tess_table_spill_words` SHALL give their count for
-1 to 65536 partitions and refuse any other, and
-`tess_table_spill_init` SHALL clear them and set the budget in bytes.
-A call SHALL refuse words of another count or alignment. The words of
-a process and the shared words SHALL take the same steps, the second
-by atomic operations.
-
-```
- word  0            1        2        3        4
-     ┌────────────┬────────┬────────┬────────┬───────────┐
-     │ partitions │ bytes  │ budget │ start  │ evictions │   the head
-     │ in force   │ in all │        │        │           │
-     └────────────┴────────┴────────┴────────┴───────────┘
- then, for each slot p of 0 .. capacity, at word 5 + 5 p:
-     ┌────────────┬────────┬────────┬────────┬───────────┐
-     │ bytes      │ records│ flags  │ next   │ next      │
-     │            │        │ 1 disk │ inner  │ outer     │
-     │            │        │ 2 alone│ file   │ file      │
-     └────────────┴────────┴────────┴────────┴───────────┘
- the slot whose number is the partitions in force counts the outer
- files of the partitions kept in memory
-```
-
-`tess_table_spill_split` SHALL split the table into a power of two of
-partitions, up to the words' capacity, unless a participant split it
-before: the first split holds, and every call SHALL return the
-partitions in force. `tess_table_spill_add_bytes` SHALL add the bytes
-of a partition's chunks to that partition and to the total, or, for a
-negative partition, bytes of no partition to the total alone, before
-the split or after it; and answer whether the total passes the budget;
-a total equal to it does not. A count of bytes SHALL never go below
-zero, nor past 2^64 - 1: such a call fails, and leaves the words as
-they were while the other calls take away only what they added.
-
-#### Scenario: The count of words
-- **WHEN** the words are sized for 1, 4 and 65536 partitions, and for 0
-  and 65537, and words of another count or misaligned are given
-- **THEN** the first three are 15, 30 and 327690 words, and the others
-  are refused
-- **Verified by:**
-  `crates/relspill/src/shared_spill.rs::the_words_are_sized_for_1_to_65536_partitions`;
-  `crates/relspill/src/shared_spill.rs::words_attach_only_as_words_for_sizes_them`;
-  `crates/tessera-capi/tests/spill.rs::the_spill_words_refuse_null_and_misaligned_words`;
-  `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`
-
-#### Scenario: Own and shared words
-- **WHEN** the same steps run over a process's own words and over shared
-  ones
-- **THEN** every answer is the same
-- **Verified by:**
-  `crates/relspill/src/shared_spill.rs::local_words_choose_as_shared_ones_do`;
-  `crates/tessera-capi/tests/spill.rs::the_spill_entry_points_choose_by_the_weights`
-
-#### Scenario: The first split holds
-- **WHEN** two participants past the budget split the table at once,
-  into 4 and into 8 partitions
-- **THEN** the first split holds for both, and a count not a power of
-  two is refused
-- **Verified by:**
-  `crates/relspill/src/loom.rs::participants_past_the_budget_agree_on_one_split`;
-  `crates/relspill/src/shared_spill.rs::the_first_split_holds_and_the_largest_partition_goes_to_disk`
-
-#### Scenario: The budget
-- **WHEN** bytes up to the budget, past it, below zero and past 2^64 - 1
-  are added, the last to a total past which a partition's count would
-  still go, and records past 2^64 - 1
-- **THEN** the first is not over, the second is, and the others fail
-  and leave the words, own or shared, as they were; against another
-  participant's call that takes away what it did not add, no count
-  wraps, and a call whose second count refuses gives the first one its
-  part back
-- **Verified by:**
-  `crates/relspill/src/shared_spill.rs::a_total_equal_to_the_budget_is_not_over`;
-  `crates/relspill/src/shared_spill.rs::a_counter_never_goes_below_zero`;
-  `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`;
-  `crates/relspill/src/shared_spill.rs::a_refused_update_leaves_the_words_as_they_were`;
-  `crates/relspill/src/loom.rs::a_refused_addition_lends_no_bytes_to_another_call`;
-  `crates/relspill/src/loom.rs::a_refused_taking_away_gives_the_partition_back`
-
-### Requirement: Sending partitions to disk
-`tess_table_spill_evict` SHALL choose the next partition to send to
-disk by weights the caller gives, and mark it on disk:
-
-- while the bytes held, with `reserve` bytes for each partition on
-  disk, pass `start` of the limit for a check's first partition and
-  `target` for each after it, the partition with the most bytes,
-  those already on disk weighed by `spilled` (0 leaves them out);
-- then, with a partition on disk and those in memory holding fewer
-  than `resident` of the records, the lowest partition in memory;
-- at most `per_check` partitions a check, 0 for any.
-
-A shared table SHALL weigh the bytes its words count against their
-budget, a process's own spill the bytes it measured against its limit.
-A partition SHALL be counted once in `tess_table_spill_evictions`, by
-the participant whose mark set its flag; one already on disk SHALL be
-chosen again when it holds the most, and its holder SHALL then free
-what it holds of it. Weights that are negative or not finite SHALL be
-refused.
-
-`tess_table_spill_splits` SHALL answer whether a partition read back
-splits into a level below by the next bits of the hash: when its size
-passes `room` of what the limit leaves beside the bytes in use, two
-bits are left past those its level's partitions take, and, with a
-`key` share above 0, it holds fewer than that share of its level's
-rows; more is one key, which no split parts. `room` and `key` that are
-negative or not finite, and bits past 32, SHALL be refused.
-
-#### Scenario: The weights
-- **WHEN** a grouping's weights and a join's choose partitions while
-  their memory goes down, with a reserve, a share of records, and a
-  limit of partitions a check
-- **THEN** the grouping sends from its start down to its target, the
-  join keeps room for its tails and a quarter of the records in memory,
-  no check passes its limit, and weights below zero or not finite are
-  refused
-- **Verified by:**
-  `crates/relspill/src/shared_spill.rs::a_grouping_goes_from_its_start_down_to_its_target`;
-  `crates/relspill/src/shared_spill.rs::a_join_keeps_reserve_for_its_tails_and_a_quarter_in_memory`;
-  `crates/relspill/src/shared_spill.rs::the_first_split_holds_and_the_largest_partition_goes_to_disk`;
-  `crates/tessera-capi/tests/spill.rs::weights_that_are_not_finite_are_refused`
-
-#### Scenario: Marked once
-- **WHEN** two participants send the largest partition at once
-- **THEN** it is marked and counted once
-- **Verified by:**
-  `crates/relspill/src/loom.rs::a_partition_goes_to_disk_once`
-
-#### Scenario: A partition chosen again
+#### Scenario: A partition chosen again under a join
 - **WHEN** a join, alone and with a shared table, spills with a weight
   of 10 for the partitions on disk and no limit a check
 - **THEN** it frees what it holds of a partition chosen again, ends,
   and returns the core's rows
 - **Verified by:**
-  `crates/relspill/src/shared_spill.rs::a_grouping_goes_from_its_start_down_to_its_target`;
   `test/sql/join.sql::A partition on disk chosen again`;
   `test/sql/join.sql::A shared table's partition on disk chosen again`
 
-#### Scenario: Room, bits and keys
-- **WHEN** partitions of sizes on both sides of the room, with two
-  bits left and one, and with a share of rows on both sides of `key`,
-  are asked about
-- **THEN** only the one past the room, with bits left and below the
-  share, splits, and bits past 32 are refused
-- **Verified by:**
-  `crates/relspill/src/shared_spill.rs::a_partition_splits_past_its_room_with_bits_left_and_many_keys`;
-  `crates/relspill/src/shared_spill.rs::a_level_past_the_bits_of_the_hash_is_refused`;
-  `crates/tessera-capi/tests/spill.rs::the_split_entry_point_weighs_room_bits_and_keys`
-
-### Requirement: The plan of a level
-`tess_spill_plan` SHALL give the plan of a level of a node's spill from
-the node's `TessSpillShape` and the level's `TessSpillLevel`: its
-partitions, the length of its chunks, the spill words that count its
-partitions, the first bit of the hash it takes, the first bit of a
-level below, and whether a level of the shape fits below. The
-partitions SHALL start from `min_partitions` and double while all of
-these hold:
-
-- the number is below `max_partitions`;
-- the number is below `at_least`, or the partitions, each holding half
-  of `limit`, hold fewer bytes than `expected`;
-- twice the number times `reserve`, what each partition keeps in memory
-  at the least, fits in half of `limit`;
-- the bits of the doubled number, after the `shift` bits the levels
-  above take, stay below 32.
-
-A level given its `partitions` SHALL take them. The chunks SHALL be
-`limit` divided by `share` times the partitions, no more than
-`max_chunk`, then no less than `min_chunk` nor than a chunk's header and
-four records of `record` bytes, which win over `max_chunk`, rounded down
-to a multiple of 8. A level below SHALL take the bits from the first
-past the partitions' bits; a level SHALL fit below while the bits left
-hold `min_partitions`, two or more. A shape of one partition takes no
-bits, and no level SHALL fit below it.
-
-`min_partitions` and `max_partitions` SHALL be powers of two, the first
-no larger. Refused SHALL be: expected bytes below zero or not a number;
-a `shift` of 32 or more, or one past which `min_partitions` do not fit
-in the 32 bits of the hash; given partitions that are no power of two
-between the two, or that pass the hash; a `share` of 0; a least chunk
-not a multiple of 8; more partitions than spill words count; and a null
-argument.
-
-`tess_spill_expected` SHALL give the bytes the first level expects:
-twice the bytes held, or the bytes the expected rows would take at the
-bytes a row so far, if more, times the participants.
-
-#### Scenario: By the bytes, the participants and the reserve
-- **WHEN** a level of 4 to 1024 partitions with a reserve of 48 KiB
-  expects 10 MiB in a limit of 4 MiB, then wants 16 partitions at
-  least, then has a limit of 256 KiB, then is given 64 partitions
-- **THEN** it gets 8 partitions, then 16, then 4, then 64
-- **Verified by:**
-  `crates/relspill/src/plan.rs::a_level_doubles_by_its_bytes_participants_and_reserve`;
-  `crates/relspill/src/plan.rs::a_level_takes_the_partitions_it_is_given`;
-  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
-
-#### Scenario: By the bits of the hash
-- **WHEN** a level of 4 to 1024 partitions that expects far more than
-  its limit comes after 28, 29, 30 and 31 bits; and a level of 32
-  partitions comes after each level above it; and a level of one
-  partition comes after 31 bits and after 32
-- **THEN** it gets 8, 4 and 4 partitions, and the last is refused; the
-  level of 32 takes 5 bits after those above, and fits six times, from
-  bit 0 to bit 25; the level of one has no level below, and after 32
-  bits is refused
-- **Verified by:**
-  `crates/relspill/src/plan.rs::a_level_keeps_to_the_bits_of_the_hash`;
-  `crates/relspill/src/plan.rs::each_level_takes_the_bits_past_those_above`
-
-#### Scenario: Wrong bounds and bytes
-- **WHEN** the least or the most partitions are not powers of two or
-  are out of order, the expected bytes are below zero or not a number,
-  the partitions given are no power of two of the shape, the share is
-  0, the least chunk is not a multiple of 8, or the partitions pass
-  what spill words count
-- **THEN** the call fails, SQLSTATE `XX000`, and writes no plan
-- **Verified by:**
-  `crates/relspill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
-  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
-
-#### Scenario: A share of the limit
-- **WHEN** at a share of 16, with chunks of 8 KiB to 1 MiB, 4 MiB is
-  shared among 8 partitions and among 1024, and 1 GiB among 4; and
-  1000000 bytes among 8, with chunks of 8 bytes to 1 MiB
-- **THEN** the chunks are 32 KiB, 8 KiB and 1 MiB, and 7808 bytes
-- **Verified by:**
-  `crates/relspill/src/plan.rs::a_chunk_is_a_share_of_the_limit_within_its_bounds`
-
-#### Scenario: The bytes a first level expects
-- **WHEN** 1000 bytes are held in 10 rows of 15 expected, of 30, of 30
-  for 4 participants, and in no rows
-- **THEN** the level expects 2000, 3000, 12000 and 2000 bytes
-- **Verified by:**
-  `crates/relspill/src/plan.rs::the_first_level_expects_twice_its_bytes_or_the_estimate`;
-  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`

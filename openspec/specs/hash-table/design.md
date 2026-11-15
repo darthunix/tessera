@@ -391,7 +391,8 @@ to node is the node's **shape**: the least and the most partitions,
 the reserve of a partition, and the bounds of a chunk. What differs from
 level to level is the level: the bytes it expects, its limit, and the
 bits the levels above took. The exact rule is in [The plan of a
-level](spec.md#requirement-the-plan-of-a-level).
+level](../relspill/spec.md#requirement-the-plan-of-a-level) of the spec
+of `relspill`.
 
 The number of partitions starts at the node's least, 4, and doubles
 while four things hold:
@@ -572,8 +573,9 @@ do. A process may attach late, and then it learns the phase the others
 are in.
 
 A build has seven phases, numbered as its barrier counts them. The
-[spec](spec.md#requirement-the-phases-of-a-shared-build) names them
-the same way:
+[spec of
+relspill](../relspill/spec.md#requirement-the-phases-of-a-shared-build)
+names them the same way:
 
 ```
  phase     every participant                  the elected one
@@ -691,8 +693,11 @@ needs to know.
 Before SIZE the elected one must know how many records to make the
 index for. Before that, every chunk needs a number unique over all the
 participants, since a reference names a chunk by its number. Four words
-that every participant maps keep this. Their layout is in [The counters
-of a shared build](spec.md#requirement-the-counters-of-a-shared-build):
+that every participant maps keep this. Their layout is drawn by the
+crate's [`Counters`](../../../crates/relspill/src/phases.rs), which
+[The phases of a shared
+build](../relspill/spec.md#requirement-the-phases-of-a-shared-build)
+promises:
 
 - A new chunk takes its number by an atomic addition of 1 to the third
   word, `tess_build_take_chunk`: the number is the value before the
@@ -805,8 +810,10 @@ participant writes its own chunks of them.
 
 The decisions lie in the **words of a spill**: an array of 64-bit
 words, a head of five words and then five words for each partition. The
-layout is drawn in [The words of a
-spill](spec.md#requirement-the-words-of-a-spill). A shared table keeps
+layout is drawn by the crate's
+[`Spill`](../../../crates/relspill/src/shared_spill.rs), which [The
+words of a spill](../relspill/spec.md#requirement-the-words-of-a-spill)
+promises. A shared table keeps
 them in memory every participant maps, and changes them by atomic
 operations. A join or a grouping of one process keeps the same words in
 its own memory.
@@ -851,19 +858,13 @@ One rule, `tess_table_spill_evict`, chooses the next partition to send
 to disk, for every node. Each call chooses one, marks it on disk and
 returns it; the node writes what it holds of it and calls again, until
 the rule returns none. The nodes differ only in the weights they give,
-`TessSpillWeights`, whose exact rule is in [Sending partitions to
-disk](spec.md#requirement-sending-partitions-to-disk). In short:
-
-1. While the memory passes a share of the limit, the partition with the
-   most bytes in memory goes. The share is `start` for the first
-   partition of a check and `target` for each after it. The memory
-   counts `reserve` bytes more for each partition on disk. A partition
-   already on disk counts its bytes times `spilled`, and 0 leaves such
-   partitions out.
-2. Then, when some partition is on disk and those still in memory hold
-   fewer than `resident` of the records, the lowest partition in memory
-   goes.
-3. A check sends at most `per_check` partitions, or any number for 0.
+`TessSpillWeights`, which [Sending partitions to
+disk](../relspill/spec.md#requirement-sending-partitions-to-disk)
+promises and the crate's
+[`Spill::evict`](../../../crates/relspill/src/shared_spill.rs) writes
+out. The idea: the largest partition goes while the memory passes a
+share of the limit, and once a partition is on disk, those still in
+memory go too when they hold too few of the records.
 
 Each node gives its own weights, from its settings:
 
@@ -995,7 +996,7 @@ A partition read back that is still too large splits into a level
 below, as "A partition too large for memory" says. Whether it does is
 one rule, `tess_table_spill_splits`, with two weights a node gives,
 `room` and `key`; its exact form is in [Sending partitions to
-disk](spec.md#requirement-sending-partitions-to-disk). For
+disk](../relspill/spec.md#requirement-sending-partitions-to-disk). For
 example, a join with a limit of 900 kB, 300 kB in use and a `room` of
 two thirds splits a partition of 500 kB, since 500 passes two thirds of
 the 600 left. It does so only if its level leaves two bits of the hash

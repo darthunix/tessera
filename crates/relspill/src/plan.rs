@@ -153,8 +153,7 @@ pub struct Plan {
 /// order ([`Rule::PlanPartitions`]); expected bytes below zero or not a
 /// number ([`Rule::Expected`]); a `shift` of 32 or more, or one after
 /// which the least partitions do not fit in the hash ([`Rule::PlanBits`]);
-/// given
-/// partitions that are no power of two of the shape's
+/// given partitions that are no power of two of the shape's
 /// ([`Rule::GivenPartitions`]); a `share` of 0 ([`Rule::Share`]); a least
 /// chunk, the longer of `min_chunk` and that of the records, that is not
 /// a multiple of 8, so that the rounding would go below it

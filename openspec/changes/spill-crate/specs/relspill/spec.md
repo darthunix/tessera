@@ -374,6 +374,291 @@ by the place a write gave it.
   `crates/relspill/src/set.rs::a_shared_set_drops_no_partition_before_its_finish`;
   `crates/relspill/src/set/reader.rs::misuse_of_a_reader_is_a_wrong_call`
 
+### Requirement: The words of a spill
+A table that spills SHALL keep its decisions in the words that
+[`Spill`](../../../crates/relspill/src/shared_spill.rs) draws, as many
+as [`words_for`](../../../crates/relspill/src/shared_spill.rs) gives
+for 1 to 65536 partitions: a process's own spill in its own memory, a
+shared table's in memory every participant maps. The words of a process
+and the shared words SHALL take the same steps, the second by atomic
+operations. [`Spill::split`](../../../crates/relspill/src/shared_spill.rs)
+SHALL split a table once: the first split holds for every participant.
+[`Spill::add_bytes`](../../../crates/relspill/src/shared_spill.rs) SHALL
+answer whether the bytes in memory pass the budget, and no count SHALL
+go below zero or past 2^64 - 1: a call that would leaves the words as
+they were.
+
+#### Scenario: The count of words
+- **WHEN** the words are sized for 1, 4 and 65536 partitions, and for 0
+  and 65537, and words of another count are given
+- **THEN** the first three are 15, 30 and 327690 words, and the others
+  are refused
+- **Verified by:**
+  `crates/relspill/src/shared_spill.rs::the_words_are_sized_for_1_to_65536_partitions`;
+  `crates/relspill/src/shared_spill.rs::words_attach_only_as_words_for_sizes_them`
+
+#### Scenario: Own and shared words
+- **WHEN** the same steps run over a process's own words and over shared
+  ones
+- **THEN** every answer is the same
+- **Verified by:**
+  `crates/relspill/src/shared_spill.rs::local_words_choose_as_shared_ones_do`
+
+#### Scenario: The first split holds
+- **WHEN** two participants past the budget split the table at once,
+  into 4 and into 8 partitions
+- **THEN** the first split holds for both, and a count not a power of
+  two is refused
+- **Verified by:**
+  `crates/relspill/src/loom.rs::participants_past_the_budget_agree_on_one_split`;
+  `crates/relspill/src/shared_spill.rs::the_first_split_holds_and_the_largest_partition_goes_to_disk`
+
+#### Scenario: The budget
+- **WHEN** bytes up to the budget, past it, below zero and past 2^64 - 1
+  are added, the last to a total past which a partition's count would
+  still go, and records past 2^64 - 1
+- **THEN** the first is not over, the second is, and the others fail
+  and leave the words, own or shared, as they were; against another
+  participant's call that takes away what it did not add, no count
+  wraps, and a call whose second count refuses gives the first one its
+  part back
+- **Verified by:**
+  `crates/relspill/src/shared_spill.rs::a_total_equal_to_the_budget_is_not_over`;
+  `crates/relspill/src/shared_spill.rs::a_counter_never_goes_below_zero`;
+  `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`;
+  `crates/relspill/src/shared_spill.rs::a_refused_update_leaves_the_words_as_they_were`;
+  `crates/relspill/src/loom.rs::a_refused_addition_lends_no_bytes_to_another_call`;
+  `crates/relspill/src/loom.rs::a_refused_taking_away_gives_the_partition_back`
+
+### Requirement: The plan of a level
+[`plan`](../../../crates/relspill/src/plan.rs) SHALL give the
+[`Plan`](../../../crates/relspill/src/plan.rs) of a level of a node's
+spill, by the one rule its documentation gives, from the node's
+[`Shape`](../../../crates/relspill/src/plan.rs) and the level's
+[`Level`](../../../crates/relspill/src/plan.rs): its partitions, the
+length of its chunks, the spill words that count its partitions, the
+bits of the hash it takes, and whether a level fits below it. A shape
+of one partition SHALL take no bits, and no level SHALL fit below it.
+[`expected`](../../../crates/relspill/src/plan.rs) SHALL give the
+bytes a first level expects.
+
+#### Scenario: By the bytes, the participants and the reserve
+- **WHEN** a level of 4 to 1024 partitions with a reserve of 48 KiB
+  expects 10 MiB in a limit of 4 MiB, then wants 16 partitions at
+  least, then has a limit of 256 KiB, then is given 64 partitions
+- **THEN** it gets 8 partitions, then 16, then 4, then 64
+- **Verified by:**
+  `crates/relspill/src/plan.rs::a_level_doubles_by_its_bytes_participants_and_reserve`;
+  `crates/relspill/src/plan.rs::a_level_takes_the_partitions_it_is_given`
+
+#### Scenario: By the bits of the hash
+- **WHEN** a level of 4 to 1024 partitions that expects far more than
+  its limit comes after 28, 29, 30 and 31 bits; and a level of 32
+  partitions comes after each level above it; and a level of one
+  partition comes after 31 bits and after 32
+- **THEN** it gets 8, 4 and 4 partitions, and the last is refused; the
+  level of 32 takes 5 bits after those above, and fits six times, from
+  bit 0 to bit 25; the level of one has no level below, and after 32
+  bits is refused
+- **Verified by:**
+  `crates/relspill/src/plan.rs::a_level_keeps_to_the_bits_of_the_hash`;
+  `crates/relspill/src/plan.rs::each_level_takes_the_bits_past_those_above`
+
+#### Scenario: Wrong bounds and bytes
+- **WHEN** the least or the most partitions are not powers of two or
+  are out of order, the expected bytes are below zero or not a number,
+  the partitions given are no power of two of the shape, the share is
+  0, the least chunk is not a multiple of 8, or the partitions pass
+  what spill words count
+- **THEN** the call is a wrong call, and gives no plan
+- **Verified by:**
+  `crates/relspill/src/plan.rs::a_plan_refuses_bounds_out_of_order`;
+  `crates/relspill/src/plan.rs::a_level_takes_the_partitions_it_is_given`
+
+#### Scenario: A share of the limit
+- **WHEN** at a share of 16, with chunks of 8 KiB to 1 MiB, 4 MiB is
+  shared among 8 partitions and among 1024, and 1 GiB among 4; and
+  1000000 bytes among 8, with chunks of 8 bytes to 1 MiB
+- **THEN** the chunks are 32 KiB, 8 KiB and 1 MiB, and 7808 bytes
+- **Verified by:**
+  `crates/relspill/src/plan.rs::a_chunk_is_a_share_of_the_limit_within_its_bounds`
+
+#### Scenario: The bytes a first level expects
+- **WHEN** 1000 bytes are held in 10 rows of 15 expected, of 30, of 30
+  for 4 participants, and in no rows
+- **THEN** the level expects 2000, 3000, 12000 and 2000 bytes
+- **Verified by:**
+  `crates/relspill/src/plan.rs::the_first_level_expects_twice_its_bytes_or_the_estimate`
+
+### Requirement: Sending partitions to disk
+[`Spill::evict`](../../../crates/relspill/src/shared_spill.rs) SHALL
+choose the next partition to send to disk, and mark it so, by the rule
+its documentation gives over the
+[`Weights`](../../../crates/relspill/src/shared_spill.rs) each node
+gives: the partition with the most bytes while the memory passes a
+share of the limit, then, once one is on disk, those in memory that
+hold too few of the records. A shared table SHALL weigh the bytes its
+words count against their budget, a process's own spill the bytes it
+measured against its limit, as
+[`Memory`](../../../crates/relspill/src/shared_spill.rs) says. A
+partition SHALL be marked and counted once, by the participant whose
+mark set its flag; one already on disk SHALL be chosen again when it
+holds the most, and its holder SHALL then free what it holds of it.
+[`splits`](../../../crates/relspill/src/shared_spill.rs) SHALL answer
+whether a partition read back splits into a level below, by the
+[`SplitWeights`](../../../crates/relspill/src/shared_spill.rs) its
+documentation names.
+
+#### Scenario: The weights
+- **WHEN** a grouping's weights and a join's choose partitions while
+  their memory goes down, with a reserve, a share of records, and a
+  limit of partitions a check
+- **THEN** the grouping sends from its start down to its target, the
+  join keeps room for its tails and a quarter of the records in memory,
+  and no check passes its limit
+- **Verified by:**
+  `crates/relspill/src/shared_spill.rs::a_grouping_goes_from_its_start_down_to_its_target`;
+  `crates/relspill/src/shared_spill.rs::a_join_keeps_reserve_for_its_tails_and_a_quarter_in_memory`;
+  `crates/relspill/src/shared_spill.rs::the_first_split_holds_and_the_largest_partition_goes_to_disk`
+
+#### Scenario: Marked once
+- **WHEN** two participants send the largest partition at once
+- **THEN** it is marked and counted once
+- **Verified by:**
+  `crates/relspill/src/loom.rs::a_partition_goes_to_disk_once`
+
+#### Scenario: A partition chosen again
+- **WHEN** a partition on disk holds the most bytes again, with the
+  partitions on disk weighed in, and then with a weight of 0 for them
+- **THEN** it is chosen again and counted once; with the weight of 0
+  the largest in memory goes instead
+- **Verified by:**
+  `crates/relspill/src/shared_spill.rs::a_grouping_goes_from_its_start_down_to_its_target`
+
+#### Scenario: Room, bits and keys
+- **WHEN** partitions of sizes on both sides of the room, with two
+  bits left and one, and with a share of rows on both sides of `key`,
+  are asked about
+- **THEN** only the one past the room, with bits left and below the
+  share, splits, and bits past 32 are refused
+- **Verified by:**
+  `crates/relspill/src/shared_spill.rs::a_partition_splits_past_its_room_with_bits_left_and_many_keys`;
+  `crates/relspill/src/shared_spill.rs::a_level_past_the_bits_of_the_hash_is_refused`
+
+### Requirement: The phases of a shared build
+A participant of a shared build,
+[`Participant`](../../../crates/relspill/src/phases.rs), SHALL step
+through the phases that
+[`phases`](../../../crates/relspill/src/phases.rs) lists, which the
+host's barrier separates, and never wait itself: each step returns an
+[`Action`](../../../crates/relspill/src/phases.rs), the host does it,
+and the barrier's answer goes into the next step. A participant that
+attaches late SHALL join the phase the others are in. A participant in
+no known state, or a phase past the last after an attach, SHALL be a
+wrong call. The participants SHALL count the build in the four
+[`Counters`](../../../crates/relspill/src/phases.rs) they share: each
+chunk number goes to one call, and a count past 2^64 - 1 is refused. A
+participant that leaves while it probes SHALL first mark a
+[`StopWord`](../../../crates/relspill/src/phases.rs), and the last
+participant to leave SHALL then return no record without a mark.
+
+#### Scenario: A participant alone
+- **WHEN** one participant attaches at the first phase and is elected
+  at the size and last at its leave
+- **THEN** its actions are attach, build, wait, flush, wait, size,
+  wait, link, wait, outer, wait, probe, leave and free
+- **Verified by:**
+  `crates/relspill/src/phases.rs::a_participant_alone_builds_flushes_sizes_links_and_probes`
+
+#### Scenario: A participant that attaches late
+- **WHEN** a participant attaches at each phase from the flush to the
+  free
+- **THEN** it does that phase's work, or waits at the size, or leaves
+  at the free, and then the phases after it
+- **Verified by:**
+  `crates/relspill/src/phases.rs::a_late_participant_joins_the_phase_the_others_are_in`
+
+#### Scenario: A state or a phase unknown
+- **WHEN** a participant holds a state no step makes, or an attach
+  answers a phase past the last
+- **THEN** the step is a wrong call
+- **Verified by:**
+  `crates/relspill/src/phases.rs::an_unknown_state_is_an_error`;
+  `crates/relspill/src/phases.rs::an_attach_past_the_last_phase_is_an_error`
+
+#### Scenario: Participants that count a build
+- **WHEN** three participants number chunks, report records and NULL
+  bits, and add duplicates at once, and a count passes 2^64 - 1
+- **THEN** no number is given twice, the records and the duplicates are
+  their sums and the NULL bits their OR, and the count past the word is
+  refused
+- **Verified by:**
+  `crates/relspill/src/phases.rs::participants_count_a_build_at_once`;
+  `crates/relspill/src/loom.rs::three_participants_attach_at_any_phase`;
+  `crates/relspill/src/phases.rs::counts_past_their_words_are_refused`
+
+#### Scenario: A participant that stops while it probes
+- **WHEN** one of two or three participants of a shared table stops
+  while it probes, in every order of their steps; when the model marks
+  the word only after that participant left; and when a participant
+  asks to stop before it probes or after it left
+- **THEN** the last participant to leave sees the mark, and with the
+  late mark the model reports a last one that missed it; out of the
+  probe nothing is marked
+- **Verified by:**
+  `crates/relspill/src/loom.rs::the_last_participant_sees_one_that_stopped_while_it_probed`;
+  `crates/relspill/src/loom.rs::a_stop_marked_after_leaving_goes_unseen`;
+  `crates/relspill/src/phases.rs::a_participant_stops_only_while_it_probes`
+
+### Requirement: The rounds over a partition on disk
+After a shared build that spilled, each partition on disk SHALL be a
+round of its own, with a barrier of its own and the phases from
+[`ROUND_ELECT`](../../../crates/relspill/src/phases.rs) to
+[`ROUND_FREE`](../../../crates/relspill/src/phases.rs), stepped by
+[`Participant::round_step`](../../../crates/relspill/src/phases.rs) as
+a build is. A participant that attaches late SHALL load the files still
+left, probe, or leave at once at the free, and an attach that answers
+a phase past the round's last SHALL be a wrong call. The words of the
+spill SHALL give each participant the partition to start its rounds at,
+[`Spill::start`](../../../crates/relspill/src/shared_spill.rs), each
+number of a partition's files to one participant,
+[`Spill::take_file`](../../../crates/relspill/src/shared_spill.rs), and
+a partition whole to one participant only,
+[`Spill::take_alone`](../../../crates/relspill/src/shared_spill.rs). A
+partition past the partitions in force SHALL be refused, by a count of
+records also when it adds none and reads none, and so SHALL a file
+number past 2^32 - 1.
+
+#### Scenario: Rounds of several participants
+- **WHEN** two or three participants join a round at any phase, load
+  its files and probe it
+- **THEN** every file is loaded once, every key is found, and the round
+  is freed once
+- **Verified by:**
+  `crates/relspill/src/loom.rs::two_participants_load_a_partition_and_probe_it`;
+  `crates/relspill/src/loom.rs::three_participants_join_a_round_at_any_phase`
+
+#### Scenario: A round alone and late
+- **WHEN** one participant attaches at each phase of a round, and at a
+  phase past the last
+- **THEN** its actions follow the phases from the one it attached at,
+  and the phase past the last is a wrong call
+- **Verified by:**
+  `crates/relspill/src/phases.rs::a_round_elects_allocates_loads_probes_and_frees`;
+  `crates/relspill/src/phases.rs::an_attach_past_the_last_phase_is_an_error`
+
+#### Scenario: Taken once
+- **WHEN** two participants take the files of a partition, and take it
+  whole, at once, and participants ask where to start their rounds
+- **THEN** each file goes to one of them, the partition to one, and the
+  starts go round the partitions; a partition past those in force, by a
+  count of records too that adds none and reads none, or a file number
+  past 2^32 - 1, is refused
+- **Verified by:**
+  `crates/relspill/src/loom.rs::files_and_a_whole_partition_go_to_one_participant_each`;
+  `crates/relspill/src/shared_spill.rs::files_and_partitions_are_taken_once`;
+  `crates/relspill/src/shared_spill.rs::counts_past_their_words_are_refused`
+
 ### Requirement: The spill of a join
 The crate SHALL provide a state machine for the spill of a hash join,
 [`Join`](../../../crates/relspill/src/join.rs).

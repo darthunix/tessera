@@ -179,7 +179,17 @@ pub struct Participant {
 
 /// The counters of a build over their words: the records appended, the
 /// payload words that hold a NULL somewhere, the chunks numbered so far,
-/// and the records linked whose keys the table held already.
+/// and the records linked whose keys the table held already, the
+/// duplicates. The participants all map the four words, aligned to 8:
+///
+/// ```text
+///  byte  0             8             16            24            32
+///        ┌─────────────┬─────────────┬─────────────┬─────────────┐
+///        │ records     │ NULL        │ chunks      │ duplicates  │
+///        │ appended    │ columns, a  │ numbered    │ the links   │
+///        │             │ bit a word  │             │ found       │
+///        └─────────────┴─────────────┴─────────────┴─────────────┘
+/// ```
 #[derive(Debug)]
 pub struct Counters<W> {
     words: W,

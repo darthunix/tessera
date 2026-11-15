@@ -89,7 +89,11 @@ const PART_WORDS: usize = 5;
 
 /// The words of the shared state for up to `partitions` partitions, and
 /// one more for the partitions kept in memory, whose outer rows are read
-/// back as one.
+/// back as one: 15 words for one partition, 327690 for the most.
+///
+/// # Errors
+///
+/// A wrong call for no partition or more than [`MAX_PARTITIONS`].
 pub fn words_for(partitions: usize) -> Result<usize> {
     ensure!(
         (1..=MAX_PARTITIONS).contains(&partitions),
@@ -173,7 +177,33 @@ impl Words for &[Cell<u64>] {
     }
 }
 
-/// The state of a spill over its words.
+/// The state of a spill over its words: a process's own in its memory,
+/// a shared table's in memory every participant maps, which take the same
+/// steps, the second by atomic operations.
+///
+/// The words, as many as [`words_for`] gives, are a head of five, then
+/// five for each slot of a partition, at word `5 + 5 p` for slot `p` of
+/// `0 ..= capacity`:
+///
+/// ```text
+///  word  0            1        2        3        4
+///      ┌────────────┬────────┬────────┬────────┬───────────┐
+///      │ partitions │ bytes  │ budget │ start  │ evictions │   the head
+///      │ in force   │ in all │        │        │           │
+///      └────────────┴────────┴────────┴────────┴───────────┘
+///  then, for each slot p of 0 ..= capacity, at word 5 + 5 p:
+///      ┌────────────┬────────┬────────┬────────┬───────────┐
+///      │ bytes      │ records│ flags  │ next   │ next      │
+///      │            │        │ 1 disk │ inner  │ outer     │
+///      │            │        │ 2 alone│ file   │ file      │
+///      │            │        │ 4 round│        │           │
+///      └────────────┴────────┴────────┴────────┴───────────┘
+/// ```
+///
+/// The partitions in force are 0 while the table is whole. The slot whose
+/// number is the partitions in force counts the outer files of the
+/// partitions kept in memory. A flag of 4 marks a partition that every
+/// participant joins together, in a round ([`Spill::set_together`]).
 #[derive(Debug)]
 pub struct Spill<W> {
     words: W,

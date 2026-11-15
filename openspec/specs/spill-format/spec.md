@@ -30,7 +30,9 @@ named here says, and SHALL return the crate's error as a status, as
 "Damaged and foreign blocks are refused" says:
 
 - `tess_spill_header_size`, which returns 48, `tess_spill_header_write`
-  and `tess_spill_header_read`: "The header of a block";
+  and `tess_spill_header_read`, and `tess_table_fingerprint`, which
+  gives the fingerprint of a set of a table's chunks, another for a
+  table of another layout of records: "The header of a block";
 - `tess_spill_pack` and `tess_spill_unpack`: "A packed chunk of
   records";
 - `tess_spill_columns_init`, `tess_spill_columns_pack` and
@@ -49,18 +51,38 @@ named here says, and SHALL return the crate's error as a status, as
 - `tess_spill_columns_pair`, `tess_spill_columns_check` and
   `tess_spill_columns_window`, which gives a window of a checked chunk's
   first columns as Datums and NULL flags, a value by reference as a
-  pointer into the values: "The pair of a chunk of columns".
+  pointer into the values: "The pair of a chunk of columns";
+- `tess_spill_plan`, from a `TessSpillShape` and a `TessSpillLevel`, and
+  `tess_spill_expected`: "The plan of a level";
+- `tess_join_init`, `tess_join_below`, `tess_join_given` and
+  `tess_join_step`: "The spill of a join";
+- `tess_group_init`, `tess_group_below`, `tess_group_step`,
+  `tess_rows_init`, `tess_rows_read` and `tess_rows_step`: "The spill of
+  a grouping";
+- `tess_runs_init` and `tess_runs_step`: "The runs of a sort";
+- `tess_shared_build_init`, `tess_shared_build_step` and
+  `tess_shared_build_stop`: "A build by several processes and its
+  rounds".
 
-Beside them the C API SHALL check what the crate leaves to its caller:
+Beside them the C API SHALL check what the crate leaves to its caller.
 `tess_spill_columns_check` SHALL check that a value ends inside the
 values by its type's length, and a window of words or rows past the
-chunk's SHALL be an internal error, SQLSTATE `XX000`.
+chunk's SHALL be an internal error, SQLSTATE `XX000`. A call SHALL
+check every output before it writes any. The words of a writer, of a
+reader and of each machine, and their parameters, events and actions,
+SHALL be the crate's own, which `tess_spill_set_layout`,
+`tess_join_layout`, `tess_group_layout`, `tess_rows_layout`,
+`tess_runs_layout` and `tess_shared_build_layout` give, and the
+kernels' module SHALL refuse a library whose sizes and offsets differ
+from those of `tessera/spill.h`.
 
 #### Scenario: A header through the C API
-- **WHEN** a module calls `tess_spill_header_size()` and writes and
-  reads a header through `tess_spill_header_write` and
-  `tess_spill_header_read`
-- **THEN** the size is 48 and the fields read back as written
+- **WHEN** a module calls `tess_spill_header_size()`, writes and reads
+  a header through `tess_spill_header_write` and
+  `tess_spill_header_read` with a table's fingerprint, and reads it with
+  the fingerprint of a table of another layout
+- **THEN** the size is 48, the fields read back as written, and the
+  read with the other fingerprint is refused
 - **Verified by:** `test/sql/table.sql::tessera_test_spill_header`
 
 #### Scenario: A chunk of columns through its entry points
@@ -74,6 +96,42 @@ chunk's SHALL be an internal error, SQLSTATE `XX000`.
   the window and the block past the pair `XX000`
 - **Verified by:**
   `crates/tessera-capi/tests/spill.rs::a_chunk_of_columns_reads_back_through_its_entry_points`
+
+#### Scenario: A plan through C
+- **WHEN** the plan of a level is asked through its entry point with
+  bounds, bytes and partitions that no node gives
+- **THEN** the call fails, SQLSTATE `XX000`, and writes no plan
+- **Verified by:**
+  `crates/tessera-capi/tests/spill.rs::the_plan_of_a_level_refuses_what_no_node_gives`
+
+#### Scenario: The machines through their entry points
+- **WHEN** a join, a grouping with its rows, a sort and a shared build
+  step through their entry points, and each is given a step it does not
+  take, outputs it has not filled, and the layout of its types is asked
+- **THEN** each goes as its machine in the crate does, refuses the step
+  and changes nothing, writes its outputs, and gives the layout of the
+  types of `tessera/spill.h`
+- **Verified by:**
+  `crates/tessera-capi/tests/join.rs::a_join_steps_through_its_build_by_the_entry_points`;
+  `crates/tessera-capi/tests/join.rs::the_join_entry_points_refuse_what_is_no_step`;
+  `crates/tessera-capi/tests/join.rs::the_join_entry_points_write_places_that_hold_nothing_yet`;
+  `crates/tessera-capi/tests/join.rs::the_join_layout_is_its_types`;
+  `crates/tessera-capi/tests/group.rs::a_grouping_spills_step_by_step_by_the_entry_points`;
+  `crates/tessera-capi/tests/group.rs::the_group_entry_points_refuse_what_is_no_step`;
+  `crates/tessera-capi/tests/group.rs::the_group_entry_points_write_places_that_hold_nothing_yet`;
+  `crates/tessera-capi/tests/group.rs::the_group_layout_is_its_types`;
+  `crates/tessera-capi/tests/group.rs::a_grouping_s_rows_freeze_and_are_read_by_the_entry_points`;
+  `crates/tessera-capi/tests/group.rs::the_rows_entry_points_refuse_what_is_no_step`;
+  `crates/tessera-capi/tests/group.rs::the_rows_entry_points_write_places_that_hold_nothing_yet`;
+  `crates/tessera-capi/tests/group.rs::the_rows_layout_is_its_types`;
+  `crates/tessera-capi/tests/runs.rs::a_sort_spills_its_runs_step_by_step_by_the_entry_points`;
+  `crates/tessera-capi/tests/runs.rs::the_runs_entry_points_refuse_what_is_no_step`;
+  `crates/tessera-capi/tests/runs.rs::the_runs_entry_points_write_places_that_hold_nothing_yet`;
+  `crates/tessera-capi/tests/runs.rs::the_runs_layout_is_its_types`;
+  `crates/tessera-capi/tests/build.rs::a_participant_alone_builds_a_table_that_splits_by_the_entry_points`;
+  `crates/tessera-capi/tests/build.rs::the_shared_build_entry_points_refuse_what_is_no_step`;
+  `crates/tessera-capi/tests/build.rs::the_shared_build_entry_points_write_places_that_hold_nothing_yet`;
+  `crates/tessera-capi/tests/build.rs::the_shared_build_layout_is_its_types`
 
 #### Scenario: Packed and plain blocks in a file
 - **WHEN** a chunk of 1000 records that packs and bytes that are no
