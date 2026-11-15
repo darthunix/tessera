@@ -925,11 +925,20 @@ reads it, as the documentation of the words and of the writer says.
   packed chunk of records.
   - Decides addresses and the length of loops: the records and the
     lanes to fill, and where each lane's values lie.
-  - Check: `unpack`, as it unpacks: counts that fill the chunk exactly,
-    a code for every lane, every lane within the body, the lane of the
-    next-record references empty, every record of the body's length,
-    and no byte past the last lane.
-  - Error: damaged, from `PackedCounts` to `PackedTail`.
+  - Check: `unpack`, before it writes a byte of the chunk: counts that
+    fill the chunk exactly, then a code for every lane, every lane
+    within the body, the lane of the next-record references empty,
+    every record of the body's length, and no byte past the last lane.
+    Then it copies the lanes it checked.
+  - Error: damaged, from `PackedCounts` to `PackedTail`, the chunk as it
+    was.
+  - Proof: `a_body_too_short_for_its_counts_is_refused`;
+    `counts_that_pass_fill_the_chunk`, for any counts, any length of the
+    body and of the chunk; and
+    `lanes_that_pass_lie_inside_the_body_and_fill_the_chunk`, for any
+    codes and lanes of two records of 24 bytes, and the copy after them
+    over any bytes the chunk held. That the data lanes come back as they
+    were packed is the tests'.
 - **`packed-columns`**: the counts, the descriptors and the lanes of a
   packed chunk of columns.
   - Decides addresses and the length of loops: the rows and the lanes

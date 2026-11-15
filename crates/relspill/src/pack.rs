@@ -203,18 +203,47 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Option<usize> {
 ///
 /// # Errors
 ///
-/// Damaged bytes, the bytes of `chunk` then of no use, for a body too
-/// short for its counts or its codes, counts that do not fill `chunk`, a
-/// code that does not exist, a next-record lane of another code than 0, a
-/// lane cut short, records of another length than the body's, or bytes
-/// past its last lane padded to 8.
+/// Damaged bytes, and `chunk` as it was, for a body too short for its
+/// counts or its codes, counts that do not fill `chunk`, a code that does
+/// not exist, a next-record lane of another code than 0, a lane cut
+/// short, records of another length than the body's, or bytes past its
+/// last lane padded to 8.
 pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
+    let body = body_of(packed, chunk.len())?;
+    check_lanes(packed, &body)?;
+    copy_lanes(packed, &body, chunk);
+    Ok(())
+}
+
+/// The counts of a packed body of records, checked against its chunk:
+/// `count` records of `len` bytes, of `lanes` lanes each, whose data
+/// start at `codes_end`, past their codes.
+#[derive(Clone, Copy, Debug)]
+struct Body {
+    count: usize,
+    len: usize,
+    lanes: usize,
+    codes_end: usize,
+}
+
+/// The counts of `packed`, which must fill a chunk of `chunk_len` bytes
+/// and leave room for a code of every lane. Inlined into [`unpack`], so
+/// that the copy after it knows the records the chunk holds.
+#[inline(always)]
+fn body_of(packed: &[u8], chunk_len: usize) -> Result<Body> {
     ensure!(
         packed.len() >= 8,
         Error::damaged(Rule::PackedCounts).with(packed.len())
     );
     let count = read::u32_at(packed, 0) as usize; // trust: packed-records
     let len = read::u32_at(packed, 4) as usize; // trust: packed-records
+    counts(count, len, packed.len(), chunk_len)
+}
+
+/// The body of `count` records of `len` bytes, its counts read from a
+/// body of `packed_len` bytes, for a chunk of `chunk_len` bytes.
+#[inline(always)]
+fn counts(count: usize, len: usize, packed_len: usize, chunk_len: usize) -> Result<Body> {
     ensure!(
         len >= MIN_RECORD
             && len.is_multiple_of(8)
@@ -222,40 +251,92 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
             && count
                 .checked_mul(len)
                 .and_then(|bytes| bytes.checked_add(USED_MARK))
-                == Some(chunk.len()),
+                == Some(chunk_len),
         Error::damaged(Rule::PackedFill).with(count).and(len)
     );
     let lanes = len / 4;
     let codes_end = 8 + lanes.next_multiple_of(4);
-    ensure!(packed.len() >= codes_end, Error::damaged(Rule::LaneCodes));
-    let used = chunk.len() as u64;
-    chunk[..USED_MARK].copy_from_slice(&used.to_ne_bytes());
-    let records = &mut chunk[USED_MARK..];
-    let mut at = codes_end;
-    for lane in 0..lanes {
+    ensure!(packed_len >= codes_end, Error::damaged(Rule::LaneCodes));
+    Ok(Body {
+        count,
+        len,
+        lanes,
+        codes_end,
+    })
+}
+
+/// The bytes a lane of `count` records stores by its code.
+fn stored(code: u8, count: usize) -> Option<usize> {
+    match code {
+        ZERO => Some(0),
+        CONSTANT => Some(4),
+        BYTE => Some(count),
+        HALF => Some(2 * count),
+        WORD => Some(4 * count),
+        _ => None,
+    }
+}
+
+/// Check every lane of `body` in `packed`, writing nothing: a code that
+/// exists, the next-record lane empty, every lane inside the body, the
+/// lane of the records' length the body's, and no byte past the last
+/// lane, padded to 8.
+fn check_lanes(packed: &[u8], body: &Body) -> Result<()> {
+    let mut at = body.codes_end;
+    for lane in 0..body.lanes {
         let code = read::u8_at(packed, 8 + lane); // trust: packed-records
         ensure!(
             lane != NEXT_LANE || code == ZERO,
             Error::damaged(Rule::NextLane).with(code)
         );
+        let need = stored(code, body.count).ok_or(Error::damaged(Rule::LaneCode).with(code))?;
+        ensure!(
+            at + need <= packed.len(),
+            Error::damaged(Rule::LaneEnd).with(lane)
+        );
+        // The lane of the records' length holds the body's length, once.
+        let length = || read::u32_at(packed, at) as usize; // trust: packed-records
+        ensure!(
+            lane != LEN_AT / 4 || (code == CONSTANT && length() == body.len / 8),
+            Error::damaged(Rule::RecordLength).with(body.len)
+        );
+        at += need;
+    }
+    ensure!(
+        at.next_multiple_of(8) == packed.len(),
+        Error::damaged(Rule::PackedTail).with(packed.len()).and(at)
+    );
+    Ok(())
+}
+
+/// Fill `chunk` from the lanes of a body that [`check_lanes`] passed: its
+/// used mark, then each lane of every record.
+#[inline(always)]
+fn copy_lanes(packed: &[u8], body: &Body, chunk: &mut [u8]) {
+    let used = chunk.len() as u64;
+    chunk[..USED_MARK].copy_from_slice(&used.to_ne_bytes());
+    let (count, len) = (body.count, body.len);
+    // The records by their count, which the counts' check made the chunk:
+    // so the compiler counts the loops over them down.
+    let records = &mut chunk[USED_MARK..USED_MARK + count * len];
+    let mut at = body.codes_end;
+    // The lanes counted from the length here, not taken from the body, so
+    // that the compiler sees each lane inside a record and checks no
+    // bound in the loops over the records.
+    for lane in 0..len / 4 {
+        let code = read::u8_at(packed, 8 + lane); // trust: packed-records
+        // Each width beside its code, so that the compiler sees a lane of
+        // `count` values and counts the loops over the records down.
         let need = match code {
             ZERO => 0,
             CONSTANT => 4,
             BYTE => count,
             HALF => 2 * count,
-            WORD => 4 * count,
-            other => return Err(Error::damaged(Rule::LaneCode).with(other)),
+            _ => 4 * count,
         };
-        ensure!(
-            at + need <= packed.len(),
-            Error::damaged(Rule::LaneEnd).with(lane)
-        );
+        // The widths of the check's, which a proof holds the copy to.
+        debug_assert_eq!(Some(need), stored(code, count));
         let place = &packed[at..at + need];
-        ensure!(
-            // trust: packed-records
-            lane != LEN_AT / 4 || (code == CONSTANT && read::u32_at(place, 0) as usize == len / 8),
-            Error::damaged(Rule::RecordLength).with(len)
-        );
         match code {
             ZERO | CONSTANT => {
                 let mut value = [0_u8; 4];
@@ -272,12 +353,10 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
         }
         at += need;
     }
-    ensure!(
-        at.next_multiple_of(8) == packed.len(),
-        Error::damaged(Rule::PackedTail).with(packed.len()).and(at)
-    );
-    Ok(())
 }
+
+#[cfg(kani)]
+mod proofs;
 
 #[cfg(test)]
 mod tests {
@@ -403,9 +482,9 @@ mod tests {
         let original = chunk(10, MIN_RECORD, |record, _| record as u32 + 1);
         let mut out = vec![0_u8; original.len()];
         let packed = pack(&original, &mut out).unwrap();
-        let mut back = vec![0_u8; original.len()];
+        let mut back = vec![0xa5_u8; original.len()];
         // Bytes read back that fail their checks are damaged data, and
-        // each names the rule it broke.
+        // each names the rule it broke; the chunk is as it was.
         let refused = |result: Result<()>| {
             let error = result.expect_err("accepted");
             assert_eq!(error.kind(), crate::Kind::Damaged, "{error}");
@@ -452,5 +531,33 @@ mod tests {
         let mut short = out[..packed].to_vec();
         short[length_at] = 4;
         assert_eq!(refused(unpack(&short, &mut back)), Rule::RecordLength);
+        assert!(
+            back.iter().all(|&byte| byte == 0xa5),
+            "a refused body wrote"
+        );
+    }
+
+    /// A chunk unpacked into bytes that held anything is the chunk packed,
+    /// but for the next-record references, which are 0: every lane is
+    /// written, those stored as nothing too.
+    #[test]
+    fn a_body_unpacks_over_any_bytes() {
+        let original = chunk(10, MIN_RECORD + 8, |record, lane| match lane {
+            KEY => record as u32 + 1,
+            VALUE => 7,
+            _ => 0,
+        });
+        let mut out = vec![0_u8; original.len()];
+        let packed = pack(&original, &mut out).unwrap();
+        let mut back = vec![0xa5_u8; original.len()];
+        unpack(&out[..packed], &mut back).unwrap();
+        let mut expected = original.clone();
+        for record in expected[USED_MARK..]
+            .as_chunks_mut::<{ MIN_RECORD + 8 }>()
+            .0
+        {
+            record[RECORD_NEXT_OFFSET..RECORD_NEXT_OFFSET + 4].fill(0);
+        }
+        assert_eq!(back, expected);
     }
 }

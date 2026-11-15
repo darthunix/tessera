@@ -196,9 +196,10 @@ A chunk of records SHALL be stored packed, in the body that
 body is shorter than the chunk, and as it is otherwise.
 [`unpack`](../../../crates/relspill/src/pack.rs) SHALL give the chunk
 back byte for byte, except that every next-record reference is 0, as
-in a chunk not yet linked. It SHALL check the body as it unpacks it,
-and refuse as damaged bytes one whose counts, codes and lanes do not
-fill the chunk and the body exactly, as its documentation lists.
+in a chunk not yet linked. It SHALL check the body before it writes a
+byte of the chunk, and refuse as damaged bytes, the chunk as it was,
+one whose counts, codes and lanes do not fill the chunk and the body
+exactly, as its documentation lists.
 
 #### Scenario: Lanes take the width their values need and read back
 - **WHEN** a chunk of records with lanes of zeros, equal values, and
@@ -220,7 +221,7 @@ fill the chunk and the body exactly, as its documentation lists.
   does not match the chunk it is unpacked into, has a lane code that
   does not exist, stores the lane of the next-record references, has
   records of another length than its own, or has bytes past its lanes
-- **THEN** unpacking fails as damaged bytes
+- **THEN** unpacking fails as damaged bytes, and the chunk is as it was
 - **Verified by:**
   `crates/relspill/src/pack.rs::damaged_packed_bodies_are_refused`
 
