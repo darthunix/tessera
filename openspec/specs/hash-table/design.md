@@ -156,9 +156,9 @@ value's bytes into blocks of its own, its **chunks of values**, and the
 payload's word for that column holds a reference to the copy: the
 number of the chunk of values plus one, and the byte where the copy
 starts. To the table this word is 8 bytes like any other. The spill
-format writes the same words to disk and defines them, in [A reference
-to a by-reference
-value](../spill-format/spec.md#requirement-a-reference-to-a-by-reference-value).
+format writes the same words to disk, and the crate `relspill` defines
+them, in [A reference to a
+value](../relspill/spec.md#requirement-a-reference-to-a-value).
 
 ```
  a record of a join on id that keeps the columns amount and name

@@ -32,7 +32,22 @@ named here says, and SHALL return the crate's error as a status, as
 - `tess_spill_header_size`, which returns 48, `tess_spill_header_write`
   and `tess_spill_header_read`: "The header of a block";
 - `tess_spill_pack` and `tess_spill_unpack`: "A packed chunk of
-  records".
+  records";
+- `tess_spill_columns_init`, `tess_spill_columns_pack` and
+  `tess_spill_columns_unpack`: "A chunk of columns" and "A chunk of
+  columns on disk";
+- `tess_spill_columns_append` and
+  `tess_spill_columns_append_partitioned`, which take Datums and their
+  types: "A chunk of columns" and "A reference to a value";
+- `tess_spill_columns_pair`, `tess_spill_columns_check` and
+  `tess_spill_columns_window`, which gives a window of a checked chunk's
+  first columns as Datums and NULL flags, a value by reference as a
+  pointer into the values: "The pair of a chunk of columns".
+
+Beside them the C API SHALL check what the crate leaves to its caller:
+`tess_spill_columns_check` SHALL check that a value ends inside the
+values by its type's length, and a window of words or rows past the
+chunk's SHALL be an internal error, SQLSTATE `XX000`.
 
 #### Scenario: A header through the C API
 - **WHEN** a module calls `tess_spill_header_size()` and writes and
@@ -40,6 +55,18 @@ named here says, and SHALL return the crate's error as a status, as
   `tess_spill_header_read`
 - **THEN** the size is 48 and the fields read back as written
 - **Verified by:** `test/sql/table.sql::tessera_test_spill_header`
+
+#### Scenario: A chunk of columns through its entry points
+- **WHEN** rows of a column by value and of a varlena, with NULLs, are
+  appended, checked with their values and read by windows through the
+  entry points; a block of the pair of another kind or number is read,
+  or a chunk with a word that refers past its values; and a window past
+  the rows or a block past the pair is asked for
+- **THEN** every word, NULL and value is the one written, a varlena a
+  pointer to its bytes in the values; the damaged ones are `XX001`, and
+  the window and the block past the pair `XX000`
+- **Verified by:**
+  `crates/tessera-capi/tests/spill.rs::a_chunk_of_columns_reads_back_through_its_entry_points`
 
 #### Scenario: Packed and plain blocks in a file
 - **WHEN** a chunk of 1000 records that packs and bytes that are no
@@ -112,38 +139,19 @@ take either as a wrong argument.
 - **Verified by:**
   `test/sql/spill_damage.sql::spec: spill-format/Damage under a node`
 
-### Requirement: A chunk of columns in memory
-A chunk of columns SHALL begin with a header of 16 bytes: the rows it
-holds (4 bytes), its capacity in rows (4 bytes), the words stored for a
-row (4 bytes) and the magic `COLS` (4 bytes). Lanes of `capacity` words
-of 8 bytes follow: first the lanes of NULL bits, one for every 64 stored
-words and at least one, where bit `w % 64` of lane `w / 64` of a row is
-set when the row's word `w` is NULL; then one lane for each stored word.
-A row's word is a by-value Datum, a reference to a by-reference value,
-or 0 for a NULL. The inline accessors of `tessera/spill.h` and the Rust
-kernels MUST agree on this layout.
-
-```
- byte 0      4          8             12       16
-      ┌──────┬──────────┬─────────────┬────────┐
-      │ rows │ capacity │ words a row │ "COLS" │
-      ├──────┴──────────┴─────────────┴────────┤
-   16 │ lanes of NULL bits, capacity × 8 bytes │
-      │ each: one for every 64 words a row,    │
-      │ at least one                           │
-      ├────────────────────────────────────────┤
-      │ lanes of words, capacity × 8 bytes     │
-      │ each: one for each word of a row       │
-      └────────────────────────────────────────┘
-```
-
-#### Scenario: A lane of NULL bits for every 64 words
-- **WHEN** the lanes of NULL bits are counted for 0, 64, 65 and 130
-  words, and a chunk of 130 words a row is filled, packed and read back
-- **THEN** there are 1, 1, 2 and 3 lanes, the words' lanes start after
-  them, and every lane reads back
-- **Verified by:**
-  `crates/relspill/src/columns.rs::wide_chunks_take_a_lane_of_null_bits_per_64_words`
+### Requirement: The accessors of a chunk of columns
+The inline accessors of `tessera/spill.h` SHALL read and write a chunk
+of columns in the layout of "A chunk of columns" of the spec of
+`relspill`: `tess_spill_columns_rows`, `tess_spill_columns_capacity`,
+`tess_spill_columns_words` and `tess_spill_columns_set_rows`, the
+fields of its header; `tess_spill_columns_null_lanes`,
+`tess_spill_columns_null_lane`, `tess_spill_columns_null_bit` and
+`tess_spill_columns_is_null`, its NULL bits; `tess_spill_columns_lane`
+and `tess_spill_columns_word`, its lanes. They SHALL agree with the
+offsets and the counts the kernels' entry points give of it: the fields
+of its header, `tess_spill_columns_layout`, and the lanes of NULL bits,
+the lane of a word and the room a packed chunk may take past its
+lanes, `tess_spill_columns_shape`.
 
 #### Scenario: The C formulas match the kernels'
 - **WHEN** the C macros and the kernels' entry points compute the lanes
@@ -155,59 +163,27 @@ kernels MUST agree on this layout.
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_lanes`;
   `crates/tessera-capi/tests/table.rs::chunks_of_columns_round_trip_through_the_entry_points`
 
-#### Scenario: Rows appended to a chunk
-- **WHEN** rows with NULLs, by-value words and by-reference values in up
-  to 69 columns are appended to a chunk
-- **THEN** each row's words lie in their lanes at the row's place, a
-  NULL has its bit set and a word of 0, and a by-reference word is a
-  reference to the place of its bytes
-- **Verified by:**
-  `crates/relspill/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`
-
-#### Scenario: Rows of more than 64 words appended by partition
-- **WHEN** rows of 64, 65, 70 and 130 words, with NULLs past word 64,
-  are appended by partition, and joins that keep 70 and 1100 outer
-  columns on disk run
-- **THEN** the NULL bit of word `w` lies in lane `w / 64`, the words lie
-  in their lanes, and the joins return the core's rows
-- **Verified by:**
-  `crates/relspill/src/spill_columns.rs::rows_wider_than_64_words_keep_a_lane_of_null_bits_per_64`;
-  `crates/tessera-capi/tests/table.rs::rows_of_70_words_append_by_partition`;
-  `test/sql/join.sql::70 outer columns kept on disk`;
+#### Scenario: Joins that keep wide rows on disk
+- **WHEN** joins that keep 70 and 1100 outer columns on disk run
+- **THEN** they return the core's rows
+- **Verified by:** `test/sql/join.sql::70 outer columns kept on disk`;
   `test/sql/join.sql::1100 outer columns kept on disk`
 
 ### Requirement: A reference to a by-reference value
 A word of a record or of a row that refers to a by-reference value SHALL
-hold the number of the value's chunk plus one in its upper 32 bits and
-the byte of the value in that chunk in its lower 32 bits. No reference
-is 0, and a chunk of values is at most 4 GiB. A chunk of columns that is
-written with one chunk of values before it SHALL refer to that chunk as
-number 0. A reader of such a chunk of columns from a file MUST refuse,
-as damaged data, a word of a by-reference column that is no reference
-into that chunk of values. A reader of any value through a reference
-from a file MUST refuse, as damaged data, a chunk it did not read and a
-value that does not end inside its chunk. The bytes a reference names
-SHALL be the value's own, as `datumCopy` copies them: an expanded
-object, which is a pointer into its owner's memory, SHALL be flattened,
-and `tess_spill_columns_append`, which copies a batch's values by their
+be the reference of "A reference to a value" of the spec of `relspill`:
+`tess_spill_value_byte` SHALL give the byte it names, and
+`tess_spill_value_in` the value it names in the one chunk of values of
+a chunk of columns, or none when it is no reference into them. A reader
+of a chunk of columns from a file MUST refuse, as damaged data, a word
+of a by-reference column that is no reference into its chunk of values.
+A reader of any value through a reference from a file MUST refuse, as
+damaged data, a chunk it did not read and a value that does not end
+inside its chunk. The bytes a reference names SHALL be the value's own,
+as `datumCopy` copies them: an expanded object, which is a pointer into
+its owner's memory, SHALL be flattened, and
+`tess_spill_columns_append`, which copies a batch's values by their
 bytes, SHALL refuse one.
-
-```
- bit 63                        32 31                             0
-     ┌───────────────────────────┬───────────────────────────────┐
-     │ number of the chunk of    │ byte of the value in that     │
-     │ values, plus one          │ chunk                         │
-     └───────────────────────────┴───────────────────────────────┘
-```
-
-#### Scenario: Rows appended with their values
-- **WHEN** rows with by-reference values are appended to a chunk of
-  columns and their values to its chunk of values
-- **THEN** the word of each such value is a reference to chunk 0 at the
-  byte its bytes were copied to
-- **Verified by:**
-  `crates/relspill/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`;
-  `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
 
 #### Scenario: What is a reference into a chunk of values
 - **WHEN** a word names the first or the last byte of a chunk of
@@ -258,143 +234,6 @@ bytes, SHALL refuse one.
 - **Verified by:**
   `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
 
-### Requirement: The limits of a chunk of columns
-A chunk of columns SHALL hold at most 4096 words a row and at most
-131071 rows, and no more rows than pack into the 4 GiB that the 32 bits
-of a header's packed length can name. A chunk MUST NOT be made in bytes
-that are too short for the header or of a length that is no multiple of
-8; a chunk of such a length MUST NOT be packed; and bytes without the
-magic MUST be refused as a chunk of columns.
-
-#### Scenario: A chunk that is not one of columns
-- **WHEN** a chunk of 8 bytes is initialized, or a chunk whose magic is
-  not `COLS` is packed
-- **THEN** the call is refused
-- **Verified by:**
-  `crates/relspill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`
-
-#### Scenario: The limits of a chunk
-- **WHEN** a chunk is initialized with more than 4096 words a row or
-  with a length that is no multiple of 8, its length would hold more
-  than 131071 rows or more than pack into 4 GiB, or a chunk with a byte
-  past a length of 8s is packed
-- **THEN** the first two are refused, the capacity stops at 131071 or
-  at the rows that pack into 4 GiB, and the packing is refused
-- **Verified by:**
-  `crates/relspill/src/columns.rs::a_chunk_keeps_within_its_limits`
-
-### Requirement: A chunk of columns on disk
-A chunk of columns SHALL be stored packed, for its rows only: the rows
-(4 bytes), the words a row (4 bytes), a descriptor of 16 bytes for each
-lane (the width in its first byte, the lane's least value in its last
-8), then each lane's values as their difference from the least value in
-0, 1, 2, 4 or 8 bytes each, the fewest that hold the lane's largest
-difference, a lane padded to a multiple of 8. The words of a lane are
-compared as signed numbers of 64 bits, and a difference is taken modulo
-2^64. A lane whose values are all equal has a width of 0 and takes no
-bytes beyond its descriptor; in a chunk without rows every lane has a
-width of 0 and a least value of 0. The lanes of NULL bits are stored as
-the lanes of words are. Reading it back MUST give a chunk with the same
-rows, words and values, whose capacity is its rows. A packed chunk with
-more rows or words than a chunk holds, a width that does not exist, a
-lane cut short, a length that does not match its counts, or bytes past
-its lanes MUST be refused as damaged data.
-
-```
- ┌─────────┬─────────────┬─────────────────────┬─────────────────────┐
- │ rows    │ words a row │ a descriptor for    │ each lane's values  │
- │         │             │ each lane, 16 bytes │ less its least one, │
- │ 4 bytes │ 4 bytes     │                     │ padded to 8         │
- └─────────┴─────────────┴─────────────────────┴─────────────────────┘
-
- a descriptor
- byte 0       1                    8                   16
-      ┌───────┬────────────────────┬───────────────────┐
-      │ width │ zeros              │ least value       │
-      └───────┴────────────────────┴───────────────────┘
-```
-
-#### Scenario: Lanes pack at the width of their span
-- **WHEN** a chunk with lanes of equal values and of spans that need 1,
-  2, 4 and 8 bytes is packed and unpacked, and a chunk whose lane holds
-  -1 and 0 is packed
-- **THEN** the packed length is the sum of those widths and the chunk
-  reads back; the lane of -1 and 0 has a least value of -1, a width of 1
-  byte and the bytes 0 and 1
-- **Verified by:**
-  `crates/relspill/src/columns.rs::lanes_pack_at_the_width_of_their_span_and_read_back`;
-  `crates/relspill/src/columns.rs::a_lane_is_stored_from_its_least_signed_value`
-
-#### Scenario: Empty and full chunks
-- **WHEN** a chunk with no rows and a chunk filled to its capacity are
-  packed and unpacked
-- **THEN** both read back as they were
-- **Verified by:**
-  `crates/relspill/src/columns.rs::empty_and_full_chunks_round_trip`
-
-#### Scenario: A damaged packed chunk of columns
-- **WHEN** a packed chunk of columns is cut short, has a wrong length
-  for its counts, a width of 3, bytes past its lanes, or one row more
-  than a chunk of its words holds
-- **THEN** unpacking fails as damaged data
-- **Verified by:**
-  `crates/relspill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`;
-  `crates/relspill/src/columns.rs::a_chunk_keeps_within_its_limits`
-
-### Requirement: The pair of a chunk of columns
-A chunk of columns written with its chunk of values SHALL be written as
-a pair of blocks under one number: its values first, a block of kind
-`TESS_SPILL_VALUES`, then its rows, a block of kind
-`TESS_SPILL_COLUMNS`. A reader has the values in hand before the words
-that refer to them. A chunk with no values SHALL be written as its rows
-alone, which are then the whole pair.
-
-- `tess_spill_columns_pair` SHALL refuse, as damaged data, a block read
-  as one of the pair that is of another kind or another number; the
-  rows read as the first block are the pair of a chunk with no values.
-- `tess_spill_columns_check` SHALL check a chunk read back once, so that
-  its rows are read unchecked after: its words, its rows when the caller
-  counted them, and every word of a column not by value of a row not
-  NULL, which SHALL refer into its chunk of values, to a byte aligned to
-  8, where every writer places a value so that its pointer serves any
-  type, or to its end, where an empty value lies, and whose value SHALL
-  end inside the values by its type's length. Any of these that fails
-  SHALL be damaged data.
-- `tess_spill_columns_window` SHALL give a window of the rows of a
-  checked chunk's first columns as Datums and NULL flags, a value by
-  reference as a pointer into the values. Words or rows past the
-  chunk's SHALL be an internal error, SQLSTATE `XX000`.
-
-#### Scenario: A pair read back
-- **WHEN** rows of a column by value and of a varlena, with NULLs, are
-  appended to a chunk, and the chunk is checked with its values and
-  read by windows
-- **THEN** every word, NULL and value is the one written, a varlena a
-  pointer to its bytes in the values
-- **Verified by:**
-  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_is_checked_then_read_by_windows`;
-  `crates/tessera-capi/tests/spill.rs::a_chunk_of_columns_reads_back_through_its_entry_points`
-
-#### Scenario: A chunk with no values
-- **WHEN** a writer writes a chunk whose rows have no value by
-  reference, and a reader loads it
-- **THEN** the chunk is written as its rows alone, with no block of
-  values, and loads as a pair does, every word and NULL the one written
-- **Verified by:**
-  `test/sql/spill.sql::tessera_test_spill_columns`;
-  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`
-
-#### Scenario: A pair not as it was written
-- **WHEN** a block of the pair of another kind or number is read, or a
-  chunk of another count of words or rows, or with a word that refers
-  past its values, to another chunk, to nothing, or to a byte not
-  aligned to 8
-- **THEN** each is damaged data, SQLSTATE `XX001`; a window past the
-  rows or a block past the pair is `XX000`
-- **Verified by:**
-  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`;
-  `crates/tessera-capi/tests/spill.rs::a_chunk_of_columns_reads_back_through_its_entry_points`
-
 ### Requirement: The writer and the reader of chunks of columns
 `TessColumnsWriter` SHALL append a batch's rows to its chunk of
 columns, their by-reference values copied into the chunk's own values,
@@ -416,6 +255,13 @@ load or show.
 - **THEN** every row reads back as written, the large value first in a
   chunk of its own, and the values grown for it stay for the chunks
   after it
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_columns`
+
+#### Scenario: A chunk with no values
+- **WHEN** a writer writes a chunk whose rows have no value by
+  reference, and a reader loads it
+- **THEN** the chunk is written as its rows alone, with no block of
+  values, and loads as a pair does, every word and NULL the one written
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_columns`
 
 #### Scenario: A chunk shown from memory, and buffers handed over

@@ -352,10 +352,10 @@ written without packing.
 A text, or any other value that does not fit in 8 bytes, does not lie
 inside a record or a column. PostgreSQL calls such values by-reference
 values. Tessera copies them into chunks of values. The record or the
-column holds a reference to the value in one word of 8 bytes. The spec
-defines the reference ([spec.md](spec.md), "A reference to a
-by-reference value"): the number of the chunk of values, plus one, and
-the byte of the value in that chunk.
+column holds a reference to the value in one word of 8 bytes. The
+crate's documentation defines the reference
+([`value_ref`](../../../crates/relspill/src/columns.rs)): the number of
+the chunk of values, plus one, and the byte of the value in that chunk.
 
 A reference is never a memory address. So it stays correct after the
 chunk has been on disk, and it is correct in another process. One is
@@ -451,9 +451,9 @@ without a file.
 In memory, a chunk of columns has a small header and then lanes. A lane
 is an array with one 8-byte word for each row. Row number `i` is word
 `i` of every lane. The first lanes hold the NULL bits of the rows. After
-them there is one lane for each word of a row. The spec draws this
-layout and says which bit marks a NULL ([spec.md](spec.md), "A chunk of
-columns in memory").
+them there is one lane for each word of a row. The crate's
+documentation draws this layout and says which bit marks a NULL
+([`columns`](../../../crates/relspill/src/columns.rs)).
 
 A word of a row is one of three things: a value that fits in 8 bytes,
 a reference to a long value, or 0 for a NULL.
@@ -474,9 +474,9 @@ difference needs:
  1000001 1000002 1000003 …   ──►   0 1 2 …
 ```
 
-The spec defines the encoding: the layout of the packed chunk, the
-descriptor of a lane and the widths a value can have
-([spec.md](spec.md), "A chunk of columns on disk").
+The crate's documentation defines the encoding: the layout of the
+packed chunk, the descriptor of a lane and the widths a value can have
+([`columns::pack`](../../../crates/relspill/src/columns.rs)).
 
 Why differences? The values of one column are often large but close to
 each other, like order numbers or dates. Their differences are small

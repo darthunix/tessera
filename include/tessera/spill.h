@@ -406,9 +406,10 @@ extern TessStatusCode tess_spill_columns_pair(const TessSpillHeader *header, int
  * chunk of values_len bytes at values, once and in one pass, so that its
  * rows are read unchecked after: it holds words words and, unless rows is
  * -1, rows rows; and every word of its first ncolumns columns not by value
- * (byvals) of a row that is not NULL refers into the values, to a byte or
- * to their end, where an empty value lies, and the value there ends inside
- * them by its type's length (typlens; -1 a varlena, -2 a C string, as
+ * (byvals) of a row that is not NULL refers into the values, to a byte
+ * aligned to 8, where every writer places a value, or to their end, where
+ * an empty value lies, and the value there ends inside them by its type's
+ * length (typlens; -1 a varlena, -2 a C string, as
  * tess_spill_value_fits tells), a TOAST pointer to data on disk by a tag
  * the core has: toast_oid8 where it has pointers of 64-bit chunk ids, tag
  * 4, beside tag 18. Any of these that fails, or a chunk that is no chunk

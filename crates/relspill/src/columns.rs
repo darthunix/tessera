@@ -2,23 +2,40 @@
 //!
 //! A join's outer rows that wait for their partition are never linked or
 //! probed: they are written, read once and probed then. They are kept as
-//! a chunk of columns instead of the table's records: a header, then a
-//! lane per column of `capacity` words each, first the rows' NULL bits
-//! (bit `w % 64` of lane `w / 64` for word `w`, one lane at least), then a
-//! lane per stored word (a by-value
-//! Datum, or the reference of a by-reference value; 0 for a NULL). The
-//! rows fill the lanes from the first place on, and a lane is read back as
-//! an array of Datums, with no gathering.
+//! a chunk of columns instead of the table's records, and a lane is read
+//! back as an array of Datums, with no gathering. A chunk is a header of
+//! [`HEADER`] bytes, then lanes of `capacity` words of 8 bytes each:
+//! first the lanes of the rows' NULL bits, one for every 64 stored words
+//! and one at least ([`null_lanes`]), then a lane for each stored word.
+//! Bit `w % 64` of lane `w / 64` of a row is set when its word `w` is
+//! NULL. A row's word is a by-value Datum, the reference of a
+//! by-reference value ([`value_ref`]), or 0 for a NULL. The rows fill
+//! the lanes from the first place on.
+//!
+//! ```text
+//!  byte 0      4          8             12       16
+//!       ┌──────┬──────────┬─────────────┬────────┐
+//!       │ rows │ capacity │ words a row │ "COLS" │
+//!       ├──────┴──────────┴─────────────┴────────┤
+//!    16 │ lanes of NULL bits, capacity × 8 bytes │
+//!       │ each: one for every 64 words a row,    │
+//!       │ at least one                           │
+//!       ├────────────────────────────────────────┤
+//!       │ lanes of words, capacity × 8 bytes     │
+//!       │ each: one for each word of a row       │
+//!       └────────────────────────────────────────┘
+//! ```
+//!
+//! The header's fields lie at [`ROWS_AT`], [`CAPACITY_AT`] and
+//! [`WORDS_AT`], then the magic, the bytes `COLS`, every one a `u32` in
+//! the machine's byte order, as every word of a spilled block is. A chunk
+//! holds at most [`MAX_WORDS`] words a row and [`MAX_ROWS`] rows, and no
+//! more rows than pack into the 4 GiB that a block's packed length can
+//! name ([`capacity`]).
 //!
 //! On disk a chunk's lanes are stored for its rows only, each by frame of
-//! reference: the lane's least value as a signed word and every value's
-//! difference from it in 1, 2, 4 or 8 bytes, the fewest that hold them
-//! all, or none when every value is the same. The chunk read back has a
-//! capacity of its row count.
-//!
-//! The header, in native byte order as every spilled block: the row count
-//! and the capacity (a `u32` each), the stored words (a `u32`) and a
-//! magic `u32`.
+//! reference, as [`pack`] draws. The chunk read back has a capacity of
+//! its row count.
 
 use crate::error::ensure;
 use crate::{Error, Result, Rule, low};
@@ -38,9 +55,19 @@ pub const MAX_WORDS: usize = 4096;
 pub const VALUE_BYTE_BITS: u32 = 32;
 
 /// The word that refers to the by-reference value at `byte` of the chunk
-/// of values numbered `chunk`. It is never 0, which is no reference. A
-/// chunk of columns written with one chunk of values before it refers to
-/// that chunk as number 0.
+/// of values numbered `chunk`, for a `chunk` below `u32::MAX` and a
+/// `byte` below 2^32: other numbers make no reference to them. It is
+/// never 0, which is no reference. A chunk of columns written with one
+/// chunk of values before it refers to that chunk as number 0. A chunk
+/// of values is at most 4 GiB:
+///
+/// ```text
+///  bit 63                        32 31                             0
+///      ┌───────────────────────────┬───────────────────────────────┐
+///      │ number of the chunk of    │ byte of the value in that     │
+///      │ values, plus one          │ chunk                         │
+///      └───────────────────────────┴───────────────────────────────┘
+/// ```
 #[inline]
 pub fn value_ref(chunk: u32, byte: usize) -> u64 {
     ((u64::from(chunk) + 1) << VALUE_BYTE_BITS) | byte as u64
@@ -134,6 +161,11 @@ pub fn capacity(len: usize, words: usize) -> usize {
 
 /// Make the `len` bytes of `chunk` an empty chunk of `words` stored words;
 /// its capacity is returned, 0 for a chunk of a header only.
+///
+/// # Errors
+///
+/// A wrong call for bytes too short for the header or of a length that
+/// is no multiple of 8, and for more than [`MAX_WORDS`] words.
 pub fn init(chunk: &mut [u8], words: usize) -> Result<usize> {
     ensure!(
         chunk.len() >= HEADER && chunk.len().is_multiple_of(8),
@@ -152,6 +184,12 @@ pub fn init(chunk: &mut [u8], words: usize) -> Result<usize> {
 }
 
 /// The shape of the chunk at `chunk`, checked against its length.
+///
+/// # Errors
+///
+/// A wrong call for bytes too short for the header, without the magic,
+/// or whose header names more words or rows than a chunk holds or than
+/// the bytes hold.
 pub fn shape(chunk: &[u8]) -> Result<Shape> {
     ensure!(
         chunk.len() >= HEADER,
@@ -221,6 +259,37 @@ fn get<const W: usize>(packed: &[u8], base: u64, out: &mut [u8]) {
 /// Pack the chunk at `chunk` into `out`, which needs [`pack_bound`] bytes
 /// for its rows: the packed length and the length of the chunk read back
 /// (its lanes for its rows only) are returned.
+///
+/// The packed body holds the chunk's rows only, each lane by frame of
+/// reference: the lane's least value and every value's difference from
+/// it, in 0, 1, 2, 4 or 8 bytes each, the fewest that hold the lane's
+/// largest difference. The words of a lane are compared as signed
+/// numbers of 64 bits, and a difference is taken modulo 2^64. A lane
+/// whose values are all equal has a width of 0 and takes no bytes past
+/// its descriptor; in a chunk without rows every lane has a width of 0
+/// and a least value of 0. The lanes of NULL bits are stored as the
+/// lanes of words are, and each lane's values are padded to a multiple
+/// of 8:
+///
+/// ```text
+///  ┌─────────┬─────────────┬─────────────────────┬─────────────────────┐
+///  │ rows    │ words a row │ a descriptor for    │ each lane's values  │
+///  │         │             │ each lane, 16 bytes │ less its least one, │
+///  │ 4 bytes │ 4 bytes     │                     │ padded to 8         │
+///  └─────────┴─────────────┴─────────────────────┴─────────────────────┘
+///
+///  a descriptor
+///  byte 0       1                    8                   16
+///       ┌───────┬────────────────────┬───────────────────┐
+///       │ width │ zeros              │ least value       │
+///       └───────┴────────────────────┴───────────────────┘
+/// ```
+///
+/// # Errors
+///
+/// A wrong call, as [`shape`] gives it, for bytes that are no chunk of
+/// columns; for a chunk of a length that is no multiple of 8; and for
+/// `out` shorter than [`pack_bound`] of its rows.
 pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
     let shape = shape(chunk)?;
     ensure!(
@@ -276,7 +345,14 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
 }
 
 /// Unpack the `packed` bytes of a chunk into `out`, of the length
-/// [`pack`] returned for it: a chunk of a capacity of its row count.
+/// [`pack`] returned for it: a chunk with the same rows, words and values,
+/// of a capacity of its row count.
+///
+/// # Errors
+///
+/// Damaged bytes for a body too short for its counts, more rows or words
+/// than a chunk holds, a length that does not match its counts, a width
+/// that does not exist, a lane cut short, or bytes past its lanes.
 pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
     ensure!(packed.len() >= 8, Error::damaged(Rule::ColumnsCounts));
     let rows = get_u32(packed, 0) as usize;

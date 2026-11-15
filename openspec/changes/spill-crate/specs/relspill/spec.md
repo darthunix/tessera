@@ -168,6 +168,148 @@ fill the chunk and the body exactly, as its documentation lists.
 - **Verified by:**
   `crates/relspill/src/pack.rs::damaged_packed_bodies_are_refused`
 
+### Requirement: A chunk of columns
+A chunk of rows by column SHALL have the layout and the limits that
+[`columns`](../../../crates/relspill/src/columns.rs) draws, of at most
+[`MAX_WORDS`](../../../crates/relspill/src/columns.rs) words a row and
+[`MAX_ROWS`](../../../crates/relspill/src/columns.rs) rows. A call SHALL
+refuse as a wrong call bytes too short for the header or of a length
+that is no multiple of 8, and bytes without the magic of a chunk of
+columns.
+
+#### Scenario: A lane of NULL bits for every 64 words
+- **WHEN** the lanes of NULL bits are counted for 0, 64, 65 and 130
+  words, and a chunk of 130 words a row is filled, packed and read back
+- **THEN** there are 1, 1, 2 and 3 lanes, the words' lanes start after
+  them, and every lane reads back
+- **Verified by:**
+  `crates/relspill/src/columns.rs::wide_chunks_take_a_lane_of_null_bits_per_64_words`
+
+#### Scenario: Rows appended to a chunk
+- **WHEN** rows with NULLs, by-value words and by-reference values in up
+  to 69 columns are appended to a chunk
+- **THEN** each row's words lie in their lanes at the row's place, a
+  NULL has its bit set and a word of 0, and a by-reference word is a
+  reference to the place of its bytes
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`
+
+#### Scenario: Rows of more than 64 words appended by partition
+- **WHEN** rows of 64, 65, 70 and 130 words, with NULLs past word 64,
+  are appended by partition
+- **THEN** the NULL bit of word `w` lies in lane `w / 64`, and the words
+  lie in their lanes
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::rows_wider_than_64_words_keep_a_lane_of_null_bits_per_64`;
+  `crates/tessera-capi/tests/table.rs::rows_of_70_words_append_by_partition`
+
+#### Scenario: A chunk that is not one of columns
+- **WHEN** a chunk of 8 bytes is made, or a chunk whose magic is not
+  `COLS` is packed
+- **THEN** the call is refused
+- **Verified by:**
+  `crates/relspill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`
+
+#### Scenario: The limits of a chunk
+- **WHEN** a chunk is made with more than 4096 words a row or with a
+  length that is no multiple of 8, its length would hold more than
+  131071 rows or more than pack into 4 GiB, or a chunk with a byte past
+  a length of 8s is packed
+- **THEN** the first two are refused, the capacity stops at 131071 or
+  at the rows that pack into 4 GiB, and the packing is refused
+- **Verified by:**
+  `crates/relspill/src/columns.rs::a_chunk_keeps_within_its_limits`
+
+### Requirement: A reference to a value
+A word of a record or of a row that refers to a by-reference value
+SHALL be the reference that
+[`value_ref`](../../../crates/relspill/src/columns.rs) draws, which
+names the value's chunk of values and its byte there, and is never 0
+for the chunks and the bytes its documentation allows.
+
+#### Scenario: Rows appended with their values
+- **WHEN** rows with by-reference values are appended to a chunk of
+  columns and their values to its chunk of values
+- **THEN** the word of each such value is a reference to chunk 0 at the
+  byte its bytes were copied to
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`;
+  `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
+
+### Requirement: A chunk of columns on disk
+A chunk of columns SHALL be stored packed, for its rows only, in the
+body that [`columns::pack`](../../../crates/relspill/src/columns.rs)
+draws: each lane by frame of reference, its least value and every
+value's difference from it in the fewest bytes that hold them all.
+[`columns::unpack`](../../../crates/relspill/src/columns.rs) SHALL give
+back a chunk with the same rows, words and values, whose capacity is
+its rows, and SHALL refuse as damaged bytes a body whose counts, widths
+and lanes do not fill the chunk and the body exactly, as its
+documentation lists.
+
+#### Scenario: Lanes pack at the width of their span
+- **WHEN** a chunk with lanes of equal values and of spans that need 1,
+  2, 4 and 8 bytes is packed and unpacked, and a chunk whose lane holds
+  -1 and 0 is packed
+- **THEN** the packed length is the sum of those widths and the chunk
+  reads back; the lane of -1 and 0 has a least value of -1, a width of 1
+  byte and the bytes 0 and 1
+- **Verified by:**
+  `crates/relspill/src/columns.rs::lanes_pack_at_the_width_of_their_span_and_read_back`;
+  `crates/relspill/src/columns.rs::a_lane_is_stored_from_its_least_signed_value`
+
+#### Scenario: Empty and full chunks
+- **WHEN** a chunk with no rows and a chunk filled to its capacity are
+  packed and unpacked
+- **THEN** both read back as they were
+- **Verified by:**
+  `crates/relspill/src/columns.rs::empty_and_full_chunks_round_trip`
+
+#### Scenario: A damaged packed chunk of columns
+- **WHEN** a packed chunk of columns is cut short, has a wrong length
+  for its counts, a width of 3, bytes past its lanes, or one row more
+  than a chunk of its words holds
+- **THEN** unpacking fails as damaged bytes
+- **Verified by:**
+  `crates/relspill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`;
+  `crates/relspill/src/columns.rs::a_chunk_keeps_within_its_limits`
+
+### Requirement: The pair of a chunk of columns
+A chunk of columns written with its chunk of values SHALL be written as
+the [`PAIR`](../../../crates/relspill/src/spill_columns.rs) of blocks
+under one number, its values first, so that a reader has the values in
+hand before the words that refer to them; a chunk with no values SHALL
+be written as its rows alone.
+[`check_pair`](../../../crates/relspill/src/spill_columns.rs) SHALL
+refuse as damaged bytes a block read as one of the pair that is of
+another kind or number, and
+[`check`](../../../crates/relspill/src/spill_columns.rs) SHALL check a
+chunk read back once, so that
+[`window`](../../../crates/relspill/src/spill_columns.rs) reads its
+rows unchecked after: its words, its rows when the caller counted them,
+and every word of a column by reference of a row not NULL, which SHALL
+refer into its values, to a byte aligned to 8 or to their end, by a
+value that ends inside them.
+
+#### Scenario: A pair read back
+- **WHEN** rows of a column by value and of a varlena, with NULLs, are
+  appended to a chunk, and the chunk is checked with its values and
+  read by windows
+- **THEN** every word, NULL and value is the one written, a varlena a
+  place of its bytes in the values
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_is_checked_then_read_by_windows`
+
+#### Scenario: A pair not as it was written
+- **WHEN** a block of the pair of another kind or number is read, or a
+  chunk of another count of words or rows, or with a word that refers
+  past its values, to another chunk, to nothing, or to a byte not
+  aligned to 8; and a chunk with no values is read as the first block
+- **THEN** each of the first is damaged bytes, and the chunk with no
+  values is the whole pair
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`
+
 ### Requirement: The file of a set
 The crate SHALL own the whole format of the file of a set: the blocks,
 the block list of each partition, and the trailer of a file that other
