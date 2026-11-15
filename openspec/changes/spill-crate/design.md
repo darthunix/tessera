@@ -920,6 +920,22 @@ files through the same calls, by the C entry points that map to them,
 and `test/sql/spill_damage.sql` damages the blocks a join, a sort and
 a grouping read back, through injection points of PostgreSQL.
 
+The fuzz targets of `crates/relspill/fuzz` give the reads and the
+machines what no list can: `bytes` reads any bytes as a set's file, of
+a set the bytes before them choose, and as a block and the packed
+bodies a block holds; `damaged` writes a set from the fuzzer's bytes,
+damages it in one to eight places they choose, and reads every
+partition back, each block, each chunk of columns checked and read by
+windows, and seeks; `machines` makes a machine of the crate from any
+params or from any words, a set's reader and writer among them, and
+steps it by any events and numbers over host regions of any numbers,
+which grow as its actions ask. A target fails on a panic, a call that
+does not end, a read a step asks for past the file or its region, an
+error of another kind than its call promises, and a machine a refused
+step changed. A host makes regions for at most as many partitions as a
+spill's words count; a writer of more, of any words, takes as long as
+its count of lists, and the target leaves it out.
+
 The words of a spill that the participants share, and the block lists
 a host keeps for a writer, are the host's memory too, but they hold no
 bytes of a file and are no trust point: the crate checks each where it

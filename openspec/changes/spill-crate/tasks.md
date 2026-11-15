@@ -373,7 +373,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       `cargo kani -p relspill` in CI
 - [x] 6.3 The damage matrix: damaged files against every read of the
       crate and of the nodes. Check: its tests
-- [ ] 6.4 Fuzz targets: any bytes as a file; any events and numbers
+- [x] 6.4 Fuzz targets: any bytes as a file; any events and numbers
       given to a machine. Check: the fuzz workflow, a minute a target
       on a pull request, and an hour a target before the close
 - [x] 6.5 Tests that no call of the crate allocates memory, under a

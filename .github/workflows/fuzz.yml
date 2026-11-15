@@ -1,16 +1,21 @@
-# The fuzz targets of relhash (crates/relhash/fuzz): tables built from
-# the fuzzer's bytes, damaged where they choose, and the crate's calls
-# over them, with any arguments, under AddressSanitizer. A pull request
-# that changes the crate runs each target for a minute; a run by hand
-# (workflow_dispatch) for as long as it is given, an hour by default,
-# before a release of the crate. An input that fails is kept as an
-# artifact, and becomes a case of the matrix of damage.
+# The fuzz targets of relhash and relspill (crates/*/fuzz), under
+# AddressSanitizer. Those of relhash: tables built from the fuzzer's
+# bytes, damaged where they choose, and the crate's calls over them,
+# with any arguments. Those of relspill: any bytes as a set's file, a
+# set written and damaged where they choose, every read over it; and
+# the machines stepped by any events and numbers. A pull request that
+# changes either crate runs each target of both for a minute; a run by
+# hand (workflow_dispatch) for as long as it is given, an hour by
+# default, before a release of a crate. An input that fails is kept as
+# an artifact, and becomes a case of the crate's matrix of damage or of
+# a machine's tests.
 name: Fuzz
 
 on:
   pull_request:
     paths:
       - "crates/relhash/**"
+      - "crates/relspill/**"
       - ".github/workflows/fuzz.yml"
   workflow_dispatch:
     inputs:
@@ -24,9 +29,13 @@ concurrency:
 
 jobs:
   fuzz:
-    name: Fuzz relhash (ubuntu-24.04)
+    name: Fuzz ${{ matrix.crate }} (ubuntu-24.04)
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [relhash, relspill]
     env:
       # cargo-fuzz needs a nightly: the one Miri's job pins.
       RUSTUP_TOOLCHAIN: nightly-2026-09-11
@@ -40,16 +49,16 @@ jobs:
           tool: cargo-fuzz@0.13.2
       - uses: Swatinem/rust-cache@v2
         with:
-          key: fuzz
-          workspaces: "crates/relhash/fuzz -> target"
+          key: fuzz-${{ matrix.crate }}
+          workspaces: "crates/${{ matrix.crate }}/fuzz -> target"
       # The workspace's checks do not reach this crate.
       - name: The format and lints of the targets
-        working-directory: crates/relhash/fuzz
+        working-directory: crates/${{ matrix.crate }}/fuzz
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
       - name: Each target
-        working-directory: crates/relhash
+        working-directory: crates/${{ matrix.crate }}
         # The cargo-fuzz installed is built for musl and builds for it
         # unless told: AddressSanitizer needs the host's glibc. An input
         # that runs ten seconds is taken for a call without end.
@@ -63,6 +72,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: fuzz-artifacts
-          path: crates/relhash/fuzz/artifacts
+          name: fuzz-artifacts-${{ matrix.crate }}
+          path: crates/${{ matrix.crate }}/fuzz/artifacts
           if-no-files-found: ignore
