@@ -6,6 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 description = "The spill of the joins, groupings and sorts of relational databases to temporary files, which its caller reads and writes"
 repository = "https://github.com/darthunix/tessera"
+readme = "README.md"
 # A crate meant for use outside Tessera, whose API a spec may name
 # (CONTRIBUTING.md); it is not published on crates.io for now.
 publish = true

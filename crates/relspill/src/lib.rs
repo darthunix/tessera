@@ -1,22 +1,6 @@
-//! Blocks of temporary storage.
-//!
-//! A node that spills writes chunks whole: a chunk of a hash table's
-//! records (the table's own format, see `openspec/specs/hash-table/`), a
-//! chunk of the by-reference values that records or rows refer to, or a
-//! chunk of rows by column ([`columns`]). Each goes to disk as a
-//! [`BlockHeader`] and then the chunk's bytes, so reading one back gives a
-//! chunk that is ready at once: the records need no decoding, only linking
-//! into a new index. The header says which chunk it was and of which
-//! partition and level, and carries the table's layout fingerprint, so
-//! that a block of another table or a damaged file is an error, never a
-//! record read the wrong way.
-//!
-//! This crate reads and writes nothing: it lays out and checks headers in
-//! the caller's buffers. The files are the node's, through PostgreSQL's
-//! temporary files (see `docs/spill.md`). Temporary files are read back by
-//! the process, or the processes of one query, that wrote them, on the
-//! same machine: the header is in native byte order and carries no
-//! checksum, as PostgreSQL's own temporary files do not.
+// The crate's page is its README.
+#![doc = include_str!("../README.md")]
+//! # Errors
 //!
 //! A call that refuses returns an [`Error`], one word: a wrong call, a
 //! value the caller passed, or damaged bytes, read back from a file, and
