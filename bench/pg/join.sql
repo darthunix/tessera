@@ -89,6 +89,10 @@ AS $function$
 DECLARE
     mode text;
 BEGIN
+    -- run.sh measure with CASES: only the cases it matches are timed.
+    IF test_name !~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') THEN
+        RETURN;
+    END IF;
     FOREACH mode IN ARRAY ARRAY['on', 'off'] LOOP
         PERFORM set_config('tessera.enable', mode, false);
         FOR warmup IN 1..5 LOOP
