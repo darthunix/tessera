@@ -106,8 +106,9 @@ this one is the cut of `agg.c` (`--cases '^g_(sum|avg)_int8$'
 A family whose modes are not `on` and `off` (the probe family's worker
 counts) gets a row per mode, without a control.
 
-The tool exits 0 when nothing is slower, 1 when a case is, 2 on an error.
-The candidate stays installed.
+The tool exits 0 when nothing is flagged, 1 when a case is slower or,
+by counts, writes more to disk or ran another plan, 2 on an error. The
+candidate stays installed.
 
 ### Counts instead of times
 
@@ -136,6 +137,27 @@ that trades instructions for memory traffic, or a candidate whose times
 are in doubt, is measured by time as well. A count does not move with
 the code's place, so `--copt=-falign-functions=64` does not apply to
 it.
+
+Two more things come from the EXPLAIN that counted each case:
+
+- **`disk`**, the ratio of the kB its plan's nodes report written to
+  disk (Disk Usage), shown where either side wrote any. The batch nodes
+  and the core's hash aggregate print it, the core's sort and hash join
+  do not. It is flagged **more disk** past the same threshold, so a
+  spill's change is read by the pair: the instructions of its work and
+  the volume it writes. It is judged only where every count of a side
+  wrote the same: with parallel workers it moves from run to run and
+  is marked `disk varies`. The I/O itself, the size and number of its
+  writes, is seen by time only.
+- **`plan differs`**: the counts of the case ran plans of more than one
+  shape, on one side or between the two. The shape is each node's type
+  or batch node, with its strategy, join type and planned workers, its
+  relation and its index (the column `plan` of `timings.csv`). EXPLAIN
+  ANALYZE counts the rows of a row-wise node one by one and of a batch
+  node batch by batch, so such a count compares other nodes, not the
+  change. The case gets no ratio and is flagged: time it. Where only
+  its control's plans differ, it keeps its ratios, loses its control,
+  and is marked `control's plan differs`.
 
 ### A flagged case
 
@@ -214,7 +236,8 @@ with a `build.txt` naming its side and revision.
 ## Tests
 
 `cargo test -p tessera-ab` checks the parsing of `timings.csv`, a side's
-summary, the verdicts against the control, the table of counts, that
-`--counters` reaches `run.sh` and its restart, which then preloads
-pg_pmu, and `moved` on small files. A measurement needs PostgreSQL and
+summary, the verdicts against the control, the table of counts with
+its disk and the cases whose plans differ, that `--counters` reaches
+`run.sh` and its restart, which then preloads pg_pmu, and `moved` on
+small files. A measurement needs PostgreSQL and
 is run by hand.

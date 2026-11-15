@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
 #[derive(Parser, Debug)]
 #[command(
     about = "Compare two revisions of Tessera at the level of PostgreSQL.",
-    after_help = "Exit of measure: 0 nothing slower, 1 a case slower past the threshold, 2 an error.\nExit of moved: 0 every line of the base moved, 1 a line missing, 2 an error."
+    after_help = "Exit of measure: 0 nothing flagged, 1 a case flagged (slower past the threshold; by counts also more disk or another plan), 2 an error.\nExit of moved: 0 every line of the base moved, 1 a line missing, 2 an error."
 )]
 struct Cli {
     #[command(subcommand)]

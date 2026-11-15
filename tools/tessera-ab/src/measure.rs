@@ -193,7 +193,7 @@ pub fn run(repo: &Path, options: &Options) -> Result<u8> {
         "The candidate stays installed. Report: {}",
         root.join("report.md").display()
     );
-    Ok(u8::from(report.slower))
+    Ok(u8::from(report.flagged))
 }
 
 /// A snapshot's build, kept between runs under `builds`, by its sources'
@@ -322,7 +322,8 @@ fn check_installed(run: &Path, build: &Path) -> Result<()> {
 
 struct Report {
     text: String,
-    slower: bool,
+    /// A case is slower, writes more to disk, or ran another plan.
+    flagged: bool,
 }
 
 fn report(
@@ -392,12 +393,25 @@ fn report(
          and by its median beyond the control.\n",
         options.threshold()
     )?;
+    if options.counters {
+        writeln!(
+            text,
+            "`disk` compares the kB the plan's nodes report written to disk (Disk Usage, \
+             which the core's sort and hash join do not print), where either side wrote \
+             any, and is flagged past the same threshold where every count of a side wrote \
+             the same; with parallel workers it varies and is not judged. A case is counted \
+             fairly only where all its counts on both sides ran one plan shape: EXPLAIN \
+             ANALYZE counts the rows of a row-wise node one by one and of a batch node batch \
+             by batch. A case whose plans differ has no ratio and is marked `plan differs`, \
+             and one whose control's plans differ has no control.\n"
+        )?;
+    }
     let unit = if options.counters {
         stats::Unit::Instructions
     } else {
         stats::Unit::Milliseconds
     };
-    let mut slower = false;
+    let (mut slower, mut replanned, mut more_disk) = (false, false, false);
     for (family, [base_runs, candidate_runs]) in measured {
         let read = |runs: &[PathBuf]| -> Result<Vec<stats::Run>> {
             runs.iter()
@@ -405,11 +419,14 @@ fn report(
                 .collect()
         };
         let (base, candidate) = (read(base_runs)?, read(candidate_runs)?);
-        let timings = |runs: &[stats::Run]| -> Vec<stats::Timings> {
-            runs.iter().map(|run| run.timings.clone()).collect()
-        };
-        let rows = stats::compare(&timings(&base), &timings(&candidate), threshold);
+        let rows = stats::compare(&base, &candidate, threshold);
         slower |= rows.iter().any(|row| row.verdict == Verdict::Slower);
+        replanned |= rows
+            .iter()
+            .any(|row| matches!(row.verdict, Verdict::Replanned { .. }));
+        more_disk |= rows
+            .iter()
+            .any(|row| row.disk.is_some_and(|disk| disk.verdict == Verdict::Slower));
         writeln!(text, "## {family}\n\n{}", stats::table(&rows, unit))?;
         let dropped: usize = base.iter().chain(&candidate).map(|run| run.dropped).sum();
         if dropped > 0 {
@@ -450,9 +467,29 @@ fn report(
             "Measure a flagged case again alone and longer (--cases, --repetitions 101); if it \
              stays, --copt=-falign-functions=64 tells whether it is the code's place."
         };
-        writeln!(text, "{hint}")?;
+        writeln!(text, "{hint}\n")?;
     }
-    Ok(Report { text, slower })
+    if more_disk {
+        writeln!(
+            text,
+            "A case flagged `more disk` spills more in the candidate: each run's timings.csv \
+             has the disk of every count, and plans.txt the Disk Usage and the spilled \
+             chunks of each node.\n"
+        )?;
+    }
+    if replanned {
+        writeln!(
+            text,
+            "A case marked `plan differs` ran another plan in the candidate, or more than one, \
+             so its count compares other nodes, not the change: the column plan of each \
+             run's timings.csv has the shape of every count. Time it (the same command \
+             without --counters, --cases for the case).\n"
+        )?;
+    }
+    Ok(Report {
+        text,
+        flagged: slower || more_disk || replanned,
+    })
 }
 
 /// The repository the tool runs in.
