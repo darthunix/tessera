@@ -93,6 +93,81 @@ row needs.
   `crates/relspill/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`;
   `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
 
+### Requirement: The header of a block
+Every block SHALL begin with the header that
+[`BlockHeader`](../../../crates/relspill/src/lib.rs) draws, of
+[`HEADER_SIZE`](../../../crates/relspill/src/lib.rs) bytes, and then
+its stored body: a chunk of a
+[`BlockKind`](../../../crates/relspill/src/lib.rs), of the lengths its
+kind allows. A writer SHALL refuse a header that a reader would refuse,
+and a reader SHALL check every field of a header before it returns it.
+
+#### Scenario: A header reads back as written
+- **WHEN** a header of a chunk of records or of values is written and
+  then read with the same fingerprint and bounds
+- **THEN** every field is returned unchanged
+- **Verified by:**
+  `crates/relspill/src/lib.rs::a_header_reads_back_as_written`
+
+#### Scenario: A header that would not read back is not written
+- **WHEN** a writer is given a header of records with a body length of
+  0, a body past its bound, or a header of values with a packed length
+- **THEN** the write fails and no header is written
+- **Verified by:**
+  `crates/relspill/src/lib.rs::a_header_that_would_not_read_back_is_not_written`
+
+#### Scenario: The lengths and the level of each kind
+- **WHEN** a header of columns has a body shorter than 16 bytes, or a
+  packed length of 0 or not a multiple of 8; and a header of any kind
+  has a level of 32, or a body past the bound of its kind
+- **THEN** it is refused on writing and on reading, while a header at
+  level 31 with a body of exactly its bound is taken
+- **Verified by:**
+  `crates/relspill/src/lib.rs::a_columns_header_keeps_its_lengths`;
+  `crates/relspill/src/lib.rs::the_level_and_the_limit_hold_for_every_kind`
+
+#### Scenario: A damaged field, or a block of another set
+- **WHEN** one field of a header is damaged: the magic, the version, the
+  kind, the packed length, the fingerprint, the body length or the
+  level; or a block is read with the fingerprint of another set
+- **THEN** the read fails as damaged bytes, by the rule of that field
+- **Verified by:**
+  `crates/relspill/src/lib.rs::every_damaged_field_is_refused`
+
+### Requirement: A packed chunk of records
+A chunk of records SHALL be stored packed, in the body that
+[`pack`](../../../crates/relspill/src/pack.rs) draws, only when that
+body is shorter than the chunk, and as it is otherwise.
+[`unpack`](../../../crates/relspill/src/pack.rs) SHALL give the chunk
+back byte for byte, except that every next-record reference is 0, as
+in a chunk not yet linked. It SHALL check the body as it unpacks it,
+and refuse as damaged bytes one whose counts, codes and lanes do not
+fill the chunk and the body exactly, as its documentation lists.
+
+#### Scenario: Lanes take the width their values need and read back
+- **WHEN** a chunk of records with lanes of zeros, equal values, and
+  values of one, two and four bytes is packed and unpacked
+- **THEN** each lane is stored at its width, and the chunk reads back
+  the same but for the next-record references
+- **Verified by:**
+  `crates/relspill/src/pack.rs::widths_follow_the_values_of_each_lane`
+
+#### Scenario: A chunk that does not get shorter stays as it is
+- **WHEN** the bytes are not a chunk of records, the used mark does not
+  match, the records differ in length, or packing would not shorten them
+- **THEN** packing is refused, and the block is stored as it is
+- **Verified by:**
+  `crates/relspill/src/pack.rs::what_is_no_chunk_of_records_stays_as_it_is`
+
+#### Scenario: A damaged packed body of records
+- **WHEN** a packed body is too short for its counts or its lane codes,
+  does not match the chunk it is unpacked into, has a lane code that
+  does not exist, stores the lane of the next-record references, has
+  records of another length than its own, or has bytes past its lanes
+- **THEN** unpacking fails as damaged bytes
+- **Verified by:**
+  `crates/relspill/src/pack.rs::damaged_packed_bodies_are_refused`
+
 ### Requirement: The file of a set
 The crate SHALL own the whole format of the file of a set: the blocks,
 the block list of each partition, and the trailer of a file that other

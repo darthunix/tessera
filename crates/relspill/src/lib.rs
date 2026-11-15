@@ -63,15 +63,24 @@ pub const HEADER_SIZE: usize = 48;
 /// level uses bits of a 32-bit hash that the levels above did not.
 pub const MAX_LEVEL: u32 = 32;
 
-/// What a block holds.
+/// What a block holds, by the code in its header, and the lengths each
+/// kind allows. For every kind the body length is a multiple of 8 and at
+/// most the bound of its kind ([`Bounds`]).
 #[repr(u32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockKind {
-    /// A chunk of records, its used mark first.
+    /// A chunk of a `relhash` table's records, its used mark of 8 bytes
+    /// first: a body of 8 bytes at least. It is stored as it is, with a
+    /// packed length of 0, or as [`pack`] packs it, with a packed length
+    /// that is a multiple of 8, at least 16 and below the body length.
     Records = 1,
-    /// A chunk of by-reference values.
+    /// A chunk of the by-reference values that records or rows refer to
+    /// ([`columns::value_ref`]), stored as it is: its packed length is 0.
     Values = 2,
-    /// A chunk of rows by column ([`columns`]), always stored packed.
+    /// A chunk of rows by column ([`columns`]): a body of
+    /// [`columns::HEADER`] bytes at least, always stored as
+    /// [`columns::pack`] packs it, with a packed length that is a multiple
+    /// of 8 and at least 8.
     Columns = 3,
 }
 
@@ -87,24 +96,47 @@ impl BlockKind {
 }
 
 /// The header of a block: which chunk follows and what it belongs to.
+///
+/// A block is this header, [`HEADER_SIZE`] bytes in the machine's byte
+/// order, and then the stored body, the chunk as it is or packed:
+///
+/// ```text
+///  byte    0           4           8           12          16
+///          ┌───────────────────────┬───────────┬───────────┐
+///        0 │ magic                 │ version   │ kind      │
+///          ├───────────┬───────────┼───────────┼───────────┤
+///       16 │ number    │ partition │ level     │ packed    │
+///          ├───────────┴───────────┼───────────┴───────────┤
+///       32 │ fingerprint           │ len                   │
+///          └───────────────────────┴───────────────────────┘
+///       48   the stored body
+/// ```
+///
+/// The magic is [`MAGIC`], whose bytes are `TESSSPIL` on a little-endian
+/// machine, the version [`VERSION`], and the kind the code of a
+/// [`BlockKind`]; the other fields are this struct's. The header carries
+/// no checksum: a temporary file is read back by the query that wrote it,
+/// on the same machine, as PostgreSQL's own temporary files are.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BlockHeader {
     /// The kind of the chunk that follows.
     pub kind: BlockKind,
-    /// The chunk's number in its table, records and values each numbered
-    /// on their own: a value reference names the value chunk by it.
+    /// The number the writer gives the chunk, records and values each
+    /// numbered on their own: a value reference names the value chunk by
+    /// it.
     pub number: u32,
     /// The partition the chunk's records or values belong to.
     pub partition: u32,
-    /// The level of partitioning, 0 for the first.
+    /// The level of partitioning, 0 for the first, below [`MAX_LEVEL`].
     pub level: u32,
-    /// The table's layout fingerprint.
+    /// The number the set was made with, which a reader compares with its
+    /// own: of a hash table's layout, or of the width of a row.
     pub fingerprint: u64,
-    /// Bytes of the body: a multiple of 8, at least 8 for records.
+    /// Bytes of the chunk a reader gets, the body unpacked; for a chunk of
+    /// columns, a chunk of its rows only. [`BlockKind`] gives its bounds.
     pub len: u64,
-    /// For a chunk of records stored packed ([`pack`]), the bytes on disk,
-    /// fewer than `len`, a multiple of 8; 0 when the body is stored as it
-    /// is, as every chunk of values is.
+    /// The bytes of the stored body when it is stored packed, 0 when it is
+    /// stored as it is; [`BlockKind`] says which kind is stored which way.
     pub packed: u32,
 }
 
@@ -223,6 +255,13 @@ impl BlockHeader {
     /// Lay the header out in the first [`HEADER_SIZE`] bytes of `out`,
     /// checking it as [`Self::read`] would, with `bounds` the most body
     /// bytes the reader accepts.
+    ///
+    /// # Errors
+    ///
+    /// A wrong call, and nothing written, for `out` shorter than a header
+    /// or a header that [`Self::read`] would refuse: a body length or a
+    /// packed length its kind does not allow, a body past the bound of its
+    /// kind, or a level of [`MAX_LEVEL`] or more.
     pub fn write(&self, out: &mut [u8], bounds: Bounds) -> Result<()> {
         ensure!(
             out.len() >= HEADER_SIZE,
@@ -242,8 +281,13 @@ impl BlockHeader {
     }
 
     /// Read and check the header at the start of `bytes`: the magic, the
-    /// version, a known kind, the table's `fingerprint` and a body length
-    /// within `bounds`.
+    /// version, a known kind, the set's `fingerprint`, the lengths its kind
+    /// allows within `bounds`, and the level.
+    ///
+    /// # Errors
+    ///
+    /// Damaged bytes for a field that fails a check; a wrong call for
+    /// `bytes` shorter than a header.
     pub fn read(bytes: &[u8], fingerprint: u64, bounds: Bounds) -> Result<Self> {
         ensure!(
             bytes.len() >= HEADER_SIZE,

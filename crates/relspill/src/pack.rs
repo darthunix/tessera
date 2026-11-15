@@ -12,11 +12,7 @@
 //! the lane of the next-record references is zero, as a chunk not yet
 //! linked has it. The offsets of a record's fields are `relhash`'s own
 //! constants, so a change of its layout changes the packing with it.
-//!
-//! The packed body: the record count and the record length (a `u32`
-//! each), a code byte per lane, padded to 4, then each lane's values one
-//! after another, the whole padded to 8. Native byte order, as the
-//! header's.
+//! [`pack`] draws the packed body.
 
 use relhash::{CHUNK_HEADER, KEY_SLOT, RECORD_HEADER, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET};
 
@@ -100,6 +96,30 @@ const PASS_LANES: usize = 64;
 /// Pack a chunk of records into `out`: the packed length, or `None` when
 /// the chunk is not one packing takes or would not get shorter, and then
 /// `out` holds nothing of use. `out` needs at most `chunk.len()` bytes.
+///
+/// Packing takes a chunk whose used mark counts the whole chunk, then one
+/// record or more, all of one length. The packed body sees the records as
+/// lanes of 4 bytes, the same lane of every record together, in the
+/// machine's byte order:
+///
+/// ```text
+///  ┌─────────┬─────────┬──────────────────┬──────────────────────────┐
+///  │ records │ record  │ a code for each  │ the lanes' data, a lane  │
+///  │         │ length  │ lane, 1 byte     │ after a lane             │
+///  │ 4 bytes │ 4 bytes │ padded to 4      │ padded to 8              │
+///  └─────────┴─────────┴──────────────────┴──────────────────────────┘
+/// ```
+///
+/// The record length is in bytes, and the codes and the lanes' data are
+/// padded with zeros. A lane gets the first code of these that fits its
+/// values:
+///
+/// - 0: every value is 0, and nothing is stored; the lane of the
+///   next-record references always has this code;
+/// - 1: all values are equal, and one value of 4 bytes is stored;
+/// - 2: every value is below 256, and 1 byte is stored for a record;
+/// - 3: every value is below 65536, and 2 bytes for a record;
+/// - 4: any other lane, and 4 bytes for a record.
 pub fn pack(chunk: &[u8], out: &mut [u8]) -> Option<usize> {
     let len = record_len(chunk)?;
     let records = &chunk[USED_MARK..];
@@ -185,7 +205,16 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Option<usize> {
 }
 
 /// Unpack a body [`pack`] made into `chunk`, which must be exactly the
-/// chunk's length.
+/// chunk's length: the chunk byte for byte, except that every next-record
+/// reference is 0, as in a chunk not yet linked.
+///
+/// # Errors
+///
+/// Damaged bytes, the bytes of `chunk` then of no use, for a body too
+/// short for its counts or its codes, counts that do not fill `chunk`, a
+/// code that does not exist, a next-record lane of another code than 0, a
+/// lane cut short, records of another length than the body's, or bytes
+/// past its last lane padded to 8.
 pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
     ensure!(
         packed.len() >= 8,

@@ -1,10 +1,10 @@
 # spill-format Specification
 
 ## Purpose
-The format of the blocks that the hash nodes and the external sort write
-to temporary files, the checks a reader applies before it trusts a
-block, and the sets of files that hold the blocks. When a node spills
-and what it keeps in memory belong to the node's own capability.
+The C API over the spill format of the crate `relspill`, and what
+PostgreSQL and SQL see of a spill. The hash nodes and the external sort
+write chunks of their memory to temporary files as blocks, and read
+them back.
 
 A chunk is a piece of a node's memory that is written whole: records of
 a hash table, the values they refer to, or rows kept by column. A block
@@ -12,142 +12,71 @@ is a chunk on disk: a header, then the stored body. A set is the blocks
 a node writes into one file, with a list of the blocks of each of its
 partitions. For a join and a grouping a partition is the rows of some
 bits of the hash, and a set belongs to one level of partitioning; for
-the sort a partition is one sorted run. The requirements go from the
-smallest piece to the largest: the header of a block, the three kinds of
-body and their packed forms, the file of a set, a shared set, reading a
-partition. [design.md](design.md) explains the whole and the reasons.
+the sort a partition is one sorted run. The blocks, their packed forms
+and what each call of the crate promises are in the spec of
+[relspill](../relspill/spec.md). The requirements here start with the
+C calls over the crate, then the errors of a damaged block, the chunks
+of columns, the file of a set, a shared set, reading a partition and
+the memory of a set. When a node spills and what it keeps in memory
+belong to the node's own capability. [design.md](design.md) explains
+the whole and the reasons.
 
 ## Requirements
 
-### Requirement: Block header layout
-Every spilled block SHALL begin with a header of 48 bytes in the
-machine's byte order, followed by the stored body.
-`tess_spill_header_size()` SHALL return 48.
+### Requirement: The C API over the crate
+Each call of `tessera/spill.h` over a block SHALL do what the calls of
+the crate `relspill` do, as the requirement of the spec of `relspill`
+named here says, and SHALL return the crate's error as a status, as
+"Damaged and foreign blocks are refused" says:
 
-```
- byte    0           4           8           12          16
-         ┌───────────────────────┬───────────┬───────────┐
-       0 │ magic                 │ version   │ kind      │
-         ├───────────┬───────────┼───────────┼───────────┤
-      16 │ number    │ partition │ level     │ packed    │
-         ├───────────┴───────────┼───────────┴───────────┤
-      32 │ fingerprint           │ body length           │
-         └───────────────────────┴───────────────────────┘
-      48   the stored body
-```
+- `tess_spill_header_size`, which returns 48, `tess_spill_header_write`
+  and `tess_spill_header_read`: "The header of a block";
+- `tess_spill_pack` and `tess_spill_unpack`: "A packed chunk of
+  records".
 
-- magic: a number of 64 bits whose bytes are `TESSSPIL` on a
-  little-endian machine;
-- version: the version of the format, 3;
-- kind: 1 records, 2 values, 3 columns;
-- number: a number the writer gives the chunk; a join finds a chunk
-  of values by it;
-- partition, and level: the level of partitioning, 0 for the first;
-- packed: the packed length, the bytes of the stored body when it is
-  stored packed, 0 when it is stored as it is;
-- fingerprint: the number the set was made with, which a reader
-  compares with its own: of a hash table's layout, or of the width of
-  a row;
-- body length: the bytes of the chunk a reader gets; for kind 3 this
-  is a chunk of its rows only.
-
-The header carries no checksum: a temporary file is read by the query
-that wrote it, on the same machine.
-
-#### Scenario: A header reads back as written
-- **WHEN** a header of a chunk of records or of values is written and
-  then read with the same fingerprint and length limit
-- **THEN** every field is returned unchanged
-- **Verified by:**
-  `crates/relspill/src/lib.rs::a_header_reads_back_as_written`
-
-#### Scenario: The size of a header through the C API
+#### Scenario: A header through the C API
 - **WHEN** a module calls `tess_spill_header_size()` and writes and
   reads a header through `tess_spill_header_write` and
   `tess_spill_header_read`
 - **THEN** the size is 48 and the fields read back as written
 - **Verified by:** `test/sql/table.sql::tessera_test_spill_header`
 
-### Requirement: Kinds of block and their lengths
-A block SHALL hold one of three bodies, and a writer MUST refuse a
-header that its own reader would reject.
-
-- Kind 1, records: a chunk of the hash table's records with its 8-byte
-  used mark first. The body length is a multiple of 8 and at least 8.
-  The packed length is 0, or a multiple of 8, at least 16 and less than
-  the body length.
-- Kind 2, values: a chunk of the by-reference values that records or
-  columns refer to. The body length is a multiple of 8. The packed
-  length is 0.
-- Kind 3, columns: a chunk of rows by column. The body length is a
-  multiple of 8 and at least 16. The packed length is a multiple of 8
-  and at least 8: a chunk of columns is always stored packed.
-
-For every kind the level is below 32 and the body length is at most the
-bound of its kind the reader accepts: one bound for chunks of records
-and of columns, another for chunks of values.
-
-#### Scenario: A header that would not read back is not written
-- **WHEN** a writer is given a records header with a body length of 0, a
-  body longer than the limit, or a values header with a packed length
-- **THEN** the write fails and no header is produced
-- **Verified by:**
-  `crates/relspill/src/lib.rs::a_header_that_would_not_read_back_is_not_written`
-
-#### Scenario: The lengths of a columns header
-- **WHEN** a header of kind 3 has a body shorter than 16 bytes, or a
-  packed length that is 0 or not a multiple of 8
-- **THEN** it is refused on writing and on reading
-- **Verified by:**
-  `crates/relspill/src/lib.rs::a_columns_header_keeps_its_lengths`
-
-#### Scenario: The level and the limit for every kind
-- **WHEN** a header of records, of values or of columns has a level of
-  32, or a body longer than the limit
-- **THEN** it is refused on writing and on reading, while a header at
-  level 31 with a body of exactly the limit is accepted
-- **Verified by:**
-  `crates/relspill/src/lib.rs::the_level_and_the_limit_hold_for_every_kind`
+#### Scenario: Packed and plain blocks in a file
+- **WHEN** a chunk of 1000 records that packs and bytes that are no
+  chunk of records are written to a set and read back
+- **THEN** the first takes its header and packed body in the file, the
+  second its header and whole body, and both read back as written but
+  for the next-record references
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_packed`
 
 ### Requirement: Damaged and foreign blocks are refused
-A reader MUST check the magic, the version, the kind, the fingerprint,
-the body length, the packed length and the level before it uses a block,
-and MUST NOT interpret the body of a block that failed a check; a packed
-body MUST be checked as it is unpacked. A failed check SHALL be reported
-as damaged data: status `TESS_ERROR_DATA_CORRUPTED` with SQLSTATE
-`XX001`. A misuse of a call, such as a buffer shorter than a header,
-SHALL be reported as an internal error, SQLSTATE `XX000`, not as damaged
-data. A node MUST also check a block it reads back against what it wrote
-there: its kind, a chunk of columns' stored words and, where the node
-counted them, its rows, and a block of values' number against the
-chunks of values written, or, where each writer of a file numbers its
-own, against the number of the block of values before it. A call of
+A block read back SHALL pass the checks of the crate's reader, as "The
+header of a block", "A packed chunk of records" and "Any bytes, a
+bounded read" of the spec of `relspill` say, before Tessera uses it,
+and a body that failed them SHALL NOT be read. A failed check SHALL be
+reported as damaged data: status `TESS_ERROR_DATA_CORRUPTED` with
+SQLSTATE `XX001`. A misuse of a call, such as a buffer shorter than a
+header, SHALL be reported as an internal error, SQLSTATE `XX000`, not as
+damaged data. A node MUST also check a block it reads back against what
+it wrote there: its kind, a chunk of columns' stored words and, where
+the node counted them, its rows, and a block of values' number against
+the chunks of values written, or, where each writer of a file numbers
+its own, against the number of the block of values before it. A call of
 the hash table over a chunk of records read back that the table refuses
 SHALL be damaged data too, though the table's own calls report it as a
 wrong argument: they cannot tell damaged bytes from a wrong call, and
 take either as a wrong argument.
 
-#### Scenario: A damaged field of a header, or another table's block
-- **WHEN** one field of a valid header is overwritten with an invalid
-  value (the magic, the version, the kind, the packed length, the
-  fingerprint, the body length or the level), or a valid block is read
-  with the fingerprint of another table
-- **THEN** reading the header fails as damaged data, and a query that
-  reads such a block raises an ERROR
-- **Verified by:**
-  `crates/relspill/src/lib.rs::every_damaged_field_is_refused`;
-  `test/sql/spill.sql::tessera_test_spill_error(7)`
+#### Scenario: A block of another table
+- **WHEN** a valid block is read with the fingerprint of another table
+- **THEN** the read raises an ERROR
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_error(7)`
 
 #### Scenario: A damaged packed body of records
-- **WHEN** a packed body is too short for its counts or its lane codes,
-  does not match the chunk it is unpacked into, has a lane code that
-  does not exist, stores the lane of the next-record references, has
-  records of another length than its own, or has bytes past its lanes
-- **THEN** unpacking fails as damaged data, and a query that reads such
-  a body from a file raises `XX001`
-- **Verified by:**
-  `crates/relspill/src/pack.rs::damaged_packed_bodies_are_refused`;
-  `test/sql/spill.sql::tessera_test_spill_sqlstate(23)`
+- **WHEN** a packed body of records read from a file has a lane code
+  that does not exist
+- **THEN** the read raises `XX001`
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_sqlstate(23)`
 
 #### Scenario: The status and SQLSTATE of damage and of misuse
 - **WHEN** the C entry points read a damaged header or unpack a damaged
@@ -182,64 +111,6 @@ take either as a wrong argument.
 - **THEN** the query fails as damaged data, SQLSTATE `XX001`
 - **Verified by:**
   `test/sql/spill_damage.sql::spec: spill-format/Damage under a node`
-
-### Requirement: A packed chunk of records
-A chunk of records SHALL be stored packed only when the packed form is
-shorter than the chunk; otherwise it is stored as it is, with a packed
-length of 0. Reading a packed chunk back MUST give the chunk byte for
-byte, except that every next-record reference is 0, as in a chunk not
-yet linked.
-
-The packed body sees the records as lanes of 4 bytes, the same lane of
-every record together: the number of records (4 bytes), the length of a
-record (4 bytes), one code byte for each lane padded to a multiple of 4,
-then the lanes' data, padded with zeros to a multiple of 8.
-
-```
- ┌─────────┬─────────┬──────────────────┬──────────────────────────┐
- │ records │ record  │ a code for each  │ the lanes' data, a lane  │
- │         │ length  │ lane, 1 byte     │ after a lane             │
- │ 4 bytes │ 4 bytes │ padded to 4      │ padded to 8              │
- └─────────┴─────────┴──────────────────┴──────────────────────────┘
-```
-
-A lane's code says how its values are stored. A writer gives a lane the
-first code of this list that fits its values:
-
-- 0: every value is 0, and nothing is stored; the next-record lane
-  always has this code, and a body that gives it another is refused as
-  damaged data;
-- 1: all values are equal, and one value of 4 bytes is stored;
-- 2: every value is below 256, and 1 byte is stored for a record;
-- 3: every value is below 65536, and 2 bytes are stored for a record;
-- 4: any other lane, and 4 bytes are stored for a record.
-
-A packed body whose records do not have its record length, or that does
-not end with its last lane, padded to a multiple of 8, MUST be refused
-as damaged data.
-
-#### Scenario: Lanes take the width their values need and read back
-- **WHEN** a chunk of records with lanes of zeros, equal values, and
-  values of one, two and four bytes is packed and unpacked
-- **THEN** each lane is stored at its width and the chunk reads back the
-  same but for the next-record references
-- **Verified by:**
-  `crates/relspill/src/pack.rs::widths_follow_the_values_of_each_lane`
-
-#### Scenario: A chunk that does not get shorter stays as it is
-- **WHEN** the bytes are not a chunk of records, the used mark does not
-  match, the records differ in length, or packing would not shorten them
-- **THEN** packing is refused and the block is stored as it is
-- **Verified by:**
-  `crates/relspill/src/pack.rs::what_is_no_chunk_of_records_stays_as_it_is`
-
-#### Scenario: Packed and plain blocks in a file
-- **WHEN** a chunk of 1000 records that packs and bytes that are no
-  chunk of records are written to a set and read back
-- **THEN** the first takes its header and packed body in the file, the
-  second its header and whole body, and both read back as written but
-  for the next-record references
-- **Verified by:** `test/sql/spill.sql::tessera_test_spill_packed`
 
 ### Requirement: A chunk of columns in memory
 A chunk of columns SHALL begin with a header of 16 bytes: the rows it

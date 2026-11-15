@@ -5,7 +5,9 @@ its memory. Then Tessera writes some of the rows to temporary files and
 reads them back later. This is called spilling.
 
 This page explains what Tessera writes, how the files are arranged, and
-why. The exact bytes, limits and errors are in [spec.md](spec.md). When
+why. The exact bytes and limits are in the documentation of the crate
+`relspill`, which owns the format, and the errors that SQL sees are in
+[spec.md](spec.md). When
 a node decides to spill, and how it divides its rows, is described in
 [docs/spill.md](../../../docs/spill.md) for the join and the grouping,
 and in [docs/nodes.md](../../../docs/nodes.md), "External sort", for
@@ -221,14 +223,14 @@ bytes it takes. To read a partition, a reader goes through its list.
   of columns a lane is one column: one word from every row. Tessera
   writes a chunk to disk lane by lane, because the values inside one
   lane are alike and can be written with few bytes. The rules of this
-  encoding are written once, in the spec.
+  encoding are written once, in the documentation of the crate.
 
 ## A block
 
-A block is a header of 48 bytes and then the body. The spec draws the
-header, with the place and the size of every field
-([spec.md](spec.md), "Block header layout"). This section says what
-each field is for.
+A block is a header of 48 bytes and then the body. The crate's
+documentation draws the header, with the place and the size of every
+field ([`BlockHeader`](../../../crates/relspill/src/lib.rs)). This
+section says what each field is for.
 
 **magic and version.** They say that these bytes are a block of this
 format, and which version of the format.
@@ -331,9 +333,9 @@ The values in the picture are invented, and each piece of 4 bytes is
 shown shorter than it is. The types of the columns do not matter:
 packing looks only at the values.
 
-The spec defines the encoding: the layout of the packed body and the
-code that says how each lane is stored ([spec.md](spec.md), "A packed
-chunk of records").
+The crate's documentation defines the encoding: the layout of the
+packed body and the code that says how each lane is stored
+([`pack`](../../../crates/relspill/src/pack.rs)).
 
 For example, 1000 records of the join above take 40 000 bytes in memory.
 The hash, the key and the value each need 4 bytes for a record, 12 000
