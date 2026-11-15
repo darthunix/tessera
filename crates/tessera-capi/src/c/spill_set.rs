@@ -369,17 +369,30 @@ pub unsafe extern "C" fn tess_spill_set_stats(
             ensure!(writer.is_aligned(), "a writer not aligned to 8");
             let writer = writer.as_ref().context("a null writer")?;
             let files_written = c_int::try_from(writer.files()).context("files past an int")?;
-            if !blocks.is_null() {
-                output(blocks, "count of blocks")?.write(writer.blocks());
+            // Every output is checked before any is written.
+            let blocks = (!blocks.is_null())
+                .then(|| output(blocks, "count of blocks"))
+                .transpose()?;
+            let bytes = (!bytes.is_null())
+                .then(|| output(bytes, "count of bytes"))
+                .transpose()?;
+            let files = (!files.is_null())
+                .then(|| output(files, "count of files"))
+                .transpose()?;
+            let values = (!values.is_null())
+                .then(|| output(values, "longest values"))
+                .transpose()?;
+            if let Some(blocks) = blocks {
+                blocks.write(writer.blocks());
             }
-            if !bytes.is_null() {
-                output(bytes, "count of bytes")?.write(writer.bytes());
+            if let Some(bytes) = bytes {
+                bytes.write(writer.bytes());
             }
-            if !files.is_null() {
-                output(files, "count of files")?.write(files_written);
+            if let Some(files) = files {
+                files.write(files_written);
             }
-            if !values.is_null() {
-                output(values, "longest values")?.write(writer.read_bounds().values);
+            if let Some(values) = values {
+                values.write(writer.read_bounds().values);
             }
             Ok(())
         })

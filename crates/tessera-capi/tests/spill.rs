@@ -1430,6 +1430,41 @@ impl CSet {
     }
 }
 
+/// The counts of a set: an output not aligned among them is refused
+/// before any output is written.
+#[test]
+fn a_set_s_counts_are_written_only_once_every_output_is_checked() {
+    use tessera_capi::c::tess_spill_set_stats;
+
+    let mut set = CSet::new(2, 256);
+    set.write(1, 2, &[7_u8; 16]);
+    set.finish();
+    let (mut blocks, mut words) = (u64::MAX, [0_u64; 2]);
+    // A count of bytes one byte into a word: not aligned to 8.
+    let bytes = words
+        .as_mut_ptr()
+        .cast::<u8>()
+        .wrapping_add(1)
+        .cast::<u64>();
+    let mut status = Status::new();
+    // SAFETY: the set's writer, a local count and a place never written,
+    // which the call refuses before it writes.
+    let code = unsafe {
+        tess_spill_set_stats(
+            &raw const set.writer,
+            &raw mut blocks,
+            bytes,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut status,
+        )
+    };
+    assert_ne!(code, Code::Ok);
+    assert_eq!(blocks, u64::MAX, "a count written before the refusal");
+    assert_eq!(words, [0, 0]);
+    assert_eq!(set.stats().0, 1);
+}
+
 /// A shared set written through its entry points: values, a chunk of
 /// records longer than the buffer packed aside, a list that grows, and a
 /// finish that lays the lists and the trailer out after the blocks; each
