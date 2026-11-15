@@ -944,11 +944,21 @@ reads it, as the documentation of the words and of the writer says.
   - Decides addresses and the length of loops: the rows and the lanes
     to fill, and where each lane's values lie; a lane's least value and
     its values are data.
-  - Check: `columns::unpack`, as it unpacks: counts within the limits
-    of a chunk that fill the chunk exactly, widths that exist, every
-    lane within the body, and no byte past the last lane.
+  - Check: `columns::unpack`, before it writes a byte of the chunk:
+    counts within the limits of a chunk that fill the chunk exactly,
+    then widths that exist, every lane within the body, and no byte
+    past the last lane. Then it copies the lanes it checked.
   - Error: damaged, `ColumnsCounts`, `ColumnsLimits`, `ColumnsFill`,
-    `Descriptors`, `LaneWidth`, `ColumnsLaneEnd` or `ColumnsTail`.
+    `Descriptors`, `LaneWidth`, `ColumnsLaneEnd` or `ColumnsTail`, the
+    chunk as it was.
+  - Proof: `a_body_too_short_for_its_counts_is_refused` of the module
+    `columns`; its `counts_that_pass_fill_the_chunk`, for any counts, any
+    length of the body and of the chunk, within the rows a block's
+    packed length can name; and its
+    `lanes_that_pass_lie_inside_the_body_and_fill_the_chunk`, for any
+    descriptors and lanes of two rows of one word, and the copy after
+    them over any bytes the chunk held. That the lanes' values come back
+    as they were packed is the tests'.
 - **`columns-header`**: the header of a chunk of columns, the host's or
   one read back.
   - Decides addresses and the length of loops: where each lane lies and

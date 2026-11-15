@@ -300,9 +300,9 @@ draws: each lane by frame of reference, its least value and every
 value's difference from it in the fewest bytes that hold them all.
 [`columns::unpack`](../../../crates/relspill/src/columns.rs) SHALL give
 back a chunk with the same rows, words and values, whose capacity is
-its rows, and SHALL refuse as damaged bytes a body whose counts, widths
-and lanes do not fill the chunk and the body exactly, as its
-documentation lists.
+its rows, and SHALL refuse as damaged bytes, the chunk as it was, a
+body whose counts, widths and lanes do not fill the chunk and the body
+exactly, as its documentation lists.
 
 #### Scenario: Lanes pack at the width of their span
 - **WHEN** a chunk with lanes of equal values and of spans that need 1,
@@ -326,7 +326,7 @@ documentation lists.
 - **WHEN** a packed chunk of columns is cut short, has a wrong length
   for its counts, a width of 3, bytes past its lanes, or one row more
   than a chunk of its words holds
-- **THEN** unpacking fails as damaged bytes
+- **THEN** unpacking fails as damaged bytes, and the chunk is as it was
 - **Verified by:**
   `crates/relspill/src/columns.rs::a_damaged_or_foreign_chunk_is_refused`;
   `crates/relspill/src/columns.rs::a_chunk_keeps_within_its_limits`

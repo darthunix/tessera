@@ -341,13 +341,39 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
 ///
 /// # Errors
 ///
-/// Damaged bytes for a body too short for its counts, more rows or words
-/// than a chunk holds, a length that does not match its counts, a width
-/// that does not exist, a lane cut short, or bytes past its lanes.
+/// Damaged bytes, and `out` as it was, for a body too short for its
+/// counts, more rows or words than a chunk holds, a length that does not
+/// match its counts, a width that does not exist, a lane cut short, or
+/// bytes past its lanes.
 pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
+    let body = body_of(packed, out.len())?;
+    check_lanes(packed, &body)?;
+    copy_lanes(packed, &body, out)
+}
+
+/// The counts of a packed chunk of columns, checked against the chunk it
+/// unpacks into: `rows` rows of `words` stored words, in `lanes` lanes.
+#[derive(Clone, Copy, Debug)]
+struct Body {
+    rows: usize,
+    words: usize,
+    lanes: usize,
+}
+
+/// The counts of `packed`, which must fill a chunk of `out_len` bytes
+/// and leave room for the descriptor of every lane.
+#[inline(always)]
+fn body_of(packed: &[u8], out_len: usize) -> Result<Body> {
     ensure!(packed.len() >= 8, Error::damaged(Rule::ColumnsCounts));
     let rows = read::u32_at(packed, 0) as usize; // trust: packed-columns
     let words = read::u32_at(packed, 4) as usize; // trust: packed-columns
+    counts(rows, words, packed.len(), out_len)
+}
+
+/// The body of `rows` rows of `words` stored words, its counts read from
+/// a body of `packed_len` bytes, for a chunk of `out_len` bytes.
+#[inline(always)]
+fn counts(rows: usize, words: usize, packed_len: usize, out_len: usize) -> Result<Body> {
     // The limits a chunk is made within: a body past them would get a
     // header of fewer places than its rows.
     ensure!(
@@ -355,14 +381,48 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
         Error::damaged(Rule::ColumnsLimits).with(rows).and(words)
     );
     ensure!(
-        out.len() == size(rows, words),
+        out_len == size(rows, words),
         Error::damaged(Rule::ColumnsFill).with(rows).and(words)
     );
     let lanes = lanes(words);
     ensure!(
-        packed.len() >= 8 + 16 * lanes,
+        packed_len >= 8 + 16 * lanes,
         Error::damaged(Rule::Descriptors)
     );
+    Ok(Body { rows, words, lanes })
+}
+
+/// Check every lane of `body` in `packed`, writing nothing: a width that
+/// exists, every lane inside the body, and no byte past the last.
+fn check_lanes(packed: &[u8], body: &Body) -> Result<()> {
+    let mut at = 8 + 16 * body.lanes;
+    for index in 0..body.lanes {
+        let width = read::u8_at(packed, 8 + 16 * index) as usize; // trust: packed-columns
+        ensure!(
+            matches!(width, 0 | 1 | 2 | 4 | 8),
+            Error::damaged(Rule::LaneWidth).with(width)
+        );
+        let need = (width * body.rows).next_multiple_of(8);
+        ensure!(
+            packed.len() >= at + need,
+            Error::damaged(Rule::ColumnsLaneEnd).with(index)
+        );
+        at += need;
+    }
+    ensure!(
+        at == packed.len(),
+        Error::damaged(Rule::ColumnsTail).with(packed.len() - at)
+    );
+    Ok(())
+}
+
+/// Fill `out` from the lanes of a body that [`check_lanes`] passed: its
+/// header, then each lane's values from its least one. The making of the
+/// header cannot fail after the counts' check, which gave `out` its
+/// length.
+#[inline(always)]
+fn copy_lanes(packed: &[u8], body: &Body, out: &mut [u8]) -> Result<()> {
+    let (rows, words) = (body.rows, body.words);
     init(out, words)?;
     let shape = Shape {
         rows,
@@ -370,20 +430,15 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
         words,
     };
     set_rows(out, rows);
+    let lanes = lanes(words);
     let mut at = 8 + 16 * lanes;
     for index in 0..lanes {
         let descriptor = 8 + 16 * index;
         let width = read::u8_at(packed, descriptor) as usize; // trust: packed-columns
         let base = read::u64_at(packed, descriptor + 8); // trust: packed-columns
-        ensure!(
-            matches!(width, 0 | 1 | 2 | 4 | 8),
-            Error::damaged(Rule::LaneWidth).with(width)
-        );
+        // The widths of the check's, which a proof holds the copy to.
+        debug_assert!(matches!(width, 0 | 1 | 2 | 4 | 8));
         let need = (width * rows).next_multiple_of(8);
-        ensure!(
-            packed.len() >= at + need,
-            Error::damaged(Rule::ColumnsLaneEnd).with(index)
-        );
         let lane_at = shape.lane_at(index);
         let target = &mut out[lane_at..lane_at + 8 * rows];
         let source = &packed[at..at + need];
@@ -400,12 +455,11 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
         }
         at += need;
     }
-    ensure!(
-        at == packed.len(),
-        Error::damaged(Rule::ColumnsTail).with(packed.len() - at)
-    );
     Ok(())
 }
+
+#[cfg(kani)]
+mod proofs;
 
 #[cfg(test)]
 mod tests {
@@ -432,7 +486,8 @@ mod tests {
         let mut out = vec![0_u8; pack_bound(rows.len(), words)];
         let (packed, len) = quiet(|| pack(&chunk, &mut out)).unwrap();
         assert!(packed.is_multiple_of(8));
-        let mut back = vec![0_u8; len];
+        // Over bytes that held anything: unpacking writes every one.
+        let mut back = vec![0xa5_u8; len];
         quiet(|| unpack(&out[..packed], &mut back)).unwrap();
         let shape = quiet(|| shape(&back)).unwrap();
         assert_eq!(
@@ -526,7 +581,7 @@ mod tests {
         );
         let chunk = chunk_of(4, 1, &[vec![0, 1], vec![0, 300]]);
         let (packed, len) = quiet(|| pack(&chunk, &mut out)).unwrap();
-        let mut back = vec![0_u8; len];
+        let mut back = vec![0xa5_u8; len];
         // Bytes read back that fail their checks are damaged data, and
         // each names the rule it broke.
         let refused = |result: Result<()>| {
@@ -559,6 +614,11 @@ mod tests {
         assert_eq!(
             refused(quiet(|| unpack(&long, &mut back))),
             Rule::ColumnsTail
+        );
+        // A body refused leaves the chunk as it was.
+        assert!(
+            back.iter().all(|&byte| byte == 0xa5),
+            "a refused body wrote"
         );
         let error = quiet(|| init(&mut [0_u8; 8], 1)).expect_err("a chunk shorter than its header");
         assert_eq!(
