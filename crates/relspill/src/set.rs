@@ -285,6 +285,9 @@ pub struct Writer {
     pending_partition: u32,
     finish: u32,
     next_partition: u32,
+    /// Kept 0: the words are whole, with no byte of padding a host would
+    /// hold unwritten.
+    spare: u32,
 }
 
 // Its size is part of its C mirror: words of 8 bytes.
@@ -384,6 +387,7 @@ impl Writer {
                 && self.pending <= FROM_BODY
                 && self.finish <= TRAILER
                 && self.next_partition <= self.partitions
+                && self.spare == 0
                 && self.files <= self.partitions
                 && self.values_written <= self.bounds.values
                 // A block left to be placed from the caller's body takes
@@ -1356,6 +1360,13 @@ pub(crate) mod tests {
             buffer_len,
             shared,
         }
+    }
+
+    /// A writer's words are whole: its last field ends its last word, so
+    /// no byte of padding is left that a host would hold unwritten.
+    #[test]
+    fn a_writer_s_words_are_whole() {
+        assert_eq!(core::mem::offset_of!(Writer, spare) + 4, 8 * WRITER_WORDS);
     }
 
     /// Every block of every partition, written through a buffer of any

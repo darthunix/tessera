@@ -166,6 +166,9 @@ pub struct Reader {
     body_packed: u32,
     /// The phase a seek started from, which a refused seek goes back to.
     seek_from: u32,
+    /// Kept 0: the words are whole, with no byte of padding a host would
+    /// hold unwritten.
+    spare_end: u32,
 }
 
 // Its size is part of its C mirror: words of 8 bytes.
@@ -240,6 +243,7 @@ impl Reader {
                 && self.partition < self.partitions
                 && self.level < MAX_LEVEL
                 && self.spare == 0
+                && self.spare_end == 0
                 && self.asked <= BLOCK
                 && self.next <= self.count
                 && self.total <= self.most
@@ -1259,6 +1263,16 @@ mod tests {
         let page = [Entry::default(); 2];
         ensure!(forged.next(&page, &[]).map_err(Error::rule) == Err(Rule::ReaderState));
         Ok(())
+    }
+
+    /// A reader's words are whole: its last field ends its last word, so
+    /// no byte of padding is left that a host would hold unwritten.
+    #[test]
+    fn a_reader_s_words_are_whole() {
+        assert_eq!(
+            core::mem::offset_of!(Reader, spare_end) + 4,
+            8 * READER_WORDS
+        );
     }
 
     /// Words of a partition with no blocks that say a page was asked for
