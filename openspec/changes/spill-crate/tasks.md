@@ -399,7 +399,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 
 - [x] 7.1 Write the design of `relspill` for a caller of the crate.
       Check: `.github/scripts/check-specs.sh`
-- [ ] 7.2 Run the fuzz targets for an hour each. Check: the run, with
+- [x] 7.2 Run the fuzz targets for an hour each. Check: the run, with
       no finding
 - [ ] 7.3 Archive the change: the contract beside the spec, the
       roadmap updated, the folder deleted. Check:
