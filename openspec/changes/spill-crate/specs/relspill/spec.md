@@ -34,10 +34,20 @@ rules, the layouts and the limits of the API.
 - **Verified by:**
   `crates/relspill/tests/records.rs::a_chunk_a_table_wrote_comes_back_and_links_again`
 
-#### Scenario: Every public item documented
-- **WHEN** the documentation of the crate is built
-- **THEN** no public item lacks documentation, and there is no warning
-- **Verified by:** pending
+#### Scenario: Documentation built with warnings as errors
+- **WHEN** the documentation of the crate is built with every warning
+  an error, and with a lint that refuses a public item without a text
+- **THEN** it builds
+- **Verified by:**
+  `.github/workflows/ci.yml::RUSTDOCFLAGS="-D warnings" cargo doc
+  --locked -p relspill --no-deps`;
+  `crates/relspill/src/lib.rs::#![deny(missing_docs)]`
+
+#### Scenario: The examples run
+- **WHEN** the tests of the documentation run
+- **THEN** every example passes
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo test --locked -p relspill --doc`
 
 ### Requirement: No input or output
 The crate SHALL NOT open, read, write or remove a file. A call that
@@ -133,6 +143,34 @@ and a reader SHALL check every field of a header before it returns it.
 - **THEN** the read fails as damaged bytes, by the rule of that field
 - **Verified by:**
   `crates/relspill/src/lib.rs::every_damaged_field_is_refused`
+
+### Requirement: Bounds of a block by its kind
+A writer and a reader of a set SHALL take a bound for each kind of
+block, a [`Bounds`](../../../crates/relspill/src/lib.rs): one for a
+chunk of records or of columns, by the plan of the node's level, and
+one for a chunk of values, by the longest one the set's writers wrote.
+A writer SHALL refuse a block past the bound of its kind as a wrong
+call, and SHALL give the bounds a reader of its set takes,
+[`Writer::read_bounds`](../../../crates/relspill/src/set.rs). A reader
+SHALL refuse a block past the bound of its kind as damaged bytes.
+
+#### Scenario: A block past the bound of its kind
+- **WHEN** a block of values or a chunk is longer than the bound of its
+  kind, though not than the other kind's
+- **THEN** a writer refuses it as a wrong call and a reader as damaged
+  bytes; a writer's bound for values is the longest it wrote
+- **Verified by:**
+  `crates/relspill/src/set.rs::a_block_past_the_bound_of_its_kind_is_refused`;
+  `crates/relspill/src/set/reader.rs::a_block_past_the_bound_of_its_kind_is_damaged`;
+  `crates/relspill/src/lib.rs::each_kind_of_block_takes_its_own_bound`
+
+#### Scenario: Values longer than a chunk
+- **WHEN** a join that spills keeps values longer than any of its
+  chunks
+- **THEN** each goes to disk in a chunk of values of its own, and reads
+  back by the bound its set gives
+- **Verified by:**
+  `test/sql/join.sql::spec: relspill/Values longer than a chunk`
 
 ### Requirement: A packed chunk of records
 A chunk of records SHALL be stored packed, in the body that
@@ -812,46 +850,15 @@ split.
   `crates/relspill/src/loom.rs::participants_take_each_partition_alone_once_and_join_the_rounds`;
   `test/sql/join.sql::-- spec: relspill/A partition taken alone`
 
-### Requirement: Bounds of a block by its kind
-A writer and a reader of a set SHALL take a bound for each kind of
-block, a [`Bounds`](../../../crates/relspill/src/lib.rs): one for a
-chunk of records or of columns, by the plan of the node's level, and
-one for a chunk of values, by the longest one the set's writers wrote.
-A writer SHALL refuse a block past the bound of its kind as a wrong
-call, and SHALL give the bounds a reader of its set takes,
-[`Writer::read_bounds`](../../../crates/relspill/src/set.rs). A reader
-SHALL refuse a block past the bound of its kind as damaged bytes.
-
-#### Scenario: A block past the bound of its kind
-- **WHEN** a block of values or a chunk is longer than the bound of its
-  kind, though not than the other kind's
-- **THEN** a writer refuses it as a wrong call and a reader as damaged
-  bytes; a writer's bound for values is the longest it wrote
-- **Verified by:**
-  `crates/relspill/src/set.rs::a_block_past_the_bound_of_its_kind_is_refused`;
-  `crates/relspill/src/set/reader.rs::a_block_past_the_bound_of_its_kind_is_damaged`;
-  `crates/relspill/src/lib.rs::each_kind_of_block_takes_its_own_bound`
-
-#### Scenario: Values longer than a chunk
-- **WHEN** a join that spills keeps values longer than any of its
-  chunks
-- **THEN** each goes to disk in a chunk of values of its own, and reads
-  back by the bound its set gives
-- **Verified by:**
-  `test/sql/join.sql::spec: relspill/Values longer than a chunk`
-
 ### Requirement: Any bytes, a bounded read
 Whatever bytes a file holds, a read of the crate SHALL return the data
 or an error. It SHALL NOT panic, loop without end, or ask for more than
 its caller allows: one block within the larger of its caller's bounds,
 with its header and the slack of packing, or one page of a list, and
 never more than the file holds. A read SHALL give its caller a chunk
-only of the kind and the shape the caller expects: a chunk of columns
-read back is checked by
-[`check_pair`](../../../crates/relspill/src/spill_columns.rs) and
-[`check`](../../../crates/relspill/src/spill_columns.rs) once, before
-its rows are read. The promise holds for
-a file that nobody writes while it is read. Bytes damaged into other
+only of the kind and the shape the caller expects, as "The pair of a
+chunk of columns" says of a chunk of columns. The promise holds for a
+file that nobody writes while it is read. Bytes damaged into other
 bytes that pass every check read as other data, since a block has no
 checksum.
 
@@ -867,15 +874,6 @@ checksum.
 - **WHEN** a fuzzer gives any bytes as a file
 - **THEN** no read panics, and none asks for more than its bounds
 - **Verified by:** pending
-
-#### Scenario: A chunk of columns of another shape
-- **WHEN** a block of a chunk of columns' pair of another kind or
-  number, or a chunk of columns of another shape or with a word that
-  refers outside its values, is read where the caller expects the pair
-  it wrote
-- **THEN** the read is refused as damaged bytes
-- **Verified by:**
-  `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`
 
 #### Scenario: A chunk of records of another kind
 - **WHEN** a block of another kind is read where the caller expects a

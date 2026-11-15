@@ -342,7 +342,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 
 ## 4. The spec of the crate
 
-- [ ] 4.1 Group the requirements of `relspill`, the moved ones and this
+- [x] 4.1 Group the requirements of `relspill`, the moved ones and this
       change's, by topic; check that the specs of `hash-table` and
       `spill-format` name no call that is gone. Check:
       `openspec validate --all --strict`;
