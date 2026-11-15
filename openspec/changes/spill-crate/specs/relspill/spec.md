@@ -311,14 +311,21 @@ value that ends inside them.
   `crates/relspill/src/spill_columns.rs::a_chunk_read_back_of_another_shape_or_reference_is_damaged`
 
 ### Requirement: The file of a set
-The crate SHALL own the whole format of the file of a set: the blocks,
-the block list of each partition, and the trailer of a file that other
-participants read. Its writer,
-[`Writer`](../../../crates/relspill/src/set.rs), SHALL keep the write
-buffer and the lists and lay the trailer out, as its documentation
-says. Its reader, [`Reader`](../../../crates/relspill/src/set/reader.rs),
-SHALL check every list, entry and trailer it reads before it asks for
-the bytes they point to.
+The crate SHALL own the whole format of the file of a set, which
+[`set`](../../../crates/relspill/src/set.rs) draws: the blocks of every
+partition one after another, in the order they were written, then the
+block list of each partition and a trailer, which a set that wrote a
+block writes when it finishes. Its writer,
+[`Writer`](../../../crates/relspill/src/set.rs), SHALL fill the write
+buffer and the lists its caller keeps, and lay the lists and the
+trailer out. Its reader,
+[`Reader`](../../../crates/relspill/src/set/reader.rs), SHALL give back
+the blocks of one partition of a finished set in the order they were
+written, from the writer's own file or another participant's, and no
+block of another partition. It SHALL check the trailer, every list and
+every entry before it asks for the bytes they name, and each block's
+header against the set and its entry, and it SHALL go to a block only
+by the place a write gave it.
 
 #### Scenario: A shared file read by another participant
 - **WHEN** a participant finishes its file, and another participant
@@ -328,12 +335,44 @@ the bytes they point to.
 - **Verified by:**
   `crates/relspill/src/set/reader.rs::a_set_reads_back_by_its_lists_and_from_its_file`
 
-#### Scenario: A partition dropped before the set is finished
-- **WHEN** a participant drops a partition of a shared set before it
-  finishes the set
-- **THEN** the call is a wrong call, and the set is unchanged
+#### Scenario: Blocks of several partitions through one file
+- **WHEN** blocks of records and values, among them an empty one and one
+  of several write buffers, are written to two of four partitions of a
+  set kept in memory and read back
+- **THEN** each partition gives its blocks in order with the bytes
+  written, and a partition without blocks has none
 - **Verified by:**
-  `crates/relspill/src/set.rs::a_shared_set_drops_no_partition_before_its_finish`
+  `crates/relspill/src/set.rs::a_set_written_in_memory_reads_back`
+
+#### Scenario: A file laid out by hand
+- **WHEN** a file is laid out byte by byte as `set` draws it, its blocks
+  then its lists and its trailer
+- **THEN** the reader gives its blocks back
+- **Verified by:**
+  `crates/relspill/src/set/reader.rs::a_file_laid_out_by_hand_reads_back`
+
+#### Scenario: A file without its lists
+- **WHEN** a file ends without a trailer, the trailer's magic, counts or
+  fingerprint do not match, a list counts more or fewer blocks than the
+  lists hold, in the partition read or in another, an entry ends past
+  the file's blocks, runs into the next block of its partition, is
+  shorter than a header or longer than the longest block, or a block's
+  header names another partition, level or length than its entry
+- **THEN** the read fails as damaged bytes before it asks for the bytes
+  that part names
+- **Verified by:**
+  `crates/relspill/src/set/reader.rs::every_damaged_part_of_a_file_is_refused`;
+  `crates/relspill/src/set/reader.rs::a_part_is_checked_before_what_it_names_is_read`
+
+#### Scenario: Calls a set or a reader does not take
+- **WHEN** a participant drops a partition of a shared set before it
+  finishes the set, and a reader seeks to a place that holds no block of
+  its partition or reads a body before its header
+- **THEN** each call is a wrong call, and the set and the reader are
+  unchanged
+- **Verified by:**
+  `crates/relspill/src/set.rs::a_shared_set_drops_no_partition_before_its_finish`;
+  `crates/relspill/src/set/reader.rs::misuse_of_a_reader_is_a_wrong_call`
 
 ### Requirement: The spill of a join
 The crate SHALL provide a state machine for the spill of a hash join,

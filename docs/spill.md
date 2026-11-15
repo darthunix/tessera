@@ -5,9 +5,11 @@ capability [hash-table](../openspec/specs/hash-table/design.md), whose
 partitions sort a table's records for the disk. When the table would
 outgrow `hash_mem`, a node writes parts of it to PostgreSQL's temporary
 files and reads them back later. What goes to disk and how it is checked
-is the capability `spill-format`: its
-[spec](../openspec/specs/spill-format/spec.md) says what a block and a
-file are, its [design](../openspec/specs/spill-format/design.md) why.
+is the crate `relspill`, whose documentation draws a block and a file,
+and the capability `spill-format`: its
+[spec](../openspec/specs/spill-format/spec.md) says what C and SQL see
+of them, its [design](../openspec/specs/spill-format/design.md) why
+they are built so.
 This guide describes what the two nodes do with them; the rest of their
 policies is in [nodes.md](nodes.md).
 

@@ -521,8 +521,8 @@ is freed. After an error, PostgreSQL deletes it when it releases the
 resources of the query. The lists of blocks stay in memory while the
 set is written. When it is finished, the set writes the lists at the
 end of its file, and then a trailer that says where the lists start.
-The spec draws the end of such a file and the trailer
-([spec.md](spec.md), "A set writes one temporary file").
+The crate's documentation draws the end of such a file and the trailer
+([`set`](../../../crates/relspill/src/set.rs)).
 
 A **shared** set belongs to a parallel query. Each participant writes
 its own file, named `<name>.<participant>`. When a participant has

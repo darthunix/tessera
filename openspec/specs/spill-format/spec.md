@@ -39,6 +39,13 @@ named here says, and SHALL return the crate's error as a status, as
 - `tess_spill_columns_append` and
   `tess_spill_columns_append_partitioned`, which take Datums and their
   types: "A chunk of columns" and "A reference to a value";
+- `tess_spill_set_init`, `tess_spill_set_write`,
+  `tess_spill_set_written`, `tess_spill_set_finish`,
+  `tess_spill_set_drop` and `tess_spill_set_stats`, over the words of a
+  writer, and `tess_spill_reader_file`, `tess_spill_reader_open`,
+  `tess_spill_reader_next`, `tess_spill_reader_body` and
+  `tess_spill_reader_seek`, over the words of a reader: "The file of a
+  set" and "Bounds of a block by its kind";
 - `tess_spill_columns_pair`, `tess_spill_columns_check` and
   `tess_spill_columns_window`, which gives a window of a checked chunk's
   first columns as Datums and NULL flags, a value by reference as a
@@ -275,35 +282,16 @@ load or show.
 
 ### Requirement: A set writes one temporary file
 A set of spilled blocks (`TessSpill`) SHALL write one temporary file,
-made when the set first writes to disk, in which the blocks of every
-partition follow one another, and SHALL keep for each partition the list
-of its blocks. `tess_spill_write` SHALL return the bytes the block takes
-in the file, the header and the stored body. After the blocks of a set
-that wrote any, `tess_spill_finish` SHALL write the lists of the blocks:
-a count of blocks for each partition (8 bytes each), then for each block
-of each partition where it starts and the bytes it takes (8 bytes each),
-then a trailer of four words of 8 bytes: a magic (the number
-0x5445535354524149), where the lists start, the number of partitions and
-the fingerprint. After `tess_spill_finish` the set only reads: a
-partition's blocks MUST read back in the order they were written, and a
-partition without blocks opens as no reader. A serial set's file is a
-temporary file of PostgreSQL, made in the session's temporary
-tablespaces: `temp_file_limit` applies to it, and it MUST be gone when
-the set is freed and, after an ERROR, when the query's resources are
-released.
-
-```
- ┌────────┬─────┬─────────────────┬────────────────────┬─────────────┐
- │ blocks │  …  │ blocks in each  │ for each block of  │ trailer     │
- │        │     │ partition,      │ each partition:    │             │
- │        │     │ 8 bytes each    │ start, bytes taken │ 32 bytes    │
- └────────┴─────┴─────────────────┴────────────────────┴─────────────┘
-
- the trailer, words of 8 bytes
- ┌───────┬───────────────────────┬────────────┬─────────────┐
- │ magic │ where the lists start │ partitions │ fingerprint │
- └───────┴───────────────────────┴────────────┴─────────────┘
-```
+made when the set first writes to disk, in the format of "The file of a
+set" of the spec of `relspill`. `tess_spill_write` SHALL return the
+bytes the block takes in the file, the header and the stored body, and
+`tess_spill_finish` SHALL write the lists of the blocks and the
+trailer. After `tess_spill_finish` the set only reads: a partition's
+blocks MUST read back in the order they were written, and a partition
+without blocks opens as no reader. A serial set's file is a temporary
+file of PostgreSQL, made in the session's temporary tablespaces:
+`temp_file_limit` applies to it, and it MUST be gone when the set is
+freed and, after an ERROR, when the query's resources are released.
 
 #### Scenario: Blocks of several partitions through one file
 - **WHEN** blocks of records and values, among them an empty one and one
@@ -312,8 +300,7 @@ released.
 - **THEN** each partition gives its blocks in order with the bytes
   written, a partition without blocks gives no reader, and the counts of
   blocks, bytes and partitions with blocks match what was written
-- **Verified by:** `test/sql/spill.sql::tessera_test_spill_serial`;
-  `crates/relspill/src/set.rs::a_set_written_in_memory_reads_back`
+- **Verified by:** `test/sql/spill.sql::tessera_test_spill_serial`
 
 #### Scenario: Misuse of a set is an error
 - **WHEN** a block is written after the finish, to a partition that does
@@ -349,14 +336,10 @@ In a shared set every participant SHALL write a file of its own in the
 query's shared file set, named `<name>.<participant>`, which ends with
 its lists and its trailer as every set's file does. Once a participant
 has finished its set, any participant MUST be able to open that
-participant's file and read a
-partition's blocks from it, each reader at a position of its own. A file
-without a valid trailer, with the fingerprint of another set than the
-reader's, or whose lists do not fill exactly the bytes between the
-blocks and the trailer, or name a block that does not lie among the
-file's blocks, runs into the next block of its partition, is shorter
-than a header or is longer than the longest block the set takes, MUST be
-refused as damaged data. `temp_file_limit` applies to a participant's
+participant's file and read a partition's blocks from it, each reader
+at a position of its own. A file that the crate's reader refuses, as
+"The file of a set" of the spec of `relspill` says, MUST be refused as
+damaged data. `temp_file_limit` applies to a participant's
 file as to a serial set's. A participant that wrote no block has no
 file, and its partitions open as no reader. A participant's file is
 deleted when the participant frees its set, and the files that are left
@@ -442,9 +425,8 @@ serial set, MUST be refused as a misuse.
 `tess_spill_open` SHALL give a reader at a partition's first block with
 a buffer as large as the partition's largest block, so that the memory
 of a read is known before it starts. `tess_spill_read_header` SHALL read
-the next block whole and MUST check its header against the set's
-fingerprint and the bound of its kind, the partition, the level, the bytes on
-disk and, for a packed body, the length that the body's own counts give;
+the next block whole and check it as the crate's reader does, and also,
+for a packed body, against the length that the body's own counts give;
 it answers false at the partition's end. `tess_spill_read_body` SHALL
 then give the body, unpacked when it was stored packed.
 `tess_spill_seek` SHALL move a reader to a block by the position
@@ -483,17 +465,19 @@ set closes its open readers, which the caller MUST NOT use afterwards.
   `test/sql/spill.sql::tessera_test_spill_sqlstate(19)`
 
 ### Requirement: The memory of a set
-`tess_spill_memory` SHALL give the bytes of the buffers a set holds now:
-its write buffer until the set is finished, the buffer through which a
-chunk longer than the write buffer is packed, and the buffer of each
-open reader, which is as large as the largest block of its partition.
+`tess_spill_memory` SHALL give the bytes of the regions a set holds now:
+until the set is finished, its write buffer, the buffer through which a
+chunk longer than the write buffer is packed, and its block lists; and
+the block buffer of each open reader, as large as the largest block of
+its partition, with its page of entries. A finished set without readers
+holds none.
 
 #### Scenario: The buffers of a set through its life
 - **WHEN** a chunk of records longer than the write buffer is written to
   a new set, the set is finished, and a reader of the chunk's partition
   is opened and closed
-- **THEN** the memory grows by at least the chunk when it is written,
-  falls by the write buffer at the finish, grows by the stored block
-  while the reader is open and falls back when it is closed; the chunk
-  reads back as it was written
+- **THEN** the memory grows past the chunk when it is written, is 0
+  once the set is finished, grows past the stored block while the
+  reader is open and is 0 again when it is closed; the chunk reads back
+  as it was written
 - **Verified by:** `test/sql/spill.sql::tessera_test_spill_memory`
