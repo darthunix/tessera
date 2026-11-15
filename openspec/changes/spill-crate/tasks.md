@@ -387,7 +387,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 - [x] 6.7 Every mutant of the crate caught by the crate's own tests, or
       listed in `.cargo/mutants.toml` with its reason. Check: a run of
       the mutants workflow for `relspill`
-- [ ] 6.8 Probes of the contract's forecast, on branches that are never
+- [x] 6.8 Probes of the contract's forecast, on branches that are never
       merged, with their counts in the design. Check: the review of the
       counts in the pull request
 

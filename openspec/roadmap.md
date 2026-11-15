@@ -98,6 +98,12 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
   maintainer took it out of `spill-crate` on 2026-11-14
+- `spill-runs-host`: the host of a sort's runs apart from the sort
+  node, for a second user of the machine of the runs
+- `spill-file-set-owner`: the spill host's set of files a type of its
+  own, behind `runtime/spill.c` alone
+- `spill-block-kinds`: one map of a block's codes in the C API, and an
+  enum of kinds that grows
 - `numeric-keys-by-digits`: numeric keys hashed and compared by their
   digits
 - `lookup-key-splitting`: A batch's keys split where their rows outgrow
@@ -828,6 +834,67 @@ columns. Out of the change `spill-crate`, where it was a task until
 - **Depends on:** a writer as fast as the loops.
 - **Capabilities:** spill-format
 - **Size:** a pull request, once the writer is fast enough.
+
+### spill-runs-host
+
+The host of a sort's runs apart from the sort node. From the probe of
+"A merge join over sorted runs" of the forecast of `relspill`'s
+contract (`spill-crate`, task 6.8).
+
+- **What:** `nodes/sort_external.c` writes, merges and reads a sort's
+  runs; 28 of its 31 functions depend on the sort node's state,
+  `TessSortState`. Give the host of the runs a state of its own, which
+  the sort node holds, so that another node that steps the machine of
+  the runs, such as a merge join of Tessera's own, uses it too.
+- **Why:** The contract forecasts a merge join as the second user of
+  the machine of the runs, touching the node that steps it; the probe
+  found the host of the runs inside the sort node. The boundary
+  crossed: the host of the runs and the sort node.
+- **Depends on:** `merge-join`, which would be its second user.
+- **Capabilities:** relspill
+- **Size:** a pull request.
+
+### spill-file-set-owner
+
+The spill host's set of files a type of its own. From the probe of "A
+host with another manager of temporary files" of the forecast of
+`relspill`'s contract (`spill-crate`, task 6.8).
+
+- **What:** `include/tessera/runtime_spill.h` names PostgreSQL's
+  `SharedFileSet` in its config and three calls, and the join's node
+  keeps one by value in its shared state and lays it out in its shared
+  memory (`nodes/hashjoin.h`, `nodes/hashjoin_begin.c`,
+  `nodes/hashjoin_shared.c`). Give the spill's host a type of its own
+  for the set, with its size and the calls that lay it out and attach
+  to it, which a node keeps without knowing what it holds.
+- **Why:** The contract says another manager of temporary files, such
+  as one of a fork with its own manager of work files, touches only the
+  host's file calls in `runtime/spill.c`; the probe found the set's
+  type in the host's interface and in the join's node. The boundary
+  crossed: `runtime/spill.c` and the nodes.
+- **Depends on:** nothing.
+- **Capabilities:** relspill
+- **Size:** a pull request.
+
+### spill-block-kinds
+
+One map of a block's codes in the C API, and an enum of kinds that
+grows. From the probe of "A new kind of block" of the forecast of
+`relspill`'s contract (`spill-crate`, task 6.8).
+
+- **What:** `tessera-capi` maps a block's code to its kind in two
+  places, `c/spill.rs` and `c/spill_set.rs`, beside the enum of
+  `include/tessera/spill.h`; and `relspill::BlockKind` is not
+  `#[non_exhaustive]`, so a caller outside the crate that matches on
+  kinds changes when one is added. One map of codes in the C API, and
+  the enum marked as one that grows: a change of the crate's public API,
+  which the maintainer decides.
+- **Why:** The probe of a new kind of block touched the C API's codes,
+  which the contract's forecast did not name. The boundary crossed: the
+  crate's public API and the C API.
+- **Depends on:** nothing.
+- **Capabilities:** relspill
+- **Size:** a pull request.
 
 ### numeric-reading
 

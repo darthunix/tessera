@@ -1088,6 +1088,70 @@ reads it, as the documentation of the words and of the writer says.
     columns.
   - Matrix: none: the bytes are no file's.
 
+## The forecast, probed
+
+The contract, [contract.md](contract.md), names the changes the crate
+is likely to see and what each would touch. A probe makes such a
+change on a branch that is never merged and counts the parts and the
+interfaces it touched. Where a probe stops short of the whole change,
+what it did not make is counted by reading the code it would reach.
+
+- **A merge join over sorted runs.** No module of the crate. A model
+  host sorts a merge join's two inputs through a machine of the runs
+  each, both spilling, holds each sorted output whole, and joins them
+  by merging: the machine takes its second user unchanged, with no
+  format and no other machine, as the forecast says. The probe makes
+  no node, and reads no output as a stream. PostgreSQL's merge join
+  already reads the output of Tessera's sort, with a Material above it
+  for mark and restore. A merge join of Tessera's own that steps the
+  runs itself meets the host of the runs where the sort node keeps it:
+  28 of the 31 functions of the sort's external part depend on the
+  sort's state. The forecast named the node that steps the machine;
+  read as a merge join's own node, that node cannot take the host of
+  the runs as it is, which is past the forecast.
+- **A host with another manager of temporary files.** No module of the
+  crate, as the forecast says. The probe gives the host's set of files
+  a name of its own and keeps PostgreSQL's manager under it: it shows
+  where the set's type reaches, not another manager's calls. The set,
+  PostgreSQL's `SharedFileSet`, is a type of the interface of the
+  spill's host, `runtime_spill.h`, in its config and three calls, and
+  the join's node keeps one by value in its shared memory and lays it
+  out there in four calls. Past the forecast, which named the host's
+  file calls alone.
+- **A new kind of block**, a chunk of the states of aggregates stored
+  as it is. In the crate: the kind, its code and its bound; the
+  header's proof of the lengths of each kind; and one row of the damage
+  matrix. The writer, the reader and the packing take it unchanged.
+  One interface past the forecast: the C API's codes of kinds, in two
+  maps of codes and the header's enum. The enum of kinds is not marked
+  as one that grows, so a caller outside the crate that matches on
+  kinds changes with it. The machine that writes states and the host's
+  code are not made; the nodes name a kind of block in 19 places of 3
+  files, and the runtime in 3.
+- **A change of the record of relhash**, its size and its NULL bits
+  swapped. In the crate, the packing alone: the check of the format it
+  knows, which stops the build as it should, and two of its tests,
+  which pin the lane of the length. Its proofs and the damage matrix,
+  which the forecast named, the machines and the spill's host take the
+  layout unchanged. Beside the spill, the table's own interface changes
+  with its record, as it does for any change of it: the C mirror of the
+  record's layout and version in the table's header, which the kernels'
+  module checks against relhash when it loads, two tests of the C API
+  of the table, and relhash's tests of its format, which the probe
+  leaves failing.
+- **A grouping by several processes that spills.** No module of the
+  crate. A model participant steps the build's machine with the
+  answers a grouping would give: nothing for the outer side, of which
+  it has none, its groups at the probe, and, keeping every inner row as
+  a grouping keeps every group, each partition on disk that holds
+  records taken in the walk round them. It answers the actions without
+  their work: it holds no rows and no groups, runs alone, and joins no
+  round of several participants. So it shows that the machine's steps
+  and parameters serve a grouping as they are, not the grouping's work;
+  the grouping's machine for a partition taken alone and the node are
+  not made. The names of the machine's actions and events are a
+  join's, which a grouping's host answers in its own terms.
+
 ## Measurement plan
 
 - **What:** the machine code; the instructions of the spill's kernels
