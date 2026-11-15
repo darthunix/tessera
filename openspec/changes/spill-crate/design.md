@@ -896,6 +896,10 @@ reads it, as the documentation of the words and of the writer says.
   - Check: `Reader::read_counts`: no count past the entries the lists
     hold, and all of them together exactly those entries.
   - Error: damaged, `ListCounts`.
+  - Proof: `counts_that_pass_keep_the_partition_s_entries_in_the_lists`,
+    a step of a page from any counts that keep to the lists; and
+    `counts_taken_open_the_partition_s_entries_inside_the_lists`, the
+    open once every count is taken.
 - **`entry`**: an entry of a partition's list, the place and the bytes
   of one block.
   - Decides an address and a length: the bytes of the file a block read
@@ -903,8 +907,14 @@ reads it, as the documentation of the words and of the writer says.
   - Check: `Reader::check_entry`: a length of a header at least and of
     the largest block at most, and a block that lies whole before the
     next block of its partition and before the lists. A page read again
-    is checked again.
+    is checked again: each entry before the next of the page, and all
+    of them before the lists.
   - Error: damaged, `EntryLength` or `EntryPlace`.
+  - Proof: `an_entry_that_passes_names_a_block_before_the_next`;
+    `entries_that_open_a_partition_name_blocks_one_after_another`, as
+    the open passes them; and
+    `a_page_that_passes_names_blocks_one_after_another`, as a page is
+    read again.
 - **`packed-counts`**: the two counts at the start of a packed body,
   read when its block is read.
   - Decides nothing but a comparison: the length the counts give must
