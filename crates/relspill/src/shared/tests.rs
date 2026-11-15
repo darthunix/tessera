@@ -670,3 +670,21 @@ fn the_machine_refuses_what_is_no_step() -> Result<()> {
     }
     Ok(())
 }
+
+/// A count of partitions sent at the top of its word is no machine's: the
+/// report of one more sent is refused, and the machine is as it was.
+#[test]
+fn a_count_of_sends_at_the_top_of_its_word_is_no_machine() {
+    let shared = Shared::new(0, 1000);
+    let mut build = Build {
+        given: SEND,
+        evicted: u32::MAX,
+        ..Build::new(&params()).expect("params")
+    };
+    let before = build;
+    assert_eq!(
+        wrong(build.step(Event::Sent { freed: true }, &shared.host(&[]))),
+        Rule::MachineState
+    );
+    assert_eq!(build, before);
+}

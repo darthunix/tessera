@@ -164,6 +164,25 @@ fn an_event_out_of_turn_is_refused_and_changes_nothing() {
         wrong(none.step(Event::BuildEnd, &mut regions.host())),
         Rule::MachineState
     );
+    // A count of partitions sent at the top of its word is no machine's,
+    // as the build sends or as it ends.
+    for phase in [SENDING, ENDING] {
+        let mut counted = Join {
+            phase,
+            evicted: u32::MAX,
+            ..join
+        };
+        let before = counted;
+        let sent = Event::Sent {
+            freed: true,
+            memory: 0,
+        };
+        assert_eq!(
+            wrong(counted.step(sent, &mut regions.host())),
+            Rule::MachineState
+        );
+        assert_eq!(counted, before);
+    }
     let mut fits = Join::new(&params(1 << 20)).expect("parameters");
     assert_eq!(
         wrong(fits.step(Event::BuildEnd, &mut Regions::none().host())),
@@ -1313,5 +1332,72 @@ fn a_partition_is_read_in_pieces_past_what_the_memory_in_use_leaves() {
         };
         assert_eq!(opened(room, shared).0, open(false), "{shared}");
         assert_eq!(opened(room + 1, shared).0, open(true), "{shared}");
+    }
+}
+
+/// A level at the top of its word is no machine's: the split of a
+/// partition that would make the level below is refused, and the machine
+/// is as it was.
+#[test]
+fn a_level_at_the_top_of_its_word_is_no_machine() {
+    let (join, _, mut regions) = spilling(1 << 20);
+    let mut top = Join {
+        phase: JOINING,
+        level: u32::MAX,
+        deeper: 1,
+        cursor: 0,
+        flags: 0,
+        ..join
+    };
+    // Partition 0 on disk, with outer rows and more bytes than a piece.
+    let spill = regions.spill();
+    spill.add_bytes(1, Some(0)).expect("bytes");
+    let any = crate::shared_spill::Weights {
+        start: 0.0,
+        target: 0.0,
+        spilled: 1.0,
+        reserve: 0,
+        resident: 0.0,
+        per_check: 0,
+    };
+    let sent = spill.evict(&any, crate::shared_spill::Memory::Counted, None, 0);
+    assert_eq!(sent, Ok(Some(0)));
+    regions.outer[0] = 1;
+    regions.disk[0] = u64::MAX;
+    regions.total = 10;
+    let before = top;
+    assert_eq!(
+        wrong(top.step(Event::Next { memory: 0 }, &mut regions.host())),
+        Rule::MachineState
+    );
+    assert_eq!(top, before);
+}
+
+/// Params of more words a row than a chunk of columns holds are no
+/// machine's: the level they would plan is refused, and the machine is as
+/// it was.
+#[test]
+fn a_row_past_the_words_of_a_chunk_is_no_machine() {
+    for words in [columns::MAX_WORDS as u64 + 1, 1 << 60, u64::MAX] {
+        let join = Join::new(&params(1 << 20)).expect("parameters");
+        let mut wide = Join {
+            params: Params {
+                outer_words: words,
+                ..params(1 << 20)
+            },
+            ..join
+        };
+        let inner = Event::Inner {
+            held: 1 << 20,
+            rows: 1000,
+            estimate: 1000.0,
+            needed: (1 << 20) + 1,
+        };
+        let before = wide;
+        assert_eq!(
+            wrong(wide.step(inner, &mut Regions::none().host())),
+            Rule::MachineState
+        );
+        assert_eq!(wide, before);
     }
 }

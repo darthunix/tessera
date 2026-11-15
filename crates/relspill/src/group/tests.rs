@@ -189,6 +189,18 @@ fn an_event_out_of_turn_is_refused_and_changes_nothing() {
         wrong(none.step(Event::InputEnd, &regions.host())),
         Rule::MachineState
     );
+    // A count of partitions sent at the top of its word is no machine's.
+    let mut counted = Group {
+        phase: SENDING,
+        evicted: u32::MAX,
+        ..group
+    };
+    let before = counted;
+    assert_eq!(
+        wrong(counted.step(Event::Sent { memory: 0 }, &regions.host())),
+        Rule::MachineState
+    );
+    assert_eq!(counted, before);
     let full = Event::Full {
         partition: 64,
         tail: true,

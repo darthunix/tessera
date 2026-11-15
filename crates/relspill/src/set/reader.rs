@@ -297,7 +297,8 @@ impl Reader {
             );
             return Ok(());
         }
-        if self.phase == EMPTY && self.count == 0 {
+        // An empty partition asks for nothing after its open.
+        if self.phase == EMPTY && self.count == 0 && self.asked == NOTHING {
             return Ok(());
         }
         // The partition's entries lie inside the lists.
@@ -1257,6 +1258,28 @@ mod tests {
         forged.count = u64::MAX;
         let page = [Entry::default(); 2];
         ensure!(forged.next(&page, &[]).map_err(Error::rule) == Err(Rule::ReaderState));
+        Ok(())
+    }
+
+    /// Words of a partition with no blocks that say a page was asked for
+    /// are no reader's: an empty partition asks for nothing after its
+    /// open.
+    #[test]
+    fn an_empty_reader_that_asked_a_page_is_refused() -> Result<()> {
+        let mut forged = Reader {
+            bounds: Bounds::all(100),
+            file_len: 40,
+            entries_at: 16,
+            partitions: 1,
+            phase: EMPTY,
+            asked: PAGE,
+            asked_len: 16,
+            ..Reader::default()
+        };
+        let before = forged;
+        let page = [Entry::default(); 2];
+        ensure!(forged.next(&page, &[]).map_err(Error::rule) == Err(Rule::ReaderState));
+        ensure!(forged == before);
         Ok(())
     }
 

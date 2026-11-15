@@ -613,7 +613,7 @@ impl Join {
                     self.phase = BUILDING;
                     return Ok(Action::Done);
                 }
-                self.send(host, Some(memory), self.evicted + 1)
+                self.send(host, Some(memory), self.next_evicted()?)
             }
             (BUILDING, Event::BuildEnd) => self.send(host, None, 0),
             (ENDING, Event::Sent { freed, .. }) => {
@@ -623,7 +623,7 @@ impl Join {
                 // The end weighs no memory, but its shares still go from
                 // start to target: a start of 0 sends a partition whatever
                 // the memory, and a target of more stops.
-                self.send(host, None, self.evicted + 1)
+                self.send(host, None, self.next_evicted()?)
             }
             (PROBING, Event::OuterEnd) if ended => {
                 self.phase = JOINING;
@@ -711,6 +711,14 @@ impl Join {
     }
 
     /// The phase, checked.
+    /// The count of the next partition this check sends: a count at the
+    /// top of its word is no machine's.
+    fn next_evicted(&self) -> Result<u32> {
+        self.evicted
+            .checked_add(1)
+            .ok_or(Error::wrong_call(Rule::MachineState).with(self.evicted))
+    }
+
     fn phase(&self) -> Result<u32> {
         ensure!(
             (FITS..=TAIL).contains(&self.phase),
@@ -747,6 +755,11 @@ impl Join {
         shift: u32,
         partitions: u32,
     ) -> Result<Start> {
+        // Params that are no machine's, past the words a row holds.
+        ensure!(
+            self.params.outer_words <= columns::MAX_WORDS as u64,
+            Error::wrong_call(Rule::MachineState).with(self.params.outer_words)
+        );
         let plan = plan::plan(
             &self.params.shape,
             &Level {
@@ -914,7 +927,10 @@ impl Join {
         }
         Ok(Action::Split(Below {
             partition,
-            level: self.level + 1,
+            level: self
+                .level
+                .checked_add(1)
+                .ok_or(Error::wrong_call(Rule::MachineState).with(self.phase))?,
             expected: host.disk[index],
             limit: plan::below_limit(self.params.limit, memory),
             shift: self.below,

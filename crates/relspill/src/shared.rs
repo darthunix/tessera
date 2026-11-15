@@ -461,7 +461,11 @@ impl Build {
                 if !freed {
                     return self.settle(spill);
                 }
-                self.evicted += 1;
+                // A count at the top of its word is no machine's.
+                self.evicted = self
+                    .evicted
+                    .checked_add(1)
+                    .ok_or(Error::wrong_call(Rule::MachineState).with(self.evicted))?;
                 self.send(spill)
             }
             (WRITE, Event::Done) => self.flush(spill),

@@ -423,7 +423,7 @@ impl Group {
                 })
             }
             (BUILDING, Event::Grown { memory }) => self.send(host, memory, 0),
-            (SENDING, Event::Sent { memory }) => self.send(host, memory, self.evicted + 1),
+            (SENDING, Event::Sent { memory }) => self.send(host, memory, self.next_evicted()?),
             (BUILDING, Event::InputEnd) => {
                 self.counts(host)?;
                 self.cursor = 0;
@@ -453,6 +453,14 @@ impl Group {
             Error::wrong_call(Rule::MachineState).with(self.phase)
         );
         Ok(self.phase)
+    }
+
+    /// The count of the next partition this check sends: a count at the
+    /// top of its word is no machine's.
+    fn next_evicted(&self) -> Result<u32> {
+        self.evicted
+            .checked_add(1)
+            .ok_or(Error::wrong_call(Rule::MachineState).with(self.evicted))
     }
 
     fn check_partition(&self, partition: u32) -> Result<()> {
