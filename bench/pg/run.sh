@@ -85,7 +85,7 @@ measure)
     check_server
     mkdir -p "$OUT/source"
     cp "$HERE/README.md" "$OUT/protocol.md"
-    cp "$HERE/setup.sql" "$HERE/$FAMILY.sql" "$OUT/source/"
+    cp "$HERE/setup.sql" "$HERE/reading.sql" "$HERE/$FAMILY.sql" "$OUT/source/"
     {
         echo "HEAD $(git -C "$ROOT" rev-parse HEAD)"
         echo "workers $WORKERS"

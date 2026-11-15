@@ -19,6 +19,8 @@ SET max_parallel_workers_per_gather = :workers;
 -- The data set's multiplier: the constants below keep their selectivity.
 SELECT scale FROM bench_scale \gset
 
+\ir reading.sql
+
 CREATE TEMP TABLE timings
 (
     test text,
@@ -37,19 +39,15 @@ CREATE FUNCTION pg_temp.measure(test_name text, mode text,
 RETURNS void
 LANGUAGE plpgsql
 AS $function$
-DECLARE
-    started_at timestamptz;
 BEGIN
     PERFORM set_config('tessera.enable', mode, false);
     FOR warmup IN 1..5 LOOP
-        EXECUTE format('EXECUTE %I', statement_name);
+        PERFORM pg_temp.reading(format('EXECUTE %I', statement_name));
     END LOOP;
     FOR sample IN 1..repetitions LOOP
-        started_at := clock_timestamp();
-        EXECUTE format('EXECUTE %I', statement_name);
         INSERT INTO timings
         VALUES (test_name, mode, sample,
-                1000 * extract(epoch FROM clock_timestamp() - started_at));
+                pg_temp.reading(format('EXECUTE %I', statement_name)));
     END LOOP;
 END
 $function$;
@@ -97,22 +95,17 @@ RETURNS void
 LANGUAGE plpgsql
 AS $function$
 DECLARE
-    started_at timestamptz;
     mode text;
 BEGIN
     FOREACH mode IN ARRAY ARRAY['on', 'off'] LOOP
         PERFORM set_config('tessera.enable', mode, false);
         FOR warmup IN 1..5 LOOP
-            EXECUTE 'EXPLAIN (COSTS OFF) ' || sql;
+            PERFORM pg_temp.plan_reading(sql, 1, '(COSTS OFF) ');
         END LOOP;
         FOR sample IN 1..repetitions LOOP
-            started_at := clock_timestamp();
-            FOR plan IN 1..100 LOOP
-                EXECUTE 'EXPLAIN (COSTS OFF) ' || sql;
-            END LOOP;
             INSERT INTO timings
             VALUES (test_name, mode, sample,
-                    10 * extract(epoch FROM clock_timestamp() - started_at));
+                    pg_temp.plan_reading(sql, 100, '(COSTS OFF) '));
         END LOOP;
     END LOOP;
 END

@@ -34,6 +34,8 @@ FROM generate_series(1, 2000000) AS g;
 VACUUM (ANALYZE) bench_prefix;
 VACUUM (ANALYZE) bench_skew;
 
+\ir reading.sql
+
 CREATE TEMP TABLE timings
 (
     test text,
@@ -61,20 +63,16 @@ RETURNS void
 LANGUAGE plpgsql
 AS $function$
 DECLARE
-    started_at timestamptz;
     command text := CASE WHEN prepared THEN format('EXECUTE %I', statement)
                          ELSE statement END;
 BEGIN
     PERFORM set_config('tessera.enable', mode, false);
     FOR warmup IN 1..5 LOOP
-        EXECUTE command;
+        PERFORM pg_temp.reading(command);
     END LOOP;
     FOR sample IN 1..repetitions LOOP
-        started_at := clock_timestamp();
-        EXECUTE command;
         INSERT INTO timings
-        VALUES (test_name, mode, sample,
-                1000 * extract(epoch FROM clock_timestamp() - started_at));
+        VALUES (test_name, mode, sample, pg_temp.reading(command));
     END LOOP;
 END
 $function$;

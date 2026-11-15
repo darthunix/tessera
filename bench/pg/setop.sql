@@ -23,6 +23,8 @@ SET work_mem = '256MB';
 SET plan_cache_mode = force_generic_plan;
 SELECT scale FROM bench_scale \gset
 
+\ir reading.sql
+
 CREATE TEMP TABLE timings
 (
     test text,
@@ -44,18 +46,15 @@ RETURNS void
 LANGUAGE plpgsql
 AS $function$
 DECLARE
-    started_at timestamptz;
+    command text := format('EXECUTE %I%s', statement_name, arguments);
 BEGIN
     PERFORM set_config('tessera.enable', mode, false);
     FOR warmup IN 1..5 LOOP
-        EXECUTE format('EXECUTE %I%s', statement_name, arguments);
+        PERFORM pg_temp.reading(command);
     END LOOP;
     FOR sample IN 1..repetitions LOOP
-        started_at := clock_timestamp();
-        EXECUTE format('EXECUTE %I%s', statement_name, arguments);
         INSERT INTO timings
-        VALUES (test_name, mode, sample,
-                1000 * extract(epoch FROM clock_timestamp() - started_at));
+        VALUES (test_name, mode, sample, pg_temp.reading(command));
     END LOOP;
 END
 $function$;
