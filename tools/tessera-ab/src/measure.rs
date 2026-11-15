@@ -470,6 +470,18 @@ mod tests {
 
     use super::*;
 
+    /// The tests that write a script or start a process run one at a time.
+    /// A child forked while a script is open for writing holds it until its
+    /// own exec, and the script's exec then fails with ETXTBSY: a restart
+    /// that never ran, now and then, on Linux.
+    static PROCESSES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn processes() -> std::sync::MutexGuard<'static, ()> {
+        PROCESSES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[derive(Parser)]
     struct Cli {
         #[command(flatten)]
@@ -512,6 +524,7 @@ mod tests {
 
     #[test]
     fn the_server_restarts_only_within_the_deadline() -> Result<()> {
+        let _processes = processes();
         let (repo, calls) = repository("0")?;
         let pg = pg();
         let options = Cli::try_parse_from(["ab", "--base", "HEAD", "--family", "win"])?.options;
@@ -529,6 +542,7 @@ mod tests {
 
     #[test]
     fn counters_ask_run_sh_for_counts_in_one_round_at_one_percent() -> Result<()> {
+        let _processes = processes();
         let times = Cli::try_parse_from(["ab", "--base", "HEAD", "--family", "win"])?.options;
         assert_eq!((times.rounds().get(), times.threshold()), (2, 2.));
         let counts =
@@ -598,6 +612,7 @@ mod tests {
 
     #[test]
     fn a_restart_for_counts_preloads_pg_pmu() -> Result<()> {
+        let _processes = processes();
         let directory = tempfile::tempdir()?;
         let bin = directory.path();
         script(
@@ -631,6 +646,7 @@ mod tests {
 
     #[test]
     fn a_restart_the_deadline_passes_ends_and_nothing_follows() -> Result<()> {
+        let _processes = processes();
         let (repo, calls) = repository("0.5")?;
         let pg = pg();
         let options = Cli::try_parse_from(["ab", "--base", "HEAD", "--family", "win"])?.options;
@@ -643,6 +659,7 @@ mod tests {
 
     #[test]
     fn the_restart_of_run_sh_bounds_the_waits_of_pg_ctl() -> Result<()> {
+        let _processes = processes();
         // The repository's run.sh, over a pg_config and a pg_ctl that note
         // their arguments.
         let directory = tempfile::tempdir()?;
