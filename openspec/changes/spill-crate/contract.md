@@ -14,14 +14,21 @@ is left to the work.
 ### Free of Tessera
 The crate builds without PostgreSQL and without any crate of Tessera
 except `relhash`, so that it can be used, and checked, on its own.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::cargo test --locked -p relspill`;
+  `.github/workflows/ci.yml::cargo publish --dry-run --locked -p relhash
+  -p relspill`;
+  `.github/workflows/ci.yml::cd target/packed/relspill-*/`
 
 ### No input or output
 The crate opens, reads, writes and removes no file, and waits for
 nothing, since its host does all of that and tells the crate what
 happened: so no error of the host jumps over the crate's frames, and a
 test, a fuzzer, a proof or a model runs the whole crate in memory.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::cargo check --locked -p relspill
+  --no-default-features`;
+  `crates/relspill/src/lib.rs::#![cfg_attr(not(test), no_std)]`
 
 ### No memory allocated
 A call of the crate allocates nothing, even when it fails, so that the
@@ -38,7 +45,8 @@ and one proof covers every read.
 The crate has no unsafe code, since all its memory, the words in shared
 memory included, comes to it as safe slices that its host makes: so the
 compiler alone keeps it sound, and no proof of soundness is owed.
-- **Checked by:** pending
+- **Checked by:**
+  `crates/relspill/src/lib.rs::#![forbid(unsafe_code)]`
 
 ### One owner for each rule of a spill
 Only the crate decides when a spill starts, which partition goes to

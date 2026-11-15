@@ -8,6 +8,9 @@
 //! and a wrong call as its own fault; a limit of the host, and why a
 //! source of rows it gives cannot give a value, stay the host's to say.
 
+// The crate's own code names nothing of std, and without its feature
+// alloc nothing of alloc: so no file and no allocation.
+#![cfg_attr(not(test), no_std)]
 // All memory comes to the crate as safe slices its host makes, so the
 // compiler alone keeps it sound, its loom models included.
 #![forbid(unsafe_code)]
@@ -15,6 +18,9 @@
 
 #[cfg(not(target_pointer_width = "64"))]
 compile_error!("relspill needs a target whose pointers are 64 bits wide");
+
+#[cfg(feature = "alloc")]
+extern crate alloc;
 
 pub mod columns;
 mod error;

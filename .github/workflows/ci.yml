@@ -101,6 +101,10 @@ jobs:
           key: relspill
       - name: The crate's tests alone
         run: cargo test --locked -p relspill
+      # Without its feature alloc, core alone builds the crate, so a file
+      # or an allocation in its code fails to build.
+      - name: The crate with core alone
+        run: cargo check --locked -p relspill --no-default-features
       - name: The documentation, every warning an error
         run: RUSTDOCFLAGS="-D warnings" cargo doc --locked -p relspill --no-deps
       - name: The examples of the documentation
@@ -109,6 +113,21 @@ jobs:
       # the two are packed and built together.
       - name: A dry run of publishing, from the packed files
         run: cargo publish --dry-run --locked -p relhash -p relspill
+      # The tests of the packed crate, built from its files and relhash's
+      # alone, with the versions of the workspace's lock: they need
+      # nothing else of Tessera.
+      - name: The tests of the packed crate
+        run: |
+          cargo package --locked --no-verify -p relhash -p relspill
+          mkdir -p target/packed
+          for crate in target/package/relhash-*.crate target/package/relspill-*.crate; do
+            tar -xzf "$crate" -C target/packed
+          done
+          cd target/packed/relspill-*/
+          printf '\n[patch.crates-io]\nrelhash = { path = "%s" }\n\n[workspace]\n' \
+            "$(echo ../relhash-*)" >> Cargo.toml
+          cp ../../../Cargo.lock .
+          cargo test
       - name: A 32-bit target refused
         run: |
           rustup target add i686-unknown-linux-gnu

@@ -11,6 +11,13 @@ readme = "README.md"
 # (CONTRIBUTING.md); it is not published on crates.io for now.
 publish = true
 
+[features]
+default = ["alloc"]
+# What the crate gives over vectors: ColumnChunks for chunks each in a
+# Vec. Without it the crate's own code names nothing of std or alloc, so
+# a file or an allocation in it fails to build.
+alloc = []
+
 [dependencies]
 relhash.workspace = true
 

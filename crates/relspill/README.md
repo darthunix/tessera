@@ -253,7 +253,10 @@ every check still passes, may be taken for other data.
 ## Building
 
 relspill builds for targets whose pointers are 64 bits wide, and on any
-other target fails to build with an error that says so.
+other target fails to build with an error that says so. Its feature
+`alloc`, on by default, gives `ColumnChunks` over chunks each in a
+`Vec`; without it the crate's own code names nothing of `std` or
+`alloc`.
 
 ## How it is built
 

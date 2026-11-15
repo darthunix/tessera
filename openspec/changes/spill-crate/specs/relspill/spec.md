@@ -81,6 +81,14 @@ nothing. A call that appends rows MAY first append the rows that fit;
 it SHALL then say which rows it appended and how many bytes the next
 row needs.
 
+#### Scenario: Its own code without std
+- **WHEN** the crate is built without its feature `alloc`
+- **THEN** it builds as `no_std`: its own code names nothing of `std`
+  or of `alloc`, so no file and no allocation
+- **Verified by:**
+  `.github/workflows/ci.yml::cargo check --locked -p relspill
+  --no-default-features`
+
 #### Scenario: Every call under a counting allocator
 - **WHEN** every call of the crate runs under an allocator that counts
   allocations

@@ -17,7 +17,7 @@
 //! row's place is referred to as the table refers to a record, by the
 //! chunk's number above [`PLACE_BITS`] bits of its place in the chunk.
 
-use std::ops::Range;
+use core::ops::Range;
 
 use relhash::{MAX_PARTITIONS, Partitions, PayloadColumns, RowMask, ones};
 
@@ -37,10 +37,11 @@ pub trait ColumnChunks {
     fn chunk(&mut self, index: usize) -> Option<&mut [u8]>;
 }
 
-/// Chunks each its own vector, by number.
-impl ColumnChunks for [Vec<u8>] {
+/// Chunks each its own vector, by number; with the feature `alloc`.
+#[cfg(feature = "alloc")]
+impl ColumnChunks for [alloc::vec::Vec<u8>] {
     fn chunk(&mut self, index: usize) -> Option<&mut [u8]> {
-        self.get_mut(index).map(Vec::as_mut_slice)
+        self.get_mut(index).map(alloc::vec::Vec::as_mut_slice)
     }
 }
 
