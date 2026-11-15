@@ -264,10 +264,12 @@ change those bytes. A region is replaced only when no action holds it.
 An action can fail: a write that wrote only part of its bytes, a read
 that got fewer bytes than it asked for, an error of the file manager,
 the limit of temporary files, a cancel. The crate does not retry and
-does not try to recover. The host reports the failure. After that, the
-set or the machine accepts only a free or a reset; any other call is a
-wrong call. In Tessera a failed action raises an ERROR, which ends the
-query and frees the set with its memory; nothing is left to report.
+does not try to recover. The host reports a write that failed to its
+set, which then takes only a reset; any other call is a wrong call. A
+machine has no report of a failed action: its host ends the spill, and
+drops the machine's words or makes the machine anew. In Tessera a
+failed action raises an ERROR, which ends the query and frees the set
+and the machine with its memory; nothing is left to report.
 
 In a shared build, a participant whose action failed never arrives at
 a barrier as done, and its claims in the shared words are not taken

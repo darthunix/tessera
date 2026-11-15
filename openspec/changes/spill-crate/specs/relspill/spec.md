@@ -53,10 +53,11 @@ rules, the layouts and the limits of the API.
 The crate SHALL NOT open, read, write or remove a file. A call that
 writes SHALL return the bytes to write and the offset of each in the
 file. A call that reads SHALL name the offset and the length it needs,
-and SHALL take the bytes the caller read. When the caller reports an
-action it could not finish, the set or the machine SHALL accept only a
-free or a reset afterwards, and SHALL refuse any other call as a wrong
-call.
+and SHALL take the bytes the caller read. When the caller reports a
+write it could not finish, the set SHALL take only a reset afterwards,
+and SHALL refuse any other call as a wrong call. A machine takes no
+report of an action its host could not do: the host then ends the
+spill, and drops the machine's words or makes the machine anew.
 
 #### Scenario: A set written and read in memory
 - **WHEN** a caller keeps the file of a set as bytes in memory, writes
@@ -67,8 +68,8 @@ call.
 
 #### Scenario: A write that fails half way
 - **WHEN** the caller reports a write that it finished only in part
-- **THEN** the set refuses every call but a free or a reset, and a set
-  that was reset writes and reads like a new one
+- **THEN** the set refuses every call but a reset, and a set that was
+  reset writes and reads like a new one
 - **Verified by:**
   `crates/relspill/src/set.rs::a_set_cut_by_a_failed_write_takes_only_a_reset`
 
