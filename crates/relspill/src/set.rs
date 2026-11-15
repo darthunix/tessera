@@ -908,6 +908,8 @@ pub(crate) mod tests {
     use crate::Kind;
     use crate::testing::quiet;
 
+    mod damage;
+
     /// Run `test` on the cases of `strategy`, and fail with the smallest
     /// failing case, which `set.proptest-regressions` beside this file
     /// keeps for the next runs.

@@ -887,6 +887,39 @@ a shared join's takes them. The solver takes the rule with weights of
 any value in half an hour, past what a proof may take in CI, so the
 weights are the nodes'.
 
+The rows of the damage matrix under a point are damages of
+`crates/relspill/src/set/tests/damage.rs`. Its test
+`every_damage_against_every_read` writes a set of four partitions:
+blocks of values of four lengths; chunks of columns, one with its
+values, one without, one whose every lane packs to a constant and one
+of lanes of 2 and 4 bytes; chunks of records that pack, by lanes of
+every width, and one stored as it is; and a partition of no block. It
+damages the file in one place, at and around the limits of a field,
+and runs every read of the crate over it twice: each partition opened
+and read to its end; its chunks of columns checked as a pair, checked
+with their values by a host that knows where a value ends, and read by
+windows, each of which must give the chunk's lanes; then a seek to
+each of its blocks, which must give the block the read gave there.
+After a read that fails, the body is asked for again and three blocks
+more. A read must end, with its data or the error of the damage's
+rule, and ask for no byte past the file or past the region it names;
+a damage that is more than data must be seen by some read; and the
+whole matrix has a deadline, so that a call that does not end fails
+it. Every rule of damaged bytes that the sources of the reads name is
+some row's, but six that no damage of a written file reaches through
+the reader: the test lists each with the check that refuses the same
+bytes first, and fails on an error of damaged bytes in a form its scan
+of the sources cannot read. Checks that an earlier check on the
+reader's path covers, such as the counts of a packed body that the
+reader compares with its header first, are reached alone by the tests
+of each call, the proofs and the fuzz targets. Two checks guard a file
+that changes between the calls of a read, which the matrix's never
+does: an entry's end against the lists in `Reader::check_entry`, and a
+block's entry against the largest in `Reader::next`. A node reads its
+files through the same calls, by the C entry points that map to them,
+and `test/sql/spill_damage.sql` damages the blocks a join, a sort and
+a grouping read back, through injection points of PostgreSQL.
+
 The words of a spill that the participants share, and the block lists
 a host keeps for a writer, are the host's memory too, but they hold no
 bytes of a file and are no trust point: the crate checks each where it
@@ -902,6 +935,8 @@ reads it, as the documentation of the words and of the writer says.
   - Proof: `a_header_that_passes_has_the_lengths_of_its_kind`, and
     `a_header_written_reads_back_as_it_was` for the writer, which
     refuses what the reader would.
+  - Matrix: the rows from `magic` to `columns packed into no 8s`,
+    among them a pair's block of another kind or number.
 - **`trailer`**: the four words at the end of a set's file.
   - Decides an address: where the lists start, and so where every read
     of the lists goes; and the length of a loop, the entries the lists
@@ -912,6 +947,8 @@ reads it, as the documentation of the words and of the writer says.
   - Error: damaged, `Trailer`, `TrailerMagic`, `TrailerPartitions`,
     `TrailerLists`, `FileFingerprint` or `ListsRoom`.
   - Proof: `a_trailer_that_passes_puts_the_lists_before_it`.
+  - Matrix: the rows from `a file shorter than a trailer` to `file
+    fingerprint`.
 - **`list-counts`**: the count of blocks of each partition, the first
   part of the lists.
   - Decides an address and the length of a loop: where the partition's
@@ -923,6 +960,9 @@ reads it, as the documentation of the words and of the writer says.
     a step of a page from any counts that keep to the lists; and
     `counts_taken_open_the_partition_s_entries_inside_the_lists`, the
     open once every count is taken.
+  - Matrix: the rows from `a count one more` to `a block counted in
+    the next partition`, and `lists an entry later` and `lists an
+    entry earlier`, which move the counts.
 - **`entry`**: an entry of a partition's list, the place and the bytes
   of one block.
   - Decides an address and a length: the bytes of the file a block read
@@ -938,12 +978,17 @@ reads it, as the documentation of the words and of the writer says.
     the open passes them; and
     `a_page_that_passes_names_blocks_one_after_another`, as a page is
     read again.
+  - Matrix: the rows from `an entry a word later` to `two entries
+    swapped`.
 - **`packed-counts`**: the two counts at the start of a packed body,
   read when its block is read.
   - Decides nothing but a comparison: the length the counts give must
     be the header's, before the host makes a buffer by it.
   - Check: `Reader::read_block`.
   - Error: damaged, `PackedHeader`.
+  - Matrix: `records one more`, `records a word longer`, `rows one
+    more`, `words one more`, `columns a word longer` and `packed
+    records read as columns`.
 - **`packed-records`**: the counts, the lane codes and the lanes of a
   packed chunk of records.
   - Decides addresses and the length of loops: the records and the
@@ -962,6 +1007,8 @@ reads it, as the documentation of the words and of the writer says.
     codes and lanes of two records of 24 bytes, and the copy after them
     over any bytes the chunk held. That the data lanes come back as they
     were packed is the tests'.
+  - Matrix: the rows from `records of 5 bytes` to `a byte of records
+    stored as they are`.
 - **`packed-columns`**: the counts, the descriptors and the lanes of a
   packed chunk of columns.
   - Decides addresses and the length of loops: the rows and the lanes
@@ -982,6 +1029,8 @@ reads it, as the documentation of the words and of the writer says.
     descriptors and lanes of two rows of one word, and the copy after
     them over any bytes the chunk held. That the lanes' values come back
     as they were packed is the tests'.
+  - Matrix: the rows from `more words than a chunk holds` to `the
+    zeros of a descriptor`.
 - **`columns-header`**: the header of a chunk of columns, the host's or
   one read back.
   - Decides addresses and the length of loops: where each lane lies and
@@ -991,6 +1040,8 @@ reads it, as the documentation of the words and of the writer says.
     back is checked by `spill_columns::check` through it.
   - Error: a wrong call, `ColumnsChunk`, `ColumnsMagic` or
     `ColumnsShape`, damaged for a chunk read back.
+  - Matrix: none: a chunk read back takes its header from its packed
+    counts, which `packed-columns` covers.
 - **`column-references`**: the NULL bits and the words of a column by
   reference, in a chunk of columns read back.
   - Decides an address: the place in the chunk of values that a word
@@ -1000,12 +1051,16 @@ reads it, as the documentation of the words and of the writer says.
     reference into the values, at a byte aligned to 8 or at their end,
     to a value that ends inside them.
   - Error: damaged, `ReadWords`, `ReadRows`, `ValueRef` or `ValueEnd`.
+  - Matrix: the rows from `references a byte later` to `a constant
+    chunk of no words, its rows and a lane to match`.
 - **`column-words`**: the words and the NULL bits of a checked chunk of
   columns, read by windows.
   - Decides only data: a word of a row, which a reference the check
     passed already is.
   - Check: none past `spill_columns::check`; `window` checks only its
     caller's bounds.
+  - Matrix: `a least word of a column by value` and `a constant of
+    NULL bits`, both data.
 - **`host-chunk`**: a chunk the host gives to be packed, or appended
   to: its used mark, its records' lengths, its lanes.
   - Decides the length of loops when it is packed: the records and the
@@ -1015,6 +1070,7 @@ reads it, as the documentation of the words and of the writer says.
     `columns::shape` checks a chunk of columns first.
   - Error: none for records, which are then not packed; a wrong call for
     columns.
+  - Matrix: none: the bytes are no file's.
 
 ## Measurement plan
 

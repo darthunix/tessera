@@ -35,15 +35,15 @@ const USED_MARK: usize = CHUNK_HEADER;
 /// The record header's word holding the record length in units of 8
 /// bytes, and the lane of the next-record reference.
 const LEN_AT: usize = RECORD_SIZE_OFFSET;
-const NEXT_LANE: usize = RECORD_NEXT_OFFSET / 4;
+pub(crate) const NEXT_LANE: usize = RECORD_NEXT_OFFSET / 4;
 /// The shortest record: its header and one key slot.
 const MIN_RECORD: usize = RECORD_HEADER + KEY_SLOT;
 
-const ZERO: u8 = 0;
-const CONSTANT: u8 = 1;
-const BYTE: u8 = 2;
-const HALF: u8 = 3;
-const WORD: u8 = 4;
+pub(crate) const ZERO: u8 = 0;
+pub(crate) const CONSTANT: u8 = 1;
+pub(crate) const BYTE: u8 = 2;
+pub(crate) const HALF: u8 = 3;
+pub(crate) const WORD: u8 = 4;
 
 /// The record length of a chunk that packing can take: a used mark that
 /// covers the whole chunk and at least one record, and a record length, a

@@ -200,6 +200,9 @@ git ls-files -- "$spill/*.rs" | perl -e '
             || $file =~ m{^\Q$crate\E/(loom\.rs|testing\.rs|(?:.*/)?proofs\.rs|.*/tests\.rs|join/model\.rs)$};
         open(my $in, "<", $file) or die "$file: $!";
         my @lines = <$in>;
+        # A file of tests: its own inner attribute keeps it out of every
+        # other build, whichever module names it.
+        next if grep { /^#!\[cfg\(test\)\]\s*$/ } @lines;
         my $tests = 0;
         for my $at (0 .. $#lines) {
             # A module of tests, to the brace that closes it at the

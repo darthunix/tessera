@@ -371,7 +371,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       picks a partition to send to disk. Each family names, in the list
       of trust points, the checks it covers. Check:
       `cargo kani -p relspill` in CI
-- [ ] 6.3 The damage matrix: damaged files against every read of the
+- [x] 6.3 The damage matrix: damaged files against every read of the
       crate and of the nodes. Check: its tests
 - [ ] 6.4 Fuzz targets: any bytes as a file; any events and numbers
       given to a machine. Check: the fuzz workflow, a minute a target

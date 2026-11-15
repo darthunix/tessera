@@ -72,6 +72,9 @@ fault "an import of the layer" crates/relspill/src/plan.rs \
 fault "a word made past a module of tests" crates/relspill/src/plan.rs \
     's{\z}{\nfn sneak(b: [u8; 8]) -> u64 { u64::from_ne_bytes(b) }\n}' \
     "reads a word of bytes around the layer"
+fault "a file of tests that is not marked one" crates/relspill/src/set/tests/damage.rs \
+    's{^#!\[cfg\(test\)\]\n}{}m' \
+    "reads a word of bytes around the layer"
 
 if [ "$failures" -ne 0 ]; then
     echo "test-check-trust: $failures failed"
