@@ -17,7 +17,7 @@
 use relhash::{CHUNK_HEADER, KEY_SLOT, RECORD_HEADER, RECORD_NEXT_OFFSET, RECORD_SIZE_OFFSET};
 
 use crate::error::ensure;
-use crate::{Error, Result, Rule, low};
+use crate::{Error, Result, Rule, low, read};
 
 // The packing knows the records of this format of `relhash`: a new
 // format stops the build here until the packing is checked against it.
@@ -45,12 +45,6 @@ const BYTE: u8 = 2;
 const HALF: u8 = 3;
 const WORD: u8 = 4;
 
-fn word(bytes: &[u8], at: usize) -> u32 {
-    let mut word = [0; 4];
-    word.copy_from_slice(&bytes[at..at + 4]);
-    u32::from_ne_bytes(word)
-}
-
 /// The record length of a chunk that packing can take: a used mark that
 /// covers the whole chunk and at least one record, and a record length, a
 /// multiple of 8 of at least [`MIN_RECORD`] bytes, that divides the rest
@@ -59,13 +53,12 @@ fn record_len(chunk: &[u8]) -> Option<usize> {
     if chunk.len() < USED_MARK + MIN_RECORD || !chunk.len().is_multiple_of(8) {
         return None;
     }
-    let mut used = [0; USED_MARK];
-    used.copy_from_slice(&chunk[..USED_MARK]);
-    let used = u64::from_ne_bytes(used);
+    let used = read::u64_at(chunk, 0); // trust: host-chunk
     if used != chunk.len() as u64 {
         return None;
     }
-    let len = (word(chunk, USED_MARK + LEN_AT) as usize).checked_mul(8)?;
+    // trust: host-chunk
+    let len = (read::u32_at(chunk, USED_MARK + LEN_AT) as usize).checked_mul(8)?;
     (len >= MIN_RECORD && (chunk.len() - USED_MARK).is_multiple_of(len)).then_some(len)
 }
 
@@ -73,7 +66,7 @@ fn record_len(chunk: &[u8]) -> Option<usize> {
 fn put<const W: usize>(records: &[u8], len: usize, lane: usize, out: &mut [u8]) {
     let at = lane * 4;
     for (record, place) in records.chunks_exact(len).zip(out.as_chunks_mut::<W>().0) {
-        let value = word(record, at).to_ne_bytes();
+        let value = read::u32_at(record, at).to_ne_bytes(); // trust: host-chunk
         place.copy_from_slice(&value[low::<W, 4>()..][..W]);
     }
 }
@@ -81,7 +74,8 @@ fn put<const W: usize>(records: &[u8], len: usize, lane: usize, out: &mut [u8]) 
 /// Load lane `lane` of every record from `W` bytes each.
 fn get<const W: usize>(packed: &[u8], len: usize, lane: usize, records: &mut [u8]) {
     let at = lane * 4;
-    for (record, place) in records.chunks_exact_mut(len).zip(packed.as_chunks::<W>().0) {
+    // trust: packed-records
+    for (record, place) in records.chunks_exact_mut(len).zip(read::values::<W>(packed)) {
         let mut value = [0_u8; 4];
         value[low::<W, 4>()..][..W].copy_from_slice(place);
         record[at..at + 4].copy_from_slice(&value);
@@ -138,19 +132,18 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Option<usize> {
         // One pass over the records in order: the lanes' bits, and
         // whether each differs from the first record's.
         for (lane, first) in first[..lanes].iter_mut().enumerate() {
-            *first = word(records, (from + lane) * 4);
+            *first = read::u32_at(records, (from + lane) * 4); // trust: host-chunk
         }
         bits[..lanes].fill(0);
         differ[..lanes].fill(0);
         for record in records.chunks_exact(len) {
-            for ((value, (bits, differ)), first) in record[from * 4..(from + lanes) * 4]
-                .as_chunks::<4>()
-                .0
+            let values = read::values::<4>(&record[from * 4..(from + lanes) * 4]); // trust: host-chunk
+            for ((value, (bits, differ)), first) in values
                 .iter()
                 .zip(bits.iter_mut().zip(differ.iter_mut()))
                 .zip(&first)
             {
-                let value = u32::from_ne_bytes(*value);
+                let value = read::u32_of(*value); // trust: host-chunk
                 *bits |= value;
                 *differ |= value ^ first;
             }
@@ -220,8 +213,8 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
         packed.len() >= 8,
         Error::damaged(Rule::PackedCounts).with(packed.len())
     );
-    let count = word(packed, 0) as usize;
-    let len = word(packed, 4) as usize;
+    let count = read::u32_at(packed, 0) as usize; // trust: packed-records
+    let len = read::u32_at(packed, 4) as usize; // trust: packed-records
     ensure!(
         len >= MIN_RECORD
             && len.is_multiple_of(8)
@@ -240,7 +233,7 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
     let records = &mut chunk[USED_MARK..];
     let mut at = codes_end;
     for lane in 0..lanes {
-        let code = packed[8 + lane];
+        let code = read::u8_at(packed, 8 + lane); // trust: packed-records
         ensure!(
             lane != NEXT_LANE || code == ZERO,
             Error::damaged(Rule::NextLane).with(code)
@@ -259,14 +252,15 @@ pub fn unpack(packed: &[u8], chunk: &mut [u8]) -> Result<()> {
         );
         let place = &packed[at..at + need];
         ensure!(
-            lane != LEN_AT / 4 || (code == CONSTANT && word(place, 0) as usize == len / 8),
+            // trust: packed-records
+            lane != LEN_AT / 4 || (code == CONSTANT && read::u32_at(place, 0) as usize == len / 8),
             Error::damaged(Rule::RecordLength).with(len)
         );
         match code {
             ZERO | CONSTANT => {
                 let mut value = [0_u8; 4];
                 if code == CONSTANT {
-                    value.copy_from_slice(place);
+                    value = read::u32_at(place, 0).to_ne_bytes(); // trust: packed-records
                 }
                 for record in records.chunks_exact_mut(len) {
                     record[lane * 4..lane * 4 + 4].copy_from_slice(&value);

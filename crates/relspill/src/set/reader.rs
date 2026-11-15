@@ -27,7 +27,9 @@
 
 use super::{ENTRY_SIZE, Entry, TRAILER_MAGIC, TRAILER_SIZE};
 use crate::error::ensure;
-use crate::{BlockHeader, BlockKind, Bounds, Error, HEADER_SIZE, MAX_LEVEL, Result, Rule, columns};
+use crate::{
+    BlockHeader, BlockKind, Bounds, Error, HEADER_SIZE, MAX_LEVEL, Result, Rule, columns, read,
+};
 
 /// What a reader reads: a partition of a set at a level, of a table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -415,7 +417,8 @@ impl Reader {
                 return Ok(self.ask(PAGE, at, TRAILER_SIZE as u64));
             }
             self.took(PAGE, page.len() * ENTRY_SIZE)?;
-            self.read_trailer(page[0], page[1])?;
+            let (first, second) = (read::entry(page, 0), read::entry(page, 1)); // trust: trailer
+            self.read_trailer(first, second)?;
         }
         if self.phase == COUNTS {
             if self.asked == PAGE {
@@ -445,7 +448,8 @@ impl Reader {
         if self.asked == PAGE {
             self.took(PAGE, page.len() * ENTRY_SIZE)?;
             let taken = (self.asked_len / ENTRY_SIZE as u64) as usize;
-            for entry in &page[..taken] {
+            // trust: entry
+            for &entry in read::entries(&page[..taken]) {
                 if self.cursor > 0 {
                     let held = Entry {
                         offset: self.held_offset,
@@ -519,12 +523,7 @@ impl Reader {
     fn read_counts(&mut self, page: &[Entry]) -> Result<()> {
         let taken = self.asked_len / 8;
         for index in 0..taken as usize {
-            let entry = page[index / 2];
-            let blocks = if index % 2 == 0 {
-                entry.offset
-            } else {
-                entry.stored
-            };
+            let blocks = read::page_word(page, index); // trust: list-counts
             ensure!(
                 blocks <= self.most - self.total,
                 Error::damaged(Rule::ListCounts)
@@ -547,7 +546,7 @@ impl Reader {
     fn entry(&self, page: &[Entry], index: u64) -> Option<Entry> {
         let first = self.page_first;
         (first <= index && index < first + self.page_count)
-            .then(|| page.get((index - first) as usize).copied())
+            .then(|| read::entry_in(page, (index - first) as usize)) // trust: entry
             .flatten()
     }
 
@@ -558,15 +557,15 @@ impl Reader {
         let taken = (self.asked_len / ENTRY_SIZE as u64) as usize;
         let first = (self.asked_at - self.entries_at) / ENTRY_SIZE as u64;
         for index in 0..taken {
+            let entry = read::entry(page, index); // trust: entry
             let end = if index + 1 < taken {
-                page[index + 1].offset
+                read::entry(page, index + 1).offset // trust: entry
             } else if first + taken as u64 == self.count {
                 self.lists_at
             } else {
-                self.lists_at
-                    .min(page[index].offset.saturating_add(self.largest))
+                self.lists_at.min(entry.offset.saturating_add(self.largest))
             };
-            self.check_entry(&page[index], end)?;
+            self.check_entry(&entry, end)?;
         }
         self.page_first = first;
         self.page_count = taken as u64;
@@ -654,11 +653,7 @@ impl Reader {
         // the header's length must be the length they give, before the
         // caller allocates by it.
         if header.packed > 0 {
-            let word = |at: usize| {
-                let mut word = [0; 4];
-                word.copy_from_slice(&bytes[HEADER_SIZE + at..HEADER_SIZE + at + 4]);
-                u64::from(u32::from_ne_bytes(word))
-            };
+            let word = |at: usize| u64::from(read::u32_at(bytes, HEADER_SIZE + at)); // trust: packed-counts
             let (count, each) = (word(0), word(4));
             let agrees = if header.kind == BlockKind::Columns {
                 // A row takes 8 bytes in every lane; divided, nothing

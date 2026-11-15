@@ -827,6 +827,132 @@ cases of damage and the documentation of what it adds come in the same
 task as the code, not later. A task that moves a file named by a spec
 or a design edits those paths in the same commit.
 
+## Where the crate trusts its bytes
+
+A **trust point** is a place where a call takes a value from bytes it
+did not write in the same call, a value it must check before the value
+decides anything. Most of these bytes came from a file: a block, the
+pages of a file's lists. The rest are a chunk that the host gives to be
+packed or appended to, which may hold anything too.
+
+What a value decides says what a wrong one would do:
+
+- an **address**, where the call reads or writes next: a wrong one
+  would reach outside the bytes it was given;
+- the **length of a loop**, how many steps a walk takes: a wrong one
+  would let the call go on and on;
+- only **data**, such as a key or a value of a row: a wrong one gives a
+  wrong answer, which no check can see, but no crash.
+
+Every such read goes through one layer, the module `read` of the crate,
+so the reads are few and can be listed. Each call of the layer carries
+a comment `// trust:` with the name of its point below.
+`.github/scripts/check-trust.sh` fails when a call has no mark, when a
+mark names no point of this list, when a point is marked nowhere, when
+the layer has a function the script does not know, when a word is made
+of bytes outside the layer, and when a module imports the layer's
+functions, so that a call could go unmarked. A byte taken from a slice
+by its index is no word, and the script cannot tell a byte of a file
+from another: the review of a change to a module that reads a file
+looks for one. A point names, when they exist, the proof and the rows
+of the damage matrix that cover it.
+
+The words of a spill that the participants share, and the block lists
+a host keeps for a writer, are the host's memory too, but they hold no
+bytes of a file and are no trust point: the crate checks each where it
+reads it, as the documentation of the words and of the writer says.
+
+- **`header`**: the fields of a block's header, read back.
+  - Decides an address and the length of a loop: the bytes of the body
+    to read, to unpack and to copy, by its kind and its packed length.
+  - Check: `BlockHeader::read`, which compares the magic, the version,
+    the kind and the fingerprint, then every length its kind allows,
+    within the bound of its kind, and the level.
+  - Error: damaged, from `Magic` to `Level`.
+- **`trailer`**: the four words at the end of a set's file.
+  - Decides an address: where the lists start, and so where every read
+    of the lists goes; and the length of a loop, the entries the lists
+    can hold.
+  - Check: `Reader::read_trailer`: the magic, the count of partitions,
+    the start of the lists within the file, the fingerprint, and lists
+    that fill whole entries after their counts.
+  - Error: damaged, `Trailer`, `TrailerMagic`, `TrailerPartitions`,
+    `TrailerLists`, `FileFingerprint` or `ListsRoom`.
+- **`list-counts`**: the count of blocks of each partition, the first
+  part of the lists.
+  - Decides an address and the length of a loop: where the partition's
+    entries start, and how many the reader reads.
+  - Check: `Reader::read_counts`: no count past the entries the lists
+    hold, and all of them together exactly those entries.
+  - Error: damaged, `ListCounts`.
+- **`entry`**: an entry of a partition's list, the place and the bytes
+  of one block.
+  - Decides an address and a length: the bytes of the file a block read
+    asks for, and the length of the block buffer.
+  - Check: `Reader::check_entry`: a length of a header at least and of
+    the largest block at most, and a block that lies whole before the
+    next block of its partition and before the lists. A page read again
+    is checked again.
+  - Error: damaged, `EntryLength` or `EntryPlace`.
+- **`packed-counts`**: the two counts at the start of a packed body,
+  read when its block is read.
+  - Decides nothing but a comparison: the length the counts give must
+    be the header's, before the host makes a buffer by it.
+  - Check: `Reader::read_block`.
+  - Error: damaged, `PackedHeader`.
+- **`packed-records`**: the counts, the lane codes and the lanes of a
+  packed chunk of records.
+  - Decides addresses and the length of loops: the records and the
+    lanes to fill, and where each lane's values lie.
+  - Check: `unpack`, as it unpacks: counts that fill the chunk exactly,
+    a code for every lane, every lane within the body, the lane of the
+    next-record references empty, every record of the body's length,
+    and no byte past the last lane.
+  - Error: damaged, from `PackedCounts` to `PackedTail`.
+- **`packed-columns`**: the counts, the descriptors and the lanes of a
+  packed chunk of columns.
+  - Decides addresses and the length of loops: the rows and the lanes
+    to fill, and where each lane's values lie; a lane's least value and
+    its values are data.
+  - Check: `columns::unpack`, as it unpacks: counts within the limits
+    of a chunk that fill the chunk exactly, widths that exist, every
+    lane within the body, and no byte past the last lane.
+  - Error: damaged, `ColumnsCounts`, `ColumnsLimits`, `ColumnsFill`,
+    `Descriptors`, `LaneWidth`, `ColumnsLaneEnd` or `ColumnsTail`.
+- **`columns-header`**: the header of a chunk of columns, the host's or
+  one read back.
+  - Decides addresses and the length of loops: where each lane lies and
+    how many rows a call reads or writes.
+  - Check: `columns::shape`: the magic, and words, rows and a capacity
+    within the limits of a chunk and the bytes it holds. A chunk read
+    back is checked by `spill_columns::check` through it.
+  - Error: a wrong call, `ColumnsChunk`, `ColumnsMagic` or
+    `ColumnsShape`, damaged for a chunk read back.
+- **`column-references`**: the NULL bits and the words of a column by
+  reference, in a chunk of columns read back.
+  - Decides an address: the place in the chunk of values that a word
+    names.
+  - Check: `spill_columns::check`, once for the chunk: the words and the
+    rows the caller expects, and each word of a row not NULL a
+    reference into the values, at a byte aligned to 8 or at their end,
+    to a value that ends inside them.
+  - Error: damaged, `ReadWords`, `ReadRows`, `ValueRef` or `ValueEnd`.
+- **`column-words`**: the words and the NULL bits of a checked chunk of
+  columns, read by windows.
+  - Decides only data: a word of a row, which a reference the check
+    passed already is.
+  - Check: none past `spill_columns::check`; `window` checks only its
+    caller's bounds.
+- **`host-chunk`**: a chunk the host gives to be packed, or appended
+  to: its used mark, its records' lengths, its lanes.
+  - Decides the length of loops when it is packed: the records and the
+    lanes; the rest is data.
+  - Check: packing takes only a chunk whose used mark covers it and
+    whose records have one length, and stores any other as it is;
+    `columns::shape` checks a chunk of columns first.
+  - Error: none for records, which are then not packed; a wrong call for
+    columns.
+
 ## Measurement plan
 
 - **What:** the machine code; the instructions of the spill's kernels

@@ -31,6 +31,7 @@ mod loom;
 mod pack;
 pub mod phases;
 pub mod plan;
+mod read;
 pub mod set;
 pub mod shared;
 pub mod shared_spill;
@@ -186,18 +187,6 @@ fn put_u64(out: &mut [u8], at: usize, value: u64) {
     out[at..at + 8].copy_from_slice(&value.to_ne_bytes());
 }
 
-fn get_u32(bytes: &[u8], at: usize) -> u32 {
-    let mut word = [0; 4];
-    word.copy_from_slice(&bytes[at..at + 4]);
-    u32::from_ne_bytes(word)
-}
-
-fn get_u64(bytes: &[u8], at: usize) -> u64 {
-    let mut word = [0; 8];
-    word.copy_from_slice(&bytes[at..at + 8]);
-    u64::from_ne_bytes(word)
-}
-
 /// Where the low `W` bytes of a word of `N` bytes start in its bytes in
 /// the machine's order: a value stored narrower than its word keeps these
 /// bytes, as the narrower integer has them.
@@ -287,25 +276,26 @@ impl BlockHeader {
             Error::wrong_call(Rule::Header).with(bytes.len())
         );
         ensure!(
-            get_u64(bytes, MAGIC_AT) == MAGIC,
+            read::u64_at(bytes, MAGIC_AT) == MAGIC, // trust: header
             Error::damaged(Rule::Magic)
         );
-        let version = get_u32(bytes, VERSION_AT);
+        let version = read::u32_at(bytes, VERSION_AT); // trust: header
         ensure!(
             version == VERSION,
             Error::damaged(Rule::Version).with(version)
         );
-        let Some(kind) = BlockKind::from_code(get_u32(bytes, KIND_AT)) else {
-            return Err(Error::damaged(Rule::BlockKind).with(get_u32(bytes, KIND_AT)));
+        let code = read::u32_at(bytes, KIND_AT); // trust: header
+        let Some(kind) = BlockKind::from_code(code) else {
+            return Err(Error::damaged(Rule::BlockKind).with(code));
         };
         let header = Self {
             kind,
-            number: get_u32(bytes, NUMBER_AT),
-            partition: get_u32(bytes, PARTITION_AT),
-            level: get_u32(bytes, LEVEL_AT),
-            fingerprint: get_u64(bytes, FINGERPRINT_AT),
-            len: get_u64(bytes, LEN_AT),
-            packed: get_u32(bytes, PACKED_AT),
+            number: read::u32_at(bytes, NUMBER_AT), // trust: header
+            partition: read::u32_at(bytes, PARTITION_AT), // trust: header
+            level: read::u32_at(bytes, LEVEL_AT),   // trust: header
+            fingerprint: read::u64_at(bytes, FINGERPRINT_AT), // trust: header
+            len: read::u64_at(bytes, LEN_AT),       // trust: header
+            packed: read::u32_at(bytes, PACKED_AT), // trust: header
         };
         ensure!(
             header.fingerprint == fingerprint,

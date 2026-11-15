@@ -361,7 +361,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 
 ## 6. The checks of the box
 
-- [ ] 6.1 Mark every read of bytes from a file as a trust point, list
+- [x] 6.1 Mark every read of bytes from a file as a trust point, list
       the trust points in the design of `relspill`, and make the script
       of trust points check the crate, failing also on a read that goes
       around the layer. Check: the script in CI
@@ -378,7 +378,7 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
       on a pull request, and an hour a target before the close
 - [x] 6.5 Tests that no call of the crate allocates memory, under a
       counting allocator. Check: `make rust-check`
-- [ ] 6.6 The checks of the contract, for every rule still pending: the
+- [x] 6.6 The checks of the contract, for every rule still pending: the
       crate packaged with `relhash` alone; built as `no_std` without
       its feature `alloc`, so that a file or an allocation fails to
       build; `#![forbid(unsafe_code)]` checked in CI; the script of

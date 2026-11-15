@@ -23,7 +23,7 @@ use relhash::{MAX_PARTITIONS, Partitions, PayloadColumns, RowMask, ones};
 
 use crate::columns::{self, Shape};
 use crate::error::ensure;
-use crate::{BlockHeader, BlockKind, Error, Result, Rule};
+use crate::{BlockHeader, BlockKind, Error, Result, Rule, read};
 
 /// Bits of a row's place in a reference; the chunk's number is above them.
 pub const PLACE_BITS: u32 = 17;
@@ -319,7 +319,7 @@ pub fn append(
                     let row = index * 64 + bit;
                     let word = match value_of(source, column, row)? {
                         Value::Null => {
-                            let mut null = get(chunk, nulls + 8 * at);
+                            let mut null = read::u64_at(chunk, nulls + 8 * at); // trust: host-chunk
                             null |= 1 << (column % 64);
                             put(chunk, nulls + 8 * at, null);
                             0
@@ -364,7 +364,7 @@ pub fn append(
                 let word = match value_of(source, column, row)? {
                     Value::Null => {
                         let nulls = shape.lane_at(column / 64) + 8 * place;
-                        let mut null = get(chunk, nulls);
+                        let mut null = read::u64_at(chunk, nulls); // trust: host-chunk
                         null |= 1 << (column % 64);
                         put(chunk, nulls, null);
                         0
@@ -490,14 +490,15 @@ pub fn check(
         let nulls = shape.lane_at(column / 64);
         let lane = shape.lane_at(shape.word_lane(column));
         // The column's lanes of its rows, taken once.
-        let (null_words, _) = chunk[nulls..nulls + 8 * shape.rows].as_chunks::<8>();
-        let (words_of, _) = chunk[lane..lane + 8 * shape.rows].as_chunks::<8>();
+        let null_words = read::values::<8>(&chunk[nulls..nulls + 8 * shape.rows]); // trust: column-references
+        let words_of = read::values::<8>(&chunk[lane..lane + 8 * shape.rows]); // trust: column-references
         let bit = column % 64;
         for (row, (null, word)) in null_words.iter().zip(words_of).enumerate() {
-            if u64::from_ne_bytes(*null) >> bit & 1 != 0 {
+            let null = read::u64_of(*null); // trust: column-references
+            if null >> bit & 1 != 0 {
                 continue;
             }
-            let word = u64::from_ne_bytes(*word);
+            let word = read::u64_of(*word); // trust: column-references
             let byte = (word & byte_mask) as usize;
             // Every writer places a value at a byte aligned to 8, so that
             // its pointer serves any type.
@@ -550,33 +551,26 @@ pub fn window(
     );
     let null_at = shape.lane_at(word / 64) + 8 * first;
     let lane_at = shape.lane_at(shape.word_lane(word)) + 8 * first;
-    let (lane, _) = chunk[lane_at..lane_at + 8 * count].as_chunks::<8>();
-    let (null_lane, _) = chunk[null_at..null_at + 8 * count].as_chunks::<8>();
+    let lane = read::values::<8>(&chunk[lane_at..lane_at + 8 * count]); // trust: column-words
+    let null_lane = read::values::<8>(&chunk[null_at..null_at + 8 * count]); // trust: column-words
     let bit = word % 64;
     // A window of no NULL is its words as they lie.
     let any = null_lane
         .iter()
-        .fold(0, |any, bits| any | u64::from_ne_bytes(*bits));
+        .fold(0, |any, bits| any | read::u64_of(*bits)); // trust: column-words
     if any >> bit & 1 == 0 {
         for (word, from) in out.iter_mut().zip(lane) {
-            *word = u64::from_ne_bytes(*from);
+            *word = read::u64_of(*from); // trust: column-words
         }
         nulls.fill(false);
         return Ok(());
     }
     for (((word, null), from), bits) in out.iter_mut().zip(nulls).zip(lane).zip(null_lane) {
-        *null = u64::from_ne_bytes(*bits) >> bit & 1 != 0;
+        *null = read::u64_of(*bits) >> bit & 1 != 0; // trust: column-words
         // A NULL's word is 0 whatever the chunk holds: the check skips it.
-        *word = if *null { 0 } else { u64::from_ne_bytes(*from) };
+        *word = if *null { 0 } else { read::u64_of(*from) }; // trust: column-words
     }
     Ok(())
-}
-
-#[inline]
-fn get(chunk: &[u8], at: usize) -> u64 {
-    let mut word = [0; 8];
-    word.copy_from_slice(&chunk[at..at + 8]);
-    u64::from_ne_bytes(word)
 }
 
 #[inline]

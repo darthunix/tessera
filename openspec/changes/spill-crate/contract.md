@@ -45,7 +45,13 @@ memory of a spill is counted where its host counts memory.
 Every read of bytes that came from a file goes through one layer, so
 that the list of places where the crate trusts such bytes is complete,
 and one proof covers every read.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/scripts/check-trust.sh::a read of the layer without a trust mark`;
+  `.github/scripts/check-trust.sh::reads a word of bytes around the layer`;
+  `.github/scripts/check-trust.sh::is no read check-trust.sh knows`;
+  `.github/scripts/check-trust.sh::reads a page around the layer`;
+  `.github/scripts/check-trust.sh::imports the layer`;
+  `.github/scripts/test-check-trust.sh::test-check-trust: all passed`
 
 ### No unsafe code
 The crate has no unsafe code, since all its memory, the words in shared

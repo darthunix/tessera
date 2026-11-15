@@ -39,7 +39,7 @@
 //! its row count.
 
 use crate::error::ensure;
-use crate::{Error, Result, Rule, low};
+use crate::{Error, Result, Rule, low, read};
 
 /// Bytes of a chunk's header; the lanes follow.
 pub const HEADER: usize = 16;
@@ -99,18 +99,6 @@ pub const CAPACITY_AT: usize = 4;
 pub const WORDS_AT: usize = 8;
 const MAGIC_AT: usize = 12;
 const MAGIC: u32 = u32::from_le_bytes(*b"COLS");
-
-fn get_u32(bytes: &[u8], at: usize) -> u32 {
-    let mut word = [0; 4];
-    word.copy_from_slice(&bytes[at..at + 4]);
-    u32::from_ne_bytes(word)
-}
-
-fn get_u64(bytes: &[u8], at: usize) -> u64 {
-    let mut word = [0; 8];
-    word.copy_from_slice(&bytes[at..at + 8]);
-    u64::from_ne_bytes(word)
-}
 
 fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
     bytes[at..at + 4].copy_from_slice(&value.to_ne_bytes());
@@ -197,13 +185,13 @@ pub fn shape(chunk: &[u8]) -> Result<Shape> {
         Error::wrong_call(Rule::ColumnsChunk).with(chunk.len())
     );
     ensure!(
-        get_u32(chunk, MAGIC_AT) == MAGIC,
+        read::u32_at(chunk, MAGIC_AT) == MAGIC, // trust: columns-header
         Error::wrong_call(Rule::ColumnsMagic)
     );
     let shape = Shape {
-        rows: get_u32(chunk, ROWS_AT) as usize,
-        capacity: get_u32(chunk, CAPACITY_AT) as usize,
-        words: get_u32(chunk, WORDS_AT) as usize,
+        rows: read::u32_at(chunk, ROWS_AT) as usize, // trust: columns-header
+        capacity: read::u32_at(chunk, CAPACITY_AT) as usize, // trust: columns-header
+        words: read::u32_at(chunk, WORDS_AT) as usize, // trust: columns-header
     };
     ensure!(
         shape.words <= MAX_WORDS
@@ -234,11 +222,9 @@ pub fn pack_bound(rows: usize, words: usize) -> usize {
 
 fn lane(chunk: &[u8], shape: &Shape, lane: usize) -> impl Iterator<Item = u64> {
     let at = shape.lane_at(lane);
-    chunk[at..at + 8 * shape.rows]
-        .as_chunks::<8>()
-        .0
+    read::values::<8>(&chunk[at..at + 8 * shape.rows]) // trust: host-chunk
         .iter()
-        .map(|word| u64::from_ne_bytes(*word))
+        .map(|word| read::u64_of(*word)) // trust: host-chunk
 }
 
 /// Store the differences of the values from `base` in `W` bytes each.
@@ -250,15 +236,14 @@ fn put<const W: usize>(values: impl Iterator<Item = u64>, base: u64, out: &mut [
 
 /// Load values stored in `W` bytes each as differences from `base`.
 fn get<const W: usize>(packed: &[u8], base: u64, out: &mut [u8]) {
-    for (place, word) in packed
-        .as_chunks::<W>()
-        .0
+    for (place, word) in read::values::<W>(packed) // trust: packed-columns
         .iter()
         .zip(out.as_chunks_mut::<8>().0)
     {
         let mut bytes = [0_u8; 8];
         bytes[low::<W, 8>()..][..W].copy_from_slice(place);
-        *word = u64::from_ne_bytes(bytes).wrapping_add(base).to_ne_bytes();
+        // trust: packed-columns
+        *word = read::u64_of(bytes).wrapping_add(base).to_ne_bytes();
     }
 }
 
@@ -361,8 +346,8 @@ pub fn pack(chunk: &[u8], out: &mut [u8]) -> Result<(usize, usize)> {
 /// that does not exist, a lane cut short, or bytes past its lanes.
 pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
     ensure!(packed.len() >= 8, Error::damaged(Rule::ColumnsCounts));
-    let rows = get_u32(packed, 0) as usize;
-    let words = get_u32(packed, 4) as usize;
+    let rows = read::u32_at(packed, 0) as usize; // trust: packed-columns
+    let words = read::u32_at(packed, 4) as usize; // trust: packed-columns
     // The limits a chunk is made within: a body past them would get a
     // header of fewer places than its rows.
     ensure!(
@@ -388,8 +373,8 @@ pub fn unpack(packed: &[u8], out: &mut [u8]) -> Result<()> {
     let mut at = 8 + 16 * lanes;
     for index in 0..lanes {
         let descriptor = 8 + 16 * index;
-        let width = packed[descriptor] as usize;
-        let base = get_u64(packed, descriptor + 8);
+        let width = read::u8_at(packed, descriptor) as usize; // trust: packed-columns
+        let base = read::u64_at(packed, descriptor + 8); // trust: packed-columns
         ensure!(
             matches!(width, 0 | 1 | 2 | 4 | 8),
             Error::damaged(Rule::LaneWidth).with(width)

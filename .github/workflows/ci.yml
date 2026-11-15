@@ -255,6 +255,8 @@ jobs:
         run: npm install --global @fission-ai/openspec@1.13.2
       - name: The cases of the check of contracts
         run: .github/scripts/test-check-contracts.sh
+      - name: The cases of the check of trust points
+        run: .github/scripts/test-check-trust.sh
       - name: The specs against the repository
         env:
           DO_NOT_TRACK: "1"
