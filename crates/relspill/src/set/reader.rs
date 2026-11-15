@@ -797,7 +797,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::super::tests::{
-        FINGERPRINT, Host, MAX_LEN, Owned, blocks, config, entry_bytes, property, records,
+        FINGERPRINT, Host, MAX_LEN, Owned, blocks, config, entry_bytes, fill, property, read_back,
+        records,
     };
     use super::*;
     use crate::Kind;
@@ -811,28 +812,6 @@ mod tests {
             partition,
             fingerprint: FINGERPRINT,
             bounds: Bounds::all(MAX_LEN),
-        }
-    }
-
-    /// The entries of `bytes` read into a page, as a host reads a file.
-    fn fill(page: &mut [Entry], bytes: &[u8]) {
-        for (entry, pair) in page.iter_mut().zip(bytes.as_chunks::<16>().0) {
-            let word = |at: usize| {
-                let mut word = [0; 8];
-                word.copy_from_slice(&pair[at..at + 8]);
-                u64::from_ne_bytes(word)
-            };
-            *entry = Entry {
-                offset: word(0),
-                stored: word(8),
-            };
-        }
-        // A tail of a single word, a count, goes into the next offset.
-        let whole = bytes.len() / 16;
-        if bytes.len() % 16 == 8 {
-            let mut word = [0; 8];
-            word.copy_from_slice(&bytes[16 * whole..]);
-            page[whole].offset = u64::from_ne_bytes(word);
         }
     }
 
@@ -925,19 +904,6 @@ mod tests {
                 self.serve(step).expect("a read in the file");
             }
         }
-    }
-
-    /// The body a block reads back as: a chunk of records loses its links
-    /// when packed, a chunk of columns keeps the lanes of its rows.
-    fn read_back(block: &Owned) -> Result<Vec<u8>> {
-        let (stored, len) = super::super::tests::stored_body(block)?;
-        let mut out = vec![0; len as usize];
-        match block.kind {
-            BlockKind::Columns => columns::unpack(&stored, &mut out)?,
-            _ if stored.len() < len as usize => crate::unpack(&stored, &mut out)?,
-            _ => out.copy_from_slice(&stored),
-        }
-        Ok(out)
     }
 
     /// Read every block of `partition` back and compare it with what was

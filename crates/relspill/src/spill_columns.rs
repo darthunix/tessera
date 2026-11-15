@@ -579,7 +579,7 @@ fn put(chunk: &mut [u8], at: usize, word: u64) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::panic::Location;
 
     use anyhow::{Result, ensure};
@@ -626,16 +626,16 @@ mod tests {
 
     /// A test's column of values by row.
     #[derive(Clone, Debug)]
-    enum Cell {
+    pub(crate) enum Cell {
         Null,
         Word(u64),
         Bytes(Vec<u8>),
     }
 
     #[derive(Clone, Debug)]
-    struct Batch {
-        columns: Vec<Vec<Cell>>,
-        by_value: bool,
+    pub(crate) struct Batch {
+        pub(crate) columns: Vec<Vec<Cell>>,
+        pub(crate) by_value: bool,
     }
 
     impl RowValues for Batch {
@@ -1052,7 +1052,7 @@ mod tests {
     /// reference and the others by value, a NULL in every third of the
     /// first 64 rows of each, so that the windows after them have none;
     /// and which columns are by value.
-    fn read_batch(nrows: usize, ncolumns: usize) -> (Batch, Vec<bool>) {
+    pub(crate) fn read_batch(nrows: usize, ncolumns: usize) -> (Batch, Vec<bool>) {
         let columns = (0..ncolumns)
             .map(|column| {
                 (0..nrows)
@@ -1076,7 +1076,7 @@ mod tests {
 
     /// The batch appended whole to a chunk of a word past its columns, as
     /// a sort's key, and the values it used.
-    fn written(batch: &Batch, nrows: usize) -> Result<(Vec<u8>, Vec<u8>, usize)> {
+    pub(crate) fn written(batch: &Batch, nrows: usize) -> Result<(Vec<u8>, Vec<u8>, usize)> {
         let words = batch.columns.len() + 1;
         let mut chunk = vec![0_u8; columns::size(nrows, words)];
         columns::init(&mut chunk, words)?;

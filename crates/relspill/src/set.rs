@@ -1132,6 +1132,41 @@ pub(crate) mod tests {
         }
     }
 
+    /// The entries of `bytes` read into a page, as a host reads a file.
+    pub(crate) fn fill(page: &mut [Entry], bytes: &[u8]) {
+        for (entry, pair) in page.iter_mut().zip(bytes.as_chunks::<16>().0) {
+            let word = |at: usize| {
+                let mut word = [0; 8];
+                word.copy_from_slice(&pair[at..at + 8]);
+                u64::from_ne_bytes(word)
+            };
+            *entry = Entry {
+                offset: word(0),
+                stored: word(8),
+            };
+        }
+        // A tail of a single word, a count, goes into the next offset.
+        let whole = bytes.len() / 16;
+        if bytes.len() % 16 == 8 {
+            let mut word = [0; 8];
+            word.copy_from_slice(&bytes[16 * whole..]);
+            page[whole].offset = u64::from_ne_bytes(word);
+        }
+    }
+
+    /// The body a block reads back as: a chunk of records loses its links
+    /// when packed, a chunk of columns keeps the lanes of its rows.
+    pub(crate) fn read_back(block: &Owned) -> Result<Vec<u8>> {
+        let (stored, len) = stored_body(block)?;
+        let mut out = vec![0; len as usize];
+        match block.kind {
+            BlockKind::Columns => columns::unpack(&stored, &mut out)?,
+            _ if stored.len() < len as usize => crate::unpack(&stored, &mut out)?,
+            _ => out.copy_from_slice(&stored),
+        }
+        Ok(out)
+    }
+
     /// Check the file of a set against the blocks written to it, in
     /// order: each partition's list names its blocks in their order, and
     /// each block reads back as written; a set that wrote a block ends
