@@ -460,13 +460,32 @@ jobs:
           MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
             cargo miri test --locked -p tessera-capi --test join --test group --test runs --test build \
               --test spill
-      # A target whose bytes run from the most significant: the packing
-      # narrows values by their low bytes, which lie last there. The
-      # property tests of the spill words, of the columns appended by
-      # partition, of a set's file and of the join's and the grouping's
-      # machines, the threads counting a build, and the damage matrix, which
-      # gives itself a minute, take minutes under Miri there: they are left
-      # out.
+
+  # Miri over relspill's tests on a target whose bytes run from the most
+  # significant: the packing narrows values by their low bytes, which lie
+  # last there. A job of its own, as it takes about as long as the one
+  # above. The property tests of the spill words, of the columns appended
+  # by partition, of a set's file and of the join's and the grouping's
+  # machines, the threads counting a build, and the damage matrix, which
+  # gives itself a minute, take minutes under Miri there: they are left
+  # out.
+  miri-big-endian:
+    name: Miri, big-endian (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-09-11
+      PROPTEST_CASES: "16"
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v4
+      - name: The pinned nightly with Miri
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri-big-endian
+      - name: Miri's standard library for the target
+        run: cargo miri setup --target s390x-unknown-linux-gnu
       - name: The spill's tests on a big-endian target
         run: |
           cargo miri test --locked -p relspill --target s390x-unknown-linux-gnu -- \
