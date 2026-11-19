@@ -811,6 +811,7 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	config.methods = &agg_path_methods;
 	config.node = &tess_agg_node;
 	config.children = list_make1(child);
+	config.flags = TESS_CHILD_ROWS_ONLY;
 	config.expressions = tlist;
 	config.node_data = (Node *) list_make4_int(nkeys,
 											   (int) Min(agg->path.rows,
@@ -1433,6 +1434,7 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		config.methods = &agg_path_methods;
 		config.node = &tess_agg_node;
 		config.children = list_make2(left, right);
+		config.flags = TESS_CHILD_ROWS_ONLY;
 		config.expressions = add_to_flat_tlist(NIL, keys);
 		config.node_data = (Node *) data;
 		add_path(output_rel, &tess_path_create(&config)->path);

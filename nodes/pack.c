@@ -278,6 +278,7 @@ pack_wrap_rows(PlannerInfo *root, Path *child)
 	config.methods = &pack_path_methods;
 	config.node = &tess_pack_node;
 	config.children = list_make1(scan);
+	config.flags = TESS_CHILD_ROWS_ONLY;
 	path = tess_path_create(&config);
 	path->path.total_cost += cpu_operator_cost * tess_pack_value_share * values *
 		path->path.rows;

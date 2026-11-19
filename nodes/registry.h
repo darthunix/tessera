@@ -82,6 +82,36 @@ extern const CustomScanMethods tess_agg_scan_methods;
 extern void tess_agg_planner_init(void);
 
 extern const TessNode tess_hash_join_node;
+/*
+ * The flag of a path whose node reads rows only from its children: on a
+ * fork of the Greenplum family the core's targeted dispatch then follows
+ * the children (extensible.h); 0 on other cores. Every node of this
+ * module sets it but those that read a table themselves, TessHeapScan and
+ * TessFilter, which name the table (scanrelid); TessLimit, which builds
+ * on installed headers only, sets the core's flag itself. TessPack, which
+ * may read the blocks of its child's table in the child's place, returns
+ * the rows the child would, on the same segments.
+ */
+#ifdef CUSTOMPATH_GP_CHILD_ROWS_ONLY
+#define TESS_CHILD_ROWS_ONLY CUSTOMPATH_GP_CHILD_ROWS_ONLY
+#else
+#define TESS_CHILD_ROWS_ONLY 0
+#endif
+
+/*
+ * The places of TessHashJoin's two children in its custom_paths and
+ * custom_plans: in the order the join starts them, the inner side first,
+ * on a fork whose walks of a plan follow that order (extensible.h);
+ * outer first elsewhere, as the core's joins keep them. custom_ps, which
+ * EXPLAIN prints, lists the outer side first on every core.
+ */
+#if TESS_MPP
+#define JOIN_OUTER_CHILD 1
+#define JOIN_INNER_CHILD 0
+#else
+#define JOIN_OUTER_CHILD 0
+#define JOIN_INNER_CHILD 1
+#endif
 extern const CustomScanMethods tess_hash_join_scan_methods;
 extern void tess_hash_join_planner_init(void);
 

@@ -69,6 +69,15 @@ make_limit_path(PlannerInfo *root, LimitPath *limit)
 	config.methods = &limit_path_methods;
 	config.node = &tess_limit_node;
 	config.children = list_make1(child);
+#ifdef CUSTOMPATH_GP_CHILD_ROWS_ONLY
+	/*
+	 * It reads rows only from its child: on a fork of the Greenplum family
+	 * the core's targeted dispatch then follows the child (extensible.h).
+	 * The node builds on installed headers only, so the flag comes straight
+	 * from the core's, not through TESS_CHILD_ROWS_ONLY.
+	 */
+	config.flags = CUSTOMPATH_GP_CHILD_ROWS_ONLY;
+#endif
 	config.expressions = list_make2(limit->limitOffset, limit->limitCount);
 	return tess_path_create(&config);
 }

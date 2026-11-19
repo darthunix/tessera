@@ -195,19 +195,20 @@ join_begin(CustomScanState *css, EState *estate, int eflags)
 
 	state->expect_rescan = (eflags & EXEC_FLAG_REWIND) != 0;
 	state->memory_limit = tess_node_memory_limit(&css->ss.ps, tess_hash_memory_limit());
-#if TESS_MPP
 	/*
-	 * As the family's hash join: the children start in the order they run,
-	 * the inner side first, so that a Shared Input Scan under both takes
-	 * its producer on the side that runs first. The list stays outer,
-	 * inner.
+	 * The children start in the order of custom_plans: on a fork of the
+	 * family the inner side first, as the join runs them (JOIN_INNER_CHILD).
+	 * custom_ps, which EXPLAIN prints, lists the outer side first.
 	 */
-	state->inner = ExecInitNode(lsecond(cscan->custom_plans), estate, eflags);
-	state->outer = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
-#else
-	state->outer = ExecInitNode(linitial(cscan->custom_plans), estate, eflags);
-	state->inner = ExecInitNode(lsecond(cscan->custom_plans), estate, eflags);
-#endif
+	for (int child = 0; child < 2; child++)
+	{
+		PlanState  *ps = ExecInitNode(list_nth(cscan->custom_plans, child), estate, eflags);
+
+		if (child == JOIN_OUTER_CHILD)
+			state->outer = ps;
+		else
+			state->inner = ps;
+	}
 	css->custom_ps = list_make2(state->outer, state->inner);
 	if (state->prune.key >= 0 &&
 		tess_append_join_prune_begin(state->outer, state->prune.values, state->prune.range,

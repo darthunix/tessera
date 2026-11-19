@@ -217,7 +217,7 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 	config.expressions = exprs;
 	config.node_data = (Node *) list_make4(keys.kinds, keys.flags, keys.sortops,
 										   keys.collations);
-	config.flags = CUSTOMPATH_SUPPORT_BACKWARD_SCAN;
+	config.flags = CUSTOMPATH_SUPPORT_BACKWARD_SCAN | TESS_CHILD_ROWS_ONLY;
 	return tess_path_create(&config);
 }
 

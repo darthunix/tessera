@@ -251,6 +251,7 @@ append_wrap(PlannerInfo *root, Path *path)
 	config.methods = &append_path_methods;
 	config.node = &tess_append_node;
 	config.children = children;
+	config.flags = TESS_CHILD_ROWS_ONLY;
 	config.node_data = (Node *) makeInteger(path->parallel_aware ?
 											append->first_partial_path : 0);
 #if TESS_PG_MAJOR < 14

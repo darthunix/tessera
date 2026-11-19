@@ -1239,8 +1239,15 @@ find_lookup(PlannerInfo *root, RelOptInfo *innerrel, const JoinKeys *keys, int n
 {
 	int			key = -1;
 
+	/*
+	 * Not on a fork of the Greenplum family: the lookup does not check the
+	 * inner table's locus, and it reads the table itself, while the join
+	 * says it reads rows only from its children (TESS_CHILD_ROWS_ONLY).
+	 */
+	if (TESS_MPP)
+		return false;
 	/* Pages that may come from the disk: the prices are measured in memory. */
-	if (TESS_MPP || !enable_indexscan || innerrel->reloptkind != RELOPT_BASEREL ||
+	if (!enable_indexscan || innerrel->reloptkind != RELOPT_BASEREL ||
 		innerrel->pages > (BlockNumber) effective_cache_size)
 		return false;
 	foreach_node(RestrictInfo, rinfo, keys->rinfos)
@@ -1560,7 +1567,7 @@ lookup_shape(PlannerInfo *root, const Path *outer, double share, LookupShape *sh
 			shape_row_each(shape, Max(outer->rows * share, 1.0));
 			return;
 		}
-		driver = linitial(((const CustomPath *) driver)->custom_paths);
+		driver = list_nth(((const CustomPath *) driver)->custom_paths, JOIN_OUTER_CHILD);
 	}
 	scan = driver;
 	if (!IS_SIMPLE_REL(driver->parent) || driver->parent->tuples <= 0)
@@ -1674,6 +1681,8 @@ path_values_stored(const Path *path)
 		}
 		return true;
 	}
+	if (node == &tess_hash_join_node)
+		return path_values_stored(list_nth(children, JOIN_OUTER_CHILD));
 	return children == NIL || path_values_stored(linitial(children));
 }
 
@@ -2312,17 +2321,10 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 	config.template_path = &template->jpath.path;
 	config.methods = &join_path_methods;
 	config.node = &tess_hash_join_node;
-	config.children = list_make2(outer, inner);
+	config.children = JOIN_OUTER_CHILD == 0 ? list_make2(outer, inner) :
+		list_make2(inner, outer);
 	/* A target above the join becomes the node's, computed over the pairs. */
-	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
-#ifdef CUSTOMPATH_GP_LAST_CHILD_FIRST
-	/*
-	 * The inner side, the last child, runs first: a fork's walks that
-	 * follow the order of execution, such as the one that gives a Shared
-	 * Input Scan its producer, visit it so.
-	 */
-	config.flags |= CUSTOMPATH_GP_LAST_CHILD_FIRST;
-#endif
+	config.flags = CUSTOMPATH_SUPPORT_PROJECTION | TESS_CHILD_ROWS_ONLY;
 #ifdef CUSTOMPATH_GP_MEMORY_INTENSIVE
 	/* Its table takes a share of the query's memory, as a Hash does (tess_path_ask_memory). */
 	config.flags |= CUSTOMPATH_GP_MEMORY_INTENSIVE;
@@ -2797,8 +2799,8 @@ join_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	List	   *columns = NIL;
 
 	tess_path_get_info(best_path, &info);
-	if (!tess_plan_child(best_path, custom_plans, 0, &outer) ||
-		!tess_plan_child(best_path, custom_plans, 1, &inner) ||
+	if (!tess_plan_child(best_path, custom_plans, JOIN_OUTER_CHILD, &outer) ||
+		!tess_plan_child(best_path, custom_plans, JOIN_INNER_CHILD, &inner) ||
 		list_length(info.expressions) != 5)
 		elog(ERROR, "TessHashJoin expected two batch children");
 	hash_clauses = linitial(info.expressions);
