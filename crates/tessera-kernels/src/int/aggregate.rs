@@ -5,8 +5,29 @@ use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use super::IntLane;
-use crate::BULK_MIN_ROWS;
+use crate::WholeRows;
 use crate::simd::{Token, Vectors};
+
+/// The bounds of whole words of the least and the greatest, which share
+/// their code, mirrored, and so a bound, the denser of the two measured:
+/// int4 from 8 selected rows on x86-64 and from 12 on AArch64 over both
+/// storages; int8 from 16 over dense values on both, and over Datum slots
+/// from 12 on x86-64 and from 24 on AArch64. The int4 `max`, which no
+/// program measures, takes the bound of `min`.
+fn extrema_rows<T>() -> WholeRows {
+    match (cfg!(target_arch = "x86_64"), size_of::<T>() == 8) {
+        (true, false) => WholeRows::both(8),
+        (true, true) => WholeRows {
+            dense: 16,
+            datum: 12,
+        },
+        (false, false) => WholeRows::both(12),
+        (false, true) => WholeRows {
+            dense: 16,
+            datum: 24,
+        },
+    }
+}
 
 /// The driver of [`crate::int32::min`] and [`crate::int64::min`].
 pub(crate) fn min<T: IntLane, C: ColumnReader<Value = T>>(
@@ -17,6 +38,7 @@ pub(crate) fn min<T: IntLane, C: ColumnReader<Value = T>>(
     let (count, least) = aggregate(
         column,
         rows,
+        extrema_rows::<T>(),
         (0_usize, T::MAX),
         |(count, least), value| {
             (
@@ -40,6 +62,7 @@ pub(crate) fn max<T: IntLane, C: ColumnReader<Value = T>>(
     let (count, greatest) = aggregate(
         column,
         rows,
+        extrema_rows::<T>(),
         (0_usize, T::MIN),
         |(count, greatest), value| {
             (
@@ -56,7 +79,8 @@ pub(crate) fn max<T: IntLane, C: ColumnReader<Value = T>>(
 }
 
 /// Run one aggregate: `fold` takes a row's value, `block` a whole word with
-/// its selection and the token of the width's aggregates. The first word
+/// its selection and the token of the width's aggregates, `whole` the
+/// aggregate's bounds of whole words. The first word
 /// decides the strategy for the call; deciding once keeps the loops free
 /// of per-word bookkeeping. Inlined into its caller, as it was when each
 /// family had its own: called, it returned the count and the result
@@ -65,6 +89,7 @@ pub(crate) fn max<T: IntLane, C: ColumnReader<Value = T>>(
 pub(crate) fn aggregate<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     column: &C,
     rows: &RowMaskView<'_>,
+    whole: WholeRows,
     init: B,
     mut fold: impl FnMut(B, Option<T>) -> B,
     block: impl for<'a> FnMut(B, T::Aggregates, WordBlock<'a, T>, u64) -> B,
@@ -77,9 +102,10 @@ pub(crate) fn aggregate<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
         // lacks. Checked here, the check takes no register from the loop.
         && column.nrows() == rows.nrows()
         && rows.get_word(0).is_some_and(|selected| {
-            (selected == u64::MAX
-                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                && column.word_block(0).is_some()
+            whole.may_take(selected)
+                && column
+                    .word_block(0)
+                    .is_some_and(|block| whole.takes_block(selected, &block))
         });
     if let Some(set) = set
         && bulk

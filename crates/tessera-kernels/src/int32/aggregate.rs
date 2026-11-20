@@ -9,8 +9,9 @@
 //! `bigint out of range`. [`min`] and [`max`] are `None` without a non-NULL
 //! row.
 //!
-//! When the first word of the selection is full, selects at least a dozen
-//! rows and the reader exposes its storage, the call aggregates whole words
+//! When the first word of the selection is full or selects at least the
+//! rows of the aggregate's bound, 8 to 12 by the storage and the machine,
+//! and the reader exposes its storage, the call aggregates whole words
 //! (vector code: NEON on AArch64, AVX2 on x86-64 where the processor has
 //! it) and reads only single-row words, the tail and refused words row by
 //! row. Otherwise it reads through [`ColumnReader::try_fold_selected`]: the
@@ -23,6 +24,19 @@
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView};
+
+use crate::WholeRows;
+
+/// The bounds of whole words of the sum: words of 8 selected rows, the
+/// fewest measured, gain over dense values on both machines and over Datum
+/// slots on AArch64; over Datum slots on x86-64 they gain from 12.
+#[cfg(target_arch = "x86_64")]
+const SUM_ROWS: WholeRows = WholeRows {
+    dense: 8,
+    datum: 12,
+};
+#[cfg(not(target_arch = "x86_64"))]
+const SUM_ROWS: WholeRows = WholeRows::both(8);
 
 /// Sum the selected non-NULL values as int8, `None` without any.
 ///
@@ -49,6 +63,7 @@ pub fn sum<C: ColumnReader<Value = i32>>(
     let (count, total) = crate::int::aggregate(
         column,
         rows,
+        SUM_ROWS,
         (0_usize, 0_i64),
         |(count, total), value| {
             (

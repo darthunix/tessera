@@ -4,8 +4,9 @@
 //! row. The count is the type-free [`crate::count::count`], and there is
 //! no sum: PostgreSQL sums int8 into numeric, which is not a kernel.
 //!
-//! When the first word of the selection is full, selects at least a dozen
-//! rows and the reader exposes its storage, the call aggregates whole words
+//! When the first word of the selection is full or selects at least the
+//! rows of the aggregate's bound, 12 to 24 by the storage and the machine,
+//! and the reader exposes its storage, the call aggregates whole words
 //! (vector code: NEON on AArch64, AVX2 on x86-64 where the processor has
 //! it) and reads only single-row words, the tail and refused words row by
 //! row. Otherwise it reads through [`ColumnReader::try_fold_selected`]: the

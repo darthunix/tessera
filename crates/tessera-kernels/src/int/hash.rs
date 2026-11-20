@@ -7,7 +7,7 @@ use anyhow::{Context, Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView, WordBlock};
 
 use super::{IntLane, Side};
-use crate::BULK_MIN_ROWS;
+use crate::WholeRows;
 use crate::int32::hash::NULL_KEY;
 use crate::int32::{NullKeys, hash_combine, murmurhash32};
 use crate::simd::{Token, Vectors};
@@ -84,6 +84,31 @@ impl Selection for Valid {
     }
 }
 
+/// The bounds of whole words of the hashes, by width and by the way of NULL
+/// keys: on x86-64 words of 8 selected rows, the fewest measured, gain for
+/// every hash; on AArch64 the hashes that reject a NULL key gain from 8
+/// rows over dense values and from 12 over Datum slots for int4, from 12
+/// and 16 for int8, and those that group it from 12 and 24 for int4, 12
+/// and 16 for int8. The second key of a chain, which `two_keys` measured
+/// with the first, takes the bounds of the first.
+fn hash_rows<T>(reject: bool) -> WholeRows {
+    match (cfg!(target_arch = "x86_64"), size_of::<T>() == 8, reject) {
+        (true, _, _) => WholeRows::both(8),
+        (false, false, true) => WholeRows {
+            dense: 8,
+            datum: 12,
+        },
+        (false, false, false) => WholeRows {
+            dense: 12,
+            datum: 24,
+        },
+        (false, true, _) => WholeRows {
+            dense: 12,
+            datum: 16,
+        },
+    }
+}
+
 /// Check the dimensions, choose the strategy by the first word, and run:
 /// whole words out of line, rows here, where the row loop knows the
 /// hashes' length and pays no bounds check per row. The fold is chosen once
@@ -115,9 +140,11 @@ where
         && match set {
             Some(set) => {
                 let selected = selection.word(valid, 0);
-                (selected == u64::MAX
-                    || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                    && block(set, column, 0).is_some()
+                let whole = hash_rows::<T>(reject);
+                whole.may_take(selected)
+                    && block(set, column, 0).is_some_and(|(side, _)| {
+                        whole.takes(selected, matches!(side, Side::Datum(_)))
+                    })
             }
             None => false,
         };

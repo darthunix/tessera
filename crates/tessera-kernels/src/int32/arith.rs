@@ -20,17 +20,18 @@
 //! `non_nulls` word cleared. The result reads as a `DenseInt32Column` with
 //! the selection as its readiness mask.
 //!
-//! When the first word of the selection is full, selects at least a dozen
-//! rows and every column operand exposes its storage, the call computes
-//! whole words, with vector code (NEON on AArch64, AVX2 on x86-64 where
-//! the processor has it): `+`, `-` and `*` with overflow detected per lane
-//! and reported once per word; `/` and `%` by a scalar divisor of
-//! magnitude at least two with a multiplier prepared once per call
-//! (`Divisor`), applied to every lane and unable to fail; other divisions
-//! lane by lane from the blocks, since neither set has an integer
-//! division. Single-row words, the tail and refused words are read
-//! row by row; every other call reads every word row by row through the
-//! word iterators.
+//! When the first word of the selection is full, or selects at least the
+//! rows of the operation's bound, measured for each width, operation, form,
+//! storage and machine, and every column operand exposes its storage, the
+//! call computes whole words, with vector code (NEON on AArch64, AVX2 on
+//! x86-64 where the processor has it): `+`, `-` and `*` with overflow
+//! detected per lane and reported once per word; `/` and `%` by a scalar
+//! divisor of magnitude at least two with a multiplier prepared once per
+//! call (`Divisor`), applied to every lane and unable to fail; other
+//! divisions lane by lane from the blocks, since neither set has an integer
+//! division. Single-row words, the tail and refused words are read row by
+//! row; every other call reads every word row by row through the word
+//! iterators.
 
 use std::mem::MaybeUninit;
 

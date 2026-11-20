@@ -5,7 +5,7 @@ use anyhow::{Result, ensure};
 use tessera_core::{ColumnReader, RowMask};
 
 use super::IntLane;
-use crate::BULK_MIN_ROWS;
+use crate::WholeRows;
 use crate::ops::CompareOp;
 use crate::simd::Token;
 
@@ -27,6 +27,20 @@ pub(crate) fn filter<T: IntLane, C: ColumnReader<Value = T>>(
         CompareOp::Le => filter_with(column, rows, op, scalar, |a, b| a <= b),
         CompareOp::Gt => filter_with(column, rows, op, scalar, |a, b| a > b),
         CompareOp::Ge => filter_with(column, rows, op, scalar, |a, b| a >= b),
+    }
+}
+
+/// The bounds of whole words of the filters: words of 8 selected rows, the
+/// fewest measured, gain over both storages on both machines, but for the
+/// int8 filter over Datum slots on AArch64, which gains from 12.
+fn whole_rows<T>() -> WholeRows {
+    if cfg!(target_arch = "aarch64") && size_of::<T>() == 8 {
+        WholeRows {
+            dense: 8,
+            datum: 12,
+        }
+    } else {
+        WholeRows::both(8)
     }
 }
 
@@ -53,10 +67,13 @@ fn filter_with<T: IntLane, C: ColumnReader<Value = T>>(
         }
         if !selected.is_power_of_two() {
             let set = T::Compares::get();
+            let whole = whole_rows::<T>();
             let bulk = set.is_some()
                 && index < nrows / 64
-                && (selected == u64::MAX || selected.count_ones() >= BULK_MIN_ROWS)
-                && column.word_block(index).is_some();
+                && whole.may_take(selected)
+                && column
+                    .word_block(index)
+                    .is_some_and(|block| whole.takes_block(selected, &block));
             return if let Some(set) = set
                 && bulk
             {

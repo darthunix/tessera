@@ -24,13 +24,15 @@
 //! any mutation; a reader error leaves the hashes and the mask partly
 //! updated, to be discarded.
 //!
-//! When the first word of the selection is full or selects at least a dozen
-//! rows and the column exposes its storage, the call hashes whole words with
-//! vector code (NEON on AArch64, AVX2 on x86-64 where the processor has
-//! it): every lane of the word, NULL lanes included (they get the group key
-//! under the group policy and meaningless values, outside the valid mask,
-//! under rejection). Single-row words, the tail and refused words go row by
-//! row; every other call reads every word row by row.
+//! When the first word of the selection is full or selects at least the
+//! rows of the hash's bound, 8 to 24 by the width, the storage, the way of
+//! NULL keys and the machine, and the column exposes its storage, the call
+//! hashes whole words with vector code (NEON on AArch64, AVX2 on x86-64
+//! where the processor has it): every lane of the word, NULL lanes included
+//! (they get the group key under the group policy and meaningless values,
+//! outside the valid mask, under rejection). Single-row words, the tail and
+//! refused words go row by row; every other call reads every word row by
+//! row.
 
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMask, RowMaskView};

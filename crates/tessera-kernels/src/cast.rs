@@ -10,8 +10,8 @@
 //! words without selected rows have their `non_nulls` word cleared. An
 //! int8 is its Datum, so the result is a column of Datums as well.
 //!
-//! When the first word of the selection is full, selects at least a dozen
-//! rows and the reader exposes its storage, the call widens whole words
+//! When the first word of the selection is full or selects at least 8 rows
+//! and the reader exposes its storage, the call widens whole words
 //! (vector code: NEON on AArch64, AVX2 on x86-64 where the processor has
 //! it) and reads only single-row words, the tail and refused words row by
 //! row; otherwise every word is read through the word iterators.
@@ -21,9 +21,14 @@ use std::mem::MaybeUninit;
 use anyhow::{Context, Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
-use crate::BULK_MIN_ROWS;
+use crate::WholeRows;
 use crate::ops::ArithmeticError;
 use crate::simd::{Simd, Token};
+
+/// The bound of whole words of the widening cast: words of 8 selected
+/// rows, the fewest measured, gain on both machines over both storages, so
+/// it is one value.
+const WHOLE_ROWS: WholeRows = WholeRows::both(8);
 
 /// Widen the selected int4 values into `values` and `non_nulls`.
 ///
@@ -72,9 +77,10 @@ pub fn int4_to_int8<C: ColumnReader<Value = i32>>(
     let bulk = simd.is_some()
         && nrows >= 64
         && rows.get_word(0).is_some_and(|selected| {
-            (selected == u64::MAX
-                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                && column.word_block(0).is_some()
+            WHOLE_ROWS.may_take(selected)
+                && column
+                    .word_block(0)
+                    .is_some_and(|block| WHOLE_ROWS.takes_block(selected, &block))
         });
     if let Some(simd) = simd
         && bulk

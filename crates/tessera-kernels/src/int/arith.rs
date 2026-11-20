@@ -13,7 +13,7 @@ use anyhow::{Context, Result, ensure};
 use tessera_core::{ColumnReader, RowMask, RowMaskView};
 
 use super::{IntLane, Range, Side};
-use crate::BULK_MIN_ROWS;
+use crate::WholeRows;
 use crate::ops::{ArithOp, ArithmeticError};
 use crate::simd::Token;
 
@@ -171,6 +171,59 @@ where
     }
 }
 
+/// The bounds of whole words of the arithmetic, Datum where an operand's
+/// block holds Datum slots, by width, operation and form, as measured: the
+/// operations part, most over Datum, and on AArch64 the checked `div` and
+/// `mod` of int8 over Datum gain at no density measured, so only their
+/// full words, which did not lose, go whole (64). Subtraction takes the
+/// bounds of addition; `mul`, `div` and `mod` of two columns those over a
+/// constant, which the programs measure; a constant on the left those of
+/// one on the right; the int2 `mod` that of its `div`. `columns` is the
+/// form of two columns.
+fn arith_rows<T, G: Range<T>>(op: ArithOp, columns: bool) -> WholeRows {
+    let (dense, datum) =
+        match (size_of::<T>() == 8, G::NARROW, op) {
+            // int4
+            (false, false, ArithOp::Add | ArithOp::Sub) if cfg!(target_arch = "x86_64") => (8, 12),
+            (false, false, ArithOp::Add | ArithOp::Sub) => (8, 24),
+            (false, false, ArithOp::Mul) if cfg!(target_arch = "x86_64") => (12, 12),
+            (false, false, ArithOp::Div) if cfg!(target_arch = "x86_64") => (8, 12),
+            (false, false, ArithOp::Mod) if cfg!(target_arch = "x86_64") => (12, 12),
+            (false, false, ArithOp::Mul | ArithOp::Div | ArithOp::Mod) => (12, 24),
+            // int2
+            (false, true, ArithOp::Add | ArithOp::Sub) if cfg!(target_arch = "x86_64") => {
+                if columns { (8, 8) } else { (8, 12) }
+            }
+            (false, true, ArithOp::Add | ArithOp::Sub) => (8, 24),
+            (false, true, ArithOp::Mul) if cfg!(target_arch = "x86_64") => (8, 12),
+            (false, true, ArithOp::Mul) => (16, 24),
+            (false, true, ArithOp::Div | ArithOp::Mod) if cfg!(target_arch = "x86_64") => (8, 8),
+            (false, true, ArithOp::Div | ArithOp::Mod) => (8, 24),
+            // int8
+            (true, _, ArithOp::Add | ArithOp::Sub) if cfg!(target_arch = "x86_64") => {
+                if columns {
+                    (8, 8)
+                } else {
+                    (8, 12)
+                }
+            }
+            (true, _, ArithOp::Add | ArithOp::Sub) => {
+                if columns {
+                    (12, 24)
+                } else {
+                    (16, 32)
+                }
+            }
+            (true, _, ArithOp::Mul) if cfg!(target_arch = "x86_64") => (8, 16),
+            (true, _, ArithOp::Mul) => (8, 32),
+            (true, _, ArithOp::Div) if cfg!(target_arch = "x86_64") => (12, 24),
+            (true, _, ArithOp::Div) => (24, 64),
+            (true, _, ArithOp::Mod) if cfg!(target_arch = "x86_64") => (24, 24),
+            (true, _, ArithOp::Mod) => (32, 64),
+        };
+    WholeRows { dense, datum }
+}
+
 /// Check the dimensions, choose the operation and the strategy, and run.
 fn run<T, G, L, R>(
     op: ArithOp,
@@ -207,12 +260,15 @@ where
     // uniform within a batch, and a partly prepared batch refuses its first
     // word as it would the rest.
     let set = T::Arith::get();
+    let whole = arith_rows::<T, G>(op, matches!(operands, Operands::Columns(..)));
     let whole_words = nrows >= 64
         && match set {
             Some(set) => rows.get_word(0).is_some_and(|selected| {
-                (selected == u64::MAX
-                    || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                    && operands.blocks(set, 0).is_some()
+                whole.may_take(selected)
+                    && operands.blocks(set, 0).is_some_and(|(lhs, rhs, _)| {
+                        let datum = matches!(lhs, Side::Datum(_)) || matches!(rhs, Side::Datum(_));
+                        whole.takes(selected, datum)
+                    })
             }),
             None => false,
         };

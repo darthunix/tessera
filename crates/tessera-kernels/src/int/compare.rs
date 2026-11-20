@@ -1,10 +1,10 @@
 //! Comparisons of two integer columns of a batch, narrowing a row mask.
 
 use anyhow::{Result, ensure};
-use tessera_core::{ColumnReader, RowMask};
+use tessera_core::{ColumnReader, RowMask, WordBlock};
 
 use super::{IntLane, Side};
-use crate::BULK_MIN_ROWS;
+use crate::WholeRows;
 use crate::ops::CompareOp;
 use crate::simd::Token;
 
@@ -36,6 +36,23 @@ where
     }
 }
 
+/// The bounds of whole words of the comparison of two columns, Datum where
+/// either operand's block holds Datum slots: over dense values words of 8
+/// selected rows, the fewest measured, gain on both machines; over Datum
+/// slots they gain from 12 on x86-64 and from 24 on AArch64. The int8
+/// comparison, which no program measures, shares the int4 one's path and
+/// takes its bounds.
+#[cfg(target_arch = "x86_64")]
+const WHOLE_ROWS: WholeRows = WholeRows {
+    dense: 8,
+    datum: 12,
+};
+#[cfg(not(target_arch = "x86_64"))]
+const WHOLE_ROWS: WholeRows = WholeRows {
+    dense: 8,
+    datum: 24,
+};
+
 fn run<T, L, R>(
     left: &L,
     right: &R,
@@ -54,10 +71,15 @@ where
     // loop's to find.
     let whole_words = set.is_some() && nrows >= 64 && {
         let selected = rows.as_view().word(0);
-        (selected == u64::MAX
-            || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-            && left.word_block(0).is_some()
-            && right.word_block(0).is_some()
+        WHOLE_ROWS.may_take(selected)
+            && match (left.word_block(0), right.word_block(0)) {
+                (Some(lhs), Some(rhs)) => WHOLE_ROWS.takes(
+                    selected,
+                    matches!(lhs, WordBlock::Datum { .. })
+                        || matches!(rhs, WordBlock::Datum { .. }),
+                ),
+                _ => false,
+            }
     };
     if let Some(set) = set
         && whole_words

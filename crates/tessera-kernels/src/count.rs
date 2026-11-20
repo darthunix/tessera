@@ -4,8 +4,8 @@
 //! so one kernel serves every width and every type whose column exposes
 //! its NULL flags, `count(int8)` and `count(text)` alike. `count(*)` is
 //! [`RowMaskView::selected_count`]. When the first word of the selection is
-//! full, selects at least a dozen rows and the reader exposes its storage,
-//! the call counts whole words: the flags of a Datum block with vector code
+//! full or selects at least 8 rows and the reader exposes its storage, the
+//! call counts whole words: the flags of a Datum block with vector code
 //! (NEON on AArch64, AVX2 on x86-64 where the processor has it), the
 //! non-NULL bits of a dense block with a population count; otherwise it
 //! reads through [`ColumnReader::try_fold_selected`].
@@ -13,8 +13,13 @@
 use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
-use crate::BULK_MIN_ROWS;
+use crate::WholeRows;
 use crate::simd::{Simd, Token, Vectors};
+
+/// The bound of whole words of `count`: words of 8 selected rows, the
+/// fewest measured, gain on both machines over both storages, so it is one
+/// value.
+const WHOLE_ROWS: WholeRows = WholeRows::both(8);
 
 /// Count the selected non-NULL rows.
 ///
@@ -43,9 +48,10 @@ pub fn count<C: ColumnReader>(column: &C, rows: &RowMaskView<'_>) -> Result<usiz
         // lacks. Checked here, the check takes no register from the loop.
         && column.nrows() == rows.nrows()
         && rows.get_word(0).is_some_and(|selected| {
-            (selected == u64::MAX
-                || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
-                && column.word_block(0).is_some()
+            WHOLE_ROWS.may_take(selected)
+                && column
+                    .word_block(0)
+                    .is_some_and(|block| WHOLE_ROWS.takes_block(selected, &block))
         });
     if let Some(simd) = simd
         && bulk

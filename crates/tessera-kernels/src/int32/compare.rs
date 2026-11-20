@@ -10,10 +10,11 @@ use super::CompareOp;
 ///
 /// Row indices remain physical; removed rows are never restored. The first
 /// word with several selected rows decides the strategy, as for
-/// [`super::filter`]: when it is full or selects at least a dozen rows and
-/// both readers expose its storage, every multi-row word both expose is
-/// compared whole (NEON on AArch64, AVX2 on x86-64 where the processor has
-/// it); every other word is read at its selected rows, the two columns in
+/// [`super::filter`]: when it is full or selects at least the rows of the
+/// comparison's bound, 8 to 24 by the storage and the machine, and both
+/// readers expose its storage, every multi-row word both expose is compared
+/// whole (NEON on AArch64, AVX2 on x86-64 where the processor has it);
+/// every other word is read at its selected rows, the two columns in
 /// lockstep. Nothing is allocated.
 ///
 /// # Errors

@@ -288,14 +288,36 @@ family's driver; `BULK_MIN_ROWS` stays only while a family uses it. A
 bound that one machine does not move stays one value, and its comment
 says that both machines measured it.
 
+Where the operations of one driver part, as the runs below found, each
+operation has its own bound, and the driver takes it with the operation,
+which it knows when it decides. The parts of an operation are those its
+driver can tell: the arithmetic by its operation and by its form, two
+columns or a column and a constant; the aggregates by the sum against
+the least and the greatest; the hashes by their way with NULL keys,
+rejected or grouped. The least and the greatest share their code,
+mirrored, and so one bound, the denser of their two; subtraction takes
+that of addition. An operation that no program measures takes the bound
+of the measured one whose path it shares: the int4 `max` that of `min`,
+the forms of `mul`, `div` and `mod` over two columns those over a
+constant, a constant on the left that on the right, the int2 `mod` that
+of its `div`, and the second key of a hash, which `two_keys` measured
+with the first, that of the first. Where no density gains, a full word
+stays whole if the full words did not lose, and goes by rows otherwise.
+
+A driver counts the rows of its first word against the lesser of its
+bounds before it asks for the word's block, whose storage then picks the
+bound: a word under both goes by rows at the cost of its count, as it
+did against the one bound of before.
+
 Refused:
 
 - A model fitted to the costs of the cases as they run today: at 32
   rows a word the drivers already take words whole, so the reports
   mix the two paths, and the regular cases are learned.
 - One bound for every family: the measured spread above.
-- A bound for each operation within a family: the drivers are shared
-  by a family's operations; if their costs part, that is a finding.
+- One bound for a family whose operations part, the denser of theirs:
+  the arithmetic of int8 over Datum on the M5 Pro would read by rows
+  where `add_column` gains from 24 rows, since `div_scalar` never does.
 
 ### What the two builds measured
 
@@ -554,8 +576,10 @@ Mac are the maintainer's commands, and the M5 Pro's are relayed.
 ## Risks / Trade-offs
 
 - [A family's costs part by operation or by storage] → A bound for
-  each storage where the driver can tell them apart; otherwise the
-  denser bound, and the rest is a finding.
+  each operation and storage the driver can tell apart, which the
+  first word's block and the call name.
+- [An operation no program measures] → It takes the bound of the one
+  whose path it shares, named above; its own cost stays unmeasured.
 - [Counting present rows costs every word] → Measured on the cases
   with NULLs and without; taken only where it loses nothing.
 - [The control is not the code before AVX2: the drivers changed since]
