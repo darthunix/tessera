@@ -336,7 +336,8 @@ prune_start(TessAppendState *state, const PartitionPruneInfo *planned, Bitmapset
 {
 	EState	   *estate = state->css.ss.ps.state;
 	CustomScan *cscan = castNode(CustomScan, state->css.ss.ps.plan);
-	PartitionPruneInfo *info = copyObject(planned);
+	/* The cast: PostgreSQL 18's copyObject keeps the const of its argument. */
+	PartitionPruneInfo *info = (PartitionPruneInfo *) copyObject(planned);
 	int			offset = bms_next_member(cscan->custom_relids, -1) -
 		bms_next_member(info->relids, -1);
 	Bitmapset  *relids = NULL;

@@ -103,7 +103,8 @@ void
 tess_plan_write_node(TessPlanWriter *writer, const char *name,
 					 const Node *value)
 {
-	write_field(writer, name, copyObject(value));
+	/* The casts: PostgreSQL 18's copyObject keeps the const of its argument. */
+	write_field(writer, name, (Node *) copyObject(value));
 }
 
 void
@@ -112,7 +113,7 @@ tess_plan_write_list(TessPlanWriter *writer, const char *name,
 {
 	if (value != NIL && !IsA(value, List))
 		elog(ERROR, "Tessera plan field \"%s\" is not a List", name);
-	write_field(writer, name, copyObject(value));
+	write_field(writer, name, (List *) copyObject(value));
 }
 
 void
@@ -121,7 +122,7 @@ tess_plan_write_int_list(TessPlanWriter *writer, const char *name,
 {
 	if (value != NIL && !IsA(value, IntList))
 		elog(ERROR, "Tessera plan field \"%s\" is not an IntList", name);
-	write_field(writer, name, copyObject(value));
+	write_field(writer, name, (List *) copyObject(value));
 }
 
 void

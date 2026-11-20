@@ -1109,7 +1109,15 @@ setop_projected(RelOptInfo *rel)
 static Path *
 union_partial_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 {
+#if PG_VERSION_NUM >= 190000
 	AppendPathInput input = {0};
+#else
+	/* PostgreSQL 18's create_append_path takes the lists one by one. */
+	struct
+	{
+		List	   *partial_subpaths;
+	}			input = {0};
+#endif
 	int			workers = 0;
 
 	if (!rel->consider_parallel || max_parallel_workers_per_gather <= 0)
@@ -1132,8 +1140,13 @@ union_partial_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 	}
 	if (workers <= 0)
 		return NULL;
+#if PG_VERSION_NUM >= 190000
 	return (Path *) create_append_path(root, rel, input, NIL, NULL, workers,
 									   enable_parallel_append, -1);
+#else
+	return (Path *) create_append_path(root, rel, NIL, input.partial_subpaths, NIL,
+									   NULL, workers, enable_parallel_append, -1);
+#endif
 }
 
 /*

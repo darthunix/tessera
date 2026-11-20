@@ -8,6 +8,154 @@
 #include "access/tupdesc.h"
 #include "access/tupmacs.h"
 
+#if PG_VERSION_NUM < 190000
+/*
+ * PostgreSQL 18 lacks the helpers of 19's deformation: these are 19's own,
+ * from c.h and access/tupmacs.h.
+ */
+#include "port/pg_bitutils.h"
+
+#ifndef pg_assume
+#if defined(USE_ASSERT_CHECKING)
+#define pg_assume(expr) Assert(expr)
+#elif defined(HAVE__BUILTIN_UNREACHABLE)
+#define pg_assume(expr) \
+	do { \
+		if (!(expr)) \
+			__builtin_unreachable(); \
+	} while (0)
+#else
+#define pg_assume(expr) ((void) 0)
+#endif
+#endif
+
+/* fetch_att without its check of a by-value length: CompactAttribute's is valid. */
+static inline Datum
+fetch_att_noerr(const void *T, bool attbyval, int attlen)
+{
+	if (attbyval)
+	{
+		switch (attlen)
+		{
+			case sizeof(int32):
+				return Int32GetDatum(*((const int32 *) T));
+			case sizeof(int16):
+				return Int16GetDatum(*((const int16 *) T));
+			case sizeof(char):
+				return CharGetDatum(*((const char *) T));
+			default:
+				Assert(attlen == sizeof(int64));
+				return Int64GetDatum(*((const int64 *) T));
+		}
+	}
+	else
+		return PointerGetDatum(T);
+}
+
+/*
+ * Align *off for an attribute, fetch the attribute at tupptr + *off and
+ * move *off past it.
+ */
+static inline Datum
+align_fetch_then_add(const char *tupptr, uint32 *off, bool attbyval, int attlen,
+					 uint8 attalignby)
+{
+	Datum		res;
+
+	if (attlen > 0)
+	{
+		const char *offset_ptr;
+
+		*off = TYPEALIGN(attalignby, *off);
+		offset_ptr = tupptr + *off;
+		*off += attlen;
+		if (attbyval)
+		{
+			switch (attlen)
+			{
+				case sizeof(char):
+					return CharGetDatum(*((const char *) offset_ptr));
+				case sizeof(int16):
+					return Int16GetDatum(*((const int16 *) offset_ptr));
+				case sizeof(int32):
+					return Int32GetDatum(*((const int32 *) offset_ptr));
+				default:
+					Assert(attlen == sizeof(int64));
+					return Int64GetDatum(*((const int64 *) offset_ptr));
+			}
+		}
+		return PointerGetDatum(offset_ptr);
+	}
+	else if (attlen == -1)
+	{
+		if (!VARATT_IS_SHORT(tupptr + *off))
+			*off = TYPEALIGN(attalignby, *off);
+
+		res = PointerGetDatum(tupptr + *off);
+		*off += VARSIZE_ANY(DatumGetPointer(res));
+		return res;
+	}
+	else
+	{
+		Assert(attlen == -2);
+		*off = TYPEALIGN(attalignby, *off);
+		res = PointerGetDatum(tupptr + *off);
+		*off += strlen(tupptr + *off) + 1;
+		return res;
+	}
+}
+
+/*
+ * The 0-based number of the first NULL attribute in a NULL bitmap, or
+ * natts when none comes before it. bits must hold a 0 bit somewhere, as
+ * the bitmap of a tuple with NULLs does.
+ */
+static inline int
+first_null_attr(const uint8 *bits, int natts)
+{
+	int			nattByte = natts >> 3;
+	int			bytenum;
+	int			res;
+
+#ifdef USE_ASSERT_CHECKING
+	int			firstnull_check = natts;
+
+	for (int i = 0; i < natts; i++)
+	{
+		if (att_isnull(i, bits))
+		{
+			firstnull_check = i;
+			break;
+		}
+	}
+#endif
+
+	for (bytenum = 0; bytenum < nattByte; bytenum++)
+	{
+		if (bits[bytenum] != 0xFF)
+			break;
+	}
+	/* The bits past natts may give more than natts; Min caps it. */
+	res = bytenum << 3;
+	res += pg_rightmost_one_pos32(~((uint32) bits[bytenum]));
+	res = Min(res, natts);
+	Assert(res == firstnull_check);
+	return res;
+}
+#endif
+
+/*
+ * The leading attributes at cached offsets, as the descriptor counts them.
+ * PostgreSQL 18 keeps no such count and sets its attcacheoff values as
+ * tuples of the descriptor are deformed, not all ahead of them, so there
+ * the cursor walks from its place.
+ */
+#if PG_VERSION_NUM >= 190000
+#define TESS_DEFORM_CACHED_ATTRS(tuple_desc) ((tuple_desc)->firstNonCachedOffsetAttr)
+#else
+#define TESS_DEFORM_CACHED_ATTRS(tuple_desc) 0
+#endif
+
 /*
  * A batch provider that keeps heap tuples deforms a column only when a
  * consumer asks for it, so a later column of a row must be reachable from
@@ -48,7 +196,8 @@ tess_deform_cursor_init(TessDeformCursor *cursor)
  * first_non_guaranteed_attr is the number of leading attributes that every
  * tuple is known to have present, non-NULL and passed by value, as the
  * descriptor's firstNonGuaranteedAttr or a slot's tts_first_nonguaranteed
- * says; a caller without that knowledge passes 0. support_cstring is true
+ * says; a caller without that knowledge passes 0, as on PostgreSQL 18,
+ * which has neither. support_cstring is true
  * only for descriptors that may hold cstring attributes, and should be a
  * compile-time constant.
  */
@@ -68,7 +217,15 @@ tess_deform_advance(TessDeformCursor *cursor, HeapTuple tuple,
 	char	   *tp = (char *) tup + tup->t_hoff;
 	uint32		off = cursor->off;
 
-	Assert(tuple_desc->firstNonCachedOffsetAttr >= 0);
+	Assert(TESS_DEFORM_CACHED_ATTRS(tuple_desc) >= 0);
+#if PG_VERSION_NUM < 190000
+	/*
+	 * 18 sets its attcacheoff values as tuples are deformed, not all ahead of
+	 * them, so no prefix is taken as guaranteed there, whatever the caller
+	 * passes.
+	 */
+	first_non_guaranteed_attr = 0;
+#endif
 	Assert(target_attnum > 0 && target_attnum <= tuple_desc->natts);
 	Assert(cursor->nvalid >= 0 && cursor->nvalid < target_attnum);
 	Assert(first_non_guaranteed_attr >= 0 &&
@@ -100,7 +257,7 @@ tess_deform_advance(TessDeformCursor *cursor, HeapTuple tuple,
 	else
 		first_null_attr_num = natts;
 	first_non_cache_offset_attr =
-		Min(tuple_desc->firstNonCachedOffsetAttr, first_null_attr_num);
+		Min(TESS_DEFORM_CACHED_ATTRS(tuple_desc), first_null_attr_num);
 
 	/* Skip any remaining guaranteed prefix using its last cached offset. */
 	if (attnum < first_non_guaranteed_attr)

@@ -144,7 +144,7 @@ SELECT tessera_test_spill_sqlstate(47);
 SELECT tessera_test_spill_sqlstate(48);
 SELECT tessera_test_spill_sqlstate(49);
 -- A TOAST pointer of 64-bit chunk ids read back: master's core has them;
--- PostgreSQL 19's has none, and there it is damaged data.
+-- PostgreSQL 19's and 18's have none, and there it is damaged data.
 SELECT split_part(tessera_test_spill_sqlstate(50), ':', 1) =
        CASE WHEN current_setting('server_version_num')::int >= 200000
             THEN 'no error' ELSE 'XX001' END AS as_its_core;

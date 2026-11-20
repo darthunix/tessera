@@ -12,6 +12,13 @@
 
 PG_MODULE_MAGIC;
 
+/* The flags of a table scan, which PostgreSQL 18's takes none of. */
+#if PG_VERSION_NUM >= 190000
+#define SCAN_FLAGS , 0
+#else
+#define SCAN_FLAGS
+#endif
+
 PG_FUNCTION_INFO_V1(tessera_test_heap_deform);
 
 /*
@@ -69,7 +76,7 @@ tessera_test_heap_deform(PG_FUNCTION_ARGS)
 	Oid			relid = PG_GETARG_OID(0);
 	Relation	rel = table_open(relid, AccessShareLock);
 	TupleTableSlot *slot = table_slot_create(rel, NULL);
-	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL, 0);
+	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL SCAN_FLAGS);
 	int64		tuples = 0;
 
 	while (table_scan_getnextslot(scan, ForwardScanDirection, slot))
@@ -81,8 +88,13 @@ tessera_test_heap_deform(PG_FUNCTION_ARGS)
 			elog(ERROR, "the scan returned no buffer tuple");
 		slot_getallattrs(slot);
 		guaranteed[0] = 0;
+#if PG_VERSION_NUM >= 190000
 		guaranteed[1] = slot->tts_first_nonguaranteed;
 		guaranteed[2] = slot->tts_tupleDescriptor->firstNonGuaranteedAttr;
+#else
+		/* PostgreSQL 18 promises no column: see heap_deform.h. */
+		guaranteed[1] = guaranteed[2] = 0;
+#endif
 		for (int mode = 0; mode < 3; mode++)
 			check_tuple(slot, bslot->base.tuple, guaranteed[mode]);
 		tuples++;

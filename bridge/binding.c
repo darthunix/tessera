@@ -149,6 +149,14 @@ binding_reset(void *arg)
 	dlist_delete(&binding->link);
 }
 
+#if PG_VERSION_NUM < 190000
+/* The reset callback of a detached binding, which is no longer listed. */
+static void
+binding_detached(void *arg)
+{
+}
+#endif
+
 static TessBinding *
 attach(TupleTableSlot *slot, const TessLayout *layout)
 {
@@ -287,12 +295,24 @@ detach(TessBinding *binding)
 	if (binding == NULL)
 		return;
 	release_batch(binding);
+#if PG_VERSION_NUM >= 190000
 	MemoryContextUnregisterResetCallback(binding->context,
 										 &binding->cleanup);
+#endif
 	dlist_delete(&binding->link);
 	bms_free((Bitmapset *) binding->request.filter_columns);
 	bms_free((Bitmapset *) binding->request.projection_columns);
 	if (binding->layout.target_columns != NULL)
 		pfree((void *) binding->layout.target_columns);
+#if PG_VERSION_NUM >= 190000
 	pfree(binding);
+#else
+	/*
+	 * PostgreSQL 18 cannot unregister a reset callback, and the context
+	 * keeps a pointer to the one in the binding: the binding stays until
+	 * the context is reset or deleted, with a callback that does nothing.
+	 * A node detaches once, at its end, so a query keeps one a node.
+	 */
+	binding->cleanup.func = binding_detached;
+#endif
 }

@@ -2049,7 +2049,7 @@ fn a_value_ends_by_its_type() {
             "{typlen} {value:?} short"
         );
     }
-    // A core without pointers of 64-bit chunk ids, PostgreSQL 19, takes
+    // A core without pointers of 64-bit chunk ids, PostgreSQL 19 or 18, takes
     // those of 32-bit ids alone: there tag 4 is no pointer.
     assert!(value_ends(-1, &external, false));
     assert!(!value_ends(-1, &external8, false));

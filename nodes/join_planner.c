@@ -711,7 +711,11 @@ pruned_append(PlannerInfo *root, Path *path, Relids leaves)
 		if (foreach_current_index(subpath) < append->first_partial_path)
 			pruned->first_partial_path++;
 	}
+#if PG_VERSION_NUM >= 190000
 	cost_append(pruned, root);
+#else
+	cost_append(pruned);
+#endif
 	pruned->path.rows = clamp_row_est(pruned->path.rows);
 	return &pruned->path;
 }
@@ -728,7 +732,15 @@ pruned_append(PlannerInfo *root, Path *path, Relids leaves)
 static Path *
 divided_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 {
+#if PG_VERSION_NUM >= 190000
 	AppendPathInput input = {0};
+#else
+	/* PostgreSQL 18's create_append_path takes the lists one by one. */
+	struct
+	{
+		List	   *partial_subpaths;
+	}			input = {0};
+#endif
 
 	if (append->first_partial_path == 0)
 		return &append->path;
@@ -744,9 +756,14 @@ divided_append(PlannerInfo *root, RelOptInfo *rel, AppendPath *append)
 		else
 			return NULL;
 	}
+#if PG_VERSION_NUM >= 190000
 	input.child_append_relid_sets = append->child_append_relid_sets;
 	return (Path *) create_append_path(root, rel, input, NIL, NULL,
 									   append->path.parallel_workers, true, -1);
+#else
+	return (Path *) create_append_path(root, rel, NIL, input.partial_subpaths, NIL,
+									   NULL, append->path.parallel_workers, true, -1);
+#endif
 }
 
 /*
@@ -1967,19 +1984,24 @@ add_join_paths(PlannerInfo *root, RelOptInfo *joinrel, RelOptInfo *outerrel,
 	Relids		leaves;
 
 	/*
-	 * The core offers no hash join either without PGS_HASHJOIN. The kinds
-	 * that keep the outer side, which the node probes with: each outer
-	 * row's matches are known when its batch has been probed; RIGHT and
-	 * FULL keep the inner side too, marking the table's records that find
-	 * a pair and returning the others after the outer side, and RIGHT
-	 * ANTI returns only those.
+	 * Without PGS_HASHJOIN, or on PostgreSQL 18 without enable_hashjoin, the
+	 * core offers a hash join only for FULL, whose clauses may allow no
+	 * other join, and the node offers none. The kinds that keep the outer
+	 * side, which the node probes with: each outer row's matches are known
+	 * when its batch has been probed; RIGHT and FULL keep the inner side
+	 * too, marking the table's records that find a pair and returning the
+	 * others after the outer side, and RIGHT ANTI returns only those.
 	 */
 	if (!tess_enabled() ||
 		(jointype != JOIN_INNER && jointype != JOIN_SEMI &&
 		 jointype != JOIN_ANTI && jointype != JOIN_LEFT &&
 		 jointype != JOIN_RIGHT && jointype != JOIN_FULL &&
 		 jointype != JOIN_RIGHT_ANTI) ||
+#if PG_VERSION_NUM >= 190000
 		(extra->pgs_mask & PGS_HASHJOIN) == 0 ||
+#else
+		!enable_hashjoin ||
+#endif
 		!find_keys(root, joinrel, extra->restrictlist, outerrel, innerrel,
 				   jointype, &keys) ||
 		!target_supported(joinrel, innerrel, &keys, &ninner) ||

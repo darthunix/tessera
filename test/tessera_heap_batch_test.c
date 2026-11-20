@@ -17,6 +17,13 @@
 
 PG_MODULE_MAGIC;
 
+/* The flags of a table scan, which PostgreSQL 18's takes none of. */
+#if PG_VERSION_NUM >= 190000
+#define SCAN_FLAGS , 0
+#else
+#define SCAN_FLAGS
+#endif
+
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch);
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch_errors);
 PG_FUNCTION_INFO_V1(tessera_test_heap_batch_nulls);
@@ -42,8 +49,12 @@ make_heap(int ncolumns, int capacity, TupleDesc desc)
 	config.ncolumns = ncolumns;
 	config.capacity = capacity;
 	config.tuple_desc = desc;
+#if PG_VERSION_NUM >= 190000
 	config.first_non_guaranteed_attr = desc == NULL ? 0 :
 		desc->firstNonGuaranteedAttr;
+#else
+	config.first_non_guaranteed_attr = 0;
+#endif
 	return tess_heap_batch_create(&config);
 }
 
@@ -114,7 +125,7 @@ static int
 fill(TessHeapBatch *heap, Relation rel, FillMode mode, int capacity)
 {
 	TupleTableSlot *slot = table_slot_create(rel, NULL);
-	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL, 0);
+	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL SCAN_FLAGS);
 	HeapScanDesc hscan = (HeapScanDesc) scan;
 	int			scanned = 0;
 	int			room = capacity;
@@ -340,7 +351,7 @@ tessera_test_heap_batch_errors(PG_FUNCTION_ARGS)
 	Oid			relid = PG_GETARG_OID(1);
 	Relation	rel = table_open(relid, AccessShareLock);
 	TupleTableSlot *slot = table_slot_create(rel, NULL);
-	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL, 0);
+	TableScanDesc scan = table_beginscan(rel, GetActiveSnapshot(), 0, NULL SCAN_FLAGS);
 	TessHeapBatch *heap = make_heap(3, 2, NULL);
 	TessBatch  *batch;
 	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
