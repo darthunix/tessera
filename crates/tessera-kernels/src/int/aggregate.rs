@@ -72,6 +72,10 @@ pub(crate) fn aggregate<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     let set = T::Aggregates::get();
     let bulk = set.is_some()
         && rows.nrows() >= 64
+        // Whole words only where the row counts agree, as the row path
+        // demands: alone they would miss the rows that the shorter side
+        // lacks. Checked here, the check takes no register from the loop.
+        && column.nrows() == rows.nrows()
         && rows.get_word(0).is_some_and(|selected| {
             (selected == u64::MAX
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))

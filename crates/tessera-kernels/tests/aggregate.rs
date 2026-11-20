@@ -275,15 +275,25 @@ fn count_reads_no_values() -> Result<()> {
 }
 
 fn row_count_mismatches<W: Lane>() -> Result<()> {
-    let name = W::NAME;
-    let values = [W::from(1); 64];
-    let column = ColumnView::try_new(&values, None)?;
-    let rows = RowMaskView::try_new(65, &[u64::MAX, 1])?;
-    assert!(count(&column, &rows).is_err(), "{name}");
-    // Without a sum kernel there is nothing to fail.
-    assert_eq!(W::sum(&column, &rows).is_err(), W::SUMS, "{name}");
-    assert!(W::least(&column, &rows).is_err(), "{name}");
-    assert!(W::greatest(&column, &rows).is_err(), "{name}");
+    let values = [W::from(1); 65];
+    // A full first word, so that the calls take whole words: a selection
+    // one row longer than the column, the extra row selected or not, and
+    // one row shorter.
+    let cases: [(usize, usize, &[u64]); 3] = [
+        (64, 65, &[u64::MAX, 1]),
+        (64, 65, &[u64::MAX, 0]),
+        (65, 64, &[u64::MAX]),
+    ];
+    for (column_rows, mask_rows, words) in cases {
+        let column = ColumnView::try_new(&values[..column_rows], None)?;
+        let rows = RowMaskView::try_new(mask_rows, words)?;
+        let case = format!("{}: {column_rows} rows, {mask_rows} selected", W::NAME);
+        assert!(count(&column, &rows).is_err(), "{case}");
+        // Without a sum kernel there is nothing to fail.
+        assert_eq!(W::sum(&column, &rows).is_err(), W::SUMS, "{case}");
+        assert!(W::least(&column, &rows).is_err(), "{case}");
+        assert!(W::greatest(&column, &rows).is_err(), "{case}");
+    }
     Ok(())
 }
 
