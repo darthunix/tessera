@@ -515,10 +515,11 @@ jobs:
           - { os: ubuntu-24.04, postgres: MASTER, rust_profile: release }
           - { os: macos-15, postgres: MASTER, rust_profile: release }
           - { os: ubuntu-24.04, postgres: MASTER, rust_profile: debug }
-          # PostgreSQL 19 on the target platform: the code differs from
-          # master's in five places only, so macOS and the debug kernels
-          # stay on master.
+          # PostgreSQL 19 and 18 on the target platform: their code differs
+          # from master's only where an interface does, read in two ways
+          # there, so macOS and the debug kernels stay on master.
           - { os: ubuntu-24.04, postgres: "19", rust_profile: release }
+          - { os: ubuntu-24.04, postgres: "18", rust_profile: release }
     runs-on: ${{ matrix.os }}
     env:
       # The temporary instance's locale (test/Makefile).
