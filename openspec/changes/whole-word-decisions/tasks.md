@@ -38,7 +38,7 @@ The words used below:
       --locked -p tessera-capi --benches`; `tests/benchmark.rs` names
       the cases; `tessera-bench --base WORKTREE` over the programs that
       gained cases, as root and on the M5 Pro, for their noise
-- [ ] 2.2 The rows build and the whole build of the design, on
+- [x] 2.2 The rows build and the whole build of the design, on
       branches never merged, measured against each other over the
       density cases and full words of every program, twice on each
       machine; the transitions of each family, storage and key count,

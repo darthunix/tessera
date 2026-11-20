@@ -297,6 +297,151 @@ Refused:
 - A bound for each operation within a family: the drivers are shared
   by a family's operations; if their costs part, that is a finding.
 
+### What the two builds measured
+
+The rows build (`probe-rows-build`) and the whole build
+(`probe-whole-build`), both on `c51ee23b`, ran against each other twice
+on each machine. Each run took the density cases at 1024 rows and the
+full words of a program, `/1024/all/nulls-none/ready/`. `table_int32`
+and `column_reader` did not run: no operation they measure calls a
+driver, and `int32::hash` runs only when a case is made. The runs, Intel
+first, the first round before the second:
+
+- `aggregate_int32`: `compare-ftt25S`, `compare-sXTdRR`;
+  `compare-VYnb8d`, `compare-GiR1Cn`.
+- `aggregate_int64`: `compare-61WI0Q`, `compare-VrvUtf`;
+  `compare-mvNA22`, `compare-Qopabh`.
+- `arith_int32`, int4: `compare-h8McKy`, `compare-CQJqlO`;
+  `compare-H8abYy`, `compare-wdO75E`.
+- `arith_int32`, int2: `compare-B2PcFo`, `compare-kGdIUz`;
+  `compare-bmJaug`, `compare-CWwDYD`.
+- `arith_int64`: `compare-kiFJfD`, `compare-2ES5GF`; `compare-AYvaGR`,
+  `compare-cwYLt2`.
+- `cast_int32`: `compare-gTiZhF`, `compare-3JFX0l`; `compare-OqKOP7`,
+  `compare-VePoOe`.
+- `compare_int32`: `compare-He9H6Q`, `compare-cLaFoB`;
+  `compare-jVP0Li`, `compare-qzVje7`.
+- `filter_int32`: `compare-MtJ9LL`, `compare-lINY6b`; `compare-JlaxpH`,
+  `compare-yM2TP9`.
+- `filter_int64`: `compare-KNXScM`, `compare-yKkqmY`; `compare-RY4qET`,
+  `compare-djCPhZ`.
+- `hash_int32`: `compare-arYXeg`, `compare-UF5oZw`; `compare-7DKvmv`,
+  `compare-rkecx6`.
+- `hash_int64`: `compare-drHKBv`, `compare-pTeDsJ`; `compare-xwQAHb`,
+  `compare-9WmV4t`.
+- `set_int32`, int4: `compare-VKPVxJ`, `compare-pLQBF2`;
+  `compare-0wbSmP`, `compare-Lxgfba`.
+- `set_int32`, int8: `compare-IInrB0`, `compare-LwRlPl`;
+  `compare-Qfz5pL`, `compare-XN3IV4`.
+
+The two builds have the same machine code. `tessera-bench --disasm`
+found no function changed on either target. The programs the runs
+measured, built as a run builds them, disassemble to the same text on
+both machines; their files differ in the UUID, the byte of the static
+and, on the M5 Pro, the signature of the code.
+
+Which path a call took shows in its counts. On a vector path the whole
+build takes the same instructions at every density, and the rows build
+more with every row: `add_scalar` of int8 over Datum takes 5930
+instructions a call on the Intel Mac from 8 to 32 rows, against 4561 to
+14 929 by rows. The rows build misses at the exits of its loops, 11 to
+17 times a call over one column, twice that over two and more in the
+sets' search; the whole build misses once or twice, but in the sets. The
+checked `mul`, `div` and `mod` of int8 by a constant miss as often in
+both: their whole path visits the selected lanes of a word one by one,
+so it too grows with the rows (`div_scalar` over Datum on the M5 Pro:
+4118 to 14 102 instructions by rows, 5279 to 12 191 whole). The reports
+fail on instructions wherever the whole build takes 1 % more; between
+these builds that marks the path, not a loss, and the cycles decide.
+
+Each density is decided by the rule of acceptance. A gain needs the
+minimum and the median to fall by more than 3 % and by more than the
+case's noise in both rounds: the change of the same statistic between
+identical sides, in the runs above. A loss needs the minimum to grow by
+more than 10 % in both. The bound of an operation is the least density
+from which it gains at every denser one. The rounds parted on three
+densities of the Intel Mac and six of the M5 Pro, which stayed
+undecided; no bound moved for them. On the Intel Mac the medians of
+identical sides moved by up to 28 %, so a fall of up to 22 % at 8 rows
+stayed undecided there.
+
+The bounds, the Intel Mac's then the M5 Pro's; "none" where the whole
+build does not gain even at 32 rows:
+
+- `count`, both widths and storages: 8 and 8.
+- `cast_int32`: 8 and 8.
+- `filter_int32`: 8 and 8. `filter_int64`: 8 and 8 over dense values,
+  8 and 12 over Datum.
+- `compare_int32`: 8 and 8 over dense values, 12 and 24 over Datum.
+- The aggregates of int4 over Datum: `min` 8 and 12, `sum` 12 and 8;
+  over dense values: `min` 8 and 12, `sum` 8 and 8. Of int8 over Datum:
+  `min` and `max` 12 and 24; over dense values: `max` 12 and 16, `min`
+  16 and 16.
+- The arithmetic of int4 over Datum: 12 and 24, every operation; over
+  dense values: `add_column` and `add_scalar` 8 and 8, `div_scalar` 8
+  and 12, `mod_scalar` and `mul_scalar` 12 and 12. Of int2 over Datum:
+  `add_column` and `div_scalar` 8 and 24, `add_scalar` and `mul_scalar`
+  12 and 24; over dense values 8 and 8, but `mul_scalar` 8 and 16.
+- The arithmetic of int8 over Datum: `add_column` 8 and 24,
+  `add_scalar` 12 and 32, `mul_scalar` 16 and 32, `div_scalar` and
+  `mod_scalar` 24 and none; over dense values: `add_column` 8 and 12,
+  `add_scalar` 8 and 16, `mul_scalar` 8 and 8, `div_scalar` 12 and 24,
+  `mod_scalar` 24 and 32.
+- The hashes of int4 over dense values: `hash` and `two_keys` 8 and 8,
+  `hash_group` 8 and 12; over Datum: `hash` and `two_keys` 8 and 12,
+  `hash_group` 8 and 24. Of int8: 8 and 12 over dense values, 8 and 16
+  over Datum.
+- The sets of int4 over Datum, by keys: 4 keys 8 and 12, 16 keys 12
+  and none, 17 keys 8 and 16, 64 and 65 keys 8 and none; over dense
+  values: 4 keys 8 and 8, 16 keys 8 and none, 17 keys 8 and 16, 64 and
+  65 keys 8 and none.
+- The sets of int8 over Datum: 4 keys 8 and 32, 16 keys 16 and none,
+  17 keys 8 and none, 64 and 65 keys 16 and none; over dense values: 4
+  keys 12 and 32, 16 keys 16 and none, 17 keys 12 and none, 64 and 65
+  keys 16 and none.
+
+On full words the whole build gains on both machines but in four places.
+`count` over dense values neither gains nor loses by the rule: its
+minimum moved by -15 to +7 % on the Intel Mac and by +3 to +27 % on the
+M5 Pro, its median by up to +44 %. `div_scalar` of int8 over Datum on
+the M5 Pro falls by 5 to 8 % on the minimum and grows by 7 to 10 % on
+the median. The sets of int8 on the M5 Pro lose with 16 keys, by 18 to
+24 %, with 64 by 107 to 110 % and with 65 by 77 to 78 %. The full words
+had no run of identical sides, so these changes are given without the
+noise. `compare_int32` over Datum on the M5 Pro gains by the median
+alone, 68 % in both rounds: in the second, one process of the rows build
+ran at the speed of the whole build, its processes 3.2 times apart.
+
+What the runs found:
+
+- The machines part, most over Datum. There the arithmetic, the
+  comparison, the hashes and the aggregates of int8 need 12 to 32 rows
+  on the M5 Pro, and more for the checked `div_scalar` and `mod_scalar`
+  of int8. The Intel Mac takes 8 to 12 rows for them, and 16 to 24 for
+  the checked operations of int8. So the bounds are one for each
+  architecture.
+- Within a family the operations part: the int4 `sum` against `min` on
+  both machines, the other way on each; `hash_group` of int4 against
+  the other hashes on the M5 Pro; and `div_scalar` and `mod_scalar` of
+  int8, whose whole path visits the lanes one by one, against the rest
+  of their family.
+- The sets on the M5 Pro, where a step of the search is a select, gain
+  from a whole word only with 4 keys, and with 17 keys of int4 from 16
+  rows. The sets compare up to 64 int4 keys and 16 int8 keys whole on
+  any word of 12 rows or more; on the M5 Pro that costs 64 int4 keys 1.4
+  to 3.6 times the cycles of their rows at 12 to 32 rows, and 16 int8
+  keys 18 to 24 % more on full words.
+
+What the runs do not show:
+
+- Densities below 8 rows: a bound of 8 means 8 or fewer.
+- The rows build reads a full word through `try_fold_full_word`, a
+  counted loop, so on full words two loops of whole words are compared.
+- Both builds of the sets drop the count of a word's selected rows
+  alike, so its cost is in neither.
+- The whole build sends a word without selected rows to `block_hits`;
+  no case measured has such words.
+
 ### The bound of keys of the sets
 
 The sets add a dimension: the number of keys. `set_int32` measures the
