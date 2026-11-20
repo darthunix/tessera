@@ -1,0 +1,27 @@
+MACHINE CODE; baseline=106740d64045dae6d42feef3c3c8ad808d05c2d3, candidate=WORKTREE@7fc26605fce5f1a15933521de1272d27080733be, target=this machine
+aggregate_int32: 55 same, 6 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+  changed: aggregate_int32::aggregating::count::<tessera_capi::column::ints::DatumIntColumn<i32>>
+  changed: aggregate_int32::aggregating::count::<tessera_capi::column::ints::DenseIntColumn<i32>>
+  changed: aggregate_int32::aggregating::min::<tessera_capi::column::ints::DatumIntColumn<i32>>
+  changed: aggregate_int32::aggregating::min::<tessera_capi::column::ints::DenseIntColumn<i32>>
+  changed: aggregate_int32::aggregating::sum::<tessera_capi::column::ints::DatumIntColumn<i32>>
+  changed: aggregate_int32::aggregating::sum::<tessera_capi::column::ints::DenseIntColumn<i32>>
+  place in a 64-byte line: the entry's offset, then each loop as the head's offset:instructions, innermost first
+  aggregate_int32::aggregating::count::<tessera_capi::column::ints::DatumIntColumn<i32>>
+    before entry 0; loops 62:7 0:9 48:9 32:9 32:10 35:14 26:29 26:37
+    after  entry 48; loops 62:7 0:9 48:9 32:9 32:10 35:14 26:29 26:37
+  aggregate_int32::aggregating::count::<tessera_capi::column::ints::DenseIntColumn<i32>>
+    before entry 16; loops 0:5 32:5 32:7 48:7 48:8 0:8 32:9 32:10
+    after  entry 48; loops 48:5 16:5 16:7 32:7 32:8 48:8 16:9 16:10
+  aggregate_int32::aggregating::min::<tessera_capi::column::ints::DatumIntColumn<i32>>
+    before entry 48; loops 27:9 48:9 16:10 0:19 48:19 17:19 8:28 8:35
+    after  entry 48; loops 30:8 32:9 0:10 27:12 48:19 32:19 56:29 56:35
+  aggregate_int32::aggregating::min::<tessera_capi::column::ints::DenseIntColumn<i32>>
+    before entry 48; loops 27:9 32:9 16:9 48:10 0:10 0:14 56:24 51:30
+    after  entry 32; loops 16:9 0:9 11:10 32:10 48:10 48:14 40:24 43:29
+  aggregate_int32::aggregating::sum::<tessera_capi::column::ints::DatumIntColumn<i32>>
+    before entry 0; loops 43:9 48:9 16:10 0:18 48:18 7:19 7:25 7:32
+    after  entry 48; loops 30:8 32:9 0:10 14:12 48:18 32:18 55:26 55:32
+  aggregate_int32::aggregating::sum::<tessera_capi::column::ints::DenseIntColumn<i32>>
+    before entry 32; loops 32:9 0:9 16:9 0:9 11:10 32:10 0:12 16:14
+    after  entry 16; loops 16:9 48:9 0:9 48:9 59:10 32:10 48:12 7:14

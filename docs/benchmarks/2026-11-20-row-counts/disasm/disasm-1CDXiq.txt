@@ -1,0 +1,35 @@
+MACHINE CODE; baseline=106740d64045dae6d42feef3c3c8ad808d05c2d3, candidate=7fc26605fce5f1a15933521de1272d27080733be, target=aarch64-apple-darwin
+aggregate_int32: 52 same, 8 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+  changed: tessera_kernels::count::count_bulk::<tessera_capi::column::ints::DatumIntColumn<i32>>
+  changed: tessera_kernels::count::count_bulk::<tessera_capi::column::ints::DenseIntColumn<i32>>
+  changed: tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DatumIntColumn<i32>, (usize, i32), tessera_kernels::int::aggregate::max<i32, tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#0}, tessera_kernels::int::aggregate::max<i32, tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#1}>
+  changed: tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DatumIntColumn<i32>, (usize, i32), tessera_kernels::int::aggregate::min<i32, tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#0}, tessera_kernels::int::aggregate::min<i32, tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#1}>
+  changed: tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DatumIntColumn<i32>, (usize, i64), tessera_kernels::int32::aggregate::sum<tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#0}, tessera_kernels::int32::aggregate::sum<tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#1}>
+  changed: tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DenseIntColumn<i32>, (usize, i32), tessera_kernels::int::aggregate::max<i32, tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#0}, tessera_kernels::int::aggregate::max<i32, tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#1}>
+  changed: tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DenseIntColumn<i32>, (usize, i32), tessera_kernels::int::aggregate::min<i32, tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#0}, tessera_kernels::int::aggregate::min<i32, tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#1}>
+  changed: tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DenseIntColumn<i32>, (usize, i64), tessera_kernels::int32::aggregate::sum<tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#0}, tessera_kernels::int32::aggregate::sum<tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#1}>
+  place in a 64-byte line: the entry's offset, then each loop as the head's offset:instructions, innermost first
+  tessera_kernels::count::count_bulk::<tessera_capi::column::ints::DatumIntColumn<i32>>
+    before entry 44; loops 60:9 20:9 4:50 32:104 32:120
+    after  entry 44; loops 60:9 16:9 60:55 32:118
+  tessera_kernels::count::count_bulk::<tessera_capi::column::ints::DenseIntColumn<i32>>
+    before entry 8; loops 12:8 40:9 36:55 60:103 12:106 60:106 12:127 12:129
+    after  entry 20; loops 24:8 52:9 60:26 28:27 60:33 8:98 8:101 24:144
+  tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DatumIntColumn<i32>, (usize, i32), tessera_kernels::int::aggregate::max<i32, tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#0}, tessera_kernels::int::aggregate::max<i32, tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#1}>
+    before entry 60; loops 24:10 12:16 56:53 56:110 56:137 56:182 56:204
+    after  entry 32; loops 60:10 32:16 44:20 44:29 4:30 28:107 28:133 28:178
+  tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DatumIntColumn<i32>, (usize, i32), tessera_kernels::int::aggregate::min<i32, tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#0}, tessera_kernels::int::aggregate::min<i32, tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#1}>
+    before entry 8; loops 36:10 24:16 4:53 4:110 4:137 4:182 4:204
+    after  entry 28; loops 56:10 28:16 40:20 40:29 0:30 24:107 24:133 24:178
+  tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DatumIntColumn<i32>, (usize, i64), tessera_kernels::int32::aggregate::sum<tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#0}, tessera_kernels::int32::aggregate::sum<tessera_capi::column::ints::DatumIntColumn<i32>>::{closure#1}>
+    before entry 20; loops 48:10 24:16 0:53 16:107 16:134 16:179 16:201
+    after  entry 24; loops 52:10 16:16 24:20 24:29 48:30 20:105 20:131 20:176
+  tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DenseIntColumn<i32>, (usize, i32), tessera_kernels::int::aggregate::max<i32, tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#0}, tessera_kernels::int::aggregate::max<i32, tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#1}>
+    before entry 16; loops 56:9 12:10 60:13 20:28 52:34 52:43 28:86 12:91
+    after  entry 16; loops 0:9 24:10 16:13 12:33 0:35 0:43 36:89 20:90
+  tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DenseIntColumn<i32>, (usize, i32), tessera_kernels::int::aggregate::min<i32, tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#0}, tessera_kernels::int::aggregate::min<i32, tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#1}>
+    before entry 48; loops 24:9 44:10 28:13 52:28 20:34 20:43 60:86 44:91
+    after  entry 60; loops 44:9 4:10 60:13 56:33 44:35 44:43 16:89 0:90
+  tessera_kernels::int::aggregate::aggregate_bulk::<i32, tessera_capi::column::ints::DenseIntColumn<i32>, (usize, i64), tessera_kernels::int32::aggregate::sum<tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#0}, tessera_kernels::int32::aggregate::sum<tessera_capi::column::ints::DenseIntColumn<i32>>::{closure#1}>
+    before entry 16; loops 56:9 12:10 60:12 8:28 40:34 40:43 28:85 12:90
+    after  entry 40; loops 24:9 48:10 40:12 24:33 12:35 12:43 60:88 44:89
