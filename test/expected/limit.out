@@ -1,4 +1,8 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
 CREATE TABLE limit_t (a int, b text);
 INSERT INTO limit_t
 SELECT i, CASE WHEN i % 10 = 0 THEN NULL ELSE 'row' || i END
@@ -139,15 +143,16 @@ SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
 (3 rows)
 
 -- A parameter is re-evaluated on every rescan.
-EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT explain_neutral($$
 SELECT g, (SELECT count(*) FROM (SELECT a FROM limit_t LIMIT g) AS s) AS n
-FROM generate_series(1, 3) AS g;
-                                         QUERY PLAN                                          
+FROM generate_series(1, 3) AS g$$,
+    'VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF');
+                                       explain_neutral                                       
 ---------------------------------------------------------------------------------------------
  Function Scan on pg_catalog.generate_series g (actual rows=3.00 loops=1)
-   Output: g.g, (SubPlan expr_1)
+   Output: g.g, (SubPlan)
    Function Call: generate_series(1, 3)
-   SubPlan expr_1
+   SubPlan
      ->  Aggregate (actual rows=1.00 loops=3)
            Output: count(*)
            ->  Custom Scan (TessLimit) (actual rows=2.00 loops=3)
@@ -296,4 +301,5 @@ SELECT a FROM limit_t OFFSET -1;
 ERROR:  OFFSET must not be negative
 \set VERBOSITY default
 DROP TABLE limit_t, limit_empty;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

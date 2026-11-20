@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 
 -- The same result with Tessera on and off, as text.
@@ -454,7 +460,7 @@ SELECT agg_same($$SELECT count(DISTINCT c), count(DISTINCT c || 'x') FROM agg_t$
 
 -- Left to the core: a window function, an empty relation, and the switch.
 EXPLAIN (COSTS OFF) SELECT count(*) OVER () FROM agg_t LIMIT 1;
-EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE false;
+SELECT explain_neutral($$SELECT count(*) FROM agg_t WHERE false$$);
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
 RESET tessera.enable;
@@ -852,4 +858,5 @@ DROP FUNCTION agg_costs_ordered(text);
 DROP TABLE agg_t;
 DROP FUNCTION agg_same(text);
 DROP FUNCTION agg_memory(text);
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

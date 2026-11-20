@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 
 \getenv libdir PG_LIBDIR
@@ -48,9 +54,10 @@ SELECT a FROM pack_t LIMIT 3;
 SELECT a FROM pack_t LIMIT 3;
 
 -- Rescan: a correlated subplan runs the node once per outer row.
-EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT explain_neutral($$
 SELECT g, (SELECT count(*) FROM pack_t AS p WHERE p.a <= g) AS n
-FROM generate_series(1, 3) AS g;
+FROM generate_series(1, 3) AS g$$,
+    'VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF');
 SELECT g, (SELECT count(*) FROM pack_t AS p WHERE p.a <= g) AS n
 FROM generate_series(1, 3) AS g;
 
@@ -107,4 +114,5 @@ RESET pack_test.rows_mode;
 
 DROP TABLE pack_t, pack_empty;
 DROP FUNCTION tessera_test_pack_paths();
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

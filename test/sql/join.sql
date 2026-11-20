@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 
 -- The rows of a query with the batch nodes and without them, sorted. With
@@ -39,6 +45,8 @@ DECLARE
 BEGIN
     FOR line IN EXECUTE format('EXPLAIN (ANALYZE, VERBOSE %s, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) %s',
                                CASE WHEN verbosely THEN 'on' ELSE 'off' END, query) LOOP
+        line := core_neutral(line);
+        CONTINUE WHEN line IS NULL;
         -- VERBOSE adds the output lists and each worker's rows: not checked here.
         CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         -- Overrun repeats what the memory line says.
@@ -815,9 +823,9 @@ SELECT join_same($$SELECT jf.v, jd.id FROM jf FULL JOIN jd ON jf.fk = jd.id AND 
 -- Filters above the join over either side's columns.
 SELECT join_same($$SELECT jf.v, jdup.w FROM jf FULL JOIN jdup ON jf.fk = jdup.k WHERE jdup.w IS NULL$$);
 SELECT join_same($$SELECT jdup.w FROM jf RIGHT JOIN jdup ON jf.fk = jdup.k WHERE jf.fk IS NULL$$);
-EXPLAIN (COSTS OFF)
+SELECT explain_neutral($$
 SELECT x, (SELECT count(*) FROM (SELECT jd.id FROM jsmall FULL JOIN jd ON jsmall.k = jd.id AND jd.id > x) s)
-FROM generate_series(0, 300, 100) AS x;
+FROM generate_series(0, 300, 100) AS x$$);
 SELECT join_same($$SELECT jf.v, jd.id FROM jf FULL JOIN jd ON jf.fk = jd.id WHERE jd.n > 1000 OR jd.n IS NULL$$);
 -- Empty sides.
 SELECT join_same($$SELECT jf.v, jempty.e FROM jf FULL JOIN jempty ON jf.fk = jempty.k$$);
@@ -855,8 +863,8 @@ SELECT line FROM join_explain($$SELECT x, (SELECT count(*) FROM jd WHERE NOT EXI
 WHERE line ~ 'Join Type|Builds';
 SELECT join_same($$SELECT x, (SELECT count(*) FROM jd WHERE NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 1000, 250) AS x$$);
 -- A parameter of the kept side too: the table is built anew.
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x;
+SELECT explain_neutral($$
+SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x$$);
 SELECT join_same($$
 SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x$$);
 
@@ -1049,7 +1057,12 @@ ANALYZE jref;
 -- No autovacuum, for the reason given at jbuild.
 CREATE TABLE jrefprobe WITH (autovacuum_enabled = off) AS SELECT g % 25000 AS k, g AS v FROM generate_series(1, 60000) AS g;
 ANALYZE jrefprobe;
-EXPLAIN (COSTS OFF) SELECT count(*), sum(jref.n), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k;
+-- Which side builds the table is a near tie that the cores price apart:
+-- 19, sizing the buckets, takes a key with a histogram and no common
+-- values as unique, 18 does not. The plan, its two scans sorted after
+-- it; the EXPLAIN of a subquery of jref below shows which side builds.
+SELECT line FROM explain_neutral($$SELECT count(*), sum(jref.n), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k$$) WITH ORDINALITY AS p(line, n)
+ORDER BY line ~ 'TessHeapScan', CASE WHEN line ~ 'TessHeapScan' THEN line END, n;
 SELECT join_same($$SELECT count(*), sum(jref.n), count(jref.t), sum(length(jref.t)), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k$$);
 SELECT join_same($$SELECT jrefprobe.v, jref.n, jref.t FROM jrefprobe LEFT JOIN jref ON jrefprobe.k = jref.k WHERE jrefprobe.v % 97 = 0$$);
 EXPLAIN (COSTS OFF) SELECT count(*), sum(length(big.t)) FROM jrefprobe JOIN (SELECT k, CASE WHEN k % 500 = 0 THEN repeat(t, 20) ELSE t END AS t FROM jref) AS big ON jrefprobe.k = big.k;
@@ -1337,11 +1350,17 @@ SELECT join_same($$SELECT jf.v, jd.id FROM jf JOIN jd ON jf.fk - 1 = jd.id * 2 A
 SELECT join_same($$SELECT jf.v, jd.label FROM jf JOIN jd ON jf.fk::int8 = jd.id8 AND 'd' || jf.fk = lower(jd.label)$$);
 SELECT join_same($$SELECT jf.v, jd.id FROM jf LEFT JOIN jd ON jf.fk = jd.id + 1$$);
 SELECT join_same($$SELECT jf.v FROM jf WHERE NOT EXISTS (SELECT 1 FROM jd WHERE jd.id * 2 = jf.fk)$$);
+-- The core's plans without Material and Memoize, which PostgreSQL 18 puts
+-- under them and 19 does not.
+SET enable_material = off;
+SET enable_memoize = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id + (random() * 0)::int;
 -- No path: the core's hash join disabled, the batch nodes off.
 SET enable_hashjoin = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET enable_hashjoin;
+RESET enable_memoize;
+RESET enable_material;
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 RESET tessera.enable;
@@ -1545,4 +1564,5 @@ DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text, boolean);
 DROP FUNCTION join_many();
 DROP FUNCTION join_same(text, boolean);
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

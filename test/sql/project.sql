@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 
@@ -60,9 +66,9 @@ FROM project_t AS o WHERE o.a > 197 ORDER BY 1;
 -- A subquery's result passed by reference lives only until the subquery
 -- runs again: under a sort, which takes the whole column of a batch,
 -- each row keeps its own numeric and text.
-EXPLAIN (COSTS OFF)
+SELECT explain_neutral($$
 SELECT o.a, (SELECT sum(i.a::bigint) FROM project_t AS i WHERE i.a < o.a) AS total
-FROM project_t AS o WHERE o.a > 190 ORDER BY 2;
+FROM project_t AS o WHERE o.a > 190 ORDER BY 2$$);
 SELECT o.a, (SELECT sum(i.a::bigint) FROM project_t AS i WHERE i.a < o.a) AS total,
     (SELECT max(i.c) FROM project_t AS i WHERE i.a > 100 AND i.a < o.a) AS top
 FROM project_t AS o WHERE o.a > 190 ORDER BY 2;
@@ -87,4 +93,5 @@ RESET tessera.enable;
 
 DROP TABLE project_t;
 DROP FUNCTION project_same(text);
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

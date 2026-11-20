@@ -1,4 +1,8 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 -- The same result with Tessera on and off, as text; each side plans afresh.
@@ -1796,18 +1800,18 @@ DROP FUNCTION parallel_restricted(int);
 -- every parallel-aware node, and the nodes under TessGather hold their
 -- flag back while it runs. An initplan, a subplan run for every outer
 -- row, INTERSECT and a recursive CTE.
-EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) ORDER BY k;
-                                  QUERY PLAN                                  
+SELECT explain_neutral($$SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) ORDER BY k$$);
+                               explain_neutral                                
 ------------------------------------------------------------------------------
  Custom Scan (TessGatherMerge)
    Workers Planned: 2
-   InitPlan expr_1
+   InitPlan
      ->  Result
    ->  Parallel Custom Scan (TessSend)
          ->  Parallel Custom Scan (TessSort)
                Sort Key: parallel_wide.k
                ->  Parallel Custom Scan (TessFilter) on parallel_wide
-                     Batch Filter: (parallel_wide.k < (InitPlan expr_1).col1)
+                     Batch Filter: (parallel_wide.k < (InitPlan).col1)
                      ->  Parallel Custom Scan (TessHeapScan) on parallel_wide
 (10 rows)
 
@@ -1823,15 +1827,15 @@ SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_wide WHERE k < x
  {"(1,888)","(2,1777)","(3,2666)"}
 (1 row)
 
-EXPLAIN (VERBOSE, COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
-                                                QUERY PLAN                                                 
+SELECT explain_neutral($$SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500$$, 'VERBOSE, COSTS OFF');
+                                              explain_neutral                                              
 -----------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
-   Output: unnamed_subquery.k
-   Group Key: unnamed_subquery.k
+   Output: subquery.k
+   Group Key: subquery.k
    Set Operation: Intersect
    ->  Custom Scan (TessPack)
-         Output: unnamed_subquery.k
+         Output: subquery.k
          Rows Kept As: forwarded batches
          ->  Custom Scan (TessGather)
                Output: parallel_wide.k
@@ -1844,7 +1848,7 @@ EXPLAIN (VERBOSE, COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT
                            ->  Parallel Custom Scan (TessHeapScan) on public.parallel_wide
                                  Output: parallel_wide.k
    ->  Custom Scan (TessPack)
-         Output: unnamed_subquery_1.a
+         Output: subquery.a
          Rows Kept As: forwarded batches
          ->  Custom Scan (TessGather)
                Output: parallel_wide_1.a
@@ -2087,15 +2091,15 @@ CREATE TABLE parallel_rescan AS SELECT g AS k, g % 1000 AS v FROM generate_serie
 CREATE TABLE parallel_rescan_keys AS SELECT g AS k, g % 7 AS w FROM generate_series(1, 100000) AS g;
 ANALYZE parallel_rescan;
 ANALYZE parallel_rescan_keys;
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x;
-                                                QUERY PLAN                                                 
+SELECT explain_neutral($$
+SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x$$);
+                                              explain_neutral                                              
 -----------------------------------------------------------------------------------------------------------
  Function Scan on generate_series x
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg)
            Partial Mode: Finalize
-           InitPlan expr_2
+           InitPlan
              ->  Result
            ->  Custom Scan (TessGather)
                  Workers Planned: 2
@@ -2107,7 +2111,7 @@ SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys A
                                    Shared Table: true
                                    ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan b
                                    ->  Parallel Custom Scan (TessFilter) on parallel_rescan_keys m
-                                         Batch Filter: (m.w = (InitPlan expr_2).col1)
+                                         Batch Filter: (m.w = (InitPlan).col1)
                                          ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan_keys m
 (18 rows)
 
@@ -2117,16 +2121,16 @@ SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN
  {"(1,14286)","(2,14286)","(3,14286)","(4,14286)"}
 (1 row)
 
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x;
-                                                QUERY PLAN                                                
+SELECT explain_neutral($$
+SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x$$);
+                                             explain_neutral                                              
 ----------------------------------------------------------------------------------------------------------
  Function Scan on generate_series x
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg)
            ->  Custom Scan (TessPack)
                  ->  Custom Scan (TessLimit)
-                       InitPlan expr_2
+                       InitPlan
                          ->  Result
                        ->  Custom Scan (TessGatherMerge)
                              Workers Planned: 2
@@ -2134,7 +2138,7 @@ SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x
                                    ->  Parallel Custom Scan (TessSort)
                                          Sort Key: parallel_rescan.k DESC
                                          ->  Parallel Custom Scan (TessFilter) on parallel_rescan
-                                               Batch Filter: (parallel_rescan.v < (InitPlan expr_2).col1)
+                                               Batch Filter: (parallel_rescan.v < (InitPlan).col1)
                                                ->  Parallel Custom Scan (TessHeapScan) on parallel_rescan
 (15 rows)
 
@@ -2144,12 +2148,12 @@ SELECT parallel_same($$SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_res
  {"(1,1989198145)","(2,3982187245)","(3,5977176345)","(4,7974165445)"}
 (1 row)
 
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x;
-                                             QUERY PLAN                                             
+SELECT explain_neutral($$
+SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x$$);
+                                          explain_neutral                                           
 ----------------------------------------------------------------------------------------------------
  Function Scan on generate_series x
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg)
            ->  Custom Scan (TessPack)
                  ->  Custom Scan (TessLimit)
@@ -2184,12 +2188,12 @@ CREATE TABLE parallel_dim AS
     FROM generate_series(1, 2000) AS g;
 ANALYZE parallel_fact;
 ANALYZE parallel_dim;
-EXPLAIN (COSTS OFF)
-SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s);
-                                                      QUERY PLAN                                                      
+SELECT explain_neutral($$
+SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)$$);
+                                                   explain_neutral                                                    
 ----------------------------------------------------------------------------------------------------------------------
  Custom Scan (TessAgg)
-   Group Key: unnamed_subquery.b
+   Group Key: subquery.b
    Set Operation: Except All
    ->  Custom Scan (TessPack)
          ->  Custom Scan (TessGather)
@@ -2243,4 +2247,5 @@ DROP FUNCTION parallel_same(text);
 DROP FUNCTION plan_property(text, text, text);
 DROP FUNCTION partial_property(text, text);
 DROP FUNCTION parallel_explain(text);
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

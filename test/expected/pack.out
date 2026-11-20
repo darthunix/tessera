@@ -1,4 +1,8 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
 LOAD 'tessera_nodes';
 \getenv libdir PG_LIBDIR
 \getenv dlsuffix PG_DLSUFFIX
@@ -189,15 +193,16 @@ SELECT a FROM pack_t LIMIT 3;
 (3 rows)
 
 -- Rescan: a correlated subplan runs the node once per outer row.
-EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT explain_neutral($$
 SELECT g, (SELECT count(*) FROM pack_t AS p WHERE p.a <= g) AS n
-FROM generate_series(1, 3) AS g;
-                                    QUERY PLAN                                    
+FROM generate_series(1, 3) AS g$$,
+    'VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF');
+                                 explain_neutral                                  
 ----------------------------------------------------------------------------------
  Function Scan on pg_catalog.generate_series g (actual rows=3.00 loops=1)
-   Output: g.g, (SubPlan expr_1)
+   Output: g.g, (SubPlan)
    Function Call: generate_series(1, 3)
-   SubPlan expr_1
+   SubPlan
      ->  Aggregate (actual rows=1.00 loops=3)
            Output: count(*)
            ->  Custom Scan (tessera_pack_sink) (actual rows=2.00 loops=3)
@@ -456,4 +461,5 @@ ERROR:  Tessera pack requires a batch-aware parent
 RESET pack_test.rows_mode;
 DROP TABLE pack_t, pack_empty;
 DROP FUNCTION tessera_test_pack_paths();
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

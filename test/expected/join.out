@@ -1,4 +1,8 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
 LOAD 'tessera_nodes';
 -- The rows of a query with the batch nodes and without them, sorted. With
 -- core_parallel_hash off the core answers without its shared hash table:
@@ -37,6 +41,8 @@ DECLARE
 BEGIN
     FOR line IN EXECUTE format('EXPLAIN (ANALYZE, VERBOSE %s, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) %s',
                                CASE WHEN verbosely THEN 'on' ELSE 'off' END, query) LOOP
+        line := core_neutral(line);
+        CONTINUE WHEN line IS NULL;
         -- VERBOSE adds the output lists and each worker's rows: not checked here.
         CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         -- Overrun repeats what the memory line says.
@@ -1080,7 +1086,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
    Deformed Datums: 10
    Restarted Datums: 0
    Computed Datums: 10
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
            Input Batches: 46
            Input Rows: 2640
@@ -1131,7 +1137,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jf JOIN jdup ON jf.
    Deformed Datums: 10
    Restarted Datums: 0
    Computed Datums: 10
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
            Input Batches: 39
            Input Rows: 2165
@@ -1418,7 +1424,7 @@ SELECT join_explain($$SELECT jsmall.k, (SELECT count(*) FROM jprobe JOIN jbuild 
    Deformed Datums: 10
    Restarted Datums: 0
    Computed Datums: 10
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=10)
            Input Batches: 49
            Input Rows: 1595
@@ -3638,13 +3644,13 @@ SELECT join_same($$SELECT jdup.w FROM jf RIGHT JOIN jdup ON jf.fk = jdup.k WHERE
  11 rows, hash c255184ea854578949468f692b9ca6bc
 (1 row)
 
-EXPLAIN (COSTS OFF)
+SELECT explain_neutral($$
 SELECT x, (SELECT count(*) FROM (SELECT jd.id FROM jsmall FULL JOIN jd ON jsmall.k = jd.id AND jd.id > x) s)
-FROM generate_series(0, 300, 100) AS x;
-                        QUERY PLAN                        
+FROM generate_series(0, 300, 100) AS x$$);
+                     explain_neutral                      
 ----------------------------------------------------------
  Function Scan on generate_series x
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg)
            ->  Custom Scan (TessHashJoin)
                  Join Type: Full
@@ -3797,12 +3803,12 @@ SELECT join_same($$SELECT x, (SELECT count(*) FROM jd WHERE NOT EXISTS (SELECT 1
 (1 row)
 
 -- A parameter of the kept side too: the table is built anew.
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x;
-                         QUERY PLAN                         
+SELECT explain_neutral($$
+SELECT x, (SELECT count(*) FROM jd WHERE jd.id > x AND NOT EXISTS (SELECT 1 FROM jf WHERE jf.fk = jd.id AND jf.v > x)) FROM generate_series(0, 300, 100) AS x$$);
+                      explain_neutral                       
 ------------------------------------------------------------
  Function Scan on generate_series x
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg)
            ->  Custom Scan (TessHashJoin)
                  Join Type: Right Anti
@@ -4507,8 +4513,13 @@ ANALYZE jref;
 -- No autovacuum, for the reason given at jbuild.
 CREATE TABLE jrefprobe WITH (autovacuum_enabled = off) AS SELECT g % 25000 AS k, g AS v FROM generate_series(1, 60000) AS g;
 ANALYZE jrefprobe;
-EXPLAIN (COSTS OFF) SELECT count(*), sum(jref.n), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k;
-                                   QUERY PLAN                                   
+-- Which side builds the table is a near tie that the cores price apart:
+-- 19, sizing the buckets, takes a key with a histogram and no common
+-- values as unique, 18 does not. The plan, its two scans sorted after
+-- it; the EXPLAIN of a subquery of jref below shows which side builds.
+SELECT line FROM explain_neutral($$SELECT count(*), sum(jref.n), max(jref.t) FROM jrefprobe JOIN jref ON jrefprobe.k = jref.k$$) WITH ORDINALITY AS p(line, n)
+ORDER BY line ~ 'TessHeapScan', CASE WHEN line ~ 'TessHeapScan' THEN line END, n;
+                                      line                                      
 --------------------------------------------------------------------------------
  Custom Scan (TessAgg)
    Partial Mode: Finalize
@@ -5329,6 +5340,10 @@ SELECT join_same($$SELECT jf.v FROM jf WHERE NOT EXISTS (SELECT 1 FROM jd WHERE 
  556 rows, hash c893d487e79a125bd3e282eb3153f256
 (1 row)
 
+-- The core's plans without Material and Memoize, which PostgreSQL 18 puts
+-- under them and 19 does not.
+SET enable_material = off;
+SET enable_memoize = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id + (random() * 0)::int;
                                           QUERY PLAN                                          
 ----------------------------------------------------------------------------------------------
@@ -5356,6 +5371,8 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
 (7 rows)
 
 RESET enable_hashjoin;
+RESET enable_memoize;
+RESET enable_material;
 SET tessera.enable = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM jf JOIN jd ON jf.fk = jd.id;
              QUERY PLAN             
@@ -5508,7 +5525,7 @@ SELECT join_explain($$SELECT s.n, set_config('work_mem', CASE s.n WHEN 1 THEN '8
                                            join_explain                                            
 ---------------------------------------------------------------------------------------------------
  Function Scan on generate_series s (actual rows=2.00 loops=1)
-   SubPlan expr_1
+   SubPlan
      ->  Custom Scan (TessAgg) (actual rows=1.00 loops=2)
            ->  Custom Scan (TessHashJoin) (actual rows=6000.00 loops=2)
                  Hash Cond: (p.k = b.k)
@@ -5855,4 +5872,5 @@ DROP FUNCTION join_property(text, text);
 DROP FUNCTION join_explain(text, boolean);
 DROP FUNCTION join_many();
 DROP FUNCTION join_same(text, boolean);
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

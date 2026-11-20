@@ -1,12 +1,22 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 
--- PostgreSQL 19 estimates a UNION's rows as all its branches' rows, where
--- master sums their distinct groups: there the workers' grouping seems to
--- save nothing and is not chosen, the rows the same (union_parallel_1.out).
+-- PostgreSQL 19 and 18 estimate a UNION's rows as all its branches' rows,
+-- where master sums their distinct groups: there the workers' grouping
+-- seems to save nothing and is not chosen. In two statements 18 and 19
+-- choose the other way between the core's UNION of sorted branches
+-- (Unique over Merge Append) and the node's grouping. The rows are the
+-- same: union_parallel_1.out is 19's output, union_parallel_2.out 18's.
 -- The core, so that each expected file matches one alone.
-SELECT current_setting('server_version_num')::int >= 200000 AS master;
+SELECT CASE WHEN current_setting('server_version_num')::int >= 200000 THEN 'master'
+            ELSE (current_setting('server_version_num')::int / 10000)::text END AS core;
 
 -- The same result with Tessera on and off, as text.
 CREATE FUNCTION union_same(query text) RETURNS text
@@ -51,13 +61,15 @@ SET min_parallel_table_scan_size = 0;
 -- The node's model of a partial scan would keep so small a table serial.
 SET tessera.scan_parallel_setup_cost = 0;
 SET tessera.scan_worker_page_cost = 0;
-EXPLAIN (VERBOSE, COSTS OFF) SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3;
+SELECT explain_neutral($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT c AS x FROM union_keys UNION SELECT b FROM union_keys WHERE c IS NULL) AS s$$);
 -- Text through dictionaries, each participant's own.
-EXPLAIN (COSTS OFF) SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3;
+SELECT explain_neutral($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$);
 SELECT union_same($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b FROM union_keys WHERE b > 3$$);
--- Their tables sent up early, and none written to disk.
+-- Their tables sent up early, and none written to disk. On 19 and 18 no
+-- participant groups (see the start): early is NULL there, and no_disk
+-- holds with nothing to show.
 CREATE FUNCTION union_partial(query text, name text) RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -76,15 +88,15 @@ SELECT union_partial($$SELECT t, b FROM union_keys WHERE b < 5 UNION SELECT t, b
 RESET work_mem;
 DROP FUNCTION union_partial;
 -- The same as the left side of an EXCEPT.
-EXPLAIN (VERBOSE, COSTS OFF)
-(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3) EXCEPT SELECT b FROM union_keys WHERE b = 1;
+SELECT explain_neutral($$
+(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3) EXCEPT SELECT b FROM union_keys WHERE b = 1$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$(SELECT c FROM union_keys WHERE b < 5 UNION SELECT c FROM union_keys WHERE b > 3)
                    EXCEPT SELECT b FROM union_keys WHERE b = 1$$);
 SET parallel_leader_participation = off;
 SELECT union_same($$SELECT c, b FROM union_keys WHERE b < 5 UNION SELECT c, b FROM union_keys WHERE b > 3$$);
 RESET parallel_leader_participation;
 ALTER TABLE union_b SET (parallel_workers = 0);
-EXPLAIN (VERBOSE, COSTS OFF) SELECT c FROM union_keys UNION SELECT a FROM union_b;
+SELECT explain_neutral($$SELECT c FROM union_keys UNION SELECT a FROM union_b$$, 'VERBOSE, COSTS OFF');
 ALTER TABLE union_b RESET (parallel_workers);
 SET max_parallel_workers_per_gather = 0;
 RESET min_parallel_table_scan_size;
@@ -95,4 +107,5 @@ DROP TABLE union_keys;
 DROP TABLE union_b;
 DROP FUNCTION union_same(text);
 RESET max_parallel_workers_per_gather;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

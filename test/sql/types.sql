@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 
@@ -688,8 +694,11 @@ SELECT types_same($$SELECT count(*), sum(x), max(y) FROM (SELECT id, sum(p * 2) 
 RESET work_mem;
 DROP TABLE types_nm;
 -- A date against a timestamp compares other than bit for bit: the core's.
+-- Without Material, which PostgreSQL 18 puts under its plan and 19 does not.
+SET enable_material = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
 SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts$$);
+RESET enable_material;
 
 -- Grouping, DISTINCT and UNION by each type; the keys come back as the
 -- core's values, NULL a group of its own.
@@ -702,7 +711,7 @@ SELECT types_same($$SELECT b, s, count(*) FROM types_f GROUP BY b, s$$);
 SELECT types_same($$SELECT d + 1, count(*) FROM types_f GROUP BY d + 1$$);
 SELECT types_same($$SELECT DISTINCT d FROM types_f$$);
 SELECT types_same($$SELECT DISTINCT b, ts FROM types_f$$);
-EXPLAIN (VERBOSE, COSTS OFF) SELECT d FROM types_f UNION SELECT d FROM types_d;
+SELECT explain_neutral($$SELECT d FROM types_f UNION SELECT d FROM types_d$$, 'VERBOSE, COSTS OFF');
 SELECT types_same($$SELECT d FROM types_f UNION SELECT d FROM types_d$$);
 SELECT types_same($$SELECT s, b FROM types_f UNION SELECT s, b FROM types_d$$);
 
@@ -750,7 +759,7 @@ SELECT types_same($$SELECT count(*), sum(c) FROM (SELECT one, count(*) AS c FROM
 SELECT types_same($$SELECT long, count(*) FROM types_g GROUP BY long HAVING count(*) > 50$$);
 SELECT types_same($$SELECT DISTINCT t FROM types_g$$);
 SELECT types_same($$SELECT DISTINCT n, t FROM types_g$$);
-EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label);
+SELECT explain_neutral($$SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label)$$, 'VERBOSE, COSTS OFF');
 SELECT types_same($$SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label)$$);
 SELECT types_same($$SELECT n FROM types_g UNION SELECT n * 2 FROM types_g$$);
 -- Text, varchar, bytea and char(n), this one without its trailing blanks,
@@ -1071,11 +1080,14 @@ SELECT types_same($$SELECT tm, count(*) FROM types_k GROUP BY tm$$);
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.tm = b.tm;
 SELECT types_same($$SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.tm = b.tm$$);
 EXPLAIN (COSTS OFF) SELECT mo, count(*) FROM types_k GROUP BY mo;
+SET enable_material = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.mo = b.mo;
+RESET enable_material;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.f4 = b.f8;
 DROP TABLE types_k;
 
 DROP FUNCTION types_order(text);
 DROP FUNCTION types_same(text);
 DROP TABLE types_f, types_d;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;
