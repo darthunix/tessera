@@ -60,7 +60,8 @@ pub const VALUE_BYTE_BITS: u32 = 32;
 /// `byte` below 2^32: other numbers make no reference to them. It is
 /// never 0, which is no reference. A chunk of columns written with one
 /// chunk of values before it refers to that chunk as number 0. A chunk
-/// of values is at most 4 GiB:
+/// of values is under 4 GiB, so that its end, where an empty value at the
+/// end lies, is a byte a reference names:
 ///
 /// ```text
 ///  bit 63                        32 31                             0

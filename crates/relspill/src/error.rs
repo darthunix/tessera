@@ -209,7 +209,7 @@ rules! {
     ChunkWidth,
     /// A chunk of columns too narrow for the rows' columns.
     ChunkColumns,
-    /// A chunk of values longer than a reference names.
+    /// A chunk of values of 4 GiB or more, whose end no reference names.
     ValuesLength,
     /// Values used past their chunk.
     ValuesUsed,
@@ -546,10 +546,7 @@ impl fmt::Display for Error {
             Rule::PartitionRows => write!(f, "{a} row counts for {b} partitions"),
             Rule::ChunkWidth => write!(f, "a chunk of {a} words takes rows of {b}"),
             Rule::ChunkColumns => write!(f, "a chunk of {a} words takes no row of {b} columns"),
-            Rule::ValuesLength => write!(
-                f,
-                "a chunk of values of {a} bytes is longer than a reference names"
-            ),
+            Rule::ValuesLength => write!(f, "a chunk of values of 4 GiB or more"),
             Rule::ValuesUsed => write!(f, "values used to byte {b} of {a}"),
             Rule::ByValueBytes => write!(f, "a by-value column {a} gave bytes"),
             Rule::ValueRead => write!(f, "the source of rows cannot give column {a} of row {b}"),

@@ -60,6 +60,8 @@ int
 tess_columns_writer_add(TessColumnsWriter *writer, const TessDatumColumn *columns,
 						TessRowMask *pending)
 {
+	/* Values under the 4 GiB a reference names, in words of 8 bytes. */
+	const Size	most = ((Size) 1 << TESS_SPILL_VALUE_BYTE_BITS) - 8;
 	int			total = 0;
 
 	for (;;)
@@ -81,14 +83,13 @@ tess_columns_writer_add(TessColumnsWriter *writer, const TessDatumColumn *column
 			return total;
 		/*
 		 * An empty chunk: the next row's values pass its chunk of values,
-		 * which grows to the 4 GiB a reference names at most; a row whose
-		 * values pass even that is an ERROR, not a loop.
+		 * which grows to the most an append takes; a row whose values pass
+		 * even that is an ERROR, not a loop.
 		 */
-		if (need > ((Size) 1 << TESS_SPILL_VALUE_BYTE_BITS) - writer->values_used)
+		if (need > most - writer->values_used)
 			elog(ERROR, "Tessera writer of a chunk of columns takes no row of %zu bytes of values",
 				 need);
-		writer->values_len = Min(Max(writer->values_len * 2, writer->values_used + need),
-								 (Size) 1 << TESS_SPILL_VALUE_BYTE_BITS);
+		writer->values_len = Min(Max(writer->values_len * 2, writer->values_used + need), most);
 		writer->values = repalloc_huge(writer->values, writer->values_len);
 	}
 }

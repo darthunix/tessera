@@ -282,7 +282,9 @@ A word of a record or of a row that refers to a by-reference value
 SHALL be the reference that
 [`value_ref`](../../../crates/relspill/src/columns.rs) draws, which
 names the value's chunk of values and its byte there, and is never 0
-for the chunks and the bytes its documentation allows.
+for the chunks and the bytes its documentation allows. An append of
+rows SHALL refuse a chunk of values of 4 GiB or more, whose end, where
+an empty value at the end lies, no reference names.
 
 #### Scenario: Rows appended with their values
 - **WHEN** rows with by-reference values are appended to a chunk of
@@ -292,6 +294,13 @@ for the chunks and the bytes its documentation allows.
 - **Verified by:**
   `crates/relspill/src/spill_columns.rs::rows_go_in_order_until_the_chunk_or_the_values_fill`;
   `crates/tessera-capi/tests/spill.rs::rows_of_datums_append_to_a_chunk_of_columns`
+
+#### Scenario: Values of 4 GiB
+- **WHEN** the bound of an append's values is asked of a chunk of
+  exactly 4 GiB, and of one of a byte fewer
+- **THEN** it refuses the first and takes the second
+- **Verified by:**
+  `crates/relspill/src/spill_columns.rs::values_under_4_gib_are_taken`
 
 ### Requirement: A chunk of columns on disk
 A chunk of columns SHALL be stored packed, for its rows only, in the

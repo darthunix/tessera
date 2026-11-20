@@ -777,8 +777,11 @@ side_store_pair(SpillSide *side, int partition, Datum value, int16 typlen)
 	Size		size = tess_value_size(value, typlen, &expanded);
 	Size		byte = part->value_used;
 
-	/* A reference names a byte of the first 4 GiB of a pair's values. */
-	if (MAXALIGN(size) > ((Size) 1 << TESS_SPILL_VALUE_BYTE_BITS) - byte)
+	/*
+	 * A reference names a byte of the first 4 GiB of a pair's values, the
+	 * end of the values among them, where the next value would lie.
+	 */
+	if (MAXALIGN(size) >= ((Size) 1 << TESS_SPILL_VALUE_BYTE_BITS) - byte)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
 				 errmsg("TessHashJoin keeps no more than 4 GB of values in a chunk of outer rows")));

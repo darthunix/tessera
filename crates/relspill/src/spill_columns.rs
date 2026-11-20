@@ -242,6 +242,13 @@ pub struct Appended {
     pub need: usize,
 }
 
+/// Whether [`append`] takes a chunk of values of `len` bytes: one under
+/// 4 GiB, whose end, where an empty value at the end lies, is a byte a
+/// reference names.
+fn values_taken(len: usize) -> bool {
+    (len as u64) < 1 << columns::VALUE_BYTE_BITS
+}
+
 /// Append the rows of `rows`, in their order, to the chunk of columns
 /// `chunk` after its rows: column `c` of a row is the chunk's word `c`, the
 /// words past the columns the caller's (a sort's keys). A by-reference
@@ -254,9 +261,9 @@ pub struct Appended {
 /// # Errors
 ///
 /// A chunk that is no chunk of columns or has fewer words than the
-/// columns, `values` longer than a reference names a byte of, or `*used`
-/// past `values` or not aligned to 8, before anything is written; or a
-/// value [`RowValues::value`] cannot tell, or bytes from a source by
+/// columns, `values` of 4 GiB or more, whose end no reference names, or
+/// `*used` past `values` or not aligned to 8, before anything is written;
+/// or a value [`RowValues::value`] cannot tell, or bytes from a source by
 /// value, which may come after rows were written past the chunk's count,
 /// values copied, `*used` moved and words of the mask taken: the chunk,
 /// `values`, `*used` and `rows` are then to be dropped.
@@ -276,7 +283,7 @@ pub fn append(
             .and(ncolumns)
     );
     ensure!(
-        values.len() as u64 <= 1 << columns::VALUE_BYTE_BITS,
+        values_taken(values.len()),
         Error::wrong_call(Rule::ValuesLength).with(values.len())
     );
     ensure!(
@@ -993,6 +1000,15 @@ pub(crate) mod tests {
                 Cell::Bytes(bytes) => Some(Value::Bytes(bytes)),
             }
         }
+    }
+
+    /// An append takes values under 4 GiB alone: an empty value at the
+    /// end of 4 GiB would lie at a byte no reference names. Values of that
+    /// size take more memory than a test may.
+    #[test]
+    fn values_under_4_gib_are_taken() {
+        assert!(values_taken((1 << columns::VALUE_BYTE_BITS) - 1));
+        assert!(!values_taken(1 << columns::VALUE_BYTE_BITS));
     }
 
     /// Each check of an append names its rule, its kind and its numbers:
