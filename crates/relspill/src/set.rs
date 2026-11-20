@@ -57,6 +57,8 @@
 //! shared set must take the largest bounds of every participant's
 //! writer, which the caller gathers after the writes end.
 
+use relhash::MAX_PARTITIONS;
+
 use crate::error::ensure;
 use crate::{BlockHeader, BlockKind, Bounds, Error, HEADER_SIZE, MAX_LEVEL, Result, Rule, columns};
 
@@ -208,7 +210,8 @@ pub struct Block<'a> {
 /// What a set is made with.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Config {
-    /// The partitions of the level, at least one.
+    /// The partitions of the level: 1 to [`MAX_PARTITIONS`], the most a
+    /// spill's words count.
     pub partitions: u32,
     /// The level, below [`MAX_LEVEL`].
     pub level: u32,
@@ -309,7 +312,7 @@ impl Writer {
     /// A writer of an empty set made with `config`.
     pub fn new(config: Config) -> Result<Self> {
         ensure!(
-            config.partitions > 0,
+            config.partitions > 0 && config.partitions as usize <= MAX_PARTITIONS,
             Error::wrong_call(Rule::SetPartitions).with(config.partitions)
         );
         ensure!(
@@ -376,6 +379,7 @@ impl Writer {
         ensure!(
             matches!(self.phase, WRITING..=FAILED)
                 && self.partitions > 0
+                && self.partitions as usize <= MAX_PARTITIONS
                 && self.level < MAX_LEVEL
                 && self.buffer_len >= MIN_BUFFER as u64
                 && self.buffered <= self.buffer_len
@@ -701,7 +705,9 @@ impl Writer {
     /// A wrong call when the writer is none a call of [`Self::new`] made.
     pub fn reset(&mut self, lists: &mut impl Lists) -> Result<()> {
         ensure!(
-            matches!(self.phase, WRITING..=FAILED) && self.partitions > 0,
+            matches!(self.phase, WRITING..=FAILED)
+                && self.partitions > 0
+                && self.partitions as usize <= MAX_PARTITIONS,
             Error::wrong_call(Rule::SetState)
         );
         for partition in 0..self.partitions as usize {
@@ -1724,6 +1730,28 @@ pub(crate) mod tests {
             .map_err(Error::rule)
         };
         assert_eq!(made(0, 0, MIN_BUFFER), Err(Rule::SetPartitions));
+        assert_eq!(
+            made(MAX_PARTITIONS as u32 + 1, 0, MIN_BUFFER),
+            Err(Rule::SetPartitions)
+        );
+        // The most partitions are a set's: a reset and a finish walk them.
+        let mut most = Host::new(config(MAX_PARTITIONS as u32, MIN_BUFFER, false))?;
+        most.writer.reset(&mut most.lists)?;
+        let mut buffer = vec![0; MIN_BUFFER];
+        let step = most.writer.finish(&mut buffer, &mut most.lists)?;
+        assert!(matches!(step, Step::Done { .. }), "{step:?}");
+        // Words that name more partitions than a set takes are no
+        // writer's: a reset or a finish would walk lists no host keeps.
+        let mut wide = Host::new(config(1, MIN_BUFFER, false))?;
+        wide.writer.partitions = MAX_PARTITIONS as u32 + 1;
+        assert_eq!(
+            wide.writer.reset(&mut wide.lists).map_err(Error::rule),
+            Err(Rule::SetState)
+        );
+        assert_eq!(
+            refused(wide.writer.finish(&mut buffer, &mut wide.lists)),
+            Rule::SetState
+        );
         assert_eq!(made(1, MAX_LEVEL, MIN_BUFFER), Err(Rule::Level));
         assert_eq!(made(1, 0, MIN_BUFFER - 8), Err(Rule::SetBuffer));
         assert_eq!(made(1, 0, MIN_BUFFER + 4), Err(Rule::SetBuffer));

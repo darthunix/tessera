@@ -2190,15 +2190,6 @@ becomes an entry, joins one, or is dropped.
   Suggested: take values of fewer than 4 GiB, a change of `append`'s
   limit that the maintainer decides; no node writes a chunk of values
   of that size.
-- **A set of any count of partitions** (the fuzz targets of
-  `spill-crate`, task 6.4). `Writer::new` and a reader's `ReadConfig`
-  take any count of partitions above 0, up to `u32::MAX`, and a reset
-  and a finish walk every partition's list: a writer of four billion
-  partitions takes seconds a call, though no host keeps so many lists.
-  A spill's words already refuse more than `MAX_PARTITIONS`.
-  Suggested: refuse a set of more partitions than a spill's words
-  count, a change of the crate's API; until then the fuzz target of the
-  machines skips such a writer.
 - **Outputs of the kernels' entry points borrowed unfilled** (the
   outside reviews of `spill-crate`, task 3.26). The spill's entry points
   write their results to the places C hands them, which C may not have

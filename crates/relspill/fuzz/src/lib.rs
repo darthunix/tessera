@@ -1162,13 +1162,6 @@ fn writer_words(input: &mut Input) {
     // SAFETY: a writer is words of integers, any value of which is one,
     // and the sizes are equal, as `WRITER_WORDS` says.
     let mut writer: Writer = unsafe { core::mem::transmute_copy(&words) };
-    // A reset and a finish walk every partition's list. A writer of more
-    // partitions than a spill's words count is a host's that keeps no such
-    // lists; a call of it takes long, though it ends (roadmap, "Not
-    // placed").
-    if writer.partitions() as usize > MOST_PARTITIONS {
-        return;
-    }
     let mut buffer = vec![0; input.below(1024)];
     let mut scratch = vec![0; input.below(1024)];
     let mut lists = HostLists(

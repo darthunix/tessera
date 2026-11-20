@@ -236,7 +236,7 @@ rules! {
     /// A window of rows past a chunk's rows.
     Window,
 
-    /// A set of no partitions.
+    /// A set of no partitions, or of more than a spill's words count.
     SetPartitions,
     /// A write buffer shorter than a header and a chunk worth packing,
     /// not a multiple of 8, or not the set's.
@@ -581,7 +581,10 @@ impl fmt::Display for Error {
                  column {b}"
             ),
             Rule::Window => write!(f, "a window of rows to {a} of a chunk of {b} rows"),
-            Rule::SetPartitions => write!(f, "a spill set of {a} partitions"),
+            Rule::SetPartitions => write!(
+                f,
+                "a spill set of {a} partitions is not 1 to {MAX_PARTITIONS}"
+            ),
             Rule::SetBuffer => write!(
                 f,
                 "a spill set's write buffer of {a} bytes where it takes {b}"

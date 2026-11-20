@@ -372,7 +372,8 @@ The crate SHALL own the whole format of the file of a set, which
 [`set`](../../../crates/relspill/src/set.rs) draws: the blocks of every
 partition one after another, in the order they were written, then the
 block list of each partition and a trailer, which a set that wrote a
-block writes when it finishes. Its writer,
+block writes when it finishes. A set SHALL have 1 to 65536
+partitions, as many as the words of a spill count. Its writer,
 [`Writer`](../../../crates/relspill/src/set.rs), SHALL fill the write
 buffer and the lists its caller keeps, and lay the lists and the
 trailer out. Its reader,
@@ -422,12 +423,14 @@ by the place a write gave it.
   `crates/relspill/src/set/reader.rs::a_part_is_checked_before_what_it_names_is_read`
 
 #### Scenario: Calls a set or a reader does not take
-- **WHEN** a participant drops a partition of a shared set before it
+- **WHEN** a set or a reader is made for no partition or for more than
+  65536, a participant drops a partition of a shared set before it
   finishes the set, and a reader seeks to a place that holds no block of
   its partition or reads a body before its header
 - **THEN** each call is a wrong call, and the set and the reader are
   unchanged
 - **Verified by:**
+  `crates/relspill/src/set.rs::misuse_of_a_set_is_a_wrong_call`;
   `crates/relspill/src/set.rs::a_shared_set_drops_no_partition_before_its_finish`;
   `crates/relspill/src/set/reader.rs::misuse_of_a_reader_is_a_wrong_call`
 

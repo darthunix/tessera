@@ -25,6 +25,8 @@
 //! stored packed. [`Reader::seek`] goes to the block a write placed at a
 //! given byte of the file.
 
+use relhash::MAX_PARTITIONS;
+
 use super::{ENTRY_SIZE, Entry, TRAILER_MAGIC, TRAILER_SIZE};
 use crate::error::ensure;
 use crate::{
@@ -34,7 +36,7 @@ use crate::{
 /// What a reader reads: a partition of a set at a level, of a table.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ReadConfig {
-    /// The partitions of the set.
+    /// The partitions of the set: 1 to [`MAX_PARTITIONS`].
     pub partitions: u32,
     /// The set's level, below [`MAX_LEVEL`].
     pub level: u32,
@@ -179,7 +181,7 @@ pub const READER_WORDS: usize = 28;
 
 fn check_config(config: &ReadConfig) -> Result<()> {
     ensure!(
-        config.partitions > 0,
+        config.partitions > 0 && config.partitions as usize <= MAX_PARTITIONS,
         Error::wrong_call(Rule::SetPartitions).with(config.partitions)
     );
     ensure!(
@@ -240,6 +242,7 @@ impl Reader {
         ensure!(
             matches!(self.phase, TRAILER..=EMPTY)
                 && self.partitions > 0
+                && self.partitions as usize <= MAX_PARTITIONS
                 && self.partition < self.partitions
                 && self.level < MAX_LEVEL
                 && self.spare == 0
@@ -1469,6 +1472,32 @@ mod tests {
             Reader::file(read_config(3, 3), file.len() as u64).map_err(Error::rule),
             Err(Rule::SetPartition)
         );
+        let made = |partitions| {
+            Reader::file(read_config(partitions, 0), file.len() as u64).map_err(Error::rule)
+        };
+        assert_eq!(made(0).err(), Some(Rule::SetPartitions));
+        assert_eq!(
+            made(MAX_PARTITIONS as u32 + 1).err(),
+            Some(Rule::SetPartitions)
+        );
+        // A reader of the most partitions takes its first step: it asks
+        // for the trailer.
+        let mut most = made(MAX_PARTITIONS as u32).expect("the most partitions");
+        let step = most
+            .open(&[Entry::default(); 2])
+            .expect("an open of the most");
+        assert!(matches!(step, ReadStep::Page { .. }), "{step:?}");
+        // Words that name more partitions than a set takes are no
+        // reader's: its first step refuses them before it reads the
+        // trailer, which would find the file another set's.
+        let mut wide = Back {
+            reader: Reader::file(read_config(3, 0), file.len() as u64)?,
+            file: &file,
+            page: vec![Entry::default(); 2],
+            block: Vec::new(),
+        };
+        wide.reader.partitions = MAX_PARTITIONS as u32 + 1;
+        assert_eq!(wrong(wide.reader.open(&wide.page)), Rule::ReaderState);
         // Partition 0 of the file, opened, a page of two entries.
         let opened = || -> Result<Back<'_>> {
             let mut back = Back {

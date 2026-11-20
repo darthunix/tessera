@@ -460,6 +460,10 @@ fn the_runs_refuse_what_is_no_step() -> Result<()> {
             ..good
         },
         Params {
+            set_runs: MAX_PARTITIONS as u32 + 1,
+            ..good
+        },
+        Params {
             batch_rows: 0,
             ..good
         },
@@ -475,6 +479,11 @@ fn the_runs_refuse_what_is_no_step() -> Result<()> {
     for params in bad {
         assert_eq!(wrong(Runs::new(&params)), Rule::MachineParams, "{params:?}");
     }
+    // A set of the most runs a set takes.
+    Runs::new(&Params {
+        set_runs: MAX_PARTITIONS as u32,
+        ..good
+    })?;
     let (mut machine, _) = Runs::new(&good)?;
     let made = machine;
     for event in [Event::Next, Event::Rescan] {

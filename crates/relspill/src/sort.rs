@@ -103,6 +103,8 @@
 //! does nothing for each row, holds no memory and allocates nothing: it
 //! is plain data the host keeps.
 
+use relhash::MAX_PARTITIONS;
+
 use crate::error::ensure;
 use crate::{Error, Result, Rule};
 
@@ -127,7 +129,8 @@ pub struct Params {
     /// The bytes of a chunk of rows in memory, which the next batch may
     /// need.
     pub chunk: u64,
-    /// The runs a set holds.
+    /// The runs a set holds, each a partition of it: 1 to
+    /// [`MAX_PARTITIONS`].
     pub set_runs: u32,
     /// The most runs a merge reads at once, at least 2.
     pub max_merge: u32,
@@ -433,11 +436,13 @@ impl Runs {
 }
 
 /// Whether `params` are those of a sort: no limit, row, set or batch of
-/// 0, a merge of 2 runs at least, and a `backward` of 0 or 1.
+/// 0, no set of more runs than a set takes partitions, a merge of 2 runs
+/// at least, and a `backward` of 0 or 1.
 fn counted(params: &Params) -> bool {
     params.limit > 0
         && params.row > 0
         && params.set_runs > 0
+        && params.set_runs as usize <= MAX_PARTITIONS
         && params.batch_rows > 0
         && params.max_merge >= 2
         && params.backward <= 1
