@@ -194,7 +194,9 @@ producer_run_case(Oid consumer_oid, int nrows, int selection)
 		desc = CreateTemplateTupleDesc(2);
 		TupleDescInitEntry(desc, 1, "number", INT4OID, -1, 0);
 		TupleDescInitEntry(desc, 2, "label", TEXTOID, -1, 0);
+#if PG_VERSION_NUM >= 190000
 		TupleDescFinalize(desc);
+#endif
 		state->slot = MakeSingleTupleTableSlot(desc, &TTSOpsVirtual);
 		state->binding = state->ops->attach(state->slot, &layout);
 		fmgr_info_cxt(consumer_oid, &state->consumer, context);

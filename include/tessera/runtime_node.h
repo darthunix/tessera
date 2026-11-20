@@ -11,6 +11,7 @@
 
 #include "access/parallel.h"
 #include "commands/explain_format.h"
+#include "commands/explain_state.h"
 #include "nodes/execnodes.h"
 
 #include "tessera/layout.h"

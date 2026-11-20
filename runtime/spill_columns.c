@@ -14,8 +14,9 @@
 
 /*
  * Whether the core has TOAST pointers of 64-bit chunk ids, tag 4: master
- * does; PostgreSQL 19 has none, and would read a value of that tag read
- * back from a damaged file as a short varlena below its header's length.
+ * does; PostgreSQL 19 and 18 have none, and would read a value of that tag
+ * read back from a damaged file as a short varlena below its header's
+ * length.
  */
 #if PG_VERSION_NUM >= 200000
 #define TOAST_OID8 true

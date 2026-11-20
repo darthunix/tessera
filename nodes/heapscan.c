@@ -184,7 +184,17 @@ typedef struct HeapScanState
 } HeapScanState;
 
 static CustomPath *heap_scan_rows(PlannerInfo *root, Path *path);
+#if PG_VERSION_NUM >= 190000
 static uint32 heap_scan_flags(HeapScanState *state);
+
+/*
+ * The last argument of the core's scans, its hint that the query only
+ * reads the relation. PostgreSQL 18's scans take no flags.
+ */
+#define SCAN_FLAGS(state) , heap_scan_flags(state)
+#else
+#define SCAN_FLAGS(state)
+#endif
 static int *index_only_columns(HeapScanState *state, IndexOnlyScan *plan);
 static Plan *heap_scan_plan(PlannerInfo *root, RelOptInfo *rel,
 							CustomPath *best_path, List *tlist, List *clauses,
@@ -677,8 +687,8 @@ heap_scan_begin(CustomScanState *css, EState *estate, int eflags)
 												 false,
 #endif
 												 estate->es_snapshot,
-												 &state->lookup_instrument, 1, 0,
-												 heap_scan_flags(state));
+												 &state->lookup_instrument, 1, 0
+												 SCAN_FLAGS(state));
 		}
 	}
 	state->layout = info.layout;
@@ -776,15 +786,21 @@ heap_scan_start(HeapScanState *state)
 	config.ncolumns = state->relation.ncolumns;
 	config.capacity = state->capacity;
 	config.tuple_desc = RelationGetDescr(rel);
+#if PG_VERSION_NUM >= 190000
 	config.first_non_guaranteed_attr = RelationGetDescr(rel)->firstNonGuaranteedAttr;
+#else
+	config.first_non_guaranteed_attr = 0;
+#endif
 	state->heap = tess_heap_batch_create(&config);
 }
 
+#if PG_VERSION_NUM >= 190000
 static uint32
 heap_scan_flags(HeapScanState *state)
 {
 	return ScanRelIsReadOnly(&state->css.ss) ? SO_HINT_REL_READ_ONLY : SO_NONE;
 }
+#endif
 
 /* Take the scan the core began: serial, or a participant's parallel one. */
 static void
@@ -866,7 +882,7 @@ begin_bitmap_scan(HeapScanState *state)
 		bitmap_built(shared);
 	}
 	scan = table_beginscan_bm(state->css.ss.ss_currentRelation, estate->es_snapshot,
-							  0, NULL, heap_scan_flags(state));
+							  0, NULL SCAN_FLAGS(state));
 	scan->st.rs_tbmiterator = tbm_begin_iterate(state->tbm, estate->es_query_dsa,
 												shared != NULL ? shared->iterator :
 												InvalidDsaPointer);
@@ -1012,10 +1028,11 @@ give_out(HeapScanState *state, TessBatch *batch)
 
 #if PG_VERSION_NUM < 200000
 /*
- * PostgreSQL 19 has no table_index_getnext_slot: the next entry's row is
- * IndexOnlyNext's of that core (nodeIndexonlyscan.c), from the index's
- * tuple, with the table's page read only where the visibility map does
- * not show it all visible, and StoreIndexTuple's copy of name columns.
+ * PostgreSQL 19 and 18 have no table_index_getnext_slot: the next entry's
+ * row is IndexOnlyNext's of 19 (nodeIndexonlyscan.c; 18's is the same
+ * loop), from the index's tuple, with the table's page read only where
+ * the visibility map does not show it all visible, and StoreIndexTuple's
+ * copy of name columns.
  * The page's predicate lock is taken before the caller's recheck, as
  * master's table AM takes it.
  */
@@ -1117,6 +1134,7 @@ index_only_batch(HeapScanState *state, int limit)
 	scan = ios->ioss_ScanDesc;
 	if (scan == NULL)
 	{
+#if PG_VERSION_NUM >= 190000
 		scan = index_beginscan(ios->ss.ss_currentRelation, ios->ioss_RelationDesc,
 #if PG_VERSION_NUM >= 200000
 							   true,
@@ -1124,6 +1142,12 @@ index_only_batch(HeapScanState *state, int limit)
 							   estate->es_snapshot, ios->ioss_Instrument,
 							   ios->ioss_NumScanKeys, ios->ioss_NumOrderByKeys,
 							   ScanRelIsReadOnly(&ios->ss) ? SO_HINT_REL_READ_ONLY : SO_NONE);
+#else
+		/* PostgreSQL 18 keeps the scan's counters in the node and takes no flags. */
+		scan = index_beginscan(ios->ss.ss_currentRelation, ios->ioss_RelationDesc,
+							   estate->es_snapshot, &ios->ioss_Instrument,
+							   ios->ioss_NumScanKeys, ios->ioss_NumOrderByKeys);
+#endif
 		ios->ioss_ScanDesc = scan;
 #if PG_VERSION_NUM < 200000
 		/* Master's index_beginscan does these for an index-only scan. */
@@ -1361,8 +1385,8 @@ heap_scan_exec(CustomScanState *css)
 		EState	   *estate = css->ss.ps.state;
 
 		begin_scan(state, table_beginscan(css->ss.ss_currentRelation,
-										  estate->es_snapshot, 0, NULL,
-										  heap_scan_flags(state)));
+										  estate->es_snapshot, 0, NULL
+										  SCAN_FLAGS(state)));
 	}
 	if (!ScanDirectionIsForward(css->ss.ps.state->es_direction))
 		elog(ERROR, "TessHeapScan supports only forward scans");
@@ -1625,7 +1649,7 @@ heap_scan_initialize_dsm(CustomScanState *css, ParallelContext *pcxt,
 		return;
 	pscan = shared_scan(coordinate);
 	table_parallelscan_initialize(rel, pscan, estate->es_snapshot);
-	begin_scan(state, table_beginscan_parallel(rel, pscan, heap_scan_flags(state)));
+	begin_scan(state, table_beginscan_parallel(rel, pscan SCAN_FLAGS(state)));
 }
 
 static void
@@ -1662,8 +1686,8 @@ heap_scan_initialize_worker(CustomScanState *css, shm_toc *toc,
 	if (state->bitmap_plan != NULL)
 		state->shared_bitmap = shared_bitmap(coordinate);
 	else if (reads_heap_itself(state))
-		begin_scan(state, table_beginscan_parallel(rel, shared_scan(coordinate),
-												   heap_scan_flags(state)));
+		begin_scan(state, table_beginscan_parallel(rel, shared_scan(coordinate)
+												   SCAN_FLAGS(state)));
 }
 
 /*

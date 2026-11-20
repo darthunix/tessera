@@ -16,6 +16,13 @@
 
 PG_MODULE_MAGIC;
 
+/* A node's counters of rows, which PostgreSQL 18 allocates as an array of them. */
+#if PG_VERSION_NUM >= 190000
+#define ALLOC_INSTRUMENT() InstrAllocNode(INSTRUMENT_ROWS, false)
+#else
+#define ALLOC_INSTRUMENT() InstrAlloc(1, INSTRUMENT_ROWS, false)
+#endif
+
 PGDLLEXPORT void _PG_init(void);
 
 PG_FUNCTION_INFO_V1(tessera_test_unary_batches);
@@ -133,7 +140,7 @@ make_node(TupleDesc desc)
 	CustomScanState *node = makeNode(CustomScanState);
 
 	node->ss.ps.ps_ResultTupleSlot = MakeSingleTupleTableSlot(desc, &TTSOpsVirtual);
-	node->ss.ps.instrument = InstrAllocNode(INSTRUMENT_ROWS, false);
+	node->ss.ps.instrument = ALLOC_INSTRUMENT();
 	return node;
 }
 

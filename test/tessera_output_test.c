@@ -13,6 +13,13 @@
 
 PG_MODULE_MAGIC;
 
+/* A node's counters of rows, which PostgreSQL 18 allocates as an array of them. */
+#if PG_VERSION_NUM >= 190000
+#define ALLOC_INSTRUMENT() InstrAllocNode(INSTRUMENT_ROWS, false)
+#else
+#define ALLOC_INSTRUMENT() InstrAlloc(1, INSTRUMENT_ROWS, false)
+#endif
+
 PG_FUNCTION_INFO_V1(tessera_test_output_rows);
 PG_FUNCTION_INFO_V1(tessera_test_output_batch);
 PG_FUNCTION_INFO_V1(tessera_test_output_layout);
@@ -100,7 +107,7 @@ tessera_test_output_rows(PG_FUNCTION_ARGS)
 	TessBatch  *batch;
 	bool		result;
 
-	ps->instrument = InstrAllocNode(INSTRUMENT_ROWS, false);
+	ps->instrument = ALLOC_INSTRUMENT();
 	output = tess_output_create(CurrentMemoryContext, ps, slot, &layout);
 	binding = tess_output_binding(output);
 	result = binding != NULL && ops->find(slot) == binding &&
@@ -157,7 +164,7 @@ tessera_test_output_batch(PG_FUNCTION_ARGS)
 	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 	bool		result;
 
-	ps->instrument = InstrAllocNode(INSTRUMENT_ROWS, false);
+	ps->instrument = ALLOC_INSTRUMENT();
 	output = tess_output_create(CurrentMemoryContext, ps, slot, &layout);
 	request.output_mode = TESS_OUTPUT_BATCH;
 	ops->set_request(tess_output_binding(output), &request);

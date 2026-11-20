@@ -24,6 +24,15 @@ struct TessHeapBatch
 	TupleDesc	tuple_desc;
 	TupleDesc	other_desc;
 	int			first_non_guaranteed;
+#if PG_VERSION_NUM < 190000
+	/*
+	 * The descriptor's leading columns at cached offsets and their offsets,
+	 * which PostgreSQL 19 keeps in the descriptor and 18 does not: counted
+	 * when the batch takes the descriptor (cache_offsets).
+	 */
+	int			first_non_cached;
+	int		   *offsets;
+#endif
 	/* Tuples copied from slots without a pinned page; reset per batch. */
 	MemoryContext copies;
 	/* One tuple header per row; t_data points into a page or a copy. */
@@ -97,6 +106,63 @@ struct TessHeapBatch
  */
 #define KEEP_SAMPLE 4
 #define KEEP_WINDOW_ROWS 1024
+
+/* The leading columns at cached offsets. */
+static inline int
+first_non_cached(const TessHeapBatch *heap)
+{
+#if PG_VERSION_NUM >= 190000
+	return heap->tuple_desc->firstNonCachedOffsetAttr;
+#else
+	return heap->first_non_cached;
+#endif
+}
+
+/*
+ * The offset of a column before first_non_cached, cattr its attribute, in
+ * a tuple with no NULL up to it.
+ */
+static inline int
+cached_offset(const TessHeapBatch *heap, const CompactAttribute *cattr, int column)
+{
+#if PG_VERSION_NUM >= 190000
+	return cattr->attcacheoff;
+#else
+	return heap->offsets[column];
+#endif
+}
+
+#if PG_VERSION_NUM < 190000
+/*
+ * Count the leading columns at cached offsets and their offsets, as
+ * PostgreSQL 19's TupleDescFinalize does: the fixed-width ones before the
+ * first of varying length or a virtual generated one, while an offset fits
+ * the 16 bits of 19's attcacheoff. Only the batch's columns are counted,
+ * and no request reaches past them.
+ */
+static void
+cache_offsets(TessHeapBatch *heap)
+{
+	TupleDesc	desc = heap->tuple_desc;
+	int			off = 0;
+	int			column;
+
+	for (column = 0; column < heap->ncolumns; column++)
+	{
+		CompactAttribute *cattr = TupleDescCompactAttr(desc, column);
+
+		if (cattr->attlen <= 0 ||
+			TupleDescAttr(desc, column)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+			break;
+		off = att_nominal_alignby(off, cattr->attalignby);
+		if (off > PG_INT16_MAX)
+			break;
+		heap->offsets[column] = off;
+		off += cattr->attlen;
+	}
+	heap->first_non_cached = column;
+}
+#endif
 
 /*
  * The cursor of a row's column before the row's cursor: the cursor of the
@@ -179,18 +245,18 @@ deform_walk(TessHeapBatch *heap, int column, int row, bool keeping)
 	int			end = Min(HeapTupleHeaderGetNatts(tup), column + 1);
 	int			first_null = HeapTupleHasNulls(tuple) ?
 		first_null_attr(tup->t_bits, end) : end;
-	int			cached = Min(desc->firstNonCachedOffsetAttr, first_null);
+	int			cached = Min(first_non_cached(heap), first_null);
 	int			attr = cursor->nvalid;
 	uint32		off = cursor->off;
 
-	Assert(attr <= column && column >= desc->firstNonCachedOffsetAttr &&
-		   heap->first_kept >= desc->firstNonCachedOffsetAttr);
+	Assert(attr <= column && column >= first_non_cached(heap) &&
+		   heap->first_kept >= first_non_cached(heap));
 	if (attr < cached)
 	{
 		CompactAttribute *cattr = &cattrs[cached - 1];
 
-		Assert(cattr->attcacheoff >= 0 && cattr->attlen > 0);
-		off = cattr->attcacheoff + cattr->attlen;
+		Assert(cached_offset(heap, cattr, cached - 1) >= 0 && cattr->attlen > 0);
+		off = cached_offset(heap, cattr, cached - 1) + cattr->attlen;
 		attr = cached;
 	}
 	for (; attr < first_null; attr++)
@@ -241,7 +307,7 @@ deform(TessHeapBatch *heap, int column, int row)
 		Assert(!heap->kept[column]);
 		cursor = back_cursor(heap, row, attnum);
 	}
-	else if (column >= heap->tuple_desc->firstNonCachedOffsetAttr)
+	else if (column >= first_non_cached(heap))
 	{
 		deform_walk(heap, column, row, false);
 		return;
@@ -342,7 +408,7 @@ deform_cached(TessHeapBatch *heap, int column, const TessRowMask *rows,
 			  const uint64 *deformed, int nwords)
 {
 	const CompactAttribute *cattr = &heap->tuple_desc->compact_attrs[column];
-	int			offset = cattr->attcacheoff;
+	int			offset = cached_offset(heap, cattr, column);
 
 	Assert(offset >= 0 && cattr->attbyval);
 	switch (cattr->attlen)
@@ -403,7 +469,7 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 		elog(ERROR, "Tessera heap batch received a row mask of another batch");
 	deformed = &heap->deformed[(Size) column * heap->nwords];
 	nwords = tess_row_mask_word_count(rows->nrows);
-	if (column >= heap->tuple_desc->firstNonCachedOffsetAttr)
+	if (column >= first_non_cached(heap))
 	{
 		if (unlikely(!heap->asked[column]))
 		{
@@ -413,7 +479,7 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 		if (heap->nasked > 1 && heap->counting)
 			count_behind(heap, column, rows, deformed, nwords);
 	}
-	if (column < heap->tuple_desc->firstNonCachedOffsetAttr &&
+	if (column < first_non_cached(heap) &&
 		heap->tuple_desc->compact_attrs[column].attbyval)
 		deform_cached(heap, column, rows, deformed, nwords);
 	else if (heap->kept[column] || heap->first_kept < column)
@@ -533,6 +599,11 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 		heap->tuple_desc = config->tuple_desc;
 		heap->first_non_guaranteed = config->first_non_guaranteed_attr;
 	}
+#if PG_VERSION_NUM < 190000
+	heap->offsets = MemoryContextAlloc(context, sizeof(int) * Max(config->ncolumns, 1));
+	if (heap->tuple_desc != NULL)
+		cache_offsets(heap);
+#endif
 	heap->batch.abi_version = TESS_BATCH_ABI_VERSION;
 	heap->batch.struct_size = sizeof(TessBatch);
 	heap->batch.values_stored = true;
@@ -602,7 +673,7 @@ count_keeping(TessHeapBatch *heap)
 	heap->counting = ++heap->batches % KEEP_SAMPLE == 0;
 	if (!counted || heap->nasked < 2)
 		return;
-	start = heap->tuple_desc->firstNonCachedOffsetAttr;
+	start = first_non_cached(heap);
 	for (int word = 0; word < nwords; word++)
 	{
 		uint64		reached = 0;
@@ -694,7 +765,11 @@ tess_heap_batch_append_slot(TessHeapBatch *heap, TupleTableSlot *slot)
 		if (slot->tts_tupleDescriptor->natts < heap->ncolumns)
 			elog(ERROR, "Tessera heap batch input has too few columns");
 		heap->tuple_desc = slot->tts_tupleDescriptor;
+#if PG_VERSION_NUM >= 190000
 		heap->first_non_guaranteed = slot->tts_first_nonguaranteed;
+#else
+		cache_offsets(heap);
+#endif
 	}
 	else if (slot->tts_tupleDescriptor != heap->tuple_desc &&
 			 slot->tts_tupleDescriptor != heap->other_desc)
@@ -702,9 +777,11 @@ tess_heap_batch_append_slot(TessHeapBatch *heap, TupleTableSlot *slot)
 		if (!same_layout(slot->tts_tupleDescriptor, heap->tuple_desc))
 			elog(ERROR, "Tessera heap batch input changed its descriptor");
 		heap->other_desc = slot->tts_tupleDescriptor;
+#if PG_VERSION_NUM >= 190000
 		/* Columns known not NULL only as far as both descriptors know it. */
 		heap->first_non_guaranteed = Min(heap->first_non_guaranteed,
 										 slot->tts_first_nonguaranteed);
+#endif
 	}
 	/* The slot's tuple header is overwritten by the next fetch. */
 	if (TTS_IS_BUFFERTUPLE(slot) && BufferIsValid(bslot->buffer))

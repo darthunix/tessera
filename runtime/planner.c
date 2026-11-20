@@ -535,6 +535,7 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 				break;
 			}
 	}
+	/* The casts: PostgreSQL 18's copyObject keeps the const of its argument. */
 	if (TESS_ABI_HAS_FIELD(config, TessPlanConfig, scan_tuple_is_relation) &&
 		config->scan_tuple_is_relation)
 	{
@@ -545,7 +546,7 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 		scan_targetlist = NIL;
 	}
 	else if (given_scan_targetlist != NIL)
-		scan_targetlist = copyObject(given_scan_targetlist);
+		scan_targetlist = (List *) copyObject(given_scan_targetlist);
 	else if (config->layout_policy == TESS_LAYOUT_PRESERVE_CHILD)
 		scan_targetlist = copyObject(((Plan *)
 			list_nth(child_plans, config->layout_child))->targetlist);
@@ -571,9 +572,9 @@ tess_plan_create(CustomPath *path, List *targetlist, List *child_plans,
 	scan->flags = path->flags;
 	scan->scan.scanrelid = config->scanrelid;
 	scan->scan.plan.targetlist = copyObject(targetlist);
-	scan->scan.plan.qual = copyObject(qual);
+	scan->scan.plan.qual = (List *) copyObject(qual);
 	scan->custom_plans = child_plans;
-	scan->custom_exprs = copyObject(expressions);
+	scan->custom_exprs = (List *) copyObject(expressions);
 	scan->custom_scan_tlist = scan_targetlist;
 	writer = tess_plan_writer_create(PLAN_DATA_KIND, DATA_VERSION);
 	tess_plan_write_string(writer, "node", path_info.node->name);

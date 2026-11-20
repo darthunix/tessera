@@ -621,8 +621,14 @@ give_rescan_params(Plan *plan)
 
 /* The planning done, the flags held back come back; a nested planning keeps its own. */
 static PlannedStmt *
+#if PG_VERSION_NUM >= 190000
 gather_planner(Query *parse, const char *query_string, int cursorOptions,
 			   ParamListInfo boundParams, ExplainState *es)
+#else
+/* PostgreSQL 18's planner takes no ExplainState. */
+gather_planner(Query *parse, const char *query_string, int cursorOptions,
+			   ParamListInfo boundParams)
+#endif
 {
 	List	   *outer = held_parallel_aware;
 	PlannedStmt *result;
@@ -630,9 +636,15 @@ gather_planner(Query *parse, const char *query_string, int cursorOptions,
 	held_parallel_aware = NIL;
 	PG_TRY();
 	{
+#if PG_VERSION_NUM >= 190000
 		result = previous_planner_hook != NULL ?
 			previous_planner_hook(parse, query_string, cursorOptions, boundParams, es) :
 			standard_planner(parse, query_string, cursorOptions, boundParams, es);
+#else
+		result = previous_planner_hook != NULL ?
+			previous_planner_hook(parse, query_string, cursorOptions, boundParams) :
+			standard_planner(parse, query_string, cursorOptions, boundParams);
+#endif
 	}
 	PG_CATCH();
 	{

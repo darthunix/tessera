@@ -18,7 +18,7 @@
 
 #include "injection_library.h"
 
-/* PostgreSQL 19 names a TOAST pointer to data on disk VARTAG_ONDISK. */
+/* PostgreSQL 19 and 18 name a TOAST pointer to data on disk VARTAG_ONDISK. */
 #if PG_VERSION_NUM < 200000
 #define VARTAG_ONDISK_OID VARTAG_ONDISK
 #endif
@@ -1093,8 +1093,8 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 			/*
 			 * A TOAST pointer of 64-bit chunk ids, tag 4, in a chunk of
 			 * columns read back: master's core has such pointers, and the
-			 * reader takes it; PostgreSQL 19's has none, and there it is
-			 * damaged data.
+			 * reader takes it; PostgreSQL 19's and 18's have none, and there it
+			 * is damaged data.
 			 */
 			{
 				static const bool byvals[1] = {false};

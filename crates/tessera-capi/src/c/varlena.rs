@@ -15,9 +15,9 @@ compile_error!("the varlena headers here are little-endian's");
 /// of 16 bytes and, where the core has pointers of 64-bit chunk ids
 /// (`oid8`), VARTAG_ONDISK_OID8's `varatt_external_oid8` of 20, as
 /// `runtime/spill.c` asserts against PostgreSQL's headers; `None` for
-/// another tag. PostgreSQL 19 has tag 18 alone: there a value of tag 4 is
-/// no pointer, and its core would read it as a short varlena whose length
-/// is below its header's.
+/// another tag. PostgreSQL 19 and 18 have tag 18 alone: there a value of
+/// tag 4 is no pointer, and their core would read it as a short varlena
+/// whose length is below its header's.
 pub(super) fn ondisk_body(tag: u8, oid8: bool) -> Option<usize> {
     match tag {
         18 => Some(16),

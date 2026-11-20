@@ -40,7 +40,8 @@ typedef struct TessHeapBatchConfig
 	 * The tuples' descriptor and the number of leading attributes every
 	 * tuple has present, non-NULL and by value (the descriptor's
 	 * firstNonGuaranteedAttr, or 0). NULL takes both from the first slot
-	 * appended; tuples appended directly need them here.
+	 * appended; tuples appended directly need them here. PostgreSQL 18 has
+	 * no such count, and there the batch takes none as guaranteed.
 	 */
 	TupleDesc	tuple_desc;
 	int			first_non_guaranteed_attr;
