@@ -223,7 +223,8 @@ one on the M5 Pro. The cases drawn at random are:
   a word over 64 and 65 keys the Intel Core missed 58 to 75 times a
   call there, where the model says about 144
   ([`halving_misses`](support/fixture.rs) and
-  [`exit_misses`](support/fixture.rs)).
+  [`exit_misses`](support/fixture.rs)); over `shuffled` it misses 183
+  to 196, where the model says about 135.
 
 The two kinds of cases are meant to be read together: a branch is judged
 against a choice made as data on the cases drawn at random, where the
