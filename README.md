@@ -143,8 +143,8 @@ PostgreSQL node
 
 ## Quick start
 
-Tessera builds against PostgreSQL 19 or master with server headers, PGXS
-and `pg_config`; it needs a C compiler, `make` and
+Tessera builds against PostgreSQL 18, 19 or master with server headers,
+PGXS and `pg_config`; it needs a C compiler, `make` and
 [rustup](https://rustup.rs/), which installs the Rust toolchain the
 repository selects.
 
@@ -194,7 +194,7 @@ count instructions, cycles and branches on macOS
 ## Status
 
 Tessera is under active development and is not ready for production use.
-It builds against PostgreSQL 19 and master.
+It builds against PostgreSQL 18, 19 and master.
 
 ## For extension developers
 

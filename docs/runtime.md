@@ -157,8 +157,9 @@ the missing value, as a slot does. `tess_heap_batch_stats` gives the
 deformed and restarted values and the copied rows for `EXPLAIN`. The
 guaranteed prefix (`tts_first_nonguaranteed` of the first slot) and the
 descriptor are taken from the slots appended, so a node needs no
-descriptor of its own. A slot of another descriptor is taken when its
-tuples deform the same (the same attributes, each of the same type,
+descriptor of its own. PostgreSQL 18 has no guaranteed prefix, and
+there the batch takes none. A slot of another descriptor is taken when
+its tuples deform the same (the same attributes, each of the same type,
 length, passing, alignment, dropped and missing-value flags), with the
 smaller guaranteed prefix of the two: a `Gather` returns the leader's rows
 in its child's slot, of the relation's descriptor, and the workers' in its
@@ -172,7 +173,10 @@ bitmap of its NULLs (`t_bits`) and a data area from `t_hoff` on, where
 the attributes lie one after another in `attnum` order. The
 fixed-width attributes before the first one of varying length have an
 offset known from the descriptor (`attcacheoff`); the descriptor's
-`firstNonCachedOffsetAttr` counts them. Past them the offset of an
+`firstNonCachedOffsetAttr` counts them. PostgreSQL 18 keeps no such
+count and sets those offsets as it deforms tuples, not all ahead of
+them, so there the batch counts them itself when it takes the
+descriptor, the same way. Past them the offset of an
 attribute is the sum of the lengths of the values before it, so, as
 PostgreSQL's documentation says of the page layout, there is no way to
 get an attribute directly except when there are only fixed-width fields
