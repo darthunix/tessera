@@ -13,7 +13,7 @@ trap 'rm -rf "$root" "$root.out" "$root.saved"' EXIT
 failures=0
 
 git ls-files -- crates/relhash/src crates/relspill/src openspec/specs/relhash \
-    openspec/changes/spill-crate openspec/specs/relspill |
+    openspec/specs/relspill |
     tar -cf - -T - | tar -xf - -C "$root"
 (cd "$root" && git init -q && git add -A)
 

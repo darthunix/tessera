@@ -25,8 +25,8 @@ the other entries keep the order of the decisions of 2026-09-30 to
 2026-10-02 (plan lines 2810–2836, 6596–6603, 7378–7390). The maintainer
 placed `spill-crate` first on 2026-10-28, after the close of
 `table-crate`, and the float kernels second on 2026-11-01, after the
-review of what more can move from C to Rust; the float kernels are
-closed. The maintainer took the six findings of the AVX2 kernels on
+review of what more can move from C to Rust; both are closed. The
+maintainer took the six findings of the AVX2 kernels on
 2026-11-01, in three changes, which come after `spill-crate` in this
 order; the first, of the benchmarks' inputs, is closed. The maintainer
 took six entries out of turn on 2026-11-02, after an analysis of TPC-H
@@ -46,29 +46,28 @@ day he moved `agg-dependent-columns` between `agg-table-presize` and
 `tpch-q9-plan`, and on 2026-11-04 widened `lookup-outer-compaction`
 into `gather-sparse-batches`:
 
-1. `spill-crate`: The spill as a crate of its own, relspill
-2. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+2. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-4. `explain-rows-per-loop`: The rows a node removed, per loop as the
+3. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-5. `join-pruning-cost`: The cost of a pruning join over the partitions
+4. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-7. `linux-x86-support`: Linux on x86-64 checked as the target platform
-8. `oltp-guard-bench`: OLTP guard family of benchmarks
-9. `runs-left-from-section-9`: Runs left to the maintainer from
+6. `linux-x86-support`: Linux on x86-64 checked as the target platform
+7. `oltp-guard-bench`: OLTP guard family of benchmarks
+8. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-13. `tpch-sf10`: TPC-H step 10: SF10
-14. `backward-scan-mark-restore`: Backward scan and mark/restore
-15. `pg-duckdb-comparison`: Comparison with pg_duckdb
+12. `tpch-sf10`: TPC-H step 10: SF10
+13. `backward-scan-mark-restore`: Backward scan and mark/restore
+14. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -373,26 +372,6 @@ dictionary and in the join.
   `tess_key_bytes` in `nodes/key_kind.h`.
 - **Capabilities:** aggregate, hash-table
 - **Size:** medium: one pull request.
-
-### spill-crate
-
-The spill as a crate of its own, `relspill`. The maintainer decided it
-on 2026-10-28, after the close of `table-crate`; it is the change
-`spill-crate`.
-
-- **What:** The format of a block and of a file, the plan of a level,
-  the words of a spill and the protocol of the join's, the grouping's
-  and the sort's spills and of a shared build's rounds, as state
-  machines, in a crate free of Tessera but `relhash`, with no input or
-  output and no memory taken; the spill validated by outside reviews
-  first; the checks `relhash` has.
-- **Why:** About 7,200 lines of C decide a spill, with rules written
-  several times; the format of a file is half in C; damaged bytes
-  reach C that trusts them; the checks are thin.
-- **Known:** The survey and the decisions are in the change's design.
-- **Depends on:** nothing.
-- **Capabilities:** relspill, spill-format, hash-table
-- **Size:** large: about fifty pull requests.
 
 ### whole-word-decisions
 
@@ -1526,10 +1505,10 @@ lines 6936–6937, 6943, 6661–6662, 7220–7221, 1535–1536.
 - **What:** Two small things: `nodes/internal.h` is still an umbrella
   that every `.c` includes, kept "for one release"; the comment of
   `join_many` in the join suite says memory goes over `hash_mem` while
-  the output stays within it. The row spill of aggregation, its
-  `RowWriter` and the merge of the three copies of `store_value` went
-  to the change `spill-crate`, whose fix of an expanded value needs one
-  copy.
+  the output stays within it. The change `spill-crate` merged the three
+  copies of `store_value`, as its fix of an expanded value needed one
+  copy; the row spill of aggregation and its `RowWriter` are the entry
+  `spill-rows-writer`.
 - **Why:** One place per pattern; the survey counted these among the
   duplicates (lines 6661–6662).
 - **Known:** Checked in the code: 21 files of `nodes/` include
@@ -1789,7 +1768,9 @@ run of every mutant of the workspace, at the maintainer's request,
   (the calendar 64, the comparisons and arithmetic of integers 86,
   decimals 23, hashing 19, the sort 19, filters 16), 34 in
   `tessera-capi` (decimals 18, the calendar 14), 21 in `relspill`
-  (the packing of a record 15) and 1 in `tessera-core`. Give each a
+  (the packing of a record 15) and 1 in `tessera-core`. The 21 of
+  `relspill` are done: the change `spill-crate` caught or listed every
+  mutant of the crate (run 43736172864, none missed). Give each a
   Rust test that catches it, or list it in `.cargo/mutants.toml` with
   the reason it is equivalent.
 - **Why:** Only Rust tests judge a mutant. Code that only the SQL
@@ -1818,8 +1799,8 @@ run of every mutant of the workspace, at the maintainer's request,
   name, would hold.
 - **Depends on:** nothing.
 - **Capabilities:** none; tests only.
-- **Size:** about four pull requests: `relspill`, `tessera-core`
-  and `tessera-capi` in one, `tessera-kernels` by its parts.
+- **Size:** about three pull requests: `tessera-core` and
+  `tessera-capi` in one, `tessera-kernels` by its parts.
 
 ### relhash-on-crates-io
 
@@ -1836,7 +1817,9 @@ The crate `relhash` published on crates.io. Left by the close of
   without warnings, and refuses a 32-bit target. Its README is the
   crate's page; its links to the design need the repository public.
   Fuzzing of one to two hours goes before each release
-  (`.github/workflows/fuzz.yml`, by hand).
+  (`.github/workflows/fuzz.yml`, by hand). `relspill`, which depends on
+  `relhash` and is checked the same way, can be published after it;
+  the change `spill-crate` left that out, as it left out `relhash`'s.
 - **Depends on:** the maintainer's decision.
 - **Capabilities:** relhash
 - **Size:** small.
@@ -1993,9 +1976,10 @@ taken. From the review of 2026-11-01.
   writes its outputs at its end, so nothing is written on failure
   (`c/status.rs`); the kernels say an error does not roll back the
   words already done (`tessera-kernels/src/lib.rs`). Each entry point
-  must say which holds. The kernels' root says unsafe code lives in two
-  modules, while `loom`, `phases` and `shared_spill` allow it too.
-  `relspill` has these rules in its contract already.
+  must say which holds. `loom`, `phases` and `shared_spill`, which
+  allowed unsafe code beside the two modules the kernels' root names,
+  moved to `relspill`, which forbids it; `relspill` has these rules in
+  its contract already.
 - **Depends on:** nothing.
 - **Capabilities:** kernel-abi, batch-functions
 - **Size:** medium: mechanical over many files.
@@ -2085,12 +2069,14 @@ The join's rounds and tails as a Rust machine. From the review of
   that stopped while it probed left pairs unmarked, and the last one
   returned their inner rows as rows without a pair (501119a7).
 - **Known:** About 450 lines decide; the rest copies values and calls
-  PostgreSQL. The machine of the join's spill (`spill-crate` 3.13 to
-  3.16) should take the rounds in memory as a level with no partitions
-  on disk; otherwise the tails are decided in two places. One call a
+  PostgreSQL. The machine of the join's spill, `relspill::join`, is
+  built; whether it can take the rounds in memory as a level with no
+  partitions on disk, so that the tails are decided in one place, is
+  the first thing to check. One call a
   round of up to 64 rows; check by the disassembly and the join
   family. It changes the C API of the nodes.
-- **Depends on:** `spill-crate` 3.13 to 3.16.
+- **Depends on:** nothing: the machine of the join's spill is done
+  (`spill-crate`, closed).
 - **Capabilities:** join-hash
 - **Size:** medium: three pull requests, the model, the machine and the
   node.
@@ -2144,12 +2130,13 @@ The grouping's phases as a Rust machine. From the review of
   when the groups are drained. The key dictionary and the generic
   aggregates stay in C.
 - **Why:** The phases checked against a plain grouping in memory, the
-  model `spill-crate` writes for its grouping. Faults: the mask of new
+  model `spill-crate` wrote for its grouping. Faults: the mask of new
   groups filled whole by each call, so a generic aggregate read a
   float8 as an array (b742ebb7); groups given out twice when an index
   regrew in the middle of a merged chunk (ca8792b8).
 - **Known:** Less gain than the join's machine: fewer faults here.
-- **Depends on:** `spill-crate` 3.17 and 3.18.
+- **Depends on:** nothing: the machine of the grouping's spill is done
+  (`spill-crate`, closed).
 - **Capabilities:** aggregate
 - **Size:** medium: two or three pull requests.
 
@@ -2181,6 +2168,22 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **Two rules of the bits a grouping's level below takes** (the close
+  of `spill-crate`, asked in its task 3.18 and merged without an
+  answer). `group::Group` splits a partition into a level below only
+  when the plan's `deeper` says a level of the shape's least partitions
+  fits in the bits left and `shared_spill::splits` finds two bits left.
+  At a least of 4 partitions, the node's, the two agree; at 8 the plan's
+  is the stricter. Suggested: one rule, the plan's, with the split's check of
+  bits kept for a join, which plans no shape; a change of the crate.
+- **A block of records damaged into the kind of values** (the close of
+  `spill-crate`, a residual risk of its task 2.3). A node's read was
+  said to drop such a block without an error before the crate's
+  readers and pair checks took the reads; not rechecked since.
+- **The overrun of a shared partition joined alone** (the close of
+  `spill-crate`, a residual risk of its task 2.10). The partition
+  passes its share by 91 to 165 kB, after the fix that cut 867 kB to
+  165 kB; the rest was not traced.
 - **Outputs of the kernels' entry points borrowed unfilled** (the
   outside reviews of `spill-crate`, task 3.26). The spill's entry points
   write their results to the places C hands them, which C may not have

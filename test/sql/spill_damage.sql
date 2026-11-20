@@ -84,6 +84,7 @@ FROM damage_outer o JOIN damage_inner i ON o.k = i.k;
 SELECT damaged(:'damage_module', NULL, 0, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
 -- A block of records read as columns; an inner block of values numbered
 -- past those written; an inner value past its chunk.
+-- spec: relspill/Records of another kind
 SELECT damaged(:'damage_module', 'kind', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
 SELECT damaged(:'damage_module', 'number', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
 SELECT damaged(:'damage_module', 'value', 1, $$SELECT count(*), sum(length(i.t)), sum(length(o.t)) FROM damage_outer o JOIN damage_inner i ON o.k = i.k$$);
