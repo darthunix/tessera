@@ -1,4 +1,38 @@
-## ADDED Requirements
+# relspill Specification
+
+## Purpose
+`relspill` decides how a hash join, a grouping and a sort of a database
+engine send their rows to disk when their memory is full, and how they
+read them back: their **spill**. It does no input or output and takes
+no memory. Its **host**, the engine's node, owns the files and the
+memory; the crate says what to write, what to read and what to free.
+
+A spill splits rows into **partitions** by bits of their hash. A
+partition too large to read back splits again by the next bits: the
+first split is **level** 0, and each split of a partition read back is
+a level below. A spill writes **blocks**, each a header and a body. A
+body is a **chunk**, a block of memory that holds rows: a chunk of a
+`relhash` table's records, a chunk of columns of rows, or a chunk of
+the **by-reference values**, such as texts, that the rows refer to and
+that do not fit in a word of 8 bytes. A **set** is one file of blocks,
+with a list of each partition's blocks and a trailer at its end. The
+**plan of a level** says how many partitions the level makes and how
+long its chunks are. The **words of a spill** are numbers in memory,
+shared by the processes of a parallel build, that count each
+partition's bytes and say which partitions go to disk. The **machines**
+of a join, a grouping, a sort and a shared build take the host's
+events one at a time and give the actions that the host takes.
+
+The requirements start with the crate as a whole. Then the blocks:
+their header and bounds, the chunks of records and of columns, the
+references to values, and the pair of a chunk of columns and its
+values. Then the file of a set; the words of a spill, the plan of a
+level and the rule that sends partitions to disk; the phases and the
+rounds of a shared build; and the machines of a join, a grouping and a
+sort, and a build by several processes. They end with the promise over
+any bytes and the errors.
+
+## Requirements
 
 ### Requirement: A crate of its own
 The spill SHALL be the Rust crate `relspill`, which depends on no crate
@@ -358,8 +392,9 @@ refer into its values, to a byte aligned to 8 or to their end, by a
 value that ends inside them.
 
 #### Scenario: A pair read back
-- **WHEN** rows of a column by value and of a varlena, with NULLs, are
-  appended to a chunk, and the chunk is checked with its values and
+- **WHEN** rows of a column by value and of a varlena, PostgreSQL's
+  value of variable length that starts with its length, with NULLs,
+  are appended to a chunk, and the chunk is checked with its values and
   read by windows
 - **THEN** every word, NULL and value is the one written, a varlena a
   place of its bytes in the values
@@ -899,18 +934,21 @@ checksum.
   over the file
 - **THEN** each read returns an error that names the rule that refused
   the bytes, or blocks that pass every check
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/src/set/tests/damage.rs::every_damage_against_every_read`
 
 #### Scenario: Any bytes as a file
 - **WHEN** a fuzzer gives any bytes as a file
 - **THEN** no read panics, and none asks for more than its bounds
-- **Verified by:** pending
+- **Verified by:**
+  `crates/relspill/fuzz/fuzz_targets/bytes.rs::fuzz_target!`
 
-#### Scenario: A chunk of records of another kind
+#### Scenario: Records of another kind
 - **WHEN** a block of another kind is read where the caller expects a
   chunk of records
 - **THEN** the read is refused as damaged bytes
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/spill_damage.sql::-- spec: relspill/Records of another kind`
 
 ### Requirement: Errors of two kinds
 An error of the crate, an

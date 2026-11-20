@@ -152,10 +152,9 @@ git ls-files -- "$crate/*.rs" | perl -e '
     exit $fail;
 ' "$crate" "$design" || status=1
 
-# 3. relspill: its design is the change's until the change is closed.
+# 3. relspill, by the list of its design.
 spill=crates/relspill/src
 spill_design=openspec/specs/relspill/design.md
-test -f "$spill_design" || spill_design=openspec/changes/spill-crate/design.md
 git ls-files -- "$spill/*.rs" | perl -e '
     my ($crate, $design) = @ARGV[0, 1];
     my $layer = "$crate/read.rs";

@@ -86,7 +86,7 @@ jobs:
   # package, its documentation with every warning an error and its
   # examples, a dry run of its publishing, a 32-bit target refused, by
   # relhash's compile_error! before its own, and its public API against
-  # the snapshot beside its change. It is not published.
+  # the snapshot beside its spec. It is not published.
   relspill:
     name: relspill alone (ubuntu-24.04)
     runs-on: ubuntu-24.04
@@ -150,7 +150,7 @@ jobs:
       - name: The public API against its snapshot
         run: |
           cargo +"$API_TOOLCHAIN" public-api -p relspill -sss > target/relspill-public-api.txt
-          diff -u openspec/changes/spill-crate/public-api.txt target/relspill-public-api.txt
+          diff -u openspec/specs/relspill/public-api.txt target/relspill-public-api.txt
 
   # The crate pmu alone, as its contract asks ("Free of Tessera", "A small
   # surface"), in the cells a runner can reach. Its tests as the only
