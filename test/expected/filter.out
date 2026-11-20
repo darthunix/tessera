@@ -1,4 +1,8 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
 LOAD 'tessera_nodes';
 CREATE TABLE filter_t (a int, b int, c text);
 INSERT INTO filter_t
@@ -300,17 +304,17 @@ DEALLOCATE above;
 DEALLOCATE gated;
 RESET plan_cache_mode;
 -- A rescan with a changed parameter: a correlated subquery.
-EXPLAIN (COSTS OFF)
+SELECT explain_neutral($$
 SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
-FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
-                             QUERY PLAN                             
+FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a$$);
+                          explain_neutral                           
 --------------------------------------------------------------------
  Custom Scan (TessSort)
    Sort Key: o.a
    ->  Custom Scan (TessFilter) on filter_t o
          Batch Filter: (o.a > 197)
          ->  Custom Scan (TessHeapScan) on filter_t o
-         SubPlan expr_1
+         SubPlan
            ->  Custom Scan (TessAgg)
                  ->  Custom Scan (TessFilter) on filter_t i
                        Batch Filter: (i.a > o.a)
@@ -611,14 +615,13 @@ SELECT filter_same($$SELECT sum(m), count(*) FROM filter_missing WHERE a > 90 AN
 
 DROP TABLE filter_missing;
 -- A clause the planner folds away leaves no scan at all.
-EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100 AND false;
-             QUERY PLAN             
-------------------------------------
+SELECT explain_neutral($$SELECT count(*) FROM filter_t WHERE a > 100 AND false$$);
+        explain_neutral         
+--------------------------------
  Aggregate
    ->  Result
-         Replaces: Scan on filter_t
          One-Time Filter: false
-(4 rows)
+(3 rows)
 
 -- Two filtered relations in a join.
 SELECT filter_same($$SELECT count(*) FROM filter_t AS x JOIN filter_t AS y ON x.a = y.b WHERE x.a > 5 AND y.b > 5$$);
@@ -1506,4 +1509,5 @@ SELECT filter_same($$SELECT sum(q), sum(p) FROM filter_keep
 DROP TABLE filter_keep;
 DROP FUNCTION filter_same(text);
 DROP TABLE filter_t;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

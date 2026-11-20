@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 
@@ -578,10 +584,10 @@ DROP FUNCTION parallel_restricted(int);
 -- every parallel-aware node, and the nodes under TessGather hold their
 -- flag back while it runs. An initplan, a subplan run for every outer
 -- row, INTERSECT and a recursive CTE.
-EXPLAIN (COSTS OFF) SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) ORDER BY k;
+SELECT explain_neutral($$SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) ORDER BY k$$);
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, a FROM parallel_wide WHERE k < (SELECT 1000) OFFSET 0) AS q$$);
 SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_wide WHERE k < x * 1000 AND a >= 0) FROM generate_series(1, 3) AS x$$);
-EXPLAIN (VERBOSE, COSTS OFF) SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500;
+SELECT explain_neutral($$SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500$$, 'VERBOSE, COSTS OFF');
 SELECT parallel_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k FROM parallel_wide WHERE k < 100 INTERSECT SELECT a FROM parallel_wide WHERE a < 500) AS q$$);
 SELECT parallel_same($$WITH RECURSIVE r(n) AS (SELECT k FROM parallel_wide WHERE k < 10 UNION SELECT n + 1 FROM r WHERE n < 20) SELECT count(*) FROM r$$);
 -- At the core's costs of parallel work the node's own paths cost a row a
@@ -656,14 +662,14 @@ CREATE TABLE parallel_rescan AS SELECT g AS k, g % 1000 AS v FROM generate_serie
 CREATE TABLE parallel_rescan_keys AS SELECT g AS k, g % 7 AS w FROM generate_series(1, 100000) AS g;
 ANALYZE parallel_rescan;
 ANALYZE parallel_rescan_keys;
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x;
+SELECT explain_neutral($$
+SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x$$);
 SELECT parallel_same($$SELECT x, (SELECT count(*) FROM parallel_rescan AS b JOIN parallel_rescan_keys AS m ON b.k = m.k WHERE m.w = (SELECT x)) FROM generate_series(1, 4) AS x$$);
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x;
+SELECT explain_neutral($$
+SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x$$);
 SELECT parallel_same($$SELECT x, (SELECT sum(k) FROM (SELECT k FROM parallel_rescan WHERE v < (SELECT x * 100) ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 4) AS x$$);
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x;
+SELECT explain_neutral($$
+SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x$$);
 SELECT parallel_same($$SELECT x, (SELECT sum(k) + x FROM (SELECT k FROM parallel_rescan ORDER BY k DESC OFFSET 10) AS q) FROM generate_series(1, 6) AS x$$);
 DROP TABLE parallel_rescan, parallel_rescan_keys;
 -- A join's TessGather reads a copy of the partial path it gathers. The
@@ -682,8 +688,8 @@ CREATE TABLE parallel_dim AS
     FROM generate_series(1, 2000) AS g;
 ANALYZE parallel_fact;
 ANALYZE parallel_dim;
-EXPLAIN (COSTS OFF)
-SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s);
+SELECT explain_neutral($$
+SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)$$);
 SELECT parallel_same($$SELECT count(*), sum(b) FROM (SELECT b FROM parallel_fact EXCEPT ALL SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)) AS q$$);
 SELECT parallel_same($$SELECT f.b - 1 FROM parallel_fact AS f WHERE f.d IN (date '2000-01-01' - 849, date '2000-01-01' + 145, date '2000-01-01' - 1283) AND NOT EXISTS (SELECT 1 FROM parallel_dim AS m WHERE m.a = f.s)$$);
 DROP TABLE parallel_fact, parallel_dim;
@@ -697,4 +703,5 @@ DROP FUNCTION parallel_same(text);
 DROP FUNCTION plan_property(text, text, text);
 DROP FUNCTION partial_property(text, text);
 DROP FUNCTION parallel_explain(text);
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

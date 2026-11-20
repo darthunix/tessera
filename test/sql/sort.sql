@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 
 -- a: NULL in every 7th row and each value in several rows; b: an int8
@@ -40,6 +46,8 @@ DECLARE
 BEGIN
     FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query
     LOOP
+        line := core_neutral(line);
+        CONTINUE WHEN line IS NULL;
         -- VERBOSE adds the output lists and each worker's rows: not checked here.
         CONTINUE WHEN line ~ '^\s*(Output|Worker \d+):';
         RETURN NEXT regexp_replace(regexp_replace(line, 'Memory Usage: \d+', 'Memory Usage: N'),
@@ -332,9 +340,9 @@ COMMIT;
 SELECT sort_same($$
 SELECT x, (SELECT array_agg(d) FROM (SELECT d FROM sort_t WHERE a = x ORDER BY d DESC) s)
 FROM generate_series(-3, 3) AS x ORDER BY x$$);
-EXPLAIN (VERBOSE, COSTS OFF)
+SELECT explain_neutral($$
 SELECT x, (SELECT array_agg(d) FROM (SELECT d FROM sort_t WHERE a = x ORDER BY d DESC) s)
-FROM generate_series(-3, 3) AS x;
+FROM generate_series(-3, 3) AS x$$, 'VERBOSE, COSTS OFF');
 SELECT sort_same($$
 SELECT x, s.d FROM generate_series(1, 3) AS x,
 LATERAL (SELECT d FROM sort_t WHERE d > 495 ORDER BY d DESC OFFSET 0) AS s ORDER BY x, s.d$$);
@@ -400,4 +408,5 @@ DROP FUNCTION sort_same(text);
 DROP FUNCTION sort_explain(text);
 DROP TABLE sort_big;
 DROP TABLE sort_t;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

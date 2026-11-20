@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 
 CREATE TABLE limit_t (a int, b text);
 INSERT INTO limit_t
@@ -36,9 +42,10 @@ SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
 SELECT a FROM limit_t ORDER BY a DESC LIMIT 3;
 
 -- A parameter is re-evaluated on every rescan.
-EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT explain_neutral($$
 SELECT g, (SELECT count(*) FROM (SELECT a FROM limit_t LIMIT g) AS s) AS n
-FROM generate_series(1, 3) AS g;
+FROM generate_series(1, 3) AS g$$,
+    'VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF');
 SELECT g, (SELECT count(*) FROM (SELECT a FROM limit_t LIMIT g) AS s) AS n
 FROM generate_series(1, 3) AS g;
 PREPARE limited(int) AS SELECT a FROM limit_t LIMIT $1;
@@ -83,4 +90,5 @@ SELECT a FROM limit_t OFFSET -1;
 \set VERBOSITY default
 
 DROP TABLE limit_t, limit_empty;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

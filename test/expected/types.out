@@ -1,4 +1,8 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 -- The same result with Tessera on and off, as text.
@@ -1912,6 +1916,8 @@ SELECT types_same($$SELECT count(*), sum(x), max(y) FROM (SELECT id, sum(p * 2) 
 RESET work_mem;
 DROP TABLE types_nm;
 -- A date against a timestamp compares other than bit for bit: the core's.
+-- Without Material, which PostgreSQL 18 puts under its plan and 19 does not.
+SET enable_material = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_f JOIN types_d ON types_f.d = types_d.ts;
                        QUERY PLAN                        
 ---------------------------------------------------------
@@ -1930,6 +1936,7 @@ SELECT types_same($$SELECT count(*) FROM types_f JOIN types_d ON types_f.d = typ
  same
 (1 row)
 
+RESET enable_material;
 -- Grouping, DISTINCT and UNION by each type; the keys come back as the
 -- core's values, NULL a group of its own.
 EXPLAIN (COSTS OFF) SELECT d, count(*) FROM types_f GROUP BY d;
@@ -1988,21 +1995,21 @@ SELECT types_same($$SELECT DISTINCT b, ts FROM types_f$$);
  same
 (1 row)
 
-EXPLAIN (VERBOSE, COSTS OFF) SELECT d FROM types_f UNION SELECT d FROM types_d;
-                           QUERY PLAN                           
+SELECT explain_neutral($$SELECT d FROM types_f UNION SELECT d FROM types_d$$, 'VERBOSE, COSTS OFF');
+                        explain_neutral                         
 ----------------------------------------------------------------
  Custom Scan (TessAgg)
-   Output: unnamed_subquery.d
-   Group Key: unnamed_subquery.d
+   Output: subquery.d
+   Group Key: subquery.d
    ->  Custom Scan (TessAppend)
-         Output: unnamed_subquery.d
+         Output: subquery.d
          ->  Custom Scan (TessPack)
-               Output: unnamed_subquery.d
+               Output: subquery.d
                Rows Kept As: forwarded batches
                ->  Custom Scan (TessHeapScan) on public.types_f
                      Output: types_f.d
          ->  Custom Scan (TessPack)
-               Output: unnamed_subquery_1.d
+               Output: subquery.d
                Rows Kept As: forwarded batches
                ->  Custom Scan (TessHeapScan) on public.types_d
                      Output: types_d.d
@@ -2147,21 +2154,21 @@ SELECT types_same($$SELECT DISTINCT n, t FROM types_g$$);
  same
 (1 row)
 
-EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label);
-                           QUERY PLAN                           
+SELECT explain_neutral($$SELECT t FROM types_g UNION SELECT label FROM (VALUES ('k1'), ('new')) AS v(label)$$, 'VERBOSE, COSTS OFF');
+                        explain_neutral                         
 ----------------------------------------------------------------
  Custom Scan (TessAgg)
-   Output: unnamed_subquery.t
-   Group Key: unnamed_subquery.t
+   Output: subquery.t
+   Group Key: subquery.t
    ->  Custom Scan (TessAppend)
-         Output: unnamed_subquery.t
+         Output: subquery.t
          ->  Custom Scan (TessPack)
-               Output: unnamed_subquery.t
+               Output: subquery.t
                Rows Kept As: forwarded batches
                ->  Custom Scan (TessHeapScan) on public.types_g
                      Output: types_g.t
          ->  Custom Scan (TessPack)
-               Output: unnamed_subquery_1.label
+               Output: subquery.label
                ->  Values Scan on "*VALUES*"
                      Output: "*VALUES*".column1
 (14 rows)
@@ -3166,6 +3173,7 @@ EXPLAIN (COSTS OFF) SELECT mo, count(*) FROM types_k GROUP BY mo;
          ->  Custom Scan (TessHeapScan) on types_k
 (5 rows)
 
+SET enable_material = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.mo = b.mo;
                         QUERY PLAN                         
 -----------------------------------------------------------
@@ -3178,6 +3186,7 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.mo 
                ->  Custom Scan (TessHeapScan) on types_k b
 (7 rows)
 
+RESET enable_material;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.f4 = b.f8;
                            QUERY PLAN                            
 -----------------------------------------------------------------
@@ -3194,4 +3203,5 @@ DROP TABLE types_k;
 DROP FUNCTION types_order(text);
 DROP FUNCTION types_same(text);
 DROP TABLE types_f, types_d;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

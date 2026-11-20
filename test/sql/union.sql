@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 
@@ -37,12 +43,12 @@ SET max_parallel_workers_per_gather = 0;
 -- An aggregate over UNION ALL of two filtered scans: TessAppend reads the
 -- branches in turn and gives the aggregate their batches, each branch's
 -- through the pack that forwards the batches of its subquery.
-EXPLAIN (VERBOSE, COSTS OFF)
+SELECT explain_neutral($$
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
-                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
-EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$, 'VERBOSE, COSTS OFF');
+SELECT explain_neutral($$
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
-                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
+                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$, 'VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF');
 SELECT union_same($$SELECT count(*), sum(a), count(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
 -- The columns in another order in each branch, one of them unused.
@@ -53,13 +59,13 @@ SELECT union_same($$SELECT sum(y), min(x) FROM (SELECT b AS y, a AS x FROM union
 
 -- Five branches: an empty table, a branch without rows, a constant
 -- target, a branch that is a plain scan.
-EXPLAIN (VERBOSE, COSTS OFF)
+SELECT explain_neutral($$
 SELECT count(*), sum(a), sum(k) FROM (
     SELECT a, 1 AS k FROM union_a WHERE a > 900
     UNION ALL SELECT a, 2 FROM union_empty
     UNION ALL SELECT a, 3 FROM union_b WHERE a > 5000
     UNION ALL SELECT a, 4 FROM union_b
-    UNION ALL SELECT a, 5 FROM union_a WHERE a < 10) AS s;
+    UNION ALL SELECT a, 5 FROM union_a WHERE a < 10) AS s$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT count(*), sum(a), sum(k) FROM (
     SELECT a, 1 AS k FROM union_a WHERE a > 900
     UNION ALL SELECT a, 2 FROM union_empty
@@ -74,15 +80,15 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
     UNION ALL (SELECT a FROM union_b WHERE a > 500 UNION ALL SELECT a FROM union_a WHERE a < 20)) AS s$$);
 -- Branches of int4 and int8: a set operation the planner does not
 -- flatten, whose Append stays the core's.
-EXPLAIN (COSTS OFF)
+SELECT explain_neutral($$
 SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
-                              UNION ALL SELECT b FROM union_b WHERE b > 100) AS s;
+                              UNION ALL SELECT b FROM union_b WHERE b > 100) AS s$$);
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a WHERE a > 100
                    UNION ALL SELECT b FROM union_b WHERE b > 100) AS s$$);
 -- Clauses that run row by row: TessFilter in each branch, forwarded.
-EXPLAIN (VERBOSE, COSTS OFF)
+SELECT explain_neutral($$
 SELECT count(*) FROM (SELECT a FROM union_a WHERE upper(t) LIKE 'A1%'
-                      UNION ALL SELECT a FROM union_b WHERE upper(t) LIKE 'B1%') AS s;
+                      UNION ALL SELECT a FROM union_b WHERE upper(t) LIKE 'B1%') AS s$$, 'VERBOSE, COSTS OFF');
 
 -- Rows to a row-wise parent: the core's Append stays.
 EXPLAIN (COSTS OFF)
@@ -90,10 +96,10 @@ SELECT a FROM union_a WHERE a > 995 UNION ALL SELECT a FROM union_b WHERE a > 69
 SELECT union_same($$SELECT a, t FROM union_a WHERE a > 995 UNION ALL SELECT a, t FROM union_b WHERE a > 695$$);
 
 -- A hash join whose outer side is UNION ALL, text and NULL keys included.
-EXPLAIN (VERBOSE, COSTS OFF)
+SELECT explain_neutral($$
 SELECT count(*), sum(s.a), count(s.t) FROM (SELECT a, t FROM union_a WHERE a > 300
                                              UNION ALL SELECT a, t FROM union_b) AS s
-JOIN union_b AS d ON d.a = s.a;
+JOIN union_b AS d ON d.a = s.a$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT count(*), sum(s.a), count(s.t) FROM (SELECT a, t FROM union_a WHERE a > 300
                    UNION ALL SELECT a, t FROM union_b) AS s JOIN union_b AS d ON d.a = s.a$$);
 -- A sort over UNION ALL, a text column carried along.
@@ -101,10 +107,10 @@ SELECT union_same($$SELECT a, t FROM (SELECT a, t FROM union_a WHERE a > 900
                    UNION ALL SELECT a, t FROM union_b WHERE a > 600) AS s ORDER BY a, t$$);
 
 -- A limit above: the bound reaches every branch, a top-N sort in each.
-EXPLAIN (VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+SELECT explain_neutral($$
 SELECT count(*) FROM (SELECT a FROM (SELECT a FROM union_a ORDER BY a DESC LIMIT 100) AS x
                       UNION ALL SELECT a FROM (SELECT a FROM union_b ORDER BY a LIMIT 100) AS y
-                      LIMIT 3) AS s;
+                      LIMIT 3) AS s$$, 'VERBOSE, ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF');
 SELECT union_same($$SELECT a FROM (SELECT a FROM (SELECT a FROM union_a ORDER BY a DESC LIMIT 100) AS x
                    UNION ALL SELECT a FROM (SELECT a FROM union_b WHERE a IS NOT NULL ORDER BY a LIMIT 100) AS y
                    LIMIT 150) AS s$$);
@@ -148,8 +154,8 @@ SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > 2500 AND v
 -- One partition left: no Append.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM union_part WHERE k < 500 AND v < 10;
 -- A parameter in a clause of another column prunes nothing.
-EXPLAIN (COSTS OFF)
-SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 3) AS g;
+SELECT explain_neutral($$
+SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 3) AS g$$);
 SELECT union_same($$SELECT g, (SELECT count(*) FROM union_part WHERE v < g) FROM generate_series(1, 5) AS g$$);
 -- Pruned while executing, as the core's Append prunes: the node shows
 -- which children it read.
@@ -160,7 +166,7 @@ DECLARE
 BEGIN
     FOR line IN EXECUTE 'EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
         IF line ~ 'Append|Subplans Removed|TessHeapScan|^ *(InitPlan|SubPlan) ' THEN
-            RETURN NEXT regexp_replace(line, '\(actual rows=[0-9.]+ loops=([0-9]+)\)', '(loops=\1)');
+            RETURN NEXT regexp_replace(core_neutral(line), '\(actual rows=[0-9.]+ loops=([0-9]+)\)', '(loops=\1)');
         END IF;
     END LOOP;
 END
@@ -325,9 +331,9 @@ SELECT union_same($$SELECT count(*), sum(k) FROM union_part WHERE k > (SELECT 90
 -- A child that is not partial, a table no worker may read, goes to one
 -- participant.
 ALTER TABLE union_b SET (parallel_workers = 0);
-EXPLAIN (VERBOSE, COSTS OFF)
+SELECT explain_neutral($$
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
-                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s;
+                              UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 100
                    UNION ALL SELECT a FROM union_b WHERE a < 600) AS s$$);
 -- Three of them and a partial one: each is read once, whoever takes it.
@@ -343,9 +349,9 @@ SELECT union_same($$SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a 
 -- the sum.
 CREATE FUNCTION union_slow(v int, seconds float8) RETURNS int
 LANGUAGE plpgsql PARALLEL SAFE AS $$ BEGIN PERFORM pg_sleep(seconds); RETURN v; END $$;
-EXPLAIN (VERBOSE, COSTS OFF)
+SELECT explain_neutral($$
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
-                              UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
+                              UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s$$, 'VERBOSE, COSTS OFF');
 SELECT count(*), sum(a) FROM (SELECT a FROM union_a WHERE a > 980 AND union_slow(a, 0.01) > 0
                               UNION ALL SELECT a FROM union_b WHERE a < 20 AND union_slow(a, 0.03) > 0) AS s;
 -- Without the leader.
@@ -388,19 +394,19 @@ RESET min_parallel_table_scan_size;
 -- UNION without ALL: TessAgg groups the branches' rows by every column
 -- over TessAppend, in place of the core's HashAggregate over its Append.
 SET max_parallel_workers_per_gather = 0;
-EXPLAIN (VERBOSE, COSTS OFF)
-SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600;
+SELECT explain_neutral($$
+SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600$$);
 -- NULL is a value of its own; duplicates within a branch and across them.
 SELECT union_same($$SELECT a % 50 AS x FROM union_a UNION SELECT a % 70 FROM union_b$$);
 SELECT union_same($$SELECT a, b FROM union_a WHERE a < 300 UNION SELECT a, b / 10 FROM union_b$$);
 SELECT union_same($$SELECT b FROM union_a UNION SELECT b FROM union_b UNION SELECT b FROM union_empty$$);
 -- The plans show the first branch's columns, as the core's Append does.
-EXPLAIN (VERBOSE, COSTS OFF)
-SELECT a, b FROM union_a WHERE a < 300 UNION SELECT a, b / 10 FROM union_b WHERE a > 0;
+SELECT explain_neutral($$
+SELECT a, b FROM union_a WHERE a < 300 UNION SELECT a, b / 10 FROM union_b WHERE a > 0$$, 'VERBOSE, COSTS OFF');
 -- A sort and a limit above.
-EXPLAIN (VERBOSE, COSTS OFF)
-SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3;
+SELECT explain_neutral($$
+SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3$$, 'VERBOSE, COSTS OFF');
 SELECT a FROM union_a WHERE a > 100 UNION SELECT a FROM union_b WHERE a < 600 ORDER BY 1 DESC LIMIT 3;
 -- In a subquery, and with more groups than work_mem holds.
 SELECT union_same($$SELECT count(*), sum(x) FROM (SELECT a AS x FROM union_a UNION SELECT a FROM union_b) AS s$$);
@@ -413,8 +419,8 @@ RESET work_mem;
 -- within bigint), the core's: the projection would not find the set
 -- operation's columns in the node's plan. So are the operations of a
 -- recursive union.
-EXPLAIN (VERBOSE, COSTS OFF)
-SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty;
+SELECT explain_neutral($$
+SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_empty$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT a FROM union_a WHERE a < 3$$);
 EXPLAIN (COSTS OFF)
 SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL SELECT b FROM union_empty;
@@ -422,7 +428,7 @@ SELECT union_same($$SELECT a FROM union_a UNION SELECT a FROM union_b UNION ALL 
 SELECT union_same($$WITH RECURSIVE r(n) AS ((SELECT a FROM union_a WHERE a < 4 UNION SELECT a FROM union_b WHERE a < 4)
                    UNION SELECT n + 1 FROM r WHERE n < 10) SELECT count(*), sum(n) FROM r$$);
 -- Text columns go through a dictionary of their values.
-EXPLAIN (VERBOSE, COSTS OFF) SELECT t FROM union_a UNION SELECT t FROM union_b;
+SELECT explain_neutral($$SELECT t FROM union_a UNION SELECT t FROM union_b$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT t FROM union_a UNION SELECT t FROM union_b$$);
 -- INTERSECT and EXCEPT, with ALL or not: grouping of both sides by every
 -- column, the left side's rows first, counting each group's rows and the
@@ -441,8 +447,8 @@ FROM generate_series(1, 700) AS i;
 INSERT INTO setop_l VALUES (NULL, NULL, NULL, NULL, NULL), (NULL, NULL, NULL, NULL, NULL);
 INSERT INTO setop_r VALUES (NULL, NULL, NULL, NULL, NULL);
 ANALYZE setop_l, setop_r;
-EXPLAIN (VERBOSE, COSTS OFF) SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r;
-EXPLAIN (VERBOSE, COSTS OFF) SELECT k FROM setop_l INTERSECT ALL SELECT k FROM setop_r;
+SELECT explain_neutral($$SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r$$, 'VERBOSE, COSTS OFF');
+SELECT explain_neutral($$SELECT k FROM setop_l INTERSECT ALL SELECT k FROM setop_r$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT k, t FROM setop_l EXCEPT SELECT k, t FROM setop_r$$);
 SELECT union_same($$SELECT k, t FROM setop_l EXCEPT ALL SELECT k, t FROM setop_r$$);
 SELECT union_same($$SELECT k, t FROM setop_l INTERSECT SELECT k, t FROM setop_r$$);
@@ -469,15 +475,15 @@ SELECT union_same($$SELECT n::text FROM (SELECT n FROM setop_r INTERSECT ALL SEL
 -- Above: a sort and a limit; within another set operation, the node's in
 -- the node's: EXCEPT of EXCEPT, INTERSECT within UNION, UNION and
 -- INTERSECT of two columns as the sides of EXCEPT ALL, a count above.
-EXPLAIN (VERBOSE, COSTS OFF)
+SELECT explain_neutral($$
+SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3$$, 'VERBOSE, COSTS OFF');
 SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
-SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r ORDER BY 1 DESC LIMIT 3;
-EXPLAIN (VERBOSE, COSTS OFF)
-SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a;
+SELECT explain_neutral($$
+SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$SELECT k FROM setop_l EXCEPT SELECT k FROM setop_r EXCEPT SELECT a FROM union_a WHERE a < 30$$);
 SELECT union_same($$SELECT k FROM setop_l INTERSECT SELECT k FROM setop_r UNION SELECT a FROM union_b WHERE a < 5$$);
-EXPLAIN (VERBOSE, COSTS OFF)
-(SELECT k, t FROM setop_l UNION SELECT k, t FROM setop_r) EXCEPT ALL (SELECT a, t FROM union_a INTERSECT SELECT k, t FROM setop_l);
+SELECT explain_neutral($$
+(SELECT k, t FROM setop_l UNION SELECT k, t FROM setop_r) EXCEPT ALL (SELECT a, t FROM union_a INTERSECT SELECT k, t FROM setop_l)$$, 'VERBOSE, COSTS OFF');
 SELECT union_same($$(SELECT k, t FROM setop_l UNION SELECT k, t FROM setop_r)
                    EXCEPT ALL (SELECT a, t FROM union_a INTERSECT SELECT k, t FROM setop_l)$$);
 SELECT union_same($$SELECT count(*), sum(x) FROM ((SELECT k AS x FROM setop_l UNION SELECT a FROM union_b)
@@ -497,8 +503,8 @@ SELECT union_same($$SELECT x, (SELECT count(*) FROM (SELECT k FROM setop_l WHERE
                    EXCEPT SELECT k FROM setop_r) AS q) FROM generate_series(0, 2) AS x$$);
 DROP TABLE setop_l, setop_r;
 -- UNION ALL the planner does not make a relation of, sorted.
-EXPLAIN (VERBOSE, COSTS OFF)
-SELECT a FROM union_a WHERE a > 990 UNION ALL SELECT b FROM union_b WHERE b > 69000 ORDER BY 1 LIMIT 4;
+SELECT explain_neutral($$
+SELECT a FROM union_a WHERE a > 990 UNION ALL SELECT b FROM union_b WHERE b > 69000 ORDER BY 1 LIMIT 4$$, 'VERBOSE, COSTS OFF');
 SELECT a FROM union_a WHERE a > 990 UNION ALL SELECT b FROM union_b WHERE b > 69000 ORDER BY 1 LIMIT 4;
 RESET max_parallel_workers_per_gather;
 
@@ -530,7 +536,7 @@ RESET max_parallel_workers_per_gather;
 -- SetOp does not read its right side, so an error the right side's rows
 -- would raise is not raised; the node does not read it either (found by
 -- tessera-crosscheck, plan 9.8).
-EXPLAIN (COSTS OFF) SELECT a FROM union_empty EXCEPT ALL SELECT a + 2147483647 FROM union_a;
+SELECT explain_neutral($$SELECT a FROM union_empty EXCEPT ALL SELECT a + 2147483647 FROM union_a$$);
 SELECT union_same($$SELECT a FROM union_empty EXCEPT ALL SELECT a + 2147483647 FROM union_a$$);
 SELECT union_same($$SELECT a FROM union_empty INTERSECT SELECT a + 2147483647 FROM union_a$$);
 SELECT union_same($$SELECT a FROM union_a WHERE a < 0 EXCEPT SELECT a + 2147483647 FROM union_b$$);
@@ -539,4 +545,5 @@ DROP TABLE union_part, union_list, union_hash, union_parent, union_child, union_
 DROP FUNCTION union_same(text);
 DROP FUNCTION union_run(text);
 RESET union_test.bound;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

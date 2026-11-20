@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 LOAD 'tessera_kernels';
 
@@ -109,8 +115,8 @@ SELECT index_same($$SELECT id, k, t FROM index_t WHERE k < 400$$);
 SELECT index_same($$SELECT count(*), sum(k) FROM index_t WHERE k < 5000 AND w = 7$$);
 -- Rescan: a parameter of the index condition changes for every outer row,
 -- and the bitmap is built again.
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT count(*) FROM index_t WHERE w < x + 20 AND k < 20000) FROM generate_series(1, 3) AS x;
+SELECT explain_neutral($$
+SELECT x, (SELECT count(*) FROM index_t WHERE w < x + 20 AND k < 20000) FROM generate_series(1, 3) AS x$$);
 SELECT index_same($$SELECT x, (SELECT count(*) FROM index_t WHERE w < x + 20 AND k < 20000),
                           (SELECT sum(k) FROM index_t WHERE w < x + 10 AND k < 20000) FROM generate_series(1, 5) AS x$$);
 -- A limit above stops the reads.
@@ -167,8 +173,8 @@ DROP TABLE index_s;
 UPDATE index_o SET t = t || 'u' WHERE id % 5 = 0;
 SELECT index_same($$SELECT count(*), max(t) FROM index_o WHERE id < 6000$$);
 SET tessera.index_min_rows = 0;
-EXPLAIN (COSTS OFF)
-SELECT x, (SELECT max(t) FROM index_o WHERE id BETWEEN x * 1000 AND x * 1000 + 3000) FROM generate_series(1, 4) AS x;
+SELECT explain_neutral($$
+SELECT x, (SELECT max(t) FROM index_o WHERE id BETWEEN x * 1000 AND x * 1000 + 3000) FROM generate_series(1, 4) AS x$$);
 SELECT index_same($$SELECT x, (SELECT max(t) FROM index_o WHERE id BETWEEN x * 1000 AND x * 1000 + 3000) FROM generate_series(1, 4) AS x$$);
 RESET tessera.index_min_rows;
 -- A rescan without a parameter in the middle of the index scan: the inner
@@ -225,10 +231,10 @@ SELECT index_same($$SELECT w, count(*), sum(x) FROM index_i WHERE w < 25 GROUP B
 -- Rescan with a parameter of the index condition for every outer row, and
 -- an initplan's value as a key, whose rows the planner guesses few.
 SET tessera.index_min_rows = 0;
-EXPLAIN (COSTS OFF)
-SELECT y, (SELECT count(*) FROM index_i WHERE k BETWEEN y * 1000 AND y * 1000 + 4000) FROM generate_series(1, 4) AS y;
+SELECT explain_neutral($$
+SELECT y, (SELECT count(*) FROM index_i WHERE k BETWEEN y * 1000 AND y * 1000 + 4000) FROM generate_series(1, 4) AS y$$);
 SELECT index_same($$SELECT y, (SELECT count(*) FROM index_i WHERE k BETWEEN y * 1000 AND y * 1000 + 4000) FROM generate_series(1, 4) AS y$$);
-EXPLAIN (COSTS OFF) SELECT count(*), sum(k) FROM index_i WHERE k < (SELECT 6000);
+SELECT explain_neutral($$SELECT count(*), sum(k) FROM index_i WHERE k < (SELECT 6000)$$);
 SELECT index_same($$SELECT count(*), sum(k) FROM index_i WHERE k < (SELECT 6000)$$);
 RESET tessera.index_min_rows;
 -- Nothing found.
@@ -453,4 +459,5 @@ RESET max_parallel_workers_per_gather;
 DROP TABLE index_t;
 DROP FUNCTION index_explain(text);
 DROP FUNCTION index_same(text);
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;

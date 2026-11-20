@@ -1,4 +1,10 @@
 CREATE EXTENSION tessera;
+-- EXPLAIN in the same words on every core: see the file.
+\getenv abs_srcdir PG_ABS_SRCDIR
+\set core_neutral :abs_srcdir '/sql/include/core_neutral.sql'
+\set ECHO none
+\i :core_neutral
+\set ECHO all
 LOAD 'tessera_nodes';
 
 CREATE TABLE filter_t (a int, b int, c text);
@@ -92,9 +98,9 @@ DEALLOCATE gated;
 RESET plan_cache_mode;
 
 -- A rescan with a changed parameter: a correlated subquery.
-EXPLAIN (COSTS OFF)
+SELECT explain_neutral($$
 SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
-FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
+FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a$$);
 SELECT o.a, (SELECT count(*) FROM filter_t AS i WHERE i.a > o.a) AS above
 FROM filter_t AS o WHERE o.a > 197 ORDER BY o.a;
 
@@ -170,7 +176,7 @@ INSERT INTO filter_missing VALUES (101, 7);
 SELECT filter_same($$SELECT sum(m), count(*) FROM filter_missing WHERE a > 90 AND m > 0$$);
 DROP TABLE filter_missing;
 -- A clause the planner folds away leaves no scan at all.
-EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a > 100 AND false;
+SELECT explain_neutral($$SELECT count(*) FROM filter_t WHERE a > 100 AND false$$);
 
 -- Two filtered relations in a join.
 SELECT filter_same($$SELECT count(*) FROM filter_t AS x JOIN filter_t AS y ON x.a = y.b WHERE x.a > 5 AND y.b > 5$$);
@@ -413,4 +419,5 @@ DROP TABLE filter_keep;
 DROP FUNCTION filter_same(text);
 
 DROP TABLE filter_t;
+DROP FUNCTION explain_neutral(text, text), core_neutral(text);
 DROP EXTENSION tessera;
