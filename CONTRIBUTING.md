@@ -84,9 +84,9 @@ build with assertions and a UTF-8 locale (CI uses `C.UTF-8`). CI builds
 it with `--enable-injection-points` too: the suite `spill_damage`
 damages through them what a node reads back from its files, and on a
 build without them it passes having checked nothing. CI runs the suites
-on PostgreSQL 19 as well, at the revision `.github/postgres.env` names:
-a change that reads an interface of the core runs them on 19 before
-pushing.
+on PostgreSQL 19 and 18 as well, at the revisions `.github/postgres.env`
+names: a change that reads an interface of the core runs them on 19 and
+18 before pushing.
 
 ```sh
 make rust-check                  # format, Clippy, debug and release tests
@@ -105,6 +105,11 @@ its own.
 
 Before a result is copied into `test/expected/`, read its diff: every
 `ERROR`, every removed line. The expected file is the oracle.
+
+An `EXPLAIN` in a suite whose plan holds a subplan, a branch of a set
+operation or a `Result` in place of a scan goes through
+`explain_neutral` (`test/sql/include/core_neutral.sql`): the cores name
+these parts apart, and one expected file serves them all.
 
 ## When work needs an OpenSpec change
 
@@ -369,7 +374,7 @@ when:
 
 ## Accepted limits
 
-- PostgreSQL 19 and master are the supported cores; Greengage 7 is
+- PostgreSQL 18, 19 and master are the supported cores; Greengage 7 is
   planned.
 - The ABI does not tie a PostgreSQL type to one physical format of a
   column.

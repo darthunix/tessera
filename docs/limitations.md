@@ -127,13 +127,20 @@ those it checks.
 
 ## Platforms
 
-- **PostgreSQL 19 and master** (20devel): the modules stop the build on
-  an older core. Five interfaces differ between the two, each read in two
-  ways where it is used. On 19 the node does not group a UNION by the
-  workers where master's would: 19 estimates a UNION's rows as all its
-  branches' rows, master sums their distinct groups, and the node takes
-  the core's estimate. The rows are the same. Greengage 7 is a design in
-  the plan's section 7, with no code yet.
+- **PostgreSQL 18, 19 and master** (20devel): the modules stop the build
+  on an older core. Where an interface differs between them, it is read
+  in two ways where it is used. On 19 and 18 the node does not group a
+  UNION by the workers where master's would: they estimate a UNION's
+  rows as all its branches' rows, master sums their distinct groups, and
+  the node takes the core's estimate. On 18 the node takes no column as
+  present and not NULL in every row, which 19 promises for the columns
+  of a table scan; its heap batches count the columns' fixed offsets
+  themselves and jump by them, but a column read behind a row's cursor
+  and a fixed-width one passed by reference are walked to from the
+  tuple's start or the cursor, where 19 jumps. Plans can differ between
+  the cores where the cores price differently, such as 19's estimate of
+  a hash join's buckets; the rows are the same. Greengage 7 is a design
+  in the plan's section 7, with no code yet.
 - **Vector kernels on AArch64** (NEON) and on x86-64 with AVX2 and
   POPCNT, chosen at run time where the processor has both; elsewhere the
   scalar kernels run, with the same results. AVX-512 is not used. The

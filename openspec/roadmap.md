@@ -783,7 +783,8 @@ Comparison with pg_duckdb. From plan 8.8, lines 6434–6456; step 11 of 8.1.
   columnar copy and belong in a separate "after conversion" table (line
   6453–6456).
 - **Depends on:** `tpch-sf10` (stable SF1 and SF10). Tessera builds on
-  PostgreSQL 19, which pg_duckdb builds with too.
+  PostgreSQL 18, which pg_duckdb supports, and on 19, which it builds
+  with.
 - **Capabilities:** bench, tools
 - **Size:** medium.
 
@@ -1287,9 +1288,10 @@ Greengage 7 port. From plan 7.1–7.10, lines 6013–6141.
   `tessera_limit`, a module removed in 4.32; the checks speak of 30
   suites where there are 42 now.
 - **Depends on:** the log treats 7.1 as doable in parallel with section
-  8 (line 2798). There is no `compat.h` yet: PostgreSQL 19's five
-  differences from master are branches where they are used, each with
-  one user; 7.1 creates the header.
+  8 (line 2798). There is no `compat.h` yet: the differences of
+  PostgreSQL 19 and 18 from master are branches where they are used,
+  the Append path of the two planners a branch in each; 7.1 creates the
+  header.
 - **Capabilities:** greengage, bridge-api, scan-heap, aggregate,
   node-contract, planner-coverage
 - **Size:** large — a series; steps 7.1–7.4 are the first milestone
