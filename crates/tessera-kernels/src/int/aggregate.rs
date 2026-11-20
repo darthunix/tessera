@@ -1,7 +1,7 @@
 //! The drivers of the aggregates over selected integer values: the least
 //! and the greatest of both widths, and the loop the int4 sum shares.
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use tessera_core::{ColumnReader, RowMaskView, WordBlock};
 
 use super::IntLane;
@@ -72,6 +72,10 @@ pub(crate) fn aggregate<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     let set = T::Aggregates::get();
     let bulk = set.is_some()
         && rows.nrows() >= 64
+        // Whole words only where the row counts agree, as the row path
+        // demands: alone they would miss the rows that the shorter side
+        // lacks. Checked here, the check takes no register from the loop.
+        && column.nrows() == rows.nrows()
         && rows.get_word(0).is_some_and(|selected| {
             (selected == u64::MAX
                 || (!selected.is_power_of_two() && selected.count_ones() >= BULK_MIN_ROWS))
@@ -97,12 +101,6 @@ fn aggregate_bulk<T: IntLane, C: ColumnReader<Value = T>, B: Copy>(
     mut fold: impl FnMut(B, Option<T>) -> B,
     mut block: impl for<'a> FnMut(B, T::Aggregates, WordBlock<'a, T>, u64) -> B,
 ) -> Result<B> {
-    // As the row path does: whole words alone would miss rows that the
-    // shorter side lacks and the selection does not take.
-    ensure!(
-        column.nrows() == rows.nrows(),
-        "column and selection row counts differ"
-    );
     let mut acc = init;
     // On x86-64 one test for empty and single-row words, told apart inside:
     // a `continue` for empty words became a loop of its own, and every
