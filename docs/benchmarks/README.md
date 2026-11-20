@@ -7,6 +7,11 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-20, row counts checked on whole words of the
+  aggregates](2026-11-20-row-counts/README.md): the counts of
+  `aggregate_int32` and `aggregate_int64` of two places of the check,
+  and of the second with every function aligned, the Intel Mac and
+  Apple M5 Pro, against `106740d6`.
 - [2026-11-03, a walk that keeps the columns read behind
   it](2026-11-03-deform-past-varlena/README.md): TPC-H serial and with
   two workers, the probes of the rule and of the step for a one-byte
