@@ -390,6 +390,10 @@ The tasks go by the harm their fault does: 2.2, 2.7, 2.8, 2.9, 2.10,
 - [x] 6.8 Probes of the contract's forecast, on branches that are never
       merged, with their counts in the design. Check: the review of the
       counts in the pull request
+- [x] 6.9 The maintainer's decisions on three findings of 6.4, 6.7 and
+      6.8: a set of 1 to `MAX_PARTITIONS` partitions, an append of
+      values under 4 GiB, and `BlockKind` marked as an enum that grows.
+      Check: `cargo test -p relspill`; the public API's snapshot
 
 ## 7. The close
 

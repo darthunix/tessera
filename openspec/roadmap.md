@@ -878,20 +878,19 @@ host with another manager of temporary files" of the forecast of
 
 ### spill-block-kinds
 
-One map of a block's codes in the C API, and an enum of kinds that
-grows. From the probe of "A new kind of block" of the forecast of
-`relspill`'s contract (`spill-crate`, task 6.8).
+One map of a block's codes in the C API. From the probe of "A new
+kind of block" of the forecast of `relspill`'s contract (`spill-crate`,
+task 6.8).
 
 - **What:** `tessera-capi` maps a block's code to its kind in two
   places, `c/spill.rs` and `c/spill_set.rs`, beside the enum of
-  `include/tessera/spill.h`; and `relspill::BlockKind` is not
-  `#[non_exhaustive]`, so a caller outside the crate that matches on
-  kinds changes when one is added. One map of codes in the C API, and
-  the enum marked as one that grows: a change of the crate's public API,
-  which the maintainer decides.
+  `include/tessera/spill.h`: one map of codes in the C API. The other
+  half of the probe's finding is done: the maintainer chose on
+  2026-11-20 to mark `relspill::BlockKind` `#[non_exhaustive]`, so a
+  caller outside the crate keeps an arm for kinds to come.
 - **Why:** The probe of a new kind of block touched the C API's codes,
   which the contract's forecast did not name. The boundary crossed: the
-  crate's public API and the C API.
+  C API.
 - **Depends on:** nothing.
 - **Capabilities:** relspill
 - **Size:** a pull request.

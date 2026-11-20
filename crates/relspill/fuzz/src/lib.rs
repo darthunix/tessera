@@ -324,7 +324,9 @@ pub fn read_partition(file: &[u8], config: ReadConfig, input: &mut Input) {
                 match header.kind {
                     BlockKind::Values => values.clone_from(&body),
                     BlockKind::Columns => read_columns(&body, &values, &ends, input),
-                    BlockKind::Records => {}
+                    // Records, and a kind to come, hold nothing a chunk
+                    // of columns reads.
+                    _ => {}
                 }
                 read.push((back.at, header, body));
             }

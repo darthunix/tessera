@@ -583,7 +583,7 @@ pub fn relspill::spill_columns::append_partitioned<C: relspill::spill_columns::C
 pub fn relspill::spill_columns::check(chunk: &[u8], words: usize, rows: core::option::Option<usize>, by_value: &[bool], values: &[u8], ends: &impl relspill::spill_columns::ValueEnds) -> relspill::Result<relspill::columns::Shape>
 pub fn relspill::spill_columns::check_pair(header: &relspill::BlockHeader, at: usize, number: u32) -> relspill::Result<()>
 pub fn relspill::spill_columns::window(chunk: &[u8], word: usize, first: usize, out: &mut [u64], nulls: &mut [bool]) -> relspill::Result<()>
-#[repr(u32)] pub enum relspill::BlockKind
+#[non_exhaustive] #[repr(u32)] pub enum relspill::BlockKind
 pub relspill::BlockKind::Columns = 3
 pub relspill::BlockKind::Records = 1
 pub relspill::BlockKind::Values = 2

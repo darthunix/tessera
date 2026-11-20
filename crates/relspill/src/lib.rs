@@ -60,8 +60,10 @@ pub const MAX_LEVEL: u32 = 32;
 
 /// What a block holds, by the code in its header, and the lengths each
 /// kind allows. For every kind the body length is a multiple of 8 and at
-/// most the bound of its kind ([`Bounds`]).
+/// most the bound of its kind ([`Bounds`]). A later version may add kinds,
+/// so a match outside the crate keeps an arm for the others.
 #[repr(u32)]
+#[non_exhaustive]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockKind {
     /// A chunk of a `relhash` table's records, its used mark first, the 8

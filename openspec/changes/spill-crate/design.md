@@ -1123,9 +1123,10 @@ what it did not make is counted by reading the code it would reach.
   header's proof of the lengths of each kind; and one row of the damage
   matrix. The writer, the reader and the packing take it unchanged.
   One interface past the forecast: the C API's codes of kinds, in two
-  maps of codes and the header's enum. The enum of kinds is not marked
-  as one that grows, so a caller outside the crate that matches on
-  kinds changes with it. The machine that writes states and the host's
+  maps of codes and the header's enum. The enum of kinds was not marked
+  as one that grows, so a caller outside the crate that matched on kinds
+  changed with it; it is marked now, and such a caller keeps an arm for
+  kinds to come. The machine that writes states and the host's
   code are not made; the nodes name a kind of block in 19 places of 3
   files, and the runtime in 3.
 - **A change of the record of relhash**, its size and its NULL bits
