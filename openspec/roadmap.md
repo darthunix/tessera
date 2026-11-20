@@ -44,10 +44,15 @@ entries out of turn on 2026-11-03, after an analysis of TPC-H with
 with the foreign keys of the schema left undeclared for now; the same
 day he moved `agg-dependent-columns` between `agg-table-presize` and
 `tpch-q9-plan`, and on 2026-11-04 widened `lookup-outer-compaction`
-into `gather-sparse-batches`. On 2026-11-21 he took the boundary of
-types between PostgreSQL and Arrow, `types-crate`, as a crate of its
-own, before `parquet-fdw` (done, the crate `datum-arrow`). On
-2026-11-22 the maintainer took `agg-int128` out of turn, after a
+into `gather-sparse-batches`. The maintainer took `source-scan` and then
+`parquet-fdw` out of turn on 2026-11-20, for Tessera's entry into
+ClickBench over the benchmark's Parquet files, and made the Parquet
+wrapper the first source of the planning contract, so that
+`parquet-fdw` no longer waits for `compressed-table-source`. On
+2026-11-21 he took the boundary of types between PostgreSQL and Arrow,
+`types-crate`, as a crate of its own, before `parquet-fdw` (done, the
+crate `datum-arrow`).
+On 2026-11-22 the maintainer took `agg-int128` out of turn, after a
 profile of ClickBench's query 4 on the branch of `parquet-fdw`, to be
 done first:
 
@@ -121,9 +126,7 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `minimal-tuples-for-storing-parents`: Minimal tuples for a parent that
   stores rows
 - `mixed-inputs`: Mixed inputs
-- `compressed-table-source`: Compressed test table AM with the source
-  planning contract
-- `parquet-fdw`: Parquet FDW
+- `compressed-table-source`: Compressed test table AM
 - `direct-arrow-batches`: Direct Arrow batches
 - `datum-fallback-native-forms`: Datum fallback for date, timestamp and
   text representations
@@ -211,6 +214,74 @@ ClickBench's query 4 on the branch of `parquet-fdw`; it is the change
 - **Depends on:** nothing.
 - **Capabilities:** aggregate, kernel-abi
 - **Size:** small: one pull request after the proposal.
+
+### source-scan
+
+The planning contract of a batch source, for foreign tables first.
+Taken by the maintainer out of turn on 2026-11-20, with `parquet-fdw`
+after it; it is the change `source-scan`.
+
+- **What:** A source in the registry reads a relation that is not a
+  heap table: given the core's foreign scan path, it returns the path
+  of its own batch node, and answers for each of the relation's
+  clauses whether it does not use it, uses it only to skip rows, or
+  checks it exactly. Tessera marks the clauses a source may use, so
+  that none runs ahead of the security clauses that guard it. The
+  registry lists its sources. Tessera plans `TessFilter` with the
+  clauses the source leaves, or the source's path alone, and
+  `TessGather` over it, serial and partial, and its batch parents read
+  it without `TessPack`; the source's paths cost what the source says.
+  A test source shows it.
+- **Why:** Only heap tables are read in batches. A foreign table's rows
+  come from its wrapper one by one: a batch parent packs them, and its
+  clauses stay with the core. A columnar source can plan a batch node
+  of its own, but cannot share the clauses with `TessFilter`, which
+  takes no such child and cannot learn which clauses the source
+  checks.
+- **Known:** The design of the change. The maintainer asked on
+  2026-11-20 that the source filter: the answers per clause, which
+  `compressed-table-source` carried, come with this change.
+- **Depends on:** nothing.
+- **Capabilities:** source-scan
+- **Size:** medium: one pull request.
+
+### parquet-fdw
+
+Parquet FDW. From plan 6.6, line 6004, where it is an Arrow FDW; the
+review of pull request 45, 2026-10-05; the analysis of ClickBench,
+2026-11-20.
+
+- **What:** A foreign data wrapper over Parquet files, a module of this
+  repository, whose source, with its batch node, is the first real
+  source of `source-scan`. It reads the files in place, one file or a
+  list of them; decodes the columns a query asks for into batches, on
+  request; checks exactly the clauses it can, such as a comparison of a
+  column with a constant on the column's encoded form; skips groups of
+  rows by their least and greatest values; reads in parallel by groups
+  of rows; serves rows when Tessera is off; and maps a file's physical
+  types to the declared ones: seconds to `timestamp`, days to `date`,
+  bytes to `text` checked as UTF-8. Then the entries of ClickBench over
+  its Parquet files, one file and a hundred.
+- **Why:** The maintainer's decision 2026-10-05: a Parquet FDW gives the
+  same Arrow batches, but from Parquet files, the form of cold storage.
+  On 2026-11-20 he chose it as Tessera's way into ClickBench. On a tenth
+  of ClickBench's rows in a heap table, in memory, Tessera took 21.4 s
+  for the 43 queries, the core 40.5 s and pg_duckdb 53.4 s; but a column
+  behind the text columns cost Tessera what it cost the core, and on
+  ClickBench's main machine, with 32 GB, the heap table does not fit in
+  memory and every heap entry takes about 258 s a query.
+- **Known:** ClickBench's files are written by parquet-cpp 1.5.1:
+  Snappy, dictionary and plain encodings, about 500 000 rows a group
+  with their least and greatest values, strings as bytes without a
+  UTF-8 mark, `EventTime` as seconds and `EventDate` as days in an
+  unsigned 16-bit number. The crate `datum-arrow` holds the boundary of
+  types. The reader is chosen in the change's proposal; the candidate
+  is the `parquet` crate of Apache Arrow's Rust implementation. The
+  plan's item was to be done without nanoarrow as a Git submodule;
+  pg_batch's dirty nanoarrow submodule is not carried over (line 7478).
+- **Depends on:** `source-scan`.
+- **Capabilities:** source-scan, and a new capability of the wrapper
+- **Size:** large.
 
 ### agg-dependent-columns
 
@@ -1128,15 +1199,15 @@ Mixed inputs. From plan 5.4, lines 3197–3198.
 
 ### compressed-table-source
 
-Compressed test table AM with the source planning contract. From plan
-6.5 and 2.8, lines 6002–6003, 108–109; also 5222–5223, 2790–2791, 335.
+Compressed test table AM. From plan 6.5 and 2.8, lines 6002–6003,
+108–109; also 5222–5223, 2790–2791, 335.
 
-- **What:** Port the compressed test table access method from pg_batch:
-  first native batches, then pruning of groups and exact filtering. With
-  it, add the planning contract of a source: the scan node passes the
-  query's conditions to the source and the source answers, per
-  condition, UNSUPPORTED, PRUNE_ONLY or EXACT, so PostgreSQL rechecks
-  only what the source does not check itself. The same item carries what
+- **What:** Port the compressed test table access method from pg_batch,
+  as a source of `source-scan`, which then offers a source the
+  sequential scan of a table of another access method, as well as a
+  foreign table's scan: first native batches, then pruning of groups
+  and exact filtering, through the answers per condition of
+  `source-scan`. The same item carries what
   was postponed "to the first columnar source": lookup and caching of
   optional, named, versioned interfaces of physical columns, and typed
   int32/int64 columns passed to the kernels through FFI without widening
@@ -1149,31 +1220,13 @@ Compressed test table AM with the source planning contract. From plan
   consumer (line 6011). `get_datum_column` stays the mandatory common
   path (line 5203). pg_batch's nanoarrow submodule is not carried over
   (line 7478). Checked in the code: no PRUNE_ONLY classification exists.
-- **Depends on:** nothing stated. `greengage-port` step 7.5 (registry
-  walk over sources) touches the same contract.
-- **Capabilities:** batch-format, bridge-api, node-contract, kernel-abi,
-  filter, planner-coverage
+- **Depends on:** `source-scan`, which took the planning contract on
+  2026-11-20, when the maintainer made the Parquet wrapper its first
+  source. `greengage-port` step 7.5 (registry walk over sources)
+  touches the same contract.
+- **Capabilities:** source-scan, batch-format, bridge-api,
+  node-contract, kernel-abi, filter, planner-coverage
 - **Size:** large.
-
-### parquet-fdw
-
-Parquet FDW. From plan 6.6, line 6004, where it is an Arrow FDW; the
-review of pull request 45, 2026-10-05.
-
-- **What:** Add a foreign data wrapper over Parquet files as a source:
-  it reads the files and gives the nodes Arrow batches. It takes the
-  place of the plan's Arrow FDW.
-- **Why:** The maintainer's decision 2026-10-05: a Parquet FDW gives the
-  same Arrow batches, but from Parquet files, the form of cold storage.
-  The plan gave the Arrow FDW one line and no reason.
-- **Known:** The plan's item was to be done without nanoarrow as a Git
-  submodule; pg_batch's dirty nanoarrow submodule is not carried over
-  (line 7478). The crate `datum-arrow` holds the boundary of types, and
-  the `parquet` crate of Apache Arrow's Rust implementation is the
-  likely reader.
-- **Depends on:** `compressed-table-source` (the source contract).
-- **Capabilities:** batch-format, bridge-api
-- **Size:** the log does not say.
 
 ### sturdy-bulk-loops
 
