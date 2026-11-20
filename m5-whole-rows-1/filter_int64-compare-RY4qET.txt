@@ -1,0 +1,48 @@
+DIAGNOSTIC: selected cases only; baseline=66397887bcc43b79e169375ec8b2d2f0121c70aa, candidate=82b542d02cc5e612cbbcbf406ea6c8d20fe7e063
+
+filter_int64
+Per call over 10 blocks per process. FAIL: instructions +1%, or minimum cycles +10% on operations of at least 500 cycles. WARNING: minimum cycles +3% (or +4 cycles below 200). Cycle verdicts need the median to grow past the warning threshold too. MODES: process medians or blocks differ by more than 1.10x and 10 cycles. UNSTABLE: zero readings or instructions disagreeing beyond 0.1%.
+PASS filter_int64/datum/words/1024/all/nulls-none/ready/scalar: instructions before=12147.1 after=3675.1 change=-69.75%; cycles min before=1337.1 after=468.9 change=-64.93% (median 1350.5/469.5, modes 1.02/1.00, 3 processes); branch misses before=1.002 after=1.000 of 282.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=17719.1 after=17719.0; library/reference=0.207x, cycles 0.195x (informational)
+  PER ROW (1024 rows): instructions before=11.86 after=3.59; cycles min before=1.31 after=0.46; IPC before=9.08 after=7.84
+FAIL filter_int64/datum/words/1024/density-12/nulls-none/ready/scalar: instructions before=3123.0 after=3675.0 change=+17.68%; cycles min before=698.8 after=469.7 change=-32.79% (median 703.2/470.7, modes 1.01/1.00, 3 processes); branch misses before=13.379 after=1.000 of 282.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3575.0 after=3575.0; library/reference=1.028x, cycles 0.666x (informational)
+  PER ROW (1024 rows): instructions before=3.05 after=3.59; cycles min before=0.68 after=0.46; IPC before=4.47 after=7.82
+PASS filter_int64/datum/words/1024/density-16/nulls-none/ready/scalar: instructions before=3955.0 after=3675.0 change=-7.08%; cycles min before=856.1 after=470.3 change=-45.07% (median 864.7/470.9, modes 1.03/1.00, 3 processes); branch misses before=13.500 after=1.000 of 282.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4663.0 after=4663.0; library/reference=0.788x, cycles 0.536x (informational)
+  PER ROW (1024 rows): instructions before=3.86 after=3.59; cycles min before=0.84 after=0.46; IPC before=4.62 after=7.81
+PASS filter_int64/datum/words/1024/density-24/nulls-none/ready/scalar: instructions before=5619.0 after=3675.0 change=-34.60%; cycles min before=1167.2 after=469.1 change=-59.81% (median 1175.3/470.6, modes 1.02/1.00, 3 processes); branch misses before=14.271 after=1.000 of 282.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=6839.0 after=6839.0; library/reference=0.537x, cycles 0.392x (informational)
+  PER ROW (1024 rows): instructions before=5.49 after=3.59; cycles min before=1.14 after=0.46; IPC before=4.81 after=7.83
+PASS filter_int64/datum/words/1024/density-32/nulls-none/ready/scalar: instructions before=7283.0 after=3675.0 change=-49.54%; cycles min before=1472.6 after=469.8 change=-68.10% (median 1482.7/470.4, modes 1.01/1.01, 3 processes); branch misses before=14.288 after=1.000 of 282.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=9015.0 after=9015.0; library/reference=0.408x, cycles 0.311x (informational)
+  PER ROW (1024 rows): instructions before=7.11 after=3.59; cycles min before=1.44 after=0.46; IPC before=4.95 after=7.82
+FAIL filter_int64/datum/words/1024/density-8/nulls-none/ready/scalar: instructions before=2291.0 after=3675.0 change=+60.41%; cycles min before=510.2 after=469.7 change=-7.94% (median 526.4/470.6, modes 1.06/1.01, 3 processes); branch misses before=11.784 after=1.000 of 282.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2487.0 after=2487.0; library/reference=1.478x, cycles 0.903x (informational)
+  PER ROW (1024 rows): instructions before=2.24 after=3.59; cycles min before=0.50 after=0.46; IPC before=4.49 after=7.82
+PASS filter_int64/dense/words/1024/all/nulls-none/ready/scalar: instructions before=13237.0 after=2965.1 change=-77.60%; cycles min before=1623.5 after=372.8 change=-77.04% (median 1636.4/373.9, modes 1.01/1.00, 3 processes); branch misses before=1.002 after=1.001 of 315.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=13643.1 after=13643.1; library/reference=0.217x, cycles 0.164x (informational)
+  PER ROW (1024 rows): instructions before=12.93 after=2.90; cycles min before=1.59 after=0.36; IPC before=8.15 after=7.95
+PASS filter_int64/dense/words/1024/density-12/nulls-none/ready/scalar: instructions before=3189.0 after=2965.0 change=-7.02%; cycles min before=704.6 after=376.3 change=-46.59% (median 718.1/377.7, modes 1.04/1.01, 3 processes); branch misses before=13.598 after=1.000 of 315.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2827.0 after=2827.0; library/reference=1.049x, cycles 0.564x (informational)
+  PER ROW (1024 rows): instructions before=3.11 after=2.90; cycles min before=0.69 after=0.37; IPC before=4.53 after=7.88
+PASS filter_int64/dense/words/1024/density-16/nulls-none/ready/scalar: instructions before=4021.0 after=2965.0 change=-26.26%; cycles min before=869.0 after=375.6 change=-56.78% (median 886.6/377.4, modes 1.04/1.01, 3 processes); branch misses before=14.238 after=1.000 of 315.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3659.0 after=3659.0; library/reference=0.810x, cycles 0.454x (informational)
+  PER ROW (1024 rows): instructions before=3.93 after=2.90; cycles min before=0.85 after=0.37; IPC before=4.63 after=7.89
+PASS filter_int64/dense/words/1024/density-24/nulls-none/ready/scalar: instructions before=5685.0 after=2965.0 change=-47.84%; cycles min before=1182.2 after=375.1 change=-68.27% (median 1198.6/377.5, modes 1.03/1.01, 3 processes); branch misses before=14.445 after=1.000 of 315.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=5323.0 after=5323.0; library/reference=0.557x, cycles 0.331x (informational)
+  PER ROW (1024 rows): instructions before=5.55 after=2.90; cycles min before=1.15 after=0.37; IPC before=4.81 after=7.91
+PASS filter_int64/dense/words/1024/density-32/nulls-none/ready/scalar: instructions before=7349.0 after=2965.0 change=-59.65%; cycles min before=1500.0 after=376.1 change=-74.93% (median 1516.3/377.4, modes 1.02/1.01, 3 processes); branch misses before=14.232 after=1.000 of 315.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=6987.0 after=6987.0; library/reference=0.424x, cycles 0.264x (informational)
+  PER ROW (1024 rows): instructions before=7.18 after=2.90; cycles min before=1.46 after=0.37; IPC before=4.90 after=7.88
+FAIL filter_int64/dense/words/1024/density-8/nulls-none/ready/scalar: instructions before=2357.0 after=2965.0 change=+25.79%; cycles min before=540.6 after=375.6 change=-30.53% (median 559.6/378.0, modes 1.06/1.01, 3 processes); branch misses before=12.948 after=1.000 of 315.0 branches; cores 12,13,14,16,17
+  REFERENCE instructions before=1995.0 after=1995.0; library/reference=1.486x, cycles 0.773x (informational)
+  PER ROW (1024 rows): instructions before=2.30 after=2.90; cycles min before=0.53 after=0.37; IPC before=4.36 after=7.89
+FAIL: 9 PASS, 3 FAIL (3 instructions, 0 cycles), 0 UNSTABLE library paths; 0 cycle warnings; 0 bistable
+
+timings.json:
+{
+  "measurement_seconds": 13.04967075,
+  "preparation_seconds": 17.636830791,
+  "total_seconds": 30.721199416
+}

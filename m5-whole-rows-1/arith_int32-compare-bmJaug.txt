@@ -1,0 +1,175 @@
+DIAGNOSTIC: selected cases only; baseline=66397887bcc43b79e169375ec8b2d2f0121c70aa, candidate=82b542d02cc5e612cbbcbf406ea6c8d20fe7e063
+
+arith_int32
+Per call over 10 blocks per process. FAIL: instructions +1%, or minimum cycles +10% on operations of at least 500 cycles. WARNING: minimum cycles +3% (or +4 cycles below 200). Cycle verdicts need the median to grow past the warning threshold too. MODES: process medians or blocks differ by more than 1.10x and 10 cycles. UNSTABLE: zero readings or instructions disagreeing beyond 0.1%.
+PASS arith_int32/datum/smallint/words/1024/all/nulls-none/ready/add_column: instructions before=38906.0 after=9019.0 change=-76.82%; cycles min before=4576.5 after=1446.9 change=-68.38% (median 4619.4/1463.2, modes 1.22/1.03, 3 processes); branch misses before=1.005 after=1.000 of 924.0 branches; cores 12,13,15,16,17
+  REFERENCE instructions before=21783.0 after=21783.0; library/reference=0.414x, cycles 0.596x (informational)
+  PER ROW (1024 rows): instructions before=37.99 after=8.81; cycles min before=4.47 after=1.41; IPC before=8.50 after=6.23
+  MODES before=1.22x after=1.03x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS arith_int32/datum/smallint/words/1024/all/nulls-none/ready/add_scalar: instructions before=27397.0 after=6907.0 change=-74.79%; cycles min before=4010.1 after=936.8 change=-76.64% (median 4088.7/938.6, modes 1.03/1.02, 3 processes); branch misses before=1.002 after=1.000 of 787.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=21783.0 after=21783.0; library/reference=0.317x, cycles 0.386x (informational)
+  PER ROW (1024 rows): instructions before=26.75 after=6.75; cycles min before=3.92 after=0.91; IPC before=6.83 after=7.37
+PASS arith_int32/datum/smallint/words/1024/all/nulls-none/ready/div_scalar: instructions before=29446.0 after=6472.0 change=-78.02%; cycles min before=3775.0 after=1032.6 change=-72.65% (median 3873.0/1059.5, modes 1.11/1.06, 3 processes); branch misses before=1.001 after=1.000 of 520.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=21783.0 after=21783.0; library/reference=0.297x, cycles 0.426x (informational)
+  PER ROW (1024 rows): instructions before=28.76 after=6.32; cycles min before=3.69 after=1.01; IPC before=7.80 after=6.27
+  MODES before=1.11x after=1.06x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS arith_int32/datum/smallint/words/1024/all/nulls-none/ready/mul_scalar: instructions before=31494.0 after=8428.0 change=-73.24%; cycles min before=4680.2 after=1536.8 change=-67.16% (median 4792.2/1539.7, modes 1.04/1.00, 3 processes); branch misses before=1.003 after=1.000 of 771.0 branches; cores 13,14,15,16
+  REFERENCE instructions before=21783.0 after=21783.0; library/reference=0.387x, cycles 0.633x (informational)
+  PER ROW (1024 rows): instructions before=30.76 after=8.23; cycles min before=4.57 after=1.50; IPC before=6.73 after=5.48
+FAIL arith_int32/datum/smallint/words/1024/density-12/nulls-none/ready/add_column: instructions before=8148.0 after=9221.0 change=+13.17%; cycles min before=1170.2 after=1644.8 change=+40.56% (median 1193.3/1647.5, modes 1.04/1.00, 3 processes); branch misses before=13.388 after=1.001 of 799.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4337.0 after=4337.0; library/reference=2.126x, cycles 2.239x (informational)
+  PER ROW (1024 rows): instructions before=7.96 after=9.00; cycles min before=1.14 after=1.61; IPC before=6.96 after=5.61
+  WARNING cycles: minimum +40.56% (+474.6 cycles) and median +38.06% with instructions +13.17% and branch misses -12.387 per call; review layout, predictor or dependency chains
+FAIL arith_int32/datum/smallint/words/1024/density-12/nulls-none/ready/add_scalar: instructions before=5791.0 after=7365.0 change=+27.18%; cycles min before=1001.5 after=1157.7 change=+15.59% (median 1032.4/1164.1, modes 1.03/1.01, 3 processes); branch misses before=13.493 after=1.000 of 662.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4337.0 after=4337.0; library/reference=1.698x, cycles 1.576x (informational)
+  PER ROW (1024 rows): instructions before=5.66 after=7.19; cycles min before=0.98 after=1.13; IPC before=5.78 after=6.36
+  WARNING cycles: minimum +15.59% (+156.2 cycles) and median +12.76% with instructions +27.18% and branch misses -12.493 per call; review layout, predictor or dependency chains
+FAIL arith_int32/datum/smallint/words/1024/density-12/nulls-none/ready/div_scalar: instructions before=6176.0 after=6498.0 change=+5.21%; cycles min before=1032.2 after=1045.4 change=+1.28% (median 1067.5/1078.4, modes 1.06/1.04, 3 processes); branch misses before=13.810 after=1.000 of 523.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4337.0 after=4337.0; library/reference=1.498x, cycles 1.423x (informational)
+  PER ROW (1024 rows): instructions before=6.03 after=6.35; cycles min before=1.01 after=1.02; IPC before=5.98 after=6.22
+FAIL arith_int32/datum/smallint/words/1024/density-12/nulls-none/ready/mul_scalar: instructions before=6560.0 after=8630.0 change=+31.55%; cycles min before=1185.6 after=1704.2 change=+43.74% (median 1211.3/1705.6, modes 1.03/1.00, 3 processes); branch misses before=13.884 after=1.001 of 646.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4337.0 after=4337.0; library/reference=1.990x, cycles 2.320x (informational)
+  PER ROW (1024 rows): instructions before=6.41 after=8.43; cycles min before=1.16 after=1.66; IPC before=5.53 after=5.06
+  WARNING cycles: minimum +43.74% (+518.6 cycles) and median +40.81% with instructions +31.55% and branch misses -12.883 per call; review layout, predictor or dependency chains
+FAIL arith_int32/datum/smallint/words/1024/density-16/nulls-none/ready/add_column: instructions before=10516.0 after=9221.0 change=-12.31%; cycles min before=1473.7 after=1647.3 change=+11.78% (median 1486.8/1648.4, modes 1.01/1.00, 3 processes); branch misses before=14.144 after=1.001 of 799.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=5681.0 after=5681.0; library/reference=1.623x, cycles 1.812x (informational)
+  PER ROW (1024 rows): instructions before=10.27 after=9.00; cycles min before=1.44 after=1.61; IPC before=7.14 after=5.60
+  FAIL cycles: minimum +11.78% and median +10.88% on an operation of 1474 cycles; instructions -12.31%, branch misses -13.144 per call
+  SLOWER-WITH-FEWER-INSTRUCTIONS: a longer dependency chain or worse prediction outweighs the saved instructions
+PASS arith_int32/datum/smallint/words/1024/density-16/nulls-none/ready/add_scalar: instructions before=7455.0 after=7365.0 change=-1.21%; cycles min before=1199.3 after=1157.4 change=-3.49% (median 1272.9/1163.7, modes 1.09/1.01, 3 processes); branch misses before=14.097 after=1.000 of 662.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=5681.0 after=5681.0; library/reference=1.296x, cycles 1.273x (informational)
+  PER ROW (1024 rows): instructions before=7.28 after=7.19; cycles min before=1.17 after=1.13; IPC before=6.22 after=6.36
+PASS arith_int32/datum/smallint/words/1024/density-16/nulls-none/ready/div_scalar: instructions before=7968.0 after=6498.0 change=-18.45%; cycles min before=1298.0 after=1042.4 change=-19.69% (median 1313.8/1063.1, modes 1.02/1.04, 3 processes); branch misses before=14.213 after=1.000 of 523.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=5681.0 after=5681.0; library/reference=1.144x, cycles 1.146x (informational)
+  PER ROW (1024 rows): instructions before=7.78 after=6.35; cycles min before=1.27 after=1.02; IPC before=6.14 after=6.23
+FAIL arith_int32/datum/smallint/words/1024/density-16/nulls-none/ready/mul_scalar: instructions before=8480.0 after=8630.0 change=+1.77%; cycles min before=1528.6 after=1702.2 change=+11.36% (median 1539.8/1705.0, modes 1.01/1.00, 3 processes); branch misses before=14.208 after=1.001 of 646.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=5681.0 after=5681.0; library/reference=1.519x, cycles 1.872x (informational)
+  PER ROW (1024 rows): instructions before=8.28 after=8.43; cycles min before=1.49 after=1.66; IPC before=5.55 after=5.07
+  WARNING cycles: minimum +11.36% (+173.7 cycles) and median +10.73% with instructions +1.77% and branch misses -13.208 per call; review layout, predictor or dependency chains
+PASS arith_int32/datum/smallint/words/1024/density-24/nulls-none/ready/add_column: instructions before=15252.0 after=9221.0 change=-39.54%; cycles min before=2036.4 after=1644.1 change=-19.26% (median 2055.7/1646.9, modes 1.01/1.04, 3 processes); branch misses before=14.221 after=1.000 of 799.0 branches; cores 13,14,15,16,17
+  REFERENCE instructions before=8369.0 after=8369.0; library/reference=1.102x, cycles 1.349x (informational)
+  PER ROW (1024 rows): instructions before=14.89 after=9.00; cycles min before=1.99 after=1.61; IPC before=7.49 after=5.61
+PASS arith_int32/datum/smallint/words/1024/density-24/nulls-none/ready/add_scalar: instructions before=10783.0 after=7365.0 change=-31.70%; cycles min before=1658.1 after=1158.0 change=-30.16% (median 1805.8/1164.3, modes 1.14/1.04, 3 processes); branch misses before=14.298 after=1.000 of 662.0 branches; cores 12,13,15,16,17
+  REFERENCE instructions before=8369.0 after=8369.0; library/reference=0.880x, cycles 0.950x (informational)
+  PER ROW (1024 rows): instructions before=10.53 after=7.19; cycles min before=1.62 after=1.13; IPC before=6.50 after=6.36
+  MODES before=1.14x after=1.04x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS arith_int32/datum/smallint/words/1024/density-24/nulls-none/ready/div_scalar: instructions before=11552.0 after=6498.0 change=-43.75%; cycles min before=1779.0 after=1046.0 change=-41.20% (median 1797.5/1083.1, modes 1.02/1.04, 3 processes); branch misses before=14.256 after=1.000 of 523.0 branches; cores 12,13,14,15,16
+  REFERENCE instructions before=8369.0 after=8369.0; library/reference=0.776x, cycles 0.858x (informational)
+  PER ROW (1024 rows): instructions before=11.28 after=6.35; cycles min before=1.74 after=1.02; IPC before=6.49 after=6.21
+PASS arith_int32/datum/smallint/words/1024/density-24/nulls-none/ready/mul_scalar: instructions before=12320.0 after=8630.0 change=-29.95%; cycles min before=2143.9 after=1702.7 change=-20.58% (median 2161.8/1704.7, modes 1.01/1.00, 3 processes); branch misses before=14.299 after=1.001 of 646.0 branches; cores 12,13,15,16,17
+  REFERENCE instructions before=8369.0 after=8369.0; library/reference=1.031x, cycles 1.397x (informational)
+  PER ROW (1024 rows): instructions before=12.03 after=8.43; cycles min before=2.09 after=1.66; IPC before=5.75 after=5.07
+PASS arith_int32/datum/smallint/words/1024/density-32/nulls-none/ready/add_column: instructions before=19988.0 after=9221.0 change=-53.87%; cycles min before=2603.0 after=1646.0 change=-36.77% (median 2625.0/1648.0, modes 1.01/1.00, 3 processes); branch misses before=14.066 after=1.000 of 799.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=11057.0 after=11057.0; library/reference=0.834x, cycles 1.068x (informational)
+  PER ROW (1024 rows): instructions before=19.52 after=9.00; cycles min before=2.54 after=1.61; IPC before=7.68 after=5.60
+PASS arith_int32/datum/smallint/words/1024/density-32/nulls-none/ready/add_scalar: instructions before=14111.0 after=7365.0 change=-47.81%; cycles min before=2133.6 after=1155.1 change=-45.86% (median 2306.8/1164.6, modes 1.09/1.01, 3 processes); branch misses before=14.187 after=1.000 of 662.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=11057.0 after=11057.0; library/reference=0.666x, cycles 0.750x (informational)
+  PER ROW (1024 rows): instructions before=13.78 after=7.19; cycles min before=2.08 after=1.13; IPC before=6.61 after=6.38
+PASS arith_int32/datum/smallint/words/1024/density-32/nulls-none/ready/div_scalar: instructions before=15136.0 after=6498.0 change=-57.07%; cycles min before=2262.4 after=1041.8 change=-53.95% (median 2274.1/1053.5, modes 1.02/1.04, 3 processes); branch misses before=14.268 after=1.000 of 523.0 branches; cores 13,14,15,16,17
+  REFERENCE instructions before=11057.0 after=11057.0; library/reference=0.588x, cycles 0.676x (informational)
+  PER ROW (1024 rows): instructions before=14.78 after=6.35; cycles min before=2.21 after=1.02; IPC before=6.69 after=6.24
+PASS arith_int32/datum/smallint/words/1024/density-32/nulls-none/ready/mul_scalar: instructions before=16160.0 after=8630.0 change=-46.60%; cycles min before=2774.8 after=1702.6 change=-38.64% (median 2791.3/1704.1, modes 1.01/1.00, 3 processes); branch misses before=14.608 after=1.001 of 646.0 branches; cores 12,14,15,16,17
+  REFERENCE instructions before=11057.0 after=11057.0; library/reference=0.781x, cycles 1.105x (informational)
+  PER ROW (1024 rows): instructions before=15.78 after=8.43; cycles min before=2.71 after=1.66; IPC before=5.82 after=5.07
+FAIL arith_int32/datum/smallint/words/1024/density-8/nulls-none/ready/add_column: instructions before=5780.0 after=9221.0 change=+59.53%; cycles min before=876.9 after=1643.5 change=+87.41% (median 893.9/1645.2, modes 1.04/1.00, 3 processes); branch misses before=13.311 after=1.001 of 799.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2993.0 after=2993.0; library/reference=3.081x, cycles 2.974x (informational)
+  PER ROW (1024 rows): instructions before=5.64 after=9.00; cycles min before=0.86 after=1.60; IPC before=6.59 after=5.61
+  WARNING cycles: minimum +87.41% (+766.5 cycles) and median +84.05% with instructions +59.53% and branch misses -12.311 per call; review layout, predictor or dependency chains
+FAIL arith_int32/datum/smallint/words/1024/density-8/nulls-none/ready/add_scalar: instructions before=4127.0 after=7365.0 change=+78.46%; cycles min before=772.4 after=1157.5 change=+49.86% (median 782.9/1166.2, modes 1.03/1.04, 3 processes); branch misses before=13.281 after=1.001 of 662.0 branches; cores 13,14,15,16,17
+  REFERENCE instructions before=2993.0 after=2993.0; library/reference=2.461x, cycles 2.095x (informational)
+  PER ROW (1024 rows): instructions before=4.03 after=7.19; cycles min before=0.75 after=1.13; IPC before=5.34 after=6.36
+  WARNING cycles: minimum +49.86% (+385.1 cycles) and median +48.95% with instructions +78.46% and branch misses -12.280 per call; review layout, predictor or dependency chains
+FAIL arith_int32/datum/smallint/words/1024/density-8/nulls-none/ready/div_scalar: instructions before=4384.0 after=6498.0 change=+48.22%; cycles min before=756.0 after=1042.1 change=+37.84% (median 792.3/1071.1, modes 1.06/1.05, 3 processes); branch misses before=13.027 after=1.000 of 523.0 branches; cores 13,14,15,16,17
+  REFERENCE instructions before=2993.0 after=2993.0; library/reference=2.171x, cycles 1.886x (informational)
+  PER ROW (1024 rows): instructions before=4.28 after=6.35; cycles min before=0.74 after=1.02; IPC before=5.80 after=6.24
+  WARNING cycles: minimum +37.84% (+286.1 cycles) and median +35.19% with instructions +48.22% and branch misses -12.026 per call; review layout, predictor or dependency chains
+FAIL arith_int32/datum/smallint/words/1024/density-8/nulls-none/ready/mul_scalar: instructions before=4640.0 after=8630.0 change=+85.99%; cycles min before=871.2 after=1702.7 change=+95.44% (median 896.8/1705.8, modes 1.04/1.00, 3 processes); branch misses before=12.812 after=1.001 of 646.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2993.0 after=2993.0; library/reference=2.883x, cycles 3.081x (informational)
+  PER ROW (1024 rows): instructions before=4.53 after=8.43; cycles min before=0.85 after=1.66; IPC before=5.33 after=5.07
+  WARNING cycles: minimum +95.44% (+831.5 cycles) and median +90.22% with instructions +85.99% and branch misses -11.811 per call; review layout, predictor or dependency chains
+PASS arith_int32/dense/smallint/words/1024/all/nulls-none/ready/add_column: instructions before=34942.0 after=6440.0 change=-81.57%; cycles min before=4885.3 after=886.9 change=-81.84% (median 4919.3/939.2, modes 1.02/1.09, 3 processes); branch misses before=1.001 after=1.000 of 878.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=16653.0 after=16653.0; library/reference=0.387x, cycles 0.413x (informational)
+  PER ROW (1024 rows): instructions before=34.12 after=6.29; cycles min before=4.77 after=0.87; IPC before=7.15 after=7.26
+PASS arith_int32/dense/smallint/words/1024/all/nulls-none/ready/add_scalar: instructions before=25417.0 after=4911.0 change=-80.68%; cycles min before=4581.5 after=747.4 change=-83.69% (median 4714.9/762.9, modes 1.04/1.03, 3 processes); branch misses before=1.002 after=1.000 of 468.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=16653.0 after=16653.0; library/reference=0.295x, cycles 0.348x (informational)
+  PER ROW (1024 rows): instructions before=24.82 after=4.80; cycles min before=4.47 after=0.73; IPC before=5.55 after=6.57
+PASS arith_int32/dense/smallint/words/1024/all/nulls-none/ready/div_scalar: instructions before=26444.0 after=5328.0 change=-79.85%; cycles min before=4377.8 after=708.2 change=-83.82% (median 4485.5/712.0, modes 1.04/1.03, 3 processes); branch misses before=2.933 after=1.000 of 458.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=16653.0 after=16653.0; library/reference=0.320x, cycles 0.330x (informational)
+  PER ROW (1024 rows): instructions before=25.82 after=5.20; cycles min before=4.28 after=0.69; IPC before=6.04 after=7.52
+PASS arith_int32/dense/smallint/words/1024/all/nulls-none/ready/mul_scalar: instructions before=28490.1 after=10032.0 change=-64.79%; cycles min before=5754.3 after=1297.5 change=-77.45% (median 5785.9/1308.2, modes 1.02/1.01, 3 processes); branch misses before=1.006 after=1.001 of 724.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=16653.0 after=16653.0; library/reference=0.602x, cycles 0.604x (informational)
+  PER ROW (1024 rows): instructions before=27.82 after=9.80; cycles min before=5.62 after=1.27; IPC before=4.95 after=7.73
+PASS arith_int32/dense/smallint/words/1024/density-12/nulls-none/ready/add_column: instructions before=7512.0 after=7186.0 change=-4.34%; cycles min before=1230.8 after=814.0 change=-33.86% (median 1250.4/824.5, modes 1.02/1.03, 3 processes); branch misses before=13.969 after=1.000 of 753.0 branches; cores 13,14,15,16,17
+  REFERENCE instructions before=3367.0 after=3367.0; library/reference=2.134x, cycles 1.154x (informational)
+  PER ROW (1024 rows): instructions before=7.34 after=7.02; cycles min before=1.20 after=0.79; IPC before=6.10 after=8.83
+FAIL arith_int32/dense/smallint/words/1024/density-12/nulls-none/ready/add_scalar: instructions before=5475.0 after=6345.0 change=+15.89%; cycles min before=1130.2 after=775.7 change=-31.36% (median 1153.6/779.0, modes 1.03/1.01, 3 processes); branch misses before=13.377 after=1.000 of 615.0 branches; cores 13,14,15,16,17
+  REFERENCE instructions before=3367.0 after=3367.0; library/reference=1.884x, cycles 1.099x (informational)
+  PER ROW (1024 rows): instructions before=5.35 after=6.20; cycles min before=1.10 after=0.76; IPC before=4.84 after=8.18
+PASS arith_int32/dense/smallint/words/1024/density-12/nulls-none/ready/div_scalar: instructions before=5670.0 after=5354.0 change=-5.57%; cycles min before=1068.7 after=716.1 change=-32.99% (median 1091.0/727.6, modes 1.04/1.17, 3 processes); branch misses before=13.712 after=1.000 of 461.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3367.0 after=3367.0; library/reference=1.590x, cycles 1.015x (informational)
+  PER ROW (1024 rows): instructions before=5.54 after=5.23; cycles min before=1.04 after=0.70; IPC before=5.31 after=7.48
+  MODES before=1.04x after=1.17x: processes or blocks run in different modes; the minimum above is the best mode seen
+FAIL arith_int32/dense/smallint/words/1024/density-12/nulls-none/ready/mul_scalar: instructions before=6052.0 after=10842.0 change=+79.15%; cycles min before=1312.8 after=1468.1 change=+11.83% (median 1330.7/1473.1, modes 1.02/1.01, 3 processes); branch misses before=13.452 after=1.001 of 615.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=3367.0 after=3367.0; library/reference=3.220x, cycles 2.081x (informational)
+  PER ROW (1024 rows): instructions before=5.91 after=10.59; cycles min before=1.28 after=1.43; IPC before=4.61 after=7.38
+  WARNING cycles: minimum +11.83% (+155.3 cycles) and median +10.70% with instructions +79.15% and branch misses -12.451 per call; review layout, predictor or dependency chains
+PASS arith_int32/dense/smallint/words/1024/density-16/nulls-none/ready/add_column: instructions before=9624.0 after=7186.0 change=-25.33%; cycles min before=1560.7 after=816.7 change=-47.67% (median 1571.5/824.2, modes 1.01/1.04, 3 processes); branch misses before=14.163 after=1.000 of 753.0 branches; cores 13,14,15,16,17
+  REFERENCE instructions before=4391.0 after=4391.0; library/reference=1.637x, cycles 0.974x (informational)
+  PER ROW (1024 rows): instructions before=9.40 after=7.02; cycles min before=1.52 after=0.80; IPC before=6.17 after=8.80
+PASS arith_int32/dense/smallint/words/1024/density-16/nulls-none/ready/add_scalar: instructions before=7011.0 after=6345.0 change=-9.50%; cycles min before=1432.5 after=775.6 change=-45.85% (median 1444.7/779.1, modes 1.03/1.01, 3 processes); branch misses before=14.158 after=1.000 of 615.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4391.0 after=4391.0; library/reference=1.445x, cycles 0.925x (informational)
+  PER ROW (1024 rows): instructions before=6.85 after=6.20; cycles min before=1.40 after=0.76; IPC before=4.89 after=8.18
+PASS arith_int32/dense/smallint/words/1024/density-16/nulls-none/ready/div_scalar: instructions before=7270.0 after=5354.0 change=-26.35%; cycles min before=1304.0 after=715.3 change=-45.15% (median 1346.2/725.7, modes 1.05/1.17, 3 processes); branch misses before=14.094 after=1.000 of 461.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4391.0 after=4391.0; library/reference=1.219x, cycles 0.853x (informational)
+  PER ROW (1024 rows): instructions before=7.10 after=5.23; cycles min before=1.27 after=0.70; IPC before=5.58 after=7.49
+  MODES before=1.05x after=1.17x: processes or blocks run in different modes; the minimum above is the best mode seen
+FAIL arith_int32/dense/smallint/words/1024/density-16/nulls-none/ready/mul_scalar: instructions before=7780.0 after=10842.0 change=+39.36%; cycles min before=1676.8 after=1463.1 change=-12.75% (median 1687.7/1471.2, modes 1.01/1.01, 3 processes); branch misses before=13.975 after=1.001 of 615.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=4391.0 after=4391.0; library/reference=2.469x, cycles 1.744x (informational)
+  PER ROW (1024 rows): instructions before=7.60 after=10.59; cycles min before=1.64 after=1.43; IPC before=4.64 after=7.41
+PASS arith_int32/dense/smallint/words/1024/density-24/nulls-none/ready/add_column: instructions before=13848.0 after=7186.0 change=-48.11%; cycles min before=2165.8 after=814.3 change=-62.40% (median 2185.4/829.0, modes 1.01/1.04, 3 processes); branch misses before=14.307 after=1.000 of 753.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=6439.0 after=6439.0; library/reference=1.116x, cycles 0.729x (informational)
+  PER ROW (1024 rows): instructions before=13.52 after=7.02; cycles min before=2.12 after=0.80; IPC before=6.39 after=8.82
+PASS arith_int32/dense/smallint/words/1024/density-24/nulls-none/ready/add_scalar: instructions before=10083.0 after=6345.0 change=-37.07%; cycles min before=2022.0 after=774.7 change=-61.69% (median 2035.4/779.4, modes 1.03/1.01, 3 processes); branch misses before=14.202 after=1.000 of 615.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=6439.0 after=6439.0; library/reference=0.985x, cycles 0.693x (informational)
+  PER ROW (1024 rows): instructions before=9.85 after=6.20; cycles min before=1.97 after=0.76; IPC before=4.99 after=8.19
+PASS arith_int32/dense/smallint/words/1024/density-24/nulls-none/ready/div_scalar: instructions before=10470.0 after=5354.0 change=-48.86%; cycles min before=1810.7 after=714.1 change=-60.56% (median 1900.8/729.5, modes 1.05/1.05, 3 processes); branch misses before=14.317 after=1.000 of 461.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=6439.0 after=6439.0; library/reference=0.831x, cycles 0.639x (informational)
+  PER ROW (1024 rows): instructions before=10.22 after=5.23; cycles min before=1.77 after=0.70; IPC before=5.78 after=7.50
+PASS arith_int32/dense/smallint/words/1024/density-24/nulls-none/ready/mul_scalar: instructions before=11236.0 after=10842.0 change=-3.51%; cycles min before=2399.1 after=1469.0 change=-38.77% (median 2418.1/1473.0, modes 1.02/1.00, 3 processes); branch misses before=14.257 after=1.001 of 615.0 branches; cores 13,14,15,16,17
+  REFERENCE instructions before=6439.0 after=6439.0; library/reference=1.684x, cycles 1.315x (informational)
+  PER ROW (1024 rows): instructions before=10.97 after=10.59; cycles min before=2.34 after=1.43; IPC before=4.68 after=7.38
+PASS arith_int32/dense/smallint/words/1024/density-32/nulls-none/ready/add_column: instructions before=18072.0 after=7186.0 change=-60.24%; cycles min before=2749.3 after=812.6 change=-70.44% (median 2764.6/826.9, modes 1.01/1.02, 3 processes); branch misses before=14.141 after=1.000 of 753.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=8487.0 after=8487.0; library/reference=0.847x, cycles 0.590x (informational)
+  PER ROW (1024 rows): instructions before=17.65 after=7.02; cycles min before=2.68 after=0.79; IPC before=6.57 after=8.84
+PASS arith_int32/dense/smallint/words/1024/density-32/nulls-none/ready/add_scalar: instructions before=13155.0 after=6345.0 change=-51.77%; cycles min before=2617.1 after=777.2 change=-70.30% (median 2642.0/780.0, modes 1.03/1.01, 3 processes); branch misses before=14.091 after=1.000 of 615.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=8487.0 after=8487.0; library/reference=0.748x, cycles 0.564x (informational)
+  PER ROW (1024 rows): instructions before=12.85 after=6.20; cycles min before=2.56 after=0.76; IPC before=5.03 after=8.16
+PASS arith_int32/dense/smallint/words/1024/density-32/nulls-none/ready/div_scalar: instructions before=13670.0 after=5354.0 change=-60.83%; cycles min before=2356.1 after=713.5 change=-69.72% (median 2471.1/730.3, modes 1.05/1.18, 3 processes); branch misses before=14.118 after=1.000 of 461.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=8487.0 after=8487.0; library/reference=0.631x, cycles 0.518x (informational)
+  PER ROW (1024 rows): instructions before=13.35 after=5.23; cycles min before=2.30 after=0.70; IPC before=5.80 after=7.50
+  MODES before=1.05x after=1.18x: processes or blocks run in different modes; the minimum above is the best mode seen
+PASS arith_int32/dense/smallint/words/1024/density-32/nulls-none/ready/mul_scalar: instructions before=14692.0 after=10842.0 change=-26.20%; cycles min before=3113.4 after=1468.1 change=-52.85% (median 3141.4/1471.4, modes 1.01/1.00, 3 processes); branch misses before=14.030 after=1.001 of 615.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=8487.0 after=8487.0; library/reference=1.277x, cycles 1.066x (informational)
+  PER ROW (1024 rows): instructions before=14.35 after=10.59; cycles min before=3.04 after=1.43; IPC before=4.72 after=7.39
+FAIL arith_int32/dense/smallint/words/1024/density-8/nulls-none/ready/add_column: instructions before=5400.0 after=7186.0 change=+33.07%; cycles min before=911.4 after=816.6 change=-10.40% (median 928.5/834.6, modes 1.04/1.02, 3 processes); branch misses before=13.459 after=1.000 of 753.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2343.0 after=2343.0; library/reference=3.067x, cycles 1.524x (informational)
+  PER ROW (1024 rows): instructions before=5.27 after=7.02; cycles min before=0.89 after=0.80; IPC before=5.92 after=8.80
+FAIL arith_int32/dense/smallint/words/1024/density-8/nulls-none/ready/add_scalar: instructions before=3939.0 after=6345.0 change=+61.08%; cycles min before=831.9 after=778.7 change=-6.40% (median 845.9/783.4, modes 1.05/1.01, 3 processes); branch misses before=12.959 after=1.000 of 615.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2343.0 after=2343.0; library/reference=2.708x, cycles 1.454x (informational)
+  PER ROW (1024 rows): instructions before=3.85 after=6.20; cycles min before=0.81 after=0.76; IPC before=4.73 after=8.15
+FAIL arith_int32/dense/smallint/words/1024/density-8/nulls-none/ready/div_scalar: instructions before=4070.0 after=5354.0 change=+31.55%; cycles min before=788.3 after=714.8 change=-9.32% (median 811.2/727.8, modes 1.06/1.15, 3 processes); branch misses before=13.257 after=1.000 of 461.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2343.0 after=2343.0; library/reference=2.285x, cycles 1.334x (informational)
+  PER ROW (1024 rows): instructions before=3.97 after=5.23; cycles min before=0.77 after=0.70; IPC before=5.16 after=7.49
+  MODES before=1.06x after=1.15x: processes or blocks run in different modes; the minimum above is the best mode seen
+FAIL arith_int32/dense/smallint/words/1024/density-8/nulls-none/ready/mul_scalar: instructions before=4324.0 after=10842.0 change=+150.74%; cycles min before=947.9 after=1468.1 change=+54.88% (median 964.4/1474.1, modes 1.03/1.01, 3 processes); branch misses before=12.874 after=1.001 of 615.0 branches; cores 12,13,14,15,16,17
+  REFERENCE instructions before=2343.0 after=2343.0; library/reference=4.627x, cycles 2.740x (informational)
+  PER ROW (1024 rows): instructions before=4.22 after=10.59; cycles min before=0.93 after=1.43; IPC before=4.56 after=7.39
+  WARNING cycles: minimum +54.88% (+520.2 cycles) and median +52.86% with instructions +150.74% and branch misses -11.873 per call; review layout, predictor or dependency chains
+FAIL: 31 PASS, 17 FAIL (16 instructions, 1 cycles), 0 UNSTABLE library paths; 10 cycle warnings; 7 bistable
+
+timings.json:
+{
+  "measurement_seconds": 36.348643916,
+  "preparation_seconds": 20.451238042,
+  "total_seconds": 56.843150542
+}
