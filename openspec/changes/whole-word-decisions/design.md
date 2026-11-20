@@ -165,18 +165,21 @@ selection takes, whatever rows it takes. At 8 rows a word over 64 and
 65 keys the Intel Mac missed 58 to 75 times a call
 (`compare-yC36rk`), where a predictor that has not seen the values
 misses about 144 by the model, 132 in the search and 12 at the exits.
-On the M5 Pro a step is a select, and the order of the values does not
-matter there.
+Over `shuffled` it missed 183 to 196 times there, on both widths
+(`compare-RDg09o`, `compare-242Yx0`), where the model says about 135,
+123 and 12. On the M5 Pro a step is a select, and the order of the
+values does not matter there.
 
 The base of every run comes after these cases, so that `tessera-bench`
 can compare it.
 
 Their noise was measured at `57275b54`: every program with density
 cases ran against itself on both machines, `tessera-bench --base
-WORKTREE --filter /density-`. Between identical sides every change is
-noise. No run failed and none was unstable. The Intel Mac gave no
-warning; the M5 Pro warned twice, on `table_int32` over Datum at 16
-rows, by +3.3 % on `probe/count_rows` and +4.6 % on
+WORKTREE --filter /density-`; `set_int32` again at `8e5d5b90`, over the
+values of `shuffled`, one width a run. Between identical sides every
+change is noise. No run failed and none was unstable. The Intel Mac
+warned once, in `set_int32`; the M5 Pro warned twice, on `table_int32`
+over Datum at 16 rows, by +3.3 % on `probe/count_rows` and +4.6 % on
 `probe/reference_count`. For each program: its runs, then the largest
 change of the minimum cycles over the operations of 500 cycles or
 more, of the median, and the largest MODES, Intel first.
@@ -203,17 +206,20 @@ more, of the median, and the largest MODES, Intel first.
   and 0.7 %; 1.72 and 1.45.
 - `hash_int64`: `compare-UFcHbG`, `compare-XIPOaz`; 1.1 and 0.6 %;
   14.9 and 1.6 %; 1.70 and 1.62.
-- `set_int32`: `compare-yC36rk`, `compare-OS3sqU`; 2.9 and 1.7 %; 22.5
-  and 5.1 %; 1.66 and 1.55. These runs took the density cases over
-  values in the order of the rows; they are measured again over the
-  values of `shuffled`.
+- `set_int32`: int4 then int8, `compare-RDg09o`, `compare-242Yx0`,
+  `compare-OBDiWD`, `compare-OAew1b`; 5.1 and 1.8 %; 28.2 and 6.2 %;
+  2.07 and 1.63. The 5.1 % is a rise of `keys4` over Datum at 8 rows of
+  int8, whose median fell. The warning is `keys16` there, +4.8 % on the
+  minimum and +3.6 % on the median. Over values in the order of the
+  rows, at `57275b54` (`compare-yC36rk`, `compare-OS3sqU`), the sets
+  gave 2.9 and 1.7 %, 22.5 and 5.1 %, 1.66 and 1.55.
 - `table_int32`: `compare-HKqNwk`, `compare-fdzWx7`; 2.4 and 7.2 %;
   9.3 and 4.7 %; 1.63 and 1.28. The 7.2 % is a fall, of
   `probe/count_rows` over dense values at 8 rows.
 
 On the Intel Mac the processes of an operation ran at levels up to 2.1
-times apart, so its medians moved by up to 22.5 % while its minimum
-moved by 3.1 % at most.
+times apart, so its medians moved by up to 28.2 % while its minimum
+moved by 5.1 % at most, and by 3.1 % outside `set_int32`.
 
 At 8 rows every operation missed 13.5 times a call or more on the
 Intel Mac and 11.3 or more on the M5 Pro, against the 12 of the model:
