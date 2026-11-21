@@ -2356,6 +2356,15 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **A group of rows larger than a selection holds** (a finding of the
+  review of the change `parquet-fdw`, task 3.2). A scan selects a
+  group's rows by one mask of a bit a row, allocated by `palloc` and
+  copied by the reader, so a group of more than about 8.6 billion rows
+  raises `54000`, where the spec promises every row. No writer known
+  makes such a group. Suggested: accept the limit in the spec, or
+  allocate the mask as a huge allocation and copy it fallibly in the
+  reader.
+
 - **A source's path taken as stored by the join planner** (a finding
   of the review of the change `parquet-fdw`). The batch planner takes a
   leaf batch path whose targets are columns as one whose values are

@@ -1,0 +1,57 @@
+-- A query that reads a group of a million rows of a Parquet file is
+-- cancelled when it has read the group's first window, and stops within
+-- the group. The cancel comes through an injection point at each window
+-- read, so this suite runs only on a build with them; on another it ends
+-- here.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set parquet_test :libdir '/tessera_parquet_test' :dlsuffix
+\set parquet_module :libdir '/tessera_parquet_test'
+CREATE FUNCTION parquet_test_injection() RETURNS boolean
+    AS :'parquet_test', 'tessera_parquet_test_injection' LANGUAGE C STRICT;
+SELECT NOT parquet_test_injection() AS skip \gset
+\if :skip
+DROP FUNCTION parquet_test_injection();
+\quit
+\endif
+
+CREATE EXTENSION tessera;
+CREATE EXTENSION tessera_parquet;
+CREATE FUNCTION parquet_test_write(text, text) RETURNS void
+    AS :'parquet_test', 'tessera_parquet_test_write' LANGUAGE C STRICT;
+CREATE FUNCTION parquet_test_cancel_after(text, int) RETURNS void
+    AS :'parquet_test', 'tessera_parquet_test_cancel_after' LANGUAGE C;
+CREATE FUNCTION parquet_test_windows() RETURNS int
+    AS :'parquet_test', 'tessera_parquet_test_windows' LANGUAGE C STRICT;
+\getenv abs_builddir PG_ABS_BUILDDIR
+\set million :abs_builddir '/results/parquet_files/million.parquet'
+SELECT parquet_test_write(:'million',
+    '{"group_rows": 1000000, "columns": [{"name": "i", "type": "int64", "range": 1000000}]}');
+CREATE SERVER pq FOREIGN DATA WRAPPER tessera_parquet;
+CREATE FOREIGN TABLE t_million (i bigint) SERVER pq OPTIONS (files :'million');
+
+-- spec: parquet-fdw/A cancel within a group of rows
+-- The group holds 977 windows of 1024 rows; the query stops, 57014,
+-- having read fewer. Once with Tessera off and once with it on.
+SET tessera.enable = off;
+SELECT parquet_test_cancel_after(:'parquet_module', 1);
+\set VERBOSITY sqlstate
+SELECT sum(i) FROM t_million;
+\set VERBOSITY default
+SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_group;
+RESET tessera.enable;
+SELECT parquet_test_cancel_after(:'parquet_module', 1);
+\set VERBOSITY sqlstate
+SELECT sum(i) FROM t_million;
+\set VERBOSITY default
+SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_group;
+SELECT parquet_test_cancel_after(:'parquet_module', NULL);
+-- Without the cancel, every window.
+SELECT sum(i) = 999999::numeric * 1000000 / 2 AS every_row FROM t_million;
+
+DROP FOREIGN TABLE t_million;
+DROP SERVER pq;
+DROP FUNCTION parquet_test_injection(), parquet_test_write(text, text),
+    parquet_test_cancel_after(text, int), parquet_test_windows();
+DROP EXTENSION tessera_parquet;
+DROP EXTENSION tessera;
