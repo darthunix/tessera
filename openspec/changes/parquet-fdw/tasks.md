@@ -21,7 +21,7 @@ maintainer to say that the machine is idle.
 
 ## 2. The reader
 
-- [ ] 2.1 `crates/tessera-parquet`: a file's footer, its schema and
+- [x] 2.1 `crates/tessera-parquet`: a file's footer, its schema and
       groups of rows, their least and greatest values and `NULL` counts
       with Parquet's rules of trust, the read plans of `datum-arrow` for
       the columns, a window of a column read for a selection, a chunk's

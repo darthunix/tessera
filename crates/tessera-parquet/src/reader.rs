@@ -1,0 +1,436 @@
+//! A column of a group of rows read window by window for a selection of
+//! its rows, and the Arrow arrays it gives as the input of `datum-arrow`.
+//!
+//! A column asked window after window keeps one reader of the `parquet`
+//! crate that goes forward over the group with the group's selection, so
+//! that each page is decompressed and the dictionary decoded once a group;
+//! its arrays hold a fixed count of selected rows, so it may read into the
+//! next window, and it keeps what it read past the window for the next
+//! ask. An ask out of that order builds a reader of its own for the rows
+//! asked, and leaves the forward one as it was.
+
+use std::fs::File;
+use std::io::{self, Read};
+use std::os::unix::fs::FileExt;
+use std::sync::Arc;
+
+use arrow_array::cast::AsArray;
+use arrow_array::types::{
+    Date32Type, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
+    TimestampMicrosecondType, TimestampMillisecondType, UInt8Type, UInt16Type, UInt32Type,
+};
+use arrow_array::{Array, ArrayRef};
+use arrow_schema::{DataType, TimeUnit};
+use bytes::Bytes;
+use datum_arrow::{Bitmap, Column, Input, Keys, ReadPlan, Values, mask_words};
+use parquet::arrow::arrow_reader::{
+    ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder, RowSelection, RowSelectionPolicy,
+    RowSelector,
+};
+use parquet::errors::ParquetError;
+use parquet::file::reader::{ChunkReader, Length};
+
+use crate::column::MappedColumn;
+use crate::error::{DATA_CORRUPTED, Error, INTERNAL_ERROR, Result};
+use crate::file::ParquetFile;
+
+/// The open file shared by every reader of it: reads at an offset, so
+/// that no reader opens or duplicates a descriptor.
+#[derive(Clone, Debug)]
+pub(crate) struct SharedFile {
+    file: Arc<File>,
+    len: u64,
+}
+
+impl SharedFile {
+    pub(crate) fn of(file: &ParquetFile) -> Self {
+        SharedFile {
+            file: Arc::clone(file.handle()),
+            len: file.identity().size,
+        }
+    }
+}
+
+impl Length for SharedFile {
+    fn len(&self) -> u64 {
+        self.len
+    }
+}
+
+/// A reader of the shared file from an offset forward.
+pub(crate) struct At {
+    file: Arc<File>,
+    position: u64,
+}
+
+impl Read for At {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.file.read_at(buf, self.position)?;
+        self.position += read as u64;
+        Ok(read)
+    }
+}
+
+impl ChunkReader for SharedFile {
+    type T = At;
+
+    fn get_read(&self, start: u64) -> parquet::errors::Result<At> {
+        Ok(At {
+            file: Arc::clone(&self.file),
+            position: start,
+        })
+    }
+
+    fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        let mut bytes = vec![0u8; length];
+        self.file
+            .read_exact_at(&mut bytes, start)
+            .map_err(|e| ParquetError::External(Box::new(e)))?;
+        Ok(Bytes::from(bytes))
+    }
+}
+
+/// The rows of a window a read gave: their values, one Arrow array of the
+/// rows in order, and the mask over the window's rows of the rows it holds.
+#[derive(Clone, Debug)]
+pub struct Window {
+    /// The values of the rows the mask holds, in their order.
+    pub array: ArrayRef,
+    /// A bit for each row of the window, set for the rows the array holds.
+    pub rows: Vec<u64>,
+}
+
+struct Forward {
+    reader: ParquetRecordBatchReader,
+    /// The group's row at which the next forward window starts.
+    next: usize,
+    /// Selected rows read past `next`, in their order.
+    pending: Vec<ArrayRef>,
+}
+
+/// A column of one group of rows, read for a selection of its rows.
+pub struct ColumnReader {
+    file: ParquetFile,
+    column: MappedColumn,
+    group: usize,
+    rows: usize,
+    selection: Arc<[u64]>,
+    batch: usize,
+    dictionary: bool,
+    forward: Option<Forward>,
+}
+
+impl ColumnReader {
+    /// A reader of `column` in group `group` of `file`, for the rows
+    /// `selection` holds, a bit for each row of the group; its arrays hold
+    /// `batch` selected rows.
+    ///
+    /// # Errors
+    ///
+    /// `XX000` for a group past the file's, a selection of fewer words than
+    /// the group's rows need, or a batch of no rows.
+    pub fn new(
+        file: &ParquetFile,
+        column: &MappedColumn,
+        group: usize,
+        selection: Arc<[u64]>,
+        batch: usize,
+    ) -> Result<Self> {
+        let rows = file
+            .group_rows(group)
+            .and_then(|r| usize::try_from(r).ok())
+            .ok_or_else(|| broken("a group of rows past the file's"))?;
+        if selection.len() < mask_words(rows) || batch == 0 {
+            return Err(broken(
+                "a selection shorter than its group, or a batch of no rows",
+            ));
+        }
+        let chunk = file.metadata().row_group(group).column(column.leaf());
+        Ok(ColumnReader {
+            file: file.clone(),
+            column: column.clone(),
+            group,
+            rows,
+            selection,
+            batch,
+            dictionary: chunk.dictionary_page_offset().is_some(),
+            forward: None,
+        })
+    }
+
+    /// The read plan of the arrays the reader gives: of a dictionary array
+    /// for a chunk of bytes that has a dictionary page.
+    pub fn plan(&self) -> &ReadPlan {
+        self.column.view(self.dictionary).1
+    }
+
+    /// Reads the window of `len` rows from the group's row `start`.
+    ///
+    /// Where the window starts where the last forward window ended, or is
+    /// the first asked, the forward reader gives every selected row of the
+    /// window; otherwise a reader of its own gives the rows `rows` asks, a
+    /// mask over the window's rows that the selection holds. The file is
+    /// checked unchanged after the read.
+    ///
+    /// # Errors
+    ///
+    /// `XX000` for a window past the group or a mask of rows shorter than
+    /// the window or holding a row the selection does not; `XX001` for
+    /// bytes the format cannot decode; `55000` for a file that changed.
+    pub fn read(&mut self, start: usize, len: usize, rows: &[u64]) -> Result<Window> {
+        let end = start
+            .checked_add(len)
+            .filter(|&end| end <= self.rows)
+            .ok_or_else(|| broken("a window past its group"))?;
+        let words = mask_words(len);
+        if rows.len() < words {
+            return Err(broken("a mask of rows shorter than its window"));
+        }
+        let selected = bits(&self.selection, start, len);
+        if rows[..words]
+            .iter()
+            .zip(&selected)
+            .any(|(asked, sel)| asked & !sel != 0)
+        {
+            return Err(broken("a row asked that the selection does not hold"));
+        }
+        let forward = match &self.forward {
+            None => true,
+            Some(f) => f.next == start,
+        };
+        let window = if forward {
+            let count = count_of(&selected);
+            let array = self.forward_read(start, end, count)?;
+            Window {
+                array,
+                rows: selected,
+            }
+        } else {
+            let asked = rows[..words].to_vec();
+            let array = self.read_rows(start, len, &asked)?;
+            Window { array, rows: asked }
+        };
+        self.file.check_unchanged()?;
+        Ok(window)
+    }
+
+    fn forward_read(&mut self, start: usize, end: usize, count: usize) -> Result<ArrayRef> {
+        if self.forward.is_none() {
+            let selection = selectors(&self.selection, start, self.rows);
+            let reader = self.build(selection, self.batch)?;
+            self.forward = Some(Forward {
+                reader,
+                next: start,
+                pending: Vec::new(),
+            });
+        }
+        let empty = self.empty()?;
+        let Some(forward) = self.forward.as_mut() else {
+            return Err(broken("a forward reader lost"));
+        };
+        let mut parts = std::mem::take(&mut forward.pending);
+        let mut have: usize = parts.iter().map(|a| a.len()).sum();
+        while have < count {
+            let Some(next) = forward.reader.next() else {
+                return Err(Error::new(
+                    DATA_CORRUPTED,
+                    "Parquet column has fewer rows than its group",
+                ));
+            };
+            let batch = next.map_err(|e| decode(&e))?;
+            let array = Arc::clone(batch.column(0));
+            have += array.len();
+            parts.push(array);
+        }
+        let all = concat(&parts, &empty)?;
+        forward.pending = vec![all.slice(count, all.len() - count)];
+        forward.next = end;
+        Ok(all.slice(0, count))
+    }
+
+    fn read_rows(&self, start: usize, len: usize, asked: &[u64]) -> Result<ArrayRef> {
+        let count = count_of(asked);
+        let empty = self.empty()?;
+        if count == 0 {
+            return Ok(empty);
+        }
+        let mut rows = vec![0u64; mask_words(self.rows)];
+        for row in 0..len {
+            if asked[row / 64] >> (row % 64) & 1 == 1 {
+                let at = start + row;
+                rows[at / 64] |= 1 << (at % 64);
+            }
+        }
+        let selection = selectors(&rows, 0, self.rows);
+        let reader = self.build(selection, count)?;
+        let parts = reader
+            .map(|batch| batch.map(|b| Arc::clone(b.column(0))))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| decode(&e))?;
+        let all = concat(&parts, &empty)?;
+        if all.len() != count {
+            return Err(Error::new(
+                DATA_CORRUPTED,
+                "Parquet column has fewer rows than its group",
+            ));
+        }
+        Ok(all)
+    }
+
+    fn build(&self, selection: RowSelection, batch: usize) -> Result<ParquetRecordBatchReader> {
+        let (view, _) = self.column.view(self.dictionary);
+        ParquetRecordBatchReaderBuilder::new_with_metadata(SharedFile::of(&self.file), view.clone())
+            .with_row_groups(vec![self.group])
+            .with_row_selection(selection)
+            .with_row_selection_policy(RowSelectionPolicy::Selectors)
+            .with_batch_size(batch)
+            .build()
+            .map_err(|e| crate::error::damaged(&e))
+    }
+
+    fn empty(&self) -> Result<ArrayRef> {
+        let (view, _) = self.column.view(self.dictionary);
+        let field = view
+            .schema()
+            .fields()
+            .first()
+            .ok_or_else(|| broken("a view without its column"))?;
+        Ok(arrow_array::new_empty_array(field.data_type()))
+    }
+}
+
+/// The rows of a group of `total` rows that `rows` holds from the row
+/// `from`, as the crate's runs of rows selected and skipped.
+fn selectors(rows: &[u64], from: usize, total: usize) -> RowSelection {
+    let selected = |row: usize| row >= from && rows[row / 64] >> (row % 64) & 1 == 1;
+    let mut out = Vec::new();
+    let mut row = 0;
+    while row < total {
+        let this = selected(row);
+        let run = (row..total).find(|&r| selected(r) != this).unwrap_or(total);
+        out.push(if this {
+            RowSelector::select(run - row)
+        } else {
+            RowSelector::skip(run - row)
+        });
+        row = run;
+    }
+    RowSelection::from(out)
+}
+
+/// The bits of `mask` from `start` for `len` rows, as a mask of their own.
+fn bits(mask: &[u64], start: usize, len: usize) -> Vec<u64> {
+    let mut out = vec![0u64; mask_words(len)];
+    for row in 0..len {
+        let at = start + row;
+        if mask[at / 64] >> (at % 64) & 1 == 1 {
+            out[row / 64] |= 1 << (row % 64);
+        }
+    }
+    out
+}
+
+fn count_of(mask: &[u64]) -> usize {
+    mask.iter().map(|w| w.count_ones() as usize).sum()
+}
+
+fn concat(parts: &[ArrayRef], empty: &ArrayRef) -> Result<ArrayRef> {
+    match parts {
+        [] => Ok(Arc::clone(empty)),
+        [one] => Ok(Arc::clone(one)),
+        _ => {
+            let refs: Vec<&dyn Array> = parts.iter().map(|a| a.as_ref()).collect();
+            arrow_select::concat::concat(&refs).map_err(|e| decode(&e))
+        }
+    }
+}
+
+fn decode(error: &arrow_schema::ArrowError) -> Error {
+    Error::new(
+        DATA_CORRUPTED,
+        format!("could not decode Parquet file: {error}"),
+    )
+}
+
+fn broken(message: &str) -> Error {
+    Error::new(INTERNAL_ERROR, message)
+}
+
+/// The buffers of an Arrow array as the input of `datum-arrow`, borrowed.
+///
+/// # Errors
+///
+/// `XX000` for an array of a type the reader does not give.
+pub fn input_of(array: &dyn Array) -> Result<Input<'_>> {
+    let len = array.len();
+    let nulls = nulls_of(array);
+    let plain = |values| Input::Plain(Column { len, values, nulls });
+    Ok(match array.data_type() {
+        DataType::Dictionary(key, _) if **key == DataType::Int32 => {
+            let dictionary = array.as_dictionary::<Int32Type>();
+            let values = dictionary.values();
+            let Input::Plain(values) = input_of(values.as_ref())? else {
+                return Err(broken("a dictionary of a dictionary"));
+            };
+            Input::Dictionary {
+                len,
+                keys: Keys::Int32(dictionary.keys().values()),
+                nulls,
+                values,
+            }
+        }
+        DataType::Boolean => {
+            let values = array.as_boolean().values();
+            plain(Values::Boolean(Bitmap::new(
+                values.inner().as_slice(),
+                values.offset(),
+            )))
+        }
+        DataType::Int8 => plain(Values::Int8(array.as_primitive::<Int8Type>().values())),
+        DataType::Int16 => plain(Values::Int16(array.as_primitive::<Int16Type>().values())),
+        DataType::Int32 => plain(Values::Int32(array.as_primitive::<Int32Type>().values())),
+        DataType::Int64 => plain(Values::Int64(array.as_primitive::<Int64Type>().values())),
+        DataType::UInt8 => plain(Values::UInt8(array.as_primitive::<UInt8Type>().values())),
+        DataType::UInt16 => plain(Values::UInt16(array.as_primitive::<UInt16Type>().values())),
+        DataType::UInt32 => plain(Values::UInt32(array.as_primitive::<UInt32Type>().values())),
+        DataType::Float32 => plain(Values::Float32(
+            array.as_primitive::<Float32Type>().values(),
+        )),
+        DataType::Float64 => plain(Values::Float64(
+            array.as_primitive::<Float64Type>().values(),
+        )),
+        DataType::Date32 => plain(Values::Int32(array.as_primitive::<Date32Type>().values())),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => plain(Values::Int64(
+            array.as_primitive::<TimestampMillisecondType>().values(),
+        )),
+        DataType::Timestamp(TimeUnit::Microsecond, _) => plain(Values::Int64(
+            array.as_primitive::<TimestampMicrosecondType>().values(),
+        )),
+        DataType::LargeBinary => {
+            let bytes = array.as_binary::<i64>();
+            plain(Values::LargeBytes {
+                offsets: bytes.value_offsets(),
+                data: bytes.values().as_slice(),
+            })
+        }
+        DataType::FixedSizeBinary(size) => {
+            let fixed = array.as_fixed_size_binary();
+            let size = usize::try_from(*size).map_err(|_| broken("a negative size"))?;
+            // A slice of fixed-size bytes slices its buffer of values.
+            plain(Values::FixedBytes {
+                size,
+                data: fixed.value_data(),
+            })
+        }
+        _ => return Err(broken("an array of a type the reader does not give")),
+    })
+}
+
+fn nulls_of(array: &dyn Array) -> Option<Bitmap<'_>> {
+    array
+        .nulls()
+        .map(|n| Bitmap::new(n.buffer().as_slice(), n.offset()))
+}
+
+#[cfg(test)]
+mod tests;
