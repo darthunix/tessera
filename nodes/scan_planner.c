@@ -1165,7 +1165,7 @@ check_source_path(const TessSource *source, const Path *offered, bool partial,
  * TESS_CLAUSE_UNSUPPORTED, when no source returns one.
  */
 static CustomPath *
-ask_sources(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial,
+ask_sources(PlannerInfo *root, Path *offered, bool partial, PathTarget *target,
 			TessScanClauses *clauses)
 {
 	const TessSourceRegistryOps *registry =
@@ -1174,7 +1174,7 @@ ask_sources(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial,
 	Size		answers = sizeof(int32) * Max(clauses->nclauses, 1);
 
 	memcpy(copy, offered, sizeof(ForeignPath));
-	copy->path.pathtarget = filter_input_target(root, rel);
+	copy->path.pathtarget = target;
 	for (const TessSource *source = registry->next(NULL); source != NULL;
 		 source = registry->next(source))
 	{
@@ -1195,26 +1195,97 @@ ask_sources(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial,
 }
 
 /*
- * A source's path for the offered path, alone with the relation's target
- * and the offered path's rows, where the relation has no clauses; NULL
- * where no source reads it.
+ * Whether a source may use the clause, that is run it ahead of the
+ * clauses TessFilter keeps: no volatile function, which the core runs in
+ * one place on each row that reaches it; no SubPlan, which would sit in
+ * two plan nodes when the source skips rows by it; and leakproof or of
+ * the relation's lowest security level, the core's own rule of moving a
+ * clause ahead of another.
+ */
+static bool
+clause_usable(RestrictInfo *rinfo, RelOptInfo *rel)
+{
+	return !contain_volatile_functions((Node *) rinfo->clause) &&
+		!contain_subplans((Node *) rinfo->clause) &&
+		restriction_is_securely_promotable(rinfo, rel);
+}
+
+/*
+ * TessFilter over a source's path, with the clauses the source does not
+ * check exactly, kept, and records of them and of those it answered for,
+ * which the filter's plan keeps and checks among the source plan's
+ * expressions. Its rows are the offered path's, as every path of the
+ * relation returns the same rows.
+ */
+static CustomPath *
+make_source_filter_path(RelOptInfo *rel, const Path *offered, CustomPath *source,
+						List *kept, List *answered)
+{
+	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
+	Path		template = source->path;
+
+	template.pathtarget = rel->reltarget;
+	template.rows = offered->rows;
+	config.template_path = &template;
+	config.methods = &filter_path_methods;
+	config.node = &tess_filter_node;
+	config.children = list_make1(source);
+	config.node_data = (Node *) list_make2(kept, answered);
+	/* Expressions in the targets are computed over the batches. */
+	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
+	return tess_path_create(&config);
+}
+
+/*
+ * A source's path for the offered path, with the relation's clauses in
+ * the core's order: alone, with the relation's target and the offered
+ * path's rows, where the source checks every clause exactly or there is
+ * none; under TessFilter, with the filter's input target, otherwise.
+ * NULL where no source reads the relation.
  */
 static Path *
 source_path(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial)
 {
+	List	   *ordered = tess_order_clauses(root, rel->baserestrictinfo);
+	int			count = list_length(ordered);
 	TessScanClauses clauses = TESS_STRUCT_INITIALIZER(TessScanClauses);
-	int32		answer = TESS_CLAUSE_UNSUPPORTED;
-	bool		usable = false;
+	RestrictInfo **items = palloc0_array(RestrictInfo *, Max(count, 1));
+	bool	   *usable = palloc0_array(bool, Max(count, 1));
+	int32	   *answers = palloc0_array(int32, Max(count, 1));
+	PathTarget *target = filter_input_target(root, rel);
+	List	   *kept = NIL;
+	List	   *answered = NIL;
 	CustomPath *path;
+	int			index = 0;
 
-	clauses.answers = &answer;
-	clauses.usable = &usable;
-	path = ask_sources(root, rel, offered, partial, &clauses);
+	foreach_node(RestrictInfo, rinfo, ordered)
+	{
+		items[index] = rinfo;
+		usable[index] = clause_usable(rinfo, rel);
+		index++;
+	}
+	clauses.nclauses = count;
+	clauses.clauses = items;
+	clauses.usable = usable;
+	clauses.answers = answers;
+	path = ask_sources(root, offered, partial, target, &clauses);
 	if (path == NULL)
 		return NULL;
-	path->path.pathtarget = rel->reltarget;
-	path->path.rows = offered->rows;
-	return &path->path;
+	for (index = 0; index < count; index++)
+	{
+		if (answers[index] != TESS_CLAUSE_EXACT)
+			kept = lappend(kept, items[index]->clause);
+		if (answers[index] != TESS_CLAUSE_UNSUPPORTED)
+			answered = lappend(answered, items[index]->clause);
+	}
+	if (kept == NIL)
+	{
+		path->path.pathtarget = rel->reltarget;
+		path->path.rows = offered->rows;
+		return &path->path;
+	}
+	path->path.pathtarget = target;
+	return (Path *) make_source_filter_path(rel, offered, path, kept, answered);
 }
 
 /*
@@ -1230,8 +1301,14 @@ add_source_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 	Path	   *path;
 
 	if (!tess_enabled() || !scan_supported(root, rel, rte) ||
-		rte->relkind != RELKIND_FOREIGN_TABLE || rel->baserestrictinfo != NIL)
+		rte->relkind != RELKIND_FOREIGN_TABLE)
 		return;
+	/* The core gates every scan of such a relation with a Result. */
+	foreach_node(RestrictInfo, rinfo, rel->baserestrictinfo)
+	{
+		if (rinfo->pseudoconstant)
+			return;
+	}
 	offered = offered_path(rel->pathlist, false);
 	path = offered != NULL ? source_path(root, rel, offered, false) : NULL;
 	if (path != NULL)
@@ -1320,6 +1397,28 @@ map_scan_tuple(TessLayout *layout, const TessPlanChild *child)
 	layout->target_columns = map;
 }
 
+/*
+ * A source's plan under the filter keeps no qualifiers, which would run
+ * the clauses the filter keeps, the ones the source may not use among
+ * them, and holds among its expressions every clause the source answered
+ * for, so that the planner lists their parameters for the node. Any other
+ * expression of the plan is the source's own duty: the spec forbids it to
+ * use a clause it did not answer for, and no check of the plan can tell
+ * a clause carried from a clause run.
+ */
+static void
+check_source_plan(Plan *plan, List *answered)
+{
+	if (!IsA(plan, CustomScan) || plan->qual != NIL)
+		elog(ERROR, "TessFilter found qualifiers on its source's plan");
+	foreach_ptr(Node, clause, answered)
+	{
+		if (!list_member(((CustomScan *) plan)->custom_exprs, clause))
+			elog(ERROR, "TessFilter found a clause its source answered for "
+				 "missing from the source's plan");
+	}
+}
+
 static Plan *
 filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			List *tlist, List *clauses, List *custom_plans)
@@ -1327,6 +1426,7 @@ filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	TessPlanConfig config = TESS_STRUCT_INITIALIZER(TessPlanConfig);
 	TessPlanChild child = TESS_STRUCT_INITIALIZER(TessPlanChild);
 	TessLayout	layout = TESS_STRUCT_INITIALIZER(TessLayout);
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
 	List	   *actual = extract_actual_clauses(clauses, false);
 	List	   *batch_clauses = NIL;
 	List	   *residual = NIL;
@@ -1336,8 +1436,29 @@ filter_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	if (!tess_plan_child(best_path, custom_plans, 0, &child) ||
 		!IsA(child.plan, CustomScan))
 		elog(ERROR, "TessFilter expected a batch child");
-	/* A native scan was planned without the clauses; a core scan had them. */
-	if (strcmp(child.node->name, TESS_HEAP_SCAN_NODE_NAME) == 0)
+	tess_path_get_info(best_path, &info);
+	/*
+	 * Over a source, the clauses it does not check exactly, in the core's
+	 * order; a native scan was planned without the clauses; a core scan
+	 * had them.
+	 */
+	if (info.node_data != NULL)
+	{
+		List	   *kept = linitial((List *) info.node_data);
+
+		check_source_plan(child.plan, lsecond((List *) info.node_data));
+		actual = NIL;
+		foreach_node(RestrictInfo, rinfo, clauses)
+		{
+			if (rinfo->pseudoconstant)
+				continue;
+			if (list_member(kept, rinfo->clause))
+				actual = lappend(actual, rinfo->clause);
+			else if (!list_member(lsecond((List *) info.node_data), rinfo->clause))
+				elog(ERROR, "TessFilter found a clause its path did not record");
+		}
+	}
+	else if (strcmp(child.node->name, TESS_HEAP_SCAN_NODE_NAME) == 0)
 	{
 		if (child.plan->qual != NIL)
 			elog(ERROR, "TessFilter expected a scan without clauses");
