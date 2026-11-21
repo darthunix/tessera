@@ -58,7 +58,7 @@ conversion once, before any value is converted.
      ReadPlan::new(arrow type, pg type, options) ─► refused, or a plan
      plan.failures() ─► the errors a caller may meet
      plan.read(slots asked, bitmaps) ─► PG representations
-     plan.test(constant, comparison) ─► a test of stored values
+     plan.test(comparison, constant) ─► a test of stored values
                                           │
    the caller: text headers, the batch ◄┘
 

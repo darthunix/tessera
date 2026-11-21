@@ -21,6 +21,13 @@ pub datum_arrow::ArrowType::Plain(datum_arrow::Plain)
 impl datum_arrow::ArrowType
 pub fn datum_arrow::ArrowType::new(data_type: &arrow_schema::datatype::DataType) -> datum_arrow::Result<Self>
 pub const fn datum_arrow::ArrowType::values(self) -> datum_arrow::Plain
+pub enum datum_arrow::Comparison
+pub datum_arrow::Comparison::Eq
+pub datum_arrow::Comparison::Ge
+pub datum_arrow::Comparison::Gt
+pub datum_arrow::Comparison::Le
+pub datum_arrow::Comparison::Lt
+pub datum_arrow::Comparison::Ne
 pub enum datum_arrow::ErrorKind
 pub datum_arrow::ErrorKind::BrokenShape
 pub datum_arrow::ErrorKind::InvalidOption
@@ -97,6 +104,10 @@ pub datum_arrow::Plain::UInt16
 pub datum_arrow::Plain::UInt32
 pub datum_arrow::Plain::UInt8
 pub datum_arrow::Plain::Utf8
+pub enum datum_arrow::RangeAnswer
+pub datum_arrow::RangeAnswer::EveryValue
+pub datum_arrow::RangeAnswer::NoValue
+pub datum_arrow::RangeAnswer::SomeMay
 pub enum datum_arrow::ReadOutput<'o, 'a>
 pub datum_arrow::ReadOutput::Bytes
 pub datum_arrow::ReadOutput::Bytes::nulls: &'o mut [u64]
@@ -104,6 +115,16 @@ pub datum_arrow::ReadOutput::Bytes::values: &'o mut [&'a [u8]]
 pub datum_arrow::ReadOutput::Datums
 pub datum_arrow::ReadOutput::Datums::nulls: &'o mut [u64]
 pub datum_arrow::ReadOutput::Datums::values: &'o mut [u64]
+pub enum datum_arrow::Test
+pub datum_arrow::Test::Compare
+pub datum_arrow::Test::Compare::bound: i64
+pub datum_arrow::Test::Compare::op: datum_arrow::Comparison
+pub datum_arrow::Test::Every
+pub datum_arrow::Test::Nothing
+impl datum_arrow::Test
+pub fn datum_arrow::Test::apply(self, column: &datum_arrow::Column<'_>, passed: &mut [u64]) -> datum_arrow::Result<()>
+pub const fn datum_arrow::Test::passes(self, stored: i64) -> bool
+pub const fn datum_arrow::Test::range(self, least: i64, greatest: i64) -> datum_arrow::RangeAnswer
 pub enum datum_arrow::TextBytes
 pub datum_arrow::TextBytes::Checked
 pub datum_arrow::TextBytes::Trusted
@@ -218,6 +239,8 @@ pub const fn datum_arrow::ReadPlan::gives_datums(&self) -> bool
 pub fn datum_arrow::ReadPlan::new(arrow: &arrow_schema::datatype::DataType, pg: datum_arrow::PgType, options: datum_arrow::ReadOptions) -> datum_arrow::Result<Self>
 pub const fn datum_arrow::ReadPlan::pg_type(&self) -> datum_arrow::PgType
 pub fn datum_arrow::ReadPlan::read<'a>(&self, input: &datum_arrow::Input<'a>, asked: &[u64], output: &mut datum_arrow::ReadOutput<'_, 'a>) -> datum_arrow::Result<()>
+impl datum_arrow::ReadPlan
+pub fn datum_arrow::ReadPlan::test(&self, op: datum_arrow::Comparison, constant: core::option::Option<i64>) -> datum_arrow::Result<datum_arrow::Test>
 pub struct datum_arrow::VarcharLength(_)
 impl datum_arrow::VarcharLength
 pub const fn datum_arrow::VarcharLength::get(self) -> u32

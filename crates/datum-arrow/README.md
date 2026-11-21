@@ -113,3 +113,29 @@ assert_eq!(written.len, 3);
 assert_eq!((values, validity[0]), ([10_957, 0, 10_958], 0b101));
 # Ok::<(), datum_arrow::Error>(())
 ```
+
+# Bounds of a comparison
+
+A reader that checks a clause on a file's stored values, or skips a
+part of a file by its least and greatest values, turns the constant
+once into a [`Test`] in the file's own unit with [`ReadPlan::test`],
+exact over every stored value; [`Test::range`] answers for a range of
+stored values, and [`Test::apply`] gives the slots of a column that
+pass.
+
+```
+use datum_arrow::{
+    Comparison, PgType, RangeAnswer, ReadOptions, ReadPlan, Test, Unit, arrow_schema::DataType,
+};
+
+let options = ReadOptions { unit: Some(Unit::Seconds), text: None, server_utf8: true };
+let plan = ReadPlan::new(&DataType::Int64, PgType::Timestamp, options)?;
+
+// EventTime >= '2000-01-01 00:00:00.5': microseconds since 2000, in
+// seconds since 1970 the first whole second after it.
+let test = plan.test(Comparison::Ge, Some(500_000))?;
+assert_eq!(test, Test::Compare { op: Comparison::Ge, bound: 946_684_801 });
+assert!(test.passes(946_684_801) && !test.passes(946_684_800));
+assert_eq!(test.range(0, 946_684_800), RangeAnswer::NoValue);
+# Ok::<(), datum_arrow::Error>(())
+```
