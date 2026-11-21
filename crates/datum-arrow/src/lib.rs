@@ -28,6 +28,15 @@ mod proofs;
 mod read;
 mod write;
 
+/// A gigabyte of zero bytes that the tests of the limits of size share,
+/// made once: they take slices of it and read none of its bytes, so its
+/// pages are never touched.
+#[cfg(test)]
+fn zeros() -> &'static [u8] {
+    static ZEROS: std::sync::LazyLock<Vec<u8>> = std::sync::LazyLock::new(|| vec![0u8; 1 << 30]);
+    &ZEROS
+}
+
 pub use arrow::{ArrowType, Key, Plain, TimeUnit};
 pub use bounds::{Comparison, RangeAnswer, Test};
 pub use column::{Bitmap, Column, Input, Keys, Values, mask_words};

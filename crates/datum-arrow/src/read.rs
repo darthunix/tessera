@@ -436,7 +436,10 @@ impl ReadPlan {
     /// slot is not `NULL` and its value converts, and otherwise with a
     /// value of no meaning. The output's place of a `NULL` slot has no
     /// meaning after the call; its bit in the mask of `NULL` slots is
-    /// set, and the bit of a slot not asked is clear.
+    /// set, and the bit of a slot not asked is clear. For strings and
+    /// bytes, and for any dictionary, the output's place of a slot not
+    /// asked is left as it was; a dictionary's value that no slot asked
+    /// and not `NULL` refers to is neither checked nor fails.
     ///
     /// # Errors
     ///
@@ -875,7 +878,8 @@ fn bytes_of<'a>(column: &Column<'a>) -> Option<ByteRange<'a>> {
 }
 
 /// The valid slots of the word from `first`: set where a slot holds a
-/// value, all of the column's slots where it has no bitmap.
+/// value, every bit where it has no bitmap; the caller masks the word
+/// by the slots asked.
 fn valid_word(nulls: Option<Bitmap<'_>>, first: usize, len: usize) -> u64 {
     // Without a bitmap every bit is set, those past the column too: each
     // use masks the word by the slots asked, which stop at the column.

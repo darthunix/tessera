@@ -60,9 +60,10 @@ one place, tested without a server.
   crate depends on those forms, which PostgreSQL keeps across releases
   as part of its on-disk format.
 - **Loops a compiler vectorizes.** A conversion over a batch runs as a
-  loop with no branch per value. The cost: a read of a column of fixed
-  width writes places of slots the caller did not ask for, and the API
-  says what those places hold.
+  loop with no branch per value. The cost: a read of a plain column of
+  integers, floating-point numbers, days, times or booleans writes
+  places of slots the caller did not ask for, and the API says what
+  those places hold.
 - **Exact bounds.** A clause such as `EventTime >= $1` is checked on the
   file's own stored integers, without converting a value, and gives
   exactly the rows the conversion and PostgreSQL's comparison would. The
@@ -101,8 +102,12 @@ one place, tested without a server.
 
 A plan holds the pair of types, the options and the failures it allows.
 A conversion takes a plan, a column's buffers, its bitmap of `NULL`
-values and a mask of the slots the caller asks for. It checks the shape
-of the buffers first, then converts each slot asked, and stops at the
+values and a mask of the slots the caller asks for. A read checks the
+shape of its buffers first; a write checks the shape of its input, then
+the size of its values, then the shape of its output, so that values
+too large are refused as such though the output be short too
+([`WritePlan::write`](../../../crates/datum-arrow/src/write.rs) gives
+the steps). Then the conversion takes each slot asked, and stops at the
 first slot asked that fails, with that slot and its error. The caller
 owns every buffer; the crate allocates nothing in a conversion and
 keeps nothing after it.
@@ -142,7 +147,7 @@ caller gives from what it knows of the file.
 
 `arrow-schema` is the crate's only dependency outside its tests. Its
 `DataType` is in the crate's public API, and Apache Arrow takes a new
-major version with every release, so a release of the crate works with
+major version several times a year, so a release of the crate works with
 one major version of Arrow, and the snapshot of its public API changes
 with each move.
 
@@ -189,10 +194,11 @@ The conversions work on PostgreSQL's **representations**: a value of a
 type the server passes by value as the 64-bit word of a `Datum`, as the
 server's own functions make it, and a `text`, a `varchar` or a `bytea`
 as its bytes without PostgreSQL's header of length. A read gives Datum
-words for a column of fixed width, so that a caller fills a batch's
-column in one pass, and slices of the input's bytes for strings, so
-that the caller copies each one once, into a value with its header, in
-memory the server owns. A write takes the same forms back.
+words for a type passed by value, so that a caller fills a batch's
+column in one pass, and slices of the input's bytes for strings, so that
+the caller copies each one once, into a value with its header, in memory
+the server owns; a `FixedSizeBinary` is bytes too, read into `bytea`. A
+write takes the same forms back.
 
 Refused: the format of `COPY BINARY`, in network byte order with a
 length before each value, which crates such as `arrow-pg` and `pgpq`
@@ -216,8 +222,10 @@ place.
 
 A write packs the slots asked, one Arrow value a slot asked, in their
 order: the Arrow array it makes holds only the rows the caller chose. A
-write of every slot, as a `COPY` makes, asks for every slot with a mask
-of all ones.
+write of every slot, as a `COPY` makes, asks for every slot of the
+column: a mask of all ones, the bits past the column's last slot clear,
+as [`WritePlan::write`](../../../crates/datum-arrow/src/write.rs) wants
+them.
 
 Refused: a list of slot numbers for the slots asked, which makes every
 loop a gather, slow on both machines; and a copy of a dictionary
@@ -226,18 +234,21 @@ uses.
 
 ## Loops a compiler vectorizes
 
-The conversions of fixed width are elementwise arithmetic with a check
-of range: an epoch shifted, a unit multiplied, an integer widened. Such
-a loop runs on the vector units of AArch64 and x86-64 without
-intrinsics when it has no branch per value, so the loops are written
-that way.
+The conversions of values passed by value are elementwise arithmetic
+with a check of range: an epoch shifted, a unit multiplied, an integer
+widened. Such a loop runs on the vector units of AArch64 and x86-64
+without intrinsics when it has no branch per value, so the loops are
+written that way.
 
 - A loop takes the 64 slots of a word of the mask at a time.
-- A plain array of fixed width converts every slot of a word, asked or
-  not, into the output's places, so that the loop is dense. A slot not
-  asked that is not `NULL` gets its true representation where its value
-  converts, so a place the caller filled before keeps its value; any
-  other place gets a value of no meaning. The documentation of
+- A plain array of integers, floating-point numbers, days, times or
+  booleans converts every slot of a word, asked or not, into the
+  output's places, so that the loop is dense. A dictionary and bytes of
+  fixed size are outside this set: they write the places of the slots
+  asked alone. A slot not asked that is not `NULL` gets its true
+  representation where its value converts, so a place the caller filled
+  before keeps its value; any other place gets a value of no meaning.
+  The documentation of
   [`ReadPlan::read`](../../../crates/datum-arrow/src/read.rs) says so.
 - A check folds its result over the 64 slots into one word, masked by
   the slots asked and not `NULL`; the first failing slot is the first
@@ -280,14 +291,14 @@ A reader that checks a clause such as `EventTime >= $1` on a file's
 seconds turns the constant once into a
 [`Test`](../../../crates/datum-arrow/src/bounds.rs) of the stored
 integers, with
-[`ReadPlan::test`](../../../crates/datum-arrow/src/bounds.rs): a bound
-in the stored unit, the operator changed where rounding needs it, or
-"every value", or "no value". For example, `= 12.5 s` passes no whole
-second, and `>= 12.5 s` is `> 12` in seconds. The test is exact over the
-whole stored domain, as if every stored value were counted in
-microseconds since 2000 in 128 bits, so that a stored value outside
-PostgreSQL's range compares by its true value, without an error, and
-only a row that passes is converted and may fail. The infinities are
+[`ReadPlan::test`](../../../crates/datum-arrow/src/bounds.rs): the
+comparison with a bound in the stored unit, rounded up or down as the
+operator needs, or "every value", or "no value". For example, `= 12.5 s`
+passes no whole second, and `>= 12.5 s` is `>= 13` in seconds. The test
+is exact over the whole stored domain, as if every stored value were
+counted in microseconds since 2000 in 128 bits, so that a stored value
+outside PostgreSQL's range compares by its true value, without an error,
+and only a row that passes is converted and may fail. The infinities are
 above and below every stored value. A plan of integers takes a constant
 of any integer type, as PostgreSQL's B-tree family of integers compares
 a `smallint` with a `bigint`.
@@ -335,7 +346,9 @@ under Kani and run in a row of CI's Kani job, every cover reached:
 - a string of up to four bytes read through a plan of checked bytes
   into `text`, refused exactly where it is not UTF-8 or holds a zero
   byte; and its characters counted as the standard library decodes
-  them.
+  them. The check of UTF-8 itself is the standard library's, which the
+  proof calls on both sides: it shows the plan's checks wired right,
+  not UTF-8.
 
 The bounds of seconds and milliseconds divide a symbolic 64-bit
 constant by a thousand or a million, which takes Kani past the ten
@@ -360,8 +373,9 @@ give the same answers.
 
 - **`numeric` and `Decimal128`.** PostgreSQL's `numeric` is a sequence
   of base-10000 digits; its conversion is a plan of its own, both ways.
-- **Nanoseconds.** PostgreSQL holds microseconds; a conversion would
-  drop digits, which a plan never does.
+- **Nanoseconds now.** PostgreSQL holds microseconds, and a plan never
+  drops digits: a plan of nanoseconds would name a new failure, a value
+  with digits below a microsecond, and come when a reader needs it.
 - **`interval`, `uuid`, times of day, nested types and unsigned 64-bit
   integers.** Each is a type of its own on one side or the other, added
   to the closed lists when a reader needs it.

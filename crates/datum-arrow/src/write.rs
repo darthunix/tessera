@@ -146,6 +146,15 @@ impl WritePlan {
     /// save the bits past `count` in the last byte of booleans and of
     /// validity, which are cleared.
     ///
+    /// The round trip: a representation valid for its type (a `boolean`
+    /// of 0 or 1; a `smallint`, an `integer`, a `date` and the bits of a
+    /// `real` widened with their sign, as the server makes them; a
+    /// string that is UTF-8 without a zero byte and within its length),
+    /// written without a failure and read back through the
+    /// [`ReadPlan`](crate::ReadPlan) of [`WritePlan::data_type`] into the
+    /// same PostgreSQL type, comes back with the same representation, bit
+    /// for bit.
+    ///
     /// # Errors
     ///
     /// In three steps, each before the next:
