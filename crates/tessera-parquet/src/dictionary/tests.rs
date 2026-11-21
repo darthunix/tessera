@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use arrow_array::Array;
 use datum_arrow::{ReadOutput, Unit, mask_words, oid};
 use parquet::basic::LogicalType;
 
@@ -176,8 +175,17 @@ fn strings_against_the_crate_s_reader() {
     let path = dir.path().join("t.parquet");
     let words: Vec<&[u8]> = vec![b"", b"google", b"\xff\xfe", b"yandex", b"", b"google"];
     let column = Column::bytes("s", &words).logical(LogicalType::String);
-    for headed in [false, true] {
-        testing::write(&path, std::slice::from_ref(&column), 6, true).unwrap();
+    for (headed, snappy) in [(false, false), (true, false), (false, true), (true, true)] {
+        let codec = if snappy {
+            parquet::basic::Compression::SNAPPY
+        } else {
+            parquet::basic::Compression::UNCOMPRESSED
+        };
+        let options = testing::Options {
+            compression: codec,
+            ..testing::Options::new(6, true)
+        };
+        testing::write_with(&path, std::slice::from_ref(&column), options).unwrap();
         if headed {
             testing::head_dictionaries_plain_dictionary(&path).unwrap();
         }
@@ -196,10 +204,27 @@ fn strings_against_the_crate_s_reader() {
         let distinct: BTreeSet<Vec<u8>> = words.iter().map(|w| w.to_vec()).collect();
         assert_eq!(values.iter().cloned().collect::<BTreeSet<_>>(), distinct);
         assert_eq!(values.len(), distinct.len());
-        // The crate's reader reads the chunk as it did.
+        // The crate's reader reads the chunk's rows as they were written,
+        // the repeats and the bytes that are not UTF-8 among them.
         let mut reader = ColumnReader::new(&file, &mapped, 0, every(6).into(), 8).unwrap();
         let window = reader.read(0, 6, &every(6)).unwrap();
-        assert_eq!(window.array.len(), 6);
+        let input = input_of(window.array.as_ref()).unwrap();
+        let mut rows: Vec<&[u8]> = vec![&[]; 6];
+        let mut nulls = [0u64; 1];
+        reader
+            .plan()
+            .read(
+                &input,
+                &every(6),
+                &mut ReadOutput::Bytes {
+                    values: &mut rows,
+                    nulls: &mut nulls,
+                },
+            )
+            .unwrap();
+        assert_eq!(rows, words);
+        // Every row is a value of the dictionary.
+        assert!(rows.iter().all(|r| values.iter().any(|v| v == r)));
     }
 }
 
@@ -262,4 +287,153 @@ fn values_shorter_than_their_page_says() {
         signed: true,
     };
     assert_eq!(plain_integers(&[255; 8], 1, 8, long).unwrap(), vec![-1]);
+}
+
+#[test]
+fn values_outside_a_mark_s_width_are_narrowed_as_the_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    let columns = [
+        Column::int32("i8", &[300, 1, 300]).logical(LogicalType::Integer {
+            bit_width: 8,
+            is_signed: true,
+        }),
+        Column::int32("u16", &[70_000, 2, 70_000]).logical(LogicalType::Integer {
+            bit_width: 16,
+            is_signed: false,
+        }),
+    ];
+    let options = testing::Options {
+        compression: parquet::basic::Compression::SNAPPY,
+        ..testing::Options::new(3, true)
+    };
+    testing::write_with(&path, &columns, options).unwrap();
+    testing::head_dictionaries_plain_dictionary(&path).unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    for (name, type_oid) in [("i8", oid::INT2), ("u16", oid::INT4)] {
+        let column = map_column(&file, &request(name, type_oid)).unwrap();
+        let Some(Dictionary::Integers(values)) = read_dictionary(&file, &column, 0).unwrap() else {
+            panic!("{name}: no dictionary");
+        };
+        let stored: BTreeSet<u64> = values.iter().map(|&v| v as u64).collect();
+        assert_eq!(stored, rows_read(&file, &column, 0), "{name}");
+    }
+    assert_eq!(
+        narrowed(
+            300,
+            FileType::Int {
+                bits: 8,
+                signed: true
+            }
+        ),
+        44
+    );
+    assert_eq!(
+        narrowed(
+            -1,
+            FileType::Int {
+                bits: 8,
+                signed: false
+            }
+        ),
+        255
+    );
+    assert_eq!(
+        narrowed(
+            70_000,
+            FileType::Int {
+                bits: 16,
+                signed: true
+            }
+        ),
+        4464
+    );
+    assert_eq!(
+        narrowed(
+            -1,
+            FileType::Int {
+                bits: 16,
+                signed: false
+            }
+        ),
+        65_535
+    );
+    assert_eq!(
+        narrowed(
+            -1,
+            FileType::Int {
+                bits: 32,
+                signed: false
+            }
+        ),
+        i64::from(u32::MAX)
+    );
+    assert_eq!(narrowed(-1, FileType::Date), -1);
+}
+
+#[test]
+fn a_dictionary_read_under_a_change_and_one_damaged_before() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    let write = || {
+        testing::write(&path, &[Column::int32("a", &[1, 2, 1])], 3, true).unwrap();
+    };
+    let damage = |file: &ParquetFile| {
+        let start = file
+            .metadata()
+            .row_group(0)
+            .column(0)
+            .dictionary_page_offset()
+            .unwrap() as usize;
+        let mut bytes = std::fs::read(&path).unwrap();
+        for byte in &mut bytes[start..start + 4] {
+            *byte = 0xff;
+        }
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        modified
+    };
+    let move_time = || {
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+    };
+    // Damaged under an open file, the time moved: the change.
+    write();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("a", oid::INT4)).unwrap();
+    damage(&file);
+    move_time();
+    assert_eq!(
+        read_dictionary(&file, &column, 0).unwrap_err().sqlstate(),
+        "55000"
+    );
+    // The time moved alone: the change, after a read that succeeds.
+    write();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("a", oid::INT4)).unwrap();
+    move_time();
+    assert_eq!(
+        read_dictionary(&file, &column, 0).unwrap_err().sqlstate(),
+        "55000"
+    );
+    // Damaged before the file was opened: damaged bytes.
+    write();
+    let first = ParquetFile::open(&path).unwrap();
+    let kept = damage(&first);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(kept)
+        .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("a", oid::INT4)).unwrap();
+    assert_eq!(
+        read_dictionary(&file, &column, 0).unwrap_err().sqlstate(),
+        "XX001"
+    );
 }

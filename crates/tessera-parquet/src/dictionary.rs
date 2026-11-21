@@ -37,8 +37,10 @@ pub enum Dictionary {
 ///
 /// # Errors
 ///
-/// `XX001` for a page the format cannot decode or values shorter than the
-/// page says; `55000` for a file that changed while the page was read.
+/// `55000` for a file that changed, whether the read failed or not;
+/// `58030` for a read the system failed; `XX001` for a page the format
+/// cannot decode, a panic of the crate's decoders among them, or values
+/// shorter than the page says.
 pub fn read_dictionary(
     file: &ParquetFile,
     column: &MappedColumn,
@@ -58,9 +60,14 @@ pub fn read_dictionary(
         return Ok(None);
     }
     let rows = usize::try_from(meta.num_rows()).unwrap_or(0);
-    let mut pages = SerializedPageReader::new(Arc::new(SharedFile::of(file)), chunk, rows, None)
-        .map_err(|e| error::damaged(&e))?;
-    let page = pages.get_next_page().map_err(|e| error::damaged(&e))?;
+    let shared = SharedFile::of(file);
+    let page = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        SerializedPageReader::new(Arc::new(shared.clone()), chunk, rows, None)
+            .and_then(|mut pages| pages.get_next_page())
+            .map_err(|e| error::damaged(&e))
+    }))
+    .unwrap_or_else(|payload| Err(crate::reader::panicked(payload.as_ref())))
+    .map_err(|e| file.read_error(shared.take_failure().unwrap_or(e)))?;
     file.check_unchanged()?;
     let Some(Page::DictionaryPage {
         buf,
@@ -94,10 +101,10 @@ fn plain_integers(buf: &[u8], count: usize, width: usize, file_type: FileType) -
         .chunks_exact(width)
         .take(count)
         .map(|bytes| match (width, file_type) {
-            (4, FileType::Int { signed: false, .. }) => {
-                i64::from(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+            (4, _) => {
+                let word = i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                narrowed(word, file_type)
             }
-            (4, _) => i64::from(i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])),
             _ => {
                 let mut word = [0u8; 8];
                 word.copy_from_slice(bytes);
@@ -105,6 +112,31 @@ fn plain_integers(buf: &[u8], count: usize, width: usize, file_type: FileType) -
             }
         })
         .collect())
+}
+
+/// A stored `INT32` as the reader gives its row: narrowed to its mark's
+/// width, as the `parquet` crate narrows a value outside it.
+pub(crate) fn narrowed(word: i32, file_type: FileType) -> i64 {
+    match file_type {
+        FileType::Int {
+            bits: 8,
+            signed: true,
+        } => i64::from(word as i8),
+        FileType::Int {
+            bits: 8,
+            signed: false,
+        } => i64::from(word as u8),
+        FileType::Int {
+            bits: 16,
+            signed: true,
+        } => i64::from(word as i16),
+        FileType::Int {
+            bits: 16,
+            signed: false,
+        } => i64::from(word as u16),
+        FileType::Int { signed: false, .. } => i64::from(word as u32),
+        _ => i64::from(word),
+    }
 }
 
 /// `count` plain values of `BYTE_ARRAY`: each a 4-byte little-endian

@@ -459,11 +459,12 @@ pass:
   the footer has no `min_value` and `max_value`, only for signed
   values;
 - for a chunk of strings, and for `= ''` and `<> ''` alone, whether its
-  least or its greatest value is empty, from the same fields where the
-  format lets a reader trust them, or from the older ones, since every
-  order of bytes puts the empty string first: `= ''` passes no row of a
-  chunk whose least value is not empty, and `<> ''` none of one whose
-  greatest value is empty;
+  least or its greatest value is empty, from the fields `min_value` and
+  `max_value` only where the column orders give the column the order of
+  its type: `= ''` passes no row of a chunk whose least value is not
+  empty, and `<> ''` none of one whose greatest value is empty; `<> ''`
+  is not tried against the dictionary of a chunk whose greatest value is
+  not empty;
 - for a clause other than `IS NULL` and `IS NOT NULL`, where these do
   not decide, its dictionary, where the footer's statistics of
   encodings say that every data page of the chunk is encoded through
