@@ -1,0 +1,15 @@
+-- A query that reads a group of a million rows of a Parquet file is
+-- cancelled when it has read the group's first window, and stops within
+-- the group. The cancel comes through an injection point at each window
+-- read, so this suite runs only on a build with them; on another it ends
+-- here.
+\getenv libdir PG_LIBDIR
+\getenv dlsuffix PG_DLSUFFIX
+\set parquet_test :libdir '/tessera_parquet_test' :dlsuffix
+\set parquet_module :libdir '/tessera_parquet_test'
+CREATE FUNCTION parquet_test_injection() RETURNS boolean
+    AS :'parquet_test', 'tessera_parquet_test_injection' LANGUAGE C STRICT;
+SELECT NOT parquet_test_injection() AS skip \gset
+\if :skip
+DROP FUNCTION parquet_test_injection();
+\quit
