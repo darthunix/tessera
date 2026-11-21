@@ -1,5 +1,5 @@
 MODULE_big = tessera_parquet
-OBJS = fdw.o files.o node.o options.o scan.o
+OBJS = analyze.o fdw.o files.o node.o options.o scan.o
 PG_CPPFLAGS = -I$(srcdir)/../include
 
 EXTENSION = tessera_parquet

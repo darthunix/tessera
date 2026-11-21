@@ -182,13 +182,8 @@ scan_rows(PlannerInfo *root, Path *path, TessScanClauses *clauses)
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	scan = tess_path_create(&config);
-	/*
-	 * shortcut: the wrapper's costs less a tenth, so that the node is
-	 * chosen; the costs of both paths from the footers come with their
-	 * estimates.
-	 */
-	scan->path.startup_cost = path->startup_cost * 0.9;
-	scan->path.total_cost = path->total_cost * 0.9;
+	parquet_source_costs(path, &scan->path.rows, &scan->path.startup_cost,
+						 &scan->path.total_cost);
 	return scan;
 }
 

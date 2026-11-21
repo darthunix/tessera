@@ -578,7 +578,7 @@ rows, and the rows of a scan by PostgreSQL's selectivity of its
 clauses. `ANALYZE` of a table SHALL sample its rows across its groups
 of rows and store their statistics, as for a heap table. The wrapper's
 and the source's paths SHALL cost the bytes of the column chunks they
-read and the rows they return, so that the source's path over the
+read and the rows of the files they read, so that the source's path over the
 columns a query reads costs less than the wrapper's rows over the same
 columns.
 
@@ -590,7 +590,8 @@ columns.
   `pg_stats` holds the table's columns, with values of every group
   among its common values or its histogram, and a clause's rows follow
   them
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Rows from the files`
 
 #### Scenario: The source chosen
 - **WHEN** a query that the scan planner offers to sources reads a

@@ -486,3 +486,59 @@ fn a_column_read_beside_hostile_neighbours_and_an_arrow_schema() {
         assert!(input_of(window.array.as_ref()).is_ok(), "{name}");
     }
 }
+
+#[test]
+fn a_column_s_chunk_bytes_are_those_of_its_groups() {
+    let dir = tempfile::tempdir().unwrap();
+    // A column of one value beside one of 10 000, compressed: the sums of
+    // their chunks differ, and each is the compressed size.
+    let path = dir.path().join("sizes.parquet");
+    let mut options = testing::Options::new(4000, false);
+    options.compression = Compression::SNAPPY;
+    let constant = vec![7i64; 10_000];
+    let spread: Vec<i64> = (0..10_000).map(|i| i * 7919).collect();
+    testing::write_with(
+        &path,
+        &[Column::int64("c", &constant), Column::int64("s", &spread)],
+        options,
+    )
+    .unwrap();
+    let sized = ParquetFile::open(&path).unwrap();
+    let sum = |leaf: usize, compressed: bool| -> u64 {
+        sized
+            .metadata()
+            .row_groups()
+            .iter()
+            .map(|g| {
+                let chunk = g.column(leaf);
+                let size = if compressed {
+                    chunk.compressed_size()
+                } else {
+                    chunk.uncompressed_size()
+                };
+                u64::try_from(size).unwrap()
+            })
+            .sum()
+    };
+    let c = map_column(&sized, &request("c", oid::INT8)).unwrap();
+    let s = map_column(&sized, &request("s", oid::INT8)).unwrap();
+    assert_eq!(c.chunk_bytes(), sum(0, true));
+    assert_eq!(s.chunk_bytes(), sum(1, true));
+    assert_ne!(c.chunk_bytes(), s.chunk_bytes());
+    assert_ne!(c.chunk_bytes(), sum(0, false));
+    let values: Vec<i64> = (0..10).collect();
+    let f = file(
+        dir.path(),
+        &[Column::int64("a", &values), Column::int64("b", &values)],
+    );
+    let mapped = map_column(&f, &request("b", oid::INT8)).unwrap();
+    let expected: i64 = f
+        .metadata()
+        .row_groups()
+        .iter()
+        .map(|group| group.column(1).compressed_size())
+        .sum();
+    assert_eq!(f.metadata().num_row_groups(), 3);
+    assert!(expected > 0);
+    assert_eq!(mapped.chunk_bytes(), u64::try_from(expected).unwrap());
+}

@@ -106,6 +106,7 @@ typedef struct TessParquetColumnInfo
 {
 	bool		gives_datums;	/* by tess_parquet_values, else as text */
 	bool		nullable;		/* the file column may hold NULL */
+	uint64_t	bytes;			/* the bytes of its chunks, compressed */
 } TessParquetColumnInfo;
 
 extern bool tess_parquet_column_info(const TessParquetColumn *column,

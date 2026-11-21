@@ -2305,6 +2305,13 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **The workers of a Parquet scan bounded by its groups** (a finding of
+  the review of the change `parquet-fdw`, task 4.3). A partial path
+  takes the workers the core gives a scan of the files' size, as the
+  spec says, but its participants take whole groups, so a large file of
+  one or two groups gets a path costed at a share of the participants
+  while one or two of them read it all. Suggested: no more participants
+  than groups, in the spec and the code.
 - **Batch nodes lose the workers' counters of a rescan** (a finding of
   the review of the change `parquet-fdw`, task 4.2). The nodes that sum
   their counters over the participants through `TessSharedStats` zero

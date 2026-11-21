@@ -69,9 +69,9 @@ maintainer to say that the machine is idle.
       wrapper's and the source's partial paths, the counts of `EXPLAIN`
       over the participants. Check: the suites; the cases of one file in
       parallel and of a file replaced between participants
-- [ ] 4.3 Estimates from the footers, the costs of both paths, and
+- [x] 4.3 Estimates from the footers, the costs of both paths, and
       `ANALYZE`. Check: the suites; the cases of the rows and of the
-      source chosen
+      costs
 - [ ] 4.4 The installed set builds the module from copies against the
       installed headers and runtime library. Check: `make -C
       test/installed installcheck`
@@ -91,9 +91,9 @@ maintainer to say that the machine is idle.
 - [ ] 5.1 The clauses on integers, dates and times checked on stored
       values through `datum-arrow`'s bounds, `IN`, `IS NULL`, with the
       values of parameters and subqueries. Check: the suites; the cases
-      of the clauses checked and left, and of values out of range, and
-      the source's halves under a clause of the cases of text from bytes
-      and of the length of a varchar
+      of the clauses checked and left, and of values out of range, the
+      source's halves under a clause of the cases of text from bytes and
+      of the length of a varchar, and the case of the source chosen
 - [ ] 5.2 The groups of rows skipped by their least and greatest values,
       their `NULL` counts and their dictionaries, with the reader's C
       entry points of a group's statistics and its dictionary. Check:

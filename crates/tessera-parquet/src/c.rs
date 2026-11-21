@@ -425,6 +425,8 @@ pub struct ColumnInfo {
     pub gives_datums: bool,
     /// Whether the file column may hold `NULL`.
     pub nullable: bool,
+    /// The bytes of the column's chunks in the file, compressed.
+    pub bytes: u64,
 }
 
 /// Writes what the wrapper needs of `column`.
@@ -447,6 +449,7 @@ pub unsafe extern "C" fn tess_parquet_column_info(
                 ColumnInfo {
                     gives_datums: column.plan().gives_datums(),
                     nullable: column.nullable(),
+                    bytes: column.chunk_bytes(),
                 },
             )
         })
