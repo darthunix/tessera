@@ -1,0 +1,23 @@
+[package]
+name = "tessera-parquet-testing"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "The writer of the Parquet files of tessera_parquet's suite, for its test module"
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+arrow-schema.workspace = true
+parquet.workspace = true
+serde_json.workspace = true
+tessera-parquet = { path = "../tessera-parquet", features = ["test-files"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

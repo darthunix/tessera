@@ -1,4 +1,4 @@
-SUBDIRS = bridge kernels runtime nodes test
+SUBDIRS = bridge kernels runtime nodes parquet test
 PG_CONFIG ?= pg_config
 CARGO ?= cargo
 
@@ -14,7 +14,7 @@ $(SUBDIRS):
 # Modules link the runtime archive and the tests link it and the Rust
 # library, so a parallel make must build those first.
 nodes: runtime
-test: runtime kernels nodes
+test: runtime kernels nodes parquet
 
 clean:
 	@for dir in $(SUBDIRS); do \
@@ -26,6 +26,7 @@ install:
 	$(MAKE) -C kernels PG_CONFIG="$(PG_CONFIG)" install
 	$(MAKE) -C runtime PG_CONFIG="$(PG_CONFIG)" install
 	$(MAKE) -C nodes PG_CONFIG="$(PG_CONFIG)" install
+	$(MAKE) -C parquet PG_CONFIG="$(PG_CONFIG)" install
 
 installcheck: all
 	$(MAKE) -C test PG_CONFIG="$(PG_CONFIG)" installcheck

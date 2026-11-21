@@ -10,8 +10,8 @@
 # aggregates written for x86-64, which are cut out by cfg here.
 
 # The tools, the test strategies, the benchmark programs, the writer of
-# tessera-parquet's test files and the loom models are not the
-# product. The table's loom models, their memory and
+# tessera-parquet's test files and its library for the suite's test
+# module, and the loom models are not the product. The table's loom models, their memory and
 # the model table (table/loom/) compile only with --cfg loom, which a
 # mutant's build lacks: each of their mutants would survive unseen. So do
 # the proofs by Kani (the table's table/proofs.rs, the float casts'
@@ -24,6 +24,7 @@ exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
     "crates/tessera-parquet/src/testing.rs",
+    "crates/tessera-parquet-testing/**",
     "crates/tessera-capi/benches/**",
     "**/loom.rs",
     "crates/relhash/src/table/loom/**",
