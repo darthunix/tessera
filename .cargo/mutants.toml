@@ -235,7 +235,7 @@ exclude_re = [
     "relspill/src/set/reader\\.rs:438:31: replace \\* with \\+ in Reader::open$",
     "relspill/src/set\\.rs:830:26: replace > with >= in Writer::finish$",
     "relspill/src/shared\\.rs:785:5: replace event_code -> u32 with [01]$",
-    "datum-arrow/src/read\\.rs:738:[0-9]+: replace > with >= in ReadPlan::check_bytes$",
+    "datum-arrow/src/read\\.rs:[0-9]+:32: replace > with >= in ReadPlan::check_bytes$",
     "datum-arrow/src/calendar\\.rs:(94|103):(25|36): replace < with <= in div_(floor|ceil)$",
     "datum-arrow/src/calendar\\.rs:(111:14: replace > with >=|113:21: replace < with <=) in clamp$",
 ]

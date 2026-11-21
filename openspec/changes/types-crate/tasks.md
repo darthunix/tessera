@@ -51,7 +51,7 @@ starts. Each commit passes `make rust-check`,
 
 ## 3. The spec, the design and the contract
 
-- [ ] 3.1 The rules and lists of the spec delta move into the crate's
+- [x] 3.1 The rules and lists of the spec delta move into the crate's
       documentation, and each requirement links to its items; every
       scenario names its test, and every pending check of the contract
       its check. Check: `openspec validate types-crate --strict`;

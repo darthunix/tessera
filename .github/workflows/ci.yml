@@ -154,10 +154,11 @@ jobs:
 
   # The crate datum-arrow alone, as for relhash and relspill: its tests
   # as the only package, its documentation with every warning an error
-  # and its examples, a dry run of its publishing, the tests of the packed
-  # crate, built from its files and Apache Arrow's crates alone, and its
-  # public API against the snapshot beside its change. It is not
-  # published.
+  # and its examples, a dry run of its publishing, its dependencies
+  # outside its tests, arrow-schema alone (the contract's rule "Free of
+  # both sides' code"), the tests of the packed crate, built from its
+  # files and Apache Arrow's crates alone, and its public API against the
+  # snapshot beside its change. It is not published.
   datum-arrow:
     name: datum-arrow alone (ubuntu-24.04)
     runs-on: ubuntu-24.04
@@ -178,6 +179,11 @@ jobs:
         run: cargo test --locked -p datum-arrow --doc
       - name: A dry run of publishing, from the packed files
         run: cargo publish --dry-run --locked -p datum-arrow
+      - name: Its dependencies outside its tests, arrow-schema alone
+        run: |
+          cargo tree --locked -p datum-arrow -e normal --depth 1 --prefix none |
+            sed 1d | cut -d' ' -f1 | sort -u > target/datum-arrow-deps.txt
+          echo arrow-schema | diff -u - target/datum-arrow-deps.txt
       - name: The tests of the packed crate
         run: |
           cargo package --locked --no-verify -p datum-arrow
