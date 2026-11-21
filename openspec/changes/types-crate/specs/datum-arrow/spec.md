@@ -45,7 +45,7 @@ errors it returns, and the rules and limits of the API.
   names, and the list holds `arrow-schema` alone
 - **Verified by:**
   `.github/workflows/ci.yml::cargo publish --dry-run --locked -p datum-arrow`;
-  `.github/workflows/ci.yml::cargo tree --locked -p datum-arrow -e normal`
+  `.github/workflows/ci.yml::cargo tree --locked -p datum-arrow`
 
 #### Scenario: Every public item documented
 - **WHEN** the crate is built with documentation required of every
@@ -88,9 +88,10 @@ its output's shape. A broken shape SHALL be the only error a call meets
 that its plan does not name.
 
 #### Scenario: Every broken shape refused
-- **WHEN** a read and a write of every plan are called over buffers of
-  each broken shape their documentation lists, the values of each
-  write within the size its offsets hold
+- **WHEN** a read and a write of every plan, and a test applied to a
+  column, are called over buffers of each broken shape their
+  documentation lists, the values of each write within the size its
+  offsets hold
 - **THEN** each call gives `XX000`, its output unchanged, and none
   panics
 - **AND** a write past the size with a slot asked past the column gives
@@ -102,7 +103,8 @@ that its plan does not name.
   `crates/datum-arrow/src/read/tests.rs::broken_shapes_of_a_dictionary_and_of_the_output`;
   `crates/datum-arrow/src/write/tests.rs::broken_shapes_of_a_write`;
   `crates/datum-arrow/src/write/tests.rs::bytes_past_the_offsets_fail_before_anything_is_written`;
-  `crates/datum-arrow/src/write/tests.rs::bytes_of_one_call_up_to_what_offsets_hold`
+  `crates/datum-arrow/src/write/tests.rs::bytes_of_one_call_up_to_what_offsets_hold`;
+  `crates/datum-arrow/src/bounds/tests.rs::a_test_applied_to_a_column`
 
 ### Requirement: The types of each side
 The crate SHALL know the PostgreSQL types
@@ -337,11 +339,11 @@ asked before any value is written.
   `crates/datum-arrow/src/proofs.rs::times_written_in_range_and_read_back`
 
 ### Requirement: The round trip
-A value of a PostgreSQL type the crate knows, valid for its type (a
-`boolean` of 0 or 1, a string that is UTF-8 without a zero byte and
-within its length), written through its write plan without a failure
-and read back through the read plan of the type the write plan gave,
-SHALL come back with the same representation, bit for bit.
+A value of a PostgreSQL type the crate knows, valid for its type,
+written through its write plan without a failure and read back through
+the read plan of the type the write plan gave, SHALL come back with the
+same representation, bit for bit, as
+[`WritePlan::write`](../../../crates/datum-arrow/src/write.rs) says.
 
 #### Scenario: Every type written and read back
 - **WHEN** values of every type, drawn at random over their whole
@@ -360,7 +362,8 @@ SHALL come back with the same representation, bit for bit.
   `arrow-array` accepts each array written as valid and gives the
   values written
 - **Verified by:**
-  `crates/datum-arrow/src/write/tests.rs::arrow_s_own_arrays`
+  `crates/datum-arrow/src/write/tests.rs::arrow_s_own_arrays`;
+  `crates/datum-arrow/src/write/tests.rs::every_type_written_and_read_back`
 
 ### Requirement: The bounds of a comparison
 For a read plan of integers, of days or of times, the crate SHALL turn a

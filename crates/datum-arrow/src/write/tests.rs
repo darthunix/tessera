@@ -273,8 +273,8 @@ fn the_values_before_a_failure_are_written() {
 fn bytes_past_the_offsets_fail_before_anything_is_written() {
     // Three values of 1 073 741 819 bytes: the first two fit the 32-bit
     // offsets, the third passes them, into a buffer of bytes too short.
-    let big = vec![0u8; 1_073_741_819];
-    let values: [&[u8]; 3] = [&big, &big, &big];
+    let big = &crate::zeros()[..1_073_741_819];
+    let values: [&[u8]; 3] = [big, big, big];
     let bytea = WritePlan::new(PgType::Bytea, true).unwrap();
     let input = WriteInput::Bytes {
         len: 3,
@@ -510,8 +510,8 @@ fn broken_shapes_of_a_write() {
 fn bytes_of_one_call_up_to_what_offsets_hold() {
     // Values of MAX_WRITE_BYTES in all pass the check of size, and fail
     // only at the output too short for them; nothing is copied.
-    let data = vec![0u8; 1 << 30];
-    let values: [&[u8]; 2] = [&data, &data[..(MAX_WRITE_BYTES - (1 << 30))]];
+    let data = crate::zeros();
+    let values: [&[u8]; 2] = [data, &data[..(MAX_WRITE_BYTES - data.len())]];
     let input = WriteInput::Bytes {
         len: 2,
         values: &values,
@@ -904,10 +904,13 @@ proptest! {
         nulls in prop::collection::vec(any::<bool>(), 140),
         asked in prop::collection::vec(prop::bool::weighted(0.7), 140),
         strings in prop::collection::vec("[^\0]{0,6}", 140),
+        blobs in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..7), 140),
     ) {
         let len = bits.len();
         let (nulls, asked) = (&nulls[..len], &asked[..len]);
-        for pg in ALL {
+        // A varchar of a length every string drawn keeps within.
+        let six = PgType::Varchar(Some(VarcharLength::new(6).unwrap()));
+        for pg in ALL.into_iter().chain([six]) {
             let mut values: Vec<u64> = bits.iter().map(|&b| representation(pg, b)).collect();
             match pg {
                 PgType::Date if len >= 2 => {
@@ -924,7 +927,12 @@ proptest! {
                 }
                 _ => {}
             }
-            let strings: Vec<Vec<u8>> = strings[..len].iter().map(|s| s.as_bytes().to_vec()).collect();
+            // Text valid for its type; bytea of any bytes.
+            let strings: Vec<Vec<u8>> = if pg == PgType::Bytea {
+                blobs[..len].to_vec()
+            } else {
+                strings[..len].iter().map(|s| s.as_bytes().to_vec()).collect()
+            };
             round_trip(pg, &values, &strings, nulls, asked);
         }
     }

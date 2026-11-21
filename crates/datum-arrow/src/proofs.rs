@@ -236,6 +236,8 @@ fn answers_for_a_range_are_exact() {
 /// A string of up to four bytes read through a plan of checked bytes
 /// into `text`: refused exactly where it is not UTF-8 or holds a zero
 /// byte, with `22021` and its slot, and given as its bytes otherwise.
+/// The check of UTF-8 is the standard library's on both sides: the proof
+/// shows the plan's checks wired, not UTF-8 itself.
 #[kani::proof]
 #[kani::unwind(6)]
 fn checked_text_is_refused_exactly() {
@@ -291,7 +293,8 @@ fn checked_text_is_refused_exactly() {
 
 /// Reads a column of one slot of `values` through the plan of
 /// `data_type` into `pg`: a plan that names no failure reads every value
-/// without one, and a plan of times fails only out of range.
+/// without one, and a plan of times fails exactly where the value is out
+/// of range.
 fn check_failures(
     data_type: &arrow_schema::DataType,
     pg: PgType,
@@ -382,7 +385,7 @@ fn long_integers_never_fail() {
     );
 }
 
-/// Seconds fail only out of range.
+/// Seconds fail exactly where the value is out of range.
 #[kani::proof]
 fn seconds_fail_only_out_of_range() {
     let values: [i64; 1] = [kani::any()];

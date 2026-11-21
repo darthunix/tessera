@@ -38,9 +38,9 @@ pub enum Test {
     Every,
     /// No stored value passes.
     Nothing,
-    /// A stored value passes where `stored op bound` holds, `bound` in
-    /// the stored unit; `op` may differ from the comparison asked, where
-    /// a bound in a coarser unit needs it.
+    /// A stored value passes where `stored op bound` holds: `op` the
+    /// comparison asked, `bound` the constant in the stored unit, rounded
+    /// up or down as the operator needs where the unit is coarser.
     Compare {
         /// The comparison of the stored value with the bound.
         op: Comparison,

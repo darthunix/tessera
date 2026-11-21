@@ -568,12 +568,12 @@ fn strings_checked() {
 fn a_string_too_large_fails_before_its_bytes_are_checked() {
     // MAX_VALUE_BYTES + 1 zero bytes: the size is checked before the zero
     // bytes, and before UTF-8.
-    let data = vec![0u8; MAX_VALUE_BYTES + 1];
+    let data = &crate::zeros()[..=MAX_VALUE_BYTES];
     let offs = [0i64, i64::try_from(data.len()).unwrap()];
     let input = plain(
         Values::LargeBytes {
             offsets: &offs,
-            data: &data,
+            data,
         },
         1,
     );
@@ -595,12 +595,13 @@ fn a_string_too_large_fails_before_its_bytes_are_checked() {
             (error.kind(), error.sqlstate()),
             (ErrorKind::TooLarge, "54000")
         );
-    } // The largest value PostgreSQL holds is read.
+    }
+    // The largest value PostgreSQL holds is read.
     let offs = [0i64, i64::try_from(MAX_VALUE_BYTES).unwrap()];
     let largest = plain(
         Values::LargeBytes {
             offsets: &offs,
-            data: &data,
+            data,
         },
         1,
     );
@@ -687,6 +688,93 @@ fn numbers_widened() {
     let input = plain(Values::Float64(&[-0.25]), 1);
     let (values, _) = datums(&double, &input, &[1]).unwrap();
     assert_eq!(values[0], (-0.25f64).to_bits());
+}
+
+/// Strings, bytes and dictionaries of either output read for a sparse
+/// selection: the place of every slot not asked keeps what the caller
+/// put there.
+#[test]
+fn places_of_slots_not_asked_kept() {
+    let (offs, data) = offsets(&[b"a", b"bb", b"ccc", b"dddd", b"e"]);
+    let asked = [0b1_0010u64];
+    let kept: &[u8] = b"kept";
+    let text = plan(&DataType::Utf8, PgType::Text, OPTIONS);
+    let strings = plain(
+        Values::Bytes {
+            offsets: &offs,
+            data: &data,
+        },
+        5,
+    );
+    let entries = Column {
+        len: 5,
+        values: Values::Bytes {
+            offsets: &offs,
+            data: &data,
+        },
+        nulls: None,
+    };
+    let keys = [4u8, 3, 2, 1, 0];
+    let text_dictionary = Input::Dictionary {
+        len: 5,
+        keys: Keys::UInt8(&keys),
+        nulls: None,
+        values: entries,
+    };
+    let dictionary_plan = plan(
+        &dictionary(DataType::UInt8, DataType::Utf8),
+        PgType::Text,
+        OPTIONS,
+    );
+    for (plan, input, expected) in [
+        (&text, &strings, [&b"bb"[..], b"e"]),
+        (&dictionary_plan, &text_dictionary, [&b"dddd"[..], b"a"]),
+    ] {
+        let mut values: Vec<&[u8]> = vec![kept; 5];
+        let mut nulls = vec![0u64; 1];
+        plan.read(
+            input,
+            &asked,
+            &mut ReadOutput::Bytes {
+                values: &mut values,
+                nulls: &mut nulls,
+            },
+        )
+        .unwrap();
+        assert_eq!([values[1], values[4]], expected);
+        assert!([0, 2, 3].iter().all(|&slot| values[slot] == kept));
+    }
+    let days = [1i32, 2, 3, 4, 5];
+    let day_dictionary = Input::Dictionary {
+        len: 5,
+        keys: Keys::UInt8(&keys),
+        nulls: None,
+        values: Column {
+            len: 5,
+            values: Values::Int32(&days),
+            nulls: None,
+        },
+    };
+    let day_plan = plan(
+        &dictionary(DataType::UInt8, DataType::Int32),
+        PgType::Date,
+        with_unit(Unit::Days),
+    );
+    let mut values = vec![7u64; 5];
+    let mut nulls = vec![0u64; 1];
+    day_plan
+        .read(
+            &day_dictionary,
+            &asked,
+            &mut ReadOutput::Datums {
+                values: &mut values,
+                nulls: &mut nulls,
+            },
+        )
+        .unwrap();
+    let day = |stored: i32| (i64::from(stored) - EPOCH_DAYS) as u64;
+    assert_eq!([values[1], values[4]], [day(4), day(1)]);
+    assert!([0, 2, 3].iter().all(|&slot| values[slot] == 7));
 }
 
 #[test]
@@ -1827,7 +1915,20 @@ proptest! {
                                 prop_assert!(plan.failures().kinds().any(|kind| kind == error.kind()), "{:?} of {:?} into {:?}", error, data_type, pg);
                             }
                             for op in [Comparison::Eq, Comparison::Ne, Comparison::Lt, Comparison::Le, Comparison::Gt, Comparison::Ge] {
-                                let Ok(test) = plan.test(op, Some(constant)) else { continue };
+                                // Bounds of integers, days and times alone, never refused.
+                                let bounded = matches!(
+                                    plan.pg_type(),
+                                    PgType::Int2 | PgType::Int4 | PgType::Int8 | PgType::Date
+                                        | PgType::Timestamp | PgType::Timestamptz
+                                );
+                                let test = match plan.test(op, Some(constant)) {
+                                    Ok(test) => test,
+                                    Err(error) => {
+                                        prop_assert!(!bounded && error.kind() == ErrorKind::NotSupported, "{:?}", error);
+                                        continue;
+                                    }
+                                };
+                                prop_assert!(bounded);
                                 let _ = test.range(constant, constant.wrapping_mul(3));
                                 if let Input::Plain(column) = &input {
                                     let mut passed = vec![0u64; mask_words(len)];
@@ -1843,7 +1944,15 @@ proptest! {
         prop_assert_eq!(accepted, 196);
         for pg in every_pg_type() {
             for server_utf8 in [true, false] {
-                let Ok(plan) = WritePlan::new(pg, server_utf8) else { continue };
+                let text = matches!(pg, PgType::Text | PgType::Varchar(_));
+                let plan = match WritePlan::new(pg, server_utf8) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        // Text on a server of another encoding alone is refused.
+                        prop_assert!(text && !server_utf8 && error.kind() == ErrorKind::NotSupported, "{:?}", error);
+                        continue;
+                    }
+                };
                 let owned: Vec<Vec<u8>> = bits.iter().map(|w| w.to_le_bytes()[..(w % 8) as usize].to_vec()).collect();
                 let strings: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
                 let nulls: Vec<u64> = (0..mask_words(len)).map(|w| bitmap.word(w * 64, len)).collect();

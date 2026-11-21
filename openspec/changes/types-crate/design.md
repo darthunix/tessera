@@ -206,7 +206,9 @@ rather than for a sample. Kani proves, of the scalar code of one value:
   not UTF-8 or holds a zero byte, and given as its bytes otherwise; and
   the count of a `varchar`'s characters against the characters the
   standard library decodes from a valid string, for strings of up to
-  four bytes.
+  four bytes. The check of UTF-8 itself is the standard library's,
+  which the proof calls on both sides: it shows the plan's wiring, not
+  UTF-8.
 
 Kani's cost grows with the length of a loop it unrolls, and it does not
 know most vector intrinsics, so it proves the code of one value; the
@@ -219,8 +221,8 @@ a row of the Kani job of CI, as `relhash` and `relspill` have.
 
 A reader that checks a clause such as `EventTime >= '2013-07-01'` on
 the file's seconds turns the constant once into a test of the stored
-integers: a bound in seconds, the operator changed where rounding needs
-it (`= 12.5 s` passes no whole second), or "every value", or "no
+integers: a bound in seconds, rounded up or down as the operator needs
+(`= 12.5 s` passes no whole second), or "every value", or "no
 value". The test is exact over the whole stored domain, as if every
 stored value were counted in microseconds since 2000 in 128 bits, so
 that a stored value outside PostgreSQL's range compares by its true
@@ -263,6 +265,12 @@ On 2026-11-21:
   are written for the compiler to vectorize, the slots asked given as a
   mask, with no crate of its own for vector code and explicit
   intrinsics only where a measurement asks for them.
+- The default build of x86-64 is kept, its loops scalar but without a
+  branch per value, with no choice of code at run time.
+- Kani proves the bounds of integers, days and microseconds; the bounds
+  of seconds and milliseconds, which Kani does not finish within the
+  limit of a harness, rest on the property tests against the exact
+  count.
 
 ## Was and will be
 
@@ -276,8 +284,9 @@ On 2026-11-21:
 - **`numeric` and `Decimal128`.** PostgreSQL's numeric is a sequence of
   base-10000 digits; its conversion is a change of its own, with
   `COPY`'s needs.
-- **Nanoseconds.** PostgreSQL holds microseconds; a conversion would
-  drop digits, which a plan of this crate never does.
+- **Nanoseconds now.** PostgreSQL holds microseconds, and a plan never
+  drops digits: a plan of nanoseconds would name a new failure, a value
+  with digits below a microsecond.
 - **A C API.** The wrapper reaches the crate from Rust, through its
   reader; a C API waits for a caller in C.
 
@@ -288,7 +297,7 @@ On 2026-11-21:
   release keeps; the wrapper's suite compares the crate's results with
   the server's own.
 - [Arrow's crates move fast] → `arrow-schema` takes a new major
-  version with every release of Apache Arrow, and its `DataType` is in
+  version several times a year, and its `DataType` is in
   this crate's public API, so a release of `datum-arrow` works with one
   major of Arrow, the one the `parquet` crate of the workspace needs,
   and its API snapshot changes with each move.

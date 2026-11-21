@@ -14,7 +14,7 @@ The crate depends on no crate of Tessera and on no code of PostgreSQL,
 and of Apache Arrow on `arrow-schema` alone outside its tests, so that
 it builds and ships by itself.
 - **Checked by:**
-  `.github/workflows/ci.yml::cargo tree --locked -p datum-arrow -e normal`;
+  `.github/workflows/ci.yml::cargo tree --locked -p datum-arrow`;
   `.github/workflows/ci.yml::cargo publish --dry-run --locked -p datum-arrow`;
   `crates/datum-arrow/src/lib.rs::#![forbid(unsafe_code)]`, no foreign
   call without it

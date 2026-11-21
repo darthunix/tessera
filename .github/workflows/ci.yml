@@ -181,7 +181,7 @@ jobs:
         run: cargo publish --dry-run --locked -p datum-arrow
       - name: Its dependencies outside its tests, arrow-schema alone
         run: |
-          cargo tree --locked -p datum-arrow -e normal --depth 1 --prefix none |
+          cargo tree --locked -p datum-arrow -e normal,build --target all --depth 1 --prefix none |
             sed 1d | cut -d' ' -f1 | sort -u > target/datum-arrow-deps.txt
           echo arrow-schema | diff -u - target/datum-arrow-deps.txt
       - name: The tests of the packed crate
