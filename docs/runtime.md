@@ -954,6 +954,15 @@ A parent that adds its path to the same relation as the child copies the
 child first (`*copy = *seqscan`): `add_path` frees a core path that the new
 path dominates, and the wrapped child must outlive it.
 
+A foreign table is read in batches by a source of the source registry,
+not by a node kind: the scan planner offers each registered source,
+through `TessSource.scan_rows`, the wrapper's foreign path and the
+relation's clauses, and adds the path the first source returns, alone
+or under `TessFilter`, to the relation's paths ([source.md](source.md)).
+`tess_batch_scan_path` and `tess_batch_input_path` ask no source: a
+batch parent reads the source's path when the planner chose it, and
+packs the wrapper's rows otherwise.
+
 A set operation's output columns are `Var`s of no relation (`varno` 0),
 which the core's `Append` and aggregate above it replace by references to
 their first child's targets, and a custom scan's target lists cannot
