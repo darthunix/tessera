@@ -63,7 +63,7 @@ maintainer to say that the machine is idle.
       column asked again and of `EXPLAIN`, and the source's halves of
       the cases of text from bytes, of the length of a varchar and of
       reading rows, those without a clause
-- [ ] 4.2 Parallel reading: the leader's list of files and groups, with
+- [x] 4.2 Parallel reading: the leader's list of files and groups, with
       each file's size, time, device and inode, checked by every
       participant on the file it opens, and the shared counter for the
       wrapper's and the source's partial paths, the counts of `EXPLAIN`

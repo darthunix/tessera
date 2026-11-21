@@ -83,6 +83,22 @@ BEGIN
         END IF;
     END LOOP;
 END $$;
+-- The same for a parallel plan, each node's actual rows and loops left
+-- out: they depend on the workers launched.
+CREATE FUNCTION parallel_lines(statement text, pattern text) RETURNS SETOF text
+LANGUAGE sql AS $$
+    SELECT regexp_replace(line, ' \(actual [^)]*\)', '')
+    FROM explain_lines('ANALYZE', statement, pattern) line
+$$;
+-- The workers a parallel plan launched, over its gathers.
+CREATE FUNCTION workers_launched(statement text) RETURNS int LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, COSTS OFF) '
+        || statement INTO plan;
+    RETURN (SELECT sum(w::int) FROM jsonb_path_query(plan, '$.** ."Workers Launched"') w);
+END $$;
 
 \getenv abs_builddir PG_ABS_BUILDDIR
 \set dir :abs_builddir '/results/parquet_files'
@@ -623,7 +639,8 @@ FROM (VALUES (64, 0, 0), (10, 6, 60)) b(max_rows, skip, first) ORDER BY max_rows
 
 -- spec: parquet-fdw/What EXPLAIN shows
 -- Plain, with VERBOSE and with ANALYZE, through the wrapper's rows and
--- through the source.
+-- through the source; the parallel plan's counts under "One file in
+-- parallel".
 SET tessera.enable = off;
 SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Row Groups');
 SELECT explain_lines('VERBOSE', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Row Groups');
@@ -633,6 +650,86 @@ SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_files', 'Scan|Parq
 SELECT explain_lines('VERBOSE', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Row Groups');
 SELECT explain_lines('ANALYZE', 'SELECT a FROM t_files',
                      'Scan|Parquet|Row Groups|Values Decoded');
+
+-- spec: parquet-fdw/One file in parallel
+-- A table of one file of eight groups read by a parallel plan, with
+-- Tessera off and on: in full, under a count, under a grouping, and as
+-- the inner side of a nested loop that rescans the parallel plan for
+-- each outer row. Each result equals the serial one, the plan has the
+-- workers the core gives the file's size, and the groups read add up to
+-- eight a scan. The counts of EXPLAIN ANALYZE are those of the serial
+-- plan (the requirement "EXPLAIN").
+SELECT parquet_test_write(:'dir' || '/eight.parquet', json_build_object(
+    'group_rows', 1000, 'columns', json_build_array(
+      json_build_object('name', 'i', 'type', 'int64', 'range', 8000),
+      json_build_object('name', 's', 'type', 'bytes', 'values',
+        (SELECT json_agg('s' || (n % 13) ORDER BY n) FROM generate_series(0, 7999) n))))::text);
+\set eight :dir '/eight.parquet'
+CREATE FOREIGN TABLE t_eight (i bigint, s text) SERVER pq OPTIONS (files :'eight');
+-- The rows a parallel plan of a query differs by from its serial plan's,
+-- both kept in tables, counted both ways.
+CREATE FUNCTION differ_serial(statement text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    n bigint;
+    saved text := current_setting('max_parallel_workers_per_gather');
+BEGIN
+    EXECUTE 'CREATE TEMP TABLE parallel_rows AS ' || statement;
+    PERFORM set_config('max_parallel_workers_per_gather', '0', true);
+    EXECUTE 'CREATE TEMP TABLE serial_rows AS ' || statement;
+    PERFORM set_config('max_parallel_workers_per_gather', saved, true);
+    SELECT count(*) INTO n FROM ((TABLE parallel_rows EXCEPT ALL TABLE serial_rows)
+                                 UNION ALL (TABLE serial_rows EXCEPT ALL TABLE parallel_rows)) d;
+    DROP TABLE parallel_rows, serial_rows;
+    RETURN n;
+END $$;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET enable_material = off;
+-- The workers the core gives the file's 14 pages: none under the
+-- default threshold of a parallel scan, and more as the threshold falls.
+SET max_parallel_workers_per_gather = 4;
+SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_eight', 'Workers Planned');
+SET min_parallel_table_scan_size = '40kB';
+SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_eight', 'Workers Planned');
+SET min_parallel_table_scan_size = '16kB';
+SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_eight', 'Workers Planned');
+SET min_parallel_table_scan_size = 0;
+SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_eight', 'Workers Planned');
+SET max_parallel_workers_per_gather = 2;
+-- The workers alone read, so that they divide the groups.
+SET parallel_leader_participation = off;
+SET tessera.enable = off;
+SELECT parallel_lines('SELECT i, s FROM t_eight', 'Workers Planned|Parallel|Row Groups');
+SELECT parallel_lines('SELECT * FROM (SELECT count(*) AS n, sum(i) AS total FROM t_eight) ss
+                       RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true',
+                      'Nested Loop|Parallel|Row Groups Read');
+SELECT workers_launched('SELECT i, s FROM t_eight') > 0 AS workers_read;
+SELECT differ_serial('SELECT i, s FROM t_eight') AS in_full,
+       differ_serial('SELECT count(*), sum(i) FROM t_eight') AS a_count,
+       differ_serial('SELECT s, count(*), sum(i) FROM t_eight GROUP BY s') AS a_grouping,
+       differ_serial('SELECT * FROM (SELECT count(*) AS n, sum(i) AS total FROM t_eight) ss
+                      RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true') AS rescanned;
+RESET tessera.enable;
+SELECT parallel_lines('SELECT count(*), sum(i), max(s) FROM t_eight',
+                      'Workers Planned|Parallel|Row Groups|Values Decoded');
+SELECT parallel_lines('SELECT * FROM (SELECT count(*) AS n, sum(i) AS total FROM t_eight) ss
+                       RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true',
+                      'Nested Loop|Parallel|Row Groups Read|Values Decoded');
+SELECT workers_launched('SELECT count(*), sum(i), max(s) FROM t_eight') > 0 AS workers_read;
+SELECT differ_serial('SELECT i, s FROM t_eight') AS in_full,
+       differ_serial('SELECT count(*), sum(i) FROM t_eight') AS a_count,
+       differ_serial('SELECT s, count(*), sum(i) FROM t_eight GROUP BY s') AS a_grouping,
+       differ_serial('SELECT * FROM (SELECT count(*) AS n, sum(i) AS total FROM t_eight) ss
+                      RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true') AS rescanned;
+RESET parallel_leader_participation;
+SET max_parallel_workers_per_gather = 0;
+SELECT explain_lines('ANALYZE', 'SELECT count(*), sum(i), max(s) FROM t_eight',
+                     'Row Groups|Values Decoded');
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_table_scan_size;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET enable_material;
 
 -- spec: parquet-fdw/Files replaced, added, removed and damaged
 -- A prepared statement over a pattern: its file replaced by one of other
@@ -763,13 +860,14 @@ SELECT i FROM t_damaged;
 DROP FOREIGN TABLE t_files, t_owned, t_plain, t_none, t_gzip, t_types, t_drop, t_clickbench,
     t_mappings, t_check_plain, t_check_dict, t_trust, t_bytes, t_vc_three, t_vc_four, t_vc_trust,
     t_rep, t_cur, t_two, t_cut, t_damaged, t_far, t_windows, t_empty, t_wide, t_asks,
-    t_damaged_pages;
+    t_damaged_pages, t_eight;
 DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks;
 DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, bool, bool, int),
     parquet_test_head_dictionaries(text), parquet_test_replace(text, text, text),
     parquet_test_remove(text), parquet_test_cut(text, int), parquet_test_damage(text, int, int),
     sqlstate_of(text), differ(text, text), differ_off(text), scans_of(text),
-    explain_lines(text, text, text), parquet_test_asks(text, int, int);
+    explain_lines(text, text, text), parquet_test_asks(text, int, int), differ_serial(text),
+    parallel_lines(text, text), workers_launched(text);
 DROP SERVER pq;
 REVOKE CREATE ON SCHEMA public FROM parquet_reader, parquet_other;
 DROP ROLE parquet_reader, parquet_other;

@@ -9,6 +9,7 @@
  */
 #include "postgres.h"
 
+#include "access/parallel.h"
 #include "access/sysattr.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
@@ -85,7 +86,6 @@ struct ParquetNode
 	uint64		next_row;		/* of the group read, the next to publish */
 	MemoryContext batch_cxt;	/* the values of the batch, reset at the next */
 	ParquetBatch batch;
-	uint64		values_decoded; /* over every rescan */
 	/* A row-wise parent: the batch served, its next row, its targets. */
 	bool		rows;
 	TessBatch  *active;
@@ -101,6 +101,11 @@ static TupleTableSlot *node_exec(CustomScanState *css);
 static void node_end(CustomScanState *css);
 static void node_rescan(CustomScanState *css);
 static void node_explain(CustomScanState *css, List *ancestors, ExplainState *es);
+static Size node_estimate_dsm(CustomScanState *css, ParallelContext *pcxt);
+static void node_initialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate);
+static void node_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate);
+static void node_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate);
+static void node_shutdown(CustomScanState *css);
 static void batch_column(TessBatch *batch, int column, const TessRowMask *rows,
 						 TessColumnPurpose purpose, TessDatumColumn *result);
 static CustomPath *scan_rows(PlannerInfo *root, Path *path, TessScanClauses *clauses);
@@ -133,6 +138,11 @@ static const CustomExecMethods exec_methods = {
 	.EndCustomScan = node_end,
 	.ReScanCustomScan = node_rescan,
 	.ExplainCustomScan = node_explain,
+	.EstimateDSMCustomScan = node_estimate_dsm,
+	.InitializeDSMCustomScan = node_initialize_dsm,
+	.ReInitializeDSMCustomScan = node_reinitialize_dsm,
+	.InitializeWorkerCustomScan = node_initialize_worker,
+	.ShutdownCustomScan = node_shutdown,
 };
 
 static const TessBatchOps batch_ops = {
@@ -143,8 +153,8 @@ static const TessBatchOps batch_ops = {
 /* ---- the source ---- */
 
 /*
- * The node's path for the wrapper's serial scan: the plan carries what
- * planning found. It checks no clause yet, and offers no partial path.
+ * The node's path for the wrapper's serial or partial scan: the plan
+ * carries what planning found. It checks no clause yet.
  */
 static CustomPath *
 scan_rows(PlannerInfo *root, Path *path, TessScanClauses *clauses)
@@ -156,8 +166,7 @@ scan_rows(PlannerInfo *root, Path *path, TessScanClauses *clauses)
 	int			first;
 
 	if (!IsA(path, ForeignPath) || path->parent->fdwroutine == NULL ||
-		path->parent->fdwroutine->GetForeignPaths != parquet_get_foreign_paths ||
-		path->parallel_workers > 0)
+		path->parent->fdwroutine->GetForeignPaths != parquet_get_foreign_paths)
 		return NULL;
 	/* The projection reads columns alone: a whole row or a system column is
 	 * the wrapper's to read. */
@@ -257,17 +266,20 @@ node_begin(CustomScanState *css, EState *estate, int eflags)
 	node->batch.batch.rows.bits = &node->batch.mask;
 	/* A read of a column can fail on a value, text not UTF-8 say. */
 	node->batch.batch.values_stored = false;
-	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
-		return;
-	attnums = lsecond(node->planned);
-	node->scan = parquet_scan_begin(RelationGetRelid(rel), parquet_strings(linitial(node->planned)),
-									attnums);
 	node->column_of = palloc_array(int, Max(natts, 1));
 	for (int a = 0; a < natts; a++)
 		node->column_of[a] = -1;
+	attnums = lsecond(node->planned);
 	foreach_int(attnum, attnums)
 		node->column_of[attnum - 1] = c++;
-	node->columns = palloc0_array(NodeColumn, Max(node->scan->ncolumns, 1));
+	node->columns = palloc0_array(NodeColumn, Max(list_length(attnums), 1));
+	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+		return;
+	/* A worker reads the leader's list, which it is given after its begin. */
+	if (IsParallelWorker() && css->ss.ps.plan->parallel_aware)
+		return;
+	node->scan = parquet_scan_begin(RelationGetRelid(rel), parquet_strings(linitial(node->planned)),
+									attnums);
 }
 
 /* The rank of the window's row r among the rows held: its place in values. */
@@ -377,7 +389,7 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 		b->values[column][i] = null ? (Datum) 0 : (Datum) col->values[p];
 	}
 	b->made[column] |= need;
-	node->values_decoded += pg_popcount64(need);
+	scan->own[PARQUET_VALUES_DECODED] += pg_popcount64(need);
 }
 
 /* A column of the batch, its values made for the rows asked not made yet. */
@@ -559,6 +571,45 @@ node_rescan(CustomScanState *css)
 	node->next_row = 0;
 }
 
+/* A parallel scan: the participants take the groups of the leader's list. */
+static Size
+node_estimate_dsm(CustomScanState *css, ParallelContext *pcxt)
+{
+	return parquet_scan_estimate(((ParquetNode *) css)->scan, pcxt->nworkers);
+}
+
+static void
+node_initialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate)
+{
+	parquet_scan_share(((ParquetNode *) css)->scan, coordinate, pcxt,
+					   css->ss.ps.state->es_query_cxt);
+}
+
+static void
+node_reinitialize_dsm(CustomScanState *css, ParallelContext *pcxt, void *coordinate)
+{
+	parquet_scan_reshare(((ParquetNode *) css)->scan, pcxt, css->ss.ps.state->es_query_cxt);
+}
+
+static void
+node_initialize_worker(CustomScanState *css, shm_toc *toc, void *coordinate)
+{
+	ParquetNode *node = (ParquetNode *) css;
+
+	node->scan = parquet_scan_attach(RelationGetRelid(css->ss.ss_currentRelation),
+									 lsecond(node->planned), coordinate,
+									 css->ss.ps.state->es_query_cxt);
+}
+
+static void
+node_shutdown(CustomScanState *css)
+{
+	ParquetNode *node = (ParquetNode *) css;
+
+	if (node->scan != NULL)
+		parquet_scan_unshare(node->scan);
+}
+
 static void
 node_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
@@ -568,7 +619,8 @@ node_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	if (es->analyze && node->scan != NULL)
 	{
 		ExplainPropertyUInteger("Row Groups Skipped", NULL, 0, es);
-		ExplainPropertyUInteger("Values Decoded", NULL, node->values_decoded, es);
+		ExplainPropertyUInteger("Values Decoded", NULL,
+								parquet_scan_counts(node->scan)[PARQUET_VALUES_DECODED], es);
 	}
 }
 
