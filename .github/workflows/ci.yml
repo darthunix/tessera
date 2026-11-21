@@ -518,6 +518,10 @@ jobs:
           MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
             cargo miri test --locked -p tessera-capi --test join --test group --test runs --test build \
               --test spill
+          # The entry points of the reader of Parquet files, over files its
+          # tests write: outputs the caller has not initialized among them.
+          MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
+            cargo miri test --locked -p tessera-parquet --lib c::tests
 
   # Miri over relspill's tests on a target whose bytes run from the most
   # significant: the packing narrows values by their low bytes, which lie

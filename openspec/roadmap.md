@@ -49,9 +49,12 @@ into `gather-sparse-batches`. The maintainer took `source-scan` and then
 ClickBench over the benchmark's Parquet files, and made the Parquet
 wrapper the first source of the planning contract, so that
 `parquet-fdw` no longer waits for `compressed-table-source`. On
-2026-11-21 he took the boundary of types between PostgreSQL and Arrow,
-`types-crate`, as a crate of its own, before `parquet-fdw` (done, the
-crate `datum-arrow`):
+2026-11-21 he put the boundary of types between PostgreSQL and Arrow,
+`types-crate`, before `parquet-fdw`, as a crate of its own (done, the
+crate `datum-arrow`), had `parquet-fdw` built on `source-scan`'s branch
+before it is merged, and set the order of what follows them: grouping
+by strings on the files' bytes, `text-keys-by-bytes`, then the
+ClickBench entry, `clickbench-entry`:
 
 1. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
@@ -101,6 +104,8 @@ These have no place in the queue. The maintainer places an entry when it
 is wanted; several wait for a measured case. `greengage-port` and
 `tpch-on-greengage` came down here from "Later" on 2026-10-05.
 
+- `projection-whole-row`: a whole row and `tableoid` computed by the
+  runtime's projection, so that a batch node serves them
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
   maintainer took it out of `spill-crate` on 2026-11-14
@@ -222,7 +227,8 @@ after it; it is the change `source-scan`.
 
 Parquet FDW. From plan 6.6, line 6004, where it is an Arrow FDW; the
 review of pull request 45, 2026-10-05; the analysis of ClickBench,
-2026-11-20.
+2026-11-20. Taken by the maintainer out of turn on 2026-11-20; it is
+the change `parquet-fdw`.
 
 - **What:** A foreign data wrapper over Parquet files, a module of this
   repository, whose source, with its batch node, is the first real
@@ -245,16 +251,66 @@ review of pull request 45, 2026-10-05; the analysis of ClickBench,
   memory and every heap entry takes about 258 s a query.
 - **Known:** ClickBench's files are written by parquet-cpp 1.5.1:
   Snappy, dictionary and plain encodings, about 500 000 rows a group
-  with their least and greatest values, strings as bytes without a
-  UTF-8 mark, `EventTime` as seconds and `EventDate` as days in an
-  unsigned 16-bit number. The crate `datum-arrow` holds the boundary of
-  types. The reader is chosen in the change's proposal; the candidate
-  is the `parquet` crate of Apache Arrow's Rust implementation. The
-  plan's item was to be done without nanoarrow as a Git submodule;
+  with their least and greatest values, strings as bytes without a UTF-8
+  mark, `EventTime` as seconds and `EventDate` as days in an unsigned
+  16-bit number; read on 2026-11-21, each of the hundred files holds two
+  groups of rows, every chunk with its least and greatest values, its
+  count of `NULL` values and its statistics of encodings. The crate
+  `datum-arrow` holds the boundary of types. The reader is the `parquet`
+  crate of Apache Arrow's Rust implementation (the change's proposal).
+  The plan's item was to be done without nanoarrow as a Git submodule;
   pg_batch's dirty nanoarrow submodule is not carried over (line 7478).
 - **Depends on:** `source-scan`.
-- **Capabilities:** source-scan, and a new capability of the wrapper
+- **Capabilities:** parquet-fdw, new; source-scan unchanged
 - **Size:** large.
+
+### text-keys-by-bytes
+
+Grouping by a string on the file's bytes, one value a group. From the
+maintainer's review of ClickBench's queries, 2026-11-21.
+
+- **What:** A batch offers a string column in a second form beside its
+  `Datum` values, the bytes and their offsets as the file holds them,
+  and TessAgg hashes and compares a key of that form on its bytes,
+  making a `text` value once a group, when it gives the group out; the
+  Parquet source offers the form, and a chunk encoded by a dictionary
+  may be keyed by its indexes.
+- **Why:** 15 of ClickBench's 43 queries group by a string (`URL`,
+  `SearchPhrase`, `Title`, `MobilePhoneModel` and others), and Q34 and
+  Q35 group all 100 M rows by `URL`: a value made for each row before
+  its hash costs what reading the file saved.
+- **Known:** The maintainer's order of 2026-11-21 puts it after the
+  Parquet wrapper's parallel reading and its queries that read no
+  string. `Datum` stays the batches' common language: this is one form
+  for one use, narrower than `direct-arrow-batches`. The fourth stage of
+  `parquet-fdw`'s measurement is its base. The contract of
+  `parquet-fdw` forecasts it in `tessera/batch.h`, the source's batches
+  and TessAgg.
+- **Depends on:** `parquet-fdw`.
+- **Capabilities:** batch-format, aggregate, parquet-fdw
+- **Size:** large.
+
+### clickbench-entry
+
+Tessera's entry of ClickBench over its Parquet files.
+
+- **What:** ClickBench's scripts for Tessera: building PostgreSQL's
+  headers and Tessera from source on the benchmark's machine, a foreign
+  table over `hits.parquet`, the queries, the timing as ClickBench runs
+  it, and the results submitted, marked `stateless` as pg_duckdb's
+  Parquet entry is, in the category Challenger.
+- **Why:** The maintainer's goal of 2026-11-20: Tessera beside
+  pg_duckdb, pg_mooncake, pg_ducklake and pgpro_tam in ClickBench.
+- **Known:** Tessera has no packages of PostgreSQL's distributions, so
+  the scripts build it. The decision of `parquet-fdw`'s measurement
+  plan: a Parquet entry when the 43 queries' hot geometric mean is
+  within twice pg_duckdb's on the same machine, otherwise the Parquet
+  times only beside the heap result on a machine that holds the table in
+  memory. The machine, c6a.4xlarge, and who runs it are open.
+- **Depends on:** `parquet-fdw`, and `text-keys-by-bytes` for the
+  groupings by strings.
+- **Capabilities:** none: scripts outside the extension
+- **Size:** medium.
 
 ### agg-dependent-columns
 
@@ -859,6 +915,30 @@ Spill of sum states instead of rows. From plan 4.23 item 4б, lines 1574,
   `tpch-indexed-schema`, `tpch-sf10`) for the measurement.
 - **Capabilities:** aggregate, spill-format, hash-table
 - **Size:** the log does not say.
+
+### projection-whole-row
+
+A whole row and a system column in the targets of a batch node. From
+the review of the change `parquet-fdw`, task 4.1, and the maintainer's
+decision there.
+
+- **What:** The runtime's projection computes a target that reads a
+  whole row of the scan's relation, the relation as one value of its row
+  type (`SELECT t FROM t`, `row_to_json(t)`, `t IS NOT NULL`, `f(t)`), by
+  filling every column of the scan tuple for the rows asked, and a
+  target that reads `tableoid`, from the batch's table. The heap scan
+  node and the Parquet source then serve such queries instead of leaving
+  them to the core's scan and the wrapper's.
+- **Why:** Such a query reads its table row by row today, outside the
+  batch nodes, with Tessera on.
+- **Known:** The projection resolves a Var of an attribute above zero
+  alone and raises `XX000` for another at the node's begin; the heap scan
+  node and the Parquet source decline such a relation for that reason.
+  No query of TPC-H or ClickBench reads one.
+- **Depends on:** nothing.
+- **Capabilities:** source-scan, parquet-fdw, the runtime's projection
+- **Size:** small: the projection's two kinds of target and the two
+  declines lifted, with tests.
 
 ### spill-rows-writer
 
@@ -2225,6 +2305,46 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **The workers of a Parquet scan bounded by its groups** (a finding of
+  the review of the change `parquet-fdw`, task 4.3). A partial path
+  takes the workers the core gives a scan of the files' size, as the
+  spec says, but its participants take whole groups, so a large file of
+  one or two groups gets a path costed at a share of the participants
+  while one or two of them read it all. Suggested: no more participants
+  than groups, in the spec and the code.
+- **Batch nodes lose the workers' counters of a rescan** (a finding of
+  the review of the change `parquet-fdw`, task 4.2). The nodes that sum
+  their counters over the participants through `TessSharedStats` zero
+  every row when a parallel plan is rescanned, after the workers of the
+  scan that ended stored theirs, so `EXPLAIN` shows the leader's counts
+  of every scan and the workers' of the last alone; the Parquet scan adds
+  them to the leader's first. Suggested: a call of the runtime that
+  carries the rows over a rescan, which the nodes then use.
+- **The counters of a Parquet scan replicated in workers** (a finding
+  of the review of the change `parquet-fdw`, task 4.2). A scan that is
+  not parallel-aware, as the inner side of a join each worker builds
+  whole, runs in every worker without the callbacks of shared memory, so
+  `EXPLAIN` shows the leader's groups read and values made alone, where
+  the spec says they are summed over the participants. Suggested: share
+  the counters apart from the groups, or say in the spec that a
+  replicated scan shows the leader's.
+- **A group of rows larger than a selection holds** (a finding of the
+  review of the change `parquet-fdw`, task 3.2). A scan selects a
+  group's rows by one mask of a bit a row, allocated by `palloc` and
+  copied by the reader, so a group of more than about 8.6 billion rows
+  raises `54000`, where the spec promises every row. No writer known
+  makes such a group. Suggested: accept the limit in the spec, or
+  allocate the mask as a huge allocation and copy it fallibly in the
+  reader.
+
+- **A source's path taken as stored by the join planner** (a finding
+  of the review of the change `parquet-fdw`). The batch planner takes a
+  leaf batch path whose targets are columns as one whose values are
+  stored, and costs a lookup join over it as if the runtime gathered
+  its sparse batches; the runtime gathers only batches whose
+  `values_stored` is set, which a Parquet source's are not. The cost of
+  such a join is then wrong, not its rows. Suggested: the source's path
+  says whether its batches are stored, and the planner reads it.
 - **Two rules of the bits a grouping's level below takes** (the close
   of `spill-crate`, asked in its task 3.18 and merged without an
   answer). `group::Group` splits a partition into a level below only

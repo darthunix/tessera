@@ -2,6 +2,8 @@
 members = [
     "crates/alloc-count",
     "crates/datum-arrow",
+    "crates/tessera-parquet",
+    "crates/tessera-parquet-testing",
     "crates/relhash",
     "crates/relspill",
     "crates/tessera-core",
@@ -36,6 +38,15 @@ arrow-schema = { version = "58.4", default-features = false }
 # checked against the arrays Arrow itself builds and validates.
 arrow-array = { version = "58.4", default-features = false }
 arrow-buffer = { version = "58.4", default-features = false }
+# Apache Arrow's reader and writer of Parquet files, for tessera-parquet:
+# its Arrow arrays and Snappy alone, no other codec, no async and no
+# experimental readers.
+parquet = { version = "58.4", default-features = false, features = ["arrow", "snap"] }
+# The parquet crate's own dependencies, named for tessera-parquet: the
+# concatenation of Arrow arrays, and the bytes its readers of pages take.
+arrow-select = { version = "58.4", default-features = false }
+bytes = "1.1"
+datum-arrow = { path = "crates/datum-arrow" }
 clap = { version = "4", features = ["derive"] }
 comfy-table = "8"
 console = "0.16"
