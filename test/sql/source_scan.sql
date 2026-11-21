@@ -527,6 +527,95 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 
+-- spec: source-scan/A source that costs less than its wrapper
+-- The source's path, and TessFilter over it with the cost of the clause
+-- it leaves, cost less than the wrapper's at the start and in total: the
+-- plan reads through the source with tessera.scan_cost_factor at its
+-- least and at its greatest, and TessFilter has the rows of the path
+-- offered, whatever the source estimates.
+SELECT tessera_test_scan_sources(ARRAY['reader']);
+SET tessera.scan_cost_factor = 0;
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE a > 900;
+SET tessera.scan_cost_factor = 10;
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE a > 900;
+RESET tessera.scan_cost_factor;
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD source_rows '7');
+SELECT plan_rows('SELECT d FROM ft_t WHERE a > 900', 'TessFilter') AS filter_rows;
+SET tessera.enable = off;
+SELECT plan_rows('SELECT d FROM ft_t WHERE a > 900', 'Foreign Scan') AS wrapper_rows;
+RESET tessera.enable;
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP source_rows);
+
+-- spec: source-scan/A source that costs more than its wrapper
+-- With clauses and without, under a limit and under a grouping: the
+-- core's ForeignScan, packed under the batch grouping.
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD source_startup '2000', ADD source_total '3000');
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t;
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE a > 900;
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE a > 900 LIMIT 3;
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM ft_t WHERE a > 900 GROUP BY b;
+SELECT source_same('SELECT b, count(*) FROM ft_t WHERE a > 900 GROUP BY b');
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP source_startup, DROP source_total);
+
+-- spec: source-scan/The clauses left decide
+-- The source's path alone costs less than the wrapper's, but a costly
+-- clause it leaves, for each row, makes TessFilter cost more; and under
+-- a LIMIT, the hashed subquery of a NOT IN it leaves, built before the
+-- first row, makes TessFilter start later than the wrapper's scan,
+-- which TessFilter costs less than without the LIMIT.
+CREATE FUNCTION costly(int) RETURNS boolean LANGUAGE plpgsql IMMUTABLE COST 100000 AS
+    $$ BEGIN RETURN $1 > 0; END $$;
+-- A column with no NULL that may hold one keeps the NOT IN a subquery.
+CREATE TABLE many_null AS SELECT i * 2 AS x FROM generate_series(1, 20000) AS i;
+ANALYZE many_null;
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t;
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE costly(a);
+-- The cost for a row counts the rows the source returns, not the rows
+-- of the path offered: one row of the source's keeps TessFilter, over a
+-- wrapper that offers 333.
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD source_rows '1');
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE costly(a);
+SELECT source_same('SELECT d FROM ft_t WHERE costly(a)');
+-- The filter's terms, from its plan and its source's: the clauses'
+-- start cost, a hashed subquery's building, counted in the start and in
+-- the total alike, and their cost for a row, which grows with the rows
+-- the source returns, ten times for ten times the rows.
+CREATE FUNCTION filter_terms(query text) RETURNS TABLE (startup numeric, per_rows numeric)
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+    filter jsonb;
+    source jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT JSON) %s', query) INTO plan;
+    filter := jsonb_path_query_first(plan, 'strict $.**?(@."Custom Plan Provider" == "TessFilter")');
+    source := jsonb_path_query_first(plan, 'strict $.**?(@."Custom Plan Provider" == "TessTestSource")');
+    startup := (filter->>'Startup Cost')::numeric - (source->>'Startup Cost')::numeric;
+    per_rows := (filter->>'Total Cost')::numeric - (source->>'Total Cost')::numeric - startup;
+    RETURN NEXT;
+END $$;
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD source_startup '0', ADD source_total '10',
+    SET source_rows '3');
+SELECT startup, round(per_rows / 250) AS source_rows FROM filter_terms('SELECT d FROM ft_t WHERE costly(a)');
+ALTER FOREIGN TABLE ft_t OPTIONS (SET source_rows '700');
+CREATE TEMP TABLE terms AS
+    SELECT * FROM filter_terms('SELECT d FROM ft_t WHERE a NOT IN (SELECT x FROM many_null)');
+ALTER FOREIGN TABLE ft_t OPTIONS (SET source_rows '7000');
+INSERT INTO terms
+    SELECT * FROM filter_terms('SELECT d FROM ft_t WHERE a NOT IN (SELECT x FROM many_null)');
+SELECT min(startup) > 0 AS start_counted, min(startup) = max(startup) AS same_start,
+    round(max(per_rows) / min(per_rows)) AS rows_ratio FROM terms;
+DROP TABLE terms;
+DROP FUNCTION filter_terms(text);
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP source_rows);
+SELECT explain_neutral('SELECT d FROM ft_t WHERE a NOT IN (SELECT x FROM many_null)');
+SELECT explain_neutral('SELECT d FROM ft_t WHERE a NOT IN (SELECT x FROM many_null) LIMIT 1');
+SELECT source_same('SELECT d FROM ft_t WHERE a NOT IN (SELECT x FROM many_null)');
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP source_startup, DROP source_total);
+SELECT tessera_test_scan_sources(ARRAY[]::text[]);
+DROP TABLE many_null;
+DROP FUNCTION costly(int);
+
 DROP VIEW ft_barrier, ht_barrier;
 DROP TABLE ft_parted, ht_parted, maybe_null, big_rows;
 DROP ROLE regress_source_rls;
