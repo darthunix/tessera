@@ -12,6 +12,15 @@
  * freed by the entry points of their type; memory the caller gives it,
  * such as an arena of text, it only fills. Masks are arrays of 64-bit
  * words, bit i % 64 of word i / 64 for row i.
+ *
+ * On a failure an entry point writes its status; it writes no output of
+ * one value, such as a handle or a count, and no mask of NULL rows,
+ * while an array of values or an arena it was writing holds values of
+ * no meaning. An output of one value, such as a handle, a count or the
+ * status, may be memory the caller has not initialized; an array the
+ * caller gives, a mask or values, must be initialized, and no two
+ * arrays of a call may overlap. The row of a status is the position of
+ * the value among the window's rows held, not the group's row.
  */
 #ifndef TESSERA_PARQUET_READER_H
 #define TESSERA_PARQUET_READER_H
@@ -92,6 +101,17 @@ extern bool tess_parquet_column(const TessParquetFile *file,
 								TessParquetStatus *status);
 extern void tess_parquet_column_free(TessParquetColumn *column);
 
+/* What the wrapper needs of a mapped column. */
+typedef struct TessParquetColumnInfo
+{
+	bool		gives_datums;	/* by tess_parquet_values, else as text */
+	bool		nullable;		/* the file column may hold NULL */
+} TessParquetColumnInfo;
+
+extern bool tess_parquet_column_info(const TessParquetColumn *column,
+									 TessParquetColumnInfo *info,
+									 TessParquetStatus *status);
+
 /*
  * A reader of a column of one group of rows, for the rows of a selection
  * of selection_words words over the group; its arrays hold batch
@@ -120,10 +140,13 @@ extern bool tess_parquet_read(TessParquetReader *reader, size_t start,
 
 /*
  * Converts the rows the mask asked asks of the window's rows held, in
- * their order, into Datum words and a mask of NULL rows, for a type
- * passed by value; values holds at least the window's count. For a plain
- * column of integers, floating-point numbers, dates, times or booleans,
- * the place of a row not asked may be written with its true value.
+ * their order, into Datum words, for a type passed by value; values holds
+ * at least the window's count. The bits of the rows asked are set or
+ * cleared in nulls; the bits of the other rows stay as an earlier call
+ * left them. For a plain column of integers, floating-point numbers,
+ * dates, times or booleans, the place in values of a row not asked may be
+ * written: with its own value where it converts, so that a value made
+ * before stays, and otherwise with a value of no meaning.
  */
 extern bool tess_parquet_values(TessParquetReader *reader,
 								const uint64_t *asked, size_t asked_words,
@@ -133,11 +156,13 @@ extern bool tess_parquet_values(TessParquetReader *reader,
 
 /*
  * Checks the text of the rows asked asks of the window (22021, 22001,
- * 54000 at the first row that fails), writes their mask of NULL rows and
- * the bytes of the arena their values need; then tess_parquet_text
- * writes each value with its header into the arena, aligned to 4 bytes,
- * and its Datum, the value's address, into values, leaving the places of
- * the other rows as they were.
+ * 54000 at the first row that fails), sets or clears their bits in nulls
+ * as tess_parquet_values does, and writes the bytes of the arena their
+ * values need; then tess_parquet_text writes each value with its header
+ * into the arena, aligned to 4 bytes, and its Datum, the value's address,
+ * into values, leaving the places of the other rows as they were. A read
+ * or a check that fails drops the text sized: tess_parquet_text then
+ * fails.
  */
 extern bool tess_parquet_text_size(TessParquetReader *reader,
 								   const uint64_t *asked, size_t asked_words,

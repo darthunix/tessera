@@ -95,9 +95,10 @@ maintainer to say that the machine is idle.
       the source's halves under a clause of the cases of text from bytes
       and of the length of a varchar
 - [ ] 5.2 The groups of rows skipped by their least and greatest values,
-      their `NULL` counts and their dictionaries. Check: the suites; the
-      cases of the groups skipped and of the groups the footer cannot
-      rule out
+      their `NULL` counts and their dictionaries, with the reader's C
+      entry points of a group's statistics and its dictionary. Check:
+      the suites; the cases of the groups skipped and of the groups the
+      footer cannot rule out
 - [ ] 5.3 Stage 2, the 17 queries that read no string. Check: the run's
       report
 

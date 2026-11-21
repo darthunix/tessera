@@ -30,4 +30,4 @@ pub use dictionary::{Dictionary, read_dictionary};
 pub use error::{Error, Result};
 pub use file::{Identity, ParquetFile};
 pub use reader::{ColumnReader, Window, input_of};
-pub use stats::{Bounds, GroupStats, group_stats};
+pub use stats::{Bounds, Empties, GroupStats, group_stats};

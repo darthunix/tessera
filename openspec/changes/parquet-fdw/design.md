@@ -314,19 +314,27 @@ when no value of it passes. Where the footer does not say how the pages
 are encoded, the dictionary is not tried. The reader takes the crate's
 default form of these statistics, a mask of the encodings of the data
 pages alone (`page_encoding_stats_mask`), and tries a chunk that has a
-dictionary page and whose mask holds `PLAIN_DICTIONARY` alone or
-`RLE_DICTIONARY` alone, as the crate's documentation of the mask gives
-the test; a list of every page, which the crate builds only on request,
-would cost a vector for each chunk of every file. ClickBench's files
-hold these statistics on every chunk; 198 of the 210 chunks of
-`hits_0.parquet` are encoded through a dictionary in every data page,
-and their dictionary pages are headed `PLAIN_DICTIONARY`. Of the least
-and greatest values of strings only their emptiness is tried, for `= ''`
-and `<> ''`, before the dictionary: every order of bytes puts the empty
-string first, so no order is trusted, and a greatest value that is not
-empty shows that a row passes `<> ''`, so the dictionary is not read for
-it. ClickBench's `SearchPhrase <> ''` and `MobilePhoneModel <> ''` are
-decided so in every group, where the dictionary would be read and
+dictionary page and whose mask holds no encoding but `PLAIN_DICTIONARY`
+and `RLE_DICTIONARY`, either or both; a list of every page, which the
+crate builds only on request, would cost a vector for each chunk of
+every file. ClickBench's files hold these statistics on every chunk; 198
+of the 210 chunks of `hits_0.parquet` are encoded through a dictionary
+in every data page, and their dictionary pages are headed
+`PLAIN_DICTIONARY`. Of the least and greatest values of strings only
+their emptiness is tried, for `= ''` and `<> ''`, before the dictionary,
+and only from the fields `min_value` and `max_value` under the column
+orders, as for integers: older writers wrote wrong least and greatest
+values of bytes in the fields `min` and `max`. Every order of bytes puts
+the empty string first, so a least value that is not empty, even one a
+writer cut short, shows that no row is empty, and a greatest value that
+is empty shows that every row is. A greatest value that is not empty
+leaves `<> ''` untried against the dictionary: the format lets a writer
+give a greatest value past every row, so it does not prove that a row
+passes, but a group it does not skip is read and its rows checked, and
+none comes out wrong; requiring the footer's word that the value is
+exact would read every dictionary of ClickBench's files, which do not
+say it. ClickBench's `SearchPhrase <> ''` and `MobilePhoneModel <> ''`
+are decided so in every group, where the dictionary would be read and
 decompressed, 468 614 bytes of `SearchPhrase` in a group, to skip
 nothing. The order of the least and greatest values of strings is not
 tried otherwise: ClickBench compares no string by `=` with another

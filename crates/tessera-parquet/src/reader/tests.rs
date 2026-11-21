@@ -74,6 +74,20 @@ fn strings(reader: &ColumnReader, window: &Window) -> Result<Vec<Option<Vec<u8>>
 }
 
 fn write_ints(dir: &Path, values: &[i32], page_rows: usize) -> ParquetFile {
+    write_ints_by(
+        dir,
+        values,
+        page_rows,
+        parquet::basic::Compression::UNCOMPRESSED,
+    )
+}
+
+fn write_ints_by(
+    dir: &Path,
+    values: &[i32],
+    page_rows: usize,
+    compression: parquet::basic::Compression,
+) -> ParquetFile {
     let path = dir.join("ints.parquet");
     let column = Column::new(
         "a",
@@ -87,6 +101,7 @@ fn write_ints(dir: &Path, values: &[i32], page_rows: usize) -> ParquetFile {
     );
     let options = Options {
         page_rows: Some(page_rows),
+        compression,
         ..Options::new(values.len(), false)
     };
     testing::write_with(&path, &[column], options).unwrap();
@@ -107,10 +122,16 @@ proptest! {
         batch in 1usize..90,
         page_rows in 1usize..120,
         again in prop::collection::vec(any::<u64>(), 4),
+        snappy in any::<bool>(),
     ) {
         let dir = tempfile::tempdir().unwrap();
         let values: Vec<i32> = (0..rows as i32).map(|v| v * 3 - 500).collect();
-        let file = write_ints(dir.path(), &values, page_rows);
+        let codec = if snappy {
+            parquet::basic::Compression::SNAPPY
+        } else {
+            parquet::basic::Compression::UNCOMPRESSED
+        };
+        let file = write_ints_by(dir.path(), &values, page_rows, codec);
         let column = map_column(&file, &request("a", oid::INT4)).unwrap();
         let selection: Arc<[u64]> = selected[..mask_words(rows)].to_vec().into();
         let mut reader = ColumnReader::new(&file, &column, 0, Arc::clone(&selection), batch).unwrap();
@@ -434,5 +455,219 @@ fn windows_of_no_row_and_a_first_window_in_the_middle() {
     assert_eq!(
         datums(&reader, &window).unwrap(),
         (100..128).map(expect).collect::<Vec<_>>()
+    );
+}
+
+/// The strings of a test column: bytes of every value, some repeated so a
+/// dictionary has work, `NULL` every eleventh row.
+fn some_strings(rows: usize, seed: &[u8]) -> Vec<Option<Vec<u8>>> {
+    (0..rows)
+        .map(|r| {
+            (r % 11 != 5).then(|| {
+                let len = (seed[r % seed.len()] % 9) as usize;
+                (0..len)
+                    .map(|i| seed[(r * 7 + i) % seed.len()] % 5 + b'a' - 1 + (r % 3) as u8 * 60)
+                    .collect()
+            })
+        })
+        .collect()
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Strings read window by window forward and again out of order, from
+    /// plain pages, through a dictionary, and through a dictionary that
+    /// falls back to plain pages, compressed by Snappy or not: each gives
+    /// the bytes of its rows, in their order.
+    #[test]
+    fn strings_forward_and_out_of_order(
+        rows in 1usize..500,
+        seed in prop::collection::vec(any::<u8>(), 1..40),
+        selected in prop::collection::vec(any::<u64>(), 8),
+        window in 1usize..150,
+        batch in 1usize..70,
+        layout in 0usize..3,
+        snappy in any::<bool>(),
+        again in prop::collection::vec(any::<u64>(), 3),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.parquet");
+        let strings = some_strings(rows, &seed);
+        let options = Options {
+            page_rows: Some(37),
+            dictionary_bytes: (layout == 2).then_some(48),
+            compression: if snappy { parquet::basic::Compression::SNAPPY } else { parquet::basic::Compression::UNCOMPRESSED },
+            ..Options::new(rows, layout > 0)
+        };
+        testing::write_with(&path, &[Column::new("s", testing::Values::Bytes(strings.clone()))], options).unwrap();
+        let file = ParquetFile::open(&path).unwrap();
+        let column = map_column(
+            &file,
+            &ColumnRequest { utf8: Some(TextBytes::Trusted), ..request("s", oid::TEXT) },
+        )
+        .unwrap();
+        let selection: Arc<[u64]> = selected[..mask_words(rows)].to_vec().into();
+        let mut reader = ColumnReader::new(&file, &column, 0, Arc::clone(&selection), batch).unwrap();
+        let mut start = 0;
+        let mut windows = Vec::new();
+        while start < rows {
+            let len = window.min(rows - start);
+            let got = reader.read(start, len, &bits(&selection, start, len)).unwrap();
+            let held = rows_of(&got.rows, len);
+            let made = strings_of(&reader, &got).unwrap();
+            prop_assert_eq!(made.len(), held.len());
+            for (value, row) in made.iter().zip(&held) {
+                prop_assert_eq!(value, &strings[start + row]);
+            }
+            windows.push((start, len));
+            start += len;
+        }
+        for (start, len) in windows.into_iter().rev() {
+            let sel = bits(&selection, start, len);
+            let asked: Vec<u64> = sel.iter().zip(again.iter().cycle()).map(|(s, a)| s & a).collect();
+            let got = reader.read(start, len, &asked).unwrap();
+            let made = strings_of(&reader, &got).unwrap();
+            for (value, row) in made.iter().zip(rows_of(&asked, len)) {
+                prop_assert_eq!(value, &strings[start + row]);
+            }
+        }
+    }
+}
+
+/// The strings of a window's rows, as `strings` gives them, through the
+/// window's own array whatever plan the reader has.
+fn strings_of(reader: &ColumnReader, window: &Window) -> Result<Vec<Option<Vec<u8>>>> {
+    strings(reader, window)
+}
+
+#[test]
+fn a_read_that_fails_under_a_changed_file_is_the_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ints.parquet");
+    testing::write(
+        &path,
+        &[Column::int32("a", &(0..100).collect::<Vec<_>>())],
+        100,
+        false,
+    )
+    .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("a", oid::INT4)).unwrap();
+    let mut reader = ColumnReader::new(&file, &column, 0, every(100).into(), 16).unwrap();
+    // Its pages overwritten in place, the size kept, the time moved on.
+    let start = file.metadata().row_group(0).column(0).data_page_offset() as usize;
+    let mut bytes = std::fs::read(&path).unwrap();
+    for byte in &mut bytes[start..start + 8] {
+        *byte = 0xff;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    let handle = std::fs::File::options().write(true).open(&path).unwrap();
+    handle
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(
+        reader.read(0, 100, &every(100)).unwrap_err().sqlstate(),
+        "55000"
+    );
+    // The forward reader was dropped: the next ask builds another, and
+    // fails the same way.
+    assert_eq!(
+        reader.read(0, 100, &every(100)).unwrap_err().sqlstate(),
+        "55000"
+    );
+}
+
+#[test]
+fn a_panic_of_the_decoders_is_damaged_bytes_or_the_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ints.parquet");
+    testing::write(
+        &path,
+        &[Column::int32("a", &(0..100).collect::<Vec<_>>())],
+        100,
+        false,
+    )
+    .unwrap();
+    testing::head_data_page_rle_dictionary(&path, 0, 0).unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("a", oid::INT4)).unwrap();
+    let mut reader = ColumnReader::new(&file, &column, 0, every(100).into(), 16).unwrap();
+    assert_eq!(
+        reader.read(0, 100, &every(100)).unwrap_err().sqlstate(),
+        "XX001"
+    );
+    let handle = std::fs::File::options().write(true).open(&path).unwrap();
+    handle
+        .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+        .unwrap();
+    assert_eq!(
+        reader.read(0, 100, &every(100)).unwrap_err().sqlstate(),
+        "55000"
+    );
+}
+
+#[test]
+fn a_failed_forward_read_leaves_no_reader_behind() {
+    use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ints.parquet");
+    let values: Vec<i32> = (0..100).collect();
+    let options = Options {
+        page_rows: Some(50),
+        ..Options::new(100, false)
+    };
+    testing::write_with(&path, &[Column::int32("a", &values)], options).unwrap();
+    // The second page's header damaged, the time kept.
+    let pages = ParquetMetaDataReader::new()
+        .with_page_index_policy(PageIndexPolicy::Required)
+        .parse_and_finish(&std::fs::File::open(&path).unwrap())
+        .unwrap();
+    let second = pages.offset_index().unwrap()[0][0].page_locations()[1].offset as usize;
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    for byte in &mut bytes[second..second + 6] {
+        *byte = 0xff;
+    }
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("a", oid::INT4)).unwrap();
+    let mut reader = ColumnReader::new(&file, &column, 0, every(100).into(), 10).unwrap();
+    assert_eq!(
+        reader.read(0, 100, &every(100)).unwrap_err().sqlstate(),
+        "XX001"
+    );
+    // A forward ask from the first row reads the first page's rows again.
+    let window = reader.read(0, 50, &every(50)).unwrap();
+    let expect: Vec<Option<u64>> = (0..50u64).map(Some).collect();
+    assert_eq!(datums(&reader, &window).unwrap(), expect);
+}
+
+#[test]
+fn a_read_the_system_fails_is_an_error_of_its_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ints.parquet");
+    testing::write(
+        &path,
+        &[Column::int32("a", &(0..10).collect::<Vec<_>>())],
+        10,
+        false,
+    )
+    .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("a", oid::INT4)).unwrap();
+    // The footer of the file over a directory: every read fails.
+    let directory = std::fs::File::open(dir.path()).unwrap();
+    let broken = file.with_handle(directory).unwrap();
+    let mut reader = ColumnReader::new(&broken, &column, 0, every(10).into(), 16).unwrap();
+    assert_eq!(
+        reader.read(0, 10, &every(10)).unwrap_err().sqlstate(),
+        "58030"
     );
 }

@@ -67,18 +67,31 @@ impl ParquetFile {
     /// and `55000` for a file whose size or time changed while its footer
     /// was read.
     pub fn open(path: &Path) -> Result<Self> {
+        ParquetFile::open_checked(path, None)
+    }
+
+    fn open_checked(path: &Path, expected: Option<&Identity>) -> Result<Self> {
         let file = fs::File::open(path).map_err(|e| error::io(&e, "open Parquet file"))?;
         let identity = stat(&file)?;
-        let metadata = ParquetMetaDataReader::new()
+        // Another version of the file is refused before its footer is read.
+        if expected.is_some_and(|e| *e != identity) {
+            return Err(changed());
+        }
+        let footer = ParquetMetaDataReader::new()
             .parse_and_finish(&file)
-            .map_err(|e| error::damaged(&e))?;
-        let opened = ParquetFile {
+            .map_err(|e| error::damaged(&e));
+        // A footer read under a file that changed, whether it decoded or
+        // not: the change.
+        if !stat(&file)?.same_contents(&identity) {
+            return Err(changed());
+        }
+        let metadata = footer?;
+        check_rows(&metadata)?;
+        Ok(ParquetFile {
             file: Arc::new(file),
             identity,
             metadata: Arc::new(metadata),
-        };
-        opened.check_unchanged()?;
-        Ok(opened)
+        })
     }
 
     /// Opens the file at `path` and checks it against the identity a scan
@@ -89,11 +102,18 @@ impl ParquetFile {
     /// Those of [`ParquetFile::open`], and `55000` for a file of another
     /// identity.
     pub fn open_expecting(path: &Path, expected: &Identity) -> Result<Self> {
-        let opened = ParquetFile::open(path)?;
-        if opened.identity != *expected {
-            return Err(changed());
+        ParquetFile::open_checked(path, Some(expected))
+    }
+
+    /// The error of a read of the file: `55000` where the file changed
+    /// since it was opened, so that a read of pages rewritten under a scan
+    /// is the change, not bytes the format cannot decode; `error` itself
+    /// otherwise.
+    pub(crate) fn read_error(&self, error: Error) -> Error {
+        match self.check_unchanged() {
+            Err(changed) => changed,
+            Ok(()) => error,
         }
-        Ok(opened)
     }
 
     /// Checks that the open file still has the size and the time it had
@@ -126,6 +146,17 @@ impl ParquetFile {
         &self.file
     }
 
+    /// The same footer over another open file, its identity that file's:
+    /// for tests of reads the system fails.
+    #[cfg(test)]
+    pub(crate) fn with_handle(&self, file: fs::File) -> Result<Self> {
+        Ok(ParquetFile {
+            identity: stat(&file)?,
+            file: Arc::new(file),
+            metadata: Arc::clone(&self.metadata),
+        })
+    }
+
     /// The count of groups of rows.
     pub fn groups(&self) -> usize {
         self.metadata.num_row_groups()
@@ -139,10 +170,40 @@ impl ParquetFile {
             .and_then(|g| u64::try_from(g.num_rows()).ok())
     }
 
-    /// The rows of the file, the sum of its groups'.
+    /// The rows of the file, the sum of its groups', which its opening
+    /// checked against the footer's count.
     pub fn rows(&self) -> u64 {
-        (0..self.groups()).filter_map(|g| self.group_rows(g)).sum()
+        self.metadata
+            .row_groups()
+            .iter()
+            .map(|g| g.num_rows().unsigned_abs())
+            .sum()
     }
+}
+
+/// Refuses a footer whose groups give a negative count of rows, or whose
+/// counts do not add up to the file's.
+fn check_rows(metadata: &ParquetMetaData) -> Result<()> {
+    let mut total = 0u64;
+    for group in metadata.row_groups() {
+        total = u64::try_from(group.num_rows())
+            .ok()
+            .and_then(|rows| total.checked_add(rows))
+            .ok_or_else(|| bad_footer("a group of a negative count of rows"))?;
+    }
+    if u64::try_from(metadata.file_metadata().num_rows()).ok() != Some(total) {
+        return Err(bad_footer(
+            "groups of rows that do not add up to the file's",
+        ));
+    }
+    Ok(())
+}
+
+fn bad_footer(what: &str) -> Error {
+    Error::new(
+        error::DATA_CORRUPTED,
+        format!("Parquet footer is damaged: {what}"),
+    )
 }
 
 fn stat(file: &fs::File) -> Result<Identity> {
@@ -234,5 +295,56 @@ mod tests {
         writer.write_all(b"more").unwrap();
         drop(writer);
         assert_eq!(file.check_unchanged().unwrap_err().sqlstate(), "55000");
+    }
+
+    #[test]
+    fn another_version_is_refused_before_its_footer_is_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.parquet");
+        testing::write(&path, &[Column::int32("a", &[1, 2])], 2, false).unwrap();
+        let first = ParquetFile::open(&path).unwrap();
+        // A file cut short under the same path: another inode, its footer
+        // never read.
+        let cut = dir.path().join("cut.parquet");
+        fs::write(&cut, b"PAR1").unwrap();
+        fs::rename(&cut, &path).unwrap();
+        let error = ParquetFile::open_expecting(&path, &first.identity()).unwrap_err();
+        assert_eq!(error.sqlstate(), "55000");
+        assert_eq!(ParquetFile::open(&path).unwrap_err().sqlstate(), "XX001");
+    }
+
+    #[test]
+    fn counts_of_rows_that_do_not_hold() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.parquet");
+        testing::write(&path, &[Column::int32("a", &[1, 2, 3])], 2, false).unwrap();
+        testing::rewrite_footer(
+            &path,
+            testing::Rewrite {
+                first_group_rows: Some(-1),
+                ..testing::Rewrite::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(ParquetFile::open(&path).unwrap_err().sqlstate(), "XX001");
+        // The crate's writer counts the file's rows from its groups: a
+        // footer whose counts disagree is made in memory.
+        testing::write(&path, &[Column::int32("a", &[1, 2, 3])], 2, false).unwrap();
+        let file = ParquetFile::open(&path).unwrap();
+        let meta = file.metadata();
+        let fm = meta.file_metadata();
+        let disagree = ParquetMetaData::new(
+            parquet::file::metadata::FileMetaData::new(
+                fm.version(),
+                fm.num_rows() + 1,
+                None,
+                None,
+                fm.schema_descr_ptr(),
+                None,
+            ),
+            meta.row_groups().to_vec(),
+        );
+        assert_eq!(check_rows(&disagree).unwrap_err().sqlstate(), "XX001");
+        check_rows(meta).unwrap();
     }
 }
