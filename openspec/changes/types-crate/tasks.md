@@ -39,10 +39,12 @@ starts. Each commit passes `make rust-check`,
       test against an exact count in 128 bits of each stored value,
       those the conversion refuses as out of range among them. Check:
       `make rust-check`
-- [ ] 2.5 The Kani proofs of the code of one value (bounds, ranges, days
-      and times, the failures each plan names, the zero byte and the
+- [x] 2.5 The Kani proofs of the code of one value (bounds of integers,
+      days and microseconds, ranges, days and times, the failures of
+      plans of integers, short days and seconds, the zero byte and the
       characters of short strings) and the crate's row in the Kani job
-      of CI. Check: `cargo kani -p datum-arrow`
+      of CI. Check: `cargo kani -p
+      datum-arrow`
 - [ ] 2.6 The crate's mutants all caught by its tests, or named, as the
       mutants job of a pull request judges them. Check: `cargo mutants
       -p datum-arrow`

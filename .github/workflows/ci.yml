@@ -360,7 +360,13 @@ jobs:
   # range, once each, in order, a refused word is not read, and nothing
   # is read after a refusal or a failed fold step; tessera-capi's walk
   # over one word of any bits, and over two after a first word that is
-  # empty or full (the bounds in each proof's module).
+  # empty or full (the bounds in each proof's module). Of datum-arrow's
+  # code of one value (proofs.rs): days and times read exactly in
+  # PostgreSQL's range, written and read back to the same value, the
+  # bounds of integers, days and microseconds exact for every stored
+  # value and constant, the answer for a range exact, plans of integers,
+  # short days and seconds failing exactly as they name, checked text of
+  # up to four bytes refused exactly, and its characters counted.
   # Kani brings its own nightly. A cover that no value reaches fails the
   # job: the proof around it would hold for no value at all. A harness
   # has a limit, ten minutes but for the walks of tessera-capi, so that
@@ -381,6 +387,7 @@ jobs:
         include:
           - { crate: relhash, step: cargo kani -p relhash, harness-timeout: 600 }
           - { crate: relspill, step: cargo kani -p relspill, harness-timeout: 600 }
+          - { crate: datum-arrow, step: cargo kani -p datum-arrow, harness-timeout: 600 }
           - { crate: tessera-kernels, step: cargo kani -p tessera-kernels, harness-timeout: 600 }
           - { crate: tessera-core, step: cargo kani -p tessera-core, harness-timeout: 600 }
           - { crate: tessera-capi, step: cargo kani -p tessera-capi, harness-timeout: 1500 }
