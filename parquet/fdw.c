@@ -8,6 +8,7 @@
 #include "postgres.h"
 
 #include "access/htup_details.h"
+#include "access/parallel.h"
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "commands/explain.h"
@@ -17,7 +18,9 @@
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
 #include "nodes/makefuncs.h"
+#include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
+#include "optimizer/paths.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/planmain.h"
 #include "optimizer/restrictinfo.h"
@@ -37,6 +40,7 @@ typedef struct PlannedTable
 	List	   *paths;			/* the files the patterns matched */
 	uint64		groups;			/* their groups of rows */
 	double		rows;			/* the rows of the files */
+	double		bytes;			/* the bytes of the files */
 } PlannedTable;
 
 /* The columns of `relid` a scan of `baserel` reads, as their numbers. */
@@ -77,6 +81,7 @@ static void
 rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 {
 	PlannedTable *planned = palloc0_object(PlannedTable);
+	TessParquetIdentity *identities;
 
 	/* The source of a bridge loaded after the module. */
 	parquet_register();
@@ -85,24 +90,60 @@ rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 	/* The table's files as they are now, each column the query reads
 	 * mapped to each. */
 	planned->paths = parquet_expand(planned->patterns);
+	identities = palloc0_array(TessParquetIdentity, Max(list_length(planned->paths), 1));
 	planned->rows = parquet_check_files(planned->paths, foreigntableid, planned->attnums,
-										NULL, NULL, NULL, &planned->groups);
+										identities, NULL, NULL, &planned->groups);
+	for (int f = 0; f < list_length(planned->paths); f++)
+		planned->bytes += (double) identities[f].size;
 	baserel->rows = clamp_row_est(planned->rows *
 								  clauselist_selectivity(root, baserel->baserestrictinfo,
 														 0, JOIN_INNER, NULL));
 	baserel->fdw_private = planned;
 }
 
-/* The wrapper's path; the source knows its tables by this function. */
+/* The share of the rows of a partial path of `workers` that one
+ * participant takes, as the core's get_parallel_divisor counts it. */
+static double
+participants(int workers)
+{
+	double		divisor = workers;
+
+	if (parallel_leader_participation && 1.0 - 0.3 * workers > 0)
+		divisor += 1.0 - 0.3 * workers;
+	return divisor;
+}
+
+/*
+ * The wrapper's serial path, and, where the relation may be read in
+ * parallel, its partial path, with the workers the core gives a scan of
+ * the files' size; the source knows its tables by this function.
+ */
 void
 parquet_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 {
 	PlannedTable *planned = baserel->fdw_private;
 	Cost		total = seq_page_cost + planned->rows * cpu_tuple_cost;
+	int			workers;
 
 	add_path(baserel, (Path *) create_foreignscan_path(root, baserel, NULL, baserel->rows, 0,
 													   0, total, NIL, baserel->lateral_relids,
 													   NULL, NIL, NIL));
+	if (!baserel->consider_parallel || baserel->lateral_relids != NULL)
+		return;
+	workers = compute_parallel_worker(baserel, planned->bytes / BLCKSZ, -1,
+									  max_parallel_workers_per_gather);
+	if (workers > 0)
+	{
+		double		share = participants(workers);
+		ForeignPath *partial = create_foreignscan_path(root, baserel, NULL,
+													   clamp_row_est(baserel->rows / share),
+													   0, 0, total / share, NIL, NULL, NULL,
+													   NIL, NIL);
+
+		partial->path.parallel_aware = true;
+		partial->path.parallel_workers = workers;
+		add_partial_path(baserel, &partial->path);
+	}
 }
 
 static ForeignScan *
@@ -156,7 +197,8 @@ parquet_explain_files(List *planned, const ParquetScan *scan, ExplainState *es)
 	if (es->verbose)
 		ExplainPropertyList("Parquet File Paths", parquet_strings(lthird(planned)), es);
 	if (es->analyze && scan != NULL)
-		ExplainPropertyUInteger("Row Groups Read", NULL, scan->groups_read, es);
+		ExplainPropertyUInteger("Row Groups Read", NULL,
+								parquet_scan_counts(scan)[PARQUET_GROUPS_READ], es);
 }
 
 static void
@@ -165,6 +207,9 @@ begin_scan(ForeignScanState *node, int eflags)
 	ForeignScan *scan = (ForeignScan *) node->ss.ps.plan;
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
+		return;
+	/* A worker reads the leader's list, which it is given after its begin. */
+	if (IsParallelWorker() && node->ss.ps.plan->parallel_aware)
 		return;
 	node->fdw_state = parquet_scan_begin(RelationGetRelid(node->ss.ss_currentRelation),
 										 parquet_strings(linitial(scan->fdw_private)),
@@ -197,6 +242,48 @@ end_scan(ForeignScanState *node)
 		parquet_scan_end(node->fdw_state);
 }
 
+/* Every table of the wrapper may be read in a worker. */
+static bool
+parallel_safe(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	return true;
+}
+
+static Size
+estimate_dsm(ForeignScanState *node, ParallelContext *pcxt)
+{
+	return parquet_scan_estimate(node->fdw_state, pcxt->nworkers);
+}
+
+static void
+initialize_dsm(ForeignScanState *node, ParallelContext *pcxt, void *coordinate)
+{
+	parquet_scan_share(node->fdw_state, coordinate, pcxt, node->ss.ps.state->es_query_cxt);
+}
+
+static void
+reinitialize_dsm(ForeignScanState *node, ParallelContext *pcxt, void *coordinate)
+{
+	parquet_scan_reshare(node->fdw_state, pcxt, node->ss.ps.state->es_query_cxt);
+}
+
+static void
+initialize_worker(ForeignScanState *node, shm_toc *toc, void *coordinate)
+{
+	ForeignScan *scan = (ForeignScan *) node->ss.ps.plan;
+
+	node->fdw_state = parquet_scan_attach(RelationGetRelid(node->ss.ss_currentRelation),
+										  lsecond(scan->fdw_private), coordinate,
+										  node->ss.ps.state->es_query_cxt);
+}
+
+static void
+shutdown(ForeignScanState *node)
+{
+	if (node->fdw_state != NULL)
+		parquet_scan_unshare(node->fdw_state);
+}
+
 Datum
 tessera_parquet_handler(PG_FUNCTION_ARGS)
 {
@@ -210,5 +297,11 @@ tessera_parquet_handler(PG_FUNCTION_ARGS)
 	routine->ReScanForeignScan = rescan;
 	routine->EndForeignScan = end_scan;
 	routine->ExplainForeignScan = explain;
+	routine->IsForeignScanParallelSafe = parallel_safe;
+	routine->EstimateDSMForeignScan = estimate_dsm;
+	routine->InitializeDSMForeignScan = initialize_dsm;
+	routine->ReInitializeDSMForeignScan = reinitialize_dsm;
+	routine->InitializeWorkerForeignScan = initialize_worker;
+	routine->ShutdownForeignScan = shutdown;
 	PG_RETURN_POINTER(routine);
 }

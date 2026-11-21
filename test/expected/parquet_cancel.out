@@ -1,8 +1,8 @@
--- A query that reads a group of a million rows of a Parquet file is
--- cancelled when it has read the group's first window, and stops within
--- the group. The cancel comes through an injection point at each window
--- read, so this suite runs only on a build with them; on another it ends
--- here.
+-- What a Parquet table's scans do at injection points: a query that
+-- reads a group of a million rows is cancelled when it has read the
+-- group's first window, and stops within the group; and a file replaced
+-- before a worker of a parallel plan opens it. This suite runs only on a
+-- build with injection points; on another it ends here.
 \getenv libdir PG_LIBDIR
 \getenv dlsuffix PG_DLSUFFIX
 \set parquet_test :libdir '/tessera_parquet_test' :dlsuffix
@@ -103,9 +103,64 @@ SELECT sum(i) = 999999::numeric * 1000000 / 2 AS every_row FROM t_million;
  t
 (1 row)
 
-DROP FOREIGN TABLE t_million;
+-- spec: parquet-fdw/A file replaced between participants
+-- A parallel plan whose leader has begun its scan, the file replaced by
+-- a rename with one of its bytes and time before a worker opens it,
+-- through an injection point before each file a worker opens: the worker
+-- raises 55000. Once with Tessera off and once with it on.
+CREATE FUNCTION parquet_test_replace_in_worker(text, bool) RETURNS void
+    AS :'parquet_test', 'tessera_parquet_test_replace_in_worker' LANGUAGE C STRICT;
+\set eight :abs_builddir '/results/parquet_files/eight_cancel.parquet'
+SELECT parquet_test_write(:'eight',
+    '{"group_rows": 1000, "columns": [{"name": "i", "type": "int64", "range": 8000}]}');
+ parquet_test_write 
+--------------------
+ 
+(1 row)
+
+CREATE FOREIGN TABLE t_eight (i bigint) SERVER pq OPTIONS (files :'eight');
+SET max_parallel_workers_per_gather = 2;
+SET min_parallel_table_scan_size = 0;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET parallel_leader_participation = off;
+SELECT parquet_test_replace_in_worker(:'parquet_module', true);
+ parquet_test_replace_in_worker 
+--------------------------------
+ 
+(1 row)
+
+SET tessera.enable = off;
+\set VERBOSITY sqlstate
+SELECT sum(i) FROM t_eight;
+ERROR:  55000
+\set VERBOSITY default
+RESET tessera.enable;
+\set VERBOSITY sqlstate
+SELECT sum(i) FROM t_eight;
+ERROR:  55000
+\set VERBOSITY default
+SELECT parquet_test_replace_in_worker(:'parquet_module', false);
+ parquet_test_replace_in_worker 
+--------------------------------
+ 
+(1 row)
+
+SELECT sum(i) FROM t_eight;
+   sum    
+----------
+ 31996000
+(1 row)
+
+RESET max_parallel_workers_per_gather;
+RESET min_parallel_table_scan_size;
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+RESET parallel_leader_participation;
+DROP FOREIGN TABLE t_million, t_eight;
 DROP SERVER pq;
 DROP FUNCTION parquet_test_injection(), parquet_test_write(text, text),
-    parquet_test_cancel_after(text, int), parquet_test_windows();
+    parquet_test_cancel_after(text, int), parquet_test_windows(),
+    parquet_test_replace_in_worker(text, bool);
 DROP EXTENSION tessera_parquet;
 DROP EXTENSION tessera;

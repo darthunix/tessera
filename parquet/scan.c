@@ -8,12 +8,32 @@
  */
 #include "postgres.h"
 
+#include "access/parallel.h"
 #include "executor/tuptable.h"
 #include "miscadmin.h"
+#include "port/atomics.h"
 #include "utils/injection_point.h"
 #include "utils/memutils.h"
 
+#include "tessera/runtime.h"
+
 #include "tessera_parquet.h"
+
+/*
+ * The list a parallel scan's leader shares: the files it found when its
+ * scan began, what fstat said of each, the rows of each group, and the
+ * counter of the groups taken, over the files in their order, so that the
+ * participants take the groups in turn. After the header come the
+ * identities, the groups of each file, the rows of each group, the paths,
+ * each ended by a zero byte, and the participants' counters.
+ */
+typedef struct ParquetShared
+{
+	pg_atomic_uint64 next;		/* the next group to take */
+	int			nfiles;
+	uint64		ngroups;
+	Size		stats_offset;	/* where the counters start */
+} ParquetShared;
 
 static size_t
 words_of(size_t rows)
@@ -35,6 +55,8 @@ every_row(size_t rows)
 	return mask;
 }
 
+static void scan_contexts(ParquetScan *scan);
+
 ParquetScan *
 parquet_scan_begin(Oid relid, List *patterns, List *attnums)
 {
@@ -53,6 +75,22 @@ parquet_scan_begin(Oid relid, List *patterns, List *attnums)
 	scan->columns = palloc_array(ParquetColumn, Max(scan->ncolumns, 1));
 	foreach_int(attnum, attnums)
 		scan->columns[i++] = parquet_column(relid, attnum);
+	scan_contexts(scan);
+	return scan;
+}
+
+/* The scan's contexts and the first group of each file, its state reset. */
+static void
+scan_contexts(ParquetScan *scan)
+{
+	uint64		first = 0;
+
+	scan->first_group = palloc_array(uint64, Max(list_length(scan->paths), 1));
+	for (int f = 0; f < list_length(scan->paths); f++)
+	{
+		scan->first_group[f] = first;
+		first += scan->groups[f];
+	}
 	scan->file_cxt = AllocSetContextCreate(CurrentMemoryContext, "tessera_parquet file",
 										   ALLOCSET_DEFAULT_SIZES);
 	/* A sibling of the file's, not its child: a reset deletes children. */
@@ -61,7 +99,6 @@ parquet_scan_begin(Oid relid, List *patterns, List *attnums)
 	scan->window_cxt = AllocSetContextCreate(CurrentMemoryContext, "tessera_parquet window",
 											 ALLOCSET_DEFAULT_SIZES);
 	parquet_scan_rescan(scan);
-	return scan;
 }
 
 void
@@ -84,14 +121,16 @@ parquet_scan_rescan(ParquetScan *scan)
 void
 parquet_scan_end(ParquetScan *scan)
 {
+	if (scan->stats != NULL)
+		tess_shared_stats_end(scan->stats);
 	MemoryContextDelete(scan->window_cxt);
 	MemoryContextDelete(scan->group_cxt);
 	MemoryContextDelete(scan->file_cxt);
 }
 
-/* Opens the next file, its columns mapped; false past the last. */
-static bool
-next_file(ParquetScan *scan)
+/* Opens the file `f`, its columns mapped. */
+static void
+open_file(ParquetScan *scan, int f)
 {
 	MemoryContext outer;
 
@@ -99,17 +138,12 @@ next_file(ParquetScan *scan)
 	MemoryContextReset(scan->group_cxt);
 	MemoryContextReset(scan->file_cxt);
 	scan->file = NULL;
-	if (scan->file_index + 1 >= list_length(scan->paths))
-	{
-		scan->file_index = list_length(scan->paths);
-		return false;
-	}
-	scan->file_index++;
+	scan->file_index = f;
 	scan->group = 0;
 	scan->group_started = false;
 	/* Without a column read, the footer's counts give the rows. */
 	if (scan->ncolumns == 0)
-		return true;
+		return;
 	outer = MemoryContextSwitchTo(scan->file_cxt);
 	scan->file = parquet_open_file(list_nth(scan->paths, scan->file_index),
 								   &scan->identities[scan->file_index]);
@@ -125,6 +159,46 @@ next_file(ParquetScan *scan)
 			parquet_raise(&status);
 	}
 	MemoryContextSwitchTo(outer);
+}
+
+/* Opens the next file; false past the last. */
+static bool
+next_file(ParquetScan *scan)
+{
+	if (scan->file_index + 1 >= list_length(scan->paths))
+	{
+		MemoryContextReset(scan->window_cxt);
+		MemoryContextReset(scan->group_cxt);
+		MemoryContextReset(scan->file_cxt);
+		scan->file = NULL;
+		scan->file_index = list_length(scan->paths);
+		return false;
+	}
+	open_file(scan, scan->file_index + 1);
+	return true;
+}
+
+/*
+ * A parallel scan's next group: the one the shared counter gives, its
+ * file opened where it is another than the one read; false past the
+ * last. A participant's groups come in the list's order.
+ */
+static bool
+take_group(ParquetScan *scan)
+{
+	uint64		g = pg_atomic_fetch_add_u64(&scan->shared->next, 1);
+	int			f = Max(scan->file_index, 0);
+
+	if (g >= scan->shared->ngroups)
+	{
+		scan->file_index = list_length(scan->paths);
+		return false;
+	}
+	while (g >= scan->first_group[f] + scan->groups[f])
+		f++;
+	if (f != scan->file_index)
+		open_file(scan, f);
+	scan->group = (size_t) (g - scan->first_group[f]);
 	return true;
 }
 
@@ -151,7 +225,7 @@ start_group(ParquetScan *scan)
 	scan->window_len = 0;
 	scan->row = 0;
 	scan->group_started = true;
-	scan->groups_read++;
+	scan->own[PARQUET_GROUPS_READ]++;
 	if (scan->readers != NULL)
 		memset(scan->readers, 0, sizeof(TessParquetReader *) * scan->ncolumns);
 }
@@ -165,6 +239,14 @@ parquet_scan_next_group(ParquetScan *scan)
 {
 	if (scan->file_index >= list_length(scan->paths))
 		return false;
+	if (scan->shared != NULL)
+	{
+		scan->group_started = false;
+		if (!take_group(scan))
+			return false;
+		start_group(scan);
+		return true;
+	}
 	if (scan->group_started)
 	{
 		scan->group++;
@@ -324,4 +406,168 @@ parquet_scan_next(ParquetScan *scan, TupleTableSlot *slot)
 	}
 	scan->row++;
 	return ExecStoreVirtualTuple(slot);
+}
+
+/* ---- a parallel scan ---- */
+
+static uint64
+total_groups(const ParquetScan *scan)
+{
+	uint64		total = 0;
+
+	for (int f = 0; f < list_length(scan->paths); f++)
+		total += scan->groups[f];
+	return total;
+}
+
+/* The bytes of the list before the counters. */
+static Size
+list_size(const ParquetScan *scan)
+{
+	Size		size = MAXALIGN(sizeof(ParquetShared));
+	int			nfiles = list_length(scan->paths);
+
+	size = add_size(size, mul_size(nfiles, sizeof(TessParquetIdentity)));
+	size = add_size(size, mul_size(nfiles, sizeof(uint64)));
+	size = add_size(size, mul_size(total_groups(scan), sizeof(uint64)));
+	foreach_ptr(char, path, scan->paths)
+		size = add_size(size, strlen(path) + 1);
+	return MAXALIGN(size);
+}
+
+/* The shared memory of the leader's scan: its list and the counters. */
+Size
+parquet_scan_estimate(const ParquetScan *scan, int nworkers)
+{
+	return add_size(list_size(scan), tess_shared_stats_estimate(PARQUET_COUNTERS, nworkers));
+}
+
+/* The leader's list of files and groups, laid out in `coordinate`. */
+void
+parquet_scan_share(ParquetScan *scan, void *coordinate, ParallelContext *pcxt,
+				   MemoryContext cxt)
+{
+	ParquetShared *shared = coordinate;
+	int			nfiles = list_length(scan->paths);
+	char	   *at = (char *) coordinate + MAXALIGN(sizeof(ParquetShared));
+
+	pg_atomic_init_u64(&shared->next, 0);
+	shared->nfiles = nfiles;
+	shared->ngroups = total_groups(scan);
+	shared->stats_offset = list_size(scan);
+	memcpy(at, scan->identities, sizeof(TessParquetIdentity) * nfiles);
+	at += sizeof(TessParquetIdentity) * nfiles;
+	for (int f = 0; f < nfiles; f++)
+	{
+		((uint64 *) at)[f] = scan->groups[f];
+	}
+	at += sizeof(uint64) * nfiles;
+	for (int f = 0; f < nfiles; f++)
+	{
+		memcpy(at, scan->group_rows[f], sizeof(uint64) * scan->groups[f]);
+		at += sizeof(uint64) * scan->groups[f];
+	}
+	foreach_ptr(char, path, scan->paths)
+	{
+		strcpy(at, path);
+		at += strlen(path) + 1;
+	}
+	scan->shared = shared;
+	/* Without a segment the core puts the list in private memory, which it
+	 * frees before the scan ends. */
+	scan->private_shared = pcxt->seg == NULL;
+	scan->stats = tess_shared_stats_setup(scan->stats, cxt,
+										  (char *) coordinate + shared->stats_offset,
+										  PARQUET_COUNTERS, pcxt->nworkers, pcxt->seg);
+}
+
+/*
+ * The leader, at a rescan of the parallel plan: the groups from the
+ * first. The workers of the scan that ended have stored their counters
+ * and exited, and the leader stores its own only when the plan shuts
+ * down: their counters join the leader's, and the rows are laid out
+ * anew, so that EXPLAIN totals every scan. The handle of the ended scan,
+ * some hundred bytes, stays in the query's context until the query ends,
+ * since the runtime frees none.
+ */
+void
+parquet_scan_reshare(ParquetScan *scan, ParallelContext *pcxt, MemoryContext cxt)
+{
+	const uint64 *ended;
+
+	pg_atomic_write_u64(&scan->shared->next, 0);
+	tess_shared_stats_collect(scan->stats);
+	ended = tess_shared_stats_totals(scan->stats);
+	for (int c = 0; c < PARQUET_COUNTERS && ended != NULL; c++)
+		scan->own[c] += ended[c];
+	scan->stats = tess_shared_stats_setup(scan->stats, cxt,
+										  (char *) scan->shared + scan->shared->stats_offset,
+										  PARQUET_COUNTERS, pcxt->nworkers, pcxt->seg);
+}
+
+/*
+ * A worker's scan of the leader's list: the files the leader found, each
+ * checked when the worker opens it against what fstat said of it then.
+ */
+ParquetScan *
+parquet_scan_attach(Oid relid, List *attnums, void *coordinate, MemoryContext cxt)
+{
+	ParquetShared *shared = coordinate;
+	MemoryContext outer = MemoryContextSwitchTo(cxt);
+	ParquetScan *scan = palloc0_object(ParquetScan);
+	int			nfiles = shared->nfiles;
+	const char *at = (const char *) coordinate + MAXALIGN(sizeof(ParquetShared));
+	const uint64 *groups;
+	int			i = 0;
+
+	scan->relid = relid;
+	scan->identities = palloc_array(TessParquetIdentity, Max(nfiles, 1));
+	memcpy(scan->identities, at, sizeof(TessParquetIdentity) * nfiles);
+	at += sizeof(TessParquetIdentity) * nfiles;
+	groups = (const uint64 *) at;
+	at += sizeof(uint64) * nfiles;
+	scan->groups = palloc0_array(size_t, Max(nfiles, 1));
+	scan->group_rows = palloc0_array(uint64 *, Max(nfiles, 1));
+	for (int f = 0; f < nfiles; f++)
+	{
+		scan->groups[f] = (size_t) groups[f];
+		scan->group_rows[f] = palloc_array(uint64, Max(groups[f], 1));
+		memcpy(scan->group_rows[f], at, sizeof(uint64) * groups[f]);
+		at += sizeof(uint64) * groups[f];
+	}
+	for (int f = 0; f < nfiles; f++)
+	{
+		scan->paths = lappend(scan->paths, pstrdup(at));
+		at += strlen(at) + 1;
+	}
+	scan->ncolumns = list_length(attnums);
+	scan->columns = palloc_array(ParquetColumn, Max(scan->ncolumns, 1));
+	foreach_int(attnum, attnums)
+		scan->columns[i++] = parquet_column(relid, attnum);
+	scan_contexts(scan);
+	scan->shared = shared;
+	scan->stats = tess_shared_stats_attach(cxt, (char *) coordinate + shared->stats_offset,
+										   ParallelWorkerNumber + 1);
+	MemoryContextSwitchTo(outer);
+	return scan;
+}
+
+/* At the parallel plan's shutdown: this participant's counters stored. */
+void
+parquet_scan_unshare(ParquetScan *scan)
+{
+	/* A serial plan shuts its scan down too, without shared memory. */
+	if (scan->stats != NULL)
+		tess_shared_stats_store(scan->stats, scan->own);
+	/* Private memory is gone before the scan ends: summed now. */
+	if (scan->stats != NULL && scan->private_shared)
+		tess_shared_stats_collect(scan->stats);
+	scan->shared = NULL;
+}
+
+/* For EXPLAIN: the counters of every participant, or this scan's own. */
+const uint64 *
+parquet_scan_counts(const ParquetScan *scan)
+{
+	return tess_shared_stats_totals_or(scan->stats, scan->own);
 }

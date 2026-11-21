@@ -11,6 +11,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "access/parallel.h"
 #include "executor/executor.h"
 #include "executor/spi.h"
 #include "fmgr.h"
@@ -57,6 +58,11 @@ PG_FUNCTION_INFO_V1(tessera_parquet_test_injection);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_cancel_after);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_windows);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_asks);
+PG_FUNCTION_INFO_V1(tessera_parquet_test_replace_in_worker);
+
+extern PGDLLEXPORT void tessera_parquet_test_replace_open(const char *name,
+														  const void *private_data,
+														  void *arg);
 
 /* The time of modification of a stat, to the nanosecond. */
 #ifdef __APPLE__
@@ -178,6 +184,26 @@ set_time(const char *path, time_t when)
 		file_error("set the time of", path);
 }
 
+/* A new file of the bytes of `from`, of the time `was` says, renamed over
+ * `to`; its temporary name is the process's, so that workers race on
+ * the rename alone, which is atomic. */
+static void
+rename_over(const char *from, const char *to, const struct stat *was)
+{
+	char	   *tmp = psprintf("%s.%d.new", to, MyProcPid);
+	struct timespec times[2] = {MTIME_OF(*was), MTIME_OF(*was)};
+	int			fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY, 0600);
+
+	if (fd < 0)
+		file_error("open", tmp);
+	copy_into(from, fd, tmp);
+	if (futimens(fd, times) != 0)
+		file_error("set the time of", tmp);
+	close(fd);
+	if (rename(tmp, to) != 0)
+		file_error("rename", tmp);
+}
+
 /*
  * parquet_test_replace(from text, to text, how text): replaces the file
  * `to` by the bytes of `from`: 'in place', the same file rewritten, its
@@ -204,20 +230,7 @@ tessera_parquet_test_replace(PG_FUNCTION_ARGS)
 		set_time(to, was.st_mtime + 60);
 	}
 	else if (strcmp(how, "rename") == 0)
-	{
-		char	   *tmp = psprintf("%s.new", to);
-		struct timespec times[2] = {MTIME_OF(was), MTIME_OF(was)};
-
-		fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | PG_BINARY, 0600);
-		if (fd < 0)
-			file_error("open", tmp);
-		copy_into(from, fd, tmp);
-		if (futimens(fd, times) != 0)
-			file_error("set the time of", tmp);
-		close(fd);
-		if (rename(tmp, to) != 0)
-			file_error("rename", tmp);
-	}
+		rename_over(from, to, &was);
 	else
 		elog(ERROR, "no replacement named %s", how);
 	{
@@ -452,4 +465,38 @@ tessera_parquet_test_asks(PG_FUNCTION_ARGS)
 	ReleaseCachedPlan(cplan, NULL);
 	SPI_finish();
 	return (Datum) 0;
+}
+
+/*
+ * The callback of the injection point "tessera-parquet-open": in a worker
+ * of a parallel plan, the file a scan is about to open replaced by a
+ * rename with one of its bytes and time.
+ */
+void
+tessera_parquet_test_replace_open(const char *name, const void *private_data, void *arg)
+{
+	const char *path = arg;
+	struct stat was;
+
+	if (!IsParallelWorker())
+		return;
+	was = stat_of(path);
+	rename_over(path, path, &was);
+}
+
+/*
+ * parquet_test_replace_in_worker(module text, on bool): replaces each file
+ * a worker opens from now on, or no longer. The callback is loaded from
+ * `module`, this module's file without its suffix.
+ */
+Datum
+tessera_parquet_test_replace_in_worker(PG_FUNCTION_ARGS)
+{
+	char	   *library = module_from_pkglib(text_to_cstring(PG_GETARG_TEXT_PP(0)));
+
+	InjectionPointDetach("tessera-parquet-open");
+	if (PG_GETARG_BOOL(1))
+		InjectionPointAttach("tessera-parquet-open", library, "tessera_parquet_test_replace_open",
+							 NULL, 0);
+	PG_RETURN_VOID();
 }
