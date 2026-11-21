@@ -585,6 +585,7 @@ SELECT differ_off('SELECT x, (SELECT count(*) FROM t_windows t WHERE t.i % 10 = 
                           (SELECT max(s) FROM t_windows t WHERE t.i % 10 = o.x) AS s
                    FROM (VALUES (1), (2), (3)) o(x)') AS rows_differ;
 
+-- spec: parquet-fdw/A whole row and a system column
 -- A whole row and a system column, which the runtime's projection does
 -- not compute, are read by the wrapper's scan with Tessera on.
 SELECT scans_of('SELECT t FROM t_files t') AS whole_row,
