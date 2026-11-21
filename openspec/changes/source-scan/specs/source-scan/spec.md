@@ -103,7 +103,8 @@ SQLSTATE `XX000`.
   and an empty name, and `next` lists the first and then the second;
   once the first is removed, `find` returns `NULL` for it and `next`
   lists the second alone; the last two removals change nothing
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source.sql::-- spec: source-scan/Sources found and listed`
 
 #### Scenario: Sources refused
 - **WHEN** a `NULL` source, a source of another version, one below the
@@ -112,14 +113,16 @@ SQLSTATE `XX000`.
   `next` are each tried in turn
 - **THEN** each raises its error, with the SQLSTATE listed above, and
   the registry stays as it was
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source.sql::-- spec: source-scan/Sources refused`
 
 #### Scenario: A registry table too old
 - **WHEN** `tess_source_registry_check` is given the bridge's table, a
   table that ends at `find`, a table of another version, and `NULL`
 - **THEN** it returns the first, and raises an error, SQLSTATE `0A000`,
   for each of the others without reading their `next`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source.sql::-- spec: source-scan/A registry table too old`
 
 #### Scenario: A source of the least size
 - **WHEN** a source whose `struct_size` is `TESS_SOURCE_MIN_SIZE`,
@@ -130,7 +133,8 @@ SQLSTATE `XX000`.
   relation, the third, whose `scan_rows` returns `NULL`, is asked and
   declines, and the plan reads the table through the source that reads
   it
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/A source of the least size`
 
 ### Requirement: A source's scan callback
 Tessera SHALL ask a source to read a relation by calling its `scan_rows`
@@ -201,7 +205,8 @@ path, the relation SHALL keep the core's paths alone.
 - **THEN** the plan reads the table through the second source's node,
   with `TessFilter` checking the clause, the third is not asked, and the
   result equals the result over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::The first source that reads the relation`
 
 #### Scenario: The path offered
 - **WHEN** a query with a `LIMIT`, under which the core keeps a path
@@ -210,7 +215,8 @@ path, the relation SHALL keep the core's paths alone.
 - **THEN** the source is given a copy of the one of the least total cost
   with its private data, and its node, built from it, says so in
   `EXPLAIN`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/The path offered`
 
 #### Scenario: A path refused
 - **WHEN** a source returns, in turn, a core path, a custom path that
@@ -222,7 +228,8 @@ path, the relation SHALL keep the core's paths alone.
   of workers, and a serial path marked parallel-safe where the given one
   is not
 - **THEN** each raises an error at planning, SQLSTATE `XX000`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/A path refused`
 
 #### Scenario: A source not safe in parallel
 - **WHEN** a source marks its serial path not parallel-safe, and a
@@ -230,13 +237,15 @@ path, the relation SHALL keep the core's paths alone.
 - **THEN** neither the source's node nor `TessFilter` over it runs
   inside a worker, and the result equals the result over heap tables of
   the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/A source not safe in parallel`
 
 #### Scenario: No source reads the relation
 - **WHEN** every source returns `NULL` for a foreign table
 - **THEN** the plan has the core's `ForeignScan`, under `TessPack` where
   a batch parent reads it, as without sources
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/No source reads the relation`
 
 ### Requirement: A source's answers for the clauses
 Tessera SHALL pass a source, with the path, a `TessScanClauses` of
@@ -277,8 +286,8 @@ valid only during the call. For the clauses it uses, the source SHALL:
 - pass them on, in its `PlanCustomPath`, the callback by which
   PostgreSQL turns a custom path into a plan node, as its plan's
   expressions (`TessPlanConfig.expressions`);
-- leave its plan's qualifiers, the conditions the executor checks on
-  each row a node returns, empty, whatever clauses `PlanCustomPath` is
+- leave its plan's qualifiers, the conditions a plan node checks on
+  each row it returns, empty, whatever clauses `PlanCustomPath` is
   handed: PostgreSQL hands it every clause of the relation, the clauses
   the source leaves and the ones it may not use among them;
 - plan its node with the relation as its scan tuple
@@ -312,7 +321,8 @@ parameter starts the node's scan again.
 - **THEN** the plan reads the table through the source's node alone,
   with no `TessFilter` and with the rows of the path offered, and the
   result equals the result over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A source that checks every clause`
 
 #### Scenario: A source that checks some clauses
 - **WHEN** a source checks exactly one of two clauses and leaves the
@@ -320,7 +330,8 @@ parameter starts the node's scan again.
 - **THEN** `EXPLAIN` shows the first under the source's node and the
   other under `TessFilter` alone, and the result equals the result over
   a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A source that checks some clauses`
 
 #### Scenario: A source that only skips rows
 - **WHEN** a source answers that it uses a clause only to skip groups of
@@ -329,7 +340,8 @@ parameter starts the node's scan again.
   rows it rejects itself, and the result equals the result of the same
   source that skips nothing and the result over a heap table of the same
   rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/A source that only skips rows`
 
 #### Scenario: A clause on an outer row's value
 - **WHEN** a correlated subquery scans a foreign table that a source
@@ -339,7 +351,8 @@ parameter starts the node's scan again.
 - **THEN** each scan returns the rows of the current outer value, with
   `TessFilter` checking the second clause, and each result equals the
   result over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A clause on an outer row's value`
 
 #### Scenario: A value fixed for the statement
 - **WHEN** a statement prepared with a generic plan, one planned once
@@ -354,7 +367,8 @@ parameter starts the node's scan again.
 - **THEN** each execution returns the rows of its own value, each query
   the rows of the subquery's value, the `EXPLAIN` runs no subquery, and
   each result equals the result over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A value fixed for the statement`
 
 ### Requirement: The clauses a source may use
 A clause has a security level: the clauses of a row security policy (a
@@ -409,7 +423,8 @@ level.
   result equals the result over heap partitions of the same rows; over a
   view with `security_barrier` instead, the clause that is not leakproof
   stays above the view's scan and never reaches the source
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::Clauses under a row security policy`
 
 #### Scenario: A source's own check reveals nothing
 - **WHEN** the source checks by code of its own, exactly and to skip
@@ -418,7 +433,8 @@ level.
   the rows the view's clause hides
 - **THEN** no error and no message comes from the source's check, and
   each result equals the result over heap tables of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A source's own check reveals nothing`
 
 #### Scenario: A volatile clause and a subquery in a clause
 - **WHEN** a foreign table that a source reads is filtered, in a full
@@ -428,7 +444,8 @@ level.
 - **THEN** neither clause is usable, `TessFilter` checks each, the
   volatile function is called as many times as over a heap table of the
   same rows, and each result equals the result over a heap table
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A volatile clause and a subquery in a clause`
 
 #### Scenario: Answers that are not allowed
 - **WHEN** a source answers that it checks exactly, or uses to skip
@@ -437,7 +454,8 @@ level.
   carry; or, under `TessFilter`, plans its node with qualifiers or
   without a clause it answered for among its plan's expressions
 - **THEN** planning raises an error, SQLSTATE `XX000`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/Answers that are not allowed`
 
 ### Requirement: The relations offered to a source
 With the setting `tessera.enable`, the switch of all of Tessera's
@@ -469,7 +487,8 @@ and path SHALL keep the plan it has without sources.
 - **WHEN** `tessera.enable` is off and a source reads a foreign table
 - **THEN** no source is asked, and the plan has the core's `ForeignScan`
   alone
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/Tessera off`
 
 #### Scenario: A statement that locks or writes rows
 - **WHEN** a `SELECT … FOR UPDATE`, also one with an `ORDER BY` that a
@@ -481,7 +500,8 @@ and path SHALL keep the plan it has without sources.
 - **THEN** the first three read the table through the core's
   `ForeignScan`, under `LockRows` in the first, with no source's node,
   and the grouping of the last reads it through the source's node
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A statement that locks or writes rows`
 
 #### Scenario: Relations and paths not offered
 - **WHEN** a foreign table that a source reads is scanned with a lateral
@@ -493,7 +513,8 @@ and path SHALL keep the plan it has without sources.
   is the one without sources in the first three, the inner side is the
   wrapper's in the fourth, and no partial path of a source is in the
   plan in the last
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::Relations and paths not offered`
 
 #### Scenario: A foreign partition
 - **WHEN** a grouping reads a partitioned table that has a heap
@@ -503,13 +524,15 @@ and path SHALL keep the plan it has without sources.
 - **THEN** each plan reads the heap side through the heap scan node and
   the foreign side through the source's node, under `TessAppend`, and
   each result equals the result over heap tables of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/A foreign partition`
 
 #### Scenario: Heap tables beside a source
 - **WHEN** a source that would take any path is registered and a query
   reads heap tables
 - **THEN** the plans and results are those without the source
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/Heap tables beside a source`
 
 ### Requirement: A source's path alone
 When a relation offered has no clauses, or the source checks every one
@@ -528,14 +551,16 @@ relation's rows again.
 - **THEN** each plan reads the table through the source's node with no
   `TessPack` between, and each result equals the result over a heap
   table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/Batch parents over a source`
 
 #### Scenario: A source read again
 - **WHEN** a nested loop scans a foreign table without clauses through
   its source once for each row of an outer relation
 - **THEN** every scan produces all the table's rows, and the result
   equals the result over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/A source read again`
 
 ### Requirement: The filter over a source
 When the source does not check every clause of a relation offered
@@ -556,7 +581,8 @@ count in no line of the filter.
 - **THEN** the plan has `TessFilter` over the source's node, the first
   clause as a batch filter and the second as a row filter, and the
   result equals the result over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::Clauses in batches and by rows`
 
 ### Requirement: A parallel read through a source
 Tessera SHALL gather a source's partial path, alone or under
@@ -580,7 +606,8 @@ a clause the source uses compares with, from the gathering node.
   partial node, with the rows of the partial path offered, when it is on
   and the core's `Gather` there when it is off, and the rows equal those
   over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::Parallel rows through a source`
 
 #### Scenario: A parallel count
 - **WHEN** a parallel plan counts the rows of a foreign table that a
@@ -590,7 +617,8 @@ a clause the source uses compares with, from the gathering node.
   over the source's partial node in the first and the source's partial
   node alone in the second, `TessGather` stands above it, and each count
   equals the count over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/A parallel count`
 
 #### Scenario: A parallel read by a subquery's value
 - **WHEN** a parallel plan reads a foreign table that a source reads by
@@ -599,7 +627,8 @@ a clause the source uses compares with, from the gathering node.
   rows under `TessFilter`, with `tessera.batch_gather` on and off
 - **THEN** every worker uses the subquery's value, and the rows equal
   those over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A parallel read by a subquery's value`
 
 #### Scenario: A parallel grouping
 - **WHEN** a parallel plan groups the rows of a foreign table that a
@@ -607,7 +636,8 @@ a clause the source uses compares with, from the gathering node.
 - **THEN** a partial `TessAgg` reads the source's partial node in each
   participant, and the groups equal those over a heap table of the same
   rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/A parallel grouping`
 
 ### Requirement: The cost of a source's paths
 Tessera SHALL cost the source's path, added alone, at the cost the
@@ -630,7 +660,8 @@ paths and the core's by cost, as it chooses between any paths.
   at its greatest
 - **THEN** the plan reads the table through the source in both, and
   `EXPLAIN` gives `TessFilter` the rows of the path offered
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A source that costs less than its wrapper`
 
 #### Scenario: A source that costs more than its wrapper
 - **WHEN** the source's path costs more than the core's foreign scan at
@@ -638,7 +669,8 @@ paths and the core's by cost, as it chooses between any paths.
   a grouping above
 - **THEN** the plan keeps the core's `ForeignScan`, under `TessPack`
   where a batch parent reads it
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::A source that costs more than its wrapper`
 
 #### Scenario: The clauses left decide
 - **WHEN** the source's path alone costs less than the core's foreign
@@ -648,4 +680,5 @@ paths and the core's by cost, as it chooses between any paths.
   whose column may be NULL, makes `TessFilter` start later than the
   core's foreign scan
 - **THEN** each plan keeps the core's `ForeignScan`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/The clauses left decide`

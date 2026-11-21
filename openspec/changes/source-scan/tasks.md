@@ -133,7 +133,7 @@ injection points.
 
 ## 6. The spec, the design and the contract
 
-- [ ] 6.1 Every scenario of the spec delta names its test; the
+- [x] 6.1 Every scenario of the spec delta names its test; the
       contract's pending checks name the installed set and the suite's
       cases of heap plans and of the policy over a foreign partition.
       Check: `openspec validate source-scan --strict`;
