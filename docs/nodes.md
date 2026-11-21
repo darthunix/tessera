@@ -843,6 +843,21 @@ before the row-wise clauses
 ([key-filter](../openspec/specs/key-filter/design.md)). Such a node
 shows no `Batch Filter`.
 
+Over a foreign table that a source reads ([source.md](source.md)), the
+node stands above the source's path, serial and partial, with the
+clauses the source does not check exactly; a source that checks them
+all stands alone. The source answers for each clause at planning, and
+the filter's path records the clauses it keeps and those the source
+answered for. Its `PlanCustomPath`, handed every clause of the
+relation, keeps its own and refuses (`XX000`) a source plan with
+qualifiers and one without a clause the source answered for among its
+expressions. It costs the source's path and the clauses it keeps as
+`cost_qual_eval` counts them, their start cost to the start and to the
+total and their cost for a row times each row the source returns to
+the total, with neither `tessera.scan_cost_factor` nor the
+scan model of the heap; its rows are the wrapper's offered path's. Rows
+the source skipped or removed count in no line of the node.
+
 Two things make the node possible before that scan. The planner gives
 every scan of the relation its clauses, so `PlanCustomPath` takes them
 away from the sequential scan below the pack node, after checking they are

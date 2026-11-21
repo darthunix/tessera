@@ -11,7 +11,10 @@ parent reads a plain heap table in batches without the pack, and
 of an `Append` in batches (see [runtime.md](runtime.md), "Building
 paths"); `set_tuple_bound` lets a node
 kind take the bound a limit above passes down, as `ExecSetTupleBound`
-tells the core nodes, and forward it to its child.
+tells the core nodes, and forward it to its child. A node's `scan_rows`
+is not a source's callback of the same name, `TessSource.scan_rows`,
+through which a source of the source registry reads a foreign table and
+answers for its clauses ([source.md](source.md)).
 
 ## Finding the registry
 

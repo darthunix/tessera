@@ -123,7 +123,7 @@ injection points.
 
 ## 5. The guides
 
-- [ ] 5.1 `docs/source.md` as the guide to writing a source, with the
+- [x] 5.1 `docs/source.md` as the guide to writing a source, with the
       test source as its example; `docs/runtime.md` ("Building paths"),
       `docs/nodes.md` (`TessFilter`), `docs/limitations.md` (foreign
       tables), `docs/bridge.md` (the source registry) and `docs/node.md`

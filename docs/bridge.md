@@ -162,8 +162,10 @@ and source registries keep their entries on a list (`bridge/registry.c`),
 the function registry, over two hundred entries that expressions look up
 many times while they are planned, in a hash table by OID: `add` accepts
 the same entry again and refuses another under its key, a name or an OID,
-`remove` removes only that entry and `find` goes by key. No module consumes the
-source registry yet; it waits for the first columnar source (plan 6.5).
+`remove` removes only that entry and `find` goes by key. The source
+registry also lists its entries in the order they were registered
+(`next`), the order in which Tessera's scan planner asks the sources
+whether they read a foreign table ([source.md](source.md)).
 `TessKernelRegistryOps` holds the one table of Rust kernel operations
 (`TessKernelOps`, `tessera/kernel_ops.h`) of a backend. `tessera/bridge.h`
 only declares the two types: a module that calls the kernels includes
@@ -226,9 +228,9 @@ and validation in `consumer_binding_ops`. API discovery uses `postgres.h`,
 `fmgr.h`, and `tessera/bridge.h`.
 
 Keep the validated operation table for subsequent calls; do not repeat API
-discovery for each row or batch. The source registry describes identities;
-a node description may also carry optional planning callbacks. Their usage
-is covered in [source.md](source.md) and [node.md](node.md).
+discovery for each row or batch. A source description and a node
+description may both carry optional planning callbacks. Their usage is
+covered in [source.md](source.md) and [node.md](node.md).
 
 ## Version zero
 
