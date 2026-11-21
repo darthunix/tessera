@@ -80,7 +80,8 @@ given twice, `42710`.
 - **THEN** it returns the rows of the seven files, the file first and
   then each pattern's two in the order of the bytes of their names, the
   groups of a file and the rows of a group in their order
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/A table over files and patterns`
 
 #### Scenario: Options refused
 - **WHEN** a server is created with an option; a table with an unknown
@@ -98,7 +99,8 @@ given twice, `42710`.
 - **THEN** each raises its error, with the SQLSTATE listed above, and
   the query that reads only the columns compressed with Snappy returns
   its rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Options refused`
 
 ### Requirement: The columns and their types
 A column of a foreign table SHALL read the file's column of the name its
@@ -164,7 +166,8 @@ holds, `54000`.
   with `NULL` values, as `smallint`, `date`, `timestamp`, `bigint` and
   `text`, with Tessera off and on
 - **THEN** every row equals the row of a heap table of the same values
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/ClickBench's types`
 
 #### Scenario: Every mapping of the list
 - **WHEN** a table reads, through the option `column` where its names
@@ -178,7 +181,8 @@ holds, `54000`.
   file's metadata keeping a schema of Apache Arrow that names other
   types, with Tessera off and on
 - **THEN** every row equals the row of a heap table of the same values
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Every mapping of the list`
 
 #### Scenario: A value larger than PostgreSQL holds
 - **WHEN** a string column holds a value of more than a gigabyte
@@ -209,7 +213,8 @@ holds, `54000`.
   two of two faults `0A000` and `22023` by the order above, and the
   queries that do not read the missing or refused columns return their
   rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Columns refused`
 
 ### Requirement: Text from bytes
 A `text` or `varchar` column SHALL need a database of the encoding
@@ -258,7 +263,8 @@ as they are.
   `text` column, and one with only `bytea` and integer columns
 - **THEN** the first raises `0A000` when it is planned, and the second
   returns its rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/A database of another encoding`
 
 ### Requirement: Reading rows
 When the planner takes the wrapper's own scan, the wrapper SHALL return
@@ -286,7 +292,8 @@ a group of rows.
   side of a nested loop that scans it once for each outer row
 - **THEN** each result equals the result over a heap table of the same
   rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Rows with Tessera off`
 
 #### Scenario: Files replaced, added, removed and damaged
 - **WHEN** a prepared statement reads a table whose files are one

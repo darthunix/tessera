@@ -12,7 +12,7 @@ MODULES = tessera_batch_test tessera_binding_test tessera_bridge_test \
 	tessera_unary_test
 REGRESS = agg batch binding bridge builder coverage expr filter forward function heap_batch \
 	heap_deform index index_join input interrupt_loops interrupts join kernel_ops kernels kernels_module \
-	limit modules node output pack parallel parquet plan planner project project_provider request \
+	limit modules node output pack parallel parquet parquet_cancel plan planner project project_provider request \
 	row_mask rows settings shared_stats sort source source_scan spill spill_damage table transfer types \
 	union union_parallel unary
 # The suites use ICU collations, which need a UTF-8 database, and expect
