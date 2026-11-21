@@ -109,10 +109,12 @@ impl ReadPlan {
 
 /// `stored * scale op constant + shift`, exact, as a test of `stored`.
 fn bound(count: Count, op: Comparison, constant: i64) -> Test {
-    let scale = i128::from(count.scale);
-    let target = i128::from(constant) + i128::from(count.shift);
-    let floor = target.div_euclid(scale);
-    let exact = target.rem_euclid(scale) == 0;
+    // Every count's shift is a whole number of its stored unit, so
+    // floor((constant + shift) / scale) is floor(constant / scale) plus
+    // the shift in stored units: a division in 64 bits, exact.
+    let floor =
+        i128::from(constant.div_euclid(count.scale)) + i128::from(count.shift / count.scale);
+    let exact = constant.rem_euclid(count.scale) == 0;
     let ceil = if exact { floor } else { floor + 1 };
     let (op, bound) = match op {
         Comparison::Lt => (Comparison::Lt, ceil),

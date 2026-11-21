@@ -181,19 +181,32 @@ checker that proves a property of a Rust function for every input
 rather than for a sample. Kani proves, of the scalar code of one value:
 
 - the test of a bound against the exact comparison in 128 bits, for
-  every stored value and every constant, in each unit;
-- the answer for a range of stored values, none, some or every, for
-  every least and greatest value;
+  every stored value and every finite constant, for integers, days and
+  microseconds; the bounds of seconds and milliseconds divide the
+  constant by a million or a thousand, and a symbolic division of 64
+  bits takes Kani past the ten minutes of a harness, so the property
+  tests compare them with the exact count, over the edges of the
+  ranges, instead;
+- the answer for a range of stored values exact, for every least and
+  greatest value: every value of the range passes where it says every
+  value, none where it says no value, and where it says some may, the
+  range holds a value that passes and one that does not; a range turned
+  the wrong way gets some may;
 - a day or a time read without an overflow and accepted exactly when it
   is in PostgreSQL's range; written without an overflow and accepted
   exactly when it is in both PostgreSQL's range and Arrow's; and every
   value written read back to the same representation;
-- for each kind of plan and every value, no failure the plan does not
-  name, the check of the contract's rule "A plan names every failure";
-- the check of the zero byte and the count of a `varchar`'s characters
-  against a plain loop over the bytes, for strings of up to eight
-  bytes; the check of UTF-8 is the standard library's, not proved
-  here.
+- for plans of integers, of days in 16 bits, of 64-bit integers and of
+  seconds, and every value of a column of one slot, a failure exactly
+  where the value is out of range and only where the plan names it, the
+  check of the contract's rule "A plan names every failure" on these
+  plans;
+- a string of up to four bytes read through a plan of checked bytes
+  into `text`: refused, with `22021` and its slot, exactly where it is
+  not UTF-8 or holds a zero byte, and given as its bytes otherwise; and
+  the count of a `varchar`'s characters against the characters the
+  standard library decodes from a valid string, for strings of up to
+  four bytes.
 
 Kani's cost grows with the length of a loop it unrolls, and it does not
 know most vector intrinsics, so it proves the code of one value; the
@@ -220,6 +233,12 @@ ClickBench's `AdvEngineID <> 0` compares a `smallint` with an
 bounds are for integers, days and times alone: a floating-point number
 orders `NaN` as PostgreSQL does not, and a string by its collation.
 
+
+The constant is divided by the stored unit in 64 bits: every epoch
+shift is a whole number of its stored unit (946 684 800 000 000
+microseconds are as many whole milliseconds and seconds), so
+floor((c + shift) / unit) is floor(c / unit) plus the shift in stored
+units; `Count::time` asserts it, and a proof checks it of every count.
 ### Decisions of the maintainer
 
 On 2026-11-21:

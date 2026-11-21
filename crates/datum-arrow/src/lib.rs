@@ -23,6 +23,8 @@ mod column;
 mod error;
 mod failures;
 mod pg;
+#[cfg(kani)]
+mod proofs;
 mod read;
 mod write;
 

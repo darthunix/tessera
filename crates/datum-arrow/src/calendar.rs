@@ -45,7 +45,8 @@ pub(crate) struct Count {
 }
 
 impl Count {
-    /// Days since 1970-01-01 into days since 2000-01-01.
+    /// Days since 1970-01-01 into days since 2000-01-01, a shift of whole
+    /// days.
     pub(crate) const DAYS: Count = Count {
         scale: 1,
         shift: EPOCH_DAYS,
@@ -57,6 +58,8 @@ impl Count {
     /// microseconds since 2000.
     pub(crate) const fn time(units_per_second: i64) -> Count {
         let scale = 1_000_000 / units_per_second;
+        // The bounds of a comparison count on a shift of whole units.
+        assert!(EPOCH_USECS % scale == 0);
         let scale_wide = scale as i128;
         let shift = EPOCH_USECS as i128;
         // The least stored value whose microseconds reach MIN_TIMESTAMP,

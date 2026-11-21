@@ -505,7 +505,7 @@ fn clear_tail(bytes: &mut [u8], count: usize) {
 
 /// A PostgreSQL date as days since 1970, if Arrow holds it: no infinity
 /// and nothing outside PostgreSQL's range.
-fn date_of(days: i32) -> Result<i32> {
+pub(crate) fn date_of(days: i32) -> Result<i32> {
     let days = i64::from(days);
     if (MIN_DATE..=MAX_DATE).contains(&days) {
         // Within PostgreSQL's range, days since 1970 fit an i32.
@@ -527,7 +527,7 @@ const LAST_WRITTEN_TIME: i64 = {
 };
 
 /// A PostgreSQL time as microseconds since 1970, if Arrow holds it.
-fn time_of(micros: i64) -> Result<i64> {
+pub(crate) fn time_of(micros: i64) -> Result<i64> {
     if (MIN_TIMESTAMP..=LAST_WRITTEN_TIME).contains(&micros) {
         Ok(micros + EPOCH_USECS)
     } else {

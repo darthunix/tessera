@@ -728,7 +728,7 @@ impl ReadPlan {
                     "invalid byte sequence for encoding \"UTF8\"",
                 ));
             }
-            if zero && bytes.contains(&0) {
+            if zero && has_zero(bytes) {
                 return Err(Error::new(
                     ErrorKind::InvalidText,
                     "invalid byte sequence for encoding \"UTF8\": 0x00",
@@ -1177,9 +1177,14 @@ fn out_of_range(pg: PgType) -> Error {
     }
 }
 
+/// Whether bytes hold a zero byte, which a PostgreSQL text cannot.
+pub(crate) fn has_zero(bytes: &[u8]) -> bool {
+    bytes.contains(&0)
+}
+
 /// The characters of UTF-8 bytes: the bytes that do not continue one.
 /// Of bytes that are not UTF-8, a count of no meaning, but no panic.
-fn count_chars(bytes: &[u8]) -> usize {
+pub(crate) fn count_chars(bytes: &[u8]) -> usize {
     bytes.iter().filter(|&&b| b & 0xc0 != 0x80).count()
 }
 
