@@ -82,7 +82,8 @@ typedef struct TessSource
 	 * Tessera's, so the source keeps no pointer to it: of the same
 	 * relation, without parameters or path keys, with
 	 * CUSTOMPATH_SUPPORT_PROJECTION, parallel-aware with the given path's
-	 * workers when the given path is partial and serial otherwise,
+	 * workers when the given path is partial (a partial offer is always
+	 * parallel-aware, with workers) and serial otherwise,
 	 * parallel-safe only where the given path is, its rows and costs the
 	 * source's estimate. Every row it returns passes each clause answered
 	 * TESS_CLAUSE_EXACT, and it leaves out a row only by such a clause or

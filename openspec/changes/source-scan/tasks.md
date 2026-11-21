@@ -74,7 +74,7 @@ injection points.
 
 ## 4. The planner
 
-- [ ] 4.1 The walk over the sources and the path alone: the scan planner
+- [x] 4.1 The walk over the sources and the path alone: the scan planner
       offers, for each of the serial and the partial path, the foreign
       scan path of the least total cost without parameters and path
       keys, a copy of the whole `ForeignPath` with the filter's input
