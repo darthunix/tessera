@@ -15,7 +15,7 @@ use std::sync::Arc;
 use parquet::basic::{ConvertedType, Encoding, LogicalType, Repetition, Type as Physical};
 use parquet::data_type::{
     BoolType, ByteArray, ByteArrayType, DoubleType, FixedLenByteArray, FixedLenByteArrayType,
-    FloatType, Int32Type, Int64Type,
+    FloatType, Int32Type, Int64Type, Int96, Int96Type,
 };
 use parquet::file::metadata::{
     FileMetaData, ParquetMetaData, ParquetMetaDataOptions, ParquetMetaDataReader,
@@ -45,6 +45,8 @@ pub enum Values {
     Bytes(Vec<Option<Vec<u8>>>),
     /// `FIXED_LEN_BYTE_ARRAY` of the given length.
     Fixed(i32, Vec<Option<Vec<u8>>>),
+    /// `INT96`, its three words.
+    Int96(Vec<Option<[u32; 3]>>),
 }
 
 impl Values {
@@ -56,6 +58,7 @@ impl Values {
             Values::Float(v) => v.len(),
             Values::Double(v) => v.len(),
             Values::Bytes(v) | Values::Fixed(_, v) => v.len(),
+            Values::Int96(v) => v.len(),
         }
     }
 
@@ -68,6 +71,7 @@ impl Values {
             Values::Double(_) => Physical::DOUBLE,
             Values::Bytes(_) => Physical::BYTE_ARRAY,
             Values::Fixed(..) => Physical::FIXED_LEN_BYTE_ARRAY,
+            Values::Int96(_) => Physical::INT96,
         }
     }
 }
@@ -85,6 +89,9 @@ pub struct Column {
     pub optional: bool,
     /// The values.
     pub values: Values,
+    /// Whether the column is a list of one value a row, a group that
+    /// holds a repeated group of the value: a nested column.
+    pub list: bool,
 }
 
 impl Column {
@@ -97,6 +104,7 @@ impl Column {
             Values::Float(v) => v.iter().any(Option::is_none),
             Values::Double(v) => v.iter().any(Option::is_none),
             Values::Bytes(v) | Values::Fixed(_, v) => v.iter().any(Option::is_none),
+            Values::Int96(v) => v.iter().any(Option::is_none),
         };
         Column {
             name: name.to_owned(),
@@ -104,6 +112,7 @@ impl Column {
             converted: ConvertedType::NONE,
             optional,
             values,
+            list: false,
         }
     }
 
@@ -152,7 +161,30 @@ impl Column {
         self
     }
 
+    /// The same values as a list of one value a row.
+    pub fn list(mut self) -> Self {
+        self.list = true;
+        self
+    }
+
     fn schema(&self) -> Result<Type> {
+        if self.list {
+            let element = Type::primitive_type_builder("element", self.values.physical())
+                .with_repetition(Repetition::REQUIRED)
+                .build()
+                .map_err(|e| error::damaged(&e))?;
+            let repeated = Type::group_type_builder("list")
+                .with_repetition(Repetition::REPEATED)
+                .with_fields(vec![Arc::new(element)])
+                .build()
+                .map_err(|e| error::damaged(&e))?;
+            return Type::group_type_builder(&self.name)
+                .with_repetition(Repetition::OPTIONAL)
+                .with_logical_type(Some(LogicalType::List))
+                .with_fields(vec![Arc::new(repeated)])
+                .build()
+                .map_err(|e| error::damaged(&e));
+        }
         let mut builder = Type::primitive_type_builder(&self.name, self.values.physical())
             .with_repetition(if self.optional {
                 Repetition::OPTIONAL
@@ -281,7 +313,8 @@ pub fn write_with(path: &Path, columns: &[Column], options: Options) -> Result<(
             let Some(mut out) = group.next_column().map_err(|e| error::damaged(&e))? else {
                 return Err(Error::new(INTERNAL_ERROR, "fewer columns than the schema"));
             };
-            write_values(&mut out, &column.values, start, end).map_err(|e| error::damaged(&e))?;
+            write_values(&mut out, &column.values, start, end, column.list)
+                .map_err(|e| error::damaged(&e))?;
             out.close().map_err(|e| error::damaged(&e))?;
         }
         group.close().map_err(|e| error::damaged(&e))?;
@@ -299,52 +332,48 @@ fn write_values(
     values: &Values,
     start: usize,
     end: usize,
+    list: bool,
 ) -> parquet::errors::Result<()> {
-    fn split<T: Clone>(values: &[Option<T>]) -> (Vec<T>, Vec<i16>) {
-        let defs = values.iter().map(|v| i16::from(v.is_some())).collect();
-        (values.iter().flatten().cloned().collect(), defs)
+    // A list of one value a row: the value at the deepest level, 2, a NULL
+    // row at none; every row starts a new list.
+    let deepest = if list { 2 } else { 1 };
+    let split = |defs_of: &[bool]| -> Vec<i16> {
+        defs_of
+            .iter()
+            .map(|&some| if some { deepest } else { 0 })
+            .collect()
+    };
+    let reps = vec![0i16; end - start];
+    let reps = list.then_some(reps.as_slice());
+    fn some<T>(values: &[Option<T>]) -> Vec<bool> {
+        values.iter().map(Option::is_some).collect()
+    }
+    fn flat<T: Clone>(values: &[Option<T>]) -> Vec<T> {
+        values.iter().flatten().cloned().collect()
+    }
+    macro_rules! write {
+        ($kind:ty, $values:expr, $map:expr) => {{
+            let slice = &$values[start..end];
+            let defs = split(&some(slice));
+            let vals: Vec<_> = flat(slice).into_iter().map($map).collect();
+            out.typed::<$kind>().write_batch(&vals, Some(&defs), reps)?;
+        }};
     }
     match values {
-        Values::Bool(v) => {
-            let (vals, defs) = split(&v[start..end]);
-            out.typed::<BoolType>()
-                .write_batch(&vals, Some(&defs), None)?;
-        }
-        Values::Int32(v) => {
-            let (vals, defs) = split(&v[start..end]);
-            out.typed::<Int32Type>()
-                .write_batch(&vals, Some(&defs), None)?;
-        }
-        Values::Int64(v) => {
-            let (vals, defs) = split(&v[start..end]);
-            out.typed::<Int64Type>()
-                .write_batch(&vals, Some(&defs), None)?;
-        }
-        Values::Float(v) => {
-            let (vals, defs) = split(&v[start..end]);
-            out.typed::<FloatType>()
-                .write_batch(&vals, Some(&defs), None)?;
-        }
-        Values::Double(v) => {
-            let (vals, defs) = split(&v[start..end]);
-            out.typed::<DoubleType>()
-                .write_batch(&vals, Some(&defs), None)?;
-        }
-        Values::Bytes(v) => {
-            let (vals, defs) = split(&v[start..end]);
-            let vals: Vec<ByteArray> = vals.into_iter().map(ByteArray::from).collect();
-            out.typed::<ByteArrayType>()
-                .write_batch(&vals, Some(&defs), None)?;
-        }
-        Values::Fixed(_, v) => {
-            let (vals, defs) = split(&v[start..end]);
-            let vals: Vec<FixedLenByteArray> = vals
-                .into_iter()
-                .map(|b| FixedLenByteArray::from(ByteArray::from(b)))
-                .collect();
-            out.typed::<FixedLenByteArrayType>()
-                .write_batch(&vals, Some(&defs), None)?;
-        }
+        Values::Bool(v) => write!(BoolType, v, |x| x),
+        Values::Int32(v) => write!(Int32Type, v, |x| x),
+        Values::Int64(v) => write!(Int64Type, v, |x| x),
+        Values::Float(v) => write!(FloatType, v, |x| x),
+        Values::Double(v) => write!(DoubleType, v, |x| x),
+        Values::Bytes(v) => write!(ByteArrayType, v, ByteArray::from),
+        Values::Fixed(_, v) => write!(FixedLenByteArrayType, v, |b: Vec<u8>| {
+            FixedLenByteArray::from(ByteArray::from(b))
+        }),
+        Values::Int96(v) => write!(Int96Type, v, |w: [u32; 3]| {
+            let mut value = Int96::new();
+            value.set_data(w[0], w[1], w[2]);
+            value
+        }),
     }
     Ok(())
 }

@@ -3,6 +3,7 @@ members = [
     "crates/alloc-count",
     "crates/datum-arrow",
     "crates/tessera-parquet",
+    "crates/tessera-parquet-testing",
     "crates/relhash",
     "crates/relspill",
     "crates/tessera-core",

@@ -239,8 +239,9 @@ unsafe fn words_mut<'a>(ptr: *mut u64, len: usize) -> Result<&'a mut [u64]> {
     Ok(unsafe { std::slice::from_raw_parts_mut(ptr, len) })
 }
 
-/// Opens the file at the path of `path_len` bytes and reads its footer;
-/// where `expected` is not null, checks the file against it.
+/// Opens the file at the path of `path_len` bytes and reads its footer,
+/// through the backend's cache of footers; where `expected` is not null,
+/// refuses a file of another identity before its footer is read.
 ///
 /// # Safety
 ///
@@ -263,10 +264,8 @@ pub unsafe extern "C" fn tess_parquet_open(
             if out.is_null() {
                 return Err(broken("a null output"));
             }
-            let file = match expected.as_ref() {
-                Some(identity) => ParquetFile::open_expecting(path, &(*identity).into())?,
-                None => ParquetFile::open(path)?,
-            };
+            let expected = expected.as_ref().map(|identity| Identity::from(*identity));
+            let file = ParquetFile::open_cached(path, expected.as_ref())?;
             put(out, Box::into_raw(Box::new(FileHandle(file))))
         })
     }

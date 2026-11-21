@@ -1555,6 +1555,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-parquet-testing"
+version = "0.1.0"
+dependencies = [
+ "arrow-schema",
+ "parquet",
+ "serde_json",
+ "tempfile",
+ "tessera-parquet",
+]
+
+[[package]]
 name = "tessera-pgtool"
 version = "0.1.0"
 dependencies = [
