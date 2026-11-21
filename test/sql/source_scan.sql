@@ -34,6 +34,12 @@ RETURNS text
 AS :'scan_source', 'tessera_test_scan_source_calls'
 LANGUAGE C STRICT;
 
+-- The sources registered, in the order the planner asks them.
+CREATE FUNCTION tessera_test_scan_source_listed()
+RETURNS text
+AS :'scan_source', 'tessera_test_scan_source_listed'
+LANGUAGE C STRICT;
+
 -- The fault the faulty source makes, NULL for none.
 CREATE FUNCTION tessera_test_scan_source_fault(text)
 RETURNS void
@@ -616,6 +622,103 @@ SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 DROP TABLE many_null;
 DROP FUNCTION costly(int);
 
+-- spec: source-scan/Tessera off
+-- No source is asked, and the plan has the core's ForeignScan alone.
+SELECT tessera_test_scan_sources(ARRAY['reader']);
+SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM ft_t WHERE a > 900 GROUP BY b;
+SELECT tessera_test_scan_source_calls();
+RESET tessera.enable;
+
+-- spec: source-scan/A statement that locks or writes rows
+-- A SELECT FOR UPDATE, with an ORDER BY a batch sort takes too; an
+-- INSERT of the rows of a SELECT the planner merges into it; an UPDATE
+-- FROM the table: the core's ForeignScan, under LockRows in the first.
+-- An INSERT of a grouping, planned as a query of its own: the grouping
+-- reads through the source's node.
+CREATE TABLE sink (a int4, b int4);
+EXPLAIN (COSTS OFF) SELECT a FROM ft_t FOR UPDATE;
+EXPLAIN (COSTS OFF) SELECT a FROM ft_t ORDER BY b FOR UPDATE;
+EXPLAIN (COSTS OFF) INSERT INTO sink SELECT a, b FROM ft_t;
+EXPLAIN (COSTS OFF) UPDATE sink SET b = f.b FROM ft_t AS f WHERE sink.a = f.a;
+SELECT explain_neutral('INSERT INTO sink SELECT b, count(*) FROM ft_t GROUP BY b');
+INSERT INTO sink SELECT b, count(*) FROM ft_t GROUP BY b;
+SELECT array_agg(a ORDER BY a) = (SELECT array_agg(DISTINCT b ORDER BY b) FROM ht_t) AS groups,
+    sum(b) = 1000 AS rows FROM sink;
+DROP TABLE sink;
+
+-- spec: source-scan/Relations and paths not offered
+-- A lateral reference, a pseudoconstant clause, foreign paths with path
+-- keys only, the inner side of a nested loop through the wrapper's
+-- parameterized path, and in parallel a partial path not parallel-aware:
+-- no source is offered those paths.
+SELECT tessera_test_scan_sources(ARRAY['reader']);
+EXPLAIN (COSTS OFF)
+    SELECT o.x, s.y, s.a FROM outer_rows AS o
+    LEFT JOIN LATERAL (SELECT o.x AS y, f.a FROM ft_t AS f) AS s ON s.a = o.x;
+SELECT source_same('SELECT o.x, s.y, s.a FROM outer_rows AS o LEFT JOIN LATERAL (SELECT o.x AS y, f.a FROM ft_t AS f) AS s ON s.a = o.x');
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE current_setting('tessera.enable') = 'on';
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM ft_sorted GROUP BY b;
+SELECT tessera_test_scan_source_calls();
+EXPLAIN (COSTS OFF)
+    SELECT o.x, f.b FROM outer_rows AS o JOIN ft_join AS f ON f.a <= o.x AND f.a >= o.x;
+SELECT tessera_test_scan_sources(ARRAY['reader']);
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM ft_unaware GROUP BY b;
+SELECT tessera_test_scan_source_calls();
+SELECT source_same('SELECT b, count(*) FROM ft_unaware GROUP BY b');
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+
+-- spec: source-scan/A foreign partition
+-- A grouping over a partitioned table of a heap and a foreign
+-- partition, over a heap table whose child of inheritance is a foreign
+-- table, and over a UNION ALL of a heap table and a foreign one: the
+-- heap side through the heap scan node, the foreign side through the
+-- source's node, under TessAppend.
+ALTER FOREIGN TABLE ft_parted_far OPTIONS (DROP exact, DROP prune, DROP own);
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a) FROM ft_parted GROUP BY b;
+SELECT source_same('SELECT b, count(*), sum(a) FROM ft_parted GROUP BY b');
+CREATE TABLE ft_inherited (a int4, b int4);
+INSERT INTO ft_inherited SELECT i, i % 10 FROM generate_series(1001, 1500) AS i;
+CREATE FOREIGN TABLE ft_inherited_child () INHERITS (ft_inherited) SERVER scan_server
+    OPTIONS (rows '1000');
+ALTER FOREIGN TABLE ft_inherited_child ALTER COLUMN b OPTIONS (ADD mod '10');
+CREATE TABLE ht_inherited (a int4, b int4);
+INSERT INTO ht_inherited SELECT i, i % 10 FROM generate_series(1001, 1500) AS i;
+CREATE TABLE ht_inherited_child () INHERITS (ht_inherited);
+INSERT INTO ht_inherited_child SELECT i, i % 10 FROM generate_series(1, 1000) AS i;
+ANALYZE ONLY ft_inherited;
+ANALYZE ht_inherited, ht_inherited_child;
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a) FROM ft_inherited GROUP BY b;
+SELECT source_same('SELECT b, count(*), sum(a) FROM ft_inherited GROUP BY b');
+SELECT explain_neutral('SELECT b, count(*), sum(a) FROM (SELECT a, b FROM ht_join UNION ALL SELECT a, b FROM ft_t) AS u GROUP BY b');
+SELECT source_same('SELECT b, count(*), sum(a) FROM (SELECT a, b FROM ht_join UNION ALL SELECT a, b FROM ft_t) AS u GROUP BY b');
+
+-- spec: source-scan/Heap tables beside a source
+-- A source that would take any path it is offered, registered while
+-- queries read heap tables: it is never asked, so the plans are those
+-- without it.
+SELECT tessera_test_scan_sources(ARRAY['any']);
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM ht_t WHERE a > 100 GROUP BY b;
+EXPLAIN (COSTS OFF) SELECT o.x, h.d FROM outer_rows AS o JOIN ht_t AS h ON h.a = o.x;
+SELECT tessera_test_scan_source_calls();
+SELECT source_same('SELECT b, count(*) FROM ht_t WHERE a > 100 GROUP BY b');
+
+-- spec: source-scan/A source of the least size
+-- A source of the least size, without scan_rows, one whose scan_rows is
+-- NULL and one past the current structure, whose scan_rows declines,
+-- beside the reader: all are found and listed, the first two are offered
+-- nothing, the third is asked, and the reader reads the table.
+SELECT tessera_test_scan_sources(ARRAY['least', 'null_callback', 'past', 'reader']);
+SELECT tessera_test_scan_source_listed();
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM ft_t GROUP BY b;
+SELECT tessera_test_scan_source_calls();
+SELECT tessera_test_scan_sources(ARRAY[]::text[]);
+DROP FOREIGN TABLE ft_inherited_child;
+DROP TABLE ht_inherited_child, ft_inherited, ht_inherited;
+
 DROP VIEW ft_barrier, ht_barrier;
 DROP TABLE ft_parted, ht_parted, maybe_null, big_rows;
 DROP ROLE regress_source_rls;
@@ -628,6 +731,7 @@ DROP SERVER scan_server;
 DROP FOREIGN DATA WRAPPER tessera_test_scan;
 DROP FUNCTION source_same(text);
 DROP FUNCTION tessera_test_scan_source_fault(text);
+DROP FUNCTION tessera_test_scan_source_listed();
 DROP FUNCTION tessera_test_scan_source_calls();
 DROP FUNCTION tessera_test_scan_sources(text[]);
 DROP FUNCTION tessera_test_scan_fdw_handler();
