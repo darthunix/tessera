@@ -32,6 +32,16 @@ pub datum_arrow::ErrorKind::TooLong
 pub datum_arrow::ErrorKind::TypeMismatch
 impl datum_arrow::ErrorKind
 pub const fn datum_arrow::ErrorKind::sqlstate(self) -> &'static str
+pub enum datum_arrow::Input<'a>
+pub datum_arrow::Input::Dictionary
+pub datum_arrow::Input::Dictionary::keys: datum_arrow::Keys<'a>
+pub datum_arrow::Input::Dictionary::len: usize
+pub datum_arrow::Input::Dictionary::nulls: core::option::Option<datum_arrow::Bitmap<'a>>
+pub datum_arrow::Input::Dictionary::values: datum_arrow::Column<'a>
+pub datum_arrow::Input::Plain(datum_arrow::Column<'a>)
+impl datum_arrow::Input<'_>
+pub const fn datum_arrow::Input<'_>::is_empty(&self) -> bool
+pub const fn datum_arrow::Input<'_>::len(&self) -> usize
 pub enum datum_arrow::Key
 pub datum_arrow::Key::Int16
 pub datum_arrow::Key::Int32
@@ -41,6 +51,15 @@ pub datum_arrow::Key::UInt16
 pub datum_arrow::Key::UInt32
 pub datum_arrow::Key::UInt64
 pub datum_arrow::Key::UInt8
+pub enum datum_arrow::Keys<'a>
+pub datum_arrow::Keys::Int16(&'a [i16])
+pub datum_arrow::Keys::Int32(&'a [i32])
+pub datum_arrow::Keys::Int64(&'a [i64])
+pub datum_arrow::Keys::Int8(&'a [i8])
+pub datum_arrow::Keys::UInt16(&'a [u16])
+pub datum_arrow::Keys::UInt32(&'a [u32])
+pub datum_arrow::Keys::UInt64(&'a [u64])
+pub datum_arrow::Keys::UInt8(&'a [u8])
 pub enum datum_arrow::PgType
 pub datum_arrow::PgType::Bool
 pub datum_arrow::PgType::Bytea
@@ -78,10 +97,54 @@ pub datum_arrow::Plain::UInt16
 pub datum_arrow::Plain::UInt32
 pub datum_arrow::Plain::UInt8
 pub datum_arrow::Plain::Utf8
+pub enum datum_arrow::ReadOutput<'o, 'a>
+pub datum_arrow::ReadOutput::Bytes
+pub datum_arrow::ReadOutput::Bytes::nulls: &'o mut [u64]
+pub datum_arrow::ReadOutput::Bytes::values: &'o mut [&'a [u8]]
+pub datum_arrow::ReadOutput::Datums
+pub datum_arrow::ReadOutput::Datums::nulls: &'o mut [u64]
+pub datum_arrow::ReadOutput::Datums::values: &'o mut [u64]
+pub enum datum_arrow::TextBytes
+pub datum_arrow::TextBytes::Checked
+pub datum_arrow::TextBytes::Trusted
 pub enum datum_arrow::TimeUnit
 pub datum_arrow::TimeUnit::Microsecond
 pub datum_arrow::TimeUnit::Millisecond
 pub datum_arrow::TimeUnit::Second
+pub enum datum_arrow::Unit
+pub datum_arrow::Unit::Days
+pub datum_arrow::Unit::Microseconds
+pub datum_arrow::Unit::Milliseconds
+pub datum_arrow::Unit::Seconds
+pub enum datum_arrow::Values<'a>
+pub datum_arrow::Values::Boolean(datum_arrow::Bitmap<'a>)
+pub datum_arrow::Values::Bytes
+pub datum_arrow::Values::Bytes::data: &'a [u8]
+pub datum_arrow::Values::Bytes::offsets: &'a [i32]
+pub datum_arrow::Values::FixedBytes
+pub datum_arrow::Values::FixedBytes::data: &'a [u8]
+pub datum_arrow::Values::FixedBytes::size: usize
+pub datum_arrow::Values::Float32(&'a [f32])
+pub datum_arrow::Values::Float64(&'a [f64])
+pub datum_arrow::Values::Int16(&'a [i16])
+pub datum_arrow::Values::Int32(&'a [i32])
+pub datum_arrow::Values::Int64(&'a [i64])
+pub datum_arrow::Values::Int8(&'a [i8])
+pub datum_arrow::Values::LargeBytes
+pub datum_arrow::Values::LargeBytes::data: &'a [u8]
+pub datum_arrow::Values::LargeBytes::offsets: &'a [i64]
+pub datum_arrow::Values::UInt16(&'a [u16])
+pub datum_arrow::Values::UInt32(&'a [u32])
+pub datum_arrow::Values::UInt8(&'a [u8])
+pub struct datum_arrow::Bitmap<'a>
+pub datum_arrow::Bitmap::bytes: &'a [u8]
+pub datum_arrow::Bitmap::offset: usize
+impl<'a> datum_arrow::Bitmap<'a>
+pub const fn datum_arrow::Bitmap<'a>::new(bytes: &'a [u8], offset: usize) -> Self
+pub struct datum_arrow::Column<'a>
+pub datum_arrow::Column::len: usize
+pub datum_arrow::Column::nulls: core::option::Option<datum_arrow::Bitmap<'a>>
+pub datum_arrow::Column::values: datum_arrow::Values<'a>
 pub struct datum_arrow::Error
 impl datum_arrow::Error
 pub const fn datum_arrow::Error::kind(&self) -> datum_arrow::ErrorKind
@@ -91,10 +154,41 @@ pub const fn datum_arrow::Error::sqlstate(&self) -> &'static str
 impl core::error::Error for datum_arrow::Error
 impl core::fmt::Display for datum_arrow::Error
 pub fn datum_arrow::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct datum_arrow::Failures(_)
+impl datum_arrow::Failures
+pub const datum_arrow::Failures::NONE: datum_arrow::Failures
+pub const datum_arrow::Failures::NOT_UTF8: datum_arrow::Failures
+pub const datum_arrow::Failures::OUT_OF_RANGE: datum_arrow::Failures
+pub const datum_arrow::Failures::TOO_LARGE: datum_arrow::Failures
+pub const datum_arrow::Failures::TOO_LONG: datum_arrow::Failures
+pub const datum_arrow::Failures::ZERO_BYTE: datum_arrow::Failures
+pub const fn datum_arrow::Failures::contains(self, other: datum_arrow::Failures) -> bool
+pub const fn datum_arrow::Failures::is_empty(self) -> bool
+pub fn datum_arrow::Failures::kinds(self) -> impl core::iter::traits::iterator::Iterator<Item = datum_arrow::ErrorKind>
+pub const fn datum_arrow::Failures::union(self, other: datum_arrow::Failures) -> datum_arrow::Failures
+impl core::fmt::Debug for datum_arrow::Failures
+pub fn datum_arrow::Failures::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::ops::bit::BitOr for datum_arrow::Failures
+pub type datum_arrow::Failures::Output = datum_arrow::Failures
+pub fn datum_arrow::Failures::bitor(self, other: datum_arrow::Failures) -> datum_arrow::Failures
+pub struct datum_arrow::ReadOptions
+pub datum_arrow::ReadOptions::server_utf8: bool
+pub datum_arrow::ReadOptions::text: core::option::Option<datum_arrow::TextBytes>
+pub datum_arrow::ReadOptions::unit: core::option::Option<datum_arrow::Unit>
+pub struct datum_arrow::ReadPlan
+impl datum_arrow::ReadPlan
+pub const fn datum_arrow::ReadPlan::arrow_type(&self) -> datum_arrow::ArrowType
+pub const fn datum_arrow::ReadPlan::failures(&self) -> datum_arrow::Failures
+pub const fn datum_arrow::ReadPlan::gives_datums(&self) -> bool
+pub fn datum_arrow::ReadPlan::new(arrow: &arrow_schema::datatype::DataType, pg: datum_arrow::PgType, options: datum_arrow::ReadOptions) -> datum_arrow::Result<Self>
+pub const fn datum_arrow::ReadPlan::pg_type(&self) -> datum_arrow::PgType
+pub fn datum_arrow::ReadPlan::read<'a>(&self, input: &datum_arrow::Input<'a>, asked: &[u64], output: &mut datum_arrow::ReadOutput<'_, 'a>) -> datum_arrow::Result<()>
 pub struct datum_arrow::VarcharLength(_)
 impl datum_arrow::VarcharLength
 pub const fn datum_arrow::VarcharLength::get(self) -> u32
 pub fn datum_arrow::VarcharLength::new(characters: u32) -> datum_arrow::Result<Self>
+pub const datum_arrow::MAX_VALUE_BYTES: usize
 pub const datum_arrow::MAX_VARCHAR_LENGTH: u32
 pub const datum_arrow::VARHDRSZ: i32
+pub const fn datum_arrow::mask_words(len: usize) -> usize
 pub type datum_arrow::Result<T, E> = core::result::Result<T, E>

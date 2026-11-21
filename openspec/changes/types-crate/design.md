@@ -142,11 +142,13 @@ has no branch per value, so the hot loops are written that way:
   rows, so that a loop takes 64 slots at a time;
 - an array of a type of fixed width, not a dictionary, whose indexes are
   read only for the slots asked, is converted for every slot of a run,
-  asked or not, into the output's places, and a slot not asked holds a
-  value of no meaning, so that the loop is dense;
+  asked or not, into the output's places, so that the loop is dense: a
+  slot not asked that is not `NULL` gets its true representation where
+  its value converts, so that a place a caller filled before keeps its
+  value, and any other place a value of no meaning;
 - a check folds its result over the 64 slots into one word, masked by
-  the slots asked and not `NULL`, and only a word that shows a failure
-  takes a second, slow pass that finds the first failing slot.
+  the slots asked and not `NULL`, and the first failing slot is the
+  first set bit of that word.
 
 Strings and bytes are checked and given for the slots asked alone: a
 string's check is a loop over its own bytes. A write packs the slots

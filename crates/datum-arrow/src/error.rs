@@ -87,7 +87,6 @@ impl Error {
     }
 
     /// The same error, given the slot of the value that failed.
-    #[allow(dead_code)] // the conversions of values report their slots
     pub(crate) const fn at(self, slot: usize) -> Self {
         Error {
             slot: Some(slot),

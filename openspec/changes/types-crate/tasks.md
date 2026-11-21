@@ -26,7 +26,7 @@ starts. Each commit passes `make rust-check`,
       snapshot `openspec/changes/types-crate/public-api.txt`, which the
       close moves beside the spec. Check: `make rust-check`; `cargo
       package -p datum-arrow`
-- [ ] 2.2 Read plans and the conversions of values read, with unit tests
+- [x] 2.2 Read plans and the conversions of values read, with unit tests
       at the edges of every range and property tests over every bit
       pattern; the hot loops without a branch per value, their machine
       code read on AArch64 and x86-64. Check: `make rust-check`; `cargo
