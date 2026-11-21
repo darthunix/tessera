@@ -46,7 +46,7 @@ maintainer to say that the machine is idle.
       writes the suite's files; the suite `test/sql/parquet.sql` with
       the cases of the options and the columns refused. Check: the
       suites
-- [ ] 3.2 The wrapper's rows: the scan, the values of every mapped type
+- [x] 3.2 The wrapper's rows: the scan, the values of every mapped type
       through `datum-arrow`, the check of UTF-8, `NULL`, rescans, files
       replaced and damaged, a cancel within a group seen through an
       injection point at each window read. Check: the suites;

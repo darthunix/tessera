@@ -226,6 +226,9 @@ pub struct Options {
     /// The bytes past which a least or greatest string is cut, so that
     /// the greatest is a bound past the rows.
     pub truncate: Option<usize>,
+    /// Whether a file of no rows holds no group, rather than one group of
+    /// no rows.
+    pub no_group: bool,
 }
 
 impl Options {
@@ -241,6 +244,7 @@ impl Options {
             compression: parquet::basic::Compression::UNCOMPRESSED,
             arrow_schema: None,
             truncate: None,
+            no_group: false,
         }
     }
 }
@@ -306,7 +310,7 @@ pub fn write_with(path: &Path, columns: &[Column], options: Options) -> Result<(
         SerializedFileWriter::new(file, Arc::new(schema), Arc::new(properties.build()))
             .map_err(|e| error::damaged(&e))?;
     let mut start = 0;
-    while start < rows || (rows == 0 && start == 0) {
+    while start < rows || (rows == 0 && start == 0 && !options.no_group) {
         let end = (start + options.group_rows).min(rows);
         let mut group = writer.next_row_group().map_err(|e| error::damaged(&e))?;
         for column in columns {

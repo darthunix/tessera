@@ -154,6 +154,9 @@ fn every_mapping_of_the_list() {
         Column::int32("i32", &[1, 2, 3]).converted(ConvertedType::INT_32),
         int32("day", LogicalType::Date),
         Column::int32("old_day", &[1, 2, 3]).converted(ConvertedType::DATE),
+        // The writer gives a logical type its older mark too: `ms` is
+        // marked not adjusted to UTC and `TIMESTAMP_MILLIS`, and the
+        // logical type decides.
         Column::int64("ms", &[1, 2, 3]).logical(ts(false, false)),
         Column::int64("us_utc", &[1, 2, 3]).logical(ts(true, true)),
         Column::int64("old_ms", &[1, 2, 3]).converted(ConvertedType::TIMESTAMP_MILLIS),

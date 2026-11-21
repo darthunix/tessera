@@ -148,10 +148,16 @@ parquet_map_column(ParquetFileEntry *entry, const ParquetColumn *column)
 /*
  * Opens the files at `paths` one by one, maps each column of `attnums` of
  * the table `relid` to each, and closes each before the next: the
- * refusals of a column come from here. Returns the rows of the files.
+ * refusals of a column come from here. Returns the rows of the files;
+ * where `identities` is not NULL, writes what fstat said of each file
+ * there, and where `groups` is not NULL, the groups of each file there
+ * and an array of the rows of each group in `group_rows`, in the
+ * current memory context.
  */
 double
-parquet_check_files(List *paths, Oid relid, List *attnums)
+parquet_check_files(List *paths, Oid relid, List *attnums,
+					TessParquetIdentity *identities, size_t *groups,
+					uint64 **group_rows)
 {
 	MemoryContext outer = CurrentMemoryContext;
 	MemoryContext one = AllocSetContextCreate(outer, "tessera_parquet file",
@@ -176,6 +182,23 @@ parquet_check_files(List *paths, Oid relid, List *attnums)
 			(void) parquet_map_column(entry, column);
 		rows += (double) entry->rows;
 		MemoryContextSwitchTo(outer);
+		if (identities != NULL)
+			identities[foreach_current_index(path)] = entry->identity;
+		if (groups != NULL)
+		{
+			int			f = foreach_current_index(path);
+			uint64	   *counts = palloc_array(uint64, Max(entry->groups, 1));
+
+			for (size_t g = 0; g < entry->groups; g++)
+			{
+				TessParquetStatus status;
+
+				if (!tess_parquet_group_rows(entry->file, g, &counts[g], &status))
+					parquet_raise(&status);
+			}
+			groups[f] = entry->groups;
+			group_rows[f] = counts;
+		}
 		/* The file closed, its descriptor given back, before the next. */
 		MemoryContextReset(one);
 	}
