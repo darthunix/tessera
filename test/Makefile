@@ -42,7 +42,7 @@ RUST_TESTS = tessera_kernels_test tessera_table_test \
 	tessera_kernel_ops_test tessera_spill_test tessera_rows_test
 RUNTIME_TESTS = tessera_builder_test tessera_output_test tessera_input_test \
 	tessera_plan_test tessera_planner_test tessera_pack_test tessera_unary_test \
-	tessera_expr_test tessera_heap_batch_test tessera_project_test \
+	tessera_source_test tessera_expr_test tessera_heap_batch_test tessera_project_test \
 	tessera_shared_stats_test \
 	tessera_kernel_ops_test tessera_spill_test tessera_rows_test
 $(RUST_TESTS:%=%$(DLSUFFIX)): $(RUST_LIB) $(RUST_PROFILE_STAMP)

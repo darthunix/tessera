@@ -35,6 +35,14 @@ tess_enabled(void)
 extern const TessKernelOps *tess_runtime_kernels(void);
 
 /*
+ * The source registry's table, ops (TessApi.sources), when its version is
+ * TESS_SOURCE_REGISTRY_OPS_ABI_VERSION and its size includes next;
+ * otherwise, NULL too, raises ERROR, 0A000, without reading next. Call it
+ * before walking the sources with next.
+ */
+extern const TessSourceRegistryOps *tess_source_registry_check(const TessSourceRegistryOps *ops);
+
+/*
  * Raise the ERROR that a failed kernel call stored in status, with its
  * SQLSTATE and message. Call it after the kernel returned, never from
  * inside one.

@@ -22,7 +22,7 @@ injection points.
 
 ## 2. The registry
 
-- [ ] 2.1 `TessSource.scan_rows`, `TessScanClauses` with its answers
+- [x] 2.1 `TessSource.scan_rows`, `TessScanClauses` with its answers
       (`TESS_CLAUSE_UNSUPPORTED`, `TESS_CLAUSE_PRUNE_ONLY`,
       `TESS_CLAUSE_EXACT`) and `TessSourceRegistryOps.next` in
       `include/tessera/source.h`, appended under the size rule, with

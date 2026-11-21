@@ -19,26 +19,148 @@ CREATE FUNCTION tessera_test_duplicate_source()
 RETURNS void
 AS :'source_test', 'tessera_test_duplicate_source'
 LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_duplicate_cleanup()
+RETURNS boolean
+AS :'source_test', 'tessera_test_duplicate_cleanup'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_source_list()
+RETURNS text
+AS :'source_test', 'tessera_test_source_list'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_source_remove(text)
+RETURNS boolean
+AS :'source_test', 'tessera_test_source_remove'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_source_next_unknown()
+RETURNS void
+AS :'source_test', 'tessera_test_source_next_unknown'
+LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_source_registry_check(integer)
+RETURNS boolean
+AS :'source_test', 'tessera_test_source_registry_check'
+LANGUAGE C STRICT;
+-- The SQLSTATE and message of a statement's error.
+CREATE FUNCTION source_error(statement text)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    EXECUTE statement;
+    RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+    RETURN SQLSTATE || ': ' || SQLERRM;
+END
+$$;
+-- spec: source-scan/Sources found and listed
 SELECT tessera_test_source_registry() AS source_registry \gset
 \echo :source_registry
 t
 SELECT tessera_test_source_sizes() AS source_sizes \gset
 \echo :source_sizes
 t
-\set VERBOSITY terse
-SELECT tessera_test_invalid_source(0);
-ERROR:  Tessera cannot register a null source
-SELECT tessera_test_invalid_source(1);
-ERROR:  incompatible Tessera source ABI
-SELECT tessera_test_invalid_source(2);
-ERROR:  incompatible Tessera source ABI
-SELECT tessera_test_invalid_source(3);
-ERROR:  Tessera source must have a name
-SELECT tessera_test_invalid_source(4);
-ERROR:  Tessera source must have a name
-SELECT tessera_test_duplicate_source();
-ERROR:  Tessera source "tessera_test.duplicate" is already registered
-\set VERBOSITY default
+-- spec: source-scan/Sources refused
+-- A NULL source, another version, below the least size, no name, an
+-- empty name, a second source of a registered name, and next given a
+-- pointer never registered; the registry stays empty.
+SELECT source_error('SELECT tessera_test_invalid_source(0)');
+                 source_error                 
+----------------------------------------------
+ XX000: Tessera cannot register a null source
+(1 row)
+
+SELECT source_error('SELECT tessera_test_invalid_source(1)');
+              source_error              
+----------------------------------------
+ 0A000: incompatible Tessera source ABI
+(1 row)
+
+SELECT source_error('SELECT tessera_test_invalid_source(2)');
+              source_error              
+----------------------------------------
+ 0A000: incompatible Tessera source ABI
+(1 row)
+
+SELECT source_error('SELECT tessera_test_invalid_source(3)');
+              source_error              
+----------------------------------------
+ XX000: Tessera source must have a name
+(1 row)
+
+SELECT source_error('SELECT tessera_test_invalid_source(4)');
+              source_error              
+----------------------------------------
+ XX000: Tessera source must have a name
+(1 row)
+
+SELECT source_error('SELECT tessera_test_duplicate_source()');
+                             source_error                             
+----------------------------------------------------------------------
+ 42710: Tessera source "tessera_test.duplicate" is already registered
+(1 row)
+
+SELECT tessera_test_duplicate_cleanup() AS first_kept;
+ first_kept 
+------------
+ t
+(1 row)
+
+SELECT source_error('SELECT tessera_test_source_next_unknown()');
+              source_error               
+-----------------------------------------
+ XX000: Tessera source is not registered
+(1 row)
+
+SELECT tessera_test_source_list() AS still_listed;
+   still_listed   
+------------------
+ tessera_test.one
+(1 row)
+
+SELECT tessera_test_source_remove('tessera_test.one') AS removed;
+ removed 
+---------
+ t
+(1 row)
+
+SELECT tessera_test_source_list() = '' AS registry_empty;
+ registry_empty 
+----------------
+ t
+(1 row)
+
+-- spec: source-scan/A registry table too old
+-- The bridge's table; one that ends at find, one of another version, and
+-- NULL.
+SELECT tessera_test_source_registry_check(0) AS bridge_table;
+ bridge_table 
+--------------
+ t
+(1 row)
+
+SELECT source_error('SELECT tessera_test_source_registry_check(1)');
+                source_error                 
+---------------------------------------------
+ 0A000: incompatible Tessera source registry
+(1 row)
+
+SELECT source_error('SELECT tessera_test_source_registry_check(2)');
+                source_error                 
+---------------------------------------------
+ 0A000: incompatible Tessera source registry
+(1 row)
+
+SELECT source_error('SELECT tessera_test_source_registry_check(3)');
+                source_error                 
+---------------------------------------------
+ 0A000: incompatible Tessera source registry
+(1 row)
+
+DROP FUNCTION source_error(text);
+DROP FUNCTION tessera_test_source_registry_check(integer);
+DROP FUNCTION tessera_test_source_next_unknown();
+DROP FUNCTION tessera_test_source_remove(text);
+DROP FUNCTION tessera_test_source_list();
+DROP FUNCTION tessera_test_duplicate_cleanup();
 DROP FUNCTION tessera_test_duplicate_source();
 DROP FUNCTION tessera_test_invalid_source(integer);
 DROP FUNCTION tessera_test_source_sizes();

@@ -10,6 +10,7 @@ static List *sources = NIL;
 static void add_source(const TessSource *source);
 static void remove_source(const TessSource *source);
 static const TessSource *find_source(const char *name);
+static const TessSource *next_source(const TessSource *previous);
 
 const TessSourceRegistryOps tess_source_registry_ops = {
 	TESS_ABI_INITIALIZER(TESS_SOURCE_REGISTRY_OPS_ABI_VERSION,
@@ -17,6 +18,7 @@ const TessSourceRegistryOps tess_source_registry_ops = {
 	.add = add_source,
 	.remove = remove_source,
 	.find = find_source,
+	.next = next_source,
 };
 
 static void
@@ -67,4 +69,25 @@ find_source(const char *name)
 	if (name == NULL || name[0] == '\0')
 		return NULL;
 	return tess_registry_find(sources, same_name, name);
+}
+
+/* The source registered after previous, the first for NULL. */
+static const TessSource *
+next_source(const TessSource *previous)
+{
+	ListCell   *cell;
+
+	if (previous == NULL)
+		return sources != NIL ? linitial(sources) : NULL;
+	foreach(cell, sources)
+	{
+		if (lfirst(cell) == previous)
+		{
+			ListCell   *after = lnext(sources, cell);
+
+			return after != NULL ? lfirst(after) : NULL;
+		}
+	}
+	elog(ERROR, "Tessera source is not registered");
+	pg_unreachable();
 }
