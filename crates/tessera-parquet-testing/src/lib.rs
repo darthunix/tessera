@@ -10,7 +10,8 @@
 //! ```json
 //! {"group_rows": 2, "dictionary": true, "page_rows": 10,
 //!  "dictionary_bytes": 64, "statistics": true, "compression": "snappy",
-//!  "truncate": 4, "arrow_schema": [{"name": "a", "type": "utf8"}],
+//!  "truncate": 4, "no_group": false,
+//!  "arrow_schema": [{"name": "a", "type": "utf8"}],
 //!  "columns": [{"name": "a", "type": "int32", "logical": "int16",
 //!               "converted": "INT_16", "optional": true,
 //!               "values": [1, null, 3]}]}
@@ -19,8 +20,9 @@
 //! A column's `type` is `bool`, `int32`, `int64`, `int96`, `float`,
 //! `double`, `bytes` or `fixed:N`; its values are numbers, booleans,
 //! strings for bytes, `{"hex": "ff00"}` for bytes of any value, three
-//! words for an `INT96`, or `null`; `"list": true` makes it a list of one
-//! value a row. Its
+//! words for an `INT96`, or `null`; `"range": N` in place of `values`
+//! gives the numbers from 0 to N - 1; `"list": true` makes it a list of
+//! one value a row. Its
 //! `logical` mark is one of `string`, `date`, `int8`, `int16`, `int32`,
 //! `int64`, `uint8`, `uint16`, `uint32`, `uint64`, `timestamp_ms`,
 //! `timestamp_us`, `timestamp_ns` with `_utc` for one adjusted to UTC,
@@ -248,10 +250,17 @@ fn column_of(spec: &Value) -> Result<Column, String> {
         .get("type")
         .and_then(Value::as_str)
         .ok_or_else(|| format!("column {name} without a type"))?;
-    let values = spec
-        .get("values")
-        .and_then(Value::as_array)
-        .ok_or_else(|| format!("column {name} without values"))?;
+    let range: Vec<Value>;
+    let values = match spec.get("range").and_then(Value::as_u64) {
+        Some(n) => {
+            range = (0..n).map(Value::from).collect();
+            &range
+        }
+        None => spec
+            .get("values")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("column {name} without values"))?,
+    };
     let mut column = Column::new(name, values_of(kind, values)?);
     if let Some(mark) = spec.get("logical").and_then(Value::as_str) {
         column = column.logical(logical(mark)?);
@@ -294,6 +303,7 @@ fn options_of(spec: &Value, rows: usize) -> Result<Options, String> {
     options.page_rows = number("page_rows");
     options.dictionary_bytes = number("dictionary_bytes");
     options.truncate = number("truncate");
+    options.no_group = spec.get("no_group").and_then(Value::as_bool) == Some(true);
     if let Some(statistics) = spec.get("statistics").and_then(Value::as_bool) {
         options.statistics = statistics;
     }
@@ -326,13 +336,21 @@ pub fn write_spec(path: &Path, spec: &str) -> Outcome {
         .iter()
         .map(column_of)
         .collect::<Result<Vec<_>, String>>()?;
-    let rows = spec
+    let first = spec
         .get("columns")
         .and_then(Value::as_array)
-        .and_then(|c| c.first())
-        .and_then(|c| c.get("values"))
-        .and_then(Value::as_array)
-        .map_or(0, Vec::len);
+        .and_then(|c| c.first());
+    let rows = first
+        .and_then(|c| c.get("range"))
+        .and_then(Value::as_u64)
+        .map(|n| n as usize)
+        .or_else(|| {
+            first
+                .and_then(|c| c.get("values"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
+        .unwrap_or(0);
     let options = options_of(&spec, rows)?;
     testing::write_with(path, &columns, options).map_err(|e| e.to_string())
 }
@@ -425,6 +443,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_file_of_no_rows_holds_one_group_or_none() {
+        let dir = tempfile::tempdir().unwrap();
+        for (no_group, groups) in [(false, 1), (true, 0)] {
+            let path = dir.path().join(format!("{no_group}.parquet"));
+            let spec = format!(
+                r#"{{"no_group": {no_group}, "columns": [{{"name": "a", "type": "int32", "values": []}}]}}"#
+            );
+            write_spec(&path, &spec).unwrap();
+            let file = tessera_parquet::ParquetFile::open(&path).unwrap();
+            assert_eq!(
+                file.metadata().num_row_groups(),
+                groups,
+                "no_group {no_group}"
+            );
+        }
+    }
+
+    #[test]
     fn a_spec_written_and_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("t.parquet");
@@ -437,7 +473,8 @@ mod tests {
               {"name": "d", "type": "bytes", "logical": "decimal:300:0", "values": ["1", "2", "3"]},
               {"name": "f", "type": "fixed:2", "values": [{"hex": "0102"}, null, "ab"]},
               {"name": "t96", "type": "int96", "values": [[1, 2, 3], null, [4, 5, 6]]},
-              {"name": "l", "type": "int32", "list": true, "values": [1, null, 3]}
+              {"name": "l", "type": "int32", "list": true, "values": [1, null, 3]},
+              {"name": "r", "type": "int64", "range": 3}
             ]}"#;
         write_spec(&path, spec).unwrap();
         let file = tessera_parquet::ParquetFile::open(&path).unwrap();

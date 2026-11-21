@@ -78,7 +78,7 @@ rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 	/* The table's files as they are now, each column the query reads
 	 * mapped to each. */
 	planned->rows = parquet_check_files(parquet_expand(planned->patterns), foreigntableid,
-										planned->attnums);
+										planned->attnums, NULL, NULL, NULL);
 	baserel->rows = clamp_row_est(planned->rows *
 								  clauselist_selectivity(root, baserel->baserestrictinfo,
 														 0, JOIN_INNER, NULL));
@@ -120,29 +120,28 @@ begin_scan(ForeignScanState *node, int eflags)
 		return;
 	foreach_node(String, pattern, linitial(scan->fdw_private))
 		patterns = lappend(patterns, strVal(pattern));
-	/* The files as they are now, their columns checked again. */
-	(void) parquet_check_files(parquet_expand(patterns),
-							   RelationGetRelid(node->ss.ss_currentRelation),
-							   lsecond(scan->fdw_private));
+	node->fdw_state = parquet_scan_begin(RelationGetRelid(node->ss.ss_currentRelation),
+										 patterns, lsecond(scan->fdw_private));
 }
 
 static TupleTableSlot *
 iterate(ForeignScanState *node)
 {
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("reading the rows of a Parquet table is not built yet")));
-	pg_unreachable();
+	return parquet_scan_next(node->fdw_state, node->ss.ss_ScanTupleSlot);
 }
 
 static void
 rescan(ForeignScanState *node)
 {
+	if (node->fdw_state != NULL)
+		parquet_scan_rescan(node->fdw_state);
 }
 
 static void
 end_scan(ForeignScanState *node)
 {
+	if (node->fdw_state != NULL)
+		parquet_scan_end(node->fdw_state);
 }
 
 Datum
