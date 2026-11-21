@@ -138,7 +138,7 @@ injection points.
       cases of heap plans and of the policy over a foreign partition.
       Check: `openspec validate source-scan --strict`;
       `.github/scripts/check-specs.sh`
-- [ ] 6.2 `openspec/specs/source-scan/design.md`, written for a reader
+- [x] 6.2 `openspec/specs/source-scan/design.md`, written for a reader
       who knows nothing of the part: the registry, the call, the answers
       for the clauses and their security rule, the relations offered,
       the plans over a source, the costs, what was refused; `## Files`
