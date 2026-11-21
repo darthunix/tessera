@@ -16,6 +16,7 @@
 /test/results/
 /test/tmp_check*/
 /test/installed/installed-work/
+/test/installed/installed-work-source/
 regression.diffs
 regression.out
 

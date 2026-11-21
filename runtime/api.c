@@ -78,6 +78,27 @@ tess_runtime_kernels(void)
 	return ops;
 }
 
+const TessSourceRegistryOps *
+tess_source_registry_check(const TessSourceRegistryOps *ops)
+{
+	if (ops == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("incompatible Tessera source registry"),
+				 errdetail("The bridge gives no source registry.")));
+	if (ops->abi_version != TESS_SOURCE_REGISTRY_OPS_ABI_VERSION ||
+		ops->struct_size < TESS_SOURCE_REGISTRY_OPS_MIN_SIZE)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("incompatible Tessera source registry"),
+				 errdetail("Expected version %u and at least %zu bytes, "
+						   "got version %u and %zu bytes.",
+						   TESS_SOURCE_REGISTRY_OPS_ABI_VERSION,
+						   TESS_SOURCE_REGISTRY_OPS_MIN_SIZE,
+						   ops->abi_version, ops->struct_size)));
+	return ops;
+}
+
 /* Whether a status is a failure with a five-character SQLSTATE of [0-9A-Z]. */
 static bool
 status_valid(const TessStatus *status)

@@ -6,7 +6,9 @@
 --   number in other orders: both become SubPlan and InitPlan;
 -- - 19 names the branches of a set operation unnamed_subquery,
 --   unnamed_subquery_1 and so on, 18 "*SELECT* 1", "*SELECT* 2", and
---   they number nested ones in other orders: all become subquery;
+--   they number nested ones in other orders; 19 names the query of an
+--   INSERT ... SELECT unnamed_subquery too, 18 "*SELECT*": all become
+--   subquery;
 -- - 19 says which scan a Result replaces (Replaces: Scan on t), 18 does
 --   not: the line goes.
 -- A plan that prints a subplan, a branch of a set operation or a Result
@@ -25,7 +27,7 @@ LANGUAGE sql IMMUTABLE AS $$
     SELECT CASE WHEN line ~ '^\s*Replaces: ' THEN NULL
         ELSE regexp_replace(regexp_replace(line,
             '\m(SubPlan|InitPlan) ([a-z_]+_)?\d+', '\1', 'g'),
-            'unnamed_subquery(_\d+)*|"\*SELECT\* \d+(_\d+)*"', 'subquery', 'g')
+            'unnamed_subquery(_\d+)*|"\*SELECT\*( \d+(_\d+)*)?"', 'subquery', 'g')
     END
 $$;
 
