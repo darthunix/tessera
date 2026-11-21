@@ -15,9 +15,6 @@
 
 #include "tessera_parquet.h"
 
-/* The rows a window holds at most. */
-#define WINDOW_ROWS 1024
-
 static size_t
 words_of(size_t rows)
 {
@@ -51,7 +48,7 @@ parquet_scan_begin(Oid relid, List *patterns, List *attnums)
 	scan->group_rows = palloc0_array(uint64 *, Max(list_length(scan->paths), 1));
 	/* The files as they are now, their columns checked again. */
 	(void) parquet_check_files(scan->paths, relid, attnums, scan->identities, scan->groups,
-							   scan->group_rows);
+							   scan->group_rows, NULL);
 	scan->ncolumns = list_length(attnums);
 	scan->columns = palloc_array(ParquetColumn, Max(scan->ncolumns, 1));
 	foreach_int(attnum, attnums)
@@ -102,9 +99,12 @@ next_file(ParquetScan *scan)
 	MemoryContextReset(scan->group_cxt);
 	MemoryContextReset(scan->file_cxt);
 	scan->file = NULL;
-	scan->file_index++;
-	if (scan->file_index >= list_length(scan->paths))
+	if (scan->file_index + 1 >= list_length(scan->paths))
+	{
+		scan->file_index = list_length(scan->paths);
 		return false;
+	}
+	scan->file_index++;
 	scan->group = 0;
 	scan->group_started = false;
 	/* Without a column read, the footer's counts give the rows. */
@@ -134,28 +134,67 @@ free_reader(void *arg)
 	tess_parquet_reader_free((TessParquetReader *) arg);
 }
 
-/* The rows of the current file's group `group`. */
-static uint64
-rows_of_group(ParquetScan *scan)
+/* The rows of the group read. */
+uint64
+parquet_scan_group_rows(const ParquetScan *scan)
 {
 	return scan->group_rows[scan->file_index][scan->group];
 }
 
-/* Starts the current group: a reader of each column, every row selected,
- * owned by the group's context, which the next group resets. */
+/* Starts the current group, its readers made when first asked for. */
 static void
 start_group(ParquetScan *scan)
 {
-	uint64		rows = rows_of_group(scan);
-	MemoryContext outer;
-
 	MemoryContextReset(scan->window_cxt);
 	MemoryContextReset(scan->group_cxt);
-	outer = MemoryContextSwitchTo(scan->group_cxt);
 	scan->window_start = 0;
 	scan->window_len = 0;
 	scan->row = 0;
 	scan->group_started = true;
+	scan->groups_read++;
+	if (scan->readers != NULL)
+		memset(scan->readers, 0, sizeof(TessParquetReader *) * scan->ncolumns);
+}
+
+/*
+ * Moves to the next group of rows, of the file read or of the next one;
+ * false past the last, until a rescan.
+ */
+bool
+parquet_scan_next_group(ParquetScan *scan)
+{
+	if (scan->file_index >= list_length(scan->paths))
+		return false;
+	if (scan->group_started)
+	{
+		scan->group++;
+		scan->group_started = false;
+	}
+	while (scan->file_index < 0 || scan->group >= scan->groups[scan->file_index])
+	{
+		if (!next_file(scan))
+			return false;
+	}
+	start_group(scan);
+	return true;
+}
+
+/*
+ * The reader of the scan's column `c` over the group read, every row
+ * selected, made at its first ask and owned by the group's context, which
+ * the next group resets.
+ */
+TessParquetReader *
+parquet_scan_reader(ParquetScan *scan, int c)
+{
+	uint64		rows = parquet_scan_group_rows(scan);
+	MemoryContext outer;
+	uint64	   *selection;
+	MemoryContextCallback *callback;
+	TessParquetStatus status;
+
+	if (scan->readers[c] != NULL)
+		return scan->readers[c];
 	/*
 	 * shortcut: a group's selection is one palloc'd mask, which the reader
 	 * copies, so a group of more rows than it holds bits is refused; lift
@@ -168,29 +207,26 @@ start_group(ParquetScan *scan)
 				 errmsg("a group of rows of Parquet file \"%s\" holds " UINT64_FORMAT
 						" rows, more than a scan selects",
 						(char *) list_nth(scan->paths, scan->file_index), rows)));
-	for (int c = 0; c < scan->ncolumns; c++)
-	{
-		uint64	   *selection = every_row(rows);
-		MemoryContextCallback *callback = palloc0_object(MemoryContextCallback);
-		TessParquetStatus status;
-
-		scan->readers[c] = NULL;
-		if (!tess_parquet_reader(scan->file->file, scan->mapped[c], scan->group, selection,
-								 words_of(rows), WINDOW_ROWS, &scan->readers[c], &status))
-			parquet_raise(&status);
-		callback->func = free_reader;
-		callback->arg = scan->readers[c];
-		MemoryContextRegisterResetCallback(scan->group_cxt, callback);
-	}
+	outer = MemoryContextSwitchTo(scan->group_cxt);
+	selection = every_row(rows);
+	callback = palloc0_object(MemoryContextCallback);
+	if (!tess_parquet_reader(scan->file->file, scan->mapped[c], scan->group, selection,
+							 words_of(rows), PARQUET_WINDOW_ROWS, &scan->readers[c], &status))
+		parquet_raise(&status);
+	callback->func = free_reader;
+	callback->arg = scan->readers[c];
+	MemoryContextRegisterResetCallback(scan->group_cxt, callback);
+	pfree(selection);
 	MemoryContextSwitchTo(outer);
+	return scan->readers[c];
 }
 
 /* Reads the next window of the current group into the window's arrays. */
 static void
 read_window(ParquetScan *scan)
 {
-	uint64		rows = rows_of_group(scan);
-	size_t		len = (size_t) Min((uint64) WINDOW_ROWS, rows - scan->window_start);
+	uint64		rows = parquet_scan_group_rows(scan);
+	size_t		len = (size_t) Min((uint64) PARQUET_WINDOW_ROWS, rows - scan->window_start);
 	size_t		words = words_of(len);
 	MemoryContext outer;
 
@@ -207,7 +243,7 @@ read_window(ParquetScan *scan)
 
 		scan->values[c] = palloc0_array(uint64, Max(len, 1));
 		scan->nulls[c] = palloc0_array(uint64, Max(words, 1));
-		if (!tess_parquet_read(scan->readers[c], scan->window_start, len, asked, words, held,
+		if (!tess_parquet_read(parquet_scan_reader(scan, c), scan->window_start, len, asked, words, held,
 							   words, &count, &status))
 			parquet_raise(&status);
 		if (count != len)
@@ -256,36 +292,21 @@ parquet_scan_next(ParquetScan *scan, TupleTableSlot *slot)
 		CHECK_FOR_INTERRUPTS();
 		/* The next window of the group read. */
 		if (scan->group_started &&
-			scan->window_start + scan->window_len < rows_of_group(scan))
+			scan->window_start + scan->window_len < parquet_scan_group_rows(scan))
 		{
 			scan->window_start += scan->window_len;
 			read_window(scan);
 			continue;
 		}
-		/* The next group, of this file or of the next. */
-		if (scan->group_started)
-		{
-			scan->group++;
-			scan->group_started = false;
-		}
-		if (scan->file_index < 0 ||
-			scan->group >= scan->groups[scan->file_index])
-		{
-			if (!next_file(scan))
-				return slot;
-			continue;
-		}
+		if (!parquet_scan_next_group(scan))
+			return slot;
 		if (scan->ncolumns == 0)
 		{
 			/* Empty rows, as many as the group holds, no page read. */
-			scan->group_started = true;
-			scan->window_start = 0;
-			scan->window_len = (size_t) rows_of_group(scan);
-			scan->row = 0;
+			scan->window_len = (size_t) parquet_scan_group_rows(scan);
 			continue;
 		}
-		start_group(scan);
-		if (rows_of_group(scan) > 0)
+		if (parquet_scan_group_rows(scan) > 0)
 			read_window(scan);
 	}
 	for (int a = 0; a < slot->tts_tupleDescriptor->natts; a++)

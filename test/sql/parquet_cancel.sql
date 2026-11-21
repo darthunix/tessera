@@ -16,6 +16,8 @@ DROP FUNCTION parquet_test_injection();
 \endif
 
 CREATE EXTENSION tessera;
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
 CREATE EXTENSION tessera_parquet;
 CREATE FUNCTION parquet_test_write(text, text) RETURNS void
     AS :'parquet_test', 'tessera_parquet_test_write' LANGUAGE C STRICT;
@@ -34,12 +36,14 @@ CREATE FOREIGN TABLE t_million (i bigint) SERVER pq OPTIONS (files :'million');
 -- The group holds 977 windows of 1024 rows; the query stops, 57014,
 -- having read fewer. Once with Tessera off and once with it on.
 SET tessera.enable = off;
+EXPLAIN (COSTS OFF) SELECT sum(i) FROM t_million;
 SELECT parquet_test_cancel_after(:'parquet_module', 1);
 \set VERBOSITY sqlstate
 SELECT sum(i) FROM t_million;
 \set VERBOSITY default
 SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_group;
 RESET tessera.enable;
+EXPLAIN (COSTS OFF) SELECT sum(i) FROM t_million;
 SELECT parquet_test_cancel_after(:'parquet_module', 1);
 \set VERBOSITY sqlstate
 SELECT sum(i) FROM t_million;

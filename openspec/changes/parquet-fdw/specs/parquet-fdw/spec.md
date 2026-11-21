@@ -312,7 +312,9 @@ a group of rows.
 - **THEN** the second run returns the new rows, the third the rows of
   both files, the fourth raises `58P01`, the fifth `42703`, the cursor
   and the serial scan `55000`, and the damaged files `XX001`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Files replaced, added, removed
+  and damaged`
 
 #### Scenario: A cancel within a group of rows
 - **WHEN** a query that reads one group of a million rows is cancelled
@@ -322,7 +324,9 @@ a group of rows.
   through the wrapper's rows and through the source's node
 - **THEN** it stops with the cancel's error, `57014`, the injection
   point having counted fewer windows than the group holds
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet_cancel.sql::-- spec: parquet-fdw/A cancel within a group of
+  rows`
 
 ### Requirement: Batches through the source
 With `tessera.enable` on, the module's source SHALL read every table of
@@ -345,7 +349,8 @@ and a cancel within a group of rows.
   with Tessera on
 - **THEN** each plan reads it through `TessParquetScan`, with no
   `TessPack`, and each result equals the result with Tessera off
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Batch parents over the source`
 
 #### Scenario: Columns made for the rows kept
 - **WHEN** `SELECT *` over a table of ten columns and 100 000 rows is
@@ -357,16 +362,18 @@ and a cancel within a group of rows.
   ANALYZE` shows (the requirement "EXPLAIN"), and the rows equal those
   with Tessera off; and the count makes no value and returns the
   footer's count of rows without an error
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Columns made for the rows kept`
 
 #### Scenario: One column asked again
 - **WHEN** a query computes `sum(a) FILTER (WHERE b = 1)` and
-  `sum(a) FILTER (WHERE b = 2)`, and `CASE WHEN k = 63 THEN v ELSE v + 1
-  END`, so that a batch is asked for `a` and for `v` more than once, for
-  rows that do not nest and in reverse order
+  `sum(a) FILTER (WHERE b = 2)`, and `CASE WHEN k % 64 = 63 THEN v ELSE
+  v + 1 END`, so that a batch is asked for `a` and for `v` more than
+  once, for rows that do not nest and in reverse order
 - **THEN** each result equals the result over a heap table of the same
   rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/One column asked again`
 
 #### Scenario: Values kept across the asks of a batch
 - **WHEN** a consumer of the test module asks one batch of the node for
@@ -376,7 +383,9 @@ and a cancel within a group of rows.
 - **THEN** every ask gives the values and the `NULL` flags of the rows
   it asked, and the arrays of the first ask still hold row 63's value
   and flag after the second
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Values kept across the asks of a
+  batch`
 
 ### Requirement: The clauses the source checks
 The source SHALL answer that it checks exactly (`TESS_CLAUSE_EXACT` of

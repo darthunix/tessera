@@ -54,7 +54,7 @@ maintainer to say that the machine is idle.
 
 ## 4. The source, its parallel reading and the first measurement
 
-- [ ] 4.1 The source and `TessParquetScan`: windows read for a
+- [x] 4.1 The source and `TessParquetScan`: windows read for a
       selection, values made through `datum-arrow` on request for the
       rows asked and kept until the batch is released, a count that
       reads no column, the lines of `EXPLAIN`, the duties of the
