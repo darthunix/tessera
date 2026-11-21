@@ -74,7 +74,10 @@ typedef struct TessNode
 	 * Optional: build this kind's path reading the relation of a
 	 * sequential scan path in batches, evaluating none of the relation's
 	 * clauses, or NULL when the kind cannot. The heap scan node publishes
-	 * it, and the runtime's tess_batch_scan_path calls it.
+	 * it, and the runtime's tess_batch_scan_path calls it. A foreign
+	 * table is read instead through the callback of the same name of a
+	 * source, TessSource.scan_rows (tessera/source.h), which answers for
+	 * the relation's clauses too.
 	 */
 	CustomPath *(*scan_rows) (PlannerInfo *root, Path *path);
 	/*

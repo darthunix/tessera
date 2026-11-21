@@ -82,7 +82,7 @@ them, newest first.
 
 | | in batches | stays with PostgreSQL |
 |---|---|---|
-| scans | heap tables: sequential, bitmap, index, index-only, BRIN | other access methods, foreign tables, `TABLESAMPLE` |
+| scans | heap tables: sequential, bitmap, index, index-only, BRIN; foreign tables a registered source reads ([docs/source.md](docs/source.md)) | other access methods, other foreign tables, `TABLESAMPLE` |
 | conditions | comparisons, arithmetic, `IN`, `BETWEEN`, `LIKE`, `CASE` over integers, numeric, dates and text; other functions row by row inside the batch filter | — |
 | aggregation | `count`, `sum`, `avg`, `min`, `max` by kernels, other aggregates of PostgreSQL's own functions; `GROUP BY` up to 16 keys; `DISTINCT`; spilling | grouping sets, ordered-set aggregates, `ORDER BY` inside an aggregate, aggregates of other extensions in C |
 | joins | hash joins: inner, left, right, full, semi, anti, right anti; spilling; one shared table in parallel plans; partitions pruned by the join's keys | nested loop, merge join, right semi joins |
