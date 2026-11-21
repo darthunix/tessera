@@ -149,6 +149,16 @@ exclude_globs = [
 #   (Reader::open); a list without blocks given a range of no bytes in a
 #   finish, the same file. And the code of an event that a refusal
 #   carries in its numbers, which are for people.
+# datum-arrow's, judged by its own tests:
+# - The shortcut of a varchar's length, which skips the count of
+#   characters of a value of no more bytes than characters allowed. A
+#   character takes a byte at least, so a value of as many bytes as
+#   characters allowed is not too long either, counted or not
+#   (check_bytes).
+# - A comparison moved onto its edge, where the answer is the same: the
+#   sign of a dividend of 0, whose remainder of 0 already ends the
+#   rounding, or of a divisor, never 0 (div_floor, div_ceil); a value at
+#   the edge of an i64, which the clamp gives as itself (clamp).
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -225,6 +235,9 @@ exclude_re = [
     "relspill/src/set/reader\\.rs:438:31: replace \\* with \\+ in Reader::open$",
     "relspill/src/set\\.rs:830:26: replace > with >= in Writer::finish$",
     "relspill/src/shared\\.rs:785:5: replace event_code -> u32 with [01]$",
+    "datum-arrow/src/read\\.rs:738:[0-9]+: replace > with >= in ReadPlan::check_bytes$",
+    "datum-arrow/src/calendar\\.rs:(94|103):(25|36): replace < with <= in div_(floor|ceil)$",
+    "datum-arrow/src/calendar\\.rs:(111:14: replace > with >=|113:21: replace < with <=) in clamp$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the

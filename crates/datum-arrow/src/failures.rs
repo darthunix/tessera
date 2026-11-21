@@ -111,5 +111,12 @@ mod tests {
         );
         assert_eq!(format!("{set:?}"), "{NOT_UTF8, ZERO_BYTE, TOO_LARGE}");
         assert_eq!(Failures::default(), Failures::NONE);
+        // Each failure a bit of its own, none of them empty.
+        let all = Failures::ALL.map(|(failure, _, _)| failure.0);
+        assert_eq!(all, [1, 2, 4, 8, 16]);
+        // The union of sets that overlap.
+        let both = Failures::NOT_UTF8 | Failures::ZERO_BYTE;
+        assert_eq!(both | Failures::ZERO_BYTE, both);
+        assert_eq!(both.union(both), both);
     }
 }

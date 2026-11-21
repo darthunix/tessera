@@ -593,7 +593,20 @@ fn a_string_too_large_fails_before_its_bytes_are_checked() {
             (error.kind(), error.sqlstate()),
             (ErrorKind::TooLarge, "54000")
         );
-    }
+    } // The largest value PostgreSQL holds is read.
+    let offs = [0i64, i64::try_from(MAX_VALUE_BYTES).unwrap()];
+    let largest = plain(
+        Values::LargeBytes {
+            offsets: &offs,
+            data: &data,
+        },
+        1,
+    );
+    let plan = plan(&DataType::LargeBinary, PgType::Bytea, OPTIONS);
+    assert_eq!(
+        bytes(&plan, &largest, &[1]).unwrap().0[0].len(),
+        MAX_VALUE_BYTES
+    );
 }
 
 #[test]
@@ -859,6 +872,7 @@ fn every_broken_shape_refused() {
     let stored = [1i64, 2, 3];
     let short_bitmap: [u8; 0] = [];
     let string = plan(&DataType::Utf8, PgType::Text, OPTIONS);
+    let large_string = plan(&DataType::LargeUtf8, PgType::Text, OPTIONS);
     let backward = [0i32, 3, 1];
     let past = [0i32, 2, 9];
     let fixed = plan(&DataType::FixedSizeBinary(4), PgType::Bytea, OPTIONS);
@@ -868,6 +882,11 @@ fn every_broken_shape_refused() {
         &dictionary(DataType::Int32, DataType::Utf8),
         PgType::Text,
         OPTIONS,
+    );
+    let day_dictionary = plan(
+        &dictionary(DataType::Int8, DataType::Int32),
+        PgType::Date,
+        with_unit(Unit::Days),
     );
     let entry_offsets = [0i32, 2];
     let entries = Column {
@@ -909,6 +928,31 @@ fn every_broken_shape_refused() {
         (&string, strings(&backward), every(2)),
         (&string, strings(&past), every(2)),
         (&string, strings(&past[..2]), every(2)),
+        // Too few offsets, though the slots asked have theirs, and none.
+        (&string, strings(&past[..2]), vec![0b1]),
+        (&string, strings(&[]), vec![0]),
+        (
+            &large_string,
+            plain(
+                Values::LargeBytes {
+                    offsets: &[0, 2],
+                    data: b"abc",
+                },
+                2,
+            ),
+            vec![0b1],
+        ),
+        (
+            &large_string,
+            plain(
+                Values::LargeBytes {
+                    offsets: &[],
+                    data: b"abc",
+                },
+                2,
+            ),
+            vec![0],
+        ),
         // Fixed-size bytes shorter than the size times the slots, and of
         // another size than the plan's.
         (
@@ -962,6 +1006,21 @@ fn every_broken_shape_refused() {
         ),
         // A plain column for a plan of a dictionary.
         (&dictionary_plan, Input::Plain(entries), every(1)),
+        // An index of a dictionary of days one past it.
+        (
+            &day_dictionary,
+            Input::Dictionary {
+                len: 1,
+                keys: Keys::Int8(&[1]),
+                nulls: None,
+                values: Column {
+                    len: 1,
+                    values: Values::Int32(&[5]),
+                    nulls: None,
+                },
+            },
+            every(1),
+        ),
     ];
     for (index, (plan, input, asked)) in cases.into_iter().enumerate() {
         let len = input.len();

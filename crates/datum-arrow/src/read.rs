@@ -875,17 +875,9 @@ fn bytes_of<'a>(column: &Column<'a>) -> Option<ByteRange<'a>> {
 /// The valid slots of the word from `first`: set where a slot holds a
 /// value, all of the column's slots where it has no bitmap.
 fn valid_word(nulls: Option<Bitmap<'_>>, first: usize, len: usize) -> u64 {
-    match nulls {
-        Some(nulls) => nulls.word(first, len),
-        None => {
-            let count = (len - first).min(64);
-            if count == 64 {
-                u64::MAX
-            } else {
-                (1 << count) - 1
-            }
-        }
-    }
+    // Without a bitmap every bit is set, those past the column too: each
+    // use masks the word by the slots asked, which stop at the column.
+    nulls.map_or(u64::MAX, |nulls| nulls.word(first, len))
 }
 
 /// Calls `visit` for each slot asked that is not `NULL`, in order.

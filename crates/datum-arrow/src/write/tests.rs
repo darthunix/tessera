@@ -440,10 +440,99 @@ fn broken_shapes_of_a_write() {
             validity: &mut short_validity,
         },
     );
+    // The validity too short beside values long enough, in every width.
+    let mut short16 = vec![7i16; 3];
+    check(
+        &WritePlan::new(PgType::Int2, true).unwrap(),
+        &fine,
+        &mut WriteOutput::Int16 {
+            values: &mut short16,
+            validity: &mut short_validity,
+        },
+    );
+    let mut long64 = vec![7i64; 3];
+    check(
+        &WritePlan::new(PgType::Int8, true).unwrap(),
+        &fine,
+        &mut WriteOutput::Int64 {
+            values: &mut long64,
+            validity: &mut short_validity,
+        },
+    );
+    let mut float32 = vec![7f32; 3];
+    check(
+        &WritePlan::new(PgType::Float4, true).unwrap(),
+        &fine,
+        &mut WriteOutput::Float32 {
+            values: &mut float32,
+            validity: &mut short_validity,
+        },
+    );
+    let mut float64 = vec![7f64; 3];
+    check(
+        &WritePlan::new(PgType::Float8, true).unwrap(),
+        &fine,
+        &mut WriteOutput::Float64 {
+            values: &mut float64,
+            validity: &mut short_validity,
+        },
+    );
+    // Representations into a plan of bytes, with an output of bytes that
+    // would fit them.
+    let mut room = vec![7i32; 4];
+    let mut bytes_room = vec![7u8; 8];
+    check(
+        &text,
+        &fine,
+        &mut WriteOutput::Bytes {
+            offsets: &mut room,
+            data: &mut bytes_room,
+            validity: &mut validity,
+        },
+    );
+    assert!(room.iter().all(|&o| o == 7) && bytes_room.iter().all(|&b| b == 7));
+    assert!(short16.iter().all(|&v| v == 7) && long64.iter().all(|&v| v == 7));
+    assert!(float32.iter().all(|&v| v == 7.0) && float64.iter().all(|&v| v == 7.0));
+    assert!(!fine.is_empty() && fine.len() == 3);
+    let empty = WriteInput::Datums {
+        len: 0,
+        values: &[],
+        nulls: &[],
+    };
+    assert!(empty.is_empty());
     assert!(short_values.iter().chain(&wide_values).all(|&v| v == 7));
     assert!(other.iter().all(|&v| v == 7) && validity == [7] && bits == [7]);
     assert!(offsets.iter().chain(&short_offsets).all(|&o| o == 7));
     assert!(data.iter().chain(&short_data).all(|&b| b == 7));
+}
+
+#[test]
+fn bytes_of_one_call_up_to_what_offsets_hold() {
+    // Values of MAX_WRITE_BYTES in all pass the check of size, and fail
+    // only at the output too short for them; nothing is copied.
+    let data = vec![0u8; 1 << 30];
+    let values: [&[u8]; 2] = [&data, &data[..(MAX_WRITE_BYTES - (1 << 30))]];
+    let input = WriteInput::Bytes {
+        len: 2,
+        values: &values,
+        nulls: &[0],
+    };
+    let plan = WritePlan::new(PgType::Bytea, true).unwrap();
+    let mut offsets = vec![0i32; 3];
+    let mut out = vec![0u8; 1];
+    let mut validity = vec![0u8; 1];
+    let error = plan
+        .write(
+            &input,
+            &every(2),
+            &mut WriteOutput::Bytes {
+                offsets: &mut offsets,
+                data: &mut out,
+                validity: &mut validity,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::BrokenShape);
 }
 
 /// The Arrow value the write gives a representation of `pg`, as Arrow's

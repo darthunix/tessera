@@ -45,7 +45,7 @@ starts. Each commit passes `make rust-check`,
       characters of short strings) and the crate's row in the Kani job
       of CI. Check: `cargo kani -p
       datum-arrow`
-- [ ] 2.6 The crate's mutants all caught by its tests, or named, as the
+- [x] 2.6 The crate's mutants all caught by its tests, or named, as the
       mutants job of a pull request judges them. Check: `cargo mutants
       -p datum-arrow`
 

@@ -133,6 +133,32 @@ mod tests {
         // date2j(5874897, 12, 31) - POSTGRES_EPOCH_JDATE
         assert_eq!(MAX_DATE, 2_145_031_948);
         assert_eq!(MIN_TIMESTAMP, (0 - 2_451_545) * USECS_PER_DAY);
+        assert_eq!(MAX_TIMESTAMP, 9_223_371_331_199_999_999);
+        assert_eq!(MIN_DATE, -2_451_545);
+    }
+
+    #[test]
+    fn floor_ceil_and_clamp_of_every_sign() {
+        for (a, b, floor, ceil) in [
+            (7i128, 2i128, 3, 4),
+            (-7, 2, -4, -3),
+            (7, -2, -4, -3),
+            (-7, -2, 3, 4),
+            (6, 2, 3, 3),
+            (-6, 2, -3, -3),
+            (0, 5, 0, 0),
+        ] {
+            assert_eq!(
+                (div_floor(a, b), div_ceil(a, b)),
+                (floor, ceil),
+                "{a} / {b}"
+            );
+        }
+        assert_eq!(clamp(i128::from(i64::MAX)), i64::MAX);
+        assert_eq!(clamp(i128::from(i64::MAX) + 1), i64::MAX);
+        assert_eq!(clamp(i128::from(i64::MIN)), i64::MIN);
+        assert_eq!(clamp(i128::from(i64::MIN) - 1), i64::MIN);
+        assert_eq!(clamp(-5), -5);
     }
 
     #[test]
