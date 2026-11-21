@@ -67,15 +67,38 @@ impl ParquetFile {
     /// and `55000` for a file whose size or time changed while its footer
     /// was read.
     pub fn open(path: &Path) -> Result<Self> {
-        ParquetFile::open_checked(path, None)
+        ParquetFile::open_checked(path, None, false)
     }
 
-    fn open_checked(path: &Path, expected: Option<&Identity>) -> Result<Self> {
+    /// Opens the file at `path` as [`ParquetFile::open_expecting`] does,
+    /// or as [`ParquetFile::open`] where `expected` is `None`, taking its
+    /// footer from the backend's cache of footers where the cache holds
+    /// one for the same path and identity, and keeping it there otherwise.
+    ///
+    /// The cache holds the footers of [`CACHED_FILES`] files at most, the
+    /// least recently used dropped first; a file replaced, even by one of
+    /// the same size and time, has another inode and is read anew.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`ParquetFile::open`] and [`ParquetFile::open_expecting`].
+    pub fn open_cached(path: &Path, expected: Option<&Identity>) -> Result<Self> {
+        ParquetFile::open_checked(path, expected, true)
+    }
+
+    fn open_checked(path: &Path, expected: Option<&Identity>, cached: bool) -> Result<Self> {
         let file = fs::File::open(path).map_err(|e| error::io(&e, "open Parquet file"))?;
         let identity = stat(&file)?;
         // Another version of the file is refused before its footer is read.
         if expected.is_some_and(|e| *e != identity) {
             return Err(changed());
+        }
+        if cached && let Some(metadata) = cache::get(path, &identity) {
+            return Ok(ParquetFile {
+                file: Arc::new(file),
+                identity,
+                metadata,
+            });
         }
         let footer = ParquetMetaDataReader::new()
             .parse_and_finish(&file)
@@ -85,12 +108,15 @@ impl ParquetFile {
         if !stat(&file)?.same_contents(&identity) {
             return Err(changed());
         }
-        let metadata = footer?;
+        let metadata = Arc::new(footer?);
         check_rows(&metadata)?;
+        if cached {
+            cache::put(path, identity, Arc::clone(&metadata));
+        }
         Ok(ParquetFile {
             file: Arc::new(file),
             identity,
-            metadata: Arc::new(metadata),
+            metadata,
         })
     }
 
@@ -102,7 +128,7 @@ impl ParquetFile {
     /// Those of [`ParquetFile::open`], and `55000` for a file of another
     /// identity.
     pub fn open_expecting(path: &Path, expected: &Identity) -> Result<Self> {
-        ParquetFile::open_checked(path, Some(expected))
+        ParquetFile::open_checked(path, Some(expected), false)
     }
 
     /// The error of a read of the file: `55000` where the file changed
@@ -178,6 +204,84 @@ impl ParquetFile {
             .iter()
             .map(|g| g.num_rows().unsigned_abs())
             .sum()
+    }
+}
+
+/// The footers of at most this many files are kept in a backend's cache.
+pub const CACHED_FILES: usize = 1000;
+
+/// The backend's cache of footers, by path and identity: the one object
+/// of the reader that outlives a query, bounded by its count of files.
+mod cache {
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
+
+    use parquet::file::metadata::ParquetMetaData;
+
+    use super::{CACHED_FILES, Identity};
+
+    struct Entry {
+        path: PathBuf,
+        identity: Identity,
+        metadata: Arc<ParquetMetaData>,
+        used: u64,
+    }
+
+    struct Cache {
+        entries: Vec<Entry>,
+        clock: u64,
+    }
+
+    static CACHE: Mutex<Cache> = Mutex::new(Cache {
+        entries: Vec::new(),
+        clock: 0,
+    });
+
+    pub(super) fn get(path: &Path, identity: &Identity) -> Option<Arc<ParquetMetaData>> {
+        let mut cache = CACHE.lock().ok()?;
+        cache.clock += 1;
+        let now = cache.clock;
+        let entry = cache
+            .entries
+            .iter_mut()
+            .find(|e| e.identity == *identity && e.path == path)?;
+        entry.used = now;
+        Some(Arc::clone(&entry.metadata))
+    }
+
+    pub(super) fn put(path: &Path, identity: Identity, metadata: Arc<ParquetMetaData>) {
+        let Ok(mut cache) = CACHE.lock() else {
+            return;
+        };
+        cache.clock += 1;
+        let used = cache.clock;
+        // Another version of the same path leaves the cache.
+        cache.entries.retain(|e| e.path != path);
+        if cache.entries.len() >= CACHED_FILES
+            && let Some(oldest) = (0..cache.entries.len()).min_by_key(|&i| cache.entries[i].used)
+        {
+            cache.entries.swap_remove(oldest);
+        }
+        cache.entries.push(Entry {
+            path: path.to_path_buf(),
+            identity,
+            metadata,
+            used,
+        });
+    }
+
+    /// The count of footers the cache holds, and whether it holds the one
+    /// of `path` under `identity`: for tests.
+    #[cfg(test)]
+    pub(super) fn holds(path: &Path, identity: &Identity) -> (usize, bool) {
+        let Ok(cache) = CACHE.lock() else {
+            return (0, false);
+        };
+        let held = cache
+            .entries
+            .iter()
+            .any(|e| e.identity == *identity && e.path == path);
+        (cache.entries.len(), held)
     }
 }
 
@@ -346,5 +450,54 @@ mod tests {
         );
         assert_eq!(check_rows(&disagree).unwrap_err().sqlstate(), "XX001");
         check_rows(meta).unwrap();
+    }
+
+    /// The cache is the process's: its tests take turns.
+    static CACHE_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn footers_kept_by_path_and_identity() {
+        let _turn = CACHE_TESTS.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cached.parquet");
+        testing::write(&path, &[Column::int32("a", &[1, 2])], 2, false).unwrap();
+        let first = ParquetFile::open_cached(&path, None).unwrap();
+        assert!(cache::holds(&path, &first.identity()).1);
+        // The same footer, not read again.
+        let again = ParquetFile::open_cached(&path, Some(&first.identity())).unwrap();
+        assert!(Arc::ptr_eq(first.metadata(), again.metadata()));
+        // A file of the same name replaced by a rename: read anew, the old
+        // footer dropped, and refused under the old identity.
+        let other = dir.path().join("other.parquet");
+        testing::write(&other, &[Column::int32("a", &[3, 4, 5])], 3, false).unwrap();
+        fs::rename(&other, &path).unwrap();
+        let error = ParquetFile::open_cached(&path, Some(&first.identity())).unwrap_err();
+        assert_eq!(error.sqlstate(), "55000");
+        let replaced = ParquetFile::open_cached(&path, None).unwrap();
+        assert_eq!(replaced.rows(), 3);
+        assert!(!cache::holds(&path, &first.identity()).1);
+        assert!(cache::holds(&path, &replaced.identity()).1);
+        // Never more than the bound.
+        assert!(cache::holds(&path, &replaced.identity()).0 <= CACHED_FILES);
+    }
+
+    #[test]
+    fn the_least_recently_used_footer_leaves_a_full_cache() {
+        let _turn = CACHE_TESTS.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.parquet");
+        testing::write(&first, &[Column::int32("a", &[1])], 1, false).unwrap();
+        let kept = ParquetFile::open_cached(&first, None).unwrap();
+        let path = dir.path().join("many.parquet");
+        testing::write(&path, &[Column::int32("a", &[1])], 1, false).unwrap();
+        // Links of one file under many names fill the cache past its bound.
+        for i in 0..CACHED_FILES {
+            let link = dir.path().join(format!("l{i}.parquet"));
+            fs::hard_link(&path, &link).unwrap();
+            ParquetFile::open_cached(&link, None).unwrap();
+        }
+        let (count, held) = cache::holds(&first, &kept.identity());
+        assert!(count <= CACHED_FILES);
+        assert!(!held);
     }
 }

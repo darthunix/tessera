@@ -3,7 +3,7 @@ MODULES = tessera_batch_test tessera_binding_test tessera_bridge_test \
 	tessera_function_test tessera_heap_batch_test tessera_heap_deform_test \
 	tessera_input_test tessera_interrupt_test tessera_kernel_ops_test tessera_kernels_test \
 	tessera_kernels_module_test \
-	tessera_node_test tessera_output_test tessera_pack_test \
+	tessera_node_test tessera_output_test tessera_pack_test tessera_parquet_test \
 	tessera_plan_test tessera_planner_test tessera_producer_test \
 	tessera_project_test \
 	tessera_request_test tessera_row_mask_test tessera_rows_test \
@@ -12,7 +12,7 @@ MODULES = tessera_batch_test tessera_binding_test tessera_bridge_test \
 	tessera_unary_test
 REGRESS = agg batch binding bridge builder coverage expr filter forward function heap_batch \
 	heap_deform index index_join input interrupt_loops interrupts join kernel_ops kernels kernels_module \
-	limit modules node output pack parallel plan planner project project_provider request \
+	limit modules node output pack parallel parquet plan planner project project_provider request \
 	row_mask rows settings shared_stats sort source source_scan spill spill_damage table transfer types \
 	union union_parallel unary
 # The suites use ICU collations, which need a UTF-8 database, and expect
@@ -46,6 +46,9 @@ RUNTIME_TESTS = tessera_builder_test tessera_output_test tessera_input_test \
 	tessera_source_test tessera_scan_source_test tessera_expr_test tessera_heap_batch_test tessera_project_test \
 	tessera_shared_stats_test \
 	tessera_kernel_ops_test tessera_spill_test tessera_rows_test
+# The test module of the suite parquet links the writer of its files.
+tessera_parquet_test$(DLSUFFIX): $(RUST_PARQUET_TESTING_LIB) $(RUST_PROFILE_STAMP)
+tessera_parquet_test$(DLSUFFIX): LDFLAGS_SL += $(RUST_PARQUET_TESTING_LIB) $(RUST_PARQUET_SYSTEM_LIBS)
 $(RUST_TESTS:%=%$(DLSUFFIX)): $(RUST_LIB) $(RUST_PROFILE_STAMP)
 $(RUST_TESTS:%=%$(DLSUFFIX)): LDFLAGS_SL += $(RUST_LIB)
 $(RUNTIME_TESTS:%=%$(DLSUFFIX)): $(RUNTIME_LIB)
