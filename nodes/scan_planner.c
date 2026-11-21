@@ -5,6 +5,7 @@
 #include "access/sysattr.h"
 #include "access/table.h"
 #include "catalog/pg_class.h"
+#include "optimizer/clauses.h"
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
@@ -53,18 +54,25 @@ const CustomScanMethods tess_filter_scan_methods = {
 };
 
 /*
- * A plain scan of one heap table in a SELECT, with nothing parameterized:
- * a base relation, or a partition or inheritance child, whose clauses the
- * core translated from its parent's.
+ * A plain scan of one table in a SELECT that locks no rows, with nothing
+ * parameterized: a base relation, or a partition or inheritance child,
+ * whose clauses the core translated from its parent's. A subquery planned
+ * on its own inside a statement that writes is such a level.
  */
 static bool
-relation_supported(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+scan_supported(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
 {
-	return IS_SIMPLE_REL(rel) &&
-		rte->rtekind == RTE_RELATION && rte->relkind == RELKIND_RELATION &&
+	return IS_SIMPLE_REL(rel) && rte->rtekind == RTE_RELATION &&
 		!rte->inh && rte->tablesample == NULL &&
 		root->parse->commandType == CMD_SELECT &&
 		root->parse->rowMarks == NIL && rel->lateral_relids == NULL;
+}
+
+/* Such a scan of a heap table, which the heap scan node reads. */
+static bool
+relation_supported(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	return scan_supported(root, rel, rte) && rte->relkind == RELKIND_RELATION;
 }
 
 /*
@@ -1084,8 +1092,160 @@ rank_scans(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte, Path *seqscan
 }
 
 /*
- * The node's paths, the full scan ranked against the index scans, then
- * TessGather over the cheapest partial path, before the core gathers it.
+ * The foreign path of the list of least total cost without parameters and
+ * path keys, and parallel-aware with workers in the partial list; NULL
+ * without one.
+ */
+static Path *
+offered_path(List *pathlist, bool partial)
+{
+	Path	   *best = NULL;
+
+	foreach_ptr(Path, path, pathlist)
+	{
+		if (!IsA(path, ForeignPath) || path->param_info != NULL ||
+			path->pathkeys != NIL ||
+			(partial && (!path->parallel_aware || path->parallel_workers <= 0)))
+			continue;
+		if (best == NULL || path->total_cost < best->total_cost)
+			best = path;
+	}
+	return best;
+}
+
+/*
+ * A source's path is a batch path of a registered node over the relation
+ * offered, without parameters or path keys, with projection, partial
+ * where the offer was, parallel-aware and parallel-safe with its workers,
+ * and serial and safe only where the offer was otherwise: anything else
+ * is the source's fault. The answers are each one of the three, used only
+ * for a clause marked usable, and carried among the path's expressions.
+ */
+static void
+check_source_path(const TessSource *source, const Path *offered, bool partial,
+				  CustomPath *path, const TessScanClauses *clauses)
+{
+	TessPathInfo info = TESS_STRUCT_INITIALIZER(TessPathInfo);
+
+	if (tess_path_node((Path *) path) == NULL)
+		elog(ERROR, "Tessera source \"%s\" returned a path of no batch node", source->name);
+	if (path->path.parent != offered->parent || path->path.param_info != NULL ||
+		path->path.pathkeys != NIL || (path->flags & CUSTOMPATH_SUPPORT_PROJECTION) == 0)
+		elog(ERROR, "Tessera source \"%s\" returned a path of another shape", source->name);
+	if (partial ? (!path->path.parallel_aware || !path->path.parallel_safe ||
+				   path->path.parallel_workers != offered->parallel_workers) :
+		(path->path.parallel_aware || path->path.parallel_workers != 0 ||
+		 (path->path.parallel_safe && !offered->parallel_safe)))
+		elog(ERROR, "Tessera source \"%s\" returned a path of other parallel properties",
+			 source->name);
+	tess_path_get_info(path, &info);
+	for (int i = 0; i < clauses->nclauses; i++)
+	{
+		int32		answer = clauses->answers[i];
+
+		if (answer != TESS_CLAUSE_UNSUPPORTED && answer != TESS_CLAUSE_PRUNE_ONLY &&
+			answer != TESS_CLAUSE_EXACT)
+			elog(ERROR, "Tessera source \"%s\" gave the answer %d for a clause",
+				 source->name, answer);
+		if (answer == TESS_CLAUSE_UNSUPPORTED)
+			continue;
+		if (!clauses->usable[i])
+			elog(ERROR, "Tessera source \"%s\" used a clause it may not use", source->name);
+		if (!list_member(info.expressions, clauses->clauses[i]->clause))
+			elog(ERROR, "Tessera source \"%s\" did not carry a clause it answered for",
+				 source->name);
+	}
+}
+
+/*
+ * Each source in the order of registration, given a copy of the offered
+ * path with the filter's input target and the relation's clauses with
+ * their answers set to TESS_CLAUSE_UNSUPPORTED: the first path returned,
+ * checked, with the answers its source gave; NULL, every answer
+ * TESS_CLAUSE_UNSUPPORTED, when no source returns one.
+ */
+static CustomPath *
+ask_sources(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial,
+			TessScanClauses *clauses)
+{
+	const TessSourceRegistryOps *registry =
+		tess_source_registry_check(tess_runtime_api()->sources);
+	ForeignPath *copy = makeNode(ForeignPath);
+	Size		answers = sizeof(int32) * Max(clauses->nclauses, 1);
+
+	memcpy(copy, offered, sizeof(ForeignPath));
+	copy->path.pathtarget = filter_input_target(root, rel);
+	for (const TessSource *source = registry->next(NULL); source != NULL;
+		 source = registry->next(source))
+	{
+		CustomPath *path;
+
+		if (!TESS_ABI_HAS_FIELD(source, TessSource, scan_rows) || source->scan_rows == NULL)
+			continue;
+		memset(clauses->answers, 0, answers);
+		path = source->scan_rows(root, &copy->path, clauses);
+		if (path != NULL)
+		{
+			check_source_path(source, offered, partial, path, clauses);
+			return path;
+		}
+	}
+	memset(clauses->answers, 0, answers);
+	return NULL;
+}
+
+/*
+ * A source's path for the offered path, alone with the relation's target
+ * and the offered path's rows, where the relation has no clauses; NULL
+ * where no source reads it.
+ */
+static Path *
+source_path(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial)
+{
+	TessScanClauses clauses = TESS_STRUCT_INITIALIZER(TessScanClauses);
+	int32		answer = TESS_CLAUSE_UNSUPPORTED;
+	bool		usable = false;
+	CustomPath *path;
+
+	clauses.answers = &answer;
+	clauses.usable = &usable;
+	path = ask_sources(root, rel, offered, partial, &clauses);
+	if (path == NULL)
+		return NULL;
+	path->path.pathtarget = rel->reltarget;
+	path->path.rows = offered->rows;
+	return &path->path;
+}
+
+/*
+ * The sources' paths of a foreign table of a SELECT, in place of the
+ * wrapper's scan and of its partial scan: each offered on its own, the
+ * foreign path of least total cost without parameters or path keys. The
+ * path costs what its source says. See docs/source.md.
+ */
+static void
+add_source_paths(PlannerInfo *root, RelOptInfo *rel, RangeTblEntry *rte)
+{
+	Path	   *offered;
+	Path	   *path;
+
+	if (!tess_enabled() || !scan_supported(root, rel, rte) ||
+		rte->relkind != RELKIND_FOREIGN_TABLE || rel->baserestrictinfo != NIL)
+		return;
+	offered = offered_path(rel->pathlist, false);
+	path = offered != NULL ? source_path(root, rel, offered, false) : NULL;
+	if (path != NULL)
+		add_path(rel, path);
+	offered = rel->consider_parallel ? offered_path(rel->partial_pathlist, true) : NULL;
+	path = offered != NULL ? source_path(root, rel, offered, true) : NULL;
+	if (path != NULL)
+		add_partial_path(rel, path);
+}
+
+/*
+ * The node's paths, the full scan ranked against the index scans, a
+ * source's path of a foreign table, then TessGather over the cheapest
+ * partial path, before the core gathers it.
  */
 static void
 set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
@@ -1120,6 +1280,7 @@ set_rel_pathlist(PlannerInfo *root, RelOptInfo *rel, Index rti,
 	add_index_paths(root, rel, rte, true, serial.time);
 	add_bitmap_paths(root, rel, rte, true, serial.time);
 	rank_scans(root, rel, rte, partial, true, &serial);
+	add_source_paths(root, rel, rte);
 	tess_gather_add_paths(root, rel);
 }
 
