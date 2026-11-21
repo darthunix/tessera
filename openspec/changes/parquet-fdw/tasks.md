@@ -72,7 +72,7 @@ maintainer to say that the machine is idle.
 - [x] 4.3 Estimates from the footers, the costs of both paths, and
       `ANALYZE`. Check: the suites; the cases of the rows and of the
       costs
-- [ ] 4.4 The installed set builds the module from copies against the
+- [x] 4.4 The installed set builds the module from copies against the
       installed headers and runtime library. Check: `make -C
       test/installed installcheck`
 - [ ] 4.5 `tools/tessera-clickbench` (`cargo clickbench`) with
