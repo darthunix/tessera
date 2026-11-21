@@ -37,6 +37,15 @@ typedef struct ParquetFileEntry
 	uint64		rows;
 } ParquetFileEntry;
 
+/* The counters of a scan that EXPLAIN sums over the participants. */
+#define PARQUET_GROUPS_READ 0
+#define PARQUET_VALUES_DECODED 1
+#define PARQUET_COUNTERS 2
+
+struct ParquetShared;
+struct TessSharedStats;
+struct ParallelContext;
+
 /* The rows of a window of a group, read at once by a reader. */
 #define PARQUET_WINDOW_ROWS 1024
 
@@ -60,7 +69,13 @@ typedef struct ParquetScan
 	TessParquetColumnInfo *info;
 	TessParquetReader **readers;
 	size_t		group;			/* the group read */
-	uint64		groups_read;	/* the groups started, over every rescan */
+	uint64	   *first_group;	/* of each file, its first group in the list */
+	struct ParquetShared *shared;	/* a parallel scan's list, or NULL */
+	struct TessSharedStats *stats;	/* the participants' counters */
+	/* This participant's, over every rescan, and in the leader the
+	 * workers' of the scans before the last of a rescanned plan. */
+	uint64		own[PARQUET_COUNTERS];
+	bool		private_shared; /* the list in the leader's private memory */
 	bool		group_started;
 	uint64		window_start;	/* the window's first row in its group */
 	size_t		window_len;
@@ -103,6 +118,15 @@ extern void parquet_scan_end(ParquetScan *scan);
 extern bool parquet_scan_next_group(ParquetScan *scan);
 extern uint64 parquet_scan_group_rows(const ParquetScan *scan);
 extern TessParquetReader *parquet_scan_reader(ParquetScan *scan, int c);
+extern Size parquet_scan_estimate(const ParquetScan *scan, int nworkers);
+extern void parquet_scan_share(ParquetScan *scan, void *coordinate,
+							   struct ParallelContext *pcxt, MemoryContext cxt);
+extern void parquet_scan_reshare(ParquetScan *scan, struct ParallelContext *pcxt,
+								 MemoryContext cxt);
+extern ParquetScan *parquet_scan_attach(Oid relid, List *attnums, void *coordinate,
+										MemoryContext cxt);
+extern void parquet_scan_unshare(ParquetScan *scan);
+extern const uint64 *parquet_scan_counts(const ParquetScan *scan);
 extern struct TupleTableSlot *parquet_scan_next(ParquetScan *scan,
 												struct TupleTableSlot *slot);
 pg_noreturn extern void parquet_raise(const TessParquetStatus *status);

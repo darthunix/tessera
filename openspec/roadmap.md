@@ -2305,6 +2305,22 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **Batch nodes lose the workers' counters of a rescan** (a finding of
+  the review of the change `parquet-fdw`, task 4.2). The nodes that sum
+  their counters over the participants through `TessSharedStats` zero
+  every row when a parallel plan is rescanned, after the workers of the
+  scan that ended stored theirs, so `EXPLAIN` shows the leader's counts
+  of every scan and the workers' of the last alone; the Parquet scan adds
+  them to the leader's first. Suggested: a call of the runtime that
+  carries the rows over a rescan, which the nodes then use.
+- **The counters of a Parquet scan replicated in workers** (a finding
+  of the review of the change `parquet-fdw`, task 4.2). A scan that is
+  not parallel-aware, as the inner side of a join each worker builds
+  whole, runs in every worker without the callbacks of shared memory, so
+  `EXPLAIN` shows the leader's groups read and values made alone, where
+  the spec says they are summed over the participants. Suggested: share
+  the counters apart from the groups, or say in the spec that a
+  replicated scan shows the leader's.
 - **A group of rows larger than a selection holds** (a finding of the
   review of the change `parquet-fdw`, task 3.2). A scan selects a
   group's rows by one mask of a bit a row, allocated by `palloc` and

@@ -358,11 +358,19 @@ the suite replaces a file between the leader and a worker through an
 injection point before the worker opens it. When the parallel plan is
 rescanned, as the inner side of a nested loop is, the leader resets the
 counter in the core's callback of a rescan of the shared memory
-(`ReInitializeDSMForeignScan`, `ReInitializeDSMCustomScan`), where
-Tessera's batch nodes reset their shared counters of `EXPLAIN` too, and
-the list of files stays the one the scan found when it began. The
-workers are the core's for a scan of the files' size. Refused: one file
-a participant, which leaves ClickBench's one file to one process.
+(`ReInitializeDSMForeignScan`, `ReInitializeDSMCustomScan`), and the
+list of files stays the one the scan found when it began. The counters
+of `EXPLAIN` lie after the list, one row a participant, the runtime's.
+At that callback the workers of the scan that ended have stored their
+rows and exited, and the leader stores its own only when the plan shuts
+down: their counts join the leader's before the rows are laid out anew,
+so that `EXPLAIN` totals every scan, where Tessera's batch nodes keep
+the last scan's workers alone. Where the core finds no segment of shared
+memory, it puts the list in the leader's private memory and frees it
+before the scan ends, so the counters are summed when the plan shuts
+down. The workers are the core's for a scan of the files' size.
+Refused: one file a participant, which leaves ClickBench's one file to
+one process.
 
 ### The footers, read once, and files that change
 
