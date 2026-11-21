@@ -577,20 +577,24 @@ fn the_info_of_a_column_and_a_message_cut_at_a_character() {
     let mut info = ColumnInfo::default();
     let a = column(file, "a", oid::INT4, -1).unwrap();
     assert!(unsafe { tess_parquet_column_info(a, &mut info, &mut st) });
+    assert!(info.bytes > 0);
     assert_eq!(
         info,
         ColumnInfo {
             gives_datums: true,
-            nullable: true
+            nullable: true,
+            bytes: info.bytes
         }
     );
     let s = column(file, "s", oid::TEXT, -1).unwrap();
     assert!(unsafe { tess_parquet_column_info(s, &mut info, &mut st) });
+    assert!(info.bytes > 0);
     assert_eq!(
         info,
         ColumnInfo {
             gives_datums: false,
-            nullable: false
+            nullable: false,
+            bytes: info.bytes
         }
     );
     assert!(!unsafe { tess_parquet_column_info(s, ptr::null_mut(), &mut st) });

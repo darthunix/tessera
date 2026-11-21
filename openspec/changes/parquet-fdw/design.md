@@ -397,13 +397,23 @@ new time.
 ### Costs and ANALYZE
 
 The paths cost the bytes of the column chunks they read, at
-`seq_page_cost` a page of 8 kB, and their rows: the wrapper's rows at
-the core's cost of a tuple and of the columns it forms, the source's
-batches at a share of it that the measurement calibrates. `ANALYZE`
-samples rows across the groups, reading only the rows it samples, which
-for 30 000 rows of a wide file still fall in most pages: `ANALYZE` of
-`hits.parquet` decompresses most of the file once. The core keeps
-their statistics; ClickBench's groupings and joins are
+`seq_page_cost` a page of 8 kB, the compressed sizes of the chunks the
+footers give, and their rows, every row of the files: the wrapper's rows
+at the core's cost of a tuple and of an operator for each column it
+forms, with the clauses the core checks on each, the source's batches at
+a share of that cost, a quarter until the measurement calibrates it, the
+clauses left to `TessFilter` above, which adds them. Both cost the
+targets PostgreSQL computes at their whole cost, on the rows the
+relation returns. A partial path costs a participant's share of both.
+The table's rows are its files' rows, so that the distinct values
+`ANALYZE` stored as a share of the rows grow with files added after it.
+`ANALYZE` samples rows at random over all the rows of the files, each
+set of positions as likely as another, finds them in their groups, and
+reads only the rows it samples, by readers whose selection holds them; a
+share fixed a group would leave out every other group of a file of small
+groups. For 30 000 rows of a wide file the rows still fall in most
+pages: `ANALYZE` of `hits.parquet` decompresses most of the file once.
+The core keeps their statistics; ClickBench's groupings and joins are
 then sized by them.
 
 ### Errors, panics, memory and cancel
