@@ -59,6 +59,7 @@ PGDLLEXPORT void _PG_init(void);
 PG_FUNCTION_INFO_V1(tessera_test_scan_fdw_handler);
 PG_FUNCTION_INFO_V1(tessera_test_scan_sources);
 PG_FUNCTION_INFO_V1(tessera_test_scan_source_calls);
+PG_FUNCTION_INFO_V1(tessera_test_scan_source_listed);
 PG_FUNCTION_INFO_V1(tessera_test_scan_source_fault);
 
 #define GROUP_ROWS 64
@@ -1450,6 +1451,25 @@ tessera_test_scan_source_calls(PG_FUNCTION_ARGS)
 							 source_names[s], source_calls[s]);
 	}
 	PG_RETURN_TEXT_P(cstring_to_text(calls.data));
+}
+
+/*
+ * The sources the registry lists, in the order of next, each found by its
+ * name, as the planner sees them.
+ */
+Datum
+tessera_test_scan_source_listed(PG_FUNCTION_ARGS)
+{
+	const TessSourceRegistryOps *registry =
+		tess_source_registry_check(tess_runtime_api()->sources);
+	StringInfoData names;
+
+	initStringInfo(&names);
+	for (const TessSource *source = registry->next(NULL); source != NULL;
+		 source = registry->next(source))
+		appendStringInfo(&names, "%s%s%s", names.len > 0 ? ", " : "", source->name,
+						 registry->find(source->name) == source ? "" : " (not found)");
+	PG_RETURN_TEXT_P(cstring_to_text(names.data));
 }
 
 /* The fault the faulty source and the node's plan make; NULL for none. */
