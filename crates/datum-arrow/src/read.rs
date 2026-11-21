@@ -122,7 +122,9 @@ impl Conv {
 ///   of time; days in 8 or 16 bits always fit;
 /// - [`Failures::ZERO_BYTE`]: strings and checked bytes into text;
 ///   Arrow's format requires `Utf8` to be UTF-8, which the crate takes
-///   so, unchecked;
+///   so, unchecked: a caller that cannot vouch for a column's bytes
+///   reads them as `Binary`, checked, and a `Utf8` value that is not
+///   UTF-8 gives a result of no promise, but no panic;
 /// - [`Failures::NOT_UTF8`]: checked bytes;
 /// - [`Failures::TOO_LONG`]: strings and checked bytes into a `varchar`
 ///   with a length, counted in characters; a string longer by spaces

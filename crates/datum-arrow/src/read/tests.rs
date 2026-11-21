@@ -4,9 +4,11 @@ use arrow_schema::{DataType, TimeUnit as ArrowUnit};
 use proptest::prelude::*;
 
 use super::*;
+use crate::bounds::Comparison;
 use crate::calendar::{EPOCH_DAYS, EPOCH_USECS, MAX_DATE, MAX_TIMESTAMP, MIN_DATE, MIN_TIMESTAMP};
 use crate::column::Bitmap;
 use crate::pg::VarcharLength;
+use crate::write::{WriteInput, WriteOutput, WritePlan};
 
 const OPTIONS: ReadOptions = ReadOptions {
     unit: None,
@@ -1634,4 +1636,235 @@ fn broken_shapes_of_a_dictionary_and_of_the_output() {
     };
     let error = time.read(&input, &every(65), &mut output).unwrap_err();
     assert_eq!(error.kind(), ErrorKind::BrokenShape);
+}
+
+/// Every Arrow type the crate takes, plain and as a dictionary's values.
+fn every_arrow_type() -> Vec<DataType> {
+    use DataType as D;
+    let mut plain = vec![
+        D::Boolean,
+        D::Int8,
+        D::Int16,
+        D::Int32,
+        D::Int64,
+        D::UInt8,
+        D::UInt16,
+        D::UInt32,
+        D::Float32,
+        D::Float64,
+        D::Date32,
+        D::Utf8,
+        D::LargeUtf8,
+        D::Binary,
+        D::LargeBinary,
+        D::FixedSizeBinary(3),
+    ];
+    for unit in [
+        ArrowUnit::Second,
+        ArrowUnit::Millisecond,
+        ArrowUnit::Microsecond,
+    ] {
+        plain.push(timestamp(unit, None));
+        plain.push(timestamp(unit, Some("UTC")));
+    }
+    let dictionaries: Vec<DataType> = plain
+        .iter()
+        .map(|value| dictionary(D::UInt8, value.clone()))
+        .collect();
+    plain.extend(dictionaries);
+    plain
+}
+
+/// Every PostgreSQL type the crate knows, `varchar` with and without a
+/// length.
+fn every_pg_type() -> Vec<PgType> {
+    vec![
+        PgType::Bool,
+        PgType::Int2,
+        PgType::Int4,
+        PgType::Int8,
+        PgType::Float4,
+        PgType::Float8,
+        PgType::Date,
+        PgType::Timestamp,
+        PgType::Timestamptz,
+        PgType::Text,
+        PgType::Varchar(None),
+        varchar(3),
+        PgType::Bytea,
+    ]
+}
+
+/// The column of `arrow`'s plain type `plain` made of `bits`, owned.
+struct AnyColumn {
+    dense: Option<Owned>,
+    offsets: Vec<i32>,
+    large_offsets: Vec<i64>,
+    data: Vec<u8>,
+    plain: Plain,
+}
+
+impl AnyColumn {
+    fn of(plain: Plain, bits: &[u64]) -> AnyColumn {
+        let width = match plain {
+            Plain::Int8 => Some(0),
+            Plain::Int16 => Some(1),
+            Plain::Int32 | Plain::Date32 => Some(2),
+            Plain::Int64 | Plain::Timestamp { .. } => Some(3),
+            Plain::UInt8 => Some(4),
+            Plain::UInt16 => Some(5),
+            Plain::UInt32 => Some(6),
+            Plain::Float32 => Some(7),
+            Plain::Float64 => Some(8),
+            Plain::Boolean => Some(9),
+            _ => None,
+        };
+        // Strings of up to seven bytes of any value, a word each.
+        let mut offsets = vec![0i32];
+        let mut data = Vec::new();
+        for &word in bits {
+            let len = (word % 8) as usize;
+            data.extend_from_slice(&word.to_le_bytes()[..len]);
+            offsets.push(i32::try_from(data.len()).unwrap());
+        }
+        if let Plain::FixedSizeBinary(size) = plain {
+            data = bits
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .take(size * bits.len())
+                .collect();
+        }
+        AnyColumn {
+            dense: width.map(|width| Owned::of(width, bits)),
+            large_offsets: offsets.iter().map(|&o| i64::from(o)).collect(),
+            offsets,
+            data,
+            plain,
+        }
+    }
+
+    fn values(&self) -> Values<'_> {
+        match (&self.dense, self.plain) {
+            (Some(owned), _) => owned.values(),
+            (None, Plain::Utf8 | Plain::Binary) => Values::Bytes {
+                offsets: &self.offsets,
+                data: &self.data,
+            },
+            (None, Plain::LargeUtf8 | Plain::LargeBinary) => Values::LargeBytes {
+                offsets: &self.large_offsets,
+                data: &self.data,
+            },
+            (None, Plain::FixedSizeBinary(size)) => Values::FixedBytes {
+                size,
+                data: &self.data,
+            },
+            (None, plain) => unreachable!("{plain:?}"),
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(48))]
+
+    /// Plans made from every pair of known types with every option, and
+    /// reads, bounds and writes through each over slots of every bit
+    /// pattern: each call returns its result or an error its plan names,
+    /// a plan's refusal one of the kinds of a plan, and none panics.
+    #[test]
+    fn no_panic_on_any_input(
+        bits in prop::collection::vec(
+            prop_oneof![any::<u64>(), Just(0), Just(u64::MAX), Just(1 << 63)],
+            1..70,
+        ),
+        valid in prop::collection::vec(any::<u8>(), 10),
+        offset in 0usize..8,
+        constant in prop_oneof![any::<i64>(), Just(i64::MAX), Just(i64::MIN)],
+    ) {
+        let len = bits.len();
+        let bitmap = Bitmap::new(&valid, offset);
+        let units = [None, Some(Unit::Days), Some(Unit::Seconds), Some(Unit::Milliseconds), Some(Unit::Microseconds)];
+        let texts = [None, Some(TextBytes::Checked), Some(TextBytes::Trusted)];
+        let keys: Vec<u8> = bits.iter().map(|&b| (b % len as u64) as u8).collect();
+        let mut accepted = 0;
+        for data_type in every_arrow_type() {
+            let arrow = ArrowType::new(&data_type).unwrap();
+            let column = AnyColumn::of(arrow.values(), &bits);
+            let input = match arrow {
+                ArrowType::Plain(_) => Input::Plain(Column { len, values: column.values(), nulls: Some(bitmap) }),
+                ArrowType::Dictionary { .. } => Input::Dictionary {
+                    len,
+                    keys: Keys::UInt8(&keys),
+                    nulls: Some(bitmap),
+                    values: Column { len, values: column.values(), nulls: Some(bitmap) },
+                },
+            };
+            for pg in every_pg_type() {
+                for unit in units {
+                    for text in texts {
+                        for server_utf8 in [true, false] {
+                            let options = ReadOptions { unit, text, server_utf8 };
+                            let plan = match ReadPlan::new(&data_type, pg, options) {
+                                Ok(plan) => plan,
+                                Err(error) => {
+                                    prop_assert!(matches!(
+                                        error.kind(),
+                                        ErrorKind::NotSupported | ErrorKind::InvalidOption
+                                            | ErrorKind::TypeMismatch | ErrorKind::TooLarge
+                                    ), "{:?}", error);
+                                    continue;
+                                }
+                            };
+                            accepted += 1;
+                            let mut nulls = vec![0u64; mask_words(len)];
+                            let result = if plan.gives_datums() {
+                                let mut values = vec![0u64; len];
+                                plan.read(&input, &every(len), &mut ReadOutput::Datums { values: &mut values, nulls: &mut nulls })
+                            } else {
+                                let mut values: Vec<&[u8]> = vec![&[]; len];
+                                plan.read(&input, &every(len), &mut ReadOutput::Bytes { values: &mut values, nulls: &mut nulls })
+                            };
+                            if let Err(error) = result {
+                                prop_assert!(plan.failures().kinds().any(|kind| kind == error.kind()), "{:?} of {:?} into {:?}", error, data_type, pg);
+                            }
+                            for op in [Comparison::Eq, Comparison::Ne, Comparison::Lt, Comparison::Le, Comparison::Gt, Comparison::Ge] {
+                                let Ok(test) = plan.test(op, Some(constant)) else { continue };
+                                let _ = test.range(constant, constant.wrapping_mul(3));
+                                if let Input::Plain(column) = &input {
+                                    let mut passed = vec![0u64; mask_words(len)];
+                                    prop_assert!(test.apply(column, &mut passed).is_ok());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Every pair the plan's table lists, by every option that applies.
+        prop_assert_eq!(accepted, 196);
+        for pg in every_pg_type() {
+            for server_utf8 in [true, false] {
+                let Ok(plan) = WritePlan::new(pg, server_utf8) else { continue };
+                let owned: Vec<Vec<u8>> = bits.iter().map(|w| w.to_le_bytes()[..(w % 8) as usize].to_vec()).collect();
+                let strings: Vec<&[u8]> = owned.iter().map(Vec::as_slice).collect();
+                let nulls: Vec<u64> = (0..mask_words(len)).map(|w| bitmap.word(w * 64, len)).collect();
+                let input = match plan.data_type() {
+                    DataType::Utf8 | DataType::Binary => WriteInput::Bytes { len, values: &strings, nulls: &nulls },
+                    _ => WriteInput::Datums { len, values: &bits, nulls: &nulls },
+                };
+                let mut validity = vec![0u8; len.div_ceil(8)];
+                let result = match plan.data_type() {
+                    DataType::Boolean => plan.write(&input, &every(len), &mut WriteOutput::Boolean { values: &mut vec![0u8; len.div_ceil(8)], validity: &mut validity }),
+                    DataType::Int16 => plan.write(&input, &every(len), &mut WriteOutput::Int16 { values: &mut vec![0; len], validity: &mut validity }),
+                    DataType::Int32 | DataType::Date32 => plan.write(&input, &every(len), &mut WriteOutput::Int32 { values: &mut vec![0; len], validity: &mut validity }),
+                    DataType::Int64 | DataType::Timestamp(..) => plan.write(&input, &every(len), &mut WriteOutput::Int64 { values: &mut vec![0; len], validity: &mut validity }),
+                    DataType::Float32 => plan.write(&input, &every(len), &mut WriteOutput::Float32 { values: &mut vec![0.0; len], validity: &mut validity }),
+                    DataType::Float64 => plan.write(&input, &every(len), &mut WriteOutput::Float64 { values: &mut vec![0.0; len], validity: &mut validity }),
+                    _ => plan.write(&input, &every(len), &mut WriteOutput::Bytes { offsets: &mut vec![0; len + 1], data: &mut vec![0; 8 * len], validity: &mut validity }),
+                };
+                if let Err(error) = result {
+                    prop_assert!(plan.failures().kinds().any(|kind| kind == error.kind()), "{:?} of {:?}", error, pg);
+                }
+            }
+        }
+    }
 }

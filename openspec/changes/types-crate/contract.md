@@ -13,14 +13,22 @@ laid out is left to the work.
 The crate depends on no crate of Tessera and on no code of PostgreSQL,
 and of Apache Arrow on `arrow-schema` alone outside its tests, so that
 it builds and ships by itself.
-- **Checked by:** pending
+- **Checked by:**
+  `.github/workflows/ci.yml::cargo tree --locked -p datum-arrow -e normal`;
+  `.github/workflows/ci.yml::cargo publish --dry-run --locked -p datum-arrow`;
+  `crates/datum-arrow/src/lib.rs::#![forbid(unsafe_code)]`, no foreign
+  call without it
 
 ### A plan names every failure
 No conversion of a value fails in a way its plan does not name, a call
 of a broken shape aside, which is refused as one, a write's output
 buffers only once its values pass the check of their size, so that a
 caller that handles the errors the plan names has handled every value.
-- **Checked by:** pending
+- **Checked by:**
+  `crates/datum-arrow/src/read/tests.rs::no_panic_on_any_input`;
+  `crates/datum-arrow/src/proofs.rs::seconds_fail_only_out_of_range`;
+  `crates/datum-arrow/src/proofs.rs::checked_text_is_refused_exactly`;
+  `crates/datum-arrow/src/write/tests.rs::bytes_of_one_call_up_to_what_offsets_hold`
 
 ### One owner of the conversions
 A value crosses between Arrow's form and PostgreSQL's only through this
