@@ -233,12 +233,12 @@ ClickBench's `AdvEngineID <> 0` compares a `smallint` with an
 bounds are for integers, days and times alone: a floating-point number
 orders `NaN` as PostgreSQL does not, and a string by its collation.
 
-
 The constant is divided by the stored unit in 64 bits: every epoch
 shift is a whole number of its stored unit (946 684 800 000 000
 microseconds are as many whole milliseconds and seconds), so
 floor((c + shift) / unit) is floor(c / unit) plus the shift in stored
 units; `Count::time` asserts it, and a proof checks it of every count.
+
 ### Decisions of the maintainer
 
 On 2026-11-21:
