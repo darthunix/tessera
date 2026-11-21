@@ -21,6 +21,18 @@ pub struct Bounds {
     pub greatest: i64,
 }
 
+/// The emptiness of the least and greatest strings of a chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Empties {
+    /// Whether the least value is the empty string: where it is not, no
+    /// row is, since a least value a writer cut short is a prefix of the
+    /// least row.
+    pub least_empty: bool,
+    /// Whether the greatest value is the empty string: where it is, every
+    /// row that is not `NULL` is.
+    pub greatest_empty: bool,
+}
+
 /// What a footer says of a column's chunk in one group of rows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct GroupStats {
@@ -29,9 +41,9 @@ pub struct GroupStats {
     /// The least and greatest values of integers, dates and times, where
     /// the footer gives them and the format lets a reader trust them.
     pub bounds: Option<Bounds>,
-    /// For strings, whether the least value is empty and whether the
-    /// greatest is, where the footer gives them.
-    pub empties: Option<(bool, bool)>,
+    /// For strings, the emptiness of the least and greatest values, where
+    /// the footer gives them and the format lets a reader trust them.
+    pub empties: Option<Empties>,
     /// Whether the chunk has a dictionary page and every data page is
     /// encoded through it, by the footer's statistics of encodings.
     pub dictionary_only: bool,
@@ -44,9 +56,11 @@ pub struct GroupStats {
 /// from the fields `min_value` and `max_value` only where the file's
 /// column orders give the column the order of its type, and from the
 /// older fields `min` and `max`, which a writer always sorted as signed,
-/// only for signed values, where the footer has no newer ones. The
-/// emptiness of strings is taken from either, since every order of bytes
-/// puts the empty string first.
+/// only for signed values, where the footer has no newer ones; a bound
+/// of a value outside its mark's width gives none, since the reader
+/// narrows such a row. The emptiness of strings is taken from the newer
+/// fields alone, under the same column orders: old writers wrote wrong
+/// least and greatest values of bytes.
 pub fn group_stats(file: &ParquetFile, column: &MappedColumn, group: usize) -> GroupStats {
     stats_of(file.metadata(), column, group)
 }
@@ -56,9 +70,14 @@ fn stats_of(metadata: &ParquetMetaData, column: &MappedColumn, group: usize) -> 
         return GroupStats::default();
     };
     let chunk = group.column(column.leaf());
+    // The mask holds the encodings of the data pages alone: each through
+    // the dictionary, by either of its names.
     let dictionary_only = chunk.dictionary_page_offset().is_some()
         && chunk.page_encoding_stats_mask().is_some_and(|mask| {
-            mask.is_only(Encoding::PLAIN_DICTIONARY) || mask.is_only(Encoding::RLE_DICTIONARY)
+            mask.encodings().next().is_some()
+                && mask
+                    .encodings()
+                    .all(|e| matches!(e, Encoding::PLAIN_DICTIONARY | Encoding::RLE_DICTIONARY))
         });
     let Some(stats) = chunk.statistics() else {
         return GroupStats {
@@ -84,12 +103,15 @@ fn stats_of(metadata: &ParquetMetaData, column: &MappedColumn, group: usize) -> 
         },
         empties: match stats {
             // Of `BYTE_ARRAY` alone, which the wrapper reads as bytes.
-            Statistics::ByteArray(s) => match (s.min_opt(), s.max_opt()) {
-                (Some(least), Some(greatest)) => {
-                    Some((least.data().is_empty(), greatest.data().is_empty()))
+            Statistics::ByteArray(s) if ordered && !stats.is_min_max_deprecated() => {
+                match (s.min_opt(), s.max_opt()) {
+                    (Some(least), Some(greatest)) => Some(Empties {
+                        least_empty: least.data().is_empty(),
+                        greatest_empty: greatest.data().is_empty(),
+                    }),
+                    _ => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         },
         dictionary_only,
@@ -111,7 +133,7 @@ fn bounds(stats: &Statistics, file_type: FileType) -> Option<Bounds> {
             greatest: greatest?,
         })
     };
-    match (stats, file_type) {
+    let found = match (stats, file_type) {
         (Statistics::Int32(s), FileType::Int { signed: false, .. }) => pair(
             s.min_opt().map(|&v| i64::from(v as u32)),
             s.max_opt().map(|&v| i64::from(v as u32)),
@@ -124,6 +146,29 @@ fn bounds(stats: &Statistics, file_type: FileType) -> Option<Bounds> {
             pair(s.min_opt().copied(), s.max_opt().copied())
         }
         _ => None,
+    }?;
+    let width = match file_type {
+        FileType::Int {
+            bits: 8,
+            signed: true,
+        } => Some((i64::from(i8::MIN), i64::from(i8::MAX))),
+        FileType::Int {
+            bits: 8,
+            signed: false,
+        } => Some((0, i64::from(u8::MAX))),
+        FileType::Int {
+            bits: 16,
+            signed: true,
+        } => Some((i64::from(i16::MIN), i64::from(i16::MAX))),
+        FileType::Int {
+            bits: 16,
+            signed: false,
+        } => Some((0, i64::from(u16::MAX))),
+        _ => None,
+    };
+    match width {
+        Some((low, high)) if found.least < low || found.greatest > high => None,
+        _ => Some(found),
     }
 }
 
