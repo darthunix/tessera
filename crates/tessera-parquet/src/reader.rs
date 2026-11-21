@@ -12,7 +12,8 @@
 use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
-use std::sync::Arc;
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::{Arc, Mutex};
 
 use arrow_array::cast::AsArray;
 use arrow_array::types::{
@@ -36,10 +37,15 @@ use crate::file::ParquetFile;
 
 /// The open file shared by every reader of it: reads at an offset, so
 /// that no reader opens or duplicates a descriptor.
+///
+/// It keeps the last error of the system's reads, other than a read past
+/// the end, since the `parquet` crate passes a read's error on to Arrow as
+/// text: the reader then reports `58030`, not bytes it cannot decode.
 #[derive(Clone, Debug)]
 pub(crate) struct SharedFile {
     file: Arc<File>,
     len: u64,
+    failed: Arc<Mutex<Option<(io::ErrorKind, String)>>>,
 }
 
 impl SharedFile {
@@ -47,7 +53,30 @@ impl SharedFile {
         SharedFile {
             file: Arc::clone(file.handle()),
             len: file.identity().size,
+            failed: Arc::new(Mutex::new(None)),
         }
+    }
+
+    fn note(failed: &Mutex<Option<(io::ErrorKind, String)>>, error: &io::Error) {
+        // A read past the end is the format's, an interrupted one is
+        // retried by the crate's readers: neither is a failure of the
+        // system.
+        if !matches!(
+            error.kind(),
+            io::ErrorKind::UnexpectedEof | io::ErrorKind::Interrupted
+        ) && let Ok(mut slot) = failed.lock()
+        {
+            *slot = Some((error.kind(), error.to_string()));
+        }
+    }
+
+    /// The error of the system's reads since the last call, as `58030`.
+    pub(crate) fn take_failure(&self) -> Option<Error> {
+        let (kind, text) = self.failed.lock().ok()?.take()?;
+        Some(crate::error::io(
+            &io::Error::new(kind, text),
+            "read Parquet file",
+        ))
     }
 }
 
@@ -61,11 +90,15 @@ impl Length for SharedFile {
 pub(crate) struct At {
     file: Arc<File>,
     position: u64,
+    failed: Arc<Mutex<Option<(io::ErrorKind, String)>>>,
 }
 
 impl Read for At {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let read = self.file.read_at(buf, self.position)?;
+        let read = self
+            .file
+            .read_at(buf, self.position)
+            .inspect_err(|e| SharedFile::note(&self.failed, e))?;
         self.position += read as u64;
         Ok(read)
     }
@@ -78,14 +111,16 @@ impl ChunkReader for SharedFile {
         Ok(At {
             file: Arc::clone(&self.file),
             position: start,
+            failed: Arc::clone(&self.failed),
         })
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
         let mut bytes = vec![0u8; length];
-        self.file
-            .read_exact_at(&mut bytes, start)
-            .map_err(|e| ParquetError::External(Box::new(e)))?;
+        self.file.read_exact_at(&mut bytes, start).map_err(|e| {
+            SharedFile::note(&self.failed, &e);
+            ParquetError::External(Box::new(e))
+        })?;
         Ok(Bytes::from(bytes))
     }
 }
@@ -118,6 +153,7 @@ pub struct ColumnReader {
     batch: usize,
     dictionary: bool,
     forward: Option<Forward>,
+    shared: SharedFile,
 }
 
 impl ColumnReader {
@@ -155,6 +191,7 @@ impl ColumnReader {
             batch,
             dictionary: chunk.dictionary_page_offset().is_some(),
             forward: None,
+            shared: SharedFile::of(file),
         })
     }
 
@@ -175,8 +212,10 @@ impl ColumnReader {
     /// # Errors
     ///
     /// `XX000` for a window past the group or a mask of rows shorter than
-    /// the window or holding a row the selection does not; `XX001` for
-    /// bytes the format cannot decode; `55000` for a file that changed.
+    /// the window or holding a row the selection does not; `55000` for a
+    /// file that changed, whether the read failed or not; `58030` for a
+    /// read the system failed; `XX001` for bytes the format cannot
+    /// decode, a panic of the crate's decoders among them.
     pub fn read(&mut self, start: usize, len: usize, rows: &[u64]) -> Result<Window> {
         let end = start
             .checked_add(len)
@@ -198,20 +237,40 @@ impl ColumnReader {
             None => true,
             Some(f) => f.next == start,
         };
-        let window = if forward {
-            let count = count_of(&selected);
-            let array = self.forward_read(start, end, count)?;
-            Window {
-                array,
-                rows: selected,
+        // No failure of an earlier read is this one's.
+        let _ = self.shared.take_failure();
+        // A panic of the crate's decoders over bytes it cannot decode is an
+        // error of this read, so that the check of the file below decides
+        // between a change and damaged bytes.
+        let read = panic::catch_unwind(AssertUnwindSafe(|| {
+            if forward {
+                let count = count_of(&selected);
+                self.forward_read(start, end, count).map(|array| Window {
+                    array,
+                    rows: selected,
+                })
+            } else {
+                let asked = rows[..words].to_vec();
+                self.read_rows(start, len, &asked)
+                    .map(|array| Window { array, rows: asked })
             }
-        } else {
-            let asked = rows[..words].to_vec();
-            let array = self.read_rows(start, len, &asked)?;
-            Window { array, rows: asked }
-        };
-        self.file.check_unchanged()?;
-        Ok(window)
+        }))
+        .unwrap_or_else(|payload| Err(panicked(payload.as_ref())));
+        match read {
+            Ok(window) => {
+                self.file.check_unchanged()?;
+                Ok(window)
+            }
+            Err(error) => {
+                // The forward reader may have read past the rows it gave:
+                // the next ask builds another.
+                if forward {
+                    self.forward = None;
+                }
+                let error = self.shared.take_failure().unwrap_or(error);
+                Err(self.file.read_error(error))
+            }
+        }
     }
 
     fn forward_read(&mut self, start: usize, end: usize, count: usize) -> Result<ArrayRef> {
@@ -279,7 +338,7 @@ impl ColumnReader {
 
     fn build(&self, selection: RowSelection, batch: usize) -> Result<ParquetRecordBatchReader> {
         let (view, _) = self.column.view(self.dictionary);
-        ParquetRecordBatchReaderBuilder::new_with_metadata(SharedFile::of(&self.file), view.clone())
+        ParquetRecordBatchReaderBuilder::new_with_metadata(self.shared.clone(), view.clone())
             .with_row_groups(vec![self.group])
             .with_row_selection(selection)
             .with_row_selection_policy(RowSelectionPolicy::Selectors)
@@ -354,6 +413,19 @@ fn decode(error: &arrow_schema::ArrowError) -> Error {
 
 fn broken(message: &str) -> Error {
     Error::new(INTERNAL_ERROR, message)
+}
+
+/// The error of a panic the crate raised while it decoded a file.
+pub(crate) fn panicked(payload: &(dyn std::any::Any + Send)) -> Error {
+    let text = payload
+        .downcast_ref::<&str>()
+        .map(|t| (*t).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| String::from("a panic"));
+    Error::new(
+        DATA_CORRUPTED,
+        format!("could not decode Parquet file: {text}"),
+    )
 }
 
 /// The buffers of an Arrow array as the input of `datum-arrow`, borrowed.

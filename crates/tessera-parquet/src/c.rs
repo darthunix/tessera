@@ -24,6 +24,10 @@ use crate::error::{DATA_CORRUPTED, Error, INTERNAL_ERROR, Result};
 use crate::file::{Identity, ParquetFile};
 use crate::reader::{ColumnReader, Window, input_of};
 
+// The headers of `text` are written as a little-endian machine reads them.
+#[cfg(not(target_endian = "little"))]
+compile_error!("tessera-parquet writes the headers of text for a little-endian machine");
+
 /// Bytes of the message of a status, its terminator included.
 pub const MESSAGE_SIZE: usize = 256;
 
@@ -90,10 +94,16 @@ pub struct ColumnHandle(MappedColumn);
 pub struct ReaderHandle {
     reader: ColumnReader,
     window: Option<Window>,
-    /// The places of the text the last call of `tess_parquet_text_size`
-    /// made, within the last window's buffers.
-    text: Vec<Option<(*const u8, usize)>>,
-    text_bytes: usize,
+    /// The text the last call of `tess_parquet_text_size` checked, for the
+    /// window still held; none after a read or a check that failed.
+    text: Option<SizedText>,
+}
+
+/// The places of a window's text in its own buffers, a row each, `None`
+/// for a row not asked or `NULL`, and the bytes of an arena they need.
+struct SizedText {
+    places: Vec<Option<(*const u8, usize)>>,
+    bytes: usize,
 }
 
 /// Runs `body`, writing its error or a caught panic into `status`.
@@ -123,28 +133,61 @@ unsafe fn guard(status: *mut Status, decoding: bool, body: impl FnOnce() -> Resu
             Error::new(code, format!("Parquet reader failed: {text}"))
         }
     };
-    // SAFETY: the caller gives null or a writable status.
-    if let Some(status) = unsafe { status.as_mut() } {
-        fill(status, &error);
+    if !status.is_null() {
+        // SAFETY: the caller gives null or a status it may not have
+        // initialized; each field is written whole, none read.
+        unsafe { fill(status, &error) };
     }
     false
 }
 
-fn fill(status: &mut Status, error: &Error) {
-    status.sqlstate = [0; 6];
-    for (place, byte) in status.sqlstate.iter_mut().zip(error.sqlstate().bytes()) {
+/// Writes `error` into the status at `status`, field by field, through
+/// the raw pointer: the caller may give memory it has not initialized.
+///
+/// # Safety
+///
+/// `status` must point to writable memory of a `Status`.
+unsafe fn fill(status: *mut Status, error: &Error) {
+    let mut sqlstate = [0 as c_char; 6];
+    for (place, byte) in sqlstate.iter_mut().zip(error.sqlstate().bytes()) {
         *place = byte as c_char;
     }
-    status.row = error
+    let row = error
         .row()
         .and_then(|r| i64::try_from(r).ok())
         .unwrap_or(-1);
-    status.message = [0; MESSAGE_SIZE];
-    let bytes = error.message().as_bytes();
-    let len = bytes.len().min(MESSAGE_SIZE - 1);
-    for (place, &byte) in status.message.iter_mut().zip(&bytes[..len]) {
+    let mut message = [0 as c_char; MESSAGE_SIZE];
+    let text = error.message();
+    // Cut at a character's boundary, so that the message stays UTF-8.
+    let mut len = text.len().min(MESSAGE_SIZE - 1);
+    while !text.is_char_boundary(len) {
+        len -= 1;
+    }
+    for (place, &byte) in message.iter_mut().zip(&text.as_bytes()[..len]) {
         *place = byte as c_char;
     }
+    // SAFETY: the caller gives a writable status; the places of its
+    // fields are written, no reference to it is made.
+    unsafe {
+        std::ptr::addr_of_mut!((*status).sqlstate).write(sqlstate);
+        std::ptr::addr_of_mut!((*status).row).write(row);
+        std::ptr::addr_of_mut!((*status).message).write(message);
+    }
+}
+
+/// Writes `value` into the output at `out`, which the caller may not have
+/// initialized.
+///
+/// # Safety
+///
+/// `out` must be null or point to writable memory of a `T`.
+unsafe fn put<T>(out: *mut T, value: T) -> Result<()> {
+    if out.is_null() {
+        return Err(broken("a null output"));
+    }
+    // SAFETY: the caller gives a writable place; nothing is read from it.
+    unsafe { out.write(value) };
+    Ok(())
 }
 
 fn broken(message: &str) -> Error {
@@ -217,13 +260,14 @@ pub unsafe extern "C" fn tess_parquet_open(
         guard(status, true, || {
             let path = bytes(path, path_len)?;
             let path = Path::new(std::ffi::OsStr::from_bytes(path));
+            if out.is_null() {
+                return Err(broken("a null output"));
+            }
             let file = match expected.as_ref() {
                 Some(identity) => ParquetFile::open_expecting(path, &(*identity).into())?,
                 None => ParquetFile::open(path)?,
             };
-            let out = out.as_mut().ok_or_else(|| broken("a null output"))?;
-            *out = Box::into_raw(Box::new(FileHandle(file)));
-            Ok(())
+            put(out, Box::into_raw(Box::new(FileHandle(file))))
         })
     }
 }
@@ -260,15 +304,12 @@ pub unsafe extern "C" fn tess_parquet_file_info(
     unsafe {
         guard(status, false, || {
             let file = &file.as_ref().ok_or_else(|| broken("a null file"))?.0;
-            let (Some(identity), Some(groups), Some(rows)) =
-                (identity.as_mut(), groups.as_mut(), rows.as_mut())
-            else {
+            if identity.is_null() || groups.is_null() || rows.is_null() {
                 return Err(broken("a null output"));
-            };
-            *identity = file.identity().into();
-            *groups = file.groups();
-            *rows = file.rows();
-            Ok(())
+            }
+            put(identity, file.identity().into())?;
+            put(groups, file.groups())?;
+            put(rows, file.rows())
         })
     }
 }
@@ -292,8 +333,7 @@ pub unsafe extern "C" fn tess_parquet_group_rows(
             let count = file
                 .group_rows(group)
                 .ok_or_else(|| broken("a group of rows past the file's"))?;
-            *rows.as_mut().ok_or_else(|| broken("a null output"))? = count;
-            Ok(())
+            put(rows, count)
         })
     }
 }
@@ -367,10 +407,49 @@ pub unsafe extern "C" fn tess_parquet_column(
                 utf8,
                 server_utf8,
             };
+            if out.is_null() {
+                return Err(broken("a null output"));
+            }
             let column = map_column(file, &request)?;
-            let out = out.as_mut().ok_or_else(|| broken("a null output"))?;
-            *out = Box::into_raw(Box::new(ColumnHandle(column)));
-            Ok(())
+            put(out, Box::into_raw(Box::new(ColumnHandle(column))))
+        })
+    }
+}
+
+/// What the wrapper needs of a mapped column, as `TessParquetColumnInfo`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ColumnInfo {
+    /// Whether its values are `Datum` words of a type passed by value, by
+    /// [`tess_parquet_values`]; text and bytes otherwise, by
+    /// [`tess_parquet_text_size`] and [`tess_parquet_text`].
+    pub gives_datums: bool,
+    /// Whether the file column may hold `NULL`.
+    pub nullable: bool,
+}
+
+/// Writes what the wrapper needs of `column`.
+///
+/// # Safety
+///
+/// `column` must be live; `info` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_column_info(
+    column: *const ColumnHandle,
+    info: *mut ColumnInfo,
+    status: *mut Status,
+) -> bool {
+    // SAFETY: as the function's contract says.
+    unsafe {
+        guard(status, false, || {
+            let column = &column.as_ref().ok_or_else(|| broken("a null column"))?.0;
+            put(
+                info,
+                ColumnInfo {
+                    gives_datums: column.plan().gives_datums(),
+                    nullable: column.nullable(),
+                },
+            )
         })
     }
 }
@@ -413,15 +492,18 @@ pub unsafe extern "C" fn tess_parquet_reader(
             let file = &file.as_ref().ok_or_else(|| broken("a null file"))?.0;
             let column = &column.as_ref().ok_or_else(|| broken("a null column"))?.0;
             let selection: Arc<[u64]> = words(selection, selection_words)?.into();
+            if out.is_null() {
+                return Err(broken("a null output"));
+            }
             let reader = ColumnReader::new(file, column, group, selection, batch)?;
-            let out = out.as_mut().ok_or_else(|| broken("a null output"))?;
-            *out = Box::into_raw(Box::new(ReaderHandle {
-                reader,
-                window: None,
-                text: Vec::new(),
-                text_bytes: 0,
-            }));
-            Ok(())
+            put(
+                out,
+                Box::into_raw(Box::new(ReaderHandle {
+                    reader,
+                    window: None,
+                    text: None,
+                })),
+            )
         })
     }
 }
@@ -447,8 +529,9 @@ pub unsafe extern "C" fn tess_parquet_reader_free(reader: *mut ReaderHandle) {
 ///
 /// # Safety
 ///
-/// `reader` must be live; `rows` must point to `rows_words` readable words
-/// and `held` to `held_words` writable ones; `count` must be writable.
+/// `reader` must be live; `rows` must point to `rows_words` readable
+/// words and `held` to `held_words` writable ones, which the caller has
+/// initialized; `count` must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_parquet_read(
     reader: *mut ReaderHandle,
@@ -467,30 +550,42 @@ pub unsafe extern "C" fn tess_parquet_read(
             let handle = reader.as_mut().ok_or_else(|| broken("a null reader"))?;
             let rows = words(rows, rows_words)?;
             let held = words_mut(held, held_words)?;
-            if held.len() < mask_words(len) {
+            if held.len() < mask_words(len) || count.is_null() {
                 return Err(broken("a mask of rows held shorter than the window"));
             }
-            let count = count.as_mut().ok_or_else(|| broken("a null output"))?;
             handle.window = None;
-            handle.text.clear();
+            handle.text = None;
             let window = handle.reader.read(start, len, rows)?;
             held[..window.rows.len()].copy_from_slice(&window.rows);
-            *count = window.array.len();
+            put(count, window.array.len())?;
             handle.window = Some(window);
             Ok(())
         })
     }
 }
 
+/// Sets in `nulls` the bits of the rows `asked` asks that `made` gives as
+/// `NULL`, and clears those of the other rows asked; the bits of rows not
+/// asked stay as an earlier call left them.
+fn merge_nulls(nulls: &mut [u64], made: &[u64], asked: &[u64]) {
+    for ((place, made), asked) in nulls.iter_mut().zip(made).zip(asked) {
+        *place = (*place & !asked) | (made & asked);
+    }
+}
+
 /// Converts the rows of the last window that `asked`, a mask over its rows
 /// held in their order, asks for, into `Datum` words: `values` of at least
-/// the window's held rows and `nulls`, a mask of as many, as
-/// `ReadPlan::read` of `datum-arrow` says for a type passed by value.
+/// the window's held rows, and the bits of those rows in `nulls`, a mask
+/// of as many, whose bits of rows not asked stay as they were. The place
+/// in `values` of a row not asked may be written, as `ReadPlan::read` of
+/// `datum-arrow` says for a type passed by value: with the row's own value
+/// where it converts, and otherwise with a value of no meaning.
 ///
 /// # Safety
 ///
-/// `reader` must be live; the masks and `values` must point to as many
-/// words as their lengths say, `values` and `nulls` writable.
+/// `reader` must be live; `asked` must point to `asked_words` readable
+/// words, `values` and `nulls` to as many writable words as their lengths
+/// say, initialized by the caller; none of the three may overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_parquet_values(
     reader: *mut ReaderHandle,
@@ -510,15 +605,16 @@ pub unsafe extern "C" fn tess_parquet_values(
                 .window
                 .as_ref()
                 .ok_or_else(|| broken("no window read"))?;
+            let asked = words(asked, asked_words)?;
+            let nulls = words_mut(nulls, nulls_words)?;
             let input = input_of(window.array.as_ref())?;
+            let mut made = vec![0u64; nulls.len()];
             let output = &mut ReadOutput::Datums {
                 values: words_mut(values, values_len)?,
-                nulls: words_mut(nulls, nulls_words)?,
+                nulls: &mut made,
             };
-            handle
-                .reader
-                .plan()
-                .read(&input, words(asked, asked_words)?, output)?;
+            handle.reader.plan().read(&input, asked, output)?;
+            merge_nulls(nulls, &made, asked);
             Ok(())
         })
     }
@@ -543,13 +639,15 @@ fn arena_bytes(values: &[Option<(*const u8, usize)>]) -> usize {
 }
 
 /// Checks the text of the rows `asked` asks of the last window, as the
-/// column's read plan says, and writes the bytes of the arena their
-/// values need into `bytes`, for [`tess_parquet_text`].
+/// column's read plan says; writes their bits of `NULL` into `nulls`, as
+/// [`tess_parquet_values`] does, and the bytes of the arena their values
+/// need into `bytes`, for [`tess_parquet_text`].
 ///
 /// # Safety
 ///
-/// `reader` must be live; `asked` must point to `asked_words` words and
-/// `nulls` to `nulls_words` writable ones; `bytes` must be writable.
+/// `reader` must be live; `asked` must point to `asked_words` readable
+/// words and `nulls` to `nulls_words` writable ones, initialized by the
+/// caller and not overlapping; `bytes` must be writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_parquet_text_size(
     reader: *mut ReaderHandle,
@@ -564,10 +662,12 @@ pub unsafe extern "C" fn tess_parquet_text_size(
     unsafe {
         guard(status, false, || {
             let handle = reader.as_mut().ok_or_else(|| broken("a null reader"))?;
+            handle.text = None;
             let asked = words(asked, asked_words)?;
             let nulls = words_mut(nulls, nulls_words)?;
-            let bytes = bytes.as_mut().ok_or_else(|| broken("a null output"))?;
-            handle.text.clear();
+            if bytes.is_null() {
+                return Err(broken("a null output"));
+            }
             let window = handle
                 .window
                 .as_ref()
@@ -575,39 +675,46 @@ pub unsafe extern "C" fn tess_parquet_text_size(
             let len = window.array.len();
             let input = input_of(window.array.as_ref())?;
             let mut values: Vec<&[u8]> = vec![&[]; len];
+            let mut made = vec![0u64; nulls.len()];
             handle.reader.plan().read(
                 &input,
                 asked,
                 &mut ReadOutput::Bytes {
                     values: &mut values,
-                    nulls,
+                    nulls: &mut made,
                 },
             )?;
             let places: Vec<Option<(*const u8, usize)>> = (0..len)
                 .map(|row| {
                     let wanted = asked[row / 64] >> (row % 64) & 1 == 1
-                        && nulls[row / 64] >> (row % 64) & 1 == 0;
+                        && made[row / 64] >> (row % 64) & 1 == 0;
                     wanted.then(|| (values[row].as_ptr(), values[row].len()))
                 })
                 .collect();
-            handle.text_bytes = arena_bytes(&places);
-            handle.text = places;
-            *bytes = handle.text_bytes;
+            merge_nulls(nulls, &made, asked);
+            let sized = SizedText {
+                bytes: arena_bytes(&places),
+                places,
+            };
+            put(bytes, sized.bytes)?;
+            handle.text = Some(sized);
             Ok(())
         })
     }
 }
 
 /// Writes the text [`tess_parquet_text_size`] checked into `arena`, of
-/// `arena_len` bytes aligned to 4, each value a `text` with its header,
-/// and its `Datum`, the address of the value, into `values`, of at least
-/// the window's held rows; the places of the other rows are left as they
-/// were.
+/// `arena_len` bytes aligned to 4, each value a `text` with its header
+/// (one byte for a value of up to 126 bytes, four aligned bytes
+/// otherwise, little-endian), and its `Datum`, the value's address, into
+/// `values`, of at least the window's held rows; the places of the other
+/// rows are left as they were.
 ///
 /// # Safety
 ///
 /// `reader` must be live; `arena` must point to `arena_len` writable bytes
-/// aligned to 4; `values` to `values_len` writable words.
+/// aligned to 4; `values` to `values_len` writable words, initialized by
+/// the caller; the two may not overlap.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_parquet_text(
     reader: *mut ReaderHandle,
@@ -621,28 +728,33 @@ pub unsafe extern "C" fn tess_parquet_text(
     unsafe {
         guard(status, false, || {
             let handle = reader.as_mut().ok_or_else(|| broken("a null reader"))?;
-            if handle.window.is_none() || arena_len < handle.text_bytes {
-                return Err(broken("no text sized, or an arena shorter than its size"));
+            let text = handle
+                .text
+                .as_ref()
+                .ok_or_else(|| broken("no text sized for the window held"))?;
+            if arena_len < text.bytes {
+                return Err(broken("an arena shorter than its size"));
             }
-            if !(arena as usize).is_multiple_of(4) || (arena.is_null() && handle.text_bytes > 0) {
+            if !(arena as usize).is_multiple_of(4) || (arena.is_null() && text.bytes > 0) {
                 return Err(broken("an arena not aligned to 4 bytes"));
             }
             let values = words_mut(values, values_len)?;
-            if values.len() < handle.text.len() {
+            if values.len() < text.places.len() {
                 return Err(broken("values shorter than the window"));
             }
             let mut at = 0usize;
-            for (row, place) in handle.text.iter().enumerate() {
+            for (row, place) in text.places.iter().enumerate() {
                 let Some((ptr, len)) = *place else {
                     continue;
                 };
-                // SAFETY: the bytes of the last window, alive in the handle,
-                // which no read replaced since `tess_parquet_text_size`.
+                // SAFETY: the bytes of the window the handle holds, which
+                // no read replaced since `tess_parquet_text_size`: a read
+                // drops the sized text with the window.
                 let value = std::slice::from_raw_parts(ptr, len);
                 let start = if len <= SHORT_MAX {
                     // A short header: the total length, header included,
                     // shifted up a bit, the low bit set.
-                    *arena.add(at) = (((len + 1) << 1) | 1) as u8;
+                    arena.add(at).write((((len + 1) << 1) | 1) as u8);
                     at + 1
                 } else {
                     at = at.next_multiple_of(4);

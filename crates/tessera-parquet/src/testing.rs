@@ -172,7 +172,7 @@ impl Column {
 }
 
 /// How a test file is written.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Options {
     /// The rows of a group, the last group taking what is left.
     pub group_rows: usize,
@@ -186,6 +186,14 @@ pub struct Options {
     /// Whether the least and greatest values and the counts of `NULL`
     /// values are written.
     pub statistics: bool,
+    /// The codec of the pages.
+    pub compression: parquet::basic::Compression,
+    /// An Arrow schema a writer keeps in the file's metadata, as
+    /// `ARROW:schema`, which the reader ignores.
+    pub arrow_schema: Option<arrow_schema::Schema>,
+    /// The bytes past which a least or greatest string is cut, so that
+    /// the greatest is a bound past the rows.
+    pub truncate: Option<usize>,
 }
 
 impl Options {
@@ -198,6 +206,9 @@ impl Options {
             page_rows: None,
             dictionary_bytes: None,
             statistics: true,
+            compression: parquet::basic::Compression::UNCOMPRESSED,
+            arrow_schema: None,
+            truncate: None,
         }
     }
 }
@@ -246,6 +257,17 @@ pub fn write_with(path: &Path, columns: &[Column], options: Options) -> Result<(
     }
     if let Some(bytes) = options.dictionary_bytes {
         properties = properties.set_dictionary_page_size_limit(bytes);
+    }
+    properties = properties
+        .set_compression(options.compression)
+        .set_statistics_truncate_length(options.truncate);
+    if let Some(schema) = &options.arrow_schema {
+        let encoded = parquet::arrow::encode_arrow_schema(schema);
+        properties =
+            properties.set_key_value_metadata(Some(vec![parquet::file::metadata::KeyValue::new(
+                String::from("ARROW:schema"),
+                encoded,
+            )]));
     }
     let file = fs::File::create(path).map_err(|e| error::io(&e, "create test file"))?;
     let mut writer =
@@ -341,6 +363,8 @@ pub struct Rewrite {
     /// The codec the footer names for every chunk of the column of this
     /// leaf, its pages left as they are.
     pub codec: Option<(usize, parquet::basic::Compression)>,
+    /// The count of rows the footer gives the first group.
+    pub first_group_rows: Option<i64>,
 }
 
 /// Rewrites the footer of the file at `path` as `rewrite` says, its pages
@@ -388,12 +412,13 @@ pub fn rewrite_footer(path: &Path, rewrite: Rewrite) -> Result<()> {
             }
             columns.push(builder.build().map_err(|e| error::damaged(&e))?);
         }
-        let rebuilt: RowGroupMetaData = group
-            .clone()
-            .into_builder()
-            .set_column_metadata(columns)
-            .build()
-            .map_err(|e| error::damaged(&e))?;
+        let mut builder = group.clone().into_builder().set_column_metadata(columns);
+        if let Some(rows) = rewrite.first_group_rows
+            && groups.is_empty()
+        {
+            builder = builder.set_num_rows(rows);
+        }
+        let rebuilt: RowGroupMetaData = builder.build().map_err(|e| error::damaged(&e))?;
         groups.push(rebuilt);
     }
     let file_meta = FileMetaData::new(
@@ -512,14 +537,61 @@ fn zigzag(encoding: Encoding) -> u8 {
     match encoding {
         Encoding::PLAIN => 0,
         Encoding::PLAIN_DICTIONARY => 4,
+        Encoding::RLE_DICTIONARY => 16,
         _ => 0xff,
     }
 }
 
+/// Heads the first data page of the column of leaf `leaf` in group `group`
+/// of the file at `path` `RLE_DICTIONARY` instead of `PLAIN`, its values
+/// left plain and no dictionary page: bytes the crate's decoders cannot
+/// read, the time of the file kept.
+///
+/// # Errors
+///
+/// `58030` for a file that cannot be read or written, `XX001` for one the
+/// format cannot decode or whose data page is not headed `PLAIN`.
+pub fn head_data_page_rle_dictionary(path: &Path, group: usize, leaf: usize) -> Result<()> {
+    let mut bytes = fs::read(path).map_err(|e| error::io(&e, "read test file"))?;
+    let file = fs::File::open(path).map_err(|e| error::io(&e, "open test file"))?;
+    let modified = file
+        .metadata()
+        .and_then(|m| m.modified())
+        .map_err(|e| error::io(&e, "stat test file"))?;
+    let metadata = ParquetMetaDataReader::new()
+        .parse_and_finish(&file)
+        .map_err(|e| error::damaged(&e))?;
+    let chunk = metadata.row_group(group).column(leaf);
+    let place = usize::try_from(chunk.data_page_offset())
+        .ok()
+        .and_then(|start| encoding_in_header(&bytes, start, 5))
+        .ok_or_else(|| Error::new(error::DATA_CORRUPTED, "no data page header"))?;
+    if bytes[place] != zigzag(Encoding::PLAIN) {
+        return Err(Error::new(
+            error::DATA_CORRUPTED,
+            "a data page not headed PLAIN",
+        ));
+    }
+    bytes[place] = zigzag(Encoding::RLE_DICTIONARY);
+    fs::write(path, bytes).map_err(|e| error::io(&e, "write test file"))?;
+    fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(modified))
+        .map_err(|e| error::io(&e, "keep the time of test file"))
+}
+
 /// The place of the byte that holds the encoding of the dictionary page
-/// header that begins at `start`: field 7 of `PageHeader`, a struct, and
-/// its field 2, an `i32`, in Thrift's compact protocol.
+/// header that begins at `start`.
 fn encoding_of_dictionary_header(bytes: &[u8], start: usize) -> Option<usize> {
+    encoding_in_header(bytes, start, 7)
+}
+
+/// The place of the byte that holds the encoding of the page header that
+/// begins at `start`: field 2, an `i32`, of the struct of field `which`
+/// of `PageHeader` (5 of a data page, 7 of a dictionary page), in
+/// Thrift's compact protocol.
+fn encoding_in_header(bytes: &[u8], start: usize, which: i16) -> Option<usize> {
     let mut at = start;
     let mut last = 0i16;
     loop {
@@ -538,8 +610,8 @@ fn encoding_of_dictionary_header(bytes: &[u8], start: usize) -> Option<usize> {
             last + delta
         };
         last = field;
-        if field == 7 && kind == 12 {
-            // The dictionary page header: field 1, num_values, then 2.
+        if field == which && kind == 12 {
+            // The page's own header: field 1, num_values, then 2.
             let mut inner = 0i16;
             loop {
                 let head = *bytes.get(at)?;

@@ -76,8 +76,14 @@ fn bounds_nulls_and_empties_of_each_group() {
             greatest: 60
         })
     );
-    assert_eq!(group_stats(&file, &s, 0).empties, Some((true, true)));
-    assert_eq!(group_stats(&file, &s, 1).empties, Some((true, false)));
+    let empty = |least_empty, greatest_empty| {
+        Some(Empties {
+            least_empty,
+            greatest_empty,
+        })
+    };
+    assert_eq!(group_stats(&file, &s, 0).empties, empty(true, true));
+    assert_eq!(group_stats(&file, &s, 1).empties, empty(true, false));
     assert_eq!(group_stats(&file, &s, 0).bounds, None);
     // A group past the file's says nothing.
     assert_eq!(group_stats(&file, &i, 2), GroupStats::default());
@@ -113,8 +119,8 @@ fn the_old_rule_trusts_signed_values_alone() {
         )
     );
     assert_eq!(group_stats(&file, &u, 0).bounds, None);
-    // The emptiness of strings holds under any order of bytes.
-    assert_eq!(group_stats(&file, &s, 1).empties, Some((true, false)));
+    // Old writers wrote wrong least and greatest strings: not trusted.
+    assert_eq!(group_stats(&file, &s, 1).empties, None);
 }
 
 #[test]
@@ -294,4 +300,145 @@ fn every_data_page_through_the_dictionary_or_not() {
         0,
     );
     assert_eq!((none.nulls, none.bounds), (None, None));
+}
+
+#[test]
+fn the_emptiness_of_strings_by_the_newer_fields_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    testing::write(&path, &columns(), 3, false).unwrap();
+    testing::rewrite_footer(
+        &path,
+        Rewrite {
+            old_rule: true,
+            ..Rewrite::default()
+        },
+    )
+    .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let s = map_column(&file, &request("s", oid::TEXT)).unwrap();
+    assert_eq!(group_stats(&file, &s, 1).empties, None);
+    // Without column orders, the newer fields are not trusted either.
+    testing::write(&path, &columns(), 3, false).unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let s = map_column(&file, &request("s", oid::TEXT)).unwrap();
+    let meta = file.metadata();
+    let fm = meta.file_metadata();
+    let without = parquet::file::metadata::ParquetMetaData::new(
+        parquet::file::metadata::FileMetaData::new(
+            fm.version(),
+            fm.num_rows(),
+            None,
+            None,
+            fm.schema_descr_ptr(),
+            None,
+        ),
+        meta.row_groups().to_vec(),
+    );
+    assert_eq!(stats_of(&without, &s, 1).empties, None);
+    assert!(stats_of(meta, &s, 1).empties.is_some());
+}
+
+#[test]
+fn a_least_string_cut_short_is_still_not_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    let options = Options {
+        truncate: Some(2),
+        ..Options::new(3, false)
+    };
+    testing::write_with(
+        &path,
+        &[Column::bytes("s", &[b"abcdefgh", b"bcdefgh"])],
+        options,
+    )
+    .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let s = map_column(&file, &request("s", oid::TEXT)).unwrap();
+    let empties = group_stats(&file, &s, 0).empties.unwrap();
+    assert!(!empties.least_empty && !empties.greatest_empty);
+}
+
+#[test]
+fn bounds_outside_a_mark_s_width_are_not_given() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    let columns = [
+        Column::int32("i8", &[1, 300]).logical(LogicalType::Integer {
+            bit_width: 8,
+            is_signed: true,
+        }),
+        Column::int32("u16", &[1, 70_000]).logical(LogicalType::Integer {
+            bit_width: 16,
+            is_signed: false,
+        }),
+        Column::int32("u8", &[1, 300]).logical(LogicalType::Integer {
+            bit_width: 8,
+            is_signed: false,
+        }),
+        Column::int32("i16", &[1, 40_000]).logical(LogicalType::Integer {
+            bit_width: 16,
+            is_signed: true,
+        }),
+        Column::int32("ok", &[-128, 127]).logical(LogicalType::Integer {
+            bit_width: 8,
+            is_signed: true,
+        }),
+    ];
+    testing::write(&path, &columns, 2, false).unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    for name in ["i8", "u16", "u8", "i16"] {
+        let c = map_column(&file, &request(name, oid::INT4)).unwrap();
+        assert_eq!(group_stats(&file, &c, 0).bounds, None, "{name}");
+    }
+    let ok = map_column(&file, &request("ok", oid::INT2)).unwrap();
+    assert_eq!(
+        group_stats(&file, &ok, 0).bounds,
+        Some(Bounds {
+            least: -128,
+            greatest: 127
+        })
+    );
+}
+
+#[test]
+fn both_names_of_the_dictionary_and_a_plain_page() {
+    use parquet::basic::{Encoding, EncodingMask};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    testing::write(&path, &[Column::int32("a", &[1, 1, 2])], 3, true).unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let a = map_column(&file, &request("a", oid::INT4)).unwrap();
+    let meta = file.metadata();
+    let with = |encodings: &[Encoding]| {
+        let chunk = meta
+            .row_group(0)
+            .column(0)
+            .clone()
+            .into_builder()
+            .set_page_encoding_stats_mask(EncodingMask::new_from_encodings(encodings.iter()))
+            .build()
+            .unwrap();
+        let group = meta
+            .row_group(0)
+            .clone()
+            .into_builder()
+            .set_column_metadata(vec![chunk])
+            .build()
+            .unwrap();
+        let rebuilt = parquet::file::metadata::ParquetMetaData::new(
+            meta.file_metadata().clone(),
+            vec![group],
+        );
+        stats_of(&rebuilt, &a, 0).dictionary_only
+    };
+    assert!(with(&[Encoding::PLAIN_DICTIONARY]));
+    assert!(with(&[Encoding::RLE_DICTIONARY]));
+    assert!(with(&[
+        Encoding::PLAIN_DICTIONARY,
+        Encoding::RLE_DICTIONARY
+    ]));
+    assert!(!with(&[Encoding::PLAIN_DICTIONARY, Encoding::PLAIN]));
+    assert!(!with(&[Encoding::RLE_DICTIONARY, Encoding::PLAIN]));
+    assert!(!with(&[]));
 }

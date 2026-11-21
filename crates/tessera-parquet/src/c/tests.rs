@@ -428,3 +428,339 @@ fn the_bytes_of_an_arena() {
     assert_eq!(arena_bytes(&[short(0), short(127)]), 1 + 3 + 4 + 127);
     assert_eq!(arena_bytes(&[short(127), short(1)]), 4 + 127 + 2);
 }
+
+#[test]
+fn asks_that_do_not_nest_keep_the_null_flags_of_each() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    testing::write(
+        &path,
+        &[
+            Column::new("a", Values::Int64(vec![None, Some(7), Some(8)])),
+            Column::new(
+                "s",
+                Values::Bytes(vec![None, Some(b"x".to_vec()), Some(b"yy".to_vec())]),
+            ),
+        ],
+        3,
+        false,
+    )
+    .unwrap();
+    let file = open(&path);
+    let mut st = status();
+    let a = column(file, "a", oid::INT8, -1).unwrap();
+    let r = reader(file, a, 3);
+    assert_eq!(read(r, 3, &[0b111]), 3);
+    let mut values = [0u64; 3];
+    let mut nulls = [0u64; 1];
+    for asked in [0b001u64, 0b010, 0b100] {
+        assert!(unsafe {
+            tess_parquet_values(
+                r,
+                [asked].as_ptr(),
+                1,
+                values.as_mut_ptr(),
+                3,
+                nulls.as_mut_ptr(),
+                1,
+                &mut st,
+            )
+        });
+    }
+    assert_eq!((nulls[0], values[1], values[2]), (0b001, 7, 8));
+    let s = column(file, "s", oid::TEXT, -1).unwrap();
+    let rs = reader(file, s, 3);
+    assert_eq!(read(rs, 3, &[0b111]), 3);
+    let mut nulls = [0u64; 1];
+    let mut bytes = 0usize;
+    for asked in [0b001u64, 0b110] {
+        assert!(unsafe {
+            tess_parquet_text_size(
+                rs,
+                [asked].as_ptr(),
+                1,
+                nulls.as_mut_ptr(),
+                1,
+                &mut bytes,
+                &mut st,
+            )
+        });
+    }
+    assert_eq!((nulls[0], bytes), (0b001, 2 + 3));
+    // A read drops the text sized for the window before it.
+    assert_eq!(read(rs, 3, &[0b111]), 3);
+    let mut arena = [0u32; 4];
+    let mut out = [0u64; 3];
+    assert!(!unsafe {
+        tess_parquet_text(
+            rs,
+            arena.as_mut_ptr().cast(),
+            16,
+            out.as_mut_ptr(),
+            3,
+            &mut st,
+        )
+    });
+    assert_eq!(text(&st.sqlstate), "XX000");
+    // So does a check that fails.
+    let bad = column_of_bad_text(dir.path());
+    let rb = reader(bad.0, bad.1, 2);
+    assert_eq!(read(rb, 2, &[0b11]), 2);
+    assert!(unsafe {
+        tess_parquet_text_size(
+            rb,
+            [0b01u64].as_ptr(),
+            1,
+            nulls.as_mut_ptr(),
+            1,
+            &mut bytes,
+            &mut st,
+        )
+    });
+    assert!(!unsafe {
+        tess_parquet_text_size(
+            rb,
+            [0b11u64].as_ptr(),
+            1,
+            nulls.as_mut_ptr(),
+            1,
+            &mut bytes,
+            &mut st,
+        )
+    });
+    assert!(!unsafe {
+        tess_parquet_text(
+            rb,
+            arena.as_mut_ptr().cast(),
+            16,
+            out.as_mut_ptr(),
+            3,
+            &mut st,
+        )
+    });
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_reader_free(rs);
+        tess_parquet_reader_free(rb);
+        tess_parquet_column_free(a);
+        tess_parquet_column_free(s);
+        tess_parquet_column_free(bad.1);
+        tess_parquet_file_free(bad.0);
+        tess_parquet_file_free(file);
+    }
+}
+
+/// A file of a text column whose second row is not UTF-8, and its column.
+fn column_of_bad_text(dir: &std::path::Path) -> (*mut FileHandle, *mut ColumnHandle) {
+    let path = dir.join("bad.parquet");
+    testing::write(&path, &[Column::bytes("s", &[b"ok", b"\xff"])], 2, false).unwrap();
+    let file = open(&path);
+    (file, column(file, "s", oid::TEXT, -1).unwrap())
+}
+
+#[test]
+fn the_info_of_a_column_and_a_message_cut_at_a_character() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    testing::write(
+        &path,
+        &[
+            Column::new("a", Values::Int32(vec![Some(1), None])),
+            Column::bytes("s", &[b"x", b"y"]),
+        ],
+        2,
+        false,
+    )
+    .unwrap();
+    let file = open(&path);
+    let mut st = status();
+    let mut info = ColumnInfo::default();
+    let a = column(file, "a", oid::INT4, -1).unwrap();
+    assert!(unsafe { tess_parquet_column_info(a, &mut info, &mut st) });
+    assert_eq!(
+        info,
+        ColumnInfo {
+            gives_datums: true,
+            nullable: true
+        }
+    );
+    let s = column(file, "s", oid::TEXT, -1).unwrap();
+    assert!(unsafe { tess_parquet_column_info(s, &mut info, &mut st) });
+    assert_eq!(
+        info,
+        ColumnInfo {
+            gives_datums: false,
+            nullable: false
+        }
+    );
+    assert!(!unsafe { tess_parquet_column_info(s, ptr::null_mut(), &mut st) });
+    // A name of two-byte characters past the message's size.
+    let name = "я".repeat(200);
+    let mut out = ptr::null_mut();
+    assert!(!unsafe {
+        tess_parquet_column(
+            file,
+            name.as_ptr().cast(),
+            name.len(),
+            oid::INT4,
+            -1,
+            -1,
+            -1,
+            true,
+            &mut out,
+            &mut st,
+        )
+    });
+    let bytes: Vec<u8> = st
+        .message
+        .iter()
+        .take_while(|&&c| c != 0)
+        .map(|&c| c as u8)
+        .collect();
+    assert!(String::from_utf8(bytes.clone()).is_ok());
+    assert!(bytes.len() >= MESSAGE_SIZE - 2 && bytes.len() < MESSAGE_SIZE);
+    unsafe {
+        tess_parquet_column_free(a);
+        tess_parquet_column_free(s);
+        tess_parquet_file_free(file);
+    }
+}
+
+#[test]
+fn outputs_the_caller_has_not_initialized() {
+    use std::mem::MaybeUninit;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    testing::write(&path, &[Column::int32("a", &[1, 2])], 2, false).unwrap();
+    let bytes = path.as_os_str().as_encoded_bytes();
+    let mut st = MaybeUninit::<Status>::uninit();
+    let mut out = MaybeUninit::<*mut FileHandle>::uninit();
+    assert!(unsafe {
+        tess_parquet_open(
+            bytes.as_ptr().cast(),
+            bytes.len(),
+            ptr::null(),
+            out.as_mut_ptr(),
+            st.as_mut_ptr(),
+        )
+    });
+    let file = unsafe { out.assume_init() };
+    let mut identity = MaybeUninit::<CIdentity>::uninit();
+    let mut groups = MaybeUninit::<usize>::uninit();
+    let mut rows = MaybeUninit::<u64>::uninit();
+    assert!(unsafe {
+        tess_parquet_file_info(
+            file,
+            identity.as_mut_ptr(),
+            groups.as_mut_ptr(),
+            rows.as_mut_ptr(),
+            st.as_mut_ptr(),
+        )
+    });
+    assert_eq!(
+        unsafe { (groups.assume_init(), rows.assume_init()) },
+        (1, 2)
+    );
+    // A failure fills a status the caller left uninitialized.
+    assert!(!unsafe { tess_parquet_check(ptr::null(), st.as_mut_ptr()) });
+    let st = unsafe { st.assume_init() };
+    assert_eq!(text(&st.sqlstate), "XX000");
+    unsafe { tess_parquet_file_free(file) };
+}
+
+#[test]
+fn a_value_out_of_range_leaves_the_mask_of_nulls() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    testing::write(
+        &path,
+        &[Column::int64("t", &[946_684_800, i64::MAX])],
+        2,
+        false,
+    )
+    .unwrap();
+    let file = open(&path);
+    let mut col = ptr::null_mut();
+    let mut st = status();
+    assert!(unsafe {
+        tess_parquet_column(
+            file,
+            "t".as_ptr().cast(),
+            1,
+            oid::TIMESTAMP,
+            -1,
+            1,
+            -1,
+            true,
+            &mut col,
+            &mut st,
+        )
+    });
+    let r = reader(file, col, 2);
+    assert_eq!(read(r, 2, &[0b11]), 2);
+    let mut values = [7u64; 2];
+    let mut nulls = [0b10u64; 1];
+    assert!(!unsafe {
+        tess_parquet_values(
+            r,
+            [0b11u64].as_ptr(),
+            1,
+            values.as_mut_ptr(),
+            2,
+            nulls.as_mut_ptr(),
+            1,
+            &mut st,
+        )
+    });
+    // The failure at its row; the mask as it was, the values of no meaning.
+    assert_eq!((text(&st.sqlstate).as_str(), st.row), ("22008", 1));
+    assert_eq!(nulls[0], 0b10);
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
+
+/// A data page the decoders cannot read: a status, not a crash. The
+/// writer keeps the file's time by a call Miri does not know.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn bytes_the_decoders_cannot_read_give_a_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut st = status();
+    let path = dir.path().join("bad.parquet");
+    testing::write(
+        &path,
+        &[Column::int32("a", &(0..50).collect::<Vec<_>>())],
+        50,
+        false,
+    )
+    .unwrap();
+    testing::head_data_page_rle_dictionary(&path, 0, 0).unwrap();
+    let file = open(&path);
+    let col = column(file, "a", oid::INT4, -1).unwrap();
+    let r = reader(file, col, 50);
+    let mut held = [0u64; 1];
+    let mut count = 0usize;
+    let asked = [u64::MAX >> 14];
+    assert!(!unsafe {
+        tess_parquet_read(
+            r,
+            0,
+            50,
+            asked.as_ptr(),
+            1,
+            held.as_mut_ptr(),
+            1,
+            &mut count,
+            &mut st,
+        )
+    });
+    assert_eq!(text(&st.sqlstate), "XX001");
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}

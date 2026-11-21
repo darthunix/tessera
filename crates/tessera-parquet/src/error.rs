@@ -89,8 +89,15 @@ impl From<datum_arrow::Error> for Error {
     }
 }
 
-/// A file the format cannot decode, from the `parquet` crate's error.
+/// A file the format cannot decode, from the `parquet` crate's error; an
+/// error of the system's reads, which the crate passes on, as one.
 pub(crate) fn damaged(error: &parquet::errors::ParquetError) -> Error {
+    if let parquet::errors::ParquetError::External(inner) = error
+        && let Some(read) = inner.downcast_ref::<std::io::Error>()
+        && read.kind() != std::io::ErrorKind::UnexpectedEof
+    {
+        return io(read, "read Parquet file");
+    }
     Error::new(
         DATA_CORRUPTED,
         format!("could not decode Parquet file: {error}"),
@@ -135,6 +142,18 @@ mod tests {
         let error = Error::from(plan.unwrap_err());
         assert_eq!(error.sqlstate(), "42804");
         assert_eq!(error.row(), None);
+    }
+
+    #[test]
+    fn a_read_the_system_failed_and_one_cut_short() {
+        let external =
+            |kind| parquet::errors::ParquetError::External(Box::new(std::io::Error::from(kind)));
+        let failed = damaged(&external(std::io::ErrorKind::PermissionDenied));
+        assert_eq!(failed.sqlstate(), "58030");
+        let short = damaged(&external(std::io::ErrorKind::UnexpectedEof));
+        assert_eq!(short.sqlstate(), "XX001");
+        let general = damaged(&parquet::errors::ParquetError::General(String::from("x")));
+        assert_eq!(general.sqlstate(), "XX001");
     }
 
     #[test]
