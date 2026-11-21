@@ -18,6 +18,8 @@
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
 #include "nodes/makefuncs.h"
+#include <math.h>
+
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/paths.h"
@@ -38,9 +40,8 @@ typedef struct PlannedTable
 	List	   *patterns;		/* the option files */
 	List	   *attnums;		/* the columns the query reads */
 	List	   *paths;			/* the files the patterns matched */
-	uint64		groups;			/* their groups of rows */
 	double		rows;			/* the rows of the files */
-	double		bytes;			/* the bytes of the files */
+	ParquetFound found;			/* their groups and bytes */
 } PlannedTable;
 
 /* The columns of `relid` a scan of `baserel` reads, as their numbers. */
@@ -81,7 +82,6 @@ static void
 rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 {
 	PlannedTable *planned = palloc0_object(PlannedTable);
-	TessParquetIdentity *identities;
 
 	/* The source of a bridge loaded after the module. */
 	parquet_register();
@@ -90,11 +90,11 @@ rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 	/* The table's files as they are now, each column the query reads
 	 * mapped to each. */
 	planned->paths = parquet_expand(planned->patterns);
-	identities = palloc0_array(TessParquetIdentity, Max(list_length(planned->paths), 1));
 	planned->rows = parquet_check_files(planned->paths, foreigntableid, planned->attnums,
-										identities, NULL, NULL, &planned->groups);
-	for (int f = 0; f < list_length(planned->paths); f++)
-		planned->bytes += (double) identities[f].size;
+										NULL, NULL, NULL, &planned->found);
+	/* The table's rows are its files' now, not the last ANALYZE's: the
+	 * statistics scale their distinct values by them. */
+	baserel->tuples = planned->rows;
 	baserel->rows = clamp_row_est(planned->rows *
 								  clauselist_selectivity(root, baserel->baserestrictinfo,
 														 0, JOIN_INNER, NULL));
@@ -114,31 +114,52 @@ participants(int workers)
 }
 
 /*
+ * The cost of reading the chunks of the columns a scan reads, a page a
+ * BLCKSZ bytes, and of forming a row of those columns out of the files'
+ * rows, the core's cost of a tuple and of an operator a column.
+ */
+static void
+scan_costs(const PlannedTable *planned, Cost *pages, Cost *per_row)
+{
+	*pages = seq_page_cost * ceil(planned->found.column_bytes / BLCKSZ);
+	*per_row = cpu_tuple_cost + list_length(planned->attnums) * cpu_operator_cost;
+}
+
+/*
  * The wrapper's serial path, and, where the relation may be read in
  * parallel, its partial path, with the workers the core gives a scan of
- * the files' size; the source knows its tables by this function.
+ * the files' size; the source knows its tables by this function. The
+ * wrapper reads every row of the files, forms the columns read, and the
+ * core checks the clauses on each.
  */
 void
 parquet_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 {
 	PlannedTable *planned = baserel->fdw_private;
-	Cost		total = seq_page_cost + planned->rows * cpu_tuple_cost;
+	Cost		pages;
+	Cost		per_row;
+	Cost		startup = baserel->baserestrictcost.startup + baserel->reltarget->cost.startup;
+	Cost		run;
 	int			workers;
 
-	add_path(baserel, (Path *) create_foreignscan_path(root, baserel, NULL, baserel->rows, 0,
-													   0, total, NIL, baserel->lateral_relids,
-													   NULL, NIL, NIL));
+	scan_costs(planned, &pages, &per_row);
+	run = pages + planned->rows * (per_row + baserel->baserestrictcost.per_tuple) +
+		baserel->rows * baserel->reltarget->cost.per_tuple;
+	add_path(baserel, (Path *) create_foreignscan_path(root, baserel, NULL, baserel->rows,
+													   0, startup, startup + run, NIL,
+													   baserel->lateral_relids, NULL, NIL,
+													   NIL));
 	if (!baserel->consider_parallel || baserel->lateral_relids != NULL)
 		return;
-	workers = compute_parallel_worker(baserel, planned->bytes / BLCKSZ, -1,
+	workers = compute_parallel_worker(baserel, planned->found.file_bytes / BLCKSZ, -1,
 									  max_parallel_workers_per_gather);
 	if (workers > 0)
 	{
 		double		share = participants(workers);
 		ForeignPath *partial = create_foreignscan_path(root, baserel, NULL,
 													   clamp_row_est(baserel->rows / share),
-													   0, 0, total / share, NIL, NULL, NULL,
-													   NIL, NIL);
+													   0, startup, startup + run / share, NIL,
+													   NULL, NULL, NIL, NIL);
 
 		partial->path.parallel_aware = true;
 		partial->path.parallel_workers = workers;
@@ -171,7 +192,33 @@ parquet_planned_list(void *fdw_private)
 	foreach_ptr(char, path, planned->paths)
 		paths = lappend(paths, makeString(path));
 	return list_make4(patterns, planned->attnums, paths,
-					  makeString(psprintf(UINT64_FORMAT, planned->groups)));
+					  makeString(psprintf(UINT64_FORMAT, planned->found.groups)));
+}
+
+/*
+ * The source's path for the wrapper's path `offered`, serial or partial:
+ * the rows it returns, every row of the files, the clauses left to
+ * TessFilter above it, and its costs, the chunks the wrapper reads, its
+ * batches at a share of the wrapper's rows over the same columns, and the
+ * targets PostgreSQL computes on the rows the relation returns, at their
+ * whole cost; a participant's share for a partial path.
+ */
+void
+parquet_source_costs(const Path *offered, double *rows, Cost *startup, Cost *total)
+{
+	const PlannedTable *planned = offered->parent->fdw_private;
+	double		share = offered->parallel_workers > 0 ?
+		participants(offered->parallel_workers) : 1.0;
+	Cost		pages;
+	Cost		per_row;
+
+	const PathTarget *target = offered->parent->reltarget;
+
+	scan_costs(planned, &pages, &per_row);
+	*rows = clamp_row_est(planned->rows / share);
+	*startup = target->cost.startup;
+	*total = *startup + (pages + planned->rows * per_row * PARQUET_BATCH_SHARE +
+						 offered->parent->rows * target->cost.per_tuple) / share;
 }
 
 /* The strings of a list of String nodes. */
@@ -297,6 +344,7 @@ tessera_parquet_handler(PG_FUNCTION_ARGS)
 	routine->ReScanForeignScan = rescan;
 	routine->EndForeignScan = end_scan;
 	routine->ExplainForeignScan = explain;
+	routine->AnalyzeForeignTable = parquet_analyze;
 	routine->IsForeignScanParallelSafe = parallel_safe;
 	routine->EstimateDSMForeignScan = estimate_dsm;
 	routine->InitializeDSMForeignScan = initialize_dsm;
