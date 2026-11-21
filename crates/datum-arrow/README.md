@@ -83,3 +83,33 @@ let error = plan.read(&input, &[0b100], &mut output).unwrap_err();
 assert_eq!((error.kind(), error.slot()), (ErrorKind::OutOfRange, Some(2)));
 # Ok::<(), datum_arrow::Error>(())
 ```
+
+# Writing
+
+A [`WritePlan`] is made from a PostgreSQL type and the server's
+encoding, and gives the Arrow type the column becomes;
+[`WritePlan::write`] packs the slots a mask asks for of a
+[`WriteInput`], PostgreSQL's representations, into a [`WriteOutput`],
+Arrow's buffers the caller owns, one value a slot asked.
+
+```
+use datum_arrow::{PgType, WriteInput, WriteOutput, WritePlan, arrow_schema::DataType};
+
+let plan = WritePlan::new(PgType::Date, true)?;
+assert_eq!(plan.data_type(), DataType::Date32);
+
+// 2000-01-01, a NULL, and 2000-01-02, as days since 2000.
+let days = [0u64, 0, 1];
+let input = WriteInput::Datums { len: 3, values: &days, nulls: &[0b010] };
+let mut values = [0i32; 3];
+let mut validity = [0u8; 1];
+let written = plan.write(
+    &input,
+    &[0b111],
+    &mut WriteOutput::Int32 { values: &mut values, validity: &mut validity },
+)?;
+assert_eq!(written.len, 3);
+// Days since 1970, the NULL's validity bit clear.
+assert_eq!((values, validity[0]), ([10_957, 0, 10_958], 0b101));
+# Ok::<(), datum_arrow::Error>(())
+```

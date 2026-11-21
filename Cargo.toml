@@ -32,6 +32,10 @@ anyhow = "1.0.104"
 # Apache Arrow's types alone, for datum-arrow: the same major version as
 # the parquet crate a reader of files takes, without its other parts.
 arrow-schema = { version = "58.4", default-features = false }
+# Apache Arrow's arrays, for datum-arrow's tests alone: its buffers are
+# checked against the arrays Arrow itself builds and validates.
+arrow-array = { version = "58.4", default-features = false }
+arrow-buffer = { version = "58.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 comfy-table = "8"
 console = "0.16"
