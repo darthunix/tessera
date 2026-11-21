@@ -517,14 +517,11 @@ pub(crate) fn date_of(days: i32) -> Result<i32> {
 
 /// The last microsecond since 2000 whose count since 1970 an `i64`
 /// holds.
-const LAST_WRITTEN_TIME: i64 = {
-    let last = i64::MAX - EPOCH_USECS;
-    if last < MAX_TIMESTAMP {
-        last
-    } else {
-        MAX_TIMESTAMP
-    }
-};
+const LAST_WRITTEN_TIME: i64 = i64::MAX - EPOCH_USECS;
+
+// PostgreSQL's last thirty years have no count since 1970 in an i64: the
+// last time written is before PostgreSQL's last.
+const _: () = assert!(LAST_WRITTEN_TIME < MAX_TIMESTAMP);
 
 /// A PostgreSQL time as microseconds since 1970, if Arrow holds it.
 pub(crate) fn time_of(micros: i64) -> Result<i64> {

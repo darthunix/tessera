@@ -85,6 +85,7 @@ fn cases() -> Vec<Case> {
         ),
         days(D::UInt16, unit(Unit::Days), 0, 65_535),
         days(D::Int8, unit(Unit::Days), -128, 127),
+        days(D::UInt32, unit(Unit::Days), 0, i64::from(u32::MAX)),
         days(
             DataType::Dictionary(Box::new(D::Int8), Box::new(D::Int32)),
             unit(Unit::Days),
@@ -175,7 +176,7 @@ proptest! {
     /// them.
     #[test]
     fn bounds_against_the_conversion(
-        case in 0usize..17,
+        case in 0usize..64,
         stored in prop::collection::vec(any::<i64>(), 1..8),
         noise in any::<i64>(),
     ) {
@@ -207,7 +208,7 @@ proptest! {
     /// the one the exact comparison of every value of the range gives.
     #[test]
     fn ranges_of_stored_values(
-        case in 0usize..17,
+        case in 0usize..64,
         a in any::<i64>(),
         b in any::<i64>(),
         noise in any::<i64>(),
@@ -459,7 +460,7 @@ proptest! {
     /// by the exact comparison, every other bit of the words cleared.
     #[test]
     fn a_test_applied_to_columns_of_every_width(
-        case in 0usize..17,
+        case in 0usize..64,
         values in prop::collection::vec(any::<i64>(), 0..150),
         valid in prop::collection::vec(any::<u8>(), 20),
         offset in 0usize..8,

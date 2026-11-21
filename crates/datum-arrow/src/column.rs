@@ -287,5 +287,11 @@ mod tests {
             usize::try_from(u64::MAX).ok()
         );
         assert_eq!(Keys::UInt16(&[7]).len(), 1);
+        let one = Input::Plain(Column {
+            len: 1,
+            values: Values::Int8(&[1]),
+            nulls: None,
+        });
+        assert!(!one.is_empty() && one.len() == 1);
     }
 }
