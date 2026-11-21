@@ -37,7 +37,11 @@ typedef struct ParquetFileEntry
 	uint64		rows;
 } ParquetFileEntry;
 
-/* The state of the wrapper's scan of a table's rows (scan.c). */
+/* The rows of a window of a group, read at once by a reader. */
+#define PARQUET_WINDOW_ROWS 1024
+
+/* The state of a scan of a table's files and groups (scan.c), the
+ * wrapper's rows and the batch node's. */
 typedef struct ParquetScan
 {
 	Oid			relid;
@@ -56,6 +60,7 @@ typedef struct ParquetScan
 	TessParquetColumnInfo *info;
 	TessParquetReader **readers;
 	size_t		group;			/* the group read */
+	uint64		groups_read;	/* the groups started, over every rescan */
 	bool		group_started;
 	uint64		window_start;	/* the window's first row in its group */
 	size_t		window_len;
@@ -75,12 +80,29 @@ extern TessParquetColumn *parquet_map_column(ParquetFileEntry *entry,
 											 const ParquetColumn *column);
 extern double parquet_check_files(List *paths, Oid relid, List *attnums,
 								  TessParquetIdentity *identities, size_t *groups,
-								  uint64 **group_rows);
+								  uint64 **group_rows, uint64 *total_groups);
+
+/* fdw.c */
+struct PlannerInfo;
+struct RelOptInfo;
+extern void parquet_get_foreign_paths(struct PlannerInfo *root, struct RelOptInfo *baserel,
+									  Oid foreigntableid);
+extern List *parquet_planned_list(void *fdw_private);
+extern List *parquet_strings(List *nodes);
+struct ExplainState;
+extern void parquet_explain_files(List *planned, const ParquetScan *scan,
+								  struct ExplainState *es);
+
+/* node.c */
+extern void parquet_register(void);
 
 /* scan.c */
 extern ParquetScan *parquet_scan_begin(Oid relid, List *patterns, List *attnums);
 extern void parquet_scan_rescan(ParquetScan *scan);
 extern void parquet_scan_end(ParquetScan *scan);
+extern bool parquet_scan_next_group(ParquetScan *scan);
+extern uint64 parquet_scan_group_rows(const ParquetScan *scan);
+extern TessParquetReader *parquet_scan_reader(ParquetScan *scan, int c);
 extern struct TupleTableSlot *parquet_scan_next(ParquetScan *scan,
 												struct TupleTableSlot *slot);
 pg_noreturn extern void parquet_raise(const TessParquetStatus *status);
