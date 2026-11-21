@@ -134,6 +134,130 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET tessera.enable;
 
+-- The SQLSTATE and message of a statement's error.
+CREATE FUNCTION source_error(statement text)
+RETURNS text
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    EXECUTE statement;
+    RETURN 'no error';
+EXCEPTION WHEN OTHERS THEN
+    RETURN SQLSTATE || ': ' || SQLERRM;
+END
+$$;
+
+-- The plan rows of the first node of query's plan named name, a node
+-- type or a custom provider.
+CREATE FUNCTION plan_rows(query text, name text) RETURNS float8
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (FORMAT JSON) %s', query) INTO plan;
+    RETURN jsonb_path_query_first(plan,
+        'strict $.**?(@."Node Type" == $n || @."Custom Plan Provider" == $n)."Plan Rows"',
+        jsonb_build_object('n', name))::float8;
+END $$;
+
+-- spec: source-scan/No source reads the relation
+-- Every source returns NULL: the core's ForeignScan, packed under a
+-- batch parent, as without sources.
+SELECT tessera_test_scan_sources(ARRAY['none']);
+EXPLAIN (COSTS OFF) SELECT b, count(*) FROM ft_t GROUP BY b;
+SELECT source_same('SELECT b, count(*) FROM ft_t GROUP BY b');
+SELECT tessera_test_scan_source_calls();
+
+-- spec: source-scan/Batch parents over a source
+-- A grouping, a sort under a limit and a hash join read the table, which
+-- has no clauses, through the source's node and no TessPack.
+SELECT tessera_test_scan_sources(ARRAY['reader']);
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(c) FROM ft_t GROUP BY b;
+SELECT source_same('SELECT b, count(*), sum(c) FROM ft_t GROUP BY b');
+EXPLAIN (COSTS OFF) SELECT a, d FROM ft_t ORDER BY c, a LIMIT 5;
+SELECT source_same('SELECT a, d FROM (SELECT a, d FROM ft_t ORDER BY c, a LIMIT 5) AS q');
+SET enable_mergejoin = off;
+SET enable_nestloop = off;
+EXPLAIN (COSTS OFF) SELECT f.a, o.x FROM ft_t AS f JOIN outer_rows AS o ON f.a = o.x;
+SELECT source_same('SELECT f.a, o.x FROM ft_t AS f JOIN outer_rows AS o ON f.a = o.x');
+RESET enable_mergejoin;
+RESET enable_nestloop;
+-- The rows of a scan the source answers row by row: a projection, a row
+-- parent.
+SELECT source_same('SELECT a + 1, d || ''x'' FROM ft_t');
+-- The path alone has the rows of the path offered, whatever the source
+-- estimates.
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD source_rows '7');
+SELECT plan_rows('SELECT b FROM ft_t', 'TessTestSource') AS source_rows;
+SET tessera.enable = off;
+SELECT plan_rows('SELECT b FROM ft_t', 'Foreign Scan') AS wrapper_rows;
+RESET tessera.enable;
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP source_rows);
+
+-- spec: source-scan/A source read again
+-- A nested loop scans the table through its source once for each outer
+-- row, every scan all its rows: the inner side of a left join.
+SET enable_hashjoin = off;
+SET enable_mergejoin = off;
+SET enable_material = off;
+EXPLAIN (COSTS OFF)
+    SELECT o.x, f.b FROM outer_rows AS o LEFT JOIN ft_t AS f ON f.a < o.x;
+SELECT source_same('SELECT o.x, f.b FROM outer_rows AS o LEFT JOIN ft_t AS f ON f.a < o.x');
+RESET enable_hashjoin;
+RESET enable_mergejoin;
+RESET enable_material;
+
+-- spec: source-scan/The path offered
+-- Under a LIMIT the core keeps the path that starts at once beside the
+-- one cheaper in total: the source is offered the latter, its private
+-- data with it, and its path, cheaper than both, says so.
+ALTER FOREIGN TABLE ft_two OPTIONS (ADD source_startup '0', ADD source_total '100');
+EXPLAIN (COSTS OFF) SELECT a FROM ft_two LIMIT 3;
+SELECT source_same('SELECT count(*) FROM (SELECT a FROM ft_two LIMIT 3) AS q');
+
+-- spec: source-scan/A parallel grouping
+-- A partial grouping reads the source's partial node in each
+-- participant, TessGather above it; and a scan of the rows, TessGather
+-- over the source's partial node.
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+EXPLAIN (COSTS OFF) SELECT b, count(*), sum(a) FROM ft_par GROUP BY b;
+SELECT source_same('SELECT b, count(*), sum(a) FROM ft_par GROUP BY b');
+EXPLAIN (COSTS OFF) SELECT a, b FROM ft_par;
+SELECT source_same('SELECT a, b FROM ft_par');
+-- The partial path alone has the rows of the partial path offered, one
+-- participant's.
+ALTER FOREIGN TABLE ft_par OPTIONS (ADD source_rows '7');
+SELECT plan_rows('SELECT a, b FROM ft_par', 'TessTestSource') AS source_rows;
+SET tessera.enable = off;
+SELECT plan_rows('SELECT a, b FROM ft_par', 'Foreign Scan') AS wrapper_rows;
+RESET tessera.enable;
+ALTER FOREIGN TABLE ft_par OPTIONS (DROP source_rows);
+
+-- spec: source-scan/A path refused
+-- A core path, a custom path tess_path_create did not build, a batch path
+-- of another relation, with parameters, with path keys, without
+-- projection, serial for a partial offer, partial for a serial one,
+-- partial and not parallel-aware, partial and not parallel-safe, of
+-- another number of workers, and serial and parallel-safe where the offer
+-- is not.
+SELECT tessera_test_scan_sources(ARRAY['faulty']);
+SELECT fault, source_error('EXPLAIN SELECT b, count(*) FROM ft_par GROUP BY b')
+FROM unnest(ARRAY['core', 'other_custom', 'other_relation', 'params', 'pathkeys',
+    'no_projection', 'serial_for_partial', 'partial_for_serial', 'partial_unaware',
+    'partial_unsafe', 'workers']) AS fault,
+    LATERAL tessera_test_scan_source_fault(fault);
+SET max_parallel_workers_per_gather = 0;
+SELECT tessera_test_scan_source_fault('serial_safe');
+SELECT source_error('EXPLAIN SELECT b, count(*) FROM ft_par GROUP BY b');
+RESET max_parallel_workers_per_gather;
+SELECT tessera_test_scan_source_fault(NULL);
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+SELECT tessera_test_scan_sources(ARRAY[]::text[]);
+
+DROP FUNCTION plan_rows(text, text);
+DROP FUNCTION source_error(text);
 DROP TABLE ht_t, ht_two, ht_sorted, ht_join, outer_rows, ht_par, ht_unaware;
 DROP FOREIGN TABLE ft_t, ft_two, ft_sorted, ft_join, ft_par, ft_unaware;
 DROP SERVER scan_server;
