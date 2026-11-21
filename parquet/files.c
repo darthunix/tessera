@@ -11,6 +11,7 @@
 
 #include "mb/pg_wchar.h"
 #include "storage/fd.h"
+#include "utils/injection_point.h"
 #include "utils/memutils.h"
 
 #include "tessera_parquet.h"
@@ -105,6 +106,9 @@ parquet_open_file(char *path, const TessParquetIdentity *expected)
 	TessParquetStatus status;
 
 	entry->path = path;
+	/* A file a scan opens, in the order its participants open them. */
+	if (expected != NULL)
+		INJECTION_POINT("tessera-parquet-open", path);
 	if (!AcquireExternalFD())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_RESOURCES),
