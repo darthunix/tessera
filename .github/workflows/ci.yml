@@ -158,7 +158,7 @@ jobs:
   # outside its tests, arrow-schema alone (the contract's rule "Free of
   # both sides' code"), the tests of the packed crate, built from its
   # files and Apache Arrow's crates alone, and its public API against the
-  # snapshot beside its change. It is not published.
+  # snapshot beside its spec. It is not published.
   datum-arrow:
     name: datum-arrow alone (ubuntu-24.04)
     runs-on: ubuntu-24.04
@@ -201,7 +201,7 @@ jobs:
       - name: The public API against its snapshot
         run: |
           cargo +"$API_TOOLCHAIN" public-api -p datum-arrow -sss > target/datum-arrow-public-api.txt
-          diff -u openspec/changes/types-crate/public-api.txt target/datum-arrow-public-api.txt
+          diff -u openspec/specs/datum-arrow/public-api.txt target/datum-arrow-public-api.txt
 
   # The crate pmu alone, as its contract asks ("Free of Tessera", "A small
   # surface"), in the cells a runner can reach. Its tests as the only
