@@ -548,14 +548,17 @@ too.
 - **THEN** each result equals the serial result, the plan's workers are
   those PostgreSQL gives a table of the files' size, and the groups read
   by the participants add up to eight for each scan of the plan
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/One file in parallel`
 
 #### Scenario: A file replaced between participants
 - **WHEN** a parallel plan's leader has begun its scan, and the file is
   replaced by a rename with one of the same size and time before a
   worker opens it
 - **THEN** the worker raises `55000`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet_cancel.sql::-- spec: parquet-fdw/A file replaced between
+  participants`
 
 ### Requirement: Estimates and ANALYZE
 The wrapper SHALL estimate a table's rows as the sum of its files'
@@ -600,4 +603,5 @@ clauses it checks (`Source Exact`).
   rows and through the source
 - **THEN** each shows its lines as listed above, and the counts with
   `ANALYZE` equal the serial ones in the parallel plan
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/What EXPLAIN shows`
