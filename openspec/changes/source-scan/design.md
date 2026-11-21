@@ -102,9 +102,9 @@ from:
 "Clauses left" are the clauses the source does not check exactly. The
 core's paths stay in the lists unless a path of Tessera dominates them,
 as `add_path` decides; the planner chooses by cost. A parent given the
-core's `ForeignScan` packs it, as today. With `tessera.enable` off, or
-when no source returns a path, nothing above is added and the plan is
-the core's.
+core's `ForeignScan` packs it, as today. With `tessera.enable` off the
+plan is the core's; when no source returns a path, the wrapper's scan
+stays, packed under a batch parent as today.
 
 ## Decisions
 
