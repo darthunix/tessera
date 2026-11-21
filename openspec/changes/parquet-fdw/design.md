@@ -471,6 +471,13 @@ On 2026-11-21, with `source-scan` open:
   reviewed.
 - The least and greatest values of a string tried for their emptiness
   alone, for `= ''` and `<> ''`, before its dictionary.
+- A query whose targets or clauses read a whole row of the table, such
+  as `SELECT t FROM t` or `row_to_json(t)`, or a system column such as
+  `tableoid`, is read by the wrapper's scan, not by the source: the
+  runtime's projection computes columns alone, as the heap scan leaves
+  such a query to the core's scan, and no query of ClickBench reads one.
+  Teaching the projection a whole row and `tableoid` is the roadmap's
+  entry `projection-whole-row`.
 - PostgreSQL's `Datum` is the common language of the batches; Tessera
   counts on no packages of PostgreSQL's distributions.
 - The order of the work: the parallel handout of groups of rows, then
