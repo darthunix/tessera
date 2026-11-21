@@ -1,10 +1,11 @@
 # A module outside the tree builds against the installed Tessera alone: every
 # installed header compiles by itself, with the include path the
-# documentation gives, and TessLimit's sources (nodes/limit*.c) and the
-# test source of the suite source_scan (test/tessera_scan_source_test.c),
-# which take the public headers and the runtime library alone, each build
-# into a module of their own from copies against the installed headers and
-# runtime library. Run after make install.
+# documentation gives, and TessLimit's sources (nodes/limit*.c), the
+# test source of the suite source_scan (test/tessera_scan_source_test.c)
+# and the Parquet wrapper (parquet/), which take the public headers and the
+# runtime library alone, each build into a module of their own from copies
+# against the installed headers and runtime library, the wrapper with the
+# static library of its reader too. Run after make install.
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
@@ -12,13 +13,22 @@ include $(PGXS)
 TESSERA_INCLUDE = $(includedir_server)/extension
 INSTALLED_HEADERS = $(sort $(wildcard $(TESSERA_INCLUDE)/tessera/*.h))
 NODES = $(srcdir)/../../nodes
+PARQUET = $(srcdir)/../../parquet
 WORK = installed-work
 SOURCE_WORK = installed-work-source
+PARQUET_WORK = installed-work-parquet
+# The reader of Parquet files, a static library of the workspace, and what
+# it needs of the system, as rust.mk names them.
+RUST_PROFILE ?= release
+PARQUET_READER = $(abspath $(srcdir)/../../target/$(RUST_PROFILE)/libtessera_parquet.a)
+ifeq ($(PORTNAME),darwin)
+PARQUET_SYSTEM_LIBS = -framework CoreFoundation
+endif
 
 .PHONY: installcheck installcheck-headers installcheck-limit installcheck-source \
-	clean-installed
+	installcheck-parquet clean-installed
 
-installcheck: installcheck-headers installcheck-limit installcheck-source
+installcheck: installcheck-headers installcheck-limit installcheck-source installcheck-parquet
 
 installcheck-headers:
 	@test -n "$(INSTALLED_HEADERS)" || { echo "no Tessera headers in $(TESSERA_INCLUDE)/tessera"; exit 1; }
@@ -54,5 +64,17 @@ installcheck-source:
 	$(MAKE) -C $(SOURCE_WORK) PG_CONFIG="$(PG_CONFIG)"
 	rm -rf $(SOURCE_WORK)
 
+installcheck-parquet:
+	rm -rf $(PARQUET_WORK) && mkdir $(PARQUET_WORK)
+	cp $(PARQUET)/*.c $(PARQUET)/*.h $(PARQUET_WORK)/
+	printf '%s\n' 'MODULE_big = tessera_parquet_check' \
+		'OBJS = $(patsubst %.c,%.o,$(notdir $(wildcard $(PARQUET)/*.c)))' \
+		'PG_CPPFLAGS = -I$$(includedir_server)/extension' \
+		'SHLIB_LINK += $$(pkglibdir)/libtessera_runtime.a $(PARQUET_READER) $(PARQUET_SYSTEM_LIBS)' \
+		'PGXS := $$(shell $$(PG_CONFIG) --pgxs)' \
+		'include $$(PGXS)' > $(PARQUET_WORK)/Makefile
+	$(MAKE) -C $(PARQUET_WORK) PG_CONFIG="$(PG_CONFIG)"
+	rm -rf $(PARQUET_WORK)
+
 clean-installed:
-	rm -rf $(WORK) $(SOURCE_WORK)
+	rm -rf $(WORK) $(SOURCE_WORK) $(PARQUET_WORK)
