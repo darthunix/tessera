@@ -46,3 +46,40 @@ assert_eq!(error.kind(), ErrorKind::NotSupported);
 assert_eq!(error.sqlstate(), "0A000");
 # Ok::<(), datum_arrow::Error>(())
 ```
+
+# Reading
+
+A [`ReadPlan`] is made from an Arrow type, a PostgreSQL type and the
+column's [`ReadOptions`]; [`ReadPlan::read`] converts the slots a mask
+asks for of an [`Input`], Arrow's buffers borrowed from the caller,
+into a [`ReadOutput`]: `Datum` words for types PostgreSQL passes by
+value, slices of the input's bytes for `text`, `varchar` and `bytea`.
+
+```
+use datum_arrow::{
+    Column, ErrorKind, Failures, Input, PgType, ReadOptions, ReadOutput, ReadPlan, Unit,
+    Values, arrow_schema::DataType,
+};
+
+// Seconds since 1970 in an Int64, read into timestamp.
+let options = ReadOptions { unit: Some(Unit::Seconds), text: None, server_utf8: true };
+let plan = ReadPlan::new(&DataType::Int64, PgType::Timestamp, options)?;
+assert_eq!(plan.failures(), Failures::OUT_OF_RANGE);
+
+let seconds = [946_684_800i64, 946_684_801, i64::MAX];
+let input = Input::Plain(Column { len: 3, values: Values::Int64(&seconds), nulls: None });
+let mut values = [0u64; 3];
+let mut nulls = [0u64; 1];
+let mut output = ReadOutput::Datums { values: &mut values, nulls: &mut nulls };
+
+// The first two slots: 2000-01-01 00:00:00 and one second later, as
+// microseconds since 2000.
+plan.read(&input, &[0b011], &mut output)?;
+assert_eq!(values[..2], [0, 1_000_000]);
+
+// The third is past PostgreSQL's last time.
+let mut output = ReadOutput::Datums { values: &mut values, nulls: &mut nulls };
+let error = plan.read(&input, &[0b100], &mut output).unwrap_err();
+assert_eq!((error.kind(), error.slot()), (ErrorKind::OutOfRange, Some(2)));
+# Ok::<(), datum_arrow::Error>(())
+```

@@ -17,9 +17,16 @@
 pub use arrow_schema;
 
 mod arrow;
+mod calendar;
+mod column;
 mod error;
+mod failures;
 mod pg;
+mod read;
 
 pub use arrow::{ArrowType, Key, Plain, TimeUnit};
+pub use column::{Bitmap, Column, Input, Keys, Values, mask_words};
 pub use error::{Error, ErrorKind, Result};
+pub use failures::Failures;
 pub use pg::{MAX_VARCHAR_LENGTH, PgType, VARHDRSZ, VarcharLength, oid};
+pub use read::{MAX_VALUE_BYTES, ReadOptions, ReadOutput, ReadPlan, TextBytes, Unit};
