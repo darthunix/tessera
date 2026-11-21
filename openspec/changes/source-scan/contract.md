@@ -14,7 +14,8 @@ A source builds against Tessera's installed headers and runtime library
 alone and reads no private structure of the bridge, the runtime or the
 nodes, so that a source can be built, shipped and loaded apart from
 Tessera's tree.
-- **Checked by:** pending
+- **Checked by:**
+  `test/installed/Makefile::installcheck-source`
 
 ### One check for each clause
 Each clause of a relation is checked once: by the source when it answers
@@ -36,7 +37,8 @@ A source uses only the clauses Tessera marks usable, so that no clause
 runs, on rows or on data derived from them, such as their least and
 greatest values, ahead of the clauses of a row security policy that
 guard it.
-- **Checked by:** pending
+- **Checked by:**
+  `test/sql/source_scan.sql::Clauses under a row security policy`
 
 ### A source's own check reveals nothing
 A source that checks a clause by code of its own, rather than by
@@ -52,7 +54,8 @@ view's clause hides is never shown by the source that skipped it.
 Registering a source changes no plan and no result of a query that reads
 no relation of the source, so that a source can be added without a risk
 to the queries that do not use it.
-- **Checked by:** pending
+- **Checked by:**
+  `test/sql/source_scan.sql::-- spec: source-scan/Heap tables beside a source`
 
 ### A source touches no part of Tessera
 Adding a source for a kind of relation that Tessera already offers to
