@@ -152,12 +152,13 @@ parquet_map_column(ParquetFileEntry *entry, const ParquetColumn *column)
  * where `identities` is not NULL, writes what fstat said of each file
  * there, and where `groups` is not NULL, the groups of each file there
  * and an array of the rows of each group in `group_rows`, in the
- * current memory context.
+ * current memory context; where `total_groups` is not NULL, the groups
+ * of all the files.
  */
 double
 parquet_check_files(List *paths, Oid relid, List *attnums,
 					TessParquetIdentity *identities, size_t *groups,
-					uint64 **group_rows)
+					uint64 **group_rows, uint64 *total_groups)
 {
 	MemoryContext outer = CurrentMemoryContext;
 	MemoryContext one = AllocSetContextCreate(outer, "tessera_parquet file",
@@ -181,6 +182,8 @@ parquet_check_files(List *paths, Oid relid, List *attnums,
 		foreach_ptr(ParquetColumn, column, columns)
 			(void) parquet_map_column(entry, column);
 		rows += (double) entry->rows;
+		if (total_groups != NULL)
+			*total_groups += entry->groups;
 		MemoryContextSwitchTo(outer);
 		if (identities != NULL)
 			identities[foreach_current_index(path)] = entry->identity;

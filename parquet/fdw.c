@@ -10,6 +10,9 @@
 #include "access/htup_details.h"
 #include "access/sysattr.h"
 #include "access/table.h"
+#include "commands/explain.h"
+#include "commands/explain_format.h"
+#include "commands/explain_state.h"
 #include "executor/executor.h"
 #include "foreign/fdwapi.h"
 #include "foreign/foreign.h"
@@ -31,6 +34,8 @@ typedef struct PlannedTable
 {
 	List	   *patterns;		/* the option files */
 	List	   *attnums;		/* the columns the query reads */
+	List	   *paths;			/* the files the patterns matched */
+	uint64		groups;			/* their groups of rows */
 	double		rows;			/* the rows of the files */
 } PlannedTable;
 
@@ -73,20 +78,24 @@ rel_size(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 {
 	PlannedTable *planned = palloc0_object(PlannedTable);
 
+	/* The source of a bridge loaded after the module. */
+	parquet_register();
 	planned->patterns = parquet_table_files(foreigntableid);
 	planned->attnums = columns_read(baserel, foreigntableid);
 	/* The table's files as they are now, each column the query reads
 	 * mapped to each. */
-	planned->rows = parquet_check_files(parquet_expand(planned->patterns), foreigntableid,
-										planned->attnums, NULL, NULL, NULL);
+	planned->paths = parquet_expand(planned->patterns);
+	planned->rows = parquet_check_files(planned->paths, foreigntableid, planned->attnums,
+										NULL, NULL, NULL, &planned->groups);
 	baserel->rows = clamp_row_est(planned->rows *
 								  clauselist_selectivity(root, baserel->baserestrictinfo,
 														 0, JOIN_INNER, NULL));
 	baserel->fdw_private = planned;
 }
 
-static void
-paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
+/* The wrapper's path; the source knows its tables by this function. */
+void
+parquet_get_foreign_paths(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid)
 {
 	PlannedTable *planned = baserel->fdw_private;
 	Cost		total = seq_page_cost + planned->rows * cpu_tuple_cost;
@@ -100,28 +109,72 @@ static ForeignScan *
 plan(PlannerInfo *root, RelOptInfo *baserel, Oid foreigntableid, ForeignPath *best_path,
 	 List *tlist, List *scan_clauses, Plan *outer_plan)
 {
-	PlannedTable *planned = baserel->fdw_private;
+	return make_foreignscan(tlist, extract_actual_clauses(scan_clauses, false),
+							baserel->relid, NIL, parquet_planned_list(baserel->fdw_private),
+							NIL, NIL, outer_plan);
+}
+
+/*
+ * What planning found, as a list a plan carries: the patterns and the
+ * files' paths as strings, the columns read, and the groups as a string.
+ */
+List *
+parquet_planned_list(void *fdw_private)
+{
+	PlannedTable *planned = fdw_private;
 	List	   *patterns = NIL;
+	List	   *paths = NIL;
 
 	foreach_ptr(char, pattern, planned->patterns)
 		patterns = lappend(patterns, makeString(pattern));
-	return make_foreignscan(tlist, extract_actual_clauses(scan_clauses, false),
-							baserel->relid, NIL,
-							list_make2(patterns, planned->attnums), NIL, NIL, outer_plan);
+	foreach_ptr(char, path, planned->paths)
+		paths = lappend(paths, makeString(path));
+	return list_make4(patterns, planned->attnums, paths,
+					  makeString(psprintf(UINT64_FORMAT, planned->groups)));
+}
+
+/* The strings of a list of String nodes. */
+List *
+parquet_strings(List *nodes)
+{
+	List	   *strings = NIL;
+
+	foreach_node(String, node, nodes)
+		strings = lappend(strings, strVal(node));
+	return strings;
+}
+
+/*
+ * The lines of EXPLAIN of both scans: the files and groups planned, with
+ * VERBOSE the files' paths, and with ANALYZE the groups read.
+ */
+void
+parquet_explain_files(List *planned, const ParquetScan *scan, ExplainState *es)
+{
+	ExplainPropertyInteger("Parquet Files", NULL, list_length(lthird(planned)), es);
+	ExplainPropertyUInteger("Row Groups", NULL, strtou64(strVal(lfourth(planned)), NULL, 10), es);
+	if (es->verbose)
+		ExplainPropertyList("Parquet File Paths", parquet_strings(lthird(planned)), es);
+	if (es->analyze && scan != NULL)
+		ExplainPropertyUInteger("Row Groups Read", NULL, scan->groups_read, es);
 }
 
 static void
 begin_scan(ForeignScanState *node, int eflags)
 {
 	ForeignScan *scan = (ForeignScan *) node->ss.ps.plan;
-	List	   *patterns = NIL;
 
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
-	foreach_node(String, pattern, linitial(scan->fdw_private))
-		patterns = lappend(patterns, strVal(pattern));
 	node->fdw_state = parquet_scan_begin(RelationGetRelid(node->ss.ss_currentRelation),
-										 patterns, lsecond(scan->fdw_private));
+										 parquet_strings(linitial(scan->fdw_private)),
+										 lsecond(scan->fdw_private));
+}
+
+static void
+explain(ForeignScanState *node, ExplainState *es)
+{
+	parquet_explain_files(((ForeignScan *) node->ss.ps.plan)->fdw_private, node->fdw_state, es);
 }
 
 static TupleTableSlot *
@@ -150,11 +203,12 @@ tessera_parquet_handler(PG_FUNCTION_ARGS)
 	FdwRoutine *routine = makeNode(FdwRoutine);
 
 	routine->GetForeignRelSize = rel_size;
-	routine->GetForeignPaths = paths;
+	routine->GetForeignPaths = parquet_get_foreign_paths;
 	routine->GetForeignPlan = plan;
 	routine->BeginForeignScan = begin_scan;
 	routine->IterateForeignScan = iterate;
 	routine->ReScanForeignScan = rescan;
 	routine->EndForeignScan = end_scan;
+	routine->ExplainForeignScan = explain;
 	PG_RETURN_POINTER(routine);
 }
