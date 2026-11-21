@@ -1215,17 +1215,28 @@ clause_usable(RestrictInfo *rinfo, RelOptInfo *rel)
  * check exactly, kept, and records of them and of those it answered for,
  * which the filter's plan keeps and checks among the source plan's
  * expressions. Its rows are the offered path's, as every path of the
- * relation returns the same rows.
+ * relation returns the same rows. It costs the source's path and the
+ * clauses kept as the core counts them (cost_qual_eval): their cost at
+ * the start, a hashed subquery's building among it, to the start and the
+ * total, and their cost for a row times each row the source's path
+ * returns to the total. tessera.scan_cost_factor, which calibrates the
+ * heap scan against the core's, has no part in it.
  */
 static CustomPath *
-make_source_filter_path(RelOptInfo *rel, const Path *offered, CustomPath *source,
-						List *kept, List *answered)
+make_source_filter_path(PlannerInfo *root, RelOptInfo *rel, const Path *offered,
+						CustomPath *source, List *kept_rinfos, List *kept,
+						List *answered)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	Path		template = source->path;
+	QualCost	clauses;
 
+	cost_qual_eval(&clauses, kept_rinfos, root);
 	template.pathtarget = rel->reltarget;
 	template.rows = offered->rows;
+	template.startup_cost = source->path.startup_cost + clauses.startup;
+	template.total_cost = source->path.total_cost + clauses.startup +
+		clauses.per_tuple * source->path.rows;
 	config.template_path = &template;
 	config.methods = &filter_path_methods;
 	config.node = &tess_filter_node;
@@ -1254,6 +1265,7 @@ source_path(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial)
 	int32	   *answers = palloc0_array(int32, Max(count, 1));
 	PathTarget *target = filter_input_target(root, rel);
 	List	   *kept = NIL;
+	List	   *kept_rinfos = NIL;
 	List	   *answered = NIL;
 	CustomPath *path;
 	int			index = 0;
@@ -1274,7 +1286,10 @@ source_path(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial)
 	for (index = 0; index < count; index++)
 	{
 		if (answers[index] != TESS_CLAUSE_EXACT)
+		{
 			kept = lappend(kept, items[index]->clause);
+			kept_rinfos = lappend(kept_rinfos, items[index]);
+		}
 		if (answers[index] != TESS_CLAUSE_UNSUPPORTED)
 			answered = lappend(answered, items[index]->clause);
 	}
@@ -1285,7 +1300,8 @@ source_path(PlannerInfo *root, RelOptInfo *rel, Path *offered, bool partial)
 		return &path->path;
 	}
 	path->path.pathtarget = target;
-	return (Path *) make_source_filter_path(rel, offered, path, kept, answered);
+	return (Path *) make_source_filter_path(root, rel, offered, path, kept_rinfos, kept,
+											answered);
 }
 
 /*
