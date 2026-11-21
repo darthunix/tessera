@@ -1,7 +1,6 @@
-# Spec Delta
+# datum-arrow Specification
 
 ## Purpose
-
 `datum-arrow` is the boundary between PostgreSQL's types and the types
 of Apache Arrow, a form of columns in memory into which Apache Arrow's
 implementations read files such as Parquet and from which they write
@@ -28,7 +27,7 @@ the values read and written, the round trip and the bounds of a
 comparison in a file's own unit; [design.md](design.md) explains the
 whole and the reasons.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: A crate of its own
 The boundary SHALL be the Rust crate `datum-arrow`, which depends on no
