@@ -527,7 +527,874 @@ SELECT tessera_test_scan_sources(ARRAY[]::text[]);
  
 (1 row)
 
-DROP FUNCTION plan_rows(text, text);
+-- spec: source-scan/Clauses in batches and by rows
+-- The source checks neither clause: TessFilter checks the one the
+-- compiler takes in batches, the regular expression by rows.
+SELECT tessera_test_scan_sources(ARRAY['reader']);
+ tessera_test_scan_sources 
+---------------------------
+ 
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT a, d FROM ft_t WHERE b = 3 AND d ~ '1';
+                 QUERY PLAN                 
+--------------------------------------------
+ Custom Scan (TessFilter) on ft_t
+   Filter: (d ~ '1'::text)
+   Batch Filter: (b = 3)
+   ->  Custom Scan (TessTestSource) on ft_t
+         Foreign Path: first
+(5 rows)
+
+SELECT source_same('SELECT a, d FROM ft_t WHERE b = 3 AND d ~ ''1''');
+  source_same  
+---------------
+ same, 31 rows
+(1 row)
+
+-- spec: source-scan/A source that checks every clause
+-- Every clause checked exactly, one on a column the query does not
+-- select: the source's node alone, with the rows of the path offered,
+-- the wrapper's, whatever the source estimates.
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD exact 'a,b', ADD source_rows '7');
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE a > 100 AND b = 3;
+               QUERY PLAN                
+-----------------------------------------
+ Custom Scan (TessTestSource) on ft_t
+   Foreign Path: first
+   Source Exact: ((a > 100) AND (b = 3))
+(3 rows)
+
+SELECT source_same('SELECT d FROM ft_t WHERE a > 100 AND b = 3');
+  source_same  
+---------------
+ same, 90 rows
+(1 row)
+
+SELECT plan_rows('SELECT d FROM ft_t WHERE a > 100 AND b = 3', 'TessTestSource') AS source_rows;
+ source_rows 
+-------------
+           2
+(1 row)
+
+SET tessera.enable = off;
+SELECT plan_rows('SELECT d FROM ft_t WHERE a > 100 AND b = 3', 'Foreign Scan') AS wrapper_rows;
+ wrapper_rows 
+--------------
+            2
+(1 row)
+
+RESET tessera.enable;
+-- spec: source-scan/A source that checks some clauses
+-- One of two clauses checked exactly: the first under the source's
+-- node, the other under TessFilter alone.
+ALTER FOREIGN TABLE ft_t OPTIONS (SET exact 'a', DROP source_rows);
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE a > 100 AND b = 3;
+                 QUERY PLAN                 
+--------------------------------------------
+ Custom Scan (TessFilter) on ft_t
+   Batch Filter: (b = 3)
+   ->  Custom Scan (TessTestSource) on ft_t
+         Foreign Path: first
+         Source Exact: (a > 100)
+(5 rows)
+
+SELECT source_same('SELECT d FROM ft_t WHERE a > 100 AND b = 3');
+  source_same  
+---------------
+ same, 90 rows
+(1 row)
+
+-- spec: source-scan/A source that only skips rows
+-- A clause used only to skip groups: TessFilter checks it and counts as
+-- removed only the rows it rejects itself, 29 of the second group here
+-- against 901 when the source skips nothing.
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP exact, ADD prune 'a');
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+    SELECT d FROM ft_t WHERE a < 100;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Custom Scan (TessFilter) on ft_t (actual rows=99.00 loops=1)
+   Batch Filter: (a < 100)
+   Rows Removed by Batch Filter: 29
+   ->  Custom Scan (TessTestSource) on ft_t (actual rows=128.00 loops=1)
+         Foreign Path: first
+         Source Prune: (a < 100)
+(6 rows)
+
+SELECT source_same('SELECT d FROM ft_t WHERE a < 100');
+  source_same  
+---------------
+ same, 99 rows
+(1 row)
+
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP prune);
+EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF)
+    SELECT d FROM ft_t WHERE a < 100;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Custom Scan (TessFilter) on ft_t (actual rows=99.00 loops=1)
+   Batch Filter: (a < 100)
+   Rows Removed by Batch Filter: 901
+   ->  Custom Scan (TessTestSource) on ft_t (actual rows=1000.00 loops=1)
+         Foreign Path: first
+(5 rows)
+
+SELECT source_same('SELECT d FROM ft_t WHERE a < 100');
+  source_same  
+---------------
+ same, 99 rows
+(1 row)
+
+-- spec: source-scan/A clause on an outer row's value
+-- A correlated subquery scans the table by the outer row's value, checked
+-- exactly, then used only to skip groups.
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD exact 'a');
+SELECT explain_neutral('SELECT o.x, (SELECT count(*) FROM ft_t AS f WHERE f.a < o.x * 10) FROM outer_rows AS o');
+                   explain_neutral                    
+------------------------------------------------------
+ Custom Scan (TessHeapScan) on outer_rows o
+   SubPlan
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessTestSource) on ft_t f
+                 Foreign Path: first
+                 Source Exact: (f.a < (o.x * 10))
+(6 rows)
+
+SELECT source_same('SELECT o.x, (SELECT count(*) FROM ft_t AS f WHERE f.a < o.x * 10) FROM outer_rows AS o');
+  source_same  
+---------------
+ same, 20 rows
+(1 row)
+
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP exact, ADD prune 'a');
+SELECT explain_neutral('SELECT o.x, (SELECT count(*) FROM ft_t AS f WHERE f.a < o.x * 10) FROM outer_rows AS o');
+                      explain_neutral                       
+------------------------------------------------------------
+ Custom Scan (TessHeapScan) on outer_rows o
+   SubPlan
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessFilter) on ft_t f
+                 Batch Filter: (f.a < (o.x * 10))
+                 ->  Custom Scan (TessTestSource) on ft_t f
+                       Foreign Path: first
+                       Source Prune: (f.a < (o.x * 10))
+(8 rows)
+
+SELECT source_same('SELECT o.x, (SELECT count(*) FROM ft_t AS f WHERE f.a < o.x * 10) FROM outer_rows AS o');
+  source_same  
+---------------
+ same, 20 rows
+(1 row)
+
+-- spec: source-scan/A value fixed for the statement
+-- A generic plan of a prepared statement, executed with two values, by
+-- the parameter and by $1 + 1; a clause on now(); a clause on an
+-- uncorrelated subquery's value, checked exactly and used to skip
+-- groups. The subquery's notice shows when it runs: never under a plain
+-- EXPLAIN.
+CREATE FUNCTION noisy_max() RETURNS int LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE NOTICE 'the subquery ran';
+    RETURN 300;
+END $$;
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP prune, ADD exact 'a');
+SET plan_cache_mode = force_generic_plan;
+PREPARE source_param(int) AS SELECT count(*), sum(a) FROM ft_t WHERE a < $1;
+PREPARE source_param_plus(int) AS SELECT count(*), sum(a) FROM ft_t WHERE a < $1 + 1;
+PREPARE heap_param(int) AS SELECT count(*), sum(a) FROM ht_t WHERE a < $1;
+EXPLAIN (COSTS OFF) EXECUTE source_param(10);
+                 QUERY PLAN                 
+--------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessTestSource) on ft_t
+         Foreign Path: first
+         Source Exact: (a < $1)
+(4 rows)
+
+EXPLAIN (COSTS OFF) EXECUTE source_param_plus(10);
+                 QUERY PLAN                 
+--------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessTestSource) on ft_t
+         Foreign Path: first
+         Source Exact: (a < ($1 + 1))
+(4 rows)
+
+EXECUTE source_param(10);
+ count | sum 
+-------+-----
+     9 |  45
+(1 row)
+
+EXECUTE source_param(500);
+ count |  sum   
+-------+--------
+   499 | 124750
+(1 row)
+
+EXECUTE source_param_plus(10);
+ count | sum 
+-------+-----
+    10 |  55
+(1 row)
+
+EXECUTE source_param_plus(500);
+ count |  sum   
+-------+--------
+   500 | 125250
+(1 row)
+
+EXECUTE heap_param(10);
+ count | sum 
+-------+-----
+     9 |  45
+(1 row)
+
+EXECUTE heap_param(500);
+ count |  sum   
+-------+--------
+   499 | 124750
+(1 row)
+
+EXECUTE heap_param(11);
+ count | sum 
+-------+-----
+    10 |  55
+(1 row)
+
+EXECUTE heap_param(501);
+ count |  sum   
+-------+--------
+   500 | 125250
+(1 row)
+
+DEALLOCATE source_param;
+DEALLOCATE source_param_plus;
+DEALLOCATE heap_param;
+RESET plan_cache_mode;
+EXPLAIN (COSTS OFF)
+    SELECT count(*) FROM ft_t WHERE a < extract(year FROM now())::int - 1500;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessTestSource) on ft_t
+         Foreign Path: first
+         Source Exact: (a < ((EXTRACT(year FROM now()))::integer - 1500))
+(4 rows)
+
+SELECT source_same('SELECT count(*) FROM ft_t WHERE a < extract(year FROM now())::int - 1500');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
+SELECT explain_neutral('SELECT count(*), sum(a) FROM ft_t WHERE a < (SELECT noisy_max())');
+                 explain_neutral                  
+--------------------------------------------------
+ Custom Scan (TessAgg)
+   InitPlan
+     ->  Result
+   ->  Custom Scan (TessTestSource) on ft_t
+         Foreign Path: first
+         Source Exact: (ft_t.a < (InitPlan).col1)
+(6 rows)
+
+SELECT count(*), sum(a) FROM ft_t WHERE a < (SELECT noisy_max());
+NOTICE:  the subquery ran
+ count |  sum  
+-------+-------
+   299 | 44850
+(1 row)
+
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP exact, ADD prune 'a');
+SELECT explain_neutral('SELECT count(*), sum(a) FROM ft_t WHERE a < (SELECT noisy_max())');
+                    explain_neutral                     
+--------------------------------------------------------
+ Custom Scan (TessAgg)
+   InitPlan
+     ->  Result
+   ->  Custom Scan (TessFilter) on ft_t
+         Batch Filter: (ft_t.a < (InitPlan).col1)
+         ->  Custom Scan (TessTestSource) on ft_t
+               Foreign Path: first
+               Source Prune: (ft_t.a < (InitPlan).col1)
+(8 rows)
+
+SELECT count(*), sum(a) FROM ft_t WHERE a < (SELECT noisy_max());
+NOTICE:  the subquery ran
+ count |  sum  
+-------+-------
+   299 | 44850
+(1 row)
+
+SELECT count(*), sum(a) FROM ht_t WHERE a < 300;
+ count |  sum  
+-------+-------
+   299 | 44850
+(1 row)
+
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP prune);
+-- spec: source-scan/Clauses under a row security policy
+-- A partitioned table with a policy, a heap partition and a foreign one,
+-- read by a role the policy binds, by a clause that is not leakproof and
+-- by one that is: the policy's clause and the leakproof one are usable,
+-- the other is not, and TessFilter checks it after the policy's. Over a
+-- view with security_barrier, the clause that is not leakproof stays
+-- above the view's scan.
+CREATE FUNCTION leaky(int) RETURNS boolean LANGUAGE plpgsql IMMUTABLE AS
+    $$ BEGIN RETURN $1 % 3 = 0; END $$;
+-- Not leakproof either, and fails on a row of the policy's.
+CREATE FUNCTION peek(int) RETURNS boolean LANGUAGE plpgsql AS $$
+BEGIN
+    IF $1 >= 5 THEN
+        RAISE EXCEPTION 'peek saw a row the policy hides';
+    END IF;
+    RETURN true;
+END $$;
+CREATE TABLE ft_parted (a int4, b int4) PARTITION BY RANGE (a);
+CREATE FOREIGN TABLE ft_parted_far PARTITION OF ft_parted FOR VALUES FROM (1) TO (1001)
+    SERVER scan_server OPTIONS (rows '1000', exact 'a,b');
+ALTER FOREIGN TABLE ft_parted_far ALTER COLUMN b OPTIONS (ADD mod '10');
+CREATE TABLE ft_parted_near PARTITION OF ft_parted FOR VALUES FROM (1001) TO (2001);
+INSERT INTO ft_parted_near SELECT i, i % 10 FROM generate_series(1001, 2000) AS i;
+CREATE TABLE ht_parted (a int4, b int4) PARTITION BY RANGE (a);
+CREATE TABLE ht_parted_far PARTITION OF ht_parted FOR VALUES FROM (1) TO (1001);
+CREATE TABLE ht_parted_near PARTITION OF ht_parted FOR VALUES FROM (1001) TO (2001);
+INSERT INTO ht_parted SELECT i, i % 10 FROM generate_series(1, 2000) AS i;
+ANALYZE ft_parted_near, ht_parted;
+CREATE ROLE regress_source_rls;
+ALTER TABLE ft_parted ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ht_parted ENABLE ROW LEVEL SECURITY;
+CREATE POLICY ft_parted_visible ON ft_parted USING (b < 5);
+CREATE POLICY ht_parted_visible ON ht_parted USING (b < 5);
+CREATE VIEW ft_barrier WITH (security_barrier) AS SELECT a, b FROM ft_t WHERE b < 5;
+CREATE VIEW ht_barrier WITH (security_barrier) AS SELECT a, b FROM ht_t WHERE b < 5;
+GRANT SELECT ON ft_parted, ht_parted, ft_barrier, ht_barrier TO regress_source_rls;
+SET ROLE regress_source_rls;
+EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM ft_parted WHERE leaky(a) AND a > 10;
+                                  QUERY PLAN                                  
+------------------------------------------------------------------------------
+ Append
+   ->  Custom Scan (TessFilter) on public.ft_parted_far ft_parted_1
+         Output: ft_parted_1.a
+         Filter: leaky(ft_parted_1.a)
+         ->  Custom Scan (TessTestSource) on public.ft_parted_far ft_parted_1
+               Output: ft_parted_1.a, ft_parted_1.b
+               Foreign Path: first
+               Source Exact: ((ft_parted_1.b < 5) AND (ft_parted_1.a > 10))
+               Offered Usable: (b < 5), (a > 10)
+               Offered Not Usable: leaky(a)
+   ->  Custom Scan (TessFilter) on public.ft_parted_near ft_parted_2
+         Output: ft_parted_2.a
+         Filter: leaky(ft_parted_2.a)
+         Batch Filter: ((ft_parted_2.b < 5) AND (ft_parted_2.a > 10))
+         ->  Custom Scan (TessHeapScan) on public.ft_parted_near ft_parted_2
+               Output: ft_parted_2.a, ft_parted_2.b
+(16 rows)
+
+SELECT source_same('SELECT a FROM ft_parted WHERE leaky(a) AND a > 10');
+  source_same   
+----------------
+ same, 331 rows
+(1 row)
+
+EXPLAIN (VERBOSE, COSTS OFF) SELECT a FROM ft_barrier WHERE leaky(a) AND a > 10;
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Subquery Scan on ft_barrier
+   Output: ft_barrier.a
+   Filter: leaky(ft_barrier.a)
+   ->  Custom Scan (TessFilter) on public.ft_t
+         Output: ft_t.a, NULL::integer
+         Batch Filter: ((ft_t.b < 5) AND (ft_t.a > 10))
+         ->  Custom Scan (TessTestSource) on public.ft_t
+               Output: ft_t.a, ft_t.b
+               Foreign Path: first
+               Offered Usable: (b < 5), (a > 10)
+(10 rows)
+
+SELECT source_same('SELECT a FROM ft_barrier WHERE leaky(a) AND a > 10');
+  source_same   
+----------------
+ same, 165 rows
+(1 row)
+
+-- The source leaves the policy's clause to TessFilter, which checks it
+-- before a clause that is not leakproof and fails on any row the policy
+-- hides.
+RESET ROLE;
+ALTER FOREIGN TABLE ft_parted_far OPTIONS (SET exact 'a');
+SET ROLE regress_source_rls;
+EXPLAIN (COSTS OFF) SELECT a FROM ft_parted WHERE peek(b) AND a > 10;
+                              QUERY PLAN                               
+-----------------------------------------------------------------------
+ Append
+   ->  Custom Scan (TessFilter) on ft_parted_far ft_parted_1
+         Filter: peek(b)
+         Batch Filter: (ft_parted_1.b < 5)
+         ->  Custom Scan (TessTestSource) on ft_parted_far ft_parted_1
+               Foreign Path: first
+               Source Exact: (ft_parted_1.a > 10)
+   ->  Custom Scan (TessFilter) on ft_parted_near ft_parted_2
+         Filter: peek(b)
+         Batch Filter: ((ft_parted_2.b < 5) AND (ft_parted_2.a > 10))
+         ->  Custom Scan (TessHeapScan) on ft_parted_near ft_parted_2
+(11 rows)
+
+SELECT source_same('SELECT a FROM ft_parted WHERE peek(b) AND a > 10');
+  source_same   
+----------------
+ same, 995 rows
+(1 row)
+
+RESET ROLE;
+-- spec: source-scan/A source's own check reveals nothing
+-- The source compares by code of its own, exactly and to skip groups, a
+-- leakproof clause over the rows the policy hides, and one the core
+-- pushes into the view over the rows the view's clause hides: no error,
+-- no message.
+ALTER FOREIGN TABLE ft_parted_far OPTIONS (SET exact 'a', ADD prune 'b', ADD own 'on');
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD exact 'a', ADD prune 'b', ADD own 'on');
+SET ROLE regress_source_rls;
+EXPLAIN (COSTS OFF) SELECT a FROM ft_parted WHERE a > 10 AND b > 2;
+                                          QUERY PLAN                                          
+----------------------------------------------------------------------------------------------
+ Append
+   ->  Custom Scan (TessFilter) on ft_parted_far ft_parted_1
+         Batch Filter: ((ft_parted_1.b < 5) AND (ft_parted_1.b > 2))
+         ->  Custom Scan (TessTestSource) on ft_parted_far ft_parted_1
+               Foreign Path: first
+               Source Exact: (ft_parted_1.a > 10)
+               Source Prune: ((ft_parted_1.b < 5) AND (ft_parted_1.b > 2))
+               Source Check: own
+   ->  Custom Scan (TessFilter) on ft_parted_near ft_parted_2
+         Batch Filter: ((ft_parted_2.b < 5) AND (ft_parted_2.a > 10) AND (ft_parted_2.b > 2))
+         ->  Custom Scan (TessHeapScan) on ft_parted_near ft_parted_2
+(11 rows)
+
+SELECT source_same('SELECT a FROM ft_parted WHERE a > 10 AND b > 2');
+  source_same   
+----------------
+ same, 398 rows
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT a FROM ft_barrier WHERE a > 10 AND b > 2;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Subquery Scan on ft_barrier
+   ->  Custom Scan (TessFilter) on ft_t
+         Batch Filter: ((ft_t.b < 5) AND (ft_t.b > 2))
+         ->  Custom Scan (TessTestSource) on ft_t
+               Foreign Path: first
+               Source Exact: (ft_t.a > 10)
+               Source Prune: ((ft_t.b < 5) AND (ft_t.b > 2))
+               Source Check: own
+(8 rows)
+
+SELECT source_same('SELECT a FROM ft_barrier WHERE a > 10 AND b > 2');
+  source_same   
+----------------
+ same, 198 rows
+(1 row)
+
+RESET ROLE;
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP exact, DROP prune, DROP own);
+-- spec: source-scan/A volatile clause and a subquery in a clause
+-- A volatile clause in a full scan without a limit, called as many
+-- times as over the heap table; and a NOT IN over a subquery whose
+-- column may be NULL, which stays in the clause: neither is usable.
+CREATE SEQUENCE source_calls;
+CREATE FUNCTION counted(int) RETURNS boolean LANGUAGE plpgsql VOLATILE AS
+    $$ BEGIN RETURN nextval('source_calls') > 0 AND $1 % 2 = 0; END $$;
+CREATE TABLE maybe_null AS SELECT CASE WHEN i = 5 THEN NULL ELSE i * 10 END AS x
+    FROM generate_series(1, 5) AS i;
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD exact 'a');
+EXPLAIN (VERBOSE, COSTS OFF) SELECT count(*) FROM ft_t WHERE counted(a);
+                       QUERY PLAN                        
+---------------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: (count(*))
+   ->  Custom Scan (TessFilter) on public.ft_t
+         Filter: counted(ft_t.a)
+         ->  Custom Scan (TessTestSource) on public.ft_t
+               Output: a
+               Foreign Path: first
+               Offered Not Usable: counted(a)
+(8 rows)
+
+SELECT setval('source_calls', 1, false) IS NOT NULL AS reset;
+ reset 
+-------
+ t
+(1 row)
+
+SELECT count(*) FROM ft_t WHERE counted(a);
+ count 
+-------
+   500
+(1 row)
+
+SELECT nextval('source_calls') - 1 AS calls_foreign;
+ calls_foreign 
+---------------
+          1000
+(1 row)
+
+SELECT setval('source_calls', 1, false) IS NOT NULL AS reset;
+ reset 
+-------
+ t
+(1 row)
+
+SELECT count(*) FROM ht_t WHERE counted(a);
+ count 
+-------
+   500
+(1 row)
+
+SELECT nextval('source_calls') - 1 AS calls_heap;
+ calls_heap 
+------------
+       1000
+(1 row)
+
+SELECT explain_neutral('SELECT count(*) FROM ft_t WHERE a NOT IN (SELECT x FROM maybe_null)',
+    'VERBOSE, COSTS OFF');
+                        explain_neutral                        
+---------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Output: (count(*))
+   ->  Custom Scan (TessFilter) on public.ft_t
+         Filter: (NOT (ANY (ft_t.a = (hashed SubPlan).col1)))
+         ->  Custom Scan (TessTestSource) on public.ft_t
+               Output: ft_t.a
+               Foreign Path: first
+               Offered Not Usable: (NOT (ANY (a = $0)))
+         SubPlan
+           ->  Custom Scan (TessHeapScan) on public.maybe_null
+                 Output: maybe_null.x
+(11 rows)
+
+SELECT source_same('SELECT count(*) FROM ft_t WHERE a NOT IN (SELECT x FROM maybe_null)');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
+-- spec: source-scan/Answers that are not allowed
+-- An exact and a pruning answer for a clause not usable, a value none of
+-- the three, an exact and a pruning answer for a clause the path does
+-- not carry; under TessFilter, a plan with qualifiers and a plan
+-- without a clause it answered for. Beyond the scenario, an internal
+-- check: a clause handed to the filter that its path did not record.
+SELECT tessera_test_scan_sources(ARRAY['faulty']);
+ tessera_test_scan_sources 
+---------------------------
+ 
+(1 row)
+
+SELECT fault, source_error('EXPLAIN SELECT count(*) FROM ft_t WHERE counted(b) AND a > 10 AND b < 5')
+FROM unnest(ARRAY['unusable', 'unusable_prune', 'bad_value', 'not_carried',
+    'not_carried_prune', 'plan_qual', 'plan_missing', 'extra_clause']) AS fault,
+    LATERAL tessera_test_scan_source_fault(fault);
+       fault       |                                      source_error                                       
+-------------------+-----------------------------------------------------------------------------------------
+ unusable          | XX000: Tessera source "tessera_test.faulty" used a clause it may not use
+ unusable_prune    | XX000: Tessera source "tessera_test.faulty" used a clause it may not use
+ bad_value         | XX000: Tessera source "tessera_test.faulty" gave the answer 7 for a clause
+ not_carried       | XX000: Tessera source "tessera_test.faulty" did not carry a clause it answered for
+ not_carried_prune | XX000: Tessera source "tessera_test.faulty" did not carry a clause it answered for
+ plan_qual         | XX000: TessFilter found qualifiers on its source's plan
+ plan_missing      | XX000: TessFilter found a clause its source answered for missing from the source's plan
+ extra_clause      | XX000: TessFilter found a clause its path did not record
+(8 rows)
+
+SELECT tessera_test_scan_source_fault(NULL);
+ tessera_test_scan_source_fault 
+--------------------------------
+ 
+(1 row)
+
+-- spec: source-scan/The first source that reads the relation
+-- The first answers that it checks the clause and declines, the second
+-- reads the table and leaves the answers, the third, cheaper, is not
+-- asked.
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP exact);
+SELECT tessera_test_scan_sources(ARRAY['decliner', 'reader', 'cheaper']);
+ tessera_test_scan_sources 
+---------------------------
+ 
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT d FROM ft_t WHERE a > 900;
+                 QUERY PLAN                 
+--------------------------------------------
+ Custom Scan (TessFilter) on ft_t
+   Batch Filter: (a > 900)
+   ->  Custom Scan (TessTestSource) on ft_t
+         Foreign Path: first
+(4 rows)
+
+SELECT tessera_test_scan_source_calls();
+ tessera_test_scan_source_calls 
+--------------------------------
+ reader 1, decliner 1
+(1 row)
+
+SELECT source_same('SELECT d FROM ft_t WHERE a > 900');
+  source_same   
+----------------
+ same, 100 rows
+(1 row)
+
+-- spec: source-scan/A source not safe in parallel
+-- A table read by the wrapper's serial path alone, whose source's path
+-- may run in a worker, then is not parallel-safe: in a parallel join
+-- with a heap table the source's node and TessFilter over it run inside
+-- the workers, then neither does.
+SELECT tessera_test_scan_sources(ARRAY['reader']);
+ tessera_test_scan_sources 
+---------------------------
+ 
+(1 row)
+
+CREATE TABLE big_rows AS SELECT i AS y, i % 1000 AS a FROM generate_series(1, 200000) AS i;
+ANALYZE big_rows;
+SET parallel_setup_cost = 0;
+SET parallel_tuple_cost = 0;
+SET tessera.scan_parallel_setup_cost = 0;
+SET min_parallel_table_scan_size = 0;
+EXPLAIN (COSTS OFF)
+    SELECT count(*) FROM big_rows AS g JOIN ft_t AS f ON f.a = g.a WHERE f.b < 5;
+                                   QUERY PLAN                                    
+---------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHashJoin)
+                           Hash Cond: (g.a = f.a)
+                           ->  Parallel Custom Scan (TessHeapScan) on big_rows g
+                           ->  Custom Scan (TessFilter) on ft_t f
+                                 Batch Filter: (f.b < 5)
+                                 ->  Custom Scan (TessTestSource) on ft_t f
+                                       Foreign Path: first
+(14 rows)
+
+ALTER FOREIGN TABLE ft_t OPTIONS (ADD source_unsafe 'on');
+EXPLAIN (COSTS OFF)
+    SELECT count(*) FROM big_rows AS g JOIN ft_t AS f ON f.a = g.a WHERE f.b < 5;
+                                QUERY PLAN                                 
+---------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHashJoin)
+         Hash Cond: (g.a = f.a)
+         ->  Custom Scan (TessGather)
+               Workers Planned: 2
+               ->  Parallel Custom Scan (TessSend)
+                     ->  Parallel Custom Scan (TessHeapScan) on big_rows g
+         ->  Custom Scan (TessFilter) on ft_t f
+               Batch Filter: (f.b < 5)
+               ->  Custom Scan (TessTestSource) on ft_t f
+                     Foreign Path: first
+(11 rows)
+
+SELECT source_same('SELECT count(*) FROM big_rows AS g JOIN ft_t AS f ON f.a = g.a WHERE f.b < 5');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
+ALTER FOREIGN TABLE ft_t OPTIONS (DROP source_unsafe);
+RESET tessera.scan_parallel_setup_cost;
+RESET min_parallel_table_scan_size;
+-- spec: source-scan/Parallel rows through a source
+-- A clause checked exactly when the serial path is offered and left when
+-- the partial one is: TessGather over TessFilter over the source's
+-- partial node, with the partial path's rows, and the core's Gather
+-- there with tessera.batch_gather off.
+ALTER FOREIGN TABLE ft_par OPTIONS (ADD exact 'b', ADD partial_exact '', ADD source_rows '7');
+EXPLAIN (COSTS OFF) SELECT a, b FROM ft_par WHERE b < 5;
+                            QUERY PLAN                             
+-------------------------------------------------------------------
+ Custom Scan (TessGather)
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessFilter) on ft_par
+               Batch Filter: (b < 5)
+               ->  Parallel Custom Scan (TessTestSource) on ft_par
+                     Foreign Path: partial
+(7 rows)
+
+SELECT source_same('SELECT a, b FROM ft_par WHERE b < 5');
+   source_same   
+-----------------
+ same, 2500 rows
+(1 row)
+
+SELECT plan_rows('SELECT a, b FROM ft_par WHERE b < 5', 'TessFilter') AS filter_rows;
+ filter_rows 
+-------------
+         695
+(1 row)
+
+SET tessera.batch_gather = off;
+EXPLAIN (COSTS OFF) SELECT a, b FROM ft_par WHERE b < 5;
+                         QUERY PLAN                          
+-------------------------------------------------------------
+ Gather
+   Workers Planned: 2
+   ->  Parallel Custom Scan (TessFilter) on ft_par
+         Batch Filter: (b < 5)
+         ->  Parallel Custom Scan (TessTestSource) on ft_par
+               Foreign Path: partial
+(6 rows)
+
+SELECT source_same('SELECT a, b FROM ft_par WHERE b < 5');
+   source_same   
+-----------------
+ same, 2500 rows
+(1 row)
+
+RESET tessera.batch_gather;
+SET tessera.enable = off;
+SELECT plan_rows('SELECT a, b FROM ft_par WHERE b < 5', 'Foreign Scan') AS partial_rows;
+ partial_rows 
+--------------
+          695
+(1 row)
+
+RESET tessera.enable;
+ALTER FOREIGN TABLE ft_par OPTIONS (DROP source_rows);
+-- spec: source-scan/A parallel count
+-- A partial TessAgg over TessFilter over the source's partial node, then
+-- over the partial node alone, every clause checked by the source.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM ft_par WHERE b < 5;
+                                  QUERY PLAN                                   
+-------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessFilter) on ft_par
+                           Batch Filter: (b < 5)
+                           ->  Parallel Custom Scan (TessTestSource) on ft_par
+                                 Foreign Path: partial
+(11 rows)
+
+SELECT source_same('SELECT count(*) FROM ft_par WHERE b < 5');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
+ALTER FOREIGN TABLE ft_par OPTIONS (SET partial_exact 'b');
+EXPLAIN (COSTS OFF) SELECT count(*) FROM ft_par WHERE b < 5;
+                               QUERY PLAN                                
+-------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessTestSource) on ft_par
+                           Foreign Path: partial
+                           Source Exact: (b < 5)
+(10 rows)
+
+SELECT source_same('SELECT count(*) FROM ft_par WHERE b < 5');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
+-- spec: source-scan/A parallel read by a subquery's value
+-- A clause on an uncorrelated subquery's value, checked exactly by the
+-- partial node alone, then used to skip groups under TessFilter: every
+-- worker uses the value the gather sends.
+ALTER FOREIGN TABLE ft_par OPTIONS (DROP exact, SET partial_exact 'a');
+SELECT explain_neutral('SELECT a, b FROM ft_par WHERE a < (SELECT max(x) * 10 FROM outer_rows)');
+                       explain_neutral                       
+-------------------------------------------------------------
+ Custom Scan (TessGather)
+   Workers Planned: 2
+   InitPlan
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessHeapScan) on outer_rows
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessTestSource) on ft_par
+               Foreign Path: partial
+               Source Exact: (ft_par.a < (InitPlan).col1)
+(9 rows)
+
+SELECT source_same('SELECT a, b FROM ft_par WHERE a < (SELECT max(x) * 10 FROM outer_rows)');
+   source_same   
+-----------------
+ same, 1399 rows
+(1 row)
+
+SET tessera.batch_gather = off;
+SELECT source_same('SELECT a, b FROM ft_par WHERE a < (SELECT max(x) * 10 FROM outer_rows)');
+   source_same   
+-----------------
+ same, 1399 rows
+(1 row)
+
+RESET tessera.batch_gather;
+ALTER FOREIGN TABLE ft_par OPTIONS (DROP partial_exact, ADD prune 'a');
+SELECT explain_neutral('SELECT a, b FROM ft_par WHERE a < (SELECT max(x) * 10 FROM outer_rows)');
+                          explain_neutral                          
+-------------------------------------------------------------------
+ Custom Scan (TessGather)
+   Workers Planned: 2
+   InitPlan
+     ->  Custom Scan (TessAgg)
+           ->  Custom Scan (TessHeapScan) on outer_rows
+   ->  Parallel Custom Scan (TessSend)
+         ->  Parallel Custom Scan (TessFilter) on ft_par
+               Batch Filter: (ft_par.a < (InitPlan).col1)
+               ->  Parallel Custom Scan (TessTestSource) on ft_par
+                     Foreign Path: partial
+                     Source Prune: (ft_par.a < (InitPlan).col1)
+(11 rows)
+
+SELECT source_same('SELECT a, b FROM ft_par WHERE a < (SELECT max(x) * 10 FROM outer_rows)');
+   source_same   
+-----------------
+ same, 1399 rows
+(1 row)
+
+SET tessera.batch_gather = off;
+SELECT source_same('SELECT a, b FROM ft_par WHERE a < (SELECT max(x) * 10 FROM outer_rows)');
+   source_same   
+-----------------
+ same, 1399 rows
+(1 row)
+
+RESET tessera.batch_gather;
+ALTER FOREIGN TABLE ft_par OPTIONS (DROP prune);
+RESET parallel_setup_cost;
+RESET parallel_tuple_cost;
+SELECT tessera_test_scan_sources(ARRAY[]::text[]);
+ tessera_test_scan_sources 
+---------------------------
+ 
+(1 row)
+
+DROP VIEW ft_barrier, ht_barrier;
+DROP TABLE ft_parted, ht_parted, maybe_null, big_rows;
+DROP ROLE regress_source_rls;
+DROP FUNCTION counted(int), leaky(int), peek(int), noisy_max(), plan_rows(text, text);
+DROP SEQUENCE source_calls;
 DROP FUNCTION source_error(text);
 DROP TABLE ht_t, ht_two, ht_sorted, ht_join, outer_rows, ht_par, ht_unaware;
 DROP FOREIGN TABLE ft_t, ft_two, ft_sorted, ft_join, ft_par, ft_unaware;

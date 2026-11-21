@@ -89,7 +89,7 @@ injection points.
       cases "Batch parents over a source", "A source read again", "A
       parallel grouping", "The path offered", "A path refused" and "No
       source reads the relation" of `source_scan.sql`
-- [ ] 4.2 `TessFilter` over a source's path, serial and partial, with
+- [x] 4.2 `TessFilter` over a source's path, serial and partial, with
       the clauses the source does not check exactly; the source's path
       alone when it checks them all; the filter's path records the
       clauses it keeps and its plan keeps only those. Check: the suites;
