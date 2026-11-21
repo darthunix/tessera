@@ -97,6 +97,17 @@ impl MappedColumn {
         self.nullable
     }
 
+    /// The bytes of the column's chunks in the file, as stored,
+    /// compressed: what a scan of the column reads.
+    pub fn chunk_bytes(&self) -> u64 {
+        self.view
+            .metadata()
+            .row_groups()
+            .iter()
+            .map(|group| u64::try_from(group.column(0).compressed_size()).unwrap_or(0))
+            .sum()
+    }
+
     /// The read plan of the column's values, as the reader gives them in a
     /// plain array.
     pub fn plan(&self) -> &ReadPlan {

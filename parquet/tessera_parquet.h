@@ -11,6 +11,7 @@
 
 #include "postgres.h"
 
+#include "foreign/fdwapi.h"
 #include "nodes/pg_list.h"
 #include "utils/palloc.h"
 
@@ -36,6 +37,18 @@ typedef struct ParquetFileEntry
 	size_t		groups;
 	uint64		rows;
 } ParquetFileEntry;
+
+/* What planning finds of a table's files, beside their rows. */
+typedef struct ParquetFound
+{
+	uint64		groups;			/* the groups of rows */
+	double		file_bytes;		/* the bytes of the files */
+	double		column_bytes;	/* the bytes of the chunks of the columns read */
+} ParquetFound;
+
+/* The share of a row's cost that the source's batches cost, of what the
+ * wrapper's rows cost over the same columns. */
+#define PARQUET_BATCH_SHARE 0.25
 
 /* The counters of a scan that EXPLAIN sums over the participants. */
 #define PARQUET_GROUPS_READ 0
@@ -71,6 +84,7 @@ typedef struct ParquetScan
 	size_t		group;			/* the group read */
 	uint64	   *first_group;	/* of each file, its first group in the list */
 	struct ParquetShared *shared;	/* a parallel scan's list, or NULL */
+	uint64	   *selection;		/* the group's rows to read, or NULL for all */
 	struct TessSharedStats *stats;	/* the participants' counters */
 	/* This participant's, over every rescan, and in the leader the
 	 * workers' of the scans before the last of a rescanned plan. */
@@ -95,7 +109,7 @@ extern TessParquetColumn *parquet_map_column(ParquetFileEntry *entry,
 											 const ParquetColumn *column);
 extern double parquet_check_files(List *paths, Oid relid, List *attnums,
 								  TessParquetIdentity *identities, size_t *groups,
-								  uint64 **group_rows, uint64 *total_groups);
+								  uint64 **group_rows, ParquetFound *found);
 
 /* fdw.c */
 struct PlannerInfo;
@@ -107,6 +121,13 @@ extern List *parquet_strings(List *nodes);
 struct ExplainState;
 extern void parquet_explain_files(List *planned, const ParquetScan *scan,
 								  struct ExplainState *es);
+struct Path;
+extern void parquet_source_costs(const struct Path *offered, double *rows, Cost *startup,
+								 Cost *total);
+
+/* analyze.c */
+extern bool parquet_analyze(Relation relation, AcquireSampleRowsFunc *func,
+							BlockNumber *totalpages);
 
 /* node.c */
 extern void parquet_register(void);

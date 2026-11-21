@@ -652,6 +652,178 @@ SELECT explain_lines('VERBOSE', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Ro
 SELECT explain_lines('ANALYZE', 'SELECT a FROM t_files',
                      'Scan|Parquet|Row Groups|Values Decoded');
 
+-- spec: parquet-fdw/Rows from the files
+-- Three files of four groups of 1000 rows each, every group of a value
+-- of g of its own, v of a value a row, planned before ANALYZE and after
+-- it: the scan's rows are the files' before; after it, pg_stats holds
+-- both columns, the sample taken across the groups, every group's value
+-- among g's common values, and a clause on g plans the rows of its group;
+-- a file added after ANALYZE counts in the table's rows and in the
+-- distinct values of v.
+SELECT parquet_test_write(:'dir' || format('/groups/g%s.parquet', f), json_build_object(
+    'group_rows', 1000, 'columns', json_build_array(
+      json_build_object('name', 'g', 'type', 'int32', 'values',
+        (SELECT json_agg(f * 10 + n / 1000 ORDER BY n) FROM generate_series(0, 3999) n)),
+      json_build_object('name', 'v', 'type', 'int64', 'values',
+        (SELECT json_agg((f - 1) * 4000 + n ORDER BY n) FROM generate_series(0, 3999) n))))::text)
+FROM generate_series(1, 3) f;
+\set groups :dir '/groups/g*.parquet'
+CREATE FOREIGN TABLE t_groups (g int, v bigint) SERVER pq OPTIONS (files :'groups');
+ALTER FOREIGN TABLE t_groups ALTER COLUMN g SET STATISTICS 20, ALTER COLUMN v SET STATISTICS 20;
+-- The rows and the total cost the planner gives a statement.
+CREATE FUNCTION plan_of(statement text, out rows numeric, out cost numeric)
+LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || statement INTO plan;
+    rows := (plan -> 0 -> 'Plan' ->> 'Plan Rows')::numeric;
+    cost := (plan -> 0 -> 'Plan' ->> 'Total Cost')::numeric;
+END $$;
+SELECT (plan_of('SELECT * FROM t_groups')).rows AS files_rows,
+       (plan_of('SELECT * FROM t_groups WHERE g = 21')).rows AS one_group_before;
+ANALYZE t_groups;
+SELECT attname, most_common_vals IS NOT NULL AS common_values,
+       histogram_bounds IS NOT NULL AS histogram
+FROM pg_stats WHERE tablename = 't_groups' ORDER BY attname;
+SELECT (SELECT most_common_vals::text::int[] FROM pg_stats
+        WHERE tablename = 't_groups' AND attname = 'g') @>
+       (SELECT array_agg(DISTINCT g) FROM t_groups) AS every_group_common;
+-- The sample is at random: the rows a clause plans are near those of its
+-- groups, within six standard deviations of the sample.
+SELECT (plan_of('SELECT * FROM t_groups WHERE g = 21')).rows BETWEEN 800 AND 1200
+           AS one_group_after,
+       (plan_of('SELECT * FROM t_groups WHERE g < 20')).rows BETWEEN 3600 AND 4400 AS four_groups,
+       (plan_of('SELECT v, count(*) FROM t_groups GROUP BY v')).rows AS distinct_v;
+SELECT parquet_test_write(:'dir' || '/groups/g4.parquet', json_build_object(
+    'group_rows', 1000, 'columns', json_build_array(
+      json_build_object('name', 'g', 'type', 'int32', 'values',
+        (SELECT json_agg(40 + n / 1000 ORDER BY n) FROM generate_series(0, 3999) n)),
+      json_build_object('name', 'v', 'type', 'int64', 'values',
+        (SELECT json_agg(12000 + n ORDER BY n) FROM generate_series(0, 3999) n))))::text);
+-- A clause on v plans by the distinct values of the files' rows now,
+-- 16 000, not those of the last ANALYZE: three values, three rows.
+SELECT (plan_of('SELECT * FROM t_groups')).rows AS files_rows,
+       (plan_of('SELECT v, count(*) FROM t_groups GROUP BY v')).rows AS distinct_v,
+       (plan_of('SELECT * FROM t_groups WHERE v IN (1, 2, 3)')).rows AS three_values;
+SELECT parquet_test_remove(:'dir' || '/groups/g4.parquet');
+
+-- ANALYZE of a table of one group of 2500 rows, three windows, the last
+-- short, with text holding NULL values and a column dropped, fewer rows
+-- than the sample: every row sampled, and the statistics of the columns
+-- equal those of a heap table of the same rows.
+SELECT parquet_test_write(:'dir' || '/analyzed.parquet', json_build_object(
+    'columns', json_build_array(
+      json_build_object('name', 'i', 'type', 'int32', 'range', 2500),
+      json_build_object('name', 'gone', 'type', 'int32', 'range', 2500),
+      json_build_object('name', 's', 'type', 'bytes', 'values',
+        (SELECT json_agg(CASE WHEN n % 11 = 0 THEN NULL ELSE 'v' || (n % 37) END ORDER BY n)
+         FROM generate_series(0, 2499) n)),
+      json_build_object('name', 'b', 'type', 'int64', 'values',
+        (SELECT json_agg(n * 3 ORDER BY n) FROM generate_series(0, 2499) n))))::text);
+\set analyzed :dir '/analyzed.parquet'
+CREATE FOREIGN TABLE t_analyzed (i int, gone int, s text, b bigint)
+    SERVER pq OPTIONS (files :'analyzed');
+ALTER FOREIGN TABLE t_analyzed DROP COLUMN gone;
+CREATE TABLE h_analyzed AS
+SELECT n AS i, CASE WHEN n % 11 = 0 THEN NULL ELSE 'v' || (n % 37) END AS s, n * 3::bigint AS b
+FROM generate_series(0, 2499) n;
+ANALYZE t_analyzed;
+ANALYZE h_analyzed;
+SELECT reltuples FROM pg_class WHERE relname = 't_analyzed';
+SELECT count(*) AS stats_differ FROM (
+    (SELECT attname, null_frac, n_distinct, most_common_vals::text, most_common_freqs::text,
+            histogram_bounds::text FROM pg_stats WHERE tablename = 't_analyzed'
+     EXCEPT
+     SELECT attname, null_frac, n_distinct, most_common_vals::text, most_common_freqs::text,
+            histogram_bounds::text FROM pg_stats WHERE tablename = 'h_analyzed')
+    UNION ALL
+    (SELECT attname, null_frac, n_distinct, most_common_vals::text, most_common_freqs::text,
+            histogram_bounds::text FROM pg_stats WHERE tablename = 'h_analyzed'
+     EXCEPT
+     SELECT attname, null_frac, n_distinct, most_common_vals::text, most_common_freqs::text,
+            histogram_bounds::text FROM pg_stats WHERE tablename = 't_analyzed')) d;
+SELECT attname FROM pg_stats WHERE tablename = 't_analyzed' ORDER BY attname;
+-- A group of 200 000 rows sampled for 300, many of its windows holding
+-- no row of the sample; a table of 301 rows sampled for 300, which leaves
+-- out one row; and 600 groups of 100 rows whose values alternate
+-- between 0 and 1 a group: both values in the sample, which is taken
+-- over every row, not a share a group.
+SELECT parquet_test_write(:'dir' || '/sparse.parquet',
+    '{"columns": [{"name": "i", "type": "int64", "range": 200000}]}');
+SELECT parquet_test_write(:'dir' || '/one_more.parquet',
+    '{"columns": [{"name": "i", "type": "int64", "range": 301}]}');
+SELECT parquet_test_write(:'dir' || '/alternating.parquet', json_build_object(
+    'group_rows', 100, 'columns', json_build_array(
+      json_build_object('name', 'a', 'type', 'int32', 'values',
+        (SELECT json_agg((n / 100) % 2 ORDER BY n) FROM generate_series(0, 59999) n))))::text);
+\set sparse :dir '/sparse.parquet'
+\set alternating :dir '/alternating.parquet'
+\set one_more :dir '/one_more.parquet'
+CREATE FOREIGN TABLE t_sparse (i bigint) SERVER pq OPTIONS (files :'sparse');
+CREATE FOREIGN TABLE t_one_more (i bigint) SERVER pq OPTIONS (files :'one_more');
+ALTER FOREIGN TABLE t_one_more ALTER COLUMN i SET STATISTICS 1;
+ANALYZE t_one_more;
+CREATE FOREIGN TABLE t_alternating (a int) SERVER pq OPTIONS (files :'alternating');
+ALTER FOREIGN TABLE t_sparse ALTER COLUMN i SET STATISTICS 1;
+ALTER FOREIGN TABLE t_alternating ALTER COLUMN a SET STATISTICS 1;
+ANALYZE t_sparse;
+ANALYZE t_alternating;
+SELECT relname, reltuples FROM pg_class
+WHERE relname IN ('t_sparse', 't_alternating', 't_one_more') ORDER BY 1;
+SELECT tablename, attname, null_frac, n_distinct FROM pg_stats
+WHERE tablename IN ('t_sparse', 't_one_more') ORDER BY 1;
+-- The sample of 300 of the 301 rows leaves one out: its least and
+-- greatest values, the histogram's two bounds, span the rows.
+SELECT (histogram_bounds::text::int[])[1] <= 1 AND (histogram_bounds::text::int[])[2] >= 299
+       AS spans_the_rows
+FROM pg_stats WHERE tablename = 't_one_more';
+SELECT n_distinct AS both_values FROM pg_stats WHERE tablename = 't_alternating';
+
+-- spec: parquet-fdw/The source chosen
+-- A query the scan planner offers the sources, with Tessera on: its plan
+-- reads the table through the source's node, which costs less than the
+-- wrapper's rows over the same columns; a clause, which the source does
+-- not check yet, is TessFilter's above it.
+SELECT scans_of('SELECT g, v FROM t_groups') AS read,
+       scans_of('SELECT g, sum(v) FROM t_groups GROUP BY g') AS grouped,
+       scans_of('SELECT count(*) FROM t_groups') AS counted,
+       scans_of('SELECT g FROM t_groups WHERE v < 10') AS filtered;
+SET tessera.enable = off;
+SELECT (plan_of('SELECT g, v FROM t_groups')).cost AS wrapper_cost \gset
+RESET tessera.enable;
+SELECT (plan_of('SELECT g, v FROM t_groups')).cost < :wrapper_cost AS source_cheaper;
+-- The paths cost the chunks of the columns they read, as the footers
+-- give their bytes: a query that reads no column costs no page, a row
+-- the core's cost of a tuple; and a column of long strings costs more
+-- pages than one of an integer, through either path.
+CREATE FUNCTION scan_cost(statement text, node text) RETURNS numeric LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE 'EXPLAIN (FORMAT JSON) ' || statement INTO plan;
+    RETURN (jsonb_path_query_first(plan,
+        '$.** ? (@."Node Type" == $n || @."Custom Plan Provider" == $n)."Total Cost"',
+        jsonb_build_object('n', node)))::numeric;
+END $$;
+SELECT parquet_test_write(:'dir' || '/widths.parquet', json_build_object(
+    'columns', json_build_array(
+      json_build_object('name', 'small', 'type', 'int32', 'values',
+        (SELECT json_agg(1) FROM generate_series(1, 2000))),
+      json_build_object('name', 'big', 'type', 'bytes', 'values',
+        (SELECT json_agg(md5(n || 'a') || md5(n || 'b') || md5(n || 'c') || md5(n || 'd') ORDER BY n)
+         FROM generate_series(1, 2000) n))))::text);
+\set widths :dir '/widths.parquet'
+CREATE FOREIGN TABLE t_widths (small int, big text) SERVER pq OPTIONS (files :'widths');
+SET tessera.enable = off;
+SELECT scan_cost('SELECT count(*) FROM t_widths', 'Foreign Scan') =
+       2000 * current_setting('cpu_tuple_cost')::numeric AS no_page_for_a_count,
+       scan_cost('SELECT big FROM t_widths', 'Foreign Scan') -
+       scan_cost('SELECT small FROM t_widths', 'Foreign Scan') > 10 AS big_pages_wrapper;
+RESET tessera.enable;
+SELECT scan_cost('SELECT big FROM t_widths', 'TessParquetScan') -
+       scan_cost('SELECT small FROM t_widths', 'TessParquetScan') > 10 AS big_pages_source;
+
 -- spec: parquet-fdw/One file in parallel
 -- A table of one file of eight groups read by a parallel plan, with
 -- Tessera off and on: in full, under a count, under a grouping, and as
@@ -861,14 +1033,15 @@ SELECT i FROM t_damaged;
 DROP FOREIGN TABLE t_files, t_owned, t_plain, t_none, t_gzip, t_types, t_drop, t_clickbench,
     t_mappings, t_check_plain, t_check_dict, t_trust, t_bytes, t_vc_three, t_vc_four, t_vc_trust,
     t_rep, t_cur, t_two, t_cut, t_damaged, t_far, t_windows, t_empty, t_wide, t_asks,
-    t_damaged_pages, t_eight;
-DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks;
+    t_damaged_pages, t_eight, t_groups, t_analyzed, t_sparse, t_alternating, t_widths,
+    t_one_more;
+DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks, h_analyzed;
 DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, bool, bool, int),
     parquet_test_head_dictionaries(text), parquet_test_replace(text, text, text),
     parquet_test_remove(text), parquet_test_cut(text, int), parquet_test_damage(text, int, int),
     sqlstate_of(text), differ(text, text), differ_off(text), scans_of(text),
     explain_lines(text, text, text), parquet_test_asks(text, int, int), differ_serial(text),
-    parallel_lines(text, text), workers_launched(text);
+    parallel_lines(text, text), workers_launched(text), plan_of(text), scan_cost(text, text);
 DROP SERVER pq;
 REVOKE CREATE ON SCHEMA public FROM parquet_reader, parquet_other;
 DROP ROLE parquet_reader, parquet_other;
