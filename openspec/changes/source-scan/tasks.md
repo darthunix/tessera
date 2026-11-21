@@ -102,7 +102,7 @@ injection points.
       answers not allowed, of a source not safe in parallel, of the
       first source that reads the relation, and of parallel rows, a
       parallel count and a parallel read by a subquery's value
-- [ ] 4.3 The costs of a source's paths: the source's own cost, and the
+- [x] 4.3 The costs of a source's paths: the source's own cost, and the
       rows of the path offered, for the path alone and for `TessFilter`
       over it; under `TessFilter` the start cost of the clauses left and
       their cost for each row the source returns;
