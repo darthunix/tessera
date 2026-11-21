@@ -110,6 +110,8 @@ These have no place in the queue. The maintainer places an entry when it
 is wanted; several wait for a measured case. `greengage-port` and
 `tpch-on-greengage` came down here from "Later" on 2026-10-05.
 
+- `projection-whole-row`: a whole row and `tableoid` computed by the
+  runtime's projection, so that a batch node serves them
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
   maintainer took it out of `spill-crate` on 2026-11-14
@@ -945,6 +947,30 @@ Spill of sum states instead of rows. From plan 4.23 item 4б, lines 1574,
   `tpch-indexed-schema`, `tpch-sf10`) for the measurement.
 - **Capabilities:** aggregate, spill-format, hash-table
 - **Size:** the log does not say.
+
+### projection-whole-row
+
+A whole row and a system column in the targets of a batch node. From
+the review of the change `parquet-fdw`, task 4.1, and the maintainer's
+decision there.
+
+- **What:** The runtime's projection computes a target that reads a
+  whole row of the scan's relation, the relation as one value of its row
+  type (`SELECT t FROM t`, `row_to_json(t)`, `t IS NOT NULL`, `f(t)`), by
+  filling every column of the scan tuple for the rows asked, and a
+  target that reads `tableoid`, from the batch's table. The heap scan
+  node and the Parquet source then serve such queries instead of leaving
+  them to the core's scan and the wrapper's.
+- **Why:** Such a query reads its table row by row today, outside the
+  batch nodes, with Tessera on.
+- **Known:** The projection resolves a Var of an attribute above zero
+  alone and raises `XX000` for another at the node's begin; the heap scan
+  node and the Parquet source decline such a relation for that reason.
+  No query of TPC-H or ClickBench reads one.
+- **Depends on:** nothing.
+- **Capabilities:** source-scan, parquet-fdw, the runtime's projection
+- **Size:** small: the projection's two kinds of target and the two
+  declines lifted, with tests.
 
 ### spill-rows-writer
 
