@@ -35,7 +35,7 @@ starts. Each commit passes `make rust-check`,
 - [x] 2.3 Write plans and the conversions of values written, with the
       property test of the round trip and the test against Arrow's own
       arrays through `arrow-array`. Check: `make rust-check`
-- [ ] 2.4 The bounds of a comparison in a file's unit, with the property
+- [x] 2.4 The bounds of a comparison in a file's unit, with the property
       test against an exact count in 128 bits of each stored value,
       those the conversion refuses as out of range among them. Check:
       `make rust-check`

@@ -379,6 +379,22 @@ impl ReadPlan {
         self.failures
     }
 
+    /// How the plan's stored integers count in PostgreSQL's terms: an
+    /// integer as itself, days and times shifted and scaled; `None` for a
+    /// plan of other values.
+    pub(crate) const fn stored_count(&self) -> Option<Count> {
+        match self.conv {
+            Conv::Int => Some(Count {
+                scale: 1,
+                shift: 0,
+                low: i64::MIN,
+                high: i64::MAX,
+            }),
+            Conv::Count(count) => Some(count),
+            _ => None,
+        }
+    }
+
     /// The plan's Arrow type.
     pub const fn arrow_type(&self) -> ArrowType {
         self.arrow

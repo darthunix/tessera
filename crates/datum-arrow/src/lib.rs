@@ -17,6 +17,7 @@
 pub use arrow_schema;
 
 mod arrow;
+mod bounds;
 mod calendar;
 mod column;
 mod error;
@@ -26,6 +27,7 @@ mod read;
 mod write;
 
 pub use arrow::{ArrowType, Key, Plain, TimeUnit};
+pub use bounds::{Comparison, RangeAnswer, Test};
 pub use column::{Bitmap, Column, Input, Keys, Values, mask_words};
 pub use error::{Error, ErrorKind, Result};
 pub use failures::Failures;
