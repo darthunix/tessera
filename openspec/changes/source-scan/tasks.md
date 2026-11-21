@@ -38,7 +38,7 @@ injection points.
 
 ## 3. The test source
 
-- [ ] 3.1 A test module, `test/tessera_scan_source_test.c`: a foreign
+- [x] 3.1 A test module, `test/tessera_scan_source_test.c`: a foreign
       data wrapper whose table generates its rows from its options, and
       a batch node that the source returns, built with the runtime's
       batch builder, serial and parallel, that serves rows too. The
