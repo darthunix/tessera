@@ -38,7 +38,7 @@ maintainer to say that the machine is idle.
 
 ## 3. The wrapper
 
-- [ ] 3.1 The extension `tessera_parquet` in `parquet/`: the wrapper,
+- [x] 3.1 The extension `tessera_parquet` in `parquet/`: the wrapper,
       its handler and validator, the options and their privileges, the
       files and patterns, the footers kept by path, size, time, device
       and inode, the mapping of columns checked at planning and when a

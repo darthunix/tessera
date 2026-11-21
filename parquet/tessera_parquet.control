@@ -1,0 +1,5 @@
+comment = 'Parquet files read in place, for Tessera'
+default_version = '0.1'
+module_pathname = '$libdir/tessera_parquet'
+relocatable = true
+requires = 'tessera'
