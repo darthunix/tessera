@@ -136,6 +136,41 @@ pub datum_arrow::Values::LargeBytes::offsets: &'a [i64]
 pub datum_arrow::Values::UInt16(&'a [u16])
 pub datum_arrow::Values::UInt32(&'a [u32])
 pub datum_arrow::Values::UInt8(&'a [u8])
+pub enum datum_arrow::WriteInput<'a>
+pub datum_arrow::WriteInput::Bytes
+pub datum_arrow::WriteInput::Bytes::len: usize
+pub datum_arrow::WriteInput::Bytes::nulls: &'a [u64]
+pub datum_arrow::WriteInput::Bytes::values: &'a [&'a [u8]]
+pub datum_arrow::WriteInput::Datums
+pub datum_arrow::WriteInput::Datums::len: usize
+pub datum_arrow::WriteInput::Datums::nulls: &'a [u64]
+pub datum_arrow::WriteInput::Datums::values: &'a [u64]
+impl datum_arrow::WriteInput<'_>
+pub const fn datum_arrow::WriteInput<'_>::is_empty(&self) -> bool
+pub const fn datum_arrow::WriteInput<'_>::len(&self) -> usize
+pub enum datum_arrow::WriteOutput<'o>
+pub datum_arrow::WriteOutput::Boolean
+pub datum_arrow::WriteOutput::Boolean::validity: &'o mut [u8]
+pub datum_arrow::WriteOutput::Boolean::values: &'o mut [u8]
+pub datum_arrow::WriteOutput::Bytes
+pub datum_arrow::WriteOutput::Bytes::data: &'o mut [u8]
+pub datum_arrow::WriteOutput::Bytes::offsets: &'o mut [i32]
+pub datum_arrow::WriteOutput::Bytes::validity: &'o mut [u8]
+pub datum_arrow::WriteOutput::Float32
+pub datum_arrow::WriteOutput::Float32::validity: &'o mut [u8]
+pub datum_arrow::WriteOutput::Float32::values: &'o mut [f32]
+pub datum_arrow::WriteOutput::Float64
+pub datum_arrow::WriteOutput::Float64::validity: &'o mut [u8]
+pub datum_arrow::WriteOutput::Float64::values: &'o mut [f64]
+pub datum_arrow::WriteOutput::Int16
+pub datum_arrow::WriteOutput::Int16::validity: &'o mut [u8]
+pub datum_arrow::WriteOutput::Int16::values: &'o mut [i16]
+pub datum_arrow::WriteOutput::Int32
+pub datum_arrow::WriteOutput::Int32::validity: &'o mut [u8]
+pub datum_arrow::WriteOutput::Int32::values: &'o mut [i32]
+pub datum_arrow::WriteOutput::Int64
+pub datum_arrow::WriteOutput::Int64::validity: &'o mut [u8]
+pub datum_arrow::WriteOutput::Int64::values: &'o mut [i64]
 pub struct datum_arrow::Bitmap<'a>
 pub datum_arrow::Bitmap::bytes: &'a [u8]
 pub datum_arrow::Bitmap::offset: usize
@@ -187,8 +222,19 @@ pub struct datum_arrow::VarcharLength(_)
 impl datum_arrow::VarcharLength
 pub const fn datum_arrow::VarcharLength::get(self) -> u32
 pub fn datum_arrow::VarcharLength::new(characters: u32) -> datum_arrow::Result<Self>
+pub struct datum_arrow::WritePlan
+impl datum_arrow::WritePlan
+pub fn datum_arrow::WritePlan::data_type(&self) -> arrow_schema::datatype::DataType
+pub const fn datum_arrow::WritePlan::failures(&self) -> datum_arrow::Failures
+pub fn datum_arrow::WritePlan::new(pg: datum_arrow::PgType, server_utf8: bool) -> datum_arrow::Result<Self>
+pub const fn datum_arrow::WritePlan::pg_type(&self) -> datum_arrow::PgType
+pub fn datum_arrow::WritePlan::write(&self, input: &datum_arrow::WriteInput<'_>, asked: &[u64], output: &mut datum_arrow::WriteOutput<'_>) -> datum_arrow::Result<datum_arrow::Written>
+pub struct datum_arrow::Written
+pub datum_arrow::Written::bytes: usize
+pub datum_arrow::Written::len: usize
 pub const datum_arrow::MAX_VALUE_BYTES: usize
 pub const datum_arrow::MAX_VARCHAR_LENGTH: u32
+pub const datum_arrow::MAX_WRITE_BYTES: usize
 pub const datum_arrow::VARHDRSZ: i32
 pub const fn datum_arrow::mask_words(len: usize) -> usize
 pub type datum_arrow::Result<T, E> = core::result::Result<T, E>

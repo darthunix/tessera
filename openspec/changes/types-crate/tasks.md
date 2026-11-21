@@ -32,7 +32,7 @@ starts. Each commit passes `make rust-check`,
       code read on AArch64 and x86-64. Check: `make rust-check`; `cargo
       rustc --release -p datum-arrow --lib -- --emit asm` on both
       targets, its loops kept in the pull request's Performance item
-- [ ] 2.3 Write plans and the conversions of values written, with the
+- [x] 2.3 Write plans and the conversions of values written, with the
       property test of the round trip and the test against Arrow's own
       arrays through `arrow-array`. Check: `make rust-check`
 - [ ] 2.4 The bounds of a comparison in a file's unit, with the property
