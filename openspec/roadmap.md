@@ -44,30 +44,34 @@ entries out of turn on 2026-11-03, after an analysis of TPC-H with
 with the foreign keys of the schema left undeclared for now; the same
 day he moved `agg-dependent-columns` between `agg-table-presize` and
 `tpch-q9-plan`, and on 2026-11-04 widened `lookup-outer-compaction`
-into `gather-sparse-batches`:
+into `gather-sparse-batches`. On 2026-11-21 he took the boundary of
+types between PostgreSQL and Arrow, `types-crate`, as a crate of its
+own, before `parquet-fdw`:
 
-1. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `types-crate`: The boundary of types between PostgreSQL and Arrow,
+   as a crate of its own
+2. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-2. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-3. `explain-rows-per-loop`: The rows a node removed, per loop as the
+4. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-4. `join-pruning-cost`: The cost of a pruning join over the partitions
+5. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-6. `linux-x86-support`: Linux on x86-64 checked as the target platform
-7. `oltp-guard-bench`: OLTP guard family of benchmarks
-8. `runs-left-from-section-9`: Runs left to the maintainer from
+7. `linux-x86-support`: Linux on x86-64 checked as the target platform
+8. `oltp-guard-bench`: OLTP guard family of benchmarks
+9. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-12. `tpch-sf10`: TPC-H step 10: SF10
-13. `backward-scan-mark-restore`: Backward scan and mark/restore
-14. `pg-duckdb-comparison`: Comparison with pg_duckdb
+13. `tpch-sf10`: TPC-H step 10: SF10
+14. `backward-scan-mark-restore`: Backward scan and mark/restore
+15. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -182,6 +186,30 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
+
+### types-crate
+
+The boundary of types between PostgreSQL and Arrow, as a crate of its
+own, `datum-arrow`. Taken by the maintainer on 2026-11-21, before
+`parquet-fdw`; it is the change `types-crate`.
+
+- **What:** A Rust crate, free of Tessera and of PostgreSQL's code,
+  meant for use outside Tessera: which PostgreSQL type an Arrow column
+  may become and the reverse, a plan of each column's conversion
+  checked once before any value, the conversions of values both ways on
+  PostgreSQL's binary representations, and the bounds of a comparison
+  in a file's own unit.
+- **Why:** The Parquet wrapper reads Arrow's types into PostgreSQL's,
+  and a `COPY` into Parquet files would write the reverse; the epochs,
+  units, ranges, infinities and rules of text differ, and each one
+  missed loses data or lets an invalid value in.
+- **Known:** The maintainer's answers of 2026-11-21: a change of its
+  own, first; Arrow's types rather than Parquet's schema; free of
+  Tessera, `publish = true`, as `relhash` and `relspill`; the name
+  `datum-arrow`.
+- **Depends on:** nothing.
+- **Capabilities:** datum-arrow
+- **Size:** medium: one pull request.
 
 ### agg-dependent-columns
 
@@ -1139,8 +1167,10 @@ review of pull request 45, 2026-10-05.
   The plan gave the Arrow FDW one line and no reason.
 - **Known:** The plan's item was to be done without nanoarrow as a Git
   submodule; pg_batch's dirty nanoarrow submodule is not carried over
-  (line 7478). Nothing is decided about what reads the Parquet files.
-- **Depends on:** `compressed-table-source` (the source contract).
+  (line 7478). The change `types-crate` takes the `parquet` crate of
+  Apache Arrow's Rust implementation as the likely reader.
+- **Depends on:** `compressed-table-source` (the source contract),
+  `types-crate`.
 - **Capabilities:** batch-format, bridge-api
 - **Size:** the log does not say.
 
