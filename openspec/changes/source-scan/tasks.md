@@ -67,7 +67,7 @@ injection points.
       the result. The rows mode only is used in this commit. Check:
       `make -C test`, and the cases of the wrapper's rows with Tessera
       off in a new suite `test/sql/source_scan.sql`
-- [ ] 3.2 The installed set builds the test source from copies against
+- [x] 3.2 The installed set builds the test source from copies against
       the installed headers and runtime library, as it builds
       `TessLimit`'s sources. Check: `make installcheck` in
       `test/installed`
