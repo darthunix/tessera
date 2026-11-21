@@ -240,6 +240,7 @@ test_package = [
     "tessera-kernels",
     "tessera-capi",
     "relspill",
+    "datum-arrow",
 ]
 
 # Cargo.toml's profile of the tests without debug information: a mutant's

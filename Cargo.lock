@@ -72,6 +72,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arrow-schema"
+version = "58.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd1edbca9214bc91c150c064aeb19f1600f807bdf6a1f90202fc8ef2bff452a5"
+
+[[package]]
 name = "async-trait"
 version = "0.1.92"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -311,6 +317,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
 dependencies = [
  "cmov",
+]
+
+[[package]]
+name = "datum-arrow"
+version = "0.1.0"
+dependencies = [
+ "arrow-schema",
 ]
 
 [[package]]

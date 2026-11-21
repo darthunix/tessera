@@ -152,6 +152,51 @@ jobs:
           cargo +"$API_TOOLCHAIN" public-api -p relspill -sss > target/relspill-public-api.txt
           diff -u openspec/specs/relspill/public-api.txt target/relspill-public-api.txt
 
+  # The crate datum-arrow alone, as for relhash and relspill: its tests
+  # as the only package, its documentation with every warning an error
+  # and its examples, a dry run of its publishing, the tests of the packed
+  # crate, built from its files and Apache Arrow's crates alone, and its
+  # public API against the snapshot beside its change. It is not
+  # published.
+  datum-arrow:
+    name: datum-arrow alone (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    env:
+      API_TOOLCHAIN: nightly-2026-09-11
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: datum-arrow
+      - name: The crate's tests alone
+        run: cargo test --locked -p datum-arrow
+      - name: The documentation, every warning an error
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --locked -p datum-arrow --no-deps
+      - name: The examples of the documentation
+        run: cargo test --locked -p datum-arrow --doc
+      - name: A dry run of publishing, from the packed files
+        run: cargo publish --dry-run --locked -p datum-arrow
+      - name: The tests of the packed crate
+        run: |
+          cargo package --locked --no-verify -p datum-arrow
+          mkdir -p target/packed
+          tar -xzf target/package/datum-arrow-*.crate -C target/packed
+          cd target/packed/datum-arrow-*/
+          printf '\n[workspace]\n' >> Cargo.toml
+          cp ../../../Cargo.lock .
+          cargo test
+      - name: The nightly of the public API's listing
+        run: rustup toolchain install "$API_TOOLCHAIN" --profile minimal
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-public-api@0.51.0
+      - name: The public API against its snapshot
+        run: |
+          cargo +"$API_TOOLCHAIN" public-api -p datum-arrow -sss > target/datum-arrow-public-api.txt
+          diff -u openspec/changes/types-crate/public-api.txt target/datum-arrow-public-api.txt
+
   # The crate pmu alone, as its contract asks ("Free of Tessera", "A small
   # surface"), in the cells a runner can reach. Its tests as the only
   # package: on x86-64 Linux the plumbing on software events, and the error

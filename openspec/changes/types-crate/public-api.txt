@@ -1,0 +1,100 @@
+pub mod datum_arrow
+pub use datum_arrow::arrow_schema
+pub mod datum_arrow::oid
+pub const datum_arrow::oid::BOOL: u32
+pub const datum_arrow::oid::BYTEA: u32
+pub const datum_arrow::oid::DATE: u32
+pub const datum_arrow::oid::FLOAT4: u32
+pub const datum_arrow::oid::FLOAT8: u32
+pub const datum_arrow::oid::INT2: u32
+pub const datum_arrow::oid::INT4: u32
+pub const datum_arrow::oid::INT8: u32
+pub const datum_arrow::oid::TEXT: u32
+pub const datum_arrow::oid::TIMESTAMP: u32
+pub const datum_arrow::oid::TIMESTAMPTZ: u32
+pub const datum_arrow::oid::VARCHAR: u32
+pub enum datum_arrow::ArrowType
+pub datum_arrow::ArrowType::Dictionary
+pub datum_arrow::ArrowType::Dictionary::key: datum_arrow::Key
+pub datum_arrow::ArrowType::Dictionary::value: datum_arrow::Plain
+pub datum_arrow::ArrowType::Plain(datum_arrow::Plain)
+impl datum_arrow::ArrowType
+pub fn datum_arrow::ArrowType::new(data_type: &arrow_schema::datatype::DataType) -> datum_arrow::Result<Self>
+pub const fn datum_arrow::ArrowType::values(self) -> datum_arrow::Plain
+pub enum datum_arrow::ErrorKind
+pub datum_arrow::ErrorKind::BrokenShape
+pub datum_arrow::ErrorKind::InvalidOption
+pub datum_arrow::ErrorKind::InvalidText
+pub datum_arrow::ErrorKind::NotSupported
+pub datum_arrow::ErrorKind::OutOfRange
+pub datum_arrow::ErrorKind::TooLarge
+pub datum_arrow::ErrorKind::TooLong
+pub datum_arrow::ErrorKind::TypeMismatch
+impl datum_arrow::ErrorKind
+pub const fn datum_arrow::ErrorKind::sqlstate(self) -> &'static str
+pub enum datum_arrow::Key
+pub datum_arrow::Key::Int16
+pub datum_arrow::Key::Int32
+pub datum_arrow::Key::Int64
+pub datum_arrow::Key::Int8
+pub datum_arrow::Key::UInt16
+pub datum_arrow::Key::UInt32
+pub datum_arrow::Key::UInt64
+pub datum_arrow::Key::UInt8
+pub enum datum_arrow::PgType
+pub datum_arrow::PgType::Bool
+pub datum_arrow::PgType::Bytea
+pub datum_arrow::PgType::Date
+pub datum_arrow::PgType::Float4
+pub datum_arrow::PgType::Float8
+pub datum_arrow::PgType::Int2
+pub datum_arrow::PgType::Int4
+pub datum_arrow::PgType::Int8
+pub datum_arrow::PgType::Text
+pub datum_arrow::PgType::Timestamp
+pub datum_arrow::PgType::Timestamptz
+pub datum_arrow::PgType::Varchar(core::option::Option<datum_arrow::VarcharLength>)
+impl datum_arrow::PgType
+pub fn datum_arrow::PgType::new(oid: u32, typmod: i32) -> datum_arrow::Result<Self>
+pub const fn datum_arrow::PgType::oid(self) -> u32
+pub const fn datum_arrow::PgType::typmod(self) -> i32
+pub enum datum_arrow::Plain
+pub datum_arrow::Plain::Binary
+pub datum_arrow::Plain::Boolean
+pub datum_arrow::Plain::Date32
+pub datum_arrow::Plain::FixedSizeBinary(usize)
+pub datum_arrow::Plain::Float32
+pub datum_arrow::Plain::Float64
+pub datum_arrow::Plain::Int16
+pub datum_arrow::Plain::Int32
+pub datum_arrow::Plain::Int64
+pub datum_arrow::Plain::Int8
+pub datum_arrow::Plain::LargeBinary
+pub datum_arrow::Plain::LargeUtf8
+pub datum_arrow::Plain::Timestamp
+pub datum_arrow::Plain::Timestamp::unit: datum_arrow::TimeUnit
+pub datum_arrow::Plain::Timestamp::utc: bool
+pub datum_arrow::Plain::UInt16
+pub datum_arrow::Plain::UInt32
+pub datum_arrow::Plain::UInt8
+pub datum_arrow::Plain::Utf8
+pub enum datum_arrow::TimeUnit
+pub datum_arrow::TimeUnit::Microsecond
+pub datum_arrow::TimeUnit::Millisecond
+pub datum_arrow::TimeUnit::Second
+pub struct datum_arrow::Error
+impl datum_arrow::Error
+pub const fn datum_arrow::Error::kind(&self) -> datum_arrow::ErrorKind
+pub const fn datum_arrow::Error::message(&self) -> &'static str
+pub const fn datum_arrow::Error::slot(&self) -> core::option::Option<usize>
+pub const fn datum_arrow::Error::sqlstate(&self) -> &'static str
+impl core::error::Error for datum_arrow::Error
+impl core::fmt::Display for datum_arrow::Error
+pub fn datum_arrow::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+pub struct datum_arrow::VarcharLength(_)
+impl datum_arrow::VarcharLength
+pub const fn datum_arrow::VarcharLength::get(self) -> u32
+pub fn datum_arrow::VarcharLength::new(characters: u32) -> datum_arrow::Result<Self>
+pub const datum_arrow::MAX_VARCHAR_LENGTH: u32
+pub const datum_arrow::VARHDRSZ: i32
+pub type datum_arrow::Result<T, E> = core::result::Result<T, E>
