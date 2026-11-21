@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/alloc-count",
+    "crates/datum-arrow",
     "crates/relhash",
     "crates/relspill",
     "crates/tessera-core",
@@ -28,6 +29,9 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1.0.104"
+# Apache Arrow's types alone, for datum-arrow: the same major version as
+# the parquet crate a reader of files takes, without its other parts.
+arrow-schema = { version = "58.4", default-features = false }
 clap = { version = "4", features = ["derive"] }
 comfy-table = "8"
 console = "0.16"

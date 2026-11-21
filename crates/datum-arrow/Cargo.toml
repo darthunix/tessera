@@ -1,0 +1,18 @@
+[package]
+name = "datum-arrow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The boundary between PostgreSQL's types and Apache Arrow's: plans of a column's conversion checked once, and the conversions of values both ways"
+repository = "https://github.com/darthunix/tessera"
+readme = "README.md"
+# A crate meant for use outside Tessera, whose API a spec may name
+# (CONTRIBUTING.md); it is not published on crates.io for now.
+publish = true
+
+[dependencies]
+arrow-schema.workspace = true
+
+[lints]
+workspace = true

@@ -17,9 +17,8 @@ starts. Each commit passes `make rust-check`,
 
 ## 2. The crate
 
-- [ ] 2.1 `crates/datum-arrow`, `publish = true`, depending on
-      `arrow-schema` alone, `arrow-array` for its tests: the PostgreSQL
-      types it knows, the Arrow
+- [x] 2.1 `crates/datum-arrow`, `publish = true`, depending on
+      `arrow-schema` alone: the PostgreSQL types it knows, the Arrow
       types it takes, the kinds of failure with their SQLSTATEs, its
       rustdoc; the job "datum-arrow alone" in CI, as `relhash`'s: its
       tests alone, its documentation with warnings denied, `cargo
