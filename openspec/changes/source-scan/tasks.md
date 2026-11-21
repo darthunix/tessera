@@ -109,7 +109,7 @@ injection points.
       `tessera.scan_cost_factor` left to heap. Check: the suites; the
       cases of the costs, with a limit and a grouping over a source that
       costs more than its wrapper
-- [ ] 4.4 The cases of the relations offered: Tessera off, a locking
+- [x] 4.4 The cases of the relations offered: Tessera off, a locking
       statement with and without `ORDER BY`, an `INSERT … SELECT` and an
       `UPDATE … FROM` over the foreign table, an `INSERT … SELECT …
       GROUP BY` whose grouping reads through the source, a lateral
