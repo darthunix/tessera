@@ -446,3 +446,40 @@ fn groups_lists_and_repeated_columns_are_outside_the_list() {
         .unwrap();
     assert_eq!(classify(&descr(int96)), None);
 }
+
+#[test]
+fn a_column_read_beside_hostile_neighbours_and_an_arrow_schema() {
+    use crate::reader::{ColumnReader, input_of};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    // The file's Arrow schema says the integers are strings and the
+    // strings are integers; a neighbour is a decimal of precision 300.
+    let lying = arrow_schema::Schema::new(vec![
+        arrow_schema::Field::new("a", arrow_schema::DataType::Utf8, false),
+        arrow_schema::Field::new("s", arrow_schema::DataType::Int64, false),
+        arrow_schema::Field::new("dec", arrow_schema::DataType::Utf8, false),
+    ]);
+    let options = testing::Options {
+        arrow_schema: Some(lying),
+        ..testing::Options::new(3, true)
+    };
+    let columns = [
+        Column::int32("a", &[1, 2, 3]),
+        Column::bytes("s", &[b"x", b"y", b"z"]),
+        Column::bytes("dec", &[b"1", b"2", b"3"]).logical(LogicalType::Decimal {
+            scale: 0,
+            precision: 300,
+        }),
+    ];
+    testing::write_with(&path, &columns, options).unwrap();
+    let f = ParquetFile::open(&path).unwrap();
+    assert_eq!(f.rows(), 3);
+    assert_eq!(code(map_column(&f, &request("dec", oid::BYTEA))), "0A000");
+    for (name, type_oid) in [("a", oid::INT4), ("s", oid::TEXT)] {
+        let column = map_column(&f, &request(name, type_oid)).unwrap();
+        let mut reader = ColumnReader::new(&f, &column, 0, vec![0b111u64].into(), 8).unwrap();
+        let window = reader.read(0, 3, &[0b111]).unwrap();
+        assert_eq!(window.array.len(), 3, "{name}");
+        assert!(input_of(window.array.as_ref()).is_ok(), "{name}");
+    }
+}
