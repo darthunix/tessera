@@ -331,7 +331,11 @@ a group of rows.
 ### Requirement: Batches through the source
 With `tessera.enable` on, the module's source SHALL read every table of
 the wrapper that the scan planner offers it (capability `source-scan`),
-and return the path of its batch node, `TessParquetScan`. The node SHALL
+and return the path of its batch node, `TessParquetScan`, but for a
+query whose targets or clauses read a whole row of the table, the table
+as one value of its row type, or a system column such as `tableoid`:
+the batch node computes columns alone, and the wrapper's scan reads such
+a query. The node SHALL
 make PostgreSQL values of a column only when a consumer of its batches
 asks for that column, and only for the rows the consumer asks for. A
 consumer SHALL get the right values whatever it asks, as many times as
@@ -343,6 +347,14 @@ values the node makes. The node SHALL keep the duties of the
 requirement "Reading rows": the files as its scan begins, the check of
 a file after each read, `55000`, the bytes it cannot decode, `XX001`,
 and a cancel within a group of rows.
+
+#### Scenario: A whole row and a system column
+- **WHEN** queries read a table's whole row and its `tableoid`, with
+  Tessera on
+- **THEN** each plan reads the table through the wrapper's scan, and
+  each result equals the result with Tessera off
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/A whole row and a system column`
 
 #### Scenario: Batch parents over the source
 - **WHEN** a grouping, a sort under a limit and a hash join read a table
