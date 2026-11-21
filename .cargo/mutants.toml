@@ -9,8 +9,9 @@
 # has no values off x86-64, and the loops of count and of the int
 # aggregates written for x86-64, which are cut out by cfg here.
 
-# The tools, the test strategies, the benchmark programs and the loom
-# models are not the product. The table's loom models, their memory and
+# The tools, the test strategies, the benchmark programs, the writer of
+# tessera-parquet's test files and the loom models are not the
+# product. The table's loom models, their memory and
 # the model table (table/loom/) compile only with --cfg loom, which a
 # mutant's build lacks: each of their mutants would survive unseen. So do
 # the proofs by Kani (the table's table/proofs.rs, the float casts'
@@ -23,6 +24,7 @@
 exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
+    "crates/tessera-parquet/src/testing.rs",
     "crates/tessera-capi/benches/**",
     "**/loom.rs",
     "crates/relhash/src/table/loom/**",
@@ -168,6 +170,10 @@ exclude_globs = [
 #   sign of a dividend of 0, whose remainder of 0 already ends the
 #   rounding, or of a divisor, never 0 (div_floor, div_ceil); a value at
 #   the edge of an i64, which the clamp gives as itself (clamp).
+# tessera-parquet's, judged by its own tests: the length of the shared
+# file, which no reader asks of a footer already read (SharedFile's
+# Length); and the arrays of a window that are one array, copied by the
+# general concatenation instead (concat).
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -249,6 +255,8 @@ exclude_re = [
     "datum-arrow/src/read\\.rs:[0-9]+:32: replace > with >= in ReadPlan::check_bytes$",
     "datum-arrow/src/calendar\\.rs:(94|103):(25|36): replace < with <= in div_(floor|ceil)$",
     "datum-arrow/src/calendar\\.rs:(111:14: replace > with >=|113:21: replace < with <=) in clamp$",
+    "replace <impl Length for SharedFile>::len -> u64 with [01]$",
+    "tessera-parquet/src/reader\\.rs:[0-9]+:[0-9]+: delete match arm \\[one\\] in concat$",
 ]
 
 # A mutant that makes a loop endless is stopped at three times the
@@ -267,6 +275,7 @@ test_package = [
     "tessera-capi",
     "relspill",
     "datum-arrow",
+    "tessera-parquet",
 ]
 
 # Cargo.toml's profile of the tests without debug information: a mutant's
