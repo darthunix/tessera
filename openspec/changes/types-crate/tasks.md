@@ -56,7 +56,7 @@ starts. Each commit passes `make rust-check`,
       scenario names its test, and every pending check of the contract
       its check. Check: `openspec validate types-crate --strict`;
       `.github/scripts/check-specs.sh`
-- [ ] 3.2 `openspec/specs/datum-arrow/design.md`, written for a reader
+- [x] 3.2 `openspec/specs/datum-arrow/design.md`, written for a reader
       who knows nothing of the crate; `## Files` and `## Tests` last.
       Check: `.github/scripts/check-specs.sh`
 - [ ] 3.3 The pull request's description, an index of evidence. Check:
