@@ -47,8 +47,9 @@ RUNTIME_TESTS = tessera_builder_test tessera_output_test tessera_input_test \
 	tessera_shared_stats_test \
 	tessera_kernel_ops_test tessera_spill_test tessera_rows_test
 # The test module of the suite parquet links the writer of its files.
-tessera_parquet_test$(DLSUFFIX): $(RUST_PARQUET_TESTING_LIB) $(RUST_PROFILE_STAMP)
-tessera_parquet_test$(DLSUFFIX): LDFLAGS_SL += $(RUST_PARQUET_TESTING_LIB) $(RUST_PARQUET_SYSTEM_LIBS)
+tessera_parquet_test$(DLSUFFIX): $(RUST_PARQUET_TESTING_LIB) $(RUST_PROFILE_STAMP) $(RUNTIME_LIB)
+tessera_parquet_test$(DLSUFFIX): LDFLAGS_SL += $(RUST_PARQUET_TESTING_LIB) $(RUST_PARQUET_SYSTEM_LIBS) \
+	$(RUNTIME_LIB)
 $(RUST_TESTS:%=%$(DLSUFFIX)): $(RUST_LIB) $(RUST_PROFILE_STAMP)
 $(RUST_TESTS:%=%$(DLSUFFIX)): LDFLAGS_SL += $(RUST_LIB)
 $(RUNTIME_TESTS:%=%$(DLSUFFIX)): $(RUNTIME_LIB)

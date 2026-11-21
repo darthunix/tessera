@@ -5,6 +5,9 @@
 \getenv dlsuffix PG_DLSUFFIX
 \set parquet_test :libdir '/tessera_parquet_test' :dlsuffix
 CREATE EXTENSION tessera;
+-- The nodes and the kernels, so that Tessera on plans its own nodes.
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
 CREATE EXTENSION tessera_parquet;
 CREATE FUNCTION parquet_test_write(text, text) RETURNS void
     AS :'parquet_test', 'tessera_parquet_test_write' LANGUAGE C STRICT;
@@ -37,6 +40,46 @@ BEGIN
     EXECUTE format('SELECT count(*) FROM ((%s EXCEPT ALL %s) UNION ALL (%s EXCEPT ALL %s)) d',
                    a, b, b, a) INTO n;
     RETURN n;
+END $$;
+-- The rows a query with Tessera on differs by from the same query with
+-- it off, counted both ways.
+CREATE FUNCTION differ_off(statement text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    n bigint;
+    saved text := current_setting('tessera.enable');
+BEGIN
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE 'CREATE TEMP TABLE tessera_off AS ' || statement;
+    PERFORM set_config('tessera.enable', saved, true);
+    EXECUTE format('SELECT count(*) FROM ((%s EXCEPT ALL TABLE tessera_off) UNION ALL '
+                   '(TABLE tessera_off EXCEPT ALL %s)) d', statement, statement) INTO n;
+    DROP TABLE tessera_off;
+    RETURN n;
+END $$;
+-- The scans of a statement's plan, and the lines of its EXPLAIN ANALYZE
+-- that match a pattern, the paths of the suite's files written $dir.
+CREATE FUNCTION scans_of(statement text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+    found text[] := '{}';
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || statement LOOP
+        found := found || ARRAY(SELECT m[1] FROM regexp_matches(line,
+            '(Foreign Scan|Seq Scan|Custom Scan \(\w+\))', 'g') m);
+    END LOOP;
+    RETURN array_to_string(found, ', ');
+END $$;
+CREATE FUNCTION explain_lines(options text, statement text, pattern text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE format('EXPLAIN (%s, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) %s',
+                               options, statement) LOOP
+        IF line ~ pattern THEN
+            RETURN NEXT replace(trim(line), current_setting('parquet.dir'), '$dir');
+        END IF;
+    END LOOP;
 END $$;
 \getenv abs_builddir PG_ABS_BUILDDIR
 \set dir :abs_builddir '/results/parquet_files'
@@ -288,7 +331,9 @@ EXPLAIN (COSTS OFF) SELECT o.x, t.a FROM (VALUES (0), (1), (2)) o(x),
    ->  Values Scan on "*VALUES*"
    ->  Foreign Scan on t_files
          Filter: ((a % 10) = "*VALUES*".column1)
-(4 rows)
+         Parquet Files: 7
+         Row Groups: 14
+(6 rows)
 
 SELECT differ('SELECT o.x, t.a FROM (VALUES (0), (1), (2)) o(x),
                    LATERAL (SELECT a FROM t_files WHERE a % 10 = o.x OFFSET 0) t',
@@ -561,6 +606,12 @@ SELECT * FROM t_bytes;
 (2 rows)
 
 RESET tessera.enable;
+SELECT scans_of('SELECT m_bad FROM t_check_plain') AS through;
+            through            
+-------------------------------
+ Custom Scan (TessParquetScan)
+(1 row)
+
 SELECT t, c, sqlstate_of(format('SELECT %I FROM %I', c, t)) AS checked
 FROM unnest(ARRAY['t_check_plain', 't_check_dict']) t,
      unnest(ARRAY['m_bad', 'u_bad', 'm_zero', 'u_zero']) c ORDER BY t, c;
@@ -635,6 +686,12 @@ SELECT sqlstate_of('EXPLAIN SELECT s FROM t_vc_trust') AS trusted_varchar;
 (1 row)
 
 RESET tessera.enable;
+SELECT scans_of('SELECT s FROM t_vc_four') AS through;
+            through            
+-------------------------------
+ Custom Scan (TessParquetScan)
+(1 row)
+
 SELECT s, octet_length(s) FROM t_vc_three;
   s  | octet_length 
 -----+--------------
@@ -887,12 +944,344 @@ SELECT sqlstate_of('EXPLAIN SELECT s FROM t_latin') AS text_in_latin1;
 EXPLAIN SELECT "è" FROM t_latin;
 ERROR:  Parquet file has no column "è"
 \c :main_db
+-- A new backend reads a table before the bridge is loaded: the wrapper
+-- alone; once the bridge and the nodes are loaded, the source plans.
+SELECT count(*) FROM t_files;
+ count 
+-------
+    21
+(1 row)
+
+LOAD 'tessera';
+LOAD 'tessera_nodes';
+LOAD 'tessera_kernels';
+SELECT scans_of('SELECT a FROM t_files') AS after_the_bridge;
+       after_the_bridge        
+-------------------------------
+ Custom Scan (TessParquetScan)
+(1 row)
+
 DROP DATABASE parquet_latin1;
 SELECT set_config('parquet.dir', :'dir', false) IS NOT NULL AS dir_set_again;
  dir_set_again 
 ---------------
  t
 (1 row)
+
+-- spec: parquet-fdw/Batch parents over the source
+-- A grouping, a sort under a limit and a hash join over a table of ten
+-- columns and 100 000 rows, with Tessera on: each through
+-- TessParquetScan, with no TessPack, and each equal to the result with
+-- Tessera off.
+SELECT parquet_test_write(:'dir' || '/wide.parquet', json_build_object(
+    'group_rows', 30000, 'columns', json_build_array(
+      json_build_object('name', 'k', 'type', 'int64', 'range', 100000),
+      json_build_object('name', 'a', 'type', 'int64', 'range', 100000),
+      json_build_object('name', 'b', 'type', 'int32', 'values',
+        (SELECT json_agg(i % 3 ORDER BY i) FROM generate_series(0, 99999) i)),
+      json_build_object('name', 'v', 'type', 'int64', 'range', 100000),
+      json_build_object('name', 's', 'type', 'bytes', 'values',
+        (SELECT json_agg(CASE WHEN i % 5 = 0 THEN NULL ELSE 'w' || i END ORDER BY i)
+         FROM generate_series(0, 99999) i)),
+      json_build_object('name', 'c1', 'type', 'int64', 'range', 100000),
+      json_build_object('name', 'c2', 'type', 'int64', 'range', 100000),
+      json_build_object('name', 'c3', 'type', 'int64', 'range', 100000),
+      json_build_object('name', 'c4', 'type', 'int64', 'range', 100000),
+      json_build_object('name', 'c5', 'type', 'int64', 'range', 100000)))::text);
+ parquet_test_write 
+--------------------
+ 
+(1 row)
+
+\set wide :dir '/wide.parquet'
+CREATE FOREIGN TABLE t_wide (k bigint, a bigint, b int, v bigint, s text,
+    c1 bigint, c2 bigint, c3 bigint, c4 bigint, c5 bigint) SERVER pq OPTIONS (files :'wide');
+CREATE TABLE h_wide AS
+SELECT i::bigint AS k, i::bigint AS a, i % 3 AS b, i::bigint AS v,
+       CASE WHEN i % 5 = 0 THEN NULL ELSE 'w' || i END AS s,
+       i::bigint AS c1, i::bigint AS c2, i::bigint AS c3, i::bigint AS c4, i::bigint AS c5
+FROM generate_series(0, 99999) i;
+CREATE TABLE h_keys AS SELECT i * 7::bigint AS k FROM generate_series(0, 999) i;
+ANALYZE h_wide, h_keys;
+SELECT scans_of('SELECT b, count(*), sum(v) FROM t_wide GROUP BY b') AS grouping,
+       scans_of('SELECT * FROM t_wide ORDER BY k LIMIT 10') AS sort_under_a_limit,
+       scans_of('SELECT count(*), sum(t.v) FROM t_wide t JOIN h_keys h ON t.k = h.k') AS hash_join;
+                       grouping                       |                               sort_under_a_limit                               |                                                  hash_join                                                   
+------------------------------------------------------+--------------------------------------------------------------------------------+--------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg), Custom Scan (TessParquetScan) | Custom Scan (TessLimit), Custom Scan (TessSort), Custom Scan (TessParquetScan) | Custom Scan (TessAgg), Custom Scan (TessHashJoin), Custom Scan (TessParquetScan), Custom Scan (TessHeapScan)
+(1 row)
+
+SELECT differ_off('SELECT b, count(*), sum(v) FROM t_wide GROUP BY b') AS grouping,
+       differ_off('(SELECT * FROM t_wide ORDER BY k LIMIT 10)') AS sort_under_a_limit,
+       differ_off('SELECT count(*), sum(t.v) FROM t_wide t JOIN h_keys h ON t.k = h.k') AS hash_join;
+ grouping | sort_under_a_limit | hash_join 
+----------+--------------------+-----------
+        0 |                  0 |         0
+(1 row)
+
+-- spec: parquet-fdw/Columns made for the rows kept
+-- The sort, top-N where its heap fits work_mem, makes every value of
+-- its column, 100 000, and of the nine others only those of the rows it
+-- took in, the first batch's 64; and the rows equal those with Tessera
+-- off.
+SET work_mem = '64MB';
+SELECT explain_lines('ANALYZE', 'SELECT * FROM t_wide ORDER BY k LIMIT 10',
+                     'TessParquetScan|Sort Method|Values Decoded');
+                                explain_lines                                
+-----------------------------------------------------------------------------
+ Sort Method: top-N in memory
+ ->  Custom Scan (TessParquetScan) on t_wide (actual rows=100000.00 loops=1)
+ Values Decoded: 100576
+(3 rows)
+
+SELECT differ_off('(SELECT * FROM t_wide ORDER BY k LIMIT 10)') AS rows_differ;
+ rows_differ 
+-------------
+           0
+(1 row)
+
+RESET work_mem;
+-- A filter keeps eight rows, in windows after gaps, two in one batch and
+-- across a group's end: the nine other columns are made for those alone,
+-- each read for the rows asked where its reader passed no window.
+SELECT scans_of('SELECT * FROM t_wide WHERE k IN (5, 2100, 2900, 2901, 29999, 30000, 61000, 99999)')
+    AS filtered;
+                        filtered                         
+---------------------------------------------------------
+ Custom Scan (TessFilter), Custom Scan (TessParquetScan)
+(1 row)
+
+SELECT explain_lines('ANALYZE',
+    'SELECT * FROM t_wide WHERE k IN (5, 2100, 2900, 2901, 29999, 30000, 61000, 99999)',
+    'TessParquetScan|Values Decoded');
+                                explain_lines                                
+-----------------------------------------------------------------------------
+ ->  Custom Scan (TessParquetScan) on t_wide (actual rows=100000.00 loops=1)
+ Values Decoded: 100072
+(2 rows)
+
+SELECT differ_off('SELECT * FROM t_wide WHERE k IN (5, 2100, 2900, 2901, 29999, 30000, 61000, 99999)')
+    AS rows_differ;
+ rows_differ 
+-------------
+           0
+(1 row)
+
+-- A count over a file whose data pages are damaged and whose footer is
+-- whole makes no value and returns the footer's count.
+SELECT parquet_test_write(:'dir' || '/damaged_pages.parquet',
+    '{"columns": [{"name": "i", "type": "int64", "range": 3000}]}');
+ parquet_test_write 
+--------------------
+ 
+(1 row)
+
+SELECT parquet_test_damage(:'dir' || '/damaged_pages.parquet', 4, 16);
+ parquet_test_damage 
+---------------------
+ 
+(1 row)
+
+\set damaged_pages :dir '/damaged_pages.parquet'
+CREATE FOREIGN TABLE t_damaged_pages (i bigint) SERVER pq OPTIONS (files :'damaged_pages');
+SELECT explain_lines('ANALYZE', 'SELECT count(*) FROM t_damaged_pages',
+                     'TessParquetScan|Values Decoded');
+                                   explain_lines                                    
+------------------------------------------------------------------------------------
+ ->  Custom Scan (TessParquetScan) on t_damaged_pages (actual rows=3000.00 loops=1)
+ Values Decoded: 0
+(2 rows)
+
+SELECT count(*) FROM t_damaged_pages;
+ count 
+-------
+  3000
+(1 row)
+
+-- Its pages are damaged: reading a value raises XX001.
+SELECT sqlstate_of('SELECT sum(i) FROM t_damaged_pages') AS pages_damaged;
+ pages_damaged 
+---------------
+ XX001
+(1 row)
+
+-- spec: parquet-fdw/One column asked again
+-- A batch asked for a and for v more than once, for rows that do not
+-- nest and in reverse order, against the heap table.
+SELECT scans_of('SELECT sum(a) FILTER (WHERE b = 1) FROM t_wide') AS filtered_sums;
+                    filtered_sums                     
+------------------------------------------------------
+ Custom Scan (TessAgg), Custom Scan (TessParquetScan)
+(1 row)
+
+SELECT differ('SELECT sum(a) FILTER (WHERE b = 1), sum(a) FILTER (WHERE b = 2),
+                      sum(CASE WHEN k % 64 = 63 THEN v ELSE v + 1 END) FROM t_wide',
+              'SELECT sum(a) FILTER (WHERE b = 1), sum(a) FILTER (WHERE b = 2),
+                      sum(CASE WHEN k % 64 = 63 THEN v ELSE v + 1 END) FROM h_wide') AS rows_differ;
+ rows_differ 
+-------------
+           0
+(1 row)
+
+-- The node scanned again for each outer row of a correlated subquery:
+-- every scan reads the group again, and the counts of EXPLAIN total the
+-- scans.
+SELECT explain_lines('ANALYZE',
+    'SELECT x, (SELECT count(*) FROM t_windows t WHERE t.i % 10 = o.x) FROM (VALUES (1), (2), (3)) o(x)',
+    'TessParquetScan|Row Groups Read|Values Decoded');
+                                 explain_lines                                  
+--------------------------------------------------------------------------------
+ ->  Custom Scan (TessParquetScan) on t_windows t (actual rows=3000.00 loops=3)
+ Row Groups Read: 3
+ Values Decoded: 9000
+(3 rows)
+
+SELECT differ_off('SELECT x, (SELECT count(*) FROM t_windows t WHERE t.i % 10 = o.x) AS n,
+                          (SELECT max(s) FROM t_windows t WHERE t.i % 10 = o.x) AS s
+                   FROM (VALUES (1), (2), (3)) o(x)') AS rows_differ;
+ rows_differ 
+-------------
+           0
+(1 row)
+
+-- A whole row and a system column, which the runtime's projection does
+-- not compute, are read by the wrapper's scan with Tessera on.
+SELECT scans_of('SELECT t FROM t_files t') AS whole_row,
+       scans_of('SELECT tableoid::regclass, a FROM t_files') AS system_column;
+  whole_row   | system_column 
+--------------+---------------
+ Foreign Scan | Foreign Scan
+(1 row)
+
+SELECT differ_off('SELECT t::text AS row FROM t_files t') AS whole_row,
+       differ_off('SELECT tableoid::regclass::text AS rel, a FROM t_files') AS system_column;
+ whole_row | system_column 
+-----------+---------------
+         0 |             0
+(1 row)
+
+-- spec: parquet-fdw/Values kept across the asks of a batch
+-- The test module asks one batch of the node for an integer, a time and
+-- a text column, each with NULL rows, for row 63, then rows 0 to 62, then
+-- row 63 again, keeping the arrays each ask gave, row 63 taken out of
+-- the batch's mask before it is asked: every ask gives the rows it
+-- asked, and the first ask's arrays still hold row 63, NULL in one
+-- column. Then, in batches of 10 rows, the batch of rows 60 to 69,
+-- across a word of the window's masks, the same way.
+CREATE FUNCTION parquet_test_asks(text, int, int)
+    RETURNS TABLE (col text, n int, ask text, value text)
+    AS :'parquet_test', 'tessera_parquet_test_asks' LANGUAGE C STRICT;
+SELECT parquet_test_write(:'dir' || '/asks.parquet', json_build_object('columns', json_build_array(
+      json_build_object('name', 'i', 'type', 'int32', 'values',
+        (SELECT json_agg(CASE WHEN n % 7 = 0 THEN NULL ELSE n END ORDER BY n)
+         FROM generate_series(0, 99) n)),
+      json_build_object('name', 't', 'type', 'int64', 'logical', 'timestamp_us', 'values',
+        (SELECT json_agg(CASE WHEN n % 5 = 2 THEN NULL ELSE n * 1000000 END ORDER BY n)
+         FROM generate_series(0, 99) n)),
+      json_build_object('name', 's', 'type', 'bytes', 'values',
+        (SELECT json_agg(CASE WHEN n % 6 = 1 THEN NULL ELSE 's' || n END ORDER BY n)
+         FROM generate_series(0, 99) n))))::text);
+ parquet_test_write 
+--------------------
+ 
+(1 row)
+
+\set asks :dir '/asks.parquet'
+CREATE FOREIGN TABLE t_asks (i int, t timestamp, s text) SERVER pq OPTIONS (files :'asks');
+CREATE TABLE h_asks AS
+SELECT n, CASE WHEN n % 7 = 0 THEN NULL ELSE n END AS i,
+       CASE WHEN n % 5 = 2 THEN NULL ELSE '1970-01-01'::timestamp + n * interval '1 second' END AS t,
+       CASE WHEN n % 6 = 1 THEN NULL ELSE 's' || n END AS s
+FROM generate_series(0, 99) n;
+SELECT max_rows, count(*) AS asked, count(*) FILTER (WHERE value IS NULL) AS null_rows,
+       count(*) FILTER (WHERE ask = 'kept' AND value IS NULL) AS kept_null
+FROM (VALUES (64, 0), (10, 6)) b(max_rows, skip),
+     parquet_test_asks('SELECT i, t, s FROM t_asks', max_rows, skip)
+GROUP BY max_rows ORDER BY max_rows;
+ max_rows | asked | null_rows | kept_null 
+----------+-------+-----------+-----------
+       10 |    36 |         5 |         0
+       64 |   198 |        36 |         1
+(2 rows)
+
+SELECT max_rows, differ(
+    format($$SELECT col, n, ask, value FROM parquet_test_asks('SELECT i, t, s FROM t_asks', %s, %s)$$,
+           max_rows, skip),
+    format($$(SELECT c, n, a, CASE c WHEN 'i' THEN i::text WHEN 't' THEN t::text ELSE s END
+              FROM h_asks, unnest(ARRAY['i', 't', 's']) c,
+                   unnest(ARRAY['first', 'kept', 'again']) a WHERE n = %s
+              UNION ALL
+              SELECT c, n, 'second', CASE c WHEN 'i' THEN i::text WHEN 't' THEN t::text ELSE s END
+              FROM h_asks, unnest(ARRAY['i', 't', 's']) c WHERE n >= %s AND n < %s)$$,
+           first + max_rows - 1, first, first + max_rows - 1)) AS asks_differ
+FROM (VALUES (64, 0, 0), (10, 6, 60)) b(max_rows, skip, first) ORDER BY max_rows;
+ max_rows | asks_differ 
+----------+-------------
+       10 |           0
+       64 |           0
+(2 rows)
+
+-- spec: parquet-fdw/What EXPLAIN shows
+-- Plain, with VERBOSE and with ANALYZE, through the wrapper's rows and
+-- through the source.
+SET tessera.enable = off;
+SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Row Groups');
+        explain_lines        
+-----------------------------
+ ->  Foreign Scan on t_files
+ Parquet Files: 7
+ Row Groups: 14
+(3 rows)
+
+SELECT explain_lines('VERBOSE', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Row Groups');
+                                                               explain_lines                                                                
+--------------------------------------------------------------------------------------------------------------------------------------------
+ ->  Foreign Scan on public.t_files
+ Parquet Files: 7
+ Row Groups: 14
+ Parquet File Paths: $dir/one.parquet, $dir/p1.parquet, $dir/p2.parquet, $dir/p1.parquet, $dir/p2.parquet, $dir/p1.parquet, $dir/p2.parquet
+(4 rows)
+
+SELECT explain_lines('ANALYZE', 'SELECT a FROM t_files', 'Scan|Parquet|Row Groups');
+                    explain_lines                    
+-----------------------------------------------------
+ Foreign Scan on t_files (actual rows=21.00 loops=1)
+ Parquet Files: 7
+ Row Groups: 14
+ Row Groups Read: 14
+(4 rows)
+
+RESET tessera.enable;
+SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Row Groups');
+                explain_lines                 
+----------------------------------------------
+ Custom Scan (TessAgg)
+ ->  Custom Scan (TessParquetScan) on t_files
+ Parquet Files: 7
+ Row Groups: 14
+(4 rows)
+
+SELECT explain_lines('VERBOSE', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Row Groups');
+                                                               explain_lines                                                                
+--------------------------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+ ->  Custom Scan (TessParquetScan) on public.t_files
+ Parquet Files: 7
+ Row Groups: 14
+ Parquet File Paths: $dir/one.parquet, $dir/p1.parquet, $dir/p2.parquet, $dir/p1.parquet, $dir/p2.parquet, $dir/p1.parquet, $dir/p2.parquet
+(5 rows)
+
+SELECT explain_lines('ANALYZE', 'SELECT a FROM t_files',
+                     'Scan|Parquet|Row Groups|Values Decoded');
+                            explain_lines                             
+----------------------------------------------------------------------
+ Custom Scan (TessParquetScan) on t_files (actual rows=21.00 loops=1)
+ Parquet Files: 7
+ Row Groups: 14
+ Row Groups Read: 14
+ Row Groups Skipped: 0
+ Values Decoded: 21
+(6 rows)
 
 -- spec: parquet-fdw/Files replaced, added, removed and damaged
 -- A prepared statement over a pattern: its file replaced by one of other
@@ -1034,6 +1423,12 @@ SELECT parquet_test_write(:'dir' || '/cur_copy.parquet', :'cur_spec');
  
 (1 row)
 
+SELECT scans_of('SELECT i FROM t_cur') AS through;
+   through    
+--------------
+ Foreign Scan
+(1 row)
+
 BEGIN;
 DECLARE c CURSOR FOR SELECT i FROM t_cur;
 FETCH 2 FROM c;
@@ -1163,6 +1558,12 @@ SELECT parquet_test_write(:'dir' || '/cur_copy.parquet', :'cur_spec');
  
 (1 row)
 
+SELECT scans_of('SELECT i FROM t_cur') AS through;
+            through            
+-------------------------------
+ Custom Scan (TessParquetScan)
+(1 row)
+
 BEGIN;
 DECLARE c CURSOR FOR SELECT i FROM t_cur;
 FETCH 2 FROM c;
@@ -1213,12 +1614,14 @@ ERROR:  XX001
 \set VERBOSITY default
 DROP FOREIGN TABLE t_files, t_owned, t_plain, t_none, t_gzip, t_types, t_drop, t_clickbench,
     t_mappings, t_check_plain, t_check_dict, t_trust, t_bytes, t_vc_three, t_vc_four, t_vc_trust,
-    t_rep, t_cur, t_two, t_cut, t_damaged, t_far, t_windows, t_empty;
-DROP TABLE h_files, h_clickbench, h_mappings, h_windows;
+    t_rep, t_cur, t_two, t_cut, t_damaged, t_far, t_windows, t_empty, t_wide, t_asks,
+    t_damaged_pages;
+DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks;
 DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, bool, bool, int),
     parquet_test_head_dictionaries(text), parquet_test_replace(text, text, text),
     parquet_test_remove(text), parquet_test_cut(text, int), parquet_test_damage(text, int, int),
-    sqlstate_of(text), differ(text, text);
+    sqlstate_of(text), differ(text, text), differ_off(text), scans_of(text),
+    explain_lines(text, text, text), parquet_test_asks(text, int, int);
 DROP SERVER pq;
 REVOKE CREATE ON SCHEMA public FROM parquet_reader, parquet_other;
 DROP ROLE parquet_reader, parquet_other;

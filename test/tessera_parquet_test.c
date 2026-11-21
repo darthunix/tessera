@@ -11,12 +11,23 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include "executor/executor.h"
+#include "executor/spi.h"
 #include "fmgr.h"
+#include "funcapi.h"
 #include "miscadmin.h"
+#include "nodes/extensible.h"
 #include "port.h"
 #include "storage/fd.h"
 #include "utils/builtins.h"
 #include "utils/injection_point.h"
+#include "utils/lsyscache.h"
+#include "utils/plancache.h"
+#include "utils/rel.h"
+#include "utils/snapmgr.h"
+#include "utils/tuplestore.h"
+
+#include "tessera/runtime.h"
 
 #include "injection_library.h"
 
@@ -45,6 +56,7 @@ PG_FUNCTION_INFO_V1(tessera_parquet_test_damage);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_injection);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_cancel_after);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_windows);
+PG_FUNCTION_INFO_V1(tessera_parquet_test_asks);
 
 /* The time of modification of a stat, to the nanosecond. */
 #ifdef __APPLE__
@@ -325,4 +337,119 @@ Datum
 tessera_parquet_test_windows(PG_FUNCTION_ARGS)
 {
 	PG_RETURN_INT32(windows_seen);
+}
+
+/* A row of parquet_test_asks: a column's value of a row, the batch's row
+ * `row`, the scan's `base + row`, as one ask gave it. */
+static void
+put_ask(ReturnSetInfo *rsinfo, Form_pg_attribute att, int base, int row, const char *ask,
+		const TessDatumColumn *column)
+{
+	Datum		values[4];
+	bool		nulls[4] = {false, false, false, false};
+	Oid			out;
+	bool		varlena;
+
+	values[0] = CStringGetTextDatum(NameStr(att->attname));
+	values[1] = Int32GetDatum(base + row);
+	values[2] = CStringGetTextDatum(ask);
+	nulls[3] = column->isnull[row];
+	if (!nulls[3])
+	{
+		getTypeOutputInfo(att->atttypid, &out, &varlena);
+		values[3] = CStringGetTextDatum(OidOutputFunctionCall(out, column->values[row]));
+	}
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+/*
+ * parquet_test_asks(query text, max_rows int, skip int): runs the query,
+ * which plans as TessParquetScan alone, in batches of max_rows rows at
+ * most, skips `skip` batches, of max_rows rows each, takes the next
+ * batch's last row out of its mask, and asks each target's column of
+ * that batch for its last row ('first'), then for
+ * the others ('second'), then for the last again ('again'), keeping the
+ * arrays each ask gave, and reads the last row of the first ask's arrays
+ * after the second ('kept'). Returns the rows (column, row of the scan,
+ * ask, value).
+ */
+Datum
+tessera_parquet_test_asks(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	char	   *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
+	SPIPlanPtr	plan;
+	CachedPlan *cplan;
+	QueryDesc  *query;
+	PlanState  *state;
+	TessInput  *input;
+	TessBatch  *batch;
+	const TessLayout *layout;
+	TupleDesc	desc;
+	int			max_rows = PG_GETARG_INT32(1);
+	int			skip = PG_GETARG_INT32(2);
+	int			base = max_rows * skip;
+	int			last;
+
+	InitMaterializedSRF(fcinfo, 0);
+	SPI_connect();
+	plan = SPI_prepare(sql, 0, NULL);
+	if (plan == NULL)
+		elog(ERROR, "could not plan %s", sql);
+	cplan = SPI_plan_get_cached_plan(plan);
+	query = CreateQueryDesc(linitial_node(PlannedStmt, cplan->stmt_list), sql,
+							GetActiveSnapshot(), InvalidSnapshot, None_Receiver, NULL, NULL, 0);
+	ExecutorStart(query, 0);
+	state = query->planstate;
+	if (!IsA(state, CustomScanState) ||
+		strcmp(((CustomScanState *) state)->methods->CustomName, "TessParquetScan") != 0)
+		elog(ERROR, "the query does not plan as TessParquetScan alone");
+	desc = RelationGetDescr(((ScanState *) state)->ss_currentRelation);
+	input = tess_input_create(CurrentMemoryContext, state);
+	request.output_mode = TESS_OUTPUT_BATCH;
+	request.max_batch_rows = max_rows;
+	tess_input_set_request(input, &request);
+	for (int i = 0; i < skip; i++)
+	{
+		if (tess_input_next(input) == NULL)
+			elog(ERROR, "the scan holds fewer batches than it skips");
+		tess_input_finish(input);
+	}
+	batch = tess_input_next(input);
+	if (batch == NULL || batch->rows.nrows != max_rows)
+		elog(ERROR, "the batch does not hold %d rows", max_rows);
+	last = max_rows - 1;
+	/* A row a consumer took out of the mask is still made when asked. */
+	tess_row_mask_clear(&batch->rows, last);
+	layout = tess_input_layout(input);
+	for (int target = 0; target < layout->ntargets; target++)
+	{
+		int			column = tess_layout_column(layout, target);
+		Form_pg_attribute att = TupleDescAttr(desc, column);
+		uint64		only_last = UINT64CONST(1) << last;
+		uint64		rest = only_last - 1;
+		TessRowMask mask = {max_rows, &only_last};
+		TessDatumColumn first = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		TessDatumColumn second = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		TessDatumColumn again = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+
+		batch->ops->get_datum_column(batch, column, &mask, TESS_COLUMN_FOR_PROJECTION, &first);
+		put_ask(rsinfo, att, base, last, "first", &first);
+		mask.bits = &rest;
+		batch->ops->get_datum_column(batch, column, &mask, TESS_COLUMN_FOR_PROJECTION, &second);
+		for (int row = 0; row < last; row++)
+			put_ask(rsinfo, att, base, row, "second", &second);
+		put_ask(rsinfo, att, base, last, "kept", &first);
+		mask.bits = &only_last;
+		batch->ops->get_datum_column(batch, column, &mask, TESS_COLUMN_FOR_PROJECTION, &again);
+		put_ask(rsinfo, att, base, last, "again", &again);
+	}
+	tess_input_finish(input);
+	ExecutorFinish(query);
+	ExecutorEnd(query);
+	FreeQueryDesc(query);
+	ReleaseCachedPlan(cplan, NULL);
+	SPI_finish();
+	return (Datum) 0;
 }
