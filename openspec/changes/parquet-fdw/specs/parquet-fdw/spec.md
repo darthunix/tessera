@@ -46,19 +46,20 @@ SHALL create the foreign data wrapper `tessera_parquet`. A server of the
 wrapper SHALL take no options. A foreign table SHALL take one option,
 `files`, required: a comma-separated list of absolute paths, each a file
 or a pattern of the shell (`*`, `?`, `[…]`) whose matching files are
-taken in the order of their names. The patterns SHALL be expanded when a
-query is planned and again when its scan begins, and the scan SHALL read
-the files they match then. A column SHALL take the options `column`, the
-name of the file's column it reads (its own name by default), `unit` and
-`utf8` (the requirements "The columns and their types" and "Text from
-bytes"). Setting or changing `files`, and any change of a column's
-options whose list then holds `utf8 'trust'`, SHALL take a superuser or
-a role with the privileges of the role `pg_read_server_files`: the
-server reads the files with its own rights, and a trusted column lets
-their bytes into `text` values unchecked. A column with `utf8 'trust'`
-SHALL name its file column by the option `column`, so that renaming the
-column cannot move the trust to another file column. The wrapper SHALL
-read files whose chunks are uncompressed or compressed with Snappy.
+taken in the order of the bytes of their names. The patterns SHALL be
+expanded when a query is planned and again when its scan begins, and the
+scan SHALL read the files they match then. A column SHALL take the
+options `column`, the name of the file's column it reads (its own name
+by default), `unit` and `utf8` (the requirements "The columns and their
+types" and "Text from bytes"). Setting or changing `files`, and any
+change of a column's options whose list then holds `utf8 'trust'`, SHALL
+take a superuser or a role with the privileges of the role
+`pg_read_server_files`: the server reads the files with its own rights,
+and a trusted column lets their bytes into `text` values unchecked. A
+column with `utf8 'trust'` SHALL name its file column by the option
+`column`, so that renaming the column cannot move the trust to another
+file column. The wrapper SHALL read files whose chunks are uncompressed
+or compressed with Snappy.
 
 The wrapper SHALL refuse with an error: an option it does not know,
 SQLSTATE `HV00D`; a table without `files`, `HV002`; a path that is not
@@ -77,8 +78,8 @@ given twice, `42710`.
   chunks uncompressed and compressed with Snappy, and a query reads it
   with Tessera off in a serial plan
 - **THEN** it returns the rows of the seven files, the file first and
-  then each pattern's two in the order of their names, the groups of a
-  file and the rows of a group in their order
+  then each pattern's two in the order of the bytes of their names, the
+  groups of a file and the rows of a group in their order
 - **Verified by:** pending
 
 #### Scenario: Options refused
