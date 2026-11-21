@@ -578,7 +578,9 @@ static const CustomExecMethods source_exec_methods = {
 /*
  * The plan: the clauses the source uses as its expressions, no
  * qualifiers, the relation as its scan tuple; or, at a fault's word, the
- * qualifiers PostgreSQL hands it, or no expressions.
+ * qualifiers PostgreSQL hands it, or no expressions, or a clause added
+ * to the relation's own list after its paths were made, which the list
+ * PostgreSQL then hands the filter above shares.
  */
 static Plan *
 source_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
@@ -602,6 +604,18 @@ source_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		config.qual = extract_actual_clauses(clauses, false);
 	if (fault != NULL && strcmp(fault, "plan_missing") == 0)
 		config.expressions = NIL;
+	if (fault != NULL && strcmp(fault, "extra_clause") == 0 && rel->baserestrictinfo != NIL)
+	{
+		Var		   *var = makeVar(rel->relid, 1, INT4OID, -1, InvalidOid, 0);
+		NullTest   *test = makeNode(NullTest);
+
+		test->arg = (Expr *) var;
+		test->nulltesttype = IS_NOT_NULL;
+		test->location = -1;
+		/* lappend keeps the list's header, which the filter's caller holds. */
+		rel->baserestrictinfo = lappend(rel->baserestrictinfo,
+										make_simple_restrictinfo(root, (Expr *) test));
+	}
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 
@@ -936,9 +950,11 @@ explain_clauses(SourceScanState *state, List *ancestors, ExplainState *es,
 	if (clauses == NIL)
 		return;
 	context = set_deparse_context_plan(es->deparse_cxt, state->css.ss.ps.plan, ancestors);
+	/* Prefixed as TessFilter shows its clauses. */
 	ExplainPropertyText(label,
 						deparse_expression((Node *) make_ands_explicit(clauses), context,
-										   es->verbose, false),
+										   es->rtable_size > 1 || es->verbose,
+										   false),
 						es);
 }
 

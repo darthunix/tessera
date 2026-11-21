@@ -148,7 +148,7 @@ the core's `ForeignScan` packs it, so a source that costs more than its
 wrapper stays unused under every parent too. The conditions of the
 relations offered (a `SELECT` without row marks, no lateral references,
 a simple relation) stay in one place, the scan planner's
-`relation_supported`, and no public call of the runtime changes.
+`scan_supported`, and no public call of the runtime changes.
 
 Refused:
 
