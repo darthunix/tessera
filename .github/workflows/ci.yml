@@ -513,6 +513,9 @@ jobs:
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
             --test spill --test join --test group --test runs --test build --test smallint \
             --test date_bound
+          # The entry points of the reader of Parquet files, over files its
+          # tests write.
+          cargo miri test --locked -p tessera-parquet --lib c::tests
           # The spill's entry points write places C has not filled yet: no
           # value may be read or borrowed there.
           MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
