@@ -17,8 +17,12 @@ decides. The [nodes guide](nodes.md) explains each node's planning.
   stay the core's (`relation_supported` in `nodes/scan_planner.c`). A
   subquery planned on its own, such as the grouping of
   `INSERT … SELECT … GROUP BY`, can use the batch nodes.
-- **Tables other than heap tables.** Foreign tables, tables of another
-  access method, and `TABLESAMPLE` keep the core's scan.
+- **Tables other than heap tables.** A foreign table keeps its wrapper's
+  scan unless a registered source reads it in batches
+  ([source.md](source.md)); tables of another access method and
+  `TABLESAMPLE` keep the core's scan. A foreign table with lateral
+  references, a pseudoconstant clause, or only paths with parameters
+  or path keys is offered to no source.
 - **Parameterized paths.** A batch path is never parameterized by an outer
   row (`check_path_config` in `runtime/planner.c`), so the inner side of a
   nested loop that probes an index for each outer row, and a scan with
