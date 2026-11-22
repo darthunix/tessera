@@ -11,7 +11,7 @@ LOAD 'tessera_kernels';
 CREATE EXTENSION tessera_parquet;
 CREATE FUNCTION parquet_test_write(text, text) RETURNS void
     AS :'parquet_test', 'tessera_parquet_test_write' LANGUAGE C STRICT;
-CREATE FUNCTION parquet_test_rewrite(text, bool, bool, bool, int) RETURNS void
+CREATE FUNCTION parquet_test_rewrite(text, bool, bool, bool, int, int) RETURNS void
     AS :'parquet_test', 'tessera_parquet_test_rewrite' LANGUAGE C STRICT;
 CREATE FUNCTION parquet_test_head_dictionaries(text) RETURNS void
     AS :'parquet_test', 'tessera_parquet_test_head_dictionaries' LANGUAGE C STRICT;
@@ -426,7 +426,7 @@ SELECT s FROM t_vc_four WHERE k = 1;
 SELECT parquet_test_write(current_setting('parquet.dir') || '/gzip.parquet',
     '{"compression": "snappy", "columns": [{"name": "a", "type": "int32", "values": [1, 2]},
                   {"name": "b", "type": "int32", "values": [3, 4]}]}');
-SELECT parquet_test_rewrite(current_setting('parquet.dir') || '/gzip.parquet', false, false, false, 1);
+SELECT parquet_test_rewrite(current_setting('parquet.dir') || '/gzip.parquet', false, false, false, 1, -1);
 CREATE FOREIGN TABLE t_gzip (a int, b int) SERVER pq OPTIONS (files :'gzip');
 SELECT sqlstate_of('EXPLAIN SELECT b FROM t_gzip') AS gzip_column;
 SELECT sqlstate_of('EXPLAIN SELECT a FROM t_gzip') AS snappy_beside_gzip;
@@ -995,6 +995,141 @@ SELECT count(*) AS rejected FROM t_far_seconds WHERE ts < TIMESTAMP '2000-01-01'
 SELECT count(*) AS passed FROM t_far_seconds WHERE ts > TIMESTAMP '2000-01-01';
 SELECT sqlstate_of($$SELECT ts FROM t_far_seconds WHERE ts > TIMESTAMP '2000-01-01'$$)
     AS made;
+-- The groups a statement's source read and skipped, by EXPLAIN ANALYZE,
+-- and the result of a clause against a heap table of the same rows.
+CREATE FUNCTION groups_of(statement text) RETURNS text LANGUAGE sql AS $$
+    SELECT string_agg(regexp_replace(line, 'Row Groups ', ''), ', ')
+    FROM explain_lines('ANALYZE', statement, 'Row Groups (Read|Skipped)') line
+$$;
+CREATE FUNCTION skipping(foreign_table text, heap text, clause text,
+                         OUT groups text, OUT rows_differ bigint, OUT heap_rows bigint)
+LANGUAGE sql AS $$
+    SELECT groups_of(format('SELECT * FROM %s WHERE %s', foreign_table, clause)),
+           differ(format('SELECT * FROM %s WHERE %s', foreign_table, clause),
+                  format('SELECT * FROM %s WHERE %s', heap, clause)),
+           rows_of(format('SELECT * FROM %s WHERE %s', heap, clause))
+$$;
+
+-- spec: parquet-fdw/Groups skipped
+-- Eight groups of a hundred rows: a ascending, n with NULL values in the
+-- first two groups alone, m NULL in every row of the last two. The
+-- groups skipped by strings join these with the clauses on strings.
+SELECT parquet_test_write(:'dir' || '/eight_groups.parquet', json_build_object(
+    'group_rows', 100, 'columns', json_build_array(
+      json_build_object('name', 'a', 'type', 'int32', 'range', 800),
+      json_build_object('name', 'n', 'type', 'int32', 'values',
+        (SELECT json_agg(CASE WHEN i < 200 AND i % 7 = 0 THEN NULL ELSE i END ORDER BY i)
+         FROM generate_series(0, 799) i)),
+      json_build_object('name', 'm', 'type', 'int32', 'values',
+        (SELECT json_agg(CASE WHEN i >= 600 THEN NULL ELSE i END ORDER BY i)
+         FROM generate_series(0, 799) i))))::text);
+\set eight_groups :dir '/eight_groups.parquet'
+CREATE FOREIGN TABLE t_eight_groups (a int, n int, m int)
+    SERVER pq OPTIONS (files :'eight_groups');
+CREATE TABLE h_eight_groups AS SELECT * FROM t_eight_groups;
+SELECT c AS clause, s.*
+FROM unnest(ARRAY['a >= 250 AND a <= 349', 'a IN (5, 705)', 'n IS NULL',
+                  'm IS NOT NULL']) c,
+     LATERAL skipping('t_eight_groups', 'h_eight_groups', c) s;
+-- Dates through dictionaries, in a file written without least and
+-- greatest values: group g holds the days 10 g, 10 g + 2 and 10 g + 4
+-- after 2013-07-01, so the 32nd day is the fourth group's alone.
+SELECT parquet_test_write(:'dir' || '/dated_groups.parquet', json_build_object(
+    'group_rows', 100, 'dictionary', true, 'statistics', false, 'columns', json_build_array(
+      json_build_object('name', 'd', 'type', 'int32', 'logical', 'date', 'values',
+        (SELECT json_agg(DATE '2013-07-01' - DATE '1970-01-01' + i / 100 * 10 + i % 3 * 2
+                         ORDER BY i)
+         FROM generate_series(0, 799) i))))::text);
+\set dated_groups :dir '/dated_groups.parquet'
+CREATE FOREIGN TABLE t_dated_groups (d date) SERVER pq OPTIONS (files :'dated_groups');
+CREATE TABLE h_dated_groups AS SELECT * FROM t_dated_groups;
+SELECT c AS clause, s.*
+FROM unnest(ARRAY[$c$d = DATE '2013-08-02'$c$]) c,
+     LATERAL skipping('t_dated_groups', 'h_dated_groups', c) s;
+-- 2 between the least and the greatest of a group of 1 and 3: ruled out
+-- by its dictionary.
+SELECT parquet_test_write(:'dir' || '/odd_values.parquet',
+    '{"dictionary": true, "columns": [{"name": "v", "type": "int32", "values": [1, 3, 1, 3]}]}');
+\set odd_values :dir '/odd_values.parquet'
+CREATE FOREIGN TABLE t_odd_values (v int) SERVER pq OPTIONS (files :'odd_values');
+CREATE TABLE h_odd_values AS SELECT * FROM t_odd_values;
+SELECT c AS clause, s.*
+FROM unnest(ARRAY['v = 2']) c, LATERAL skipping('t_odd_values', 'h_odd_values', c) s;
+-- Dictionary pages headed PLAIN_DICTIONARY, as ClickBench's are.
+SELECT parquet_test_write(:'dir' || '/headed_groups.parquet', json_build_object(
+    'group_rows', 100, 'dictionary', true, 'statistics', false, 'columns', json_build_array(
+      json_build_object('name', 'd', 'type', 'int32', 'logical', 'date', 'values',
+        (SELECT json_agg(DATE '2013-07-01' - DATE '1970-01-01' + i / 100 * 10 + i % 3 * 2
+                         ORDER BY i)
+         FROM generate_series(0, 799) i))))::text);
+SELECT parquet_test_head_dictionaries(:'dir' || '/headed_groups.parquet');
+\set headed_groups :dir '/headed_groups.parquet'
+CREATE FOREIGN TABLE t_headed_groups (d date) SERVER pq OPTIONS (files :'headed_groups');
+SELECT c AS clause, s.*
+FROM unnest(ARRAY[$c$d = DATE '2013-08-02'$c$]) c,
+     LATERAL skipping('t_headed_groups', 'h_dated_groups', c) s;
+
+-- spec: parquet-fdw/Groups the footer cannot rule out
+-- A value in the plain pages a dictionary fell back to, in a file
+-- without least and greatest values.
+SELECT parquet_test_write(:'dir' || '/fallen_back.parquet',
+    '{"dictionary": true, "dictionary_bytes": 64, "page_rows": 50, "statistics": false,
+      "columns": [{"name": "v", "type": "int32", "range": 400}]}');
+\set fallen_back :dir '/fallen_back.parquet'
+CREATE FOREIGN TABLE t_fallen_back (v int) SERVER pq OPTIONS (files :'fallen_back');
+CREATE TABLE h_fallen_back AS SELECT * FROM t_fallen_back;
+SELECT c AS clause, s.*
+FROM unnest(ARRAY['v = 399']) c, LATERAL skipping('t_fallen_back', 'h_fallen_back', c) s;
+-- A value outside the dictionary of a chunk whose footer says nothing of
+-- the encodings of its pages.
+SELECT parquet_test_write(:'dir' || '/unsaid.parquet',
+    '{"dictionary": true, "statistics": false,
+      "columns": [{"name": "v", "type": "int32", "values": [1, 3, 1, 3]}]}');
+SELECT parquet_test_rewrite(:'dir' || '/unsaid.parquet', false, true, false, -1, -1);
+\set unsaid :dir '/unsaid.parquet'
+CREATE FOREIGN TABLE t_unsaid (v int) SERVER pq OPTIONS (files :'unsaid');
+SELECT c AS clause, s.*
+FROM unnest(ARRAY['v = 2']) c, LATERAL skipping('t_unsaid', 'h_odd_values', c) s;
+-- Unsigned integers whose least and greatest values are in the older
+-- fields, sorted as signed, with and without column orders; signed ones
+-- in the newer fields without column orders.
+SELECT parquet_test_write(:'dir' || '/unsigned_' || o || '.parquet',
+    '{"columns": [{"name": "u", "type": "int32", "logical": "uint32",
+                   "values": [1, 4000000000]},
+                  {"name": "i", "type": "int32", "values": [1, 2]}]}')
+FROM unnest(ARRAY['old', 'old_ordered', 'unordered']) o;
+SELECT parquet_test_rewrite(:'dir' || '/unsigned_old.parquet', true, false, false, -1, -1),
+       parquet_test_rewrite(:'dir' || '/unsigned_old_ordered.parquet', true, false, false, -1, 1),
+       parquet_test_rewrite(:'dir' || '/unsigned_unordered.parquet', false, false, false, -1, 0);
+\set unsigned_old :dir '/unsigned_old.parquet'
+\set unsigned_old_ordered :dir '/unsigned_old_ordered.parquet'
+\set unsigned_unordered :dir '/unsigned_unordered.parquet'
+CREATE FOREIGN TABLE t_unsigned_old (u bigint, i int)
+    SERVER pq OPTIONS (files :'unsigned_old');
+CREATE FOREIGN TABLE t_unsigned_old_ordered (u bigint, i int)
+    SERVER pq OPTIONS (files :'unsigned_old_ordered');
+CREATE FOREIGN TABLE t_unsigned_unordered (u bigint, i int)
+    SERVER pq OPTIONS (files :'unsigned_unordered');
+CREATE TABLE h_unsigned (u bigint, i int);
+INSERT INTO h_unsigned VALUES (1, 1), (4000000000, 2);
+SELECT t AS foreign_table, c AS clause, s.*
+FROM unnest(ARRAY['t_unsigned_old', 't_unsigned_old_ordered']) t,
+     unnest(ARRAY['u > 2000000000']) c,
+     LATERAL skipping(t, 'h_unsigned', c) s;
+SELECT c AS clause, s.*
+FROM unnest(ARRAY['i > 100']) c, LATERAL skipping('t_unsigned_unordered', 'h_unsigned', c) s;
+-- IS NULL on a chunk without a count of NULL values, every page through
+-- its dictionary, holding NULL values.
+SELECT parquet_test_write(:'dir' || '/uncounted.parquet',
+    '{"dictionary": true, "columns": [{"name": "v", "type": "int32", "values": [1, null, 3, null]}]}');
+SELECT parquet_test_rewrite(:'dir' || '/uncounted.parquet', false, false, true, -1, -1);
+\set uncounted :dir '/uncounted.parquet'
+CREATE FOREIGN TABLE t_uncounted (v int) SERVER pq OPTIONS (files :'uncounted');
+CREATE TABLE h_uncounted (v int);
+INSERT INTO h_uncounted VALUES (1), (NULL), (3), (NULL);
+SELECT c AS clause, s.*
+FROM unnest(ARRAY['v IS NULL']) c, LATERAL skipping('t_uncounted', 'h_uncounted', c) s;
+
 -- The paths cost the chunks of the columns they read, as the footers
 -- give their bytes: a query that reads no column costs no page, a row
 -- the core's cost of a tuple; and a column of long strings costs more
@@ -1098,6 +1233,8 @@ SELECT parallel_lines('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)',
 SELECT checked_by('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)') AS checked_by;
 SELECT workers_launched('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)') > 0
     AS workers_read;
+-- The groups each participant skips, summed: the last three, as serial.
+SELECT groups_of('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)') AS parallel_groups;
 SELECT differ_serial('SELECT i, s FROM t_eight WHERE i % 2 = 0 AND i < 4500') AS filtered,
        differ_serial('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)') AS by_a_subquery;
 SELECT differ_serial('SELECT i, s FROM t_eight') AS in_full,
@@ -1107,6 +1244,7 @@ SELECT differ_serial('SELECT i, s FROM t_eight') AS in_full,
                       RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true') AS rescanned;
 RESET parallel_leader_participation;
 SET max_parallel_workers_per_gather = 0;
+SELECT groups_of('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)') AS serial_groups;
 SELECT explain_lines('ANALYZE', 'SELECT count(*), sum(i), max(s) FROM t_eight',
                      'Row Groups|Values Decoded');
 RESET max_parallel_workers_per_gather;
@@ -1245,16 +1383,19 @@ DROP FOREIGN TABLE t_files, t_owned, t_plain, t_none, t_gzip, t_types, t_drop, t
     t_mappings, t_check_plain, t_check_dict, t_trust, t_bytes, t_vc_three, t_vc_four, t_vc_trust,
     t_rep, t_cur, t_two, t_cut, t_damaged, t_far, t_windows, t_empty, t_wide, t_asks,
     t_damaged_pages, t_eight, t_groups, t_analyzed, t_sparse, t_alternating, t_widths,
-    t_one_more, t_clauses, t_far_seconds, t_mixed;
+    t_one_more, t_clauses, t_far_seconds, t_mixed, t_eight_groups, t_dated_groups, t_odd_values,
+    t_headed_groups, t_fallen_back, t_unsaid, t_unsigned_old, t_unsigned_old_ordered,
+    t_unsigned_unordered, t_uncounted;
 DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks, h_analyzed,
-    h_clauses, h_outer, h_mixed;
-DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, bool, bool, int),
+    h_clauses, h_outer, h_mixed, h_eight_groups, h_dated_groups, h_odd_values, h_fallen_back,
+    h_unsigned, h_uncounted;
+DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, bool, bool, int, int),
     parquet_test_head_dictionaries(text), parquet_test_replace(text, text, text),
     parquet_test_remove(text), parquet_test_cut(text, int), parquet_test_damage(text, int, int),
     sqlstate_of(text), differ(text, text), differ_off(text), scans_of(text),
     explain_lines(text, text, text), parquet_test_asks(text, int, int), differ_serial(text),
     parallel_lines(text, text), workers_launched(text), plan_of(text), scan_cost(text, text),
-    checked_by(text), rows_of(text);
+    checked_by(text), rows_of(text), groups_of(text), skipping(text, text, text);
 DROP SERVER pq;
 REVOKE CREATE ON SCHEMA public FROM parquet_reader, parquet_other;
 DROP ROLE parquet_reader, parquet_other;

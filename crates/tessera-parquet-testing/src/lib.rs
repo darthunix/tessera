@@ -381,9 +381,10 @@ pub unsafe extern "C" fn tess_parquet_test_write(
 
 /// Rewrites the footer of the file at the path of `path_len` bytes: the
 /// least and greatest values of the old rule, the statistics of
-/// encodings or the counts of `NULL` values dropped, as the flags say, and
+/// encodings or the counts of `NULL` values dropped, as the flags say,
 /// the codec named for every chunk of leaf `codec_leaf` (-1 for none) set
-/// to GZIP.
+/// to GZIP, and the column orders kept for `column_orders` 1, dropped for
+/// 0, and as the old rule says for -1.
 ///
 /// # Safety
 ///
@@ -397,6 +398,7 @@ pub unsafe extern "C" fn tess_parquet_test_rewrite(
     drop_encoding_stats: bool,
     drop_null_counts: bool,
     codec_leaf: i32,
+    column_orders: i32,
     status: *mut Status,
 ) -> bool {
     // SAFETY: as the function's contract says.
@@ -407,6 +409,11 @@ pub unsafe extern "C" fn tess_parquet_test_rewrite(
                 old_rule,
                 drop_encoding_stats,
                 drop_null_counts,
+                column_orders: match column_orders {
+                    0 => Some(false),
+                    1 => Some(true),
+                    _ => None,
+                },
                 codec: usize::try_from(codec_leaf)
                     .ok()
                     .map(|leaf| (leaf, Compression::GZIP(Default::default()))),
@@ -538,6 +545,7 @@ mod tests {
                 true,
                 true,
                 0,
+                1,
                 &mut status
             ));
             assert!(!tess_parquet_test_write(

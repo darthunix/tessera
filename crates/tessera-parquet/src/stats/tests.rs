@@ -147,6 +147,20 @@ fn newer_fields_without_column_orders_are_not_trusted() {
     );
     assert_eq!(stats_of(&without, &i, 0).bounds, None);
     assert_eq!(stats_of(&without, &i, 0).nulls, Some(1));
+    // The same from a footer whose column orders were cut.
+    testing::rewrite_footer(
+        &path,
+        Rewrite {
+            column_orders: Some(false),
+            ..Rewrite::default()
+        },
+    )
+    .unwrap();
+    let cut = ParquetFile::open(&path).unwrap();
+    let i_cut = map_column(&cut, &request("i", oid::INT4)).unwrap();
+    assert!(cut.metadata().file_metadata().column_orders().is_none());
+    assert_eq!(group_stats(&cut, &i_cut, 0).bounds, None);
+    assert_eq!(group_stats(&cut, &i_cut, 0).nulls, Some(1));
     assert_eq!(
         stats_of(meta, &i, 0).bounds,
         Some(Bounds {

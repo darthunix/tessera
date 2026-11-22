@@ -53,7 +53,8 @@ typedef struct ParquetFound
 /* The counters of a scan that EXPLAIN sums over the participants. */
 #define PARQUET_GROUPS_READ 0
 #define PARQUET_VALUES_DECODED 1
-#define PARQUET_COUNTERS 2
+#define PARQUET_GROUPS_SKIPPED 2
+#define PARQUET_COUNTERS 3
 
 struct ParquetShared;
 struct TessSharedStats;
@@ -152,6 +153,7 @@ extern ParquetScan *parquet_scan_attach(Oid relid, List *attnums, void *coordina
 										MemoryContext cxt);
 extern void parquet_scan_unshare(ParquetScan *scan);
 extern const uint64 *parquet_scan_counts(const ParquetScan *scan);
+extern void parquet_scan_skip_group(ParquetScan *scan);
 extern struct TupleTableSlot *parquet_scan_next(ParquetScan *scan,
 												struct TupleTableSlot *slot);
 pg_noreturn extern void parquet_raise(const TessParquetStatus *status);

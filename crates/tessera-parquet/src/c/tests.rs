@@ -769,6 +769,63 @@ fn bytes_the_decoders_cannot_read_give_a_status() {
     }
 }
 
+/// A group ruled out through the C entry, by the statistics and by the
+/// dictionary; broken calls refused.
+#[test]
+fn a_group_ruled_out_through_the_c_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    // Two groups: 1 and 3, then 5 and 6.
+    testing::write(
+        &path,
+        &[Column::int32("a", &[1, 3, 1, 3, 5, 6, 5, 6])],
+        4,
+        true,
+    )
+    .unwrap();
+    let file = open(&path);
+    let col = column(file, "a", oid::INT4, -1).unwrap();
+    let mut test = ptr::null_mut();
+    let mut st = status();
+    // a = 2: between the first group's least and greatest, in no row.
+    assert!(unsafe {
+        tess_parquet_test(
+            col,
+            0,
+            [2i64].as_ptr(),
+            [false].as_ptr(),
+            1,
+            &mut test,
+            &mut st,
+        )
+    });
+    let ruled_out = |group: usize, dictionary: bool| {
+        let mut out = false;
+        let mut st = status();
+        assert!(unsafe {
+            tess_parquet_group_ruled_out(file, col, group, test, dictionary, &mut out, &mut st)
+        });
+        out
+    };
+    assert!(!ruled_out(0, false));
+    assert!(ruled_out(0, true));
+    assert!(ruled_out(1, false));
+    let mut out = false;
+    let mut st = status();
+    assert!(!unsafe {
+        tess_parquet_group_ruled_out(file, col, 0, ptr::null(), false, &mut out, &mut st)
+    });
+    assert_eq!(text(&st.sqlstate), "XX000");
+    assert!(!unsafe {
+        tess_parquet_group_ruled_out(file, col, 0, test, false, ptr::null_mut(), &mut st)
+    });
+    unsafe {
+        tess_parquet_test_free(test);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
+
 /// The kinds of comparison as the header numbers them.
 #[test]
 fn comparisons_by_the_header_s_kinds() {

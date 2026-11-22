@@ -379,6 +379,28 @@ tried otherwise: ClickBench compares no string by `=` with another
 constant or by a prefix, and its `LIKE` of a part inside the string no
 bound can rule out.
 
+The reader decides and the node asks. When a group starts, the node asks
+for each clause the source checks whether the footer rules the group
+out: first by the statistics of every clause's column, which cost no
+read, and then by the dictionaries, so that a dictionary page is read
+only where no statistics decide. A group ruled out is counted as
+skipped, not read. A footer that contradicts itself rules nothing out:
+neither a range turned the wrong way nor a chunk whose count of values
+is not its group's rows, whose group is then read, and the reading
+raises what it finds. A footer consistent with itself is trusted, as the
+format's statistics are. The decision is in Rust, where Kani and the
+mutants judge it. Kani proves the decision by statistics for every kind
+of clause, every count of rows and of `NULL` rows and every least and
+greatest value: a group ruled out holds no row that passes, and `IN` of
+up to three bounds is ruled out exactly where a range the right way
+round holds none of them. The decision by dictionaries is shown by
+tests. A property test writes files of random values, `NULL` among them,
+signed and unsigned, of random groups and pages, with dictionaries and
+their fallback, with statistics and without, under rewritten footers,
+and checks that no group ruled out holds a row that passes. Two clauses
+on one column read its dictionary twice; ClickBench asks no such pair
+that the statistics leave undecided.
+
 ### Parallel reading by groups of rows
 
 The plan carries the files' paths and patterns. When a scan begins, the
@@ -482,7 +504,12 @@ and greatest values of the old rule, the deprecated fields without
 column orders, which the crate's writer never writes, on a column of
 plain pages, and to drop the statistics of encodings and the counts of
 `NULL` values; it reads the footer with the statistics of encodings
-whole, since the crate writes back only those it read so. No binary file
+whole, since the crate writes back only those it read so. The crate's
+writer always writes column orders, so a footer without them, as older
+writers wrote it, is made by cutting them from the footer it wrote:
+they are its last field, of a shape the module checks byte by byte and
+refuses otherwise. The old fields under column orders and the newer
+fields without them are written the same way. No binary file
 is kept in the tree. Every query is compared with the same query over a
 heap table of the same rows.
 
