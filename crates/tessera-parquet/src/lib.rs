@@ -11,10 +11,14 @@
 //!   the file, with the read plan of `datum-arrow` its values cross.
 //! - [`ColumnReader`]: a column of a group of rows read window by window
 //!   for a selection of rows, forward.
+//! - [`ClauseTest`]: a clause the source checks, made once from the
+//!   clause's values and a column's read plan, applied to the arrays a
+//!   reader gives before any value is made.
 //! - [`GroupStats`] and [`Dictionary`]: what a footer and a dictionary
 //!   page say of a column's chunk, for the skipping of groups of rows.
 
 pub mod c;
+mod clause;
 mod column;
 mod dictionary;
 mod error;
@@ -25,6 +29,7 @@ mod stats;
 #[cfg(any(test, feature = "test-files"))]
 pub mod testing;
 
+pub use clause::{ClauseKind, ClauseTest};
 pub use column::{ColumnRequest, FileType, MappedColumn, map_column};
 pub use dictionary::{Dictionary, read_dictionary};
 pub use error::{Error, Result};
