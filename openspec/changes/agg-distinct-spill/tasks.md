@@ -31,7 +31,7 @@ one pull request; the work and the close are a second.
 
 ## 3. The pairs through the machine
 
-- [ ] 3.1 A property test of `relspill`: random pairs of group and
+- [x] 3.1 A property test of `relspill`: random pairs of group and
       value through a set frozen by `Rows` under a random limit, its
       pairs not found written by their hash, its levels read back into
       sets of their own and frozen again, count the distinct pairs of

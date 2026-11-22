@@ -1,5 +1,5 @@
 use core::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use proptest::prelude::*;
 
@@ -1304,5 +1304,169 @@ fn rows_freeze_level_under_level() -> Result<()> {
     let (counts, deepest) = count_rows(&rows_params(2 * 1024), keys, 64)?;
     assert_eq!(counts.len(), 40_000);
     assert!(deepest > 1, "{deepest} levels");
+    Ok(())
+}
+
+/// The hash of a pair of group and value, as a DISTINCT set's: the
+/// group's folded with the value's.
+fn pair_hash(group: u32, value: u32) -> u32 {
+    hash(hash(group) ^ value.wrapping_mul(0x85eb_ca6b))
+}
+
+/// The pairs of each partition of a level.
+type Partitions = Vec<Vec<(u32, u32)>>;
+
+/// A DISTINCT set of the pairs model: its pairs, and whether it takes no
+/// new pair.
+struct PairsSet {
+    machine: Rows,
+    pairs: BTreeSet<(u32, u32)>,
+    frozen: Option<Plan>,
+    /// The pairs it lacks, by partition, once frozen.
+    written: Partitions,
+}
+
+/// Count the distinct values of each group of `pairs` through DISTINCT
+/// sets that freeze past the limit, beside groups that never leave
+/// memory: each group takes `group_bytes`, and while the input is read the
+/// groups weigh as many as `estimate` of them at least. A frozen set's
+/// pairs it lacks go to the partitions of their hash; each level is read
+/// back, the last written first, into sets of their own, read as of the
+/// last level when the groups alone pass the fill. The counts, and the
+/// most levels.
+fn count_pairs(
+    params: &RowsParams,
+    pairs: Vec<(u32, u32)>,
+    batch: usize,
+    group_bytes: u64,
+    estimate: u64,
+) -> Result<(BTreeMap<u32, u64>, u32)> {
+    let mut counts = BTreeMap::new();
+    let mut counted = BTreeSet::new();
+    let mut groups = BTreeSet::new();
+    let mut deepest = 0;
+    let mut input = true;
+    // The levels to read, the last written on top: each with its machine
+    // and its partitions' pairs.
+    let mut pending: Vec<(Rows, Partitions)> = Vec::new();
+    let mut sets = vec![(Rows::new(params)?, pairs)];
+    while let Some((machine, rows)) = sets.pop() {
+        let mut set = PairsSet {
+            machine,
+            pairs: BTreeSet::new(),
+            frozen: None,
+            written: Vec::new(),
+        };
+        for chunk in rows.chunks(batch) {
+            for &(group, value) in chunk {
+                if input {
+                    groups.insert(group);
+                }
+                if set.pairs.contains(&(group, value)) {
+                    continue;
+                }
+                if let Some(plan) = &set.frozen {
+                    let partition = (pair_hash(group, value) >> plan.shift) as usize
+                        & (plan.partitions as usize - 1);
+                    set.written[partition].push((group, value));
+                } else {
+                    set.pairs.insert((group, value));
+                    assert!(
+                        counted.insert((group, value)),
+                        "pair ({group}, {value}) counted twice"
+                    );
+                    *counts.entry(group).or_insert(0_u64) += 1;
+                }
+            }
+            if set.frozen.is_none() {
+                let weighed = if input {
+                    (groups.len() as u64).max(estimate)
+                } else {
+                    groups.len() as u64
+                };
+                let grown = RowsEvent::Grown {
+                    memory: weighed * group_bytes + set.pairs.len() as u64 * RECORD,
+                    records: set.pairs.len() as u64,
+                };
+                if let RowsAction::Freeze { plan, .. } =
+                    set.machine.step(grown, &RowsHost { written: &[] })?
+                {
+                    set.written = vec![Vec::new(); plan.partitions as usize];
+                    set.frozen = Some(plan);
+                }
+            }
+        }
+        input = false;
+        if set.frozen.is_some() {
+            assert_eq!(
+                set.machine
+                    .step(RowsEvent::Written, &RowsHost { written: &[] })?,
+                RowsAction::Done
+            );
+            pending.push((set.machine, set.written));
+        }
+        // The next set: the next partition of the last level written.
+        let crowded = full(params.limit, params.fill, groups.len() as u64 * group_bytes);
+        while let Some((machine, written)) = pending.last_mut() {
+            let lens: Vec<u64> = written.iter().map(|rows| rows.len() as u64).collect();
+            match machine.step(RowsEvent::Next, &RowsHost { written: &lens })? {
+                RowsAction::Read(mut table) => {
+                    deepest = deepest.max(table.level);
+                    table.last |= crowded;
+                    let rows = core::mem::take(&mut written[table.partition as usize]);
+                    sets.push((Rows::read(params, &table)?, rows));
+                    break;
+                }
+                RowsAction::LevelDone => {
+                    assert!(written.iter().all(Vec::is_empty), "pairs left unread");
+                    pending.pop();
+                }
+                action => panic!("{action:?} for the next partition"),
+            }
+        }
+    }
+    Ok((counts, deepest))
+}
+
+#[test]
+fn pairs_through_frozen_sets_count_each_pair_of_its_group_once() {
+    let strategy = (
+        prop::collection::vec((0_u32..300, 0_u32..3000), 0..6000),
+        2_u64..64,
+        1_usize..200,
+        0_u64..256,
+        0_u64..400,
+    );
+    property(strategy, |(pairs, kib, batch, group_bytes, estimate)| {
+        let mut expected = BTreeMap::new();
+        for (group, _) in pairs.iter().copied().collect::<BTreeSet<_>>() {
+            *expected.entry(group).or_insert(0_u64) += 1;
+        }
+        let (got, _) = count_pairs(
+            &rows_params(kib * 1024),
+            pairs,
+            batch,
+            group_bytes,
+            estimate,
+        )?;
+        assert_eq!(got, expected);
+        Ok(())
+    });
+}
+
+#[test]
+fn sets_read_back_as_the_last_level_once_the_groups_fill_the_limit() -> Result<()> {
+    let pairs: Vec<(u32, u32)> = (0..50_000_u32)
+        .map(|row| (row % 100, row * 7919 % 40_000))
+        .collect();
+    // Groups of 4 bytes leave the sets room: they freeze level under level.
+    let (counts, deepest) = count_pairs(&rows_params(2 * 1024), pairs.clone(), 64, 4, 0)?;
+    assert_eq!(counts.values().sum::<u64>(), 40_000);
+    assert!(deepest > 1, "{deepest} levels");
+    // Groups of 32 bytes alone pass seven eighths of 2 kB: the sets read
+    // back grow rather than freeze again.
+    let (counts, deepest) = count_pairs(&rows_params(2 * 1024), pairs, 64, 32, 0)?;
+    assert_eq!(counts.values().sum::<u64>(), 40_000);
+    assert_eq!(deepest, 1);
     Ok(())
 }
