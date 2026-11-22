@@ -114,7 +114,7 @@ pub fn single(run: &Run) -> String {
     if run.meta.counters {
         return single_counts(run);
     }
-    let mut text = format!("{}\n", run.meta.label());
+    let mut text = format!("{} {}\n", run.meta.id, run.meta.label());
     let tries = run.meta.tries as usize;
     let _ = write!(text, "{:<5}", "query");
     for index in 1..=tries {
@@ -175,7 +175,7 @@ fn spread(times: &QueryTimes) -> String {
 /// billions, with the spread of its cycles and its workers' share, and
 /// their sums.
 fn single_counts(run: &Run) -> String {
-    let mut text = format!("{}\n", run.meta.label());
+    let mut text = format!("{} {}\n", run.meta.id, run.meta.label());
     let _ = writeln!(
         text,
         "{:<5} {:>10} {:>12} {:>8} {:>9}",
@@ -298,29 +298,41 @@ fn side_by_side_counts(runs: &[Run]) -> String {
     text
 }
 
-/// The runs as the columns of a report: runs of one mode, workers,
-/// threads, files, commit and settings whose queries differ, as a run of
-/// each query alone gives them, are one column, in the order of their
-/// first run, its id followed by the count of the others; a run that
-/// repeats a query of its column starts another.
+/// The runs as the columns of a report: timed or counted runs of one
+/// mode, workers, threads, files and rows, commit, server, power and
+/// settings whose queries differ, as a run of each query alone gives them, are
+/// one column, in the order of their first run, its id followed by the
+/// count of the others; a run that repeats a query of its column, or
+/// that has no times, starts another.
 pub fn merged(runs: Vec<Run>) -> Vec<Run> {
     let key = |meta: &Meta| {
         (
-            meta.command.clone(),
-            meta.modes.clone(),
-            meta.workers,
-            meta.duckdb_threads,
-            meta.files.clone(),
-            meta.counters,
-            meta.head.clone(),
-            meta.work_mem.clone(),
-            meta.tries,
+            (
+                meta.command.clone(),
+                meta.modes.clone(),
+                meta.workers,
+                meta.duckdb_threads,
+                meta.files.clone(),
+                meta.rows,
+                meta.counters,
+            ),
+            (
+                meta.head.clone(),
+                meta.postgres.clone(),
+                meta.duckdb.clone(),
+                meta.power.clone(),
+                meta.work_mem.clone(),
+                meta.timeout_s,
+                meta.tries,
+            ),
         )
     };
     let mut columns: Vec<(Run, usize)> = Vec::new();
     for run in runs {
         let open = columns.iter_mut().find(|(column, _)| {
-            key(&column.meta) == key(&run.meta)
+            !run.times.is_empty()
+                && !column.times.is_empty()
+                && key(&column.meta) == key(&run.meta)
                 && !run
                     .times
                     .iter()
@@ -488,11 +500,16 @@ mod tests {
 
     #[test]
     fn runs_of_one_column_are_merged() {
+        let mut other_server = run("e", "on", &[(3, Some(1.0))]);
+        other_server.meta.postgres = "PostgreSQL 18.1".into();
         let merged = merged(vec![
             run("a", "on", &[(2, Some(1.0))]),
             run("b", "duckdb", &[(1, Some(0.5))]),
             run("c", "on", &[(1, Some(2.0))]),
             run("d", "on", &[(1, Some(3.0))]),
+            other_server,
+            run("f", "on", &[]),
+            run("g", "on", &[]),
         ]);
         let columns: Vec<(&str, Vec<usize>)> = merged
             .iter()
@@ -505,8 +522,22 @@ mod tests {
             .collect();
         assert_eq!(
             columns,
-            [("a and 1 more", vec![1, 2]), ("b", vec![1]), ("d", vec![1])]
+            [
+                ("a and 1 more", vec![1, 2]),
+                ("b", vec![1]),
+                ("d", vec![1]),
+                ("e", vec![3]),
+                ("f", vec![]),
+                ("g", vec![]),
+            ]
         );
+        // A timed run does not join a column without times either.
+        let ids: Vec<String> =
+            super::merged(vec![run("f", "on", &[]), run("h", "on", &[(1, Some(1.0))])])
+                .into_iter()
+                .map(|run| run.meta.id)
+                .collect();
+        assert_eq!(ids, ["f", "h"]);
     }
 
     #[test]
@@ -534,6 +565,7 @@ mod tests {
     #[test]
     fn a_single_run_shows_its_tries() {
         let text = single(&run("aaaaaa", "on", &[(1, Some(0.5)), (2, None)]));
+        assert!(text.starts_with("aaaaaa on w0 (1 file)\n"), "{text}");
         assert!(text.contains("Q1        0.500     0.500"), "{text}");
         assert!(text.contains("Q2      timeout         -"), "{text}");
         assert!(text.contains("over 1 of 2 queries"), "{text}");
