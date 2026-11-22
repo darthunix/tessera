@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use datum_arrow::{Comparison, ReadOutput, TextBytes, Unit, mask_words};
 
-use crate::clause::{ClauseKind, ClauseTest};
+use crate::clause::{ClauseKind, ClauseTest, comparison};
 use crate::column::{ColumnRequest, MappedColumn, map_column};
 use crate::error::{DATA_CORRUPTED, Error, INTERNAL_ERROR, Result};
 use crate::file::{Identity, ParquetFile};
@@ -639,6 +639,28 @@ const TEST_KINDS: [ClauseKind; 9] = [
     ClauseKind::IsNull,
     ClauseKind::IsNotNull,
 ];
+
+/// The kind of test, `TESS_PARQUET_TEST_EQ` to `TESS_PARQUET_TEST_GE`, of
+/// a clause that compares a column of PostgreSQL type `column` with a
+/// side of type `side`, as [`comparison`] takes them, or -1 for a clause
+/// the source does not check.
+#[unsafe(no_mangle)]
+pub extern "C" fn tess_parquet_comparison(
+    column: u32,
+    side: u32,
+    strategy: i32,
+    negator: i32,
+    commuted: bool,
+) -> i32 {
+    comparison(column, side, strategy, negator, commuted)
+        .and_then(|op| {
+            TEST_KINDS
+                .iter()
+                .position(|kind| *kind == ClauseKind::Compare(op))
+        })
+        .and_then(|kind| i32::try_from(kind).ok())
+        .unwrap_or(-1)
+}
 
 /// Makes the test of `column`'s stored values that keeps a clause of the
 /// kind `kind` with the `nvalues` values `values`, each `NULL` where

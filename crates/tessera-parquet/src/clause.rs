@@ -3,7 +3,7 @@
 //! arrays a reader gives, a bit a slot, before any value is made.
 
 use arrow_array::Array;
-use datum_arrow::{Comparison, Input, ReadPlan, Test, Values, mask_words};
+use datum_arrow::{Comparison, Input, ReadPlan, Test, Values, mask_words, oid};
 
 use crate::column::MappedColumn;
 use crate::error::{Error, INTERNAL_ERROR, Result};
@@ -20,6 +20,51 @@ pub enum ClauseKind {
     IsNull,
     /// `IS NOT NULL`.
     IsNotNull,
+}
+
+/// The strategy numbers of the comparisons of a B-tree family, as
+/// PostgreSQL's `stratnum.h` gives them.
+const LESS: i32 = 1;
+const LESS_EQUAL: i32 = 2;
+const EQUAL: i32 = 3;
+const GREATER_EQUAL: i32 = 4;
+const GREATER: i32 = 5;
+
+/// The comparison of the column with the side that a clause `column op
+/// side` asks, or `side op column` where `commuted`, between a column of
+/// PostgreSQL type `column` and a side of type `side`. `strategy` is the
+/// operator's strategy in the column type's B-tree family, 0 where the
+/// operator is not of it, and `negator` that of the operator's negator.
+/// `None` for any other clause: a pair of types whose values are not of
+/// one unit, the integers' or a date's or a time's own, or an operator
+/// that is neither a comparison of the family nor `<>`, the negator of
+/// its `=`.
+pub fn comparison(
+    column: u32,
+    side: u32,
+    strategy: i32,
+    negator: i32,
+    commuted: bool,
+) -> Option<Comparison> {
+    let integer = |of| matches!(of, oid::INT2 | oid::INT4 | oid::INT8);
+    let one_unit = match column {
+        oid::DATE | oid::TIMESTAMP | oid::TIMESTAMPTZ => side == column,
+        _ => integer(column) && integer(side),
+    };
+    if !one_unit {
+        return None;
+    }
+    // Each comparison, and the same with the side on the left.
+    let (op, turned) = match strategy {
+        LESS => (Comparison::Lt, Comparison::Gt),
+        LESS_EQUAL => (Comparison::Le, Comparison::Ge),
+        EQUAL => (Comparison::Eq, Comparison::Eq),
+        GREATER_EQUAL => (Comparison::Ge, Comparison::Le),
+        GREATER => (Comparison::Gt, Comparison::Lt),
+        0 if negator == EQUAL => (Comparison::Ne, Comparison::Ne),
+        _ => return None,
+    };
+    Some(if commuted { turned } else { op })
 }
 
 #[derive(Clone, Debug, PartialEq)]

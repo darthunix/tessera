@@ -769,6 +769,27 @@ fn bytes_the_decoders_cannot_read_give_a_status() {
     }
 }
 
+/// The kinds of comparison as the header numbers them.
+#[test]
+fn comparisons_by_the_header_s_kinds() {
+    let kind = |strategy, negator, commuted| {
+        tess_parquet_comparison(oid::INT4, oid::INT8, strategy, negator, commuted)
+    };
+    // TESS_PARQUET_TEST_EQ, _NE, _LT, _LE, _GT and _GE.
+    assert_eq!(kind(3, 0, false), 0);
+    assert_eq!(kind(0, 3, true), 1);
+    assert_eq!(kind(1, 0, false), 2);
+    assert_eq!(kind(2, 0, false), 3);
+    assert_eq!(kind(5, 0, false), 4);
+    assert_eq!(kind(4, 0, false), 5);
+    assert_eq!(kind(1, 0, true), 4);
+    assert_eq!(kind(0, 1, false), -1);
+    assert_eq!(
+        tess_parquet_comparison(oid::DATE, oid::TIMESTAMP, 3, 0, false),
+        -1
+    );
+}
+
 #[test]
 fn a_clause_tested_on_the_window_read() {
     let dir = tempfile::tempdir().unwrap();
