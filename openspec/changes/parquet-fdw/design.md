@@ -415,20 +415,20 @@ The paths cost the bytes of the column chunks they read, at
 footers give, and their rows, every row of the files: the wrapper's rows
 at the core's cost of a tuple and of an operator for each column it
 forms, with the clauses the core checks on each, the source's batches at
-a share of that cost, a quarter until the measurement calibrates it, the
-clauses left to `TessFilter` above, which adds them. Both cost the
-targets PostgreSQL computes at their whole cost, on the rows the
-relation returns. A partial path costs a participant's share of both.
-The table's rows are its files' rows, so that the distinct values
-`ANALYZE` stored as a share of the rows grow with files added after it.
-`ANALYZE` samples rows at random over all the rows of the files, each
-set of positions as likely as another, finds them in their groups, and
-reads only the rows it samples, by readers whose selection holds them; a
-share fixed a group would leave out every other group of a file of small
-groups. For 30 000 rows of a wide file the rows still fall in most
-pages: `ANALYZE` of `hits.parquet` decompresses most of the file once.
-The core keeps their statistics; ClickBench's groupings and joins are
-then sized by them.
+a share of that cost, a quarter, near the ratio of the serial times of a
+scan of one or two columns with and without Tessera, the clauses left to
+`TessFilter` above, which adds them. Both cost the targets PostgreSQL
+computes at their whole cost, on the rows the relation returns. A
+partial path costs a participant's share of both. The table's rows are
+its files' rows, so that the distinct values `ANALYZE` stored as a share
+of the rows grow with files added after it. `ANALYZE` samples rows at
+random over all the rows of the files, each set of positions as likely
+as another, finds them in their groups, and reads only the rows it
+samples, by readers whose selection holds them; a share fixed a group
+would leave out every other group of a file of small groups. For 30 000
+rows of a wide file the rows still fall in most pages: `ANALYZE` of
+`hits.parquet` decompresses most of the file once. The core keeps their
+statistics; ClickBench's groupings and joins are then sized by them.
 
 ### Errors, panics, memory and cancel
 
@@ -571,8 +571,10 @@ On 2026-11-21, with `source-scan` open:
   `values_stored` is false; the join's cost is then wrong, not its rows.
   The roadmap's "Not placed" holds it.
 - [The cost model misprices the source against the wrapper's rows] →
-  plans move between the two; the measurement calibrates it, and both
-  give the same rows.
+  plans move between the two, and both give the same rows. The share of
+  a quarter holds for scans; a distinct aggregate, which Tessera runs
+  serially only, can be chosen over the core's parallel plan where that
+  is faster, which the roadmap's "Not placed" holds.
 - [An error differs between the two paths] → the wrapper's rows make
   every value read and may raise an error of a value the source's
   batches never make, as Tessera's batch nodes may already
