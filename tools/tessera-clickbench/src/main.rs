@@ -47,6 +47,8 @@ enum Command {
     Run(RunArgs),
     /// Print runs again from their directories, side by side when there
     /// are several: each query's hot time and the ratio to the first.
+    /// Runs of one mode, workers and files, each of other queries, make
+    /// one column.
     Report {
         /// Run directories, target/bench-runs/clickbench-<id>.
         #[arg(required = true)]
@@ -588,10 +590,11 @@ fn main() -> Result<()> {
             })?;
         }
         Command::Report { dirs } => {
-            let runs = dirs
-                .iter()
-                .map(|dir| report::load(dir))
-                .collect::<Result<Vec<Run>>>()?;
+            let runs = report::merged(
+                dirs.iter()
+                    .map(|dir| report::load(dir))
+                    .collect::<Result<Vec<Run>>>()?,
+            );
             if let [run] = &runs[..] {
                 print!("{}", report::single(run));
             } else {
