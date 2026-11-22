@@ -104,7 +104,9 @@ maintainer to say that the machine is idle.
       the suites; the cases of the groups skipped and of the groups the
       footer cannot rule out
 - [x] 5.3 Stage 2, the 17 queries that read no string. Check: the run's
-      report
+      report. Measured; the stage's criterion is not met on Q10 at 8
+      workers over the ten files, a finding in "Not placed" of the
+      roadmap for the maintainer to decide
 
 ## 6. The clauses on strings
 

@@ -2426,20 +2426,32 @@ becomes an entry, joins one, or is dropped.
   sorting their share under a Gather Merge. ClickBench's Q6 over
   `hits.parquet` at 8 workers took 9.35 s with Tessera on and 8.42 s
   off; Q5 and Q6 do not scale with workers with Tessera on. In stage 2,
-  Q10 over the ten files at 8 workers, a grouped distinct count under
-  the core's sort over a serial `TessParquetScan`, took 2.03 s on and
-  1.17 s off, the stage's only query Tessera off won; and Q33, 100 M
-  groups, planned a serial `TessAgg` at 8 workers, 17.6 s against
-  DuckDB's 1.2 s. Suggested: cost the serial plans against the partial
-  paths' workers, or parallel forms of these aggregates.
+  Q10 over the ten files at 8 workers, a grouped distinct count that
+  `TessAgg` did not take (the next entry), ran under the core's sort
+  over a serial `TessParquetScan`: 2.03 s on and 1.17 s off, the
+  stage's only query Tessera off won; and Q33, 100 M groups, planned a
+  serial `TessAgg` at 8 workers, 17.6 s against DuckDB's 1.2 s.
+  Suggested: cost the serial plans against the partial paths' workers,
+  or parallel forms of these aggregates.
 - **A grouped `COUNT(DISTINCT)` left to the core** (a finding of the
-  change `parquet-fdw`, its stage 2 measured). `TessAgg` takes
-  `COUNT(DISTINCT)` without a grouping alone, so ClickBench's Q9 and
-  Q10 sort every row by region and user in the core and aggregate in
-  its `GroupAggregate`: 469 and 532 billion instructions over
-  `hits.parquet`, 9 to 33 times DuckDB's time. Suggested: a distinct
-  aggregate of `TessAgg` by group, a set of values in each group's
-  state.
+  change `parquet-fdw`, its stage 2 measured). `TessAgg` groups
+  `COUNT(DISTINCT)`, as ClickBench's Q9 over ten of its files shows,
+  but two gates of its planner give such a query to the core.
+  - The table of the pairs of group and value does not spill, so the
+    node takes the query only when the planner's estimate of the pairs
+    fits `hash_mem`. Over `hits.parquet`, 100 M rows, the pairs of
+    region and user do not: Q9 and Q10 sort every row in the core and
+    aggregate in its `GroupAggregate`, 469 and 532 billion
+    instructions, 9 to 33 times DuckDB's time.
+  - Beside a DISTINCT aggregate, the gate of the generic aggregates'
+    states (`generic_fits` in `nodes/agg_planner.c`) counts the groups
+    by the core's hashed plans, and the core builds none when an
+    aggregate has DISTINCT, so it never passes: Q10, whose sum and avg
+    of `smallint` are generic, goes to the core over the ten files too.
+
+  Both causes are read from the code and the plans, not traced in the
+  planner. Suggested: count the groups of that gate by the planner's estimate,
+  as the distinct gate does, and a table of pairs that spills.
 - **`TessAgg` refuses more than 64 aggregates** (a finding of the change
   `parquet-fdw`, its stage 2 measured). `AGG_MAX_GROUPED` caps a node's
   aggregates at 64; ClickBench's Q30 has 90 sums and runs in the core's
