@@ -14,7 +14,10 @@ the work.
 The module builds against Tessera's installed headers and runtime
 library and its own reader alone, and reads no private structure of
 the bridge, the runtime or the nodes, so that it can be built, shipped
-and loaded as a module of another extension would be.
+and loaded as a module of another extension would be. The one crate of
+Tessera the reader links is `tessera-kernels`, for the pattern of LIKE
+alone, so that the source and `TessFilter` match a string by one rule,
+until that pattern moves to a crate meant for use outside Tessera.
 - **Checked by:** pending
 
 ### The same rows by every path
