@@ -1,0 +1,1 @@
+14:44:24 waited 1040 s before: run --no-install --keep-running --timeout 90 --mode off --queries 30 --workers 0 --files /Users/darthunix/git/tessera-duckdb/target/clickbench-data

@@ -68,11 +68,11 @@ is kept and explained.
 - 13:49: the run stopped after the check of Q8 at 0 workers over
   hits.parquet, since another session's Kani started again; resumed by
   a script that waits, before each timed or counted run, until no Kani
-  has run for a minute (waits.txt: one wait, of 1040 s, before the first
-  run of Q30).
+  has run for a minute ([waits.txt](waits.txt): one wait, of 1040 s,
+  before the first run of Q30).
 - 15:23: that wait slept a minute before every run, Kani or not, which
   cost time and nothing else; the script was stopped between runs and
-  waits only after Kani ran since.
+  since waits only while Kani runs, and a minute after it ends.
 - 15:27: by the maintainer's word, hits.parquet is timed with Tessera on
   and pg_duckdb alone: Tessera off there has Q1 to Q5 and Q7 at 0
   workers, the runs made before the word. The run in progress was cut
