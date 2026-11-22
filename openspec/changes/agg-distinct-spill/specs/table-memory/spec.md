@@ -141,14 +141,16 @@ most half of `hash_mem`.
   `count(DISTINCT v)` of a `bigint` has groups and pairs that fit
   `hash_mem`
 - **THEN** its plan is `TessAgg`'s, and its rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/A generic aggregate beside DISTINCT`
 
 #### Scenario: Groups past the limit by the estimate
 - **WHEN** the planner's estimate of the groups of a grouping with
   `count(DISTINCT v)` and a generic aggregate, with their states,
   passes `hash_mem`, though its pairs fit
 - **THEN** its plan is the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Groups past the limit by the estimate`
 
 #### Scenario: Pairs past the limit by the estimate
 - **WHEN** the planner's estimate of a grouping's pairs of an

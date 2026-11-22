@@ -55,6 +55,7 @@ extern bool generic_supported(const Aggref *agg);
 extern bool batch_aggregate(const Aggref *agg);
 extern bool sum_state_aggregate(const Aggref *agg);
 extern bool own_partial_aggregate(const Aggref *agg);
+extern Size agg_float_state_bytes(const Aggref *agg);
 
 /*
  * The state of the node and the groups it gives out (agg.c), read and

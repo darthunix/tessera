@@ -980,7 +980,8 @@ below the core's sort, unless `enable_hashagg` is off (as for any grouping
 whose hashed path the core dropped). The pairs' tables
 do not spill, and neither do the groups of a query that has them: the
 node takes the path only when the planner's estimate of the pairs fits
-`hash_mem`, and shows their bytes in `Memory Usage`.
+`hash_mem`, and so does its estimate of the groups before `HAVING` with
+their states (below), and shows their bytes in `Memory Usage`.
 
 `UNION` without `ALL` is grouping of the branches' rows by every column:
 at the set operation stage (`UPPERREL_SETOP`) the node's path stands next
@@ -1184,11 +1185,15 @@ of the buckets of a table of 2^b of them for the first (32 - b) / 5
 levels, four of a table of 1024 buckets and three of 65536; a deeper
 level takes bits of the buckets too. A group's rows stay in their
 order, as an order-sensitive aggregate such as `string_agg` needs.
-With a `DISTINCT` aggregate alongside, whose table does not
-spill, the path is taken only when the planner's estimate of the groups
-and their states, a type's average width or an internal state's
-declared space or 1 kB as the core estimates them, fits `hash_mem`. Not
-in a partial plan, whose table empties early.
+With a `DISTINCT` aggregate alongside, whose table does not spill, the
+groups do not spill either, of the node's own aggregates or generic
+ones: the path is taken only when the planner's estimate of the groups
+and their states fits `hash_mem`. A state counts a type's average width,
+or an internal state's declared space or 8 kB, as the core estimates
+them, and a float's state that the node keeps apart its own size. The
+groups are the most of the core's grouped paths, before `HAVING`; beside
+a `DISTINCT` aggregate the core builds sorted ones alone, and no partial
+ones.
 
 An aggregate with `FILTER (WHERE condition)` reads the rows the condition
 keeps: the condition is a computed column of the projection of its own,

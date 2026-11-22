@@ -386,6 +386,18 @@ ANALYZE agg_dm;
 SELECT agg_same($$SELECT count(*), sum(n) FROM (SELECT k % 1000 AS g, count(DISTINCT v % 97) AS n FROM agg_dm GROUP BY k % 1000) AS s$$);
 SELECT agg_same($$SELECT count(DISTINCT v) FROM agg_dm$$);
 DROP TABLE agg_dm;
+-- Beside a DISTINCT aggregate the groups do not spill: the node takes
+-- the grouping when the planner's estimate of its groups, with their
+-- states, fits hash_mem, here 100 groups of sum and avg of a smallint,
+-- which the kernels fold, and max of a text, through the core's functions.
+CREATE TABLE agg_beside AS SELECT i % 100 AS g, (i % 1000)::int2 AS s, i::bigint * 1000000007 % 50000 AS v FROM generate_series(1, 20000) AS i;
+ANALYZE agg_beside;
+-- spec: table-memory/A generic aggregate beside DISTINCT
+EXPLAIN (COSTS OFF) SELECT g, sum(s), avg(s), count(*), count(DISTINCT v) FROM agg_beside GROUP BY g;
+SELECT agg_same($$SELECT g, sum(s), avg(s), count(*), count(DISTINCT v) FROM agg_beside GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+EXPLAIN (COSTS OFF) SELECT g, max(s::text), count(DISTINCT v) FROM agg_beside GROUP BY g;
+SELECT agg_same($$SELECT g, max(s::text), count(DISTINCT v) FROM agg_beside GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+DROP TABLE agg_beside;
 -- What a DISTINCT set's table takes, in the node's peak: its first
 -- index, its chunks, and while an index is rebuilt larger, the old one
 -- and the new. Integer keys and arguments keep no dictionary, so Memory
@@ -621,6 +633,23 @@ RESET work_mem;
 -- by the planner's estimate the grouping stays with the core.
 SET work_mem = '64kB';
 EXPLAIN (COSTS OFF) SELECT g, max(t), count(DISTINCT g) FROM agg_groups GROUP BY g;
+-- So with pairs that fit: 20 000 pairs of 32 bytes fit hash_mem, 1 MB,
+-- but not 20 000 states of array_agg of 8 kB each by the estimate, nor
+-- 20 000 states of a float's sum that the node keeps apart.
+SET work_mem = '1MB';
+SET hash_mem_multiplier = 1;
+-- spec: table-memory/Groups past the limit by the estimate
+EXPLAIN (COSTS OFF) SELECT g, array_agg(n), count(DISTINCT g) FROM agg_groups GROUP BY g;
+SELECT agg_same($$SELECT count(*), sum(c), sum(d) FROM (SELECT g, array_length(array_agg(n), 1) AS c, count(DISTINCT g) AS d FROM agg_groups GROUP BY g) AS q$$);
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT g), sum(g::float8) FROM agg_groups GROUP BY g;
+-- The node's own aggregates alone, 64 bytes a group, and HAVING, which
+-- lowers the rows the planner expects out but not the groups held: past
+-- 1 MB with the core, at 4 MB the node's.
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT g), sum(g), min(g), max(g) FROM agg_groups GROUP BY g HAVING count(DISTINCT g) > 0;
+SET work_mem = '4MB';
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT g), sum(g), min(g), max(g) FROM agg_groups GROUP BY g HAVING count(DISTINCT g) > 0;
+SELECT agg_same($$SELECT count(*), sum(d), sum(s), min(l), max(h) FROM (SELECT g, count(DISTINCT g) AS d, sum(g) AS s, min(g) AS l, max(g) AS h FROM agg_groups GROUP BY g HAVING count(DISTINCT g) > 0) AS q$$);
+RESET hash_mem_multiplier;
 RESET work_mem;
 DROP TABLE agg_groups;
 -- In a parallel plan: each participant's partial state, the core's

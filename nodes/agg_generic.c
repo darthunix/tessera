@@ -59,6 +59,42 @@ typedef struct FastState
 	float4		sx4;
 } FastState;
 
+/* The float type of an aggregate the node folds over floats, else InvalidOid. */
+static Oid
+fast_float_type(Oid aggfnoid)
+{
+	switch (aggfnoid)
+	{
+		case F_SUM_FLOAT8:
+		case F_AVG_FLOAT8:
+		case F_MIN_FLOAT8:
+		case F_MAX_FLOAT8:
+			return FLOAT8OID;
+		case F_SUM_FLOAT4:
+		case F_AVG_FLOAT4:
+		case F_MIN_FLOAT4:
+		case F_MAX_FLOAT4:
+			return FLOAT4OID;
+		default:
+			return InvalidOid;
+	}
+}
+
+/*
+ * The bytes of a group's state of a float aggregate the node folds, which
+ * it allocates apart from the group's record (fast_advance), for the
+ * planner's estimate of the groups; 0 for any other aggregate.
+ */
+Size
+agg_float_state_bytes(const Aggref *agg)
+{
+#ifdef HAVE_INT128
+	if (list_length(agg->args) == 1 && OidIsValid(fast_float_type(agg->aggfnoid)))
+		return sizeof(FastState);
+#endif
+	return 0;
+}
+
 /*
  * Whether the node folds an aggregate itself, and over which argument: a
  * whole one, or a partial one whose state the node writes as the final
@@ -78,24 +114,7 @@ fast_kind(const Aggref *agg, GenericAgg *generic, bool own_states)
 	generic->fast_numeric = false;
 	generic->fast_wide = false;
 	generic->fast_int8_result = false;
-	generic->fast_float = InvalidOid;
-	switch (agg->aggfnoid)
-	{
-		case F_SUM_FLOAT8:
-		case F_AVG_FLOAT8:
-		case F_MIN_FLOAT8:
-		case F_MAX_FLOAT8:
-			generic->fast_float = FLOAT8OID;
-			break;
-		case F_SUM_FLOAT4:
-		case F_AVG_FLOAT4:
-		case F_MIN_FLOAT4:
-		case F_MAX_FLOAT4:
-			generic->fast_float = FLOAT4OID;
-			break;
-		default:
-			break;
-	}
+	generic->fast_float = fast_float_type(agg->aggfnoid);
 	switch (agg->aggfnoid)
 	{
 		case F_SUM_FLOAT8:

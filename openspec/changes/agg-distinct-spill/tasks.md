@@ -20,7 +20,7 @@ one pull request; the work and the close are a second.
 
 ## 2. The gate of the groups
 
-- [ ] 2.1 Every grouping with a DISTINCT aggregate asks that its groups
+- [x] 2.1 Every grouping with a DISTINCT aggregate asks that its groups
       with their states fit `hash_mem`, its groups the most `numGroups`
       of the core's grouped paths in the relation, in place of its
       hashed paths alone; the gate of the pairs stays as it is. Tests in
@@ -86,9 +86,8 @@ one pull request; the work and the close are a second.
       plans of the scenarios "Pairs past the limit by the estimate",
       "Groups past half the limit by the estimate" and "Text arguments
       past the limit by the estimate"; the scenario "Groups thought more
-      than they are", against the core; task 2.1's test of groups past
-      the limit names the scenario "Groups past the limit by the
-      estimate". `docs/costs.md` and `docs/limitations.md` updated.
+      than they are", against the core. `docs/costs.md` and
+      `docs/limitations.md` updated.
       Check: `make installcheck`
 
 ## 5. The measurement

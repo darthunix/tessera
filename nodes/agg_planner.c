@@ -251,22 +251,25 @@ own_partials(List *tlist)
 }
 
 /*
- * Whether the groups of a grouping with generic aggregates fit hash_mem,
- * as the planner estimates them, since their states, words of the records
- * or addresses of copies, keep the groups from spilling: a record, a sum
- * state's four more words, and the states a word does not hold, each by
- * its type's average width or, for an internal state, the aggregate's
- * declared space or 1 kB, as the core estimates its hashed groups.
+ * Whether the groups of a grouping with a DISTINCT aggregate fit hash_mem,
+ * as the planner estimates them, since such groups do not spill: a record,
+ * a sum state's four more words, a float's state of the node's own, and
+ * the states a word does not hold, each by its type's average width or,
+ * for an internal state, the aggregate's declared space or 8 kB, as the
+ * core estimates its hashed groups. The
+ * groups are the most of the core's grouped paths, before HAVING: the
+ * relation's own rows are set only after this hook, and beside a DISTINCT
+ * aggregate the core's paths are sorted ones alone.
  */
 static bool
-generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
+groups_fit(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 {
 	double		groups = 0;
 	double		bytes;
 
 	foreach_ptr(Path, path, output_rel->pathlist)
-		if (IsA(path, AggPath) && ((AggPath *) path)->aggstrategy == AGG_HASHED)
-			groups = Max(groups, path->rows);
+		if (IsA(path, AggPath))
+			groups = Max(groups, ((AggPath *) path)->numGroups);
 	if (groups <= 0)
 		return false;
 	bytes = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
@@ -286,9 +289,12 @@ generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 			bytes += 8.0 * (AGG_SUM_STATE_WORDS - 1);
 			continue;
 		}
-		get_typlenbyval(agg->aggtranstype, &len, &byval);
-		if (byval)
+		if (agg_float_state_bytes(agg) > 0)
+		{
+			bytes += (double) agg_float_state_bytes(agg);
 			continue;
+		}
+		/* Before byval: internal passes by value, its state lies elsewhere. */
 		if (agg->aggtranstype == INTERNALOID)
 		{
 			HeapTuple	tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(agg->aggfnoid));
@@ -299,24 +305,14 @@ generic_fits(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 				space = ((Form_pg_aggregate) GETSTRUCT(tuple))->aggtransspace;
 				ReleaseSysCache(tuple);
 			}
-			bytes += space > 0 ? space : ALLOCSET_SMALL_INITSIZE;
+			bytes += space > 0 ? space : ALLOCSET_DEFAULT_INITSIZE;
+			continue;
 		}
-		else
+		get_typlenbyval(agg->aggtranstype, &len, &byval);
+		if (!byval)
 			bytes += get_typavgwidth(agg->aggtranstype, -1);
 	}
 	return groups * bytes <= (double) tess_hash_memory_limit();
-}
-
-/* Whether an aggregate of the target list goes through the core's functions. */
-static bool
-has_generic(List *tlist)
-{
-	foreach_node(TargetEntry, entry, tlist)
-	{
-		if (IsA(entry->expr, Aggref) && !batch_aggregate((Aggref *) entry->expr))
-			return true;
-	}
-	return false;
 }
 
 /*
@@ -1405,11 +1401,11 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	if (!distinct_fits(root, input_rel, keys, tlist))
 		return;
 	/*
-	 * Groups of generic aggregates spill their rows, not their states, but
-	 * not alongside a DISTINCT aggregate's table: then their states must fit.
+	 * Beside a DISTINCT aggregate's table neither the groups nor the rows of
+	 * generic aggregates spill: the groups with their states must fit.
 	 */
-	if (keys != NIL && has_generic(tlist) && has_distinct_aggregate(tlist) &&
-		!generic_fits(root, output_rel, list_length(keys), tlist))
+	if (keys != NIL && has_distinct_aggregate(tlist) &&
+		!groups_fit(root, output_rel, list_length(keys), tlist))
 		return;
 	/* add_path changes the list: the candidates are taken first. */
 	templates = aggregate_templates(output_rel->pathlist, strategy, AGGSPLIT_SIMPLE);
