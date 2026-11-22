@@ -527,6 +527,14 @@ SELECT agg_same($$SELECT sum(DISTINCT abs(a) % 20), avg(DISTINCT abs(a) % 20), s
 SELECT agg_same($$SELECT b, count(DISTINCT t), count(DISTINCT n) FILTER (WHERE a > 0), sum(DISTINCT abs(a) % 10), avg(DISTINCT j % 11) FROM agg_any GROUP BY b$$);
 SELECT agg_same($$SELECT g, (SELECT count(DISTINCT t) FROM agg_any WHERE a > g * 50) FROM generate_series(1, 4) AS g$$);
 SELECT agg_same($$SELECT a % 5, count(DISTINCT t), count(DISTINCT d), count(DISTINCT f) FROM agg_any GROUP BY 1$$);
+-- A set is keyed by the reference of its group's record, whatever the
+-- group's keys: a text key through its dictionary beside a date and a
+-- boolean, and sixteen keys, as many as a table takes, which left the
+-- set no room for its argument while it held the keys themselves.
+SELECT agg_same($$SELECT t, d, b, count(DISTINCT a % 3), sum(DISTINCT a % 4), count(DISTINCT n) FROM agg_any GROUP BY t, d, b$$) NOT LIKE 'MISMATCH%' AS same;
+SELECT agg_same($$SELECT b, t IS NULL, count(DISTINCT a % 7), max(DISTINCT j % 5), min(DISTINCT a) FROM agg_any GROUP BY b, t IS NULL$$);
+EXPLAIN (COSTS OFF) SELECT count(DISTINCT j) FROM agg_any GROUP BY a % 2, a % 3, a % 4, a % 5, a % 6, a % 7, a % 8, a % 9, a % 10, a % 11, a % 12, a % 13, a % 14, a % 15, a % 16, a % 17;
+SELECT agg_same($$SELECT a % 2, a % 3, a % 4, a % 5, a % 6, a % 7, a % 8, a % 9, a % 10, a % 11, a % 12, a % 13, a % 14, a % 15, a % 16, a % 17, count(DISTINCT j % 4), count(DISTINCT t) FROM agg_any GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16$$) NOT LIKE 'MISMATCH%' AS same;
 CREATE COLLATION agg_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
 SELECT agg_same($$SELECT count(DISTINCT t COLLATE agg_ci), count(DISTINCT (CASE WHEN a % 2 = 0 THEN upper(t) ELSE t END) COLLATE agg_ci) FROM agg_any$$);
 DROP COLLATION agg_ci;

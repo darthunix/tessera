@@ -716,7 +716,8 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 		}
 		if (value->distinct != NULL)
 		{
-			TessRowMask pairs = agg_distinct_rows(state, value, rows.nrows, NULL, &rows, column);
+			TessRowMask pairs = agg_distinct_rows(state, value, rows.nrows, NULL, NULL, &rows,
+												  column);
 
 			agg_generic_accumulate(state, value->generic, &pairs);
 		}
@@ -726,7 +727,8 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	}
 	if (value->distinct != NULL)
 	{
-		TessRowMask pairs = agg_distinct_rows(state, value, rows.nrows, NULL, &rows, column);
+		TessRowMask pairs = agg_distinct_rows(state, value, rows.nrows, NULL, NULL, &rows,
+											  column);
 
 		evaluate(state, value, column, &pairs);
 		return;

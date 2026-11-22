@@ -958,9 +958,11 @@ states, and the groups go out in batches when the input ends.
 the node's path stands next to each of the core's hashed distinct paths,
 its keys the distinct expressions (`DISTINCT ON` stays with the core).
 An aggregate with `DISTINCT` of one argument keeps a table of its own,
-without payload, keyed by the group's keys and the argument (the argument
-alone without `GROUP BY`): a batch's rows go into the aggregate only
-where they inserted their pair, NULL arguments dropped by the hash. An
+without payload, keyed by the reference of the group's record and the
+argument (the argument alone without `GROUP BY`), whatever the group's
+keys, its pairs hashed by the group's hash folded with the argument's: a
+batch's rows go into the aggregate only where they inserted their pair,
+NULL arguments dropped by the hash. An
 argument a word holds (int2, int4, int8, date, timestamp, bool) is its
 word; another of a type whose equality hashes (text, numeric, float8,
 under its collation, a nondeterministic one too) goes by its number in a

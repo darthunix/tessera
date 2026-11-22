@@ -975,7 +975,8 @@ has_distinct_aggregate(List *tlist)
 /*
  * Whether the pairs of group and argument of the DISTINCT aggregates fit
  * hash_mem, as the planner estimates them: their tables do not spill. A
- * group key fewer than a table's most leaves room for the argument.
+ * pair is the reference of its group's record and the argument, or the
+ * argument alone without GROUP BY.
  */
 static bool
 distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
@@ -990,12 +991,10 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 		if (!IsA(entry->expr, Aggref) || ((Aggref *) entry->expr)->aggdistinct == NIL)
 			continue;
 		agg = (Aggref *) entry->expr;
-		if (list_length(keys) >= TESS_TABLE_MAX_KEYS)
-			return false;
 		pairs = estimate_num_groups(root,
 									lappend(list_copy(keys), aggregate_argument(agg)),
 									input_rel->rows, NULL, NULL);
-		bytes += pairs * (double) tess_table_record_bytes(list_length(keys) + 1, 0);
+		bytes += pairs * (double) tess_table_record_bytes(keys != NIL ? 2 : 1, 0);
 		/* A dictionary of the values a word does not hold: an entry and a copy each. */
 		{
 			Node	   *argument = aggregate_argument(agg);

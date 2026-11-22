@@ -95,7 +95,7 @@ distinct_index(TessAggState *state, DistinctSet *set, uint64 capacity, Size *siz
 	return MemoryContextAllocExtended(set->context, *size, MCXT_ALLOC_HUGE);
 }
 
-/* An empty set: the groups' keys, then the argument. */
+/* An empty set: with GROUP BY the group's record, then the argument. */
 void
 agg_distinct_reset(TessAggState *state, AggValue *value)
 {
@@ -108,10 +108,9 @@ agg_distinct_reset(TessAggState *state, AggValue *value)
 											 "TessAgg distinct",
 											 ALLOCSET_DEFAULT_SIZES);
 	MemoryContextReset(set->context);
-	set->nkeys = state->nkeys + 1;
-	for (int key = 0; key < state->nkeys; key++)
-		set->kinds[key] = state->kinds[key];
-	set->kinds[state->nkeys] = value->argument_kind;
+	set->nkeys = state->nkeys > 0 ? 2 : 1;
+	set->kinds[0] = TESS_TABLE_KEY_INT8;
+	set->kinds[set->nkeys - 1] = value->argument_kind;
 	set->capacity = 0;
 	set->slots = 16;
 	set->bases = MemoryContextAlloc(set->context, sizeof(void *) * set->slots);
@@ -169,20 +168,21 @@ distinct_regrow(TessAggState *state, DistinctSet *set, uint64 records)
 /*
  * The rows of valid, of a batch of nrows rows, that insert their pair into
  * the aggregate's set: a mask in the set's buffers. group_hashes are the
- * rows' hashes of the groups' keys, state->table_keys their keys, or NULL
- * without GROUP BY.
+ * rows' hashes of the groups' keys and group_refs the references of their
+ * groups' records, or both NULL without GROUP BY.
  */
 TessRowMask
 agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
-			  const uint32 *group_hashes, const TessRowMask *valid,
-			  const TessDatumColumn *argument)
+			  const uint32 *group_hashes, const uint32 *group_refs,
+			  const TessRowMask *valid, const TessDatumColumn *argument)
 {
 	DistinctSet *set = value->distinct;
 	int			nwords = tess_row_mask_word_count(nrows);
-	TessTableKey keys[TESS_TABLE_MAX_KEYS];
+	TessTableKey keys[2];
 	TessRowMask pending;
 	TessRowMask inserted;
 	TessDatumColumn numbers;
+	TessDatumColumn refs = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 
 	/* A value a word does not hold: the pairs take its number in the dictionary. */
 	if (value->distinct_dict != NULL)
@@ -204,6 +204,8 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 	}
 	if (set->capacity < nrows)
 	{
+		set->refs = MemoryContextAlloc(set->context, sizeof(Datum) * nrows);
+		set->ref_nulls = MemoryContextAllocZero(set->context, sizeof(bool) * nrows);
 		set->hashes = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
 		set->offsets = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
 		set->pending_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
@@ -231,11 +233,21 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 												  set->hashes, &pending,
 												  &state->status));
 	}
-	for (int key = 0; key < state->nkeys; key++)
-		keys[key] = state->table_keys[key];
-	keys[state->nkeys].kind = value->argument_kind;
-	keys[state->nkeys].column = argument;
-	keys[state->nkeys].prepared = NULL;
+	/* The groups' references, of the rows the set reads. */
+	if (group_refs != NULL)
+	{
+		int			row = -1;
+
+		while ((row = tess_row_mask_next(valid, row)) >= 0)
+			set->refs[row] = (Datum) group_refs[row];
+		refs.values = set->refs;
+		refs.isnull = set->ref_nulls;
+		refs.nrows = nrows;
+		keys[0] = (TessTableKey) {TESS_TABLE_KEY_INT8, &refs, valid};
+	}
+	keys[set->nkeys - 1].kind = value->argument_kind;
+	keys[set->nkeys - 1].column = argument;
+	keys[set->nkeys - 1].prepared = NULL;
 	if (set->table.nchunks == 0)
 		distinct_add_chunk(state, set);
 	for (;;)

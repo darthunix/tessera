@@ -468,13 +468,14 @@ group_batch(TessAggState *state, TessBatch *batch)
 				continue;
 			}
 			if (value->distinct != NULL)
-				rows = agg_distinct_rows(state, value, nrows, state->hashes, &rows, &column);
+				rows = agg_distinct_rows(state, value, nrows, state->hashes, state->offsets,
+										 &rows, &column);
 			agg_generic_group_accumulate(state, index, &rows, &inserted);
 			continue;
 		}
 		if (value->distinct != NULL)
-			rows = agg_distinct_rows(state, value, nrows, state->hashes, &rows,
-								 &column);
+			rows = agg_distinct_rows(state, value, nrows, state->hashes, state->offsets,
+									 &rows, &column);
 		state->calls++;
 		check(state, state->kernels->table_accumulate(&state->table,
 													  state->offsets, &rows,

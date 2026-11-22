@@ -83,7 +83,7 @@ state of the code that shapes the design.
 - **Was:** the set's key is the group's keys followed by the argument,
   up to `TESS_TABLE_MAX_KEYS` - 1 keys and the argument.
 - **Will be:** with `GROUP BY`, the set's key is the reference of the
-  group's record, as an `integer` word, and the argument. The pair's
+  group's record, as an `int8` word, and the argument. The pair's
   hash stays the group's hash folded with the argument's.
 - **Why:** a pair written to disk then carries two words and its hash,
   whatever the keys, and goes back to its group by its reference, with

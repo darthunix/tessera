@@ -127,10 +127,11 @@ typedef struct GenericAgg
 
 /*
  * DISTINCT in an aggregate: a table of its own, without payload, keyed by
- * the group's keys and the argument, the argument alone without GROUP BY.
- * A row goes into the aggregate only when it inserted its pair: the ones
- * seen before are dropped, and so are NULL arguments, which the aggregate
- * skips anyway. The table does not spill.
+ * the reference of the group's record, an int8 word, and the argument, the
+ * argument alone without GROUP BY; a pair's hash is its group's folded
+ * with the argument's. A row goes into the aggregate only when it
+ * inserted its pair: the ones seen before are dropped, and so are NULL
+ * arguments, which the aggregate skips anyway. The table does not spill.
  */
 typedef struct DistinctSet
 {
@@ -142,8 +143,13 @@ typedef struct DistinctSet
 	Size	   *lens;
 	int			slots;
 	Size		bytes;
-	/* The buffers of a batch, for capacity rows. */
+	/*
+	 * The buffers of a batch, for capacity rows: the references of the rows'
+	 * groups as a key column, never NULL.
+	 */
 	int			capacity;
+	Datum	   *refs;
+	bool	   *ref_nulls;
 	uint32	   *hashes;
 	uint32	   *offsets;
 	uint64	   *pending_bits;
@@ -324,6 +330,7 @@ extern Datum agg_generic_value(GenericAgg *generic, bool *isnull);
 extern void agg_distinct_reset(TessAggState *state, AggValue *value);
 extern TessRowMask agg_distinct_rows(TessAggState *state, AggValue *value,
 									 int nrows, const uint32 *group_hashes,
+									 const uint32 *group_refs,
 									 const TessRowMask *valid,
 									 const TessDatumColumn *argument);
 extern Size agg_distinct_bytes(TessAggState *state);
