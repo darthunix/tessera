@@ -4,7 +4,7 @@
 //! proof shows too that the code cannot panic. The loops over a batch
 //! are compared with this code by the property tests.
 
-use crate::bounds::{Comparison, RangeAnswer, Test};
+use crate::bounds::{Comparison, RangeAnswer, Test, bound_of};
 use crate::calendar::{
     Count, EPOCH_DAYS, EPOCH_USECS, MAX_DATE, MAX_TIMESTAMP, MIN_DATE, MIN_TIMESTAMP,
 };
@@ -168,10 +168,38 @@ fn bounds_of_days_are_exact() {
     );
 }
 
-// The bounds of a unit of a second or a millisecond divide the constant
-// by a million or a thousand, which Kani does not prove within the limit
-// of a harness; the property tests compare them with the exact count
-// over the edges instead.
+/// The bounds of every unit, a second and a millisecond among them, whose
+/// division of the constant by a thousand or a million Kani does not
+/// finish: past that division, for every quotient, rest, shift and
+/// stored value, the test passes the stored value exactly when
+/// `stored * scale - shift * scale op constant`. The division is Euclid's,
+/// by the standard library: `constant = quotient * scale + rest`, with
+/// `0 <= rest < scale`. The difference is then `units * scale - rest`,
+/// `units` being `stored - shift - quotient`, and its sign is that of
+/// `units` where `units` is not zero, and of `-rest` where it is: a number
+/// of two digits in base `scale`, compared digit by digit. The property
+/// tests compare the whole of it with the exact count.
+#[kani::proof]
+fn bounds_past_the_division_are_exact() {
+    let op = any_comparison();
+    let quotient: i64 = kani::any();
+    let exact: bool = kani::any();
+    let shift: i64 = kani::any();
+    let test = bound_of(op, quotient, exact, shift);
+    let stored: i64 = kani::any();
+    let units = i128::from(stored) - i128::from(shift) - i128::from(quotient);
+    let sign = if units != 0 {
+        units.signum()
+    } else if exact {
+        0
+    } else {
+        -1
+    };
+    assert!(test.passes(stored) == compare(op, sign, 0));
+    kani::cover!(matches!(test, Test::Compare { .. }), "a bound");
+    kani::cover!(test == Test::Every, "every value");
+    kani::cover!(test == Test::Nothing, "no value");
+}
 
 #[kani::proof]
 fn bounds_of_microseconds_are_exact() {
@@ -186,6 +214,54 @@ fn bounds_of_microseconds_are_exact() {
         options,
         MICROSECONDS,
     );
+}
+
+/// The test of an equality, past the division, is one bound or none:
+/// never every value, and never another comparison. That is all `IN`
+/// asks of the tests of its values, whose bounds it keeps, so with this
+/// proof and the next its answer holds for every unit.
+#[kani::proof]
+fn an_equality_is_one_bound_or_none() {
+    let test = bound_of(Comparison::Eq, kani::any(), kani::any(), kani::any());
+    assert!(matches!(
+        test,
+        Test::Nothing
+            | Test::Compare {
+                op: Comparison::Eq,
+                ..
+            }
+    ));
+    kani::cover!(test == Test::Nothing, "no bound");
+    kani::cover!(test != Test::Nothing, "one bound");
+}
+
+/// Before the division, the test of an equality with `NULL` or an
+/// infinity is no bound, for a plan of every unit of days and times.
+#[kani::proof]
+fn an_equality_with_null_or_infinity_is_none() {
+    let options = |unit| ReadOptions {
+        unit: Some(unit),
+        text: None,
+        server_utf8: true,
+    };
+    let days = [None, Some(i64::from(i32::MAX)), Some(i64::from(i32::MIN))];
+    let times = [None, Some(i64::MAX), Some(i64::MIN)];
+    let int32 = arrow_schema::DataType::Int32;
+    let int64 = arrow_schema::DataType::Int64;
+    let mut plans = vec![(&int32, PgType::Date, Unit::Days, days)];
+    for pg in [PgType::Timestamp, PgType::Timestamptz] {
+        for unit in [Unit::Seconds, Unit::Milliseconds, Unit::Microseconds] {
+            plans.push((&int64, pg, unit, times));
+        }
+    }
+    for (arrow, pg, unit, constants) in plans {
+        let Ok(plan) = ReadPlan::new(arrow, pg, options(unit)) else {
+            panic!("the plans are made");
+        };
+        for constant in constants {
+            assert!(plan.test(Comparison::Eq, constant) == Ok(Test::Nothing));
+        }
+    }
 }
 
 /// The answer for a range is exact: a range turned the wrong way gets
