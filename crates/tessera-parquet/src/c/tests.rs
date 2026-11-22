@@ -768,3 +768,90 @@ fn bytes_the_decoders_cannot_read_give_a_status() {
         tess_parquet_file_free(file);
     }
 }
+
+#[test]
+fn a_clause_tested_on_the_window_read() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    testing::write(
+        &path,
+        &[Column::new(
+            "a",
+            Values::Int32(vec![Some(-1), None, Some(3), Some(4), Some(5)]),
+        )],
+        5,
+        false,
+    )
+    .unwrap();
+    let file = open(&path);
+    let col = column(file, "a", oid::INT4, -1).unwrap();
+    let r = reader(file, col, 5);
+    assert_eq!(read(r, 5, &[0b11111]), 5);
+    let test = |kind: i32, values: &[i64], nulls: &[bool]| {
+        let mut out = ptr::null_mut();
+        let mut st = status();
+        let ok = unsafe {
+            tess_parquet_test(
+                col,
+                kind,
+                values.as_ptr(),
+                nulls.as_ptr(),
+                values.len(),
+                &mut out,
+                &mut st,
+            )
+        };
+        if ok { Ok(out) } else { Err(text(&st.sqlstate)) }
+    };
+    let apply = |t: *mut TestHandle| {
+        let mut passed = [u64::MAX; 2];
+        let mut st = status();
+        assert!(unsafe { tess_parquet_window_test(r, t, passed.as_mut_ptr(), 2, &mut st) });
+        unsafe { tess_parquet_test_free(t) };
+        passed
+    };
+    // a >= 3; a IN (4, NULL, -1); a IS NULL; a IS NOT NULL; a = NULL.
+    assert_eq!(apply(test(5, &[3], &[false]).unwrap()), [0b11100, 0]);
+    assert_eq!(
+        apply(test(6, &[4, 0, -1], &[false, true, false]).unwrap()),
+        [0b01001, 0]
+    );
+    assert_eq!(apply(test(7, &[], &[]).unwrap()), [0b00010, 0]);
+    assert_eq!(apply(test(8, &[], &[]).unwrap()), [0b11101, 0]);
+    assert_eq!(apply(test(0, &[3], &[true]).unwrap()), [0, 0]);
+    // An unknown kind, a comparison of no value, and null values.
+    assert_eq!(test(9, &[], &[]).unwrap_err(), "XX000");
+    assert_eq!(test(0, &[], &[]).unwrap_err(), "XX000");
+    let mut out = ptr::null_mut();
+    let mut st = status();
+    assert!(!unsafe { tess_parquet_test(col, 6, ptr::null(), ptr::null(), 2, &mut out, &mut st) });
+    assert_eq!(text(&st.sqlstate), "XX000");
+    // A test of a text column's values is refused; its NULL tests are not.
+    let words = dir.path().join("s.parquet");
+    testing::write(&words, &[Column::bytes("s", &[b"x"])], 1, false).unwrap();
+    let text_file = open(&words);
+    let s = column(text_file, "s", oid::TEXT, -1).unwrap();
+    let mut st = status();
+    assert!(!unsafe {
+        tess_parquet_test(
+            s,
+            0,
+            [1i64].as_ptr(),
+            [false].as_ptr(),
+            1,
+            &mut out,
+            &mut st,
+        )
+    });
+    assert_eq!(text(&st.sqlstate), "XX000");
+    assert!(unsafe { tess_parquet_test(s, 7, ptr::null(), ptr::null(), 0, &mut out, &mut st) });
+    unsafe {
+        tess_parquet_test_free(out);
+        tess_parquet_test_free(ptr::null_mut());
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_column_free(s);
+        tess_parquet_file_free(file);
+        tess_parquet_file_free(text_file);
+    }
+}
