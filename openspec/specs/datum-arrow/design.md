@@ -338,7 +338,10 @@ under Kani and run in a row of CI's Kani job, every cover reached:
   Arrow both hold it, and read back to the same value;
 - the test of a bound against the exact comparison in 128 bits, for
   every stored value and every finite constant, for integers, days and
-  microseconds; and the shift of every count a whole number of its unit;
+  microseconds; past the division of the constant by its unit, for
+  every unit, and an equality's test there one bound or none, and none
+  for `NULL` or an infinity; and the shift of every count a whole number
+  of its unit;
 - the answer for a range exact, for every least and greatest value;
 - for plans of integers, of days in 16 bits, of 64-bit integers and of
   seconds, a failure exactly where the value is out of range and only
@@ -353,9 +356,19 @@ under Kani and run in a row of CI's Kani job, every cover reached:
 The bounds of seconds and milliseconds divide a symbolic 64-bit
 constant by a thousand or a million, which takes Kani past the ten
 minutes of a harness, tried with the comparison fixed, with another
-solver and as the floor property alone. Their exactness rests on the
-property tests, which compare them with the exact count over random
-constants and the edges of every range.
+solver and as the floor property alone. So the computation of a bound
+is split in two. First the constant is divided by the unit, as Euclid
+divides: `constant = quotient * scale + rest`, with
+`0 <= rest < scale`. That step is the standard library's. Then the
+bound is taken from the quotient, whether the rest is zero, and the
+shift in stored units. Kani proves the second step for every quotient,
+shift and stored value, against the sign of the exact difference. The
+difference is `units * scale - rest`, `units` being the stored value
+less the shift and the quotient. Its sign is that of `units` where
+`units` is not zero, and that of `-rest` where it is. The proof thus
+holds no multiplication and no division, and finishes in seconds. The
+property tests compare the two steps together with the exact count,
+over random constants and the edges of every range.
 
 Kani's cost grows with the length of a loop it unrolls, and it knows
 few vector intrinsics, so it proves the code of one value. The loops
