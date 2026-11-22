@@ -688,6 +688,12 @@ pub fn to_int8(
 /// exact `i128` with room for any decimal rescaled to its scale.
 pub const SUM_BOUND: i128 = LIMIT as i128 * LIMIT as i128;
 
+/// The most rows a [`Sum`] counts: an int64's, as C keeps the count
+/// (`TessDecimalSum.count`) and the core's sum and average states keep
+/// theirs. A sum refuses a term or a sum that would count past it, as it
+/// refuses one past its bound, and a state that comes in past it fails.
+pub const SUM_COUNT_MOST: u64 = i64::MAX as u64;
+
 /// Whether `value` is below [`SUM_BOUND`] in magnitude. By `unsigned_abs`:
 /// `i128::MIN.abs()` overflows, and stays negative in a build without
 /// overflow checks, where it would pass a comparison by `abs`.
@@ -712,13 +718,17 @@ pub struct Sum {
 impl Sum {
     /// Add a decimal at the larger of its scale and the sum's, or return
     /// false, the sum unchanged, when the result or the rescaled sum would
-    /// reach [`SUM_BOUND`] or the decimal's scale passes 18.
+    /// reach [`SUM_BOUND`], the decimal's scale passes 18, or the count is
+    /// at [`SUM_COUNT_MOST`].
     #[inline(always)]
     pub fn add(&mut self, decimal: Decimal) -> bool {
         // The invariant the arithmetic below rests on: below the bound, a
         // sum rescaled by up to 10^18 and a decimal of 18 digits rescaled
         // by as much stay far inside an i128.
         debug_assert!(below_bound(self.value), "a sum past its bound");
+        if self.count >= SUM_COUNT_MOST {
+            return false;
+        }
         let term = i128::from(decimal.value);
         let (value, scale) = if decimal.scale == self.scale {
             (self.value + term, self.scale)
@@ -751,11 +761,18 @@ impl Sum {
 
     /// Add the sum `value` of `count` values at `scale`, as [`Sum::add`]
     /// adds one: false, the sum unchanged, when the result or the rescaled
-    /// sum would reach [`SUM_BOUND`], a term rescaled would overflow, or a
-    /// scale passes 18.
+    /// sum would reach [`SUM_BOUND`], a term rescaled would overflow, a
+    /// scale passes 18, or the count would pass [`SUM_COUNT_MOST`].
     #[inline(always)]
     pub fn add_many(&mut self, value: i128, scale: u32, count: u64) -> bool {
         debug_assert!(below_bound(self.value), "a sum past its bound");
+        let Some(rows) = self
+            .count
+            .checked_add(count)
+            .filter(|&rows| rows <= SUM_COUNT_MOST)
+        else {
+            return false;
+        };
         if scale > MAX_READ_SCALE {
             return false;
         }
@@ -786,7 +803,7 @@ impl Sum {
         };
         self.value = sum;
         self.scale = scale;
-        self.count += count;
+        self.count = rows;
         true
     }
 }
@@ -799,8 +816,8 @@ impl Sum {
 ///
 /// # Errors
 ///
-/// Masks of different row counts, or a sum past its bound or of a scale
-/// past 18, fail before any mutation.
+/// Masks of different row counts, or a sum past its bound, of a scale
+/// past 18 or of a count past [`SUM_COUNT_MOST`], fail before any mutation.
 pub fn sum(
     source: &impl Source,
     rows: RowMaskView<'_>,
@@ -836,9 +853,9 @@ impl<S: Source> Terms for SourceTerms<'_, S> {
 ///
 /// # Errors
 ///
-/// Masks of different row counts, a sum past its bound or of a scale past
-/// 18, or a source that hands over rows it was not asked for, fail before
-/// any mutation of `total`.
+/// Masks of different row counts, a sum past its bound, of a scale past 18
+/// or of a count past [`SUM_COUNT_MOST`], or a source that hands over rows
+/// it was not asked for, fail before any mutation of `total`.
 pub fn sum_terms(
     terms: &impl Terms,
     rows: RowMaskView<'_>,
@@ -847,7 +864,7 @@ pub fn sum_terms(
 ) -> Result<()> {
     check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
     ensure!(
-        below_bound(total.value) && total.scale <= MAX_READ_SCALE,
+        below_bound(total.value) && total.scale <= MAX_READ_SCALE && total.count <= SUM_COUNT_MOST,
         "a decimal sum past its bound"
     );
     let mut sum = *total;
@@ -898,9 +915,9 @@ fn add_integer(sum: &mut Sum, value: i64) -> bool {
 ///
 /// # Errors
 ///
-/// Masks of different row counts, a sum past its bound or of a scale past
-/// 18, or a partial state of another format, fail before any mutation of
-/// `total`.
+/// Masks of different row counts, a sum past its bound, of a scale past 18
+/// or of a count past [`SUM_COUNT_MOST`], or a partial state of another
+/// format, fail before any mutation of `total`.
 pub fn merge_partials(
     partials: &impl Partials,
     rows: RowMaskView<'_>,
@@ -909,7 +926,7 @@ pub fn merge_partials(
 ) -> Result<()> {
     check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
     ensure!(
-        below_bound(total.value) && total.scale <= MAX_READ_SCALE,
+        below_bound(total.value) && total.scale <= MAX_READ_SCALE && total.count <= SUM_COUNT_MOST,
         "a decimal sum past its bound"
     );
     let mut sum = *total;
@@ -1244,13 +1261,16 @@ impl SumState {
         let stored = (u128::from(words[1]) << 64 | u128::from(words[0])) as i128;
         debug_assert!(below_bound(stored), "a sum state past its bound");
         let value = stored + i128::from(term);
+        // The count one more, within an int64's most: past it, or wrapped
+        // from 2^64 - 1 to 0, it reads as an int64 of 0 or less.
+        let count = words[2].wrapping_add(1);
         // Below the bound in magnitude, both signs in one comparison.
-        if (value + (SUM_BOUND - 1)) as u128 > (2 * (SUM_BOUND - 1)) as u128 {
+        if (value + (SUM_BOUND - 1)) as u128 > (2 * (SUM_BOUND - 1)) as u128 || count as i64 <= 0 {
             return false;
         }
         words[0] = value as u64;
         words[1] = ((value as u128) >> 64) as u64;
-        words[2] += 1;
+        words[2] = count;
         true
     }
 
@@ -1981,6 +2001,52 @@ mod tests {
         let mut sum = start;
         assert!(!sum.add_many(-170_141_183_460_469_231_731, 0, 19));
         assert_eq!(sum, start);
+    }
+
+    #[test]
+    fn a_sum_counts_within_an_int64() {
+        let one = Decimal::new(1, 0).unwrap();
+        let at = |count| Sum {
+            value: 0,
+            scale: 0,
+            count,
+        };
+        // At the most: every way in refused, the sum as it was.
+        let mut full = at(SUM_COUNT_MOST);
+        assert!(!full.add(one));
+        assert!(!full.add_many(1, 0, 1));
+        assert_eq!(full, at(SUM_COUNT_MOST));
+        // One short: one more taken, then none.
+        let mut near = at(SUM_COUNT_MOST - 1);
+        assert!(near.add(one));
+        assert_eq!(near.count, SUM_COUNT_MOST);
+        assert!(!near.add(one));
+        let mut many = at(SUM_COUNT_MOST - 5);
+        assert!(!many.add_many(10, 0, 6));
+        assert!(many.add_many(10, 0, 5));
+        assert_eq!((many.value, many.count), (10, SUM_COUNT_MOST));
+        // A count no entry lets in still cannot wrap.
+        let mut wide = at(u64::MAX);
+        assert!(!wide.add_many(1, 0, 1));
+        // A state's words and a merge refuse it alike.
+        let state = |count| SumState {
+            sum: at(count),
+            ..SumState::default()
+        };
+        let mut words = state(SUM_COUNT_MOST).to_words();
+        let before = words;
+        assert!(!SumState::add_to(&mut words, Term::Decimal(one)));
+        assert!(!SumState::add_to(&mut words, Term::Integer(i64::MAX)));
+        assert_eq!(words, before);
+        let half = SUM_COUNT_MOST / 2 + 1;
+        assert!(!state(half).merge(state(half)));
+        // On the way in, past the most.
+        let mut past = at(SUM_COUNT_MOST + 1);
+        let rows = RowMaskView::try_new(0, &[]).unwrap();
+        let mut none = [0_u64; 0];
+        let mut rest = RowMask::try_new(0, &mut none).unwrap();
+        assert!(sum_terms(&NoRows, rows, &mut past, &mut rest).is_err());
+        assert!(merge_partials(&NoRows, rows, &mut past, &mut rest).is_err());
     }
 
     #[test]

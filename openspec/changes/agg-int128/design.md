@@ -202,6 +202,37 @@ comparison and stays as it is.
 It is a fix of its own, with its own test, a state of `i128::MIN`
 refused on the way in, so it comes in a commit before the term.
 
+### The count within an int64
+
+A sum counts its rows in a `u64`, and C keeps the count in an int64,
+as the core keeps its N. The kernels added counts unchecked, and so did
+the node's C, for the rows it takes from the rest and the counts of the
+states it merges. A count past an int64's needs 2^63 rows, or a partial
+state whose bytes claim it; read back by C, it became a negative
+count, which an `avg` divides by.
+
+The bound is `SUM_COUNT_MOST`, an int64's most, a constant beside
+`SUM_BOUND`, owned by `Sum`:
+- on the way in, a state past it fails as one past the bound does: a
+  `TessDecimalSum` holds an int64 already, and `state_partial` checks a
+  partial state's count;
+- `Sum::add`, `Sum::add_many` and the fast path of `SumState::add_to`
+  refuse a term or a sum that would count past it, as they refuse one
+  past the bound, and the row goes to the rest;
+- in the node one function, `sum_count`, adds every count, a row taken
+  or another state's, and fails past an int64's with `bigint out of
+  range` (22003), as the core's `count(*)` and the node's own merge of
+  counts do.
+
+Kani proves the kernels' side for any count of a `u64`. No query
+reaches the node's side, which needs 2^63 rows or a damaged partial
+state, so its check is by review. The fast path of `SumState::add_to`
+compares the count on every row it takes, which costs the groupings
+whose rows go to their records one by one 0.4 % of instructions, and
+the local sums' counts 0.2 %, past the rule of 1 % on three of them;
+the maintainer chose to keep the check, the results below give the
+runs.
+
 ### The bound and the state stay
 
 The bound of 10^36 stays for integer sums. An integer sum would reach

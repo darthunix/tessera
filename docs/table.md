@@ -65,11 +65,11 @@ records, which only the one writer changes:
   bitmap), a sum at scale 0. A state with a rest, one not read in place,
   or one the record's sum refuses at its bound is set in the sum's
   `rest` for the caller to merge, the record's state unchanged; a value
-  of another tag, words out of range (a scale past 18, a sum at 10^36) or
-  another array fails the call, as do partial states and numeric or int4
-  sums in one call; an int8 column among partial states
-  (`TESS_TABLE_SUM_OF_INT8`, the core's partial value of `sum(int2)`) is
-  a state of one value each;
+  of another tag, words out of range (a scale past 18, a sum at 10^36,
+  a count past an int64's) or another array fails the call, as do
+  partial states and numeric or int4 sums in one call; an int8 column
+  among partial states (`TESS_TABLE_SUM_OF_INT8`, the core's partial
+  value of `sum(int2)`) is a state of one value each;
 - `tess_table_accumulate_extremes(&table, offsets, &rows, column,
   value_at, max, &rest, &status)` offers each selected row's numeric to
   the `min` or `max` state of its record, `TESS_TABLE_EXTREME_WORDS` (3)

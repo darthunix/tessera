@@ -553,7 +553,8 @@ fn state_partial(data: &[u8]) -> Result<Partial> {
     ensure!(
         words[3] & !STATE_FLAG_BITS == 0
             && state.sum.scale <= decimal::MAX_READ_SCALE
-            && decimal::below_bound(state.sum.value),
+            && decimal::below_bound(state.sum.value)
+            && state.sum.count <= decimal::SUM_COUNT_MOST,
         "a partial sum state out of its range"
     );
     Ok(Partial::State(state))
@@ -1351,10 +1352,17 @@ mod tests {
     }
 
     #[test]
-    fn a_partial_state_of_i128_min_is_refused() {
+    fn a_partial_state_out_of_its_range_is_refused() {
         // The tag, then the words: the sum i128::MIN, a count of 1, scale 0.
         let mut data = super::STATE_TAG.to_ne_bytes().to_vec();
         for word in [0, i64::MIN as u64, 1, 0] {
+            data.extend_from_slice(&word.to_ne_bytes());
+        }
+        let error = super::state_partial(&data).unwrap_err();
+        assert!(error.to_string().contains("out of its range"), "{error}");
+        // A count past an int64's.
+        let mut data = super::STATE_TAG.to_ne_bytes().to_vec();
+        for word in [5_u64, 0, 1 << 63, 0] {
             data.extend_from_slice(&word.to_ne_bytes());
         }
         let error = super::state_partial(&data).unwrap_err();

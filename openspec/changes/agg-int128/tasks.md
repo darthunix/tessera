@@ -58,6 +58,15 @@ one pull request; the work and the close are a second.
       diffs of `test/expected/agg.out` and `parallel.out` read line by
       line
 
+- [x] 3.4 The count of a sum within an int64's: `SUM_COUNT_MOST` beside
+      `SUM_BOUND`, checked on the way in and by every addition of the
+      kernels, the node's counts added by one function that fails with
+      `bigint out of range`; the proofs by Kani for any count; the
+      headers and `docs/table.md` say so. Check: `cargo test --locked
+      -p tessera-kernels -p tessera-capi`; `cargo kani -p
+      tessera-kernels` over the proofs of the sums; `cargo mutants` over
+      the changed lines; `make installcheck`
+
 ## 4. The measurements
 
 - [ ] 4.1 The counts and the times of the design's measurement plan,

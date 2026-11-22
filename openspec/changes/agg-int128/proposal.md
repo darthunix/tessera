@@ -48,6 +48,12 @@ measurement plan.
   another scale could land on `i128::MIN`, whose `abs` stays negative
   in a release build; the checks of the states the entry points take
   from C and from bytes let that value pass today.
+- The count of a sum stays within an int64's, as C and the core keep
+  it: a state past it fails on the way in, the kernels refuse a term
+  that would take it past, and the node fails with `bigint out of
+  range` where it adds counts, as `count(*)` does. A count past it
+  needs 2^63 rows or a damaged partial state; read back by C, it became
+  negative.
 - The family `anyagg` gets cases of `sum` and `avg` over a `bigint`
   column of 19 digits, each beside a twin of 18 digits: without groups,
   by groups whose keys come in runs, and by groups whose keys follow

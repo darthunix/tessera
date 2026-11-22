@@ -8,6 +8,7 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_aggregate.h"
+#include "common/int.h"
 #include "executor/executor.h"
 #include "parser/parse_agg.h"
 #include "utils/array.h"
@@ -174,6 +175,23 @@ fast_int8(int128 sum, Datum rest)
 		return Int64GetDatum((int64) sum);
 	return DirectFunctionCall1(numeric_int8,
 							   DirectFunctionCall2(numeric_add, rest, fast_numeric(sum, 0)));
+}
+
+/*
+ * A sum's count with rows more: a row the kernels left, or another state's
+ * count. Past an int64, as the core's count(*) fails, bigint out of range;
+ * the kernels' sums count within it too (SUM_COUNT_MOST).
+ */
+static uint64
+sum_count(uint64 count, uint64 rows)
+{
+	uint64		total;
+
+	if (pg_add_u64_overflow(count, rows, &total) || total > (uint64) PG_INT64_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+				 errmsg("bigint out of range")));
+	return total;
 }
 
 /* A numeric added to the rest's sum, in the states' context. */
@@ -577,7 +595,7 @@ fast_advance(GenericAgg *generic, int row, MemoryContext states)
 	 * then moves the sum to the rest, so that the next batches add from
 	 * zero. The row's numeric joins the rest.
 	 */
-	fast->count++;
+	fast->count = (int64) sum_count((uint64) fast->count, 1);
 	if (fast->sum != 0 &&
 		(!generic->fast_numeric ||
 		 fast_row_decimal(generic, decimal_rows != NULL ? decimal_rows[row / 64] : 0,
@@ -1090,7 +1108,7 @@ sum_state_rest(TessAggState *state, const GenericAgg *generic, int slot, int row
 			TESS_TABLE_SUM_NEGATIVE_INFINITY;
 		return;
 	}
-	words[2]++;
+	words[2] = sum_count(words[2], 1);
 	old = MemoryContextSwitchTo(states);
 	if (words[TESS_TABLE_SUM_WORDS] == 0)
 		words[TESS_TABLE_SUM_WORDS] =
@@ -1170,7 +1188,7 @@ sum_state_merge_rest(TessAggState *state, const GenericAgg *generic, int slot, i
 		sum_state_read(value, theirs, &rest);
 	words[3] |= theirs[3] & (TESS_TABLE_SUM_NAN | TESS_TABLE_SUM_POSITIVE_INFINITY |
 							 TESS_TABLE_SUM_NEGATIVE_INFINITY);
-	words[2] += theirs[2];
+	words[2] = sum_count(words[2], theirs[2]);
 	sum = fast_numeric((int128) (((uint128) theirs[1] << 64) | theirs[0]),
 					   (int) (theirs[3] & TESS_TABLE_SUM_SCALE_MASK));
 	if (rest != (Datum) 0)
@@ -1226,7 +1244,7 @@ agg_fast_merge(TessAggState *state, GenericAgg *generic, const TessDatumColumn *
 			generic->state_null = false;
 		}
 		fast = (FastState *) DatumGetPointer(generic->state);
-		fast->count += (int64) words[2];
+		fast->count = (int64) sum_count((uint64) fast->count, words[2]);
 		fast_rest(fast, fast_numeric((int128) (((uint128) words[1] << 64) | words[0]), scale),
 				  states);
 		if (numeric_rest != (Datum) 0)

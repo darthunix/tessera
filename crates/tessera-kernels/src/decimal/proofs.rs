@@ -1,32 +1,37 @@
 //! Kani proofs of the arithmetic of integer sums: a term or a word's bulk
-//! sum of an int8 column, at scale 0, into a sum below the bound, at each
-//! scale a state may have. For every such state and term the sum never
-//! panics, takes the term exactly when the exact sum, the term rescaled to
-//! the state's scale, fits an `i128` and is below the bound, `i128::MIN`
-//! among the sums refused, and a refused term leaves the state as it was;
-//! a state's words take an integer in place as the decoded state does.
-//! The scale is a literal in each harness, so that the power of ten is a
-//! constant: Kani does not finish a product of two unknowns.
+//! sum of an int8 column, at scale 0, into a sum below the bound, of any
+//! count, at each scale a state may have. For every such state and term
+//! the sum never panics, takes the term exactly when the exact sum, the
+//! term rescaled to the state's scale, fits an `i128` and is below the
+//! bound, `i128::MIN` among the sums refused, and the count with the rows
+//! stays within an int64's, and a refused term leaves the state as it
+//! was; a state's words take an integer in place as the decoded state
+//! does. The scale is a literal in each harness, so that the power of ten
+//! is a constant: Kani does not finish a product of two unknowns.
 
-use super::{POWERS, SUM_BOUND, Sum, SumState, Term, below_bound};
+use super::{Decimal, POWERS, SUM_BOUND, SUM_COUNT_MOST, Sum, SumState, Term, below_bound};
 
 /// The most a word's bulk sum of an int8 column reaches in magnitude: 64
 /// values of 2^63.
 const BULK_MOST: u128 = 64 << 63;
 
-/// A state the entry points let in, at `scale`: its count an int64's, as
-/// C keeps it (`TessDecimalSum.count`), so that the rows a call adds,
-/// which the sum counts unchecked, never reach 2^64.
+/// A state below the bound at `scale`, of any count, even one no entry
+/// point lets in.
 fn state(scale: u32) -> Sum {
     let value: i128 = kani::any();
     kani::assume(below_bound(value));
-    let count: u64 = kani::any();
-    kani::assume(count <= i64::MAX as u64);
     Sum {
         value,
         scale,
-        count,
+        count: kani::any(),
     }
+}
+
+/// Whether a count has room for `rows` more within an int64's.
+fn counts(count: u64, rows: u64) -> bool {
+    count
+        .checked_add(rows)
+        .is_some_and(|total| total <= SUM_COUNT_MOST)
 }
 
 /// The exact sum of `sum` and `term` at scale 0, the term rescaled to the
@@ -47,7 +52,7 @@ fn bulk_into(scale: u32) {
     let mut sum = start;
     let taken = sum.add_many(term, 0, rows);
     let exact = exact(start, term);
-    assert!(taken == exact.is_some_and(below_bound));
+    assert!(taken == (exact.is_some_and(below_bound) && counts(start.count, rows)));
     if taken {
         assert!(Some(sum.value) == exact && sum.scale == scale);
         assert!(sum.count == start.count + rows);
@@ -55,7 +60,8 @@ fn bulk_into(scale: u32) {
         assert!(sum == start);
     }
     kani::cover!(taken);
-    kani::cover!(!taken && exact.is_some());
+    kani::cover!(!taken && exact.is_some_and(below_bound));
+    kani::cover!(!taken && exact.is_some() && counts(start.count, rows));
 }
 
 macro_rules! bulk_proofs {
@@ -123,7 +129,7 @@ fn integer_in_place(scale: u32) {
     assert!(taken == decoded.add(term));
     assert!(words == decoded.to_words());
     let exact = exact(start.sum, i128::from(value));
-    assert!(taken == exact.is_some_and(below_bound));
+    assert!(taken == (exact.is_some_and(below_bound) && counts(start.sum.count, 1)));
     let after = SumState::from_words(words);
     if taken {
         assert!(Some(after.sum.value) == exact && after.sum.scale == scale);
@@ -148,6 +154,30 @@ fn an_integer_in_place_at_scale_0() {
 #[kani::proof]
 fn an_integer_in_place_at_scale_1() {
     integer_in_place(1);
+}
+
+/// [`Sum::add`] of a decimal at scale 0 into a state at scale 0, of any
+/// count: taken exactly when the sum stays below the bound and the count
+/// below an int64's most, the sum and count exact; refused, the state as
+/// it was.
+#[kani::proof]
+fn a_decimal_counts_within_an_int64() {
+    let start = state(0);
+    let value: i64 = kani::any();
+    let Some(decimal) = Decimal::new(value, 0) else {
+        return;
+    };
+    let mut sum = start;
+    let taken = sum.add(decimal);
+    let exact = start.value + i128::from(value);
+    assert!(taken == (below_bound(exact) && counts(start.count, 1)));
+    if taken {
+        assert!(sum.value == exact && sum.count == start.count + 1);
+    } else {
+        assert!(sum == start);
+    }
+    kani::cover!(taken);
+    kani::cover!(!taken && below_bound(exact));
 }
 
 /// The bound by `unsigned_abs`: every `i128`, `i128::MIN` among them, is
