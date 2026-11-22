@@ -1,0 +1,28 @@
+HEAD 256e0df58508
+command run
+modes duckdb
+workers 8
+work_mem 64MB
+timeout 60 s
+deadline 300 s
+tries 5
+counters true
+duckdb threads Some(9)
+pg_config ~/git/tessera-duckdb/target/pg19/bin/pg_config
+postgres PostgreSQL 19rc2
+pg_duckdb 1.2.0
+started 2026-11-22 09:48:13.348402+07
+power AC Power
+load average { 2.63 2.55 2.33 }
+rows 99997496
+files:
+   14779976446  ~/git/tessera-duckdb/target/clickbench-one/hits.parquet
+sha256:
+  2ce5f5503115fd5488578f687d08e5cb7dd2539e301941b8007febb9a1be9e10  ~/git/tessera-duckdb/target/pg19/lib/postgresql/tessera.dylib
+  700707c06390591b287fc2dc1d9419990501c31aec27befcafd77a035b5f0cf6  ~/git/tessera-duckdb/target/pg19/lib/postgresql/tessera_nodes.dylib
+  4fac3e98128e9d9eea3c3b7ecf63bac7653becf87e62e209a06c36e83a8b6d43  ~/git/tessera-duckdb/target/pg19/lib/postgresql/tessera_kernels.dylib
+  05dda4384fe59964fe3d176e470957213a9e2e84929e2842fbc8fb91e3de00cc  ~/git/tessera-duckdb/target/pg19/lib/postgresql/libtessera_runtime.a
+  baf397782b4b548ddaf2107aeffb4265eb98ccc920f2485aa393ce63b50b2da1  ~/git/tessera-duckdb/target/pg19/bin/postgres
+  a2d349b0782db44fbc1a3d72179631cd153ac3c0ea676310aeffa67386104f09  ~/git/tessera-duckdb/target/pg19/lib/postgresql/tessera_parquet.dylib
+  68e1a1e2bffadf3b73411a34f71671471e50e7e254845743115a26d8659ce232  ~/git/tessera-duckdb/target/pg19/lib/postgresql/pg_duckdb.dylib
+  b88932717e6fbc4012cceb9d5400e04a3a90bdbd29b45f0b5564759940f1370f  ~/git/tessera-duckdb/target/pg19/lib/postgresql/pg_pmu.dylib

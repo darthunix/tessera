@@ -1,0 +1,34 @@
+--mode off --queries 1-7 --workers 0 --files clickbench-data -> target/bench-runs/clickbench-zJpeF7
+--mode on --queries 1-7 --workers 0 --files clickbench-data -> target/bench-runs/clickbench-XU8FTM
+--mode duckdb --queries 1-7 --workers 0 --files clickbench-data -> target/bench-runs/clickbench-KtyA1h
+--mode off --queries 1-7 --workers 2 --files clickbench-data -> target/bench-runs/clickbench-gRF0TN
+--mode on --queries 1-7 --workers 2 --files clickbench-data -> target/bench-runs/clickbench-2T2Igw
+--mode duckdb --queries 1-7 --workers 2 --files clickbench-data -> target/bench-runs/clickbench-RGOEYf
+--mode off --queries 1-7 --workers 4 --files clickbench-data -> target/bench-runs/clickbench-rJqmNo
+--mode on --queries 1-7 --workers 4 --files clickbench-data -> target/bench-runs/clickbench-Z7lJsX
+--mode duckdb --queries 1-7 --workers 4 --files clickbench-data -> target/bench-runs/clickbench-Yj3G8D
+--mode off --queries 1-7 --workers 8 --files clickbench-data -> target/bench-runs/clickbench-klMr8x
+--mode on --queries 1-7 --workers 8 --files clickbench-data -> target/bench-runs/clickbench-VfaKk2
+--mode duckdb --queries 1-7 --workers 8 --files clickbench-data -> target/bench-runs/clickbench-mEz7p7
+--mode off --queries 1-7 --workers 0 --files clickbench-one -> target/bench-runs/clickbench-tY9ukM
+--mode on --queries 1-7 --workers 0 --files clickbench-one -> target/bench-runs/clickbench-eEClsZ
+--mode duckdb --queries 1-7 --workers 0 --files clickbench-one -> target/bench-runs/clickbench-KpcicB
+--mode off --queries 1-7 --workers 2 --files clickbench-one -> target/bench-runs/clickbench-h8yy6g
+--mode on --queries 1-7 --workers 2 --files clickbench-one -> target/bench-runs/clickbench-4mWbru
+--mode duckdb --queries 1-7 --workers 2 --files clickbench-one -> target/bench-runs/clickbench-EloxYZ
+--mode off --queries 1-7 --workers 4 --files clickbench-one -> target/bench-runs/clickbench-VtvAY3
+--mode on --queries 1-7 --workers 4 --files clickbench-one -> target/bench-runs/clickbench-aGzCo4
+--mode duckdb --queries 1-7 --workers 4 --files clickbench-one -> target/bench-runs/clickbench-PETZGr
+--mode off --queries 1-7 --workers 8 --files clickbench-one -> target/bench-runs/clickbench-BKCDDt
+--mode on --queries 1-7 --workers 8 --files clickbench-one -> target/bench-runs/clickbench-mb0X0J
+--mode duckdb --queries 1-7 --workers 8 --files clickbench-one -> target/bench-runs/clickbench-udn4un
+done times
+--counters --tries 5 --mode on --queries 1-7 --workers 0 --files clickbench-data -> target/bench-runs/clickbench-bSSeHy
+--counters --tries 5 --mode duckdb --queries 1-7 --workers 0 --files clickbench-data -> target/bench-runs/clickbench-dQL9Wk
+--counters --tries 5 --mode on --queries 1-7 --workers 8 --files clickbench-data -> target/bench-runs/clickbench-CrIhZu
+--counters --tries 5 --mode duckdb --queries 1-7 --workers 8 --files clickbench-data -> target/bench-runs/clickbench-MPtrEc
+--counters --tries 5 --mode on --queries 1-7 --workers 0 --files clickbench-one -> target/bench-runs/clickbench-myYQsR
+--counters --tries 5 --mode duckdb --queries 1-7 --workers 0 --files clickbench-one -> target/bench-runs/clickbench-hTc1yJ
+--counters --tries 5 --mode on --queries 1-7 --workers 8 --files clickbench-one -> target/bench-runs/clickbench-DgUPTM
+--counters --tries 5 --mode duckdb --queries 1-7 --workers 8 --files clickbench-one -> target/bench-runs/clickbench-JhtwoO
+done counts
