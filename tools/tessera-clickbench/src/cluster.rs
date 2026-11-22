@@ -24,6 +24,9 @@ pub struct ServerSettings {
     pub shared_buffers: String,
     /// Whether pg_duckdb is preloaded and created.
     pub duckdb: bool,
+    /// Whether pg_pmu is preloaded, last, so that its hooks are the
+    /// outermost: only for a run that counts.
+    pub pmu: bool,
 }
 
 impl ServerSettings {
@@ -36,12 +39,15 @@ impl ServerSettings {
             socket_dir,
             shared_buffers,
             duckdb,
+            pmu,
         } = self;
-        let preload = if *duckdb {
-            "tessera, tessera_nodes, tessera_kernels, pg_duckdb"
-        } else {
-            "tessera, tessera_nodes, tessera_kernels"
-        };
+        let mut preload = String::from("tessera, tessera_nodes, tessera_kernels");
+        if *duckdb {
+            preload.push_str(", pg_duckdb");
+        }
+        if *pmu {
+            preload.push_str(", pg_pmu");
+        }
         format!(
             "# Written by tessera-clickbench at every start; changes are lost.
 port = {port}
@@ -61,6 +67,13 @@ work_mem = 64MB
     }
 }
 
+/// Whether the build has pg_pmu installed.
+pub fn pmu_installed(pg: &Pg) -> bool {
+    pg.pkglibdir
+        .join(format!("pg_pmu{}", Pg::dlsuffix()))
+        .exists()
+}
+
 /// Whether the build has pg_duckdb installed.
 pub fn duckdb_installed(pg: &Pg) -> bool {
     pg.sharedir.join("extension/pg_duckdb.control").exists()
@@ -74,7 +87,7 @@ pub fn duckdb_installed(pg: &Pg) -> bool {
 /// the server's, the wrapper's and pg_duckdb's.
 pub fn binaries(pg: &Pg) -> Vec<PathBuf> {
     let mut files = pg.binaries();
-    for module in ["tessera_parquet", "pg_duckdb"] {
+    for module in ["tessera_parquet", "pg_duckdb", "pg_pmu"] {
         files.push(pg.pkglibdir.join(format!("{module}{}", Pg::dlsuffix())));
     }
     files
@@ -320,11 +333,18 @@ mod tests {
             socket_dir: "/tmp".into(),
             shared_buffers: "2GB".into(),
             duckdb: true,
+            pmu: false,
         };
         assert!(settings.conf().contains(
             "shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, pg_duckdb'"
         ));
+        settings.pmu = true;
+        assert!(settings.conf().contains(
+            "shared_preload_libraries = 'tessera, tessera_nodes, tessera_kernels, pg_duckdb, \
+             pg_pmu'"
+        ));
         settings.duckdb = false;
+        settings.pmu = false;
         assert!(
             settings
                 .conf()

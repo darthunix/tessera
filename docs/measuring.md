@@ -66,8 +66,8 @@ test and a line in its README.
   `cargo tpch`, described in
   [bench/tpch/README.md](../bench/tpch/README.md).
 - **Are the answers of ClickBench's queries over its Parquet files the
-  same with Tessera on, off and pg_duckdb, and the times?** `cargo
-  clickbench`, described in
+  same with Tessera on, off and pg_duckdb, and their times and counts?**
+  `cargo clickbench`, described in
   [bench/clickbench/README.md](../bench/clickbench/README.md).
 
 The bench cluster is made once by `bench/pg/run.sh setup`. `run.sh stop`
