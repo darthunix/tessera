@@ -157,6 +157,40 @@ extern bool tess_parquet_values(TessParquetReader *reader,
 								TessParquetStatus *status);
 
 /*
+ * A clause's test of a column's stored values, made once from the clause's
+ * values: as a Datum of the column's type gives them, widened to 64 bits
+ * (days since 2000-01-01 for a date, microseconds since 2000-01-01 for a
+ * time), each NULL where nulls says; one for a comparison, any number for
+ * IN, none for the tests of NULL. A comparison with NULL passes no row.
+ */
+typedef struct TessParquetTest TessParquetTest;
+
+#define TESS_PARQUET_TEST_EQ 0
+#define TESS_PARQUET_TEST_NE 1
+#define TESS_PARQUET_TEST_LT 2
+#define TESS_PARQUET_TEST_LE 3
+#define TESS_PARQUET_TEST_GT 4
+#define TESS_PARQUET_TEST_GE 5
+#define TESS_PARQUET_TEST_IN 6
+#define TESS_PARQUET_TEST_IS_NULL 7
+#define TESS_PARQUET_TEST_IS_NOT_NULL 8
+
+extern bool tess_parquet_test(const TessParquetColumn *column, int32_t kind,
+							  const int64_t *values, const bool *nulls,
+							  size_t nvalues, TessParquetTest **out,
+							  TessParquetStatus *status);
+extern void tess_parquet_test_free(TessParquetTest *test);
+
+/*
+ * Writes a bit for each row the reader's last window holds, in their
+ * order, set where the row passes the test; no value is made.
+ */
+extern bool tess_parquet_window_test(const TessParquetReader *reader,
+									 const TessParquetTest *test,
+									 uint64_t *passed, size_t passed_words,
+									 TessParquetStatus *status);
+
+/*
  * Checks the text of the rows asked asks of the window (22021, 22001,
  * 54000 at the first row that fails), sets or clears their bits in nulls
  * as tess_parquet_values does, and writes the bytes of the arena their
