@@ -15,6 +15,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use arrow_array::cast::AsArray;
@@ -42,12 +43,16 @@ use crate::file::ParquetFile;
 ///
 /// It keeps the last error of the system's reads, other than a read past
 /// the end, since the `parquet` crate passes a read's error on to Arrow as
-/// text: the reader then reports `58030`, not bytes it cannot decode.
+/// text: the reader then reports `58030`, not bytes it cannot decode. It
+/// counts the reads that reached the file, so that a reader checks the
+/// file after the windows whose pages it read, not after those it took
+/// from pages read before.
 #[derive(Clone, Debug)]
 pub(crate) struct SharedFile {
     file: Arc<File>,
     len: u64,
     failed: Arc<Mutex<Option<(io::ErrorKind, String)>>>,
+    reads: Arc<AtomicU64>,
 }
 
 impl SharedFile {
@@ -56,7 +61,13 @@ impl SharedFile {
             file: Arc::clone(file.handle()),
             len: file.identity().size,
             failed: Arc::new(Mutex::new(None)),
+            reads: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// How many reads reached the file.
+    pub(crate) fn reads(&self) -> u64 {
+        self.reads.load(Ordering::Relaxed)
     }
 
     fn note(failed: &Mutex<Option<(io::ErrorKind, String)>>, error: &io::Error) {
@@ -93,10 +104,12 @@ pub(crate) struct At {
     file: Arc<File>,
     position: u64,
     failed: Arc<Mutex<Option<(io::ErrorKind, String)>>>,
+    reads: Arc<AtomicU64>,
 }
 
 impl Read for At {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         let read = self
             .file
             .read_at(buf, self.position)
@@ -114,10 +127,12 @@ impl ChunkReader for SharedFile {
             file: Arc::clone(&self.file),
             position: start,
             failed: Arc::clone(&self.failed),
+            reads: Arc::clone(&self.reads),
         })
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         let mut bytes = vec![0u8; length];
         self.file.read_exact_at(&mut bytes, start).map_err(|e| {
             SharedFile::note(&self.failed, &e);
@@ -156,6 +171,8 @@ pub struct ColumnReader {
     dictionary: bool,
     forward: Option<Forward>,
     shared: SharedFile,
+    /// The reads of the file at its last check.
+    checked: u64,
 }
 
 impl ColumnReader {
@@ -194,6 +211,7 @@ impl ColumnReader {
             dictionary: chunk.dictionary_page_offset().is_some(),
             forward: None,
             shared: SharedFile::of(file),
+            checked: 0,
         })
     }
 
@@ -210,7 +228,9 @@ impl ColumnReader {
     /// selected row of the window, built anew from the window after a gap;
     /// otherwise, for a window behind it, a reader of its own gives the
     /// rows `rows` asks, a mask over the window's rows that the selection
-    /// holds. The file is checked unchanged after the read.
+    /// holds. The file is checked unchanged after a read that reached it,
+    /// before what it read is used; a window whose pages were read before
+    /// is not checked again.
     ///
     /// # Errors
     ///
@@ -261,7 +281,11 @@ impl ColumnReader {
         .unwrap_or_else(|payload| Err(panicked(payload.as_ref())));
         match read {
             Ok(window) => {
-                self.file.check_unchanged()?;
+                let reads = self.shared.reads();
+                if reads != self.checked {
+                    self.file.check_unchanged()?;
+                    self.checked = reads;
+                }
                 Ok(window)
             }
             Err(error) => {

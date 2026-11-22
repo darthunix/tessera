@@ -295,6 +295,36 @@ fn a_file_changed_after_a_read_and_a_damaged_page() {
         "55000"
     );
 
+    // A window of pages read before the change is not checked again: one
+    // page of every row, read with the first window, gives the second,
+    // which the crate decodes from the page it holds, arrays of 16 rows at
+    // a time, whatever the file is now; a window behind, which reads the
+    // page again, fails.
+    let page = dir.path().join("one-page");
+    std::fs::create_dir(&page).unwrap();
+    let file = write_ints(&page, &(0..100).collect::<Vec<_>>(), 100);
+    let column = map_column(&file, &request("a", oid::INT4)).unwrap();
+    let mut reader = ColumnReader::new(&file, &column, 0, Arc::clone(&all), 16).unwrap();
+    reader.read(0, 50, &every(50)).unwrap();
+    let reads = reader.shared.reads();
+    let mut out = std::fs::OpenOptions::new()
+        .append(true)
+        .open(page.join("ints.parquet"))
+        .unwrap();
+    out.write_all(b"x").unwrap();
+    drop(out);
+    let later = reader.read(50, 40, &every(40)).unwrap();
+    assert_eq!(reader.shared.reads(), reads);
+    let expect = |row: usize| (row % 7 != 3).then_some(row as u64);
+    assert_eq!(
+        datums(&reader, &later).unwrap(),
+        (50..90).map(expect).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        reader.read(0, 50, &every(50)).unwrap_err().sqlstate(),
+        "55000"
+    );
+
     // A page header overwritten: the bytes cannot be decoded.
     let path = dir.path().join("bad.parquet");
     testing::write(
