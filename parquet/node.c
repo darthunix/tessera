@@ -31,6 +31,7 @@
 #include "port/pg_bitutils.h"
 #include "utils/array.h"
 #include "utils/date.h"
+#include "utils/fmgroids.h"
 #include "utils/injection_point.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
@@ -92,7 +93,7 @@ typedef struct NodeColumn
  * A clause the source checks: the column, the test's kind
  * (TESS_PARQUET_TEST_*), and the side without columns whose value the test
  * takes, of the type type: one value, an array of them for IN, none for
- * the tests of NULL.
+ * the tests of NULL, a string for the tests of strings.
  */
 typedef struct ParquetClause
 {
@@ -111,8 +112,13 @@ typedef struct NodeClause
 	int64	   *values;			/* computed when first asked for rows */
 	bool	   *nulls;
 	int			nvalues;
+	char	   *bytes;			/* of a test of strings, its string's bytes */
+	size_t		nbytes;
 	TessParquetTest *test;		/* for the file read, or NULL */
 } NodeClause;
+
+/* Whether a test's kind is one of strings, which takes bytes. */
+#define STRING_TEST(kind) ((kind) >= TESS_PARQUET_TEST_BYTES_EQ)
 
 struct ParquetNode
 {
@@ -242,12 +248,73 @@ comparison_kind(Oid opno, Oid column, Oid side, bool commuted)
 	return tess_parquet_comparison(column, side, strategy, negator, commuted);
 }
 
+/* A column of text or varchar, through the relabeling to text that a
+ * varchar's operators take. */
+static bool
+string_var(Node *node, Index relid, Var **var)
+{
+	if (node != NULL && IsA(node, RelabelType))
+		node = (Node *) ((RelabelType *) node)->arg;
+	return column_var(node, relid, var) &&
+		((*var)->vartype == TEXTOID || (*var)->vartype == VARCHAROID);
+}
+
+/*
+ * The test kind of a clause on a string column's bytes, -1 for another:
+ * = and <> of text, either side the column, and LIKE and NOT LIKE, the
+ * column on the left and on the right a constant pattern the reader
+ * takes, of fixed parts and %. Under a deterministic collation alone,
+ * under which strings are equal only when their bytes are and LIKE of
+ * such a pattern matches bytes. side gets the other side.
+ */
+static int
+string_kind(OpExpr *op, Index relid, Var **var, Node **side)
+{
+	Node	   *left = linitial(op->args);
+	Node	   *right = lsecond(op->args);
+	Oid			func = get_opcode(op->opno);
+	bool		like = func == F_TEXTLIKE || func == F_TEXTNLIKE;
+
+	if ((func != F_TEXTEQ && func != F_TEXTNE && !like) ||
+		!OidIsValid(op->inputcollid) || !get_collation_isdeterministic(op->inputcollid))
+		return -1;
+	if (!string_var(left, relid, var))
+	{
+		if (like || !string_var(right, relid, var))
+			return -1;
+		right = left;
+	}
+	if (contain_var_clause(right))
+		return -1;
+	/* A NULL pattern folds away before planning: none is taken here. */
+	if (like)
+	{
+		Const	   *pattern = (Const *) right;
+		text	   *bytes;
+
+		if (!IsA(right, Const) || pattern->constisnull)
+			return -1;
+		bytes = DatumGetTextPP(pattern->constvalue);
+		if (!tess_parquet_like_checked((const uint8 *) VARDATA_ANY(bytes),
+									   VARSIZE_ANY_EXHDR(bytes)))
+			return -1;
+	}
+	*side = right;
+	if (func == F_TEXTEQ)
+		return TESS_PARQUET_TEST_BYTES_EQ;
+	if (func == F_TEXTNE)
+		return TESS_PARQUET_TEST_BYTES_NE;
+	return func == F_TEXTLIKE ? TESS_PARQUET_TEST_LIKE : TESS_PARQUET_TEST_NOT_LIKE;
+}
+
 /*
  * The shape of a clause the source checks: a comparison of a column of an
  * integer type, date, timestamp or timestamptz with a side without the
  * relation's columns, by its type's B-tree family or <>; such a column =
- * ANY an array, IN a list; IS NULL or IS NOT NULL of any column. False
- * for any other clause.
+ * ANY an array, IN a list; IS NULL or IS NOT NULL of any column; = and <>
+ * of a text or varchar column with a string, and LIKE and NOT LIKE of it
+ * with a constant pattern, as string_kind takes them. False for any other
+ * clause.
  */
 static bool
 clause_shape(Expr *clause, Index relid, ParquetClause *shape)
@@ -274,7 +341,17 @@ clause_shape(Expr *clause, Index relid, ParquetClause *shape)
 		Node	   *right = lsecond(op->args);
 		bool		commuted = false;
 		int			kind;
+		Node	   *side;
 
+		kind = string_kind(op, relid, &var, &side);
+		if (kind >= 0)
+		{
+			shape->attno = var->varattno;
+			shape->kind = kind;
+			shape->side = (Expr *) side;
+			shape->type = exprType(side);
+			return true;
+		}
 		if (!column_var(left, relid, &var))
 		{
 			Node	   *swap = left;
@@ -731,11 +808,27 @@ compute_values(ParquetNode *node)
 		clause->nvalues = 0;
 		clause->values = NULL;
 		clause->nulls = NULL;
+		clause->bytes = NULL;
+		clause->nbytes = 0;
 		if (clause->side == NULL)
 			continue;
 		value = ExecEvalExprSwitchContext(clause->side, econtext, &isnull);
 		outer = MemoryContextSwitchTo(node->values_cxt);
-		if (clause->shape.kind != TESS_PARQUET_TEST_IN)
+		if (STRING_TEST(clause->shape.kind))
+		{
+			/* A copy: the value may live in the context reset below. */
+			text	   *string = isnull ? NULL : DatumGetTextPCopy(value);
+
+			clause->nvalues = 1;
+			clause->nulls = palloc_object(bool);
+			clause->nulls[0] = isnull;
+			if (string != NULL)
+			{
+				clause->bytes = VARDATA(string);
+				clause->nbytes = VARSIZE(string) - VARHDRSZ;
+			}
+		}
+		else if (clause->shape.kind != TESS_PARQUET_TEST_IN)
 		{
 			clause->nvalues = 1;
 			clause->values = palloc_object(int64);
@@ -801,10 +894,17 @@ make_tests(ParquetNode *node)
 	for (int k = 0; k < node->nclauses; k++)
 	{
 		NodeClause *clause = &node->clauses[k];
+		bool		made;
 
-		if (!tess_parquet_test(scan->mapped[clause->column], clause->shape.kind,
-							   clause->values, clause->nulls, (size_t) clause->nvalues,
-							   &clause->test, &status))
+		if (STRING_TEST(clause->shape.kind))
+			made = tess_parquet_bytes_test(scan->mapped[clause->column], clause->shape.kind,
+										   (const uint8_t *) clause->bytes, clause->nbytes,
+										   clause->nulls[0], &clause->test, &status);
+		else
+			made = tess_parquet_test(scan->mapped[clause->column], clause->shape.kind,
+									 clause->values, clause->nulls, (size_t) clause->nvalues,
+									 &clause->test, &status);
+		if (!made)
 		{
 			free_tests(node);
 			parquet_raise(&status);
