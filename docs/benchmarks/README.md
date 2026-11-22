@@ -7,6 +7,11 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-22, ClickBench over Parquet, stage
+  1](2026-11-22-clickbench-stage1/README.md): Q1 to Q7 over ten of its
+  files and over `hits.parquet`, Tessera on and off and pg_duckdb at 0
+  to 8 workers, and the cycles and instructions of Tessera and DuckDB,
+  Apple M5 Pro, PostgreSQL 19, the change `parquet-fdw` at `256e0df5`.
 - [2026-11-20, row counts checked on whole words of the
   aggregates](2026-11-20-row-counts/README.md): the counts of
   `aggregate_int32` and `aggregate_int64` of two places of the check,

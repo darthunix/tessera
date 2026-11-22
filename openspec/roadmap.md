@@ -2331,6 +2331,15 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **A distinct aggregate chosen serially over the core's parallel plan**
+  (a finding of the change `parquet-fdw`, its stage 1 measured).
+  `TessAgg`'s `COUNT(DISTINCT)` has no parallel form, and the costs
+  choose it over a Parquet scan before the core's parallel plan, workers
+  sorting their share under a Gather Merge. ClickBench's Q6 over
+  `hits.parquet` at 8 workers took 9.35 s with Tessera on and 8.42 s
+  off; Q5 and Q6 do not scale with workers with Tessera on. Suggested:
+  cost the serial aggregate against the partial paths' workers, or a
+  parallel distinct aggregate.
 - **The workers of a Parquet scan bounded by its groups** (a finding of
   the review of the change `parquet-fdw`, task 4.3). A partial path
   takes the workers the core gives a scan of the files' size, as the

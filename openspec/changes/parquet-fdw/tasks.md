@@ -82,7 +82,7 @@ maintainer to say that the machine is idle.
       them by companion queries where a `LIMIT` leaves the rows open,
       three tries a query, the report. Check: `make rust-check`; `cargo
       clickbench check` over the ten files
-- [ ] 4.6 Stage 1, parallel groups of rows: Q1 to Q7 by 0, 2, 4 and 8
+- [x] 4.6 Stage 1, parallel groups of rows: Q1 to Q7 by 0, 2, 4 and 8
       workers, over the ten files and over `hits.parquet`, the run kept
       in `docs/benchmarks/`. Check: the run's report
 
