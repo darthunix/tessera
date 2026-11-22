@@ -3,8 +3,10 @@
 //! share (tessera-tpch, tessera-crosscheck). The build is the one
 //! `PG_CONFIG` names; the cluster is a data directory under the tool's run
 //! directory, created, configured, started and stopped by the tool. The
-//! tools that compare two revisions (tessera-bench, tessera-ab) share the
-//! snapshots of their sources ([`snapshot`]).
+//! tools that run a benchmark's queries share the comparison of their
+//! answers ([`compare`]) and what a run records about itself ([`run`]);
+//! the tools that compare two revisions (tessera-bench, tessera-ab) share
+//! the snapshots of their sources ([`snapshot`]).
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -17,6 +19,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail, ensure};
 
+pub mod compare;
+pub mod run;
 pub mod snapshot;
 
 /// A PostgreSQL build, as its `pg_config` describes it.
