@@ -103,7 +103,7 @@ maintainer to say that the machine is idle.
       entry points of a group's statistics and its dictionary. Check:
       the suites; the cases of the groups skipped and of the groups the
       footer cannot rule out
-- [ ] 5.3 Stage 2, the 17 queries that read no string. Check: the run's
+- [x] 5.3 Stage 2, the 17 queries that read no string. Check: the run's
       report
 
 ## 6. The clauses on strings
