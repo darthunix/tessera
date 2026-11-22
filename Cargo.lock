@@ -1566,6 +1566,7 @@ dependencies = [
  "parquet",
  "proptest",
  "tempfile",
+ "tessera-kernels",
 ]
 
 [[package]]

@@ -174,6 +174,10 @@ typedef struct TessParquetTest TessParquetTest;
 #define TESS_PARQUET_TEST_IN 6
 #define TESS_PARQUET_TEST_IS_NULL 7
 #define TESS_PARQUET_TEST_IS_NOT_NULL 8
+#define TESS_PARQUET_TEST_BYTES_EQ 9
+#define TESS_PARQUET_TEST_BYTES_NE 10
+#define TESS_PARQUET_TEST_LIKE 11
+#define TESS_PARQUET_TEST_NOT_LIKE 12
 
 /*
  * The kind of test, TESS_PARQUET_TEST_EQ to TESS_PARQUET_TEST_GE, of a
@@ -193,6 +197,24 @@ extern bool tess_parquet_test(const TessParquetColumn *column, int32_t kind,
 							  size_t nvalues, TessParquetTest **out,
 							  TessParquetStatus *status);
 extern void tess_parquet_test_free(TessParquetTest *test);
+
+/*
+ * Whether the source checks LIKE with the len bytes of pattern on a
+ * string's bytes: fixed parts and % signs, without _ or the escape
+ * character.
+ */
+extern bool tess_parquet_like_checked(const uint8_t *pattern, size_t len);
+
+/*
+ * The test of a string column's stored bytes that keeps a clause of kind
+ * TESS_PARQUET_TEST_BYTES_EQ to TESS_PARQUET_TEST_NOT_LIKE with the len
+ * bytes of value, the string compared or the pattern, or NULL where
+ * isnull, which passes no row. A pattern must be one
+ * tess_parquet_like_checked takes.
+ */
+extern bool tess_parquet_bytes_test(const TessParquetColumn *column, int32_t kind,
+									const uint8_t *value, size_t len, bool isnull,
+									TessParquetTest **out, TessParquetStatus *status);
 
 /*
  * Sets *out where group group of file holds no row that passes test, by
