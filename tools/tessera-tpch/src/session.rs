@@ -10,7 +10,7 @@ use postgres::SimpleQueryMessage;
 use postgres::error::SqlState;
 
 use crate::cluster::Cluster;
-use crate::compare::Row;
+use tessera_pgtool::compare::Row;
 
 /// The settings a query runs under.
 #[derive(Debug, Clone, PartialEq)]

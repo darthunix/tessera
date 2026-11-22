@@ -10,10 +10,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::answers;
-use crate::compare::{Precision, compare};
 use crate::config::Scale;
 use crate::queries;
 use crate::session::{Execution, Outcome, Session};
+use tessera_pgtool::compare::{Precision, compare};
 
 /// The result of a comparison.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

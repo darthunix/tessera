@@ -5,7 +5,6 @@
 mod answers;
 mod check;
 mod cluster;
-mod compare;
 mod config;
 mod load;
 mod measure;

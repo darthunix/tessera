@@ -4,7 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::rundir::splitmix;
+use tessera_pgtool::run::splitmix;
 
 /// Resamples of the bootstrap.
 const RESAMPLES: usize = 2000;
