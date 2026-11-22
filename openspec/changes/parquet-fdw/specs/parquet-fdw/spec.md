@@ -543,7 +543,8 @@ The results SHALL be those without skipping.
   encoded through its dictionary, and which holds `NULL` values
 - **THEN** `EXPLAIN ANALYZE` shows no group skipped, and each result
   equals the result over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Groups the footer cannot rule out`
 
 ### Requirement: Parallel reading
 Where the relation may be read in parallel, the wrapper SHALL offer a

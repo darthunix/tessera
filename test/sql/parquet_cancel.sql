@@ -49,12 +49,13 @@ SELECT parquet_test_cancel_after(:'parquet_module', 1);
 SELECT sum(i) FROM t_million;
 \set VERBOSITY default
 SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_group;
--- Under a clause the source checks that passes no row, the cancel comes
--- in the pass over the clause's column, before the group is selected.
-EXPLAIN (COSTS OFF) SELECT count(*) FROM t_million WHERE i < 0;
+-- Under a clause the source checks whose only row is the last, which the
+-- footer cannot rule out, the cancel comes in the pass over the clause's
+-- column, before the group is selected.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM t_million WHERE i > 999998;
 SELECT parquet_test_cancel_after(:'parquet_module', 1);
 \set VERBOSITY sqlstate
-SELECT count(*) FROM t_million WHERE i < 0;
+SELECT count(*) FROM t_million WHERE i > 999998;
 \set VERBOSITY default
 SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_pass;
 SELECT parquet_test_cancel_after(:'parquet_module', NULL);

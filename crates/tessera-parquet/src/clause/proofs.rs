@@ -10,11 +10,19 @@
 //! are the standard library's, whose sort takes Kani past the limit of a
 //! harness; the property tests compare the whole, over arrays, with
 //! PostgreSQL's answer.
+//!
+//! The proof of a group ruled out by its statistics shows that such a
+//! group holds no row that may pass, for every kind of clause and every
+//! statistic; the dictionaries are shown by the unit and property
+//! tests.
 
 use datum_arrow::arrow_schema::DataType;
 use datum_arrow::{Comparison, PgType, ReadOptions, ReadPlan, Unit};
 
-use super::equalities;
+use datum_arrow::Test;
+
+use super::{ClauseTest, Kind, equalities, found};
+use crate::stats::{Bounds, GroupStats};
 
 /// The bounds of `IN` of two values, any of them `NULL` or repeated,
 /// hold a stored value exactly when one value's test of equality passes
@@ -79,4 +87,84 @@ fn in_of_microseconds_is_any_equality() {
         left_out && values.contains(&Some(i64::MIN)),
         "-infinity left out"
     );
+}
+
+fn any_comparison() -> Comparison {
+    match kani::any::<u8>() % 6 {
+        0 => Comparison::Eq,
+        1 => Comparison::Ne,
+        2 => Comparison::Lt,
+        3 => Comparison::Le,
+        4 => Comparison::Gt,
+        _ => Comparison::Ge,
+    }
+}
+
+/// A group the statistics rule out holds no row that passes, for every
+/// kind of clause, every count of rows, of them `NULL` and of the count
+/// the footer gives or not, and every least and greatest value: `IS
+/// NULL` ruled out holds no `NULL` row, `IS NOT NULL` ruled out only
+/// `NULL` rows; a comparison passes no value from the least to the
+/// greatest; and `IN` of up to three bounds is ruled out exactly where a
+/// range the right way round holds none of them.
+#[kani::proof]
+#[kani::unwind(5)]
+fn a_group_ruled_out_holds_no_passing_row() {
+    let list: [i64; 3] = kani::any();
+    let len: usize = kani::any();
+    kani::assume(len <= list.len());
+    let list = &list[..len];
+    kani::assume(list.windows(2).all(|pair| pair[0] < pair[1]));
+    let kind = match kani::any::<u8>() % 4 {
+        0 => Kind::IsNull,
+        1 => Kind::IsNotNull,
+        2 => Kind::Compare(match kani::any::<u8>() % 3 {
+            0 => Test::Every,
+            1 => Test::Nothing,
+            _ => Test::Compare {
+                op: any_comparison(),
+                bound: kani::any(),
+            },
+        }),
+        _ => Kind::In(list.to_vec()),
+    };
+    let test = ClauseTest { kind };
+    let rows: u64 = kani::any();
+    let null_rows: u64 = kani::any();
+    kani::assume(null_rows <= rows);
+    let stats = GroupStats {
+        nulls: kani::any::<bool>().then_some(null_rows),
+        bounds: kani::any::<bool>().then(|| Bounds {
+            least: kani::any(),
+            greatest: kani::any(),
+        }),
+        empties: None,
+        dictionary_only: kani::any(),
+    };
+    let ruled_out = test.rules_out(&stats, rows);
+    let value: i64 = kani::any();
+    let within = stats
+        .bounds
+        .is_some_and(|b| b.least <= value && value <= b.greatest);
+    match &test.kind {
+        Kind::IsNull => assert!(!ruled_out || null_rows == 0),
+        Kind::IsNotNull => assert!(!ruled_out || null_rows == rows),
+        Kind::Compare(compare) => assert!(!(ruled_out && within && compare.passes(value))),
+        Kind::In(bounds) => {
+            let none = stats.bounds.is_some_and(|b| {
+                b.least <= b.greatest && !bounds.iter().any(|&x| b.least <= x && x <= b.greatest)
+            });
+            assert!(ruled_out == none);
+            assert!(!(ruled_out && within && found(bounds, value)));
+        }
+    }
+    kani::cover!(
+        ruled_out && matches!(test.kind, Kind::Compare(_)),
+        "a comparison ruled out"
+    );
+    kani::cover!(
+        ruled_out && len == 3 && matches!(test.kind, Kind::In(_)),
+        "IN ruled out"
+    );
+    kani::cover!(!ruled_out && within, "a group that may pass");
 }

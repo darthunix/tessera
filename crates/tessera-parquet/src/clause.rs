@@ -3,11 +3,14 @@
 //! arrays a reader gives, a bit a slot, before any value is made.
 
 use arrow_array::Array;
-use datum_arrow::{Comparison, Input, ReadPlan, Test, Values, mask_words, oid};
+use datum_arrow::{Comparison, Input, RangeAnswer, ReadPlan, Test, Values, mask_words, oid};
 
 use crate::column::MappedColumn;
+use crate::dictionary::{Dictionary, read_dictionary};
 use crate::error::{Error, INTERNAL_ERROR, Result};
+use crate::file::ParquetFile;
 use crate::reader::input_of;
+use crate::stats::{GroupStats, group_stats};
 
 /// What a clause asks of a column's values.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -118,6 +121,68 @@ impl ClauseTest {
         Ok(ClauseTest { kind })
     }
 
+    /// Whether group `group` of `file` holds no row that passes, by what
+    /// its footer says of `column`'s chunk, the column the test was made
+    /// for. Without `dictionary`, by the chunk's statistics alone: its
+    /// count of `NULL` values for the tests of `NULL`, and for the other
+    /// clauses, which pass no `NULL`, its least and greatest values, as
+    /// [`group_stats`] trusts them. With `dictionary`, by its dictionary,
+    /// read alone, where the footer says every data page is encoded
+    /// through it: ruled out when no value of it passes. A group the
+    /// footer does not rule out is not.
+    ///
+    /// # Errors
+    ///
+    /// With `dictionary`, those of [`read_dictionary`].
+    pub fn rules_out_group(
+        &self,
+        file: &ParquetFile,
+        column: &MappedColumn,
+        group: usize,
+        dictionary: bool,
+    ) -> Result<bool> {
+        let stats = group_stats(file, column, group);
+        if !dictionary {
+            return Ok(file
+                .group_rows(group)
+                .is_some_and(|rows| self.rules_out(&stats, rows)));
+        }
+        if !stats.dictionary_only || matches!(self.kind, Kind::IsNull | Kind::IsNotNull) {
+            return Ok(false);
+        }
+        Ok(read_dictionary(file, column, group)?.is_some_and(|values| self.rules_out_by(&values)))
+    }
+
+    /// Whether the statistics `stats` of a chunk of `rows` rows show that
+    /// no row passes.
+    fn rules_out(&self, stats: &GroupStats, rows: u64) -> bool {
+        match &self.kind {
+            Kind::IsNull => stats.nulls == Some(0),
+            Kind::IsNotNull => stats.nulls == Some(rows),
+            Kind::Compare(test) => stats
+                .bounds
+                .is_some_and(|b| test.range(b.least, b.greatest) == RangeAnswer::NoValue),
+            // A range turned the wrong way, as a damaged footer may give,
+            // rules nothing out.
+            Kind::In(bounds) => stats
+                .bounds
+                .is_some_and(|b| b.least <= b.greatest && !any_within(bounds, b.least, b.greatest)),
+        }
+    }
+
+    /// Whether no value of a chunk's dictionary passes, every row that is
+    /// not `NULL` holding one of them.
+    fn rules_out_by(&self, dictionary: &Dictionary) -> bool {
+        let Dictionary::Integers(values) = dictionary else {
+            return false;
+        };
+        match &self.kind {
+            Kind::Compare(test) => !values.iter().any(|&value| test.passes(value)),
+            Kind::In(bounds) => !values.iter().any(|&value| found(bounds, value)),
+            Kind::IsNull | Kind::IsNotNull => false,
+        }
+    }
+
     /// Writes into `passed` a bit for each slot of `array`, set where the
     /// slot passes, the bits past the array's slots cleared.
     ///
@@ -205,6 +270,12 @@ fn equalities(plan: &ReadPlan, values: &[Option<i64>]) -> datum_arrow::Result<Ve
         }
     }
     Ok(bounds)
+}
+
+/// Whether one of the sorted `bounds` lies from `least` to `greatest`.
+fn any_within(bounds: &[i64], least: i64, greatest: i64) -> bool {
+    let first = bounds.partition_point(|&bound| bound < least);
+    bounds.get(first).is_some_and(|&bound| bound <= greatest)
 }
 
 /// Whether `value` is one of the sorted `bounds`.

@@ -60,7 +60,8 @@ pub struct GroupStats {
 /// of a value outside its mark's width gives none, since the reader
 /// narrows such a row. The emptiness of strings is taken from the newer
 /// fields alone, under the same column orders: old writers wrote wrong
-/// least and greatest values of bytes.
+/// least and greatest values of bytes. A chunk whose count of values is
+/// not its group's rows says nothing.
 pub fn group_stats(file: &ParquetFile, column: &MappedColumn, group: usize) -> GroupStats {
     stats_of(file.metadata(), column, group)
 }
@@ -70,6 +71,12 @@ fn stats_of(metadata: &ParquetMetaData, column: &MappedColumn, group: usize) -> 
         return GroupStats::default();
     };
     let chunk = group.column(column.leaf());
+    // Each row of a flat column is one value of its chunk, NULL or not: a
+    // chunk whose count of values is not its group's rows, as a damaged
+    // footer may give, is trusted in nothing.
+    if chunk.num_values() != group.num_rows() {
+        return GroupStats::default();
+    }
     // The mask holds the encodings of the data pages alone: each through
     // the dictionary, by either of its names.
     let dictionary_only = chunk.dictionary_page_offset().is_some()
