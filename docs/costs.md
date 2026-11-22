@@ -426,7 +426,11 @@ a row, so its cost is a share of what the core counts
   final costs; and, when the groups at the node's bytes an entry pass
   seven eighths of `hash_mem`, the rows of the groups that do not fit
   written and read once a level of partitioning, `seq_page_cost` a page
-  and `cpu_tuple_cost` a row;
+  and `cpu_tuple_cost` a row; with `DISTINCT` pairs past the room the
+  groups leave of those seven eighths, by the planner's estimate of both,
+  set by set, the rows whose pairs a set lacks once full, written and read
+  back once a level of that set, three words a row, at the same costs,
+  before the first group goes out;
 - an aggregation without `GROUP BY` (`plain_cost`): the transition costs
   at `agg_kernel_share` when the kernels fold every aggregate and at
   `agg_generic_share` with one they do not, an argument the kernels do

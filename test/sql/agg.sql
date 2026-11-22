@@ -745,6 +745,61 @@ SET work_mem = '1MB';
 EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT v) FROM agg_dlate GROUP BY g;
 SELECT agg_spill($$SELECT g, count(DISTINCT v) FROM agg_dlate GROUP BY g$$);
 SELECT agg_same($$SELECT count(*), sum(n), max(n) FROM (SELECT g, count(DISTINCT v) AS n FROM agg_dlate GROUP BY g) AS q$$);
+-- The planner gives the node a grouping whose pairs do not fit by its
+-- estimate, with GROUP BY, words for arguments and groups within half of
+-- hash_mem: agg_dspill's statistics taken anew hold its 400 000 pairs.
+ANALYZE agg_dspill;
+SET work_mem = '4MB';
+-- spec: table-memory/Pairs past the limit by the estimate
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g;
+SELECT agg_pairs($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$);
+SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) <= 4096 + 512 AS within;
+SELECT agg_same($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+-- 40 000 groups by the estimate, 1.6 MB, in the order of the key, so
+-- that most come after the set froze: the set keeps their room and the
+-- node stays within 5 MB, while the same rows under statistics that keep
+-- no room for them, the planner thinking the pairs fit, take more.
+CREATE TABLE agg_dorder AS SELECT i / 10 AS g, i::bigint AS v FROM generate_series(0, 399999) AS i;
+ANALYZE agg_dorder;
+CREATE TABLE agg_dorder_stale (g int, v bigint) WITH (autovacuum_enabled = off);
+INSERT INTO agg_dorder_stale SELECT i % 100, i % 10 FROM generate_series(1, 1000) AS i;
+ANALYZE agg_dorder_stale;
+INSERT INTO agg_dorder_stale SELECT i / 10, i FROM generate_series(0, 399999) AS i;
+SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dorder GROUP BY g$$) <= 5120 AS within,
+       agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dorder_stale GROUP BY g$$) >
+       agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dorder GROUP BY g$$) AS without_room_more;
+SELECT agg_same($$SELECT g, count(DISTINCT v) FROM agg_dorder GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+DROP TABLE agg_dorder, agg_dorder_stale;
+-- 60 000 groups, past half of hash_mem by the estimate: the core.
+CREATE TABLE agg_dhalf AS SELECT i % 60000 AS g, i::bigint AS v FROM generate_series(1, 500000) AS i;
+ANALYZE agg_dhalf;
+-- spec: table-memory/Groups past half the limit
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT v) FROM agg_dhalf GROUP BY g;
+-- At 5 MB their 2.4 MB are within half of it: the node's.
+SET work_mem = '5MB';
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT v) FROM agg_dhalf GROUP BY g;
+-- Two sets of text, each within hash_mem by the estimate and past it
+-- together: the core, since such a set does not spill.
+CREATE TABLE agg_dtext AS SELECT i % 100 AS g, 't' || i % 10000 AS t, 'u' || i % 10000 AS u FROM generate_series(1, 100000) AS i;
+ANALYZE agg_dtext;
+SET work_mem = '1536kB';
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT t) FROM agg_dtext GROUP BY g;
+-- spec: table-memory/Text sets past the limit together
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT t), count(DISTINCT u) FROM agg_dtext GROUP BY g;
+-- Groups the planner thinks 16 000 by two keys equal to each other, a
+-- tenth of the rows, three quarters of hash_mem, while they are 550, and
+-- pairs that fit: no estimate of the groups weighs on the set, which
+-- stays in memory.
+CREATE TABLE agg_dthought AS
+SELECT p % 550 AS a, p % 550 AS b, p::bigint AS v
+FROM generate_series(0, 159999) AS i, LATERAL (SELECT i % 10000 AS p) AS q;
+ANALYZE agg_dthought;
+SET work_mem = '1MB';
+-- spec: table-memory/Groups thought more than they are
+EXPLAIN (COSTS OFF) SELECT a, b, count(DISTINCT v) FROM agg_dthought GROUP BY a, b;
+SELECT agg_spill($$SELECT a, b, count(DISTINCT v) FROM agg_dthought GROUP BY a, b$$);
+SELECT agg_same($$SELECT a, b, count(DISTINCT v) FROM agg_dthought GROUP BY a, b$$) NOT LIKE 'MISMATCH%' AS same;
+DROP TABLE agg_dhalf, agg_dtext, agg_dthought;
 RESET work_mem;
 RESET hash_mem_multiplier;
 DROP TABLE agg_dspill, agg_dlate;

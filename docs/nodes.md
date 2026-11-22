@@ -982,7 +982,13 @@ below the core's sort, unless `enable_hashagg` is off (as for any grouping
 whose hashed path the core dropped). The groups of a query with such
 an aggregate do not spill, and the node takes the path only when the
 planner's estimate of its groups before `HAVING`, with their states,
-fits `hash_mem` (below), and so does its estimate of the pairs. With
+fits `hash_mem` (below), and so does its estimate of the pairs, or, with
+`GROUP BY` and a word for every argument, its groups take at most half
+of `hash_mem`, leaving the rest to the sets, which then go to disk; only
+there do the sets weigh the groups by the most of their bytes and that
+estimate while the input is read, so that a set that freezes early
+keeps room for the groups still to come, and the cost counts the rows
+whose pairs pass that room written and read a level. With
 `GROUP BY`, the set of an argument a word holds goes to disk past seven
 eighths of `hash_mem`, as a frozen table's rows of generic aggregates
 do, on the same machine of `relspill` (`Rows`): after each batch the

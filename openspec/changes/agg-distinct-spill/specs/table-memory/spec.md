@@ -128,7 +128,8 @@ pairs of a partition that no bit of their hash is left to split.
   the estimate and in fact
 - **THEN** its plan is `TessAgg`'s, its EXPLAIN ANALYZE shows no
   `Batches`, and its rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Groups thought more than they are`
 
 ### Requirement: The groupings with DISTINCT the node takes
 The planner SHALL offer `TessAgg` for a grouping with a DISTINCT
@@ -161,18 +162,21 @@ most half of `hash_mem`.
   `integer` key and a `bigint` passes `hash_mem` and its groups take
   less than half of it
 - **THEN** its plan is `TessAgg`'s
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Pairs past the limit by the estimate`
 
-#### Scenario: Groups past half the limit by the estimate
+#### Scenario: Groups past half the limit
 - **WHEN** the planner's estimate of the pairs of a grouping with
   `count(DISTINCT v)` of a `bigint` passes `hash_mem`, and its groups
   take more than half of it
 - **THEN** its plan is the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Groups past half the limit`
 
-#### Scenario: Text arguments past the limit by the estimate
+#### Scenario: Text sets past the limit together
 - **WHEN** the planner's estimates of the pairs of two
   `count(DISTINCT)` of `text` arguments by group each fit `hash_mem`
   but pass it together
 - **THEN** its plan is the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Text sets past the limit together`

@@ -141,6 +141,14 @@ typedef struct TessAggState
 	int			spilling_sets;
 	TessRowsParams pairs_params;
 	uint64		spilled_pairs;
+	/*
+	 * The bytes the planner expects the groups to take, where it gave the
+	 * node a grouping whose pairs do not fit by its estimate, else 0: while
+	 * the input is read the sets weigh the groups by the most of their
+	 * bytes and these, so that a set that freezes early keeps their room
+	 * for the groups still to come.
+	 */
+	Size		groups_bytes_estimate;
 	uint64		batches;
 	uint64		rows;
 	uint64		calls;

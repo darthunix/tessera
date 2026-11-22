@@ -492,7 +492,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 #endif
 	/* Past seven eighths of hash_mem a DISTINCT set takes no new pair. */
 	if (state->spilling_sets > 0)
-		agg_distinct_grown(state, NULL, groups_memory(state));
+		agg_distinct_grown(state, NULL, Max(groups_memory(state),
+											state->groups_bytes_estimate));
 	/*
 	 * Past seven eighths of hash_mem, the rest left for a batch's chunk and
 	 * index: the groups go into partitions, and the largest to disk; in

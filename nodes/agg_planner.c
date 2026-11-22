@@ -50,6 +50,19 @@
 #define AGG_PATH_FINALIZE 0x04
 #define AGG_PATH_OWN_STATES 0x08
 
+/*
+ * A grouping whose DISTINCT pairs do not fit hash_mem by the planner's
+ * estimate, and go to disk: the bytes of its pairs, of each set and of
+ * them all, and of its groups, as the planner estimates them.
+ */
+typedef struct PairsEstimate
+{
+	double		pairs;
+	double		groups;
+	int			sets;
+	double		set_pairs[AGG_MAX_GROUPED];
+} PairsEstimate;
+
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
 
 static Plan *agg_plan(PlannerInfo *root, RelOptInfo *rel,
@@ -251,8 +264,9 @@ own_partials(List *tlist)
 }
 
 /*
- * Whether the groups of a grouping with a DISTINCT aggregate fit hash_mem,
- * as the planner estimates them, since such groups do not spill: a record,
+ * The bytes the groups of a grouping with a DISTINCT aggregate take, as
+ * the planner estimates them, or -1 without a grouped path to count them
+ * by; such groups do not spill. A group takes a record,
  * a sum state's four more words, a float's state of the node's own, and
  * the states a word does not hold, each by its type's average width or,
  * for an internal state, the aggregate's declared space or 8 kB, as the
@@ -261,8 +275,8 @@ own_partials(List *tlist)
  * relation's own rows are set only after this hook, and beside a DISTINCT
  * aggregate the core's paths are sorted ones alone.
  */
-static bool
-groups_fit(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
+static double
+groups_bytes(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 {
 	double		groups = 0;
 	double		bytes;
@@ -271,7 +285,7 @@ groups_fit(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 		if (IsA(path, AggPath))
 			groups = Max(groups, ((AggPath *) path)->numGroups);
 	if (groups <= 0)
-		return false;
+		return -1;
 	bytes = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
 	foreach_node(TargetEntry, entry, tlist)
 	{
@@ -312,7 +326,7 @@ groups_fit(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 		if (!byval)
 			bytes += get_typavgwidth(agg->aggtranstype, -1);
 	}
-	return groups * bytes <= (double) tess_hash_memory_limit();
+	return groups * bytes;
 }
 
 /*
@@ -604,7 +618,7 @@ rowwise_argument_cost(PlannerInfo *root, List *tlist, AggSplit split)
 
 static void
 group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
-		   List *tlist, AggSplit split, Path *result)
+		   List *tlist, AggSplit split, const PairsEstimate *pairs, Path *result)
 {
 	AggClauseCosts costs;
 	double		rows = child->rows;
@@ -677,6 +691,27 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	}
 	else
 		run = 0;
+	/*
+	 * DISTINCT pairs past the room the groups leave, set by set: the rows
+	 * whose pairs a set lacks once full, written and read back once a
+	 * level, three words each, before the first group goes out. A set
+	 * whose pairs fit the room writes none, and each set reads its levels
+	 * back alone, in the whole room.
+	 */
+	for (int set = 0; pairs != NULL && set < pairs->sets; set++)
+	{
+		double		room = limit - pairs->groups;
+		double		bytes = pairs->set_pairs[set];
+
+		if (room > 0 && bytes > room)
+		{
+			double		depth = ceil(log(bytes / room) / log((double) ROWS_PARTS));
+			double		spilled = rows * (1.0 - room / bytes) * Max(depth, 1.0);
+			double		pages = spilled * 3 * sizeof(uint64) / BLCKSZ;
+
+			startup += 2 * (pages * seq_page_cost + spilled * cpu_tuple_cost);
+		}
+	}
 	startup += costs.finalCost.startup;
 	run += costs.finalCost.per_tuple * groups + cpu_tuple_cost * groups;
 	result->startup_cost = startup;
@@ -724,10 +759,12 @@ plain_cost(PlannerInfo *root, const Path *child, List *tlist, AggSplit split,
  * groups spill past hash_mem as the core's do. NULL when the input cannot
  * be read in batches or lacks a column. The private data: the keys, the
  * groups expected, the set operation's command (-1), the path's flags
- * (AGG_PATH_*) and each key's equality.
+ * (AGG_PATH_*), each key's equality, and the kB of the groups the planner
+ * expects where DISTINCT pairs go to disk (pairs), 0 elsewhere.
  */
 static CustomPath *
-make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int flags)
+make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int flags,
+			  const PairsEstimate *pairs)
 {
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	Path	   *child;
@@ -748,7 +785,7 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	 * cost; a final one the core's: its work is a row a participant.
 	 */
 	if (nkeys > 0)
-		group_cost(root, child, agg->path.rows, nkeys, tlist, agg->aggsplit, &template);
+		group_cost(root, child, agg->path.rows, nkeys, tlist, agg->aggsplit, pairs, &template);
 	else if ((flags & AGG_PATH_FINALIZE) == 0)
 		plain_cost(root, child, tlist, agg->aggsplit, &template);
 	/* The groups come in no order, whatever order the core's had. */
@@ -777,6 +814,11 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 			return NULL;
 		config.node_data = (Node *) lappend_int((List *) config.node_data, eqop);
 	}
+	/* The groups' bytes in kB where the pairs go to disk, which the node weighs. */
+	config.node_data = (Node *) lappend_int((List *) config.node_data,
+											pairs == NULL ? 0 :
+											(int) Min(ceil(pairs->groups / 1024),
+													  (double) PG_INT32_MAX));
 	return tess_path_create(&config);
 }
 
@@ -818,7 +860,7 @@ add_key_stack_path(PlannerInfo *root, RelOptInfo *partial_rel, RelOptInfo *outpu
 
 	if (not_from_groups((Node *) partial->path.pathtarget->exprs, keys))
 		return;
-	below = make_agg_path(root, partial, tlist, list_length(keys), AGG_PATH_PARTIAL);
+	below = make_agg_path(root, partial, tlist, list_length(keys), AGG_PATH_PARTIAL, NULL);
 	if (below == NULL || !below->path.parallel_safe || below->path.parallel_workers <= 0)
 		return;
 	below->path.parallel_aware = true;
@@ -828,7 +870,7 @@ add_key_stack_path(PlannerInfo *root, RelOptInfo *partial_rel, RelOptInfo *outpu
 	final = create_agg_path(root, output_rel, gather,
 							target != NULL ? target : partial->path.pathtarget,
 							AGG_HASHED, AGGSPLIT_SIMPLE, clauses, NIL, NULL, groups);
-	path = make_agg_path(root, final, tlist, list_length(keys), flags);
+	path = make_agg_path(root, final, tlist, list_length(keys), flags, NULL);
 	if (path != NULL)
 		add_path(output_rel, &path->path);
 }
@@ -909,7 +951,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		CustomPath *partial = make_agg_path(root, agg, tlist, list_length(keys),
 											AGG_PATH_PARTIAL |
 											(nsums > 0 || nown > 0 ?
-											 AGG_PATH_OWN_STATES : 0));
+											 AGG_PATH_OWN_STATES : 0), NULL);
 		Path	   *gathered;
 		CustomPath *path;
 		GatherPath *gather;
@@ -931,7 +973,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 									&extra->agg_final_costs, keys != NIL ? groups : 1.0);
 			path = make_agg_path(root, final, final_tlist, list_length(keys),
 								 AGG_PATH_HAVING | AGG_PATH_FINALIZE |
-								 (nown > 0 ? AGG_PATH_OWN_STATES : 0));
+								 (nown > 0 ? AGG_PATH_OWN_STATES : 0), NULL);
 			if (path != NULL)
 			{
 				add_path(grouped_rel, &path->path);
@@ -943,7 +985,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 			continue;
 		if (nown > 0)
 		{
-			partial = make_agg_path(root, agg, tlist, 0, AGG_PATH_PARTIAL);
+			partial = make_agg_path(root, agg, tlist, 0, AGG_PATH_PARTIAL, NULL);
 			if (partial == NULL)
 				continue;
 			partial->path.parallel_aware = true;
@@ -973,15 +1015,20 @@ has_distinct_aggregate(List *tlist)
 }
 
 /*
- * Whether the pairs of group and argument of the DISTINCT aggregates fit
- * hash_mem, as the planner estimates them: their tables do not spill. A
+ * The bytes the pairs of group and argument of the DISTINCT aggregates
+ * take together, with their arguments' dictionaries, as the planner
+ * estimates them, and into *words whether a word holds every argument. A
  * pair is the reference of its group's record and the argument, or the
  * argument alone without GROUP BY.
  */
-static bool
-distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
+static double
+distinct_bytes(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist,
+			   bool *words, PairsEstimate *each)
 {
 	double		bytes = 0;
+
+	*words = true;
+	each->sets = 0;
 
 	foreach_node(TargetEntry, entry, tlist)
 	{
@@ -994,20 +1041,25 @@ distinct_fits(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist)
 		pairs = estimate_num_groups(root,
 									lappend(list_copy(keys), aggregate_argument(agg)),
 									input_rel->rows, NULL, NULL);
-		bytes += pairs * (double) tess_table_record_bytes(keys != NIL ? 2 : 1, 0);
+		pairs *= (double) tess_table_record_bytes(keys != NIL ? 2 : 1, 0);
+		bytes += pairs;
+		each->set_pairs[each->sets++] = pairs;
 		/* A dictionary of the values a word does not hold: an entry and a copy each. */
 		{
 			Node	   *argument = aggregate_argument(agg);
 			TessTableKeyKind kind;
 
 			if (!tess_word_key_kind(exprType(argument), &kind))
+			{
+				*words = false;
 				bytes += estimate_num_groups(root, list_make1(argument), input_rel->rows,
 											 NULL, NULL) *
 					(sizeof(KeyEntry) * 2 + sizeof(Datum) +
 					 get_typavgwidth(exprType(argument), exprTypmod(argument)));
+			}
 		}
 	}
-	return bytes <= (double) tess_hash_memory_limit();
+	return bytes;
 }
 
 /*
@@ -1040,7 +1092,7 @@ create_distinct_paths(PlannerInfo *root, RelOptInfo *input_rel,
 		if (agg->groupClause == NIL ||
 			not_from_groups((Node *) agg->path.pathtarget->exprs, keys))
 			continue;
-		path = make_agg_path(root, agg, tlist, list_length(keys), 0);
+		path = make_agg_path(root, agg, tlist, list_length(keys), 0, NULL);
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
@@ -1231,7 +1283,7 @@ create_setop_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		if (branches != agg->subpath)
 			continue;
 		tlist = add_to_flat_tlist(NIL, keys);
-		path = make_agg_path(root, agg, tlist, list_length(keys), 0);
+		path = make_agg_path(root, agg, tlist, list_length(keys), 0, NULL);
 		if (path != NULL)
 			add_path(output_rel, &path->path);
 	}
@@ -1312,6 +1364,7 @@ create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel)
 		}
 		if (data == NIL)
 			continue;
+		data = lappend_int(data, 0);
 		left = setop->leftpath;
 		right = setop->rightpath;
 		/* Sorts the core put below for its sorted SetOp: hashing needs none. */
@@ -1362,6 +1415,8 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	List	   *templates;
 	AggStrategy strategy = AGG_PLAIN;
 	double		groups = 0;
+	PairsEstimate spill;
+	const PairsEstimate *pairs = NULL;
 
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
@@ -1397,15 +1452,33 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		tlist == NIL ||
 		list_length(tlist) - list_length(keys) > AGG_MAX_GROUPED)
 		return;
-	if (!distinct_fits(root, input_rel, keys, tlist))
-		return;
 	/*
 	 * Beside a DISTINCT aggregate's table neither the groups nor the rows of
-	 * generic aggregates spill: the groups with their states must fit.
+	 * generic aggregates spill: the groups with their states must fit. The
+	 * pairs must fit too, or, with GROUP BY and a word for every argument,
+	 * they go to disk, the groups leaving them half of hash_mem at least;
+	 * only then does the node weigh the groups by the estimate.
 	 */
-	if (keys != NIL && has_distinct_aggregate(tlist) &&
-		!groups_fit(root, output_rel, list_length(keys), tlist))
-		return;
+	if (has_distinct_aggregate(tlist))
+	{
+		double		limit = (double) tess_hash_memory_limit();
+		bool		words;
+
+		spill.pairs = distinct_bytes(root, input_rel, keys, tlist, &words, &spill);
+		spill.groups = 0;
+		if (keys != NIL)
+		{
+			spill.groups = groups_bytes(root, output_rel, list_length(keys), tlist);
+			if (spill.groups < 0 || spill.groups > limit)
+				return;
+		}
+		if (spill.pairs > limit)
+		{
+			if (keys == NIL || !words || spill.groups > limit / 2)
+				return;
+			pairs = &spill;
+		}
+	}
 	/* add_path changes the list: the candidates are taken first. */
 	templates = aggregate_templates(output_rel->pathlist, strategy, AGGSPLIT_SIMPLE);
 	/*
@@ -1420,7 +1493,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	foreach_ptr(AggPath, agg, templates)
 	{
 		CustomPath *path = make_agg_path(root, agg, tlist, list_length(keys),
-										 AGG_PATH_HAVING);
+										 AGG_PATH_HAVING, pairs);
 
 		if (path != NULL)
 			add_path(output_rel, &path->path);
@@ -1706,6 +1779,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	tess_plan_write_int(writer, "partial", (flags & AGG_PATH_PARTIAL) != 0);
 	tess_plan_write_int(writer, "own_states", (flags & AGG_PATH_OWN_STATES) != 0);
 	tess_plan_write_int(writer, "finalize", (flags & AGG_PATH_FINALIZE) != 0);
+	tess_plan_write_int(writer, "groups_kb", list_nth_int(path_data, 4 + nkeys));
 	config.methods = &tess_agg_scan_methods;
 	config.layout_policy = TESS_LAYOUT_DENSE;
 	config.qual = (flags & AGG_PATH_HAVING) ? (List *) root->parse->havingQual : NIL;

@@ -101,6 +101,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	List	   *keys;
 	TessPlanReader *reader;
 	int			groups;
+	int			groups_kb;
 	int			index = 0;
 
 	tess_node_require_forward(eflags, "TessAgg");
@@ -121,6 +122,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	state->partial = tess_plan_read_int(reader, "partial") != 0;
 	state->own_states = tess_plan_read_int(reader, "own_states") != 0;
 	state->finalize = tess_plan_read_int(reader, "finalize") != 0;
+	groups_kb = tess_plan_read_int(reader, "groups_kb");
+	state->groups_bytes_estimate = (Size) Max(groups_kb, 0) * 1024;
 	tess_plan_reader_finish(reader);
 	if (state->finalize && (state->partial || state->setop >= 0))
 		elog(ERROR, "TessAgg received a foreign plan");

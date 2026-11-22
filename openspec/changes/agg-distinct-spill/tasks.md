@@ -78,15 +78,15 @@ one pull request; the work and the close are a second.
       and `Disk Usage`, and VERBOSE shows `Spilled Pairs`. Tests: the
       EXPLAIN of the scenarios "Pairs past the limit" and "A partition
       read back past the limit". Check: `make installcheck`
-- [ ] 4.4 The planner offers the node a grouping whose pairs do not fit
+- [x] 4.4 The planner offers the node a grouping whose pairs do not fit
       by the estimate, with `GROUP BY`, word arguments and groups within
       half of `hash_mem`, costs the pairs' spill, and on that way alone
       passes the node the estimate of the groups' bytes, which the
       machines of its sets weigh while the input is read. Tests: the
       plans of the scenarios "Pairs past the limit by the estimate",
-      "Groups past half the limit by the estimate" and "Text arguments
-      past the limit by the estimate"; the scenario "Groups thought more
-      than they are", against the core. `docs/costs.md` and
+      "Groups past half the limit" and "Text sets past the limit
+      together"; the scenario "Groups thought more than they are",
+      against the core. `docs/costs.md` and
       `docs/limitations.md` updated.
       Check: `make installcheck`
 

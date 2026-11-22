@@ -53,6 +53,16 @@ those it checks.
   equality hashes and for `sum`, `avg`, `min` and `max` of integers
   (`distinct_supported`); any other, such as `sum(DISTINCT numeric)`,
   leaves the whole aggregation to the core.
+- **A grouping with `DISTINCT` past `hash_mem`**: its pairs go to disk
+  only with `GROUP BY` and an argument a word holds (`smallint`,
+  `integer`, `bigint`, `date`, `boolean`, `timestamp`, `timestamptz`).
+  The pairs of a text or `numeric` argument, and the set of an aggregate
+  without `GROUP BY`, stay in memory: the node takes such a grouping only
+  when the planner's estimate of its pairs fits `hash_mem`. The groups of
+  a grouping with `DISTINCT` never go to disk: the node takes it only
+  when the estimate of its groups with their states fits `hash_mem`, and
+  half of it when its pairs do not fit. Such a grouping has no parallel
+  form.
 - **Aggregates of other extensions** whose functions are C functions of a
   loadable library, and aggregates whose arguments contain a subquery
   (`generic_supported`).
