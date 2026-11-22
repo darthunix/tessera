@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use datum_arrow::{Comparison, ReadOutput, TextBytes, Unit, mask_words};
 
-use crate::clause::{ClauseKind, ClauseTest, comparison};
+use crate::clause::{ClauseKind, ClauseTest, comparison, like_checked};
 use crate::column::{ColumnRequest, MappedColumn, map_column};
 use crate::error::{DATA_CORRUPTED, Error, INTERNAL_ERROR, Result};
 use crate::file::{Identity, ParquetFile};
@@ -627,8 +627,9 @@ pub unsafe extern "C" fn tess_parquet_values(
 pub struct TestHandle(ClauseTest);
 
 /// The kinds of a test: the comparisons in the order of [`Comparison`],
-/// then `IN`, `IS NULL` and `IS NOT NULL`.
-const TEST_KINDS: [ClauseKind; 9] = [
+/// then `IN`, `IS NULL` and `IS NOT NULL`, then the tests of strings: `=`,
+/// `<>`, `LIKE` and `NOT LIKE`.
+const TEST_KINDS: [ClauseKind; 13] = [
     ClauseKind::Compare(Comparison::Eq),
     ClauseKind::Compare(Comparison::Ne),
     ClauseKind::Compare(Comparison::Lt),
@@ -638,7 +639,67 @@ const TEST_KINDS: [ClauseKind; 9] = [
     ClauseKind::In,
     ClauseKind::IsNull,
     ClauseKind::IsNotNull,
+    ClauseKind::BytesEq,
+    ClauseKind::BytesNe,
+    ClauseKind::Like,
+    ClauseKind::NotLike,
 ];
+
+/// Whether the source checks `LIKE` with the `len` bytes of `pattern` on a
+/// string's bytes, as [`like_checked`] says.
+///
+/// # Safety
+///
+/// `pattern` must point to `len` readable bytes, or be null with `len` 0.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_like_checked(pattern: *const u8, len: usize) -> bool {
+    if pattern.is_null() {
+        return len == 0 && like_checked(&[]);
+    }
+    // SAFETY: as the function's contract says.
+    like_checked(unsafe { std::slice::from_raw_parts(pattern, len) })
+}
+
+/// Makes the test of `column`'s strings that keeps a clause of the kind
+/// `kind`, one of the tests of strings, with the `len` bytes of `value`,
+/// or `NULL` where `isnull`, as [`ClauseTest::of_bytes`] takes them.
+///
+/// # Safety
+///
+/// `column` must be live; `value` must point to `len` readable bytes, or
+/// be null with `len` 0, unless `isnull`; `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_bytes_test(
+    column: *const ColumnHandle,
+    kind: i32,
+    value: *const u8,
+    len: usize,
+    isnull: bool,
+    out: *mut *mut TestHandle,
+    status: *mut Status,
+) -> bool {
+    // SAFETY: as the function's contract says.
+    unsafe {
+        guard(status, false, || {
+            let column = &column.as_ref().ok_or_else(|| broken("a null column"))?.0;
+            let kind = usize::try_from(kind)
+                .ok()
+                .and_then(|kind| TEST_KINDS.get(kind))
+                .ok_or_else(|| broken("an unknown kind of test"))?;
+            let bytes = match (isnull, value.is_null()) {
+                (true, _) => None,
+                (false, true) if len == 0 => Some(&[][..]),
+                (false, true) => return Err(broken("null bytes")),
+                (false, false) => Some(std::slice::from_raw_parts(value, len)),
+            };
+            if out.is_null() {
+                return Err(broken("a null output"));
+            }
+            let test = ClauseTest::of_bytes(column, *kind, bytes)?;
+            put(out, Box::into_raw(Box::new(TestHandle(test))))
+        })
+    }
+}
 
 /// The kind of test, `TESS_PARQUET_TEST_EQ` to `TESS_PARQUET_TEST_GE`, of
 /// a clause that compares a column of PostgreSQL type `column` with a

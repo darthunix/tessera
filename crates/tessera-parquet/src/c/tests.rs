@@ -897,8 +897,10 @@ fn a_clause_tested_on_the_window_read() {
     assert_eq!(apply(test(7, &[], &[]).unwrap()), [0b00010, 0]);
     assert_eq!(apply(test(8, &[], &[]).unwrap()), [0b11101, 0]);
     assert_eq!(apply(test(0, &[3], &[true]).unwrap()), [0, 0]);
-    // An unknown kind, a comparison of no value, and null values.
-    assert_eq!(test(9, &[], &[]).unwrap_err(), "XX000");
+    // An unknown kind, a test of strings without bytes, a comparison of
+    // no value, and null values.
+    assert_eq!(test(13, &[], &[]).unwrap_err(), "XX000");
+    assert_eq!(test(9, &[1], &[false]).unwrap_err(), "XX000");
     assert_eq!(test(0, &[], &[]).unwrap_err(), "XX000");
     let mut out = ptr::null_mut();
     let mut st = status();
@@ -931,5 +933,89 @@ fn a_clause_tested_on_the_window_read() {
         tess_parquet_column_free(s);
         tess_parquet_file_free(file);
         tess_parquet_file_free(text_file);
+    }
+}
+
+/// The tests of strings through the C entries, as the header numbers
+/// their kinds: `=`, `<>`, `LIKE` and `NOT LIKE` on the window's bytes, a
+/// clause with `NULL`, the patterns the reader takes, and broken calls
+/// refused.
+#[test]
+fn tests_of_strings_through_the_c_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    let strings: Vec<Option<Vec<u8>>> = [
+        Some(&b"aba"[..]),
+        Some(b""),
+        None,
+        Some(b"abba"),
+        Some(b"x"),
+    ]
+    .iter()
+    .map(|v| v.map(<[u8]>::to_vec))
+    .collect();
+    testing::write(&path, &[Column::new("s", Values::Bytes(strings))], 5, true).unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader(file, col, 5);
+    assert_eq!(read(r, 5, &[0b11111]), 5);
+    let test = |kind: i32, value: Option<&[u8]>| {
+        let mut out = ptr::null_mut();
+        let mut st = status();
+        let ok = unsafe {
+            tess_parquet_bytes_test(
+                col,
+                kind,
+                value.map_or(ptr::null(), <[u8]>::as_ptr),
+                value.map_or(0, <[u8]>::len),
+                value.is_none(),
+                &mut out,
+                &mut st,
+            )
+        };
+        if ok { Ok(out) } else { Err(text(&st.sqlstate)) }
+    };
+    let apply = |t: *mut TestHandle| {
+        let mut passed = [u64::MAX; 2];
+        let mut st = status();
+        assert!(unsafe { tess_parquet_window_test(r, t, passed.as_mut_ptr(), 2, &mut st) });
+        unsafe { tess_parquet_test_free(t) };
+        passed
+    };
+    // s = 'x'; s <> ''; s LIKE 'ab%ba'; s NOT LIKE 'a%'; s = NULL.
+    assert_eq!(apply(test(9, Some(b"x")).unwrap()), [0b10000, 0]);
+    assert_eq!(apply(test(10, Some(b"")).unwrap()), [0b11001, 0]);
+    assert_eq!(apply(test(11, Some(b"ab%ba")).unwrap()), [0b01000, 0]);
+    assert_eq!(apply(test(12, Some(b"a%")).unwrap()), [0b10010, 0]);
+    assert_eq!(apply(test(9, None).unwrap()), [0, 0]);
+    // A pattern the reader does not take, a kind not of strings, and
+    // null bytes that are not NULL.
+    assert_eq!(test(11, Some(b"a_")).unwrap_err(), "XX000");
+    assert_eq!(test(6, Some(b"x")).unwrap_err(), "XX000");
+    let mut out = ptr::null_mut();
+    let mut st = status();
+    assert!(!unsafe { tess_parquet_bytes_test(col, 9, ptr::null(), 2, false, &mut out, &mut st) });
+    assert!(unsafe { tess_parquet_bytes_test(col, 9, ptr::null(), 0, false, &mut out, &mut st) });
+    unsafe { tess_parquet_test_free(out) };
+    assert!(unsafe { tess_parquet_like_checked(b"%a%b%".as_ptr(), 5) });
+    assert!(unsafe { tess_parquet_like_checked(ptr::null(), 0) });
+    assert!(!unsafe { tess_parquet_like_checked(b"a_".as_ptr(), 2) });
+    assert!(!unsafe { tess_parquet_like_checked(ptr::null(), 1) });
+    // A test of strings on a column of integers.
+    let ints = dir.path().join("i.parquet");
+    testing::write(&ints, &[Column::int32("a", &[1])], 1, false).unwrap();
+    let int_file = open(&ints);
+    let int_col = column(int_file, "a", oid::INT4, -1).unwrap();
+    let mut st = status();
+    assert!(!unsafe {
+        tess_parquet_bytes_test(int_col, 9, b"1".as_ptr(), 1, false, &mut out, &mut st)
+    });
+    assert_eq!(text(&st.sqlstate), "XX000");
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_column_free(int_col);
+        tess_parquet_file_free(file);
+        tess_parquet_file_free(int_file);
     }
 }

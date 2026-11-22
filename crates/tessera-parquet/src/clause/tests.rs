@@ -1,14 +1,15 @@
 use std::path::Path;
 
 use arrow_array::{
-    Int8Array, Int16Array, Int32Array, Int64Array, UInt8Array, UInt16Array, UInt32Array,
+    Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray, UInt8Array, UInt16Array,
+    UInt32Array,
 };
 use datum_arrow::{Unit, oid};
 use proptest::prelude::*;
 
 use super::*;
 use crate::column::{ColumnRequest, map_column};
-use crate::stats::Bounds;
+use crate::stats::{Bounds, Empties};
 use crate::testing::{self, Column, Options, Rewrite, Values as Written};
 
 fn request(name: &str, type_oid: u32) -> ColumnRequest<'_> {
@@ -338,7 +339,7 @@ fn stats(nulls: Option<u64>, bounds: Option<(i64, i64)>) -> GroupStats {
 /// do not where they leave a row that may pass.
 #[test]
 fn statistics_rule_groups_out() {
-    let of = |kind| ClauseTest { kind };
+    let of = ClauseTest::of;
     let less = of(Kind::Compare(Test::Compare {
         op: Comparison::Lt,
         bound: 5,
@@ -370,7 +371,7 @@ fn statistics_rule_groups_out() {
 /// comparison and `IN`; never for the tests of `NULL` or bytes.
 #[test]
 fn dictionaries_rule_groups_out() {
-    let of = |kind| ClauseTest { kind };
+    let of = ClauseTest::of;
     let values = Dictionary::Integers(vec![1, 3]);
     let equal = |bound| {
         of(Kind::Compare(Test::Compare {
@@ -543,6 +544,403 @@ proptest! {
                 || test.rules_out_group(&file, &a, group, true).unwrap();
             if ruled_out {
                 prop_assert!(!rows.iter().any(|&v| passes(v)), "group {} of {:?}", group, rows);
+            }
+        }
+    }
+}
+
+// ---- the clauses on strings ----
+
+/// A file of one string column `s`, of `values` in groups of `group_rows`,
+/// its pages encoded through a dictionary where `dictionary` says.
+fn strings_file(
+    dir: &Path,
+    values: &[Option<&[u8]>],
+    group_rows: usize,
+    dictionary: bool,
+) -> (ParquetFile, MappedColumn) {
+    let path = dir.join("strings.parquet");
+    let written = values.iter().map(|v| v.map(<[u8]>::to_vec)).collect();
+    testing::write(
+        &path,
+        &[Column::new("s", Written::Bytes(written))],
+        group_rows,
+        dictionary,
+    )
+    .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let s = map_column(&file, &request("s", oid::TEXT)).unwrap();
+    (file, s)
+}
+
+/// LIKE of a pattern of fixed parts and `%`, matched one byte at a time:
+/// the rule PostgreSQL's `MatchText` follows for such a pattern.
+fn naive_like(pattern: &[u8], value: &[u8]) -> bool {
+    match pattern.split_first() {
+        None => value.is_empty(),
+        Some((b'%', rest)) => (0..=value.len()).any(|at| naive_like(rest, &value[at..])),
+        Some((byte, rest)) => value.first() == Some(byte) && naive_like(rest, &value[1..]),
+    }
+}
+
+/// The answer of a test of strings for a value, as PostgreSQL gives it
+/// under a deterministic collation; `NULL` passes no test.
+fn string_answer(kind: ClauseKind, constant: &[u8], value: Option<&[u8]>) -> bool {
+    value.is_some_and(|value| match kind {
+        ClauseKind::BytesEq => value == constant,
+        ClauseKind::BytesNe => value != constant,
+        ClauseKind::Like => naive_like(constant, value),
+        ClauseKind::NotLike => !naive_like(constant, value),
+        _ => unreachable!("a test of strings"),
+    })
+}
+
+const STRING_KINDS: [ClauseKind; 4] = [
+    ClauseKind::BytesEq,
+    ClauseKind::BytesNe,
+    ClauseKind::Like,
+    ClauseKind::NotLike,
+];
+
+fn plain_strings(values: &[Option<Vec<u8>>]) -> LargeBinaryArray {
+    values.iter().map(|v| v.as_deref()).collect()
+}
+
+/// The same strings as a dictionary of their distinct values, in the
+/// order first seen.
+fn dictionary_strings(values: &[Option<Vec<u8>>]) -> DictionaryArray<Int32Type> {
+    let mut distinct: Vec<&[u8]> = Vec::new();
+    let keys: Int32Array = values
+        .iter()
+        .map(|v| {
+            v.as_deref().map(|v| {
+                let at = distinct.iter().position(|d| *d == v).unwrap_or_else(|| {
+                    distinct.push(v);
+                    distinct.len() - 1
+                });
+                i32::try_from(at).unwrap()
+            })
+        })
+        .collect();
+    let values: LargeBinaryArray = distinct.into_iter().map(Some).collect();
+    DictionaryArray::try_new(keys, Arc::new(values)).unwrap()
+}
+
+/// The examples of the spec, each kind of string test on plain and on
+/// dictionary arrays: `<> ''` by the length, `LIKE 'ab%ba'` that rejects
+/// `'aba'`, `LIKE 'a%a'` that rejects `'a'`, bytes that are not UTF-8
+/// compared as any other, `NULL` passing none.
+#[test]
+fn strings_checked_by_their_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, s) = strings_file(dir.path(), &[Some(b"x")], 1, false);
+    let values: Vec<Option<Vec<u8>>> = [
+        Some(&b""[..]),
+        Some(b"a"),
+        Some(b"aba"),
+        Some(b"abba"),
+        Some(b"x"),
+        None,
+        Some(b"\xff\xfe"),
+        Some(b"ab"),
+    ]
+    .iter()
+    .map(|v| v.map(<[u8]>::to_vec))
+    .collect();
+    let len = values.len();
+    let plain = plain_strings(&values);
+    let dictionary = dictionary_strings(&values);
+    let cases: [(ClauseKind, &[u8]); 10] = [
+        (ClauseKind::BytesNe, b""),
+        (ClauseKind::BytesEq, b""),
+        (ClauseKind::BytesEq, b"x"),
+        (ClauseKind::BytesNe, b"x"),
+        (ClauseKind::BytesEq, b"\xff\xfe"),
+        (ClauseKind::Like, b"%a%b%"),
+        (ClauseKind::NotLike, b"a%"),
+        (ClauseKind::Like, b"ab%ba"),
+        (ClauseKind::Like, b"a%a"),
+        (ClauseKind::Like, b"%"),
+    ];
+    for (kind, constant) in cases {
+        let test = ClauseTest::of_bytes(&s, kind, Some(constant)).unwrap();
+        let expected: Vec<bool> = values
+            .iter()
+            .map(|v| string_answer(kind, constant, v.as_deref()))
+            .collect();
+        for array in [&plain as &dyn Array, &dictionary as &dyn Array] {
+            let mut passed = vec![u64::MAX; 2];
+            test.apply(array, &mut passed).unwrap();
+            assert_eq!(bits(&passed, len), expected, "{kind:?} {constant:?}");
+            assert_eq!(passed[1], 0);
+        }
+    }
+    // NULL passes no row.
+    for kind in STRING_KINDS {
+        let test = ClauseTest::of_bytes(&s, kind, None).unwrap();
+        let mut passed = vec![u64::MAX; 2];
+        test.apply(&plain, &mut passed).unwrap();
+        assert_eq!(passed, [0, 0]);
+    }
+}
+
+/// A test of strings is refused for another kind, for a pattern with `_`
+/// or the escape character, and for a column that is not of strings;
+/// `like_checked` says which patterns the reader takes.
+#[test]
+fn tests_of_strings_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, s) = strings_file(dir.path(), &[Some(b"x")], 1, false);
+    let file = file(dir.path());
+    let int4 = map_column(&file, &request("a", oid::INT4)).unwrap();
+    assert!(ClauseTest::of_bytes(&s, ClauseKind::In, Some(b"x")).is_err());
+    assert!(ClauseTest::of_bytes(&s, ClauseKind::IsNull, None).is_err());
+    assert!(ClauseTest::of_bytes(&s, ClauseKind::Like, Some(b"a_b")).is_err());
+    assert!(ClauseTest::of_bytes(&s, ClauseKind::NotLike, Some(b"a\\%")).is_err());
+    assert!(ClauseTest::of_bytes(&int4, ClauseKind::BytesEq, Some(b"1")).is_err());
+    assert!(ClauseTest::new(&s, ClauseKind::BytesEq, &[Some(1)]).is_err());
+    assert!(like_checked(b"%a%b%") && like_checked(b"") && like_checked(b"%"));
+    assert!(!like_checked(b"a_") && !like_checked(b"\\%"));
+    // At most 31 % signs, the 32 parts of the kernels' pattern.
+    assert!(like_checked(&[b'%'; 31]) && !like_checked(&[b'%'; 32]));
+    // An array of another type than the strings the plan reads.
+    let test = ClauseTest::of_bytes(&s, ClauseKind::BytesEq, Some(b"x")).unwrap();
+    let mut passed = vec![0u64; 1];
+    assert!(test.apply(&Int32Array::from(vec![1]), &mut passed).is_err());
+}
+
+/// The answers of a dictionary's values are kept for the windows that
+/// share it, and made anew for another dictionary, whose answers differ.
+#[test]
+fn a_dictionary_s_answers_follow_their_dictionary() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, s) = strings_file(dir.path(), &[Some(b"x")], 1, false);
+    let test = ClauseTest::of_bytes(&s, ClauseKind::Like, Some(b"a%")).unwrap();
+    let first: Arc<dyn Array> = Arc::new(LargeBinaryArray::from(vec![&b"ab"[..], b"b"]));
+    let second: Arc<dyn Array> = Arc::new(LargeBinaryArray::from(vec![&b"b"[..], b"ab"]));
+    let window = |values: &Arc<dyn Array>, keys: Vec<Option<i32>>| {
+        DictionaryArray::<Int32Type>::try_new(Int32Array::from(keys), Arc::clone(values)).unwrap()
+    };
+    let answer = |array: &DictionaryArray<Int32Type>| {
+        let mut passed = vec![0u64; 1];
+        test.apply(array, &mut passed).unwrap();
+        bits(&passed, array.len())
+    };
+    assert_eq!(
+        answer(&window(&first, vec![Some(0), Some(1), None])),
+        [true, false, false]
+    );
+    assert_eq!(
+        answer(&window(&first, vec![Some(1), Some(1), Some(0)])),
+        [false, false, true]
+    );
+    assert_eq!(
+        answer(&window(&second, vec![Some(0), Some(1), Some(0)])),
+        [false, true, false]
+    );
+    assert_eq!(answer(&window(&first, vec![Some(0)])), [true]);
+    // A NULL slot's key may name no value: it is not looked up.
+    let keys = Int32Array::new(vec![0, 7].into(), Some(vec![true, false].into()));
+    if let Ok(nulls) = DictionaryArray::<Int32Type>::try_new(keys, Arc::clone(&first)) {
+        assert_eq!(answer(&nulls), [true, false]);
+    }
+}
+
+/// The statistics of strings rule a group out by `= ''` where the least
+/// value is not empty and by `<> ''` where the greatest is empty, and
+/// nothing else of strings; a clause with `NULL` rules out every group.
+#[test]
+fn statistics_of_strings_rule_groups_out() {
+    let of = ClauseTest::of;
+    let empties = |least_empty, greatest_empty| GroupStats {
+        empties: Some(Empties {
+            least_empty,
+            greatest_empty,
+        }),
+        ..GroupStats::default()
+    };
+    let equal = |value: &[u8]| {
+        of(Kind::Bytes {
+            equal: true,
+            value: value.to_vec(),
+        })
+    };
+    let unequal = |value: &[u8]| {
+        of(Kind::Bytes {
+            equal: false,
+            value: value.to_vec(),
+        })
+    };
+    assert!(equal(b"").rules_out(&empties(false, false), 10));
+    assert!(!equal(b"").rules_out(&empties(true, false), 10));
+    assert!(!equal(b"").rules_out(&GroupStats::default(), 10));
+    assert!(unequal(b"").rules_out(&empties(true, true), 10));
+    assert!(!unequal(b"").rules_out(&empties(true, false), 10));
+    assert!(!equal(b"x").rules_out(&empties(false, false), 10));
+    assert!(!unequal(b"x").rules_out(&empties(true, true), 10));
+    let like = of(Kind::Like {
+        pattern: b"%".to_vec(),
+        negated: false,
+    });
+    assert!(!like.rules_out(&empties(false, true), 10));
+    assert!(of(Kind::NoRow).rules_out(&GroupStats::default(), 10));
+    // A least value not empty above a greatest one empty, as a damaged
+    // footer may give, rules nothing out.
+    assert!(!equal(b"").rules_out(&empties(false, true), 10));
+    assert!(!unequal(b"").rules_out(&empties(false, true), 10));
+}
+
+/// A dictionary of strings rules a group out where no value passes.
+#[test]
+fn dictionaries_of_strings_rule_groups_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, s) = strings_file(dir.path(), &[Some(b"x")], 1, false);
+    let values = Dictionary::Bytes(vec![b"ab".to_vec(), b"ba".to_vec()]);
+    let test = |kind, value: &[u8]| ClauseTest::of_bytes(&s, kind, Some(value)).unwrap();
+    assert!(test(ClauseKind::BytesEq, b"x").rules_out_by(&values));
+    assert!(!test(ClauseKind::BytesEq, b"ba").rules_out_by(&values));
+    assert!(test(ClauseKind::Like, b"%x%").rules_out_by(&values));
+    assert!(!test(ClauseKind::Like, b"b%").rules_out_by(&values));
+    assert!(test(ClauseKind::NotLike, b"%").rules_out_by(&values));
+    assert!(!test(ClauseKind::BytesNe, b"ab").rules_out_by(&values));
+    assert!(!test(ClauseKind::BytesEq, b"x").rules_out_by(&Dictionary::Integers(vec![1])));
+}
+
+/// A file's groups of strings ruled out through its footer: `=` and
+/// `LIKE` by a dictionary, `= ''` and `<> ''` by the least and greatest
+/// values, and `<> ''` not by the dictionary of a group whose greatest
+/// value is not empty.
+#[test]
+fn groups_of_strings_ruled_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let values: [Option<&[u8]>; 6] = [
+        Some(b"ab"),
+        Some(b"ba"),
+        Some(b""),
+        Some(b""),
+        Some(b"cd"),
+        None,
+    ];
+    let (file, s) = strings_file(dir.path(), &values, 2, true);
+    let out = |kind, value: &[u8], group, dictionary| {
+        ClauseTest::of_bytes(&s, kind, Some(value))
+            .unwrap()
+            .rules_out_group(&file, &s, group, dictionary)
+            .unwrap()
+    };
+    // Group 0 holds "ab" and "ba", group 1 two empty strings, group 2 "cd"
+    // and NULL.
+    assert!(out(ClauseKind::BytesEq, b"cd", 0, true));
+    assert!(!out(ClauseKind::BytesEq, b"cd", 2, true));
+    assert!(!out(ClauseKind::BytesEq, b"cd", 0, false));
+    assert!(out(ClauseKind::Like, b"c%", 0, true));
+    assert!(!out(ClauseKind::Like, b"%b%", 0, true));
+    assert!(out(ClauseKind::BytesEq, b"", 0, false));
+    assert!(!out(ClauseKind::BytesEq, b"", 1, false));
+    assert!(out(ClauseKind::BytesNe, b"", 1, false));
+    assert!(!out(ClauseKind::BytesNe, b"", 0, false));
+    // The greatest value of group 0 is not empty: its dictionary is not
+    // read for <> '', which a damaged dictionary page shows, while = reads
+    // it and fails.
+    let start = usize::try_from(
+        file.metadata()
+            .row_group(0)
+            .column(0)
+            .dictionary_page_offset()
+            .unwrap(),
+    )
+    .unwrap();
+    let path = dir.path().join("strings.parquet");
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes[start..start + 4].fill(0xff);
+    std::fs::write(&path, &bytes).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let s = map_column(&file, &request("s", oid::TEXT)).unwrap();
+    let unequal = ClauseTest::of_bytes(&s, ClauseKind::BytesNe, Some(b"")).unwrap();
+    assert!(!unequal.rules_out_group(&file, &s, 0, true).unwrap());
+    let equal = ClauseTest::of_bytes(&s, ClauseKind::BytesEq, Some(b"cd")).unwrap();
+    assert_eq!(
+        equal
+            .rules_out_group(&file, &s, 0, true)
+            .unwrap_err()
+            .sqlstate(),
+        "XX001"
+    );
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// Each kind of string test over plain and dictionary arrays, of
+    /// random strings and patterns of `a`, `b` and `%`, each slot's bit
+    /// the answer PostgreSQL gives, slices of an array among them.
+    #[test]
+    fn strings_as_postgresql_compares_them(
+        values in prop::collection::vec(prop::option::of(prop::collection::vec(prop::sample::select(vec![b'a', b'b']), 0..6)), 0..150),
+        constant in prop::collection::vec(prop::sample::select(vec![b'a', b'b', b'%']), 0..6),
+        cut in 0usize..40,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_, s) = strings_file(dir.path(), &[Some(b"x")], 1, false);
+        let cut = cut.min(values.len());
+        let kept = &values[cut..];
+        let len = kept.len();
+        let words = mask_words(len) + 1;
+        let plain = plain_strings(&values);
+        let dictionary = dictionary_strings(&values);
+        let arrays: [Box<dyn Array>; 2] = [
+            Box::new(plain.slice(cut, len)),
+            Box::new(dictionary.slice(cut, len)),
+        ];
+        for kind in STRING_KINDS {
+            let test = ClauseTest::of_bytes(&s, kind, Some(&constant)).unwrap();
+            let expected: Vec<bool> =
+                kept.iter().map(|v| string_answer(kind, &constant, v.as_deref())).collect();
+            for array in &arrays {
+                let mut passed = vec![u64::MAX; words];
+                test.apply(array.as_ref(), &mut passed).unwrap();
+                prop_assert_eq!(bits(&passed, len), expected.clone());
+                prop_assert_eq!(passed[words - 1], 0);
+            }
+        }
+    }
+
+    /// Every group of strings the footer rules out, by its statistics or
+    /// its dictionary, holds no row that passes: files of random strings,
+    /// empty ones and `NULL` among them, in random groups, with and
+    /// without dictionaries and statistics.
+    #[test]
+    fn groups_of_strings_ruled_out_hold_no_passing_row(
+        values in prop::collection::vec(prop::option::of(prop::collection::vec(prop::sample::select(vec![b'a', b'b']), 0..3)), 1..60),
+        group_rows in 1usize..12,
+        dictionary in any::<bool>(),
+        statistics in any::<bool>(),
+        kind in 0usize..4,
+        constant in prop::collection::vec(prop::sample::select(vec![b'a', b'b', b'%']), 0..4),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("strings.parquet");
+        let options = Options { statistics, page_rows: Some(3), ..Options::new(group_rows, dictionary) };
+        testing::write_with(&path, &[Column::new("s", Written::Bytes(values.clone()))], options).unwrap();
+        let file = ParquetFile::open(&path).unwrap();
+        let s = map_column(&file, &request("s", oid::TEXT)).unwrap();
+        let kind = STRING_KINDS[kind];
+        let test = ClauseTest::of_bytes(&s, kind, Some(&constant)).unwrap();
+        for (group, rows) in values.chunks(group_rows).enumerate() {
+            for by_dictionary in [false, true] {
+                if test.rules_out_group(&file, &s, group, by_dictionary).unwrap() {
+                    prop_assert!(
+                        !rows.iter().any(|v| string_answer(kind, &constant, v.as_deref())),
+                        "group {} ruled out by {:?} {:?}", group, kind, constant
+                    );
+                }
             }
         }
     }

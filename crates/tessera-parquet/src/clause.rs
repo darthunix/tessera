@@ -2,10 +2,16 @@
 //! made once from a clause and a column's read plan, then applied to the
 //! arrays a reader gives, a bit a slot, before any value is made.
 
-use arrow_array::Array;
-use datum_arrow::{Comparison, Input, RangeAnswer, ReadPlan, Test, Values, mask_words, oid};
+use std::cell::RefCell;
+use std::fmt;
+use std::sync::Arc;
 
-use crate::column::MappedColumn;
+use arrow_array::types::Int32Type;
+use arrow_array::{Array, ArrayRef, DictionaryArray};
+use datum_arrow::{Comparison, Input, RangeAnswer, ReadPlan, Test, Values, mask_words, oid};
+use tessera_kernels::text::Like;
+
+use crate::column::{FileType, MappedColumn};
 use crate::dictionary::{Dictionary, read_dictionary};
 use crate::error::{Error, INTERNAL_ERROR, Result};
 use crate::file::ParquetFile;
@@ -23,6 +29,21 @@ pub enum ClauseKind {
     IsNull,
     /// `IS NOT NULL`.
     IsNotNull,
+    /// A string equal to one value, its bytes compared.
+    BytesEq,
+    /// A string unequal to one value.
+    BytesNe,
+    /// A string that matches a pattern of `LIKE` of fixed parts and `%`.
+    Like,
+    /// A string that does not match such a pattern.
+    NotLike,
+}
+
+/// Whether the source checks `LIKE` with `pattern` on a string's bytes: a
+/// pattern of fixed parts and `%` signs, without `_` or the escape
+/// character, as [`Like::parse`] takes it.
+pub fn like_checked(pattern: &[u8]) -> bool {
+    Like::parse(pattern).is_some()
 }
 
 /// The strategy numbers of the comparisons of a B-tree family, as
@@ -78,15 +99,126 @@ enum Kind {
     In(Vec<i64>),
     IsNull,
     IsNotNull,
+    /// A string equal to `value`, or unequal where not `equal`.
+    Bytes {
+        equal: bool,
+        value: Vec<u8>,
+    },
+    /// A string that matches `pattern`, or does not where `negated`; a
+    /// pattern [`like_checked`] takes.
+    Like {
+        pattern: Vec<u8>,
+        negated: bool,
+    },
+    /// No row passes: a clause on strings with `NULL`.
+    NoRow,
+}
+
+/// The answers of a test for the values of the last dictionary it was
+/// applied over: 0 not yet asked, 1 fails, 2 passes. The windows of one
+/// chunk share their dictionary's buffers, each window in an array of its
+/// own, so the dictionary is known by the addresses of its offsets and
+/// bytes and its count of values. The memo holds the array, so that
+/// another dictionary cannot take those addresses while it does.
+#[derive(Clone, Default)]
+struct Memo {
+    of: Option<ArrayRef>,
+    key: (usize, usize, usize),
+    answers: Vec<u8>,
+}
+
+impl fmt::Debug for Memo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Memo({} answers)", self.answers.len())
+    }
 }
 
 /// A clause's test of a column's stored values.
-#[derive(Clone, Debug, PartialEq)]
+///
+/// A test of strings keeps the answers for the values of the last
+/// dictionary it was applied over, so that a value of a chunk's dictionary
+/// is checked once, however many windows of rows refer to it.
+#[derive(Clone, Debug)]
 pub struct ClauseTest {
     kind: Kind,
+    memo: RefCell<Memo>,
+}
+
+/// A test of a string's bytes, borrowed from a test's kind. One lives on
+/// the stack for a call: a box of the pattern would allocate a window.
+#[allow(clippy::large_enum_variant)]
+enum StringTest<'a> {
+    Equal(&'a [u8], bool),
+    Like(Like<'a>, bool),
+}
+
+impl StringTest<'_> {
+    fn passes(&self, value: &[u8]) -> bool {
+        match self {
+            StringTest::Equal(constant, equal) => (value == *constant) == *equal,
+            StringTest::Like(like, negated) => like.matches(value) != *negated,
+        }
+    }
 }
 
 impl ClauseTest {
+    fn of(kind: Kind) -> Self {
+        ClauseTest {
+            kind,
+            memo: RefCell::default(),
+        }
+    }
+
+    /// The test of `column`'s strings that keeps the clause `kind`, one of
+    /// [`ClauseKind::BytesEq`], [`ClauseKind::BytesNe`],
+    /// [`ClauseKind::Like`] and [`ClauseKind::NotLike`], with the bytes of
+    /// `value`, `None` for `NULL`: the string compared, or the pattern. A
+    /// clause with `NULL` passes no row. The bytes are compared as they
+    /// are, as PostgreSQL compares strings under a deterministic
+    /// collation.
+    ///
+    /// # Errors
+    ///
+    /// `XX000` for another kind, for a column that is not of strings, and
+    /// for a pattern [`like_checked`] refuses.
+    pub fn of_bytes(column: &MappedColumn, kind: ClauseKind, value: Option<&[u8]>) -> Result<Self> {
+        if column.file_type() != FileType::Bytes {
+            return Err(broken("a test of strings of a column of another type"));
+        }
+        let Some(value) = value else {
+            return match kind {
+                ClauseKind::BytesEq
+                | ClauseKind::BytesNe
+                | ClauseKind::Like
+                | ClauseKind::NotLike => Ok(Self::of(Kind::NoRow)),
+                _ => Err(broken("a test of strings of another kind")),
+            };
+        };
+        let kind = match kind {
+            ClauseKind::BytesEq | ClauseKind::BytesNe => Kind::Bytes {
+                equal: kind == ClauseKind::BytesEq,
+                value: value.to_vec(),
+            },
+            ClauseKind::Like | ClauseKind::NotLike if like_checked(value) => Kind::Like {
+                pattern: value.to_vec(),
+                negated: kind == ClauseKind::NotLike,
+            },
+            _ => return Err(broken("a test of strings of another kind or pattern")),
+        };
+        Ok(Self::of(kind))
+    }
+
+    /// The test of a string's bytes of a test of strings.
+    fn string_test(&self) -> Option<StringTest<'_>> {
+        match &self.kind {
+            Kind::Bytes { equal, value } => Some(StringTest::Equal(value, *equal)),
+            Kind::Like { pattern, negated } => {
+                Like::parse(pattern).map(|like| StringTest::Like(like, *negated))
+            }
+            _ => None,
+        }
+    }
+
     /// The test of `column`'s stored values that keeps the clause `kind`
     /// with `values`: a value of the column's PostgreSQL type as a `Datum`
     /// gives it, widened to 64 bits, `None` for `NULL`, as
@@ -117,8 +249,11 @@ impl ClauseTest {
             ),
             ClauseKind::IsNull => Kind::IsNull,
             ClauseKind::IsNotNull => Kind::IsNotNull,
+            ClauseKind::BytesEq | ClauseKind::BytesNe | ClauseKind::Like | ClauseKind::NotLike => {
+                return Err(broken("a test of strings without bytes"));
+            }
         };
-        Ok(ClauseTest { kind })
+        Ok(Self::of(kind))
     }
 
     /// Whether group `group` of `file` holds no row that passes, by what
@@ -126,10 +261,14 @@ impl ClauseTest {
     /// for. Without `dictionary`, by the chunk's statistics alone: its
     /// count of `NULL` values for the tests of `NULL`, and for the other
     /// clauses, which pass no `NULL`, its least and greatest values, as
-    /// [`group_stats`] trusts them. With `dictionary`, by its dictionary,
-    /// read alone, where the footer says every data page is encoded
-    /// through it: ruled out when no value of it passes. A group the
-    /// footer does not rule out is not.
+    /// [`group_stats`] trusts them, of which a string's equality with the
+    /// empty string and its inequality take only whether they are empty.
+    /// With `dictionary`, by its dictionary, read alone, where the footer
+    /// says every data page is encoded through it: ruled out when no value
+    /// of it passes; not for `<> ''` where the greatest value is not empty,
+    /// which shows that some row is not empty unless a writer gave a
+    /// greatest value past the rows. A group the footer does not rule out
+    /// is not.
     ///
     /// # Errors
     ///
@@ -150,6 +289,11 @@ impl ClauseTest {
         if !stats.dictionary_only || matches!(self.kind, Kind::IsNull | Kind::IsNotNull) {
             return Ok(false);
         }
+        let not_empty =
+            matches!(&self.kind, Kind::Bytes { equal: false, value } if value.is_empty());
+        if not_empty && stats.empties.is_some_and(|e| !e.greatest_empty) {
+            return Ok(false);
+        }
         Ok(read_dictionary(file, column, group)?.is_some_and(|values| self.rules_out_by(&values)))
     }
 
@@ -167,19 +311,39 @@ impl ClauseTest {
             Kind::In(bounds) => stats
                 .bounds
                 .is_some_and(|b| b.least <= b.greatest && !any_within(bounds, b.least, b.greatest)),
+            // Every order of bytes puts the empty string first: a least
+            // value not empty shows no row is, a greatest value empty that
+            // every row is. Both at once is a range turned the wrong way,
+            // which rules nothing out.
+            Kind::Bytes { equal, value } if value.is_empty() => stats
+                .empties
+                .filter(|e| e.least_empty || !e.greatest_empty)
+                .is_some_and(|e| {
+                    if *equal {
+                        !e.least_empty
+                    } else {
+                        e.greatest_empty
+                    }
+                }),
+            Kind::Bytes { .. } | Kind::Like { .. } => false,
+            Kind::NoRow => true,
         }
     }
 
     /// Whether no value of a chunk's dictionary passes, every row that is
     /// not `NULL` holding one of them.
     fn rules_out_by(&self, dictionary: &Dictionary) -> bool {
-        let Dictionary::Integers(values) = dictionary else {
-            return false;
-        };
-        match &self.kind {
-            Kind::Compare(test) => !values.iter().any(|&value| test.passes(value)),
-            Kind::In(bounds) => !values.iter().any(|&value| found(bounds, value)),
-            Kind::IsNull | Kind::IsNotNull => false,
+        match (&self.kind, dictionary) {
+            (Kind::Compare(test), Dictionary::Integers(values)) => {
+                !values.iter().any(|&value| test.passes(value))
+            }
+            (Kind::In(bounds), Dictionary::Integers(values)) => {
+                !values.iter().any(|&value| found(bounds, value))
+            }
+            (Kind::Bytes { .. } | Kind::Like { .. }, Dictionary::Bytes(values)) => self
+                .string_test()
+                .is_some_and(|test| !values.iter().any(|value| test.passes(value))),
+            _ => false,
         }
     }
 
@@ -242,11 +406,118 @@ impl ClauseTest {
                     _ => return Err(broken("a test of a column that is not of integers")),
                 }
             }
+            Kind::Bytes { .. } | Kind::Like { .. } => {
+                let test = self
+                    .string_test()
+                    .ok_or_else(|| broken("a pattern the reader does not check"))?;
+                self.apply_strings(array, &test, &valid, &mut passed[..words])?;
+            }
+            Kind::NoRow => passed[..words].fill(0),
         }
         for word in &mut passed[words..] {
             *word = 0;
         }
         Ok(())
+    }
+}
+
+impl ClauseTest {
+    /// The bits of `array`'s strings that pass `test`, into `passed`, one
+    /// word for each 64 slots; a dictionary's values checked once for all
+    /// the windows that refer to them.
+    fn apply_strings(
+        &self,
+        array: &dyn Array,
+        test: &StringTest<'_>,
+        valid: &[u64],
+        passed: &mut [u64],
+    ) -> Result<()> {
+        if let Some(dictionary) = array.as_any().downcast_ref::<DictionaryArray<Int32Type>>() {
+            let values = dictionary.values();
+            let strings = Strings::of(values.as_ref())?;
+            let mut memo = self.memo.borrow_mut();
+            let key = strings.key();
+            if memo.of.is_none() || memo.key != key {
+                memo.of = Some(Arc::clone(values));
+                memo.key = key;
+                memo.answers.clear();
+                memo.answers.resize(strings.len(), 0);
+            }
+            let answers = &mut memo.answers;
+            let keys = dictionary.keys().values();
+            for (word, (chunk, out)) in keys.chunks(64).zip(passed.iter_mut()).enumerate() {
+                let mut bits = 0u64;
+                let live = valid[word];
+                for (i, &key) in chunk.iter().enumerate() {
+                    // The key of a NULL slot may be any number.
+                    if live >> i & 1 == 0 {
+                        continue;
+                    }
+                    let at = usize::try_from(key).unwrap_or(usize::MAX);
+                    let answer = answers
+                        .get_mut(at)
+                        .ok_or_else(|| broken("a key past its dictionary"))?;
+                    if *answer == 0 {
+                        *answer = 1 + u8::from(test.passes(strings.get(at)));
+                    }
+                    bits |= u64::from(*answer == 2) << i;
+                }
+                *out = bits;
+            }
+            return Ok(());
+        }
+        let strings = Strings::of(array)?;
+        for (word, out) in passed.iter_mut().enumerate() {
+            let mut bits = 0u64;
+            for i in 0..64.min(strings.len().saturating_sub(word * 64)) {
+                bits |= u64::from(test.passes(strings.get(word * 64 + i))) << i;
+            }
+            *out = bits & valid[word];
+        }
+        Ok(())
+    }
+}
+
+/// The strings of an array of bytes, by their 64-bit offsets: the reader
+/// gives every column of bytes so.
+struct Strings<'a> {
+    offsets: &'a [i64],
+    data: &'a [u8],
+}
+
+impl<'a> Strings<'a> {
+    fn of(array: &'a dyn Array) -> Result<Self> {
+        match input_of(array)? {
+            Input::Plain(column) => match column.values {
+                Values::LargeBytes { offsets, data } => Ok(Strings { offsets, data }),
+                _ => Err(broken(
+                    "a test of strings of an array that is not of strings",
+                )),
+            },
+            Input::Dictionary { .. } => Err(broken("a dictionary of a dictionary")),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    /// The addresses of the offsets and the bytes, and the count of
+    /// values, which tell one dictionary from another while it lives.
+    fn key(&self) -> (usize, usize, usize) {
+        (
+            self.offsets.as_ptr().addr(),
+            self.data.as_ptr().addr(),
+            self.len(),
+        )
+    }
+
+    /// The bytes of slot `i`, below [`Strings::len`]: Arrow's offsets of a
+    /// valid array are in order and within its bytes.
+    fn get(&self, i: usize) -> &'a [u8] {
+        let from = usize::try_from(self.offsets[i]).unwrap_or(0);
+        let to = usize::try_from(self.offsets[i + 1]).unwrap_or(0);
+        self.data.get(from..to).unwrap_or_default()
     }
 }
 
