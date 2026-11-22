@@ -112,8 +112,7 @@ is wanted; several wait for a measured case. `greengage-port` and
 
 - `projection-whole-row`: a whole row and `tableoid` computed by the
   runtime's projection, so that a batch node serves them
-- `agg-int128-and-date`: `avg` and `sum` of `bigint` summed in a 128-bit
-  integer by a kernel, and `min` and `max` of `date` by kernels
+- `agg-date-min-max`: `min` and `max` of `date` by kernels
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
   maintainer took it out of `spill-crate` on 2026-11-14
@@ -1062,29 +1061,21 @@ task 6.8).
 - **Capabilities:** relspill
 - **Size:** a pull request.
 
-### agg-int128-and-date
+### agg-date-min-max
 
-TessAgg's `avg` and `sum` of `bigint` in a 128-bit sum, and `min` and
-`max` of `date`, by kernels.
+TessAgg's `min` and `max` of `date`, by kernels.
 
-- **What:** A kernel sums the values of a `bigint` column a batch at a
-  time into a 128-bit integer, with the count, as PostgreSQL's own
-  `int8_avg_accum` does where the compiler has a 128-bit integer, and
-  the aggregate turns the sum into `numeric` once, at its end; `min`
-  and `max` of `date`, and of the other types of four or eight bytes
-  that compare as integers, by the kernels of the integers.
-- **Why:** A profile of ClickBench's Q4, `avg(UserID)` over
-  `hits.parquet`, serial, found 55 % of Tessera's time in its generic
-  accumulation, which turns each value into `numeric` and adds it with
-  `numeric_add`, a call a row; Tessera spent 1075 instructions a row
-  there, DuckDB 78. Q7, `min` and `max` of `EventDate`, spent 32 % in
-  the generic path, `date_smaller` and `date_larger` called a row.
-- **Known:** Not Parquet's own: a heap table takes the same path. The
-  answers stay `numeric` for `avg` and `sum` of `bigint`, equal to the
-  core's. Not measured beyond the profiles.
+- **What:** `min` and `max` of `date`, and of the other types of four or
+  eight bytes that compare as integers, by the kernels of the integers.
+- **Why:** A profile of ClickBench's Q7, `min` and `max` of `EventDate`
+  over `hits.parquet`, serial, found 32 % of Tessera's time in the
+  generic path, `date_smaller` and `date_larger` called a row. The sums
+  of `bigint` the same profile found are the change `agg-int128`, done.
+- **Known:** Not Parquet's own: a heap table takes the same path. Not
+  measured beyond the profile.
 - **Depends on:** nothing.
 - **Capabilities:** aggregate
-- **Size:** one pull request.
+- **Size:** small.
 
 ### numeric-reading
 
