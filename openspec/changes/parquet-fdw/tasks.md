@@ -95,7 +95,9 @@ maintainer to say that the machine is idle.
       source's halves under a clause of the cases of text from bytes and
       of the length of a varchar, and the case of the source chosen; the
       node's check of a forward window's rows counts the rows the
-      selection holds, not the window's
+      selection holds, not the window's; a case whose selection holds part
+      of a window and whose batch is the window's short last one, so that
+      the places of the rows of a window held in part are made and checked
 - [ ] 5.2 The groups of rows skipped by their least and greatest values,
       their `NULL` counts and their dictionaries, with the reader's C
       entry points of a group's statistics and its dictionary. Check:

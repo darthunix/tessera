@@ -65,6 +65,7 @@ typedef struct NodeColumn
 	uint64		window;			/* the window's first row, or NO_WINDOW */
 	uint64		forward_end;	/* where the forward reads ended, or NO_WINDOW */
 	uint64		held[WINDOW_WORDS]; /* the window's rows the read holds */
+	size_t		held_count;		/* how many */
 	uint64		values[PARQUET_WINDOW_ROWS];	/* of the rows held, in order */
 	uint64		nulls[WINDOW_WORDS];
 } NodeColumn;
@@ -290,6 +291,17 @@ rank_of(const uint64 *held, int r)
 	return rank;
 }
 
+/* The window's rows r to r + 63, a bit each, from a mask over it. */
+static uint64
+bits_from(const uint64 *mask, int r)
+{
+	uint64		bits = mask[r / 64] >> (r % 64);
+
+	if (r % 64 != 0 && r / 64 + 1 < WINDOW_WORDS)
+		bits |= mask[r / 64 + 1] << (64 - r % 64);
+	return bits;
+}
+
 /* Whether every row of rows is held. */
 static bool
 all_held(const uint64 *rows, const uint64 *held)
@@ -324,6 +336,9 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 	TessParquetStatus status;
 	size_t		count;
 	int			held_words;
+	int			base;
+	uint64		run;
+	bool		whole;
 
 	rows[offset / 64] |= need << (offset % 64);
 	if (offset % 64 != 0 && offset / 64 + 1 < WINDOW_WORDS)
@@ -338,6 +353,7 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 							   (len + 63) / 64, &count, &status))
 			parquet_raise(&status);
 		col->window = window;
+		col->held_count = count;
 		if (forward)
 		{
 			col->forward_end = window + len;
@@ -348,15 +364,34 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 		}
 		INJECTION_POINT("tessera-parquet-window", NULL);
 	}
-	count = 0;
-	for (int w = 0; w < WINDOW_WORDS; w++)
-		count += pg_popcount64(col->held[w]);
+	count = col->held_count;
 	held_words = (int) Max((count + 63) / 64, 1);
-	for (uint64 bits = need; bits != 0; bits &= bits - 1)
-	{
-		int			p = rank_of(col->held, offset + pg_rightmost_one_pos64(bits));
 
-		asked[p / 64] |= UINT64CONST(1) << (p % 64);
+	/*
+	 * A row's place among the rows held is the rank of the batch's first
+	 * row, counted once, and the rows held before it in the batch. Where
+	 * the read holds every row of the batch, as a forward read does, it is
+	 * that rank and the row's number in the batch.
+	 */
+	base = rank_of(col->held, offset);
+	run = bits_from(col->held, offset);
+	whole = (run & b->all) == b->all;
+	if (whole)
+	{
+		asked[base / 64] |= need << (base % 64);
+		if (base % 64 != 0 && base / 64 + 1 < WINDOW_WORDS)
+			asked[base / 64 + 1] |= need >> (64 - base % 64);
+	}
+	else
+	{
+		for (uint64 bits = need; bits != 0; bits &= bits - 1)
+		{
+			int			i = pg_rightmost_one_pos64(bits);
+			int			p = base + pg_popcount64(run & ((UINT64CONST(1) << i) - 1));
+
+			Assert(p == rank_of(col->held, offset + i));
+			asked[p / 64] |= UINT64CONST(1) << (p % 64);
+		}
 	}
 	if (scan->info[c].gives_datums)
 	{
@@ -376,14 +411,30 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 		if (!tess_parquet_text(reader, arena, bytes, col->values, Max(count, 1), &status))
 			parquet_raise(&status);
 	}
-	for (uint64 bits = need; bits != 0; bits &= bits - 1)
+	if (whole && need == b->all)
 	{
-		int			i = pg_rightmost_one_pos64(bits);
-		int			p = rank_of(col->held, offset + i);
-		bool		null = (col->nulls[p / 64] >> (p % 64)) & 1;
+		/* Every row of the batch, in its places: a loop without a mask. */
+		for (int i = 0; i < b->nrows; i++)
+		{
+			bool		null = (col->nulls[(base + i) / 64] >> ((base + i) % 64)) & 1;
 
-		b->isnull[column][i] = null;
-		b->values[column][i] = null ? (Datum) 0 : (Datum) col->values[p];
+			b->isnull[column][i] = null;
+			b->values[column][i] = null ? (Datum) 0 : (Datum) col->values[base + i];
+		}
+	}
+	else
+	{
+		for (uint64 bits = need; bits != 0; bits &= bits - 1)
+		{
+			int			i = pg_rightmost_one_pos64(bits);
+			int			p = whole ? base + i :
+				base + pg_popcount64(run & ((UINT64CONST(1) << i) - 1));
+			bool		null = (col->nulls[p / 64] >> (p % 64)) & 1;
+
+			Assert(p == rank_of(col->held, offset + i));
+			b->isnull[column][i] = null;
+			b->values[column][i] = null ? (Datum) 0 : (Datum) col->values[p];
+		}
 	}
 	b->made[column] |= need;
 	scan->own[PARQUET_VALUES_DECODED] += pg_popcount64(need);

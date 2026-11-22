@@ -689,3 +689,62 @@ fn a_read_the_system_fails_is_an_error_of_its_reads() {
         "58030"
     );
 }
+
+/// The bits of `mask` from `start` for `len` rows, a row at a time: the
+/// reference of [`bits`].
+fn bits_one_by_one(mask: &[u64], start: usize, len: usize) -> Vec<u64> {
+    let mut out = vec![0u64; mask_words(len)];
+    for row in 0..len {
+        let at = start + row;
+        if mask[at / 64] >> (at % 64) & 1 == 1 {
+            out[row / 64] |= 1 << (row % 64);
+        }
+    }
+    out
+}
+
+/// The runs of a selection found a row at a time: the reference of
+/// [`selectors`].
+fn selectors_one_by_one(rows: &[u64], from: usize, total: usize) -> Vec<RowSelector> {
+    let selected = |row: usize| row >= from && rows[row / 64] >> (row % 64) & 1 == 1;
+    let mut out = Vec::new();
+    let mut row = 0;
+    while row < total {
+        let this = selected(row);
+        let run = (row..total).find(|&r| selected(r) != this).unwrap_or(total);
+        out.push(if this {
+            RowSelector::select(run - row)
+        } else {
+            RowSelector::skip(run - row)
+        });
+        row = run;
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// The masks a word at a time give what a row at a time gives, for
+    /// masks of long runs and of single rows, from any row.
+    #[test]
+    fn masks_by_words_are_masks_by_rows(
+        words in prop::collection::vec(
+            prop_oneof![Just(0u64), Just(u64::MAX), any::<u64>()],
+            1..12,
+        ),
+        start in 0usize..700,
+        len in 0usize..700,
+        from in 0usize..800,
+    ) {
+        let rows = words.len() * 64;
+        let start = start.min(rows);
+        let len = len.min(rows - start);
+        prop_assert_eq!(bits(&words, start, len), bits_one_by_one(&words, start, len));
+        let total = rows - rows.min(len % 64);
+        let by_words: Vec<RowSelector> = selectors(&words, from, total).into();
+        let by_rows: Vec<RowSelector> =
+            RowSelection::from(selectors_one_by_one(&words, from, total)).into();
+        prop_assert_eq!(by_words, by_rows);
+    }
+}
