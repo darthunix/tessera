@@ -91,6 +91,10 @@ what a change touches, not the family:
 - **Counts and disk**: a spill's format, encoding or partitioning. The
   report's `disk` column gives the volume a case writes beside its
   instructions.
+- **Cycles** (`cargo ab measure --counters --cycles`): what pg_pmu
+  counts of the processor's time, with the stalls a count of
+  instructions misses, where a time is wanted without its other noise;
+  they move with the machine as a time does.
 - **Times**:
   - the I/O of a spill: the size and number of its writes, the reads
     ahead, the number of its files;

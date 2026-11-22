@@ -282,8 +282,11 @@ number of instructions the processor spent on a case's execution, which
 [pg_pmu](https://github.com/darthunix/pg_pmu) counts in
 `EXPLAIN (ANALYZE, PMU, TIMING off, BUFFERS off)`, parallel workers
 included. A planning case reads the instructions of its planning, and its
-query then runs once as well. Both kinds of reading are taken by
-`reading.sql`, which every family that times includes.
+query then runs once as well. With `METRIC=cycles` a reading is the
+processor's cycles of the same execution instead: they see the stalls
+on memory and the mispredicted branches that a count of instructions
+misses, and move with the machine as a time does. Every kind of reading
+is taken by `reading.sql`, which every family that times includes.
 
 - pg_pmu must be installed in the PostgreSQL build. The server preloads it
   only for such a run: `run.sh` puts `shared_preload_libraries` on the

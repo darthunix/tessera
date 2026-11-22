@@ -123,6 +123,12 @@ the command line of the restart.
 cargo ab measure --base main --family anyagg --counters
 ```
 
+`--counters --cycles` compares the cycles of each case instead
+(`METRIC=cycles`): they see stalls on memory and mispredicted branches,
+which the instructions do not, and they move with the machine and the
+code's place as a time does, so the control's move tells how settled
+they are.
+
 On Linux the count of a serial case repeats to the instruction, so one
 round a side and three readings a case are enough (`--rounds 1` and
 `REPETITIONS` 3 by default), and a case is flagged past 1 %

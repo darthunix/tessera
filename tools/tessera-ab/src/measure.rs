@@ -59,6 +59,11 @@ pub struct Options {
     /// the PostgreSQL build.
     #[arg(long)]
     pub counters: bool,
+    /// With --counters, compare the cycles pg_pmu counts in each case
+    /// instead of its instructions (run.sh's METRIC=cycles): unlike
+    /// instructions they move with memory and the machine, as a time does.
+    #[arg(long, requires = "counters")]
+    pub cycles: bool,
     /// Seconds for the run's steps, its builds included: the tool checks
     /// the deadline before each step and between its phases, and stops the
     /// step under way, a make or a run.sh, with every process it started,
@@ -84,6 +89,17 @@ impl Options {
     pub fn threshold(&self) -> f64 {
         self.threshold
             .unwrap_or(if self.counters { 1. } else { 2. })
+    }
+
+    /// What pg_pmu counts with --counters (run.sh's METRIC), or None for
+    /// times.
+    #[must_use]
+    pub fn metric(&self) -> Option<&'static str> {
+        self.counters.then_some(if self.cycles {
+            "cycles"
+        } else {
+            "instructions"
+        })
     }
 }
 
@@ -238,10 +254,7 @@ fn run_sh(repo: &Path, pg: &Pg, options: &Options) -> Command {
     for (name, value) in [
         ("CASES", options.cases.clone()),
         ("REPETITIONS", options.repetitions.map(|n| n.to_string())),
-        (
-            "METRIC",
-            options.counters.then(|| "instructions".to_owned()),
-        ),
+        ("METRIC", options.metric().map(str::to_owned)),
     ] {
         match value {
             Some(value) => command.env(name, value),
@@ -360,10 +373,10 @@ fn report(
          cases {}; repetitions {}; workers {}; COPT {}{power}.\n",
         pg.major(),
         pg.pg_config.display(),
-        if options.counters {
-            "instructions counted by pg_pmu"
-        } else {
-            "times"
+        match options.metric() {
+            Some("cycles") => "cycles counted by pg_pmu",
+            Some(_) => "instructions counted by pg_pmu",
+            None => "times",
         },
         options.rounds(),
         options.cases.as_deref().unwrap_or("all"),
@@ -379,10 +392,10 @@ fn report(
         options.workers,
         options.copt.as_deref().unwrap_or("none"),
     )?;
-    let what = if options.counters {
-        "count of instructions"
-    } else {
-        "time"
+    let what = match options.metric() {
+        Some("cycles") => "count of cycles",
+        Some(_) => "count of instructions",
+        None => "time",
     };
     writeln!(
         text,
@@ -406,10 +419,10 @@ fn report(
              and one whose control's plans differ has no control.\n"
         )?;
     }
-    let unit = if options.counters {
-        stats::Unit::Instructions
-    } else {
-        stats::Unit::Milliseconds
+    let unit = match options.metric() {
+        Some("cycles") => stats::Unit::Cycles,
+        Some(_) => stats::Unit::Instructions,
+        None => stats::Unit::Milliseconds,
     };
     let (mut slower, mut replanned, mut more_disk) = (false, false, false);
     for (family, [base_runs, candidate_runs]) in measured {
@@ -450,7 +463,12 @@ fn report(
         )?;
     }
     if slower {
-        let hint = if options.counters {
+        let hint = if options.cycles {
+            "Cycles move with memory, the processor's state and the code's place, as a \
+             time does: count the instructions of the case too (--counters without \
+             --cycles), and where they did not move, compare the machine code's places \
+             (tessera-bench --disasm --module nodes --function NAME)."
+        } else if options.counters {
             "A count does not move with the code's place: a flagged case runs more \
              instructions. Compare the machine code of the functions it runs \
              (tessera-bench --disasm --module nodes --function NAME); a change that trades \
@@ -644,6 +662,16 @@ mod tests {
                 ("REPETITIONS".to_owned(), Some("5".to_owned())),
             ]
         );
+        // Cycles in place of instructions, and only with counts.
+        assert_eq!(
+            envs(&["--counters", "--cycles"])?,
+            [
+                ("CASES".to_owned(), None),
+                ("METRIC".to_owned(), Some("cycles".to_owned())),
+                ("REPETITIONS".to_owned(), None),
+            ]
+        );
+        assert!(envs(&["--cycles"]).is_err(), "--cycles without --counters");
         Ok(())
     }
 
@@ -661,22 +689,31 @@ mod tests {
             "#!/bin/sh\necho \"$@\" > \"$0.args\"\n",
         )?;
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let restart = || {
+        let restart = |metric: &str| {
             Command::new(repo.join("bench/pg/run.sh"))
                 .arg("restart")
                 .env("PG_CONFIG", bin.join("pg_config"))
-                .env("METRIC", "instructions")
+                .env("METRIC", metric)
                 .status()
         };
-        assert!(!restart()?.success(), "a restart without pg_pmu installed");
-        fs::write(bin.join(format!("pg_pmu{}", Pg::dlsuffix())), "")?;
-        assert!(restart()?.success());
-        let args = fs::read_to_string(bin.join("pg_ctl.args"))?;
         assert!(
-            args.contains(
-                "-c shared_preload_libraries='tessera, tessera_nodes, tessera_kernels, pg_pmu'"
-            ),
-            "{args}"
+            !restart("instructions")?.success(),
+            "a restart without pg_pmu installed"
+        );
+        fs::write(bin.join(format!("pg_pmu{}", Pg::dlsuffix())), "")?;
+        for metric in ["instructions", "cycles"] {
+            assert!(restart(metric)?.success(), "{metric}");
+            let args = fs::read_to_string(bin.join("pg_ctl.args"))?;
+            assert!(
+                args.contains(
+                    "-c shared_preload_libraries='tessera, tessera_nodes, tessera_kernels, pg_pmu'"
+                ),
+                "{metric}: {args}"
+            );
+        }
+        assert!(
+            !restart("branches")?.success(),
+            "a metric run.sh does not count"
         );
         Ok(())
     }

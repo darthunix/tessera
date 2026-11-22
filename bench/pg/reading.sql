@@ -2,9 +2,9 @@
 -- cases, so that what a reading is lives in one place. A family includes
 -- this file and records what these functions return in the table
 -- `timings` it creates: a time in milliseconds or, when run.sh measures
--- with METRIC=instructions (the setting bench.metric), the instructions
--- the processor spent, which pg_pmu counts in EXPLAIN ANALYZE, parallel
--- workers included.
+-- with METRIC=instructions or METRIC=cycles (the setting bench.metric),
+-- the instructions or the cycles the processor spent, which pg_pmu counts
+-- in EXPLAIN ANALYZE, parallel workers included.
 
 -- The readings of a run, one row a reading of a case in a mode, which the
 -- family writes to timings.csv. A count of instructions also gives its
@@ -21,12 +21,21 @@ CREATE TEMP TABLE timings
     plan text
 );
 
--- Whether the run counts instructions instead of timing.
+-- Whether the run counts instructions or cycles instead of timing.
 CREATE FUNCTION pg_temp.counting()
 RETURNS boolean
 LANGUAGE sql
 AS $function$
-SELECT current_setting('bench.metric', true) IS NOT DISTINCT FROM 'instructions'
+SELECT coalesce(current_setting('bench.metric', true) IN ('instructions', 'cycles'), false)
+$function$;
+
+-- What pg_pmu's EXPLAIN names the count of a phase, such as
+-- 'Execution Instructions' or 'Planning Cycles'.
+CREATE FUNCTION pg_temp.count_name(phase text)
+RETURNS text
+LANGUAGE sql
+AS $function$
+SELECT phase || ' ' || initcap(current_setting('bench.metric'))
 $function$;
 
 -- The shape of a plan node and of the nodes under it, from EXPLAIN's
@@ -121,8 +130,8 @@ $function$;
 CREATE TRIGGER counted_row BEFORE INSERT ON timings
     FOR EACH ROW EXECUTE FUNCTION pg_temp.counted_row();
 
--- A statement's reading: its time in milliseconds, or the instructions of
--- its execution. `command` is what the family runs, such as EXECUTE of a
+-- A statement's reading: its time in milliseconds, or the instructions or
+-- the cycles of its execution. `command` is what the family runs, such as EXECUTE of a
 -- prepared statement.
 CREATE FUNCTION pg_temp.reading(command text)
 RETURNS numeric
@@ -132,7 +141,7 @@ DECLARE
     started_at timestamptz;
 BEGIN
     IF pg_temp.counting() THEN
-        RETURN pg_temp.counted(command, 'Execution Instructions');
+        RETURN pg_temp.counted(command, pg_temp.count_name('Execution'));
     END IF;
     started_at := clock_timestamp();
     EXECUTE command;
@@ -142,7 +151,7 @@ $function$;
 
 -- The reading of a query's planning alone: the mean time in milliseconds
 -- of `plans` EXPLAINs with `options`, such as '(COSTS OFF) ', which plan
--- the query and run nothing; or the instructions of one planning, which
+-- the query and run nothing; or the count of one planning, which
 -- pg_pmu counts only under ANALYZE, so that the query then runs as well.
 CREATE FUNCTION pg_temp.plan_reading(sql text, plans integer,
                                      options text DEFAULT '')
@@ -153,7 +162,7 @@ DECLARE
     started_at timestamptz;
 BEGIN
     IF pg_temp.counting() THEN
-        RETURN pg_temp.counted(sql, 'Planning Instructions');
+        RETURN pg_temp.counted(sql, pg_temp.count_name('Planning'));
     END IF;
     started_at := clock_timestamp();
     FOR plan IN 1..plans LOOP

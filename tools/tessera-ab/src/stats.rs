@@ -300,6 +300,8 @@ pub enum Unit {
     Milliseconds,
     /// Shown in millions.
     Instructions,
+    /// Shown in millions.
+    Cycles,
 }
 
 /// The rows as a Markdown table, the readings in `unit`.
@@ -307,6 +309,7 @@ pub fn table(rows: &[Row], unit: Unit) -> String {
     let (label, scale) = match unit {
         Unit::Milliseconds => ("ms", 1.),
         Unit::Instructions => ("M instructions", 1e-6),
+        Unit::Cycles => ("M cycles", 1e-6),
     };
     let modes: BTreeSet<&str> = rows.iter().map(|row| row.mode.as_str()).collect();
     let show_mode = modes.len() > 1 || modes.first().is_some_and(|mode| *mode != "on");
@@ -496,6 +499,8 @@ mod tests {
             table.contains("| a | 3.000 | 3.150 | 1.050 | 1.050 | 1.000 |"),
             "{table}"
         );
+        let cycles = super::table(&rows, Unit::Cycles);
+        assert!(cycles.contains("base, M cycles"), "{cycles}");
     }
 
     #[test]

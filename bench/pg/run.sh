@@ -13,10 +13,10 @@
 # (every case by default; the plans are written for those timed), and
 # REPETITIONS, the runs of each case in each mode (the family's own, 31,
 # by default): a development A/B times the cases a change touches, fewer
-# times, to stay within minutes. METRIC=instructions makes every command
-# count instead of time: a reading is then the instructions pg_pmu counts
-# in a case's execution, the server preloads pg_pmu besides Tessera, and
-# REPETITIONS is 3 by default.
+# times, to stay within minutes. METRIC=instructions, or cycles, makes
+# every command count instead of time: a reading is then the instructions,
+# or the cycles, pg_pmu counts in a case's execution, the server preloads
+# pg_pmu besides Tessera, and REPETITIONS is 3 by default.
 set -eu
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 HERE=$ROOT/bench/pg
@@ -42,9 +42,9 @@ PRELOAD='tessera, tessera_nodes, tessera_kernels'
 METRIC=${METRIC:-time}
 case $METRIC in
 time) ;;
-instructions)
+instructions | cycles)
     if [ "$1" != stop ] && [ ! -f "$LIB/pg_pmu$DLSUFFIX" ]; then
-        echo "METRIC=instructions needs pg_pmu in $LIB:" \
+        echo "METRIC=$METRIC needs pg_pmu in $LIB:" \
             "https://github.com/darthunix/pg_pmu" >&2
         exit 1
     fi
@@ -52,7 +52,7 @@ instructions)
     SERVER_OPTIONS="$SERVER_OPTIONS -c shared_preload_libraries='$PRELOAD, pg_pmu'"
     ;;
 *)
-    echo "METRIC is time or instructions, not $METRIC" >&2
+    echo "METRIC is time, instructions or cycles, not $METRIC" >&2
     exit 2
     ;;
 esac
@@ -97,7 +97,7 @@ measure)
         echo "bench/pg has no family $FAMILY" >&2
         exit 2
     fi
-    if [ "$METRIC" = instructions ]; then
+    if [ "$METRIC" != time ]; then
         if ! grep -q 'pg_temp\.\(plan_\)\{0,1\}reading' "$HERE/$FAMILY.sql"; then
             echo "the family $FAMILY takes times of its own: it cannot count" >&2
             exit 2
@@ -121,9 +121,9 @@ measure)
     # nothing more for times.
     preloaded=$("$BIN/psql" -X -tAc 'SHOW shared_preload_libraries')
     case "$METRIC $preloaded" in
-    "instructions "*pg_pmu*) ;;
-    instructions*)
-        echo "the server preloads no pg_pmu: restart it with METRIC=instructions" >&2
+    "instructions "*pg_pmu* | "cycles "*pg_pmu*) ;;
+    instructions* | cycles*)
+        echo "the server preloads no pg_pmu: restart it with METRIC=$METRIC" >&2
         exit 1
         ;;
     *pg_pmu*)
