@@ -88,6 +88,18 @@ pub fn integer<T: Int>() -> BoxedStrategy<T> {
     prop_oneof![1 => edge::<T>(), 2 => small::<T>(), 1 => T::any()].boxed()
 }
 
+/// An int8 leaning to the edges of 18 and 19 digits: a value of
+/// [`integer`] one time in three, an edge of 18 or 19 digits (±(10^18 − 1),
+/// ±10^18, `i64::MIN`, `i64::MAX`) one time in six, any value of 19 digits
+/// otherwise.
+pub fn int8_digits() -> BoxedStrategy<i64> {
+    const LIMIT: i64 = 1_000_000_000_000_000_000;
+    let wide = (LIMIT..=i64::MAX, any::<bool>())
+        .prop_map(|(magnitude, negative)| if negative { -magnitude } else { magnitude });
+    let edges = [-(LIMIT - 1), LIMIT - 1, -LIMIT, LIMIT, i64::MIN, i64::MAX];
+    prop_oneof![2 => integer::<i64>(), 1 => select(edges.to_vec()), 3 => wide].boxed()
+}
+
 /// The value and scale of a decimal of at most 18 digits: values at the
 /// digit edges (0, ±1, ±10^k, ±(10^k − 1)) one time in two, otherwise any
 /// value of a random digit count; scales of 0, of `max_scale` and of

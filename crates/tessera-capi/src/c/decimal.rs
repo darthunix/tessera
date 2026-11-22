@@ -378,15 +378,14 @@ impl Terms for Side<'_> {
 }
 
 /// An integer column's terms: each value a decimal at scale 0, an int8
-/// of 19 digits one the caller adds; int4 words (`WIDE` false) read as
-/// their low half.
+/// of 19 digits an integer term, which the sums take as well; int4 words
+/// (`WIDE` false) read as their low half.
 pub(super) struct Integers<'a, const WIDE: bool> {
     column: Plain<'a>,
 }
 
 impl<const WIDE: bool> Terms for Integers<'_, WIDE> {
-    /// Every row among `rows` that is not NULL, of a decimal's magnitude,
-    /// handed on.
+    /// Every row among `rows` that is not NULL handed on, of any size.
     #[inline(always)]
     fn fold_decimals(
         &self,
@@ -411,7 +410,7 @@ impl<const WIDE: bool> Terms for Integers<'_, WIDE> {
                 } else {
                     i64::from(word as i32)
                 };
-                if *column.isnull.add(row) == 0 && decimal_value(value) {
+                if *column.isnull.add(row) == 0 {
                     add(bit, value);
                     bulk |= 1 << bit;
                 }
@@ -438,7 +437,7 @@ impl<const WIDE: bool> Terms for Integers<'_, WIDE> {
             } else {
                 i64::from(word as i32)
             };
-            Decimal::new(value, 0).map_or(Term::Other, Term::Decimal)
+            Decimal::new(value, 0).map_or(Term::Integer(value), Term::Decimal)
         }
     }
 }
@@ -1264,6 +1263,91 @@ mod tests {
         assert_eq!(partials.partial(0).unwrap(), state(42));
         assert_eq!(partials.partial(1).unwrap(), state(-7));
         assert_eq!(partials.partial(2).unwrap(), Partial::Null);
+    }
+
+    /// The integers' terms keep their promise: every non-NULL row among
+    /// those asked for is handed over in bulk at scale 0, of any size, and
+    /// its term, a decimal or else an integer, gives the same value; an
+    /// int4's high half is not read.
+    #[test]
+    fn integers_hand_over_every_value_as_their_terms_give_it() {
+        use proptest::prelude::*;
+        use tessera_kernels::decimal::{Decimal, Term, Terms};
+
+        let column = (0..=130_usize).prop_flat_map(|nrows| {
+            (
+                proptest::collection::vec(
+                    proptest::option::weighted(0.9, tessera_testing::int8_digits()),
+                    nrows,
+                ),
+                proptest::collection::vec(any::<u64>(), nrows.div_ceil(64)),
+                any::<bool>(),
+            )
+        });
+        tessera_testing::property(column, |(values, asked, wide)| -> anyhow::Result<()> {
+            let nrows = values.len();
+            let words: Vec<u64> = values
+                .iter()
+                .map(|value| match (value, wide) {
+                    (None, _) => 0,
+                    (Some(value), true) => *value as u64,
+                    (&Some(value), false) => u64::from(value as i32 as u32) | 0xABCD << 40,
+                })
+                .collect();
+            let isnull: Vec<bool> = values.iter().map(Option::is_none).collect();
+            let column = super::DatumColumn {
+                values: words.as_ptr(),
+                isnull: isnull.as_ptr(),
+                nrows: nrows as i32,
+                ..super::DatumColumn::EMPTY
+            };
+            let input = if wide {
+                super::SumInput::Int8
+            } else {
+                super::SumInput::Int4
+            };
+            // SAFETY: the arrays hold the column's rows.
+            let terms = unsafe { super::SumColumn::new(input, &column, nrows) }?;
+            for (index, &asked) in asked.iter().enumerate() {
+                let live = nrows - 64 * index;
+                let rows = if live >= 64 {
+                    asked
+                } else {
+                    asked & ((1 << live) - 1)
+                };
+                let mut handed = 0_u64;
+                let word = terms
+                    .fold_decimals(index, rows, |bit, value| {
+                        let term = terms.term(index * 64 + bit);
+                        let decimal = Decimal::new(value, 0).map(Term::Decimal);
+                        assert_eq!(term, decimal.unwrap_or(Term::Integer(value)), "{bit}");
+                        handed |= 1 << bit;
+                    })
+                    .unwrap();
+                anyhow::ensure!(word.rows == handed && word.scale == 0, "word {index}");
+                for bit in tessera_core::ones(rows) {
+                    let row = index * 64 + bit;
+                    let expected = match values[row] {
+                        None => None,
+                        Some(value) if wide => Some(value),
+                        Some(value) => Some(i64::from(value as i32)),
+                    };
+                    anyhow::ensure!(
+                        (handed >> bit & 1 == 1) == expected.is_some(),
+                        "row {row} handed {}",
+                        handed >> bit & 1
+                    );
+                    if let Some(value) = expected {
+                        let term =
+                            Decimal::new(value, 0).map_or(Term::Integer(value), Term::Decimal);
+                        anyhow::ensure!(terms.term(row) == term, "row {row}");
+                    } else {
+                        anyhow::ensure!(terms.term(row) == Term::Null, "row {row}");
+                    }
+                }
+            }
+            Ok(())
+        });
     }
 
     #[test]

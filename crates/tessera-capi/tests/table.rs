@@ -1166,7 +1166,7 @@ fn sum_states_accumulate_through_the_entry_point() -> Result<()> {
         assert_eq!(code, Code::Ok, "{}", status.message());
         assert_eq!(rest_words[0], [0, 0]);
         assert_eq!(rest_words[1], [0, 0]);
-        assert_eq!(rest_words[2], [1 << 9, 0], "the int8 of 19 digits");
+        assert_eq!(rest_words[2], [0, 0], "the int8 of 19 digits taken");
         // The first four rows' records are the four groups.
         let mut four = [0xf_u64];
         let groups = Mask {
@@ -1197,8 +1197,8 @@ fn sum_states_accumulate_through_the_entry_point() -> Result<()> {
                     0 => (
                         rows.clone()
                             .filter(|&row| row != 5)
-                            .map(|row| row * 25)
-                            .sum::<i64>(),
+                            .map(|row| i128::from(row * 25))
+                            .sum::<i128>(),
                         rows.clone().filter(|&row| row != 5).count(),
                         2,
                         group == 1,
@@ -1206,25 +1206,25 @@ fn sum_states_accumulate_through_the_entry_point() -> Result<()> {
                     1 => (
                         rows.clone()
                             .filter(|&row| row != 7)
-                            .map(|row| row - 50)
+                            .map(|row| i128::from(row - 50))
                             .sum(),
                         rows.clone().filter(|&row| row != 7).count(),
                         0,
                         false,
                     ),
+                    // The int8 of 19 digits, i64::MAX, in its group's sum.
                     _ => (
                         rows.clone()
-                            .filter(|&row| row != 9)
-                            .map(|row| row << 33)
+                            .map(|row| i128::from(if row == 9 { i64::MAX } else { row << 33 }))
                             .sum(),
-                        rows.clone().filter(|&row| row != 9).count(),
+                        rows.clone().count(),
                         0,
                         false,
                     ),
                 };
                 assert_eq!(
                     (state.sum.value, state.sum.count, state.sum.scale, state.nan),
-                    (i128::from(value), count as u64, scale, nan),
+                    (value, count as u64, scale, nan),
                     "sum {sum}, group {group}"
                 );
             }

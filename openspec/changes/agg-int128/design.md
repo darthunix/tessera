@@ -156,10 +156,19 @@ it takes a decimal of scale 0:
 - `Sum::add` and `SumState::add`, as `add_many` takes a sum of one value
   at scale 0, refused at the bound as a decimal is;
 - the fast path of `SumState::add_to`, when the state's scale is 0, so
-  that the rows of further groups cost what a decimal costs;
-- the plain loop's match of a row's term, and in the grouped loop the
-  local sum, the retry of a local sum refused at the bound, and the rows
-  of further groups;
+  that the rows of further groups cost what a decimal costs. The fast
+  path of a decimal stays as it was, and the integer's comes after it;
+  one fast path for both, which built the pair of a value and a scale
+  from either term, cost the groupings whose rows go to their records
+  one by one 1.3 to 1.9 % more instructions;
+- the plain loop's match of a row's term, through a function of its own
+  kept out of line: only a row after its word's bulk sum was refused at
+  the bound comes there, and inline, its copy of `Sum::add_many` cost
+  the sums of `numeric` without groups 1.2 % more instructions; and in
+  the grouped loop the retry of a local sum refused at the bound and the
+  rows of further
+  groups; the local sum itself needs no arm, since an integer column
+  hands every value over in bulk;
 - `ExtremeState::offer` and the extreme's loop, whose sources never give
   it, take it as `Other`.
 
@@ -224,21 +233,26 @@ The Rust is checked in two ways, each where it reaches:
 - **Proofs by Kani** of the arithmetic of the integers, in a module of
   proofs beside `decimal.rs` that CI runs with the crate's other proofs.
   The states are those the entry points let in: below the bound, of a
-  scale up to 18. The terms and bulk sums are those of an integer
-  column: at scale 0, a value of an `int64` or a sum of up to 64 of
-  them. For each scale of a state, a literal in its harness so that the
-  power of ten is a constant, `Sum::add` with the integer term,
-  `Sum::add_many` and `SumState::add_to` never panic, and a sum taken is
-  the exact sum and below the bound. A term into a state of scale 0 is
-  taken exactly when the exact sum is below the bound. Into a state of
-  another scale it may also be refused when the term rescaled would
-  overflow an `i128`, which the harness states as the other way to
-  refuse. `i128::MIN` is among the sums the checks must refuse. Kani
-  does not finish a product or a division of two unknowns: no harness
-  needs one, since the factor is constant and terms at scale 0 never
-  take the branch that divides the bound. A scale whose proof does not
-  end within the limit of CI goes to the property tests instead, and
-  the design says so.
+  scale up to 18, with the count of an int64, as C keeps it, so that
+  the rows a call adds, which the sum counts unchecked, never reach
+  2^64. The terms and bulk sums are those of an integer column: at scale
+  0, a value of an `int64` or a sum of up to 64 of them. For each scale
+  of a state, a literal in its harness so that the power of ten is a
+  constant, `Sum::add_many`, which takes a single integer term as a sum
+  of one, never panics, and takes a term exactly when the exact sum, the
+  term rescaled to the state's scale, fits an `i128` and is below the
+  bound; a sum taken is that exact sum with the count, a sum refused is
+  left as it was. A harness of its own shows a state of scale 18 and a
+  bulk sum that land exactly on `i128::MIN` refused. `SumState::add_to`
+  takes an integer in place as the decoded state does, with the same
+  exact sum and count, at scale 0, its fast path, and at scale 1, the
+  decoded path, whose arithmetic is `Sum::add_many`'s. Kani does not
+  finish a product or a division of two unknowns: no harness needs one,
+  since the factor is constant and terms at scale 0 never take the
+  branch that divides the bound. Every scale ends within the limit of
+  CI: on the M5 Pro the longest proof, scale 18, takes 87 s, and the 23
+  proofs 711 s with their build. A bound of the count tied to the rows
+  added, or one of 2^64 less a word, took one proof to 465 s.
 - **Property tests by `proptest`** of the loops, too large for a proof:
   both loops of the terms against a model that adds row by row in
   `i128`, over random words of `int8` with NULLs, values of 18 and 19
@@ -344,7 +358,11 @@ measurements, then the close; tasks.md lists them.
 - `crates/tessera-kernels/tests/decimal.rs`
 - `crates/tessera-kernels/tests/table.rs`
 - `crates/tessera-capi/src/c/decimal.rs`
+- `crates/tessera-capi/tests/decimal.rs`
 - `crates/tessera-capi/tests/table.rs`
+- `crates/tessera-testing/src/lib.rs`, a strategy of int8 values of 18
+  and 19 digits
+- `.cargo/mutants.toml`, the equivalent mutants of the fast path
 - `include/tessera/decimal.h`
 - `include/tessera/table.h`
 - `nodes/agg_generic.c`, comments only
@@ -357,26 +375,31 @@ measurements, then the close; tasks.md lists them.
 
 - Kani, `crates/tessera-kernels/src/decimal/proofs.rs`: the proofs of
   the arithmetic of the sum the decision above lists.
-- `proptest`, in the tests of `src/decimal.rs` and
-  `src/accumulate.rs`: both loops of the terms against a model that
-  adds row by row, over `int8` words with values of 18 and 19 digits,
-  `i64::MIN` and `i64::MAX` among them, with fewer and more than 16
-  groups a word, and from states near the bound, whose refused rows go
-  to the rest; the case of a state of scale 18 that a rescaled bulk sum
-  would take to `i128::MIN` as a test of its own. The models of
-  `tests/decimal.rs` and `tests/table.rs` take the new term.
+- `proptest`, in `crates/tessera-kernels/tests/decimal.rs` and
+  `tests/table.rs`: both loops of the terms against a model that adds
+  row by row, over `int8` words with values of 18 and 19 digits,
+  `i64::MIN` and `i64::MAX` among them, with one to 64 groups a word,
+  from empty states and states near the bound: the sum taken and the
+  rows left make up every value, and no row is left when every value
+  fits in any order. The models of the extremes and of the groups take
+  the new term.
+- Rust, `tessera-kernels`: a word's bulk sum and a group's local sum
+  refused at the bound taking their integers again one by one, eleven
+  of 64; a state of `i128::MIN` refused by `sum_terms` and
+  `merge_partials`, and a sum landing on it refused by `Sum::add_many`.
 - `proptest`, in the tests of `tessera-capi`'s `c/decimal.rs`: the bulk
-  fold and the term of the integers give each row the same value.
-- Rust, `tessera-capi`: `tess_decimal_sum` and
-  `tess_table_accumulate_sums` through their raw pointers, an `int8`
-  column of 19 digits leaving no rest; in
+  fold and the term of the integers give each row the same value; beside
+  it, a partial state of `i128::MIN` refused from its bytes.
+- Rust, `tessera-capi`, through the raw pointers: `tess_decimal_sum` of
+  an `int8` column at the edges of `int64` leaving no rest, and a state
+  of `i128::MIN` refused with the sum as it was; in
   `sum_states_accumulate_through_the_entry_point` the row of `i64::MAX`
-  leaves the rest for the sum and the count; a state of `i128::MIN`
-  refused on the way in.
+  leaves the rest for the sum and the count.
 - SQL, `test/sql/agg.sql`: `sum` and `avg` of a `bigint` column with
   `-9223372036854775808` and `9223372036854775807`, with and without
-  groups, many groups, workers and past `hash_mem`, against the core's
-  answers (`agg_same`).
+  groups, many groups, past `hash_mem` with its rows to disk and back,
+  and with workers, the plan shown, against the core's answers
+  (`agg_same`).
 - SQL, `test/sql/parallel.sql`: its `bigint` values of 19 digits, a
   rest of the partial states today, now merge in the words; the rests
   of partial states stay covered by its `numeric` values of more than

@@ -827,11 +827,12 @@ impl<S: Source> Terms for SourceTerms<'_, S> {
 
 /// Add the selected rows' terms to `total`, as [`Sum::add`] adds them one
 /// by one, NULL rows skipped: the rows a source hands over in bulk
-/// ([`Terms::fold_decimals`]) a word at a time, the others term by term. A
-/// row whose term is not a decimal, or that the sum refuses at its bound,
-/// goes to `rest`, whose other bits are cleared, for the caller to add by
-/// the core's means; exact sums add in any order, so the rows refused may
-/// differ with the order and the total does not.
+/// ([`Terms::fold_decimals`]) a word at a time, the others term by term, an
+/// integer as a sum of one at scale 0 ([`Sum::add_many`]). A row whose term
+/// is neither a decimal nor an integer, or that the sum refuses at its
+/// bound, goes to `rest`, whose other bits are cleared, for the caller to
+/// add by the core's means; exact sums add in any order, so the rows
+/// refused may differ with the order and the total does not.
 ///
 /// # Errors
 ///
@@ -871,6 +872,7 @@ pub fn sum_terms(
             match terms.term(word * 64 + bit) {
                 Term::Null => {}
                 Term::Decimal(decimal) if sum.add(decimal) => {}
+                Term::Integer(value) if add_integer(&mut sum, value) => {}
                 _ => other |= 1 << bit,
             }
         }
@@ -878,6 +880,14 @@ pub fn sum_terms(
     })?;
     *total = sum;
     Ok(())
+}
+
+/// An integer taken alone into a sum, as a sum of one at scale 0: only a
+/// row after its word's bulk sum was refused at the bound comes here.
+#[cold]
+#[inline(never)]
+fn add_integer(sum: &mut Sum, value: i64) -> bool {
+    sum.add_many(i128::from(value), 0, 1)
 }
 
 /// Merge the selected rows' partial states into `total`, as a plain final
@@ -1016,7 +1026,7 @@ fn extreme_of<const MAX: bool>(
                         found = Some(row);
                     }
                 }
-                Term::Special(_) | Term::Other => other |= 1 << bit,
+                Term::Special(_) | Term::Integer(_) | Term::Other => other |= 1 << bit,
             }
         }
         Ok(rest.set_word(word, other)?)
@@ -1055,17 +1065,21 @@ impl Special {
 pub enum Term {
     /// SQL NULL: skipped.
     Null,
-    /// A decimal, an integer being one at scale 0.
+    /// A decimal, an integer of at most 18 digits being one at scale 0.
     Decimal(Decimal),
     /// NaN or an infinity, which the state counts apart.
     Special(Special),
     /// A value the caller must add by the core's means: a longer value, a
     /// stored form not read in place.
     Other,
+    /// An integer past 18 digits, at scale 0, which only a sum takes: no
+    /// [`Decimal`] holds it. Last, so that the others keep their tags.
+    Integer(i64),
 }
 
-/// The rows of a word whose terms a source hands over in bulk, decimals
-/// of one scale none of which is NULL.
+/// The rows of a word whose terms a source hands over in bulk, none of
+/// which is NULL: decimals of one scale or, at scale 0, integers of any
+/// size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DecimalWord {
     /// The rows, among those asked for.
@@ -1081,10 +1095,13 @@ pub trait Terms {
     fn term(&self, row: usize) -> Term;
 
     /// Of the rows `rows` of word `index`, hand those whose terms are
-    /// decimals of one scale to `add`, the row's bit and value, in bulk: the
-    /// term [`Terms::term`] would give such a row is `Decimal` of that value
-    /// and scale. The rows handed and their scale are returned; the other
-    /// rows go through [`Terms::term`]. `None` hands over none.
+    /// decimals of one scale, or at scale 0 integers of any size, to `add`,
+    /// the row's bit and value, in bulk: the term [`Terms::term`] would
+    /// give such a row is `Decimal` of that value and scale, or `Integer`
+    /// of that value. The rows handed and their scale are returned; the
+    /// other rows go through [`Terms::term`]. `None` hands over none. The
+    /// sums take both; [`extreme`] takes decimals alone, and its sources
+    /// hand over no integers.
     #[inline(always)]
     fn fold_decimals(
         &self,
@@ -1198,24 +1215,19 @@ impl SumState {
     }
 
     /// Take a term into a state's words in place, as [`Self::add`] takes
-    /// it: a decimal of the sum's scale is added to the words without
-    /// decoding the rest of the state.
+    /// it: a decimal of the sum's scale, or an integer into a sum at scale
+    /// 0, is added to the words without decoding the rest of the state.
     #[inline(always)]
     pub fn add_to(words: &mut [u64; Self::WORDS], term: Term) -> bool {
         if let Term::Decimal(decimal) = term
             && u64::from(decimal.scale) == words[3] & 0xFF
         {
-            let stored = (u128::from(words[1]) << 64 | u128::from(words[0])) as i128;
-            debug_assert!(below_bound(stored), "a sum state past its bound");
-            let value = stored + i128::from(decimal.value);
-            // Below the bound in magnitude, both signs in one comparison.
-            if (value + (SUM_BOUND - 1)) as u128 > (2 * (SUM_BOUND - 1)) as u128 {
-                return false;
-            }
-            words[0] = value as u64;
-            words[1] = ((value as u128) >> 64) as u64;
-            words[2] += 1;
-            return true;
+            return Self::add_in_place(words, decimal.value);
+        }
+        if let Term::Integer(value) = term
+            && words[3] & 0xFF == 0
+        {
+            return Self::add_in_place(words, value);
         }
         let mut state = Self::from_words(*words);
         let taken = state.add(term);
@@ -1223,6 +1235,23 @@ impl SumState {
             *words = state.to_words();
         }
         taken
+    }
+
+    /// Add a term of the state's scale to its words in place: false, the
+    /// words unchanged, when the sum would reach the bound.
+    #[inline(always)]
+    fn add_in_place(words: &mut [u64; Self::WORDS], term: i64) -> bool {
+        let stored = (u128::from(words[1]) << 64 | u128::from(words[0])) as i128;
+        debug_assert!(below_bound(stored), "a sum state past its bound");
+        let value = stored + i128::from(term);
+        // Below the bound in magnitude, both signs in one comparison.
+        if (value + (SUM_BOUND - 1)) as u128 > (2 * (SUM_BOUND - 1)) as u128 {
+            return false;
+        }
+        words[0] = value as u64;
+        words[1] = ((value as u128) >> 64) as u64;
+        words[2] += 1;
+        true
     }
 
     /// Merge another state into this one, as the core's combine function
@@ -1252,6 +1281,7 @@ impl SumState {
         match term {
             Term::Null => true,
             Term::Decimal(decimal) => self.sum.add(decimal),
+            Term::Integer(value) => self.sum.add_many(i128::from(value), 0, 1),
             Term::Special(Special::NaN) => {
                 self.nan = true;
                 true
@@ -1405,7 +1435,8 @@ impl ExtremeState {
             _ if self.pending => return Offer::Rest,
             Term::Decimal(decimal) => ExtremeValue::Decimal(decimal),
             Term::Special(special) => ExtremeValue::Special(special),
-            Term::Other => {
+            // An integer comes from no source of an extreme.
+            Term::Integer(_) | Term::Other => {
                 self.pending = true;
                 return Offer::Rest;
             }
@@ -1511,6 +1542,9 @@ fn read_with(
         Ok(decimals.set_word(word, kept | found)?)
     })
 }
+
+#[cfg(kani)]
+mod proofs;
 
 #[cfg(test)]
 mod tests {

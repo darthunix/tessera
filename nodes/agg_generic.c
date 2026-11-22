@@ -573,9 +573,9 @@ fast_advance(GenericAgg *generic, int row, MemoryContext states)
 	}
 	/*
 	 * A row the kernels left to the sum (fast_sum): NaN, an infinity or a
-	 * longer value, or a decimal at the sum's bound, which then moves the
-	 * sum to the rest, so that the next batches add from zero. The row's
-	 * numeric joins the rest.
+	 * longer value, or a decimal or an integer at the sum's bound, which
+	 * then moves the sum to the rest, so that the next batches add from
+	 * zero. The row's numeric joins the rest.
 	 */
 	fast->count++;
 	if (fast->sum != 0 &&

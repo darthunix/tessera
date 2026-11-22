@@ -11,9 +11,9 @@
 use std::ptr;
 
 use tessera_capi::c::{
-    Code, DatumColumn, DecimalArg, Mask, Status, tess_decimal_compute, tess_decimal_filter,
-    tess_decimal_read, tess_decimal_read_datum, tess_decimal_to_int4, tess_decimal_to_int8,
-    tess_decimal_write, tess_decimal_write_datum,
+    Code, DatumColumn, DecimalArg, DecimalSum, Mask, Status, tess_decimal_compute,
+    tess_decimal_filter, tess_decimal_read, tess_decimal_read_datum, tess_decimal_sum,
+    tess_decimal_to_int4, tess_decimal_to_int8, tess_decimal_write, tess_decimal_write_datum,
 };
 use tessera_kernels::decimal::{Decimal, NUMERIC_MAX};
 
@@ -453,4 +453,77 @@ fn a_decimal_side_without_decimals_may_have_no_scale() {
             assert_eq!((scale, decimals[0], out[0]), (1, 0b01, 5));
         }
     }
+}
+
+/// `TESS_TABLE_SUM_OF_INT8`.
+const SUM_INT8: std::ffi::c_uint = 2;
+
+/// The sum of an int8 column as TessAgg calls it, a batch at a time: the
+/// values of 19 digits at the edges of int8 go into the sum with the
+/// others, none to the rest; a state of `i128::MIN` coming in, whose
+/// magnitude `abs` would leave negative, is an invalid argument, the sum
+/// left as it was.
+#[test]
+fn an_int8_sum_takes_values_of_19_digits_and_refuses_i128_min() {
+    let values = [
+        i64::MIN,
+        i64::MAX,
+        -1_000_000_000_000_000_000,
+        999_999_999_999_999_999,
+        7,
+        0,
+    ];
+    let isnull = [false, false, false, false, false, true];
+    let words: Vec<u64> = values.iter().map(|&value| value as u64).collect();
+    let column = column(&words, &isnull);
+    let mut all = [0b11_1111_u64];
+    let rows = mask(6, &mut all);
+    // Set before the call, cleared by it.
+    let mut left = [0b11_1111_u64];
+    let mut rest = mask(6, &mut left);
+    let mut sum = DecimalSum {
+        low: 0,
+        high: 0,
+        scale: 0,
+        count: 0,
+    };
+    let mut status = Status::new();
+    // SAFETY: the column's arrays, the masks and the sum outlive the call.
+    let code = unsafe {
+        tess_decimal_sum(
+            SUM_INT8,
+            &raw const column,
+            &raw const rows,
+            &raw mut sum,
+            &raw mut rest,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::Ok, "{}", status.message());
+    assert_eq!(left, [0], "no row left");
+    let expected: i128 = values[..5].iter().map(|&value| i128::from(value)).sum();
+    let value = i128::from(sum.high) << 64 | i128::from(sum.low);
+    assert_eq!((value, sum.scale, sum.count), (expected, 0, 5));
+    let mut min = DecimalSum {
+        low: 0,
+        high: i64::MIN,
+        scale: 0,
+        count: 1,
+    };
+    // SAFETY: as above.
+    let code = unsafe {
+        tess_decimal_sum(
+            SUM_INT8,
+            &raw const column,
+            &raw const rows,
+            &raw mut min,
+            &raw mut rest,
+            &raw mut status,
+        )
+    };
+    assert_eq!(code, Code::InvalidArgument, "{}", status.message());
+    assert_eq!(
+        (min.low, min.high, min.scale, min.count),
+        (0, i64::MIN, 0, 1)
+    );
 }

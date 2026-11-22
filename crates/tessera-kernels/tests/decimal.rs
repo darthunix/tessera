@@ -17,7 +17,7 @@ use tessera_kernels::decimal::{
     MAX_SCALE, Offer, Op, POWERS, Partial, Partials, Results, SUM_BOUND, Scales, Source, Special,
     Sum, SumState, Term, Terms,
 };
-use tessera_testing::{bounded_sum, decimal_parts, flags, nrows, property};
+use tessera_testing::{bounded_sum, decimal_parts, flags, int8_digits, nrows, property};
 
 /// A column of arguments by row.
 #[derive(Clone, Debug)]
@@ -686,6 +686,8 @@ fn extreme_states_offer_rows_in_numeric_order() {
     let term = prop_oneof![
         1 => Just(Term::Null),
         1 => Just(Term::Other),
+        // No source of an extreme gives one: taken as a longer value.
+        1 => any::<i64>().prop_map(Term::Integer),
         2 => special().prop_map(Term::Special),
         6 => read_decimal().prop_map(Term::Decimal),
     ];
@@ -703,7 +705,7 @@ fn extreme_states_offer_rows_in_numeric_order() {
                     Term::Null => None,
                     Term::Decimal(decimal) => Some(ExtremeValue::Decimal(decimal)),
                     Term::Special(special) => Some(ExtremeValue::Special(special)),
-                    Term::Other => Some(ExtremeValue::Numeric),
+                    Term::Integer(_) | Term::Other => Some(ExtremeValue::Numeric),
                 };
                 // The model: a row after one left, or one only the core
                 // orders, is left; else the later of equal values wins.
@@ -814,6 +816,149 @@ fn a_sum_of_terms_takes_the_same_in_bulk_and_term_by_term() {
         }
         Ok(())
     });
+}
+
+/// An int8 column as the integers of `tessera-capi` give it: every
+/// non-NULL value handed over in bulk at scale 0, or none; a row alone a
+/// decimal of at most 18 digits, else an integer.
+struct IntegerTerms<'a> {
+    values: &'a [Option<i64>],
+    bulk: bool,
+}
+
+impl Terms for IntegerTerms<'_> {
+    fn term(&self, row: usize) -> Term {
+        match self.values[row] {
+            None => Term::Null,
+            Some(value) => Decimal::new(value, 0).map_or(Term::Integer(value), Term::Decimal),
+        }
+    }
+
+    fn fold_decimals(
+        &self,
+        index: usize,
+        rows: u64,
+        mut add: impl FnMut(usize, i64),
+    ) -> Option<DecimalWord> {
+        if !self.bulk {
+            return None;
+        }
+        let mut bulk = 0;
+        for bit in (0..64).filter(|bit| rows >> bit & 1 == 1) {
+            if let Some(value) = self.values[index * 64 + bit] {
+                add(bit, value);
+                bulk |= 1 << bit;
+            }
+        }
+        Some(DecimalWord {
+            rows: bulk,
+            scale: 0,
+        })
+    }
+}
+
+/// An int8 column's values of 18 and 19 digits into a sum, in bulk and
+/// row by row, from an empty state or from any state below the bound. The
+/// rows refused near the bound depend on the order, so the test asserts
+/// what does not: the sum taken and the rows left make up every value,
+/// at the state's scale, and the counts with them; and no row is left
+/// when the state and every value, rescaled, stay below the bound in any
+/// order, as from an empty state.
+#[test]
+fn an_integer_sum_takes_every_value_of_19_digits() {
+    let rows = nrows().prop_flat_map(|nrows| {
+        (
+            proptest::collection::vec(proptest::option::weighted(0.9, int8_digits()), nrows),
+            flags(nrows),
+            proptest::option::of(sum()),
+        )
+    });
+    property(rows, |(values, selected, start)| -> Result<()> {
+        let nrows = values.len();
+        let rows = selection(&selected);
+        let begin = start.unwrap_or_default();
+        for bulk in [true, false] {
+            let mut total = begin;
+            let mut rest = words(nrows, |_| true);
+            decimal::sum_terms(
+                &IntegerTerms {
+                    values: &values,
+                    bulk,
+                },
+                RowMaskView::try_new(nrows, &rows).unwrap(),
+                &mut total,
+                &mut RowMask::try_new(nrows, &mut rest).unwrap(),
+            )?;
+            let (mut taken, mut count, mut left) = (0_i128, 0_u64, 0_u64);
+            // The most the sum can reach in magnitude, in any order.
+            let mut most = Some(begin.value.unsigned_abs());
+            for (row, &value) in values.iter().enumerate() {
+                let rested = bit(&rest, row);
+                match value {
+                    _ if !selected[row] => ensure!(!rested, "row {row} not selected"),
+                    None => ensure!(!rested, "a NULL row {row} left"),
+                    Some(value) => {
+                        most = most.and_then(|most| {
+                            let term = u128::from(value.unsigned_abs())
+                                .checked_mul(10_u128.pow(begin.scale))?;
+                            most.checked_add(term)
+                        });
+                        if rested {
+                            left += 1;
+                        } else {
+                            taken += i128::from(value);
+                            count += 1;
+                        }
+                    }
+                }
+            }
+            let fits = most.is_some_and(|most| most < SUM_BOUND as u128);
+            ensure!(
+                !fits || left == 0,
+                "bulk {bulk}: {left} rows left from {begin:?}, all of which fit"
+            );
+            let expected = taken
+                .checked_mul(10_i128.pow(begin.scale))
+                .and_then(|taken| taken.checked_add(begin.value));
+            ensure!(
+                total.scale == begin.scale
+                    && total.count == begin.count + count
+                    && Some(total.value) == expected
+                    && decimal::below_bound(total.value),
+                "bulk {bulk}: {total:?} from {begin:?}, {taken} taken of {count} rows"
+            );
+        }
+        Ok(())
+    });
+}
+
+/// A word's bulk sum refused at the bound goes term by term, its integers
+/// of 19 digits among them: from a state 10^20 short of the bound, eleven
+/// values of 9 × 10^18 still fit and the twelfth and later go to the rest.
+#[test]
+fn a_word_refused_at_the_bound_takes_its_integers_one_by_one() -> Result<()> {
+    let value = 9_000_000_000_000_000_000_i64;
+    let values = vec![Some(value); 64];
+    let start = Sum {
+        value: SUM_BOUND - 100_000_000_000_000_000_000,
+        scale: 0,
+        count: 1,
+    };
+    let mut total = start;
+    let all = [u64::MAX];
+    let mut rest = [0_u64];
+    decimal::sum_terms(
+        &IntegerTerms {
+            values: &values,
+            bulk: true,
+        },
+        RowMaskView::try_new(64, &all).unwrap(),
+        &mut total,
+        &mut RowMask::try_new(64, &mut rest).unwrap(),
+    )?;
+    ensure!(rest == [!((1_u64 << 11) - 1)], "rest {:#x}", rest[0]);
+    ensure!(total.value == start.value + 11 * i128::from(value) && total.count == 12);
+    Ok(())
 }
 
 /// A sum: a value leaning to the bound's edges at a scale the batch reads,

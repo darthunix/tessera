@@ -285,18 +285,19 @@ fn fold_term(payload: &mut [u8], at: usize, term: Term) -> Result<bool> {
 }
 
 /// Fold each selected row's terms into the [`SumState`]s of its record's
-/// payload, as if row by row: a decimal into the sum, NaN or an infinity
-/// into its flag, NULL skipped. A row a state does not take (a longer
-/// value, a decimal the sum refuses) goes to that sum's rest, for the
-/// caller to add by the core's means.
+/// payload, as if row by row: a decimal or an integer into the sum, NaN or
+/// an infinity into its flag, NULL skipped. A row a state does not take (a
+/// longer value, a decimal or an integer the sum refuses) goes to that
+/// sum's rest, for the caller to add by the core's means.
 ///
 /// A word's rows are first added up by group, for up to `LOCAL_GROUPS`
 /// groups a word, whose records are found once: for each sum, the decimals
-/// of one scale a group's rows give make one local sum, which goes into the
-/// record once. The rows a source hands over in bulk (decimals of one scale
-/// without NULL, integers) are added by a loop over their values alone; the
-/// others go term by term, and a term that is no such decimal goes to the
-/// record directly, as do the rows of further groups. Exact sums add in any
+/// of one scale, or the integers, a group's rows give make one local sum,
+/// which goes into the record once. The rows a source hands over in bulk
+/// (decimals of one scale without NULL, integers) are added by a loop over
+/// their values alone; the others go term by term, and a term that is no
+/// such decimal goes to the record directly, as do the rows of further
+/// groups. Exact sums add in any
 /// order; a local sum the state refuses at its bound is taken again row by
 /// row, so that the rows it refuses go to the rest.
 pub fn sum_terms<T: Terms>(
@@ -428,15 +429,19 @@ pub fn sum_terms<T: Terms>(
                     continue;
                 }
                 // At the bound: the rows that made the local sum, one by one;
-                // one that is no decimal of its scale goes to the rest.
+                // one that is neither a decimal of its scale nor an integer
+                // into a sum at scale 0 goes to the rest.
                 let again = taken;
                 for bit in ones(again) {
                     if usize::from(row_groups[bit]) != group {
                         continue;
                     }
                     let term = sum.terms.term(index * 64 + bit);
-                    let decimal =
-                        matches!(term, Term::Decimal(decimal) if decimal.scale() == local.scale);
+                    let decimal = match term {
+                        Term::Decimal(decimal) => decimal.scale() == local.scale,
+                        Term::Integer(_) => local.scale == 0,
+                        _ => false,
+                    };
                     if !decimal || !fold_term(payload, sum.at, term)? {
                         *other |= 1 << bit;
                     }

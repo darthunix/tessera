@@ -10,7 +10,7 @@
 )]
 #![deny(unsafe_code)]
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use proptest::prelude::*;
 use tessera_core::{ColumnReader, ColumnView, RowMask, RowMaskView};
 use tessera_kernels::accumulate::{self, ExtremeSlot, Fold, Slot, SumSlot};
@@ -24,7 +24,7 @@ use tessera_kernels::ops::ArithmeticError;
 use tessera_kernels::table::{
     CHUNK_HEADER, Cursor, KeySource, Matches, MatchesView, OwnedTable, Table, TableConfig,
 };
-use tessera_testing::{flags, integer, property, values, words};
+use tessera_testing::{flags, int8_digits, integer, nrows, property, values, words};
 
 /// Chunks of the tests: small, so that most tables span several.
 const CHUNK: usize = 4096;
@@ -412,12 +412,14 @@ impl Terms for TermColumn {
         let scale = self.bulk?;
         let mut bulk = 0;
         for bit in (0..64).filter(|bit| rows >> bit & 1 == 1) {
-            if let Term::Decimal(decimal) = self.terms[index * 64 + bit]
-                && decimal.scale() == scale
-            {
-                add(bit, decimal.value());
-                bulk |= 1 << bit;
-            }
+            let value = match self.terms[index * 64 + bit] {
+                Term::Decimal(decimal) if decimal.scale() == scale => decimal.value(),
+                // An integer of any size, at scale 0 alone.
+                Term::Integer(value) if scale == 0 => value,
+                _ => continue,
+            };
+            add(bit, value);
+            bulk |= 1 << bit;
         }
         Some(DecimalWord { rows: bulk, scale })
     }
@@ -437,6 +439,9 @@ fn model_term(column: usize, row: usize) -> Term {
         5 => Term::Decimal(Decimal::new(999_999_999_999_999_999, 0).unwrap()),
         // Another scale within a word's group now and then.
         6 | 7 => Term::Decimal(Decimal::new(row as i64 - 150, 3).unwrap()),
+        // An integer of 19 digits, positive so that near the bound every
+        // one is refused in any order; not among the extremes' terms.
+        8 if column != 1 => Term::Integer(i64::MAX - row as i64),
         _ => Term::Decimal(
             Decimal::new(
                 (row as i64 * 7919 + column as i64) % 20001 - 10000,
@@ -596,6 +601,182 @@ fn sum_states_follow_a_row_by_row_model() -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+/// An int8 column's values of 18 and 19 digits into the sums of groups,
+/// as the integers of `tessera-capi` give them: every non-NULL value in
+/// bulk, a row alone a decimal of at most 18 digits or else an integer.
+/// Keys of one to 64 groups a word, so that a word's rows go through its
+/// local sums, past them one by one, or both; every group's state empty or
+/// near the bound. The rows refused near the bound depend on the order, so
+/// the test asserts what does not: for each group, the state's sum and the
+/// rows left make up its values, and the counts with them; from empty
+/// states no row is left.
+#[test]
+fn integer_sums_by_group_take_every_value_of_19_digits() {
+    let rows = nrows().prop_flat_map(|nrows| {
+        (
+            proptest::collection::vec(proptest::option::weighted(0.9, int8_digits()), nrows),
+            (1..=64_i32).prop_flat_map(move |groups| proptest::collection::vec(0..groups, nrows)),
+            flags(nrows),
+            any::<Option<bool>>(),
+        )
+    });
+    property(rows, |(values, keys, selected, near)| -> Result<()> {
+        let nrows = values.len();
+        let config = TableConfig {
+            nkeys: 1,
+            payload_size: 8 + 8 * SumState::WORDS,
+        };
+        let key_column = [ColumnView::try_new(&keys, None)?];
+        let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
+        let mut table = OwnedTable::new(&config, 256, CHUNK_HEADER + 64 * 128)?;
+        let (offsets, _) = resolve_all(&mut table, &hashes, &KeyColumns(&key_column))?;
+        // Near the bound of either sign, within 10^20: a few values of 19
+        // digits reach it.
+        let begin = SumState {
+            sum: decimal::Sum {
+                value: match near {
+                    None => 0,
+                    Some(positive) => {
+                        let value = decimal::SUM_BOUND - 100_000_000_000_000_000_000;
+                        if positive { value } else { -value }
+                    }
+                },
+                scale: 0,
+                count: u64::from(near.is_some()),
+            },
+            ..SumState::default()
+        };
+        let mut writer = table.table_mut()?;
+        for &offset in &offsets {
+            let payload = writer.payload_mut(offset)?;
+            for (word, value) in begin.to_words().into_iter().enumerate() {
+                payload[8 + 8 * word..16 + 8 * word].copy_from_slice(&value.to_ne_bytes());
+            }
+        }
+        let terms = TermColumn {
+            terms: values
+                .iter()
+                .map(|value| match *value {
+                    None => Term::Null,
+                    Some(value) => {
+                        Decimal::new(value, 0).map_or(Term::Integer(value), Term::Decimal)
+                    }
+                })
+                .collect(),
+            bulk: Some(0),
+        };
+        let selection = words(&selected);
+        let rows = RowMaskView::try_new(nrows, &selection)?;
+        let mut rest_words = vec![0_u64; nrows.div_ceil(64)];
+        let mut slots = [SumSlot {
+            terms: &terms,
+            at: 8,
+            rest: RowMask::try_new(nrows, &mut rest_words)?,
+        }];
+        accumulate::sum_terms(&mut table.table_mut()?, &offsets, &rows, &mut slots)?;
+        let mut model: std::collections::HashMap<i32, (i128, u64, u32)> = Default::default();
+        for row in 0..nrows {
+            let rested = rest_words[row / 64] >> (row % 64) & 1 == 1;
+            match values[row] {
+                _ if !selected[row] => ensure!(!rested, "row {row} not selected"),
+                None => ensure!(!rested, "a NULL row {row} left"),
+                Some(value) => {
+                    let (taken, count, left) = model.entry(keys[row]).or_default();
+                    if rested {
+                        *left += 1;
+                    } else {
+                        *taken += i128::from(value);
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        let mut writer = table.table_mut()?;
+        for (row, &offset) in offsets.iter().enumerate() {
+            let Some(&(taken, count, left)) = model.get(&keys[row]) else {
+                continue;
+            };
+            let payload = writer.payload_mut(offset)?;
+            let state = SumState::from_words(std::array::from_fn(|word| {
+                u64::from_ne_bytes(payload[8 + 8 * word..16 + 8 * word].try_into().unwrap())
+            }));
+            ensure!(
+                near.is_some() || left == 0,
+                "group {}: {left} rows left from an empty state",
+                keys[row]
+            );
+            ensure!(
+                state.sum.scale == 0
+                    && state.sum.count == begin.sum.count + count
+                    && state.sum.value == begin.sum.value + taken
+                    && decimal::below_bound(state.sum.value),
+                "group {}: {state:?}, {taken} taken of {count} rows",
+                keys[row]
+            );
+        }
+        Ok(())
+    });
+}
+
+/// A word's local sum of a group that its record refuses at the bound is
+/// taken again row by row, its integers of 19 digits among them: from a
+/// state 10^20 short of the bound, eleven values of 9 × 10^18 still fit and
+/// the twelfth and later go to the rest.
+#[test]
+fn a_local_sum_refused_at_the_bound_takes_its_integers_again() -> Result<()> {
+    let config = TableConfig {
+        nkeys: 1,
+        payload_size: 8 + 8 * SumState::WORDS,
+    };
+    let nrows = 64;
+    let keys = vec![7_i32; nrows];
+    let key_column = [ColumnView::try_new(&keys, None)?];
+    let hashes: Vec<u32> = keys.iter().map(|&key| hash_i32(key)).collect();
+    let mut table = OwnedTable::new(&config, 256, CHUNK_HEADER + 64 * 128)?;
+    let (offsets, _) = resolve_all(&mut table, &hashes, &KeyColumns(&key_column))?;
+    let start = SumState {
+        sum: decimal::Sum {
+            value: decimal::SUM_BOUND - 100_000_000_000_000_000_000,
+            scale: 0,
+            count: 1,
+        },
+        ..SumState::default()
+    };
+    let words = |table: &mut OwnedTable| -> Result<[u64; SumState::WORDS]> {
+        let mut writer = table.table_mut()?;
+        let payload = writer.payload_mut(offsets[0])?;
+        Ok(std::array::from_fn(|word| {
+            u64::from_ne_bytes(payload[8 + 8 * word..16 + 8 * word].try_into().unwrap())
+        }))
+    };
+    {
+        let mut writer = table.table_mut()?;
+        let payload = writer.payload_mut(offsets[0])?;
+        for (word, value) in start.to_words().into_iter().enumerate() {
+            payload[8 + 8 * word..16 + 8 * word].copy_from_slice(&value.to_ne_bytes());
+        }
+    }
+    let value = 9_000_000_000_000_000_000_i64;
+    let terms = TermColumn {
+        terms: vec![Term::Integer(value); nrows],
+        bulk: Some(0),
+    };
+    let all = all_rows(nrows);
+    let rows = RowMaskView::try_new(nrows, &all)?;
+    let mut rest = [0_u64];
+    let mut slots = [SumSlot {
+        terms: &terms,
+        at: 8,
+        rest: RowMask::try_new(nrows, &mut rest)?,
+    }];
+    accumulate::sum_terms(&mut table.table_mut()?, &offsets, &rows, &mut slots)?;
+    assert_eq!(rest, [!((1_u64 << 11) - 1)], "the twelfth row and later");
+    let state = SumState::from_words(words(&mut table)?);
+    assert_eq!(state.sum.value, start.sum.value + 11 * i128::from(value));
+    assert_eq!(state.sum.count, 12);
     Ok(())
 }
 

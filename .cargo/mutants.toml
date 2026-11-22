@@ -14,8 +14,9 @@
 # the model table (table/loom/) compile only with --cfg loom, which a
 # mutant's build lacks: each of their mutants would survive unseen. So do
 # the proofs by Kani (the table's table/proofs.rs, the float casts'
-# float/proofs.rs, the date bound's calendar/proofs.rs, the word walks'
-# reader/proofs.rs and column/proofs.rs, the sort key's sort/proofs.rs,
+# float/proofs.rs, the integer sums' decimal/proofs.rs, the date bound's
+# calendar/proofs.rs, the word walks' reader/proofs.rs and
+# column/proofs.rs, the sort key's sort/proofs.rs,
 # the divisors' int32/divisor/proofs.rs and int64/divisor/proofs.rs, and
 # every proofs.rs of relspill, and datum-arrow's proofs.rs), built only
 # under Kani.
@@ -32,6 +33,7 @@ exclude_globs = [
     "crates/tessera-capi/src/column/proofs.rs",
     "crates/tessera-core/src/reader/proofs.rs",
     "crates/tessera-kernels/src/calendar/proofs.rs",
+    "crates/tessera-kernels/src/decimal/proofs.rs",
     "crates/tessera-kernels/src/float/proofs.rs",
     "crates/tessera-kernels/src/int32/divisor/proofs.rs",
     "crates/tessera-kernels/src/int64/divisor/proofs.rs",
@@ -62,6 +64,13 @@ exclude_globs = [
 # their hash of groups 18 slots for 32 leaves every sum and rest as it
 # was. Two of these read as mutants the tests catch, so their place
 # names them.
+# SumState::add_to takes a decimal of the state's scale, or an integer
+# into a state at scale 0, in its words without decoding the state, for
+# speed alone: the decoded state takes the same. The mask of the scale of
+# its integer's path turned to | or ^, which never matches, sends every
+# integer the decoded way and leaves every sum and rest as it was.
+# SumState::add_in_place joins the state's two words, the high one
+# shifted past the low: they share no bit, so | is ^.
 # The first word of a batch decides whether cast, count, the int
 # aggregates, arithmetic, comparison, the hashes and the filter read
 # whole words of a column's storage or its rows one by one, and each
@@ -171,7 +180,7 @@ exclude_re = [
     "delete match arm Term::Null in sum_terms$",
     "replace match guard decimal\\.scale\\(\\) <= .* with false in sum_terms$",
     "replace <= with > in sum_terms$",
-    "accumulate\\.rs:399:50: replace \\|\\| with && in sum_terms$",
+    "accumulate\\.rs:400:50: replace \\|\\| with && in sum_terms$",
     "accumulate\\.rs:[0-9]+:[0-9]+: replace \\* with \\+$",
     "cast\\.rs:7[34]:[0-9]+: replace (&& with \\|\\||>= with <) in int4_to_int8$",
     "count\\.rs:40:[0-9]+: replace >= with < in count$",
@@ -195,7 +204,9 @@ exclude_re = [
     "delete match arm \\(ArithOp::((Add|Sub), _|(Div|Mod), Some\\(divisor\\))\\) in <impl IntLane for i64>::arith_block$",
     "replace \\| with \\^ in (Place::reference|Cursor::at)$",
     "table/writer\\.rs:(234|282):[0-9]+: replace \\| with \\^ in resolve_rows$",
-    "decimal\\.rs:1511:41: replace \\| with \\^ in read_with$",
+    "decimal\\.rs:1542:41: replace \\| with \\^ in read_with$",
+    "decimal\\.rs:1228:25: replace & with [|^] in SumState::add_to$",
+    "replace \\| with \\^ in SumState::add_in_place$",
     "replace OwnedTable::chunk_is_empty -> Result<bool> with Ok\\(false\\)$",
     "replace Access<'r, R>::room -> Result<\\(usize, usize\\)> with ",
     "replace (prefetch|<impl Region for RawRegion>::prefetch(_record)?|Access<'r, R>::prefetch_(bucket|record)) with \\(\\)$",

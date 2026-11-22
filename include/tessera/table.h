@@ -743,10 +743,10 @@ typedef struct TessTableSumArg
 /*
  * Fold each selected row of rows into the sum states of the payload of its
  * record, the offset in offsets from tess_table_find_or_insert, the record
- * found once a row for all nsums sums: a decimal (an integer at scale 0)
- * into the sum and the count, NaN or an infinity into its bit, NULL
- * skipped. A row a state does not take, a numeric not read in place or of
- * more than 18 digits or a display scale past 18, or one the sum would
+ * found once a row for all nsums sums: a decimal, or an integer of any size
+ * at scale 0, into the sum and the count, NaN or an infinity into its bit,
+ * NULL skipped. A row a state does not take, a numeric not read in place or
+ * of more than 18 digits or a display scale past 18, or one the sum would
  * carry to its bound, is set in that sum's rest, whose other bits are
  * cleared, for the caller to add by the core's means. One writer, as for
  * the other grouping calls. When a sum's column holds partial states

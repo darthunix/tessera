@@ -34,7 +34,7 @@ one pull request; the work and the close are a second.
       stays. Tests: a state of `i128::MIN` refused on the way in, from
       C and from bytes. Check: `cargo test --locked -p tessera-kernels
       -p tessera-capi`
-- [ ] 3.2 `Integers` hands over every non-NULL value in bulk, and the
+- [x] 3.2 `Integers` hands over every non-NULL value in bulk, and the
       promise of `Terms::fold_decimals` and `DecimalWord` says so;
       `Term` gets the variant of an integer past 18 digits, which
       `Integers::term` gives and every place the design lists takes;
