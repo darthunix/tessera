@@ -92,12 +92,13 @@ one pull request; the work and the close are a second.
 
 ## 5. The measurement
 
-- [ ] 5.1 The runs of the design's measurement plan, on the
-      maintainer's word: the family `spill`, the counts of the path
-      that fits against `main`, and ClickBench Q9 and Q10 on a local
-      merge with the branch of `parquet-fdw`. The runs kept in
-      `docs/benchmarks/`, as `docs/measuring.md` says. Check: the
-      thresholds of the plan, or the finding that stops the work
+- [ ] 5.1 The runs of the design's measurement plan, on the maintainer's
+      word, by the cycles and instructions pg_pmu counts: the family
+      `spill`, the counts of the path that fits against `main`, and
+      ClickBench Q9 and Q10 on a local merge with the branch of
+      `parquet-fdw`. The runs kept in `docs/benchmarks/`, as
+      `docs/measuring.md` says. Check: the thresholds of the plan, or
+      the finding that stops the work
 
 ## 6. The close
 

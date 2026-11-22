@@ -260,10 +260,14 @@ state of the code that shapes the design.
 ## Measurement plan
 
 Rules of docs/measuring.md: a release build, an idle machine on the
-maintainer's word, five minutes a run at most.
+maintainer's word, five minutes a run at most. Every run counts the
+cycles that pg_pmu counts of an execution, with its instructions, and
+takes no times. EXPLAIN ANALYZE counts the rows of a row-wise node one
+by one, so the core's counts carry their instrumentation.
 
 1. **The family `spill` of `bench/pg`**, new cases, Tessera on against
-   the core at `work_mem` 4, 16 and 64 MB:
+   the core by cycles (`run.sh` with `METRIC=cycles`) at `work_mem` 4,
+   16 and 64 MB:
    - `count(DISTINCT v)` of a `bigint` by an `integer` of 1000 groups,
      whose pairs pass `hash_mem` at 4 and 16 MB and fit at 64 MB;
    - its twin with `sum` and `avg` of a `smallint` beside it;
@@ -280,25 +284,26 @@ maintainer's word, five minutes a run at most.
    Threshold: a ratio below 1 in every case at every `work_mem`. The
    disk each case writes is kept with its plans, the copies of pairs
    seen often among them.
-2. **The path that fits**, by `cargo ab measure --counters` against
-   `main`, with task 4.1 and again at the end: the new cases at 64 MB,
-   where their pairs fit, and the case of groups thought more than they
-   are at 16 MB. Threshold: instructions within 1 %, or fewer.
-3. **ClickBench Q9 and Q10** by `cargo clickbench`, on a local build of
-   the branch of `parquet-fdw` merged with this one, never pushed: the
-   ten files and `hits.parquet`, at 0 and 8 workers, Tessera on, off
-   and pg_duckdb. Thresholds: Tessera on beats off on Q9 and Q10 over
-   both at 0 and 8 workers, Q10 over the ten files at 8 workers among
-   them, the criterion that stage 2 missed. Expected over
-   `hits.parquet`: on at least twice as fast as stage 2's 20.3 and
-   22.6 s serially, since the core sorted every row there; DuckDB
-   still faster.
+2. **The path that fits**, by `cargo ab measure --counters` and
+   `--counters --cycles` against `main`: the new cases at 64 MB, where
+   their pairs fit, and the case of groups thought more than they are
+   at 16 MB. Threshold: the tool's flag of 1 % past the control, for
+   instructions and for cycles.
+3. **ClickBench Q9 and Q10** by `cargo clickbench` with its counts, on
+   a local build of the branch of `parquet-fdw` merged with this one,
+   never pushed: the ten files and `hits.parquet`, at 0 and 8 workers,
+   Tessera on, off and pg_duckdb. Thresholds: Tessera on takes fewer
+   cycles than off on Q9 and Q10 over both at 0 and 8 workers, Q10 over
+   the ten files at 8 workers among them, the criterion that stage 2
+   missed. Expected over `hits.parquet`: on at most half of stage 2's
+   cycles of the core's sort; DuckDB still fewer.
 
 ## Decisions of the maintainer
 
 - 2026-11-22: fix both causes of Q10 going to the core, the gate of
   the groups and the set that does not spill, in a change of its own
   off `main`.
+- 2026-11-22: the runs count cycles with pg_pmu, not times.
 - 2026-11-22: the estimate of the groups weighs in the freeze of a set
   only where the planner gave the node a grouping whose pairs do not
   fit by the estimate; where they fit, a set freezes by the memory the
