@@ -305,8 +305,9 @@ all_held(const uint64 *rows, const uint64 *held)
 /*
  * Makes the values of the rows `need` of the batch's column `column`, the
  * scan's column `c`: the batch's window read where the column's reader
- * does not hold those rows, forward where the window follows the last
- * forward one or is the first, and for those rows alone otherwise.
+ * does not hold those rows, forward where the window starts at the last
+ * forward one's end or after it, or is the first, and for those rows
+ * alone behind it.
  */
 static void
 make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
@@ -329,7 +330,8 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 		rows[offset / 64 + 1] |= need >> (64 - offset % 64);
 	if (col->window != window || !all_held(rows, col->held))
 	{
-		bool		forward = col->forward_end == NO_WINDOW || col->forward_end == window;
+		/* As the reader decides: a window after a gap is read forward. */
+		bool		forward = col->forward_end == NO_WINDOW || col->forward_end <= window;
 
 		memset(col->held, 0, sizeof(col->held));
 		if (!tess_parquet_read(reader, window, len, rows, (len + 63) / 64, col->held,

@@ -167,9 +167,17 @@ it, keeps one reader that goes forward over the group with its
 selection, so that each page is decompressed and the dictionary decoded
 once a group; its arrays hold a fixed count of selected rows, so it may
 read into the next window, and keeps what it read past the window for
-the next ask. An ask out of that order, a window after a gap or one
-already passed, as a top-N sort asks for the rows it kept, builds a
-reader for that window and the rows asked: it decodes the dictionary
+the next ask. A window after a gap, past windows no consumer asked for,
+as when a clause above the scan passes no row of a window, builds the
+forward reader anew from that window, which skips the pages of the gap;
+the windows after it are forward again, read once each. The new reader
+decodes the dictionary again, walks the headers of the pages before the
+window and decompresses the page under its start again, so a clause
+above the scan that passes rows in scattered windows pays that for each
+window asked; the measurement of stage 2 weighs it against reading a
+short gap and dropping its rows. An ask behind the forward reader, a
+window already passed, as a top-N sort asks for the rows it kept, builds
+a reader for that window and the rows asked: it decodes the dictionary
 again and walks the headers of the pages before the window, but
 decompresses only the pages that hold the rows. A window no consumer
 asks a column for is never read for it. A clause's column a consumer
@@ -187,6 +195,12 @@ Refused:
 - **The crate's array readers, which read and skip forward.** They sit
   behind its feature `experimental`, which brings the crates of the
   `variant` type.
+- **A reader for the rows asked after a gap.** Each batch of the windows
+  after it would build one and decompress its page again, so that a
+  clause above the scan that passes no row of one early window would
+  leave the rest of the group read 64 rows at a time. Nor is the gap
+  read and dropped: that decodes what no one asked for, where a new
+  forward reader skips it.
 - **A reader for each column and window.** Each reader starts at the
   chunk's start: over a scan in full it would decode the dictionary and
   decompress the page under each window boundary once a window.
