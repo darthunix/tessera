@@ -6,9 +6,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use crate::compare::Kind::{self, Exact, Ratio, Sum};
-use crate::compare::Shape;
 use crate::config::Scale;
+use tessera_pgtool::compare::Kind::{self, Exact, Ratio, Sum};
+use tessera_pgtool::compare::Shape;
 
 /// A query of TPC-H.
 #[derive(Debug)]
