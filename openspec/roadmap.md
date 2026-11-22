@@ -49,32 +49,34 @@ types between PostgreSQL and Arrow, `types-crate`, as a crate of its
 own, before `parquet-fdw` (done, the crate `datum-arrow`). On
 2026-11-22 the maintainer took `agg-int128` out of turn, after a
 profile of ClickBench's query 4 on the branch of `parquet-fdw`, to be
-done first:
+done first, and the same day `agg-distinct-spill` after it, a finding
+of stage 2 of ClickBench on that branch:
 
 1. `agg-int128`: `sum` and `avg` of `bigint` values of 19 digits in the
    kernels' 128-bit sum
-2. `whole-word-decisions`: When and where a driver takes a word whole,
+2. `agg-distinct-spill`: A grouping's DISTINCT set past `hash_mem`
+3. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+4. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-4. `explain-rows-per-loop`: The rows a node removed, per loop as the
+5. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-5. `join-pruning-cost`: The cost of a pruning join over the partitions
+6. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+7. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-7. `linux-x86-support`: Linux on x86-64 checked as the target platform
-8. `oltp-guard-bench`: OLTP guard family of benchmarks
-9. `runs-left-from-section-9`: Runs left to the maintainer from
-   section 9
-10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+8. `linux-x86-support`: Linux on x86-64 checked as the target platform
+9. `oltp-guard-bench`: OLTP guard family of benchmarks
+10. `runs-left-from-section-9`: Runs left to the maintainer from
+    section 9
+11. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+12. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+13. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-13. `tpch-sf10`: TPC-H step 10: SF10
-14. `backward-scan-mark-restore`: Backward scan and mark/restore
-15. `pg-duckdb-comparison`: Comparison with pg_duckdb
+14. `tpch-sf10`: TPC-H step 10: SF10
+15. `backward-scan-mark-restore`: Backward scan and mark/restore
+16. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -211,6 +213,28 @@ ClickBench's query 4 on the branch of `parquet-fdw`; it is the change
 - **Depends on:** nothing.
 - **Capabilities:** aggregate, kernel-abi
 - **Size:** small: one pull request after the proposal.
+
+### agg-distinct-spill
+
+A grouping's DISTINCT set past `hash_mem`. The maintainer took it on
+2026-11-22, after stage 2 of ClickBench on the branch of `parquet-fdw`;
+it is the change `agg-distinct-spill`.
+
+- **What:** The gate of a grouping with a DISTINCT aggregate weighs its
+  groups by the planner's estimate; the DISTINCT set of an argument a
+  word holds stops taking pairs past `hash_mem` and writes the pairs it
+  lacks to disk, read back by partition into their groups.
+- **Why:** ClickBench's Q9 and Q10, `count(DISTINCT UserID)` by
+  `RegionID`, go to the core's sort over `hits.parquet`, 469 and 532
+  billion instructions serially, 9 to 33 times DuckDB's time; Q10 goes
+  there over ten files too, by a gate that never passes, and lost to
+  Tessera off at 8 workers, 2.03 s against 1.17.
+- **Known:** The design of the change. The groups of such a grouping
+  stay in memory; a set a dictionary numbers and the set without
+  `GROUP BY` keep the gate of the pairs.
+- **Depends on:** nothing.
+- **Capabilities:** table-memory
+- **Size:** medium: one pull request after the proposal.
 
 ### agg-dependent-columns
 
