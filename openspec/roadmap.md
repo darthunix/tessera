@@ -2425,9 +2425,27 @@ becomes an entry, joins one, or is dropped.
   choose it over a Parquet scan before the core's parallel plan, workers
   sorting their share under a Gather Merge. ClickBench's Q6 over
   `hits.parquet` at 8 workers took 9.35 s with Tessera on and 8.42 s
-  off; Q5 and Q6 do not scale with workers with Tessera on. Suggested:
-  cost the serial aggregate against the partial paths' workers, or a
-  parallel distinct aggregate.
+  off; Q5 and Q6 do not scale with workers with Tessera on. In stage 2,
+  Q10 over the ten files at 8 workers, a grouped distinct count under
+  the core's sort over a serial `TessParquetScan`, took 2.03 s on and
+  1.17 s off, the stage's only query Tessera off won; and Q33, 100 M
+  groups, planned a serial `TessAgg` at 8 workers, 17.6 s against
+  DuckDB's 1.2 s. Suggested: cost the serial plans against the partial
+  paths' workers, or parallel forms of these aggregates.
+- **A grouped `COUNT(DISTINCT)` left to the core** (a finding of the
+  change `parquet-fdw`, its stage 2 measured). `TessAgg` takes
+  `COUNT(DISTINCT)` without a grouping alone, so ClickBench's Q9 and
+  Q10 sort every row by region and user in the core and aggregate in
+  its `GroupAggregate`: 469 and 532 billion instructions over
+  `hits.parquet`, 9 to 33 times DuckDB's time. Suggested: a distinct
+  aggregate of `TessAgg` by group, a set of values in each group's
+  state.
+- **`TessAgg` refuses more than 64 aggregates** (a finding of the change
+  `parquet-fdw`, its stage 2 measured). `AGG_MAX_GROUPED` caps a node's
+  aggregates at 64; ClickBench's Q30 has 90 sums and runs in the core's
+  aggregate, 704 billion instructions over `hits.parquet`, 143 times
+  DuckDB's time serially. Suggested: lift the cap, or split the
+  aggregates into nodes of 64 over one input.
 - **The workers of a Parquet scan bounded by its groups** (a finding of
   the review of the change `parquet-fdw`, task 4.3). A partial path
   takes the workers the core gives a scan of the files' size, as the
