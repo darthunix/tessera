@@ -142,6 +142,11 @@ struct RunArgs {
     /// such.
     #[arg(long, default_value_t = 300, value_name = "SECONDS")]
     deadline: u64,
+    /// Count the instructions and cycles of each query's execution with
+    /// pg_pmu instead of timing it: on one connection, once to warm up,
+    /// then a reading a try.
+    #[arg(long)]
+    counters: bool,
 }
 
 /// The repository's root, which holds the queries and the run directories.
@@ -166,9 +171,15 @@ struct Up {
 /// Brings the cluster up; with `deadline`, the build and install, and
 /// the making of the tables, stop at it.
 /// A server it started is stopped again when what follows fails, unless
-/// `keep` says otherwise.
-fn bring_up(args: &ClusterArgs, deadline: Option<Instant>, keep: bool) -> Result<Up> {
+/// `keep` says otherwise; with `pmu`, the server preloads pg_pmu.
+fn bring_up(args: &ClusterArgs, deadline: Option<Instant>, keep: bool, pmu: bool) -> Result<Up> {
     let pg = Pg::discover()?;
+    if pmu && !cluster::pmu_installed(&pg) {
+        bail!(
+            "counting needs pg_pmu in {}: https://github.com/darthunix/pg_pmu",
+            pg.pkglibdir.display()
+        );
+    }
     let paths = if args.files.is_empty() {
         vec![root().join("target/clickbench-data")]
     } else {
@@ -192,6 +203,7 @@ fn bring_up(args: &ClusterArgs, deadline: Option<Instant>, keep: bool) -> Result
         socket_dir: "/tmp".into(),
         shared_buffers: args.shared_buffers.clone(),
         duckdb,
+        pmu,
     };
     let cluster = Cluster::new(pg, &runs_dir(), settings);
     // A start may fail after the server is up, as when an extension
@@ -242,9 +254,10 @@ fn stopped(cluster: &Cluster, keep: bool, error: anyhow::Error) -> anyhow::Error
 fn with_cluster<T>(
     args: &ClusterArgs,
     deadline: Option<Instant>,
+    pmu: bool,
     work: impl FnOnce(&Up) -> Result<T>,
 ) -> Result<T> {
-    let up = bring_up(args, deadline, args.keep_running)?;
+    let up = bring_up(args, deadline, args.keep_running, pmu)?;
     let result = work(&up);
     if !up.was_running && !args.keep_running {
         up.cluster.stop()?;
@@ -260,6 +273,7 @@ fn open_run(
     modes: &[Mode],
     queries: &QueryArgs,
     timing: (u64, u64, u32),
+    counters: bool,
 ) -> Result<(RunDir, Meta)> {
     let dir = RunDir::create(&runs_dir())?;
     let mut client = up.cluster.connect()?;
@@ -285,12 +299,13 @@ fn open_run(
         duckdb: up.duckdb.clone(),
         started,
         power: tessera_pgtool::run::power(&root()),
+        counters,
         duckdb_threads: Some(queries.duckdb_threads.unwrap_or(queries.workers + 1)),
     };
     let mut source = format!(
         "HEAD {}\ncommand {command}\nmodes {}\nworkers {}\nwork_mem {}\n\
          timeout {timeout_s} s\ndeadline {deadline_s} s\ntries {tries}\n\
-         duckdb threads {:?}\n\
+         counters {counters}\nduckdb threads {:?}\n\
          pg_config {}\npostgres {}\npg_duckdb {}\nstarted {}\npower {}\nload average {}\n",
         meta.head,
         meta.modes.join(","),
@@ -321,7 +336,7 @@ fn open_run(
     dir.write("source.txt", &source)?;
     // The queries and the tables as they were run, which HEAD alone does
     // not give when the tree has changes.
-    for name in ["queries.sql", "create.sql", "view.sql"] {
+    for name in ["queries.sql", "create.sql", "view.sql", "count.sql"] {
         let path = root().join("bench/clickbench").join(name);
         dir.write(name, &std::fs::read_to_string(&path)?)?;
     }
@@ -344,6 +359,7 @@ fn settings(up: &Up, queries: &QueryArgs) -> Settings {
         work_mem: queries.work_mem.clone(),
         duckdb: up.cluster.settings.duckdb,
         duckdb_threads: queries.duckdb_threads.unwrap_or(queries.workers + 1),
+        counting: false,
     }
 }
 
@@ -363,7 +379,14 @@ fn check_command(args: &CheckArgs, up: &Up) -> Result<()> {
         bail!("mode {mode}: pg_duckdb is not installed in this build");
     }
     let all = queries::load(&root())?;
-    let (dir, meta) = open_run(up, "check", &modes, &args.queries, (args.timeout, 0, 1))?;
+    let (dir, meta) = open_run(
+        up,
+        "check",
+        &modes,
+        &args.queries,
+        (args.timeout, 0, 1),
+        false,
+    )?;
     let settings = settings(up, &args.queries);
     let timeout = Duration::from_secs(args.timeout);
     let mut sessions = modes
@@ -442,8 +465,18 @@ fn run_command(args: &RunArgs, up: &Up, deadline: Instant) -> Result<()> {
         &[args.mode],
         &args.queries,
         (args.timeout, args.deadline, args.tries),
+        args.counters,
     )?;
-    let settings = settings(up, &args.queries);
+    let settings = Settings {
+        counting: args.counters,
+        ..settings(up, &args.queries)
+    };
+    if args.counters {
+        let path = root().join("bench/clickbench/count.sql");
+        up.cluster
+            .connect()?
+            .batch_execute(&std::fs::read_to_string(&path)?)?;
+    }
     let selected: Vec<&queries::Query> = args
         .queries
         .queries
@@ -473,8 +506,9 @@ fn run_command(args: &RunArgs, up: &Up, deadline: Instant) -> Result<()> {
     drop(session);
     dir.write("plans.txt", &plans)?;
     println!(
-        "tessera-clickbench run, {}, {} tries, timeout {} s, deadline {} s",
+        "tessera-clickbench run, {}, {} {}, timeout {} s, deadline {} s",
         meta.label(),
+        if args.counters { "readings" } else { "tries" },
         args.tries,
         args.timeout,
         args.deadline
@@ -485,14 +519,20 @@ fn run_command(args: &RunArgs, up: &Up, deadline: Instant) -> Result<()> {
         tries: args.tries,
         timeout: Duration::from_secs(args.timeout),
         deadline,
+        counters: args.counters,
     };
     let times = measure::run(&up.cluster, &timing, &selected, |query, times| {
         let tries: Vec<String> = times
             .tries
             .iter()
-            .map(|one| match one.seconds {
-                Some(seconds) => format!("{seconds:.3}"),
-                None => one.outcome.clone(),
+            .map(|one| match (one.cycles, one.instructions, one.seconds) {
+                (Some(cycles), Some(instructions), _) => format!(
+                    "{:.3} Gcycles {:.3} Ginstructions",
+                    cycles as f64 / 1e9,
+                    instructions as f64 / 1e9
+                ),
+                (_, _, Some(seconds)) => format!("{seconds:.3}"),
+                _ => one.outcome.clone(),
             })
             .collect();
         println!("{:<4} {}", query.name(), tries.join("  "));
@@ -510,11 +550,18 @@ fn run_command(args: &RunArgs, up: &Up, deadline: Instant) -> Result<()> {
     let unfinished: Vec<String> = run
         .times
         .iter()
-        .filter(|times| times.hot().is_none())
+        .filter(|times| {
+            if args.counters {
+                times.median(|one| one.cycles).is_none()
+            } else {
+                times.hot().is_none()
+            }
+        })
         .map(|times| format!("Q{}", times.query))
         .collect();
     if !unfinished.is_empty() {
-        println!("not timed: {}", unfinished.join(", "));
+        let what = if args.counters { "counted" } else { "timed" };
+        println!("not {what}: {}", unfinished.join(", "));
     }
     Ok(())
 }
@@ -522,7 +569,7 @@ fn run_command(args: &RunArgs, up: &Up, deadline: Instant) -> Result<()> {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Command::Setup(args) => {
-            bring_up(&args, None, args.keep_running)?;
+            bring_up(&args, None, args.keep_running, false)?;
             println!(
                 "the server runs; psql -h /tmp -p {} {}, SET search_path = fdw or ddb, public; \
                  stop it with cargo clickbench stop",
@@ -531,12 +578,12 @@ fn main() -> Result<()> {
             );
         }
         Command::Check(args) => {
-            with_cluster(&args.cluster, None, |up| check_command(&args, up))?;
+            with_cluster(&args.cluster, None, false, |up| check_command(&args, up))?;
         }
         Command::Run(args) => {
             // The deadline bounds the whole run, its build and tables too.
             let deadline = Instant::now() + Duration::from_secs(args.deadline);
-            with_cluster(&args.cluster, Some(deadline), |up| {
+            with_cluster(&args.cluster, Some(deadline), args.counters, |up| {
                 run_command(&args, up, deadline)
             })?;
         }
@@ -562,6 +609,7 @@ fn main() -> Result<()> {
                     socket_dir: "/tmp".into(),
                     shared_buffers: args.shared_buffers.clone(),
                     duckdb,
+                    pmu: false,
                 },
             );
             if cluster.stop()? {

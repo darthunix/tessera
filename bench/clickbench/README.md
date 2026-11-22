@@ -59,7 +59,9 @@ are installed.
   and the plans; no timing, so it may run on a busy machine.
 - `cargo clickbench run --mode <on|off|duckdb>`: the times of one mode.
   Run it on an idle machine on mains power, after a check of the same
-  files.
+  files. With `--counters`, the instructions and cycles of each query
+  instead, which [pg_pmu](https://github.com/darthunix/pg_pmu) counts
+  (see "Counts").
 - `cargo clickbench report <dir>...`: a run again, or several side by
   side.
 - `cargo clickbench stop`: stop the cluster; its data stays.
@@ -164,6 +166,33 @@ query's hot time in each and its ratio to the first run's, both plus
 10 ms, and the means over the queries every run timed; below 1 is
 faster than the first run.
 
+## Counts
+
+`run --counters` reads, in place of a time, the instructions and cycles
+that pg_pmu counts while a function runs the query: its parsing,
+planning and execution, as a timed try has them, and the function's own
+small part; the backend's, its parallel workers' and, since it counts
+the whole process, the threads of DuckDB in it. The server then preloads pg_pmu, last; a run that times does not
+load it. Each query runs on one connection, once to warm it up, DuckDB's
+instance started, then once a try, each a reading:
+
+```sql
+EXPLAIN (ANALYZE, PMU, VERBOSE, TIMING off, BUFFERS off, SUMMARY off, FORMAT JSON)
+  SELECT public.bench_exec($q$<the query>$q$)
+```
+
+pg_duckdb runs a query under `EXPLAIN` only when it prints the plan,
+after the window pg_pmu counts, so its query is read through a cursor of
+PL/pgSQL, `bench_rows`; Tessera's through an `EXECUTE` of PL/pgSQL,
+`bench_exec`, which may have parallel workers; both are in `count.sql`,
+and both spare the query the counting of rows of `EXPLAIN ANALYZE`. A
+report gives each query's median of its readings, the spread of its
+cycles, the share of its parallel workers and the sums; runs side by
+side, their ratios. On macOS pg_pmu counts the kernel's work too, and
+counts with workers spread by a few percent. Counts say how much work a
+query does, not how long it takes: compare engines by cycles and time
+both.
+
 ## A run's directory
 
 `target/bench-runs/clickbench-<id>/`, which git ignores:
@@ -171,7 +200,8 @@ faster than the first run.
 - `source.txt`: the commit, the settings, the files and their sizes,
   the hashes of the installed libraries, the power source and the load;
 - `pg_settings.txt`: every setting of the server;
-- `queries.sql`, `create.sql` and `view.sql`, as they were run;
+- `queries.sql`, `create.sql`, `view.sql` and `count.sql`, as they were
+  run;
 - `results.txt` and `plans-<mode>.txt` of a check, `times.csv`,
   `plans.txt` and `summary.txt` of a run;
 - `run.json`: all of it, which `report` reads.

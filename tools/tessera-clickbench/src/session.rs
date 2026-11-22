@@ -74,6 +74,9 @@ pub struct Settings {
     /// DuckDB's threads in the mode duckdb, set before its instance
     /// starts at the connection's first query of DuckDB.
     pub duckdb_threads: u32,
+    /// Whether the run counts, reading its queries inside a function,
+    /// which pg_duckdb then has to be allowed to run them in.
+    pub counting: bool,
 }
 
 impl Settings {
@@ -98,6 +101,10 @@ impl Settings {
         }
         if mode == Mode::Duckdb {
             text.push_str(&format!("; SET duckdb.threads = {}", self.duckdb_threads));
+            if self.counting {
+                // The functions of a counting run read the query inside them.
+                text.push_str("; SET duckdb.unsafe_allow_execution_inside_functions = on");
+            }
         }
         text
     }
@@ -196,6 +203,7 @@ mod tests {
             work_mem: "64MB".into(),
             duckdb: true,
             duckdb_threads: 5,
+            counting: false,
         };
         let timeout = Duration::from_secs(60);
         assert_eq!(
@@ -214,6 +222,14 @@ mod tests {
                 .statements(Mode::Duckdb, timeout)
                 .ends_with("SET duckdb.force_execution = on; SET duckdb.threads = 5")
         );
+        let counting = Settings {
+            counting: true,
+            ..settings.clone()
+        };
+        assert!(counting.statements(Mode::Duckdb, timeout).ends_with(
+            "SET duckdb.threads = 5; SET duckdb.unsafe_allow_execution_inside_functions = on"
+        ));
+        assert!(!counting.statements(Mode::On, timeout).contains("unsafe"));
         let plain = Settings {
             duckdb: false,
             ..settings
