@@ -6,8 +6,10 @@
 //! that each page is decompressed and the dictionary decoded once a group;
 //! its arrays hold a fixed count of selected rows, so it may read into the
 //! next window, and it keeps what it read past the window for the next
-//! ask. An ask out of that order builds a reader of its own for the rows
-//! asked, and leaves the forward one as it was.
+//! ask. A window after a gap, past windows no one asked for, builds the
+//! forward reader anew from the window, which skips the pages of the gap.
+//! An ask behind it builds a reader of its own for the rows asked, and
+//! leaves the forward one as it was.
 
 use std::fs::File;
 use std::io::{self, Read};
@@ -203,11 +205,12 @@ impl ColumnReader {
 
     /// Reads the window of `len` rows from the group's row `start`.
     ///
-    /// Where the window starts where the last forward window ended, or is
-    /// the first asked, the forward reader gives every selected row of the
-    /// window; otherwise a reader of its own gives the rows `rows` asks, a
-    /// mask over the window's rows that the selection holds. The file is
-    /// checked unchanged after the read.
+    /// Where the window starts where the last forward window ended or
+    /// after it, or is the first asked, the forward reader gives every
+    /// selected row of the window, built anew from the window after a gap;
+    /// otherwise, for a window behind it, a reader of its own gives the
+    /// rows `rows` asks, a mask over the window's rows that the selection
+    /// holds. The file is checked unchanged after the read.
     ///
     /// # Errors
     ///
@@ -235,7 +238,7 @@ impl ColumnReader {
         }
         let forward = match &self.forward {
             None => true,
-            Some(f) => f.next == start,
+            Some(f) => f.next <= start,
         };
         // No failure of an earlier read is this one's.
         let _ = self.shared.take_failure();
@@ -274,6 +277,11 @@ impl ColumnReader {
     }
 
     fn forward_read(&mut self, start: usize, end: usize, count: usize) -> Result<ArrayRef> {
+        // After a gap the reader starts again at the window: reading the
+        // gap's rows to drop them would decode what no one asked for.
+        if self.forward.as_ref().is_some_and(|f| f.next != start) {
+            self.forward = None;
+        }
         if self.forward.is_none() {
             let selection = selectors(&self.selection, start, self.rows);
             let reader = self.build(selection, self.batch)?;
