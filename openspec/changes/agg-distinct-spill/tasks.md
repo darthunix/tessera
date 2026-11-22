@@ -74,7 +74,7 @@ one pull request; the work and the close are a second.
       `openspec/specs/table-memory/design.md` updated. The commit says
       why it is not split if it passes 500 lines. Check:
       `make installcheck`
-- [ ] 4.3 EXPLAIN counts the pairs' partitions and disk in `Batches`
+- [x] 4.3 EXPLAIN counts the pairs' partitions and disk in `Batches`
       and `Disk Usage`, and VERBOSE shows `Spilled Pairs`. Tests: the
       EXPLAIN of the scenarios "Pairs past the limit" and "A partition
       read back past the limit". Check: `make installcheck`

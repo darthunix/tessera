@@ -72,6 +72,8 @@ enum
 	AGG_EARLY,
 	/* Generic states past hash_mem: the rows sent to partitions on disk. */
 	AGG_SPILLED_ROWS,
+	/* DISTINCT sets past hash_mem: the pairs sent to partitions on disk. */
+	AGG_SPILLED_PAIRS,
 	/* The input rows copied into gathered batches. */
 	AGG_GATHERED,
 	AGG_NCOUNTERS
@@ -1070,6 +1072,7 @@ agg_counters(TessAggState *state, uint64 *values)
 	values[AGG_SPLITS] = state->splits;
 	values[AGG_EARLY] = state->early_emits;
 	values[AGG_SPILLED_ROWS] = state->spilled_rows;
+	values[AGG_SPILLED_PAIRS] = state->spilled_pairs;
 }
 
 /* The totals of every participant in a parallel plan, else the node's own. */
@@ -1140,6 +1143,8 @@ agg_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 			ExplainPropertyInteger("Spilled Chunks", NULL, totals[AGG_SPILLED], es);
 			if (totals[AGG_SPILLED_ROWS] > 0)
 				ExplainPropertyInteger("Spilled Rows", NULL, totals[AGG_SPILLED_ROWS], es);
+			if (totals[AGG_SPILLED_PAIRS] > 0)
+				ExplainPropertyInteger("Spilled Pairs", NULL, totals[AGG_SPILLED_PAIRS], es);
 			if (totals[AGG_SPLITS] > 0)
 				ExplainPropertyInteger("Split Partitions", NULL, totals[AGG_SPLITS], es);
 		}

@@ -101,14 +101,16 @@ pairs of a partition that no bit of their hash is left to split.
   `Spilled Pairs` are above 0, its Memory Usage is within 4 MB and the
   512 kB its level's tail chunks and write buffer take, and its rows
   are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Pairs past the limit`
 
 #### Scenario: A partition read back past the limit
 - **WHEN** the pairs of one partition written by a set are more than
   `hash_mem` holds
 - **THEN** `Batches` is above 32, the partitions of one set's first
   level, and the rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/A partition read back past the limit`
 
 #### Scenario: Aggregates through the spill
 - **WHEN** `count`, `sum`, `avg`, `min` and `max` with DISTINCT of

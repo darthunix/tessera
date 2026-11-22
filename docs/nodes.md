@@ -1002,7 +1002,10 @@ in the one partition its hash names. When the groups alone pass seven
 eighths of `hash_mem` once the input is read, the sets read back are
 read as of the last level, and grow past `hash_mem` rather than freeze
 at 64 pairs level after level. Any other set grows past `hash_mem` if
-it must. `Memory Usage` shows the sets, their writers and readers.
+it must. `Memory Usage` shows the sets, their writers and readers;
+`Batches` and `Disk Usage` count the pairs' partitions and bytes with the
+others', and `EXPLAIN (ANALYZE, VERBOSE)` shows `Spilled Pairs`, the
+pairs written.
 
 `UNION` without `ALL` is grouping of the branches' rows by every column:
 at the set operation stage (`UPPERREL_SETOP`) the node's path stands next

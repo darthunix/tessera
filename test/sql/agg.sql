@@ -669,6 +669,20 @@ DROP TABLE agg_groups;
 -- planner thinks the pairs fit; 100 groups, 400 000 pairs in 500 000
 -- rows, a set several times hash_mem.
 CREATE TABLE agg_dspill (g int, v bigint, w int, s int2, t text) WITH (autovacuum_enabled = off);
+-- Whether TessAgg wrote to disk, and pairs among what it wrote.
+CREATE FUNCTION agg_pairs(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+    disk boolean := false;
+    pairs boolean := false;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        disk := disk OR line ~ 'Disk Usage: [1-9]';
+        pairs := pairs OR line ~ 'Spilled Pairs: [1-9]';
+    END LOOP;
+    RETURN format('disk: %s, pairs spilled: %s', disk, pairs);
+END $$;
 INSERT INTO agg_dspill SELECT i % 100, i % 10, i % 7, i % 9, 't' || i % 3 FROM generate_series(1, 1000) AS i;
 ANALYZE agg_dspill;
 INSERT INTO agg_dspill
@@ -677,7 +691,13 @@ FROM generate_series(1, 500000) AS i;
 SET work_mem = '4MB';
 SET hash_mem_multiplier = 1;
 EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g;
+-- Its partitions, the disk they took and the pairs they hold, and its
+-- memory within hash_mem and the 512 kB its level's tail chunks and
+-- write buffer take.
+-- spec: table-memory/Pairs past the limit
 SELECT agg_spill($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$);
+SELECT agg_pairs($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$);
+SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) <= 4096 + 512 AS within;
 SELECT agg_same($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
 -- Every aggregate the node takes with DISTINCT, two sets and a FILTER,
 -- NULL arguments, a generic aggregate and a sum state beside them; at
@@ -686,6 +706,11 @@ SELECT agg_same($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) NOT 
 -- spec: table-memory/Aggregates through the spill
 SELECT agg_same($$SELECT g, count(DISTINCT v), sum(DISTINCT w), avg(DISTINCT w), min(DISTINCT v), max(DISTINCT v), count(DISTINCT w) FILTER (WHERE s > 500), max(t), sum(s) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
 SET work_mem = '256kB';
+-- A partition of one set past the limit: its first level's 32
+-- partitions, and a level below.
+-- spec: table-memory/A partition read back past the limit
+SELECT agg_spill($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$);
+SELECT agg_same($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
 SELECT agg_spill($$SELECT g, count(DISTINCT v), sum(DISTINCT w) FROM agg_dspill GROUP BY g$$);
 SELECT agg_same($$SELECT g, count(DISTINCT v), sum(DISTINCT w) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
 -- A text set, which does not spill, emptied with the others once the
@@ -723,6 +748,7 @@ SELECT agg_same($$SELECT count(*), sum(n), max(n) FROM (SELECT g, count(DISTINCT
 RESET work_mem;
 RESET hash_mem_multiplier;
 DROP TABLE agg_dspill, agg_dlate;
+DROP FUNCTION agg_pairs(text);
 -- In a parallel plan: each participant's partial state, the core's
 -- serialized where the state is internal and the node does not fold it
 -- (the node's own format for numeric sums), for the node's final
