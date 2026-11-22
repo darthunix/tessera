@@ -99,9 +99,10 @@ node, in C, since PostgreSQL's interfaces for a wrapper, a custom scan
 and errors are C. The files are read by a Rust crate of the workspace,
 `crates/tessera-parquet`, linked into the module as a static library,
 with its entry points in a header of the module; it uses `datum-arrow`
-for every conversion of a value. The module uses the public C API of
-Tessera alone (the contract of `source-scan`), so that it builds against
-the installed headers as a module of another extension would.
+for every conversion of a value, and `tessera-kernels` for the pattern
+of LIKE alone (below). The module uses the public C API of Tessera alone
+(the contract of `source-scan`), so that it builds against the installed
+headers as a module of another extension would.
 
 Refused:
 
@@ -569,12 +570,24 @@ On 2026-11-21, with `source-scan` open:
 - A Parquet entry of ClickBench, like pg_duckdb's, is marked `stateless`
   and stays in the category Challenger.
 
+On 2026-11-22, in the review of the clauses on strings:
+
+- The reader takes the pattern of LIKE from `tessera-kernels`, a crate
+  not meant for use outside Tessera, so that the source and `TessFilter`
+  match a string by one rule. Was: the rule "Only the public C API"
+  promised a module built against the installed headers and its own
+  reader alone. Will be: the rule names that crate as its one exception,
+  until the pattern moves to a crate meant for use outside Tessera, an
+  entry of the roadmap. Why: a copy of the pattern in the reader would
+  keep one rule in two places; the move is work of its own.
+
 ## Was and will be
 
 - **Foreign tables in batches.** Was: the test source alone. Will be:
   Parquet files through `tessera_parquet`.
 - **The workspace.** Was: `datum-arrow` and its `arrow-schema`. Will be:
-  also the crate `tessera-parquet` and its dependency `parquet`.
+  also the crate `tessera-parquet` and its dependency `parquet`; it
+  takes `tessera-kernels` for the pattern of LIKE.
 - **Measuring ClickBench.** Was: scripts of one run in
   `target/bench-runs`. Will be: `cargo clickbench`.
 - **The nodes, the runtime and the bridge.** Was and will be the same.

@@ -2401,6 +2401,14 @@ becomes an entry, joins one, or is dropped.
   Both causes are read from the code and the plans, not traced in the
   planner. Suggested: count the groups of that gate by the planner's estimate,
   as the distinct gate does, and a table of pairs that spills.
+- **The pattern of LIKE in a crate meant for use outside Tessera** (a
+  decision of the review of the change `parquet-fdw`, task 6.1). The
+  Parquet reader takes `Like` from `tessera-kernels`, so that the source
+  and `TessFilter` match a string by one rule; the contract's rule
+  "Only the public C API" of the Parquet module names that crate as its
+  one exception, the boundary between the module and Tessera's own
+  crates. Suggested: move `Like` with its search into a crate meant for
+  use outside Tessera that both take, and drop the exception.
 - **`TessAgg` refuses more than 64 aggregates** (a finding of the change
   `parquet-fdw`, its stage 2 measured). `AGG_MAX_GROUPED` caps a node's
   aggregates at 64; ClickBench's Q30 has 90 sums and runs in the core's
