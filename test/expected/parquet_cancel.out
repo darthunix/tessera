@@ -90,14 +90,15 @@ SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_group;
  t
 (1 row)
 
--- Under a clause the source checks that passes no row, the cancel comes
--- in the pass over the clause's column, before the group is selected.
-EXPLAIN (COSTS OFF) SELECT count(*) FROM t_million WHERE i < 0;
+-- Under a clause the source checks whose only row is the last, which the
+-- footer cannot rule out, the cancel comes in the pass over the clause's
+-- column, before the group is selected.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM t_million WHERE i > 999998;
                     QUERY PLAN                    
 --------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessParquetScan) on t_million
-         Source Exact: (i < 0)
+         Source Exact: (i > 999998)
          Parquet Files: 1
          Row Groups: 1
 (5 rows)
@@ -109,7 +110,7 @@ SELECT parquet_test_cancel_after(:'parquet_module', 1);
 (1 row)
 
 \set VERBOSITY sqlstate
-SELECT count(*) FROM t_million WHERE i < 0;
+SELECT count(*) FROM t_million WHERE i > 999998;
 ERROR:  57014
 \set VERBOSITY default
 SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_pass;

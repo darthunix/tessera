@@ -603,6 +603,14 @@ parquet_scan_unshare(ParquetScan *scan)
 	scan->shared = NULL;
 }
 
+/* The group started is skipped, not read: counted so. */
+void
+parquet_scan_skip_group(ParquetScan *scan)
+{
+	scan->own[PARQUET_GROUPS_READ]--;
+	scan->own[PARQUET_GROUPS_SKIPPED]++;
+}
+
 /* For EXPLAIN: the counters of every participant, or this scan's own. */
 const uint64 *
 parquet_scan_counts(const ParquetScan *scan)
