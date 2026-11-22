@@ -91,6 +91,10 @@ struct QueryArgs {
     /// work_mem.
     #[arg(long, default_value = "64MB", value_name = "SIZE")]
     work_mem: String,
+    /// DuckDB's threads in the mode duckdb [default: --workers + 1, the
+    /// processes of a parallel plan of PostgreSQL].
+    #[arg(long, value_name = "THREADS", value_parser = clap::value_parser!(u32).range(1..))]
+    duckdb_threads: Option<u32>,
 }
 
 /// The modes of a check, in the order of [`Mode::ALL`].
@@ -281,15 +285,18 @@ fn open_run(
         duckdb: up.duckdb.clone(),
         started,
         power: tessera_pgtool::run::power(&root()),
+        duckdb_threads: Some(queries.duckdb_threads.unwrap_or(queries.workers + 1)),
     };
     let mut source = format!(
         "HEAD {}\ncommand {command}\nmodes {}\nworkers {}\nwork_mem {}\n\
          timeout {timeout_s} s\ndeadline {deadline_s} s\ntries {tries}\n\
+         duckdb threads {:?}\n\
          pg_config {}\npostgres {}\npg_duckdb {}\nstarted {}\npower {}\nload average {}\n",
         meta.head,
         meta.modes.join(","),
         meta.workers,
         meta.work_mem,
+        meta.duckdb_threads,
         up.cluster.pg.pg_config.display(),
         meta.postgres,
         meta.duckdb.as_deref().unwrap_or("none"),
@@ -336,6 +343,7 @@ fn settings(up: &Up, queries: &QueryArgs) -> Settings {
         workers: queries.workers,
         work_mem: queries.work_mem.clone(),
         duckdb: up.cluster.settings.duckdb,
+        duckdb_threads: queries.duckdb_threads.unwrap_or(queries.workers + 1),
     }
 }
 

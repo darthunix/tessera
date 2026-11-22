@@ -35,13 +35,22 @@ pub struct Meta {
     pub duckdb: Option<String>,
     pub started: String,
     pub power: String,
+    /// DuckDB's threads in the mode duckdb; none in a run recorded before
+    /// the tool set them, which ran with DuckDB's default.
+    #[serde(default)]
+    pub duckdb_threads: Option<u32>,
 }
 
 impl Meta {
     /// A short name for a column of the report.
     pub fn label(&self) -> String {
+        let threads = match self.duckdb_threads {
+            _ if !self.modes.iter().any(|mode| mode == "duckdb") => String::new(),
+            Some(threads) => format!(" t{threads}"),
+            None => " t default".into(),
+        };
         format!(
-            "{} w{} ({} file{})",
+            "{} w{}{threads} ({} file{})",
             self.modes.join(","),
             self.workers,
             self.files.len(),
@@ -235,6 +244,7 @@ mod tests {
                 duckdb: None,
                 started: "now".into(),
                 power: "AC Power".into(),
+                duckdb_threads: None,
             },
             checks: Vec::new(),
             times: hot
@@ -279,6 +289,17 @@ mod tests {
         assert!(text.contains("Q1        0.500     0.500"), "{text}");
         assert!(text.contains("Q2      timeout         -"), "{text}");
         assert!(text.contains("over 1 of 2 queries"), "{text}");
+    }
+
+    #[test]
+    fn duckdb_runs_are_labelled_by_their_threads() {
+        let mut duckdb = run("aaaaaa", "duckdb", &[]);
+        assert_eq!(duckdb.meta.label(), "duckdb w0 t default (1 file)");
+        duckdb.meta.duckdb_threads = Some(9);
+        assert_eq!(duckdb.meta.label(), "duckdb w0 t9 (1 file)");
+        let mut on = run("bbbbbb", "on", &[]);
+        on.meta.duckdb_threads = Some(1);
+        assert_eq!(on.meta.label(), "on w0 (1 file)");
     }
 
     #[test]

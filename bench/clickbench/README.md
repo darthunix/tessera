@@ -69,7 +69,11 @@ leave it running if it ran before or with `--keep-running`. Both take
 `--queries` (`all`, `1-7`, `1,3,24`, numbered from 1 as ClickBench's
 results number them), `--workers` (`max_parallel_workers_per_gather`,
 0 by default) and `--work-mem` (64 MB by default, as ClickBench's
-PostgreSQL entry sets it).
+PostgreSQL entry sets it). DuckDB runs with `--duckdb-threads`, by
+default as many threads as a parallel plan of PostgreSQL has processes,
+`--workers` + 1, so that the modes compare at the same parallelism;
+`--duckdb-threads 18` gives it every core of an 18-core machine, as
+ClickBench's pg_duckdb entry runs.
 
 ## The tables
 
