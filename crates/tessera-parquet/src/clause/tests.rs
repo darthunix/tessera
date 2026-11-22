@@ -173,6 +173,71 @@ proptest! {
     }
 }
 
+/// Every pair of types, strategy, negator and order of a comparison: a
+/// clause is checked exactly for a pair of one unit and a comparison of
+/// the B-tree family or `<>`, and the comparison of the column with the
+/// side it gives holds exactly where the operator does.
+#[test]
+fn comparisons_of_every_operator() {
+    const TYPES: [u32; 10] = [
+        oid::INT2,
+        oid::INT4,
+        oid::INT8,
+        oid::DATE,
+        oid::TIMESTAMP,
+        oid::TIMESTAMPTZ,
+        oid::FLOAT8,
+        oid::TEXT,
+        oid::BOOL,
+        0,
+    ];
+    let integers = [oid::INT2, oid::INT4, oid::INT8];
+    let times = [oid::DATE, oid::TIMESTAMP, oid::TIMESTAMPTZ];
+    // The operator of each strategy of a B-tree family, `left op right`.
+    let operator = |strategy: i32, left: i64, right: i64| match strategy {
+        1 => left < right,
+        2 => left <= right,
+        3 => left == right,
+        4 => left >= right,
+        5 => left > right,
+        _ => unreachable!(),
+    };
+    let mut checked = 0;
+    for column in TYPES {
+        for side in TYPES {
+            for strategy in -1..=6 {
+                for negator in -1..=6 {
+                    for commuted in [false, true] {
+                        let one_unit = (integers.contains(&column) && integers.contains(&side))
+                            || (times.contains(&column) && side == column);
+                        let known = (1..=5).contains(&strategy) || (strategy == 0 && negator == 3);
+                        let got = super::comparison(column, side, strategy, negator, commuted);
+                        let case = (column, side, strategy, negator, commuted);
+                        assert_eq!(got.is_some(), one_unit && known, "{case:?}");
+                        let Some(op) = got else { continue };
+                        checked += 1;
+                        for x in -2..=2 {
+                            for c in -2..=2 {
+                                // The column's value x, the side's c.
+                                let (left, right) = if commuted { (c, x) } else { (x, c) };
+                                let holds = if strategy == 0 {
+                                    !operator(3, left, right)
+                                } else {
+                                    operator(strategy, left, right)
+                                };
+                                assert_eq!(compare(op, x, c), holds, "{case:?} on {x} and {c}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Nine pairs of integers and three of times, five comparisons and <>
+    // in both orders, <> under every negator's strategy but =.
+    assert_eq!(checked, 12 * (5 * 8 + 1) * 2);
+}
+
 #[test]
 fn a_comparison_with_null_passes_no_row() {
     let dir = tempfile::tempdir().unwrap();

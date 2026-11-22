@@ -203,25 +203,6 @@ static const TessBatchOps batch_ops = {
 
 /* ---- the clauses the source checks ---- */
 
-/* Whether a side of type side compares with a column of type column. */
-static bool
-types_compare(Oid column, Oid side)
-{
-	switch (column)
-	{
-		case INT2OID:
-		case INT4OID:
-		case INT8OID:
-			return side == INT2OID || side == INT4OID || side == INT8OID;
-		case DATEOID:
-		case TIMESTAMPOID:
-		case TIMESTAMPTZOID:
-			return side == column;
-		default:
-			return false;
-	}
-}
-
 /* A column of the relation, as a clause names it. */
 static bool
 column_var(Node *node, Index relid, Var **var)
@@ -232,40 +213,33 @@ column_var(Node *node, Index relid, Var **var)
 	return (*var)->varno == relid && (*var)->varlevelsup == 0 && (*var)->varattno > 0;
 }
 
+/* The strategy numbers the reader takes are PostgreSQL's. */
+StaticAssertDecl(BTLessStrategyNumber == 1 && BTLessEqualStrategyNumber == 2 &&
+				 BTEqualStrategyNumber == 3 && BTGreaterEqualStrategyNumber == 4 &&
+				 BTGreaterStrategyNumber == 5,
+				 "B-tree strategy numbers");
+
 /*
- * The test kind of operator opno between a column of type column and its
- * side, a comparison of the type's B-tree family or <>, the negator of its
- * =; -1 for any other operator. With the side on the left, the comparison
- * is turned around.
+ * The test kind of operator opno between a column of type column and a
+ * side of type side, on the left where commuted; -1 for a clause the
+ * source does not check. The catalog gives the operator's strategy in the
+ * column type's B-tree family, or that of its negator; the reader says
+ * what they ask.
  */
 static int
-comparison_kind(Oid opno, Oid column, bool commuted)
+comparison_kind(Oid opno, Oid column, Oid side, bool commuted)
 {
-	static const int kinds[] = {
-		[BTLessStrategyNumber] = TESS_PARQUET_TEST_LT,
-		[BTLessEqualStrategyNumber] = TESS_PARQUET_TEST_LE,
-		[BTEqualStrategyNumber] = TESS_PARQUET_TEST_EQ,
-		[BTGreaterEqualStrategyNumber] = TESS_PARQUET_TEST_GE,
-		[BTGreaterStrategyNumber] = TESS_PARQUET_TEST_GT,
-	};
 	Oid			family = lookup_type_cache(column, TYPECACHE_BTREE_OPFAMILY)->btree_opf;
-	int			strategy;
-	Oid			negator;
+	int			strategy = 0;
+	int			negator = 0;
 
-	if (!OidIsValid(family))
-		return -1;
-	strategy = get_op_opfamily_strategy(opno, family);
-	if (strategy == 0)
+	if (OidIsValid(family))
 	{
-		negator = get_negator(opno);
-		if (OidIsValid(negator) &&
-			get_op_opfamily_strategy(negator, family) == BTEqualStrategyNumber)
-			return TESS_PARQUET_TEST_NE;
-		return -1;
+		strategy = get_op_opfamily_strategy(opno, family);
+		if (strategy == 0 && OidIsValid(get_negator(opno)))
+			negator = get_op_opfamily_strategy(get_negator(opno), family);
 	}
-	if (commuted)
-		strategy = BTMaxStrategyNumber + 1 - strategy;
-	return kinds[strategy];
+	return tess_parquet_comparison(column, side, strategy, negator, commuted);
 }
 
 /*
@@ -309,10 +283,9 @@ clause_shape(Expr *clause, Index relid, ParquetClause *shape)
 			right = swap;
 			commuted = true;
 		}
-		if (!column_var(left, relid, &var) || contain_var_clause(right) ||
-			!types_compare(var->vartype, exprType(right)))
+		if (!column_var(left, relid, &var) || contain_var_clause(right))
 			return false;
-		kind = comparison_kind(op->opno, var->vartype, commuted);
+		kind = comparison_kind(op->opno, var->vartype, exprType(right), commuted);
 		if (kind < 0)
 			return false;
 		shape->attno = var->varattno;
@@ -329,8 +302,7 @@ clause_shape(Expr *clause, Index relid, ParquetClause *shape)
 
 		if (!saop->useOr || list_length(saop->args) != 2 ||
 			!column_var(linitial(saop->args), relid, &var) || contain_var_clause(array) ||
-			!types_compare(var->vartype, element) ||
-			comparison_kind(saop->opno, var->vartype, false) != TESS_PARQUET_TEST_EQ)
+			comparison_kind(saop->opno, var->vartype, element, false) != TESS_PARQUET_TEST_EQ)
 			return false;
 		shape->attno = var->varattno;
 		shape->kind = TESS_PARQUET_TEST_IN;
