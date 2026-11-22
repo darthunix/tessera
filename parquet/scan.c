@@ -202,6 +202,9 @@ take_group(ParquetScan *scan)
 	return true;
 }
 
+static TessParquetReader *make_reader(ParquetScan *scan, int c, MemoryContext cxt,
+									  uint64 *chosen);
+
 static void
 free_reader(void *arg)
 {
@@ -270,14 +273,47 @@ parquet_scan_next_group(ParquetScan *scan)
 TessParquetReader *
 parquet_scan_reader(ParquetScan *scan, int c)
 {
+	if (scan->readers[c] == NULL)
+		scan->readers[c] = make_reader(scan, c, scan->group_cxt, scan->selection);
+	return scan->readers[c];
+}
+
+/*
+ * A reader of column c of the group read, for every row of it, freed with
+ * cxt, a context the group's outlives: the reader of the pass over the
+ * columns of the clauses the source checks, before the group's selection
+ * is known.
+ */
+TessParquetReader *
+parquet_scan_every_row_reader(ParquetScan *scan, int c, MemoryContext cxt)
+{
+	return make_reader(scan, c, cxt, NULL);
+}
+
+/*
+ * The group's selection, a bit a row, palloc'd in the group's context: the
+ * readers made from now on read its rows alone.
+ */
+void
+parquet_scan_select(ParquetScan *scan, uint64 *selection)
+{
+	scan->selection = selection;
+}
+
+/*
+ * A reader of column c of the group read for the rows of selection, every
+ * row where it is NULL, freed when cxt is reset or deleted.
+ */
+static TessParquetReader *
+make_reader(ParquetScan *scan, int c, MemoryContext cxt, uint64 *chosen)
+{
 	uint64		rows = parquet_scan_group_rows(scan);
 	MemoryContext outer;
 	uint64	   *selection;
 	MemoryContextCallback *callback;
 	TessParquetStatus status;
+	TessParquetReader *reader;
 
-	if (scan->readers[c] != NULL)
-		return scan->readers[c];
 	/*
 	 * shortcut: a group's selection is one palloc'd mask, which the reader
 	 * copies, so a group of more rows than it holds bits is refused; lift
@@ -290,19 +326,19 @@ parquet_scan_reader(ParquetScan *scan, int c)
 				 errmsg("a group of rows of Parquet file \"%s\" holds " UINT64_FORMAT
 						" rows, more than a scan selects",
 						(char *) list_nth(scan->paths, scan->file_index), rows)));
-	outer = MemoryContextSwitchTo(scan->group_cxt);
-	selection = scan->selection != NULL ? scan->selection : every_row(rows);
+	outer = MemoryContextSwitchTo(cxt);
+	selection = chosen != NULL ? chosen : every_row(rows);
 	callback = palloc0_object(MemoryContextCallback);
 	if (!tess_parquet_reader(scan->file->file, scan->mapped[c], scan->group, selection,
-							 words_of(rows), PARQUET_WINDOW_ROWS, &scan->readers[c], &status))
+							 words_of(rows), PARQUET_WINDOW_ROWS, &reader, &status))
 		parquet_raise(&status);
 	callback->func = free_reader;
-	callback->arg = scan->readers[c];
-	MemoryContextRegisterResetCallback(scan->group_cxt, callback);
-	if (selection != scan->selection)
+	callback->arg = reader;
+	MemoryContextRegisterResetCallback(cxt, callback);
+	if (selection != chosen)
 		pfree(selection);
 	MemoryContextSwitchTo(outer);
-	return scan->readers[c];
+	return reader;
 }
 
 /* Reads the next window of the current group into the window's arrays. */

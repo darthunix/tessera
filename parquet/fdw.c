@@ -196,28 +196,43 @@ parquet_planned_list(void *fdw_private)
 }
 
 /*
- * The source's path for the wrapper's path `offered`, serial or partial:
- * the rows it returns, every row of the files, the clauses left to
- * TessFilter above it, and its costs, the chunks the wrapper reads, its
- * batches at a share of the wrapper's rows over the same columns, and the
- * targets PostgreSQL computes on the rows the relation returns, at their
- * whole cost; a participant's share for a partial path.
+ * The source's path for the wrapper's path `offered`, serial or partial,
+ * which checks the clauses `exact`, on `checked` columns: the rows it
+ * returns, those of the files the clauses' selectivity leaves, the others
+ * left to TessFilter above it; and its costs, the chunks the wrapper
+ * reads, its batches at a share of the wrapper's rows over the same
+ * columns, and the targets PostgreSQL computes on the rows the relation
+ * returns, at their whole cost; a participant's share for a partial path.
  */
 void
-parquet_source_costs(const Path *offered, double *rows, Cost *startup, Cost *total)
+parquet_source_costs(PlannerInfo *root, const Path *offered, List *exact, int checked,
+					 double *rows, Cost *startup, Cost *total)
 {
 	const PlannedTable *planned = offered->parent->fdw_private;
 	double		share = offered->parallel_workers > 0 ?
 		participants(offered->parallel_workers) : 1.0;
 	Cost		pages;
 	Cost		per_row;
+	Selectivity passed = exact != NIL ?
+		clauselist_selectivity(root, exact, 0, JOIN_INNER, NULL) : 1.0;
+	double		selected = planned->rows * passed;
+	Cost		checks;
+	Cost		made;
 
 	const PathTarget *target = offered->parent->reltarget;
 
 	scan_costs(planned, &pages, &per_row);
-	*rows = clamp_row_est(planned->rows / share);
+	/*
+	 * The columns of the clauses it checks are read for every row and
+	 * their clauses checked on the stored values; every column read is
+	 * costed as made for the rows that pass, at the batches' share of a
+	 * row's cost; TessFilter adds the clauses left.
+	 */
+	checks = planned->rows * (checked + list_length(exact)) * cpu_operator_cost;
+	made = selected * per_row;
+	*rows = clamp_row_est(selected / share);
 	*startup = target->cost.startup;
-	*total = *startup + (pages + planned->rows * per_row * PARQUET_BATCH_SHARE +
+	*total = *startup + (pages + (checks + made) * PARQUET_BATCH_SHARE +
 						 offered->parent->rows * target->cost.per_tuple) / share;
 }
 

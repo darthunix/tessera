@@ -1,16 +1,21 @@
 /*
  * The module's batch source and its node, TessParquetScan. The source
- * reads every table of the wrapper the scan planner offers it; the node
- * publishes batches of up to 64 rows of one window of a group, and makes
- * the PostgreSQL values of a column only when a consumer asks for it, for
- * the rows it asks for, keeping them until the next batch. Each column is
- * read by one reader a group, forward window by window, or, for a window
- * after a gap, for the rows asked alone.
+ * reads every table of the wrapper the scan planner offers it, and checks
+ * the clauses on integers, dates and times, IN and the tests of NULL on
+ * the files' stored values; the node reads a group in two passes: first
+ * the columns of those clauses, every row, into the group's selection,
+ * then batches of up to 64 selected rows of one window, making the
+ * PostgreSQL values of a column only when a consumer asks for it, for the
+ * rows it asks for, keeping them until the next batch. Each column is read
+ * by one reader a group, forward window by window, or, for a window
+ * behind, for the rows asked alone.
  */
 #include "postgres.h"
 
 #include "access/parallel.h"
+#include "access/stratnum.h"
 #include "access/sysattr.h"
+#include "catalog/pg_type.h"
 #include "commands/explain.h"
 #include "commands/explain_format.h"
 #include "commands/explain_state.h"
@@ -19,12 +24,20 @@
 #include "foreign/fdwapi.h"
 #include "miscadmin.h"
 #include "nodes/extensible.h"
+#include "nodes/makefuncs.h"
+#include "nodes/nodeFuncs.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
 #include "port/pg_bitutils.h"
+#include "utils/array.h"
+#include "utils/date.h"
 #include "utils/injection_point.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/rel.h"
+#include "utils/ruleutils.h"
+#include "utils/timestamp.h"
+#include "utils/typcache.h"
 
 #include "tessera/bridge.h"
 #include "tessera/plan.h"
@@ -45,12 +58,16 @@ PGDLLEXPORT void _PG_init(void);
 
 typedef struct ParquetNode ParquetNode;
 
-/* The batch the node publishes: rows of one window of a group. */
+/* The batch the node publishes: selected rows of one window of a group. */
 typedef struct ParquetBatch
 {
 	TessBatch	batch;
 	ParquetNode *node;
-	uint64		start;			/* its first row in the group */
+	uint64		window;			/* its window's first row in the group */
+	int			first;			/* its first row's rank among the window's selected */
+	uint16		positions[BATCH_ROWS];	/* of each row, its place in the window */
+	bool		contiguous;		/* its rows follow each other from positions[0],
+								 * the only place then written */
 	int			nrows;
 	uint64		mask;			/* its rows selected, which a consumer narrows */
 	uint64		all;			/* every row of it, BATCH_ROWS at most */
@@ -66,9 +83,36 @@ typedef struct NodeColumn
 	uint64		forward_end;	/* where the forward reads ended, or NO_WINDOW */
 	uint64		held[WINDOW_WORDS]; /* the window's rows the read holds */
 	size_t		held_count;		/* how many */
+	bool		held_selected;	/* held is the window's selection, read forward */
 	uint64		values[PARQUET_WINDOW_ROWS];	/* of the rows held, in order */
 	uint64		nulls[WINDOW_WORDS];
 } NodeColumn;
+
+/*
+ * A clause the source checks: the column, the test's kind
+ * (TESS_PARQUET_TEST_*), and the side without columns whose value the test
+ * takes, of the type type: one value, an array of them for IN, none for
+ * the tests of NULL.
+ */
+typedef struct ParquetClause
+{
+	AttrNumber	attno;
+	int			kind;
+	Expr	   *side;
+	Oid			type;
+} ParquetClause;
+
+/* A clause as the node checks it. */
+typedef struct NodeClause
+{
+	ParquetClause shape;
+	int			column;			/* the scan's column */
+	ExprState  *side;
+	int64	   *values;			/* computed when first asked for rows */
+	bool	   *nulls;
+	int			nvalues;
+	TessParquetTest *test;		/* for the file read, or NULL */
+} NodeClause;
 
 struct ParquetNode
 {
@@ -87,6 +131,12 @@ struct ParquetNode
 	uint64		next_row;		/* of the group read, the next to publish */
 	MemoryContext batch_cxt;	/* the values of the batch, reset at the next */
 	ParquetBatch batch;
+	/* The clauses checked, their columns' order, and their sides' values. */
+	NodeClause *clauses;
+	int			nclauses;
+	int		   *clause_order;	/* the clauses by their column */
+	bool		values_ready;
+	MemoryContext values_cxt;	/* the sides' values, reset at a rescan */
 	/* A row-wise parent: the batch served, its next row, its targets. */
 	bool		rows;
 	TessBatch  *active;
@@ -151,11 +201,152 @@ static const TessBatchOps batch_ops = {
 	.get_datum_column = batch_column,
 };
 
+/* ---- the clauses the source checks ---- */
+
+/* Whether a side of type side compares with a column of type column. */
+static bool
+types_compare(Oid column, Oid side)
+{
+	switch (column)
+	{
+		case INT2OID:
+		case INT4OID:
+		case INT8OID:
+			return side == INT2OID || side == INT4OID || side == INT8OID;
+		case DATEOID:
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			return side == column;
+		default:
+			return false;
+	}
+}
+
+/* A column of the relation, as a clause names it. */
+static bool
+column_var(Node *node, Index relid, Var **var)
+{
+	if (node == NULL || !IsA(node, Var))
+		return false;
+	*var = (Var *) node;
+	return (*var)->varno == relid && (*var)->varlevelsup == 0 && (*var)->varattno > 0;
+}
+
+/*
+ * The test kind of operator opno between a column of type column and its
+ * side, a comparison of the type's B-tree family or <>, the negator of its
+ * =; -1 for any other operator. With the side on the left, the comparison
+ * is turned around.
+ */
+static int
+comparison_kind(Oid opno, Oid column, bool commuted)
+{
+	static const int kinds[] = {
+		[BTLessStrategyNumber] = TESS_PARQUET_TEST_LT,
+		[BTLessEqualStrategyNumber] = TESS_PARQUET_TEST_LE,
+		[BTEqualStrategyNumber] = TESS_PARQUET_TEST_EQ,
+		[BTGreaterEqualStrategyNumber] = TESS_PARQUET_TEST_GE,
+		[BTGreaterStrategyNumber] = TESS_PARQUET_TEST_GT,
+	};
+	Oid			family = lookup_type_cache(column, TYPECACHE_BTREE_OPFAMILY)->btree_opf;
+	int			strategy;
+	Oid			negator;
+
+	if (!OidIsValid(family))
+		return -1;
+	strategy = get_op_opfamily_strategy(opno, family);
+	if (strategy == 0)
+	{
+		negator = get_negator(opno);
+		if (OidIsValid(negator) &&
+			get_op_opfamily_strategy(negator, family) == BTEqualStrategyNumber)
+			return TESS_PARQUET_TEST_NE;
+		return -1;
+	}
+	if (commuted)
+		strategy = BTMaxStrategyNumber + 1 - strategy;
+	return kinds[strategy];
+}
+
+/*
+ * The shape of a clause the source checks: a comparison of a column of an
+ * integer type, date, timestamp or timestamptz with a side without the
+ * relation's columns, by its type's B-tree family or <>; such a column =
+ * ANY an array, IN a list; IS NULL or IS NOT NULL of any column. False
+ * for any other clause.
+ */
+static bool
+clause_shape(Expr *clause, Index relid, ParquetClause *shape)
+{
+	Var		   *var;
+
+	if (IsA(clause, NullTest))
+	{
+		NullTest   *test = (NullTest *) clause;
+
+		if (test->argisrow || !column_var((Node *) test->arg, relid, &var))
+			return false;
+		shape->attno = var->varattno;
+		shape->kind = test->nulltesttype == IS_NULL ? TESS_PARQUET_TEST_IS_NULL :
+			TESS_PARQUET_TEST_IS_NOT_NULL;
+		shape->side = NULL;
+		shape->type = InvalidOid;
+		return true;
+	}
+	if (IsA(clause, OpExpr) && list_length(((OpExpr *) clause)->args) == 2)
+	{
+		OpExpr	   *op = (OpExpr *) clause;
+		Node	   *left = linitial(op->args);
+		Node	   *right = lsecond(op->args);
+		bool		commuted = false;
+		int			kind;
+
+		if (!column_var(left, relid, &var))
+		{
+			Node	   *swap = left;
+
+			left = right;
+			right = swap;
+			commuted = true;
+		}
+		if (!column_var(left, relid, &var) || contain_var_clause(right) ||
+			!types_compare(var->vartype, exprType(right)))
+			return false;
+		kind = comparison_kind(op->opno, var->vartype, commuted);
+		if (kind < 0)
+			return false;
+		shape->attno = var->varattno;
+		shape->kind = kind;
+		shape->side = (Expr *) right;
+		shape->type = exprType(right);
+		return true;
+	}
+	if (IsA(clause, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr *saop = (ScalarArrayOpExpr *) clause;
+		Node	   *array = lsecond(saop->args);
+		Oid			element = get_element_type(exprType(array));
+
+		if (!saop->useOr || list_length(saop->args) != 2 ||
+			!column_var(linitial(saop->args), relid, &var) || contain_var_clause(array) ||
+			!types_compare(var->vartype, element) ||
+			comparison_kind(saop->opno, var->vartype, false) != TESS_PARQUET_TEST_EQ)
+			return false;
+		shape->attno = var->varattno;
+		shape->kind = TESS_PARQUET_TEST_IN;
+		shape->side = (Expr *) array;
+		shape->type = element;
+		return true;
+	}
+	return false;
+}
+
 /* ---- the source ---- */
 
 /*
  * The node's path for the wrapper's serial or partial scan: the plan
- * carries what planning found. It checks no clause yet.
+ * carries what planning found, and the node checks exactly each clause it
+ * can, which it holds as its path's expressions.
  */
 static CustomPath *
 scan_rows(PlannerInfo *root, Path *path, TessScanClauses *clauses)
@@ -164,6 +355,9 @@ scan_rows(PlannerInfo *root, Path *path, TessScanClauses *clauses)
 	TessPlanWriter *writer;
 	CustomPath *scan;
 	Bitmapset  *attrs = NULL;
+	Bitmapset  *checked = NULL;
+	List	   *expressions = NIL;
+	List	   *exact = NIL;
 	int			first;
 
 	if (!IsA(path, ForeignPath) || path->parent->fdwroutine == NULL ||
@@ -175,16 +369,29 @@ scan_rows(PlannerInfo *root, Path *path, TessScanClauses *clauses)
 	first = bms_next_member(attrs, -1);
 	if (first >= 0 && first + FirstLowInvalidHeapAttributeNumber <= 0)
 		return NULL;
+	for (int i = 0; i < clauses->nclauses; i++)
+	{
+		ParquetClause shape;
+
+		if (!clauses->usable[i] ||
+			!clause_shape(clauses->clauses[i]->clause, path->parent->relid, &shape))
+			continue;
+		clauses->answers[i] = TESS_CLAUSE_EXACT;
+		expressions = lappend(expressions, clauses->clauses[i]->clause);
+		exact = lappend(exact, clauses->clauses[i]);
+		checked = bms_add_member(checked, shape.attno);
+	}
 	writer = tess_plan_writer_create(DATA_KIND, DATA_VERSION);
 	tess_plan_write_list(writer, "planned", parquet_planned_list(path->parent->fdw_private));
 	config.template_path = path;
 	config.methods = &path_methods;
 	config.node = &parquet_node;
+	config.expressions = expressions;
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION;
 	scan = tess_path_create(&config);
-	parquet_source_costs(path, &scan->path.rows, &scan->path.startup_cost,
-						 &scan->path.total_cost);
+	parquet_source_costs(root, path, exact, bms_num_members(checked), &scan->path.rows,
+						 &scan->path.startup_cost, &scan->path.total_cost);
 	return scan;
 }
 
@@ -269,6 +476,36 @@ node_begin(CustomScanState *css, EState *estate, int eflags)
 	foreach_int(attnum, attnums)
 		node->column_of[attnum - 1] = c++;
 	node->columns = palloc0_array(NodeColumn, Max(list_length(attnums), 1));
+	node->nclauses = list_length(cscan->custom_exprs);
+	node->clauses = palloc0_array(NodeClause, Max(node->nclauses, 1));
+	node->clause_order = palloc_array(int, Max(node->nclauses, 1));
+	node->values_cxt = AllocSetContextCreate(estate->es_query_cxt, "TessParquetScan values",
+											 ALLOCSET_SMALL_SIZES);
+	c = 0;
+	foreach_ptr(Expr, clause, cscan->custom_exprs)
+	{
+		NodeClause *checked = &node->clauses[c];
+
+		if (!clause_shape(clause, cscan->scan.scanrelid, &checked->shape) ||
+			node->column_of[checked->shape.attno - 1] < 0)
+			elog(ERROR, "TessParquetScan cannot check a clause of its plan");
+		checked->column = node->column_of[checked->shape.attno - 1];
+		if (checked->shape.side != NULL)
+			checked->side = ExecInitExpr(checked->shape.side, &css->ss.ps);
+		node->clause_order[c] = c;
+		c++;
+	}
+	/* By column, so that a pass reads each column once a window. */
+	for (int i = 1; i < node->nclauses; i++)
+		for (int j = i; j > 0 &&
+			 node->clauses[node->clause_order[j]].column <
+			 node->clauses[node->clause_order[j - 1]].column; j--)
+		{
+			int			swap = node->clause_order[j];
+
+			node->clause_order[j] = node->clause_order[j - 1];
+			node->clause_order[j - 1] = swap;
+		}
 	if (eflags & EXEC_FLAG_EXPLAIN_ONLY)
 		return;
 	/* A worker reads the leader's list, which it is given after its begin. */
@@ -291,17 +528,6 @@ rank_of(const uint64 *held, int r)
 	return rank;
 }
 
-/* The window's rows r to r + 63, a bit each, from a mask over it. */
-static uint64
-bits_from(const uint64 *mask, int r)
-{
-	uint64		bits = mask[r / 64] >> (r % 64);
-
-	if (r % 64 != 0 && r / 64 + 1 < WINDOW_WORDS)
-		bits |= mask[r / 64 + 1] << (64 - r % 64);
-	return bits;
-}
-
 /* Whether every row of rows is held. */
 static bool
 all_held(const uint64 *rows, const uint64 *held)
@@ -312,6 +538,22 @@ all_held(const uint64 *rows, const uint64 *held)
 			return false;
 	}
 	return true;
+}
+
+/* Row i's place in the window. */
+static inline int
+position_of(const ParquetBatch *b, int i)
+{
+	return b->contiguous ? b->positions[0] + i : b->positions[i];
+}
+
+/* The selected rows of the window from its row r on, as a scan's selection says. */
+static int
+selected_before(const ParquetScan *scan, uint64 window, int r)
+{
+	if (scan->selection == NULL)
+		return r;
+	return rank_of(scan->selection + window / 64, r);
 }
 
 /*
@@ -326,23 +568,34 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 {
 	ParquetScan *scan = node->scan;
 	NodeColumn *col = &node->columns[c];
-	uint64		window = b->start / PARQUET_WINDOW_ROWS * PARQUET_WINDOW_ROWS;
+	uint64		window = b->window;
 	size_t		len = (size_t) Min((uint64) PARQUET_WINDOW_ROWS,
 								   parquet_scan_group_rows(scan) - window);
-	int			offset = (int) (b->start - window);
 	uint64		rows[WINDOW_WORDS] = {0};
 	uint64		asked[WINDOW_WORDS] = {0};
 	TessParquetReader *reader = parquet_scan_reader(scan, c);
 	TessParquetStatus status;
 	size_t		count;
 	int			held_words;
-	int			base;
-	uint64		run;
-	bool		whole;
+	int			base = b->first;
 
-	rows[offset / 64] |= need << (offset % 64);
-	if (offset % 64 != 0 && offset / 64 + 1 < WINDOW_WORDS)
-		rows[offset / 64 + 1] |= need >> (64 - offset % 64);
+	if (b->contiguous)
+	{
+		int			from = b->positions[0];
+
+		rows[from / 64] |= need << (from % 64);
+		if (from % 64 != 0 && from / 64 + 1 < WINDOW_WORDS)
+			rows[from / 64 + 1] |= need >> (64 - from % 64);
+	}
+	else
+	{
+		for (uint64 bits = need; bits != 0; bits &= bits - 1)
+		{
+			int			p = b->positions[pg_rightmost_one_pos64(bits)];
+
+			rows[p / 64] |= UINT64CONST(1) << (p % 64);
+		}
+	}
 	if (col->window != window || !all_held(rows, col->held))
 	{
 		/* As the reader decides: a window after a gap is read forward. */
@@ -354,10 +607,12 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 			parquet_raise(&status);
 		col->window = window;
 		col->held_count = count;
+		col->held_selected = forward;
 		if (forward)
 		{
 			col->forward_end = window + len;
-			if (count != len)
+			/* A forward read holds every selected row of the window. */
+			if (count != (size_t) selected_before(scan, window, (int) len))
 				ereport(ERROR,
 						(errcode(ERRCODE_DATA_CORRUPTED),
 						 errmsg("Parquet column holds fewer rows than its group")));
@@ -368,15 +623,12 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 	held_words = (int) Max((count + 63) / 64, 1);
 
 	/*
-	 * A row's place among the rows held is the rank of the batch's first
-	 * row, counted once, and the rows held before it in the batch. Where
-	 * the read holds every row of the batch, as a forward read does, it is
-	 * that rank and the row's number in the batch.
+	 * A row's place among the rows held: where the read holds the window's
+	 * selection, as a forward read does, the batch's rows are consecutive
+	 * among them from the batch's first rank; otherwise, behind, its rank
+	 * among the rows held.
 	 */
-	base = rank_of(col->held, offset);
-	run = bits_from(col->held, offset);
-	whole = (run & b->all) == b->all;
-	if (whole)
+	if (col->held_selected)
 	{
 		asked[base / 64] |= need << (base % 64);
 		if (base % 64 != 0 && base / 64 + 1 < WINDOW_WORDS)
@@ -386,10 +638,8 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 	{
 		for (uint64 bits = need; bits != 0; bits &= bits - 1)
 		{
-			int			i = pg_rightmost_one_pos64(bits);
-			int			p = base + pg_popcount64(run & ((UINT64CONST(1) << i) - 1));
+			int			p = rank_of(col->held, position_of(b, pg_rightmost_one_pos64(bits)));
 
-			Assert(p == rank_of(col->held, offset + i));
 			asked[p / 64] |= UINT64CONST(1) << (p % 64);
 		}
 	}
@@ -411,7 +661,7 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 		if (!tess_parquet_text(reader, arena, bytes, col->values, Max(count, 1), &status))
 			parquet_raise(&status);
 	}
-	if (whole && need == b->all)
+	if (col->held_selected && need == b->all)
 	{
 		/* Every row of the batch, in its places: a loop without a mask. */
 		for (int i = 0; i < b->nrows; i++)
@@ -427,11 +677,10 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 		for (uint64 bits = need; bits != 0; bits &= bits - 1)
 		{
 			int			i = pg_rightmost_one_pos64(bits);
-			int			p = whole ? base + i :
-				base + pg_popcount64(run & ((UINT64CONST(1) << i) - 1));
+			int			p = col->held_selected ? base + i :
+				rank_of(col->held, position_of(b, i));
 			bool		null = (col->nulls[p / 64] >> (p % 64)) & 1;
 
-			Assert(p == rank_of(col->held, offset + i));
 			b->isnull[column][i] = null;
 			b->values[column][i] = null ? (Datum) 0 : (Datum) col->values[p];
 		}
@@ -472,9 +721,204 @@ batch_column(TessBatch *batch, int column, const TessRowMask *rows,
 	}
 }
 
+/* A value of a side of type type, widened as a test takes it. */
+static int64
+side_value(Datum value, Oid type)
+{
+	switch (type)
+	{
+		case INT2OID:
+			return DatumGetInt16(value);
+		case INT4OID:
+			return DatumGetInt32(value);
+		case DATEOID:
+			return DatumGetDateADT(value);
+		default:
+			return DatumGetInt64(value);
+	}
+}
+
 /*
- * The next batch: up to the capacity's rows of the group read, within one
- * window, or NULL past the last group. A query that reads no column opens
+ * The sides' values, through PostgreSQL's evaluation of expressions: when
+ * the node is first asked for rows and after each rescan, so that a
+ * parameter, a subquery's value or an outer row's is the current one.
+ */
+static void
+compute_values(ParquetNode *node)
+{
+	ExprContext *econtext = node->css.ss.ps.ps_ExprContext;
+
+	MemoryContextReset(node->values_cxt);
+	for (int k = 0; k < node->nclauses; k++)
+	{
+		NodeClause *clause = &node->clauses[k];
+		Datum		value;
+		bool		isnull;
+		MemoryContext outer;
+
+		clause->nvalues = 0;
+		clause->values = NULL;
+		clause->nulls = NULL;
+		if (clause->side == NULL)
+			continue;
+		value = ExecEvalExprSwitchContext(clause->side, econtext, &isnull);
+		outer = MemoryContextSwitchTo(node->values_cxt);
+		if (clause->shape.kind != TESS_PARQUET_TEST_IN)
+		{
+			clause->nvalues = 1;
+			clause->values = palloc_object(int64);
+			clause->nulls = palloc_object(bool);
+			clause->nulls[0] = isnull;
+			clause->values[0] = isnull ? 0 : side_value(value, clause->shape.type);
+		}
+		else if (!isnull)
+		{
+			ArrayType  *array = DatumGetArrayTypeP(value);
+			int16		typlen;
+			bool		typbyval;
+			char		typalign;
+			Datum	   *elements;
+			bool	   *nulls;
+
+			get_typlenbyvalalign(clause->shape.type, &typlen, &typbyval, &typalign);
+			deconstruct_array(array, clause->shape.type, typlen, typbyval, typalign,
+							  &elements, &nulls, &clause->nvalues);
+			clause->values = palloc_array(int64, Max(clause->nvalues, 1));
+			clause->nulls = nulls;
+			for (int i = 0; i < clause->nvalues; i++)
+				clause->values[i] = nulls[i] ? 0 : side_value(elements[i], clause->shape.type);
+		}
+		MemoryContextSwitchTo(outer);
+		ResetExprContext(econtext);
+	}
+	node->values_ready = true;
+}
+
+/* Frees the clauses' tests, made for the file read. */
+static void
+free_tests(void *arg)
+{
+	ParquetNode *node = arg;
+
+	for (int k = 0; k < node->nclauses; k++)
+	{
+		tess_parquet_test_free(node->clauses[k].test);
+		node->clauses[k].test = NULL;
+	}
+}
+
+/*
+ * The clauses' tests for the file read, made once a file: a file's own
+ * column decides the unit the values compare in. They are freed with the
+ * file's context.
+ */
+static void
+make_tests(ParquetNode *node)
+{
+	ParquetScan *scan = node->scan;
+	MemoryContextCallback *callback;
+	TessParquetStatus status;
+
+	if (node->nclauses == 0 || node->clauses[0].test != NULL)
+		return;
+	/* The freeing first, so that no test outlives a failure. */
+	callback = MemoryContextAllocZero(scan->file_cxt, sizeof(MemoryContextCallback));
+	callback->func = free_tests;
+	callback->arg = node;
+	MemoryContextRegisterResetCallback(scan->file_cxt, callback);
+	for (int k = 0; k < node->nclauses; k++)
+	{
+		NodeClause *clause = &node->clauses[k];
+
+		if (!tess_parquet_test(scan->mapped[clause->column], clause->shape.kind,
+							   clause->values, clause->nulls, (size_t) clause->nvalues,
+							   &clause->test, &status))
+		{
+			free_tests(node);
+			parquet_raise(&status);
+		}
+	}
+}
+
+/*
+ * The first pass over the group read: the columns of the clauses, every
+ * row, window by window, each read once a window, the clauses checked on
+ * the stored values into the group's selection, no value made. False when
+ * no row of the group passes.
+ */
+static bool
+select_rows(ParquetNode *node)
+{
+	ParquetScan *scan = node->scan;
+	uint64		rows = parquet_scan_group_rows(scan);
+	MemoryContext pass = AllocSetContextCreate(scan->group_cxt, "TessParquetScan clauses",
+											   ALLOCSET_SMALL_SIZES);
+	TessParquetReader **readers = MemoryContextAllocZero(pass, sizeof(TessParquetReader *) *
+														 scan->ncolumns);
+	uint64	   *selection = MemoryContextAllocZero(scan->group_cxt,
+												   sizeof(uint64) * Max((rows + 63) / 64, 1));
+	TessParquetStatus status;
+	bool		any = false;
+
+	make_tests(node);
+	for (uint64 window = 0; window < rows; window += PARQUET_WINDOW_ROWS)
+	{
+		size_t		len = (size_t) Min((uint64) PARQUET_WINDOW_ROWS, rows - window);
+		int			words = (int) ((len + 63) / 64);
+		uint64		passed[WINDOW_WORDS];
+		uint64		held[WINDOW_WORDS];
+		uint64		every[WINDOW_WORDS];
+		uint64	   *out = selection + window / 64;
+		int			read = -1;
+
+		CHECK_FOR_INTERRUPTS();
+		for (int w = 0; w < words; w++)
+			every[w] = w + 1 < words || len % 64 == 0 ? ~UINT64CONST(0) :
+				(UINT64CONST(1) << (len % 64)) - 1;
+		memcpy(out, every, sizeof(uint64) * words);
+		for (int i = 0; i < node->nclauses; i++)
+		{
+			NodeClause *clause = &node->clauses[node->clause_order[i]];
+			int			c = clause->column;
+			uint64		left = 0;
+			size_t		count;
+
+			for (int w = 0; w < words; w++)
+				left |= out[w];
+			if (left == 0)
+				break;
+			if (read != c)
+			{
+				if (readers[c] == NULL)
+					readers[c] = parquet_scan_every_row_reader(scan, c, pass);
+				memset(held, 0, sizeof(held));
+				if (!tess_parquet_read(readers[c], window, len, every, words, held, words,
+									   &count, &status))
+					parquet_raise(&status);
+				if (count != len)
+					ereport(ERROR,
+							(errcode(ERRCODE_DATA_CORRUPTED),
+							 errmsg("Parquet column holds fewer rows than its group")));
+				read = c;
+				INJECTION_POINT("tessera-parquet-window", NULL);
+			}
+			if (!tess_parquet_window_test(readers[c], clause->test, passed, words, &status))
+				parquet_raise(&status);
+			for (int w = 0; w < words; w++)
+				out[w] &= passed[w];
+		}
+		for (int w = 0; w < words; w++)
+			any |= out[w] != 0;
+	}
+	MemoryContextDelete(pass);
+	parquet_scan_select(scan, selection);
+	return any;
+}
+
+/*
+ * The next batch: up to the batch's rows of the selected rows of one
+ * window of the group read, from the next row to publish, or NULL past the
+ * last group. A query that reads no column publishes the rows and opens
  * no file and reads no page.
  */
 static TessBatch *
@@ -482,39 +926,86 @@ next_batch(ParquetNode *node)
 {
 	ParquetScan *scan = node->scan;
 	ParquetBatch *b = &node->batch;
-	uint64		rows;
-	uint64		end;
 	int			natts = node->relation.ncolumns;
+	int			n = 0;
+	uint64		window = 0;
 
 	if (node->exhausted)
 		return NULL;
-	while (!scan->group_started || node->next_row >= parquet_scan_group_rows(scan))
+	if (!node->values_ready && node->nclauses > 0)
+		compute_values(node);
+	while (n == 0)
 	{
+		uint64		rows;
+		uint64		end;
+
 		CHECK_FOR_INTERRUPTS();
-		if (!parquet_scan_next_group(scan))
+		if (!scan->group_started || node->next_row >= parquet_scan_group_rows(scan))
 		{
-			node->exhausted = true;
-			return NULL;
+			if (!parquet_scan_next_group(scan))
+			{
+				node->exhausted = true;
+				return NULL;
+			}
+			node->next_row = 0;
+			for (int c = 0; c < scan->ncolumns; c++)
+			{
+				node->columns[c].window = NO_WINDOW;
+				node->columns[c].forward_end = NO_WINDOW;
+			}
+			if (node->nclauses > 0 && !select_rows(node))
+				node->next_row = parquet_scan_group_rows(scan);
+			continue;
 		}
-		node->next_row = 0;
-		for (int c = 0; c < scan->ncolumns; c++)
+		rows = parquet_scan_group_rows(scan);
+		window = node->next_row / PARQUET_WINDOW_ROWS * PARQUET_WINDOW_ROWS;
+		end = Min(rows, window + PARQUET_WINDOW_ROWS);
+		if (scan->selection == NULL)
 		{
-			node->columns[c].window = NO_WINDOW;
-			node->columns[c].forward_end = NO_WINDOW;
+			/* Every row: the next ones, in order, by the first's place. */
+			n = (int) Min((uint64) node->capacity, end - node->next_row);
+			b->positions[0] = (uint16) (node->next_row - window);
+			node->next_row += n;
+			continue;
 		}
+		/* The selected rows from the next one on, a word at a time. */
+		for (uint64 r = node->next_row; r < end && n < node->capacity;)
+		{
+			uint64		word = scan->selection != NULL ? scan->selection[r / 64] :
+				~UINT64CONST(0);
+
+			word &= ~UINT64CONST(0) << (r % 64);
+			if (end - r / 64 * 64 < 64)
+				word &= (UINT64CONST(1) << (end - r / 64 * 64)) - 1;
+			while (word != 0 && n < node->capacity)
+			{
+				uint64		at = r / 64 * 64 + pg_rightmost_one_pos64(word);
+
+				b->positions[n++] = (uint16) (at - window);
+				node->next_row = at + 1;
+				word &= word - 1;
+			}
+			if (n < node->capacity)
+			{
+				r = (r / 64 + 1) * 64;
+				node->next_row = Min(r, end);
+			}
+		}
+		if (n == 0)
+			node->next_row = end;
 	}
-	rows = parquet_scan_group_rows(scan);
-	end = Min(rows, (node->next_row / PARQUET_WINDOW_ROWS + 1) * PARQUET_WINDOW_ROWS);
 	MemoryContextReset(node->batch_cxt);
-	b->start = node->next_row;
-	b->nrows = (int) Min((uint64) node->capacity, end - node->next_row);
+	b->window = window;
+	b->first = selected_before(scan, window, b->positions[0]);
+	b->contiguous = scan->selection == NULL ||
+		b->positions[n - 1] - b->positions[0] == n - 1;
+	b->nrows = n;
 	b->all = b->nrows == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << b->nrows) - 1;
 	b->mask = b->all;
 	b->values = MemoryContextAllocZero(node->batch_cxt, sizeof(Datum *) * Max(natts, 1));
 	b->isnull = MemoryContextAllocZero(node->batch_cxt, sizeof(bool *) * Max(natts, 1));
 	b->made = MemoryContextAllocZero(node->batch_cxt, sizeof(uint64) * Max(natts, 1));
 	b->batch.rows.nrows = b->nrows;
-	node->next_row += b->nrows;
 	if (node->projection != NULL)
 		return tess_projection_wrap(node->projection, &b->batch);
 	return &b->batch;
@@ -600,6 +1091,7 @@ node_end(CustomScanState *css)
 	tess_output_end(node->output);
 	if (node->scan != NULL)
 		parquet_scan_end(node->scan);
+	free_tests(node);
 }
 
 /* The next scan reads every file again, as it was when the scan began. */
@@ -615,6 +1107,9 @@ node_rescan(CustomScanState *css)
 	MemoryContextReset(node->batch_cxt);
 	if (node->scan != NULL)
 		parquet_scan_rescan(node->scan);
+	/* The sides' values may change: computed again, and the tests made. */
+	free_tests(node);
+	node->values_ready = false;
 	node->exhausted = false;
 	node->next_row = 0;
 }
@@ -662,7 +1157,20 @@ static void
 node_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 {
 	ParquetNode *node = (ParquetNode *) css;
+	CustomScan *cscan = castNode(CustomScan, css->ss.ps.plan);
 
+	if (cscan->custom_exprs != NIL)
+	{
+		List	   *context = set_deparse_context_plan(es->deparse_cxt, css->ss.ps.plan,
+													   ancestors);
+
+		/* Prefixed as TessFilter shows its clauses. */
+		ExplainPropertyText("Source Exact",
+							deparse_expression((Node *) make_ands_explicit(cscan->custom_exprs),
+											   context, es->rtable_size > 1 || es->verbose,
+											   false),
+							es);
+	}
 	parquet_explain_files(node->planned, node->scan, es);
 	if (es->analyze && node->scan != NULL)
 	{

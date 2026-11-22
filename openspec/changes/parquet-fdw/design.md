@@ -416,19 +416,22 @@ footers give, and their rows, every row of the files: the wrapper's rows
 at the core's cost of a tuple and of an operator for each column it
 forms, with the clauses the core checks on each, the source's batches at
 a share of that cost, a quarter, near the ratio of the serial times of a
-scan of one or two columns with and without Tessera, the clauses left to
-`TessFilter` above, which adds them. Both cost the targets PostgreSQL
-computes at their whole cost, on the rows the relation returns. A
-partial path costs a participant's share of both. The table's rows are
-its files' rows, so that the distinct values `ANALYZE` stored as a share
-of the rows grow with files added after it. `ANALYZE` samples rows at
-random over all the rows of the files, each set of positions as likely
-as another, finds them in their groups, and reads only the rows it
-samples, by readers whose selection holds them; a share fixed a group
-would leave out every other group of a file of small groups. For 30 000
-rows of a wide file the rows still fall in most pages: `ANALYZE` of
-`hits.parquet` decompresses most of the file once. The core keeps their
-statistics; ClickBench's groupings and joins are then sized by them.
+scan of one or two columns with and without Tessera: the columns of the
+clauses it checks for every row, with the clauses, and the other columns
+for the rows that pass, as many as the clauses' selectivity gives, the
+clauses it leaves to `TessFilter` above, which adds them. Both cost the
+targets PostgreSQL computes at their whole cost, on the rows the
+relation returns. A partial path costs a participant's share of both.
+The table's rows are its files' rows, so that the distinct values
+`ANALYZE` stored as a share of the rows grow with files added after it.
+`ANALYZE` samples rows at random over all the rows of the files, each
+set of positions as likely as another, finds them in their groups, and
+reads only the rows it samples, by readers whose selection holds them; a
+share fixed a group would leave out every other group of a file of small
+groups. For 30 000 rows of a wide file the rows still fall in most
+pages: `ANALYZE` of `hits.parquet` decompresses most of the file once.
+The core keeps their statistics; ClickBench's groupings and joins are
+then sized by them.
 
 ### Errors, panics, memory and cancel
 
