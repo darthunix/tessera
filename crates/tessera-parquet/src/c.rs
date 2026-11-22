@@ -17,8 +17,9 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Arc;
 
-use datum_arrow::{ReadOutput, TextBytes, Unit, mask_words};
+use datum_arrow::{Comparison, ReadOutput, TextBytes, Unit, mask_words};
 
+use crate::clause::{ClauseKind, ClauseTest};
 use crate::column::{ColumnRequest, MappedColumn, map_column};
 use crate::error::{DATA_CORRUPTED, Error, INTERNAL_ERROR, Result};
 use crate::file::{Identity, ParquetFile};
@@ -618,6 +619,107 @@ pub unsafe extern "C" fn tess_parquet_values(
             handle.reader.plan().read(&input, asked, output)?;
             merge_nulls(nulls, &made, asked);
             Ok(())
+        })
+    }
+}
+
+/// A clause's test of a column's stored values, as `TessParquetTest`.
+pub struct TestHandle(ClauseTest);
+
+/// The kinds of a test: the comparisons in the order of [`Comparison`],
+/// then `IN`, `IS NULL` and `IS NOT NULL`.
+const TEST_KINDS: [ClauseKind; 9] = [
+    ClauseKind::Compare(Comparison::Eq),
+    ClauseKind::Compare(Comparison::Ne),
+    ClauseKind::Compare(Comparison::Lt),
+    ClauseKind::Compare(Comparison::Le),
+    ClauseKind::Compare(Comparison::Gt),
+    ClauseKind::Compare(Comparison::Ge),
+    ClauseKind::In,
+    ClauseKind::IsNull,
+    ClauseKind::IsNotNull,
+];
+
+/// Makes the test of `column`'s stored values that keeps a clause of the
+/// kind `kind` with the `nvalues` values `values`, each `NULL` where
+/// `nulls` says, as [`ClauseTest::new`] takes them.
+///
+/// # Safety
+///
+/// `column` must be live; `values` and `nulls` must point to `nvalues`
+/// readable items, or be null with `nvalues` 0; `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_test(
+    column: *const ColumnHandle,
+    kind: i32,
+    values: *const i64,
+    nulls: *const bool,
+    nvalues: usize,
+    out: *mut *mut TestHandle,
+    status: *mut Status,
+) -> bool {
+    // SAFETY: as the function's contract says.
+    unsafe {
+        guard(status, false, || {
+            let column = &column.as_ref().ok_or_else(|| broken("a null column"))?.0;
+            let kind = usize::try_from(kind)
+                .ok()
+                .and_then(|kind| TEST_KINDS.get(kind))
+                .ok_or_else(|| broken("an unknown kind of test"))?;
+            if nvalues > 0 && (values.is_null() || nulls.is_null()) {
+                return Err(broken("null values"));
+            }
+            let given: Vec<Option<i64>> = (0..nvalues)
+                .map(|i| (!*nulls.add(i)).then(|| *values.add(i)))
+                .collect();
+            if out.is_null() {
+                return Err(broken("a null output"));
+            }
+            let test = ClauseTest::new(column, *kind, &given)?;
+            put(out, Box::into_raw(Box::new(TestHandle(test))))
+        })
+    }
+}
+
+/// Frees a test of [`tess_parquet_test`].
+///
+/// # Safety
+///
+/// `test` must be null or a test not yet freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_test_free(test: *mut TestHandle) {
+    if !test.is_null() {
+        // SAFETY: a test of `tess_parquet_test`, freed once.
+        drop(unsafe { Box::from_raw(test) });
+    }
+}
+
+/// Writes into `passed`, of `passed_words` words, a bit for each row the
+/// reader's last window holds, in their order, set where the row passes
+/// `test`, as [`ClauseTest::apply`] says.
+///
+/// # Safety
+///
+/// `reader` and `test` must be live; `passed` must point to
+/// `passed_words` writable words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_window_test(
+    reader: *const ReaderHandle,
+    test: *const TestHandle,
+    passed: *mut u64,
+    passed_words: usize,
+    status: *mut Status,
+) -> bool {
+    // SAFETY: as the function's contract says.
+    unsafe {
+        guard(status, false, || {
+            let handle = reader.as_ref().ok_or_else(|| broken("a null reader"))?;
+            let test = &test.as_ref().ok_or_else(|| broken("a null test"))?.0;
+            let window = handle
+                .window
+                .as_ref()
+                .ok_or_else(|| broken("no window read"))?;
+            test.apply(window.array.as_ref(), words_mut(passed, passed_words)?)
         })
     }
 }
