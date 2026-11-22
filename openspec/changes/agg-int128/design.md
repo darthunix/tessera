@@ -360,6 +360,49 @@ before each:
 A hypothesis that fails stops the work for a profile, as
 `docs/measuring.md` says.
 
+**Results**, on the M5 Pro on mains power, the base the commit of task
+2.1:
+
+- The machine code (disasm-nGziP7, disasm-4k1OJJ): every program of
+  `tessera-bench` the same. The loops of `tess_decimal_sum` are no
+  longer than the base's, those of `tess_table_accumulate_extremes` the
+  base's. The body of `tess_table_accumulate_sums` moved into its
+  closure, called once a call, its loops not one for one with the
+  base's, the innermost 5, 6, 7 and 8 instructions against 5, 6, 7 and
+  7: its counts judge it.
+- The counts (ab-P9AhLD), the control at 1.000 in every case.
+  Hypothesis 1 holds: the cases of 19 digits fall from 1095 to 117
+  million instructions without groups (0.107), from 1369 to 353 by runs
+  of keys (0.258) and from 1373 to 416 by keys that follow one another
+  (0.303), each within 0.5 % of its twin. Hypothesis 2 holds but for
+  three groupings whose rows go to their records one by one,
+  `g_group_sum`, `g_group_sum_numeric` and `g_spread_digits18`, which
+  grow 1.4 %; `g_group_int2` grows 1.0 %, `g_sum_numeric` 0.7 %, eleven
+  cases fall, by up to 4 %, the sums of int8 whose bulk loop lost a
+  comparison, and the others stay.
+- The three over the rule of 1 % pay for the count within an int64:
+  0.6 to 0.8 % before it (ab-r7rvrY), 1.0 % without its comparison in
+  the fast path of `SumState::add_to` (ab-VCSIaH), the rest the count
+  of `Sum::add_many`'s local sums. Comparing the count after its
+  increment by its sign did not change the code (ab-abdDO2). The
+  maintainer chose on 2026-11-22 to keep the check on every row, which
+  no input can pass, and to accept the 1.4 %; their times do not move,
+  0.997 of the base over three rounds.
+- The way there. The first version failed hypothesis 2 on five cases,
+  by 1.2 to 1.9 % (ab-6Sofa4); task 3.1 alone stayed within 0.1 %
+  (ab-l6MsrF). The decimal's fast path of `SumState::add_to` restored,
+  the integer's apart, brought the groupings to 0.6 to 0.8 %
+  (ab-gie5Ox); the plain loop's arm of an integer kept out of line
+  brought the sum of `numeric` from 1.2 % to 0.1 % (ab-dN34G1).
+- The times (ab-9lFXYK, three rounds of 11). Hypothesis 3 holds: with
+  Tessera on over off, by the means of the medians, `sum` of 19 digits
+  1.89 on the base and 0.23 on the candidate, `avg` 1.88 and 0.23, by
+  runs of keys 1.14 and 0.35, by keys that follow one another 0.93 and
+  0.28; over 1 M rows `sum` and `avg` of 19 digits take 35 ms on the
+  base and 4.3 ms on the candidate. One round of the first version
+  (ab-yWk7W3) read a twin 1.033 of the base, three rounds 1.007
+  (ab-GEoCaC), as its counts.
+
 ## Risks / Trade-offs
 
 - **A sum with a wrong digit.** The sum is exact on both paths, so a

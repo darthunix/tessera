@@ -69,7 +69,7 @@ one pull request; the work and the close are a second.
 
 ## 4. The measurements
 
-- [ ] 4.1 The counts and the times of the design's measurement plan,
+- [x] 4.1 The counts and the times of the design's measurement plan,
       the base the commit of 2.1, each hypothesis judged as written
       there, the ids of the runs and their results in the design.
       Check: `cargo ab measure --base <the commit of 2.1> --family
