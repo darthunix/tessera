@@ -289,11 +289,25 @@ value is made, into the window's selection:
 - a string's equality with a constant by its length first and its bytes
   after; `<> ''` by its length alone; on a dictionary array, a clause is
   checked once a dictionary value and the rows take their index's
-  answer;
-- `LIKE` with fixed parts and `%`: each part searched in order with
-  `memchr`'s `memmem`, the first anchored at the start and the last at
-  the end unless a `%` stands there, each part at or after the end of
-  the one before it, so that `'ab%ba'` rejects `'aba'`.
+  answer. The answers are kept for the chunk's dictionary, which every
+  window of the chunk shares: each window is an array of its own over
+  the same buffers, so the dictionary is known by the addresses of its
+  offsets and bytes, and the test holds its array while it keeps the
+  answers, so that no other dictionary can take those addresses;
+- `LIKE` with fixed parts and `%`, by the pattern of the kernels' own
+  `LIKE`, `Like` of `tessera-kernels`, so that the source and
+  `TessFilter` match a string by one rule: each part found in order, the
+  first anchored at the start and the last at the end unless a `%`
+  stands there, each part at or after the end of the one before it, so
+  that `'ab%ba'` rejects `'aba'`.
+
+The node takes a clause on a string by the function of its operator,
+`texteq`, `textne`, `textlike` or `textnlike`, under a collation that is
+deterministic; a `varchar` column comes through the relabeling to `text`
+its operators take. A pattern of `LIKE` must be a constant, which the
+reader takes or refuses at planning: one with `_`, with the escape
+character `\` or with more than 31 `%` signs, the 32 parts the kernels'
+pattern holds, is left to `TessFilter`, as is `ILIKE`.
 
 A `timestamp` compared with a `timestamptz` is left to `TessFilter`:
 PostgreSQL turns each row's time into the session's zone, which no
@@ -316,18 +330,19 @@ pair of a list of types, and checks each answer against the operator's
 meaning on values. Kept in C, it would be judged by the suites alone,
 since only Rust tests judge a mutant.
 
-The rest is proved or compared with PostgreSQL. Kani, a checker that
+The rest is proved or compared with PostgreSQL. A property test compares
+each test of strings, over plain and dictionary arrays and their slices,
+with a match of the pattern one byte at a time. Kani, a checker that
 proves a property of a Rust function for every input, proves in
 `datum-arrow` each comparison's bound exact, for seconds and
 milliseconds past the division of the constant by the unit, and an
-equality's test one bound or none. In the reader it proves the bounds
-of `IN` the union of its values' tests of equality, for lists of two
-values over plans of integers, days and microseconds; it asks of a test
-no more than that one bound or none, so it holds for every unit. Their
-sort and the binary search over them are the standard
-library's, whose sort takes Kani past the limit of a harness. The
-property tests compare the whole, over every kind of array, with
-PostgreSQL's answer.
+equality's test one bound or none. In the reader it proves the bounds of
+`IN` the union of its values' tests of equality, for lists of two values
+over plans of integers, days and microseconds; it asks of a test no more
+than that one bound or none, so it holds for every unit. Their sort and
+the binary search over them are the standard library's, whose sort takes
+Kani past the limit of a harness. The property tests compare the whole,
+over every kind of array, with PostgreSQL's answer.
 
 ### Groups of rows skipped
 
@@ -392,15 +407,17 @@ raises what it finds. A footer consistent with itself is trusted, as the
 format's statistics are. The decision is in Rust, where Kani and the
 mutants judge it. Kani proves the decision by statistics for every kind
 of clause, every count of rows and of `NULL` rows and every least and
-greatest value: a group ruled out holds no row that passes, and `IN` of
+greatest value, the emptiness of strings among them: a group ruled out
+holds no row that passes, and `IN` of
 up to three bounds is ruled out exactly where a range the right way
 round holds none of them. The decision by dictionaries is shown by
 tests. A property test writes files of random values, `NULL` among them,
 signed and unsigned, of random groups and pages, with dictionaries and
 their fallback, with statistics and without, under rewritten footers,
-and checks that no group ruled out holds a row that passes. Two clauses
-on one column read its dictionary twice; ClickBench asks no such pair
-that the statistics leave undecided.
+and checks that no group ruled out holds a row that passes; another does
+the same over files of random strings, empty ones among them, by each
+clause on strings. Two clauses on one column read its dictionary twice;
+ClickBench asks no such pair that the statistics leave undecided.
 
 ### Parallel reading by groups of rows
 

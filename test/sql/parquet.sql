@@ -855,12 +855,13 @@ RESET tessera.enable;
 SELECT (plan_of('SELECT g FROM t_groups WHERE v < 10')).cost < :wrapper_cost
     AS source_cheaper_filtered;
 
--- The clauses on integers, dates and times, IN and = ANY, and the tests
--- of NULL, which the source checks on the stored values: each shown
--- under its node and none in TessFilter, by constants, the smallint's
--- against bigint constants outside its range, a prepared statement's
--- parameter and a subquery's value, each result that of a heap table of
--- the same rows. The clauses on strings come with them later.
+-- spec: parquet-fdw/Clauses checked by the source
+-- The clauses on integers, dates and times, IN and = ANY, the tests of
+-- NULL and the clauses on strings, which the source checks on the stored
+-- values: each shown under its node and none in TessFilter, by constants,
+-- the smallint's against bigint constants outside its range, a prepared
+-- statement's parameter and a subquery's value, each result that of a
+-- heap table of the same rows.
 SELECT parquet_test_write(:'dir' || '/clauses.parquet', json_build_object(
     'group_rows', 1000, 'columns', json_build_array(
       json_build_object('name', 'i2', 'type', 'int32', 'logical', 'int16', 'values',
@@ -926,6 +927,48 @@ EXECUTE listed(NULL);
 DEALLOCATE below;
 DEALLOCATE listed;
 RESET plan_cache_mode;
+-- The clauses on strings, over a file whose strings go through
+-- dictionaries and one whose strings are plain: a text column marked as
+-- a string, a varchar one over unmarked bytes, the examples of the spec
+-- among them, 'aba' and 'abba' for 'ab%ba' and 'a' for 'a%a'. Each group
+-- of 500 rows starts its cycle of values at another one, so that its
+-- dictionary holds them in another order than the group before it.
+CREATE TABLE h_strings (s text, v varchar(10));
+INSERT INTO h_strings
+SELECT CASE WHEN i % 11 = 0 THEN NULL
+            ELSE (ARRAY['', 'a', 'aba', 'abba', 'x', 'X', 'ab', 'ba', 'abc', 'été'])
+                 [(i + i / 500 * 3) % 10 + 1]
+       END,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE (ARRAY['ab', 'b', '', 'aab'])[i % 4 + 1] END
+FROM generate_series(0, 1999) i;
+SELECT parquet_test_write(:'dir' || '/strings_' || d || '.parquet', json_build_object(
+    'group_rows', 500, 'dictionary', d = 'dictionary', 'columns', json_build_array(
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(s ORDER BY i) FROM (SELECT row_number() OVER () AS i, s FROM h_strings) q)),
+      json_build_object('name', 'v', 'type', 'bytes', 'values',
+        (SELECT json_agg(v ORDER BY i) FROM (SELECT row_number() OVER () AS i, v FROM h_strings) q))))::text)
+FROM unnest(ARRAY['dictionary', 'plain']) d;
+\set strings :dir '/strings_dictionary.parquet,' :dir '/strings_plain.parquet'
+CREATE FOREIGN TABLE t_strings (s text, v varchar(10)) SERVER pq OPTIONS (files :'strings');
+INSERT INTO h_strings SELECT * FROM h_strings;
+SELECT c AS clause,
+       checked_by(format('SELECT * FROM t_strings WHERE %s', c)) AS checked_by,
+       differ(format('SELECT * FROM t_strings WHERE %s', c),
+              format('SELECT * FROM h_strings WHERE %s', c)) AS rows_differ,
+       rows_of(format('SELECT * FROM h_strings WHERE %s', c)) AS heap_rows
+FROM unnest(ARRAY[$c$s <> ''$c$, $c$s = ''$c$, $c$s = 'x'$c$, $c$'x' = s$c$, $c$s <> 'x'$c$,
+    $c$s = 'été'$c$, $c$s LIKE '%a%b%'$c$, $c$s NOT LIKE 'a%'$c$, $c$s LIKE 'ab%ba'$c$,
+    $c$s LIKE 'a%a'$c$, $c$s LIKE '%'$c$, $c$s LIKE 'abc'$c$, $c$v = 'ab'$c$,
+    $c$v LIKE 'a%b'$c$, $c$v <> ''$c$, $c$s = (SELECT 'aba')$c$,
+    $c$s LIKE repeat('%', 31)$c$]) c;
+SET plan_cache_mode = force_generic_plan;
+PREPARE named(text) AS SELECT count(*) FROM t_strings WHERE s = $1;
+SELECT checked_by($$EXECUTE named('ab')$$) AS checked_by;
+EXECUTE named('ab');
+EXECUTE named(NULL);
+SELECT count(*) AS heap FROM h_strings WHERE s = 'ab';
+DEALLOCATE named;
+RESET plan_cache_mode;
 -- A table of two files whose clause columns differ in type: bigint over
 -- INT32 and over INT64, timestamp over milliseconds and microseconds,
 -- each file's tests made in its own unit.
@@ -957,14 +1000,31 @@ SELECT c AS clause, checked_by(format('SELECT * FROM t_wide WHERE %s', c)) AS ch
               format('SELECT * FROM h_wide WHERE %s', c)) AS rows_differ,
        rows_of(format('SELECT * FROM h_wide WHERE %s', c)) AS heap_rows
 FROM unnest(ARRAY['s IS NULL', 's IS NOT NULL AND k < 100']) c;
+-- spec: parquet-fdw/Clauses left to the filter
 -- Clauses the source leaves to TessFilter: an operator over a column, two
 -- columns compared, a function of a column, a timestamp against a
--- timestamptz.
+-- timestamptz under a zone with daylight saving.
+SET TIME ZONE 'America/New_York';
 SELECT c AS clause,
        checked_by(format('SELECT * FROM t_clauses WHERE %s', c)) AS checked_by,
        differ(format('SELECT * FROM t_clauses WHERE %s', c),
               format('SELECT * FROM h_clauses WHERE %s', c)) AS rows_differ
 FROM unnest(ARRAY['i4 + 0 < 10', 'i4 < i8', 'abs(i2) < 3', 'ts < tz']) c;
+-- On strings: a regular expression, LIKE with _ or an escape, or with 32
+-- % signs, ILIKE, a function, two columns, and =, <> and LIKE under a
+-- case-insensitive nondeterministic collation, over 'x' and 'X', which it
+-- holds equal.
+CREATE COLLATION parquet_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+SELECT c AS clause,
+       checked_by(format('SELECT * FROM t_strings WHERE %s', c)) AS checked_by,
+       differ(format('SELECT * FROM t_strings WHERE %s', c),
+              format('SELECT * FROM h_strings WHERE %s', c)) AS rows_differ,
+       rows_of(format('SELECT * FROM h_strings WHERE %s', c)) AS heap_rows
+FROM unnest(ARRAY[$c$s ~ '^a.a$'$c$, $c$s LIKE 'a_a'$c$, $c$s LIKE 'a\%'$c$,
+    $c$s LIKE repeat('%', 32)$c$,
+    $c$s ILIKE 'A%'$c$, $c$upper(s) = 'X'$c$, $c$s = v$c$,
+    $c$s COLLATE parquet_ci = 'X'$c$, $c$s COLLATE parquet_ci <> 'x'$c$,
+    $c$s COLLATE parquet_ci LIKE 'X%'$c$]) c;
 RESET TIME ZONE;
 
 -- spec: parquet-fdw/A clause on a value that changes by rescan
@@ -1012,8 +1072,7 @@ $$;
 
 -- spec: parquet-fdw/Groups skipped
 -- Eight groups of a hundred rows: a ascending, n with NULL values in the
--- first two groups alone, m NULL in every row of the last two. The
--- groups skipped by strings join these with the clauses on strings.
+-- first two groups alone, m NULL in every row of the last two.
 SELECT parquet_test_write(:'dir' || '/eight_groups.parquet', json_build_object(
     'group_rows', 100, 'columns', json_build_array(
       json_build_object('name', 'a', 'type', 'int32', 'range', 800),
@@ -1031,6 +1090,34 @@ SELECT c AS clause, s.*
 FROM unnest(ARRAY['a >= 250 AND a <= 349', 'a IN (5, 705)', 'n IS NULL',
                   'm IS NOT NULL']) c,
      LATERAL skipping('t_eight_groups', 'h_eight_groups', c) s;
+-- Strings through dictionaries: 'only' is in the fourth group's alone,
+-- by = and by LIKE.
+SELECT parquet_test_write(:'dir' || '/string_groups.parquet', json_build_object(
+    'group_rows', 100, 'dictionary', true, 'columns', json_build_array(
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(CASE WHEN i / 100 = 3 AND i % 10 = 0 THEN 'only'
+                              ELSE 'g' || i / 100 || '-' || i % 5 END ORDER BY i)
+         FROM generate_series(0, 799) i))))::text);
+\set string_groups :dir '/string_groups.parquet'
+CREATE FOREIGN TABLE t_string_groups (s text) SERVER pq OPTIONS (files :'string_groups');
+CREATE TABLE h_string_groups AS SELECT * FROM t_string_groups;
+SELECT c AS clause, s.*
+FROM unnest(ARRAY[$c$s = 'only'$c$, $c$s LIKE 'on%'$c$]) c,
+     LATERAL skipping('t_string_groups', 'h_string_groups', c) s;
+-- Plain strings whose least and greatest values decide: the third group
+-- holds only empty strings, and no other group holds one.
+SELECT parquet_test_write(:'dir' || '/empty_groups.parquet', json_build_object(
+    'group_rows', 100, 'dictionary', false, 'columns', json_build_array(
+      json_build_object('name', 'e', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(CASE WHEN i / 100 = 2 THEN '' WHEN i % 9 = 0 THEN NULL
+                              ELSE 'e' || i END ORDER BY i)
+         FROM generate_series(0, 799) i))))::text);
+\set empty_groups :dir '/empty_groups.parquet'
+CREATE FOREIGN TABLE t_empty_groups (e text) SERVER pq OPTIONS (files :'empty_groups');
+CREATE TABLE h_empty_groups AS SELECT * FROM t_empty_groups;
+SELECT c AS clause, s.*
+FROM unnest(ARRAY[$c$e <> ''$c$, $c$e = ''$c$]) c,
+     LATERAL skipping('t_empty_groups', 'h_empty_groups', c) s;
 -- Dates through dictionaries, in a file written without least and
 -- greatest values: group g holds the days 10 g, 10 g + 2 and 10 g + 4
 -- after 2013-07-01, so the 32nd day is the fourth group's alone.
@@ -1385,10 +1472,11 @@ DROP FOREIGN TABLE t_files, t_owned, t_plain, t_none, t_gzip, t_types, t_drop, t
     t_damaged_pages, t_eight, t_groups, t_analyzed, t_sparse, t_alternating, t_widths,
     t_one_more, t_clauses, t_far_seconds, t_mixed, t_eight_groups, t_dated_groups, t_odd_values,
     t_headed_groups, t_fallen_back, t_unsaid, t_unsigned_old, t_unsigned_old_ordered,
-    t_unsigned_unordered, t_uncounted;
+    t_unsigned_unordered, t_uncounted, t_strings, t_string_groups, t_empty_groups;
 DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks, h_analyzed,
     h_clauses, h_outer, h_mixed, h_eight_groups, h_dated_groups, h_odd_values, h_fallen_back,
-    h_unsigned, h_uncounted;
+    h_unsigned, h_uncounted, h_strings, h_string_groups, h_empty_groups;
+DROP COLLATION parquet_ci;
 DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, bool, bool, int, int),
     parquet_test_head_dictionaries(text), parquet_test_replace(text, text, text),
     parquet_test_remove(text), parquet_test_cut(text, int), parquet_test_damage(text, int, int),

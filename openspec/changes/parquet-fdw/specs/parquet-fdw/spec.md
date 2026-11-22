@@ -421,8 +421,8 @@ SHALL leave every other clause to `TessFilter`:
   `text` or `varchar` column with a string that holds no column of the
   relation, which `= ''` and `<> ''` answer by the length alone;
 - under a deterministic collation, `LIKE` and `NOT LIKE` of such a
-  column with a constant pattern of fixed parts and `%` signs, without
-  `_` or an escape character.
+  column with a constant pattern of fixed parts and at most 31 `%`
+  signs, without `_` or an escape character.
 
 The source SHALL compute a side that is not a constant as `source-scan`
 says, when its node is first asked for rows and after each rescan, and
@@ -443,18 +443,20 @@ equal the result of the same query over a heap table of the same rows.
 - **THEN** `EXPLAIN` shows each under the source's node and none in
   `TessFilter`, and each result equals the result over a heap table of
   the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Clauses checked by the source`
 
 #### Scenario: Clauses left to the filter
 - **WHEN** a table is filtered by a regular expression, by a `LIKE` with
-  `_`, by a comparison of two of its columns, by a function of a column,
-  by a `timestamp` column compared with a `timestamptz` under a time
-  zone with daylight saving, and by a `LIKE`, an `=` and a `<>` under a
-  case-insensitive nondeterministic collation, over strings that differ
-  in their bytes and compare equal
+  `_` and one with 32 `%` signs, by a comparison of two of its columns,
+  by a function of a column, by a `timestamp` column compared with a
+  `timestamptz` under a time zone with daylight saving, and by a `LIKE`,
+  an `=` and a `<>` under a case-insensitive nondeterministic collation,
+  over strings that differ in their bytes and compare equal
 - **THEN** `TessFilter` checks each, and each result equals the result
   over a heap table of the same rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Clauses left to the filter`
 
 #### Scenario: A clause on a value that changes by rescan
 - **WHEN** the table is read with Tessera on in a correlated subquery,
@@ -529,7 +531,7 @@ The results SHALL be those without skipping.
   then seven, then the group of empty strings, then the seven groups
   without one, and each result equals the result over a heap table of
   the same rows
-- **Verified by:** pending
+- **Verified by:** `test/sql/parquet.sql::-- spec: parquet-fdw/Groups skipped`
 
 #### Scenario: Groups the footer cannot rule out
 - **WHEN** a table is filtered by a value found only in a group's data

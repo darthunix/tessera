@@ -110,7 +110,7 @@ maintainer to say that the machine is idle.
 
 ## 6. The clauses on strings
 
-- [ ] 6.1 Equality, `<> ''` and `LIKE` of fixed parts on stored bytes
+- [x] 6.1 Equality, `<> ''` and `LIKE` of fixed parts on stored bytes
       and on dictionaries. Check: the suites; the cases of the clauses
       checked and left, whose scenarios the cases of integers, dates and
       times of 5.1 join, and the items on strings of the groups skipped
