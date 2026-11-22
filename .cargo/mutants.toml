@@ -195,7 +195,7 @@ exclude_re = [
     "delete match arm \\(ArithOp::((Add|Sub), _|(Div|Mod), Some\\(divisor\\))\\) in <impl IntLane for i64>::arith_block$",
     "replace \\| with \\^ in (Place::reference|Cursor::at)$",
     "table/writer\\.rs:(234|282):[0-9]+: replace \\| with \\^ in resolve_rows$",
-    "decimal\\.rs:1503:41: replace \\| with \\^ in read_with$",
+    "decimal\\.rs:1511:41: replace \\| with \\^ in read_with$",
     "replace OwnedTable::chunk_is_empty -> Result<bool> with Ok\\(false\\)$",
     "replace Access<'r, R>::room -> Result<\\(usize, usize\\)> with ",
     "replace (prefetch|<impl Region for RawRegion>::prefetch(_record)?|Access<'r, R>::prefetch_(bucket|record)) with \\(\\)$",

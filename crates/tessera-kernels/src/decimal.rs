@@ -688,6 +688,14 @@ pub fn to_int8(
 /// exact `i128` with room for any decimal rescaled to its scale.
 pub const SUM_BOUND: i128 = LIMIT as i128 * LIMIT as i128;
 
+/// Whether `value` is below [`SUM_BOUND`] in magnitude. By `unsigned_abs`:
+/// `i128::MIN.abs()` overflows, and stays negative in a build without
+/// overflow checks, where it would pass a comparison by `abs`.
+#[inline(always)]
+pub const fn below_bound(value: i128) -> bool {
+    value.unsigned_abs() < SUM_BOUND as u128
+}
+
 /// A running sum of decimals as the core's numeric `sum` and `avg` keep
 /// it: the value at the largest display scale met, below [`SUM_BOUND`] in
 /// magnitude, and the rows added.
@@ -710,7 +718,7 @@ impl Sum {
         // The invariant the arithmetic below rests on: below the bound, a
         // sum rescaled by up to 10^18 and a decimal of 18 digits rescaled
         // by as much stay far inside an i128.
-        debug_assert!(self.value.abs() < SUM_BOUND, "a sum past its bound");
+        debug_assert!(below_bound(self.value), "a sum past its bound");
         let term = i128::from(decimal.value);
         let (value, scale) = if decimal.scale == self.scale {
             (self.value + term, self.scale)
@@ -722,7 +730,7 @@ impl Sum {
                 return false;
             };
             let factor = i128::from(factor);
-            if self.value.abs() >= SUM_BOUND / factor {
+            if self.value.unsigned_abs() >= (SUM_BOUND / factor) as u128 {
                 return false;
             }
             (self.value * factor + term, decimal.scale)
@@ -732,7 +740,7 @@ impl Sum {
             };
             (self.value + term * i128::from(factor), self.scale)
         };
-        if value.abs() >= SUM_BOUND {
+        if !below_bound(value) {
             return false;
         }
         self.value = value;
@@ -747,7 +755,7 @@ impl Sum {
     /// scale passes 18.
     #[inline(always)]
     pub fn add_many(&mut self, value: i128, scale: u32, count: u64) -> bool {
-        debug_assert!(self.value.abs() < SUM_BOUND, "a sum past its bound");
+        debug_assert!(below_bound(self.value), "a sum past its bound");
         if scale > MAX_READ_SCALE {
             return false;
         }
@@ -758,7 +766,7 @@ impl Sum {
                 return false;
             };
             let factor = i128::from(factor);
-            if self.value.abs() >= SUM_BOUND / factor {
+            if self.value.unsigned_abs() >= (SUM_BOUND / factor) as u128 {
                 return false;
             }
             ((self.value * factor).checked_add(value), scale)
@@ -773,7 +781,7 @@ impl Sum {
                 self.scale,
             )
         };
-        let Some(sum) = sum.filter(|sum| sum.abs() < SUM_BOUND) else {
+        let Some(sum) = sum.filter(|&sum| below_bound(sum)) else {
             return false;
         };
         self.value = sum;
@@ -838,7 +846,7 @@ pub fn sum_terms(
 ) -> Result<()> {
     check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
     ensure!(
-        total.value.abs() < SUM_BOUND && total.scale <= MAX_READ_SCALE,
+        below_bound(total.value) && total.scale <= MAX_READ_SCALE,
         "a decimal sum past its bound"
     );
     let mut sum = *total;
@@ -891,7 +899,7 @@ pub fn merge_partials(
 ) -> Result<()> {
     check_rows(rows.nrows(), &[rest.as_view().nrows()])?;
     ensure!(
-        total.value.abs() < SUM_BOUND && total.scale <= MAX_READ_SCALE,
+        below_bound(total.value) && total.scale <= MAX_READ_SCALE,
         "a decimal sum past its bound"
     );
     let mut sum = *total;
@@ -1198,7 +1206,7 @@ impl SumState {
             && u64::from(decimal.scale) == words[3] & 0xFF
         {
             let stored = (u128::from(words[1]) << 64 | u128::from(words[0])) as i128;
-            debug_assert!(stored.abs() < SUM_BOUND, "a sum state past its bound");
+            debug_assert!(below_bound(stored), "a sum state past its bound");
             let value = stored + i128::from(decimal.value);
             // Below the bound in magnitude, both signs in one comparison.
             if (value + (SUM_BOUND - 1)) as u128 > (2 * (SUM_BOUND - 1)) as u128 {
@@ -1898,6 +1906,47 @@ mod tests {
             ));
             assert_eq!(words, before);
         }
+    }
+
+    /// A batch of no rows: the checks on the way in alone.
+    struct NoRows;
+
+    impl Terms for NoRows {
+        fn term(&self, _: usize) -> Term {
+            Term::Null
+        }
+    }
+
+    impl Partials for NoRows {
+        fn partial(&self, _: usize) -> Result<Partial> {
+            Ok(Partial::Null)
+        }
+    }
+
+    #[test]
+    fn a_sum_of_i128_min_is_refused() {
+        // On the way in: by abs its magnitude would stay negative in a
+        // release build and pass.
+        let mut total = Sum {
+            value: i128::MIN,
+            scale: 0,
+            count: 0,
+        };
+        let rows = RowMaskView::try_new(0, &[]).unwrap();
+        let mut none = [0_u64; 0];
+        let mut rest = RowMask::try_new(0, &mut none).unwrap();
+        assert!(sum_terms(&NoRows, rows, &mut total, &mut rest).is_err());
+        assert!(merge_partials(&NoRows, rows, &mut total, &mut rest).is_err());
+        // A state of scale 18 and a sum at scale 0 rescaled to it that land
+        // exactly on i128::MIN, which both checked operations allow.
+        let start = Sum {
+            value: -687_303_715_884_105_728,
+            scale: 18,
+            count: 1,
+        };
+        let mut sum = start;
+        assert!(!sum.add_many(-170_141_183_460_469_231_731, 0, 19));
+        assert_eq!(sum, start);
     }
 
     #[test]

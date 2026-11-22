@@ -27,7 +27,7 @@ one pull request; the work and the close are a second.
 
 ## 3. The terms
 
-- [ ] 3.1 Every check of the sum's magnitude against its bound by `abs`
+- [x] 3.1 Every check of the sum's magnitude against its bound by `abs`
       uses `unsigned_abs`: in `Sum::add`, `Sum::add_many`, the checks
       of `decimal::sum_terms` and `decimal::merge_partials` on the way
       in, and `state_partial`; the fast path of `SumState::add_to`
