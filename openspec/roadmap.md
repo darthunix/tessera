@@ -46,30 +46,35 @@ day he moved `agg-dependent-columns` between `agg-table-presize` and
 `tpch-q9-plan`, and on 2026-11-04 widened `lookup-outer-compaction`
 into `gather-sparse-batches`. On 2026-11-21 he took the boundary of
 types between PostgreSQL and Arrow, `types-crate`, as a crate of its
-own, before `parquet-fdw` (done, the crate `datum-arrow`):
+own, before `parquet-fdw` (done, the crate `datum-arrow`). On
+2026-11-22 the maintainer took `agg-int128` out of turn, after a
+profile of ClickBench's query 4 on the branch of `parquet-fdw`, to be
+done first:
 
-1. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `agg-int128`: `sum` and `avg` of `bigint` values of 19 digits in the
+   kernels' 128-bit sum
+2. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-2. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-3. `explain-rows-per-loop`: The rows a node removed, per loop as the
+4. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-4. `join-pruning-cost`: The cost of a pruning join over the partitions
+5. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-6. `linux-x86-support`: Linux on x86-64 checked as the target platform
-7. `oltp-guard-bench`: OLTP guard family of benchmarks
-8. `runs-left-from-section-9`: Runs left to the maintainer from
+7. `linux-x86-support`: Linux on x86-64 checked as the target platform
+8. `oltp-guard-bench`: OLTP guard family of benchmarks
+9. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-12. `tpch-sf10`: TPC-H step 10: SF10
-13. `backward-scan-mark-restore`: Backward scan and mark/restore
-14. `pg-duckdb-comparison`: Comparison with pg_duckdb
+13. `tpch-sf10`: TPC-H step 10: SF10
+14. `backward-scan-mark-restore`: Backward scan and mark/restore
+15. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -184,6 +189,28 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
+
+### agg-int128
+
+`sum` and `avg` of `bigint` values of 19 digits in the kernels' 128-bit
+sum. The maintainer took it on 2026-11-22, after a profile of
+ClickBench's query 4 on the branch of `parquet-fdw`; it is the change
+`agg-int128`.
+
+- **What:** The integer terms of a sum take every `bigint` value,
+  without `GROUP BY` and with it, in partial aggregates and in the rows
+  that go to disk and come back; a value of 19 digits taken alone is a
+  term of its own kind; the checks of the bound use `unsigned_abs`.
+- **Why:** The kernels take an integer only below 10^18 in magnitude
+  and leave a value of 19 digits to the node, which adds it with
+  `numeric_add`, a call a row: 43 to 55 % of the time of `avg(UserID)`
+  over `hits.parquet`, about 1075 instructions a row against DuckDB's
+  78.
+- **Known:** The design of the change. The answers stay the core's; the
+  state's words, its partial format and the bound of 10^36 stay.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate, kernel-abi
+- **Size:** small: one pull request after the proposal.
 
 ### agg-dependent-columns
 
