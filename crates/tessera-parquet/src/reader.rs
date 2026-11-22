@@ -369,30 +369,57 @@ impl ColumnReader {
 /// The rows of a group of `total` rows that `rows` holds from the row
 /// `from`, as the crate's runs of rows selected and skipped.
 fn selectors(rows: &[u64], from: usize, total: usize) -> RowSelection {
-    let selected = |row: usize| row >= from && rows[row / 64] >> (row % 64) & 1 == 1;
+    // The bits of the word `w`, those of the rows before `from` clear.
+    let word = |w: usize| -> u64 {
+        let bits = rows.get(w).copied().unwrap_or(0);
+        match from.saturating_sub(w * 64) {
+            0 => bits,
+            below if below >= 64 => 0,
+            below => bits & (!0u64 << below),
+        }
+    };
     let mut out = Vec::new();
     let mut row = 0;
     while row < total {
-        let this = selected(row);
-        let run = (row..total).find(|&r| selected(r) != this).unwrap_or(total);
+        let this = word(row / 64) >> (row % 64) & 1 == 1;
+        // The run ends at the first row of the other kind, found a word at
+        // a time.
+        let mut at = row;
+        let end = loop {
+            let w = at / 64;
+            let differs = if this { !word(w) } else { word(w) } & (!0u64 << (at % 64));
+            if differs != 0 {
+                break (w * 64 + differs.trailing_zeros() as usize).min(total);
+            }
+            at = (w + 1) * 64;
+            if at >= total {
+                break total;
+            }
+        };
         out.push(if this {
-            RowSelector::select(run - row)
+            RowSelector::select(end - row)
         } else {
-            RowSelector::skip(run - row)
+            RowSelector::skip(end - row)
         });
-        row = run;
+        row = end;
     }
     RowSelection::from(out)
 }
 
 /// The bits of `mask` from `start` for `len` rows, as a mask of their own.
 fn bits(mask: &[u64], start: usize, len: usize) -> Vec<u64> {
-    let mut out = vec![0u64; mask_words(len)];
-    for row in 0..len {
-        let at = start + row;
-        if mask[at / 64] >> (at % 64) & 1 == 1 {
-            out[row / 64] |= 1 << (row % 64);
-        }
+    let (first, shift) = (start / 64, start % 64);
+    let at = |w: usize| mask.get(first + w).copied().unwrap_or(0);
+    let mut out: Vec<u64> = (0..mask_words(len))
+        .map(|w| match shift {
+            0 => at(w),
+            _ => at(w) >> shift | at(w + 1) << (64 - shift),
+        })
+        .collect();
+    if !len.is_multiple_of(64)
+        && let Some(last) = out.last_mut()
+    {
+        *last &= (1u64 << (len % 64)) - 1;
     }
     out
 }
