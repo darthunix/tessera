@@ -2357,6 +2357,17 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **A forward reader rebuilt after a window of no selected row** (a
+  finding of the review of the change `parquet-fdw`, task 5.1). Under a
+  clause the source checks, a window whose rows the clause rejects is
+  not asked, and the next window asked is a gap for the column's reader,
+  which builds its forward reader anew: the dictionary decoded again and
+  the page headers walked from the chunk's start, once a column and such
+  a window. Within the selection there is no gap: the reader already
+  stands at the next selected row. Suggested: keep the forward reader
+  where the selection holds no row between its end and the window, once
+  counts show the rebuilds cost, as a sparse clause over many columns
+  would.
 - **A distinct aggregate chosen serially over the core's parallel plan**
   (a finding of the change `parquet-fdw`, its stage 1 measured).
   `TessAgg`'s `COUNT(DISTINCT)` has no parallel form, and the costs

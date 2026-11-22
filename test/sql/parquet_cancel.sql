@@ -49,25 +49,39 @@ SELECT parquet_test_cancel_after(:'parquet_module', 1);
 SELECT sum(i) FROM t_million;
 \set VERBOSITY default
 SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_group;
+-- Under a clause the source checks that passes no row, the cancel comes
+-- in the pass over the clause's column, before the group is selected.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM t_million WHERE i < 0;
+SELECT parquet_test_cancel_after(:'parquet_module', 1);
+\set VERBOSITY sqlstate
+SELECT count(*) FROM t_million WHERE i < 0;
+\set VERBOSITY default
+SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_pass;
 SELECT parquet_test_cancel_after(:'parquet_module', NULL);
 -- Without the cancel, every window.
 SELECT sum(i) = 999999::numeric * 1000000 / 2 AS every_row FROM t_million;
 
 -- The windows a scan reads, counted at the same injection point, with a
 -- cancel that never comes: a group of three windows whose middle one
--- holds no row the clause passes. The node reads a's three windows, and
--- b's first and last, each once, forward: the last is read forward after
--- the gap, not again for each of its batches.
+-- holds no row TessFilter's clause passes. The node reads a's three
+-- windows, and b's first and last, each once, forward: the last is read
+-- forward after the gap, not again for each of its batches. Where the
+-- source checks the clause itself, its pass reads a's three windows and
+-- then b's two.
 \set gap :abs_builddir '/results/parquet_files/gap.parquet'
 SELECT parquet_test_write(:'gap', '{"group_rows": 3072, "columns": [
     {"name": "a", "type": "int64", "values": ' ||
     (SELECT json_agg(CASE WHEN g / 1024 = 1 THEN 0 ELSE 1 END) FROM generate_series(0, 3071) g) ||
     '}, {"name": "b", "type": "int64", "range": 3072}]}');
 CREATE FOREIGN TABLE t_gap (a bigint, b bigint) SERVER pq OPTIONS (files :'gap');
-EXPLAIN (COSTS OFF) SELECT sum(b) FROM t_gap WHERE a <> 0;
+EXPLAIN (COSTS OFF) SELECT sum(b) FROM t_gap WHERE a + 0 <> 0;
+SELECT parquet_test_cancel_after(:'parquet_module', 1000000);
+SELECT sum(b) = 3071 * 3072 / 2 - (1024 + 2047) * 1024 / 2 AS passed_rows
+FROM t_gap WHERE a + 0 <> 0;
+SELECT parquet_test_windows() AS windows_read;
 SELECT parquet_test_cancel_after(:'parquet_module', 1000000);
 SELECT sum(b) = 3071 * 3072 / 2 - (1024 + 2047) * 1024 / 2 AS passed_rows FROM t_gap WHERE a <> 0;
-SELECT parquet_test_windows() AS windows_read;
+SELECT parquet_test_windows() AS windows_read_under_the_source;
 SELECT parquet_test_cancel_after(:'parquet_module', NULL);
 
 -- spec: parquet-fdw/A file replaced between participants
