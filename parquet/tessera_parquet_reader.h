@@ -128,8 +128,9 @@ extern void tess_parquet_reader_free(TessParquetReader *reader);
 
 /*
  * Reads the window of len rows from the group's row start. Where it
- * starts where the last forward window ended, or is the first, every
- * selected row of it is read; otherwise the rows the mask rows asks for.
+ * starts where the last forward window ended or after it, or is the
+ * first, every selected row of it is read; otherwise, for a window behind
+ * the forward ones, the rows the mask rows asks for.
  * Writes the mask of the rows the window holds, over the window, and
  * their count; the window is the reader's until the next read.
  */
