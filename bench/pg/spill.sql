@@ -134,6 +134,53 @@ FROM unnest(ARRAY['build_250k', 'build_300k', 'build_420k', 'group_fk_1536kb', '
             ARRAY['8MB', '8MB', '8MB', '1536kB', '128kB', '128kB'])
          WITH ORDINALITY AS c(name, sql, memory, c_order)
 ORDER BY c_order;
+/*
+ * Groupings with DISTINCT whose pairs of group and value pass hash_mem,
+ * over tables made here, at each work_mem:
+ * - distinct_big: count(DISTINCT) of a bigint by an integer of 1000
+ *   groups, 2 M pairs in 4 M rows, past hash_mem by the estimate at 4
+ *   and 16 MB and within it at 64 MB;
+ * - distinct_generic: the same with sum and avg of a smallint beside it;
+ * - distinct_two: the same with a second DISTINCT set of 500 000 pairs,
+ *   the two freezing together;
+ * - distinct_keys: the first by two keys of 1000 groups together, whose
+ *   pairs shrink most when a set is keyed by its group's record;
+ * - distinct_half: 300 000 groups of ten values each in 3 M rows, near
+ *   half of hash_mem at 16 MB, the least room the planner leaves the
+ *   sets, its rows in the order of the key, so that most groups come
+ *   after the sets froze;
+ * - distinct_thought: 550 groups by two keys equal to each other, which
+ *   the planner thinks 250 000, a tenth of the rows, 12 MB, and 500 000
+ *   pairs that fit, at 16 and 64 MB alone, since at 4 MB its groups pass
+ *   hash_mem by the estimate.
+ * The statistics of the first table hold its pairs, not the product of
+ * its columns' values.
+ */
+CREATE TEMP TABLE distinct_big AS
+SELECT p % 1000 AS g, p::bigint * 1000003 AS v, (p % 500000)::bigint AS w,
+       (i % 1000)::int2 AS s, p % 1000 / 40 AS k1, p % 40 AS k2
+FROM generate_series(0, 3999999) AS i, LATERAL (SELECT i % 2000000 AS p) AS q;
+CREATE STATISTICS distinct_big_nd (ndistinct) ON g, v, w, k1, k2 FROM distinct_big;
+CREATE TEMP TABLE distinct_half AS
+SELECT i / 10 AS k, i::bigint AS v FROM generate_series(0, 2999999) AS i;
+CREATE TEMP TABLE distinct_thought AS
+SELECT p % 550 AS a, p % 550 AS b, p::bigint AS v
+FROM generate_series(0, 2499999) AS i, LATERAL (SELECT i % 500000 AS p) AS q;
+ANALYZE distinct_big, distinct_half, distinct_thought;
+SELECT pg_temp.measure_pair(format('%s_%s', name, lower(memory)), sql, memory,
+                            :warmups, :repetitions)
+FROM unnest(ARRAY['4MB', '16MB', '64MB']) WITH ORDINALITY AS m(memory, m_order),
+     unnest(ARRAY['distinct_big', 'distinct_generic', 'distinct_two', 'distinct_keys',
+                  'distinct_half', 'distinct_thought'],
+            ARRAY['SELECT sum(n) FROM (SELECT g, count(DISTINCT v) AS n FROM distinct_big GROUP BY g) AS q',
+                  'SELECT sum(n), sum(t), sum(a) FROM (SELECT g, count(DISTINCT v) AS n, sum(s) AS t, avg(s) AS a FROM distinct_big GROUP BY g) AS q',
+                  'SELECT sum(n), sum(m) FROM (SELECT g, count(DISTINCT v) AS n, count(DISTINCT w) AS m FROM distinct_big GROUP BY g) AS q',
+                  'SELECT sum(n) FROM (SELECT k1, k2, count(DISTINCT v) AS n FROM distinct_big GROUP BY k1, k2) AS q',
+                  'SELECT sum(n) FROM (SELECT k, count(DISTINCT v) AS n FROM distinct_half GROUP BY k) AS q',
+                  'SELECT sum(n) FROM (SELECT a, b, count(DISTINCT v) AS n FROM distinct_thought GROUP BY a, b) AS q'])
+         WITH ORDINALITY AS c(name, sql, c_order)
+WHERE name <> 'distinct_thought' OR memory <> '4MB'
+ORDER BY m_order, c_order;
 RESET work_mem;
 
 \copy timings TO 'timings.csv' CSV HEADER

@@ -69,7 +69,16 @@ query down, and where it can, does it speed one up.
   3000 pairs at 256 kB (`distinct_128kb`), and a grouping whose
   partitions regrow their index while they merge (`regrow_128kb`); their
   tables are made by the family, so they mean the same at any data
-  multiplier. The family sets `hash_mem_multiplier` to 2 for every case.
+  multiplier. Six cases more group with `count(DISTINCT)` of a `bigint`
+  whose pairs of group and value pass `hash_mem`, at each `work_mem`,
+  over tables of their own: 2 M pairs of 1000 groups (`distinct_big`),
+  the same with `sum` and `avg` of a `smallint` beside it
+  (`distinct_generic`), with a second set (`distinct_two`) and by two
+  keys (`distinct_keys`); 300 000 groups near half of `hash_mem` at
+  16 MB, in the order of the key (`distinct_half`); and 550 groups the
+  planner thinks 250 000, whose pairs fit, at 16 and 64 MB alone
+  (`distinct_thought`). The family sets `hash_mem_multiplier` to 2 for
+  every case.
 - **sort** (`sort.sql`): `ORDER BY` over `bench_sort` (2 M rows per
   multiplier, keys in no order of the rows): a unique int4 key, an int8 one
   past the int4 range, a key of 1000 values, two keys, a descending key with
