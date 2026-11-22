@@ -163,15 +163,56 @@ the chunk it reads and an empty one, and counts them. The join's values
 keep a directory of their own, with their own references and limit.
 
 The limit of memory keeps a node that spills far from 32768 chunks, so
-there the check is the last guard. A DISTINCT set never spills: the
-planner takes it only when its estimate fits `hash_mem`, and past that
-estimate the check is its guard.
+there the check is the last guard. A DISTINCT set that does not spill
+(below) is taken by the planner only when its estimate fits
+`hash_mem`, and past that estimate the check is its guard.
 
 Refused:
 
 - An allocator over both memory contexts and DSA: one caller uses DSA,
   with headers and a budget the others lack.
 - A public header: every caller is a node of Tessera.
+
+## A DISTINCT set past the limit
+
+The groups of a grouping with a DISTINCT aggregate stay in memory, and
+so its sets have what the groups leave. With `GROUP BY`, the set of an
+argument a word holds is keyed by the reference of its group's record
+and the value, a pair of two words whatever the keys. Each such set has
+a machine of `relspill`'s `Rows`, the one a frozen table of generic
+aggregates has:
+
+```
+  input                              after the input
+  ─────                              ───────────────
+  row → group's record r             every set emptied
+      → pair (r, v), hash h          each set's levels, last first:
+  in the set?  yes → drop              each partition into the set
+       │ no                              emptied, under h:
+  frozen?      no  → insert, step        new → step the aggregate at r
+       │ yes                             seen → drop
+  write (r, v, h) to the partition       past the fill → a level below
+  of h's bits                        then the groups go out
+```
+
+- After each batch the machine weighs the node's memory, as Memory
+  Usage counts it, and the set's pairs; past seven eighths of
+  `hash_mem`, with 64 pairs at least, it freezes the set. A frozen set
+  takes no new pair, so a pair it lacks was never counted in memory,
+  and every copy of it goes to the one partition its hash names.
+- The pairs of a level are 32 partitions of chunks of three words a
+  pair. Their writers, a write buffer and a reader are what a set's
+  spill holds past the limit, beside the set.
+- The groups do not spill, so they may pass their estimate and leave
+  the sets no room. When the groups alone pass seven eighths of
+  `hash_mem` once the input is read, the sets are read back as of the
+  last level and grow, rather than freeze at 64 pairs and write every
+  pair again a level at a time.
+
+Refused: a set split into partitions with the largest sent to disk, as
+the groups of the node's own aggregates go. It writes fewer copies of a
+pair seen often, but it sends records and needs a merge of sets; the
+freeze needs neither.
 
 ## What Memory Usage counts
 
@@ -253,9 +294,10 @@ Refused:
 
 ## What we decided not to do
 
-- A spill for a grouping with a DISTINCT aggregate. It never spills;
-  the planner takes it only when its estimate of the pairs of group
-  and value fits `hash_mem`.
+- A spill of the groups of a grouping with a DISTINCT aggregate, and
+  of a set whose values a dictionary numbers, or of the set of a
+  DISTINCT aggregate without `GROUP BY`. These never spill; the planner
+  takes them only when its estimate of their memory fits `hash_mem`.
 - The key dictionary of a grouping, PostgreSQL's simplehash: another
   table, with another allocator.
 - The chunks of `TessRows`, whose length comes from their caller, a
@@ -278,8 +320,12 @@ Refused:
   reservation of the index of the partitions in memory
 - `nodes/agg_group.c`: the grouping's chunks, its first index, its
   regrow and its note of memory
-- `nodes/agg_keydict.c`: the sets of the DISTINCT aggregates
-- `nodes/agg_spill.c`: a grouping's reload, its merge and its totals
+- `nodes/agg_keydict.c`: the sets of the DISTINCT aggregates, a frozen
+  set's look-up and a partition read back into a set
+- `nodes/agg_spill.c`: a grouping's reload, its merge and its totals;
+  the levels of a DISTINCT set's pairs, their writers and readers
+- `crates/relspill/src/group.rs`: the machine of a frozen table, which
+  freezes a DISTINCT set and gives its partitions to read
 - `crates/relspill/src/plan.rs`: the plan of a level, which gives the
   length of a chunk
 
@@ -289,7 +335,12 @@ Refused:
   limit, of a regrow while another set is alive, and of DISTINCT over no
   rows, each against the bytes the sizes of `relhash` give; a reload
   that merges and regrows, whose every note checks its totals in a
-  build with assertions; the first index at limits of 2, 3 and 4 MiB.
+  build with assertions; the first index at limits of 2, 3 and 4 MiB;
+  DISTINCT sets past the limit, at several limits, with groups that
+  come after a freeze and groups that alone fill the limit, against
+  the core.
+- `crates/relspill/src/group/tests.rs`: the pairs of DISTINCT sets
+  through frozen sets and their levels, counted once each.
 - `test/sql/join.sql`: serial builds of 250 000 and 420 000 rows at
   16 MiB and of 262 150 rows at 13 MiB, whether each spills and its
   rows against the core's; the last with a filter, whether it stays in

@@ -131,7 +131,11 @@ typedef struct GenericAgg
  * argument alone without GROUP BY; a pair's hash is its group's folded
  * with the argument's. A row goes into the aggregate only when it
  * inserted its pair: the ones seen before are dropped, and so are NULL
- * arguments, which the aggregate skips anyway. The table does not spill.
+ * arguments, which the aggregate skips anyway. With GROUP BY, the set of
+ * an argument a word holds goes to disk past hash_mem (pairs): it takes no
+ * new pair, a row whose pair it lacks writes it, and once the input is
+ * read each partition is read back into the set emptied (agg_group.c);
+ * else pairs is NULL, and the set grows past hash_mem if it must.
  */
 typedef struct DistinctSet
 {
@@ -154,6 +158,7 @@ typedef struct DistinctSet
 	uint32	   *offsets;
 	uint64	   *pending_bits;
 	uint64	   *inserted_bits;
+	PairSpill  *pairs;
 } DistinctSet;
 
 struct AggValue
@@ -333,6 +338,9 @@ extern TessRowMask agg_distinct_rows(TessAggState *state, AggValue *value,
 									 const uint32 *group_refs,
 									 const TessRowMask *valid,
 									 const TessDatumColumn *argument);
+extern TessRowMask agg_distinct_read(TessAggState *state, AggValue *value, int nrows,
+									 Datum *const *columns);
+extern void agg_distinct_grown(TessAggState *state, AggValue *only, Size groups);
 extern Size agg_distinct_bytes(TessAggState *state);
 extern KeyDict *agg_key_dict_create(TessAggState *state, Oid eqop, Oid type,
 									Oid collation);

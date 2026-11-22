@@ -165,6 +165,72 @@ distinct_regrow(TessAggState *state, DistinctSet *set, uint64 records)
 	pfree(old);
 }
 
+/* The set's buffers of a batch of nrows rows. */
+static void
+distinct_reserve(DistinctSet *set, int nrows)
+{
+	int			nwords = tess_row_mask_word_count(nrows);
+
+	if (set->capacity >= nrows)
+		return;
+	set->refs = MemoryContextAlloc(set->context, sizeof(Datum) * nrows);
+	set->ref_nulls = MemoryContextAllocZero(set->context, sizeof(bool) * nrows);
+	set->hashes = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
+	set->offsets = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
+	set->pending_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
+	set->inserted_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
+	set->capacity = nrows;
+}
+
+/*
+ * The rows of pending, hashed into set->hashes and keyed by keys, into the
+ * set: inserted, cleared, receives those that made a pair. A frozen set
+ * takes none: a row whose pair it has drops, and the others go to disk,
+ * with the references of set->refs and the values of keys' argument.
+ */
+static void
+distinct_insert(TessAggState *state, DistinctSet *set, const TessTableKey *keys,
+				TessRowMask *pending, TessRowMask *inserted)
+{
+	if (set->pairs != NULL && set->pairs->writing != NULL)
+	{
+		int			nwords = tess_row_mask_word_count(pending->nrows);
+
+		check(state, state->kernels->table_probe(&set->table, set->hashes, set->nkeys, keys,
+												 pending, set->offsets, inserted,
+												 &state->status));
+		for (int word = 0; word < nwords; word++)
+		{
+			pending->bits[word] &= ~inserted->bits[word];
+			inserted->bits[word] = 0;
+		}
+		pairs_write(state, set->pairs, pending, set->refs, keys[1].column->values, set->hashes);
+		return;
+	}
+	if (set->table.nchunks == 0)
+		distinct_add_chunk(state, set);
+	for (;;)
+	{
+		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+
+		/* Each call adds the pairs it makes to inserted, cleared by the caller. */
+		check(state, state->kernels->table_find_or_insert(&set->table,
+														  set->table.nchunks - 1,
+														  set->hashes, set->nkeys,
+														  keys, pending,
+														  set->offsets, inserted,
+														  &state->status));
+		if (tess_row_mask_count(pending) == 0)
+			break;
+		check(state, state->kernels->table_stats(&set->table, &stats,
+												 &state->status));
+		if (stats.records * 2 >= stats.buckets)
+			distinct_regrow(state, set, stats.records);
+		else
+			distinct_add_chunk(state, set);
+	}
+}
+
 /*
  * The rows of valid, of a batch of nrows rows, that insert their pair into
  * the aggregate's set: a mask in the set's buffers. group_hashes are the
@@ -202,16 +268,7 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 		numbers.values = dict->batch_numbers;
 		argument = &numbers;
 	}
-	if (set->capacity < nrows)
-	{
-		set->refs = MemoryContextAlloc(set->context, sizeof(Datum) * nrows);
-		set->ref_nulls = MemoryContextAllocZero(set->context, sizeof(bool) * nrows);
-		set->hashes = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
-		set->offsets = MemoryContextAlloc(set->context, sizeof(uint32) * nrows);
-		set->pending_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
-		set->inserted_bits = MemoryContextAlloc(set->context, sizeof(uint64) * nwords);
-		set->capacity = nrows;
-	}
+	distinct_reserve(set, nrows);
 	pending = (TessRowMask) {nrows, set->pending_bits};
 	inserted = (TessRowMask) {nrows, set->inserted_bits};
 	memset(set->inserted_bits, 0, sizeof(uint64) * nwords);
@@ -234,6 +291,7 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 												  &state->status));
 	}
 	/* The groups' references, of the rows the set reads. */
+	Assert((group_refs != NULL) == (set->nkeys == 2));
 	if (group_refs != NULL)
 	{
 		int			row = -1;
@@ -248,29 +306,70 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 	keys[set->nkeys - 1].kind = value->argument_kind;
 	keys[set->nkeys - 1].column = argument;
 	keys[set->nkeys - 1].prepared = NULL;
-	if (set->table.nchunks == 0)
-		distinct_add_chunk(state, set);
-	for (;;)
+	distinct_insert(state, set, keys, &pending, &inserted);
+	return inserted;
+}
+
+/*
+ * The nrows pairs of a partition read back (pairs_read) into the set of
+ * value, under the hashes they were written with: the rows that make a
+ * pair, a mask in the set's buffers. A set frozen again sends the others
+ * to the level below.
+ */
+TessRowMask
+agg_distinct_read(TessAggState *state, AggValue *value, int nrows, Datum *const *columns)
+{
+	DistinctSet *set = value->distinct;
+	int			nwords = tess_row_mask_word_count(nrows);
+	TessDatumColumn refs = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	TessDatumColumn values = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	TessTableKey keys[2];
+	TessRowMask pending;
+	TessRowMask inserted;
+
+	Assert(set->nkeys == 2 && nrows <= AGG_GROUP_ROWS);
+	distinct_reserve(set, nrows);
+	pending = (TessRowMask) {nrows, set->pending_bits};
+	inserted = (TessRowMask) {nrows, set->inserted_bits};
+	memset(set->inserted_bits, 0, sizeof(uint64) * nwords);
+	set->pending_bits[0] = nrows == 64 ? UINT64_MAX : (UINT64CONST(1) << nrows) - 1;
+	for (int row = 0; row < nrows; row++)
 	{
+		set->refs[row] = columns[0][row];
+		set->hashes[row] = (uint32) columns[2][row];
+	}
+	refs.values = set->refs;
+	refs.isnull = set->ref_nulls;
+	refs.nrows = nrows;
+	values.values = columns[1];
+	values.isnull = set->ref_nulls;
+	values.nrows = nrows;
+	keys[0] = (TessTableKey) {TESS_TABLE_KEY_INT8, &refs, NULL};
+	keys[1] = (TessTableKey) {value->argument_kind, &values, NULL};
+	distinct_insert(state, set, keys, &pending, &inserted);
+	return inserted;
+}
+
+/*
+ * After a batch, the groups taking groups bytes: the machine of each set
+ * that spills, or of only's alone, weighs the node's memory and the set's
+ * pairs, and may freeze the set.
+ */
+void
+agg_distinct_grown(TessAggState *state, AggValue *only, Size groups)
+{
+	for (int index = 0; index < state->nvalues; index++)
+	{
+		AggValue   *value = &state->values[index];
+		DistinctSet *set = value->distinct;
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
 
-		/* Each call adds the pairs it makes to inserted, cleared above. */
-		check(state, state->kernels->table_find_or_insert(&set->table,
-														  set->table.nchunks - 1,
-														  set->hashes, set->nkeys,
-														  keys, &pending,
-														  set->offsets, &inserted,
-														  &state->status));
-		if (tess_row_mask_count(&pending) == 0)
-			break;
-		check(state, state->kernels->table_stats(&set->table, &stats,
-												 &state->status));
-		if (stats.records * 2 >= stats.buckets)
-			distinct_regrow(state, set, stats.records);
-		else
-			distinct_add_chunk(state, set);
+		if (set == NULL || set->pairs == NULL || set->pairs->writing != NULL ||
+			(only != NULL && value != only) || set->table.nchunks == 0)
+			continue;
+		check(state, state->kernels->table_stats(&set->table, &stats, &state->status));
+		pairs_grown(state, set->pairs, groups + agg_distinct_bytes(state), stats.records);
 	}
-	return inserted;
 }
 
 /* The bytes of every distinct set. */
@@ -285,6 +384,8 @@ agg_distinct_bytes(TessAggState *state)
 
 		if (value->distinct != NULL)
 			bytes += value->distinct->bytes;
+		if (value->distinct != NULL && value->distinct->pairs != NULL)
+			bytes += pairs_memory(value->distinct->pairs);
 		if (value->distinct_dict != NULL)
 			bytes += MemoryContextMemAllocated(value->distinct_dict->context, true);
 	}

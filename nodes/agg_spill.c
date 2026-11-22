@@ -1580,3 +1580,211 @@ rows_reader_init(TessAggState *state)
 }
 
 
+/* ------------------------------------------------------ DISTINCT pairs past hash_mem */
+
+/*
+ * A DISTINCT set's pairs on disk go as a frozen table's rows do, by the
+ * same machine (relspill's Rows), each pair three words: its group's
+ * reference, its value and its hash, none NULL.
+ */
+#define PAIRS_WORDS 3
+
+static const bool pairs_byvals[PAIRS_WORDS] = {true, true, true};
+static const int16 pairs_lens[PAIRS_WORDS] = {sizeof(Datum), sizeof(Datum), sizeof(Datum)};
+
+/*
+ * What every level of pairs shares, for the node's sets that spill:
+ * hash_mem, ROWS_PARTS partitions of a chunk of ROWS_BLOCK_ROWS pairs, the
+ * chunks shared among the sets, which may freeze together, and the fill
+ * and least of the rows' machine.
+ */
+void
+pairs_params_init(TessAggState *state, int sets)
+{
+	int			null_lanes = tess_spill_columns_null_lanes(PAIRS_WORDS);
+	Size		len = TESS_SPILL_COLUMNS_HEADER +
+		sizeof(uint64) * ROWS_BLOCK_ROWS * (null_lanes + PAIRS_WORDS);
+
+	state->pairs_params = (TessRowsParams) {
+		.limit = tess_hash_memory_limit(),
+		.shape = (TessSpillShape) {
+			.reserve = len,
+			.share = (Size) sets,
+			.min_chunk = len,
+			.max_chunk = len,
+			.min_partitions = ROWS_PARTS,
+			.max_partitions = ROWS_PARTS,
+		},
+		.fill = AGG_SPILL_FILL,
+		.least = AGG_GROUP_ROWS,
+	};
+}
+
+/* A set's input starts: its machine, which freezes it past the fill. */
+void
+pairs_begin(TessAggState *state, PairSpill *pairs)
+{
+	check(state, state->kernels->rows_init(&pairs->machine, &state->pairs_params,
+										   &state->status));
+}
+
+/*
+ * After a batch, the set holds records pairs and the node takes memory
+ * bytes: past the fill its machine freezes it, into a level of pairs whose
+ * files are not made until written.
+ */
+void
+pairs_grown(TessAggState *state, PairSpill *pairs, Size memory, uint64 records)
+{
+	TessRowsAction action;
+
+	if (pairs->writing != NULL)
+		return;
+	action = rows_step(state, &pairs->machine, NULL, 0, (TessRowsEvent) {
+		.kind = TESS_ROWS_GROWN,
+		.memory = memory,
+		.records = records,
+	});
+	if (action.kind != TESS_ROWS_FREEZE)
+		return;
+	pairs->writing = level_create(state, &action, &pairs->machine, PAIRS_WORDS, 0);
+	note_memory(state);
+}
+
+/*
+ * The pairs of the rows of rows to the partitions of their hashes' bits
+ * from the level's shift: the reference of each row's group, its value
+ * and its hash.
+ */
+void
+pairs_write(TessAggState *state, PairSpill *pairs, const TessRowMask *rows,
+			const Datum *refs, const Datum *values, const uint32 *hashes)
+{
+	RowSpill   *spill = pairs->writing;
+	int			null_lanes = tess_spill_columns_null_lanes(PAIRS_WORDS);
+	int			row = -1;
+	bool		flushed = false;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		int			part = (int) tess_table_partition(hashes[row], spill->shift, ROWS_PARTS);
+		RowWriter  *writer = &spill->writers[part];
+		uint64	   *nulls;
+		uint64	   *words;
+
+		if (writer->rows == writer->capacity)
+		{
+			rows_flush(state, spill, part);
+			flushed = true;
+		}
+		nulls = tess_spill_columns_lane(writer->chunk, 0) + writer->rows;
+		words = nulls + (Size) writer->capacity * null_lanes;
+		for (int lane = 0; lane < null_lanes; lane++)
+			nulls[(Size) writer->capacity * lane] = 0;
+		words[0] = (uint64) refs[row];
+		words[writer->capacity] = (uint64) values[row];
+		words[(Size) writer->capacity * 2] = hashes[row];
+		writer->rows++;
+		state->spilled_pairs++;
+	}
+	/* A chunk written grows the level's lists of blocks. */
+	if (flushed)
+		note_memory(state);
+}
+
+/* End the level a set writes, if any, and put it on the set's stack to read. */
+void
+pairs_close(TessAggState *state, PairSpill *pairs)
+{
+	if (pairs->writing == NULL)
+		return;
+	/* Its last chunks, noted before the level frees its writers and lists. */
+	for (int part = 0; part < ROWS_PARTS; part++)
+		rows_flush(state, pairs->writing, part);
+	note_memory(state);
+	level_finish(state, pairs->writing);
+	pairs->pending = lcons(pairs->writing, pairs->pending);
+	pairs->writing = NULL;
+}
+
+/*
+ * Open the next partition of a set's pairs to read, depth first: the last
+ * level written first, its partitions as its machine gives them; false
+ * when none is left. The set's machine becomes the partition's, as of the
+ * last level when last, so that it grows rather than freezes.
+ */
+bool
+pairs_next_partition(TessAggState *state, PairSpill *pairs, bool last)
+{
+	RowReader  *reader = pairs->reader;
+
+	if (reader != NULL && reader->file != NULL)
+		tess_spill_close(reader->file);
+	if (reader != NULL)
+		reader->file = NULL;
+	while (pairs->pending != NIL)
+	{
+		RowSpill   *spill = linitial(pairs->pending);
+		uint64		written[ROWS_PARTS];
+		TessRowsAction action;
+
+		for (int part = 0; part < ROWS_PARTS; part++)
+			written[part] = spill->writers[part].written;
+		action = rows_step(state, &spill->machine, written, ROWS_PARTS,
+						   (TessRowsEvent) {.kind = TESS_ROWS_NEXT});
+		if (action.kind == TESS_ROWS_READ)
+		{
+			if (reader == NULL)
+				reader = pairs->reader = reader_create(state, PAIRS_WORDS, PAIRS_WORDS,
+													   pairs_byvals, pairs_lens);
+			reader->file = tess_spill_open(spill->file, 0, (int) action.table.partition);
+			reader->columns.rows = 0;
+			reader->next = 0;
+			reader->pairs = 0;
+			if (last)
+				action.table.last = 1;
+			check(state, state->kernels->rows_read(&pairs->machine, &state->pairs_params,
+												   &action.table, &state->status));
+			return true;
+		}
+		pairs->pending = list_delete_first(pairs->pending);
+		rows_spill_free_one(spill);
+	}
+	return false;
+}
+
+/*
+ * The next pairs of the partition being read, up to 64: their references,
+ * values and hashes into columns[0], [1] and [2]; 0 at its end.
+ */
+int
+pairs_read(TessAggState *state, PairSpill *pairs, Datum **columns)
+{
+	uint32		take = reader_window(pairs->reader);
+
+	for (int column = 0; column < PAIRS_WORDS; column++)
+		columns[column] = pairs->reader->column_values[column];
+	return (int) take;
+}
+
+/*
+ * The memory of a set's levels of pairs, and of its reader once made: the
+ * chunk and values a load reads into, and the window's columns.
+ */
+Size
+pairs_memory(const PairSpill *pairs)
+{
+	Size		bytes = levels_memory(pairs->writing, pairs->pending);
+
+	if (pairs->reader != NULL)
+		bytes += pairs->reader->columns.own_chunk_len + pairs->reader->columns.own_values_len +
+			PAIRS_WORDS * AGG_GROUP_ROWS * (sizeof(Datum) + sizeof(bool));
+	return bytes;
+}
+
+/* Forget a set's levels of pairs and the partition being read. */
+void
+pairs_free(PairSpill *pairs)
+{
+	levels_free(&pairs->writing, &pairs->pending, pairs->reader);
+}

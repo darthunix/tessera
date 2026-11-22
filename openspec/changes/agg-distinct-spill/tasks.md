@@ -52,7 +52,7 @@ one pull request; the work and the close are a second.
       several kinds and several keys. `docs/nodes.md` says the set's
       key. Check: `make installcheck`; the counts of the measurement
       plan's item 2 at 64 MB against `main`, on the maintainer's word
-- [ ] 4.2 The set of an argument a word holds freezes on its machine's
+- [x] 4.2 The set of an argument a word holds freezes on its machine's
       word, writes the pairs it lacks, and reads its levels back into
       their groups before the groups go out; every set is emptied at the
       end of the input; Memory Usage counts the writers and readers and

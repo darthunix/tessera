@@ -979,11 +979,30 @@ grouped by int2, of dates 325 and 54, by int4 of texts 699 and 88;
 `sum` and `avg` of int4 71 and 38. The core groups such a query only sorted; the node takes its
 `GroupAggregate` or plain `Aggregate` as a template and reads the input
 below the core's sort, unless `enable_hashagg` is off (as for any grouping
-whose hashed path the core dropped). The pairs' tables
-do not spill, and neither do the groups of a query that has them: the
-node takes the path only when the planner's estimate of the pairs fits
-`hash_mem`, and so does its estimate of the groups before `HAVING` with
-their states (below), and shows their bytes in `Memory Usage`.
+whose hashed path the core dropped). The groups of a query with such
+an aggregate do not spill, and the node takes the path only when the
+planner's estimate of its groups before `HAVING`, with their states,
+fits `hash_mem` (below), and so does its estimate of the pairs. With
+`GROUP BY`, the set of an argument a word holds goes to disk past seven
+eighths of `hash_mem`, as a frozen table's rows of generic aggregates
+do, on the same machine of `relspill` (`Rows`): after each batch the
+machine of each set weighs the node's memory, the groups, every set and
+the writers and readers of their levels, and the set's pairs, and past
+the fill, with 64 pairs at least, freezes the set. A frozen set takes
+no new pair: a row is looked up without insert, a row whose pair it has
+drops, and the others write their group's reference, their value and
+their pair's hash to the partition of that hash's bits, one of 32 of a
+level. Once the input is read every set is emptied, its pairs in memory
+counted already, and before the groups go out the levels of each set
+are read back, the last written first, each partition into the set
+emptied, under the hashes written, the rows that make a pair stepping
+the aggregate at their group's record; a partition past the fill
+freezes into a level below. Each pair counts once: it is in memory or
+in the one partition its hash names. When the groups alone pass seven
+eighths of `hash_mem` once the input is read, the sets read back are
+read as of the last level, and grow past `hash_mem` rather than freeze
+at 64 pairs level after level. Any other set grows past `hash_mem` if
+it must. `Memory Usage` shows the sets, their writers and readers.
 
 `UNION` without `ALL` is grouping of the branches' rows by every column:
 at the set operation stage (`UPPERREL_SETOP`) the node's path stands next

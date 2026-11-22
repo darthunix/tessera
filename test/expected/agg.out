@@ -1356,7 +1356,9 @@ BEGIN
 END $$;
 CREATE TABLE agg_dset AS SELECT 0 AS g, i AS v, i % 100 AS w FROM generate_series(1, 3000) AS i;
 ANALYZE agg_dset;
-SET work_mem = '256kB';
+-- At 384 kB, whose seven eighths these sets stay within, so that none
+-- goes to disk.
+SET work_mem = '384kB';
 SET hash_mem_multiplier = 1;
 EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset GROUP BY g;
                   QUERY PLAN                  
@@ -1368,7 +1370,7 @@ EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT w), count(DISTINCT v) FROM agg_dset
 
 -- One set of 3000 values in the group's table: its last regrow, both of
 -- its indexes alive, is the highest moment; its chunks past the first are
--- an eighth of hash_mem, 64 kB here.
+-- an eighth of hash_mem, no less than 64 kB.
 -- spec: table-memory/A DISTINCT set under a small limit
 SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dset GROUP BY g$$);
  agg_memory 
@@ -1416,7 +1418,7 @@ SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dset GROUP BY g$$);
 -- rows), and a set of 100 pairs, its argument NULL in the other rows: the
 -- groups' last regrow, both of its indexes alive beside the set, is the
 -- highest moment.
-SET work_mem = '256kB';
+SET work_mem = '384kB';
 SELECT agg_memory($$SELECT v, count(DISTINCT CASE WHEN v <= 100 THEN v % 100 END) FROM generate_series(1, 3000) AS t(v) GROUP BY v$$);
  agg_memory 
 ------------
@@ -2085,6 +2087,142 @@ SELECT agg_same($$SELECT count(*), sum(d), sum(s), min(l), max(h) FROM (SELECT g
 RESET hash_mem_multiplier;
 RESET work_mem;
 DROP TABLE agg_groups;
+-- A DISTINCT set of a word past seven eighths of hash_mem takes no new
+-- pair: a row whose pair it lacks goes to disk, and each partition is
+-- read back into its group once the input is read. The statistics were
+-- taken over the first thousand rows, ten values of v, so that the
+-- planner thinks the pairs fit; 100 groups, 400 000 pairs in 500 000
+-- rows, a set several times hash_mem.
+CREATE TABLE agg_dspill (g int, v bigint, w int, s int2, t text) WITH (autovacuum_enabled = off);
+INSERT INTO agg_dspill SELECT i % 100, i % 10, i % 7, i % 9, 't' || i % 3 FROM generate_series(1, 1000) AS i;
+ANALYZE agg_dspill;
+INSERT INTO agg_dspill
+SELECT i % 100, CASE WHEN i % 13 = 0 THEN NULL ELSE (i % 400000)::bigint * 7919 END, i % 50000, i % 1000, 't' || i % 77
+FROM generate_series(1, 500000) AS i;
+SET work_mem = '4MB';
+SET hash_mem_multiplier = 1;
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g;
+                   QUERY PLAN                   
+------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: g
+   ->  Custom Scan (TessHeapScan) on agg_dspill
+(3 rows)
+
+SELECT agg_spill($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$);
+          agg_spill           
+------------------------------
+ rows spilled: f, levels: one
+(1 row)
+
+SELECT agg_same($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+ same 
+------
+ t
+(1 row)
+
+-- Every aggregate the node takes with DISTINCT, two sets and a FILTER,
+-- NULL arguments, a generic aggregate and a sum state beside them; at
+-- 256 kB a partition read back passes the limit and splits into a level
+-- below.
+-- spec: table-memory/Aggregates through the spill
+SELECT agg_same($$SELECT g, count(DISTINCT v), sum(DISTINCT w), avg(DISTINCT w), min(DISTINCT v), max(DISTINCT v), count(DISTINCT w) FILTER (WHERE s > 500), max(t), sum(s) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+ same 
+------
+ t
+(1 row)
+
+SET work_mem = '256kB';
+SELECT agg_spill($$SELECT g, count(DISTINCT v), sum(DISTINCT w) FROM agg_dspill GROUP BY g$$);
+            agg_spill             
+----------------------------------
+ rows spilled: f, levels: several
+(1 row)
+
+SELECT agg_same($$SELECT g, count(DISTINCT v), sum(DISTINCT w) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+ same 
+------
+ t
+(1 row)
+
+-- A text set, which does not spill, emptied with the others once the
+-- input is read.
+SELECT agg_same($$SELECT g, count(DISTINCT v), count(DISTINCT t) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+ same 
+------
+ t
+(1 row)
+
+SET work_mem = '4MB';
+-- A grouping rescanned, its sets and their machines made anew each
+-- time, and a cursor that reads a few groups: every level is read back
+-- before the first group goes out.
+SELECT agg_same($$SELECT x, (SELECT n FROM (SELECT g, count(DISTINCT v) AS n FROM agg_dspill WHERE g % 3 = x GROUP BY g) AS q ORDER BY n LIMIT 1) FROM generate_series(0, 2) AS x$$);
+              agg_same              
+------------------------------------
+ {"(0,3769)","(1,3770)","(2,3770)"}
+(1 row)
+
+BEGIN;
+DECLARE agg_cursor CURSOR FOR SELECT count(DISTINCT v) > 3000 FROM agg_dspill GROUP BY g;
+FETCH 2 FROM agg_cursor;
+ ?column? 
+----------
+ t
+ t
+(2 rows)
+
+CLOSE agg_cursor;
+COMMIT;
+-- Groups that come after the sets froze, their rows in the order of the
+-- key: they go on into the table, their pairs to disk.
+CREATE TABLE agg_dlate (g int, v bigint) WITH (autovacuum_enabled = off);
+INSERT INTO agg_dlate SELECT i % 100, i % 10 FROM generate_series(1, 1000) AS i;
+ANALYZE agg_dlate;
+INSERT INTO agg_dlate SELECT i / 5000, i FROM generate_series(1, 500000) AS i;
+SELECT agg_spill($$SELECT g, count(DISTINCT v), sum(v) FROM agg_dlate GROUP BY g$$);
+          agg_spill           
+------------------------------
+ rows spilled: f, levels: one
+(1 row)
+
+SELECT agg_same($$SELECT g, count(DISTINCT v), sum(v) FROM agg_dlate GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+ same 
+------
+ t
+(1 row)
+
+-- Groups that alone pass seven eighths of hash_mem, 50 000 of them where
+-- the statistics say 100: the sets read back grow rather than freeze
+-- again, level after level.
+TRUNCATE agg_dlate;
+INSERT INTO agg_dlate SELECT i % 100, i % 10 FROM generate_series(1, 1000) AS i;
+ANALYZE agg_dlate;
+INSERT INTO agg_dlate SELECT i % 50000, i % 300000 FROM generate_series(1, 600000) AS i;
+SET work_mem = '1MB';
+EXPLAIN (COSTS OFF) SELECT g, count(DISTINCT v) FROM agg_dlate GROUP BY g;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: g
+   ->  Custom Scan (TessHeapScan) on agg_dlate
+(3 rows)
+
+SELECT agg_spill($$SELECT g, count(DISTINCT v) FROM agg_dlate GROUP BY g$$);
+          agg_spill           
+------------------------------
+ rows spilled: f, levels: one
+(1 row)
+
+SELECT agg_same($$SELECT count(*), sum(n), max(n) FROM (SELECT g, count(DISTINCT v) AS n FROM agg_dlate GROUP BY g) AS q$$);
+       agg_same       
+----------------------
+ {"(50000,300090,7)"}
+(1 row)
+
+RESET work_mem;
+RESET hash_mem_multiplier;
+DROP TABLE agg_dspill, agg_dlate;
 -- In a parallel plan: each participant's partial state, the core's
 -- serialized where the state is internal and the node does not fold it
 -- (the node's own format for numeric sums), for the node's final

@@ -298,6 +298,12 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 				}
 				value->distinct = palloc0(sizeof(struct DistinctSet));
 				state->has_distinct = true;
+				/* Its pairs go to disk past hash_mem, with GROUP BY and a word. */
+				if (state->nkeys > 0 && value->distinct_dict == NULL)
+				{
+					value->distinct->pairs = palloc0(sizeof(PairSpill));
+					state->spilling_sets++;
+				}
 			}
 		}
 	}
@@ -748,15 +754,40 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 	}
 }
 
-/* Empty every distinct set, before the input is read; their first indexes noted. */
+/*
+ * Empty every distinct set, before the input is read, the pairs of the
+ * last input on disk forgotten; their first indexes noted.
+ */
 void
 agg_reset_distinct(TessAggState *state)
 {
+	if (state->spilling_sets > 0)
+		pairs_params_init(state, state->spilling_sets);
 	for (int index = 0; index < state->nvalues; index++)
-		if (state->values[index].distinct != NULL)
-			agg_distinct_reset(state, &state->values[index]);
+	{
+		DistinctSet *set = state->values[index].distinct;
+
+		if (set == NULL)
+			continue;
+		agg_distinct_reset(state, &state->values[index]);
+		if (set->pairs != NULL)
+		{
+			pairs_free(set->pairs);
+			pairs_begin(state, set->pairs);
+		}
+	}
 	if (state->has_distinct)
 		note_memory(state);
+}
+
+/* Forget the pairs of the distinct sets on disk. */
+static void
+free_pairs(TessAggState *state)
+{
+	for (int index = 0; index < state->nvalues; index++)
+		if (state->values[index].distinct != NULL &&
+			state->values[index].distinct->pairs != NULL)
+			pairs_free(state->values[index].distinct->pairs);
 }
 
 /* Read every batch of the child into the running values. */
@@ -951,6 +982,7 @@ agg_end(CustomScanState *css)
 		ExecEndNode(state->child);
 	agg_spill_free(state);
 	rows_spill_free(state);
+	free_pairs(state);
 	if (state->table_context != NULL)
 		MemoryContextDelete(state->table_context);
 }
@@ -990,6 +1022,7 @@ agg_rescan(CustomScanState *css)
 	/* GROUP BY: the table is built again from the rescanned child. */
 	agg_spill_free(state);
 	rows_spill_free(state);
+	free_pairs(state);
 	state->drained = false;
 	state->input_done = false;
 	state->published = NULL;

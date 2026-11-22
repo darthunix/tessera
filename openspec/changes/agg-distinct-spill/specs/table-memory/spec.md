@@ -89,17 +89,18 @@ show `Spilled Pairs`, the pairs written. For a grouping the planner
 gave the node although its estimate of the pairs did not fit, while
 its groups and their states take no more than their estimate, its
 Memory Usage SHALL stay within `hash_mem`, but by what one batch adds
-past seven eighths, by the chunk each partition of a level fills, by a
-set of fewer than 64 pairs, and by the pairs of a partition that no bit
-of their hash is left to split.
+past seven eighths, by the chunk each partition of a level fills and
+the level's write buffer, by a set of fewer than 64 pairs, and by the
+pairs of a partition that no bit of their hash is left to split.
 
 #### Scenario: Pairs past the limit
 - **WHEN** a grouping counts `count(DISTINCT v)` of a `bigint` by an
   `integer` key of 100 groups at `work_mem` = 4 MB and
   `hash_mem_multiplier` = 1, its pairs several times `hash_mem`
 - **THEN** its plan is `TessAgg`'s, its `Batches`, `Disk Usage` and
-  `Spilled Pairs` are above 0, its Memory Usage is within 4 MB, and its
-  rows are the core's
+  `Spilled Pairs` are above 0, its Memory Usage is within 4 MB and the
+  512 kB its level's tail chunks and write buffer take, and its rows
+  are the core's
 - **Verified by:** pending
 
 #### Scenario: A partition read back past the limit
@@ -115,7 +116,8 @@ of their hash is left to split.
   NULL arguments and a generic aggregate beside them go through a spill
   of pairs
 - **THEN** the rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Aggregates through the spill`
 
 #### Scenario: Groups thought more than they are
 - **WHEN** a grouping by two keys that depend on each other, with

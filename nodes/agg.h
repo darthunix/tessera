@@ -67,6 +67,20 @@ extern Size agg_float_state_bytes(const Aggref *agg);
 typedef struct AggValue AggValue;
 typedef struct KeyDict KeyDict;
 
+/*
+ * A DISTINCT set's pairs past hash_mem (agg_spill.c), as a frozen table's
+ * rows: the machine of the set in memory, which freezes it; the level its
+ * pairs go to once frozen, NULL before; the stack of levels to read, the
+ * last written on top; and the reader of their partitions.
+ */
+typedef struct PairSpill
+{
+	TessRowsMachine machine;
+	struct RowSpill *writing;
+	List	   *pending;
+	struct RowReader *reader;
+} PairSpill;
+
 /* The execution state of TessAgg. */
 typedef struct TessAggState
 {
@@ -118,9 +132,15 @@ typedef struct TessAggState
 	bool		finalize;
 	/*
 	 * An aggregate has DISTINCT: its pairs of group and argument live in a
-	 * table of their own, which does not spill, so neither do the groups.
+	 * table of their own, so the groups do not spill. With GROUP BY, the
+	 * set of an argument a word holds sends its pairs to disk past hash_mem
+	 * (spilling_sets of them, what every level of their pairs shares, the
+	 * pairs written), read back into their groups before they go out.
 	 */
 	bool		has_distinct;
+	int			spilling_sets;
+	TessRowsParams pairs_params;
+	uint64		spilled_pairs;
 	uint64		batches;
 	uint64		rows;
 	uint64		calls;
@@ -350,5 +370,15 @@ extern void rows_spill_free(TessAggState *state);
 extern TessBatch *reader_next(TessAggState *state);
 extern bool rows_next_partition(TessAggState *state);
 extern void rows_reader_init(TessAggState *state);
+extern void pairs_params_init(TessAggState *state, int sets);
+extern void pairs_begin(TessAggState *state, PairSpill *pairs);
+extern void pairs_grown(TessAggState *state, PairSpill *pairs, Size memory, uint64 records);
+extern void pairs_write(TessAggState *state, PairSpill *pairs, const TessRowMask *rows,
+						const Datum *refs, const Datum *values, const uint32 *hashes);
+extern void pairs_close(TessAggState *state, PairSpill *pairs);
+extern bool pairs_next_partition(TessAggState *state, PairSpill *pairs, bool last);
+extern int	pairs_read(TessAggState *state, PairSpill *pairs, Datum **columns);
+extern Size pairs_memory(const PairSpill *pairs);
+extern void pairs_free(PairSpill *pairs);
 
 #endif							/* TESSERA_NODES_AGG_H */

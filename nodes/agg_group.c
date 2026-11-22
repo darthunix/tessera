@@ -490,6 +490,9 @@ group_batch(TessAggState *state, TessBatch *batch)
 	if (nsums > 0)
 		agg_sum_states_accumulate(state, nsums, state->sum_indexes, &valid);
 #endif
+	/* Past seven eighths of hash_mem a DISTINCT set takes no new pair. */
+	if (state->spilling_sets > 0)
+		agg_distinct_grown(state, NULL, groups_memory(state));
 	/*
 	 * Past seven eighths of hash_mem, the rest left for a batch's chunk and
 	 * index: the groups go into partitions, and the largest to disk; in
@@ -522,6 +525,101 @@ group_batch(TessAggState *state, TessBatch *batch)
 	}
 	if (state->spill != NULL)
 		agg_make_room(state);
+}
+
+/* NULL flags of the values of pairs read back, none NULL. */
+static const bool no_nulls[AGG_GROUP_ROWS];
+
+/*
+ * A DISTINCT aggregate's step over the rows of rows, whose groups' records
+ * are in state->offsets and whose argument is column, no group made: by
+ * the table for the node's own aggregate, else by the generic one's.
+ */
+static void
+distinct_step(TessAggState *state, int index, const TessRowMask *rows,
+			  const TessDatumColumn *column)
+{
+	AggValue   *value = &state->values[index];
+
+	if (value->generic != NULL)
+	{
+		uint64		none_bits = 0;
+		TessRowMask none = {rows->nrows, &none_bits};
+
+		value->generic->columns[0] = *column;
+		agg_generic_group_accumulate(state, index, rows, &none);
+		return;
+	}
+	state->calls++;
+	check(state, state->kernels->table_accumulate(&state->table, state->offsets, rows,
+												  value->accumulate, column, NULL,
+												  sizeof(uint64) * value->slot, 0,
+												  (uint32) index, &state->status));
+}
+
+/*
+ * Once the input is read, and before the groups go out, the pairs of the
+ * DISTINCT sets on disk into their groups. Every set is emptied: its
+ * pairs in memory are counted already. Then the levels of each set in
+ * turn, the last written first, each partition into the set emptied, the
+ * rows that make a pair stepping the aggregate at their group's record. A
+ * partition past seven eighths of hash_mem freezes into a level below,
+ * unless the groups alone pass that, and the sets read back grow instead.
+ */
+static void
+distinct_read_back(TessAggState *state)
+{
+	bool		crowded = groups_memory(state) >
+		(Size) (tess_hash_memory_limit() / 8 * AGG_SPILL_FILL);
+
+	reserve_rows(state, AGG_GROUP_ROWS);
+	for (int index = 0; index < state->nvalues; index++)
+	{
+		AggValue   *value = &state->values[index];
+
+		if (value->distinct == NULL)
+			continue;
+		if (value->distinct->pairs != NULL)
+			pairs_close(state, value->distinct->pairs);
+		agg_distinct_reset(state, value);
+	}
+	for (int index = 0; index < state->nvalues; index++)
+	{
+		AggValue   *value = &state->values[index];
+		PairSpill  *pairs = value->distinct != NULL ? value->distinct->pairs : NULL;
+
+		if (pairs == NULL)
+			continue;
+		while (pairs_next_partition(state, pairs, crowded))
+		{
+			Datum	   *columns[3];
+			int			nrows;
+
+			agg_distinct_reset(state, value);
+			while ((nrows = pairs_read(state, pairs, columns)) > 0)
+			{
+				TessRowMask inserted = agg_distinct_read(state, value, nrows, columns);
+				TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+				int			row = -1;
+
+				while ((row = tess_row_mask_next(&inserted, row)) >= 0)
+				{
+					state->offsets[row] = (uint32) columns[0][row];
+					Assert(tess_table_ref_chunk(state->offsets[row]) <
+						   (uint32) state->table.nchunks);
+				}
+				column.values = columns[1];
+				column.isnull = no_nulls;
+				column.nrows = nrows;
+				ResetExprContext(state->css.ss.ps.ps_ExprContext);
+				distinct_step(state, index, &inserted, &column);
+				agg_distinct_grown(state, value, groups_memory(state));
+			}
+			pairs_close(state, pairs);
+		}
+		agg_distinct_reset(state, value);
+	}
+	note_memory(state);
 }
 
 /* Read every batch of the child into the table of groups. */
@@ -616,6 +714,8 @@ agg_group_drain(TessAggState *state)
 		}
 		tess_input_finish(state->input);
 	}
+	if (state->spilling_sets > 0)
+		distinct_read_back(state);
 	state->drained = true;
 	state->input_done = true;
 	state->cursor = 0;
@@ -700,6 +800,8 @@ rows_drain(TessAggState *state)
 {
 	TessBatch  *batch;
 
+	/* A set's references would outlive the table made anew here. */
+	Assert(!state->has_distinct);
 	rows_spill_close(state);
 	if (state->reader == NULL)
 		rows_reader_init(state);
