@@ -1941,7 +1941,6 @@ SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT g, count(
 
 RESET enable_sort;
 RESET work_mem;
-DROP FUNCTION agg_spill(text);
 -- With a DISTINCT aggregate the groups keep no partitions: past hash_mem
 -- by the planner's estimate the grouping stays with the core.
 SET work_mem = '64kB';
@@ -2015,12 +2014,13 @@ RESET parallel_tuple_cost;
 DROP TABLE agg_any, agg_any_big;
 -- sum and avg of numeric, bigint, integer and smallint, min and max of
 -- numeric, folded by the node itself: the decimals' sum (numeric values of
--- at most 18 digits read from their stored form, integers) in int128 at
--- the largest scale met, the rest (NaN, infinities, longer values, sums
--- past 10^36) in a numeric sum; the value as the core's final functions
--- make it, the scale of a sum the largest of its values'; min and max
--- keep the last of equal extremes, as the core's do (1.0 or 1.00). With
--- and without GROUP BY, FILTER, DISTINCT, rows past hash_mem, workers.
+-- at most 18 digits read from their stored form, integers of any size) in
+-- int128 at the largest scale met, the rest (NaN, infinities, longer
+-- values, sums past 10^36) in a numeric sum; the value as the core's
+-- final functions make it, the scale of a sum the largest of its values';
+-- min and max keep the last of equal extremes, as the core's do (1.0 or
+-- 1.00). With and without GROUP BY, FILTER, DISTINCT, rows past hash_mem,
+-- workers.
 CREATE TABLE agg_fast (id int, g int, n numeric(15, 2), u numeric, b bigint, i4 int, s int2);
 INSERT INTO agg_fast
 SELECT i, i % 5,
@@ -2264,6 +2264,43 @@ SELECT agg_same($$SELECT g, sum(v), avg(v) FROM (SELECT g, u * 10000000000000000
  {"(0,-Infinity,-Infinity)","(1,-Infinity,-Infinity)","(2,-Infinity,-Infinity)","(3,-Infinity,-Infinity)","(4,-Infinity,-Infinity)"}
 (1 row)
 
+-- bigint values at the edges of int8, of 19 digits and of 18, which the
+-- integer sums take: without groups, by three groups whose rows a word
+-- adds up by group, and by 100 groups whose keys follow one another, so
+-- that most of a word's rows go to their records one by one.
+CREATE TABLE agg_edges (id int, g int, b bigint);
+INSERT INTO agg_edges
+SELECT i, i % 3,
+       CASE i % 5 WHEN 0 THEN -9223372036854775808 WHEN 1 THEN 9223372036854775807
+                  WHEN 2 THEN -1000000000000000000 WHEN 3 THEN 999999999999999999 END
+FROM generate_series(1, 3000) AS i;
+ANALYZE agg_edges;
+EXPLAIN (COSTS OFF) SELECT g, sum(b), avg(b) FROM agg_edges GROUP BY g;
+                  QUERY PLAN                   
+-----------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: g
+   ->  Custom Scan (TessHeapScan) on agg_edges
+(3 rows)
+
+SELECT agg_same($$SELECT sum(b), avg(b), count(b) FROM agg_edges$$);
+                 agg_same                 
+------------------------------------------
+ {"(-1200,-0.50000000000000000000,2400)"}
+(1 row)
+
+SELECT agg_same($$SELECT g, sum(b), avg(b) FROM agg_edges GROUP BY g$$);
+                                                  agg_same                                                  
+------------------------------------------------------------------------------------------------------------
+ {"(0,-400,-0.50000000000000000000)","(1,-400,-0.50000000000000000000)","(2,-400,-0.50000000000000000000)"}
+(1 row)
+
+SELECT agg_same($$SELECT count(*), sum(s), min(s), max(v) FROM (SELECT id % 100 AS k, sum(b) AS s, avg(b) AS v FROM agg_edges GROUP BY 1) AS t$$);
+                          agg_same                          
+------------------------------------------------------------
+ {"(100,-1200,-276701161105643274240,9223372036854775807)"}
+(1 row)
+
 -- Past hash_mem: the rows of new groups to disk and back.
 SET work_mem = '64kB';
 SELECT agg_same($$SELECT count(*), sum(x), sum(y) FROM (SELECT id, sum(n) AS x, max(u) AS y FROM agg_fast GROUP BY id) AS t$$);
@@ -2272,8 +2309,8 @@ SELECT agg_same($$SELECT count(*), sum(x), sum(y) FROM (SELECT id, sum(n) AS x, 
  {"(5000,NaN,NaN)"}
 (1 row)
 
--- Groups whose states hold a rest (longer values, a bigint past 18
--- digits), NaN and infinities, their rows to disk and back.
+-- Groups whose states hold a rest (longer values), NaN and infinities,
+-- and bigint sums of 19 digits, their rows to disk and back.
 SELECT agg_same($$SELECT count(*), sum(x), sum(y), sum(z) FROM (SELECT id % 2000 AS k, sum(u) AS x, avg(u) AS y, avg(b) AS z FROM agg_fast GROUP BY id % 2000) AS t WHERE x NOT IN ('NaN', 'Infinity', '-Infinity')$$);
                                                              agg_same                                                              
 -----------------------------------------------------------------------------------------------------------------------------------
@@ -2284,6 +2321,20 @@ SELECT agg_same($$SELECT x, count(*) FROM (SELECT id % 2000 AS k, sum(u) AS x FR
                    agg_same                   
 ----------------------------------------------
  {"(-Infinity,58)","(Infinity,54)","(NaN,1)"}
+(1 row)
+
+-- bigint sums at the edges of int8 by 3000 groups, their rows to disk
+-- and back.
+SELECT agg_spill($$SELECT id, sum(b), avg(b) FROM agg_edges GROUP BY id$$);
+          agg_spill           
+------------------------------
+ rows spilled: t, levels: one
+(1 row)
+
+SELECT agg_same($$SELECT count(*), sum(s), min(s), max(v) FROM (SELECT id AS k, sum(b) AS s, avg(b) AS v FROM agg_edges GROUP BY 1) AS t$$);
+                         agg_same                          
+-----------------------------------------------------------
+ {"(3000,-1200,-9223372036854775808,9223372036854775807)"}
 (1 row)
 
 RESET work_mem;
@@ -2335,13 +2386,33 @@ SELECT agg_same($$SELECT g, sum(s), avg(s), sum(b) FROM agg_fast GROUP BY g$$);
  {"(0,-26563775,-27498.731884057971,8974340991857264290211)","(1,-26566789,-27501.851966873706,8974340991857266292211)","(2,-26564803,-27499.796066252588,8974340991857263294211)","(3,-26537805,-27500.316062176166,8974340991857265291211)","(4,-26535790,-27498.227979274611,8974340991857262293211)"}
 (1 row)
 
+-- Partial sums of bigint at the edges of int8, merged in the words.
+EXPLAIN (COSTS OFF) SELECT sum(b), avg(b) FROM agg_edges;
+                                QUERY PLAN                                
+--------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on agg_edges
+(8 rows)
+
+SELECT agg_same($$SELECT sum(b), avg(b) FROM agg_edges$$);
+              agg_same               
+-------------------------------------
+ {"(-1200,-0.50000000000000000000)"}
+(1 row)
+
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
 RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
-DROP TABLE agg_fast;
+DROP TABLE agg_fast, agg_edges;
 -- Sum states cost as the node's own aggregates do, a quarter of the
 -- core's transition cost and five words of a record: with two workers at
 -- the default costs and without TessGather (whose absence leaves sum
@@ -2522,6 +2593,7 @@ SELECT agg_costs_ordered($$SELECT count(*), sum(a), max(c) FROM agg_t$$) AS plai
 
 DROP FUNCTION agg_costs_ordered(text);
 DROP TABLE agg_t;
+DROP FUNCTION agg_spill(text);
 DROP FUNCTION agg_same(text);
 DROP FUNCTION agg_memory(text);
 DROP FUNCTION explain_neutral(text, text), core_neutral(text);

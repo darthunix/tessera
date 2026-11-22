@@ -268,7 +268,7 @@ SET parallel_tuple_cost = 0;
 -- the flag merged with them), 3 with both infinities (NaN), 4 with such
 -- values (rests), 5 whose sum at scale 0 meets a value at scale 18 (past
 -- the bound), 6 of NULL values only; half the bigint values have 19
--- digits (rests).
+-- digits, which the integer sums take.
 CREATE TABLE parallel_sums AS
 SELECT i AS id, i % 7 AS g,
        (CASE i % 7

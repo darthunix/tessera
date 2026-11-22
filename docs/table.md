@@ -37,10 +37,10 @@ records, which only the one writer changes:
   (bits 0 to 7) and whether NaN, +Infinity and -Infinity were met (bits
   8, 9 and 10), as `tessera_kernels::decimal::SumState` keeps it; all
   zeros is the empty state a new record has. A sum's column is numeric
-  (read in place, or its decimals), int4 or int8 words (an integer is a
-  decimal at scale 0). A row a state does not take, a numeric not read
-  in place or of more than 18 digits or a display scale past 18, or one
-  the sum would carry to its bound, is set in that sum's `rest` mask for
+  (read in place, or its decimals), int4 or int8 words (any integer, at
+  scale 0). A row a state does not take, a numeric not read in place or
+  of more than 18 digits or a display scale past 18, or one the sum
+  would carry to its bound, is set in that sum's `rest` mask for
   the caller. Within a batch the rows of up to 16 groups are added up by
   group first, the decimals a source hands over in bulk by a loop over
   their values, and each group's record is found once and changed once a

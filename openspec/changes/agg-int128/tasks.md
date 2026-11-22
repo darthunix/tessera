@@ -48,7 +48,7 @@ one pull request; the work and the close are a second.
       changed lines of both crates, by their own tests; `tessera-bench
       --base <the commit of 2.1> --disasm --module kernels`, then
       `--disasm --bench <program>` for each program
-- [ ] 3.3 `test/sql/agg.sql` sums `bigint` values at the edges of
+- [x] 3.3 `test/sql/agg.sql` sums `bigint` values at the edges of
       `int64` with and without groups, with many groups, with workers
       and past `hash_mem`; its comments and those of
       `test/sql/parallel.sql` no longer call a `bigint` of 19 digits a

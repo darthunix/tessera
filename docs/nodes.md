@@ -1086,10 +1086,10 @@ allocates besides goes with the batch's memory. A whole `sum` or `avg` of
 numeric, bigint, integer or smallint, and `min` or `max` of numeric, the
 node folds itself in place of the transition function, its state its own
 in that context: the sum of the values that are decimals (a numeric of at
-most 18 digits read from its stored form, an integer at scale 0) in an
-int128 at the largest scale met, kept below 10^36 in magnitude, the count,
-and the numeric sum of the rest (NaN, infinities, longer values, the
-decimals' sums past the bound); the value is the core's final
+most 18 digits read from its stored form) or integers (of any size, at
+scale 0) in an int128 at the largest scale met, kept below 10^36 in
+magnitude, the count, and the numeric sum of the rest (NaN, infinities,
+longer values, the sums past the bound); the value is the core's final
 function's: the decimals' sum plus the rest's by `numeric_add` (NaN and
 the infinities as the core's sum keeps them, the display scale the
 largest of the values'), `sum(int2)` its int8, `avg` the sum divided by
@@ -1156,8 +1156,9 @@ them apart, then the address of a numeric rest, 0 without one. The
 kernels fold a batch into the states of all such aggregates of the rows
 every one takes (without FILTER or DISTINCT) in one call, each group's
 record found once a batch, and leave the rows they cannot add exactly (a
-numeric not read in place or longer than 18 digits, a sum at its bound)
-to the node, which adds them to the rest by `numeric_add`; the value is
+numeric not read in place or longer than 18 digits, a sum at its bound;
+never an integer, which they add at any size) to the node, which adds
+them to the rest by `numeric_add`; the value is
 `numeric_sum`'s, `numeric_avg`'s or `int8_avg`'s from the words and the
 rest. Against the fold into a state of the node's own it replaced (2 M
 rows, eight rounds, medians): even for numeric (`sum(n)`, `avg(n)`,

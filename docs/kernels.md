@@ -268,8 +268,9 @@ is a column or, without one, a scalar numeric.
   its scale in `scales`.
 - `tess_decimal_sum(column, rows, sum, rest, status)`: the rows' decimals
   added to a running sum (`TessDecimalSum`: an int128 at the largest scale
-  met, below 10^36, and a count); a row that is not a decimal, or that
-  would take the sum to the bound, is left in `rest`.
+  met, below 10^36, and a count), an int4 or int8 column's integers of
+  any size among them at scale 0; a row that is neither, or that would
+  take the sum to the bound, is left in `rest`.
 - `tess_decimal_write(values, scales, scale, rows, space, len, used,
   status)`: each row's decimal replaced by the pointer to its numeric,
   written as `make_result` writes it into `space` at MAXALIGN'd offsets;

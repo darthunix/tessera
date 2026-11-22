@@ -617,7 +617,6 @@ SELECT split_part(agg_spill($$SELECT g, count(*) FILTER (WHERE n > 100), max(t) 
 SELECT agg_same($$SELECT count(*), sum(c), max(m), sum(x) FROM (SELECT g, count(*) FILTER (WHERE n > 100) AS c, max(t) FILTER (WHERE g % 2 = 0) AS m, sum(1000 / (g % 5)) FILTER (WHERE g % 5 <> 0) AS x FROM agg_groups GROUP BY g) AS q$$);
 RESET enable_sort;
 RESET work_mem;
-DROP FUNCTION agg_spill(text);
 -- With a DISTINCT aggregate the groups keep no partitions: past hash_mem
 -- by the planner's estimate the grouping stays with the core.
 SET work_mem = '64kB';
@@ -650,12 +649,13 @@ DROP TABLE agg_any, agg_any_big;
 
 -- sum and avg of numeric, bigint, integer and smallint, min and max of
 -- numeric, folded by the node itself: the decimals' sum (numeric values of
--- at most 18 digits read from their stored form, integers) in int128 at
--- the largest scale met, the rest (NaN, infinities, longer values, sums
--- past 10^36) in a numeric sum; the value as the core's final functions
--- make it, the scale of a sum the largest of its values'; min and max
--- keep the last of equal extremes, as the core's do (1.0 or 1.00). With
--- and without GROUP BY, FILTER, DISTINCT, rows past hash_mem, workers.
+-- at most 18 digits read from their stored form, integers of any size) in
+-- int128 at the largest scale met, the rest (NaN, infinities, longer
+-- values, sums past 10^36) in a numeric sum; the value as the core's
+-- final functions make it, the scale of a sum the largest of its values';
+-- min and max keep the last of equal extremes, as the core's do (1.0 or
+-- 1.00). With and without GROUP BY, FILTER, DISTINCT, rows past hash_mem,
+-- workers.
 CREATE TABLE agg_fast (id int, g int, n numeric(15, 2), u numeric, b bigint, i4 int, s int2);
 INSERT INTO agg_fast
 SELECT i, i % 5,
@@ -730,13 +730,32 @@ SELECT agg_same($$SELECT k, sum(v), avg(v) FROM agg_bound WHERE k = 7 GROUP BY k
 SELECT agg_same($$SELECT k, sum(v) - 10::numeric ^ 12000, avg(v) * 2 - 10::numeric ^ 12000 FROM agg_bound WHERE k = 8 GROUP BY k$$);
 DROP TABLE agg_bound;
 SELECT agg_same($$SELECT g, sum(v), avg(v) FROM (SELECT g, u * 1000000000000000000 AS v FROM agg_fast WHERE u < 1e6) AS t GROUP BY g$$);
+-- bigint values at the edges of int8, of 19 digits and of 18, which the
+-- integer sums take: without groups, by three groups whose rows a word
+-- adds up by group, and by 100 groups whose keys follow one another, so
+-- that most of a word's rows go to their records one by one.
+CREATE TABLE agg_edges (id int, g int, b bigint);
+INSERT INTO agg_edges
+SELECT i, i % 3,
+       CASE i % 5 WHEN 0 THEN -9223372036854775808 WHEN 1 THEN 9223372036854775807
+                  WHEN 2 THEN -1000000000000000000 WHEN 3 THEN 999999999999999999 END
+FROM generate_series(1, 3000) AS i;
+ANALYZE agg_edges;
+EXPLAIN (COSTS OFF) SELECT g, sum(b), avg(b) FROM agg_edges GROUP BY g;
+SELECT agg_same($$SELECT sum(b), avg(b), count(b) FROM agg_edges$$);
+SELECT agg_same($$SELECT g, sum(b), avg(b) FROM agg_edges GROUP BY g$$);
+SELECT agg_same($$SELECT count(*), sum(s), min(s), max(v) FROM (SELECT id % 100 AS k, sum(b) AS s, avg(b) AS v FROM agg_edges GROUP BY 1) AS t$$);
 -- Past hash_mem: the rows of new groups to disk and back.
 SET work_mem = '64kB';
 SELECT agg_same($$SELECT count(*), sum(x), sum(y) FROM (SELECT id, sum(n) AS x, max(u) AS y FROM agg_fast GROUP BY id) AS t$$);
--- Groups whose states hold a rest (longer values, a bigint past 18
--- digits), NaN and infinities, their rows to disk and back.
+-- Groups whose states hold a rest (longer values), NaN and infinities,
+-- and bigint sums of 19 digits, their rows to disk and back.
 SELECT agg_same($$SELECT count(*), sum(x), sum(y), sum(z) FROM (SELECT id % 2000 AS k, sum(u) AS x, avg(u) AS y, avg(b) AS z FROM agg_fast GROUP BY id % 2000) AS t WHERE x NOT IN ('NaN', 'Infinity', '-Infinity')$$);
 SELECT agg_same($$SELECT x, count(*) FROM (SELECT id % 2000 AS k, sum(u) AS x FROM agg_fast GROUP BY id % 2000) AS t WHERE x IN ('NaN', 'Infinity', '-Infinity') GROUP BY x$$);
+-- bigint sums at the edges of int8 by 3000 groups, their rows to disk
+-- and back.
+SELECT agg_spill($$SELECT id, sum(b), avg(b) FROM agg_edges GROUP BY id$$);
+SELECT agg_same($$SELECT count(*), sum(s), min(s), max(v) FROM (SELECT id AS k, sum(b) AS s, avg(b) AS v FROM agg_edges GROUP BY 1) AS t$$);
 RESET work_mem;
 -- With workers, a partial aggregate the node folds itself too: numeric and
 -- bigint sums in the node's own format, extremes as the core's values.
@@ -754,13 +773,16 @@ SELECT agg_same($$SELECT sum(u), avg(u) FROM agg_fast WHERE u > '-Infinity' AND 
 -- sum and avg of smallint, with and without groups.
 SELECT agg_same($$SELECT sum(s), avg(s) FROM agg_fast$$);
 SELECT agg_same($$SELECT g, sum(s), avg(s), sum(b) FROM agg_fast GROUP BY g$$);
+-- Partial sums of bigint at the edges of int8, merged in the words.
+EXPLAIN (COSTS OFF) SELECT sum(b), avg(b) FROM agg_edges;
+SELECT agg_same($$SELECT sum(b), avg(b) FROM agg_edges$$);
 RESET max_parallel_workers_per_gather;
 RESET parallel_setup_cost;
 RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 RESET parallel_tuple_cost;
 RESET min_parallel_table_scan_size;
-DROP TABLE agg_fast;
+DROP TABLE agg_fast, agg_edges;
 -- Sum states cost as the node's own aggregates do, a quarter of the
 -- core's transition cost and five words of a record: with two workers at
 -- the default costs and without TessGather (whose absence leaves sum
@@ -856,6 +878,7 @@ SELECT agg_costs_ordered($$SELECT count(*), sum(a), max(c) FROM agg_t$$) AS plai
 DROP FUNCTION agg_costs_ordered(text);
 
 DROP TABLE agg_t;
+DROP FUNCTION agg_spill(text);
 DROP FUNCTION agg_same(text);
 DROP FUNCTION agg_memory(text);
 DROP FUNCTION explain_neutral(text, text), core_neutral(text);
