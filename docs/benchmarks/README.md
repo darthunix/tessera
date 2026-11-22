@@ -8,6 +8,12 @@ of the kernels' benchmarks of
 with the plans of the cases the README cites, newest first:
 
 - [2026-11-22, ClickBench over Parquet, stage
+  2](2026-11-22-clickbench-stage2/README.md): the 17 queries that read
+  no string, over ten of its files and over `hits.parquet`, Tessera on
+  and pg_duckdb at 0 and 8 workers, Tessera off over the ten files, and
+  the cycles and instructions of Tessera and DuckDB, Apple M5 Pro,
+  PostgreSQL 19, the change `parquet-fdw` at `7d3fdf4c`.
+- [2026-11-22, ClickBench over Parquet, stage
   1](2026-11-22-clickbench-stage1/README.md): Q1 to Q7 over ten of its
   files and over `hits.parquet`, Tessera on and off and pg_duckdb at 0
   to 8 workers, and the cycles and instructions of Tessera and DuckDB,

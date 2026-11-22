@@ -1,0 +1,139 @@
+The plans of the runs the README cites, as each run's plans.txt keeps
+them (EXPLAIN without ANALYZE), under the run's id.
+
+== UCgiRc: Q9, on, 0 workers, the ten files
+@@ Q9 on
+Custom Scan (TessLimit)
+  ->  Custom Scan (TessSort)
+        Sort Key: (count(DISTINCT userid)) DESC
+        ->  Custom Scan (TessAgg)
+              Group Key: regionid
+              ->  Custom Scan (TessParquetScan) on hits
+                    Parquet Files: 10
+                    Row Groups: 28
+
+== MGNVDh: Q9, on, 0 workers, hits.parquet
+@@ Q9 on
+Custom Scan (TessLimit)
+  ->  Custom Scan (TessSort)
+        Sort Key: (count(DISTINCT userid)) DESC
+        ->  Custom Scan (TessPack)
+              ->  GroupAggregate
+                    Group Key: regionid
+                    ->  Sort
+                          Sort Key: regionid, userid
+                          ->  Custom Scan (TessParquetScan) on hits
+                                Parquet Files: 1
+                                Row Groups: 226
+
+== 4DrUjD: Q9, on, 8 workers, hits.parquet
+@@ Q9 on
+Custom Scan (TessLimit)
+  ->  Custom Scan (TessSort)
+        Sort Key: (count(DISTINCT userid)) DESC
+        ->  Custom Scan (TessPack)
+              ->  GroupAggregate
+                    Group Key: regionid
+                    ->  Gather Merge
+                          Workers Planned: 7
+                          ->  Sort
+                                Sort Key: regionid, userid
+                                ->  Parallel Custom Scan (TessParquetScan) on hits
+                                      Parquet Files: 1
+                                      Row Groups: 226
+
+== 0h6MtD: Q10, on, 8 workers, the ten files
+@@ Q10 on
+Custom Scan (TessLimit)
+  ->  Custom Scan (TessSort)
+        Sort Key: (count(*)) DESC
+        ->  Custom Scan (TessPack)
+              ->  GroupAggregate
+                    Group Key: regionid
+                    ->  Sort
+                          Sort Key: regionid, userid
+                          ->  Custom Scan (TessParquetScan) on hits
+                                Parquet Files: 10
+                                Row Groups: 28
+
+== t9pLsj: Q10, off, 8 workers, the ten files
+@@ Q10 off
+Limit
+  ->  Sort
+        Sort Key: (count(*)) DESC
+        ->  GroupAggregate
+              Group Key: regionid
+              ->  Gather Merge
+                    Workers Planned: 5
+                    ->  Sort
+                          Sort Key: regionid, userid
+                          ->  Parallel Foreign Scan on hits
+                                Parquet Files: 10
+                                Row Groups: 28
+
+== BVnaC5: Q30, on, 0 workers, hits.parquet
+@@ Q30 on
+Aggregate
+  ->  Custom Scan (TessParquetScan) on hits
+        Parquet Files: 1
+        Row Groups: 226
+
+== qaL0Iz: Q5, on, 8 workers, hits.parquet
+@@ Q5 on
+Custom Scan (TessAgg)
+  ->  Custom Scan (TessParquetScan) on hits
+        Parquet Files: 1
+        Row Groups: 226
+
+== B8WSdW: Q33, on, 8 workers, hits.parquet
+@@ Q33 on
+Custom Scan (TessLimit)
+  ->  Custom Scan (TessSort)
+        Sort Key: (count(*)) DESC
+        ->  Custom Scan (TessAgg)
+              Group Key: watchid, clientip
+              ->  Custom Scan (TessParquetScan) on hits
+                    Parquet Files: 1
+                    Row Groups: 226
+
+== 91qis2: Q41, on, 0 workers, hits.parquet
+@@ Q41 on
+Custom Scan (TessLimit)
+  ->  Custom Scan (TessSort)
+        Sort Key: (count(*)) DESC
+        ->  Custom Scan (TessPack)
+              ->  GroupAggregate
+                    Group Key: urlhash, eventdate
+                    ->  Sort
+                          Sort Key: urlhash, eventdate
+                          ->  Custom Scan (TessParquetScan) on hits
+                                Source Exact: ((eventdate >= '2013-07-01'::date) AND (eventdate <= '2013-07-31'::date) AND (traficsourceid = ANY ('{-1,6}'::integer[])) AND (counterid = 62) AND (isrefresh = 0) AND (refererhash = '3594120000172545465'::bigint))
+                                Parquet Files: 1
+                                Row Groups: 226
+
+== 07vZgm: Q42, on, 0 workers, hits.parquet
+@@ Q42 on
+Custom Scan (TessLimit)
+  ->  Custom Scan (TessSort)
+        Sort Key: (count(*)) DESC
+        ->  Custom Scan (TessPack)
+              ->  GroupAggregate
+                    Group Key: windowclientwidth, windowclientheight
+                    ->  Sort
+                          Sort Key: windowclientwidth, windowclientheight
+                          ->  Custom Scan (TessParquetScan) on hits
+                                Source Exact: ((eventdate >= '2013-07-01'::date) AND (eventdate <= '2013-07-31'::date) AND (counterid = 62) AND (isrefresh = 0) AND (dontcounthits = 0) AND (urlhash = '2868770270353813622'::bigint))
+                                Parquet Files: 1
+                                Row Groups: 226
+
+== zqGnAs: Q43, on, 0 workers, hits.parquet
+@@ Q43 on
+Custom Scan (TessLimit)
+  ->  Custom Scan (TessSort)
+        Sort Key: (date_trunc('minute'::text, eventtime))
+        ->  Custom Scan (TessAgg)
+              Group Key: date_trunc('minute'::text, eventtime)
+              ->  Custom Scan (TessParquetScan) on hits
+                    Source Exact: ((eventdate >= '2013-07-14'::date) AND (eventdate <= '2013-07-15'::date) AND (counterid = 62) AND (isrefresh = 0) AND (dontcounthits = 0))
+                    Parquet Files: 1
+                    Row Groups: 226
