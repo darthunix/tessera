@@ -13,8 +13,8 @@
 //!
 //! The proof of a group ruled out by its statistics shows that such a
 //! group holds no row that may pass, for every kind of clause and every
-//! statistic; the dictionaries are shown by the unit and property
-//! tests.
+//! statistic, the emptiness of the least and greatest strings among
+//! them; the dictionaries are shown by the unit and property tests.
 
 use datum_arrow::arrow_schema::DataType;
 use datum_arrow::{Comparison, PgType, ReadOptions, ReadPlan, Unit};
@@ -22,7 +22,7 @@ use datum_arrow::{Comparison, PgType, ReadOptions, ReadPlan, Unit};
 use datum_arrow::Test;
 
 use super::{ClauseTest, Kind, equalities, found};
-use crate::stats::{Bounds, GroupStats};
+use crate::stats::{Bounds, Empties, GroupStats};
 
 /// The bounds of `IN` of two values, any of them `NULL` or repeated,
 /// hold a stored value exactly when one value's test of equality passes
@@ -115,7 +115,7 @@ fn a_group_ruled_out_holds_no_passing_row() {
     kani::assume(len <= list.len());
     let list = &list[..len];
     kani::assume(list.windows(2).all(|pair| pair[0] < pair[1]));
-    let kind = match kani::any::<u8>() % 4 {
+    let kind = match kani::any::<u8>() % 7 {
         0 => Kind::IsNull,
         1 => Kind::IsNotNull,
         2 => Kind::Compare(match kani::any::<u8>() % 3 {
@@ -126,9 +126,22 @@ fn a_group_ruled_out_holds_no_passing_row() {
                 bound: kani::any(),
             },
         }),
-        _ => Kind::In(list.to_vec()),
+        3 => Kind::In(list.to_vec()),
+        4 => Kind::Bytes {
+            equal: kani::any(),
+            value: if kani::any() {
+                Vec::new()
+            } else {
+                b"x".to_vec()
+            },
+        },
+        5 => Kind::Like {
+            pattern: b"%".to_vec(),
+            negated: kani::any(),
+        },
+        _ => Kind::NoRow,
     };
-    let test = ClauseTest { kind };
+    let test = ClauseTest::of(kind);
     let rows: u64 = kani::any();
     let null_rows: u64 = kani::any();
     kani::assume(null_rows <= rows);
@@ -138,10 +151,22 @@ fn a_group_ruled_out_holds_no_passing_row() {
             least: kani::any(),
             greatest: kani::any(),
         }),
-        empties: None,
+        empties: kani::any::<bool>().then(|| Empties {
+            least_empty: kani::any(),
+            greatest_empty: kani::any(),
+        }),
         dictionary_only: kani::any(),
     };
     let ruled_out = test.rules_out(&stats, rows);
+    // A string of the chunk, not NULL, as its least and greatest values
+    // allow: empty where the greatest is, not where the least is not.
+    // Flags that contradict each other, a least value not empty and a
+    // greatest one empty, allow any row: the footer is damaged.
+    let row_empty: bool = kani::any();
+    kani::assume(stats.empties.is_none_or(|e| {
+        (!e.least_empty && e.greatest_empty)
+            || ((e.least_empty || !row_empty) && (!e.greatest_empty || row_empty))
+    }));
     let value: i64 = kani::any();
     let within = stats
         .bounds
@@ -157,7 +182,30 @@ fn a_group_ruled_out_holds_no_passing_row() {
             assert!(ruled_out == none);
             assert!(!(ruled_out && within && found(bounds, value)));
         }
+        // Of the strings only the emptiness decides, for `= ''` and `<>
+        // ''`: a group ruled out holds no row that passes.
+        Kind::Bytes { equal, value } if value.is_empty() => {
+            assert!(!(ruled_out && row_empty == *equal));
+        }
+        Kind::Bytes { .. } | Kind::Like { .. } => assert!(!ruled_out),
+        Kind::NoRow => assert!(ruled_out),
     }
+    kani::cover!(
+        ruled_out && matches!(&test.kind, Kind::Bytes { equal: true, .. }),
+        "= '' ruled out"
+    );
+    kani::cover!(
+        ruled_out && matches!(&test.kind, Kind::Bytes { equal: false, .. }),
+        "<> '' ruled out"
+    );
+    kani::cover!(
+        stats
+            .empties
+            .is_some_and(|e| !e.least_empty && e.greatest_empty)
+            && matches!(&test.kind, Kind::Bytes { .. })
+            && !ruled_out,
+        "contradicting flags rule nothing out"
+    );
     kani::cover!(
         ruled_out && matches!(test.kind, Kind::Compare(_)),
         "a comparison ruled out"

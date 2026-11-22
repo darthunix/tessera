@@ -778,3 +778,53 @@ proptest! {
         prop_assert_eq!(by_words, by_rows);
     }
 }
+
+/// The windows the forward reader gives of a chunk of strings encoded
+/// through its dictionary share the dictionary's buffers, so that a test
+/// of strings checks each value of it once for the chunk.
+#[test]
+fn windows_of_a_chunk_share_its_dictionary() {
+    use arrow_array::Array as _;
+    use arrow_array::cast::AsArray as _;
+    use arrow_array::types::Int32Type;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.parquet");
+    let rows = 3000;
+    let strings: Vec<Option<Vec<u8>>> = (0..rows)
+        .map(|i| Some(format!("v{}", i % 50).into_bytes()))
+        .collect();
+    let options = Options {
+        page_rows: Some(500),
+        ..Options::new(rows, true)
+    };
+    testing::write_with(
+        &path,
+        &[Column::new("s", testing::Values::Bytes(strings))],
+        options,
+    )
+    .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("s", oid::TEXT)).unwrap();
+    let selection: Arc<[u64]> = vec![u64::MAX; mask_words(rows)].into();
+    let mut reader = ColumnReader::new(&file, &column, 0, Arc::clone(&selection), 1024).unwrap();
+    let mut dictionaries = Vec::new();
+    for start in (0..rows).step_by(1024) {
+        let len = 1024.min(rows - start);
+        let got = reader
+            .read(start, len, &bits(&selection, start, len))
+            .unwrap();
+        let values = Arc::clone(got.array.as_dictionary::<Int32Type>().values());
+        assert!(values.len() <= 50);
+        dictionaries.push(values);
+    }
+    assert!(dictionaries.len() == 3);
+    // Each window an array of its own over the same buffers.
+    let buffers = |d: &Arc<dyn arrow_array::Array>| {
+        let b = d.as_binary::<i64>();
+        (b.value_offsets().as_ptr(), b.values().as_ptr(), b.len())
+    };
+    for pair in dictionaries.windows(2) {
+        assert_eq!(buffers(&pair[0]), buffers(&pair[1]));
+    }
+}
