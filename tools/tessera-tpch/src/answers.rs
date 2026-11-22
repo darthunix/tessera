@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use crate::compare::Row;
+use tessera_pgtool::compare::Row;
 
 /// The answer to a query at SF 1, values trimmed; there is none at other
 /// scale factors.
