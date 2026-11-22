@@ -394,6 +394,7 @@ jobs:
           - { crate: relhash, step: cargo kani -p relhash, harness-timeout: 600 }
           - { crate: relspill, step: cargo kani -p relspill, harness-timeout: 600 }
           - { crate: datum-arrow, step: cargo kani -p datum-arrow, harness-timeout: 600 }
+          - { crate: tessera-parquet, step: cargo kani -p tessera-parquet, harness-timeout: 600 }
           - { crate: tessera-kernels, step: cargo kani -p tessera-kernels, harness-timeout: 600 }
           - { crate: tessera-core, step: cargo kani -p tessera-core, harness-timeout: 600 }
           - { crate: tessera-capi, step: cargo kani -p tessera-capi, harness-timeout: 1500 }

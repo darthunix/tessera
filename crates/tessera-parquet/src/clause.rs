@@ -3,7 +3,7 @@
 //! arrays a reader gives, a bit a slot, before any value is made.
 
 use arrow_array::Array;
-use datum_arrow::{Comparison, Input, Test, Values, mask_words};
+use datum_arrow::{Comparison, Input, ReadPlan, Test, Values, mask_words};
 
 use crate::column::MappedColumn;
 use crate::error::{Error, INTERNAL_ERROR, Result};
@@ -63,19 +63,10 @@ impl ClauseTest {
                 [value] => Kind::Compare(test(op, *value)?),
                 _ => return Err(broken("a comparison of other than one value")),
             },
-            ClauseKind::In => {
-                let mut bounds = Vec::with_capacity(values.len());
-                for value in values {
-                    // Every is not the answer of an equality; Nothing
-                    // matches no row.
-                    if let Test::Compare { bound, .. } = test(Comparison::Eq, *value)? {
-                        bounds.push(bound);
-                    }
-                }
-                bounds.sort_unstable();
-                bounds.dedup();
-                Kind::In(bounds)
-            }
+            ClauseKind::In => Kind::In(
+                in_bounds(column.plan(), values)
+                    .map_err(|e| Error::new(INTERNAL_ERROR, e.to_string()))?,
+            ),
             ClauseKind::IsNull => Kind::IsNull,
             ClauseKind::IsNotNull => Kind::IsNotNull,
         };
@@ -118,15 +109,26 @@ impl ClauseTest {
                 let Input::Plain(column) = input_of(array)? else {
                     return Err(broken("a test of a dictionary of integers"));
                 };
-                let found = |value: i64| bounds.binary_search(&value).is_ok();
                 match column.values {
-                    Values::Int8(v) => fold(&v[..len], &valid, passed, |x| found(i64::from(*x))),
-                    Values::Int16(v) => fold(&v[..len], &valid, passed, |x| found(i64::from(*x))),
-                    Values::Int32(v) => fold(&v[..len], &valid, passed, |x| found(i64::from(*x))),
-                    Values::Int64(v) => fold(&v[..len], &valid, passed, |x| found(*x)),
-                    Values::UInt8(v) => fold(&v[..len], &valid, passed, |x| found(i64::from(*x))),
-                    Values::UInt16(v) => fold(&v[..len], &valid, passed, |x| found(i64::from(*x))),
-                    Values::UInt32(v) => fold(&v[..len], &valid, passed, |x| found(i64::from(*x))),
+                    Values::Int8(v) => {
+                        fold(&v[..len], &valid, passed, |x| found(bounds, i64::from(*x)))
+                    }
+                    Values::Int16(v) => {
+                        fold(&v[..len], &valid, passed, |x| found(bounds, i64::from(*x)))
+                    }
+                    Values::Int32(v) => {
+                        fold(&v[..len], &valid, passed, |x| found(bounds, i64::from(*x)))
+                    }
+                    Values::Int64(v) => fold(&v[..len], &valid, passed, |x| found(bounds, *x)),
+                    Values::UInt8(v) => {
+                        fold(&v[..len], &valid, passed, |x| found(bounds, i64::from(*x)))
+                    }
+                    Values::UInt16(v) => {
+                        fold(&v[..len], &valid, passed, |x| found(bounds, i64::from(*x)))
+                    }
+                    Values::UInt32(v) => {
+                        fold(&v[..len], &valid, passed, |x| found(bounds, i64::from(*x)))
+                    }
                     _ => return Err(broken("a test of a column that is not of integers")),
                 }
             }
@@ -136,6 +138,33 @@ impl ClauseTest {
         }
         Ok(())
     }
+}
+
+/// The bounds in the stored unit of `plan` that a value equal to one of
+/// `values` holds, sorted and without repeats.
+fn in_bounds(plan: &ReadPlan, values: &[Option<i64>]) -> datum_arrow::Result<Vec<i64>> {
+    let mut bounds = equalities(plan, values)?;
+    bounds.sort_unstable();
+    bounds.dedup();
+    Ok(bounds)
+}
+
+/// The bound of each value's test of equality, in the values' order,
+/// those that match no stored value left out.
+fn equalities(plan: &ReadPlan, values: &[Option<i64>]) -> datum_arrow::Result<Vec<i64>> {
+    let mut bounds = Vec::with_capacity(values.len());
+    for value in values {
+        // Every is not the answer of an equality; Nothing matches no row.
+        if let Test::Compare { bound, .. } = plan.test(Comparison::Eq, *value)? {
+            bounds.push(bound);
+        }
+    }
+    Ok(bounds)
+}
+
+/// Whether `value` is one of the sorted `bounds`.
+fn found(bounds: &[i64], value: i64) -> bool {
+    bounds.binary_search(&value).is_ok()
 }
 
 /// The bits of the slots of word `word` among `len` slots.
@@ -173,5 +202,7 @@ fn broken(message: &str) -> Error {
     Error::new(INTERNAL_ERROR, message)
 }
 
+#[cfg(kani)]
+mod proofs;
 #[cfg(test)]
 mod tests;

@@ -19,8 +19,8 @@
 # calendar/proofs.rs, the word walks' reader/proofs.rs and
 # column/proofs.rs, the sort key's sort/proofs.rs,
 # the divisors' int32/divisor/proofs.rs and int64/divisor/proofs.rs, and
-# every proofs.rs of relspill, and datum-arrow's proofs.rs), built only
-# under Kani.
+# every proofs.rs of relspill, datum-arrow's proofs.rs, and the clauses'
+# clause/proofs.rs of tessera-parquet), built only under Kani.
 exclude_globs = [
     "tools/**",
     "crates/tessera-testing/**",
@@ -33,6 +33,7 @@ exclude_globs = [
     "crates/relspill/src/**/proofs.rs",
     "crates/relspill/src/proofs.rs",
     "crates/datum-arrow/src/proofs.rs",
+    "crates/tessera-parquet/src/clause/proofs.rs",
     "crates/tessera-capi/src/column/proofs.rs",
     "crates/tessera-core/src/reader/proofs.rs",
     "crates/tessera-kernels/src/calendar/proofs.rs",
