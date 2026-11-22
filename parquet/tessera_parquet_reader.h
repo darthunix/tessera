@@ -175,6 +175,19 @@ typedef struct TessParquetTest TessParquetTest;
 #define TESS_PARQUET_TEST_IS_NULL 7
 #define TESS_PARQUET_TEST_IS_NOT_NULL 8
 
+/*
+ * The kind of test, TESS_PARQUET_TEST_EQ to TESS_PARQUET_TEST_GE, of a
+ * clause that compares a column of type column with a side of type side,
+ * column op side, or side op column where commuted: strategy is the
+ * operator's strategy in the column type's B-tree family, 0 where the
+ * operator is not of it, and negator that of its negator. -1 for a clause
+ * the source does not check: types whose values are not of one unit, or
+ * an operator neither a comparison of the family nor <>.
+ */
+extern int32_t tess_parquet_comparison(uint32_t column, uint32_t side,
+									   int32_t strategy, int32_t negator,
+									   bool commuted);
+
 extern bool tess_parquet_test(const TessParquetColumn *column, int32_t kind,
 							  const int64_t *values, const bool *nulls,
 							  size_t nvalues, TessParquetTest **out,

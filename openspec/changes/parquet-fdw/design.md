@@ -304,6 +304,30 @@ message. Refused: the answers `TESS_CLAUSE_PRUNE_ONLY` for these
 clauses, which would have `TessFilter` check them again on values the
 source made only for it.
 
+Which comparison a clause asks is found in two steps. The node asks
+PostgreSQL's catalog for the operator's strategy in the column type's
+B-tree family, the number that says "less", "equal" and so on, and for
+`<>` the strategy of its negator. The reader then turns the strategy,
+the order of the operands and the pair of types into a comparison of
+the column with the side, or refuses the clause. The rule is small and
+closed, so a Rust test runs it for every strategy, negator, order and
+pair of a list of types, and checks each answer against the operator's
+meaning on values. Kept in C, it would be judged by the suites alone,
+since only Rust tests judge a mutant.
+
+The rest is proved or compared with PostgreSQL. Kani, a checker that
+proves a property of a Rust function for every input, proves in
+`datum-arrow` each comparison's bound exact, for seconds and
+milliseconds past the division of the constant by the unit, and an
+equality's test one bound or none. In the reader it proves the bounds
+of `IN` the union of its values' tests of equality, for lists of two
+values over plans of integers, days and microseconds; it asks of a test
+no more than that one bound or none, so it holds for every unit. Their
+sort and the binary search over them are the standard
+library's, whose sort takes Kani past the limit of a harness. The
+property tests compare the whole, over every kind of array, with
+PostgreSQL's answer.
+
 ### Groups of rows skipped
 
 Before a group is read, each clause the source checks is tried against
