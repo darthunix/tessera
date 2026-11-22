@@ -53,6 +53,23 @@ SELECT parquet_test_cancel_after(:'parquet_module', NULL);
 -- Without the cancel, every window.
 SELECT sum(i) = 999999::numeric * 1000000 / 2 AS every_row FROM t_million;
 
+-- The windows a scan reads, counted at the same injection point, with a
+-- cancel that never comes: a group of three windows whose middle one
+-- holds no row the clause passes. The node reads a's three windows, and
+-- b's first and last, each once, forward: the last is read forward after
+-- the gap, not again for each of its batches.
+\set gap :abs_builddir '/results/parquet_files/gap.parquet'
+SELECT parquet_test_write(:'gap', '{"group_rows": 3072, "columns": [
+    {"name": "a", "type": "int64", "values": ' ||
+    (SELECT json_agg(CASE WHEN g / 1024 = 1 THEN 0 ELSE 1 END) FROM generate_series(0, 3071) g) ||
+    '}, {"name": "b", "type": "int64", "range": 3072}]}');
+CREATE FOREIGN TABLE t_gap (a bigint, b bigint) SERVER pq OPTIONS (files :'gap');
+EXPLAIN (COSTS OFF) SELECT sum(b) FROM t_gap WHERE a <> 0;
+SELECT parquet_test_cancel_after(:'parquet_module', 1000000);
+SELECT sum(b) = 3071 * 3072 / 2 - (1024 + 2047) * 1024 / 2 AS passed_rows FROM t_gap WHERE a <> 0;
+SELECT parquet_test_windows() AS windows_read;
+SELECT parquet_test_cancel_after(:'parquet_module', NULL);
+
 -- spec: parquet-fdw/A file replaced between participants
 -- A parallel plan whose leader has begun its scan, the file replaced by
 -- a rename with one of its bytes and time before a worker opens it,
@@ -86,7 +103,7 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET parallel_leader_participation;
 
-DROP FOREIGN TABLE t_million, t_eight;
+DROP FOREIGN TABLE t_million, t_eight, t_gap;
 DROP SERVER pq;
 DROP FUNCTION parquet_test_injection(), parquet_test_write(text, text),
     parquet_test_cancel_after(text, int), parquet_test_windows(),

@@ -111,9 +111,11 @@ fn write_ints_by(
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
-    /// Windows read forward over a selection, and windows read again out
-    /// of order for rows asked: each gives the values of its rows, in
-    /// their order, `NULL` where the file holds one.
+    /// Windows read forward over a selection, some of them passed over
+    /// as no consumer asks for them, and windows read again out of order
+    /// for rows asked: each gives the values of its rows, in their order,
+    /// `NULL` where the file holds one; a window after a gap gives every
+    /// selected row, as a forward one does.
     #[test]
     fn windows_forward_and_out_of_order(
         rows in 1usize..700,
@@ -123,6 +125,7 @@ proptest! {
         page_rows in 1usize..120,
         again in prop::collection::vec(any::<u64>(), 4),
         snappy in any::<bool>(),
+        passed in any::<u64>(),
     ) {
         let dir = tempfile::tempdir().unwrap();
         let values: Vec<i32> = (0..rows as i32).map(|v| v * 3 - 500).collect();
@@ -140,9 +143,23 @@ proptest! {
         let mut windows = Vec::new();
         while start < rows {
             let len = window.min(rows - start);
-            let got = reader.read(start, len, &bits(&selection, start, len)).unwrap();
+            // The window's index decides whether it is passed over.
+            let index = (start / window) % 64;
+            if passed >> index & 1 == 1 {
+                start += len;
+                continue;
+            }
+            // Asked for its first selected row alone: a forward window
+            // gives every selected row whatever it is asked.
+            let sel = bits(&selection, start, len);
+            let first: Vec<u64> = sel.iter().scan(false, |found, &word| {
+                let bit = if *found { 0 } else { word.isolate_lowest_one() };
+                *found |= bit != 0;
+                Some(bit)
+            }).collect();
+            let got = reader.read(start, len, &first).unwrap();
             let held = rows_of(&got.rows, len);
-            prop_assert_eq!(&got.rows, &bits(&selection, start, len));
+            prop_assert_eq!(&got.rows, &sel);
             let made = datums(&reader, &got).unwrap();
             prop_assert_eq!(made.len(), held.len());
             for (value, row) in made.iter().zip(&held) {
@@ -151,7 +168,8 @@ proptest! {
             windows.push((start, len));
             start += len;
         }
-        // Each window again, for some of its selected rows.
+        // Each window read again, behind the forward reader now, for some
+        // of its selected rows.
         for (start, len) in windows {
             let sel = bits(&selection, start, len);
             let asked: Vec<u64> = sel.iter().zip(again.iter().cycle()).map(|(s, a)| s & a).collect();

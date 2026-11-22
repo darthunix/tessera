@@ -93,7 +93,9 @@ maintainer to say that the machine is idle.
       values of parameters and subqueries. Check: the suites; the cases
       of the clauses checked and left, and of values out of range, the
       source's halves under a clause of the cases of text from bytes and
-      of the length of a varchar, and the case of the source chosen
+      of the length of a varchar, and the case of the source chosen; the
+      node's check of a forward window's rows counts the rows the
+      selection holds, not the window's
 - [ ] 5.2 The groups of rows skipped by their least and greatest values,
       their `NULL` counts and their dictionaries, with the reader's C
       entry points of a group's statistics and its dictionary. Check:
