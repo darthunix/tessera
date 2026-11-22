@@ -246,7 +246,9 @@ as they are.
   the batches under the clause return the other rows without an error,
   the dictionary's value used only by rejected rows raises none,
   `'trust'` returns the bytes as text, and `bytea` returns them as bytes
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Bytes checked when
+  they become values`
 
 #### Scenario: The length of a varchar
 - **WHEN** a `varchar(3)` column reads strings of three characters of
@@ -256,7 +258,8 @@ as they are.
 - **THEN** the strings of three characters are returned, the string of
   four raises `22001` where it is returned and nothing where the clause
   rejects it, and the trusted column raises `42804` when it is planned
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/The length of a varchar`
 
 #### Scenario: A database of another encoding
 - **WHEN** a database of the encoding `LATIN1` reads a table with a
@@ -460,7 +463,9 @@ equal the result of the same query over a heap table of the same rows.
   rescanned for each outer row
 - **THEN** each result equals the result over a heap table of the same
   rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/A clause on a value
+  that changes by rescan`
 
 #### Scenario: Values out of range in a clause
 - **WHEN** a file holds a time in seconds past the range of `timestamp`,
@@ -468,7 +473,8 @@ equal the result of the same query over a heap table of the same rows.
   rejects it, and then one which passes it
 - **THEN** the first count is right and raises no error, and the second
   raises `22008` only where a consumer asks for the column's value
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Values out of range in a clause`
 
 ### Requirement: Groups of rows skipped
 For the clauses it checks exactly, the source SHALL skip a whole group
@@ -598,7 +604,8 @@ columns.
   table with Tessera on, its clauses all checked by the source
 - **THEN** the plan reads it through the source's node, not the
   wrapper's rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/The source chosen`
 
 ### Requirement: EXPLAIN
 The wrapper's scan and the source's node SHALL show in `EXPLAIN` the

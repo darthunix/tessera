@@ -90,6 +90,34 @@ SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_group;
  t
 (1 row)
 
+-- Under a clause the source checks that passes no row, the cancel comes
+-- in the pass over the clause's column, before the group is selected.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM t_million WHERE i < 0;
+                    QUERY PLAN                    
+--------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessParquetScan) on t_million
+         Source Exact: (i < 0)
+         Parquet Files: 1
+         Row Groups: 1
+(5 rows)
+
+SELECT parquet_test_cancel_after(:'parquet_module', 1);
+ parquet_test_cancel_after 
+---------------------------
+ 
+(1 row)
+
+\set VERBOSITY sqlstate
+SELECT count(*) FROM t_million WHERE i < 0;
+ERROR:  57014
+\set VERBOSITY default
+SELECT parquet_test_windows() BETWEEN 1 AND 976 AS stopped_within_the_pass;
+ stopped_within_the_pass 
+-------------------------
+ t
+(1 row)
+
 SELECT parquet_test_cancel_after(:'parquet_module', NULL);
  parquet_test_cancel_after 
 ---------------------------
@@ -105,9 +133,11 @@ SELECT sum(i) = 999999::numeric * 1000000 / 2 AS every_row FROM t_million;
 
 -- The windows a scan reads, counted at the same injection point, with a
 -- cancel that never comes: a group of three windows whose middle one
--- holds no row the clause passes. The node reads a's three windows, and
--- b's first and last, each once, forward: the last is read forward after
--- the gap, not again for each of its batches.
+-- holds no row TessFilter's clause passes. The node reads a's three
+-- windows, and b's first and last, each once, forward: the last is read
+-- forward after the gap, not again for each of its batches. Where the
+-- source checks the clause itself, its pass reads a's three windows and
+-- then b's two.
 \set gap :abs_builddir '/results/parquet_files/gap.parquet'
 SELECT parquet_test_write(:'gap', '{"group_rows": 3072, "columns": [
     {"name": "a", "type": "int64", "values": ' ||
@@ -119,16 +149,35 @@ SELECT parquet_test_write(:'gap', '{"group_rows": 3072, "columns": [
 (1 row)
 
 CREATE FOREIGN TABLE t_gap (a bigint, b bigint) SERVER pq OPTIONS (files :'gap');
-EXPLAIN (COSTS OFF) SELECT sum(b) FROM t_gap WHERE a <> 0;
+EXPLAIN (COSTS OFF) SELECT sum(b) FROM t_gap WHERE a + 0 <> 0;
                      QUERY PLAN                     
 ----------------------------------------------------
  Custom Scan (TessAgg)
    ->  Custom Scan (TessFilter) on t_gap
-         Batch Filter: (a <> 0)
+         Batch Filter: ((a + 0) <> 0)
          ->  Custom Scan (TessParquetScan) on t_gap
                Parquet Files: 1
                Row Groups: 1
 (6 rows)
+
+SELECT parquet_test_cancel_after(:'parquet_module', 1000000);
+ parquet_test_cancel_after 
+---------------------------
+ 
+(1 row)
+
+SELECT sum(b) = 3071 * 3072 / 2 - (1024 + 2047) * 1024 / 2 AS passed_rows
+FROM t_gap WHERE a + 0 <> 0;
+ passed_rows 
+-------------
+ t
+(1 row)
+
+SELECT parquet_test_windows() AS windows_read;
+ windows_read 
+--------------
+            5
+(1 row)
 
 SELECT parquet_test_cancel_after(:'parquet_module', 1000000);
  parquet_test_cancel_after 
@@ -142,10 +191,10 @@ SELECT sum(b) = 3071 * 3072 / 2 - (1024 + 2047) * 1024 / 2 AS passed_rows FROM t
  t
 (1 row)
 
-SELECT parquet_test_windows() AS windows_read;
- windows_read 
---------------
-            5
+SELECT parquet_test_windows() AS windows_read_under_the_source;
+ windows_read_under_the_source 
+-------------------------------
+                             5
 (1 row)
 
 SELECT parquet_test_cancel_after(:'parquet_module', NULL);
