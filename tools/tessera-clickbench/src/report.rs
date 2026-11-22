@@ -298,6 +298,55 @@ fn side_by_side_counts(runs: &[Run]) -> String {
     text
 }
 
+/// The runs as the columns of a report: runs of one mode, workers,
+/// threads, files, commit and settings whose queries differ, as a run of
+/// each query alone gives them, are one column, in the order of their
+/// first run, its id followed by the count of the others; a run that
+/// repeats a query of its column starts another.
+pub fn merged(runs: Vec<Run>) -> Vec<Run> {
+    let key = |meta: &Meta| {
+        (
+            meta.command.clone(),
+            meta.modes.clone(),
+            meta.workers,
+            meta.duckdb_threads,
+            meta.files.clone(),
+            meta.counters,
+            meta.head.clone(),
+            meta.work_mem.clone(),
+            meta.tries,
+        )
+    };
+    let mut columns: Vec<(Run, usize)> = Vec::new();
+    for run in runs {
+        let open = columns.iter_mut().find(|(column, _)| {
+            key(&column.meta) == key(&run.meta)
+                && !run
+                    .times
+                    .iter()
+                    .any(|times| column.times.iter().any(|t| t.query == times.query))
+        });
+        match open {
+            Some((column, more)) => {
+                column.times.extend(run.times);
+                column.checks.extend(run.checks);
+                *more += 1;
+            }
+            None => columns.push((run, 0)),
+        }
+    }
+    columns
+        .into_iter()
+        .map(|(mut column, more)| {
+            column.times.sort_by_key(|times| times.query);
+            if more > 0 {
+                column.meta.id = format!("{} and {more} more", column.meta.id);
+            }
+            column
+        })
+        .collect()
+}
+
 /// Several runs side by side: the hot time of each query in each, and the
 /// ratio of each run's to the first's; the geometric means over the
 /// queries that every run timed. Counting runs, by their counts.
@@ -435,6 +484,29 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn runs_of_one_column_are_merged() {
+        let merged = merged(vec![
+            run("a", "on", &[(2, Some(1.0))]),
+            run("b", "duckdb", &[(1, Some(0.5))]),
+            run("c", "on", &[(1, Some(2.0))]),
+            run("d", "on", &[(1, Some(3.0))]),
+        ]);
+        let columns: Vec<(&str, Vec<usize>)> = merged
+            .iter()
+            .map(|run| {
+                (
+                    run.meta.id.as_str(),
+                    run.times.iter().map(|times| times.query).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            columns,
+            [("a and 1 more", vec![1, 2]), ("b", vec![1]), ("d", vec![1])]
+        );
     }
 
     #[test]
