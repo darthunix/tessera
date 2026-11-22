@@ -63,7 +63,8 @@ are installed.
   instead, which [pg_pmu](https://github.com/darthunix/pg_pmu) counts
   (see "Counts").
 - `cargo clickbench report <dir>...`: a run again, or several side by
-  side.
+  side. Runs of one mode, workers and files, each of other queries, as
+  runs of one query each give them, make one column.
 - `cargo clickbench stop`: stop the cluster; its data stays.
 
 `check` and `run` stop the server at the end if they started it, and
