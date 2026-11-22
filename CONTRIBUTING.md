@@ -71,9 +71,9 @@ ask".
   (`tessera-capi`), the hash table (`relhash`), the spill format, the
   shared core.
 - `tools/`: measuring and checking tools: the counters of the processor
-  (`pmu`), `tessera-ab`, `tessera-bench`, `tessera-crosscheck`,
-  `tessera-tpch`, and the stack frames of a built library
-  (`binary-stack-usage`).
+  (`pmu`), `tessera-ab`, `tessera-bench`, `tessera-clickbench`,
+  `tessera-crosscheck`, `tessera-tpch`, and the stack frames of a built
+  library (`binary-stack-usage`).
 - `test/`: the SQL suites with their C test modules; `bench/`: the
   benchmark families.
 

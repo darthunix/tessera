@@ -1508,6 +1508,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tessera-clickbench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "console",
+ "postgres",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tessera-pgtool",
+]
+
+[[package]]
 name = "tessera-core"
 version = "0.1.0"
 dependencies = [

@@ -33,6 +33,7 @@ impl Query {
             kinds: self.kinds,
             keys: self.keys,
             limit: self.limit,
+            offset: 0,
         }
     }
 
