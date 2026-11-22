@@ -71,6 +71,9 @@ pub struct Settings {
     pub work_mem: String,
     /// Whether the cluster has pg_duckdb, whose setting a mode then sets.
     pub duckdb: bool,
+    /// DuckDB's threads in the mode duckdb, set before its instance
+    /// starts at the connection's first query of DuckDB.
+    pub duckdb_threads: u32,
 }
 
 impl Settings {
@@ -92,6 +95,9 @@ impl Settings {
         );
         if self.duckdb {
             text.push_str(&format!("; SET duckdb.force_execution = {duckdb}"));
+        }
+        if mode == Mode::Duckdb {
+            text.push_str(&format!("; SET duckdb.threads = {}", self.duckdb_threads));
         }
         text
     }
@@ -189,6 +195,7 @@ mod tests {
             workers: 4,
             work_mem: "64MB".into(),
             duckdb: true,
+            duckdb_threads: 5,
         };
         let timeout = Duration::from_secs(60);
         assert_eq!(
@@ -205,7 +212,7 @@ mod tests {
         assert!(
             settings
                 .statements(Mode::Duckdb, timeout)
-                .ends_with("SET duckdb.force_execution = on")
+                .ends_with("SET duckdb.force_execution = on; SET duckdb.threads = 5")
         );
         let plain = Settings {
             duckdb: false,
