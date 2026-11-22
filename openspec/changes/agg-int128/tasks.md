@@ -18,7 +18,7 @@ one pull request; the work and the close are a second.
 
 ## 2. The cases
 
-- [ ] 2.1 `bench/pg/anyagg.sql` makes the table `bench_digits` once and
+- [x] 2.1 `bench/pg/anyagg.sql` makes the table `bench_digits` once and
       gets the eight cases of the design's measurement plan, named in
       both lists of its plans; the family's entry in
       `bench/pg/README.md` names them. Check: `cargo ab measure --base

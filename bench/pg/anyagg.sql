@@ -17,6 +17,18 @@ SET jit = off;
 -- Parallel workers per Gather, for both modes; none unless asked for.
 SET max_parallel_workers_per_gather = :workers;
 
+-- The family's own table, made once: a bigint w whose every value has 19
+-- digits, past a decimal's 18, of both signs and in no order, and its twin
+-- s = w / 10 of 18 digits; a key r whose values come in runs of 64 rows,
+-- so that a word of rows holds one group or two, and a key p whose values
+-- follow one another, so that a word holds 64.
+CREATE TABLE IF NOT EXISTS bench_digits AS
+SELECT g / 64 % 100 AS r, g % 100 AS p, w, w / 10 AS s
+FROM generate_series(1, 1000000) AS g,
+     LATERAL (SELECT CASE WHEN g % 3 = 0 THEN -1 ELSE 1 END *
+                     (1000000000000000000 + g::bigint * 7919 % 1000003 * 8000000000000) AS w) AS v;
+VACUUM (ANALYZE) bench_digits;
+
 \ir reading.sql
 
 /*
@@ -83,6 +95,18 @@ SELECT pg_temp.measure_pair('g_group_int2', 'SELECT count(*), max(s) FROM (SELEC
 -- expression's decimals.
 SELECT pg_temp.measure_pair('g_group_sum', 'SELECT count(*), sum(s), sum(v) FROM (SELECT d % 100, sum(c) AS s, avg(f) AS v FROM bench_mixed GROUP BY 1) AS g', :repetitions);
 SELECT pg_temp.measure_pair('g_group_sum_numeric', 'SELECT count(*), sum(s) FROM (SELECT d % 100, sum(a::numeric) AS s FROM bench_mixed GROUP BY 1) AS g', :repetitions);
+-- sum and avg of bigint values of 19 digits, each beside its twin of 18:
+-- without groups, by groups whose keys come in runs (every row through
+-- its group's sum of the word) and by groups whose keys follow one
+-- another (three rows in four into their records one by one).
+SELECT pg_temp.measure_pair('g_sum_digits19', 'SELECT sum(w) FROM bench_digits', :repetitions);
+SELECT pg_temp.measure_pair('g_sum_digits18', 'SELECT sum(s) FROM bench_digits', :repetitions);
+SELECT pg_temp.measure_pair('g_avg_digits19', 'SELECT avg(w) FROM bench_digits', :repetitions);
+SELECT pg_temp.measure_pair('g_avg_digits18', 'SELECT avg(s) FROM bench_digits', :repetitions);
+SELECT pg_temp.measure_pair('g_runs_digits19', 'SELECT count(*), sum(t) FROM (SELECT r, sum(w) AS t FROM bench_digits GROUP BY 1) AS g', :repetitions);
+SELECT pg_temp.measure_pair('g_runs_digits18', 'SELECT count(*), sum(t) FROM (SELECT r, sum(s) AS t FROM bench_digits GROUP BY 1) AS g', :repetitions);
+SELECT pg_temp.measure_pair('g_spread_digits19', 'SELECT count(*), sum(t) FROM (SELECT p, sum(w) AS t FROM bench_digits GROUP BY 1) AS g', :repetitions);
+SELECT pg_temp.measure_pair('g_spread_digits18', 'SELECT count(*), sum(t) FROM (SELECT p, sum(s) AS t FROM bench_digits GROUP BY 1) AS g', :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -101,11 +125,11 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric']) AS name
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric', 'g_sum_digits19', 'g_sum_digits18', 'g_avg_digits19', 'g_avg_digits18', 'g_runs_digits19', 'g_runs_digits18', 'g_spread_digits19', 'g_spread_digits18']) AS name
 WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric']) AS name
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric', 'g_sum_digits19', 'g_sum_digits18', 'g_avg_digits19', 'g_avg_digits18', 'g_runs_digits19', 'g_runs_digits18', 'g_spread_digits19', 'g_spread_digits18']) AS name
 WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 DEALLOCATE ALL;

@@ -219,8 +219,12 @@ query down, and where it can, does it speed one up.
   and 50 000 groups of text extremes (their int8 sums reach no result,
   and the planner drops them), 100 groups of numeric extremes (both
   kinds) and of `sum` of smallint, and 100 groups of `sum` and `avg` of
-  int8 and of `sum` of numeric, whose results the query reads. A ratio
-  below one is the win.
+  int8 and of `sum` of numeric, whose results the query reads; and over
+  the family's own table `bench_digits` of 1 M rows, `sum` and `avg` of
+  int8 values of 19 digits, each beside a twin of 18 digits
+  (`g_*_digits19`, `g_*_digits18`): without groups, by 100 groups whose
+  keys come in runs of 64 rows (`runs`) and by 100 groups whose keys
+  follow one another (`spread`). A ratio below one is the win.
 - **anykey** (`anykey.sql`): groupings, `DISTINCT` and `UNION` keyed by
   text and numeric over `bench_mixed`: a text expression of 99 values, a
   text column of 450 000, with aggregates, numeric of 1000 values, and
