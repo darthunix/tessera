@@ -1,12 +1,15 @@
 //! Whether two answers to a query are the same: the answer of TPC-H
-//! against ours by the precision rules of clause 2.1.3.5, and Tessera on
-//! against off value for value.
+//! against ours by the precision rules of clause 2.1.3.5, Tessera on
+//! against off value for value, and another engine's answer against
+//! PostgreSQL's with its numbers close.
 //!
 //! Rows are compared in their order, except that rows equal in the
 //! columns of ORDER BY may come in any order, so such a run of rows is
 //! compared as a multiset; and where the query's LIMIT cuts a run, the
 //! rows that made it past the cut are any of the run's, so only their
-//! sort columns are compared.
+//! sort columns are compared. An OFFSET cuts the first run in the same
+//! way. Whether the rows of a cut run are rows of the query at all is for
+//! the caller to check, against the query's result without its LIMIT.
 
 /// A row of an answer, every value as text, NULL as `None`.
 pub type Row = Vec<Option<String>>;
@@ -32,6 +35,14 @@ pub enum Precision {
     /// By the kinds of the columns, clause 2.1.3.5: our answer against the
     /// published one, which rounds to two decimals and pads with spaces.
     Specification,
+    /// In a column of the kinds `Sum` and `Ratio`, finite numbers within
+    /// a relative 10^-9 of each other; in a column of the kind `Exact`,
+    /// and any value that is not a finite number, byte for byte: another
+    /// engine against PostgreSQL, where one computes an average in
+    /// `double precision` and the other in `numeric`. The runs of rows
+    /// equal in their keys are those of keys equal byte for byte, so
+    /// that close keys do not chain into one run.
+    Close,
 }
 
 /// What the comparison needs to know of a query's answer.
@@ -41,6 +52,10 @@ pub struct Shape<'a> {
     /// The output columns of ORDER BY, by position.
     pub keys: &'a [usize],
     pub limit: Option<usize>,
+    /// The rows the query's OFFSET skips: where it is above zero, the
+    /// first run of rows equal in their keys may hold any of its run's
+    /// rows, as the last one may past the LIMIT.
+    pub offset: usize,
 }
 
 /// Compares `actual` with `expected`; the error names the first
@@ -70,16 +85,19 @@ pub fn compare(
         }
     }
     let cut = shape.limit == Some(expected.len());
+    let runs = if precision == Precision::Close {
+        Precision::Exact
+    } else {
+        precision
+    };
     let mut start = 0;
     while start < expected.len() {
         let mut end = start + 1;
-        while end < expected.len()
-            && keys_equal(&expected[end - 1], &expected[end], shape, precision)
-        {
+        while end < expected.len() && keys_equal(&expected[end - 1], &expected[end], shape, runs) {
             end += 1;
         }
-        if cut && end == expected.len() {
-            // Past the cut any rows of the run may come: their keys only.
+        if cut && end == expected.len() || shape.offset > 0 && start == 0 {
+            // Past a cut any rows of the run may come: their keys only.
             for index in start..end {
                 if !keys_equal(&expected[start], &actual[index], shape, precision) {
                     return Err(difference(index, &expected[index], &actual[index]));
@@ -172,8 +190,14 @@ fn values_equal(
         (Some(expected), Some(actual)) => (expected, actual),
         (expected, actual) => return expected == actual,
     };
-    if precision == Precision::Exact {
+    if precision == Precision::Exact || expected == actual {
         return expected == actual;
+    }
+    if precision == Precision::Close {
+        return kind != Kind::Exact
+            && numbers(expected, actual).is_some_and(|(e, a)| {
+                e.is_finite() && a.is_finite() && (a - e).abs() <= 1e-9 * e.abs().max(a.abs())
+            });
     }
     let (expected, actual) = (expected.trim(), actual.trim());
     match kind {
@@ -238,6 +262,7 @@ mod tests {
         kinds: &[Exact, Sum, Ratio, Exact],
         keys: &[0],
         limit: None,
+        offset: 0,
     };
 
     #[test]
@@ -274,6 +299,7 @@ mod tests {
             kinds: &[Exact],
             keys: &[],
             limit: None,
+            offset: 0,
         };
         let expected = rows(&[&["1995"], &["0.05"], &["-0"]]);
         let actual = rows(&[&["1995.0"], &["0.050"], &["0.00"]]);
@@ -306,6 +332,7 @@ mod tests {
             kinds: &[Exact, Exact],
             keys: &[0],
             limit: None,
+            offset: 0,
         };
         let expected = rows(&[&["1", "a"], &["2", "b"], &["2", "c"], &["3", "d"]]);
         let swapped = rows(&[&["1", "a"], &["2", "c"], &["2", "b"], &["3", "d"]]);
@@ -329,6 +356,7 @@ mod tests {
             kinds: &[Exact, Exact],
             keys: &[0],
             limit: Some(3),
+            offset: 0,
         };
         let expected = rows(&[&["1", "a"], &["2", "b"], &["2", "c"]]);
         let other = rows(&[&["1", "a"], &["2", "x"], &["2", "b"]]);
@@ -344,11 +372,100 @@ mod tests {
     }
 
     #[test]
+    fn past_the_offset_any_rows_of_the_first_run_come() {
+        let shape = Shape {
+            kinds: &[Exact, Exact],
+            keys: &[0],
+            limit: Some(10),
+            offset: 5,
+        };
+        let expected = rows(&[&["1", "a"], &["1", "b"], &["2", "c"], &["2", "d"]]);
+        let other = rows(&[&["1", "x"], &["1", "a"], &["2", "d"], &["2", "c"]]);
+        assert_eq!(compare(&expected, &other, &shape, Precision::Exact), Ok(()));
+        // Only the first run: the next ones are whole.
+        let wrong = rows(&[&["1", "a"], &["1", "b"], &["2", "c"], &["2", "x"]]);
+        assert_eq!(
+            compare(&expected, &wrong, &shape, Precision::Exact),
+            Err("row 4: expected [2 | d], got [2 | x]".into())
+        );
+        let unskipped = Shape { offset: 0, ..shape };
+        assert!(compare(&expected, &other, &unskipped, Precision::Exact).is_err());
+        // Without keys every row is of one run, cut by the offset.
+        let unsorted = Shape { keys: &[], ..shape };
+        let any = rows(&[&["7", "y"], &["8", "z"], &["9", "w"], &["0", "v"]]);
+        assert_eq!(
+            compare(&expected, &any, &unsorted, Precision::Exact),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn close_numbers_are_equal_in_their_columns_alone() {
+        let shape = Shape {
+            kinds: &[Ratio, Ratio, Exact],
+            keys: &[],
+            limit: None,
+            offset: 0,
+        };
+        let expected = rows(&[&["1513.2345678901234568", "2.5e18", "a"]]);
+        let near = rows(&[&["1513.2345678901235", "2500000000000000001", "a"]]);
+        assert_eq!(compare(&expected, &near, &shape, Precision::Close), Ok(()));
+        assert!(compare(&expected, &near, &shape, Precision::Exact).is_err());
+        for wrong in [
+            ["1513.23457", "2.5e18", "a"],
+            ["1513.2345678901234568", "2.5e18", "b"],
+            ["1513.2345678901234568", "NaN", "a"],
+            ["Infinity", "2.5e18", "a"],
+            ["-Infinity", "2.5e18", "a"],
+        ] {
+            let actual = rows(&[&wrong]);
+            assert!(
+                compare(&expected, &actual, &shape, Precision::Close).is_err(),
+                "{wrong:?}"
+            );
+        }
+        let zero = rows(&[&["0", "0", "a"]]);
+        assert_eq!(compare(&zero, &zero, &shape, Precision::Close), Ok(()));
+        let near_zero = rows(&[&["0.0000000001", "0", "a"]]);
+        assert!(compare(&zero, &near_zero, &shape, Precision::Close).is_err());
+        // An exact column is compared byte for byte, numbers or not.
+        let ids = rows(&[&["1", "1", "435090932899640449"]]);
+        let next = rows(&[&["1", "1", "435090932899640450"]]);
+        assert!(compare(&ids, &next, &shape, Precision::Close).is_err());
+        let phrase = rows(&[&["1", "1", "01"]]);
+        let other = rows(&[&["1", "1", "1"]]);
+        assert!(compare(&phrase, &other, &shape, Precision::Close).is_err());
+    }
+
+    #[test]
+    fn close_keys_do_not_chain_into_one_run() {
+        let shape = Shape {
+            kinds: &[Ratio, Exact],
+            keys: &[0],
+            limit: Some(3),
+            offset: 0,
+        };
+        // Each key is close to the next, not the first to the last: the
+        // runs are of equal keys, and an answer equal to the reference
+        // passes.
+        let expected = rows(&[
+            &["100.00000015", "a"],
+            &["100.000000075", "b"],
+            &["100", "c"],
+        ]);
+        assert_eq!(
+            compare(&expected, &expected, &shape, Precision::Close),
+            Ok(())
+        );
+    }
+
+    #[test]
     fn counts_widths_and_nulls() {
         let shape = Shape {
             kinds: &[Exact, Sum],
             keys: &[],
             limit: None,
+            offset: 0,
         };
         let expected = rows(&[&["a", "1"]]);
         assert_eq!(

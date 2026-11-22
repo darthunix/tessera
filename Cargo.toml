@@ -15,6 +15,7 @@ members = [
     "tools/tessera-bench",
     "tools/tessera-crosscheck",
     "tools/tessera-pgtool",
+    "tools/tessera-clickbench",
     "tools/tessera-tpch",
 ]
 resolver = "3"

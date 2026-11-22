@@ -1,5 +1,8 @@
 # `cargo tpch`: the queries derived from TPC-H, see bench/tpch/README.md.
 [alias]
 tpch = "run --release --locked -p tessera-tpch --"
+# `cargo clickbench`: ClickBench's queries over its Parquet files, see
+# bench/clickbench/README.md.
+clickbench = "run --release --locked -p tessera-clickbench --"
 # `cargo ab`: two revisions compared, see tools/tessera-ab/README.md.
 ab = "run --release --locked -p tessera-ab --"

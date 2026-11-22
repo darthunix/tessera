@@ -75,7 +75,7 @@ maintainer to say that the machine is idle.
 - [x] 4.4 The installed set builds the module from copies against the
       installed headers and runtime library. Check: `make -C
       test/installed installcheck`
-- [ ] 4.5 `tools/tessera-clickbench` (`cargo clickbench`) with
+- [x] 4.5 `tools/tessera-clickbench` (`cargo clickbench`) with
       ClickBench's queries in `bench/clickbench/` and its README: the
       cluster, the foreign table over one file or a list, the modes
       Tessera on, Tessera off and pg_duckdb, the answers checked between
