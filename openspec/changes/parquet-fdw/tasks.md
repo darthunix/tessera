@@ -88,7 +88,7 @@ maintainer to say that the machine is idle.
 
 ## 5. The clauses on integers, dates and times
 
-- [ ] 5.1 The clauses on integers, dates and times checked on stored
+- [x] 5.1 The clauses on integers, dates and times checked on stored
       values through `datum-arrow`'s bounds, `IN`, `IS NULL`, with the
       values of parameters and subqueries. Check: the suites; the cases
       of the clauses checked and left, and of values out of range, the
@@ -110,7 +110,8 @@ maintainer to say that the machine is idle.
 
 - [ ] 6.1 Equality, `<> ''` and `LIKE` of fixed parts on stored bytes
       and on dictionaries. Check: the suites; the cases of the clauses
-      checked and left, and the items on strings of the groups skipped
+      checked and left, whose scenarios the cases of integers, dates and
+      times of 5.1 join, and the items on strings of the groups skipped
 - [ ] 6.2 Stage 3, the 18 queries that filter on a string. Check: the
       run's report
 - [ ] 6.3 Stage 4, the 15 queries that group by a string, as they are:

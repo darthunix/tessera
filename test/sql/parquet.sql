@@ -71,6 +71,28 @@ BEGIN
     END LOOP;
     RETURN array_to_string(found, ', ');
 END $$;
+-- The rows of a statement.
+CREATE FUNCTION rows_of(statement text) RETURNS bigint LANGUAGE plpgsql AS $$
+DECLARE
+    n bigint;
+BEGIN
+    EXECUTE format('SELECT count(*) FROM (%s) s', statement) INTO n;
+    RETURN n;
+END $$;
+-- Who checks a statement's clauses: the source alone, TessFilter, or
+-- another plan.
+CREATE FUNCTION checked_by(statement text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+    source boolean := false;
+    filter boolean := false;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (COSTS OFF) ' || statement LOOP
+        source := source OR line ~ 'Source Exact';
+        filter := filter OR line ~ 'Filter:';
+    END LOOP;
+    RETURN CASE WHEN filter THEN 'filter' WHEN source THEN 'source' ELSE 'none' END;
+END $$;
 CREATE FUNCTION explain_lines(options text, statement text, pattern text) RETURNS SETOF text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -329,7 +351,11 @@ RESET TIME ZONE;
 -- A string that is not UTF-8 and one with a zero byte, marked as a
 -- string and unmarked, in plain pages and through a dictionary: checked,
 -- each raises 22021; trusted, the bytes become text; as bytea, bytes.
+-- Under a clause the source checks that rejects their row, the batches
+-- return the other row, the dictionary's value no row passing uses
+-- raising nothing.
 SELECT parquet_test_write(:'dir' || format('/bad_%s.parquet', d), format('{"dictionary": %s, "columns": [
+      {"name": "k", "type": "int32", "values": [1, 2]},
       {"name": "m_bad", "type": "bytes", "logical": "string", "values": ["a", {"hex": "ff"}]},
       {"name": "u_bad", "type": "bytes", "values": ["a", {"hex": "ff"}]},
       {"name": "m_zero", "type": "bytes", "logical": "string", "values": ["a", {"hex": "6100"}]},
@@ -337,9 +363,9 @@ SELECT parquet_test_write(:'dir' || format('/bad_%s.parquet', d), format('{"dict
 FROM unnest(ARRAY['false', 'true']) d;
 \set bad_plain :dir '/bad_false.parquet'
 \set bad_dict :dir '/bad_true.parquet'
-CREATE FOREIGN TABLE t_check_plain (m_bad text, u_bad text, m_zero text, u_zero text)
+CREATE FOREIGN TABLE t_check_plain (k int, m_bad text, u_bad text, m_zero text, u_zero text)
     SERVER pq OPTIONS (files :'bad_plain');
-CREATE FOREIGN TABLE t_check_dict (m_bad text, u_bad text, m_zero text, u_zero text)
+CREATE FOREIGN TABLE t_check_dict (k int, m_bad text, u_bad text, m_zero text, u_zero text)
     SERVER pq OPTIONS (files :'bad_dict');
 CREATE FOREIGN TABLE t_trust (m_bad text OPTIONS (column 'm_bad', utf8 'trust'),
     u_zero text OPTIONS (column 'u_zero', utf8 'trust'))
@@ -361,18 +387,26 @@ FROM unnest(ARRAY['t_check_plain', 't_check_dict']) t,
 SELECT encode(textsend(m_bad), 'hex') AS m_bad, encode(textsend(u_zero), 'hex') AS u_zero
 FROM t_trust;
 SELECT * FROM t_bytes;
+SELECT checked_by('SELECT m_bad FROM t_check_dict WHERE k = 1') AS checked_by;
+SELECT t, c, sqlstate_of(format('SELECT %I FROM %I WHERE k = 1', c, t)) AS under_a_clause
+FROM unnest(ARRAY['t_check_plain', 't_check_dict']) t,
+     unnest(ARRAY['m_bad', 'u_bad', 'm_zero', 'u_zero']) c ORDER BY t, c;
+SELECT m_bad, u_bad, m_zero, u_zero FROM t_check_dict WHERE k = 1;
 
 -- spec: parquet-fdw/The length of a varchar
 -- Into varchar(3): three characters of two bytes each are returned, four
 -- characters raise 22001, and a trusted varchar(3) is refused, 42804.
+-- Under a clause the source checks that rejects the row of four, its
+-- batches return the other row.
 SELECT parquet_test_write(:'dir' || '/vc_three.parquet',
     '{"columns": [{"name": "s", "type": "bytes", "logical": "string", "values": ["абв", "ab"]}]}');
 SELECT parquet_test_write(:'dir' || '/vc_four.parquet',
-    '{"columns": [{"name": "s", "type": "bytes", "values": ["абв", "abcd"]}]}');
+    '{"columns": [{"name": "s", "type": "bytes", "values": ["абв", "abcd"]},
+                  {"name": "k", "type": "int32", "values": [1, 2]}]}');
 \set vc_three :dir '/vc_three.parquet'
 \set vc_four :dir '/vc_four.parquet'
 CREATE FOREIGN TABLE t_vc_three (s varchar(3)) SERVER pq OPTIONS (files :'vc_three');
-CREATE FOREIGN TABLE t_vc_four (s varchar(3)) SERVER pq OPTIONS (files :'vc_four');
+CREATE FOREIGN TABLE t_vc_four (s varchar(3), k int) SERVER pq OPTIONS (files :'vc_four');
 CREATE FOREIGN TABLE t_vc_trust (s varchar(3) OPTIONS (column 's', utf8 'trust'))
     SERVER pq OPTIONS (files :'vc_three');
 SET tessera.enable = off;
@@ -384,6 +418,8 @@ SELECT scans_of('SELECT s FROM t_vc_four') AS through;
 SELECT s, octet_length(s) FROM t_vc_three;
 SELECT sqlstate_of('SELECT s FROM t_vc_four') AS four_characters;
 SELECT sqlstate_of('EXPLAIN SELECT s FROM t_vc_trust') AS trusted_varchar;
+SELECT scans_of('SELECT s FROM t_vc_four WHERE k = 1') AS under_a_clause;
+SELECT s FROM t_vc_four WHERE k = 1;
 
 -- A column compressed by a codec other than Snappy is refused, its
 -- neighbours planned.
@@ -543,9 +579,9 @@ SELECT explain_lines('ANALYZE', 'SELECT * FROM t_wide ORDER BY k LIMIT 10',
                      'TessParquetScan|Sort Method|Values Decoded');
 SELECT differ_off('(SELECT * FROM t_wide ORDER BY k LIMIT 10)') AS rows_differ;
 RESET work_mem;
--- A filter keeps eight rows, in windows after gaps, two in one batch and
--- across a group's end: the nine other columns are made for those alone,
--- each read for the rows asked where its reader passed no window.
+-- A clause the source checks keeps eight rows, in windows after gaps,
+-- two in one batch and across a group's end: the ten columns are made for
+-- those alone, each read forward over the selection.
 SELECT scans_of('SELECT * FROM t_wide WHERE k IN (5, 2100, 2900, 2901, 29999, 30000, 61000, 99999)')
     AS filtered;
 SELECT explain_lines('ANALYZE',
@@ -553,6 +589,23 @@ SELECT explain_lines('ANALYZE',
     'TessParquetScan|Values Decoded');
 SELECT differ_off('SELECT * FROM t_wide WHERE k IN (5, 2100, 2900, 2901, 29999, 30000, 61000, 99999)')
     AS rows_differ;
+-- The same clause by a function of the column, which TessFilter checks:
+-- the column is made for every row, the nine others for the rows kept,
+-- each read for the rows asked where its reader passed no window.
+SELECT explain_lines('ANALYZE',
+    'SELECT * FROM t_wide WHERE k + 0 IN (5, 2100, 2900, 2901, 29999, 30000, 61000, 99999)',
+    'TessParquetScan|Values Decoded');
+SELECT differ_off('SELECT * FROM t_wide WHERE k + 0 IN (5, 2100, 2900, 2901, 29999, 30000, 61000, 99999)')
+    AS rows_differ;
+-- A clause the source checks keeps part of a window, 1100 rows: the
+-- second window's 76 in a batch of 64 and its short last of 12, whose
+-- rows take their places in the window's selection from the rank of the
+-- batch's first. The five rows kept are of the short batch.
+SET work_mem = '64MB';
+SELECT explain_lines('ANALYZE', 'SELECT * FROM t_wide WHERE k < 1100 ORDER BY v DESC LIMIT 5',
+                     'TessParquetScan|Source Exact|Values Decoded');
+SELECT differ_off('(SELECT * FROM t_wide WHERE k < 1100 ORDER BY v DESC LIMIT 5)') AS rows_differ;
+RESET work_mem;
 -- A count over a file whose data pages are damaged and whose footer is
 -- whole makes no value and returns the footer's count.
 SELECT parquet_test_write(:'dir' || '/damaged_pages.parquet',
@@ -651,6 +704,9 @@ SELECT explain_lines('ANALYZE false', 'SELECT count(*) FROM t_files', 'Scan|Parq
 SELECT explain_lines('VERBOSE', 'SELECT count(*) FROM t_files', 'Scan|Parquet|Row Groups');
 SELECT explain_lines('ANALYZE', 'SELECT a FROM t_files',
                      'Scan|Parquet|Row Groups|Values Decoded');
+-- The clauses the source checks, as its node shows them.
+SELECT explain_lines('ANALYZE false', 'SELECT a FROM t_files WHERE a > 1 AND a IS NOT NULL',
+                     'Scan|Source Exact');
 
 -- spec: parquet-fdw/Rows from the files
 -- Three files of four groups of 1000 rows each, every group of a value
@@ -783,8 +839,8 @@ SELECT n_distinct AS both_values FROM pg_stats WHERE tablename = 't_alternating'
 -- spec: parquet-fdw/The source chosen
 -- A query the scan planner offers the sources, with Tessera on: its plan
 -- reads the table through the source's node, which costs less than the
--- wrapper's rows over the same columns; a clause, which the source does
--- not check yet, is TessFilter's above it.
+-- wrapper's rows over the same columns, and checks the query's clause
+-- itself.
 SELECT scans_of('SELECT g, v FROM t_groups') AS read,
        scans_of('SELECT g, sum(v) FROM t_groups GROUP BY g') AS grouped,
        scans_of('SELECT count(*) FROM t_groups') AS counted,
@@ -793,6 +849,152 @@ SET tessera.enable = off;
 SELECT (plan_of('SELECT g, v FROM t_groups')).cost AS wrapper_cost \gset
 RESET tessera.enable;
 SELECT (plan_of('SELECT g, v FROM t_groups')).cost < :wrapper_cost AS source_cheaper;
+SET tessera.enable = off;
+SELECT (plan_of('SELECT g FROM t_groups WHERE v < 10')).cost AS wrapper_cost \gset
+RESET tessera.enable;
+SELECT (plan_of('SELECT g FROM t_groups WHERE v < 10')).cost < :wrapper_cost
+    AS source_cheaper_filtered;
+
+-- The clauses on integers, dates and times, IN and = ANY, and the tests
+-- of NULL, which the source checks on the stored values: each shown
+-- under its node and none in TessFilter, by constants, the smallint's
+-- against bigint constants outside its range, a prepared statement's
+-- parameter and a subquery's value, each result that of a heap table of
+-- the same rows. The clauses on strings come with them later.
+SELECT parquet_test_write(:'dir' || '/clauses.parquet', json_build_object(
+    'group_rows', 1000, 'columns', json_build_array(
+      json_build_object('name', 'i2', 'type', 'int32', 'logical', 'int16', 'values',
+        (SELECT json_agg(CASE WHEN i % 7 = 0 THEN NULL ELSE i % 300 - 150 END ORDER BY i)
+         FROM generate_series(0, 2999) i)),
+      json_build_object('name', 'i4', 'type', 'int32', 'values',
+        (SELECT json_agg(CASE WHEN i % 11 = 0 THEN NULL ELSE i END ORDER BY i)
+         FROM generate_series(0, 2999) i)),
+      json_build_object('name', 'i8', 'type', 'int64', 'values',
+        (SELECT json_agg(CASE WHEN i % 13 = 0 THEN NULL ELSE i * 1000000007::bigint END ORDER BY i)
+         FROM generate_series(0, 2999) i)),
+      json_build_object('name', 'd', 'type', 'int32', 'logical', 'date', 'values',
+        (SELECT json_agg(CASE WHEN i % 17 = 0 THEN NULL ELSE 15800 + i % 200 END ORDER BY i)
+         FROM generate_series(0, 2999) i)),
+      json_build_object('name', 'ts', 'type', 'int64', 'values',
+        (SELECT json_agg(CASE WHEN i % 19 = 0 THEN NULL ELSE 1373846400 + i * 37 END ORDER BY i)
+         FROM generate_series(0, 2999) i)),
+      json_build_object('name', 'tz', 'type', 'int64', 'logical', 'timestamp_us_utc', 'values',
+        (SELECT json_agg(CASE WHEN i % 23 = 0 THEN NULL
+                              ELSE (1373846400 + i * 41) * 1000000::bigint END ORDER BY i)
+         FROM generate_series(0, 2999) i))))::text);
+\set clauses :dir '/clauses.parquet'
+CREATE FOREIGN TABLE t_clauses (i2 smallint, i4 integer, i8 bigint, d date,
+    ts timestamp OPTIONS (unit 'seconds'), tz timestamptz)
+    SERVER pq OPTIONS (files :'clauses');
+CREATE TABLE h_clauses AS
+SELECT CASE WHEN i % 7 = 0 THEN NULL ELSE i % 300 - 150 END::smallint AS i2,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i END AS i4,
+       CASE WHEN i % 13 = 0 THEN NULL ELSE i * 1000000007::bigint END AS i8,
+       CASE WHEN i % 17 = 0 THEN NULL ELSE DATE '1970-01-01' + (15800 + i % 200) END AS d,
+       CASE WHEN i % 19 = 0 THEN NULL
+            ELSE 'epoch'::timestamp + (1373846400 + i * 37) * interval '1 second' END AS ts,
+       CASE WHEN i % 23 = 0 THEN NULL ELSE to_timestamp(1373846400 + i * 41) END AS tz
+FROM generate_series(0, 2999) i;
+SET TIME ZONE 'UTC';
+SELECT c AS clause,
+       checked_by(format('SELECT * FROM t_clauses WHERE %s', c)) AS checked_by,
+       differ(format('SELECT * FROM t_clauses WHERE %s', c),
+              format('SELECT * FROM h_clauses WHERE %s', c)) AS rows_differ,
+       rows_of(format('SELECT * FROM h_clauses WHERE %s', c)) AS heap_rows
+FROM unnest(ARRAY[
+    'i2 < 10', 'i2 >= -5', 'i2 = 7', 'i2 <> 7', '40000 > i2', 'i2 = 40000::bigint',
+    'i2 > -40000::bigint', 'i4 <= 100', 'i4 = ANY (ARRAY[1, 2, 3, 2999])', 'i4 IN (5, NULL, 77)',
+    'i8 > 1000000007000::bigint', 'i8 IN (0, 2000000014)', $c$d >= DATE '2013-05-01'$c$,
+    $c$d = DATE '2013-04-10'$c$, $c$d <> DATE '2013-04-10'$c$,
+    $c$ts > TIMESTAMP '2013-07-15 10:00:00'$c$, $c$ts = TIMESTAMP '2013-07-15 00:00:37'$c$,
+    $c$ts < TIMESTAMP '2013-07-15 00:00:37.5'$c$, $c$tz <= TIMESTAMPTZ '2013-07-15 12:00:00+00'$c$,
+    'i8 IS NULL', 'd IS NOT NULL', 'i2 < 10 AND ts IS NOT NULL AND i4 > 100',
+    'i4 < (SELECT max(i4) / 2 FROM h_clauses)', $c$d < DATE 'infinity'$c$,
+    $c$d = DATE 'infinity'$c$, $c$ts <> TIMESTAMP '-infinity'$c$,
+    $c$d IN (DATE 'infinity', DATE '2013-04-10')$c$]) c;
+SET plan_cache_mode = force_generic_plan;
+PREPARE below(int, date) AS SELECT count(*) FROM t_clauses WHERE i4 < $1 AND d >= $2;
+SELECT checked_by($$EXECUTE below(500, '2013-05-01')$$) AS checked_by;
+EXECUTE below(500, '2013-05-01');
+SELECT count(*) AS heap FROM h_clauses WHERE i4 < 500 AND d >= '2013-05-01';
+-- A parameter that is NULL, and an array that is: no row.
+EXECUTE below(NULL, '2013-05-01');
+PREPARE listed(int[]) AS SELECT count(*) FROM t_clauses WHERE i4 = ANY ($1);
+SELECT checked_by('EXECUTE listed(ARRAY[1, 2])') AS checked_by;
+EXECUTE listed(ARRAY[1, 2, NULL]);
+EXECUTE listed(NULL);
+DEALLOCATE below;
+DEALLOCATE listed;
+RESET plan_cache_mode;
+-- A table of two files whose clause columns differ in type: bigint over
+-- INT32 and over INT64, timestamp over milliseconds and microseconds,
+-- each file's tests made in its own unit.
+SELECT parquet_test_write(:'dir' || '/mixed_a.parquet',
+    '{"columns": [{"name": "c", "type": "int32", "values": [1, 5, null, 9]},
+                  {"name": "t", "type": "int64", "logical": "timestamp_ms",
+                   "values": [1373846400000, 1373846400500, 1373846401000, null]}]}');
+SELECT parquet_test_write(:'dir' || '/mixed_b.parquet',
+    '{"columns": [{"name": "c", "type": "int64", "values": [5000000000, 5, null]},
+                  {"name": "t", "type": "int64", "logical": "timestamp_us",
+                   "values": [1373846400000000, 1373846400500000, 1373846400000001]}]}');
+\set mixed :dir '/mixed_a.parquet,' :dir '/mixed_b.parquet'
+CREATE FOREIGN TABLE t_mixed (c bigint, t timestamp) SERVER pq OPTIONS (files :'mixed');
+CREATE TABLE h_mixed (c bigint, t timestamp);
+INSERT INTO h_mixed VALUES
+    (1, '2013-07-15 00:00:00'), (5, '2013-07-15 00:00:00.5'), (NULL, '2013-07-15 00:00:01'),
+    (9, NULL), (5000000000, '2013-07-15 00:00:00'), (5, '2013-07-15 00:00:00.5'),
+    (NULL, '2013-07-15 00:00:00.000001');
+SELECT c AS clause,
+       checked_by(format('SELECT * FROM t_mixed WHERE %s', c)) AS checked_by,
+       differ(format('SELECT * FROM t_mixed WHERE %s', c),
+              format('SELECT * FROM h_mixed WHERE %s', c)) AS rows_differ,
+       rows_of(format('SELECT * FROM h_mixed WHERE %s', c)) AS heap_rows
+FROM unnest(ARRAY['c = 5', 'c > 4', 'c IN (1, 5000000000)', 'c IS NULL',
+    $c$t = TIMESTAMP '2013-07-15 00:00:00.5'$c$, $c$t > TIMESTAMP '2013-07-15 00:00:00'$c$]) c;
+-- The tests of NULL on a column of text.
+SELECT c AS clause, checked_by(format('SELECT * FROM t_wide WHERE %s', c)) AS checked_by,
+       differ(format('SELECT * FROM t_wide WHERE %s', c),
+              format('SELECT * FROM h_wide WHERE %s', c)) AS rows_differ,
+       rows_of(format('SELECT * FROM h_wide WHERE %s', c)) AS heap_rows
+FROM unnest(ARRAY['s IS NULL', 's IS NOT NULL AND k < 100']) c;
+-- Clauses the source leaves to TessFilter: an operator over a column, two
+-- columns compared, a function of a column, a timestamp against a
+-- timestamptz.
+SELECT c AS clause,
+       checked_by(format('SELECT * FROM t_clauses WHERE %s', c)) AS checked_by,
+       differ(format('SELECT * FROM t_clauses WHERE %s', c),
+              format('SELECT * FROM h_clauses WHERE %s', c)) AS rows_differ
+FROM unnest(ARRAY['i4 + 0 < 10', 'i4 < i8', 'abs(i2) < 3', 'ts < tz']) c;
+RESET TIME ZONE;
+
+-- spec: parquet-fdw/A clause on a value that changes by rescan
+-- A correlated subquery rescans the source's node for each outer row,
+-- under a comparison with the outer row's value and an IN of its values.
+CREATE TABLE h_outer AS SELECT i * 150 AS x, i * 150 + 1 AS y FROM generate_series(0, 19) i;
+SELECT scans_of('SELECT o.x, (SELECT count(*) FROM t_clauses t WHERE t.i4 > o.x) FROM h_outer o')
+    AS rescanned;
+SELECT differ(
+    'SELECT o.x, (SELECT count(*) FROM t_clauses t WHERE t.i4 > o.x),
+            (SELECT count(*) FROM t_clauses t WHERE t.i4 IN (o.x, o.y)) FROM h_outer o',
+    'SELECT o.x, (SELECT count(*) FROM h_clauses t WHERE t.i4 > o.x),
+            (SELECT count(*) FROM h_clauses t WHERE t.i4 IN (o.x, o.y)) FROM h_outer o')
+    AS rows_differ;
+
+-- spec: parquet-fdw/Values out of range in a clause
+-- Seconds past the range of timestamp: a clause that rejects them counts
+-- the other rows, one that passes them counts them too, both without an
+-- error, and only a value made of them raises 22008.
+SELECT parquet_test_write(:'dir' || '/far_seconds.parquet',
+    '{"columns": [{"name": "ts", "type": "int64", "values": [0, 1000000000000000, null]}]}');
+\set far_seconds :dir '/far_seconds.parquet'
+CREATE FOREIGN TABLE t_far_seconds (ts timestamp OPTIONS (unit 'seconds'))
+    SERVER pq OPTIONS (files :'far_seconds');
+SELECT checked_by($$SELECT count(*) FROM t_far_seconds WHERE ts < TIMESTAMP '2000-01-01'$$)
+    AS checked_by;
+SELECT count(*) AS rejected FROM t_far_seconds WHERE ts < TIMESTAMP '2000-01-01';
+SELECT count(*) AS passed FROM t_far_seconds WHERE ts > TIMESTAMP '2000-01-01';
+SELECT sqlstate_of($$SELECT ts FROM t_far_seconds WHERE ts > TIMESTAMP '2000-01-01'$$)
+    AS made;
 -- The paths cost the chunks of the columns they read, as the footers
 -- give their bytes: a query that reads no column costs no page, a row
 -- the core's cost of a tuple; and a column of long strings costs more
@@ -889,6 +1091,15 @@ SELECT parallel_lines('SELECT * FROM (SELECT count(*) AS n, sum(i) AS total FROM
                        RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true',
                       'Nested Loop|Parallel|Row Groups Read|Values Decoded');
 SELECT workers_launched('SELECT count(*), sum(i), max(s) FROM t_eight') > 0 AS workers_read;
+-- A clause the source checks, each participant selecting the rows of
+-- the groups it takes, the value of a subquery among them.
+SELECT parallel_lines('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)',
+                      'Gather|TessParquetScan');
+SELECT checked_by('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)') AS checked_by;
+SELECT workers_launched('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)') > 0
+    AS workers_read;
+SELECT differ_serial('SELECT i, s FROM t_eight WHERE i % 2 = 0 AND i < 4500') AS filtered,
+       differ_serial('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)') AS by_a_subquery;
 SELECT differ_serial('SELECT i, s FROM t_eight') AS in_full,
        differ_serial('SELECT count(*), sum(i) FROM t_eight') AS a_count,
        differ_serial('SELECT s, count(*), sum(i) FROM t_eight GROUP BY s') AS a_grouping,
@@ -1034,14 +1245,16 @@ DROP FOREIGN TABLE t_files, t_owned, t_plain, t_none, t_gzip, t_types, t_drop, t
     t_mappings, t_check_plain, t_check_dict, t_trust, t_bytes, t_vc_three, t_vc_four, t_vc_trust,
     t_rep, t_cur, t_two, t_cut, t_damaged, t_far, t_windows, t_empty, t_wide, t_asks,
     t_damaged_pages, t_eight, t_groups, t_analyzed, t_sparse, t_alternating, t_widths,
-    t_one_more;
-DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks, h_analyzed;
+    t_one_more, t_clauses, t_far_seconds, t_mixed;
+DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks, h_analyzed,
+    h_clauses, h_outer, h_mixed;
 DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, bool, bool, int),
     parquet_test_head_dictionaries(text), parquet_test_replace(text, text, text),
     parquet_test_remove(text), parquet_test_cut(text, int), parquet_test_damage(text, int, int),
     sqlstate_of(text), differ(text, text), differ_off(text), scans_of(text),
     explain_lines(text, text, text), parquet_test_asks(text, int, int), differ_serial(text),
-    parallel_lines(text, text), workers_launched(text), plan_of(text), scan_cost(text, text);
+    parallel_lines(text, text), workers_launched(text), plan_of(text), scan_cost(text, text),
+    checked_by(text), rows_of(text);
 DROP SERVER pq;
 REVOKE CREATE ON SCHEMA public FROM parquet_reader, parquet_other;
 DROP ROLE parquet_reader, parquet_other;

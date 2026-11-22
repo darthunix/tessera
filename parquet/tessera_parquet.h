@@ -122,7 +122,8 @@ struct ExplainState;
 extern void parquet_explain_files(List *planned, const ParquetScan *scan,
 								  struct ExplainState *es);
 struct Path;
-extern void parquet_source_costs(const struct Path *offered, double *rows, Cost *startup,
+extern void parquet_source_costs(struct PlannerInfo *root, const struct Path *offered,
+								 List *exact, int checked, double *rows, Cost *startup,
 								 Cost *total);
 
 /* analyze.c */
@@ -139,6 +140,9 @@ extern void parquet_scan_end(ParquetScan *scan);
 extern bool parquet_scan_next_group(ParquetScan *scan);
 extern uint64 parquet_scan_group_rows(const ParquetScan *scan);
 extern TessParquetReader *parquet_scan_reader(ParquetScan *scan, int c);
+extern TessParquetReader *parquet_scan_every_row_reader(ParquetScan *scan, int c,
+														MemoryContext cxt);
+extern void parquet_scan_select(ParquetScan *scan, uint64 *selection);
 extern Size parquet_scan_estimate(const ParquetScan *scan, int nworkers);
 extern void parquet_scan_share(ParquetScan *scan, void *coordinate,
 							   struct ParallelContext *pcxt, MemoryContext cxt);
