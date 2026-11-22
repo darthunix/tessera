@@ -47,8 +47,8 @@ enum Command {
     Run(RunArgs),
     /// Print runs again from their directories, side by side when there
     /// are several: each query's hot time and the ratio to the first.
-    /// Runs of one mode, workers and files, each of other queries, make
-    /// one column.
+    /// Timed or counted runs that differ only in their queries, as runs
+    /// of one query each do, make one column.
     Report {
         /// Run directories, target/bench-runs/clickbench-<id>.
         #[arg(required = true)]
