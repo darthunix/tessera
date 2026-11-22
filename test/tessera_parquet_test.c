@@ -43,7 +43,8 @@ extern bool tess_parquet_test_write(const char *path, size_t path_len, const cha
 									size_t spec_len, TessParquetTestStatus *status);
 extern bool tess_parquet_test_rewrite(const char *path, size_t path_len, bool old_rule,
 									  bool drop_encoding_stats, bool drop_null_counts,
-									  int32 codec_leaf, TessParquetTestStatus *status);
+									  int32 codec_leaf, int32 column_orders,
+									  TessParquetTestStatus *status);
 extern bool tess_parquet_test_head_dictionaries(const char *path, size_t path_len,
 												TessParquetTestStatus *status);
 
@@ -112,7 +113,9 @@ tessera_parquet_test_write(PG_FUNCTION_ARGS)
 
 /*
  * parquet_test_rewrite(path text, old_rule bool, drop_encoding_stats bool,
- * drop_null_counts bool, codec_leaf int): rewrites the file's footer.
+ * drop_null_counts bool, codec_leaf int, column_orders int): rewrites the
+ * file's footer, its column orders kept for 1, dropped for 0, and as the
+ * old rule says for -1.
  */
 Datum
 tessera_parquet_test_rewrite(PG_FUNCTION_ARGS)
@@ -121,7 +124,8 @@ tessera_parquet_test_rewrite(PG_FUNCTION_ARGS)
 	TessParquetTestStatus status;
 
 	check(tess_parquet_test_rewrite(path, strlen(path), PG_GETARG_BOOL(1), PG_GETARG_BOOL(2),
-									PG_GETARG_BOOL(3), PG_GETARG_INT32(4), &status),
+									PG_GETARG_BOOL(3), PG_GETARG_INT32(4), PG_GETARG_INT32(5),
+									&status),
 		  &status);
 	PG_RETURN_VOID();
 }

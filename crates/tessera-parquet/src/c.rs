@@ -703,6 +703,40 @@ pub unsafe extern "C" fn tess_parquet_test(
     }
 }
 
+/// Sets `out` where group `group` of `file` holds no row that passes
+/// `test`, by what the footer says of `column`'s chunk: its statistics,
+/// or, with `dictionary`, its dictionary read alone, as
+/// [`ClauseTest::rules_out_group`] says.
+///
+/// # Safety
+///
+/// `file`, `column` and `test` must be live, the column mapped in the file
+/// and the test made for it; `out` must be writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_group_ruled_out(
+    file: *const FileHandle,
+    column: *const ColumnHandle,
+    group: usize,
+    test: *const TestHandle,
+    dictionary: bool,
+    out: *mut bool,
+    status: *mut Status,
+) -> bool {
+    // SAFETY: as the function's contract says.
+    unsafe {
+        guard(status, false, || {
+            let file = &file.as_ref().ok_or_else(|| broken("a null file"))?.0;
+            let column = &column.as_ref().ok_or_else(|| broken("a null column"))?.0;
+            let test = &test.as_ref().ok_or_else(|| broken("a null test"))?.0;
+            if out.is_null() {
+                return Err(broken("a null output"));
+            }
+            let ruled_out = test.rules_out_group(file, column, group, dictionary)?;
+            put(out, ruled_out)
+        })
+    }
+}
+
 /// Frees a test of [`tess_parquet_test`].
 ///
 /// # Safety

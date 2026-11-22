@@ -8,8 +8,8 @@ use proptest::prelude::*;
 
 use super::*;
 use crate::column::{ColumnRequest, map_column};
-use crate::file::ParquetFile;
-use crate::testing::{self, Column, Values as Written};
+use crate::stats::Bounds;
+use crate::testing::{self, Column, Options, Rewrite, Values as Written};
 
 fn request(name: &str, type_oid: u32) -> ColumnRequest<'_> {
     ColumnRequest {
@@ -324,4 +324,226 @@ fn broken_calls_are_refused() {
         test.apply(&array, &mut [0u64]).unwrap_err().sqlstate(),
         "XX000"
     );
+}
+
+fn stats(nulls: Option<u64>, bounds: Option<(i64, i64)>) -> GroupStats {
+    GroupStats {
+        nulls,
+        bounds: bounds.map(|(least, greatest)| Bounds { least, greatest }),
+        ..GroupStats::default()
+    }
+}
+
+/// The statistics of a chunk rule a group out by each kind of clause, and
+/// do not where they leave a row that may pass.
+#[test]
+fn statistics_rule_groups_out() {
+    let of = |kind| ClauseTest { kind };
+    let less = of(Kind::Compare(Test::Compare {
+        op: Comparison::Lt,
+        bound: 5,
+    }));
+    assert!(less.rules_out(&stats(None, Some((5, 9))), 10));
+    assert!(!less.rules_out(&stats(None, Some((4, 9))), 10));
+    assert!(!less.rules_out(&stats(Some(0), None), 10));
+    // A range turned the wrong way rules nothing out.
+    assert!(!less.rules_out(&stats(None, Some((9, 5))), 10));
+    let listed = of(Kind::In(vec![2, 7]));
+    assert!(listed.rules_out(&stats(None, Some((3, 6))), 10));
+    assert!(listed.rules_out(&stats(None, Some((8, 9))), 10));
+    assert!(!listed.rules_out(&stats(None, Some((3, 7))), 10));
+    assert!(!listed.rules_out(&stats(None, Some((2, 2))), 10));
+    assert!(!listed.rules_out(&stats(None, Some((6, 3))), 10));
+    assert!(!listed.rules_out(&stats(None, None), 10));
+    assert!(of(Kind::In(vec![])).rules_out(&stats(None, Some((0, 0))), 10));
+    let null = of(Kind::IsNull);
+    assert!(null.rules_out(&stats(Some(0), None), 10));
+    assert!(!null.rules_out(&stats(Some(1), Some((0, 1))), 10));
+    assert!(!null.rules_out(&stats(None, Some((0, 1))), 10));
+    let not_null = of(Kind::IsNotNull);
+    assert!(not_null.rules_out(&stats(Some(10), None), 10));
+    assert!(!not_null.rules_out(&stats(Some(9), None), 10));
+    assert!(!not_null.rules_out(&stats(None, None), 10));
+}
+
+/// A dictionary rules a group out where no value of it passes, for a
+/// comparison and `IN`; never for the tests of `NULL` or bytes.
+#[test]
+fn dictionaries_rule_groups_out() {
+    let of = |kind| ClauseTest { kind };
+    let values = Dictionary::Integers(vec![1, 3]);
+    let equal = |bound| {
+        of(Kind::Compare(Test::Compare {
+            op: Comparison::Eq,
+            bound,
+        }))
+    };
+    assert!(equal(2).rules_out_by(&values));
+    assert!(!equal(3).rules_out_by(&values));
+    assert!(of(Kind::In(vec![0, 2, 4])).rules_out_by(&values));
+    assert!(!of(Kind::In(vec![0, 1])).rules_out_by(&values));
+    assert!(!of(Kind::IsNull).rules_out_by(&values));
+    assert!(!of(Kind::IsNotNull).rules_out_by(&Dictionary::Integers(vec![])));
+    assert!(!equal(2).rules_out_by(&Dictionary::Bytes(vec![b"x".to_vec()])));
+}
+
+/// A file's groups ruled out through its footer: by the statistics, by
+/// the dictionary where every data page is encoded through it, and not by
+/// a dictionary that fell back to plain pages.
+#[test]
+fn groups_of_a_file_ruled_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("groups.parquet");
+    // Two groups: 1 and 3 a row, then 5 and 6 with a NULL.
+    let values = vec![
+        Some(1),
+        Some(3),
+        Some(1),
+        Some(3),
+        Some(5),
+        None,
+        Some(6),
+        Some(5),
+    ];
+    let write = |options| {
+        testing::write_with(
+            &path,
+            &[Column::new("a", Written::Int32(values.clone()))],
+            options,
+        )
+        .unwrap();
+        let file = ParquetFile::open(&path).unwrap();
+        let a = map_column(&file, &request("a", oid::INT4)).unwrap();
+        (file, a)
+    };
+    let (file, a) = write(Options::new(4, true));
+    let test = |kind, values: &[Option<i64>]| ClauseTest::new(&a, kind, values).unwrap();
+    let out = |test: &ClauseTest, group, dictionary| {
+        test.rules_out_group(&file, &a, group, dictionary).unwrap()
+    };
+    let above = test(ClauseKind::Compare(Comparison::Gt), &[Some(4)]);
+    assert!(out(&above, 0, false));
+    assert!(!out(&above, 1, false));
+    let null = test(ClauseKind::IsNull, &[]);
+    assert!(out(&null, 0, false));
+    assert!(!out(&null, 1, false));
+    assert!(!out(&null, 0, true));
+    // 2 lies between the least and the greatest, in no row.
+    let two = test(ClauseKind::In, &[Some(2)]);
+    assert!(!out(&two, 0, false));
+    assert!(out(&two, 0, true));
+    // 5 and 6 rule it out alone.
+    assert!(out(&two, 1, false));
+    assert!(!out(&two, 2, false));
+    // Plain pages after the dictionary grew too large: not tried.
+    let options = Options {
+        page_rows: Some(1),
+        dictionary_bytes: Some(4),
+        ..Options::new(4, true)
+    };
+    let (file, a) = write(options);
+    let two = ClauseTest::new(&a, ClauseKind::In, &[Some(2)]).unwrap();
+    assert!(!two.rules_out_group(&file, &a, 0, true).unwrap());
+}
+
+/// A clause's answer for a row, as PostgreSQL gives it.
+type Passes<'a> = Box<dyn Fn(Option<i32>) -> bool + 'a>;
+
+/// A footer whose group gives fewer rows than its chunk holds values
+/// rules nothing out: the row the reader reads is not lost to a count of
+/// `NULL` values that matches the group's rows.
+#[test]
+fn a_footer_of_counts_that_disagree_rules_nothing_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("counts.parquet");
+    let column = Column::new("a", Written::Int32(vec![Some(7), None]));
+    testing::write(&path, &[column], 2, false).unwrap();
+    let rewrite = Rewrite {
+        first_group_rows: Some(1),
+        ..Rewrite::default()
+    };
+    testing::rewrite_footer(&path, rewrite).unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let a = map_column(&file, &request("a", oid::INT4)).unwrap();
+    assert_eq!(file.group_rows(0), Some(1));
+    assert_eq!(group_stats(&file, &a, 0), GroupStats::default());
+    for kind in [ClauseKind::IsNull, ClauseKind::IsNotNull] {
+        let test = ClauseTest::new(&a, kind, &[]).unwrap();
+        assert!(!test.rules_out_group(&file, &a, 0, false).unwrap());
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// Every group the footer rules out, by its statistics or by its
+    /// dictionary, holds no row that passes: over files of random values,
+    /// `NULL` among them, signed and unsigned, of random groups and pages,
+    /// dictionaries and their fallback to plain pages, with statistics and
+    /// without, under footers of the old rule and without counts of `NULL`
+    /// values or statistics of encodings.
+    #[test]
+    fn groups_ruled_out_hold_no_passing_row(
+        values in prop::collection::vec(prop::option::of(-20i32..20), 1..120),
+        group_rows in 1usize..40,
+        dictionary in any::<bool>(),
+        statistics in any::<bool>(),
+        small_dictionary in any::<bool>(),
+        rewrite in (any::<bool>(), any::<bool>(), any::<bool>()),
+        unsigned in any::<bool>(),
+        kind in 0u8..4,
+        op in comparison(),
+        constant in -25i64..25,
+        list in prop::collection::vec(prop::option::of(-25i64..25), 0..4),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("groups.parquet");
+        let mut column = Column::new("a", Written::Int32(values.clone()));
+        if unsigned {
+            column = column.logical(parquet::basic::LogicalType::Integer {
+                bit_width: 32,
+                is_signed: false,
+            });
+        }
+        let options = Options {
+            page_rows: Some(7),
+            dictionary_bytes: small_dictionary.then_some(16),
+            statistics,
+            ..Options::new(group_rows, dictionary)
+        };
+        testing::write_with(&path, &[column], options).unwrap();
+        let (old_rule, drop_encoding_stats, drop_null_counts) = rewrite;
+        if old_rule || drop_encoding_stats || drop_null_counts {
+            let rewrite = Rewrite {
+                old_rule,
+                drop_encoding_stats,
+                drop_null_counts,
+                ..Rewrite::default()
+            };
+            testing::rewrite_footer(&path, rewrite).unwrap();
+        }
+        let file = ParquetFile::open(&path).unwrap();
+        let a = map_column(&file, &request("a", oid::INT8)).unwrap();
+        // A row's value as the column reads it.
+        let read = |v: i32| if unsigned { i64::from(v as u32) } else { i64::from(v) };
+        let (test, passes): (ClauseTest, Passes<'_>) = match kind {
+            0 => (ClauseTest::new(&a, ClauseKind::IsNull, &[]).unwrap(), Box::new(|v| v.is_none())),
+            1 => (ClauseTest::new(&a, ClauseKind::IsNotNull, &[]).unwrap(), Box::new(|v| v.is_some())),
+            2 => (
+                ClauseTest::new(&a, ClauseKind::Compare(op), &[Some(constant)]).unwrap(),
+                Box::new(move |v| v.is_some_and(|v| compare(op, read(v), constant))),
+            ),
+            _ => (
+                ClauseTest::new(&a, ClauseKind::In, &list).unwrap(),
+                Box::new(|v| v.is_some_and(|v| list.contains(&Some(read(v))))),
+            ),
+        };
+        for (group, rows) in values.chunks(group_rows).enumerate() {
+            let ruled_out = test.rules_out_group(&file, &a, group, false).unwrap()
+                || test.rules_out_group(&file, &a, group, true).unwrap();
+            if ruled_out {
+                prop_assert!(!rows.iter().any(|&v| passes(v)), "group {} of {:?}", group, rows);
+            }
+        }
+    }
 }

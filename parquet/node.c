@@ -813,6 +813,37 @@ make_tests(ParquetNode *node)
 }
 
 /*
+ * Whether the footer rules the group started out: a clause the statistics
+ * of its column's chunk show no row passes, or else one its dictionary
+ * shows it, so that a dictionary is read only where no statistics decide.
+ * No data page is read.
+ */
+static bool
+group_ruled_out(ParquetNode *node)
+{
+	ParquetScan *scan = node->scan;
+	TessParquetStatus status;
+
+	make_tests(node);
+	for (int round = 0; round < 2; round++)
+	{
+		for (int k = 0; k < node->nclauses; k++)
+		{
+			NodeClause *clause = &node->clauses[k];
+			bool		out;
+
+			if (!tess_parquet_group_ruled_out(scan->file->file, scan->mapped[clause->column],
+											  scan->group, clause->test, round == 1, &out,
+											  &status))
+				parquet_raise(&status);
+			if (out)
+				return true;
+		}
+	}
+	return false;
+}
+
+/*
  * The first pass over the group read: the columns of the clauses, every
  * row, window by window, each read once a window, the clauses checked on
  * the stored values into the group's selection, no value made. False when
@@ -925,7 +956,12 @@ next_batch(ParquetNode *node)
 				node->columns[c].window = NO_WINDOW;
 				node->columns[c].forward_end = NO_WINDOW;
 			}
-			if (node->nclauses > 0 && !select_rows(node))
+			if (node->nclauses > 0 && group_ruled_out(node))
+			{
+				parquet_scan_skip_group(scan);
+				node->next_row = parquet_scan_group_rows(scan);
+			}
+			else if (node->nclauses > 0 && !select_rows(node))
 				node->next_row = parquet_scan_group_rows(scan);
 			continue;
 		}
@@ -1146,7 +1182,8 @@ node_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	parquet_explain_files(node->planned, node->scan, es);
 	if (es->analyze && node->scan != NULL)
 	{
-		ExplainPropertyUInteger("Row Groups Skipped", NULL, 0, es);
+		ExplainPropertyUInteger("Row Groups Skipped", NULL,
+								parquet_scan_counts(node->scan)[PARQUET_GROUPS_SKIPPED], es);
 		ExplainPropertyUInteger("Values Decoded", NULL,
 								parquet_scan_counts(node->scan)[PARQUET_VALUES_DECODED], es);
 	}

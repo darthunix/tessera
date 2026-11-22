@@ -392,11 +392,17 @@ pub struct Rewrite {
     pub drop_encoding_stats: bool,
     /// No counts of `NULL` values.
     pub drop_null_counts: bool,
+    /// Whether the footer keeps its column orders, where not as
+    /// `old_rule` says: the old fields under column orders, or the newer
+    /// ones without. The crate's writer always writes them, so they are
+    /// cut from the footer it wrote.
+    pub column_orders: Option<bool>,
 
     /// The codec the footer names for every chunk of the column of this
     /// leaf, its pages left as they are.
     pub codec: Option<(usize, parquet::basic::Compression)>,
-    /// The count of rows the footer gives the first group.
+    /// The count of rows the footer gives the first group, and the file
+    /// the sum of its groups'.
     pub first_group_rows: Option<i64>,
 }
 
@@ -454,24 +460,72 @@ pub fn rewrite_footer(path: &Path, rewrite: Rewrite) -> Result<()> {
         let rebuilt: RowGroupMetaData = builder.build().map_err(|e| error::damaged(&e))?;
         groups.push(rebuilt);
     }
+    let rows = match rewrite.first_group_rows {
+        Some(_) => groups.iter().map(RowGroupMetaData::num_rows).sum(),
+        None => file_meta.num_rows(),
+    };
     let file_meta = FileMetaData::new(
         file_meta.version(),
-        file_meta.num_rows(),
+        rows,
         file_meta.created_by().map(str::to_owned),
         file_meta.key_value_metadata().cloned(),
         Arc::clone(&schema),
-        if rewrite.old_rule {
-            None
-        } else {
+        if rewrite.column_orders.unwrap_or(!rewrite.old_rule) {
             file_meta.column_orders().cloned()
+        } else {
+            None
         },
     );
+    let leaves = schema.num_columns();
     let rewritten = ParquetMetaData::new(file_meta, groups);
     let mut out = bytes[..data_end].to_vec();
     ParquetMetaDataWriter::new(&mut out, &rewritten)
         .finish()
         .map_err(|e| error::damaged(&e))?;
+    if !rewrite.column_orders.unwrap_or(!rewrite.old_rule) {
+        drop_column_orders(&mut out, data_end, leaves)?;
+    }
     fs::write(path, out).map_err(|e| error::io(&e, "write test file"))
+}
+
+/// Cuts the column orders from the footer the crate's writer wrote after
+/// `data_end` in `file`, as writers older than them wrote it. They are
+/// the last field of the footer's Thrift structure, field 7, a list of
+/// one `TYPE_ORDER` a leaf, each three bytes in the compact protocol; any
+/// other shape is refused rather than guessed at.
+fn drop_column_orders(file: &mut Vec<u8>, data_end: usize, leaves: usize) -> Result<()> {
+    let refused = || Error::new(error::DATA_CORRUPTED, "column orders of another shape");
+    let tail = file.len().checked_sub(8).ok_or_else(refused)?;
+    let mut field = vec![0x0C];
+    if leaves < 15 {
+        field[0] |= u8::try_from(leaves << 4).map_err(|_| refused())?;
+    } else {
+        field[0] |= 0xF0;
+        let mut n = leaves;
+        while n >= 0x80 {
+            field.push(u8::try_from(n & 0x7F).map_err(|_| refused())? | 0x80);
+            n >>= 7;
+        }
+        field.push(u8::try_from(n).map_err(|_| refused())?);
+    }
+    for _ in 0..leaves {
+        // TYPE_ORDER, field 1, an empty struct; the union's stop.
+        field.extend_from_slice(&[0x1C, 0x00, 0x00]);
+    }
+    // The footer's stop follows the list.
+    field.push(0x00);
+    let start = tail.checked_sub(field.len() + 1).ok_or_else(refused)?;
+    let header = file[start];
+    // A list, field 7, after field 4, 5 or 6.
+    if header & 0x0F != 0x09 || !(1..=3).contains(&(header >> 4)) || file[start + 1..tail] != field
+    {
+        return Err(refused());
+    }
+    file.splice(start..tail, [0x00]);
+    let length = u32::try_from(file.len() - 8 - data_end).map_err(|_| refused())?;
+    let at = file.len() - 8;
+    file[at..at + 4].copy_from_slice(&length.to_le_bytes());
+    Ok(())
 }
 
 fn footer_length(bytes: &[u8]) -> Result<usize> {

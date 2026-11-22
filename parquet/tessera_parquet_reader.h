@@ -195,6 +195,18 @@ extern bool tess_parquet_test(const TessParquetColumn *column, int32_t kind,
 extern void tess_parquet_test_free(TessParquetTest *test);
 
 /*
+ * Sets *out where group group of file holds no row that passes test, by
+ * what the footer says of column's chunk: its statistics, or, with
+ * dictionary, its dictionary page read alone where every data page is
+ * encoded through it. The test must be made for the column.
+ */
+extern bool tess_parquet_group_ruled_out(const TessParquetFile *file,
+										 const TessParquetColumn *column,
+										 size_t group, const TessParquetTest *test,
+										 bool dictionary, bool *out,
+										 TessParquetStatus *status);
+
+/*
  * Writes a bit for each row the reader's last window holds, in their
  * order, set where the row passes the test; no value is made.
  */
