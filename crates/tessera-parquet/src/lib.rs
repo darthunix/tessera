@@ -17,6 +17,7 @@
 //! - [`GroupStats`] and [`Dictionary`]: what a footer and a dictionary
 //!   page say of a column's chunk, for the skipping of groups of rows.
 
+mod bytes;
 pub mod c;
 mod clause;
 mod column;
