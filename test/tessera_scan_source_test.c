@@ -14,6 +14,8 @@
 
 #include "access/parallel.h"
 #include "access/reloptions.h"
+#include "access/toast_compression.h"
+#include "access/toast_internals.h"
 #include "access/stratnum.h"
 #include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_operator_d.h"
@@ -124,6 +126,12 @@ typedef struct TableOptions
 	bool		check_bytes;
 	/* Off: the source asks identities of a root cut before the operation. */
 	bool		bridge_identities;
+	/*
+	 * The bytes form of every other batch alone (bytes_batches 'alternate'),
+	 * for a consumer's dictionary of both forms; not with check_bytes, which
+	 * reads every batch in both forms.
+	 */
+	bool		bytes_alternate;
 } TableOptions;
 
 /* How one column's values are made. */
@@ -134,6 +142,11 @@ typedef struct ColumnGen
 	int64		nulls;
 	/* A text column's width: see column_text. */
 	int64		width;
+	/*
+	 * A text column's values compressed where they compress, as a heap may
+	 * keep them; not with check_bytes, which reads a Datum's bytes in place.
+	 */
+	bool		compress;
 } ColumnGen;
 
 /* The rows of a table, taken group by group. */
@@ -154,6 +167,7 @@ typedef struct Generator
 	int64		dictionary_batches;
 	bool		check_bytes;
 	bool		bridge_identities;
+	bool		bytes_alternate;
 } Generator;
 
 /* The sources, by the position of their name. */
@@ -288,6 +302,12 @@ read_options(Oid relid, TableOptions *options)
 		}
 		else if (strcmp(def->defname, "dictionary_batches") == 0)
 			options->dictionary_batches = (int64) option_number(def);
+		else if (strcmp(def->defname, "bytes_batches") == 0)
+		{
+			if (strcmp(defGetString(def), "alternate") != 0)
+				elog(ERROR, "unknown bytes_batches \"%s\"", defGetString(def));
+			options->bytes_alternate = true;
+		}
 		else if (strcmp(def->defname, "check_bytes") == 0)
 			options->check_bytes = defGetBoolean(def);
 		else if (strcmp(def->defname, "bridge_identities") == 0)
@@ -332,6 +352,8 @@ generator_init(Generator *gen, Relation rel)
 				gen->columns[i].nulls = (int64) option_number(def);
 			else if (strcmp(def->defname, "width") == 0)
 				gen->columns[i].width = (int64) option_number(def);
+			else if (strcmp(def->defname, "compress") == 0)
+				gen->columns[i].compress = defGetBoolean(def);
 			else
 				elog(ERROR, "unknown column option \"%s\"", def->defname);
 		}
@@ -340,6 +362,11 @@ generator_init(Generator *gen, Relation rel)
 	gen->dictionary_batches = options.dictionary_batches;
 	gen->check_bytes = options.check_bytes;
 	gen->bridge_identities = options.bridge_identities;
+	gen->bytes_alternate = options.bytes_alternate;
+	for (int i = 0; i < gen->natts && gen->check_bytes; i++)
+		if (gen->bytes_alternate || gen->columns[i].compress)
+			elog(ERROR, "check_bytes reads every batch's plain values in both forms: "
+				 "not with bytes_batches or compress");
 	gen->shared = NULL;
 	gen->next_group = 0;
 	gen->first = 1;
@@ -404,6 +431,14 @@ column_text(const ColumnGen *column, int64 value)
 			appendStringInfoChar(&buf, 'x');
 	result = cstring_to_text_with_len(buf.data, buf.len);
 	pfree(buf.data);
+	if (column->compress)
+	{
+		Datum		compressed = toast_compress_datum(PointerGetDatum(result),
+													  TOAST_PGLZ_COMPRESSION);
+
+		if (compressed != (Datum) 0)
+			result = (text *) DatumGetPointer(compressed);
+	}
 	return result;
 }
 
@@ -979,7 +1014,8 @@ bytes_column(TessBatch *batch, int column, const TessRowMask *rows,
 
 	if (result->struct_size < TESS_BYTES_COLUMN_MIN_SIZE ||
 		column < 0 || column >= state->gen.natts ||
-		state->gen.columns[column].type != TEXTOID)
+		state->gen.columns[column].type != TEXTOID ||
+		(state->gen.bytes_alternate && state->batch_number % 2 == 0))
 		return false;
 	nvalues = state->identities[column] != 0 ? dictionary_values(state, column) : 0;
 	bytes_asks++;
@@ -999,6 +1035,13 @@ bytes_column(TessBatch *batch, int column, const TessRowMask *rows,
 		isnull[row] = datums.isnull[row];
 		if (isnull[row])
 			continue;
+		/* A compressed value's bytes, made plain for the batch. */
+		if (VARATT_IS_COMPRESSED(value))
+		{
+			old = MemoryContextSwitchTo(state->bytes_context);
+			value = (Pointer) pg_detoast_datum_packed((struct varlena *) value);
+			MemoryContextSwitchTo(old);
+		}
 		data[row] = VARDATA_ANY(value);
 		lengths[row] = VARSIZE_ANY_EXHDR(value);
 		if (nvalues > 0)

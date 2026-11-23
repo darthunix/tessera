@@ -200,13 +200,13 @@ of values the source made, in `EXPLAIN (ANALYZE)`, SHALL count the
 ### Requirement: Keys of a grouping by their bytes
 TessAgg SHALL read a grouping key of `text`, `varchar` or `bytea` in the
 bytes form where its input offers it and the key's collation is
-deterministic, and SHALL then ask its input for the key's `Datum` values
-only for the rows it writes to a spill file. Its groups, their order
-where a sort above asks for one, and its spill SHALL be those of the
-same grouping over `Datum` values. The ungrouped `COUNT(DISTINCT)` of
-such a column SHALL read it the same way. A key of a nondeterministic
-collation, and a column that is not offered, SHALL be read as `Datum`
-values.
+deterministic, and SHALL then make the key's `Datum` values only for
+the rows it writes to a spill file, from their bytes. Its groups, their
+order where a sort above asks for one, and the rows its spill reads back
+SHALL be those of the same grouping over `Datum` values. The ungrouped
+`COUNT(DISTINCT)` of such a column SHALL read it the same way. A key of
+a nondeterministic collation, and a column that is not offered, SHALL
+be read as `Datum` values.
 
 #### Scenario: Groups by bytes
 - **WHEN** queries group the Parquet table of plain and dictionary
@@ -223,7 +223,8 @@ values.
   `work_mem` holds
 - **THEN** its groups are those of the core, and its spill files are
   written and read back
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Groups that spill`
 
 #### Scenario: A partial stage that sends its tables up
 - **WHEN** the partial stage of a parallel grouping by that column has
@@ -236,7 +237,8 @@ values.
 - **WHEN** a grouping by a `text` column of a case-insensitive
   collation reads the Parquet table
 - **THEN** its groups are those of the core, made from `Datum` values
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/A nondeterministic collation`
 
 ### Requirement: The bytes form in batch functions
 A batch function (`tessera/function.h`) SHALL say that it reads its
