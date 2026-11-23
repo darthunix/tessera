@@ -125,9 +125,9 @@ static char *small_numerics;
 static inline bool
 small_numeric(Datum value)
 {
-	const char *pointer = DatumGetPointer(value);
-
-	return pointer >= small_numerics && pointer < small_numerics + SMALL_NUMERIC_BLOCK;
+	/* As integers: no offset to NULL, no compare of separate objects. */
+	return small_numerics != NULL &&
+		value - PointerGetDatum(small_numerics) < SMALL_NUMERIC_BLOCK;
 }
 
 Numeric
