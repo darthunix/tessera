@@ -1120,19 +1120,28 @@ fn fill_rows(
     {
         return Err(FillError::Short);
     }
+    // The rows asked alone, by the set bits of their words, the NULL ones
+    // left out.
+    let given = |word: usize| {
+        let bits = asked.get(word).copied().unwrap_or(0) & !made.get(word).copied().unwrap_or(0);
+        std::iter::successors((bits != 0).then_some(bits), |&b| {
+            let next = b & (b - 1);
+            (next != 0).then_some(next)
+        })
+        .map(move |b| word * 64 + b.trailing_zeros() as usize)
+        .take_while(move |&row| row < rows)
+    };
+    let words = rows.div_ceil(64);
     // Every count fits before any is written, so that a refusal writes
     // nothing.
-    if values
-        .iter()
-        .any(|value| u32::try_from(value.len()).is_err())
+    if (0..words)
+        .flat_map(given)
+        .any(|row| u32::try_from(values[row].len()).is_err())
     {
         return Err(FillError::Long);
     }
-    for (row, value) in values.iter().enumerate() {
-        let bit = |mask: &[u64]| mask.get(row / 64).is_some_and(|w| w >> (row % 64) & 1 == 1);
-        if !bit(asked) || bit(made) {
-            continue;
-        }
+    for row in (0..words).flat_map(given) {
+        let value = values[row];
         data[row] = if value.is_empty() {
             &EMPTY
         } else {
