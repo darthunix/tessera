@@ -71,18 +71,18 @@ test.
       `make rust-check`; `cargo kani -p tessera-parquet`; `cargo miri
       test -p tessera-parquet --lib c::tests`; `cargo mutants` over the
       changed lines
-- [ ] 3.2 `crates/tessera-parquet`: the check of the bytes given by the
-      column's rule: a dictionary's value once, with a bitmap of the
-      values array; a plain window's encoding and zero bytes in one
-      pass, falling back to the rows asked one by one; the size and the
-      characters of a `varchar(n)` for each row asked, in the order of
-      `datum-arrow`'s check, so that a row fails with the error its
-      `Datum` would; property tests against `datum-arrow`'s check over
-      windows, masks, `NULL` rows, checked and trusted text, `bytea`
-      and lengths of `varchar(n)`, and a unit test of the size's limit
-      that allocates no value of that size; a Kani proof, within its
-      bounds, that the one pass passes exactly where each value's check
-      of encoding and zero bytes passes. Check: `make rust-check`;
+- [x] 3.2 `crates/tessera-parquet`: the check of the bytes given by the
+      column's rule: a dictionary's values array whole once; a plain
+      window's encoding and zero bytes in one pass, once a window; every
+      other case, varchar of a length among them, read row by row
+      through the plan, so that a row fails with the error its `Datum`
+      would; in a debug build, every window checked the cheaper way read
+      row by row again; property tests against `datum-arrow`'s check
+      over windows, masks, `NULL` rows, checked and trusted text,
+      `bytea` and lengths of `varchar(n)`, and a unit test of the size's
+      limit that allocates no value of that size; a Kani proof, within
+      its bounds, that the one pass passes exactly where each value's
+      check of encoding and zero bytes passes. Check: `make rust-check`;
       `cargo kani -p tessera-parquet`; `cargo mutants` over the changed
       lines
 - [ ] 3.3 `parquet/node.c`: `get_bytes_column` for the `text`,

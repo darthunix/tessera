@@ -1412,6 +1412,7 @@ fn a_number_kept_for_one_values_array_and_new_for_another() {
     let col = column(file, "s", oid::TEXT, -1).unwrap();
     let r = reader_of(file, col, rows, 64);
     let asked = [(1u64 << 20) - 1];
+    let checked = || unsafe { (*r).values_checked };
     let number_of = |start: usize| {
         assert_eq!(read_at(r, start, 20), 20);
         let (ok, _, _, _, _, _, nvalues, number, hold) = bytes_of(r, &asked, 20);
@@ -1430,10 +1431,14 @@ fn a_number_kept_for_one_values_array_and_new_for_another() {
         forward[0] != 0 && forward.iter().all(|&n| n == forward[0]),
         "{forward:?}"
     );
+    // The values array of a number checked once, and each new one again.
+    assert_eq!(checked(), 7, "one array, checked once");
     let behind = number_of(0);
     assert!(behind != 0 && behind != forward[0]);
+    assert_eq!(checked(), 14, "a new number, checked again");
     let after = number_of(60);
     assert!(after != 0 && after != behind && after != forward[0]);
+    assert_eq!(checked(), 21);
     unsafe {
         tess_parquet_reader_free(r);
         tess_parquet_column_free(col);
@@ -1587,6 +1592,361 @@ proptest::proptest! {
         }
         if refused && let Some(indexes) = &indexes {
             proptest::prop_assert!(indexes.iter().all(|&i| i == -1));
+        }
+    }
+}
+
+/// A column of `type_oid` and `typmod`, its text checked, trusted or of
+/// the default rule (`utf8` of the header's codes).
+fn column_typed(
+    file: *const FileHandle,
+    type_oid: u32,
+    typmod: i32,
+    utf8: i32,
+) -> Result<*mut ColumnHandle, String> {
+    let mut out = ptr::null_mut();
+    let mut st = status();
+    let ok = unsafe {
+        tess_parquet_column(
+            file,
+            "s".as_ptr().cast(),
+            1,
+            type_oid,
+            typmod,
+            -1,
+            utf8,
+            true,
+            &mut out,
+            &mut st,
+        )
+    };
+    if ok { Ok(out) } else { Err(text(&st.sqlstate)) }
+}
+
+/// What a call of the bytes form gave, comparable: the error's code and
+/// row, or each row's bytes or `NULL`, the mask of `NULL`s, the indexes of
+/// the rows asked and the count of values.
+#[allow(clippy::type_complexity)]
+fn bytes_seen(
+    r: *mut ReaderHandle,
+    asked: &[u64],
+    len: usize,
+) -> Result<(Vec<Option<Vec<u8>>>, u64, Vec<i32>, u32), (String, i64)> {
+    let (ok, st, data, lengths, indexes, nulls, nvalues, _, hold) = bytes_of(r, asked, len);
+    if !ok {
+        return Err((text(&st.sqlstate), st.row));
+    }
+    let bit = |row: usize| asked[0] >> row & 1 == 1;
+    let rows = (0..len)
+        .map(|row| {
+            (bit(row) && nulls >> row & 1 == 0).then(|| unsafe {
+                std::slice::from_raw_parts(data[row], lengths[row] as usize).to_vec()
+            })
+        })
+        .collect();
+    let indexes = (0..len)
+        .map(|row| {
+            if bit(row) && nulls >> row & 1 == 0 {
+                indexes[row]
+            } else {
+                -1
+            }
+        })
+        .collect();
+    unsafe { tess_parquet_hold_free(hold) };
+    Ok((rows, nulls, indexes, nvalues))
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(48))]
+
+    /// The cheaper check gives what the plan's check row by row gives, for
+    /// strings of bytes of every kind (NULL rows, empty strings, bytes that
+    /// are not UTF-8, zero bytes, characters of several bytes), plain and
+    /// through a dictionary, read as checked text, trusted text, varchar of
+    /// a length and bytea, for any rows asked, over two windows of a chunk:
+    /// the same error at the same row, or the same bytes, NULLs, indexes
+    /// and count. Not under Miri, whose run would write the files for hours;
+    /// the cases of fixed files above are its.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn the_cheaper_check_is_the_plan_s_row_by_row(
+        strings in proptest::collection::vec(
+            proptest::option::of(proptest::collection::vec(proptest::prop_oneof![
+                proptest::strategy::Just(0u8), proptest::strategy::Just(b'a'),
+                proptest::strategy::Just(0xc3), proptest::strategy::Just(0xa9),
+                proptest::strategy::Just(0xe2), proptest::strategy::Just(0xff),
+                b'b'..b'e'
+            ], 0..5)),
+            40),
+        asked in proptest::collection::vec(proptest::prelude::any::<u64>(), 2),
+        dictionary in proptest::prelude::any::<bool>(),
+        kind in 0usize..4,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.parquet");
+        testing::write(&path, &[Column::new("s", Values::Bytes(strings.clone()))], 40, dictionary).unwrap();
+        let file = open(&path);
+        let (type_oid, typmod, utf8) = match kind {
+            0 => (oid::TEXT, -1, -1),
+            1 => (oid::TEXT, -1, 1),
+            2 => (oid::VARCHAR, 4 + 3, -1),
+            _ => (oid::BYTEA, -1, -1),
+        };
+        let col = column_typed(file, type_oid, typmod, utf8).unwrap();
+        let cheaper = reader_of(file, col, 40, 64);
+        let rows = reader_of(file, col, 40, 64);
+        unsafe { (*rows).rows_only = true };
+        for (start, mask) in [(0usize, asked[0] & 0xf_ffff), (20, asked[1] & 0xf_ffff)] {
+            assert_eq!(read_at(cheaper, start, 20), 20);
+            assert_eq!(read_at(rows, start, 20), 20);
+            proptest::prop_assert_eq!(bytes_seen(cheaper, &[mask], 20), bytes_seen(rows, &[mask], 20));
+        }
+        unsafe {
+            tess_parquet_reader_free(cheaper);
+            tess_parquet_reader_free(rows);
+            tess_parquet_column_free(col);
+            tess_parquet_file_free(file);
+        }
+    }
+}
+
+/// Through a dictionary, the values array is checked whole once for the
+/// chunk, and the windows after take their rows' bytes without a check;
+/// a dictionary with a value that is not UTF-8 sends its windows to the
+/// read row by row, which fails a window only where a row asked names the
+/// value, at the first such row. A plain window is checked in one pass
+/// once, however many batches ask it.
+#[test]
+fn a_dictionary_checked_once_and_a_window_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("d.parquet");
+    let all = [(1u64 << 20) - 1];
+    for bad in [false, true] {
+        // Rows of "a" and "b", then "c" from row 40, and at row 50 bytes
+        // that are not UTF-8 where the dictionary has them.
+        let strings: Vec<Option<Vec<u8>>> = (0..60)
+            .map(|r| {
+                Some(match r {
+                    50 if bad => b"\xff".to_vec(),
+                    r if r >= 40 => b"c".to_vec(),
+                    r => vec![b'a' + (r % 2) as u8],
+                })
+            })
+            .collect();
+        testing::write(&path, &[Column::new("s", Values::Bytes(strings))], 60, true).unwrap();
+        let file = open(&path);
+        let col = column(file, "s", oid::TEXT, -1).unwrap();
+        let r = reader_of(file, col, 60, 64);
+        let nvalues = if bad { 4 } else { 3 };
+        assert_eq!(read_at(r, 0, 20), 20);
+        assert!(bytes_seen(r, &all, 20).is_ok());
+        assert_eq!(
+            unsafe { (*r).values_checked },
+            nvalues,
+            "the whole dictionary"
+        );
+        assert_eq!(unsafe { (*r).dictionary_passes }, Some(!bad));
+        assert_eq!(read_at(r, 20, 20), 20);
+        assert!(bytes_seen(r, &all, 20).is_ok());
+        assert_eq!(read_at(r, 40, 20), 20);
+        // Row 10 of this window, the group's row 50, left out: no error.
+        let without = [all[0] & !(1 << 10)];
+        assert!(bytes_seen(r, &without, 20).is_ok());
+        assert_eq!(unsafe { (*r).values_checked }, nvalues, "checked once");
+        if bad {
+            assert_eq!(bytes_seen(r, &all, 20), Err(("22021".to_string(), 10)));
+        } else {
+            assert!(bytes_seen(r, &all, 20).is_ok());
+        }
+        unsafe {
+            tess_parquet_reader_free(r);
+            tess_parquet_column_free(col);
+        }
+        // Plain: each window passes once, however many asks.
+        testing::write(
+            &path,
+            &[Column::new(
+                "s",
+                Values::Bytes((0..60).map(|r| Some(vec![b'a' + (r % 5) as u8])).collect()),
+            )],
+            60,
+            false,
+        )
+        .unwrap();
+        unsafe { tess_parquet_file_free(file) };
+        let file = open(&path);
+        let col = column(file, "s", oid::TEXT, -1).unwrap();
+        let r = reader_of(file, col, 60, 64);
+        for start in [0usize, 20] {
+            assert_eq!(read_at(r, start, 20), 20);
+            for _ in 0..3 {
+                assert!(bytes_seen(r, &all, 20).is_ok());
+            }
+        }
+        assert_eq!(unsafe { (*r).windows_checked }, 2, "one pass a window");
+        unsafe {
+            tess_parquet_reader_free(r);
+            tess_parquet_column_free(col);
+            tess_parquet_file_free(file);
+        }
+    }
+}
+
+/// A dictionary of more values than a word of a mask counts is read whole
+/// and passes: the mask over its values asks each of them, and none past.
+#[test]
+fn a_dictionary_of_more_than_a_word_passes_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("w.parquet");
+    let rows = 100;
+    let strings = (0..rows)
+        .map(|r| Some(format!("v{r}").into_bytes()))
+        .collect();
+    testing::write(
+        &path,
+        &[Column::new("s", Values::Bytes(strings))],
+        rows,
+        true,
+    )
+    .unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader_of(file, col, rows, 128);
+    assert_eq!(read_at(r, 0, 64), 64);
+    let (_, _, _, nvalues) = bytes_seen(r, &[u64::MAX], 64).unwrap();
+    assert_eq!(nvalues, 100);
+    assert_eq!(unsafe { (*r).dictionary_passes }, Some(true));
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
+
+/// A dictionary whose values array has a NULL slot is not taken as
+/// checked, though its bytes would pass the plan's read of the array,
+/// which skips NULL slots: a row whose key names that slot would get its
+/// bytes, `0xff` here, unchecked. The file's writer never makes one, so
+/// the arrays are built in Arrow.
+#[test]
+fn a_null_value_of_a_dictionary_is_not_taken_as_checked() {
+    use arrow_array::types::Int32Type;
+    use arrow_array::{DictionaryArray, Int32Array, LargeBinaryArray};
+    use arrow_buffer::{Buffer, NullBuffer, OffsetBuffer, ScalarBuffer};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("n.parquet");
+    let strings = (0..2).map(|_| Some(b"a".to_vec())).collect();
+    testing::write(&path, &[Column::new("s", Values::Bytes(strings))], 2, true).unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader_of(file, col, 2, 64);
+    let values: Arc<dyn Array> = Arc::new(LargeBinaryArray::new(
+        OffsetBuffer::new(ScalarBuffer::from(vec![0i64, 1, 2])),
+        Buffer::from(b"a\xff".to_vec()),
+        Some(NullBuffer::from(vec![true, false])),
+    ));
+    let keys = Int32Array::from(vec![0, 1]);
+    let array = DictionaryArray::<Int32Type>::try_new(keys, Arc::clone(&values)).unwrap();
+    let (mut values_checked, mut windows_checked) = (0, 0);
+    let (mut dictionary_passes, mut window_passes) = (None, None);
+    let mut made = [0u64; 1];
+    let fast = cheaper_check(
+        unsafe { &(*r).reader },
+        (&mut values_checked, &mut windows_checked),
+        &array,
+        Some(values.as_ref()),
+        &[0b11],
+        &mut dictionary_passes,
+        &mut window_passes,
+        &mut made,
+    )
+    .unwrap();
+    assert!(fast.is_none(), "read row by row");
+    assert_eq!(dictionary_passes, Some(false));
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
+
+/// A mask the plan refuses is refused by the bytes entry too, whichever
+/// check it takes: one that asks a row past the window, one shorter than
+/// the window, and a mask of NULLs shorter than it, all `XX000`. The
+/// release build's tests run this without the debug build's check again.
+#[test]
+fn masks_the_plan_refuses_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.parquet");
+    for dictionary in [false, true] {
+        let strings: Vec<Option<Vec<u8>>> =
+            (0..70).map(|r| Some(vec![b'a' + (r % 3) as u8])).collect();
+        testing::write(
+            &path,
+            &[Column::new("s", Values::Bytes(strings))],
+            70,
+            dictionary,
+        )
+        .unwrap();
+        let file = open(&path);
+        let col = column(file, "s", oid::TEXT, -1).unwrap();
+        let r = reader_of(file, col, 70, 128);
+        assert_eq!(read_at(r, 0, 1), 1);
+        // The plan's refusal, not the debug build's error of a cheaper
+        // check that passed too much, which is XX000 too.
+        let refused = |ok: bool, st: &Status| {
+            !ok && text(&st.sqlstate) == "XX000" && text(&st.message).contains("a mask shorter")
+        };
+        let (ok, st, ..) = bytes_of(r, &[0b10], 1);
+        assert!(refused(ok, &st), "a row past the window");
+        assert_eq!(read_at(r, 0, 70), 70);
+        // Each mask short alone, the other of the window's two words.
+        let ask = |asked: &[u64], nulls_words: usize| {
+            let mut data = vec![ptr::null::<u8>(); 70];
+            let mut lengths = vec![0u32; 70];
+            let mut indexes = vec![0i32; 70];
+            let mut nulls = vec![0u64; nulls_words];
+            let mut out = BytesOut {
+                data: data.as_mut_ptr(),
+                lengths: lengths.as_mut_ptr(),
+                indexes: indexes.as_mut_ptr(),
+                len: 70,
+                nvalues: 0,
+                number: 0,
+            };
+            let mut hold = ptr::null_mut();
+            let mut st = status();
+            let ok = unsafe {
+                tess_parquet_bytes(
+                    r,
+                    asked.as_ptr(),
+                    asked.len(),
+                    nulls.as_mut_ptr(),
+                    nulls.len(),
+                    &mut out,
+                    &mut hold,
+                    &mut st,
+                )
+            };
+            assert!(hold.is_null());
+            assert!(data.iter().all(|p| p.is_null()) && lengths.iter().all(|&l| l == 0));
+            (ok, st)
+        };
+        let (ok, st) = ask(&[u64::MAX], 2);
+        assert!(refused(ok, &st), "a mask shorter than the window");
+        let (ok, st) = ask(&[u64::MAX, u64::MAX], 2);
+        assert!(refused(ok, &st), "a second word past the window");
+        let (ok, st) = ask(&[u64::MAX, (1u64 << 6) - 1], 1);
+        assert!(
+            !ok && text(&st.sqlstate) == "XX000" && text(&st.message).contains("an output shorter"),
+            "a mask of NULLs shorter than the window"
+        );
+        unsafe {
+            tess_parquet_reader_free(r);
+            tess_parquet_column_free(col);
+            tess_parquet_file_free(file);
         }
     }
 }
