@@ -1,28 +1,27 @@
 ## 0. How the work goes
 
-The branch `text-keys-by-bytes` starts from `parquet-fdw`'s branch, and
-its pull request, #172, the proposal's, is based on it until
-`parquet-fdw` is merged. By the maintainer's word of 2026-11-23 the
-work goes into that one pull request, in four stages: the form and the
-Parquet source's form (groups 2 and 3), TessAgg's keys (4), the kernels
-(5), the sort (6). Every task is one commit, but 7.3, the pull
-request's description; each is reviewed by Codex and Claude Fable
-before the next starts. Each
-commit passes `.github/scripts/check-specs.sh` and the check named in
-its task, and names in a scenario's "Verified by" or a contract's
-"Checked by" each test or check it lands. "The suites" means `make &&
-make install` and `make installcheck
+The branch `text-keys-by-bytes` starts from `parquet-fdw`'s branch. Its
+first pull request, #172, the proposal's, took the proposal and group 2,
+and the maintainer merged it into `parquet-fdw` on 2026-11-23; the rest
+goes in pull requests of its own into that branch until `parquet-fdw` is
+merged, in four stages: the form and the Parquet source's form (groups 2
+and 3), TessAgg's keys (4), the kernels (5), the sort (6). Every task is
+one commit, but 7.3, the pull request's description; each is reviewed by
+Codex and Claude Fable before the next starts. Each commit passes
+`.github/scripts/check-specs.sh` and the check named in its task, and
+names in a scenario's "Verified by" or a contract's "Checked by" each
+test or check it lands. "The suites" means `make && make install` and
+`make installcheck
 EXTRA_REGRESS_OPTS="--temp-instance=$PWD/test/tmp_check"` on PostgreSQL
 master, 19 and 18 built as CI builds them, with assertions. A count is
 taken by `cargo clickbench run --counters` and `cargo ab measure
 --counters` and judged by its instructions, as the design's measurement
 plan says; by the maintainer's word of 2026-11-23 it needs no idle
 machine, which a timed run still waits for. A commit that changes a hot
-path carries in its message its counts against the commit before it;
-the last task of each stage commits the stage's report.
-A Kani harness is bounded to finish within CI's 600 seconds; what its
-bounds leave out is named in the harness and covered by a property
-test.
+path carries in its message its counts against the commit before it; the
+last task of each stage commits the stage's report. A Kani harness is
+bounded to finish within CI's 600 seconds; what its bounds leave out is
+named in the harness and covered by a property test.
 
 ## 1. The proposal
 
@@ -129,7 +128,7 @@ test.
       compared with the same query over the heap table, with groupings,
       `ORDER BY … LIMIT`, `LIKE` and `length`. Check: `make
       crosscheck`, within the time CI gives it
-- [ ] 3.7 Count as the measurement plan says for the form: every query
+- [x] 3.7 Count as the measurement plan says for the form: every query
       counted no more than 1 per cent above the base; the report under
       `docs/benchmarks/`. Check: `.github/scripts/check-specs.sh`
 
