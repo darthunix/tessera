@@ -294,14 +294,17 @@ the change `parquet-fdw`.
 ### text-keys-by-bytes
 
 Grouping by a string on the file's bytes, one value a group. From the
-maintainer's review of ClickBench's queries, 2026-11-21.
+maintainer's review of ClickBench's queries, 2026-11-21; widened by him
+on 2026-11-23 to the string functions and the order by bytes, in one
+change. It is the change `text-keys-by-bytes`.
 
 - **What:** A batch offers a string column in a second form beside its
-  `Datum` values, the bytes and their offsets as the file holds them,
-  and TessAgg hashes and compares a key of that form on its bytes,
-  making a `text` value once a group, when it gives the group out; the
-  Parquet source offers the form, and a chunk encoded by a dictionary
-  may be keyed by its indexes.
+  `Datum` values, the bytes of each row as the source holds them, and
+  TessAgg hashes and compares a key of that form on its bytes, making a
+  `text` value once a group; the Parquet source offers the form, and a
+  chunk encoded by a dictionary may be keyed by its indexes. The string
+  kernels read the form, and TessSort orders a string by its bytes
+  under a collation that orders by bytes.
 - **Why:** 15 of ClickBench's 43 queries group by a string (`URL`,
   `SearchPhrase`, `Title`, `MobilePhoneModel` and others), and Q34 and
   Q35 group all 100 M rows by `URL`: a value made for each row before
@@ -314,8 +317,8 @@ maintainer's review of ClickBench's queries, 2026-11-21.
   `parquet-fdw` forecasts it in `tessera/batch.h`, the source's batches
   and TessAgg.
 - **Depends on:** `parquet-fdw`.
-- **Capabilities:** batch-format, aggregate, parquet-fdw
-- **Size:** large.
+- **Capabilities:** string-bytes, new
+- **Size:** large: four pull requests after the proposal.
 
 ### clickbench-entry
 
