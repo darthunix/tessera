@@ -318,7 +318,7 @@ change. It is the change `text-keys-by-bytes`.
   and TessAgg.
 - **Depends on:** `parquet-fdw`.
 - **Capabilities:** string-bytes, new
-- **Size:** large: four pull requests after the proposal.
+- **Size:** large: one pull request of four stages after the proposal.
 
 ### clickbench-entry
 
