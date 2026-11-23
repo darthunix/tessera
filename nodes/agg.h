@@ -120,6 +120,8 @@ typedef struct TessAggState
 	 * table of their own, which does not spill, so neither do the groups.
 	 */
 	bool		has_distinct;
+	/* Whether an ungrouped COUNT(DISTINCT)'s argument may come as bytes. */
+	bool		has_distinct_bytes;
 	uint64		batches;
 	uint64		rows;
 	uint64		calls;

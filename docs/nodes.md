@@ -1343,7 +1343,9 @@ made from its bytes, a header and the bytes. The node asks no `Datum`
 value of such a key: the rows a frozen table writes to disk get theirs
 made by the node from the bytes, which passed the column's rule, so
 that the source neither checks nor copies them again; and its read of
-the columns in their order leaves the column out. A key of
+the columns in their order leaves the column out. The argument of an
+ungrouped `COUNT(DISTINCT)`, a column of bytes, is read the same way and
+numbered by the same lookup, with no `Datum` made. A key of
 a nondeterministic collation, a key computed from a column, and a set
 operation's keys are read as `Datum` values.
 

@@ -214,12 +214,19 @@ groups_memory(TessAggState *state)
 	return bytes;
 }
 
-/* Whether the batch at hand gave the child's column as a key's bytes. */
+/*
+ * Whether the batch at hand gave the child's column as a key's bytes, or
+ * as the bytes of an ungrouped COUNT(DISTINCT)'s argument.
+ */
 static bool
 read_by_bytes(const TessAggState *state, int column)
 {
 	for (int key = 0; key < state->nkeys; key++)
 		if (state->key_by_bytes[key] && state->key_bytes_column[key] == column)
+			return true;
+	for (int index = 0; state->has_distinct_bytes && index < state->nvalues; index++)
+		if (state->values[index].distinct_by_bytes &&
+			state->values[index].distinct_bytes_column == column)
 			return true;
 	return false;
 }

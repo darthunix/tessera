@@ -2029,6 +2029,46 @@ SELECT tessera_test_scan_source_asks();
  datum 112, bytes 16, checked 64, through a projection 0
 (1 row)
 
+-- The ungrouped COUNT(DISTINCT) of s and of n reads both as bytes, beside
+-- a sum of the column a before them: Datums of a alone are asked, twice
+-- a batch, by the read of the columns in their order and by the sum.
+SELECT source_same('SELECT count(DISTINCT s), count(DISTINCT n), sum(a) FROM ft_bytes');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
+SELECT tessera_test_scan_source_asks();
+             tessera_test_scan_source_asks              
+--------------------------------------------------------
+ datum 32, bytes 32, checked 16, through a projection 0
+(1 row)
+
+-- Under a FILTER of a, which numbers some of the rows whose bytes the
+-- batch gave, 5 values of s, 3 of n and none: Datums of a alone, for the
+-- read in order and each filter.
+SELECT source_same('SELECT count(DISTINCT s) FILTER (WHERE a % 50 < 5),
+                           count(DISTINCT n) FILTER (WHERE a % 13 < 3),
+                           count(DISTINCT s) FILTER (WHERE a < 0) FROM ft_bytes');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
+SELECT count(DISTINCT s) FILTER (WHERE a % 50 < 5) AS s5,
+       count(DISTINCT n) FILTER (WHERE a % 13 < 3) AS n3,
+       count(DISTINCT s) FILTER (WHERE a < 0) AS none FROM ft_bytes;
+ s5 | n3 | none 
+----+----+------
+  5 |  3 |    0
+(1 row)
+
+SELECT tessera_test_scan_source_asks();
+              tessera_test_scan_source_asks              
+---------------------------------------------------------
+ datum 128, bytes 96, checked 32, through a projection 0
+(1 row)
+
 -- Through the source's projection, which passes s on and computes the
 -- others: the bytes of s at the source's addresses, and no bytes of the
 -- computed columns.
@@ -2169,10 +2209,16 @@ SELECT source_same('SELECT m, count(*) FROM ft_bytes_mixed GROUP BY m');
 (1 row)
 
 RESET work_mem;
+SELECT source_same('SELECT count(DISTINCT s), count(DISTINCT m) FROM ft_bytes_mixed');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
 SELECT tessera_test_scan_source_asks();
-             tessera_test_scan_source_asks             
--------------------------------------------------------
- datum 93, bytes 96, checked 0, through a projection 0
+              tessera_test_scan_source_asks              
+---------------------------------------------------------
+ datum 155, bytes 160, checked 0, through a projection 0
 (1 row)
 
 DROP FOREIGN TABLE ft_bytes_mixed;
@@ -2202,6 +2248,12 @@ SELECT source_same('SELECT s, count(*) FROM ft_bytes_index GROUP BY s');
  same, 2047 rows
 (1 row)
 
+SELECT source_same('SELECT count(DISTINCT s) FROM ft_bytes_index');
+ source_same  
+--------------
+ same, 1 rows
+(1 row)
+
 RESET work_mem;
 SELECT source_same('SELECT s, count(*) FROM ft_bytes_index GROUP BY s');
    source_same   
@@ -2217,10 +2269,17 @@ SELECT source_same('SELECT g, (SELECT count(*) FROM (SELECT s FROM ft_bytes_inde
  same, 3 rows
 (1 row)
 
+SELECT source_same('SELECT g, (SELECT count(DISTINCT s) FROM ft_bytes_index WHERE a > g * 1000)
+                    FROM generate_series(1, 3) AS g');
+ source_same  
+--------------
+ same, 3 rows
+(1 row)
+
 SELECT tessera_test_scan_source_asks();
               tessera_test_scan_source_asks              
 ---------------------------------------------------------
- datum 384, bytes 548, checked 0, through a projection 0
+ datum 768, bytes 968, checked 0, through a projection 0
 (1 row)
 
 DROP FOREIGN TABLE ft_bytes_index;
