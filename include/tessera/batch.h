@@ -81,7 +81,7 @@ tess_column_decimal_rows(const TessDatumColumn *column)
  * dictionary, it may give indexes, each such row the index of its value,
  * 0 or more and below nvalues, the dictionary's count of values, and
  * dictionary the dictionary's identity, a number other than 0 taken from
- * the identity operation of Tessera's API (tessera/bridge.h), one counter
+ * next_dictionary_identity of Tessera's API (tessera/bridge.h), one counter
  * of the backend; a producer of a backend whose API lacks that operation
  * gives no dictionary. Batches that follow one another over one dictionary
  * give it the same identity, a dictionary given again after another may

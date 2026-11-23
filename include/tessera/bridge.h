@@ -69,9 +69,29 @@ typedef struct TessApi
 	 * table, which the module linking the Rust kernels installs.
 	 */
 	const TessKernelRegistryOps *kernels;
+	/*
+	 * Optional (check TESS_ABI_HAS_FIELD, or ask tess_dictionary_identity):
+	 * a new identity of a dictionary of the bytes form (tessera/batch.h),
+	 * from one counter of the backend, 1 first and never 0 nor twice; it
+	 * raises an error should the counter ever pass its last value.
+	 */
+	uint64		(*next_dictionary_identity) (void);
 } TessApi;
 
 /* All subsystem pointers are required in the current root. */
 #define TESS_API_MIN_SIZE TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, settings)
+
+/*
+ * A new identity of a dictionary of the bytes form, or 0 from a bridge
+ * whose API lacks the operation: a producer then gives no dictionary.
+ */
+static inline uint64
+tess_dictionary_identity(const TessApi *api)
+{
+	if (!TESS_ABI_HAS_FIELD(api, TessApi, next_dictionary_identity) ||
+		api->next_dictionary_identity == NULL)
+		return 0;
+	return api->next_dictionary_identity();
+}
 
 #endif /* TESSERA_BRIDGE_H */
