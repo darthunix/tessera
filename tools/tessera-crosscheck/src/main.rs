@@ -125,8 +125,9 @@ synchronous_commit = off
         conf,
         port,
         socket_dir: "/tmp".into(),
-        // The C collation: text compares by its bytes in both modes.
-        initdb_args: vec!["--no-locale".into()],
+        // UTF8, and the C collation where a query names none: text compares
+        // by its bytes, and under the collations the setup makes as they do.
+        initdb_args: vec!["--no-locale".into(), "--encoding=UTF8".into()],
         extensions: vec!["tessera".into()],
         stop_hint: "cargo run -p tessera-crosscheck -- stop".into(),
     };

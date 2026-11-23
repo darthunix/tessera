@@ -33,6 +33,33 @@ const TYPES: [Ty; 9] = [
 /// The depth of the expressions of a query.
 const DEPTH: u32 = 2;
 
+/// The collations a text expression may be put under, which the setup
+/// makes where they are not built in: C, the builtin provider's C.UTF-8,
+/// `lc` of libc for a language, and `nd`, ICU's nondeterministic one that
+/// ignores case. Where an output stands for equal values, as a group's key
+/// or the least of them does, only a deterministic one: under `nd` equal
+/// values differ in their bytes, and which of them stands is not defined.
+const COLLATIONS: [&str; 4] = ["C", "pg_c_utf8", "lc", "nd"];
+const DETERMINISTIC: [&str; 3] = ["C", "pg_c_utf8", "lc"];
+
+/// A text expression as it is, or under one of `collations`: as it is
+/// first, so that shrinking drops the collation. One collation an
+/// expression, put on one side, so that no two meet.
+fn collated(expr: BoxedStrategy<Expr>, collations: &[&'static str]) -> BoxedStrategy<Expr> {
+    (
+        expr,
+        proptest::option::weighted(0.35, select(collations.to_vec())),
+    )
+        .prop_map(|(arg, collation)| match collation {
+            Some(collation) => Expr::Collate {
+                arg: boxed(arg),
+                collation,
+            },
+            None => arg,
+        })
+        .boxed()
+}
+
 /// The columns a query's expressions may read: each with the position of
 /// its table in the FROM list.
 #[derive(Clone, Debug, Default)]
@@ -143,9 +170,15 @@ pub fn literal(ty: Ty) -> BoxedStrategy<Expr> {
         .prop_map(cast)
         .boxed(),
         Ty::Text => prop_oneof![
-            vec(select(vec!['a', 'b', ' ', '%', '_', 'A', 'z']), 0..4)
-                .prop_map(|chars| chars.into_iter().collect::<String>()),
-            select(vec!["", " ", "zzzz", "a%b"]).prop_map(String::from),
+            vec(
+                select(vec![
+                    'a', 'b', ' ', '%', '_', 'A', 'z', '\u{e9}', '\u{c9}', '\u{df}'
+                ]),
+                0..4
+            )
+            .prop_map(|chars| chars.into_iter().collect::<String>()),
+            select(vec!["", " ", "zzzz", "a%b", "SS", "e\u{301}", "\u{1f600}"])
+                .prop_map(String::from),
         ]
         .prop_map(cast)
         .boxed(),
@@ -300,8 +333,19 @@ fn composites(
         }
         Ty::Text => {
             options.push((2, binary(vec!["||"])));
-            options.push((1, call("lower")));
-            options.push((1, call("upper")));
+            // The case of a character is the collation's: of the argument,
+            // under a deterministic one now and then.
+            for name in ["lower", "upper"] {
+                options.push((
+                    1,
+                    collated(same(), &DETERMINISTIC)
+                        .prop_map(move |arg| Expr::Call {
+                            name,
+                            args: vec![arg],
+                        })
+                        .boxed(),
+                ));
+            }
             options.push((
                 1,
                 (same(), 0_i32..=4, 0_i32..=4)
@@ -378,8 +422,14 @@ fn predicates(
                 Just(ty).boxed()
             };
             let below = below.clone();
-            (Just(ty), partner)
-                .prop_flat_map(move |(left, right)| (below[&left].clone(), below[&right].clone()))
+            (Just(ty), partner).prop_flat_map(move |(left, right)| {
+                let first = if left == Ty::Text {
+                    collated(below[&left].clone(), &COLLATIONS)
+                } else {
+                    below[&left].clone()
+                };
+                (first, below[&right].clone())
+            })
         }
     });
     let comparison = (select(vec!["=", "<>", "<", "<=", ">", ">="]), any_compared)
@@ -418,7 +468,14 @@ fn predicates(
     let in_list = (
         select(vec![Ty::Int4, Ty::Int8, Ty::Text, Ty::Date, Ty::Numeric]).prop_flat_map({
             let below = below.clone();
-            move |ty| (below[&ty].clone(), vec(literal(ty), 1..8))
+            move |ty| {
+                let arg = if ty == Ty::Text {
+                    collated(below[&ty].clone(), &COLLATIONS)
+                } else {
+                    below[&ty].clone()
+                };
+                (arg, vec(literal(ty), 1..8))
+            }
         }),
         any::<bool>(),
     )
@@ -429,8 +486,8 @@ fn predicates(
         })
         .boxed();
     let like = (
-        below[&Ty::Text].clone(),
-        vec(select(vec!['a', 'b', ' ', '%', '_', 'A']), 0..5)
+        collated(below[&Ty::Text].clone(), &COLLATIONS),
+        vec(select(vec!['a', 'b', ' ', '%', '_', 'A', '\u{e9}']), 0..5)
             .prop_map(|chars| chars.into_iter().collect::<String>()),
         any::<bool>(),
     )
@@ -497,6 +554,17 @@ fn representative(ty: Ty, expr: Expr) -> Expr {
     }
 }
 
+/// Whether an expression is put under the nondeterministic collation.
+fn nondeterministic(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Collate {
+            collation: "nd",
+            ..
+        }
+    )
+}
+
 /// The settings: serial three times in four, work_mem small enough for the
 /// hash tables and sorts to spill now and then.
 fn settings() -> impl Strategy<Value = Settings> {
@@ -561,6 +629,27 @@ fn key_pairs(table: Table, scope: &Scope) -> Vec<(&'static str, Expr)> {
         .collect()
 }
 
+/// One of `pairs` of a column of `table` and an expression: a key of text
+/// compared under a collation now and then, which a join or a lookup by
+/// its bytes must not take.
+fn key_pair(table: Table, pairs: Vec<(&'static str, Expr)>) -> BoxedStrategy<(&'static str, Expr)> {
+    select(pairs)
+        .prop_flat_map(move |(column, other)| {
+            let text = table
+                .columns
+                .iter()
+                .any(|c| c.name == column && c.ty == Ty::Text);
+            let other = Just(other).boxed();
+            let other = if text {
+                collated(other, &COLLATIONS)
+            } else {
+                other
+            };
+            (Just(column), other)
+        })
+        .boxed()
+}
+
 /// The joins of a FROM list: one or two key pairs each, and an extra
 /// condition over the tables so far a time in four.
 fn joins(first: Table, joined: Vec<(JoinKind, Table)>) -> BoxedStrategy<Vec<Join>> {
@@ -570,9 +659,10 @@ fn joins(first: Table, joined: Vec<(JoinKind, Table)>) -> BoxedStrategy<Vec<Join
         let before = Scope::of(&tables);
         tables.push(table);
         let with = expressions(&Scope::of(&tables), 1);
+        let pair = key_pair(table, key_pairs(table, &before));
         strategies.push(
             (
-                vec(select(key_pairs(table, &before)), 1..=2),
+                vec(pair, 1..=2),
                 proptest::option::weighted(0.25, with[&Ty::Bool].clone()),
             )
                 .prop_map(move |(mut keys, extra)| {
@@ -603,7 +693,7 @@ fn exists(tables: &[Table]) -> BoxedStrategy<Expr> {
                 .extend(inner.columns.iter().map(|column| (depth, *column)));
             let with = expressions(&all, 1);
             (
-                select(pairs),
+                key_pair(inner, pairs),
                 proptest::option::weighted(0.5, with[&Ty::Bool].clone()),
                 prop_oneof![2 => Just(false), 1 => Just(true)],
             )
@@ -645,7 +735,16 @@ fn aggregate(exprs: &HashMap<Ty, BoxedStrategy<Expr>>) -> BoxedStrategy<Expr> {
     let call = |name: &'static str, types: Vec<Ty>, distinct: bool| {
         let exprs = exprs.clone();
         select(types)
-            .prop_flat_map(move |ty| (Just(ty), exprs[&ty].clone()))
+            .prop_flat_map(move |ty| {
+                // The least of values under a collation is a value: of
+                // equal ones under `nd`, any.
+                let arg = match (ty, name) {
+                    (Ty::Text, "min" | "max") => collated(exprs[&ty].clone(), &DETERMINISTIC),
+                    (Ty::Text, _) => collated(exprs[&ty].clone(), &COLLATIONS),
+                    _ => exprs[&ty].clone(),
+                };
+                (Just(ty), arg)
+            })
             .prop_map(move |(ty, arg)| {
                 let aggregate = Expr::Aggregate {
                     name,
@@ -711,7 +810,14 @@ fn grouped(exprs: &HashMap<Ty, BoxedStrategy<Expr>>) -> BoxedStrategy<(Vec<Expr>
     ];
     let key = {
         let exprs = exprs.clone();
-        select(key_types).prop_flat_map(move |ty| (Just(ty), exprs[&ty].clone()))
+        select(key_types).prop_flat_map(move |ty| {
+            let key = if ty == Ty::Text {
+                collated(exprs[&ty].clone(), &COLLATIONS)
+            } else {
+                exprs[&ty].clone()
+            };
+            (Just(ty), key)
+        })
     };
     let having = (
         select(vec!["=", "<>", "<", ">"]),
@@ -731,8 +837,11 @@ fn grouped(exprs: &HashMap<Ty, BoxedStrategy<Expr>>) -> BoxedStrategy<(Vec<Expr>
         proptest::option::weighted(0.3, having),
     )
         .prop_map(|(keys, aggregates, having)| {
+            // A key under `nd` groups values of other bytes, any of which
+            // stands for the group: the groups are compared by the rest.
             let items = keys
                 .iter()
+                .filter(|(_, key)| !nondeterministic(key))
                 .map(|(ty, key)| representative(*ty, key.clone()))
                 .chain(aggregates)
                 .collect();
@@ -753,16 +862,43 @@ fn select_query() -> impl Strategy<Value = Select> {
         let shallow = expressions(&Scope::of(&tables), 1);
         // A plain output keeps its type: under DISTINCT or a limit it is a
         // representative of equal values. A grouping's are already.
+        // A text output under a deterministic collation now and then,
+        // which an order or a limit then follows.
+        let output = (
+            any_expr(&exprs),
+            proptest::option::weighted(0.25, select(DETERMINISTIC.to_vec())),
+        )
+            .prop_map(|((ty, item), collation)| match (ty, collation) {
+                (Ty::Text, Some(collation)) => (
+                    ty,
+                    Expr::Collate {
+                        arg: boxed(item),
+                        collation,
+                    },
+                ),
+                _ => (ty, item),
+            });
         let plain = (
-            vec(any_expr(&exprs), 1..=4),
+            vec(output, 1..=4),
             proptest::option::weighted(0.15, Just(())),
         )
             .prop_map(|(items, distinct)| {
                 let items = items.into_iter().map(|(ty, item)| (Some(ty), item));
                 (items.collect::<Vec<_>>(), None, distinct.is_some())
             });
+        // A sum or an average is a numeric, whose equal values may differ
+        // in scale: under an order or a limit it stands for them.
         let aggregated = grouped(&shallow).prop_map(|(items, grouping)| {
-            let items = items.into_iter().map(|item| (None, item));
+            let items = items.into_iter().map(|item| {
+                let numeric = matches!(
+                    item,
+                    Expr::Aggregate {
+                        name: "sum" | "avg",
+                        ..
+                    }
+                );
+                (numeric.then_some(Ty::Numeric), item)
+            });
             (items.collect::<Vec<_>>(), Some(grouping), false)
         });
         (
@@ -770,29 +906,39 @@ fn select_query() -> impl Strategy<Value = Select> {
             prop_oneof![3 => plain, 2 => aggregated],
             condition(&tables, &exprs),
             proptest::option::weighted(0.2, 1_u32..20),
+            proptest::option::weighted(0.15, Just(())),
         )
             .prop_map(
-                move |(joins, (items, grouping, distinct), filter, limit)| Select {
-                    distinct,
-                    items: items
-                        .into_iter()
-                        .map(|(ty, item)| match ty {
-                            Some(ty) if distinct || limit.is_some() => representative(ty, item),
-                            _ => item,
-                        })
-                        .collect(),
-                    from: first,
-                    joins,
-                    filter,
-                    grouping,
-                    limit,
+                move |(joins, (items, grouping, distinct), filter, limit, ordered)| {
+                    let ordered = limit.is_none() && ordered.is_some();
+                    Select {
+                        distinct,
+                        items: items
+                            .into_iter()
+                            .map(|(ty, item)| match ty {
+                                Some(ty) if distinct || ordered || limit.is_some() => {
+                                    representative(ty, item)
+                                }
+                                _ => item,
+                            })
+                            .collect(),
+                        from: first,
+                        joins,
+                        filter,
+                        grouping,
+                        limit,
+                        ordered,
+                    }
                 },
             )
     })
 }
 
 /// A SELECT whose outputs have the given types, for a set operation.
-fn typed_select(types: Vec<Ty>) -> impl Strategy<Value = Select> {
+fn typed_select(
+    types: Vec<Ty>,
+    collations: Vec<Option<&'static str>>,
+) -> impl Strategy<Value = Select> {
     from_list().prop_flat_map(move |(first, joined)| {
         let tables: Vec<Table> = std::iter::once(first)
             .chain(joined.iter().map(|(_, table)| *table))
@@ -802,10 +948,20 @@ fn typed_select(types: Vec<Ty>) -> impl Strategy<Value = Select> {
         // equal values.
         let items: Vec<BoxedStrategy<Expr>> = types
             .iter()
-            .map(|&ty| {
+            .zip(collations.clone())
+            .map(|(&ty, collation)| {
                 exprs[&ty]
                     .clone()
-                    .prop_map(move |expr| representative(ty, expr))
+                    // C where none is drawn: a branch's text may hold a
+                    // collation of its own, as lower's argument does, and
+                    // the two branches' must not meet.
+                    .prop_map(move |expr| match ty {
+                        Ty::Text => Expr::Collate {
+                            arg: boxed(expr),
+                            collation: collation.unwrap_or("C"),
+                        },
+                        _ => representative(ty, expr),
+                    })
                     .boxed()
             })
             .collect();
@@ -823,6 +979,7 @@ fn typed_select(types: Vec<Ty>) -> impl Strategy<Value = Select> {
                 filter,
                 grouping: None,
                 limit: None,
+                ordered: false,
             })
     })
 }
@@ -848,8 +1005,23 @@ fn set_operation() -> impl Strategy<Value = (Select, SetOp, Select)> {
         SetOp::Except,
         SetOp::ExceptAll,
     ]);
+    // A text column of both under one deterministic collation now and then,
+    // by which their rows match.
     (types, op)
-        .prop_flat_map(|(types, op)| (typed_select(types.clone()), Just(op), typed_select(types)))
+        .prop_flat_map(|(types, op)| {
+            let collations = vec(
+                proptest::option::weighted(0.3, select(DETERMINISTIC.to_vec())),
+                types.len(),
+            );
+            (Just(types), Just(op), collations)
+        })
+        .prop_flat_map(|(types, op, collations)| {
+            (
+                typed_select(types.clone(), collations.clone()),
+                Just(op),
+                typed_select(types, collations),
+            )
+        })
 }
 
 /// A query and its settings: a SELECT, or a set operation of two, one
@@ -885,6 +1057,114 @@ mod tests {
         let again = query().new_tree(&mut runner(7)).unwrap().current();
         assert_eq!(first, again);
         assert!(first.sql().starts_with("SELECT "));
+    }
+
+    /// Under `nd` equal values differ in their bytes: no output stands for
+    /// them, neither a group's key nor the least or greatest of them.
+    #[test]
+    fn no_output_stands_for_values_equal_under_nd() {
+        fn stands_under_nd(item: &Expr) -> bool {
+            match item {
+                Expr::Collate {
+                    collation: "nd", ..
+                } => true,
+                Expr::Aggregate {
+                    name: "min" | "max",
+                    arg: Some(arg),
+                    ..
+                } => matches!(
+                    **arg,
+                    Expr::Collate {
+                        collation: "nd",
+                        ..
+                    }
+                ),
+                Expr::Call { args, .. } => args.iter().any(stands_under_nd),
+                _ => false,
+            }
+        }
+        let mut runner = runner(3);
+        let (mut grouped_nd, mut exists_collated) = (0, 0);
+        for _ in 0..500 {
+            let query = query().new_tree(&mut runner).unwrap().current();
+            let select = &query.select;
+            assert!(!select.items.iter().any(stands_under_nd), "{}", query.sql());
+            if let Some(grouping) = &select.grouping {
+                grouped_nd += grouping.keys.iter().filter(|k| nondeterministic(k)).count();
+            }
+            // A lookup stands alone, or after AND, in the condition.
+            let lookup = match &select.filter {
+                Some(Expr::Binary {
+                    op: "AND", right, ..
+                }) => Some(&**right),
+                other => other.as_ref(),
+            };
+            exists_collated += usize::from(matches!(
+                lookup,
+                Some(Expr::Exists { outer, .. }) if matches!(**outer, Expr::Collate { .. })
+            ));
+        }
+        assert!(grouped_nd > 0, "no key was put under nd");
+        assert!(
+            exists_collated > 0,
+            "no key of text was put under a collation"
+        );
+    }
+
+    /// The two sides of a set operation put each text column under one
+    /// collation, so that the collations their text holds never meet.
+    #[test]
+    fn set_operations_share_their_collations() {
+        let mut runner = runner(9);
+        let mut seen = 0;
+        for _ in 0..500 {
+            let query = query().new_tree(&mut runner).unwrap().current();
+            let Some((_, other)) = &query.set else {
+                continue;
+            };
+            let collation = |item: &Expr| match item {
+                Expr::Collate { collation, .. } => Some(*collation),
+                _ => None,
+            };
+            for (left, right) in query.select.items.iter().zip(&other.items) {
+                assert_eq!(collation(left), collation(right), "{}", query.sql());
+                seen += usize::from(collation(left).is_some());
+            }
+        }
+        assert!(seen > 0, "no set operation of text was drawn");
+    }
+
+    /// Equal sums and averages may differ in scale: under an order or a
+    /// limit each is an output that stands for them.
+    #[test]
+    fn ordered_sums_stand_for_equal_values() {
+        let mut runner = runner(5);
+        let mut seen = 0;
+        for _ in 0..500 {
+            let query = query().new_tree(&mut runner).unwrap().current();
+            let select = &query.select;
+            if select.grouping.is_none() || !(select.ordered || select.limit.is_some()) {
+                continue;
+            }
+            for item in &select.items {
+                let bare = matches!(
+                    item,
+                    Expr::Aggregate {
+                        name: "sum" | "avg",
+                        ..
+                    }
+                );
+                assert!(!bare, "{}", query.sql());
+                seen += usize::from(matches!(
+                    item,
+                    Expr::Call {
+                        name: "trim_scale",
+                        ..
+                    }
+                ));
+            }
+        }
+        assert!(seen > 0, "no ordered sum was drawn");
     }
 
     #[test]
