@@ -2541,6 +2541,13 @@ becomes an entry, joins one, or is dropped.
   of rows, and a pair is three words; whether pairs want more was not
   measured. Suggested: a case of `spill` at a small `hash_mem` with
   levels below, counted with 32 and 64 partitions.
+- **The sanitizers of one compiler** (two reports of clang's UBSan on
+  macOS, 2026-11-23, both fixed). CI's sanitizers job builds
+  PostgreSQL and Tessera with gcc, whose UBSan reported neither an
+  offset added to a null pointer (`pointer-overflow`) nor a member read
+  through a pointer to a smaller object (`object-size`); clang's
+  aborted the suites `agg` and `join` on them. Suggested: the job built
+  with clang, or a second job with it.
 
 ## Decided against
 
