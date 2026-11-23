@@ -1,6 +1,7 @@
 # A module outside the tree builds against the installed Tessera alone: every
 # installed header compiles by itself, with the include path the
-# documentation gives, and TessLimit's sources (nodes/limit*.c), the
+# documentation gives, the layouts the specs draw hold (layouts.c), and
+# TessLimit's sources (nodes/limit*.c), the
 # test source of the suite source_scan (test/tessera_scan_source_test.c)
 # and the Parquet wrapper (parquet/), which take the public headers and the
 # runtime library alone, each build into a module of their own from copies
@@ -25,10 +26,11 @@ ifeq ($(PORTNAME),darwin)
 PARQUET_SYSTEM_LIBS = -framework CoreFoundation
 endif
 
-.PHONY: installcheck installcheck-headers installcheck-limit installcheck-source \
-	installcheck-parquet clean-installed
+.PHONY: installcheck installcheck-headers installcheck-layouts installcheck-limit \
+	installcheck-source installcheck-parquet clean-installed
 
-installcheck: installcheck-headers installcheck-limit installcheck-source installcheck-parquet
+installcheck: installcheck-headers installcheck-layouts installcheck-limit installcheck-source \
+	installcheck-parquet
 
 installcheck-headers:
 	@test -n "$(INSTALLED_HEADERS)" || { echo "no Tessera headers in $(TESSERA_INCLUDE)/tessera"; exit 1; }
@@ -39,6 +41,12 @@ installcheck-headers:
 			-fsyntax-only -x c - || { echo "$$name does not compile alone"; exit 1; }; \
 	done
 	@echo "$(words $(INSTALLED_HEADERS)) installed headers compile alone"
+
+# The offsets the specs draw of the structures one module gives another.
+installcheck-layouts:
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(includedir_server) -I$(TESSERA_INCLUDE) \
+		-fsyntax-only $(srcdir)/layouts.c
+	@echo "the installed layouts are those of the specs"
 
 installcheck-limit:
 	rm -rf $(WORK) && mkdir $(WORK)
