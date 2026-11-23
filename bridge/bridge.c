@@ -18,6 +18,19 @@ static const TessSettings tess_settings = {
 	.enable = &tess_enable,
 };
 
+/* The identities of the bytes form's dictionaries given in this backend. */
+static uint64 tess_dictionary_identities = 0;
+
+static uint64
+tess_next_dictionary_identity(void)
+{
+	if (tess_dictionary_identities == PG_UINT64_MAX)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("no identity of a dictionary is left in this backend")));
+	return ++tess_dictionary_identities;
+}
+
 static const TessApi tess_api = {
 	TESS_ABI_INITIALIZER(TESS_API_ABI_VERSION, TessApi),
 	.binding_ops = &tess_binding_ops,
@@ -26,6 +39,7 @@ static const TessApi tess_api = {
 	.functions = &tess_function_registry_ops,
 	.settings = &tess_settings,
 	.kernels = &tess_kernel_registry_ops,
+	.next_dictionary_identity = tess_next_dictionary_identity,
 };
 
 void

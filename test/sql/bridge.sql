@@ -44,6 +44,25 @@ LOAD 'tessera_nodes';
 SET tessera.enabel = off;
 \set VERBOSITY default
 
+-- spec: string-bytes/Identities of one backend
+-- The identities of the bytes form's dictionaries: one counter of the
+-- backend, which two modules share, never 0 nor twice.
+CREATE FUNCTION tessera_test_dictionary_identity()
+RETURNS bigint
+AS :'bridge_test', 'tessera_test_dictionary_identity'
+LANGUAGE C STRICT;
+\set batch_test :libdir '/tessera_batch_test' :dlsuffix
+CREATE FUNCTION tessera_test_batch_dictionary_identity()
+RETURNS bigint
+AS :'batch_test', 'tessera_test_batch_dictionary_identity'
+LANGUAGE C STRICT;
+SELECT tessera_test_dictionary_identity() AS first \gset
+SELECT tessera_test_batch_dictionary_identity() AS second \gset
+SELECT tessera_test_dictionary_identity() AS third \gset
+SELECT 0 < :first AND :first < :second AND :second < :third AS distinct_identities;
+DROP FUNCTION tessera_test_batch_dictionary_identity();
+DROP FUNCTION tessera_test_dictionary_identity();
+
 DROP FUNCTION tessera_test_settings();
 DROP FUNCTION tessera_test_abi_helpers();
 DROP FUNCTION tessera_test_api_visible();
