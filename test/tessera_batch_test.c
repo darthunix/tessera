@@ -7,6 +7,7 @@
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_batch);
+PG_FUNCTION_INFO_V1(tessera_test_batch_bytes);
 
 #define TEST_NROWS 70
 #define TEST_NCOLUMNS 2
@@ -139,4 +140,85 @@ tessera_test_batch(PG_FUNCTION_ARGS)
 	batch.ops->release(&batch);
 	PG_RETURN_BOOL(data.release_calls == 1 && batch.table_oid == 42 &&
 		batch.private_data == &data);
+}
+
+/* The bytes form of the test's string column, two rows "ab" and "". */
+static const char *const test_bytes_data[TEST_NROWS] = {"ab", ""};
+static const uint32 test_bytes_lengths[TEST_NROWS] = {2, 0};
+static const bool test_bytes_isnull[TEST_NROWS] = {false, false, true};
+
+static bool
+test_get_bytes_column(TessBatch *batch, int column, const TessRowMask *rows,
+					  TessBytesColumn *result)
+{
+	if (rows == NULL || rows->nrows != batch->rows.nrows || result == NULL)
+		elog(ERROR, "invalid Tessera test bytes request");
+	if (column != 1 || result->struct_size < TESS_BYTES_COLUMN_MIN_SIZE)
+		return false;
+	result->nrows = TEST_NROWS;
+	result->isnull = test_bytes_isnull;
+	result->data = test_bytes_data;
+	result->lengths = test_bytes_lengths;
+	return true;
+}
+
+static const TessBatchOps test_bytes_ops = {
+	TESS_ABI_INITIALIZER(TESS_BATCH_OPS_ABI_VERSION, TessBatchOps),
+	.get_datum_column = test_get_datum_column,
+	.release = test_release,
+	.get_bytes_column = test_get_bytes_column,
+};
+
+/*
+ * tess_batch_bytes_column: the operation's answer where the operations
+ * have it, false for operations of a size without it and for one left
+ * NULL, the result initialized with its size in every case.
+ */
+Datum
+tessera_test_batch_bytes(PG_FUNCTION_ARGS)
+{
+	TestBatchData data = {0};
+	uint64		active_bits[2] = {UINT64CONST(0x7), 0};
+	TessBatch	batch = {
+		TESS_ABI_INITIALIZER(TESS_BATCH_ABI_VERSION, TessBatch),
+		.rows = {TEST_NROWS, active_bits},
+		.ops = &test_bytes_ops,
+		.private_data = &data,
+	};
+	TessBytesColumn bytes;
+	/* Operations of the size before the field, allocated at that size. */
+	Size		short_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessBatchOps, release);
+	TessBatchOps *short_ops = palloc(short_size);
+	TessBatchOps null_ops = test_bytes_ops;
+	const TessBytesColumn zero = TESS_STRUCT_INITIALIZER(TessBytesColumn);
+
+	if (!tess_batch_bytes_column(&batch, 1, &batch.rows, &bytes) ||
+		bytes.struct_size != sizeof(TessBytesColumn) ||
+		bytes.nrows != TEST_NROWS || bytes.lengths[0] != 2 ||
+		memcmp(bytes.data[0], "ab", 2) != 0 ||
+		bytes.lengths[1] != 0 || bytes.data[1] == NULL ||
+		!bytes.isnull[2] || bytes.indexes != NULL ||
+		bytes.nvalues != 0 || bytes.dictionary != 0)
+		PG_RETURN_BOOL(false);
+	/*
+	 * A column the provider does not offer, operations of the size before
+	 * the field, and the field left NULL: false, each over a result filled
+	 * with bytes of no meaning, which the helper initializes.
+	 */
+	memset(&bytes, 0x5a, sizeof(bytes));
+	if (tess_batch_bytes_column(&batch, 0, &batch.rows, &bytes) ||
+		bytes.struct_size != sizeof(TessBytesColumn))
+		PG_RETURN_BOOL(false);
+	memcpy(short_ops, &test_bytes_ops, short_size);
+	short_ops->struct_size = short_size;
+	batch.ops = short_ops;
+	memset(&bytes, 0x5a, sizeof(bytes));
+	if (tess_batch_bytes_column(&batch, 1, &batch.rows, &bytes) ||
+		memcmp(&bytes, &zero, sizeof(bytes)) != 0)
+		PG_RETURN_BOOL(false);
+	null_ops.get_bytes_column = NULL;
+	batch.ops = &null_ops;
+	memset(&bytes, 0x5a, sizeof(bytes));
+	PG_RETURN_BOOL(!tess_batch_bytes_column(&batch, 1, &batch.rows, &bytes) &&
+				   memcmp(&bytes, &zero, sizeof(bytes)) == 0);
 }

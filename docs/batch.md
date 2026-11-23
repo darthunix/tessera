@@ -39,6 +39,30 @@ not ask, leaves `decimal_rows` NULL. The fields follow `nrows`, so an array
 of columns, as the kernels read one, has the size of the whole structure:
 the Rust mirror (`DatumColumn`) carries them too.
 
+A string column of `text`, `varchar` or `bytea` may come in a second form,
+its bytes as the producer holds them. `get_bytes_column`, an optional
+operation after `release`, fills a `TessBytesColumn` for the rows of a mask
+and returns true, or returns false for a column the provider does not
+offer so; a consumer asks through `tess_batch_bytes_column()`, which also
+answers false for operations of a size without the field, and reads any
+column that is not offered through `get_datum_column`, as every consumer
+can. For each row asked that is not NULL, `data` points to the value's
+bytes and `lengths` gives their count, without a header, never compressed
+nor stored apart; where the producer holds the column through a
+dictionary, it may give `indexes`, the row's index, 0 or more and below
+`nvalues`, and `dictionary` the dictionary's identity, which it takes
+from Tessera's API, so that a consumer may keep what it learned of an
+index while the identity stays; a producer of a backend whose API lacks
+the identity operation gives no dictionary, and an identity never passes
+from one process to another. The bytes passed the column's rule, as a
+Datum made for the row would: a row asked whose bytes fail it raises the
+error that making its Datum would, and a row not asked never fails the
+call. A provider fills only the fields the caller's `struct_size`
+covers. The pointers stay
+valid until the batch is released, whatever the consumer asks of the
+batch in between. The spec of the capability `string-bytes` draws the
+structure and holds the rules of the dictionary and its identity.
+
 `TessColumnPurpose` tells the provider whether the values are needed for a
 filter or a later projection. It may affect preparation strategy but never the
 values returned.
