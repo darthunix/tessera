@@ -266,14 +266,16 @@ own_partials(List *tlist)
 /*
  * The bytes the groups of a grouping with a DISTINCT aggregate take, as
  * the planner estimates them, or -1 without a grouped path to count them
- * by; such groups do not spill. A group takes a record,
- * a sum state's four more words, a float's state of the node's own, and
- * the states a word does not hold, each by its type's average width or,
- * for an internal state, the aggregate's declared space or 8 kB, as the
- * core estimates its hashed groups. The
- * groups are the most of the core's grouped paths, before HAVING: the
- * relation's own rows are set only after this hook, and beside a DISTINCT
- * aggregate the core's paths are sorted ones alone.
+ * by; such groups do not spill. A group takes a record, a sum state's
+ * four more words, a float's state of the node's own, and the states a
+ * word does not hold, each by its type's average width or, for an
+ * internal state, the aggregate's declared space or 8 kB, as the core
+ * estimates its hashed groups. The index takes the two buckets of 4 bytes
+ * a group the node gives it, a power of two of them and 1024 at least,
+ * counted in floating point, since an estimate may pass any power a word
+ * holds. The groups are the most of the core's grouped paths, before
+ * HAVING: the relation's own rows are set only after this hook, and
+ * beside a DISTINCT aggregate the core's paths are sorted ones alone.
  */
 static double
 groups_bytes(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
@@ -326,7 +328,7 @@ groups_bytes(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 		if (!byval)
 			bytes += get_typavgwidth(agg->aggtranstype, -1);
 	}
-	return groups * bytes;
+	return groups * bytes + 4.0 * pow(2.0, ceil(log2(Max(2.0 * groups, 1024.0))));
 }
 
 /*

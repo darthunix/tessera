@@ -1215,15 +1215,16 @@ of the buckets of a table of 2^b of them for the first (32 - b) / 5
 levels, four of a table of 1024 buckets and three of 65536; a deeper
 level takes bits of the buckets too. A group's rows stay in their
 order, as an order-sensitive aggregate such as `string_agg` needs.
-With a `DISTINCT` aggregate alongside, whose table does not spill, the
-groups do not spill either, of the node's own aggregates or generic
-ones: the path is taken only when the planner's estimate of the groups
-and their states fits `hash_mem`. A state counts a type's average width,
-or an internal state's declared space or 8 kB, as the core estimates
-them, and a float's state that the node keeps apart its own size. The
-groups are the most of the core's grouped paths, before `HAVING`; beside
-a `DISTINCT` aggregate the core builds sorted ones alone, and no partial
-ones.
+With a `DISTINCT` aggregate alongside, the groups do not spill, of the
+node's own aggregates or generic ones: the path is taken only when the
+planner's estimate of the groups and their states fits `hash_mem`. A
+state counts a type's average width, or an internal state's declared
+space or 8 kB, as the core estimates them, and a float's state that the
+node keeps apart its own size; the index counts two buckets of 4 bytes
+a group, a power of two of them and 1024 at least, as the node makes
+it. The groups are the most of the core's grouped paths, before
+`HAVING`; beside a `DISTINCT` aggregate the core builds sorted ones
+alone, and no partial ones.
 
 An aggregate with `FILTER (WHERE condition)` reads the rows the condition
 keeps: the condition is a computed column of the projection of its own,
