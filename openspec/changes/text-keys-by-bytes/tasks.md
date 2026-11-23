@@ -122,7 +122,7 @@ test.
       compared by their counts, not by which value stands for them;
       errors left to the suites. Check: `make crosscheck`, within the
       time CI gives it
-- [ ] 3.6 `tools/tessera-crosscheck`: the extension `tessera_parquet`,
+- [x] 3.6 `tools/tessera-crosscheck`: the extension `tessera_parquet`,
       and for each table of strings a Parquet twin, its rows read back
       from the heap table and written by the crate's writer in
       dictionary, plain and mixed chunks; each query over the twin

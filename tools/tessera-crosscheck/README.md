@@ -26,8 +26,10 @@ the setup; remove its directory. The server must be built with ICU.
 ## What it generates
 
 The data comes from PostgreSQL's `random()` after `setseed`, so a seed gives
-the same rows on the same build. There are three tables: `fact` (2000 rows
-by default), `dim` (200) and `tiny` (5).
+the same rows on the same build. There are four tables: `fact` (2000 rows
+by default), `dim` (200), `tiny` (5), and `words` (3000), a table of
+strings: `t` of a few words, which a Parquet writer keeps through a
+dictionary, and `u` of longer strings, most of them apart.
 
 - **Types.** int2, int4, int8, numeric at a fixed and at varying scales,
   float8, text, date, timestamp and bool.
@@ -78,6 +80,20 @@ FROM (query) q`, so that its rows compare in their order too: a subquery
 with ORDER BY is not pulled up, and the aggregate over it is not
 parallel.
 
+- **Over the Parquet twin.** `words` has a twin, `words_pq`, a foreign
+  table of `tessera_parquet`: its rows, read back from the heap table, are
+  written by the reader's crate into
+  `target/bench-runs/crosscheck-twin`, in a file of chunks through a
+  dictionary, one of plain chunks, and one of chunks whose dictionary
+  fills up and falls back to plain pages, which the setup checks in the
+  footer; a group of the first and of the last file is longer than a
+  window of the reader, 1024 rows. A query that reads `words`, and
+  whose modes agree, runs once more over the twin with Tessera on, and
+  is decided against the heap table with Tessera off, as two modes are:
+  a fault of the reader, which both modes over the twin would share,
+  shows there. A finding over the twin shrinks to one over the twin, and
+  its file keeps the seed's files of the twin beside it, with the SQL
+  that reads them.
 - **Agree.** The same rows. Or both modes fail, whatever their SQLSTATEs,
   unless one is an internal error (class XX). A batch evaluates a condition
   for its 64 rows before it computes their outputs, so of two rows that

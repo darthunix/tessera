@@ -10,9 +10,15 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+parquet.workspace = true
 postgres.workspace = true
 proptest.workspace = true
+# The writer of the Parquet twin of the table of strings.
+tessera-parquet = { path = "../../crates/tessera-parquet", features = ["test-files"] }
 tessera-pgtool.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
