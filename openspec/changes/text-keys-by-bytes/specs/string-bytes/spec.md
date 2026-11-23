@@ -103,12 +103,14 @@ SHALL NOT pass from one process to another. Without a dictionary,
 - **Verified by:**
   `test/sql/source_scan.sql::-- spec: string-bytes/Batches over one dictionary`
 
-#### Scenario: A dictionary given again after another
-- **WHEN** a grouping reads the Parquet column of a chunk through its
+#### Scenario: A dictionary given again
+- **WHEN** a grouping reads the Parquet column of two chunks, whose
+  dictionaries give one index to two values, each through its
   dictionary forward, a window of it behind the forward one, and the
   forward windows again
 - **THEN** its groups are those of the core
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet_cancel.sql::-- spec: string-bytes/A dictionary given again`
 
 #### Scenario: Identities of one backend
 - **WHEN** two modules of a backend take identities from Tessera's API
@@ -130,7 +132,8 @@ SHALL NOT pass from one process to another. Without a dictionary,
 - **WHEN** a dictionary holds the same bytes at two indexes and a
   grouping by the column reads rows of both
 - **THEN** the rows of both indexes fall into one group
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: string-bytes/Two indexes of one value`
 
 ### Requirement: Bytes checked by their column's rule
 A producer SHALL give in the bytes form only bytes that pass the check
@@ -226,12 +229,13 @@ be read as `Datum` values.
 - **Verified by:**
   `test/sql/parquet.sql::-- spec: string-bytes/Groups that spill`
 
-#### Scenario: A partial stage that sends its tables up
+#### Scenario: A partial stage's tables sent up
 - **WHEN** the partial stage of a parallel grouping by that column has
   more groups than `work_mem` holds, so that it sends a table up and
   starts the next over the same chunk's dictionary
 - **THEN** its groups are those of the core
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/A partial stage's tables sent up`
 
 #### Scenario: A nondeterministic collation
 - **WHEN** a grouping by a `text` column of a case-insensitive

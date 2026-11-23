@@ -499,6 +499,11 @@ agg_key_dict_reset(KeyDict *dict, uint64 values, int shares)
 	dict->block_used = 0;
 	dict->block_len = 0;
 	dict->form_table = NULL;
+	/* The numbers of a source's indexes: none until a batch names one. */
+	dict->index_identity = 0;
+	dict->index_count = 0;
+	dict->index_entries = NULL;
+	dict->index_share = tess_hash_memory_limit() / 8 / Max(shares, 1);
 }
 
 #define KEYDICT_BLOCK_LEN (64 * 1024)
@@ -609,6 +614,57 @@ keydict_prefetch_rows(KeyDict *dict, const TessDatumColumn *column, const TessRo
 }
 
 /*
+ * The numbers of the indexes of a source's dictionary of identity and
+ * nvalues values, all unseen: no more entries than its values, nor than the
+ * key's share; the array of an identity before is freed.
+ */
+static void
+keydict_index_reset(KeyDict *dict, uint64 identity, uint32 nvalues)
+{
+	Size		count = Min((Size) nvalues, dict->index_share / sizeof(KeyIndexEntry));
+
+	if (dict->index_entries != NULL)
+		pfree(dict->index_entries);
+	dict->index_entries = NULL;
+	dict->index_count = 0;
+	dict->index_identity = identity;
+	if (count == 0)
+		return;
+	dict->index_entries = MemoryContextAllocExtended(dict->context,
+													 mul_size(count, sizeof(KeyIndexEntry)),
+													 MCXT_ALLOC_HUGE);
+	for (Size index = 0; index < count; index++)
+		dict->index_entries[index].number = KEY_INDEX_UNSEEN;
+	dict->index_count = (uint32) count;
+}
+
+/* The entry of a row's index of a source's dictionary, or NULL past the array. */
+static inline KeyIndexEntry *
+keydict_index_of(KeyDict *dict, const TessBytesColumn *bytes, int row)
+{
+	int32		index;
+
+	if (bytes == NULL || bytes->indexes == NULL || bytes->dictionary == 0 ||
+		bytes->dictionary != dict->index_identity)
+		return NULL;
+	index = bytes->indexes[row];
+	return index >= 0 && (uint32) index < dict->index_count ?
+		&dict->index_entries[index] : NULL;
+}
+
+#ifdef USE_ASSERT_CHECKING
+/* A number found by an index holds the row's bytes. */
+static void
+keydict_check_index(KeyDict *dict, uint32 number, const char *data, uint32 len)
+{
+	dict->probe_data = data;
+	dict->probe_len = len;
+	if (number >= dict->count || !keydict_probe_equal(dict, dict->values[number]))
+		elog(ERROR, "TessAgg found by a source's index a number of other bytes");
+}
+#endif
+
+/*
  * The numbers of the rows of rows, of a column of Datums or, where bytes
  * is given, of a column in the bytes form, the hashes of the latter's
  * rows already in hashes where hashed: one loop for both forms, so that
@@ -626,6 +682,7 @@ keydict_numbers(KeyDict *dict, const TessDatumColumn *datums, const TessBytesCol
 
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
+		KeyIndexEntry *cached = NULL;
 		Datum		key;
 		uint32		hash;
 		int64		number;
@@ -638,6 +695,17 @@ keydict_numbers(KeyDict *dict, const TessDatumColumn *datums, const TessBytesCol
 		}
 		if (bytes != NULL)
 		{
+			/* A source's index met before: its number and hash. */
+			cached = keydict_index_of(dict, bytes, row);
+			if (cached != NULL && cached->number != KEY_INDEX_UNSEEN)
+			{
+#ifdef USE_ASSERT_CHECKING
+				keydict_check_index(dict, cached->number, bytes->data[row], bytes->lengths[row]);
+#endif
+				numbers[row] = Int64GetDatum((int64) cached->number);
+				hashes[row] = cached->hash;
+				continue;
+			}
 			dict->probe_data = bytes->data[row];
 			dict->probe_len = bytes->lengths[row];
 			key = probe;
@@ -671,6 +739,12 @@ keydict_numbers(KeyDict *dict, const TessDatumColumn *datums, const TessBytesCol
 			number = entry != NULL ? (int64) entry->number : -1;
 		}
 		numbers[row] = Int64GetDatum(number);
+		/* A value the dictionary holds: its index's number from now on. */
+		if (cached != NULL && number >= 0)
+		{
+			cached->number = (uint32) number;
+			cached->hash = hash;
+		}
 	}
 }
 
@@ -705,15 +779,27 @@ agg_keydict_numbers_bytes(KeyDict *dict, const TessBytesColumn *column,
 	int			row = -1;
 
 	Assert(dict->bytes == TESS_KEY_BYTES_WHOLE);
-	/* Past the caches, each bucket asked of memory first, by the hash kept. */
+	/* A source's dictionary of another identity: its indexes' numbers anew. */
+	if (column->dictionary != 0 && column->indexes != NULL &&
+		dict->index_identity != column->dictionary)
+		keydict_index_reset(dict, column->dictionary, column->nvalues);
+	/*
+	 * Past the caches, each bucket asked of memory first, by the hash kept;
+	 * not of a row whose index is met before, which looks nothing up.
+	 */
 	if (hashed)
 		while ((row = tess_row_mask_next(rows, row)) >= 0)
-			if (!column->isnull[row])
+		{
+			KeyIndexEntry *cached = keydict_index_of(dict, column, row);
+
+			if (!column->isnull[row] &&
+				(cached == NULL || cached->number == KEY_INDEX_UNSEEN))
 			{
 				hashes[row] = hash_bytes((const unsigned char *) column->data[row],
 										 (int) column->lengths[row]);
 				keydict_prefetch(&dict->table->data[hashes[row] & dict->table->sizemask]);
 			}
+		}
 	keydict_numbers(dict, NULL, column, hashed, rows, insert, numbers, hashes);
 }
 

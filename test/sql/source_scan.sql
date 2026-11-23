@@ -821,6 +821,59 @@ RESET work_mem;
 SELECT tessera_test_scan_source_asks();
 DROP FOREIGN TABLE ft_bytes_mixed;
 DROP TABLE ht_bytes_mixed;
+-- spec: string-bytes/Two indexes of one value
+-- A source's index to a key's number: a row of an index met before costs
+-- no hash and no lookup. The source gives an even row of a batch its
+-- value as its index and an odd row the value plus 2047, so that of 2047
+-- values, each read four times, twice at either parity, every value
+-- stands at two indexes, each met twice: the rows of both fall into one
+-- group. Under a work_mem of 64kB a key keeps the numbers of the first
+-- 2048 indexes, its share of the grouping's memory: the rows of the
+-- indexes 0 to 2047 find them there, the last at the array's end, and
+-- those of 2048 to 4093, past it, are looked up by their bytes; under the
+-- default work_mem every index is kept. A rescan for each outer row, the
+-- source keeping its dictionary's identity, drops the numbers with the
+-- key dictionary it resets. The heap's groups each time; an assert build
+-- checks each number found by an index against the row's bytes.
+CREATE FOREIGN TABLE ft_bytes_index (a int4, s text OPTIONS (mod '2047'))
+    SERVER scan_server OPTIONS (rows '8192', bytes 'twice', rescan_identities 'keep');
+CREATE TABLE ht_bytes_index AS SELECT i AS a, (i % 2047)::text AS s
+    FROM generate_series(1, 8192) AS i;
+SET work_mem = '64kB';
+SELECT source_same('SELECT s, count(*) FROM ft_bytes_index GROUP BY s');
+RESET work_mem;
+SELECT source_same('SELECT s, count(*) FROM ft_bytes_index GROUP BY s');
+SELECT source_same('SELECT g, (SELECT count(*) FROM (SELECT s FROM ft_bytes_index
+                                                    WHERE a > g * 1000 GROUP BY s) q)
+                    FROM generate_series(1, 3) AS g');
+SELECT tessera_test_scan_source_asks();
+DROP FOREIGN TABLE ft_bytes_index;
+DROP TABLE ht_bytes_index;
+-- Large sparse indexes: of a dictionary of two million values, the key
+-- keeps no more numbers than its share of the default work_mem, an
+-- eighth of hash_mem, which the grouping counts with its groups: the
+-- table writes nothing to disk, where an array of every value, 16 MB,
+-- would pass hash_mem and freeze it. An odd row's index, a million past
+-- its value, lies far past the array and is looked up by its bytes. The
+-- heap's groups.
+CREATE FUNCTION agg_spilled(query text) RETURNS bool LANGUAGE plpgsql AS $$
+DECLARE
+    plan jsonb;
+BEGIN
+    EXECUTE format('EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF, SUMMARY OFF, BUFFERS OFF, '
+                   'COSTS OFF) %s', query) INTO plan;
+    RETURN jsonb_path_exists(plan,
+        '$.** ? (@."Custom Plan Provider" == "TessAgg")."Disk Usage"');
+END $$;
+CREATE FOREIGN TABLE ft_bytes_sparse (a int4, s text OPTIONS (mod '1000000'))
+    SERVER scan_server OPTIONS (rows '600', bytes 'twice');
+CREATE TABLE ht_bytes_sparse AS SELECT i AS a, (i % 1000000)::text AS s
+    FROM generate_series(1, 600) AS i;
+SELECT source_same('SELECT s, count(*) FROM ft_bytes_sparse GROUP BY s');
+SELECT NOT agg_spilled('SELECT s, count(*) FROM ft_bytes_sparse GROUP BY s') AS within_hash_mem;
+DROP FOREIGN TABLE ft_bytes_sparse;
+DROP TABLE ht_bytes_sparse;
+DROP FUNCTION agg_spilled(text);
 SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 DROP FOREIGN TABLE ft_bytes;
 DROP TABLE ht_bytes;
