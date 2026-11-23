@@ -41,7 +41,7 @@ form's own, a batch's operations, Tessera's API and a batch function's
 call, gain fields only at their end and are read by the size their
 caller gives, so that a module built against an older header reads them
 as it did.
-- **Checked by:** pending
+- **Checked by:** `test/installed/layouts.c::TessBytesColumn is 56 bytes`
 
 ## Forecast
 

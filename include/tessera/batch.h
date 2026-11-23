@@ -71,6 +71,51 @@ tess_column_decimal_rows(const TessDatumColumn *column)
 }
 
 /*
+ * A string column's bytes as the producer holds them, the bytes form of a
+ * column of text, varchar or bytea, indexed by physical row number like a
+ * TessDatumColumn and governed by the TessBatchOps ABI as it is. For a row
+ * asked that is not NULL, data points to the value's bytes and lengths
+ * gives their count: the bytes of the value without its header, never
+ * compressed nor stored apart; the pointer of such a row is never NULL, an
+ * empty value's too. Where the producer holds the column through a
+ * dictionary, it may give indexes, each such row the index of its value,
+ * 0 or more and below nvalues, the dictionary's count of values, and
+ * dictionary the dictionary's identity, a number other than 0 taken from
+ * the identity operation of Tessera's API (tessera/bridge.h), one counter
+ * of the backend; a producer of a backend whose API lacks that operation
+ * gives no dictionary. Batches that follow one another over one dictionary
+ * give it the same identity, a dictionary given again after another may
+ * get a new one, and no two dictionaries share one, so a consumer may keep
+ * what it learned of an index while the identity stays; an identity never
+ * passes from one process to another. Rows of one index hold the same
+ * bytes; rows of two indexes may too. Without a dictionary, indexes is
+ * NULL and nvalues and dictionary 0.
+ *
+ * Every pointer stays valid, its bytes unchanged, until the batch is
+ * released, whatever the consumer asks of the batch in between; the
+ * consumer keeps none of them past the release. The bytes passed the
+ * column's rule, as a Datum made for the row would. The caller sets
+ * struct_size; the provider keeps it, fills the fields struct_size covers
+ * and no other, and answers false for a size below
+ * TESS_BYTES_COLUMN_MIN_SIZE. Rows not asked hold entries of no meaning
+ * that a consumer may load.
+ */
+typedef struct TessBytesColumn
+{
+	Size		struct_size;
+	int			nrows;
+	uint32		nvalues;
+	const bool *isnull;
+	const char *const *data;
+	const uint32 *lengths;
+	const int32 *indexes;
+	uint64		dictionary;
+} TessBytesColumn;
+
+#define TESS_BYTES_COLUMN_MIN_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessBytesColumn, dictionary)
+
+/*
  * Operations supplied by the owner of a batch's physical representation.
  * The table remains valid for at least as long as every batch that uses it.
  */
@@ -85,6 +130,17 @@ typedef struct TessBatchOps
 								 TessDatumColumn *result);
 	/* Optional cleanup called when the exclusive consumer is finished. */
 	void		(*release) (TessBatch *batch);
+	/*
+	 * Optional (check TESS_ABI_HAS_FIELD, or ask tess_batch_bytes_column): a
+	 * string column in the bytes form for the rows of the mask, true when it
+	 * is given; false, the result of no meaning, for a column not offered
+	 * so, which the consumer then reads through get_datum_column. A row
+	 * asked whose bytes fail the column's rule raises the error that making
+	 * its Datum would; a row not asked never fails the call.
+	 */
+	bool		(*get_bytes_column) (TessBatch *batch, int column,
+									 const TessRowMask *rows,
+									 TessBytesColumn *result);
 } TessBatchOps;
 
 #define TESS_BATCH_OPS_MIN_SIZE \
@@ -119,6 +175,24 @@ struct TessBatch
 
 #define TESS_BATCH_MIN_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessBatch, private_data)
+
+/*
+ * A column of the batch in the bytes form, for the rows of the mask: false
+ * for a batch whose operations have no get_bytes_column, and for a column
+ * the provider does not offer so; result is initialized here.
+ */
+static inline bool
+tess_batch_bytes_column(TessBatch *batch, int column, const TessRowMask *rows,
+						TessBytesColumn *result)
+{
+	const TessBatchOps *ops = batch->ops;
+
+	*result = (TessBytesColumn) TESS_STRUCT_INITIALIZER(TessBytesColumn);
+	if (!TESS_ABI_HAS_FIELD(ops, TessBatchOps, get_bytes_column) ||
+		ops->get_bytes_column == NULL)
+		return false;
+	return ops->get_bytes_column(batch, column, rows, result);
+}
 
 /* Whether reading the batch's columns evaluates no expression. */
 static inline bool

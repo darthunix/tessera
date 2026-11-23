@@ -11,4 +11,13 @@ LANGUAGE C STRICT;
 SELECT tessera_test_batch() AS batch \gset
 \echo :batch
 
+CREATE FUNCTION tessera_test_batch_bytes()
+RETURNS boolean
+AS :'batch_test', 'tessera_test_batch_bytes'
+LANGUAGE C STRICT;
+
+SELECT tessera_test_batch_bytes() AS bytes \gset
+\echo :bytes
+
+DROP FUNCTION tessera_test_batch_bytes();
 DROP FUNCTION tessera_test_batch();
