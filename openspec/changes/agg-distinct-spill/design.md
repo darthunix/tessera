@@ -298,6 +298,39 @@ by one, so the core's counts carry their instrumentation.
    missed. Expected over `hits.parquet`: on at most half of stage 2's
    cycles of the core's sort; DuckDB still fewer.
 
+### Results
+
+The runs are in `docs/benchmarks/2026-11-23-agg-distinct-spill/`.
+
+1. Tessera on takes 0.13 to 0.34 of the core's cycles wherever its
+   node runs, 0.59 and 0.71 for the groups near half of `hash_mem`.
+   The groups near half at 4 MB miss the threshold, 1.053: they pass
+   half by the estimate, so both modes run the core's plan, Tessera
+   giving it the scan alone; `main` counts the same. The plan forgot
+   to leave the case out at 4 MB, as it left the groups thought more
+   than they are; the maintainer kept it. The first runs found those
+   groups at 16 MB at 34 689 kB of a `hash_mem` of 32 768: the planner's
+   estimate of the groups' bytes counted no index. It counts the index
+   now, and the node takes 30 593 kB.
+2. The first counts against `main` found 5.9 % and 8.6 % more
+   instructions for one and two sets at 64 MB, past the 1 %. Three
+   fixes, each a hypothesis counted on its own build, brought them to
+   0.6 % and 0.8 %, and the grouping by two keys to 4.9 % fewer: the
+   reference key read without a mask of the rows ready, the machine
+   of a set asked again only when the memory moved, the copy of the
+   references through a local pointer. By cycles, over three rounds a
+   side, the tool flags none of the four cases counted, the control
+   moving 2 to 4 % with the machine's unequal cores; the instructions
+   resolve the threshold. The groups near half at 64 MB count 14 %
+   more: their pairs fit by the estimate, not in fact, and where `main`
+   held 143 489 kB past a `hash_mem` of 131 072, the node writes them
+   to disk and stays within it.
+3. Tessera on takes 0.09 to 0.22 of Tessera off's cycles on Q9 and Q10
+   in every row, Q10 over the ten files at 8 workers among them. Over
+   `hits.parquet` Q9 and Q10 take 0.22 and 0.28 of stage 2's cycles
+   of the core's sort; pg_duckdb with one thread 2.4 times fewer than
+   Tessera.
+
 ## Decisions of the maintainer
 
 - 2026-11-22: fix both causes of Q10 going to the core, the gate of
@@ -309,6 +342,10 @@ by one, so the core's counts carry their instrumentation.
   fit by the estimate; where they fit, a set freezes by the memory the
   node holds, so that a grouping whose groups the planner thinks more
   than they are runs as today.
+- 2026-11-23: the runs are judged by cycles wherever pg_pmu counts
+  them; the instructions go beside them.
+- 2026-11-23: the groups near half of `hash_mem` stay in the family at
+  4 MB, their 1.053 the scan's tax under the core's plan.
 
 ## Open Questions
 

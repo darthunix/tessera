@@ -37,16 +37,17 @@ one pull request; the work and the close are a second.
       sets of their own and frozen again, count the distinct pairs of
       each group as a set in memory does. No production code. Check:
       `cargo test --locked -p relspill`
-- [ ] 3.2 The family `spill` of `bench/pg` gets the cases of the
+- [x] 3.2 The family `spill` of `bench/pg` gets the cases of the
       design's measurement plan, named in its lists and in
       `bench/pg/README.md`. Check: the family at `repetitions` 1 on the
       maintainer's word, its plans showing the core's grouping at 4 and
       16 MB, where the pairs do not fit by the estimate, and `TessAgg`
-      at 64 MB
+      at 64 MB. Since task 4.4 the plans are `TessAgg`'s at every
+      `work_mem`, but where the groups pass half of `hash_mem`
 
 ## 4. The set that spills
 
-- [ ] 4.1 The set of a grouping is keyed by its group's reference and
+- [x] 4.1 The set of a grouping is keyed by its group's reference and
       the argument; nothing else changes. Tests: the suites as they
       are, and DISTINCT cases of `test/sql/agg.sql` with keys of
       several kinds and several keys. `docs/nodes.md` says the set's
@@ -92,7 +93,7 @@ one pull request; the work and the close are a second.
 
 ## 5. The measurement
 
-- [ ] 5.1 The runs of the design's measurement plan, on the maintainer's
+- [x] 5.1 The runs of the design's measurement plan, on the maintainer's
       word, by the cycles and instructions pg_pmu counts: the family
       `spill`, the counts of the path that fits against `main`, and
       ClickBench Q9 and Q10 on a local merge with the branch of

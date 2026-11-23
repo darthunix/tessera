@@ -1,0 +1,12 @@
+tessera-clickbench check, off,on,duckdb w0 t1 (10 files), modes off,on,duckdb, timeout 300 s
+Q9    off 2.36 s reference  on 0.30 s same  duckdb 0.16 s same  10 rows
+Q10   off 2.58 s reference  on 0.49 s same  duckdb 0.24 s same (cut rows contained)  10 rows
+tessera-clickbench check, off,on,duckdb w8 t9 (10 files), modes off,on,duckdb, timeout 300 s
+Q9    off 1.01 s reference  on 0.30 s same  duckdb 0.03 s same  10 rows
+Q10   off 1.14 s reference  on 0.50 s same  duckdb 0.04 s same (cut rows contained)  10 rows
+tessera-clickbench check, off,on,duckdb w0 t1 (1 file), modes off,on,duckdb, timeout 300 s
+Q9    off 29.78 s reference  on 4.18 s same  duckdb 1.71 s same  10 rows
+Q10   off 32.14 s reference  on 6.20 s same  duckdb 2.46 s same (cut rows contained)  10 rows
+tessera-clickbench check, off,on,duckdb w8 t9 (1 file), modes off,on,duckdb, timeout 300 s
+Q9    off 8.88 s reference  on 4.21 s same  duckdb 0.26 s same  10 rows
+Q10   off 10.29 s reference  on 6.34 s same  duckdb 0.36 s same (cut rows contained)  10 rows

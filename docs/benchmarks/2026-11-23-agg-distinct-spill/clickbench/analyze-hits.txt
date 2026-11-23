@@ -1,0 +1,28 @@
+   Input Batches: 1
+   Input Rows: 10
+         Memory Usage: 69 kB
+         Input Batches: 142
+         Input Rows: 9040
+         ->  Custom Scan (TessAgg) (actual rows=9040.00 loops=1)
+               Memory Usage: 123649 kB
+               Batches: 32
+               Disk Usage: 1158215 kB
+               Input Batches: 1562479
+               Input Rows: 99997497
+               Groups: 9040
+               Spilled Pairs: 79468659
+                     Row Groups: 226
+   Input Batches: 1
+   Input Rows: 10
+         Memory Usage: 133 kB
+         Input Batches: 142
+         Input Rows: 9040
+         ->  Custom Scan (TessAgg) (actual rows=9040.00 loops=1)
+               Memory Usage: 124673 kB
+               Batches: 32
+               Disk Usage: 1224034 kB
+               Input Batches: 1562479
+               Input Rows: 99997497
+               Groups: 9040
+               Spilled Pairs: 79468659
+                     Row Groups: 226

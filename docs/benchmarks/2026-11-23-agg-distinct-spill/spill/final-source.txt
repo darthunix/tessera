@@ -1,0 +1,14 @@
+HEAD 8e126650f0cb7f551acc8687070d68cbdd9e3918
+metric cycles
+workers 0
+cases ^distinct_[a-z]+_4mb$
+repetitions 3
+scale 1
+shared_buffers 2GB
+status:
+sha256:
+8600f196b6c637141d70941a9aa731cf11efc745cdd5693c0ed24691da02f2aa  /Users/darthunix/git/postgres-review/build-release/lib/tessera.dylib
+61baa218849e8963eacd8816f4274ea2ee462951b5282d81da456feb270bf9ac  /Users/darthunix/git/postgres-review/build-release/lib/tessera_nodes.dylib
+3a0ef67ade16ab1c914076df38ebb383945182f84a0f119b945f68bf7f7ebf73  /Users/darthunix/git/postgres-review/build-release/lib/tessera_kernels.dylib
+e36c1cdb1274fdb47277c62efee3513aef92052309615e0ba7eae776503e10c9  /Users/darthunix/git/postgres-review/build-release/lib/libtessera_runtime.a
+753ce236dff3eb515f21ba16ac975f7570da4aa4b9a582b0328b8a58ce2746f4  /Users/darthunix/git/postgres-review/build-release/bin/postgres

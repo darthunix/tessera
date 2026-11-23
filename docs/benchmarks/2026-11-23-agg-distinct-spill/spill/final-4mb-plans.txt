@@ -1,0 +1,262 @@
+SET
+SET
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum(q.n))
+   Input Batches: 16
+   Input Rows: 1000
+   Kernel Calls: 0
+   Computed Datums: 1000
+   ->  Custom Scan (TessPack) (actual rows=1000.00 loops=1)
+         Output: q.n
+         Rows Kept As: forwarded batches
+         Batches: 16
+         ->  Subquery Scan on q (never executed)
+               Output: q.n
+               ->  Custom Scan (TessAgg) (actual rows=1000.00 loops=1)
+                     Output: distinct_big.g, (count(DISTINCT distinct_big.v))
+                     Group Key: distinct_big.g
+                     Memory Usage: 8073 kB
+                     Batches: 32
+                     Disk Usage: 52755 kB
+                     Input Batches: 66667
+                     Input Rows: 4000000
+                     Kernel Calls: 125020
+                     Computed Datums: 8000000
+                     Groups: 1000
+                     Table Grows: 0
+                     Evictions: 0
+                     Spilled Chunks: 14600
+                     Spilled Pairs: 3733712
+                     ->  Custom Scan (TessHeapScan) on pg_temp.distinct_big (actual rows=4000000.00 loops=1)
+                           Output: distinct_big.g, distinct_big.v
+                           Batch Size: 64
+                           Batches: 66667
+                           Pages: 33334
+                           Deformed Datums: 8000000
+                           Restarted Datums: 0
+(34 rows)
+
+SET
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   Output: sum((count(DISTINCT distinct_big.v)))
+   ->  GroupAggregate (actual rows=1000.00 loops=1)
+         Output: distinct_big.g, count(DISTINCT distinct_big.v)
+         Group Key: distinct_big.g
+         ->  Sort (actual rows=4000000.00 loops=1)
+               Output: distinct_big.g, distinct_big.v
+               Sort Key: distinct_big.g, distinct_big.v
+               Sort Method: external merge  Disk: 101784kB
+               ->  Seq Scan on pg_temp.distinct_big (actual rows=4000000.00 loops=1)
+                     Output: distinct_big.g, distinct_big.v
+(11 rows)
+
+SET
+SET
+                                                         QUERY PLAN                                                         
+----------------------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum(q.n)), (sum(q.t)), (sum(q.a))
+   Input Batches: 16
+   Input Rows: 1000
+   Kernel Calls: 0
+   Computed Datums: 3000
+   ->  Custom Scan (TessPack) (actual rows=1000.00 loops=1)
+         Output: q.n, q.t, q.a
+         Rows Kept As: forwarded batches
+         Batches: 16
+         ->  Subquery Scan on q (never executed)
+               Output: q.n, q.t, q.a
+               ->  Custom Scan (TessAgg) (actual rows=1000.00 loops=1)
+                     Output: distinct_big.g, (count(DISTINCT distinct_big.v)), (sum(distinct_big.s)), (avg(distinct_big.s))
+                     Group Key: distinct_big.g
+                     Memory Usage: 8329 kB
+                     Batches: 32
+                     Disk Usage: 60110 kB
+                     Input Batches: 66667
+                     Input Rows: 4000000
+                     Kernel Calls: 125082
+                     Computed Datums: 16000000
+                     Groups: 1000
+                     Table Grows: 0
+                     Evictions: 0
+                     Spilled Chunks: 14618
+                     Spilled Pairs: 3737792
+                     ->  Custom Scan (TessHeapScan) on pg_temp.distinct_big (actual rows=4000000.00 loops=1)
+                           Output: distinct_big.g, distinct_big.v, distinct_big.s
+                           Batch Size: 64
+                           Batches: 66667
+                           Pages: 33334
+                           Deformed Datums: 12000000
+                           Restarted Datums: 0
+(34 rows)
+
+SET
+                                                QUERY PLAN                                                
+----------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   Output: sum((count(DISTINCT distinct_big.v))), sum((sum(distinct_big.s))), sum((avg(distinct_big.s)))
+   ->  GroupAggregate (actual rows=1000.00 loops=1)
+         Output: distinct_big.g, count(DISTINCT distinct_big.v), sum(distinct_big.s), avg(distinct_big.s)
+         Group Key: distinct_big.g
+         ->  Sort (actual rows=4000000.00 loops=1)
+               Output: distinct_big.g, distinct_big.v, distinct_big.s
+               Sort Key: distinct_big.g, distinct_big.v
+               Sort Method: external merge  Disk: 109632kB
+               ->  Seq Scan on pg_temp.distinct_big (actual rows=4000000.00 loops=1)
+                     Output: distinct_big.g, distinct_big.v, distinct_big.s
+(11 rows)
+
+SET
+SET
+                                                   QUERY PLAN                                                   
+----------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum(q.n)), (sum(q.m))
+   Input Batches: 16
+   Input Rows: 1000
+   Kernel Calls: 0
+   Computed Datums: 2000
+   ->  Custom Scan (TessPack) (actual rows=1000.00 loops=1)
+         Output: q.n, q.m
+         Rows Kept As: forwarded batches
+         Batches: 16
+         ->  Subquery Scan on q (never executed)
+               Output: q.n, q.m
+               ->  Custom Scan (TessAgg) (actual rows=1000.00 loops=1)
+                     Output: distinct_big.g, (count(DISTINCT distinct_big.v)), (count(DISTINCT distinct_big.w))
+                     Group Key: distinct_big.g
+                     Memory Usage: 9930 kB
+                     Batches: 64
+                     Disk Usage: 83326 kB
+                     Input Batches: 66667
+                     Input Rows: 4000000
+                     Kernel Calls: 247800
+                     Computed Datums: 12000000
+                     Groups: 1000
+                     Table Grows: 0
+                     Evictions: 0
+                     Spilled Chunks: 28641
+                     Spilled Pairs: 7323760
+                     ->  Custom Scan (TessHeapScan) on pg_temp.distinct_big (actual rows=4000000.00 loops=1)
+                           Output: distinct_big.g, distinct_big.v, distinct_big.w
+                           Batch Size: 64
+                           Batches: 66667
+                           Pages: 33334
+                           Deformed Datums: 12000000
+                           Restarted Datums: 0
+(34 rows)
+
+SET
+                                           QUERY PLAN                                           
+------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   Output: sum((count(DISTINCT distinct_big.v))), sum((count(DISTINCT distinct_big.w)))
+   ->  GroupAggregate (actual rows=1000.00 loops=1)
+         Output: distinct_big.g, count(DISTINCT distinct_big.v), count(DISTINCT distinct_big.w)
+         Group Key: distinct_big.g
+         ->  Sort (actual rows=4000000.00 loops=1)
+               Output: distinct_big.g, distinct_big.v, distinct_big.w
+               Sort Key: distinct_big.g, distinct_big.v
+               Sort Method: external merge  Disk: 133168kB
+               ->  Seq Scan on pg_temp.distinct_big (actual rows=4000000.00 loops=1)
+                     Output: distinct_big.g, distinct_big.v, distinct_big.w
+(11 rows)
+
+SET
+SET
+                                                 QUERY PLAN                                                  
+-------------------------------------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Output: (sum(q.n))
+   Input Batches: 16
+   Input Rows: 1000
+   Kernel Calls: 0
+   Computed Datums: 1000
+   ->  Custom Scan (TessPack) (actual rows=1000.00 loops=1)
+         Output: q.n
+         Rows Kept As: forwarded batches
+         Batches: 16
+         ->  Subquery Scan on q (never executed)
+               Output: q.n
+               ->  Custom Scan (TessAgg) (actual rows=1000.00 loops=1)
+                     Output: distinct_big.k1, distinct_big.k2, (count(DISTINCT distinct_big.v))
+                     Group Key: distinct_big.k1, distinct_big.k2
+                     Memory Usage: 8073 kB
+                     Batches: 32
+                     Disk Usage: 52753 kB
+                     Input Batches: 66667
+                     Input Rows: 4000000
+                     Kernel Calls: 125022
+                     Computed Datums: 12000000
+                     Groups: 1000
+                     Table Grows: 0
+                     Evictions: 0
+                     Spilled Chunks: 14600
+                     Spilled Pairs: 3733712
+                     ->  Custom Scan (TessHeapScan) on pg_temp.distinct_big (actual rows=4000000.00 loops=1)
+                           Output: distinct_big.k1, distinct_big.k2, distinct_big.v
+                           Batch Size: 64
+                           Batches: 66667
+                           Pages: 33334
+                           Deformed Datums: 12000000
+                           Restarted Datums: 0
+(34 rows)
+
+SET
+                                     QUERY PLAN                                      
+-------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   Output: sum((count(DISTINCT distinct_big.v)))
+   ->  GroupAggregate (actual rows=1000.00 loops=1)
+         Output: distinct_big.k1, distinct_big.k2, count(DISTINCT distinct_big.v)
+         Group Key: distinct_big.k1, distinct_big.k2
+         ->  Sort (actual rows=4000000.00 loops=1)
+               Output: distinct_big.k1, distinct_big.k2, distinct_big.v
+               Sort Key: distinct_big.k1, distinct_big.k2, distinct_big.v
+               Sort Method: external merge  Disk: 101784kB
+               ->  Seq Scan on pg_temp.distinct_big (actual rows=4000000.00 loops=1)
+                     Output: distinct_big.k1, distinct_big.k2, distinct_big.v
+(11 rows)
+
+SET
+SET
+                                               QUERY PLAN                                               
+--------------------------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   Output: sum((count(DISTINCT distinct_half.v)))
+   ->  GroupAggregate (actual rows=300000.00 loops=1)
+         Output: distinct_half.k, count(DISTINCT distinct_half.v)
+         Group Key: distinct_half.k
+         ->  Sort (actual rows=3000000.00 loops=1)
+               Output: distinct_half.k, distinct_half.v
+               Sort Key: distinct_half.k, distinct_half.v
+               Sort Method: external merge  Disk: 76344kB
+               ->  Custom Scan (TessHeapScan) on pg_temp.distinct_half (actual rows=3000000.00 loops=1)
+                     Output: distinct_half.k, distinct_half.v
+                     Batch Size: 64
+                     Batches: 48649
+                     Pages: 16217
+                     Deformed Datums: 6000000
+                     Restarted Datums: 0
+(16 rows)
+
+SET
+                                      QUERY PLAN                                      
+--------------------------------------------------------------------------------------
+ Aggregate (actual rows=1.00 loops=1)
+   Output: sum((count(DISTINCT distinct_half.v)))
+   ->  GroupAggregate (actual rows=300000.00 loops=1)
+         Output: distinct_half.k, count(DISTINCT distinct_half.v)
+         Group Key: distinct_half.k
+         ->  Sort (actual rows=3000000.00 loops=1)
+               Output: distinct_half.k, distinct_half.v
+               Sort Key: distinct_half.k, distinct_half.v
+               Sort Method: external merge  Disk: 76344kB
+               ->  Seq Scan on pg_temp.distinct_half (actual rows=3000000.00 loops=1)
+                     Output: distinct_half.k, distinct_half.v
+(11 rows)
+

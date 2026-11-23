@@ -7,6 +7,11 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-23, DISTINCT sets past the
+  limit](2026-11-23-agg-distinct-spill/README.md): the cycles of the
+  new cases of `spill`, of the path that fits against `main` and of
+  ClickBench's Q9 and Q10, Apple M5 Pro, PostgreSQL 20devel and 19rc2,
+  the change `agg-distinct-spill` against 75fb4ba4.
 - [2026-11-20, row counts checked on whole words of the
   aggregates](2026-11-20-row-counts/README.md): the counts of
   `aggregate_int32` and `aggregate_int64` of two places of the check,
