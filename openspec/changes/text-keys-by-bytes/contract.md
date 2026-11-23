@@ -44,6 +44,26 @@ caller gives, so that a module built against an older header reads them
 as it did.
 - **Checked by:** `test/installed/layouts.c::TessBytesColumn is 56 bytes`
 
+### No collation library of Tessera's own
+No module of Tessera links a library of collations, ICU among them, and
+no crate of its Rust code orders strings by a language's rules, so that
+every comparison under a collation in a backend is made by the one
+library the server loaded, and a node of Tessera inside a plan of the
+core orders rows as the core's nodes above and below it do.
+- **Checked by:** `.github/scripts/check-collation.sh::libicu`
+
+### Strings by their bytes only where PostgreSQL does
+A node orders strings by their bytes only under a collation that
+PostgreSQL itself orders by bytes, `C`, `POSIX` and the builtin
+provider's, and hashes or compares them for equality by their bytes only
+under a deterministic collation, and leaves every other to PostgreSQL's
+comparator and hash, so that its order and its groups are the core's
+under every collation and every version of ICU and of the C library.
+- **Checked by:** agent review — list every place that orders, hashes
+  or compares strings by their bytes and, for each, the gate it passes:
+  `collate_is_c` for an order, a deterministic collation for equality
+  and a hash; a place without its gate fails the rule
+
 ## Forecast
 
 - **The heap source's form.** Pointers into the pages the heap batch
