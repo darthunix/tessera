@@ -128,7 +128,7 @@ synchronous_commit = off
         // UTF8, and the C collation where a query names none: text compares
         // by its bytes, and under the collations the setup makes as they do.
         initdb_args: vec!["--no-locale".into(), "--encoding=UTF8".into()],
-        extensions: vec!["tessera".into()],
+        extensions: vec!["tessera".into(), "tessera_parquet".into()],
         stop_hint: "cargo run -p tessera-crosscheck -- stop".into(),
     };
     Cluster::new(pg, &runs_dir(), spec)
@@ -139,6 +139,7 @@ synchronous_commit = off
 struct Counts {
     queries: u32,
     with_tessera: u32,
+    over_twin: u32,
     kinds: BTreeMap<&'static str, u32>,
 }
 
@@ -157,8 +158,13 @@ impl Finding {
     /// reaches a row first.
     fn headline(&self) -> String {
         let class = self.original.1.class().unwrap_or("finding");
-        if self.verdict.is_finding() {
+        let class = if self.original.1.twin {
+            format!("{class} over the Parquet twin")
+        } else {
             class.to_string()
+        };
+        if self.verdict.is_finding() {
+            class
         } else {
             format!("{class}, not repeated by the shrunk query on a run of its own")
         }
@@ -196,7 +202,8 @@ fn run_seed(
         let shrinking = original
             .borrow()
             .as_ref()
-            .and_then(|(_, verdict)| verdict.class());
+            .filter(|(_, verdict)| verdict.class().is_some())
+            .map(|(_, verdict)| verdict.clone());
         if deadline.is_some_and(|deadline| Instant::now() > deadline) && shrinking.is_none() {
             return Ok(());
         }
@@ -209,7 +216,7 @@ fn run_seed(
             Err(error) => return Err(TestCaseError::fail(format!("the server: {error:#}"))),
         };
         match shrinking {
-            Some(class) if verdict.class() == Some(class) => {
+            Some(original) if oracle::same_finding(&original, &verdict) => {
                 Err(TestCaseError::fail(verdict.describe()))
             }
             Some(_) => Ok(()),
@@ -225,6 +232,7 @@ fn run_seed(
                 if oracle.uses_tessera(&query).unwrap_or(false) {
                     counts.with_tessera += 1;
                 }
+                counts.over_twin += u32::from(oracle::reads_twinned(&query.sql()));
                 Ok(())
             }
         }
@@ -254,18 +262,41 @@ fn run_seed(
 
 /// Writes a finding as a file a suite case can be made of: the data's
 /// SQL, the settings and the query in both modes.
-fn write_finding(finding: &Finding, args: &RunArgs) -> Result<PathBuf> {
-    let directory = runs_dir().join("crosscheck");
-    fs::create_dir_all(&directory)?;
+fn write_finding(
+    finding: &Finding,
+    args: &RunArgs,
+    twin_files: &[PathBuf],
+    directory: &Path,
+) -> Result<PathBuf> {
+    fs::create_dir_all(directory)?;
     let path = directory.join(format!("finding-{}.sql", finding.seed));
     let sql = finding.query.sql();
     let comment = |text: String| text.replace('\n', "\n-- ");
+    // A finding over the twin, first or on its run of its own, keeps the
+    // seed's files of the twin beside it: the next seed writes others.
+    let twin = if finding.original.1.twin || finding.verdict.twin {
+        let mut copies = Vec::new();
+        for (index, file) in twin_files.iter().enumerate() {
+            let copy = directory.join(format!("finding-{}-words-{index}.parquet", finding.seed));
+            fs::copy(file, &copy)?;
+            copies.push(copy);
+        }
+        format!(
+            "-- over the Parquet twin of words, from the files beside this one:\n\
+             CREATE EXTENSION IF NOT EXISTS tessera_parquet;\n{}\n\
+             SET tessera.enable = on;\n{};\n",
+            oracle::twin_table(&copies),
+            oracle::twinned(&sql)
+        )
+    } else {
+        String::new()
+    };
     let text = format!(
         "-- tessera-crosscheck finding, seed {seed}, {rows} rows: {headline}\n\
          -- {verdict}\n\
          -- first found as:\n-- {original}\n-- {original_verdict}\n\n\
          {setup}\n{settings}\n\
-         SET tessera.enable = on;\n{sql};\nSET tessera.enable = off;\n{sql};\n",
+         SET tessera.enable = on;\n{sql};\nSET tessera.enable = off;\n{sql};\n{twin}",
         seed = finding.seed,
         rows = args.rows,
         headline = finding.headline(),
@@ -317,15 +348,21 @@ fn run(args: RunArgs) -> Result<u8> {
             .map(|(kind, count)| format!("{count} {kind}"))
             .collect();
         println!(
-            "seed {seed}: {} queries in {:.1} s ({}), {} with a Tessera node",
+            "seed {seed}: {} queries in {:.1} s ({}), {} with a Tessera node, {} over the Parquet twin",
             counts.queries,
             started.elapsed().as_secs_f64(),
             kinds.join(", "),
             counts.with_tessera,
+            counts.over_twin,
         );
         if let Some(finding) = finding {
             findings += 1;
-            let path = write_finding(&finding, &args)?;
+            let path = write_finding(
+                &finding,
+                &args,
+                &oracle.borrow().twin_files(),
+                &runs_dir().join("crosscheck"),
+            )?;
             println!(
                 "FINDING ({}), shrunk:\n{}\n{}\nfirst found as:\n{}\n{}\nwritten to {}",
                 finding.headline(),
@@ -360,5 +397,74 @@ fn main() -> ExitCode {
             eprintln!("ERROR: {error:#}");
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Expr, Select, Settings};
+    use crate::oracle::Outcome;
+
+    /// A finding first met over the twin keeps the query over the twin and
+    /// copies of the seed's files of it, which the SQL reads, though its
+    /// shrunk query agrees on its run of its own; the next seed's files do
+    /// not touch the copies.
+    #[test]
+    fn a_finding_over_the_twin_keeps_its_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources: Vec<PathBuf> = (0..3)
+            .map(|index| dir.path().join(format!("words-{index}.parquet")))
+            .collect();
+        for (index, source) in sources.iter().enumerate() {
+            fs::write(source, format!("seed's {index}")).unwrap();
+        }
+        let query = Query {
+            select: Select {
+                distinct: false,
+                items: vec![Expr::Column {
+                    table: 0,
+                    name: "t",
+                }],
+                from: schema::WORDS,
+                joins: Vec::new(),
+                filter: None,
+                grouping: None,
+                limit: None,
+                ordered: false,
+            },
+            set: None,
+            settings: Settings {
+                workers: 0,
+                work_mem: "64kB",
+            },
+        };
+        let verdict = |off: &str, twin| Verdict {
+            on: Outcome::Rows(Some("{a}".into())),
+            off: Outcome::Rows(Some(off.into())),
+            relaxed: None,
+            twin,
+        };
+        let finding = Finding {
+            seed: 9,
+            query: query.clone(),
+            verdict: verdict("{a}", false),
+            original: (query, verdict("{b}", true)),
+        };
+        let args = Cli::parse_from(["tessera-crosscheck"]).run;
+        let out = dir.path().join("crosscheck");
+        let path = write_finding(&finding, &args, &sources, &out).unwrap();
+        let text = fs::read_to_string(path).unwrap();
+        assert!(text.contains("FROM words_pq AS t0"), "{text}");
+        for (index, source) in sources.iter().enumerate() {
+            let copy = out.join(format!("finding-9-words-{index}.parquet"));
+            assert!(text.contains(&copy.display().to_string()), "{text}");
+            fs::write(source, "the next seed's").unwrap();
+            assert_eq!(
+                fs::read_to_string(&copy).unwrap(),
+                format!("seed's {index}")
+            );
+        }
+        assert!(text.contains("over the Parquet twin"), "{text}");
     }
 }
