@@ -1,6 +1,7 @@
 //! The oracle: the same query with Tessera on and off, in one connection,
 //! as the SQL suites' `agg_same` runs it. The rows are compared as a
-//! multiset (aggregated in a sorted array of their text). When both modes
+//! multiset (aggregated in a sorted array of their text), and those of a
+//! query ordered by every output column in their order. When both modes
 //! fail, they agree whatever the SQLSTATEs, unless one is an internal
 //! error (class XX): a batch evaluates a condition for its 64 rows before
 //! it computes their outputs, so of two rows that would each raise an
@@ -177,7 +178,13 @@ impl<'c> Oracle<'c> {
     /// Runs `query` in both modes under its settings.
     pub fn check(&mut self, query: &Query) -> Result<Verdict> {
         let sql = query.sql();
-        let wrapped = format!("SELECT array_agg(q::text ORDER BY q::text) FROM ({sql}) AS q");
+        // The subquery's order holds: a subquery with ORDER BY is not
+        // pulled up, and the aggregate over it is not parallel.
+        let wrapped = if query.ordered() {
+            format!("SELECT array_agg(q::text) FROM ({sql}) AS q")
+        } else {
+            format!("SELECT array_agg(q::text ORDER BY q::text) FROM ({sql}) AS q")
+        };
         let prelude = format!(
             "{} SET statement_timeout = {};",
             query.settings.statements(),
