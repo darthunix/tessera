@@ -626,6 +626,16 @@ jobs:
         run: |
           make COPT=-Werror
           make install COPT=-Werror
+      # The rule "No collation library of Tessera's own" of string-bytes:
+      # none in Tessera's modules and crates, and the check fails on the
+      # server's binary, which links ICU.
+      - name: No collation library of Tessera's own
+        run: |
+          .github/scripts/check-collation.sh
+          if .github/scripts/check-collation.sh "$("$PG_CONFIG" --bindir)/postgres"; then
+            echo "check-collation.sh passes a binary that links ICU" >&2
+            exit 1
+          fi
       - name: Regression suites and the installed set
         run: make installcheck COPT=-Werror EXTRA_REGRESS_OPTS="--temp-instance=$RUNNER_TEMP/cluster"
       # Random queries with Tessera on and off (plan 9.8): the seeds of
