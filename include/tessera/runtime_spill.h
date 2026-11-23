@@ -163,7 +163,8 @@ extern bool tess_spill_value_fits_other(const char *value, Size room, int16 typl
 static inline bool
 tess_spill_value_fits(const char *value, Size room, int16 typlen)
 {
-	uint32		header;
+	/* VARSIZE_4B reads it as a varattrib_4b, which is 8 bytes. */
+	varattrib_4b header;
 
 	if (typlen > 0)
 		return (Size) typlen <= room;
