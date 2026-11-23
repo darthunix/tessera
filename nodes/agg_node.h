@@ -205,6 +205,18 @@ struct AggValue
  * the value's first.
  */
 
+/*
+ * Of a source's dictionary, an index's number in a key dictionary and its
+ * value's hash; KEY_INDEX_UNSEEN for an index not yet met.
+ */
+typedef struct KeyIndexEntry
+{
+	uint32		number;
+	uint32		hash;
+} KeyIndexEntry;
+
+#define KEY_INDEX_UNSEEN PG_UINT32_MAX
+
 typedef struct KeyForm
 {
 	uint32		ref;
@@ -252,6 +264,19 @@ struct KeyDict
 	const char *probe_data;
 	uint32		probe_len;
 	char		probe;
+	/*
+	 * A key whose batches come through a source's dictionary: of the
+	 * identity index_identity, each index's number and hash, so that a row
+	 * of an index met before costs no hash and no lookup; index_count
+	 * entries, no more than the source's values nor index_share bytes, the
+	 * key's share of the grouping's memory, in the dictionary's context, so
+	 * that every reset of it drops them; an index past them is looked up
+	 * by its bytes.
+	 */
+	uint64		index_identity;
+	uint32		index_count;
+	Size		index_share;
+	KeyIndexEntry *index_entries;
 	/*
 	 * A key of several in a grouping whose equal values may differ in form:
 	 * the groups whose first row's form is not their number's, by their

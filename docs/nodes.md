@@ -1347,6 +1347,16 @@ the columns in their order leaves the column out. A key of
 a nondeterministic collation, a key computed from a column, and a set
 operation's keys are read as `Datum` values.
 
+Where such a batch also gives its source dictionary's indexes, the key
+keeps, for that dictionary's identity, an array from an index to its
+number and hash: a row of an index met before costs no hash and no
+lookup. The array holds no more entries than the dictionary's values,
+nor than an eighth of hash_mem shared by the keys of dictionaries; an
+index past it is looked up by its bytes. It is dropped when another
+identity comes, and with the key dictionary at every reset: a spill's
+replay, a partial stage's table sent up, a rescan. An assert build
+checks each number an index finds against the row's bytes.
+
 Equal values may differ in form: numeric 1.0, 1.00 and 1.000, float8 -0
 and 0, text of either case under a case-insensitive collation, bpchar
 with trailing blanks. A number keeps its value's first form of the whole
