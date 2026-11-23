@@ -1068,6 +1068,24 @@ SELECT agg_costs_ordered($$SELECT count(*), sum(a), max(c) FROM agg_t$$) AS plai
        agg_costs_ordered($$SELECT count(*) FROM agg_t WHERE a > 10$$) AS filtered;
 DROP FUNCTION agg_costs_ordered(text);
 
+-- Past the caches, of more than 43 690 values, a key dictionary asks each
+-- row's bucket of memory first and keeps the hash it computed there for
+-- the lookup: of 70 000 values of text, each two or three times, NULL in
+-- every seventh row, the rows a filter leaves, a sparse mask, hold some
+-- 60 000, the dictionary grown from the size of an estimate without
+-- statistics; grouped, and their distinct count with no grouping: the
+-- core's.
+SET work_mem = '64MB';
+CREATE TABLE agg_past WITH (autovacuum_enabled = off) AS
+SELECT i, CASE WHEN i % 7 = 0 THEN NULL ELSE 'w' || (i % 70000) END AS s
+FROM generate_series(1, 150000) AS i;
+EXPLAIN (COSTS OFF) SELECT s, count(*) FROM agg_past WHERE i % 3 <> 0 GROUP BY s;
+SELECT agg_same($$SELECT count(*), sum(c), md5(string_agg(s || ':' || c, ',' ORDER BY s))
+                  FROM (SELECT s, count(*) AS c FROM agg_past WHERE i % 3 <> 0 GROUP BY s) AS q$$);
+SELECT agg_same($$SELECT count(DISTINCT s) FROM agg_past WHERE i % 3 <> 0$$);
+DROP TABLE agg_past;
+RESET work_mem;
+
 DROP TABLE agg_t;
 DROP FUNCTION agg_spill(text);
 DROP FUNCTION agg_same(text);

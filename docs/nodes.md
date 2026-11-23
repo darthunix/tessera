@@ -1355,9 +1355,14 @@ bits. Grouping
 by 450 000 values of text took 13 % less, `INTERSECT` of texts 8 % less,
 small dictionaries 1 to 3 % less (pg-anykey-OqakjS, pg-setop-UmZbY2
 against the build before). Both parts matter: the pass alone took 2 to
-3 % off, the blocks and entries alone nothing; hashes kept from the pass
-for the lookups, or a second copy of their loop, made the compiler stop
-inlining them and cost small dictionaries 3 to 4 %. The table fills to
+3 % off, the blocks and entries alone nothing. The lookups keep the
+hashes the pass computed, in the one loop the lookups by `Datum` and by
+bytes share: grouping by 450 000 values of text 4.8 % less, small
+dictionaries, which make no pass, 0.8 to 0.95 % more, most of it the
+loop's test of a row's form (pg-anykey-NVLYO2 against
+pg-anykey-wPW53a, the build before the lookup by bytes). Kept as a
+second copy of the loop, the hashes had made the compiler stop inlining
+the table's calls, at 3 to 4 % of small dictionaries. The table fills to
 three quarters, not simplehash's nine tenths, near which its robin hood
 runs grow long: a dictionary of 450 000 values made for an estimate of as
 many, 86 % full, took 17 % more of the grouping, `INTERSECT` of texts 12 %
