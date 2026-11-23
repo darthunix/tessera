@@ -1793,6 +1793,43 @@ fn a_dictionary_checked_once_and_a_window_once() {
     }
 }
 
+/// The count of references alive on a thread: one more for each the
+/// bytes entry makes, one less for each freed, none for a failed call.
+#[test]
+fn references_counted_while_they_live() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.parquet");
+    let strings = (0..4).map(|r| Some(vec![b'a' + r as u8])).collect();
+    testing::write(&path, &[Column::new("s", Values::Bytes(strings))], 4, false).unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader_of(file, col, 4, 64);
+    let start = tess_parquet_test_holds();
+    assert_eq!(read_at(r, 0, 4), 4);
+    let (ok, .., first) = bytes_of(r, &[0b1111], 4);
+    let (.., second) = bytes_of(r, &[0b11], 4);
+    assert!(ok && !first.is_null() && !second.is_null());
+    assert_eq!(tess_parquet_test_holds(), start + 2);
+    let (ok, .., none) = bytes_of(r, &[0b10000], 4);
+    assert!(!ok && none.is_null());
+    assert_eq!(tess_parquet_test_holds(), start + 2, "none for a failure");
+    unsafe {
+        tess_parquet_hold_free(first);
+        tess_parquet_reader_free(r);
+    }
+    assert_eq!(
+        tess_parquet_test_holds(),
+        start + 1,
+        "the reader's end frees none"
+    );
+    unsafe {
+        tess_parquet_hold_free(second);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+    assert_eq!(tess_parquet_test_holds(), start);
+}
+
 /// A dictionary of more values than a word of a mask counts is read whole
 /// and passes: the mask over its values asks each of them, and none past.
 #[test]

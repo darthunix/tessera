@@ -1052,6 +1052,25 @@ pub struct BytesOut {
 /// freed.
 pub struct HoldHandle(#[allow(dead_code)] ArrayRef);
 
+thread_local! {
+    /// The references of this thread, a backend's in PostgreSQL, made and
+    /// not yet freed: what [`tess_parquet_test_holds`] counts.
+    static HOLDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+impl HoldHandle {
+    fn new(array: ArrayRef) -> Self {
+        HOLDS.with(|holds| holds.set(holds.get() + 1));
+        Self(array)
+    }
+}
+
+impl Drop for HoldHandle {
+    fn drop(&mut self) {
+        HOLDS.with(|holds| holds.set(holds.get() - 1));
+    }
+}
+
 /// The pointer of an empty value: never null, and never read.
 static EMPTY: u8 = 0;
 
@@ -1459,7 +1478,7 @@ pub unsafe extern "C" fn tess_parquet_bytes(
             std::ptr::addr_of_mut!((*out).number).write(number);
             put(
                 hold,
-                Box::into_raw(Box::new(HoldHandle(Arc::clone(&window.array)))),
+                Box::into_raw(Box::new(HoldHandle::new(Arc::clone(&window.array)))),
             )
         })
     }
@@ -1478,6 +1497,15 @@ pub unsafe extern "C" fn tess_parquet_hold_free(hold: *mut HoldHandle) {
         // SAFETY: a reference of `tess_parquet_bytes`, freed once.
         drop(unsafe { Box::from_raw(hold) });
     }
+}
+
+/// The references of [`tess_parquet_bytes`] that the calling thread made
+/// and has not freed, for the tests of their lifetime: a count of the
+/// thread, since a PostgreSQL backend is one, so that tests on other
+/// threads do not move it.
+#[unsafe(no_mangle)]
+pub extern "C" fn tess_parquet_test_holds() -> u64 {
+    HOLDS.with(std::cell::Cell::get)
 }
 
 /// Raises a panic inside the guard, for the test of the boundary.

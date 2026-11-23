@@ -274,17 +274,26 @@ the check that can see it; the contract of the capability names them.
   ASan takes over `malloc` for the whole process, so a read in C of a
   buffer the reader freed is caught, though not a read inside Rust,
   which is not instrumented. So each case of a lifetime reads the bytes
-  in C: a test module's call keeps the pointers of a batch, forces a
-  read behind the forward reader, a rescan and a read past the window,
-  and reads every byte before the batch is released; and an assert
-  build's expression compiler reads the first and the last byte of each
-  row it hands a kernel. The commit shows by a mutant that drops the
-  batch's reference early that the suite under ASan fails.
+  in C: a test module's call keeps the pointers of a batch, has the
+  reader replace the arrays they point into, and reads every byte
+  before the batch is released; and an assert build's expression
+  compiler reads the first and the last byte of each row it hands a
+  kernel. The Parquet node reads a batch's window once, and nothing
+  else a reader holds changes while the batch lives, so no query would
+  show a reference dropped early. An injection point of the node makes
+  each ask read the batch's window again, behind the reader, which then
+  decodes it anew, and a column through a dictionary names a second one.
+  The forward reader keeps what it read forward, so the test asks the
+  column as `Datum` values first: its ask in the bytes form is then a
+  read behind too, and once the later asks replace that read, its bytes
+  live by their reference alone. The commit shows by a mutant that drops
+  the batch's reference early that the suite under ASan fails.
 - **An error between taking and dropping a reference.** ASan's job does
   not look for leaks, so an injection point raises an error after a
-  batch's references are taken, and the test module's counts of
-  references taken and dropped must be equal after the reset; a mutant
-  that never drops them fails the counts.
+  batch's references are taken, and the reader's count of the
+  references alive in the backend must be where it was after the reset,
+  as after a rescan and the scan's end; a mutant that never drops them
+  fails the counts.
 - **Self-checks of an assert build, against wrong groups and orders.**
   PostgreSQL is built with assertions for CI's suites. Each hit of
   TessAgg's array from index to number compares the row's bytes with
