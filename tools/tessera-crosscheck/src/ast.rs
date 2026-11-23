@@ -57,6 +57,11 @@ pub enum Expr {
     },
     /// `arg::ty`.
     Cast { arg: Box<Expr>, ty: Ty },
+    /// `arg COLLATE "collation"`, a text expression under a collation.
+    Collate {
+        arg: Box<Expr>,
+        collation: &'static str,
+    },
     /// `[NOT] EXISTS (SELECT 1 FROM table AS sN WHERE sN.inner = outer AND filter)`,
     /// a semi or anti join; `filter` refers to the inner table as the
     /// table after the outer query's FROM list.
@@ -114,6 +119,7 @@ impl Expr {
             Expr::Prefix { arg, .. }
             | Expr::IsNull { arg, .. }
             | Expr::Cast { arg, .. }
+            | Expr::Collate { arg, .. }
             | Expr::Like { arg, .. } => vec![arg],
             Expr::Binary { left, right, .. } => vec![left, right],
             Expr::Call { args, .. } => args.iter().collect(),
@@ -166,7 +172,10 @@ impl Expr {
     fn filter_aggregates(&mut self) {
         match self {
             Expr::Column { .. } | Expr::Literal(_) | Expr::Like { .. } => {}
-            Expr::Prefix { arg, .. } | Expr::IsNull { arg, .. } | Expr::Cast { arg, .. } => {
+            Expr::Prefix { arg, .. }
+            | Expr::IsNull { arg, .. }
+            | Expr::Cast { arg, .. }
+            | Expr::Collate { arg, .. } => {
                 arg.filter_aggregates();
             }
             Expr::Binary { left, right, .. } => {
@@ -300,6 +309,11 @@ impl Expr {
                 arg.write(out, depth);
                 let _ = write!(out, ")::{}", ty.sql());
             }
+            Expr::Collate { arg, collation } => {
+                out.push('(');
+                arg.write(out, depth);
+                let _ = write!(out, " COLLATE \"{collation}\")");
+            }
             Expr::Exists {
                 table,
                 inner,
@@ -427,6 +441,9 @@ pub struct Select {
     /// equal but written differently tie too, so the generator gives such
     /// a query its representatives of equal values as outputs.
     pub limit: Option<u32>,
+    /// `ORDER BY` every output column without a limit: the rows come in
+    /// one order in both modes, compared in it, as under a limit.
+    pub ordered: bool,
 }
 
 impl Select {
@@ -483,7 +500,7 @@ impl Select {
                 having.write(out, depth);
             }
         }
-        if let Some(limit) = self.limit {
+        if self.ordered || self.limit.is_some() {
             out.push_str(" ORDER BY ");
             for index in 0..self.items.len() {
                 if index > 0 {
@@ -491,6 +508,8 @@ impl Select {
                 }
                 let _ = write!(out, "{}", index + 1);
             }
+        }
+        if let Some(limit) = self.limit {
             let _ = write!(out, " LIMIT {limit}");
         }
     }
@@ -534,6 +553,13 @@ pub struct Query {
 }
 
 impl Query {
+    /// Whether the query's rows come in an order of their own, by every
+    /// output column, which both modes must give: a single SELECT ordered,
+    /// with or without a limit.
+    pub fn ordered(&self) -> bool {
+        self.set.is_none() && (self.select.ordered || self.select.limit.is_some())
+    }
+
     /// The query's SQL.
     pub fn sql(&self) -> String {
         let mut out = String::new();
@@ -562,6 +588,7 @@ impl Query {
             let mut select = Select {
                 distinct: false,
                 limit: None,
+                ordered: false,
                 ..select.clone()
             };
             select.items.iter_mut().for_each(Expr::filter_aggregates);
@@ -721,7 +748,7 @@ impl Display for Query {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{DIM, FACT};
+    use crate::schema::{DIM, FACT, TINY};
 
     fn column(table: usize, name: &'static str) -> Expr {
         Expr::Column { table, name }
@@ -763,6 +790,7 @@ mod tests {
                 }),
                 grouping: None,
                 limit: Some(3),
+                ordered: false,
             },
             set: None,
             settings: Settings {
@@ -780,6 +808,36 @@ mod tests {
     }
 
     #[test]
+    fn a_collation_and_an_order_without_a_limit() {
+        let query = Query {
+            select: Select {
+                distinct: false,
+                items: vec![Expr::Collate {
+                    arg: Box::new(column(0, "t")),
+                    collation: "nd",
+                }],
+                from: TINY,
+                joins: Vec::new(),
+                filter: None,
+                grouping: None,
+                limit: None,
+                ordered: true,
+            },
+            set: None,
+            settings: Settings {
+                workers: 0,
+                work_mem: "64kB",
+            },
+        };
+        assert_eq!(
+            query.sql(),
+            "SELECT (t0.t COLLATE \"nd\") AS c0 FROM tiny AS t0 ORDER BY 1"
+        );
+        assert!(query.ordered());
+        assert!(!query.relaxed().ordered());
+    }
+
+    #[test]
     fn a_relaxed_query_has_no_limit_or_distinct() {
         let select = Select {
             distinct: true,
@@ -789,6 +847,7 @@ mod tests {
             filter: None,
             grouping: None,
             limit: Some(3),
+            ordered: false,
         };
         let query = Query {
             select: select.clone(),
@@ -884,6 +943,7 @@ mod tests {
                     having: None,
                 }),
                 limit: None,
+                ordered: false,
             },
             set: None,
             settings: Settings {

@@ -114,7 +114,7 @@ test.
       batch's reference early fails under ASan, and one that never
       drops it fails the counts. Check: the suites; the suites under
       ASan and UBSan as CI's job runs them
-- [ ] 3.5 `tools/tessera-crosscheck`: a cluster of `UTF8`; string
+- [x] 3.5 `tools/tessera-crosscheck`: a cluster of `UTF8`; string
       columns; the collations `C`, `C.UTF-8` of the builtin provider, a
       libc one and a nondeterministic one; for a query with `ORDER BY`,
       the rows compared in order, the order made total by every output
