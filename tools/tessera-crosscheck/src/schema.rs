@@ -1,21 +1,22 @@
 //! The tables the queries read and the SQL that fills them from a seed.
 //!
-//! Three tables of different sizes share their key columns' ranges, so
-//! that joins find matches, misses and duplicates: `fact` with a few
-//! thousand rows, `dim` with two hundred, `tiny` with five. Every
-//! column but the key `id` has NULLs, and the values lean to the edges
-//! where code breaks: the ends of the integer types, zero and ±1, empty
-//! strings, numerics of several scales, dates far from today, NaN and
-//! the infinities; strings of characters of two, three and four bytes
-//! in UTF-8, a combining accent, and pairs a collation that ignores
-//! case takes as equal, as `é` and `É`. The setup also makes the
-//! collations the queries name: `lc`, of libc for a language
-//! (`en_US.UTF-8`, or `C.UTF-8` where that is missing), and `nd`, ICU's
-//! nondeterministic one that ignores case, which needs a server built
-//! with ICU. The rows come from PostgreSQL's own `random()` after
-//! `setseed`, in one connection, so a seed gives the same data on the
-//! same build every time, and a finding's file can carry the SQL that
-//! makes it.
+//! Three tables of different sizes, and a table of strings, share their
+//! key columns' ranges, so that joins find matches, misses and
+//! duplicates: `fact` with a few thousand rows, `dim` with two hundred,
+//! `tiny` with five, and `words`, of strings, with three thousand,
+//! which has a Parquet twin as well (see the oracle). Every column but
+//! the key `id` has NULLs, and the values lean to the edges where code
+//! breaks: the ends of the integer types, zero and ±1, empty strings,
+//! numerics of several scales, dates far from today, NaN and the
+//! infinities; strings of characters of two, three and four bytes in
+//! UTF-8, a combining accent, and pairs a collation that ignores case
+//! takes as equal, as `é` and `É`. The setup also makes the collations
+//! the queries name: `lc`, of libc for a language (`en_US.UTF-8`, or
+//! `C.UTF-8` where that is missing), and `nd`, ICU's nondeterministic
+//! one that ignores case, which needs a server built with ICU. The rows
+//! come from PostgreSQL's own `random()` after `setseed`, in one
+//! connection, so a seed gives the same data on the same build every
+//! time, and a finding's file can carry the SQL that makes it.
 
 use std::fmt::Write;
 
@@ -113,8 +114,31 @@ pub const TINY: Table = Table {
     ],
 };
 
-/// The tables, largest first.
-pub const TABLES: [Table; 3] = [FACT, DIM, TINY];
+/// The table of strings: `t` of a few words, which a Parquet writer keeps
+/// through a dictionary, and `u` of longer strings, most of them apart.
+/// It has a Parquet twin, `words_pq`.
+pub const WORDS: Table = Table {
+    name: "words",
+    columns: &[
+        column("id", Ty::Int4),
+        column("a", Ty::Int4),
+        column("t", Ty::Text),
+        column("u", Ty::Text),
+    ],
+};
+
+/// The tables, largest first but for the table of strings.
+pub const TABLES: [Table; 4] = [FACT, DIM, TINY, WORDS];
+
+/// The rows of the table of strings.
+pub const WORDS_ROWS: u32 = 3000;
+
+/// A word of the table of strings: cases, accents whole and combining, a
+/// character of a script of three bytes, one of four, and LIKE's own
+/// characters.
+const WORD: &str = "(ARRAY['apple', 'Apple', 'APPLE', 'caf\u{e9}', 'CAF\u{c9}', 'cafe\u{301}', \
+     'stra\u{df}e', 'STRASSE', 'na\u{ef}ve', '\u{65e5}\u{672c}', '\u{65e5}\u{672c}\u{8a9e}', \
+     '\u{1f600}', '\u{20ac}uro', 'zzz', 'a%b', '_'])[1 + floor(random() * 16)::int]";
 
 /// A value of a column: NULL with `nulls`, an edge with `edges`, otherwise
 /// `common`; each expression calls `random()` afresh, left to right.
@@ -203,7 +227,7 @@ pub fn setup(seed: u64, rows: u32) -> String {
          RAISE EXCEPTION 'the cluster is not UTF8: remove target/bench-runs/pgdata-crosscheck'; \
          END IF; END $$;"
     );
-    let _ = writeln!(sql, "DROP TABLE IF EXISTS fact, dim, tiny;");
+    let _ = writeln!(sql, "DROP TABLE IF EXISTS fact, dim, tiny, words;");
     let _ = writeln!(
         sql,
         "DROP COLLATION IF EXISTS lc; DROP COLLATION IF EXISTS nd;"
@@ -269,10 +293,23 @@ pub fn setup(seed: u64, rows: u32) -> String {
         a = int4(5),
         t = text(),
     );
+    let _ = writeln!(
+        sql,
+        "CREATE TABLE words AS SELECT g AS id, {a} AS a, {t} AS t, {u} AS u \
+         FROM generate_series(1, {WORDS_ROWS}) AS g;",
+        a = int4(50),
+        t = value(0.1, TEXT_EDGES, 0.05, WORD),
+        u = value(
+            0.1,
+            TEXT_EDGES,
+            0.05,
+            &format!("repeat({WORD}, floor(random() * 4)::int) || {TEXT_COMMON}")
+        ),
+    );
     // Indexes give the planner index and bitmap paths to choose.
     let _ = writeln!(sql, "CREATE INDEX fact_b ON fact (b);");
     let _ = writeln!(sql, "CREATE INDEX dim_id ON dim (id);");
-    let _ = writeln!(sql, "ANALYZE fact, dim, tiny;");
+    let _ = writeln!(sql, "ANALYZE fact, dim, tiny, words;");
     sql
 }
 

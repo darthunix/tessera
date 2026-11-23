@@ -21,16 +21,88 @@
 //! table (every row of it, through each largest part of the query's
 //! expressions that reads it alone). Otherwise the error is one mode's
 //! own, an overflow that is none, or one missed.
+//!
+//! The table of strings has a Parquet twin, `words_pq`: its rows, read
+//! back from the heap table, written by the reader's crate in three
+//! files, of chunks through a dictionary, of plain chunks, and of chunks
+//! whose dictionary fills up and falls back to plain pages. A query that
+//! reads the table of strings, and whose modes agree, runs once more over
+//! the twin with Tessera on, against the heap table with it off: a fault
+//! of the reader, which both modes over the twin would share, shows there.
 
 use std::fmt::Write;
+use std::fs::{self, File};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use parquet::basic::{Encoding, LogicalType};
+use parquet::file::reader::{FileReader, SerializedFileReader};
 use postgres::SimpleQueryMessage;
 use postgres::error::SqlState;
+use tessera_parquet::testing::{self, Column, Options, Values};
 use tessera_pgtool::Cluster;
 
-use crate::ast::Query;
+use crate::ast::{Query, quote};
+use crate::schema::WORDS_ROWS;
+
+/// How the table of strings is written in its query's SQL, and its twin.
+const TWINNED: &str = " words AS ";
+const TWIN: &str = " words_pq AS ";
+
+/// Whether the SQL of a query reads the table of strings.
+pub fn reads_twinned(sql: &str) -> bool {
+    sql.contains(TWINNED)
+}
+
+/// The SQL with the table of strings read from its Parquet twin: the
+/// generator writes a table as `name AS alias`, and no literal holds that.
+pub fn twinned(sql: &str) -> String {
+    sql.replace(TWINNED, TWIN)
+}
+
+/// The SQL that makes the Parquet twin over `files`.
+pub fn twin_table(files: &[PathBuf]) -> String {
+    let files: Vec<String> = files
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    format!(
+        "CREATE SERVER IF NOT EXISTS twin FOREIGN DATA WRAPPER tessera_parquet; \
+         DROP FOREIGN TABLE IF EXISTS words_pq; \
+         CREATE FOREIGN TABLE words_pq (id int4, a int4, t text, u text) \
+         SERVER twin OPTIONS (files {}); ANALYZE words_pq;",
+        quote(&files.join(","))
+    )
+}
+
+/// Whether every string chunk of a group of the file has a dictionary
+/// page and data pages both through it and plain, as a writer falls back
+/// when its dictionary fills up: the footer's mask of the data pages'
+/// encodings, which the reader reads too.
+fn falls_back(path: &Path) -> Result<bool> {
+    let reader = SerializedFileReader::new(File::open(path)?)?;
+    Ok(reader.metadata().row_groups().iter().any(|group| {
+        group.columns()[2..].iter().all(|chunk| {
+            let dictionary =
+                |e: &Encoding| matches!(e, Encoding::PLAIN_DICTIONARY | Encoding::RLE_DICTIONARY);
+            chunk.dictionary_page_offset().is_some()
+                && chunk.page_encoding_stats_mask().is_some_and(|mask| {
+                    mask.encodings().any(|e| dictionary(&e))
+                        && mask.encodings().any(|e| !dictionary(&e))
+                })
+        })
+    }))
+}
+
+/// Whether a verdict met while shrinking stands for `original`: the same
+/// class of finding, by the same comparison, of two modes or over the
+/// twin.
+pub fn same_finding(original: &Verdict, verdict: &Verdict) -> bool {
+    original.class().is_some()
+        && verdict.class() == original.class()
+        && verdict.twin == original.twin
+}
 
 /// How long one mode of a query may run.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -79,6 +151,10 @@ pub struct Verdict {
     /// After a data exception in one mode only: the relaxed query in the
     /// mode that returned rows.
     pub relaxed: Option<Outcome>,
+    /// Whether `on` is the query over the Parquet twin of the table of
+    /// strings with Tessera on, and `off` the query over the heap table
+    /// with it off.
+    pub twin: bool,
 }
 
 impl Verdict {
@@ -145,7 +221,13 @@ impl Verdict {
     }
 
     pub fn describe(&self) -> String {
-        let mut text = format!("on: {}\noff: {}", self.on.short(), self.off.short());
+        let mut text = String::new();
+        if self.twin {
+            text.push_str(
+                "on: over the Parquet twin, with Tessera; off: over the heap table, without\n",
+            );
+        }
+        let _ = write!(text, "on: {}\noff: {}", self.on.short(), self.off.short());
         if let (Some(on), Some(relaxed)) = (self.one_sided(), &self.relaxed) {
             let mode = if on { "on" } else { "off" };
             let _ = write!(text, "\nrelaxed, {mode}: {}", relaxed.short());
@@ -172,7 +254,72 @@ impl<'c> Oracle<'c> {
         self.reconnect()?;
         self.client
             .batch_execute(setup)
-            .context("cannot create the tables")
+            .context("cannot create the tables")?;
+        self.write_twin().context("cannot write the Parquet twin")
+    }
+
+    /// Writes the Parquet twin of the table of strings from its rows, in a
+    /// file of chunks through a dictionary, one of plain chunks, and one
+    /// of chunks whose dictionary falls back to plain pages, and makes the
+    /// foreign table over them.
+    pub fn twin_files(&self) -> Vec<PathBuf> {
+        let directory = self.cluster.data.with_file_name("crosscheck-twin");
+        (0..3)
+            .map(|index| directory.join(format!("words-{index}.parquet")))
+            .collect()
+    }
+
+    fn write_twin(&mut self) -> Result<()> {
+        let directory = self.cluster.data.with_file_name("crosscheck-twin");
+        fs::create_dir_all(&directory)?;
+        let rows = self
+            .client
+            .query("SELECT id, a, t, u FROM words ORDER BY id", &[])?;
+        let ints = |at: usize| -> Vec<Option<i32>> { rows.iter().map(|row| row.get(at)).collect() };
+        let strings = |at: usize| -> Vec<Option<Vec<u8>>> {
+            rows.iter()
+                .map(|row| row.get::<_, Option<String>>(at).map(String::into_bytes))
+                .collect()
+        };
+        let (id, a, t, u) = (ints(0), ints(1), strings(2), strings(3));
+        // A group of the first and of the last file is longer than a
+        // window of the reader, 1024 rows: the reader carries its forward
+        // read from one window to the next, and windows share a dictionary.
+        let (first, second) = (1300, 1800);
+        anyhow::ensure!(rows.len() == WORDS_ROWS as usize, "words holds other rows");
+        let paged = |group, dictionary| Options {
+            page_rows: Some(64),
+            ..Options::new(group, dictionary)
+        };
+        let mixed = Options {
+            page_rows: Some(32),
+            dictionary_bytes: Some(64),
+            ..Options::new(rows.len() - second, true)
+        };
+        let parts = [
+            (0..first, paged(first, true)),
+            (first..second, paged(128, false)),
+            (second..rows.len(), mixed),
+        ];
+        let files = self.twin_files();
+        for ((range, options), path) in parts.into_iter().zip(&files) {
+            let string = |name: &str, values: &[Option<Vec<u8>>]| {
+                Column::new(name, Values::Bytes(values.to_vec())).logical(LogicalType::String)
+            };
+            let columns = [
+                Column::new("id", Values::Int32(id[range.clone()].to_vec())),
+                Column::new("a", Values::Int32(a[range.clone()].to_vec())),
+                string("t", &t[range.clone()]),
+                string("u", &u[range]),
+            ];
+            testing::write_with(path, &columns, options)?;
+        }
+        anyhow::ensure!(
+            falls_back(&files[2])?,
+            "the twin's last file has no chunk whose dictionary falls back to plain pages"
+        );
+        self.client.batch_execute(&twin_table(&files))?;
+        Ok(())
     }
 
     /// Runs `query` in both modes under its settings.
@@ -190,23 +337,46 @@ impl<'c> Oracle<'c> {
             query.settings.statements(),
             STATEMENT_TIMEOUT.as_millis()
         );
-        let mut run = |mode: &str| -> Result<Outcome> {
+        let mut run = |mode: &str, sql: &str| -> Result<Outcome> {
             self.reconnect()?;
             self.client
                 .batch_execute(&format!("{prelude} SET tessera.enable = {mode};"))?;
-            Ok(self.run(&wrapped))
+            Ok(self.run(sql))
         };
-        let on = run("on")?;
-        let off = run("off")?;
+        let on = run("on", &wrapped)?;
+        let off = run("off", &wrapped)?;
+        let twin = (reads_twinned(&sql))
+            .then(|| run("on", &twinned(&wrapped)))
+            .transpose()?;
         let mut verdict = Verdict {
             on,
             off,
             relaxed: None,
+            twin: false,
         };
         if let Some(on) = verdict.one_sided() {
-            verdict.relaxed = Some(self.relaxed(query, &prelude, on)?);
+            verdict.relaxed = Some(self.relaxed(query, &prelude, on, false)?);
         }
-        Ok(verdict)
+        let Some(twin) = twin else {
+            return Ok(verdict);
+        };
+        if verdict.is_finding() {
+            return Ok(verdict);
+        }
+        let mut over_twin = Verdict {
+            on: twin,
+            off: verdict.off.clone(),
+            relaxed: None,
+            twin: true,
+        };
+        if let Some(on) = over_twin.one_sided() {
+            over_twin.relaxed = Some(self.relaxed(query, &prelude, on, on)?);
+        }
+        Ok(if over_twin.is_finding() {
+            over_twin
+        } else {
+            verdict
+        })
     }
 
     /// The relaxed query in one mode, then the probes of its tables, in a
@@ -216,8 +386,10 @@ impl<'c> Oracle<'c> {
     /// join cost unit makes the node's join cost thousands of times the
     /// core's). A hash join still skips its inner side after an empty
     /// outer one, in the core and in Tessera alike; the probes do not.
-    fn relaxed(&mut self, query: &Query, prelude: &str, on: bool) -> Result<Outcome> {
-        let sql = query.relaxed().sql();
+    /// With `twin`, all of them over the Parquet twin.
+    fn relaxed(&mut self, query: &Query, prelude: &str, on: bool, twin: bool) -> Result<Outcome> {
+        let over = |sql: String| if twin { twinned(&sql) } else { sql };
+        let sql = over(query.relaxed().sql());
         let wrapped = format!("SELECT array_agg(q::text ORDER BY q::text) FROM ({sql}) AS q");
         let mode = if on {
             "SET LOCAL tessera.enable = on; SET LOCAL tessera.join_cost_unit = 0.001;"
@@ -237,7 +409,7 @@ impl<'c> Oracle<'c> {
                 if !matches!(outcome, Outcome::Rows(_)) {
                     break;
                 }
-                let probed = self.run(&probe);
+                let probed = self.run(&over(probe));
                 if !matches!(probed, Outcome::Rows(_)) {
                     outcome = probed;
                 }
@@ -333,11 +505,43 @@ mod tests {
     }
 
     #[test]
+    fn a_finding_over_the_twin_stands_only_for_one_over_the_twin() {
+        let verdict = |twin| Verdict {
+            on: rows("{1}"),
+            off: rows("{2}"),
+            relaxed: None,
+            twin,
+        };
+        assert!(same_finding(&verdict(true), &verdict(true)));
+        assert!(!same_finding(&verdict(true), &verdict(false)));
+        assert!(!same_finding(&verdict(false), &verdict(true)));
+        let agree = Verdict {
+            off: rows("{1}"),
+            ..verdict(true)
+        };
+        assert!(!same_finding(&agree, &agree));
+    }
+
+    #[test]
+    fn the_twin_takes_the_place_of_the_table_of_strings() {
+        let sql = "SELECT t0.t AS c0 FROM words AS t0 JOIN fact AS t1 ON t1.t = t0.t \
+                   WHERE (EXISTS (SELECT 1 FROM words AS t2 WHERE t2.id = t0.a))";
+        assert!(reads_twinned(sql));
+        assert_eq!(
+            twinned(sql),
+            "SELECT t0.t AS c0 FROM words_pq AS t0 JOIN fact AS t1 ON t1.t = t0.t \
+             WHERE (EXISTS (SELECT 1 FROM words_pq AS t2 WHERE t2.id = t0.a))"
+        );
+        assert!(!reads_twinned("SELECT t0.a AS c0 FROM fact AS t0"));
+    }
+
+    #[test]
     fn findings_are_disagreements_and_crashes() {
         let verdict = |on, off| Verdict {
             on,
             off,
             relaxed: None,
+            twin: false,
         };
         assert!(!verdict(rows("{1}"), rows("{1}")).is_finding());
         assert!(verdict(rows("{1}"), rows("{2}")).is_finding());
@@ -369,7 +573,12 @@ mod tests {
 
     #[test]
     fn a_data_exception_in_one_mode_is_the_datas_when_the_relaxed_query_raises_one() {
-        let verdict = |on, off, relaxed| Verdict { on, off, relaxed };
+        let verdict = |on, off, relaxed| Verdict {
+            on,
+            off,
+            relaxed,
+            twin: false,
+        };
         let skipped = verdict(error("22012"), rows("{1}"), Some(error("22003")));
         assert!(!skipped.is_finding());
         assert_eq!(skipped.kind(), "error of a row one plan skips");
