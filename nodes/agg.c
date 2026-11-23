@@ -222,6 +222,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		value->function = tess_runtime_api()->functions->find(agg->aggfnoid);
 		value->computed = -1;
 		value->filter = -1;
+		value->distinct_bytes_column = -1;
 		if (!batch_aggregate(agg))
 		{
 			if (!generic_supported(agg) ||
@@ -314,6 +315,25 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 														   exprCollation(argument));
 					/* Only the count of the values matters, not a form to put out. */
 					value->distinct_dict->forms = false;
+					/*
+					 * An ungrouped count of a bare column of bytes: by its
+					 * bytes where the batch offers them, as a key's.
+					 */
+					if (state->nkeys == 0 && value->kind == AGG_COUNT &&
+						value->distinct_dict->bytes == TESS_KEY_BYTES_WHOLE)
+					{
+						Node	   *bare = argument;
+
+						while (IsA(bare, RelabelType))
+							bare = (Node *) ((RelabelType *) bare)->arg;
+						if (IsA(bare, Var) && ((Var *) bare)->varno == INDEX_VAR)
+						{
+							value->distinct_bytes_column =
+								tess_layout_column(&state->child_layout,
+												   ((Var *) bare)->varattno - 1);
+							state->has_distinct_bytes = true;
+						}
+					}
 				}
 				value->distinct = palloc0(sizeof(struct DistinctSet));
 				state->has_distinct = true;
@@ -692,14 +712,23 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 		evaluate(state, value, NULL, &rows);
 		return;
 	}
-	/* A numeric aggregate of its own reads its argument's decimals. */
-	computed.accept_decimals = fast_decimals(value);
-	batch->ops->get_datum_column(batch,
-								 state->child_layout.ncolumns + value->computed,
-								 &rows, TESS_COLUMN_FOR_PROJECTION, &computed);
-	if (computed.values == NULL || computed.isnull == NULL ||
-		computed.nrows != batch->rows.nrows)
-		elog(ERROR, "Tessera projection returned an invalid column");
+	if (value->distinct_by_bytes)
+	{
+		/* Numbered by its bytes below: no Datum of the argument made. */
+		computed.nrows = batch->rows.nrows;
+		computed.isnull = value->distinct_bytes.isnull;
+	}
+	else
+	{
+		/* A numeric aggregate of its own reads its argument's decimals. */
+		computed.accept_decimals = fast_decimals(value);
+		batch->ops->get_datum_column(batch,
+									 state->child_layout.ncolumns + value->computed,
+									 &rows, TESS_COLUMN_FOR_PROJECTION, &computed);
+		if (computed.values == NULL || computed.isnull == NULL ||
+			computed.nrows != batch->rows.nrows)
+			elog(ERROR, "Tessera projection returned an invalid column");
+	}
 	/*
 	 * Above a gather: a row a participant's partial value, NULL skipped (a
 	 * participant without rows gives a count of 0 and NULL otherwise), not
@@ -755,6 +784,9 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 		TessRowMask pairs = agg_distinct_rows(state, value, rows.nrows, NULL, NULL, &rows,
 											  column);
 
+		/* The count reads the rows' NULLs; their numbers stand for the values. */
+		if (value->distinct_by_bytes)
+			computed.values = value->distinct_dict->batch_numbers;
 		evaluate(state, value, column, &pairs);
 		return;
 	}
@@ -837,6 +869,15 @@ drain(TessAggState *state)
 			ResetExprContext(state->css.ss.ps.ps_ExprContext);
 			if (state->projection != NULL)
 				input = tess_projection_wrap(state->projection, batch);
+			/* A distinct argument by its bytes, where the batch gives them. */
+			for (int index = 0; state->has_distinct_bytes && index < state->nvalues; index++)
+			{
+				AggValue   *value = &state->values[index];
+
+				value->distinct_by_bytes = value->distinct_bytes_column >= 0 &&
+					tess_batch_bytes_column(input, value->distinct_bytes_column,
+											&input->rows, &value->distinct_bytes);
+			}
 			agg_read_in_order(state, input);
 			for (int index = 0; index < state->nvalues; index++)
 				accumulate(state, &state->values[index], input, rows);

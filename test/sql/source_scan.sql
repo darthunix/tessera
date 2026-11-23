@@ -761,6 +761,21 @@ SELECT source_same('SELECT s, count(*), count(n) FROM ft_bytes GROUP BY s');
 SELECT source_same('SELECT g, (SELECT count(n) FROM ft_bytes WHERE a > g)
     FROM generate_series(1, 3) AS g');
 SELECT tessera_test_scan_source_asks();
+-- The ungrouped COUNT(DISTINCT) of s and of n reads both as bytes, beside
+-- a sum of the column a before them: Datums of a alone are asked, twice
+-- a batch, by the read of the columns in their order and by the sum.
+SELECT source_same('SELECT count(DISTINCT s), count(DISTINCT n), sum(a) FROM ft_bytes');
+SELECT tessera_test_scan_source_asks();
+-- Under a FILTER of a, which numbers some of the rows whose bytes the
+-- batch gave, 5 values of s, 3 of n and none: Datums of a alone, for the
+-- read in order and each filter.
+SELECT source_same('SELECT count(DISTINCT s) FILTER (WHERE a % 50 < 5),
+                           count(DISTINCT n) FILTER (WHERE a % 13 < 3),
+                           count(DISTINCT s) FILTER (WHERE a < 0) FROM ft_bytes');
+SELECT count(DISTINCT s) FILTER (WHERE a % 50 < 5) AS s5,
+       count(DISTINCT n) FILTER (WHERE a % 13 < 3) AS n3,
+       count(DISTINCT s) FILTER (WHERE a < 0) AS none FROM ft_bytes;
+SELECT tessera_test_scan_source_asks();
 -- Through the source's projection, which passes s on and computes the
 -- others: the bytes of s at the source's addresses, and no bytes of the
 -- computed columns.
@@ -818,6 +833,7 @@ SELECT source_same('SELECT md5(s), count(*) FROM ft_bytes_mixed GROUP BY s');
 SET work_mem = '64kB';
 SELECT source_same('SELECT m, count(*) FROM ft_bytes_mixed GROUP BY m');
 RESET work_mem;
+SELECT source_same('SELECT count(DISTINCT s), count(DISTINCT m) FROM ft_bytes_mixed');
 SELECT tessera_test_scan_source_asks();
 DROP FOREIGN TABLE ft_bytes_mixed;
 DROP TABLE ht_bytes_mixed;
@@ -841,10 +857,13 @@ CREATE TABLE ht_bytes_index AS SELECT i AS a, (i % 2047)::text AS s
     FROM generate_series(1, 8192) AS i;
 SET work_mem = '64kB';
 SELECT source_same('SELECT s, count(*) FROM ft_bytes_index GROUP BY s');
+SELECT source_same('SELECT count(DISTINCT s) FROM ft_bytes_index');
 RESET work_mem;
 SELECT source_same('SELECT s, count(*) FROM ft_bytes_index GROUP BY s');
 SELECT source_same('SELECT g, (SELECT count(*) FROM (SELECT s FROM ft_bytes_index
                                                     WHERE a > g * 1000 GROUP BY s) q)
+                    FROM generate_series(1, 3) AS g');
+SELECT source_same('SELECT g, (SELECT count(DISTINCT s) FROM ft_bytes_index WHERE a > g * 1000)
                     FROM generate_series(1, 3) AS g');
 SELECT tessera_test_scan_source_asks();
 DROP FOREIGN TABLE ft_bytes_index;
