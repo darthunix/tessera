@@ -776,6 +776,61 @@ SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 32, f
 SELECT count(*) AS asked FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 127, false, false);
 SELECT count(*) FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 128, false, false);
 SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, true, false);
+-- spec: string-bytes/Groups by bytes
+-- TessAgg reads a grouping's string keys in the bytes form: by text, by
+-- varchar and the int column before it, whose values the grouping makes,
+-- and by bytea, over the file of plain pages and the one through a
+-- dictionary: its groups are the core's, and the scan makes no value of
+-- a key, Values Decoded counting the int column's alone.
+SELECT tbl, differ_off(format('SELECT s, count(*) FROM %s GROUP BY s', tbl)) AS by_text,
+       differ_off(format('SELECT v, i, count(*) FROM %s GROUP BY v, i', tbl)) AS by_varchar_int,
+       differ_off(format('SELECT b, count(*) FROM %s GROUP BY b', tbl)) AS by_bytea
+FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl);
+SELECT explain_lines('ANALYZE', 'SELECT s, count(*) FROM t_bytes_dict GROUP BY s',
+                     'TessAgg|Decoded');
+SELECT explain_lines('ANALYZE', 'SELECT v, i, count(*) FROM t_bytes_plain GROUP BY v, i',
+                     'TessAgg|Decoded');
+-- spec: string-bytes/A nondeterministic collation
+-- Under a collation that ignores case, whose equal values may differ in
+-- their bytes, the key is read as Datum values, the scan making each
+-- row's.
+CREATE COLLATION parquet_bytes_ci (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+SELECT differ_off('SELECT lower(s COLLATE parquet_bytes_ci), count(*)
+                   FROM t_bytes_dict GROUP BY s COLLATE parquet_bytes_ci') AS by_nondeterministic;
+SELECT explain_lines('ANALYZE', 'SELECT count(*) FROM t_bytes_dict GROUP BY s COLLATE parquet_bytes_ci',
+                     'TessAgg|Decoded');
+DROP COLLATION parquet_bytes_ci;
+-- spec: string-bytes/Groups that spill
+-- A serial grouping by a text column through a dictionary, of more groups
+-- than work_mem holds: its groups are the core's, its rows written to
+-- disk and read back; the values of the rows written are made by TessAgg
+-- from their bytes, so that the scan makes none. Grouped by two text
+-- columns, the values both keys make for a batch's rows are written.
+SELECT parquet_test_write(:'dir' || '/bytes_many.parquet', json_build_object(
+    'dictionary', true, 'columns', json_build_array(
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(CASE WHEN n % 2 = 0 THEN 'hot' || n % 10 ELSE 'é' || (n * 7919 % 5000) END
+                         ORDER BY n) FROM generate_series(1, 20000) n)),
+      json_build_object('name', 't', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(CASE WHEN n % 11 = 0 THEN NULL WHEN n % 2 = 0 THEN 'k' || n % 3
+                              ELSE 'ü' || n % 4 END
+                         ORDER BY n) FROM generate_series(1, 20000) n))))::text);
+\set bytes_many :dir '/bytes_many.parquet'
+CREATE FOREIGN TABLE t_bytes_many (s text, t text) SERVER pq OPTIONS (files :'bytes_many');
+SET work_mem = '64kB';
+SELECT differ_off('SELECT s, count(*) FROM t_bytes_many GROUP BY s') AS spilled_groups_differ;
+SELECT differ_off('SELECT s, t, count(*) FROM t_bytes_many GROUP BY s, t')
+    AS spilled_pairs_differ;
+SELECT count(*) FILTER (WHERE line ~ 'Disk Usage') > 0 AS spilled,
+       max(substring(line from 'Values Decoded: (\d+)')::int) = 0 AS no_value_of_the_scan
+FROM explain_lines('ANALYZE', 'SELECT s, count(*) FROM t_bytes_many GROUP BY s',
+                   'Disk Usage|Decoded') line;
+SELECT count(*) FILTER (WHERE line ~ 'Disk Usage') > 0 AS spilled,
+       max(substring(line from 'Values Decoded: (\d+)')::int) = 0 AS no_value_of_the_scan
+FROM explain_lines('ANALYZE', 'SELECT s, t, count(*) FROM t_bytes_many GROUP BY s, t',
+                   'Disk Usage|Decoded') line;
+RESET work_mem;
+DROP FOREIGN TABLE t_bytes_many;
 DROP FOREIGN TABLE t_bytes_plain, t_bytes_dict, t_bytes_bad;
 DROP TABLE h_bytes;
 DROP FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool);

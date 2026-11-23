@@ -1333,6 +1333,20 @@ never its records, and a spilled row's partition is chosen by the hash
 of its values, not of its numbers (with numbers, every row of a group
 the frozen table lacks would take one partition).
 
+A key of bytes (text and varchar under a deterministic collation, bytea)
+that is a column of the input is read in the bytes form where the
+batch offers it ([batch.md](batch.md)), as the Parquet source's do: the
+dictionary looks each row's value up by its bytes, by the same
+`hash_bytes` and the same equality by length and `memcmp`, so that rows
+of either form find one number, and a value it lacks enters as a copy
+made from its bytes, a header and the bytes. The node asks no `Datum`
+value of such a key: the rows a frozen table writes to disk get theirs
+made by the node from the bytes, which passed the column's rule, so
+that the source neither checks nor copies them again; and its read of
+the columns in their order leaves the column out. A key of
+a nondeterministic collation, a key computed from a column, and a set
+operation's keys are read as `Datum` values.
+
 Equal values may differ in form: numeric 1.0, 1.00 and 1.000, float8 -0
 and 0, text of either case under a case-insensitive collation, bpchar
 with trailing blanks. A number keeps its value's first form of the whole

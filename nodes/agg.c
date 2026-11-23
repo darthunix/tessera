@@ -162,14 +162,28 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		int			position = foreach_current_index(key);
 
+		state->key_bytes_column[position] = -1;
 		if (list_nth_int(eqops, position) != 0)
 		{
+			Node	   *bare = key;
+
 			state->kinds[position] = TESS_KEY_KIND_NUMBER;
 			state->dicts[position] = agg_key_dict_create(state, (Oid) list_nth_int(eqops, position),
 													exprType(key), exprCollation(key));
 			state->has_dicts = true;
 			state->has_forms |= state->dicts[position]->forms;
 			state->row_spill = true;
+			/*
+			 * A key of bytes that is a column of the child, varchar as text
+			 * among them, may come in the bytes form; not of a set
+			 * operation, whose two sides have two layouts.
+			 */
+			while (IsA(bare, RelabelType))
+				bare = (Node *) ((RelabelType *) bare)->arg;
+			if (state->dicts[position]->bytes == TESS_KEY_BYTES_WHOLE && state->setop < 0 &&
+				IsA(bare, Var) && ((Var *) bare)->varno == INDEX_VAR)
+				state->key_bytes_column[position] =
+					tess_layout_column(&state->child_layout, ((Var *) bare)->varattno - 1);
 		}
 		else if (!tess_word_key_kind(exprType(key), &state->kinds[position]))
 			elog(ERROR, "TessAgg received a key of type %u", exprType(key));

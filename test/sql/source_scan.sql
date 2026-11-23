@@ -738,9 +738,10 @@ SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 -- within its batches and changed at the next and after a rescan; a plain
 -- column's fields written over a result of a dictionary; a structure of an
 -- older size refused and left as it was; and a projection over the source
--- passes the bytes of the columns it passes on and no others. No consumer
--- reads the form yet: the asks counted are of Datum values, and the
--- batches checked are shown.
+-- passes the bytes of the columns it passes on and no others. TessAgg
+-- reads a grouping's text key in the bytes form, asking no Datum value of
+-- it, where the batches offer it: the asks of either form are counted,
+-- and the batches checked are shown.
 SELECT tessera_test_scan_sources(ARRAY['reader']);
 CREATE FOREIGN TABLE ft_bytes (a int4, s text OPTIONS (mod '50', width '10000'),
     n text OPTIONS (mod '13', nulls '7'), p text)
@@ -790,6 +791,36 @@ CREATE FOREIGN TABLE ft_bytes_one (a int4, s text OPTIONS (mod '13'))
 SELECT count(s) FROM ft_bytes_one;
 SELECT tessera_test_scan_source_asks();
 DROP FOREIGN TABLE ft_bytes_wide, ft_bytes_one;
+-- Keys of both forms in one dictionary: the batches given as Datum values
+-- and in the bytes form in turn, the long values compressed, with NULL
+-- rows and empty strings, so that a grouping's value enters from either
+-- form and is found from the other, a compressed one made plain to be
+-- compared: the groups of the heap; and, of 3000 values under a small
+-- work_mem, the lookups of a frozen table and the rows it writes to disk.
+CREATE FOREIGN TABLE ft_bytes_mixed (a int4,
+    s text OPTIONS (mod '50', width '10000', compress 'on', nulls '7'),
+    m text OPTIONS (mod '3000', width '300', compress 'on'))
+    SERVER scan_server OPTIONS (rows '4000', bytes 'plain', bytes_batches 'alternate');
+-- The source's check of its own batches, which reads each batch's plain
+-- values in both forms, is refused with these options.
+ALTER FOREIGN TABLE ft_bytes_mixed OPTIONS (ADD check_bytes 'on');
+SELECT count(*) FROM ft_bytes_mixed;
+ALTER FOREIGN TABLE ft_bytes_mixed OPTIONS (DROP check_bytes);
+CREATE TABLE ht_bytes_mixed AS
+    SELECT i AS a,
+        CASE WHEN i % 7 = 0 THEN NULL WHEN i % 50 = 0 THEN ''
+             ELSE (i % 50)::text || repeat('x', (i % 50) * 7919 % 10000) END AS s,
+        CASE WHEN i % 3000 = 0 THEN ''
+             ELSE (i % 3000)::text || repeat('x', (i % 3000) * 7919 % 300) END AS m
+    FROM generate_series(1, 4000) AS i;
+SELECT source_same('SELECT s, count(*) FROM ft_bytes_mixed GROUP BY s');
+SELECT source_same('SELECT md5(s), count(*) FROM ft_bytes_mixed GROUP BY s');
+SET work_mem = '64kB';
+SELECT source_same('SELECT m, count(*) FROM ft_bytes_mixed GROUP BY m');
+RESET work_mem;
+SELECT tessera_test_scan_source_asks();
+DROP FOREIGN TABLE ft_bytes_mixed;
+DROP TABLE ht_bytes_mixed;
 SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 DROP FOREIGN TABLE ft_bytes;
 DROP TABLE ht_bytes;

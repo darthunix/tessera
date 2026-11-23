@@ -134,15 +134,16 @@ named in the harness and covered by a property test.
 
 ## 4. TessAgg's keys
 
-- [ ] 4.1 `nodes/agg_keydict.c`, `nodes/agg_group.c`: the lookup of a
+- [x] 4.1 `nodes/agg_keydict.c`, `nodes/agg_group.c`: the lookup of a
       key by bytes beside the lookup by `Datum`, with the same hash and
       equality; a value copied from its bytes when it enters; the
-      values of rows written to a spill file asked for those rows
-      alone; the read of the columns in their order without the columns
-      read as bytes; cases over the test source and the `parquet`
-      suite, grouped by `text`, `varchar` with a number of a column
-      before it and `bytea`, a nondeterministic collation, a serial
-      spill; `docs/nodes.md`. Check: the suites; `make crosscheck`
+      values of rows written to a spill file made from their bytes for
+      those rows alone; the read of the columns in their order without
+      the columns read as bytes; cases over the test source and the
+      `parquet` suite, grouped by `text`, `varchar` with a number of a
+      column before it and `bytea`, a nondeterministic collation, a
+      serial spill by one key and by two; `docs/nodes.md`. Check: the
+      suites; `make crosscheck`
 - [ ] 4.2 The array from a source dictionary's index to a key's number
       and hash: its size bounded by the dictionary's count of values
       and by a share of the grouping's memory, its arithmetic checked,

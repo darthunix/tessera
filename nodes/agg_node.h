@@ -245,6 +245,14 @@ struct KeyDict
 	Datum	   *batch_numbers;
 	uint32	   *batch_hashes;
 	/*
+	 * A value looked up by its bytes (agg_keydict_numbers_bytes): the table
+	 * is asked for the key that points to probe, whose equality reads these
+	 * bytes in place of a Datum's.
+	 */
+	const char *probe_data;
+	uint32		probe_len;
+	char		probe;
+	/*
 	 * A key of several in a grouping whose equal values may differ in form:
 	 * the groups whose first row's form is not their number's, by their
 	 * records, a copy of the form each; NULL while there is none.
@@ -333,6 +341,9 @@ extern void agg_key_dict_reset(KeyDict *dict, uint64 values, int shares);
 extern void agg_keydict_numbers(KeyDict *dict, const TessDatumColumn *column,
 								const TessRowMask *rows, bool insert,
 								Datum *numbers, uint32 *hashes);
+extern void agg_keydict_numbers_bytes(KeyDict *dict, const TessBytesColumn *column,
+									  const TessRowMask *rows, bool insert,
+									  Datum *numbers, uint32 *hashes);
 extern void agg_key_forms(TessAggState *state, const TessRowMask *inserted);
 
 #endif							/* TESSERA_NODES_AGG_NODE_H */

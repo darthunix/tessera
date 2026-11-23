@@ -56,7 +56,7 @@ in the C API, no change of `TessDatumColumn`, no setting.
         │                                         first 8 bytes; values
         └── get_datum_column ──▶ every other      made for kept rows
             consumer, and the rows that need      alone
-            a value (output, spill, heap)
+            a value (output, heap)
 ```
 
 A consumer that can read bytes asks for them first; a `false` answer,
@@ -64,8 +64,9 @@ or a batch without the operation, sends it to `get_datum_column`, as
 today. A consumer that needs values for some rows, a row written to a
 spill file, a row that beats the worst of a top-N heap, asks
 `get_datum_column` for those rows alone: the source makes values only
-for the rows asked. TessAgg makes a group's value from its bytes when
-the value enters its dictionary, without asking the source.
+for the rows asked. TessAgg asks the source for none: it makes a
+group's value from its bytes when the value enters its dictionary, and
+a value of a row it writes to a spill file the same way.
 
 ## Decisions
 
@@ -182,7 +183,13 @@ whenever the key dictionary is reset: when a spill is replayed, and
 when a partial stage under a gather sends its table up and starts the
 next. The ungrouped `COUNT(DISTINCT)` numbers its values through the
 same lookup. A row the frozen table writes to a spill file needs its
-values: the node asks `get_datum_column` for the rows it writes alone.
+values: the node makes them from the bytes for the rows it writes
+alone, a header and the bytes, which passed the column's rule when the
+source gave them. Asking the source instead checked and copied each
+string a second time, nearly a quarter of the instructions of a
+grouping of strings that spills. The values of every key of a batch
+live in one context of the node's until the batch's rows are written,
+and the next batch resets it.
 The node's read of its columns in their order, made before it computes
 anything so that a heap batch deforms each row once, leaves out every
 column it reads as bytes, a key, the argument of a `COUNT(DISTINCT)`

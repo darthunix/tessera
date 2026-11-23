@@ -214,7 +214,21 @@ groups_memory(TessAggState *state)
 	return bytes;
 }
 
-/* The child's columns the node reads, in their order, before it computes anything. */
+/* Whether the batch at hand gave the child's column as a key's bytes. */
+static bool
+read_by_bytes(const TessAggState *state, int column)
+{
+	for (int key = 0; key < state->nkeys; key++)
+		if (state->key_by_bytes[key] && state->key_bytes_column[key] == column)
+			return true;
+	return false;
+}
+
+/*
+ * The child's columns the node reads, in their order, before it computes
+ * anything; not a column a key read as bytes, whose values it would make
+ * for every row.
+ */
 void
 agg_read_in_order(TessAggState *state, TessBatch *batch)
 {
@@ -224,6 +238,8 @@ agg_read_in_order(TessAggState *state, TessBatch *batch)
 	{
 		TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 
+		if (read_by_bytes(state, state->read_columns[index]))
+			continue;
 		batch->ops->get_datum_column(batch, state->read_columns[index], &batch->rows,
 									 TESS_COLUMN_FOR_PROJECTION, &column);
 	}
@@ -241,6 +257,55 @@ computed_column(TessAggState *state, TessBatch *batch, int computed,
 	if (result->values == NULL || result->isnull == NULL ||
 		result->nrows != batch->rows.nrows)
 		elog(ERROR, "Tessera projection returned an invalid column");
+}
+
+/*
+ * The Datum values of a key read as bytes, for the rows of rows alone,
+ * made from the bytes the batch gave, which passed the column's rule as a
+ * Datum of the row would: a header and the bytes, in the batch's context
+ * of such values, which the caller resets once a batch, so that the
+ * values of every key live until the batch's rows are written; the source
+ * neither checks nor copies them again.
+ */
+static void
+key_values(TessAggState *state, TessBatch *batch, int key, const TessRowMask *rows,
+		   TessDatumColumn *result)
+{
+	const TessBytesColumn *bytes = &state->key_bytes[key];
+	int			nrows = batch->rows.nrows;
+	Datum	   *values;
+	bool	   *isnull;
+	MemoryContext old;
+	int			row = -1;
+	Size		total = 0;
+	char	   *block;
+
+	old = MemoryContextSwitchTo(state->key_values_context);
+	values = palloc0_array(Datum, Max(nrows, 1));
+	isnull = palloc0_array(bool, Max(nrows, 1));
+	/* One block for the rows' values, each at a MAXALIGN'd place. */
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+		if (!bytes->isnull[row])
+			total = add_size(total, MAXALIGN(VARHDRSZ + (Size) bytes->lengths[row]));
+	block = MemoryContextAllocHuge(state->key_values_context, Max(total, 1));
+	row = -1;
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		Size		size = VARHDRSZ + (Size) bytes->lengths[row];
+
+		isnull[row] = bytes->isnull[row];
+		if (isnull[row])
+			continue;
+		SET_VARSIZE(block, size);
+		memcpy(VARDATA(block), bytes->data[row], bytes->lengths[row]);
+		values[row] = PointerGetDatum(block);
+		block += MAXALIGN(size);
+	}
+	MemoryContextSwitchTo(old);
+	*result = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	result->values = values;
+	result->isnull = isnull;
+	result->nrows = nrows;
 }
 
 /*
@@ -271,6 +336,11 @@ group_batch(TessAggState *state, TessBatch *batch)
 		!state->frozen && state->spill == NULL;
 
 	reserve_rows(state, nrows);
+	/* A key of bytes in the bytes form, where the batch offers it. */
+	for (int key = 0; key < state->nkeys; key++)
+		state->key_by_bytes[key] = state->key_bytes_column[key] >= 0 && !state->replaying &&
+			tess_batch_bytes_column(batch, state->key_bytes_column[key], &batch->rows,
+									&state->key_bytes[key]);
 	if (!state->replaying)
 		agg_read_in_order(state, batch);
 	memset(state->valid_bits, 0, sizeof(uint64) * nwords);
@@ -283,7 +353,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 		TessDatumColumn *column = &state->key_columns[key];
 		KeyDict    *dict = state->dicts[key];
 
-		computed_column(state, batch, key, TESS_COLUMN_FOR_FILTER, false, column);
+		if (!state->key_by_bytes[key])
+			computed_column(state, batch, key, TESS_COLUMN_FOR_FILTER, false, column);
 		/* A key through a dictionary: the table groups by its values' numbers. */
 		if (dict != NULL)
 		{
@@ -295,9 +366,22 @@ group_batch(TessAggState *state, TessBatch *batch)
 				dict->batch_numbers = MemoryContextAlloc(query, sizeof(Datum) * nrows);
 				dict->batch_hashes = MemoryContextAlloc(query, sizeof(uint32) * nrows);
 			}
-			agg_keydict_numbers(dict, column, &batch->rows, !state->frozen && !probe,
-							dict->batch_numbers, dict->batch_hashes);
-			state->number_columns[key] = *column;
+			if (state->key_by_bytes[key])
+			{
+				/* The numbers by the key's bytes; its Datums only for a spill's rows. */
+				agg_keydict_numbers_bytes(dict, &state->key_bytes[key], &batch->rows,
+										  !state->frozen && !probe, dict->batch_numbers,
+										  dict->batch_hashes);
+				state->number_columns[key] = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+				state->number_columns[key].nrows = nrows;
+				state->number_columns[key].isnull = state->key_bytes[key].isnull;
+			}
+			else
+			{
+				agg_keydict_numbers(dict, column, &batch->rows, !state->frozen && !probe,
+								dict->batch_numbers, dict->batch_hashes);
+				state->number_columns[key] = *column;
+			}
 			state->number_columns[key].values = dict->batch_numbers;
 			column = &state->number_columns[key];
 		}
@@ -378,9 +462,18 @@ group_batch(TessAggState *state, TessBatch *batch)
 			missing_bits[word] = state->valid_bits[word] & ~state->pending_bits[word];
 			state->valid_bits[word] = state->pending_bits[word];
 		}
+		/* The values the keys read as bytes make for these rows: the last batch's go. */
+		if (state->key_values_context == NULL)
+			state->key_values_context = AllocSetContextCreate(state->css.ss.ps.state->es_query_cxt,
+															  "TessAgg key values of a batch",
+															  ALLOCSET_DEFAULT_SIZES);
+		else
+			MemoryContextReset(state->key_values_context);
 		for (int column = 0; column < state->ncomputed; column++)
 		{
-			if (column < state->nkeys)
+			if (column < state->nkeys && state->key_by_bytes[column])
+				key_values(state, batch, column, &missing, &state->computed_columns[column]);
+			else if (column < state->nkeys)
 				state->computed_columns[column] = state->key_columns[column];
 			else
 				computed_column(state, batch, column, TESS_COLUMN_FOR_PROJECTION, false,
