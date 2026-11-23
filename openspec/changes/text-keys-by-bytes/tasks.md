@@ -161,7 +161,7 @@ named in the harness and covered by a property test.
       lookups; cases as in 4.1 and 4.2, and one whose argument comes
       after another column it reads. Check: the suites; `make
       crosscheck`
-- [ ] 4.4 Count the string queries, the controls and the heap's cases
+- [x] 4.4 Count the string queries, the controls and the heap's cases
       against the base, as the measurement plan says; the report under
       `docs/benchmarks/`. Check: `.github/scripts/check-specs.sh`
 
