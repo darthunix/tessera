@@ -44,7 +44,7 @@ test.
       of the backend, 64-bit, from 1, with an error should it ever pass
       its last value; a test module call that takes identities from two
       modules and finds them distinct. Check: the suites
-- [ ] 2.3 `test/`: a test source that gives a table of strings in both
+- [x] 2.3 `test/`: a test source that gives a table of strings in both
       forms, with and without dictionaries, and counts the asks of each
       form; a test module call that reads the form and checks the
       layout, the dictionary's count of values, the lifetime of every
