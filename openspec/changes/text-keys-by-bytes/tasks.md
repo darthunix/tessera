@@ -39,7 +39,7 @@ test.
       the form and answers false for a batch without the operation; the
       offsets of `TessBytesColumn` asserted in the installed headers'
       check; `docs/batch.md`. Check: the suites
-- [ ] 2.2 `include/tessera/bridge.h`, `bridge/`: the optional operation
+- [x] 2.2 `include/tessera/bridge.h`, `bridge/`: the optional operation
       of `TessApi` that gives a dictionary's identity from one counter
       of the backend, 64-bit, from 1, with an error should it ever pass
       its last value; a test module call that takes identities from two

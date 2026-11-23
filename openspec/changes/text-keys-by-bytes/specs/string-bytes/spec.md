@@ -108,6 +108,16 @@ SHALL NOT pass from one process to another. Without a dictionary,
 - **THEN** its groups are those of the core
 - **Verified by:** pending
 
+#### Scenario: Identities of one backend
+- **WHEN** two modules of a backend take identities from Tessera's API
+  in turn, and one also asks through a root of the size before the
+  operation and through one whose operation is `NULL`
+- **THEN** each identity is above 0 and above the one taken before it,
+  and both of those asks get 0, so that their producer gives no
+  dictionary
+- **Verified by:**
+  `test/sql/bridge.sql::-- spec: string-bytes/Identities of one backend`
+
 #### Scenario: Dictionaries of two producers
 - **WHEN** one query reads the test source and the Parquet table, each
   through dictionaries, in the same backend
