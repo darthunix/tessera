@@ -34,7 +34,7 @@ test.
 
 ## 2. The form
 
-- [ ] 2.1 `include/tessera/batch.h`: `TessBytesColumn`, the optional
+- [x] 2.1 `include/tessera/batch.h`: `TessBytesColumn`, the optional
       operation `get_bytes_column` and a helper that asks a batch for
       the form and answers false for a batch without the operation; the
       offsets of `TessBytesColumn` asserted in the installed headers'
