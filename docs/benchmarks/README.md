@@ -7,6 +7,12 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-23, the bytes form, stage 1 of
+  `text-keys-by-bytes`](2026-11-23-text-keys-by-bytes-form/README.md):
+  ClickBench's 43 queries over `hits.parquet` counted at 0 workers, and
+  the heap's families `sort` and `anykey`, against `531b5d7d`; the
+  first count's excess and its two fixes, Apple M5 Pro, PostgreSQL 19.
+
 - [2026-11-23, DISTINCT sets past the
   limit](2026-11-23-agg-distinct-spill/README.md): the cycles of the
   new cases of `spill`, of the path that fits against `main` and of
