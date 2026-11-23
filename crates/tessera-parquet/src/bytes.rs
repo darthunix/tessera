@@ -63,19 +63,26 @@ pub(crate) fn slices<'a>(
 ) -> Option<Vec<&'a [u8]>> {
     let (offsets, data) = strings;
     let mut values: Vec<&[u8]> = vec![&[]; rows];
-    for (row, value) in values.iter_mut().enumerate() {
-        if asked.get(row / 64).is_none_or(|w| w >> (row % 64) & 1 == 0) {
-            continue;
+    // The rows asked alone, by the set bits of their words: a batch asks
+    // 64 rows of a window of 1024.
+    for (word, &bits) in asked.iter().enumerate() {
+        let mut bits = bits;
+        while bits != 0 {
+            let row = word * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let Some(value) = values.get_mut(row) else {
+                break;
+            };
+            if is_null(row) {
+                *made.get_mut(row / 64)? |= 1 << (row % 64);
+                continue;
+            }
+            let (start, len) = slot_range(offsets, data.len(), slot_of(row))?;
+            if len > max {
+                return None;
+            }
+            *value = &data[start..start + len];
         }
-        if is_null(row) {
-            *made.get_mut(row / 64)? |= 1 << (row % 64);
-            continue;
-        }
-        let (start, len) = slot_range(offsets, data.len(), slot_of(row))?;
-        if len > max {
-            return None;
-        }
-        *value = &data[start..start + len];
     }
     Some(values)
 }
