@@ -208,7 +208,11 @@ impl ColumnReader {
             rows,
             selection,
             batch,
-            dictionary: chunk.dictionary_page_offset().is_some(),
+            // A chunk that falls back to plain pages is read plain: the
+            // crate would build a dictionary of each array of its plain
+            // pages, hashing every value, and a window over two arrays
+            // would merge their dictionaries.
+            dictionary: crate::stats::through_dictionary(chunk) != Some(false),
             forward: None,
             shared: SharedFile::of(file),
             checked: 0,
@@ -216,7 +220,8 @@ impl ColumnReader {
     }
 
     /// The read plan of the arrays the reader gives: of a dictionary array
-    /// for a chunk of bytes that has a dictionary page.
+    /// for a chunk of bytes that has a dictionary page and no data page
+    /// the footer says is encoded otherwise.
     pub fn plan(&self) -> &ReadPlan {
         self.column.view(self.dictionary).1
     }

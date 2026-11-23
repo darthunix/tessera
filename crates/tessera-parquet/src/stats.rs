@@ -4,7 +4,7 @@
 //! whether every data page is encoded through its dictionary.
 
 use parquet::basic::{ColumnOrder, Encoding};
-use parquet::file::metadata::ParquetMetaData;
+use parquet::file::metadata::{ColumnChunkMetaData, ParquetMetaData};
 use parquet::file::statistics::Statistics;
 
 use crate::column::{FileType, MappedColumn};
@@ -66,6 +66,26 @@ pub fn group_stats(file: &ParquetFile, column: &MappedColumn, group: usize) -> G
     stats_of(file.metadata(), column, group)
 }
 
+/// Whether the data pages of `chunk` are encoded through its dictionary,
+/// as its footer says: `Some(true)` where it has a dictionary page and
+/// every data page is encoded through it, `Some(false)` where it has no
+/// dictionary page or a data page is encoded otherwise, as a writer falls
+/// back to plain pages when the dictionary grows, and `None` where the
+/// footer does not say how its data pages are encoded.
+pub(crate) fn through_dictionary(chunk: &ColumnChunkMetaData) -> Option<bool> {
+    if chunk.dictionary_page_offset().is_none() {
+        return Some(false);
+    }
+    // The mask holds the encodings of the data pages alone: each through
+    // the dictionary, by either of its names.
+    let mask = chunk.page_encoding_stats_mask()?;
+    mask.encodings().next()?;
+    Some(
+        mask.encodings()
+            .all(|e| matches!(e, Encoding::PLAIN_DICTIONARY | Encoding::RLE_DICTIONARY)),
+    )
+}
+
 fn stats_of(metadata: &ParquetMetaData, column: &MappedColumn, group: usize) -> GroupStats {
     let Some(group) = metadata.row_groups().get(group) else {
         return GroupStats::default();
@@ -77,15 +97,7 @@ fn stats_of(metadata: &ParquetMetaData, column: &MappedColumn, group: usize) -> 
     if chunk.num_values() != group.num_rows() {
         return GroupStats::default();
     }
-    // The mask holds the encodings of the data pages alone: each through
-    // the dictionary, by either of its names.
-    let dictionary_only = chunk.dictionary_page_offset().is_some()
-        && chunk.page_encoding_stats_mask().is_some_and(|mask| {
-            mask.encodings().next().is_some()
-                && mask
-                    .encodings()
-                    .all(|e| matches!(e, Encoding::PLAIN_DICTIONARY | Encoding::RLE_DICTIONARY))
-        });
+    let dictionary_only = through_dictionary(chunk) == Some(true);
     let Some(stats) = chunk.statistics() else {
         return GroupStats {
             dictionary_only,
