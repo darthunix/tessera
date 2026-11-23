@@ -228,7 +228,12 @@ a clause the source answered for among its expressions.
 The node is an ordinary batch node ([node.md](node.md)): it publishes
 batches through the output helper, serves a row-wise parent, rescans,
 and installs the shared memory callbacks of a parallel-aware path to
-divide the rows among the participants. A clause may compare a column
+divide the rows among the participants. Its batches may also offer a
+string column in the bytes form ([batch.md](batch.md)), the bytes as
+the source holds them, with the dictionary of its values where it keeps
+one, its identity taken from Tessera's API; the Parquet source does,
+keeping a reference to each window's array that a batch's bytes point
+into until the batch's memory is reset. A clause may compare a column
 with a value that is not a constant of the plan: an outer row's value,
 a prepared statement's parameter, an uncorrelated subquery's value, or
 an expression such as `now()`. Compute that side through PostgreSQL's
