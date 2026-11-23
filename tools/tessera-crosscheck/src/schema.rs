@@ -2,13 +2,20 @@
 //!
 //! Three tables of different sizes share their key columns' ranges, so
 //! that joins find matches, misses and duplicates: `fact` with a few
-//! thousand rows, `dim` with two hundred, `tiny` with five. Every column
-//! but the key `id` has NULLs, and the values lean to the edges where code
-//! breaks: the ends of the integer types, zero and ±1, empty strings,
-//! numerics of several scales, dates far from today, NaN and the
-//! infinities. The rows come from PostgreSQL's own `random()` after
-//! `setseed`, in one connection, so a seed gives the same data on the same
-//! build every time, and a finding's file can carry the SQL that makes it.
+//! thousand rows, `dim` with two hundred, `tiny` with five. Every
+//! column but the key `id` has NULLs, and the values lean to the edges
+//! where code breaks: the ends of the integer types, zero and ±1, empty
+//! strings, numerics of several scales, dates far from today, NaN and
+//! the infinities; strings of characters of two, three and four bytes
+//! in UTF-8, a combining accent, and pairs a collation that ignores
+//! case takes as equal, as `é` and `É`. The setup also makes the
+//! collations the queries name: `lc`, of libc for a language
+//! (`en_US.UTF-8`, or `C.UTF-8` where that is missing), and `nd`, ICU's
+//! nondeterministic one that ignores case, which needs a server built
+//! with ICU. The rows come from PostgreSQL's own `random()` after
+//! `setseed`, in one connection, so a seed gives the same data on the
+//! same build every time, and a finding's file can carry the SQL that
+//! makes it.
 
 use std::fmt::Write;
 
@@ -133,16 +140,18 @@ const NUMERIC_EDGES: &str = "ARRAY[0, -0.01, 0.01, 9999999999.99, -9999999999.99
      999999999999999999, 0.000001, 1e20, -1e-20]::numeric[]";
 const FLOAT8_EDGES: &str =
     "ARRAY['NaN', 'Infinity', '-Infinity', '0', '-0', '1e308', '-1e-308']::float8[]";
-const TEXT_EDGES: &str = "ARRAY['', ' ', '%', '_', 'a%b', 'zzzz']::text[]";
+const TEXT_EDGES: &str = "ARRAY['', ' ', '%', '_', 'a%b', 'zzzz', '\u{e9}', 'e\u{301}', \
+     '\u{c9}', '\u{df}', 'SS', '\u{130}', '\u{20ac}', '\u{1f600}']::text[]";
 const DATE_EDGES: &str =
     "ARRAY['4713-11-24 BC', '0001-01-01', '1999-12-31', '2000-01-01', '9999-12-31']::date[]";
 const TIMESTAMP_EDGES: &str = "ARRAY['4713-11-24 00:00:00 BC', '2000-01-01 00:00:00', \
      '1999-12-31 23:59:59.999999', '9999-12-31 23:59:59']::timestamp[]";
 
-/// A short string of a few characters, with spaces, `%`, `_` and capitals
-/// among them, as LIKE patterns and comparisons need.
+/// A short string of a few characters, with spaces, `%`, `_`, capitals and
+/// characters of two bytes among them, as LIKE patterns and comparisons
+/// need.
 const TEXT_COMMON: &str = "translate(substr(md5(random()::text), 1, floor(random() * 7)::int), \
-     '0123', ' %_A')";
+     '012345', ' %_A\u{e9}\u{df}')";
 
 fn int4(range: i64) -> String {
     value(0.1, INT4_EDGES, 0.05, &format!("{}::int4", small(range)))
@@ -186,7 +195,35 @@ pub fn setup(seed: u64, rows: u32) -> String {
     // setseed takes a fraction in [-1, 1].
     let fraction = (seed % 2_000_001) as f64 / 1_000_000.0 - 1.0;
     let mut sql = String::new();
+    // A cluster an older version of the tool made has another encoding,
+    // under which the queries' strings and collations fail in both modes.
+    let _ = writeln!(
+        sql,
+        "DO $$ BEGIN IF current_setting('server_encoding') <> 'UTF8' THEN \
+         RAISE EXCEPTION 'the cluster is not UTF8: remove target/bench-runs/pgdata-crosscheck'; \
+         END IF; END $$;"
+    );
     let _ = writeln!(sql, "DROP TABLE IF EXISTS fact, dim, tiny;");
+    let _ = writeln!(
+        sql,
+        "DROP COLLATION IF EXISTS lc; DROP COLLATION IF EXISTS nd;"
+    );
+    let _ = writeln!(
+        sql,
+        "DO $$ BEGIN CREATE COLLATION lc (provider = libc, locale = 'en_US.UTF-8'); \
+         EXCEPTION WHEN OTHERS THEN CREATE COLLATION lc (provider = libc, locale = 'C.UTF-8'); \
+         END $$;"
+    );
+    let _ = writeln!(
+        sql,
+        "CREATE COLLATION nd (provider = icu, locale = 'und-u-ks-level2', deterministic = false);"
+    );
+    // The pairs of the data that `nd` is there for: equal, other bytes.
+    let _ = writeln!(
+        sql,
+        "DO $$ BEGIN IF NOT ('\u{e9}' = '\u{c9}' COLLATE nd AND '\u{e9}' = 'e\u{301}' COLLATE nd) \
+         THEN RAISE EXCEPTION 'nd does not take the pairs of the data as equal'; END IF; END $$;"
+    );
     let _ = writeln!(sql, "SELECT setseed({fraction});");
     let _ = writeln!(
         sql,
