@@ -194,6 +194,15 @@ struct AggValue
 	struct DistinctSet *distinct;
 	TessTableKeyKind argument_kind;
 	struct KeyDict *distinct_dict;
+	/*
+	 * An ungrouped COUNT(DISTINCT) of a column of bytes through
+	 * distinct_dict: the child's column, read in the bytes form where a
+	 * batch offers it, else -1; whether the batch at hand gave it, and the
+	 * form it gave, valid until the batch is released.
+	 */
+	int			distinct_bytes_column;
+	bool		distinct_by_bytes;
+	TessBytesColumn distinct_bytes;
 	GenericAgg *generic;
 };
 

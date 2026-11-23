@@ -157,7 +157,7 @@ named in the harness and covered by a property test.
       `parquet` suite with a spill of repeated indexes, a partial stage
       that sends its tables up and a dictionary given again. Check: the
       suites; the suites under ASan and UBSan; `make crosscheck`
-- [ ] 4.3 The ungrouped `COUNT(DISTINCT)` of a string through the same
+- [x] 4.3 The ungrouped `COUNT(DISTINCT)` of a string through the same
       lookups; cases as in 4.1 and 4.2, and one whose argument comes
       after another column it reads. Check: the suites; `make
       crosscheck`

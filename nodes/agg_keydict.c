@@ -291,7 +291,12 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 			dict->batch_numbers = MemoryContextAlloc(query, sizeof(Datum) * nrows);
 			dict->batch_hashes = MemoryContextAlloc(query, sizeof(uint32) * nrows);
 		}
-		agg_keydict_numbers(dict, argument, valid, true, dict->batch_numbers, dict->batch_hashes);
+		if (value->distinct_by_bytes)
+			agg_keydict_numbers_bytes(dict, &value->distinct_bytes, valid, true,
+									  dict->batch_numbers, dict->batch_hashes);
+		else
+			agg_keydict_numbers(dict, argument, valid, true, dict->batch_numbers,
+								dict->batch_hashes);
 		numbers = *argument;
 		numbers.values = dict->batch_numbers;
 		argument = &numbers;

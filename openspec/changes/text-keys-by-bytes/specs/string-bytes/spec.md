@@ -218,7 +218,8 @@ be read as `Datum` values.
   count the distinct values of the `text` column with no grouping
 - **THEN** their results are those of the core, and the scan counts no
   value made for the columns grouped by
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Groups by bytes`
 
 #### Scenario: Groups that spill
 - **WHEN** a serial grouping by a `text` column of the Parquet table,
