@@ -157,6 +157,17 @@ a dictionary of it where the chunk is encoded by one: its offsets are
 offsets of `Binary` hold even when each value fits PostgreSQL, and the
 crate would fail the array before `datum-arrow` sees a value.
 
+A writer whose dictionary grows past its limit falls back to plain pages
+for the rest of the chunk, as most chunks of the long strings of
+ClickBench's files do. Read as a dictionary, such a chunk costs twice:
+the crate builds a dictionary of each array of its plain pages, hashing
+every value, and a window over two arrays of different dictionaries
+merges them, hashing again. So a chunk is read as a dictionary only
+where it has a dictionary page and its footer names no data page
+encoded otherwise; a footer that does not say how its data pages are
+encoded leaves the chunk read through its dictionary, which is right
+for a chunk that does not fall back.
+
 The node reads a group in two passes. First the columns of the clauses
 it checks, forward over every row of the group, window by window, the
 clauses checked on each window's stored values and the values then

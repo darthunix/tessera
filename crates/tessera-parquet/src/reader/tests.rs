@@ -828,3 +828,58 @@ fn windows_of_a_chunk_share_its_dictionary() {
         assert_eq!(buffers(&pair[0]), buffers(&pair[1]));
     }
 }
+
+/// A chunk of strings whose writer fell back from its dictionary to plain
+/// pages is read as a plain array, so that no array of its plain pages
+/// gets a dictionary of its own; a footer that does not say how the pages
+/// are encoded leaves it read through the dictionary.
+#[test]
+fn a_chunk_that_falls_back_to_plain_pages_is_read_plain() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.parquet");
+    let rows = 2000;
+    let strings: Vec<Option<Vec<u8>>> = (0..rows)
+        .map(|i| Some(format!("value {i}").into_bytes()))
+        .collect();
+    let options = Options {
+        page_rows: Some(100),
+        dictionary_bytes: Some(256),
+        ..Options::new(rows, true)
+    };
+    testing::write_with(
+        &path,
+        &[Column::new("s", testing::Values::Bytes(strings.clone()))],
+        options,
+    )
+    .unwrap();
+    for drop_encoding_stats in [false, true] {
+        if drop_encoding_stats {
+            testing::rewrite_footer(
+                &path,
+                testing::Rewrite {
+                    drop_encoding_stats,
+                    ..testing::Rewrite::default()
+                },
+            )
+            .unwrap();
+        }
+        let file = ParquetFile::open(&path).unwrap();
+        let chunk = file.metadata().row_group(0).column(0);
+        assert!(chunk.dictionary_page_offset().is_some());
+        let column = map_column(&file, &request("s", oid::TEXT)).unwrap();
+        let selection: Arc<[u64]> = vec![u64::MAX; mask_words(rows)].into();
+        // Windows that straddle the arrays the crate gives.
+        let mut reader = ColumnReader::new(&file, &column, 0, Arc::clone(&selection), 700).unwrap();
+        for start in (0..rows).step_by(500) {
+            let got = reader
+                .read(start, 500, &bits(&selection, start, 500))
+                .unwrap();
+            assert_eq!(
+                matches!(got.array.data_type(), DataType::Dictionary(..)),
+                drop_encoding_stats
+            );
+            let made = strings_of(&reader, &got).unwrap();
+            assert_eq!(made, strings[start..start + 500]);
+        }
+    }
+}
