@@ -3,11 +3,13 @@
 #include "fmgr.h"
 
 #include "tessera/batch.h"
+#include "tessera/bridge.h"
 
 PG_MODULE_MAGIC;
 
 PG_FUNCTION_INFO_V1(tessera_test_batch);
 PG_FUNCTION_INFO_V1(tessera_test_batch_bytes);
+PG_FUNCTION_INFO_V1(tessera_test_batch_dictionary_identity);
 
 #define TEST_NROWS 70
 #define TEST_NCOLUMNS 2
@@ -221,4 +223,13 @@ tessera_test_batch_bytes(PG_FUNCTION_ARGS)
 	memset(&bytes, 0x5a, sizeof(bytes));
 	PG_RETURN_BOOL(!tess_batch_bytes_column(&batch, 1, &batch.rows, &bytes) &&
 				   memcmp(&bytes, &zero, sizeof(bytes)) == 0);
+}
+
+/* A dictionary identity taken through the API by a module of its own. */
+Datum
+tessera_test_batch_dictionary_identity(PG_FUNCTION_ARGS)
+{
+	const TessApi *api = *find_rendezvous_variable(TESS_API_RENDEZVOUS);
+
+	PG_RETURN_INT64((int64) tess_dictionary_identity(api));
 }
