@@ -255,6 +255,48 @@ extern bool tess_parquet_text(TessParquetReader *reader, uint8_t *arena,
 							  size_t arena_len, uint64_t *values,
 							  size_t values_len, TessParquetStatus *status);
 
+/*
+ * Where a window's bytes form goes: arrays of len entries, a row of the
+ * window each, which tess_parquet_bytes fills for each row asked that is
+ * not NULL, indexes only for a window read through a dictionary (it may be
+ * NULL otherwise); then the window's count of dictionary values and the
+ * reader's number of its array of values, 1 first and anew for each other
+ * array, both 0 for a plain window.
+ */
+typedef struct TessParquetBytes
+{
+	const uint8_t **data;
+	uint32_t   *lengths;
+	int32_t    *indexes;
+	size_t		len;
+	uint32_t	nvalues;
+	uint64_t	number;
+} TessParquetBytes;
+
+/* A reference to a window's array, which keeps its bytes where they are. */
+typedef struct TessParquetHold TessParquetHold;
+
+/*
+ * Gives the rows asked asks of the window in the bytes form, checked as
+ * tess_parquet_text_size checks them (22021, 22001, 54000 at the first row
+ * that fails, and no row not asked): each row's place of its bytes in the
+ * window's buffers, never NULL, its count and, through a dictionary, its
+ * index; sets or clears their bits in nulls as tess_parquet_values does;
+ * and writes into hold a reference that keeps those bytes where they are,
+ * whatever the reader reads after, until tess_parquet_hold_free frees it.
+ * The caller sets the arrays and len of bytes and initializes the arrays'
+ * entries, as it does nulls; nvalues and number are written. On a failure
+ * no output is written and no hold made. Every hold is the caller's to
+ * free, after an error too: a caller arranges the freeing before the call,
+ * as by a callback of the memory context the hold lives for.
+ */
+extern bool tess_parquet_bytes(TessParquetReader *reader,
+							   const uint64_t *asked, size_t asked_words,
+							   uint64_t *nulls, size_t nulls_words,
+							   TessParquetBytes *bytes, TessParquetHold **hold,
+							   TessParquetStatus *status);
+extern void tess_parquet_hold_free(TessParquetHold *hold);
+
 /* Raises a panic inside the reader, for the test of the boundary. */
 extern bool tess_parquet_test_panic(TessParquetStatus *status);
 

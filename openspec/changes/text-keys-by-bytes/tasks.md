@@ -58,7 +58,7 @@ test.
 
 ## 3. The Parquet source's form
 
-- [ ] 3.1 `crates/tessera-parquet`: an entry point that gives, for the
+- [x] 3.1 `crates/tessera-parquet`: an entry point that gives, for the
       rows asked of the window, each row's pointer, length and index,
       the dictionary's count of values, and a number of the reader for
       each new values array, and keeps a reference to the window's
