@@ -132,6 +132,11 @@ typedef struct TableOptions
 	 * reads every batch in both forms.
 	 */
 	bool		bytes_alternate;
+	/*
+	 * A rescan keeps the dictionaries' identities (rescan_identities 'keep'),
+	 * as a producer may that gives the same dictionary again.
+	 */
+	bool		keep_identities;
 } TableOptions;
 
 /* How one column's values are made. */
@@ -168,6 +173,7 @@ typedef struct Generator
 	bool		check_bytes;
 	bool		bridge_identities;
 	bool		bytes_alternate;
+	bool		keep_identities;
 } Generator;
 
 /* The sources, by the position of their name. */
@@ -302,6 +308,12 @@ read_options(Oid relid, TableOptions *options)
 		}
 		else if (strcmp(def->defname, "dictionary_batches") == 0)
 			options->dictionary_batches = (int64) option_number(def);
+		else if (strcmp(def->defname, "rescan_identities") == 0)
+		{
+			if (strcmp(defGetString(def), "keep") != 0)
+				elog(ERROR, "unknown rescan_identities \"%s\"", defGetString(def));
+			options->keep_identities = true;
+		}
 		else if (strcmp(def->defname, "bytes_batches") == 0)
 		{
 			if (strcmp(defGetString(def), "alternate") != 0)
@@ -363,6 +375,7 @@ generator_init(Generator *gen, Relation rel)
 	gen->check_bytes = options.check_bytes;
 	gen->bridge_identities = options.bridge_identities;
 	gen->bytes_alternate = options.bytes_alternate;
+	gen->keep_identities = options.keep_identities;
 	for (int i = 0; i < gen->natts && gen->check_bytes; i++)
 		if (gen->bytes_alternate || gen->columns[i].compress)
 			elog(ERROR, "check_bytes reads every batch's plain values in both forms: "
@@ -1607,9 +1620,10 @@ source_rescan(CustomScanState *css)
 	generator_rescan(&state->gen);
 	state->exhausted = false;
 	state->values_ready = false;
-	/* A dictionary given again after a rescan gets an identity anew. */
+	/* A dictionary given again after a rescan gets an identity anew, or keeps it. */
 	state->batch_number = 0;
-	state->identity_period = -1;
+	if (!state->gen.keep_identities)
+		state->identity_period = -1;
 	/* The check's own count: the next scan's first period is a new one. */
 	if (state->check_batches > 0)
 		state->check_period_base = state->check_last_period + 1;
