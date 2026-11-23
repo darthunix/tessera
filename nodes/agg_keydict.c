@@ -602,20 +602,23 @@ keydict_enter(KeyDict *dict, KeyEntry *entry, Datum value, const char *data, uin
  * A dictionary of values past the caches: each row's bucket asked of
  * memory before the lookups, so that the misses of a batch's rows overlap
  * rather than each lookup waiting for its own (half a million values of
- * text: 8 to 11 % of the query). A pass of its own, the hashes computed
- * again by the lookups, and only by the values held, not the buckets: a
- * table made for the planner's estimate of 427 000 groups held 99 values,
- * which the pass cost 8 %.
+ * text: 8 to 11 % of the query). A pass of its own, whose hashes the
+ * lookups keep, and only by the values held, not the buckets: a table
+ * made for the planner's estimate of 427 000 groups held 99 values, which
+ * the pass cost 8 %.
  */
 static pg_noinline void
-keydict_prefetch_rows(KeyDict *dict, const TessDatumColumn *column, const TessRowMask *rows)
+keydict_prefetch_rows(KeyDict *dict, const TessDatumColumn *column, const TessRowMask *rows,
+					  uint32 *hashes)
 {
 	int			row = -1;
 
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 		if (!column->isnull[row])
-			keydict_prefetch(&dict->table->data[keydict_value_hash(dict, column->values[row]) &
-												 dict->table->sizemask]);
+		{
+			hashes[row] = keydict_value_hash(dict, column->values[row]);
+			keydict_prefetch(&dict->table->data[hashes[row] & dict->table->sizemask]);
+		}
 }
 
 /*
@@ -671,11 +674,11 @@ keydict_check_index(KeyDict *dict, uint32 number, const char *data, uint32 len)
 
 /*
  * The numbers of the rows of rows, of a column of Datums or, where bytes
- * is given, of a column in the bytes form, the hashes of the latter's
- * rows already in hashes where hashed: one loop for both forms, so that
- * the table's lookup and insertion have one caller each, which the
- * compiler inlines into it (a second caller made it call them for every
- * row, 2 % of a COUNT(DISTINCT) of strings).
+ * is given, of a column in the bytes form, the rows' hashes already in
+ * hashes where hashed, by the prefetch past the caches: one loop for both
+ * forms, so that the table's lookup and insertion have one caller each,
+ * which the compiler inlines into it (a second caller made it call them
+ * for every row, 2 % of a COUNT(DISTINCT) of strings).
  */
 static void
 keydict_numbers(KeyDict *dict, const TessDatumColumn *datums, const TessBytesColumn *bytes,
@@ -720,7 +723,7 @@ keydict_numbers(KeyDict *dict, const TessDatumColumn *datums, const TessBytesCol
 		else
 		{
 			key = datums->values[row];
-			hash = keydict_value_hash(dict, key);
+			hash = hashed ? hashes[row] : keydict_value_hash(dict, key);
 		}
 		hashes[row] = hash;
 		if (insert)
@@ -763,9 +766,12 @@ void
 agg_keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask *rows,
 				bool insert, Datum *numbers, uint32 *hashes)
 {
-	if (dict->table->members * sizeof(KeyEntry) > KEYDICT_PREFETCH_BYTES)
-		keydict_prefetch_rows(dict, column, rows);
-	keydict_numbers(dict, column, NULL, false, rows, insert, numbers, hashes);
+	bool		hashed = dict->table->members * sizeof(KeyEntry) > KEYDICT_PREFETCH_BYTES;
+
+	/* Past the caches, each bucket asked of memory first, by the hash kept. */
+	if (hashed)
+		keydict_prefetch_rows(dict, column, rows, hashes);
+	keydict_numbers(dict, column, NULL, hashed, rows, insert, numbers, hashes);
 }
 
 /*
