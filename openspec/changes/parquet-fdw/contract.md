@@ -56,8 +56,9 @@ by its count of files and owned by the module for the backend's life.
 
 - **Grouping by a string on the file's bytes.** A form of column other
   than `Datum` in the batch, which the node offers and a grouping reads:
-  `tessera/batch.h`, the node's batches, TessAgg; not the reader, nor
-  the wrapper.
+  `tessera/batch.h`, the node's batches, TessAgg, and the reader's C
+  entries, which alone can give the places of the bytes in its arrays
+  and keep those arrays for a batch; not the wrapper.
 - **Another format of files, such as Arrow's own.** A reader of its own
   and its module, which take the node's pattern; not this module.
 - **Files in an object store.** The reader's input and the option of
