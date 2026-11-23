@@ -226,6 +226,12 @@ impl ColumnReader {
         self.column.view(self.dictionary).1
     }
 
+    /// The read plan of the column's plain arrays, which reads the values
+    /// of a dictionary as a column of their own.
+    pub fn plain_plan(&self) -> &ReadPlan {
+        self.column.plan()
+    }
+
     /// Reads the window of `len` rows from the group's row `start`.
     ///
     /// Where the window starts where the last forward window ended or
