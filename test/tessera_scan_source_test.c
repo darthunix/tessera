@@ -640,6 +640,8 @@ typedef struct SourceScanState
 	 */
 	TessBatch	bytes_batch;
 	TessBatch  *inner;
+	/* The columns the projection computes after the relation's. */
+	int			ncomputed;
 	MemoryContext bytes_context;
 	int64		batch_number;
 	uint64	   *identities;
@@ -814,6 +816,7 @@ source_begin(CustomScanState *css, EState *estate, int eflags)
 	state->relation.ncolumns = RelationGetDescr(rel)->natts;
 	state->relation.ntargets = RelationGetDescr(rel)->natts;
 	state->row_slot = ExecInitExtraTupleSlot(estate, RelationGetDescr(rel), &TTSOpsVirtual);
+	state->ncomputed = list_length(info.computed);
 	if (info.computed != NIL)
 		state->projection = tess_node_projection(css, css->ss.ss_ScanTupleSlot, &state->relation,
 												 state->relation.ncolumns, info.computed);
@@ -909,6 +912,7 @@ row_passes_own(SourceScanState *state, int64 i)
 static int64 datum_asks;
 static int64 bytes_asks;
 static int64 bytes_checks;
+static int64 projection_checks;
 
 /* The most indexes of which the check keeps what each held. */
 #define CHECK_MAX_VALUES 4096
@@ -1296,6 +1300,51 @@ source_identity(SourceScanState *state)
 }
 
 /*
+ * The projection's batch over the source's: each text column it passes on
+ * gives the bytes the source's own batch gives, at the same addresses, and
+ * each column it computes is not offered. The source's own asks are not
+ * counted.
+ */
+static void
+check_projection_bytes(SourceScanState *state, TessBatch *batch)
+{
+	int64		saved_datum = datum_asks;
+	int64		saved_bytes = bytes_asks;
+	MemoryContext old = MemoryContextSwitchTo(state->bytes_context);
+
+	for (int c = 0; c < state->relation.ncolumns + state->ncomputed; c++)
+	{
+		TessBytesColumn through;
+		TessBytesColumn own;
+		int			row = -1;
+
+		if (c >= state->relation.ncolumns)
+		{
+			if (tess_batch_bytes_column(batch, c, &batch->rows, &through))
+				elog(ERROR, "the projection gave its computed column %d as bytes", c);
+			continue;
+		}
+		if (state->gen.columns[c].type != TEXTOID)
+			continue;
+		if (!tess_batch_bytes_column(batch, c, &batch->rows, &through) ||
+			!tess_batch_bytes_column(&state->bytes_batch, c, &batch->rows, &own))
+			elog(ERROR, "the projection did not pass the bytes of column %d on", c);
+		while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+			if (through.isnull[row] != own.isnull[row] ||
+				(!own.isnull[row] &&
+				 (through.data[row] != own.data[row] ||
+				  through.lengths[row] != own.lengths[row])))
+				elog(ERROR, "the projection changed the bytes of row %d of column %d", row, c);
+		if (through.dictionary != own.dictionary || through.nvalues != own.nvalues)
+			elog(ERROR, "the projection changed the dictionary of column %d", c);
+	}
+	MemoryContextSwitchTo(old);
+	datum_asks = saved_datum;
+	bytes_asks = saved_bytes;
+	projection_checks++;
+}
+
+/*
  * The builder's batch behind the operations of the bytes form, with its
  * rows: the arrays of the last batch's bytes freed, and each dictionary
  * column's identity taken anew at the start of each period of batches.
@@ -1397,7 +1446,11 @@ next_batch(SourceScanState *state)
 	if (batch != NULL && state->gen.bytes != BYTES_NONE)
 		batch = bytes_wrap(state, batch);
 	if (batch != NULL && state->projection != NULL)
+	{
 		batch = tess_projection_wrap(state->projection, batch);
+		if (state->gen.bytes != BYTES_NONE && state->gen.check_bytes)
+			check_projection_bytes(state, batch);
+	}
 	return batch;
 }
 
@@ -2043,18 +2096,20 @@ tessera_test_scan_source_calls(PG_FUNCTION_ARGS)
 
 /*
  * The asks of each form of the source's batches, and the batches its own
- * check read, since the last call, in the calling process.
+ * checks read, of the form and through a projection, since the last call,
+ * in the calling process.
  */
 Datum
 tessera_test_scan_source_asks(PG_FUNCTION_ARGS)
 {
 	char	   *asks = psprintf("datum " INT64_FORMAT ", bytes " INT64_FORMAT
-								", checked " INT64_FORMAT,
-								datum_asks, bytes_asks, bytes_checks);
+								", checked " INT64_FORMAT ", through a projection " INT64_FORMAT,
+								datum_asks, bytes_asks, bytes_checks, projection_checks);
 
 	datum_asks = 0;
 	bytes_asks = 0;
 	bytes_checks = 0;
+	projection_checks = 0;
 	PG_RETURN_TEXT_P(cstring_to_text(asks));
 }
 

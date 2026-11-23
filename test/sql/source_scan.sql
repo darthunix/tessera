@@ -737,8 +737,10 @@ SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 -- under its identity, the identities of two columns apart and each kept
 -- within its batches and changed at the next and after a rescan; a plain
 -- column's fields written over a result of a dictionary; a structure of an
--- older size refused and left as it was. No consumer reads the form yet:
--- the asks counted are of Datum values, and the batches checked are shown.
+-- older size refused and left as it was; and a projection over the source
+-- passes the bytes of the columns it passes on and no others. No consumer
+-- reads the form yet: the asks counted are of Datum values, and the
+-- batches checked are shown.
 SELECT tessera_test_scan_sources(ARRAY['reader']);
 CREATE FOREIGN TABLE ft_bytes (a int4, s text OPTIONS (mod '50', width '10000'),
     n text OPTIONS (mod '13', nulls '7'), p text)
@@ -757,6 +759,12 @@ SELECT tessera_test_scan_source_asks();
 SELECT source_same('SELECT s, count(*), count(n) FROM ft_bytes GROUP BY s');
 SELECT source_same('SELECT g, (SELECT count(n) FROM ft_bytes WHERE a > g)
     FROM generate_series(1, 3) AS g');
+SELECT tessera_test_scan_source_asks();
+-- Through the source's projection, which passes s on and computes the
+-- others: the bytes of s at the source's addresses, and no bytes of the
+-- computed columns.
+EXPLAIN (COSTS OFF, VERBOSE) SELECT s, lower(n), p || 'y' FROM ft_bytes;
+SELECT source_same('SELECT s, lower(n), p || ''y'' FROM ft_bytes');
 SELECT tessera_test_scan_source_asks();
 ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'twice');
 SELECT source_same('SELECT n, count(*) FROM ft_bytes GROUP BY n');
