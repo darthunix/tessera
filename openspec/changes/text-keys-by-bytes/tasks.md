@@ -85,18 +85,20 @@ test.
       check of encoding and zero bytes passes. Check: `make rust-check`;
       `cargo kani -p tessera-parquet`; `cargo mutants` over the changed
       lines
-- [ ] 3.3 `parquet/node.c`: `get_bytes_column` for the `text`,
+- [x] 3.3 `parquet/node.c`: `get_bytes_column` for the `text`,
       `varchar` and `bytea` columns; the identity of each new values
       array of a reader asked of `TessApi`; the references of a batch
       dropped when its memory context is reset; `EXPLAIN (ANALYZE)`'s
-      count of values made counts `Datum`s alone; in an assert build, a
-      window that passes in one pass checked again row by row; cases of
-      the `parquet` suite over plain and dictionary chunks, `NULL` rows,
+      count of values made counts `Datum`s alone; in an assert build,
+      the rows given as bytes checked again row by row by the plan;
+      cases of the `parquet` suite, through a test module's call that
+      asks the form, over plain and dictionary chunks, `NULL` rows,
       empty strings, bad bytes in and out of the mask and `varchar(n)`
-      too long, serial and parallel; `docs/source.md`; the forecast of
-      `parquet-fdw`'s contract updated, and the roadmap's entry for
-      simplifying the reader's boundary with the node. Check: the
-      suites
+      too long, serial (a parallel plan's workers read the form first
+      in 4.1, through TessAgg's partial stage); `docs/source.md`; the
+      forecast of `parquet-fdw`'s contract updated, and the roadmap's
+      entry for simplifying the reader's boundary with the node. Check:
+      the suites
 - [ ] 3.4 `test/tessera_parquet_test.c`: a call that asks a batch for a
       column as bytes, keeps every pointer, forces a read behind the
       forward reader, a rescan and a read past the window, then reads
