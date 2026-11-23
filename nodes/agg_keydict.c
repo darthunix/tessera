@@ -43,10 +43,35 @@ keydict_value_hash(KeyDict *dict, Datum value)
 	const char *data;
 	Size		len;
 
+	/* A probe of bytes comes with its hash (agg_keydict_numbers_bytes). */
+	Assert(value != PointerGetDatum(&dict->probe));
 	if (dict->bytes != TESS_KEY_BYTES_NONE &&
 		tess_key_value_bytes(value, dict->bytes, &data, &len))
 		return hash_bytes((const unsigned char *) data, len);
 	return DatumGetUInt32(FunctionCall1Coll(&dict->hashfn, dict->collation, value));
+}
+
+/*
+ * Whether a probe of bytes equals a value of the dictionary: by its bytes,
+ * as the type's equality under a deterministic collation compares, a value
+ * the dictionary keeps compressed made plain first.
+ */
+static pg_noinline bool
+keydict_probe_equal(KeyDict *dict, Datum value)
+{
+	const char *data;
+	Size		len;
+	struct varlena *plain;
+	bool		equal;
+
+	if (tess_key_value_bytes(value, dict->bytes, &data, &len))
+		return len == dict->probe_len && memcmp(data, dict->probe_data, len) == 0;
+	plain = pg_detoast_datum_packed((struct varlena *) DatumGetPointer(value));
+	equal = VARSIZE_ANY_EXHDR(plain) == dict->probe_len &&
+		memcmp(VARDATA_ANY(plain), dict->probe_data, dict->probe_len) == 0;
+	if ((Pointer) plain != DatumGetPointer(value))
+		pfree(plain);
+	return equal;
 }
 
 /* Inline in the table's loops, as before char(n) made it longer. */
@@ -58,6 +83,9 @@ keydict_value_equal(KeyDict *dict, Datum a, Datum b)
 	Size		a_len;
 	Size		b_len;
 
+	/* simplehash compares an entry's key with the key asked, second. */
+	if (unlikely(b == PointerGetDatum(&dict->probe)))
+		return keydict_probe_equal(dict, a);
 	if (dict->bytes != TESS_KEY_BYTES_NONE &&
 		tess_key_value_bytes(a, dict->bytes, &a_data, &a_len) &&
 		tess_key_value_bytes(b, dict->bytes, &b_data, &b_len))
@@ -509,6 +537,58 @@ keydict_copy(KeyDict *dict, Datum value)
 }
 
 /*
+ * A copy of a value of a key of bytes from its bytes: a header and the
+ * bytes, as a Datum of the type holds them, in the dictionary's blocks as
+ * keydict_copy places a Datum's.
+ */
+static Datum
+keydict_copy_bytes(KeyDict *dict, const char *data, uint32 len)
+{
+	Size		size = VARHDRSZ + (Size) len;
+	char	   *copy;
+
+	if (size > KEYDICT_BLOCK_LEN / 4)
+		copy = palloc(size);
+	else
+	{
+		if (dict->block == NULL || dict->block_used + size > dict->block_len)
+		{
+			dict->block = MemoryContextAlloc(dict->context, KEYDICT_BLOCK_LEN);
+			dict->block_len = KEYDICT_BLOCK_LEN;
+			dict->block_used = 0;
+		}
+		copy = dict->block + dict->block_used;
+		dict->block_used += MAXALIGN(size);
+	}
+	SET_VARSIZE(copy, size);
+	memcpy(VARDATA(copy), data, len);
+	return PointerGetDatum(copy);
+}
+
+/*
+ * A new value's number: the next, its copy kept by it in the dictionary's
+ * context, made from data and len where data is given, else from value.
+ */
+static pg_always_inline void
+keydict_enter(KeyDict *dict, KeyEntry *entry, Datum value, const char *data, uint32 len)
+{
+	MemoryContext old = MemoryContextSwitchTo(dict->context);
+
+	if (dict->count == dict->slots)
+	{
+		if (dict->count == PG_UINT32_MAX)
+			elog(ERROR, "TessAgg numbers at most %u values of a key", PG_UINT32_MAX);
+		dict->slots *= 2;
+		dict->values = repalloc_huge(dict->values, sizeof(Datum) * dict->slots);
+	}
+	entry->value = data != NULL ? keydict_copy_bytes(dict, data, len) :
+		keydict_copy(dict, value);
+	entry->number = (uint32) dict->count;
+	dict->values[dict->count++] = entry->value;
+	MemoryContextSwitchTo(old);
+}
+
+/*
  * A dictionary of values past the caches: each row's bucket asked of
  * memory before the lookups, so that the misses of a batch's rows overlap
  * rather than each lookup waiting for its own (half a million values of
@@ -529,6 +609,72 @@ keydict_prefetch_rows(KeyDict *dict, const TessDatumColumn *column, const TessRo
 }
 
 /*
+ * The numbers of the rows of rows, of a column of Datums or, where bytes
+ * is given, of a column in the bytes form, the hashes of the latter's
+ * rows already in hashes where hashed: one loop for both forms, so that
+ * the table's lookup and insertion have one caller each, which the
+ * compiler inlines into it (a second caller made it call them for every
+ * row, 2 % of a COUNT(DISTINCT) of strings).
+ */
+static void
+keydict_numbers(KeyDict *dict, const TessDatumColumn *datums, const TessBytesColumn *bytes,
+				bool hashed, const TessRowMask *rows, bool insert, Datum *numbers,
+				uint32 *hashes)
+{
+	Datum		probe = PointerGetDatum(&dict->probe);
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		Datum		key;
+		uint32		hash;
+		int64		number;
+
+		if (bytes != NULL ? bytes->isnull[row] : datums->isnull[row])
+		{
+			numbers[row] = (Datum) 0;
+			hashes[row] = 0;
+			continue;
+		}
+		if (bytes != NULL)
+		{
+			dict->probe_data = bytes->data[row];
+			dict->probe_len = bytes->lengths[row];
+			key = probe;
+			hash = hashed ? hashes[row] :
+				hash_bytes((const unsigned char *) dict->probe_data, (int) dict->probe_len);
+		}
+		else
+		{
+			key = datums->values[row];
+			hash = keydict_value_hash(dict, key);
+		}
+		hashes[row] = hash;
+		if (insert)
+		{
+			bool		found;
+			KeyEntry   *entry = keydict_insert_hash(dict->table, key, hash, &found);
+
+			if (!found)
+			{
+				if (bytes != NULL)
+					keydict_enter(dict, entry, (Datum) 0, dict->probe_data, dict->probe_len);
+				else
+					keydict_enter(dict, entry, key, NULL, 0);
+			}
+			number = entry->number;
+		}
+		else
+		{
+			KeyEntry   *entry = keydict_lookup_hash(dict->table, key, hash);
+
+			number = entry != NULL ? (int64) entry->number : -1;
+		}
+		numbers[row] = Int64GetDatum(number);
+	}
+}
+
+/*
  * The numbers of the values of the rows of rows: a value the dictionary
  * lacks gets the next number, or, with insert false, -1, which no record
  * has; NULL stays NULL for the table's NULL key. hashes[row] receives the
@@ -538,53 +684,37 @@ void
 agg_keydict_numbers(KeyDict *dict, const TessDatumColumn *column, const TessRowMask *rows,
 				bool insert, Datum *numbers, uint32 *hashes)
 {
-	int			row = -1;
-
 	if (dict->table->members * sizeof(KeyEntry) > KEYDICT_PREFETCH_BYTES)
 		keydict_prefetch_rows(dict, column, rows);
-	while ((row = tess_row_mask_next(rows, row)) >= 0)
-	{
-		Datum		value = column->values[row];
-		uint32		hash;
+	keydict_numbers(dict, column, NULL, false, rows, insert, numbers, hashes);
+}
 
-		if (column->isnull[row])
-		{
-			numbers[row] = (Datum) 0;
-			hashes[row] = 0;
-			continue;
-		}
-		hash = keydict_value_hash(dict, value);
-		hashes[row] = hash;
-		if (insert)
-		{
-			bool		found;
-			KeyEntry   *entry = keydict_insert_hash(dict->table, value, hash, &found);
+/*
+ * As agg_keydict_numbers, of the rows of a column in the bytes form, of a
+ * key of bytes (TESS_KEY_BYTES_WHOLE): each value looked up by its bytes,
+ * with the hash and the equality its Datum would get, so that rows of
+ * either form find one number; a value the dictionary lacks enters as a
+ * copy made from its bytes.
+ */
+void
+agg_keydict_numbers_bytes(KeyDict *dict, const TessBytesColumn *column,
+						  const TessRowMask *rows, bool insert, Datum *numbers,
+						  uint32 *hashes)
+{
+	bool		hashed = dict->table->members * sizeof(KeyEntry) > KEYDICT_PREFETCH_BYTES;
+	int			row = -1;
 
-			if (!found)
+	Assert(dict->bytes == TESS_KEY_BYTES_WHOLE);
+	/* Past the caches, each bucket asked of memory first, by the hash kept. */
+	if (hashed)
+		while ((row = tess_row_mask_next(rows, row)) >= 0)
+			if (!column->isnull[row])
 			{
-				MemoryContext old = MemoryContextSwitchTo(dict->context);
-
-				if (dict->count == dict->slots)
-				{
-					if (dict->count == PG_UINT32_MAX)
-						elog(ERROR, "TessAgg numbers at most %u values of a key", PG_UINT32_MAX);
-					dict->slots *= 2;
-					dict->values = repalloc_huge(dict->values, sizeof(Datum) * dict->slots);
-				}
-				entry->value = keydict_copy(dict, value);
-				entry->number = (uint32) dict->count;
-				dict->values[dict->count++] = entry->value;
-				MemoryContextSwitchTo(old);
+				hashes[row] = hash_bytes((const unsigned char *) column->data[row],
+										 (int) column->lengths[row]);
+				keydict_prefetch(&dict->table->data[hashes[row] & dict->table->sizemask]);
 			}
-			numbers[row] = Int64GetDatum(entry->number);
-		}
-		else
-		{
-			KeyEntry   *entry = keydict_lookup_hash(dict->table, value, hash);
-
-			numbers[row] = Int64GetDatum(entry != NULL ? (int64) entry->number : -1);
-		}
-	}
+	keydict_numbers(dict, NULL, column, hashed, rows, insert, numbers, hashes);
 }
 
 /* As datum_image_eq, without its calls for a value whose bytes are at hand. */

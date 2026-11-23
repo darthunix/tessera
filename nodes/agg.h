@@ -214,6 +214,17 @@ typedef struct TessAggState
 	uint32	   *value_hashes;
 	int			value_hash_rows;
 	TessDatumColumn number_columns[TESS_TABLE_MAX_KEYS];
+	/*
+	 * A key through a dictionary that reads bytes (TESS_KEY_BYTES_WHOLE)
+	 * and is a column of the child: that column, which a batch may offer in
+	 * the bytes form, else -1; of the batch at hand, whether it did, and
+	 * the form it gave, which the dictionary numbers in place of Datums.
+	 */
+	int			key_bytes_column[TESS_TABLE_MAX_KEYS];
+	bool		key_by_bytes[TESS_TABLE_MAX_KEYS];
+	TessBytesColumn key_bytes[TESS_TABLE_MAX_KEYS];
+	/* The values a frozen table makes of such keys for its rows to disk, a batch's. */
+	MemoryContext key_values_context;
 
 	/*
 	 * GROUP BY: the keys, computed columns before the arguments, and the
