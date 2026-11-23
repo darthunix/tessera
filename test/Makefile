@@ -50,6 +50,13 @@ RUNTIME_TESTS = tessera_builder_test tessera_output_test tessera_input_test \
 tessera_parquet_test$(DLSUFFIX): $(RUST_PARQUET_TESTING_LIB) $(RUST_PROFILE_STAMP) $(RUNTIME_LIB)
 tessera_parquet_test$(DLSUFFIX): LDFLAGS_SL += $(RUST_PARQUET_TESTING_LIB) $(RUST_PARQUET_SYSTEM_LIBS) \
 	$(RUNTIME_LIB)
+# The writer carries a copy of the Parquet reader, whose entries the module
+# would export: loaded before tessera_parquet, it would take the node's
+# calls on an ELF system, where a module's symbols join the global scope,
+# and the reader's counts would be its copy's. They stay inside the module.
+ifneq ($(filter linux freebsd netbsd openbsd,$(PORTNAME)),)
+tessera_parquet_test$(DLSUFFIX): LDFLAGS_SL += -Wl,--exclude-libs,ALL
+endif
 $(RUST_TESTS:%=%$(DLSUFFIX)): $(RUST_LIB) $(RUST_PROFILE_STAMP)
 $(RUST_TESTS:%=%$(DLSUFFIX)): LDFLAGS_SL += $(RUST_LIB)
 $(RUNTIME_TESTS:%=%$(DLSUFFIX)): $(RUNTIME_LIB)

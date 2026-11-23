@@ -701,7 +701,7 @@ FROM (VALUES (64, 0, 0), (10, 6, 60)) b(max_rows, skip, first) ORDER BY max_rows
 -- every row's bytes are its value's, the first ask's still after the
 -- others, and the rows through a dictionary carry indexes, which the
 -- module checks lie among the dictionary's values, one a value.
-CREATE FUNCTION parquet_test_bytes(text, int, int, bigint, bool)
+CREATE FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool)
     RETURNS TABLE (col text, n int, ask text, bytes bytea, ind int, dict bool)
     AS :'parquet_test', 'tessera_parquet_test_bytes' LANGUAGE C STRICT;
 SELECT parquet_test_write(:'dir' || '/bytes_' || f || '.parquet', json_build_object(
@@ -740,11 +740,11 @@ SELECT tbl, max_rows, col, count(*) FILTER (WHERE ask <> 'not offered') AS asked
 FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl),
      (VALUES (64, 0), (10, 6)) b(max_rows, skip),
      parquet_test_bytes(format('SELECT s, i, b, v FROM %s', tbl), max_rows, skip,
-                        x'5555555555555555'::bigint, true)
+                        x'5555555555555555'::bigint, true, false)
 GROUP BY tbl, max_rows, col ORDER BY tbl, max_rows, col;
 SELECT tbl, max_rows, differ(
     format($$SELECT col, n, ask, bytes FROM parquet_test_bytes('SELECT s, b, v FROM %s', %s, %s,
-                                                                x'5555555555555555'::bigint, true)$$,
+                                                                x'5555555555555555'::bigint, true, false)$$,
            tbl, max_rows, skip),
     format($$(SELECT c, n, a, CASE c WHEN 's' THEN convert_to(s, 'UTF8') WHEN 'b' THEN b
                                     ELSE convert_to(v, 'UTF8') END
@@ -771,14 +771,14 @@ SELECT parquet_test_write(:'dir' || '/bytes_bad.parquet', '{"dictionary": false,
        "values": ["a", "b", "c", "d", "e", "f", "g", "long"]}]}');
 \set bytes_bad :dir '/bytes_bad.parquet'
 CREATE FOREIGN TABLE t_bytes_bad (s text, v varchar(3)) SERVER pq OPTIONS (files :'bytes_bad');
-SELECT count(*) AS asked FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, false);
-SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 32, false);
-SELECT count(*) AS asked FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 127, false);
-SELECT count(*) FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 128, false);
-SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, true);
+SELECT count(*) AS asked FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, false, false);
+SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 32, false, false);
+SELECT count(*) AS asked FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 127, false, false);
+SELECT count(*) FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 128, false, false);
+SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, true, false);
 DROP FOREIGN TABLE t_bytes_plain, t_bytes_dict, t_bytes_bad;
 DROP TABLE h_bytes;
-DROP FUNCTION parquet_test_bytes(text, int, int, bigint, bool);
+DROP FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool);
 
 -- spec: parquet-fdw/What EXPLAIN shows
 -- Plain, with VERBOSE and with ANALYZE, through the wrapper's rows and

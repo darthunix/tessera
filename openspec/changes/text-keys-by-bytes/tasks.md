@@ -99,14 +99,18 @@ test.
       forecast of `parquet-fdw`'s contract updated, and the roadmap's
       entry for simplifying the reader's boundary with the node. Check:
       the suites
-- [ ] 3.4 `test/tessera_parquet_test.c`: a call that asks a batch for a
-      column as bytes, keeps every pointer, forces a read behind the
-      forward reader, a rescan and a read past the window, then reads
-      every byte through those pointers before the batch is released;
-      an injection point after the references are taken and before the
-      release, which raises an error, and counts of references taken
-      and dropped, equal after the reset; cases of the `parquet` suite
-      over them; the commit's message shows that a mutant that drops a
+- [x] 3.4 `test/tessera_parquet_test.c`: a call that asks a batch for a
+      column as bytes, keeps every pointer, has the reader replace the
+      window's arrays, rescans, then reads every byte through those
+      pointers before the batch is released; since the node reads a
+      batch's window only once, an injection point of the node makes
+      each ask read it again, behind the reader; an injection point
+      after the references are taken and before the release, which
+      raises an error, and a count of the references alive, which the
+      reader keeps for the backend, back to where it was after a
+      rescan, the scan's end and the error; cases of the
+      `parquet_cancel` suite over them, which runs where injection
+      points are; the commit's message shows that a mutant that drops a
       batch's reference early fails under ASan, and one that never
       drops it fails the counts. Check: the suites; the suites under
       ASan and UBSan as CI's job runs them

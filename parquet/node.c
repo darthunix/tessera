@@ -674,7 +674,16 @@ window_asked(ParquetNode *node, ParquetBatch *b, int c, uint64 need, uint64 *ask
 	TessParquetStatus status;
 	size_t		count;
 	int			base = b->first;
+	bool		again = false;
 
+	/*
+	 * A test's way to have each ask read the window again, behind the
+	 * reader, which then replaces the arrays an earlier ask's bytes point
+	 * into: only their references keep those bytes.
+	 */
+	INJECTION_POINT("tessera-parquet-again", &again);
+	if (again)
+		col->window = NO_WINDOW;
 	if (b->contiguous)
 	{
 		int			from = b->positions[0];
@@ -915,6 +924,8 @@ make_bytes(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 	if (!tess_parquet_bytes(reader, asked, held_words, col->bytes_nulls, held_words, &out, hold,
 							&status))
 		parquet_raise(&status);
+	/* A test's error, with the reference taken and the batch not released. */
+	INJECTION_POINT("tessera-parquet-bytes", NULL);
 	if (out.number != 0)
 	{
 		if (out.number != col->number)
