@@ -49,34 +49,33 @@ types between PostgreSQL and Arrow, `types-crate`, as a crate of its
 own, before `parquet-fdw` (done, the crate `datum-arrow`). On
 2026-11-22 the maintainer took `agg-int128` out of turn, after a
 profile of ClickBench's query 4 on the branch of `parquet-fdw`, to be
-done first, and the same day `agg-distinct-spill` after it, a finding
-of stage 2 of ClickBench on that branch:
+done first, and the same day `agg-distinct-spill` (done) after it, a
+finding of stage 2 of ClickBench on that branch:
 
 1. `agg-int128`: `sum` and `avg` of `bigint` values of 19 digits in the
    kernels' 128-bit sum
-2. `agg-distinct-spill`: A grouping's DISTINCT set past `hash_mem`
-3. `whole-word-decisions`: When and where a driver takes a word whole,
+2. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-4. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-5. `explain-rows-per-loop`: The rows a node removed, per loop as the
+4. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-6. `join-pruning-cost`: The cost of a pruning join over the partitions
+5. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-7. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-8. `linux-x86-support`: Linux on x86-64 checked as the target platform
-9. `oltp-guard-bench`: OLTP guard family of benchmarks
-10. `runs-left-from-section-9`: Runs left to the maintainer from
-    section 9
-11. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-12. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+7. `linux-x86-support`: Linux on x86-64 checked as the target platform
+8. `oltp-guard-bench`: OLTP guard family of benchmarks
+9. `runs-left-from-section-9`: Runs left to the maintainer from
+   section 9
+10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-13. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-14. `tpch-sf10`: TPC-H step 10: SF10
-15. `backward-scan-mark-restore`: Backward scan and mark/restore
-16. `pg-duckdb-comparison`: Comparison with pg_duckdb
+13. `tpch-sf10`: TPC-H step 10: SF10
+14. `backward-scan-mark-restore`: Backward scan and mark/restore
+15. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -137,6 +136,10 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `parallel-worker-page-faults`: Parallel workers: page faults and their
   diagnostics
 - `parallel-final-grouping`: Parallel final stage of grouping for many groups
+- `agg-distinct-dictionary-spill`: The DISTINCT sets of values a
+  dictionary numbers, and the set without `GROUP BY`, past `hash_mem`
+- `agg-distinct-groups-spill`: The groups of a grouping with DISTINCT
+  to disk, and its partial form for parallel plans
 - `merge-append`: Batch MergeAppend
 - `one-sum-state-shape`: "One sum state" record form
 - `hot-code-alignment`: Alignment of hot code
@@ -213,28 +216,6 @@ ClickBench's query 4 on the branch of `parquet-fdw`; it is the change
 - **Depends on:** nothing.
 - **Capabilities:** aggregate, kernel-abi
 - **Size:** small: one pull request after the proposal.
-
-### agg-distinct-spill
-
-A grouping's DISTINCT set past `hash_mem`. The maintainer took it on
-2026-11-22, after stage 2 of ClickBench on the branch of `parquet-fdw`;
-it is the change `agg-distinct-spill`.
-
-- **What:** The gate of a grouping with a DISTINCT aggregate weighs its
-  groups by the planner's estimate; the DISTINCT set of an argument a
-  word holds stops taking pairs past `hash_mem` and writes the pairs it
-  lacks to disk, read back by partition into their groups.
-- **Why:** ClickBench's Q9 and Q10, `count(DISTINCT UserID)` by
-  `RegionID`, go to the core's sort over `hits.parquet`, 469 and 532
-  billion instructions serially, 9 to 33 times DuckDB's time; Q10 goes
-  there over ten files too, by a gate that never passes, and lost to
-  Tessera off at 8 workers, 2.03 s against 1.17.
-- **Known:** The design of the change. The groups of such a grouping
-  stay in memory; a set a dictionary numbers and the set without
-  `GROUP BY` keep the gate of the pairs.
-- **Depends on:** nothing.
-- **Capabilities:** table-memory
-- **Size:** medium: one pull request after the proposal.
 
 ### agg-dependent-columns
 
@@ -1461,6 +1442,51 @@ Parallel final stage of grouping for many groups. From plan 5.11 item
 - **Capabilities:** aggregate, parallel-gather, hash-table, cost-model
 - **Size:** large.
 
+### agg-distinct-dictionary-spill
+
+The DISTINCT sets of values a dictionary numbers, and the set without
+`GROUP BY`, past `hash_mem`. Left by the change `agg-distinct-spill`,
+which sent to disk the sets of words by group alone.
+
+- **What:** A set of `text`, `numeric` or `float8` values, which the
+  node keeps by their numbers in a dictionary of the aggregate's own,
+  freezes with its dictionary: a value is looked up without insert,
+  and a pair the set lacks goes to disk with its value, not a number.
+  The set without `GROUP BY`, whose pairs are values with no group,
+  goes to disk on the same machine of `relspill` with another host.
+- **Why:** Such groupings keep the gate of their pairs and go to the
+  core's sort once the pairs pass `hash_mem` by the estimate.
+  ClickBench's Q5 and Q6 count DISTINCT without `GROUP BY`, the second
+  of a text; whether they reach the core over `hits.parquet` was not
+  measured.
+- **Known:** The dictionary grows with every new value, also of a pair
+  that would be written, so a frozen set needs a frozen dictionary.
+- **Depends on:** nothing.
+- **Capabilities:** table-memory, aggregate
+- **Size:** medium.
+
+### agg-distinct-groups-spill
+
+The groups of a grouping with DISTINCT to disk, and its partial form
+for parallel plans. Left by the change `agg-distinct-spill`.
+
+- **What:** The groups of such a grouping go to disk past `hash_mem`,
+  and a partial form, or a parallel final stage, runs it in a parallel
+  plan; each needs the sets to follow their groups, to disk or across
+  the participants.
+- **Why:** A grouping whose groups pass `hash_mem` by the estimate
+  goes to the core, and past it in fact holds them in memory. At 8
+  workers ClickBench's Q9 over `hits.parquet` runs in one process of
+  TessAgg, 18.1 billion cycles, while pg_duckdb spreads 7.9 billion
+  over nine threads; the core's parallel sort takes 152.
+- **Known:** The node has no partial form of a grouping with DISTINCT,
+  and its groups do not spill, as its sets keep the references of their
+  records. `parallel-final-grouping` weighs a parallel final stage for
+  the groups of the node's own aggregates.
+- **Depends on:** nothing; it meets `parallel-final-grouping`.
+- **Capabilities:** aggregate, parallel-gather, table-memory
+- **Size:** large.
+
 ### merge-append
 
 Batch MergeAppend. From plan 5.11 е item 6, lines 4303–4305, 4527–4565.
@@ -2407,12 +2433,14 @@ becomes an entry, joins one, or is dropped.
   Suggested: count what the next batch can allocate in place of the
   room, with task 3.23 of `spill-crate`, or accept.
 - **The planner's gate of DISTINCT leaves out the set's index** (the
-  same close). A grouping with a DISTINCT aggregate never spills; the
-  planner takes it when its estimate of the pairs of group and value
-  fits `hash_mem`. The estimate counts the pairs' records and leaves
-  out each set's index and the room left in its last chunk, so a set
-  may pass the estimate by its index. Suggested: count the index in the
-  gate, with a case near the limit, or drop.
+  same close, and the close of `agg-distinct-spill`). The estimate of
+  the pairs of group and value counts their records and leaves out each
+  set's index and the room left in its last chunk. Where the pairs fit
+  by it but not in fact, a set of words goes to disk freezing by the
+  memory held, as `spill`'s distinct_half at 64 MB does, and a set a
+  dictionary numbers passes `hash_mem`. The estimate of the groups
+  beside it counts their index. Suggested: count the pairs' index the
+  same way, with a case near the limit.
 
 - **Whole-word division leaves NULL slots unwritten** (an outside review
   of `int2-and-date-bounds-in-rust`, 2026-11-02). The int4 and
@@ -2501,6 +2529,18 @@ becomes an entry, joins one, or is dropped.
   A whole A/B of `join` or `exec` passed the deadline of five minutes
   at the data's scale of 1; the change left them untimed, their plans
   the base's. Suggested: their cases split into groups that fit.
+- **The scan under the core's sort of a DISTINCT grouping** (the close
+  of `agg-distinct-spill`). Where a grouping with DISTINCT goes to the
+  core, its groups past half of `hash_mem` by the estimate, the planner
+  still gives the core's sort TessHeapScan, which costs 5 % more
+  cycles than the core's Seq Scan there (`spill`, distinct_half at
+  4 MB: 1.053), as under a row-wise hash join above. Suggested: the
+  remedy of that item.
+- **The partitions of a level of pairs** (the open question of
+  `agg-distinct-spill`). A level of pairs has 32 partitions, as a level
+  of rows, and a pair is three words; whether pairs want more was not
+  measured. Suggested: a case of `spill` at a small `hash_mem` with
+  levels below, counted with 32 and 64 partitions.
 
 ## Decided against
 

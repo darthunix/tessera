@@ -207,17 +207,50 @@ aggregates has:
   boundary twice.
 - The pairs of a level are 32 partitions of chunks of three words a
   pair. Their writers, a write buffer and a reader are what a set's
-  spill holds past the limit, beside the set.
+  spill holds past the limit, beside the set. The level's shape names
+  the node's sets that spill as its `share`, the takers among whom the
+  plan divides the limit; with one length of chunk, 256 pairs, it
+  changes nothing yet, and sets that freeze together each take their
+  32 chunks and a write buffer.
+- A level's files are temporary files of the node's spill. A rescan
+  closes every level of every set with the groups, the node's end
+  closes them, and on an error PostgreSQL closes its temporary files
+  with the transaction. A cursor that stops early has read the pairs
+  back already: they are read before the first group goes out. A
+  reference never outlives its group, since the groups never leave
+  memory and the sets are emptied with their table; an assertion checks
+  that a reference read back falls in a chunk of the table.
 - The groups do not spill, so they may pass their estimate and leave
   the sets no room. When the groups alone pass seven eighths of
   `hash_mem` once the input is read, the sets are read back as of the
   last level and grow, rather than freeze at 64 pairs and write every
   pair again a level at a time.
+- The planner gives the node such a grouping in two ways: its pairs fit
+  by the estimate, or its groups take at most half of `hash_mem`, the
+  rest left to the sets. Only on the second way do the sets weigh the
+  groups by the most of their bytes and the planner's estimate, so that
+  a set that freezes early keeps room for the groups still to come. On
+  the first way a set weighs the memory held: a grouping whose groups
+  the planner thinks more than they are, as it often does for several
+  keys, keeps its sets in memory where they fit.
+- The estimate of the groups counts each group's record, its states and
+  the table's index, two buckets of 4 bytes a group. Without the index,
+  groups near half of the limit took half again as much as their
+  estimate, and the node passed `hash_mem` by 6 %.
 
 Refused: a set split into partitions with the largest sent to disk, as
 the groups of the node's own aggregates go. It writes fewer copies of a
 pair seen often, but it sends records and needs a merge of sets; the
 freeze needs neither.
+
+Refused: the group's keys written with the pair and the table of
+groups probed when it is read back. A key a dictionary numbers would
+need its number again, and a probe a row costs what the reference
+saves.
+
+Refused: half of `hash_mem` for the groups of every grouping with
+DISTINCT. A grouping by a key nearly unique, whose pairs fit, would go
+to the core.
 
 ## What Memory Usage counts
 
