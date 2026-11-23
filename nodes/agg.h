@@ -152,6 +152,8 @@ typedef struct TessAggState
 	 * for the groups still to come.
 	 */
 	Size		groups_bytes_estimate;
+	/* Whether an ungrouped COUNT(DISTINCT)'s argument may come as bytes. */
+	bool		has_distinct_bytes;
 	uint64		batches;
 	uint64		rows;
 	uint64		calls;

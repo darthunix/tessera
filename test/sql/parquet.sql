@@ -781,14 +781,26 @@ SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, t
 -- varchar and the int column before it, whose values the grouping makes,
 -- and by bytea, over the file of plain pages and the one through a
 -- dictionary: its groups are the core's, and the scan makes no value of
--- a key, Values Decoded counting the int column's alone.
+-- a key, Values Decoded counting the int column's alone. The ungrouped
+-- COUNT(DISTINCT) of text, of bytea, and of varchar beside a sum of the
+-- int column before it, reads its argument the same way.
 SELECT tbl, differ_off(format('SELECT s, count(*) FROM %s GROUP BY s', tbl)) AS by_text,
        differ_off(format('SELECT v, i, count(*) FROM %s GROUP BY v, i', tbl)) AS by_varchar_int,
-       differ_off(format('SELECT b, count(*) FROM %s GROUP BY b', tbl)) AS by_bytea
+       differ_off(format('SELECT b, count(*) FROM %s GROUP BY b', tbl)) AS by_bytea,
+       differ_off(format('SELECT count(DISTINCT s) FROM %s', tbl)) AS distinct_text,
+       differ_off(format('SELECT count(DISTINCT b) FROM %s', tbl)) AS distinct_bytea,
+       differ_off(format('SELECT count(DISTINCT v), sum(i) FROM %s', tbl)) AS distinct_after_int
 FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl);
 SELECT explain_lines('ANALYZE', 'SELECT s, count(*) FROM t_bytes_dict GROUP BY s',
                      'TessAgg|Decoded');
 SELECT explain_lines('ANALYZE', 'SELECT v, i, count(*) FROM t_bytes_plain GROUP BY v, i',
+                     'TessAgg|Decoded');
+SELECT explain_lines('ANALYZE', 'SELECT count(DISTINCT s) FROM t_bytes_dict',
+                     'TessAgg|Decoded');
+SELECT explain_lines('ANALYZE', format('SELECT count(DISTINCT b) FROM %s', tbl),
+                     'TessAgg|Decoded')
+FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl);
+SELECT explain_lines('ANALYZE', 'SELECT count(DISTINCT v), sum(i) FROM t_bytes_plain',
                      'TessAgg|Decoded');
 -- spec: string-bytes/A nondeterministic collation
 -- Under a collation that ignores case, whose equal values may differ in
