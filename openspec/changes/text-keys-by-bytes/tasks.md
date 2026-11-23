@@ -51,7 +51,7 @@ test.
       pointer across later asks of the batch, and a read of an old
       structure of the form's size before a field, allocated at that
       size. Check: the suites
-- [ ] 2.4 `runtime/project.c`: a projection's batch offers the form of
+- [x] 2.4 `runtime/project.c`: a projection's batch offers the form of
       a column it passes on unchanged, and answers false for a column
       it computes; a case of the test source through a projection.
       Check: the suites

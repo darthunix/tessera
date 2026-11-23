@@ -1970,8 +1970,10 @@ SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 -- under its identity, the identities of two columns apart and each kept
 -- within its batches and changed at the next and after a rescan; a plain
 -- column's fields written over a result of a dictionary; a structure of an
--- older size refused and left as it was. No consumer reads the form yet:
--- the asks counted are of Datum values, and the batches checked are shown.
+-- older size refused and left as it was; and a projection over the source
+-- passes the bytes of the columns it passes on and no others. No consumer
+-- reads the form yet: the asks counted are of Datum values, and the
+-- batches checked are shown.
 SELECT tessera_test_scan_sources(ARRAY['reader']);
  tessera_test_scan_sources 
 ---------------------------
@@ -1990,9 +1992,9 @@ CREATE TABLE ht_bytes AS
         i::text AS p
     FROM generate_series(1, 1000) AS i;
 SELECT tessera_test_scan_source_asks();
- tessera_test_scan_source_asks 
--------------------------------
- datum 0, bytes 0, checked 0
+            tessera_test_scan_source_asks            
+-----------------------------------------------------
+ datum 0, bytes 0, checked 0, through a projection 0
 (1 row)
 
 SELECT source_same('SELECT a, length(s), md5(s), n, p FROM ft_bytes');
@@ -2002,9 +2004,9 @@ SELECT source_same('SELECT a, length(s), md5(s), n, p FROM ft_bytes');
 (1 row)
 
 SELECT tessera_test_scan_source_asks();
- tessera_test_scan_source_asks  
---------------------------------
- datum 128, bytes 0, checked 16
+              tessera_test_scan_source_asks              
+---------------------------------------------------------
+ datum 128, bytes 0, checked 16, through a projection 16
 (1 row)
 
 SELECT source_same('SELECT s, count(*), count(n) FROM ft_bytes GROUP BY s');
@@ -2021,9 +2023,32 @@ SELECT source_same('SELECT g, (SELECT count(n) FROM ft_bytes WHERE a > g)
 (1 row)
 
 SELECT tessera_test_scan_source_asks();
- tessera_test_scan_source_asks  
---------------------------------
- datum 128, bytes 0, checked 64
+             tessera_test_scan_source_asks              
+--------------------------------------------------------
+ datum 128, bytes 0, checked 64, through a projection 0
+(1 row)
+
+-- Through the source's projection, which passes s on and computes the
+-- others: the bytes of s at the source's addresses, and no bytes of the
+-- computed columns.
+EXPLAIN (COSTS OFF, VERBOSE) SELECT s, lower(n), p || 'y' FROM ft_bytes;
+                   QUERY PLAN                    
+-------------------------------------------------
+ Custom Scan (TessTestSource) on public.ft_bytes
+   Output: s, lower(n), (p || 'y'::text)
+   Foreign Path: first
+(3 rows)
+
+SELECT source_same('SELECT s, lower(n), p || ''y'' FROM ft_bytes');
+   source_same   
+-----------------
+ same, 1000 rows
+(1 row)
+
+SELECT tessera_test_scan_source_asks();
+             tessera_test_scan_source_asks              
+--------------------------------------------------------
+ datum 96, bytes 0, checked 16, through a projection 16
 (1 row)
 
 ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'twice');
@@ -2034,9 +2059,9 @@ SELECT source_same('SELECT n, count(*) FROM ft_bytes GROUP BY n');
 (1 row)
 
 SELECT tessera_test_scan_source_asks();
- tessera_test_scan_source_asks 
--------------------------------
- datum 16, bytes 0, checked 16
+             tessera_test_scan_source_asks             
+-------------------------------------------------------
+ datum 16, bytes 0, checked 16, through a projection 0
 (1 row)
 
 ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'plain');
@@ -2047,9 +2072,9 @@ SELECT source_same('SELECT a, md5(s), n FROM ft_bytes WHERE a > 900');
 (1 row)
 
 SELECT tessera_test_scan_source_asks();
- tessera_test_scan_source_asks 
--------------------------------
- datum 28, bytes 0, checked 16
+             tessera_test_scan_source_asks             
+-------------------------------------------------------
+ datum 28, bytes 0, checked 16, through a projection 0
 (1 row)
 
 -- Without the bridge's identities, as an older bridge has none, every
@@ -2062,9 +2087,9 @@ SELECT source_same('SELECT n, count(*) FROM ft_bytes GROUP BY n');
 (1 row)
 
 SELECT tessera_test_scan_source_asks();
- tessera_test_scan_source_asks 
--------------------------------
- datum 16, bytes 0, checked 16
+             tessera_test_scan_source_asks             
+-------------------------------------------------------
+ datum 16, bytes 0, checked 16, through a projection 0
 (1 row)
 
 ALTER FOREIGN TABLE ft_bytes OPTIONS (DROP bridge_identities);
@@ -2080,9 +2105,9 @@ SELECT count(s) FROM ft_bytes_wide;
 (1 row)
 
 SELECT tessera_test_scan_source_asks();
- tessera_test_scan_source_asks 
--------------------------------
- datum 1, bytes 0, checked 1
+            tessera_test_scan_source_asks            
+-----------------------------------------------------
+ datum 1, bytes 0, checked 1, through a projection 0
 (1 row)
 
 CREATE FOREIGN TABLE ft_bytes_one (a int4, s text OPTIONS (mod '13'))
@@ -2094,9 +2119,9 @@ SELECT count(s) FROM ft_bytes_one;
 (1 row)
 
 SELECT tessera_test_scan_source_asks();
- tessera_test_scan_source_asks 
--------------------------------
- datum 1, bytes 0, checked 1
+            tessera_test_scan_source_asks            
+-----------------------------------------------------
+ datum 1, bytes 0, checked 1, through a projection 0
 (1 row)
 
 DROP FOREIGN TABLE ft_bytes_wide, ft_bytes_one;
