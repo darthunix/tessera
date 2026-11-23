@@ -327,7 +327,8 @@ source's own form.
 - 2026-11-23: the string functions and the order by bytes join the
   keys in this one change, rather than a change of their own.
 - 2026-11-23: the checks of the code as "How the code is checked" says
-  them, and the proposal, approved.
+  them, and the proposal, approved; the work goes into the proposal's
+  pull request, #172, rather than four of its own.
 - 2026-11-22 and 2026-11-23: the stages of speed are counted first,
   cycles and instructions by `pg_pmu`, the verdict by instructions,
   which another session's load does not change; times come when the
@@ -387,13 +388,14 @@ source's own form.
 On the M5 Pro, with `cargo clickbench run --counters --tries 5 --mode
 on`, one query a run, `--workers 0`, over `hits.parquet`, PostgreSQL 19
 with `pg_pmu`: instructions decide, cycles are reported beside them.
-Each pull request counts every query of ClickBench that reads a
-string, and the 17 that read none as controls, against two bases: the
-commit its branch starts from, which judges what it alone changed, and
-stage 4 of `parquet-fdw`, which shows the whole change so far. The
+Each stage of the work, the form, the keys, the functions and the sort,
+counts every query of ClickBench that reads a string, and the 17 that
+read none as controls, against two bases: the commit the stage starts
+from, which judges what it alone changed, and stage 4 of
+`parquet-fdw`, which shows the whole change so far. The
 heap's cases of strings are counted against the first by `cargo ab
 measure --counters --base <the commit> --family sort --family anykey`.
-The queries of each pull request:
+The queries of each stage:
 
 - the form: none, since no consumer reads it yet;
 - keys: Q6, Q13, Q15, Q17, Q18, Q19, Q34, Q35, Q37, Q38, Q39, Q40;
@@ -402,12 +404,12 @@ The queries of each pull request:
 
 Hypotheses, written before the runs: Q13 20 to 35 per cent fewer
 instructions; Q26 25 to 40; Q28 20 to 30; Q34 and Q35 15 to 30; the
-others of each list fewer. Against the commit it starts from, a pull
-request is kept when its first query of the list above, Q13, Q28 or
-Q26, loses at least 15 per cent, its other queries lose some, and every
-other query counted, of ClickBench and of the heap, gains no more than
-1 per cent; the first pull request, of the form, only by the last
-rule; otherwise its run's
+others of each list fewer. Against the commit it starts from, a stage
+is kept when its first query of the list above, Q13, Q28 or Q26, loses
+at least 15 per cent, its other queries lose some, and every other
+query counted, of ClickBench and of the heap, gains no more than 1 per
+cent; the first stage, of the form, only by the last rule; otherwise
+its run's
 report says which way failed and why, and the maintainer decides. Each
 run's report is kept under `docs/benchmarks/`, as `docs/measuring.md`
 says.

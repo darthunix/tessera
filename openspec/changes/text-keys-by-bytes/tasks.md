@@ -1,11 +1,13 @@
 ## 0. How the work goes
 
 The branch `text-keys-by-bytes` starts from `parquet-fdw`'s branch, and
-its pull requests are based on it until `parquet-fdw` is merged. The
-work goes in four pull requests: the form and the Parquet source's form
-(groups 2 and 3), TessAgg's keys (4), the kernels (5), the sort (6).
-Every task is one commit, but 7.3, the pull request's description; each
-is reviewed by Codex and Claude Fable before the next starts. Each
+its pull request, #172, the proposal's, is based on it until
+`parquet-fdw` is merged. By the maintainer's word of 2026-11-23 the
+work goes into that one pull request, in four stages: the form and the
+Parquet source's form (groups 2 and 3), TessAgg's keys (4), the kernels
+(5), the sort (6). Every task is one commit, but 7.3, the pull
+request's description; each is reviewed by Codex and Claude Fable
+before the next starts. Each
 commit passes `.github/scripts/check-specs.sh` and the check named in
 its task, and names in a scenario's "Verified by" or a contract's
 "Checked by" each test or check it lands. "The suites" means `make &&
@@ -17,7 +19,7 @@ taken by `cargo clickbench run --counters` and `cargo ab measure
 plan says; by the maintainer's word of 2026-11-23 it needs no idle
 machine, which a timed run still waits for. A commit that changes a hot
 path carries in its message its counts against the commit before it;
-the last task of each pull request commits the pull request's report.
+the last task of each stage commits the stage's report.
 A Kani harness is bounded to finish within CI's 600 seconds; what its
 bounds leave out is named in the harness and covered by a property
 test.
@@ -235,7 +237,7 @@ test.
       who knows nothing of the part; `## Files` and `## Tests` last;
       the contract moved beside the spec. Check:
       `.github/scripts/check-specs.sh`
-- [ ] 7.3 The last pull request's description, an index of evidence
+- [ ] 7.3 The pull request's description, an index of evidence
       with the counts of 3.7, 4.4, 5.4 and 6.4. Check: CI green
 - [ ] 7.4 `openspec archive text-keys-by-bytes --yes`, the folder it
       makes under `openspec/changes/archive/` deleted; the entry
