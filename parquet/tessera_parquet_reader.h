@@ -297,6 +297,12 @@ extern bool tess_parquet_bytes(TessParquetReader *reader,
 							   TessParquetStatus *status);
 extern void tess_parquet_hold_free(TessParquetHold *hold);
 
+/*
+ * The references of tess_parquet_bytes the calling thread, a backend, made
+ * and has not freed, for the tests of their lifetime.
+ */
+extern uint64_t tess_parquet_test_holds(void);
+
 /* Raises a panic inside the reader, for the test of the boundary. */
 extern bool tess_parquet_test_panic(TessParquetStatus *status);
 

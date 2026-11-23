@@ -16,7 +16,8 @@ The bytes a batch gives in the bytes form stay where they are until the
 batch is released, whatever is read in between, and no consumer keeps a
 pointer to them past the release, so that no read of the form touches
 memory that a later read, a reset or an error has freed.
-- **Checked by:** pending
+- **Checked by:**
+  `test/sql/parquet_cancel.sql::-- contract: string-bytes/bytes past a batch`
 
 ### One owner of the check
 A producer checks the bytes of a column by the column's rule before it

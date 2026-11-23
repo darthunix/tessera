@@ -118,10 +118,64 @@ RESET parallel_setup_cost;
 RESET parallel_tuple_cost;
 RESET parallel_leader_participation;
 
-DROP FOREIGN TABLE t_million, t_eight, t_gap;
+-- contract: string-bytes/bytes past a batch
+-- The references that keep a batch's bytes where they are. With each
+-- ask made to read the batch's window again, behind the reader, and the
+-- column asked as Datum values before its first ask in the bytes form,
+-- so that this ask's window is a read behind too, whose arrays the later
+-- asks replace, the test module reads the first ask's bytes again after
+-- the later asks, in C, so that ASan sees a buffer freed early, and the
+-- reader keeps no other reference to them; every row is its value's, and
+-- the two asks of a column through a dictionary name two dictionaries,
+-- so that the second gives no indexes. The module fails where no
+-- reference lives while the batch does, or one is left after a rescan
+-- or the scan's end; an error raised right after a reference is taken
+-- leaves none either.
+CREATE FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool)
+    RETURNS TABLE (col text, n int, ask text, bytes bytea, ind int, dict bool)
+    AS :'parquet_test', 'tessera_parquet_test_bytes' LANGUAGE C STRICT;
+CREATE FUNCTION parquet_test_holds() RETURNS bigint
+    AS :'parquet_test', 'tessera_parquet_test_holds' LANGUAGE C STRICT;
+CREATE FUNCTION parquet_test_point(text, text, bool) RETURNS void
+    AS :'parquet_test', 'tessera_parquet_test_point' LANGUAGE C STRICT;
+\set held :abs_builddir '/results/parquet_files/held_'
+SELECT parquet_test_write(:'held' || f || '.parquet', json_build_object(
+    'dictionary', f = 'dict', 'columns', json_build_array(
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(CASE WHEN n % 6 = 1 THEN NULL ELSE repeat('é', n % 9) || n % 11 END
+                         ORDER BY n)
+         FROM generate_series(0, 99) n))))::text)
+FROM (VALUES ('plain'), ('dict')) t(f);
+\set held_plain :held 'plain.parquet'
+\set held_dict :held 'dict.parquet'
+CREATE FOREIGN TABLE t_held_plain (s text) SERVER pq OPTIONS (files :'held_plain');
+CREATE FOREIGN TABLE t_held_dict (s text) SERVER pq OPTIONS (files :'held_dict');
+CREATE TABLE h_held AS
+SELECT n, CASE WHEN n % 6 = 1 THEN NULL ELSE repeat('é', n % 9) || n % 11 END AS s
+FROM generate_series(0, 99) n;
+SELECT parquet_test_point(:'parquet_module', 'tessera-parquet-again', true);
+SELECT tbl, max_rows, ask, count(*) AS asked, bool_or(dict) AS dict,
+       count(*) FILTER (WHERE bytes IS DISTINCT FROM convert_to(h.s, 'UTF8')) AS differ
+FROM (VALUES ('t_held_plain'), ('t_held_dict')) t(tbl),
+     (VALUES (64, 0), (10, 6)) b(max_rows, skip),
+     parquet_test_bytes(format('SELECT s FROM %s', tbl), max_rows, skip,
+                        x'5555555555555555'::bigint, true, true) p
+     JOIN h_held h ON h.n = p.n
+GROUP BY tbl, max_rows, ask ORDER BY tbl, max_rows, ask;
+SELECT parquet_test_point(:'parquet_module', 'tessera-parquet-again', false);
+SELECT parquet_test_holds() AS holds \gset
+SELECT parquet_test_point(:'parquet_module', 'tessera-parquet-bytes', true);
+SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_held_dict', 64, 0, 1, false, false);
+SELECT parquet_test_point(:'parquet_module', 'tessera-parquet-bytes', false);
+SELECT parquet_test_holds() - :holds AS left_after_the_error;
+
+DROP FOREIGN TABLE t_million, t_eight, t_gap, t_held_plain, t_held_dict;
+DROP TABLE h_held;
 DROP SERVER pq;
 DROP FUNCTION parquet_test_injection(), parquet_test_write(text, text),
     parquet_test_cancel_after(text, int), parquet_test_windows(),
-    parquet_test_replace_in_worker(text, bool);
+    parquet_test_replace_in_worker(text, bool),
+    parquet_test_bytes(text, int, int, bigint, bool, bool), parquet_test_holds(),
+    parquet_test_point(text, text, bool);
 DROP EXTENSION tessera_parquet;
 DROP EXTENSION tessera;
