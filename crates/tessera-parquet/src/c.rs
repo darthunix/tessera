@@ -20,7 +20,7 @@ use std::sync::Arc;
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, ArrayRef};
 
-use datum_arrow::{Comparison, ReadOutput, TextBytes, Unit, mask_words};
+use datum_arrow::{Comparison, Failures, MAX_VALUE_BYTES, ReadOutput, TextBytes, Unit, mask_words};
 
 use crate::clause::{ClauseKind, ClauseTest, comparison, like_checked};
 use crate::column::{ColumnRequest, MappedColumn, map_column};
@@ -106,6 +106,20 @@ pub struct ReaderHandle {
     /// and the numbers given so far.
     numbered: Option<(ArrayRef, u64)>,
     numbers: u64,
+    /// Whether every value of the array numbered last passed the column's
+    /// rule, as one read of the whole array found, and none is `NULL`:
+    /// unknown before a window names it.
+    dictionary_passes: Option<bool>,
+    /// Whether the last window, a plain one, passed its one pass: unknown
+    /// before a window is asked, and again after each read.
+    window_passes: Option<bool>,
+    /// The values of dictionaries checked whole and the plain windows
+    /// checked in one pass, which the tests read.
+    values_checked: usize,
+    windows_checked: usize,
+    /// Every window read row by row through the plan, for the tests.
+    #[cfg(test)]
+    rows_only: bool,
 }
 
 /// The places of a window's text in its own buffers, a row each, `None`
@@ -515,6 +529,12 @@ pub unsafe extern "C" fn tess_parquet_reader(
                     text: None,
                     numbered: None,
                     numbers: 0,
+                    dictionary_passes: None,
+                    window_passes: None,
+                    values_checked: 0,
+                    windows_checked: 0,
+                    #[cfg(test)]
+                    rows_only: false,
                 })),
             )
         })
@@ -572,6 +592,7 @@ pub unsafe extern "C" fn tess_parquet_read(
             held[..window.rows.len()].copy_from_slice(&window.rows);
             put(count, window.array.len())?;
             handle.window = Some(window);
+            handle.window_passes = None;
             Ok(())
         })
     }
@@ -1120,6 +1141,150 @@ fn values_key(values: &dyn Array) -> Result<(usize, usize, usize)> {
     ))
 }
 
+/// The rows `asked` asks of `window`, read row by row through the column's
+/// plan, which checks each by the column's rule: their bytes, and a mask
+/// of `words` words of their `NULL` rows.
+fn read_by_rows<'a>(
+    reader: &ColumnReader,
+    window: &'a Window,
+    asked: &[u64],
+    words: usize,
+) -> Result<(Vec<&'a [u8]>, Vec<u64>)> {
+    let input = input_of(window.array.as_ref())?;
+    let mut values: Vec<&[u8]> = vec![&[]; window.array.len()];
+    let mut made = vec![0u64; words];
+    reader.plan().read(
+        &input,
+        asked,
+        &mut ReadOutput::Bytes {
+            values: &mut values,
+            nulls: &mut made,
+        },
+    )?;
+    Ok((values, made))
+}
+
+/// The bytes of the rows `asked` asks of a window of a column of text that
+/// the plan checks for UTF-8 and zero bytes and counts no characters of,
+/// by a check cheaper than the plan's row by row. Through a dictionary,
+/// the first window that names its values array reads the whole array
+/// once through the plan, into `dictionary_passes`: where every value
+/// passes and none is `NULL`, every window over it takes its rows' bytes
+/// unchecked again. Plain, the window's bytes pass in one pass
+/// ([`crate::bytes::window_passes`]), made once a window into
+/// `window_passes`. `made` gets the bits of the rows asked that are `NULL`.
+/// `None` where the column is of another rule, where the dictionary or
+/// the window did not pass, or where an offset or an index does not hold:
+/// the caller then reads row by row, which fails as the plan fails, and
+/// at the plan's row.
+#[allow(clippy::too_many_arguments)]
+fn cheaper_check<'a>(
+    reader: &ColumnReader,
+    checks: (&mut usize, &mut usize),
+    array: &'a dyn Array,
+    dictionary: Option<&'a dyn Array>,
+    asked: &[u64],
+    dictionary_passes: &mut Option<bool>,
+    window_passes: &mut Option<bool>,
+    made: &mut [u64],
+) -> Result<Option<Vec<&'a [u8]>>> {
+    let text = Failures::NOT_UTF8 | Failures::ZERO_BYTE | Failures::TOO_LARGE;
+    let rows = array.len();
+    // A mask the plan refuses, shorter than the window or asking past it,
+    // or a mask of NULLs shorter than the window, is the plan's to refuse.
+    let words = mask_words(rows);
+    let past = |mask: &[u64]| {
+        mask.iter().enumerate().any(|(w, &bits)| {
+            let below = rows.saturating_sub(w * 64).min(64);
+            below < 64 && bits >> below != 0
+        })
+    };
+    if reader.plan().failures() != text || asked.len() < words || made.len() < words || past(asked)
+    {
+        return Ok(None);
+    }
+    match dictionary {
+        Some(values) => {
+            let Some(keys) = array
+                .as_any_dictionary_opt()
+                .and_then(|d| d.keys().as_any().downcast_ref::<arrow_array::Int32Array>())
+            else {
+                return Ok(None);
+            };
+            let Some(bytes) = values
+                .as_any()
+                .downcast_ref::<arrow_array::LargeBinaryArray>()
+            else {
+                return Ok(None);
+            };
+            if dictionary_passes.is_none() {
+                // The whole array once, a value not named by any row asked
+                // among them: a value that fails only sends its windows to
+                // the read row by row, which fails where a row asks it.
+                let passes = bytes.null_count() == 0 && {
+                    let all: Vec<u64> = (0..mask_words(bytes.len()))
+                        .map(|w| match (bytes.len() - w * 64).min(64) {
+                            64 => u64::MAX,
+                            n => (1u64 << n) - 1,
+                        })
+                        .collect();
+                    let mut sink: Vec<&[u8]> = vec![&[]; bytes.len()];
+                    let mut sink_nulls = vec![0u64; all.len()];
+                    reader
+                        .plain_plan()
+                        .read(
+                            &input_of(values)?,
+                            &all,
+                            &mut ReadOutput::Bytes {
+                                values: &mut sink,
+                                nulls: &mut sink_nulls,
+                            },
+                        )
+                        .is_ok()
+                };
+                *checks.0 += bytes.len();
+                *dictionary_passes = Some(passes);
+            }
+            if *dictionary_passes != Some(true) {
+                return Ok(None);
+            }
+            Ok(crate::bytes::slices(
+                rows,
+                asked,
+                |row| keys.is_null(row),
+                |row| usize::try_from(keys.value(row)).unwrap_or(usize::MAX),
+                (bytes.value_offsets(), bytes.values()),
+                MAX_VALUE_BYTES,
+                made,
+            ))
+        }
+        None => {
+            let Some(bytes) = array
+                .as_any()
+                .downcast_ref::<arrow_array::LargeBinaryArray>()
+            else {
+                return Ok(None);
+            };
+            let passes = *window_passes.get_or_insert_with(|| {
+                *checks.1 += 1;
+                crate::bytes::window_passes(bytes.value_offsets(), bytes.values())
+            });
+            if !passes {
+                return Ok(None);
+            }
+            Ok(crate::bytes::slices(
+                rows,
+                asked,
+                |row| bytes.is_null(row),
+                |row| row,
+                (bytes.value_offsets(), bytes.values()),
+                MAX_VALUE_BYTES,
+                made,
+            ))
+        }
+    }
+}
+
 /// Gives the rows `asked` asks of the last window in the bytes form, as
 /// the column's read plan checks them (`22021`, `22001`, `54000` at the
 /// first row that fails, and no row not asked): into `out`'s arrays, for
@@ -1180,17 +1345,6 @@ pub unsafe extern "C" fn tess_parquet_bytes(
             if out_len < len {
                 return Err(broken("outputs shorter than the window"));
             }
-            let input = input_of(window.array.as_ref())?;
-            let mut values: Vec<&[u8]> = vec![&[]; len];
-            let mut made = vec![0u64; nulls.len()];
-            handle.reader.plan().read(
-                &input,
-                asked,
-                &mut ReadOutput::Bytes {
-                    values: &mut values,
-                    nulls: &mut made,
-                },
-            )?;
             let dictionary = window
                 .array
                 .as_any_dictionary_opt()
@@ -1230,6 +1384,57 @@ pub unsafe extern "C" fn tess_parquet_bytes(
                 }
                 None => None,
             };
+            // What is known of this window's values array: the held array's,
+            // or nothing of a new one.
+            let mut dictionary_passes = match &numbering {
+                Some((_, _, None)) => handle.dictionary_passes,
+                _ => None,
+            };
+            let mut made = vec![0u64; nulls.len()];
+            #[cfg(test)]
+            let rows_only = handle.rows_only;
+            #[cfg(not(test))]
+            let rows_only = false;
+            let fast = if rows_only {
+                None
+            } else {
+                cheaper_check(
+                    &handle.reader,
+                    (&mut handle.values_checked, &mut handle.windows_checked),
+                    window.array.as_ref(),
+                    dictionary.as_ref().map(|(_, v)| v.as_ref()),
+                    asked,
+                    &mut dictionary_passes,
+                    &mut handle.window_passes,
+                    &mut made,
+                )?
+            };
+            let values = match fast {
+                Some(values) => {
+                    if cfg!(debug_assertions) {
+                        // The cheaper check agrees with the plan's, row by
+                        // row: every row asked passes it, at the same bytes;
+                        // a row the plan fails is the check's fault, not the
+                        // row's, and so an error of its own.
+                        match read_by_rows(&handle.reader, window, asked, nulls.len()) {
+                            Ok((by_rows, rows_made)) if by_rows == values && rows_made == made => {}
+                            _ => {
+                                return Err(broken(
+                                    "the cheaper check of a window differs from the plan's",
+                                ));
+                            }
+                        }
+                    }
+
+                    values
+                }
+                None => {
+                    let (values, rows_made) =
+                        read_by_rows(&handle.reader, window, asked, nulls.len())?;
+                    made = rows_made;
+                    values
+                }
+            };
             // SAFETY: the caller gives `len` initialized, writable entries
             // at each.
             let data = std::slice::from_raw_parts_mut(out_data, len);
@@ -1245,6 +1450,7 @@ pub unsafe extern "C" fn tess_parquet_bytes(
                         handle.numbers = number;
                         handle.numbered = Some((values, number));
                     }
+                    handle.dictionary_passes = dictionary_passes;
                     (nvalues, number)
                 }
                 None => (0, 0),

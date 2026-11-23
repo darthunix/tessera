@@ -121,23 +121,30 @@ the dictionary's address alone, which a later array may reuse once the
 first is freed; a counter of each module, two of which can give one
 number.
 
-### The check: the producer's, once a value where it can
+### The check: the producer's, once a dictionary or a window
 
 The source checks the bytes it gives by the column's rule, so that the
 rule of `parquet-fdw`'s contract, no text unchecked by its column's
-rule, keeps its one owner. For a chunk read through its dictionary the
-source checks a dictionary value once, the first time a row asked names
-it, and marks it in a bitmap of the values array. For a plain chunk it
-checks the encoding and the zero bytes of the window's bytes in one
-pass, all its rows' bytes together, and a row's start for a continuation
-byte of UTF-8; where that pass fails, it checks the rows asked one by
-one, so that a row not asked never fails a query. The size of a value
-and the characters of a `varchar(n)` are checked for each row asked, by
-its length and, for `varchar(n)`, its characters, in the order
-`datum-arrow`'s check takes them, so that a row that would fail two ways
-fails with the error its `Datum` would raise. Refused: bytes given
-unchecked and checked by each consumer once a new value, which puts the
-rule in every consumer, the kernels' among them.
+rule, keeps its one owner: the column's read plan of `datum-arrow`. For
+a column of text the plan checks for UTF-8 and zero bytes and counts no
+characters of, the check costs less. For a chunk read through its
+dictionary, the first window that names the dictionary's values array
+reads the whole array once through the plan; where every value passes
+and none is `NULL`, the windows over it take their rows' bytes with no
+check again. For a plain window, one pass checks the encoding and the
+zero bytes of the window's bytes, all its rows' together, and each
+value's start for a byte that continues a character; the pass is made
+once a window, however many batches ask it. Every other case, a
+dictionary with a value that fails, a window that fails its pass, a
+value past PostgreSQL's size, an offset or an index that does not hold,
+`varchar(n)`, trusted text and `bytea`, reads the rows asked one by one
+through the plan, as a `Datum` is made, so that a row that fails fails
+at its row with its `Datum`'s error and a row not asked never fails a
+query. Refused: bytes given unchecked and checked by each consumer once
+a new value, which puts the rule in every consumer, the kernels' among
+them; and a dictionary's values checked one by one as rows name them,
+whose bitmap and scratch arrays cost every batch a pass over the
+dictionary.
 
 ### The window's arrays kept for the batch
 
@@ -283,8 +290,11 @@ the check that can see it; the contract of the capability names them.
   TessAgg's array from index to number compares the row's bytes with
   its group's; after a sort and after a merge, each pair of adjacent
   rows is checked by their full bytes, and each comparison of ties and
-  each row a top-N sort drops against the worst it keeps; a window that
-  passes its check in one pass is checked row by row again. The words
+  each row a top-N sort drops against the worst it keeps; the rows the
+  source gives in the bytes form are checked again by the plan row by
+  row, by the node through the entry that sizes text, and, in a debug
+  build of the reader, as CI's cells of debug kernels build it, inside
+  the reader too, where a difference is an error of its own. The words
   themselves are compared in a kernel, where C does not see them;
   equal words of unequal strings are ties, which the full comparison
   decides.
