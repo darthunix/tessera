@@ -40,6 +40,12 @@ RETURNS text
 AS :'scan_source', 'tessera_test_scan_source_listed'
 LANGUAGE C STRICT;
 
+-- The asks of each form of the test source's batches since the last call.
+CREATE FUNCTION tessera_test_scan_source_asks()
+RETURNS text
+AS :'scan_source', 'tessera_test_scan_source_asks'
+LANGUAGE C STRICT;
+
 -- The fault the faulty source makes, NULL for none.
 CREATE FUNCTION tessera_test_scan_source_fault(text)
 RETURNS void
@@ -716,6 +722,70 @@ SELECT tessera_test_scan_source_listed();
 EXPLAIN (COSTS OFF) SELECT b, count(*) FROM ft_t GROUP BY b;
 SELECT tessera_test_scan_source_calls();
 SELECT tessera_test_scan_sources(ARRAY[]::text[]);
+
+-- spec: string-bytes/A column offered as bytes
+-- spec: string-bytes/Batches over one dictionary
+-- The test source's bytes form, which later consumers read: text columns
+-- given plain, through a dictionary that changes every three batches,
+-- and through one that holds each value at two indexes, beside a text
+-- column of no bounded values, given without a dictionary, with NULL rows,
+-- empty strings and strings of up to 10 000 bytes, over a rescan too. The
+-- source reads each batch it makes as a consumer would (check_bytes): the
+-- layout; each view's arrays and bytes as given, and those of the row's
+-- Datum, after asks of every column in both forms; the dictionary's count
+-- and each row's index against the generator's, one index's bytes the same
+-- under its identity, the identities of two columns apart and each kept
+-- within its batches and changed at the next and after a rescan; a plain
+-- column's fields written over a result of a dictionary; a structure of an
+-- older size refused and left as it was. No consumer reads the form yet:
+-- the asks counted are of Datum values, and the batches checked are shown.
+SELECT tessera_test_scan_sources(ARRAY['reader']);
+CREATE FOREIGN TABLE ft_bytes (a int4, s text OPTIONS (mod '50', width '10000'),
+    n text OPTIONS (mod '13', nulls '7'), p text)
+    SERVER scan_server
+    OPTIONS (rows '1000', bytes 'dictionary', dictionary_batches '3', check_bytes 'on');
+CREATE TABLE ht_bytes AS
+    SELECT i AS a,
+        CASE WHEN i % 50 = 0 THEN ''
+             ELSE (i % 50)::text || repeat('x', (i % 50) * 7919 % 10000) END AS s,
+        CASE WHEN i % 7 = 0 THEN NULL ELSE (i % 13)::text END AS n,
+        i::text AS p
+    FROM generate_series(1, 1000) AS i;
+SELECT tessera_test_scan_source_asks();
+SELECT source_same('SELECT a, length(s), md5(s), n, p FROM ft_bytes');
+SELECT tessera_test_scan_source_asks();
+SELECT source_same('SELECT s, count(*), count(n) FROM ft_bytes GROUP BY s');
+SELECT source_same('SELECT g, (SELECT count(n) FROM ft_bytes WHERE a > g)
+    FROM generate_series(1, 3) AS g');
+SELECT tessera_test_scan_source_asks();
+ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'twice');
+SELECT source_same('SELECT n, count(*) FROM ft_bytes GROUP BY n');
+SELECT tessera_test_scan_source_asks();
+ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'plain');
+SELECT source_same('SELECT a, md5(s), n FROM ft_bytes WHERE a > 900');
+SELECT tessera_test_scan_source_asks();
+-- Without the bridge's identities, as an older bridge has none, every
+-- column is given plain.
+ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'dictionary', ADD bridge_identities 'off');
+SELECT source_same('SELECT n, count(*) FROM ft_bytes GROUP BY n');
+SELECT tessera_test_scan_source_asks();
+ALTER FOREIGN TABLE ft_bytes OPTIONS (DROP bridge_identities);
+-- Values bounded past what an index holds: given plain, in either form of
+-- a dictionary; and a scan of one row in the form of two indexes a value,
+-- whose one row stands at an even place.
+CREATE FOREIGN TABLE ft_bytes_wide (a int4, s text OPTIONS (mod '2147483648'))
+    SERVER scan_server OPTIONS (rows '2', bytes 'twice', check_bytes 'on');
+SELECT count(s) FROM ft_bytes_wide;
+SELECT tessera_test_scan_source_asks();
+CREATE FOREIGN TABLE ft_bytes_one (a int4, s text OPTIONS (mod '13'))
+    SERVER scan_server OPTIONS (rows '1', bytes 'twice', check_bytes 'on');
+SELECT count(s) FROM ft_bytes_one;
+SELECT tessera_test_scan_source_asks();
+DROP FOREIGN TABLE ft_bytes_wide, ft_bytes_one;
+SELECT tessera_test_scan_sources(ARRAY[]::text[]);
+DROP FOREIGN TABLE ft_bytes;
+DROP TABLE ht_bytes;
+
 DROP FOREIGN TABLE ft_inherited_child;
 DROP TABLE ht_inherited_child, ft_inherited, ht_inherited;
 
@@ -730,6 +800,7 @@ DROP FOREIGN TABLE ft_t, ft_two, ft_sorted, ft_join, ft_par, ft_unaware;
 DROP SERVER scan_server;
 DROP FOREIGN DATA WRAPPER tessera_test_scan;
 DROP FUNCTION source_same(text);
+DROP FUNCTION tessera_test_scan_source_asks();
 DROP FUNCTION tessera_test_scan_source_fault(text);
 DROP FUNCTION tessera_test_scan_source_listed();
 DROP FUNCTION tessera_test_scan_source_calls();

@@ -63,7 +63,8 @@ offset size field
 - **THEN** the call returns true; each row asked holds its value's
   bytes and length, or its `NULL` mark; the pointers of the first call
   still give the same bytes after the later asks
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: string-bytes/A column offered as bytes`
 
 #### Scenario: A column or a batch without the form
 - **WHEN** a consumer reads a batch whose operations end at `release`,
@@ -92,14 +93,15 @@ SHALL NOT pass from one process to another. Without a dictionary,
 `indexes` SHALL be `NULL`, and `nvalues` and `dictionary` 0.
 
 #### Scenario: Batches over one dictionary
-- **WHEN** a test source gives three batches whose column is held
-  through one dictionary, then a batch of another dictionary, then one
-  without a dictionary
-- **THEN** the first three give the same identity and each row the
-  index of its value; the fourth gives another identity; the fifth
-  gives `NULL` indexes and the identity 0; a batch over the first
-  dictionary again gives an identity that is not the fourth's
-- **Verified by:** pending
+- **WHEN** a test source gives a column through one dictionary for
+  three batches, then through another for the next three, and again
+  after a rescan, beside a column it gives without a dictionary
+- **THEN** the batches of one dictionary give the same identity and
+  each row the index of its value, those of the next another identity,
+  and those after the rescan one apart from the last before it; the
+  column without a dictionary gives `NULL` indexes and the identity 0
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: string-bytes/Batches over one dictionary`
 
 #### Scenario: A dictionary given again after another
 - **WHEN** a grouping reads the Parquet column of a chunk through its
