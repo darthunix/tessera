@@ -2592,6 +2592,42 @@ SELECT agg_costs_ordered($$SELECT count(*), sum(a), max(c) FROM agg_t$$) AS plai
 (1 row)
 
 DROP FUNCTION agg_costs_ordered(text);
+-- Past the caches, of more than 43 690 values, a key dictionary asks each
+-- row's bucket of memory first and keeps the hash it computed there for
+-- the lookup: of 70 000 values of text, each two or three times, NULL in
+-- every seventh row, the rows a filter leaves, a sparse mask, hold some
+-- 60 000, the dictionary grown from the size of an estimate without
+-- statistics; grouped, and their distinct count with no grouping: the
+-- core's.
+SET work_mem = '64MB';
+CREATE TABLE agg_past WITH (autovacuum_enabled = off) AS
+SELECT i, CASE WHEN i % 7 = 0 THEN NULL ELSE 'w' || (i % 70000) END AS s
+FROM generate_series(1, 150000) AS i;
+EXPLAIN (COSTS OFF) SELECT s, count(*) FROM agg_past WHERE i % 3 <> 0 GROUP BY s;
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: s
+   ->  Custom Scan (TessFilter) on agg_past
+         Batch Filter: ((i % 3) <> 0)
+         ->  Custom Scan (TessHeapScan) on agg_past
+(5 rows)
+
+SELECT agg_same($$SELECT count(*), sum(c), md5(string_agg(s || ':' || c, ',' ORDER BY s))
+                  FROM (SELECT s, count(*) AS c FROM agg_past WHERE i % 3 <> 0 GROUP BY s) AS q$$);
+                      agg_same                       
+-----------------------------------------------------
+ {"(60001,100000,5df9f1fdbd613a1f4182d9e314c7efaa)"}
+(1 row)
+
+SELECT agg_same($$SELECT count(DISTINCT s) FROM agg_past WHERE i % 3 <> 0$$);
+ agg_same  
+-----------
+ {(60000)}
+(1 row)
+
+DROP TABLE agg_past;
+RESET work_mem;
 DROP TABLE agg_t;
 DROP FUNCTION agg_spill(text);
 DROP FUNCTION agg_same(text);
