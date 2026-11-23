@@ -162,6 +162,32 @@ FROM (VALUES ('t_held_plain'), ('t_held_dict')) t(tbl),
                         x'5555555555555555'::bigint, true, true) p
      JOIN h_held h ON h.n = p.n
 GROUP BY tbl, max_rows, ask ORDER BY tbl, max_rows, ask;
+-- spec: string-bytes/A dictionary given again
+-- A grouping over windows read again at each ask, over two chunks of 1100
+-- rows whose dictionaries give one index to two values: in each chunk the
+-- first batch reads the window of 1024 rows forward, every later batch of
+-- it reads it behind, decoding the chunk's dictionary anew under a new
+-- identity, and the first batch of the rows past it reads forward again.
+-- The key's numbers of the indexes are dropped at each new identity; the
+-- heap's groups. Kept across the second chunk, the first's numbers would
+-- be taken for its values.
+SELECT parquet_test_write(:'held' || 'two.parquet', json_build_object(
+    'group_rows', 1100, 'dictionary', true, 'columns', json_build_array(
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(CASE WHEN n % 6 = 1 THEN NULL ELSE repeat('é', n % 9) || n % 11 END
+                         ORDER BY n)
+         FROM generate_series(0, 2199) n))))::text);
+\set held_two :held 'two.parquet'
+CREATE FOREIGN TABLE t_held_two (s text) SERVER pq OPTIONS (files :'held_two');
+CREATE TABLE h_held_two AS
+SELECT CASE WHEN n % 6 = 1 THEN NULL ELSE repeat('é', n % 9) || n % 11 END AS s
+FROM generate_series(0, 2199) n;
+SELECT (SELECT array_agg(x ORDER BY x) FROM
+          (SELECT s || ':' || count(*) AS x FROM t_held_two GROUP BY s) a) IS NOT DISTINCT FROM
+       (SELECT array_agg(x ORDER BY x) FROM
+          (SELECT s || ':' || count(*) AS x FROM h_held_two GROUP BY s) b) AS same_groups;
+DROP FOREIGN TABLE t_held_two;
+DROP TABLE h_held_two;
 SELECT parquet_test_point(:'parquet_module', 'tessera-parquet-again', false);
 SELECT parquet_test_holds() AS holds \gset
 SELECT parquet_test_point(:'parquet_module', 'tessera-parquet-bytes', true);

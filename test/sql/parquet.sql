@@ -1457,6 +1457,32 @@ SELECT parallel_lines('SELECT * FROM (SELECT count(*) AS n, sum(i) AS total FROM
                        RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true',
                       'Nested Loop|Parallel|Row Groups Read|Values Decoded');
 SELECT workers_launched('SELECT count(*), sum(i), max(s) FROM t_eight') > 0 AS workers_read;
+-- spec: string-bytes/A partial stage's tables sent up
+-- A parallel grouping by a string of 8000 values of some 65 bytes through
+-- the chunks' dictionaries, under a work_mem its workers' tables outgrow,
+-- each value's 20 rows together so that a table folds them: each worker's
+-- partial stage sends a table up in the middle of a chunk and starts the
+-- next over the same chunk's dictionary, its numbers of the indexes
+-- dropped with the key dictionary it resets; the groups of the core.
+SELECT parquet_test_write(:'dir' || '/eight_many.parquet', json_build_object(
+    'group_rows', 20000, 'dictionary', true, 'columns', json_build_array(
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg('v' || n / 20 || repeat('ü', 30) ORDER BY n)
+         FROM generate_series(0, 159999) n))))::text);
+\set eight_many :dir '/eight_many.parquet'
+CREATE FOREIGN TABLE t_eight_many (s text) SERVER pq OPTIONS (files :'eight_many');
+SET work_mem = '64kB';
+\set eight_groups 'SELECT md5(string_agg(s || \':\' || c, \',\' ORDER BY s)) AS groups FROM (SELECT s, count(*) AS c FROM t_eight_many GROUP BY s) q'
+:eight_groups \gset tess_
+SET tessera.enable = off;
+:eight_groups \gset core_
+RESET tessera.enable;
+SELECT :'tess_groups' = :'core_groups' AS same_as_core;
+SELECT count(*) FILTER (WHERE line ~ 'Early Emits') > 0 AS sent_up,
+       count(*) FILTER (WHERE line ~ 'Partial Mode: Partial') > 0 AS partial_stage
+FROM explain_lines('ANALYZE, VERBOSE', :'eight_groups', 'Early Emits|Partial Mode') line;
+RESET work_mem;
+DROP FOREIGN TABLE t_eight_many;
 -- A clause the source checks, each participant selecting the rows of
 -- the groups it takes, the value of a subquery among them.
 SELECT parallel_lines('SELECT count(*) FROM t_eight WHERE i < (SELECT 4500)',

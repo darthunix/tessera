@@ -144,7 +144,7 @@ named in the harness and covered by a property test.
       column before it and `bytea`, a nondeterministic collation, a
       serial spill by one key and by two; `docs/nodes.md`. Check: the
       suites; `make crosscheck`
-- [ ] 4.2 The array from a source dictionary's index to a key's number
+- [x] 4.2 The array from a source dictionary's index to a key's number
       and hash: its size bounded by the dictionary's count of values
       and by a share of the grouping's memory, its arithmetic checked,
       every index checked against it before it is read, the lookup by
