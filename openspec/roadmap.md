@@ -112,6 +112,8 @@ is wanted; several wait for a measured case. `greengage-port` and
 
 - `projection-whole-row`: a whole row and `tableoid` computed by the
   runtime's projection, so that a batch node serves them
+- `parquet-reader-boundary`: the boundary between the Parquet node
+  and its reader, which the bytes form crossed beside the forecast
 - `agg-date-min-max`: `min` and `max` of `date` by kernels
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
@@ -325,6 +327,29 @@ change. It is the change `text-keys-by-bytes`.
 - **Depends on:** `parquet-fdw`.
 - **Capabilities:** string-bytes, new
 - **Size:** large: one pull request of four stages after the proposal.
+
+### parquet-reader-boundary
+
+The boundary between the Parquet node and its reader. Opened by the
+change `text-keys-by-bytes`, whose bytes form crossed it beside the
+forecast of `parquet-fdw`'s contract.
+
+- **What:** Find whether the boundary between `parquet/node.c` and the
+  reader's C entries has worn: the node now asks the reader for the
+  places of a window's bytes and holds references to its arrays for a
+  batch (`tess_parquet_bytes`, `tess_parquet_hold_free`), beside the
+  values it made before. Simplify it where it has, before the next
+  change of the node adds to it.
+- **Why:** The rules of contracts: a change that touches a part its
+  forecast did not name opens an entry for simplifying that part,
+  naming the boundary it crossed; a second departure over the same
+  boundary calls for a diagnosis.
+- **Known:** The forecast said "not the reader"; the pointers into the
+  reader's arrays can only be taken in the reader's crate. The forecast
+  was updated with the departure.
+- **Depends on:** `text-keys-by-bytes`.
+- **Capabilities:** parquet-fdw
+- **Size:** small.
 
 ### clickbench-entry
 
@@ -2402,6 +2427,14 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **A batch's text past one allocation** (a finding of the review of
+  the change `text-keys-by-bytes`, task 3.3). The Parquet node makes the
+  text of a batch's rows in one arena of its memory, allocated as one
+  piece, which PostgreSQL limits to a gigabyte less a byte. A batch of
+  64 rows whose values together pass that, each within the limit of a
+  value, fails with "invalid memory alloc request size" where the core
+  reads each value apart. An allocation of the huge kind lifts the
+  limit; whether a batch should hold that much, or be cut, is open.
 - **A forward reader rebuilt after a window of no selected row** (a
   finding of the review of the change `parquet-fdw`, task 5.1). Under a
   clause the source checks, a window whose rows the clause rejects is

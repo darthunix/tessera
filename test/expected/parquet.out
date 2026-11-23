@@ -1346,6 +1346,146 @@ FROM (VALUES (64, 0, 0), (10, 6, 60)) b(max_rows, skip, first) ORDER BY max_rows
        64 |           0
 (2 rows)
 
+-- The bytes form of the node's batches, which TessAgg and the kernels
+-- read: the test module asks one batch's text, bytea and varchar columns
+-- as bytes for every other row, then every row as Datum values and the
+-- rest as bytes, and reads the first ask's places again; an int column
+-- is not offered. Over a file of plain pages and one through a
+-- dictionary, with NULL rows, empty strings and characters of several
+-- bytes, in batches of 64 and of 10 across a word of the window's masks:
+-- every row's bytes are its value's, the first ask's still after the
+-- others, and the rows through a dictionary carry indexes, which the
+-- module checks lie among the dictionary's values, one a value.
+CREATE FUNCTION parquet_test_bytes(text, int, int, bigint, bool)
+    RETURNS TABLE (col text, n int, ask text, bytes bytea, ind int, dict bool)
+    AS :'parquet_test', 'tessera_parquet_test_bytes' LANGUAGE C STRICT;
+SELECT parquet_test_write(:'dir' || '/bytes_' || f || '.parquet', json_build_object(
+    'dictionary', f = 'dict', 'columns', json_build_array(
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(CASE WHEN n % 6 = 1 THEN NULL WHEN n % 10 = 3 THEN ''
+                              WHEN n % 7 = 4 THEN 'é' || n % 5 ELSE 's' || n % 13 END ORDER BY n)
+         FROM generate_series(0, 99) n)),
+      json_build_object('name', 'i', 'type', 'int32', 'values',
+        (SELECT json_agg(n ORDER BY n) FROM generate_series(0, 99) n)),
+      json_build_object('name', 'b', 'type', 'bytes', 'values',
+        (SELECT json_agg(CASE WHEN n % 9 = 0 THEN NULL ELSE 'b' || n % 4 END ORDER BY n)
+         FROM generate_series(0, 99) n)),
+      json_build_object('name', 'v', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg('v' || n % 3 ORDER BY n) FROM generate_series(0, 99) n))))::text)
+FROM (VALUES ('plain'), ('dict')) t(f);
+ parquet_test_write 
+--------------------
+ 
+ 
+(2 rows)
+
+\set bytes_plain :dir '/bytes_plain.parquet'
+\set bytes_dict :dir '/bytes_dict.parquet'
+CREATE FOREIGN TABLE t_bytes_plain (s text, i int, b bytea, v varchar(3))
+    SERVER pq OPTIONS (files :'bytes_plain');
+CREATE FOREIGN TABLE t_bytes_dict (s text, i int, b bytea, v varchar(3))
+    SERVER pq OPTIONS (files :'bytes_dict');
+CREATE TABLE h_bytes AS
+SELECT n, CASE WHEN n % 6 = 1 THEN NULL WHEN n % 10 = 3 THEN ''
+               WHEN n % 7 = 4 THEN 'é' || n % 5 ELSE 's' || n % 13 END AS s,
+       CASE WHEN n % 9 = 0 THEN NULL ELSE ('b' || n % 4)::bytea END AS b,
+       ('v' || n % 3)::varchar(3) AS v
+FROM generate_series(0, 99) n;
+SELECT tbl, max_rows, col, count(*) FILTER (WHERE ask <> 'not offered') AS asked,
+       count(*) FILTER (WHERE ask = 'not offered') AS not_offered,
+       count(*) FILTER (WHERE bytes IS NULL AND ask <> 'not offered') AS null_rows,
+       bool_or(dict) AS dict,
+       CASE WHEN bool_or(dict) THEN
+         count(DISTINCT (ind, bytes)) FILTER (WHERE bytes IS NOT NULL) = count(DISTINCT ind)
+         AND count(DISTINCT ind) = count(DISTINCT bytes) END AS one_index_a_value
+FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl),
+     (VALUES (64, 0), (10, 6)) b(max_rows, skip),
+     parquet_test_bytes(format('SELECT s, i, b, v FROM %s', tbl), max_rows, skip,
+                        x'5555555555555555'::bigint, true)
+GROUP BY tbl, max_rows, col ORDER BY tbl, max_rows, col;
+      tbl      | max_rows | col | asked | not_offered | null_rows | dict | one_index_a_value 
+---------------+----------+-----+-------+-------------+-----------+------+-------------------
+ t_bytes_dict  |       10 | b   |    15 |           0 |         1 | t    | t
+ t_bytes_dict  |       10 | i   |     0 |           1 |         0 | f    | 
+ t_bytes_dict  |       10 | s   |    15 |           0 |         2 | t    | t
+ t_bytes_dict  |       10 | v   |    15 |           0 |         0 | t    | t
+ t_bytes_dict  |       64 | b   |    96 |           0 |        12 | t    | t
+ t_bytes_dict  |       64 | i   |     0 |           1 |         0 | f    | 
+ t_bytes_dict  |       64 | s   |    96 |           0 |        11 | t    | t
+ t_bytes_dict  |       64 | v   |    96 |           0 |         0 | t    | t
+ t_bytes_plain |       10 | b   |    15 |           0 |         1 | f    | 
+ t_bytes_plain |       10 | i   |     0 |           1 |         0 | f    | 
+ t_bytes_plain |       10 | s   |    15 |           0 |         2 | f    | 
+ t_bytes_plain |       10 | v   |    15 |           0 |         0 | f    | 
+ t_bytes_plain |       64 | b   |    96 |           0 |        12 | f    | 
+ t_bytes_plain |       64 | i   |     0 |           1 |         0 | f    | 
+ t_bytes_plain |       64 | s   |    96 |           0 |        11 | f    | 
+ t_bytes_plain |       64 | v   |    96 |           0 |         0 | f    | 
+(16 rows)
+
+SELECT tbl, max_rows, differ(
+    format($$SELECT col, n, ask, bytes FROM parquet_test_bytes('SELECT s, b, v FROM %s', %s, %s,
+                                                                x'5555555555555555'::bigint, true)$$,
+           tbl, max_rows, skip),
+    format($$(SELECT c, n, a, CASE c WHEN 's' THEN convert_to(s, 'UTF8') WHEN 'b' THEN b
+                                    ELSE convert_to(v, 'UTF8') END
+              FROM h_bytes, unnest(ARRAY['s', 'b', 'v']) c,
+                   unnest(ARRAY['first', 'kept']) a
+              WHERE n >= %s AND n < %s AND (n - %s) %% 2 = 0
+              UNION ALL
+              SELECT c, n, 'rest', CASE c WHEN 's' THEN convert_to(s, 'UTF8') WHEN 'b' THEN b
+                                        ELSE convert_to(v, 'UTF8') END
+              FROM h_bytes, unnest(ARRAY['s', 'b', 'v']) c
+              WHERE n >= %s AND n < %s AND (n - %s) %% 2 = 1)$$,
+           first, first + max_rows, first, first, first + max_rows, first)) AS bytes_differ
+FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl),
+     (VALUES (64, 0, 0), (10, 6, 60)) b(max_rows, skip, first)
+ORDER BY tbl, max_rows;
+      tbl      | max_rows | bytes_differ 
+---------------+----------+--------------
+ t_bytes_dict  |       10 |            0
+ t_bytes_dict  |       64 |            0
+ t_bytes_plain |       10 |            0
+ t_bytes_plain |       64 |            0
+(4 rows)
+
+-- Bytes that are not UTF-8 and a value longer than its varchar fail
+-- only where a row asked holds them, with the errors of their Datums;
+-- the last fails in the ask of every row as Datums, after the first ask
+-- took a reference to the window's array, which the error frees.
+SELECT parquet_test_write(:'dir' || '/bytes_bad.parquet', '{"dictionary": false, "columns": [
+      {"name": "s", "type": "bytes", "logical": "string",
+       "values": ["a", "b", "c", "d", "e", {"hex": "ff"}, "g", "h"]},
+      {"name": "v", "type": "bytes", "logical": "string",
+       "values": ["a", "b", "c", "d", "e", "f", "g", "long"]}]}');
+ parquet_test_write 
+--------------------
+ 
+(1 row)
+
+\set bytes_bad :dir '/bytes_bad.parquet'
+CREATE FOREIGN TABLE t_bytes_bad (s text, v varchar(3)) SERVER pq OPTIONS (files :'bytes_bad');
+SELECT count(*) AS asked FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, false);
+ asked 
+-------
+     5
+(1 row)
+
+SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 32, false);
+ERROR:  invalid byte sequence for encoding "UTF8"
+SELECT count(*) AS asked FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 127, false);
+ asked 
+-------
+     7
+(1 row)
+
+SELECT count(*) FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 128, false);
+ERROR:  value too long for type character varying
+SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, true);
+ERROR:  invalid byte sequence for encoding "UTF8"
+DROP FOREIGN TABLE t_bytes_plain, t_bytes_dict, t_bytes_bad;
+DROP TABLE h_bytes;
+DROP FUNCTION parquet_test_bytes(text, int, int, bigint, bool);
 -- spec: parquet-fdw/What EXPLAIN shows
 -- Plain, with VERBOSE and with ANALYZE, through the wrapper's rows and
 -- through the source; the parallel plan's counts under "One file in

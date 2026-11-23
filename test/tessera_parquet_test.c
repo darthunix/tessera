@@ -59,6 +59,7 @@ PG_FUNCTION_INFO_V1(tessera_parquet_test_injection);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_cancel_after);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_windows);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_asks);
+PG_FUNCTION_INFO_V1(tessera_parquet_test_bytes);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_replace_in_worker);
 
 extern PGDLLEXPORT void tessera_parquet_test_replace_open(const char *name,
@@ -461,6 +462,161 @@ tessera_parquet_test_asks(PG_FUNCTION_ARGS)
 		mask.bits = &only_last;
 		batch->ops->get_datum_column(batch, column, &mask, TESS_COLUMN_FOR_PROJECTION, &again);
 		put_ask(rsinfo, att, base, last, "again", &again);
+	}
+	tess_input_finish(input);
+	ExecutorFinish(query);
+	ExecutorEnd(query);
+	FreeQueryDesc(query);
+	ReleaseCachedPlan(cplan, NULL);
+	SPI_finish();
+	return (Datum) 0;
+}
+
+/* A row of parquet_test_bytes: a column's bytes of a row, as one ask gave it. */
+static void
+put_bytes(ReturnSetInfo *rsinfo, Form_pg_attribute att, int base, int row, const char *ask,
+		  const TessBytesColumn *column)
+{
+	Datum		values[6];
+	bool		nulls[6] = {false, false, false, false, false, false};
+
+	values[0] = CStringGetTextDatum(NameStr(att->attname));
+	values[1] = Int32GetDatum(base + row);
+	values[2] = CStringGetTextDatum(ask);
+	nulls[3] = column->isnull[row];
+	if (!nulls[3])
+	{
+		bytea	   *bytes = palloc(VARHDRSZ + column->lengths[row]);
+
+		if (column->data[row] == NULL)
+			elog(ERROR, "a row of the bytes form not NULL whose place is NULL");
+		SET_VARSIZE(bytes, VARHDRSZ + column->lengths[row]);
+		memcpy(VARDATA(bytes), column->data[row], column->lengths[row]);
+		values[3] = PointerGetDatum(bytes);
+	}
+	nulls[4] = column->indexes == NULL || column->isnull[row];
+	if (!nulls[4] && (column->dictionary == 0 || column->indexes[row] < 0 ||
+					  (uint32) column->indexes[row] >= column->nvalues))
+		elog(ERROR, "row %d's index %d names no value of the dictionary's %u", row,
+			 column->indexes[row], column->nvalues);
+	values[4] = nulls[4] ? (Datum) 0 : Int32GetDatum(column->indexes[row]);
+	values[5] = BoolGetDatum(column->dictionary != 0);
+	tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+}
+
+/*
+ * parquet_test_bytes(query text, max_rows int, skip int, mask bigint,
+ * rest bool): runs the query, which plans as TessParquetScan alone, in
+ * batches of max_rows rows at most, skips `skip` batches, and asks each
+ * target's column of the next batch in the bytes form for the rows of
+ * `mask` ('first'); with `rest`, then for every row as Datum values and
+ * every other row as bytes ('rest'), and reads the first ask's places
+ * again ('kept'). A
+ * column not offered gives one row, its row -1, 'not offered'. Returns
+ * the rows (column, row of the scan, ask, bytes, index, through a
+ * dictionary).
+ */
+Datum
+tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
+{
+	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	char	   *sql = text_to_cstring(PG_GETARG_TEXT_PP(0));
+	TessRequest request = TESS_STRUCT_INITIALIZER(TessRequest);
+	SPIPlanPtr	plan;
+	CachedPlan *cplan;
+	QueryDesc  *query;
+	PlanState  *state;
+	TessInput  *input;
+	TessBatch  *batch;
+	const TessLayout *layout;
+	TupleDesc	desc;
+	int			max_rows = PG_GETARG_INT32(1);
+	int			skip = PG_GETARG_INT32(2);
+	uint64		mask = (uint64) PG_GETARG_INT64(3);
+	bool		ask_rest = PG_GETARG_BOOL(4);
+	int			base = max_rows * skip;
+
+	InitMaterializedSRF(fcinfo, 0);
+	SPI_connect();
+	plan = SPI_prepare(sql, 0, NULL);
+	if (plan == NULL)
+		elog(ERROR, "could not plan %s", sql);
+	cplan = SPI_plan_get_cached_plan(plan);
+	query = CreateQueryDesc(linitial_node(PlannedStmt, cplan->stmt_list), sql,
+							GetActiveSnapshot(), InvalidSnapshot, None_Receiver, NULL, NULL, 0);
+	ExecutorStart(query, 0);
+	state = query->planstate;
+	if (!IsA(state, CustomScanState) ||
+		strcmp(((CustomScanState *) state)->methods->CustomName, "TessParquetScan") != 0)
+		elog(ERROR, "the query does not plan as TessParquetScan alone");
+	desc = RelationGetDescr(((ScanState *) state)->ss_currentRelation);
+	input = tess_input_create(CurrentMemoryContext, state);
+	request.output_mode = TESS_OUTPUT_BATCH;
+	request.max_batch_rows = max_rows;
+	tess_input_set_request(input, &request);
+	for (int i = 0; i < skip; i++)
+	{
+		if (tess_input_next(input) == NULL)
+			elog(ERROR, "the scan holds fewer batches than it skips");
+		tess_input_finish(input);
+	}
+	batch = tess_input_next(input);
+	if (batch == NULL || batch->rows.nrows != max_rows)
+		elog(ERROR, "the batch does not hold %d rows", max_rows);
+	layout = tess_input_layout(input);
+	for (int target = 0; target < layout->ntargets; target++)
+	{
+		int			column = tess_layout_column(layout, target);
+		Form_pg_attribute att = TupleDescAttr(desc, column);
+		uint64		all = max_rows == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << max_rows) - 1;
+		uint64		first_rows = mask & all;
+		uint64		rest_rows = all & ~first_rows;
+		TessRowMask rows = {max_rows, &first_rows};
+		TessBytesColumn first;
+		TessBytesColumn rest;
+		TessDatumColumn datums = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		char	  **copies = palloc0_array(char *, max_rows);
+
+		if (!tess_batch_bytes_column(batch, column, &rows, &first))
+		{
+			Datum		values[6] = {0};
+			bool		nulls[6] = {false, false, false, true, true, false};
+
+			values[0] = CStringGetTextDatum(NameStr(att->attname));
+			values[1] = Int32GetDatum(-1);
+			values[2] = CStringGetTextDatum("not offered");
+			values[5] = BoolGetDatum(false);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+			continue;
+		}
+		for (int row = 0; row < max_rows; row++)
+			if (first_rows >> row & 1)
+			{
+				put_bytes(rsinfo, att, base, row, "first", &first);
+				if (!first.isnull[row])
+				{
+					copies[row] = palloc(Max(first.lengths[row], 1));
+					memcpy(copies[row], first.data[row], first.lengths[row]);
+				}
+			}
+		if (!ask_rest)
+			continue;
+		rows.bits = &all;
+		batch->ops->get_datum_column(batch, column, &rows, TESS_COLUMN_FOR_PROJECTION, &datums);
+		rows.bits = &rest_rows;
+		if (!tess_batch_bytes_column(batch, column, &rows, &rest))
+			elog(ERROR, "a column given as bytes once and not again");
+		for (int row = 0; row < max_rows; row++)
+			if (rest_rows >> row & 1)
+				put_bytes(rsinfo, att, base, row, "rest", &rest);
+		for (int row = 0; row < max_rows; row++)
+			if (first_rows >> row & 1)
+			{
+				if (!first.isnull[row] &&
+					memcmp(copies[row], first.data[row], first.lengths[row]) != 0)
+					elog(ERROR, "the bytes of row %d changed after later asks", row);
+				put_bytes(rsinfo, att, base, row, "kept", &first);
+			}
 	}
 	tess_input_finish(input);
 	ExecutorFinish(query);
