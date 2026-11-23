@@ -48,6 +48,7 @@
 #include "utils/ruleutils.h"
 #include "utils/varlena.h"
 
+#include "tessera/bridge.h"
 #include "tessera/plan.h"
 #include "tessera/planner.h"
 #include "tessera/runtime.h"
@@ -61,11 +62,25 @@ PG_FUNCTION_INFO_V1(tessera_test_scan_sources);
 PG_FUNCTION_INFO_V1(tessera_test_scan_source_calls);
 PG_FUNCTION_INFO_V1(tessera_test_scan_source_listed);
 PG_FUNCTION_INFO_V1(tessera_test_scan_source_fault);
+PG_FUNCTION_INFO_V1(tessera_test_scan_source_asks);
 
 #define GROUP_ROWS 64
 #define NODE_NAME "tessera_test.scan_source"
 #define DATA_KIND "tessera_test.scan_source"
 #define DATA_VERSION 1
+
+/*
+ * The bytes form the source's batches give their text columns: none, plain,
+ * through a dictionary of the column's values, or through one that holds
+ * each value at two indexes.
+ */
+typedef enum BytesForm
+{
+	BYTES_NONE,
+	BYTES_PLAIN,
+	BYTES_DICTIONARY,
+	BYTES_TWICE
+} BytesForm;
 
 /* The table's options: the wrapper's paths, and what the source does. */
 typedef struct TableOptions
@@ -99,6 +114,16 @@ typedef struct TableOptions
 	List	   *partial_prune;
 	/* It compares the values with its columns by code of its own. */
 	bool		own;
+	/*
+	 * The bytes form of its text columns; a new dictionary every so many
+	 * batches, or one for the scan at 0; and whether the source reads each
+	 * batch it makes as a consumer would, to check the form's promises.
+	 */
+	BytesForm	bytes;
+	int64		dictionary_batches;
+	bool		check_bytes;
+	/* Off: the source asks identities of a root cut before the operation. */
+	bool		bridge_identities;
 } TableOptions;
 
 /* How one column's values are made. */
@@ -107,6 +132,8 @@ typedef struct ColumnGen
 	Oid			type;
 	int64		mod;
 	int64		nulls;
+	/* A text column's width: see column_text. */
+	int64		width;
 } ColumnGen;
 
 /* The rows of a table, taken group by group. */
@@ -122,6 +149,11 @@ typedef struct Generator
 	int64		first;
 	int64		last;
 	int64		row;
+	/* The table's bytes form and its dictionaries, from its options. */
+	BytesForm	bytes;
+	int64		dictionary_batches;
+	bool		check_bytes;
+	bool		bridge_identities;
 } Generator;
 
 /* The sources, by the position of their name. */
@@ -186,6 +218,7 @@ read_options(Oid relid, TableOptions *options)
 	options->source_rows = -1;
 	options->source_startup = -1;
 	options->source_total = -1;
+	options->bridge_identities = true;
 	foreach_node(DefElem, def, table->options)
 	{
 		if (strcmp(def->defname, "rows") == 0)
@@ -240,6 +273,25 @@ read_options(Oid relid, TableOptions *options)
 		}
 		else if (strcmp(def->defname, "own") == 0)
 			options->own = defGetBoolean(def);
+		else if (strcmp(def->defname, "bytes") == 0)
+		{
+			char	   *value = defGetString(def);
+
+			if (strcmp(value, "plain") == 0)
+				options->bytes = BYTES_PLAIN;
+			else if (strcmp(value, "dictionary") == 0)
+				options->bytes = BYTES_DICTIONARY;
+			else if (strcmp(value, "twice") == 0)
+				options->bytes = BYTES_TWICE;
+			else
+				elog(ERROR, "unknown bytes form \"%s\"", value);
+		}
+		else if (strcmp(def->defname, "dictionary_batches") == 0)
+			options->dictionary_batches = (int64) option_number(def);
+		else if (strcmp(def->defname, "check_bytes") == 0)
+			options->check_bytes = defGetBoolean(def);
+		else if (strcmp(def->defname, "bridge_identities") == 0)
+			options->bridge_identities = defGetBoolean(def);
 		else
 			elog(ERROR, "unknown option \"%s\"", def->defname);
 	}
@@ -278,10 +330,16 @@ generator_init(Generator *gen, Relation rel)
 				gen->columns[i].mod = (int64) option_number(def);
 			else if (strcmp(def->defname, "nulls") == 0)
 				gen->columns[i].nulls = (int64) option_number(def);
+			else if (strcmp(def->defname, "width") == 0)
+				gen->columns[i].width = (int64) option_number(def);
 			else
 				elog(ERROR, "unknown column option \"%s\"", def->defname);
 		}
 	}
+	gen->bytes = options.bytes;
+	gen->dictionary_batches = options.dictionary_batches;
+	gen->check_bytes = options.check_bytes;
+	gen->bridge_identities = options.bridge_identities;
 	gen->shared = NULL;
 	gen->next_group = 0;
 	gen->first = 1;
@@ -325,6 +383,41 @@ column_integer(const ColumnGen *column, int64 i, int64 *value)
 	return true;
 }
 
+/*
+ * A text column's value: the decimal of value, or with the column's width
+ * the empty string for 0 and otherwise the decimal followed by
+ * (value * 7919) % width bytes of 'x', so that the values of a column
+ * differ in their bytes, the decimal standing for the value, and run past
+ * the width.
+ */
+static text *
+column_text(const ColumnGen *column, int64 value)
+{
+	StringInfoData buf;
+	text	   *result;
+
+	initStringInfo(&buf);
+	if (column->width <= 0 || value != 0)
+		appendStringInfo(&buf, INT64_FORMAT, value);
+	if (column->width > 0 && value != 0)
+		for (int64 n = value * 7919 % column->width; n > 0; n--)
+			appendStringInfoChar(&buf, 'x');
+	result = cstring_to_text_with_len(buf.data, buf.len);
+	pfree(buf.data);
+	return result;
+}
+
+/* The value a text column's bytes stand for: their leading decimal. */
+static int64
+bytes_value(const char *data, uint32 len)
+{
+	int64		value = 0;
+
+	for (uint32 k = 0; k < len && data[k] >= '0' && data[k] <= '9'; k++)
+		value = value * 10 + (data[k] - '0');
+	return value;
+}
+
 /* Row i into values and isnull, allocating text in the current context. */
 static void
 generator_row(const Generator *gen, int64 i, Datum *values, bool *isnull)
@@ -342,12 +435,7 @@ generator_row(const Generator *gen, int64 i, Datum *values, bool *isnull)
 		else if (column->type == INT8OID)
 			values[c] = Int64GetDatum(value);
 		else
-		{
-			char		text[32];
-
-			snprintf(text, sizeof(text), INT64_FORMAT, value);
-			values[c] = PointerGetDatum(cstring_to_text(text));
-		}
+			values[c] = PointerGetDatum(column_text(column, value));
 	}
 }
 
@@ -487,6 +575,26 @@ clause_text(Expr *clause, Index relid, Oid reloid)
 
 /* ---- the node ---- */
 
+/*
+ * What the source's own check saw of a text column given through a
+ * dictionary: the identity and the period of the batches it saw it last,
+ * the bytes of each index under that identity, where the dictionary is
+ * small enough to keep them, and whether an index past the column's values
+ * appeared, as the form of two indexes a value gives.
+ */
+typedef struct CheckedColumn
+{
+	uint64		identity;
+	int64		period;
+	/* The bytes of each index, in a context reset when the identity changes. */
+	MemoryContext context;
+	char	  **seen;
+	uint32	   *seen_lengths;
+	/* A row not NULL at an odd place, and an index past the values. */
+	bool		odd_seen;
+	bool		high_seen;
+} CheckedColumn;
+
 typedef struct SourceScanState
 {
 	CustomScanState css;
@@ -523,6 +631,27 @@ typedef struct SourceScanState
 	TessBatch  *active;
 	int			next_row;
 	TessDatumColumn *columns;
+	/*
+	 * The batch given in the bytes form: the builder's batch, inner, behind
+	 * operations of its own; the arrays of its bytes, reset at the next
+	 * batch; the batches made since the scan began; each column's identity
+	 * of its current dictionary and the period of batches they are for;
+	 * and, for the source's own check, what it saw of each column.
+	 */
+	TessBatch	bytes_batch;
+	TessBatch  *inner;
+	MemoryContext bytes_context;
+	int64		batch_number;
+	uint64	   *identities;
+	int64		identity_period;
+	struct CheckedColumn *checked;
+	/*
+	 * The check's own count of the batches of the scan, the period its
+	 * count makes past those of earlier scans, and the last period.
+	 */
+	int64		check_batches;
+	int64		check_period_base;
+	int64		check_last_period;
 } SourceScanState;
 
 static Plan *source_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
@@ -770,6 +899,448 @@ row_passes_own(SourceScanState *state, int64 i)
 	return true;
 }
 
+/* ---- the bytes form of the source's batches ---- */
+
+/*
+ * The asks of each form of the source's batches, and the batches its own
+ * check read: in the calling process alone, so that a case that counts
+ * them runs serial.
+ */
+static int64 datum_asks;
+static int64 bytes_asks;
+static int64 bytes_checks;
+
+/* The most indexes of which the check keeps what each held. */
+#define CHECK_MAX_VALUES 4096
+
+static void
+bytes_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
+				   TessColumnPurpose purpose, TessDatumColumn *result)
+{
+	SourceScanState *state = batch->private_data;
+
+	datum_asks++;
+	state->inner->ops->get_datum_column(state->inner, column, rows, purpose, result);
+}
+
+static void
+bytes_release(TessBatch *batch)
+{
+	SourceScanState *state = batch->private_data;
+
+	if (TESS_ABI_HAS_FIELD(state->inner->ops, TessBatchOps, release) &&
+		state->inner->ops->release != NULL)
+		state->inner->ops->release(state->inner);
+}
+
+/*
+ * The count of values of a text column's dictionary, or 0 where it is given
+ * without one: a column of values bounded by mod, in a form through a
+ * dictionary, whose indexes fit an int32.
+ */
+static uint32
+dictionary_values(const SourceScanState *state, int column)
+{
+	const ColumnGen *gen_column = &state->gen.columns[column];
+	int64		factor = state->gen.bytes == BYTES_TWICE ? 2 : 1;
+
+	if (state->gen.bytes == BYTES_NONE || state->gen.bytes == BYTES_PLAIN ||
+		gen_column->type != TEXTOID || gen_column->mod <= 0 ||
+		gen_column->mod > PG_INT32_MAX / factor)
+		return 0;
+	return (uint32) (gen_column->mod * factor);
+}
+
+/*
+ * A text column's bytes for the rows asked: the bytes behind the builder's
+ * values, which live until its next batch; through a dictionary, of the
+ * column's own identity, each row's index is the value its bytes stand
+ * for, and in the form of two indexes a value the odd rows' is moved past
+ * the column's values. Every field the structure's size covers is written.
+ */
+static bool
+bytes_column(TessBatch *batch, int column, const TessRowMask *rows,
+			 TessBytesColumn *result)
+{
+	SourceScanState *state = batch->private_data;
+	TessDatumColumn datums = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	int			nrows = batch->rows.nrows;
+	uint32		nvalues;
+	bool	   *isnull;
+	const char **data;
+	uint32	   *lengths;
+	int32	   *indexes = NULL;
+	MemoryContext old;
+	int			row = -1;
+
+	if (result->struct_size < TESS_BYTES_COLUMN_MIN_SIZE ||
+		column < 0 || column >= state->gen.natts ||
+		state->gen.columns[column].type != TEXTOID)
+		return false;
+	nvalues = state->identities[column] != 0 ? dictionary_values(state, column) : 0;
+	bytes_asks++;
+	state->inner->ops->get_datum_column(state->inner, column, rows,
+										TESS_COLUMN_FOR_PROJECTION, &datums);
+	old = MemoryContextSwitchTo(state->bytes_context);
+	isnull = palloc0_array(bool, Max(nrows, 1));
+	data = palloc0_array(const char *, Max(nrows, 1));
+	lengths = palloc0_array(uint32, Max(nrows, 1));
+	if (nvalues > 0)
+		indexes = palloc0_array(int32, Max(nrows, 1));
+	MemoryContextSwitchTo(old);
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		Pointer		value = DatumGetPointer(datums.values[row]);
+
+		isnull[row] = datums.isnull[row];
+		if (isnull[row])
+			continue;
+		data[row] = VARDATA_ANY(value);
+		lengths[row] = VARSIZE_ANY_EXHDR(value);
+		if (nvalues > 0)
+			indexes[row] = (int32) (bytes_value(data[row], lengths[row]) +
+									(state->gen.bytes == BYTES_TWICE && row % 2 == 1 ?
+									 state->gen.columns[column].mod : 0));
+	}
+	result->nrows = nrows;
+	result->isnull = isnull;
+	result->data = data;
+	result->lengths = lengths;
+	result->indexes = indexes;
+	result->nvalues = nvalues;
+	result->dictionary = nvalues > 0 ? state->identities[column] : 0;
+	return true;
+}
+
+static const TessBatchOps bytes_ops = {
+	TESS_ABI_INITIALIZER(TESS_BATCH_OPS_ABI_VERSION, TessBatchOps),
+	.get_datum_column = bytes_datum_column,
+	.release = bytes_release,
+	.get_bytes_column = bytes_column,
+};
+
+/*
+ * The count of values the check expects of a text column's dictionary, by
+ * its own reading of the table's options and of the bridge: 0 for a plain
+ * form, a bridge whose root lacks the identities' operation or a table
+ * that asks a cut one, and a column of values an int32 index cannot hold.
+ */
+static uint32
+expected_values(const SourceScanState *state, int column)
+{
+	const TessApi *api = tess_runtime_api();
+	int64		mod = state->gen.columns[column].mod;
+
+	if (!state->gen.bridge_identities ||
+		!TESS_ABI_HAS_FIELD(api, TessApi, next_dictionary_identity) ||
+		api->next_dictionary_identity == NULL || mod <= 0)
+		return 0;
+	if (state->gen.bytes == BYTES_DICTIONARY)
+		return mod <= PG_INT32_MAX ? (uint32) mod : 0;
+	if (state->gen.bytes == BYTES_TWICE)
+		return mod <= PG_INT32_MAX / 2 ? (uint32) (2 * mod) : 0;
+	return 0;
+}
+
+/* A view of the form and copies of what it held when it was given. */
+typedef struct HeldView
+{
+	TessBytesColumn view;
+	bool	   *isnull;
+	const char **data;
+	uint32	   *lengths;
+	int32	   *indexes;
+	char	  **bytes;
+} HeldView;
+
+/* A copy of what view holds for the rows of mask. */
+static void
+hold_view(HeldView *held, const TessBytesColumn *view, const TessRowMask *mask)
+{
+	int			nrows = Max(view->nrows, 1);
+	int			row = -1;
+
+	held->view = *view;
+	held->isnull = palloc0_array(bool, nrows);
+	held->data = palloc0_array(const char *, nrows);
+	held->lengths = palloc0_array(uint32, nrows);
+	held->indexes = palloc0_array(int32, nrows);
+	held->bytes = palloc0_array(char *, nrows);
+	while ((row = tess_row_mask_next(mask, row)) >= 0)
+	{
+		held->isnull[row] = view->isnull[row];
+		if (view->isnull[row])
+			continue;
+		held->data[row] = view->data[row];
+		held->lengths[row] = view->lengths[row];
+		if (view->indexes != NULL)
+			held->indexes[row] = view->indexes[row];
+		held->bytes[row] = palloc(Max(view->lengths[row], 1));
+		memcpy(held->bytes[row], view->data[row], view->lengths[row]);
+	}
+}
+
+/* Whether the view still holds what it held, and its bytes the Datum's. */
+static bool
+view_held(const HeldView *held, const TessRowMask *mask, const TessDatumColumn *datums)
+{
+	const TessBytesColumn *view = &held->view;
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(mask, row)) >= 0)
+	{
+		Pointer		value;
+
+		if (view->isnull[row] != held->isnull[row] ||
+			view->isnull[row] != datums->isnull[row])
+			return false;
+		if (view->isnull[row])
+			continue;
+		value = DatumGetPointer(datums->values[row]);
+		if (view->data[row] != held->data[row] || view->data[row] == NULL ||
+			view->lengths[row] != held->lengths[row] ||
+			(view->indexes != NULL && view->indexes[row] != held->indexes[row]) ||
+			memcmp(view->data[row], held->bytes[row], view->lengths[row]) != 0 ||
+			VARSIZE_ANY_EXHDR(value) != view->lengths[row] ||
+			memcmp(VARDATA_ANY(value), view->data[row], view->lengths[row]) != 0)
+			return false;
+	}
+	return true;
+}
+
+/*
+ * The source reads its own batch as a consumer would, and fails the query
+ * where the form breaks a promise of the spec of string-bytes. Every text
+ * column is asked as bytes first and its view held; then every column as
+ * Datum values and every text column as bytes again; and only then is
+ * each view checked: its arrays and its bytes as given, the bytes the
+ * row's Datum's. Each view's layout, and its dictionary against an oracle
+ * of its own: the count of values and each row's index as the generator
+ * makes them, one index's bytes the same in every batch of an identity,
+ * the identities of two columns apart, a column's identity kept within its
+ * period of batches and changed at the next and after a rescan. A result
+ * filled with another column's dictionary gets a plain column's fields
+ * written; a structure of the size before its last field, allocated at
+ * that size, is answered false and left as it was; one allocated at the
+ * form's size is answered. The source's own asks are not counted.
+ */
+static void
+check_bytes(SourceScanState *state, TessBatch *batch)
+{
+	int64		period = state->check_period_base +
+		(state->gen.dictionary_batches > 0 ?
+		 state->check_batches / state->gen.dictionary_batches : 0);
+	int64		saved_datum = datum_asks;
+	int64		saved_bytes = bytes_asks;
+	int			natts = state->gen.natts;
+	HeldView   *held = palloc0_array(HeldView, Max(natts, 1));
+	TessBytesColumn dictionary_view = TESS_STRUCT_INITIALIZER(TessBytesColumn);
+
+	for (int c = 0; c < natts; c++)
+	{
+		TessBytesColumn bytes;
+		uint32		expected = expected_values(state, c);
+		CheckedColumn *checked = &state->checked[c];
+		int			row = -1;
+
+		if (state->gen.columns[c].type != TEXTOID)
+			continue;
+		if (!tess_batch_bytes_column(batch, c, &batch->rows, &bytes))
+			elog(ERROR, "the test source did not give its text column %d as bytes", c);
+		if (bytes.struct_size != sizeof(TessBytesColumn) ||
+			bytes.nrows != batch->rows.nrows || bytes.nvalues != expected ||
+			(bytes.indexes == NULL) != (expected == 0) ||
+			(bytes.dictionary == 0) != (expected == 0))
+			elog(ERROR, "the test source's bytes of column %d break their layout", c);
+		hold_view(&held[c], &bytes, &batch->rows);
+		if (expected == 0)
+			continue;
+		dictionary_view = bytes;
+		for (int other = 0; other < c; other++)
+			if (held[other].view.dictionary == bytes.dictionary)
+				elog(ERROR, "the test source's columns %d and %d share an identity", other, c);
+		if (checked->identity != 0 &&
+			(period == checked->period) != (bytes.dictionary == checked->identity))
+			elog(ERROR, "the test source's dictionary of column %d broke its identity", c);
+		if (bytes.dictionary != checked->identity)
+		{
+			checked->identity = bytes.dictionary;
+			if (checked->context == NULL)
+				checked->context = AllocSetContextCreate(state->css.ss.ps.state->es_query_cxt,
+														 "TessTestSource check",
+														 ALLOCSET_DEFAULT_SIZES);
+			else
+				MemoryContextReset(checked->context);
+			checked->seen = NULL;
+			if (expected <= CHECK_MAX_VALUES)
+			{
+				checked->seen = MemoryContextAllocZero(checked->context,
+													   sizeof(char *) * expected);
+				checked->seen_lengths = MemoryContextAllocZero(checked->context,
+															   sizeof(uint32) * expected);
+			}
+		}
+		checked->period = period;
+		while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+		{
+			int64		index;
+
+			if (bytes.isnull[row])
+				continue;
+			index = bytes_value(bytes.data[row], bytes.lengths[row]) +
+				(state->gen.bytes == BYTES_TWICE && row % 2 == 1 ? state->gen.columns[c].mod : 0);
+			if (bytes.indexes[row] != index)
+				elog(ERROR, "the test source's row %d of column %d has another index", row, c);
+			if (row % 2 == 1)
+				checked->odd_seen = true;
+			if (index >= state->gen.columns[c].mod)
+				checked->high_seen = true;
+			if (checked->seen == NULL)
+				continue;
+			if (checked->seen[index] == NULL)
+			{
+				checked->seen[index] = MemoryContextAlloc(checked->context,
+														  Max(bytes.lengths[row], 1));
+				memcpy(checked->seen[index], bytes.data[row], bytes.lengths[row]);
+				checked->seen_lengths[index] = bytes.lengths[row];
+			}
+			else if (checked->seen_lengths[index] != bytes.lengths[row] ||
+					 memcmp(checked->seen[index], bytes.data[row], bytes.lengths[row]) != 0)
+				elog(ERROR, "the test source's index %ld of column %d holds two values",
+					 (long) index, c);
+		}
+	}
+	/* The asks between: every column's Datums, every text column's bytes. */
+	for (int c = 0; c < natts; c++)
+	{
+		TessDatumColumn datums = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+		TessBytesColumn again;
+
+		batch->ops->get_datum_column(batch, c, &batch->rows, TESS_COLUMN_FOR_PROJECTION,
+									 &datums);
+		if (state->gen.columns[c].type == TEXTOID)
+			(void) tess_batch_bytes_column(batch, c, &batch->rows, &again);
+	}
+	for (int c = 0; c < natts; c++)
+	{
+		TessDatumColumn datums = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+
+		if (state->gen.columns[c].type != TEXTOID)
+			continue;
+		batch->ops->get_datum_column(batch, c, &batch->rows, TESS_COLUMN_FOR_PROJECTION,
+									 &datums);
+		if (!view_held(&held[c], &batch->rows, &datums))
+			elog(ERROR, "the test source's bytes of column %d changed", c);
+	}
+	for (int c = 0; c < natts; c++)
+	{
+		Size		short_size = offsetof(TessBytesColumn, dictionary);
+		TessBytesColumn *short_form;
+		TessBytesColumn *exact;
+		TessBytesColumn reused;
+		char	   *before;
+
+		if (state->gen.columns[c].type != TEXTOID)
+			continue;
+		if (expected_values(state, c) == 0 && dictionary_view.dictionary != 0)
+		{
+			reused = dictionary_view;
+			if (!batch->ops->get_bytes_column(batch, c, &batch->rows, &reused) ||
+				reused.indexes != NULL || reused.nvalues != 0 || reused.dictionary != 0)
+				elog(ERROR, "the test source left a dictionary in plain column %d", c);
+		}
+		short_form = palloc(short_size);
+		memset(short_form, 0x5a, short_size);
+		short_form->struct_size = short_size;
+		before = palloc(short_size);
+		memcpy(before, short_form, short_size);
+		if (batch->ops->get_bytes_column(batch, c, &batch->rows, short_form) ||
+			memcmp(before, short_form, short_size) != 0)
+			elog(ERROR, "the test source answered a structure of an older size");
+		pfree(short_form);
+		pfree(before);
+		exact = palloc(TESS_BYTES_COLUMN_MIN_SIZE);
+		*exact = (TessBytesColumn) TESS_STRUCT_INITIALIZER(TessBytesColumn);
+		if (!batch->ops->get_bytes_column(batch, c, &batch->rows, exact))
+			elog(ERROR, "the test source refused a structure of the form's size");
+		pfree(exact);
+	}
+	datum_asks = saved_datum;
+	bytes_asks = saved_bytes;
+	bytes_checks++;
+	state->check_batches++;
+	state->check_last_period = period;
+}
+
+/*
+ * A new identity of a dictionary, from the bridge, or with bridge_identities
+ * off from a root cut before the operation, as an older bridge gives it: 0.
+ */
+static uint64
+source_identity(SourceScanState *state)
+{
+	const TessApi *api = tess_runtime_api();
+	Size		cut = Min(TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, kernels),
+						  api->struct_size);
+	TessApi    *older;
+	uint64		identity;
+
+	if (state->gen.bridge_identities)
+		return tess_dictionary_identity(api);
+	older = palloc(cut);
+	memcpy(older, api, cut);
+	older->struct_size = cut;
+	identity = tess_dictionary_identity(older);
+	pfree(older);
+	return identity;
+}
+
+/*
+ * The builder's batch behind the operations of the bytes form, with its
+ * rows: the arrays of the last batch's bytes freed, and each dictionary
+ * column's identity taken anew at the start of each period of batches.
+ */
+static TessBatch *
+bytes_wrap(SourceScanState *state, TessBatch *inner)
+{
+	int64		period = state->gen.dictionary_batches > 0 ?
+		state->batch_number / state->gen.dictionary_batches : 0;
+	MemoryContext query = state->css.ss.ps.state->es_query_cxt;
+
+	if (state->bytes_context == NULL)
+	{
+		state->bytes_context = AllocSetContextCreate(query, "TessTestSource bytes",
+													 ALLOCSET_DEFAULT_SIZES);
+		state->identities = MemoryContextAllocZero(query,
+												   sizeof(uint64) * Max(state->gen.natts, 1));
+		state->checked = MemoryContextAllocZero(query,
+												sizeof(CheckedColumn) * Max(state->gen.natts, 1));
+		state->identity_period = -1;
+	}
+	else
+		MemoryContextReset(state->bytes_context);
+	state->batch_number++;
+	if (period != state->identity_period)
+	{
+		for (int c = 0; c < state->gen.natts; c++)
+			state->identities[c] = dictionary_values(state, c) > 0 ?
+				source_identity(state) : 0;
+		state->identity_period = period;
+	}
+	state->inner = inner;
+	state->bytes_batch = *inner;
+	state->bytes_batch.ops = &bytes_ops;
+	state->bytes_batch.private_data = state;
+	if (state->gen.check_bytes)
+	{
+		MemoryContext old = MemoryContextSwitchTo(state->bytes_context);
+
+		check_bytes(state, &state->bytes_batch);
+		MemoryContextSwitchTo(old);
+	}
+	return &state->bytes_batch;
+}
+
 /* The next batch of rows that pass the exact clauses, or NULL at the end. */
 static TessBatch *
 next_batch(SourceScanState *state)
@@ -823,6 +1394,8 @@ next_batch(SourceScanState *state)
 	}
 	batch = tess_builder_finish(state->builder,
 								RelationGetRelid(state->css.ss.ss_currentRelation));
+	if (batch != NULL && state->gen.bytes != BYTES_NONE)
+		batch = bytes_wrap(state, batch);
 	if (batch != NULL && state->projection != NULL)
 		batch = tess_projection_wrap(state->projection, batch);
 	return batch;
@@ -913,6 +1486,14 @@ source_end(CustomScanState *css)
 
 	drop_active(state);
 	tess_output_end(state->output);
+	/*
+	 * The form of two indexes a value gave an index past the values, where
+	 * a row not NULL stood at an odd place.
+	 */
+	if (state->checked != NULL && state->gen.bytes == BYTES_TWICE)
+		for (int c = 0; c < state->gen.natts; c++)
+			if (state->checked[c].odd_seen && !state->checked[c].high_seen)
+				elog(ERROR, "the test source's column %d gave each value one index", c);
 }
 
 /* The next scan reads every group again, and computes the values anew. */
@@ -930,6 +1511,13 @@ source_rescan(CustomScanState *css)
 	generator_rescan(&state->gen);
 	state->exhausted = false;
 	state->values_ready = false;
+	/* A dictionary given again after a rescan gets an identity anew. */
+	state->batch_number = 0;
+	state->identity_period = -1;
+	/* The check's own count: the next scan's first period is a new one. */
+	if (state->check_batches > 0)
+		state->check_period_base = state->check_last_period + 1;
+	state->check_batches = 0;
 }
 
 /* The clauses of one answer, as the plan's expressions show them. */
@@ -1451,6 +2039,23 @@ tessera_test_scan_source_calls(PG_FUNCTION_ARGS)
 							 source_names[s], source_calls[s]);
 	}
 	PG_RETURN_TEXT_P(cstring_to_text(calls.data));
+}
+
+/*
+ * The asks of each form of the source's batches, and the batches its own
+ * check read, since the last call, in the calling process.
+ */
+Datum
+tessera_test_scan_source_asks(PG_FUNCTION_ARGS)
+{
+	char	   *asks = psprintf("datum " INT64_FORMAT ", bytes " INT64_FORMAT
+								", checked " INT64_FORMAT,
+								datum_asks, bytes_asks, bytes_checks);
+
+	datum_asks = 0;
+	bytes_asks = 0;
+	bytes_checks = 0;
+	PG_RETURN_TEXT_P(cstring_to_text(asks));
 }
 
 /*
