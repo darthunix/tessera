@@ -69,11 +69,15 @@ projection_get_datum_column(TessBatch *batch, int column,
 							const TessRowMask *rows, TessColumnPurpose purpose,
 							TessDatumColumn *result);
 static void projection_release(TessBatch *batch);
+static bool projection_get_bytes_column(TessBatch *batch, int column,
+										const TessRowMask *rows,
+										TessBytesColumn *result);
 
 static const TessBatchOps projection_ops = {
 	TESS_ABI_INITIALIZER(TESS_BATCH_OPS_ABI_VERSION, TessBatchOps),
 	.get_datum_column = projection_get_datum_column,
 	.release = projection_release,
+	.get_bytes_column = projection_get_bytes_column,
 };
 
 /* Compile one target: a chain when the compiler takes it, else the executor. */
@@ -352,6 +356,33 @@ projection_get_datum_column(TessBatch *batch, int column,
 		result->isnull = computed->isnull;
 	}
 	result->nrows = batch->rows.nrows;
+}
+
+/*
+ * A column the projection passes on from its child, in the bytes form where
+ * the child offers it, with the caller's structure as it is; false for a
+ * column the projection computes.
+ */
+static bool
+projection_get_bytes_column(TessBatch *batch, int column, const TessRowMask *rows,
+							TessBytesColumn *result)
+{
+	TessProjection *projection = batch->private_data;
+	const TessBatchOps *ops;
+
+	if (projection->child == NULL)
+		elog(ERROR, "Tessera projection wraps no batch");
+	if (column < 0 || column >= projection->base_columns + projection->ncomputed)
+		elog(ERROR, "Tessera projection column is out of range");
+	if (rows == NULL || rows->nrows != batch->rows.nrows)
+		elog(ERROR, "Tessera projection received a row mask of another batch");
+	if (column >= projection->base_columns)
+		return false;
+	ops = projection->child->ops;
+	if (!TESS_ABI_HAS_FIELD(ops, TessBatchOps, get_bytes_column) ||
+		ops->get_bytes_column == NULL)
+		return false;
+	return ops->get_bytes_column(projection->child, column, rows, result);
 }
 
 /* The child's batch is the node's to finish: the wrapper only forgets it. */
