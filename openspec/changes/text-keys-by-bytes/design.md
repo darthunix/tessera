@@ -307,6 +307,18 @@ the check that can see it; the contract of the capability names them.
   themselves are compared in a kernel, where C does not see them;
   equal words of unequal strings are ties, which the full comparison
   decides.
+- **One library of collations, the server's.** A node of Tessera sits
+  in a plan of the core, under a merge join, a sorted grouping or a
+  gather that merges, which compare by the core's functions, so a string
+  ordered under a collation must be ordered by them too. CI's job of the
+  suites runs `.github/scripts/check-collation.sh` after the build: no
+  module of Tessera links ICU or another library of collations, and no
+  crate of its Rust code is one, so a backend holds the one copy the
+  server loaded; the script also fails on the server's binary, which
+  links ICU, so that it is seen to look. Where a node orders, hashes or
+  compares strings by their bytes, each place's gate is listed at
+  review: `collate_is_c` for an order, a deterministic collation for
+  equality.
 - **Random queries.** `tessera-crosscheck`, which CI runs, gets a
   cluster of `UTF8`, string columns and the collations `C`, the
   builtin `C.UTF-8`, a libc one and a nondeterministic one; the rows of
