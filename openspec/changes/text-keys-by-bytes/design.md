@@ -371,6 +371,10 @@ source's own form.
   cycles and instructions by `pg_pmu`, the verdict by instructions,
   which another session's load does not change; times come when the
   maintainer says the work by counts is done.
+- 2026-11-24: stage 2, the keys, kept although Q13 lost 6.9 per cent
+  of its instructions, not 15: half of the query is the reading of the
+  column, which the form cannot remove, and the making of `Datum`
+  values the stage removes was 7 per cent of it.
 
 ## Was and will be
 

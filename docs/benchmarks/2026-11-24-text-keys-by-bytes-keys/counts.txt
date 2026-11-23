@@ -1,0 +1,512 @@
+== keys against start
+
+A: xujmzV and 38 more on w0 (1 file), counts
+B: 4CnOF2 and 9 more on w0 (1 file), counts
+C: BoXF1j and 28 more on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A         C     C/A
+Q1        0.338     0.332    0.98         -       -
+Q2        0.565     0.558    0.99         -       -
+Q3        4.587     4.612    1.01         -       -
+Q4        2.701     2.778    1.03         -       -
+Q5       10.707    10.465    0.98         -       -
+Q6       35.412    21.961    0.62         -       -
+Q7        4.465     4.695    1.05         -       -
+Q8        1.585     1.544    0.97         -       -
+Q9       86.543    88.370    1.02         -       -
+Q10      98.707    97.621    0.99         -       -
+Q11      17.820         -       -    17.575    0.99
+Q12      21.518         -       -    21.780    1.01
+Q13      26.586         -       -    23.330    0.88
+Q14      44.618         -       -    44.414    1.00
+Q15      28.800         -       -    25.990    0.90
+Q16      15.016         -       -    14.446    0.96
+Q17      56.869         -       -    47.013    0.83
+Q18      39.591         -       -    30.302    0.77
+Q19      97.228         -       -    87.365    0.90
+Q20       0.329         -       -     0.332    1.01
+Q21      27.358         -       -    27.625    1.01
+Q22      64.076         -       -    64.561    1.01
+Q24      56.554         -       -    57.253    1.01
+Q25      10.744         -       -    10.699    1.00
+Q26      17.905         -       -    17.426    0.97
+Q27      22.657         -       -    22.068    0.97
+Q28      78.081         -       -    76.885    0.98
+Q30     131.531         -       -   139.536    1.06
+Q31      19.012         -       -    19.020    1.00
+Q32      21.693         -       -    21.437    0.99
+Q33      73.090         -       -    75.156    1.03
+Q36      18.897         -       -    18.046    0.95
+Q37       0.835         -       -     0.643    0.77
+Q38       0.599         -       -     0.485    0.81
+Q39       0.217         -       -     0.217    1.00
+Q40       1.514         -       -     1.241    0.82
+Q41       0.119         -       -     0.120    1.01
+Q42       0.134         -       -     0.134    1.00
+Q43       0.107         -       -     0.109    1.02
+sum       0.000     0.000       -     0.000       -
+sums over the 0 queries every run counted
+
+instructions, billions
+query         A         B     B/A         C     C/A
+Q1        1.869     1.873    1.00         -       -
+Q2        3.234     3.282    1.01         -       -
+Q3       27.507    27.568    1.00         -       -
+Q4       14.575    14.588    1.00         -       -
+Q5       29.263    29.278    1.00         -       -
+Q6      136.779    74.789    0.55         -       -
+Q7       33.643    33.712    1.00         -       -
+Q8        7.870     7.876    1.00         -       -
+Q9      468.836   469.565    1.00         -       -
+Q10     532.452   532.420    1.00         -       -
+Q11      99.554         -       -    99.558    1.00
+Q12     116.989         -       -   116.988    1.00
+Q13      76.995         -       -    71.660    0.93
+Q14     171.033         -       -   171.072    1.00
+Q15      89.806         -       -    84.399    0.94
+Q16      53.102         -       -    53.146    1.00
+Q17     245.812         -       -   192.835    0.78
+Q18     174.518         -       -   124.858    0.72
+Q19     478.729         -       -   428.200    0.89
+Q20       1.359         -       -     1.359    1.00
+Q21      64.352         -       -    64.345    1.00
+Q22     151.302         -       -   151.350    1.00
+Q24     148.770         -       -   148.834    1.00
+Q25      40.067         -       -    40.075    1.00
+Q26      59.698         -       -    59.696    1.00
+Q27      78.663         -       -    78.626    1.00
+Q28     262.035         -       -   261.810    1.00
+Q30     703.626         -       -   703.498    1.00
+Q31      85.231         -       -    85.218    1.00
+Q32     104.850         -       -   104.856    1.00
+Q33     420.032         -       -   420.374    1.00
+Q36      69.758         -       -    69.895    1.00
+Q37       2.406         -       -     1.806    0.75
+Q38       2.194         -       -     1.718    0.78
+Q39       0.638         -       -     0.638    1.00
+Q40       4.584         -       -     3.824    0.83
+Q41       0.599         -       -     0.599    1.00
+Q42       0.690         -       -     0.691    1.00
+Q43       0.594         -       -     0.595    1.00
+sum       0.000     0.000       -     0.000       -
+sums over the 0 queries every run counted
+
+== keys against base
+
+A: qEPK1D and 38 more on w0 (1 file), counts
+B: 4CnOF2 and 9 more on w0 (1 file), counts
+C: BoXF1j and 28 more on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A         C     C/A
+Q1        0.335     0.332    0.99         -       -
+Q2        0.554     0.558    1.01         -       -
+Q3        4.789     4.612    0.96         -       -
+Q4        2.638     2.778    1.05         -       -
+Q5       10.468    10.465    1.00         -       -
+Q6       34.002    21.961    0.65         -       -
+Q7        4.534     4.695    1.04         -       -
+Q8        1.533     1.544    1.01         -       -
+Q9       86.128    88.370    1.03         -       -
+Q10      96.867    97.621    1.01         -       -
+Q11      17.578         -       -    17.575    1.00
+Q12      21.375         -       -    21.780    1.02
+Q13      27.221         -       -    23.330    0.86
+Q14      44.968         -       -    44.414    0.99
+Q15      29.181         -       -    25.990    0.89
+Q16      14.900         -       -    14.446    0.97
+Q17      59.959         -       -    47.013    0.78
+Q18      38.662         -       -    30.302    0.78
+Q19      98.869         -       -    87.365    0.88
+Q20       0.332         -       -     0.332    1.00
+Q21      27.348         -       -    27.625    1.01
+Q22      64.405         -       -    64.561    1.00
+Q24      58.384         -       -    57.253    0.98
+Q25      11.458         -       -    10.699    0.93
+Q26      17.584         -       -    17.426    0.99
+Q27      22.277         -       -    22.068    0.99
+Q28      76.485         -       -    76.885    1.01
+Q30     133.995         -       -   139.536    1.04
+Q31      19.216         -       -    19.020    0.99
+Q32      22.745         -       -    21.437    0.94
+Q33      73.391         -       -    75.156    1.02
+Q36      18.747         -       -    18.046    0.96
+Q37       0.837         -       -     0.643    0.77
+Q38       0.623         -       -     0.485    0.78
+Q39       0.223         -       -     0.217    0.98
+Q40       1.495         -       -     1.241    0.83
+Q41       0.120         -       -     0.120    1.00
+Q42       0.138         -       -     0.134    0.97
+Q43       0.111         -       -     0.109    0.98
+sum       0.000     0.000       -     0.000       -
+sums over the 0 queries every run counted
+
+instructions, billions
+query         A         B     B/A         C     C/A
+Q1        1.862     1.873    1.01         -       -
+Q2        3.236     3.282    1.01         -       -
+Q3       27.274    27.568    1.01         -       -
+Q4       14.532    14.588    1.00         -       -
+Q5       29.223    29.278    1.00         -       -
+Q6      136.655    74.789    0.55         -       -
+Q7       33.605    33.712    1.00         -       -
+Q8        7.872     7.876    1.00         -       -
+Q9      468.933   469.565    1.00         -       -
+Q10     532.448   532.420    1.00         -       -
+Q11      99.548         -       -    99.558    1.00
+Q12     116.983         -       -   116.988    1.00
+Q13      77.006         -       -    71.660    0.93
+Q14     171.043         -       -   171.072    1.00
+Q15      89.828         -       -    84.399    0.94
+Q16      53.058         -       -    53.146    1.00
+Q17     245.730         -       -   192.835    0.78
+Q18     174.601         -       -   124.858    0.72
+Q19     478.404         -       -   428.200    0.90
+Q20       1.360         -       -     1.359    1.00
+Q21      64.371         -       -    64.345    1.00
+Q22     151.308         -       -   151.350    1.00
+Q24     149.036         -       -   148.834    1.00
+Q25      40.150         -       -    40.075    1.00
+Q26      59.724         -       -    59.696    1.00
+Q27      78.623         -       -    78.626    1.00
+Q28     261.790         -       -   261.810    1.00
+Q30     703.532         -       -   703.498    1.00
+Q31      85.146         -       -    85.218    1.00
+Q32     104.836         -       -   104.856    1.00
+Q33     419.865         -       -   420.374    1.00
+Q36      69.719         -       -    69.895    1.00
+Q37       2.409         -       -     1.806    0.75
+Q38       2.194         -       -     1.718    0.78
+Q39       0.639         -       -     0.638    1.00
+Q40       4.583         -       -     3.824    0.83
+Q41       0.599         -       -     0.599    1.00
+Q42       0.692         -       -     0.691    1.00
+Q43       0.595         -       -     0.595    1.00
+sum       0.000     0.000       -     0.000       -
+sums over the 0 queries every run counted
+
+== first against start
+
+A: xujmzV and 38 more on w0 (1 file), counts
+B: oDYZv7 and 38 more on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A
+Q1        0.338     0.335    0.99
+Q2        0.565     0.553    0.98
+Q3        4.587     4.855    1.06
+Q4        2.701     2.758    1.02
+Q5       10.707    10.488    0.98
+Q6       35.412    21.562    0.61
+Q7        4.465     4.505    1.01
+Q8        1.585     1.543    0.97
+Q9       86.543    87.114    1.01
+Q10      98.707    93.828    0.95
+Q11      17.820    17.717    0.99
+Q12      21.518    20.969    0.97
+Q13      26.586    24.808    0.93
+Q14      44.618    44.692    1.00
+Q15      28.800    26.346    0.91
+Q16      15.016    14.524    0.97
+Q17      56.869    53.248    0.94
+Q18      39.591    30.368    0.77
+Q19      97.228    91.075    0.94
+Q20       0.329     0.345    1.05
+Q21      27.358    27.328    1.00
+Q22      64.076    63.888    1.00
+Q24      56.554    56.692    1.00
+Q25      10.744    10.637    0.99
+Q26      17.905    17.648    0.99
+Q27      22.657    22.054    0.97
+Q28      78.081    76.842    0.98
+Q30     131.531   137.793    1.05
+Q31      19.012    18.785    0.99
+Q32      21.693    21.532    0.99
+Q33      73.090    71.540    0.98
+Q36      18.897    18.076    0.96
+Q37       0.835     0.645    0.77
+Q38       0.599     0.488    0.81
+Q39       0.217     0.218    1.00
+Q40       1.514     1.289    0.85
+Q41       0.119     0.117    0.98
+Q42       0.134     0.134    1.00
+Q43       0.107     0.111    1.04
+sum    1139.109  1097.451    0.96
+sums over the 39 queries every run counted
+
+instructions, billions
+query         A         B     B/A
+Q1        1.869     1.894    1.01
+Q2        3.234     3.243    1.00
+Q3       27.507    27.690    1.01
+Q4       14.575    14.607    1.00
+Q5       29.263    29.300    1.00
+Q6      136.779    74.850    0.55
+Q7       33.643    33.788    1.00
+Q8        7.870     7.874    1.00
+Q9      468.836   469.051    1.00
+Q10     532.452   532.274    1.00
+Q11      99.554    99.558    1.00
+Q12     116.989   116.991    1.00
+Q13      76.995    73.182    0.95
+Q14     171.033   171.003    1.00
+Q15      89.806    86.008    0.96
+Q16      53.102    53.141    1.00
+Q17     245.812   198.146    0.81
+Q18     174.518   124.834    0.72
+Q19     478.729   433.410    0.91
+Q20       1.359     1.359    1.00
+Q21      64.352    64.336    1.00
+Q22     151.302   151.405    1.00
+Q24     148.770   148.861    1.00
+Q25      40.067    40.077    1.00
+Q26      59.698    59.688    1.00
+Q27      78.663    78.619    1.00
+Q28     262.035   261.732    1.00
+Q30     703.626   703.480    1.00
+Q31      85.231    85.240    1.00
+Q32     104.850   104.847    1.00
+Q33     420.032   420.327    1.00
+Q36      69.758    69.926    1.00
+Q37       2.406     1.805    0.75
+Q38       2.194     1.718    0.78
+Q39       0.638     0.638    1.00
+Q40       4.584     3.970    0.87
+Q41       0.599     0.599    1.00
+Q42       0.690     0.691    1.00
+Q43       0.594     0.596    1.00
+sum    4964.011  4750.756    0.96
+sums over the 39 queries every run counted
+
+== split against start
+
+A: xujmzV and 5 more on w0 (1 file), counts
+B: LJM7kO and 5 more on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A
+Q1        0.338     0.333    0.99
+Q3        4.587     4.595    1.00
+Q6       35.412    22.186    0.63
+Q7        4.465     4.581    1.03
+Q13      26.586    23.999    0.90
+Q17      56.869    48.239    0.85
+sum     128.257   103.932    0.81
+sums over the 6 queries every run counted
+
+instructions, billions
+query         A         B     B/A
+Q1        1.869     1.873    1.00
+Q3       27.507    27.567    1.00
+Q6      136.779    75.498    0.55
+Q7       33.643    33.739    1.00
+Q13      76.995    73.412    0.95
+Q17     245.812   199.936    0.81
+sum     522.605   412.024    0.79
+sums over the 6 queries every run counted
+
+== prefetch against start
+
+A: xujmzV and 3 more on w0 (1 file), counts
+B: 3V46xL and 3 more on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A
+Q1        0.338     0.331    0.98
+Q6       35.412    21.627    0.61
+Q13      26.586    23.373    0.88
+Q17      56.869    47.263    0.83
+sum     119.205    92.594    0.78
+sums over the 4 queries every run counted
+
+instructions, billions
+query         A         B     B/A
+Q1        1.869     1.873    1.00
+Q6      136.779    74.833    0.55
+Q13      76.995    71.685    0.93
+Q17     245.812   192.776    0.78
+sum     461.455   341.166    0.74
+sums over the 4 queries every run counted
+
+== keys34 against start34
+
+A: zVvh8S and 1 more on w0 (1 file), counts
+B: nE07Wf and 1 more on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A
+Q34     185.352   158.710    0.86
+Q35     189.494   156.815    0.83
+sum     374.846   315.525    0.84
+sums over the 2 queries every run counted
+
+instructions, billions
+query         A         B     B/A
+Q34     450.075   351.974    0.78
+Q35     459.343   360.014    0.78
+sum     909.418   711.989    0.78
+sums over the 2 queries every run counted
+
+== keys34-first against start34-first
+
+A: ElMnzR and 1 more on w0 (1 file), counts
+B: djn79l and 1 more on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A
+Q34     184.853   158.401    0.86
+Q35     188.590   164.224    0.87
+sum     373.443   322.625    0.86
+sums over the 2 queries every run counted
+
+instructions, billions
+query         A         B     B/A
+Q34     450.298   370.700    0.82
+Q35     456.520   378.674    0.83
+sum     906.818   749.375    0.83
+sums over the 2 queries every run counted
+
+== q2-head-1 against q2-start-1
+
+A: WtpSIH on w0 (1 file), counts
+B: xO2Bh0 on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A
+Q2        0.550     0.564    1.03
+sum       0.550     0.564    1.03
+sums over the 1 queries every run counted
+
+instructions, billions
+query         A         B     B/A
+Q2        3.287     3.281    1.00
+sum       3.287     3.281    1.00
+sums over the 1 queries every run counted
+
+== q2-head-2 against q2-start-2
+
+A: ffg7mP on w0 (1 file), counts
+B: wqoH5X on w0 (1 file), counts
+
+cycles, billions
+query         A         B     B/A
+Q2        0.593     0.563    0.95
+sum       0.593     0.563    0.95
+sums over the 1 queries every run counted
+
+instructions, billions
+query         A         B     B/A
+Q2        3.235     3.249    1.00
+sum       3.235     3.249    1.00
+sums over the 1 queries every run counted
+
+
+== the heap's families sort and anykey, cargo ab measure --counters --base 76d43940, the candidate the stage's last commit
+
+## anykey
+| case | base, M instructions | candidate, M instructions | min | median | control | |
+|---|---:|---:|---:|---:|---:|---|
+| any_distinct | 387.856 | 391.286 | 1.009 | 1.009 | 1.000 |  |
+| any_join_numeric | 1980.264 | 1980.463 | 1.000 | 1.000 | 1.000 |  |
+| any_join_semi | 1469.156 | 1469.174 | 1.000 | 1.000 | 1.000 |  |
+| any_join_text | 1352.349 | 1352.598 | 1.000 | 1.000 | 1.000 |  |
+| any_join_two | 1672.653 | 1672.854 | 1.000 | 1.000 | 1.000 |  |
+| any_numeric | 452.254 | 455.683 | 1.008 | 1.008 | 1.000 |  |
+| any_text_agg | 379.867 | 383.491 | 1.010 | 1.010 | 1.000 |  |
+| any_text_col | 507.318 | 482.924 | 0.952 | 0.952 | 1.000 | faster |
+| any_text_few | 354.154 | 357.456 | 1.009 | 1.009 | 1.000 |  |
+| any_union | 748.157 | 754.515 | 1.009 | 1.008 | 1.000 |  |
+Runs: base pg-anykey-FWzXeV; candidate pg-anykey-facXdF.
+## sort
+| case | base, M instructions | candidate, M instructions | min | median | control | |
+|---|---:|---:|---:|---:|---:|---|
+| distinct_agg | 486.911 | 487.244 | 1.001 | 1.001 | 1.003 |  |
+| distinct_few | 499.331 | 500.409 | 1.002 | 1.002 | 1.000 |  |
+| distinct_group | 980.813 | 983.080 | 1.002 | 1.002 | 1.002 |  |
+| distinct_many | 797.034 | 798.288 | 1.002 | 1.002 | 1.000 |  |
+| order_big | 1209.987 | 1210.033 | 1.000 | 1.000 | 1.013 |  |
+| order_desc | 1247.404 | 1247.369 | 1.000 | 1.000 | 1.012 |  |
+| order_few | 1103.279 | 1103.287 | 1.000 | 1.000 | 1.013 |  |
+| order_few_text | 11120.128 | 11120.055 | 1.000 | 1.000 | 0.999 |  |
+| order_filter | 384.997 | 385.008 | 1.000 | 1.000 | 1.000 |  |
+| order_int | 1103.565 | 1103.594 | 1.000 | 1.000 | 1.013 |  |
+| order_multi | 1427.809 | 1427.783 | 1.000 | 1.000 | 1.006 |  |
+| order_numeric | 2509.885 | 2509.888 | 1.000 | 1.000 | 1.001 |  |
+| order_out | 1241.465 | 1241.623 | 1.000 | 1.000 | 1.010 |  |
+| order_sorted | 757.076 | 757.088 | 1.000 | 1.000 | 1.006 |  |
+| order_text_c | 7657.399 | 7657.354 | 1.000 | 1.000 | 1.000 |  |
+| order_text_out | 1663.153 | 1663.323 | 1.000 | 1.000 | 1.010 |  |
+| order_wide | 1629.112 | 1629.091 | 1.000 | 1.000 | 1.010 |  |
+| topn_few | 410.211 | 410.207 | 1.000 | 1.000 | 1.000 |  |
+| topn_many | 721.754 | 721.768 | 1.000 | 1.000 | 1.000 |  |
+| topn_numeric | 1629.929 | 1629.933 | 1.000 | 1.000 | 1.000 |  |
+| topn_offset | 421.315 | 421.320 | 1.000 | 1.000 | 1.000 |  |
+| topn_reverse | 1212.213 | 1212.221 | 1.000 | 1.000 | 1.000 |  |
+| topn_text_c | 1347.029 | 1347.023 | 1.000 | 1.000 | 1.000 |  |
+Runs: base pg-sort-qXak3Q; candidate pg-sort-CEKuNl.
+The candidate stays installed. Report: /Users/darthunix/git/tessera-text-keys-by-bytes/target/bench-runs/ab-B7n96j/report.md
+
+== the same at the first count, the candidate 4.3 before the fixes
+
+## anykey
+| case | base, M instructions | candidate, M instructions | min | median | control | |
+|---|---:|---:|---:|---:|---:|---|
+| any_distinct | 387.832 | 390.310 | 1.006 | 1.006 | 1.000 |  |
+| any_join_numeric | 1980.758 | 1981.502 | 1.000 | 1.000 | 1.000 |  |
+| any_join_semi | 1469.152 | 1469.185 | 1.000 | 1.000 | 1.000 |  |
+| any_join_text | 1352.336 | 1353.635 | 1.001 | 1.001 | 1.000 |  |
+| any_join_two | 1672.661 | 1673.943 | 1.001 | 1.001 | 1.000 |  |
+| any_numeric | 452.243 | 454.635 | 1.005 | 1.005 | 1.000 |  |
+| any_text_agg | 379.870 | 382.727 | 1.008 | 1.008 | 1.000 |  |
+| any_text_col | 507.312 | 512.438 | 1.010 | 1.010 | 1.000 | **slower** |
+| any_text_few | 354.126 | 356.554 | 1.007 | 1.007 | 1.000 |  |
+| any_union | 748.145 | 752.678 | 1.006 | 1.006 | 1.000 |  |
+Runs: base pg-anykey-OFTibN; candidate pg-anykey-67bzgx.
+## sort
+| case | base, M instructions | candidate, M instructions | min | median | control | |
+|---|---:|---:|---:|---:|---:|---|
+| distinct_agg | 486.907 | 487.761 | 1.002 | 1.002 | 0.984 |  |
+| distinct_few | 499.325 | 500.334 | 1.002 | 1.002 | 1.000 |  |
+| distinct_group | 980.837 | 983.672 | 1.003 | 1.003 | 0.999 |  |
+| distinct_many | 797.005 | 798.630 | 1.002 | 1.002 | 1.000 |  |
+| order_big | 1209.998 | 1211.014 | 1.000 | 1.001 | 1.000 |  |
+| order_desc | 1247.392 | 1247.381 | 1.000 | 1.000 | 0.988 |  |
+| order_few | 1103.256 | 1103.289 | 1.000 | 1.000 | 1.000 |  |
+| order_few_text | 11119.940 | 11120.381 | 1.000 | 1.000 | 1.000 |  |
+| order_filter | 385.006 | 384.991 | 1.000 | 1.000 | 1.000 |  |
+| order_int | 1103.585 | 1103.594 | 1.000 | 1.000 | 1.000 |  |
+| order_multi | 1427.802 | 1427.783 | 1.000 | 1.000 | 0.994 |  |
+| order_numeric | 2509.874 | 2509.862 | 1.000 | 1.000 | 1.000 |  |
+| order_out | 1241.461 | 1242.092 | 1.000 | 1.001 | 0.990 |  |
+| order_sorted | 757.084 | 757.084 | 1.000 | 1.000 | 0.994 |  |
+| order_text_c | 7657.339 | 7657.502 | 1.000 | 1.000 | 0.997 |  |
+| order_text_out | 1663.158 | 1663.776 | 1.000 | 1.000 | 0.990 |  |
+| order_wide | 1629.121 | 1629.136 | 1.000 | 1.000 | 0.991 |  |
+| topn_few | 410.034 | 410.216 | 1.000 | 1.000 | 1.000 |  |
+| topn_many | 721.900 | 721.791 | 1.000 | 1.000 | 1.000 |  |
+| topn_numeric | 1630.133 | 1629.925 | 1.000 | 1.000 | 1.000 |  |
+| topn_offset | 421.123 | 421.324 | 1.000 | 1.000 | 1.000 |  |
+| topn_reverse | 1212.010 | 1212.200 | 1.000 | 1.000 | 1.000 |  |
+| topn_text_c | 1347.189 | 1347.015 | 1.000 | 1.000 | 1.000 |  |
+Runs: base pg-sort-tNUNuS; candidate pg-sort-KC7zOB.
+A count does not move with the code's place: a flagged case runs more instructions. Compare the machine code of the functions it runs (tessera-bench --disasm --module nodes --function NAME); a change that trades instructions for memory is judged by time.
+The candidate stays installed. Report: /Users/darthunix/git/tessera-text-keys-by-bytes/target/bench-runs/ab-9lISrs/report.md
+
+== anykey at the try of the kept hash, the candidate the tree of that try
+
+## anykey
+| case | base, M instructions | candidate, M instructions | min | median | control | |
+|---|---:|---:|---:|---:|---:|---|
+| any_distinct | 387.835 | 391.265 | 1.009 | 1.009 | 1.000 |  |
+| any_join_numeric | 1980.248 | 1980.532 | 1.000 | 1.000 | 1.000 |  |
+| any_join_semi | 1469.144 | 1469.182 | 1.000 | 1.000 | 1.000 |  |
+| any_join_text | 1352.362 | 1352.590 | 1.000 | 1.000 | 1.000 |  |
+| any_join_two | 1672.653 | 1672.834 | 1.000 | 1.000 | 1.000 |  |
+| any_numeric | 452.215 | 455.689 | 1.008 | 1.008 | 1.000 |  |
+| any_text_agg | 379.870 | 383.473 | 1.009 | 1.009 | 1.000 |  |
+| any_text_col | 507.292 | 482.921 | 0.952 | 0.952 | 1.000 | faster |
+| any_text_few | 354.122 | 357.465 | 1.009 | 1.009 | 1.000 |  |
+| any_union | 748.160 | 754.535 | 1.008 | 1.009 | 1.000 |  |
+Runs: base pg-anykey-wPW53a; candidate pg-anykey-NVLYO2.
+The candidate stays installed. Report: /Users/darthunix/git/tessera-text-keys-by-bytes/target/bench-runs/ab-kqD7Bs/report.md

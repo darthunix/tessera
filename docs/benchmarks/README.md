@@ -7,6 +7,13 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-24, TessAgg's keys by bytes, stage 2 of
+  `text-keys-by-bytes`](2026-11-24-text-keys-by-bytes-keys/README.md):
+  ClickBench's queries over `hits.parquet` counted at 0 workers, Q34
+  and Q35 in pairs, and the heap's families `sort` and `anykey`,
+  against `76d43940`; Q13's miss of the plan's 15 per cent, the first
+  count's two excesses and their fixes, Apple M5 Pro, PostgreSQL 19.
+
 - [2026-11-23, the bytes form, stage 1 of
   `text-keys-by-bytes`](2026-11-23-text-keys-by-bytes-form/README.md):
   ClickBench's 43 queries over `hits.parquet` counted at 0 workers, and
