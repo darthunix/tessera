@@ -60,7 +60,9 @@ error that making its Datum would, and a row not asked never fails the
 call. A provider fills only the fields the caller's `struct_size`
 covers. The pointers stay
 valid until the batch is released, whatever the consumer asks of the
-batch in between. The spec of the capability `string-bytes` draws the
+batch in between. A projection's batch (`tess_projection_wrap`) offers the
+form of a column it passes on from its child, where the child offers it,
+and no other. The spec of the capability `string-bytes` draws the
 structure and holds the rules of the dictionary and its identity.
 
 `TessColumnPurpose` tells the provider whether the values are needed for a
