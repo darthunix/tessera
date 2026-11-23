@@ -146,3 +146,30 @@ fn slices_of_rows_asked_and_the_limit_of_a_length() {
         "a mask too short"
     );
 }
+
+/// The rows asked past the mask's first word: each set bit stands for the
+/// row of its word and place, a `NULL` one marked in its own word.
+#[test]
+fn slices_of_rows_past_the_first_word() {
+    let data = b"abcdef";
+    let offsets = [0i64, 1, 3, 3, 6];
+    let mut made = [0u64; 3];
+    let got = slices(
+        130,
+        &[1 << 2, 1 << 3, 1 << 1],
+        |row| row == 67,
+        |row| row % 4,
+        (&offsets, data),
+        3,
+        &mut made,
+    )
+    .unwrap();
+    assert_eq!(got.len(), 130);
+    assert_eq!(got[129], &b"bc"[..]);
+    assert!(
+        got.iter()
+            .enumerate()
+            .all(|(row, value)| row == 129 || value.is_empty())
+    );
+    assert_eq!(made, [0, 1 << 3, 0]);
+}
