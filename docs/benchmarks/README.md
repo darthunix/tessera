@@ -7,6 +7,12 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-23, the bytes form, stage 1 of
+  `text-keys-by-bytes`](2026-11-23-text-keys-by-bytes-form/README.md):
+  ClickBench's 43 queries over `hits.parquet` counted at 0 workers, and
+  the heap's families `sort` and `anykey`, against `531b5d7d`; the
+  first count's excess and its two fixes, Apple M5 Pro, PostgreSQL 19.
+
 - [2026-11-22, ClickBench over Parquet, stage
   2](2026-11-22-clickbench-stage2/README.md): the 17 queries that read
   no string, over ten of its files and over `hits.parquet`, Tessera on
