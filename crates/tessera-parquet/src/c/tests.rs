@@ -82,6 +82,57 @@ fn reader(file: *const FileHandle, col: *const ColumnHandle, rows: usize) -> *mu
     out
 }
 
+fn reader_of(
+    file: *const FileHandle,
+    col: *const ColumnHandle,
+    rows: usize,
+    batch: usize,
+) -> *mut ReaderHandle {
+    let selection = vec![u64::MAX; mask_words(rows)];
+    let mut out = ptr::null_mut();
+    let mut st = status();
+    assert!(unsafe {
+        tess_parquet_reader(
+            file,
+            col,
+            0,
+            selection.as_ptr(),
+            selection.len(),
+            batch,
+            &mut out,
+            &mut st,
+        )
+    });
+    out
+}
+
+/// Reads the window of `len` rows from `start`, every row asked.
+fn read_at(r: *mut ReaderHandle, start: usize, len: usize) -> usize {
+    let asked: Vec<u64> = (0..mask_words(len))
+        .map(|w| match (len - w * 64).min(64) {
+            64 => u64::MAX,
+            rows => (1u64 << rows) - 1,
+        })
+        .collect();
+    let mut held = vec![0u64; mask_words(len)];
+    let mut count = 0usize;
+    let mut st = status();
+    assert!(unsafe {
+        tess_parquet_read(
+            r,
+            start,
+            len,
+            asked.as_ptr(),
+            asked.len(),
+            held.as_mut_ptr(),
+            held.len(),
+            &mut count,
+            &mut st,
+        )
+    });
+    count
+}
+
 fn read(r: *mut ReaderHandle, len: usize, asked: &[u64]) -> usize {
     let mut held = vec![0u64; mask_words(len)];
     let mut count = 0usize;
@@ -1017,5 +1068,525 @@ fn tests_of_strings_through_the_c_entries() {
         tess_parquet_column_free(int_col);
         tess_parquet_file_free(file);
         tess_parquet_file_free(int_file);
+    }
+}
+
+/// The bytes form of one window of `asked` rows, into arrays of `len`
+/// entries: the call's success, the outputs and the reference that holds
+/// the window's array.
+#[allow(clippy::type_complexity)]
+fn bytes_of(
+    r: *mut ReaderHandle,
+    asked: &[u64],
+    len: usize,
+) -> (
+    bool,
+    Status,
+    Vec<*const u8>,
+    Vec<u32>,
+    Vec<i32>,
+    u64,
+    u32,
+    u64,
+    *mut HoldHandle,
+) {
+    let mut data = vec![ptr::null::<u8>(); len];
+    let mut lengths = vec![u32::MAX; len];
+    let mut indexes = vec![-1i32; len];
+    let mut nulls = [0u64; 1];
+    let mut out = BytesOut {
+        data: data.as_mut_ptr(),
+        lengths: lengths.as_mut_ptr(),
+        indexes: indexes.as_mut_ptr(),
+        len,
+        nvalues: u32::MAX,
+        number: u64::MAX,
+    };
+    let mut hold = ptr::null_mut();
+    let mut st = status();
+    let ok = unsafe {
+        tess_parquet_bytes(
+            r,
+            asked.as_ptr(),
+            asked.len(),
+            nulls.as_mut_ptr(),
+            nulls.len(),
+            &mut out,
+            &mut hold,
+            &mut st,
+        )
+    };
+    (
+        ok,
+        st,
+        data,
+        lengths,
+        indexes,
+        nulls[0],
+        out.nvalues,
+        out.number,
+        hold,
+    )
+}
+
+/// The bytes form of a window, plain and through a dictionary: each row
+/// asked its bytes in place, `NULL` rows marked, an empty value's pointer
+/// not null, the dictionary's indexes and count; a row that is not UTF-8
+/// fails only when it is asked; and every pointer still gives its bytes
+/// after the window is replaced and the reader freed, while the reference
+/// lives, as Miri checks.
+#[test]
+fn the_bytes_form_of_a_window_and_the_reference_that_holds_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("b.parquet");
+    let long = vec![b'x'; 300];
+    let strings: Vec<Option<Vec<u8>>> = vec![
+        Some(b"short".to_vec()),
+        None,
+        Some(long.clone()),
+        Some(Vec::new()),
+        Some(b"short".to_vec()),
+        Some(b"\xff".to_vec()),
+        Some("\u{e9}t\u{e9}".as_bytes().to_vec()),
+    ];
+    for dictionary in [false, true] {
+        testing::write(
+            &path,
+            &[Column::new("s", Values::Bytes(strings.clone()))],
+            7,
+            dictionary,
+        )
+        .unwrap();
+        let file = open(&path);
+        let col = column(file, "s", oid::TEXT, -1).unwrap();
+        let r = reader(file, col, 7);
+        assert_eq!(read(r, 7, &[0b111_1111]), 7);
+        // The row that is not UTF-8, asked, fails the call at its row.
+        let (ok, st, ..) = bytes_of(r, &[0b111_1111], 7);
+        assert!(!ok);
+        assert_eq!((text(&st.sqlstate).as_str(), st.row), ("22021", 5));
+        // Left out, it does not.
+        let asked = [0b101_1111u64];
+        let (ok, _, data, lengths, indexes, nulls, nvalues, number, hold) = bytes_of(r, &asked, 7);
+        assert!(ok);
+        assert_eq!(nulls, 0b10);
+        assert!(
+            data.iter()
+                .enumerate()
+                .all(|(row, p)| row == 1 || row == 5 || !p.is_null())
+        );
+        assert_eq!(lengths[3], 0);
+        assert_eq!(lengths[5], u32::MAX, "a row not asked is left as it was");
+        if dictionary {
+            assert_eq!(number, 1);
+            assert!(nvalues >= 5);
+            assert_eq!(indexes[0], indexes[4], "one value, one index");
+            assert!(
+                indexes
+                    .iter()
+                    .enumerate()
+                    .all(|(row, &i)| row == 1 || row == 5 || (i >= 0 && (i as u32) < nvalues))
+            );
+        } else {
+            assert_eq!((nvalues, number), (0, 0));
+            assert_eq!(indexes, vec![-1; 7], "no index for a plain window");
+        }
+        // The window replaced by a read behind the forward one, then the
+        // reader freed: the reference alone holds the bytes.
+        assert_eq!(read(r, 7, &[0b111_1111]), 7);
+        unsafe { tess_parquet_reader_free(r) };
+        for row in [0usize, 2, 3, 4, 6] {
+            let got = unsafe { std::slice::from_raw_parts(data[row], lengths[row] as usize) };
+            assert_eq!(Some(got.to_vec()), strings[row], "row {row}");
+        }
+        unsafe {
+            tess_parquet_hold_free(hold);
+            tess_parquet_column_free(col);
+            tess_parquet_file_free(file);
+        }
+    }
+}
+
+/// A reader numbers the dictionary values arrays of its windows: one
+/// array, one number, and a new number for the array a read behind the
+/// forward one decodes anew.
+#[test]
+fn the_numbers_of_a_reader_s_dictionaries() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("n.parquet");
+    let strings: Vec<Option<Vec<u8>>> = (0..7).map(|i| Some(vec![b'a' + i % 3])).collect();
+    testing::write(&path, &[Column::new("s", Values::Bytes(strings))], 7, true).unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader(file, col, 7);
+    let mut numbers = Vec::new();
+    for _ in 0..3 {
+        assert_eq!(read(r, 7, &[0b111_1111]), 7);
+        let (ok, _, _, _, _, _, nvalues, number, hold) = bytes_of(r, &[0b111_1111], 7);
+        assert!(ok);
+        assert_eq!(nvalues, 3);
+        numbers.push(number);
+        unsafe { tess_parquet_hold_free(hold) };
+    }
+    assert_eq!(numbers[0], 1);
+    assert!(numbers.windows(2).all(|w| w[1] > w[0]), "{numbers:?}");
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
+
+/// `fill_rows` over 70 rows, past the first word of a mask: the rows
+/// asked and not `NULL` get their places, counts and indexes, the others
+/// are left; outputs of the window's length are taken and shorter ones,
+/// keys shorter than the window or keys without indexes, are refused.
+#[test]
+fn rows_filled_over_two_words_and_short_outputs_refused() {
+    let buffer: Vec<u8> = (0..140u8).collect();
+    let values: Vec<&[u8]> = (0..70).map(|r| &buffer[r * 2..r * 2 + r % 3]).collect();
+    let keys: Vec<i32> = (0..70i32).map(|r| r * 10).collect();
+    // Rows 1, 64 and 69 asked; 64 NULL.
+    let asked = [1u64 << 1, 1 | 1 << 5];
+    let made = [0u64, 1];
+    let mut data = vec![ptr::null::<u8>(); 70];
+    let mut lengths = vec![u32::MAX; 70];
+    let mut indexes = vec![-1i32; 70];
+    fill_rows(
+        &values,
+        &made,
+        &asked,
+        Some(&keys),
+        &mut data,
+        &mut lengths,
+        Some(&mut indexes),
+    )
+    .unwrap();
+    for row in 0..70 {
+        if row == 1 || row == 69 {
+            assert_eq!(lengths[row] as usize, values[row].len(), "row {row}");
+            assert_eq!(indexes[row], keys[row]);
+            if values[row].is_empty() {
+                assert!(ptr::eq(data[row], &EMPTY));
+            } else {
+                assert_eq!(data[row], values[row].as_ptr());
+            }
+        } else {
+            assert!(data[row].is_null() && lengths[row] == u32::MAX && indexes[row] == -1);
+        }
+    }
+    let mut short = vec![ptr::null::<u8>(); 69];
+    let mut short_lengths = vec![0u32; 69];
+    let mut short_indexes = vec![0i32; 69];
+    assert_eq!(
+        fill_rows(&values, &made, &asked, None, &mut short, &mut lengths, None),
+        Err(FillError::Short)
+    );
+    assert_eq!(
+        fill_rows(
+            &values,
+            &made,
+            &asked,
+            None,
+            &mut data,
+            &mut short_lengths,
+            None
+        ),
+        Err(FillError::Short)
+    );
+    assert_eq!(
+        fill_rows(
+            &values,
+            &made,
+            &asked,
+            Some(&keys[..69]),
+            &mut data,
+            &mut lengths,
+            Some(&mut indexes)
+        ),
+        Err(FillError::Short)
+    );
+    assert_eq!(
+        fill_rows(
+            &values,
+            &made,
+            &asked,
+            Some(&keys),
+            &mut data,
+            &mut lengths,
+            Some(&mut short_indexes)
+        ),
+        Err(FillError::Short)
+    );
+    assert_eq!(
+        fill_rows(
+            &values,
+            &made,
+            &asked,
+            Some(&keys),
+            &mut data,
+            &mut lengths,
+            None
+        ),
+        Err(FillError::Short)
+    );
+    assert_eq!(
+        fill_rows(&values, &made, &asked, None, &mut data, &mut lengths, None),
+        Ok(())
+    );
+}
+
+/// Holds of every kind of window keep their bytes: windows forward of 20
+/// rows over arrays of 64, which the reader slices from its pending rows
+/// and joins across two arrays, and a window read behind the forward one,
+/// decoded anew; after every read and the reader freed, every place still
+/// gives its bytes, as Miri checks, plain and through a dictionary.
+#[test]
+fn holds_of_sliced_joined_and_backward_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("h.parquet");
+    let rows = 200;
+    let strings: Vec<Option<Vec<u8>>> = (0..rows)
+        .map(|r| Some(format!("value {} {}", r % 37, "y".repeat(r % 5)).into_bytes()))
+        .collect();
+    for dictionary in [false, true] {
+        testing::write(
+            &path,
+            &[Column::new("s", Values::Bytes(strings.clone()))],
+            rows,
+            dictionary,
+        )
+        .unwrap();
+        let file = open(&path);
+        let col = column(file, "s", oid::TEXT, -1).unwrap();
+        let r = reader_of(file, col, rows, 64);
+        let mut kept = Vec::new();
+        let windows: Vec<usize> = (0..rows).step_by(20).chain([0]).collect();
+        for start in windows {
+            assert_eq!(read_at(r, start, 20), 20);
+            let asked = [(1u64 << 20) - 1];
+            let (ok, _, data, lengths, _, _, _, _, hold) = bytes_of(r, &asked, 20);
+            assert!(ok);
+            kept.push((start, data, lengths, hold));
+        }
+        unsafe { tess_parquet_reader_free(r) };
+        for (start, data, lengths, hold) in kept {
+            for row in 0..20 {
+                let got = unsafe { std::slice::from_raw_parts(data[row], lengths[row] as usize) };
+                assert_eq!(
+                    Some(got.to_vec()),
+                    strings[start + row],
+                    "row {}",
+                    start + row
+                );
+            }
+            unsafe { tess_parquet_hold_free(hold) };
+        }
+        unsafe {
+            tess_parquet_column_free(col);
+            tess_parquet_file_free(file);
+        }
+    }
+}
+
+/// One values array, one number: the forward windows of a chunk and the
+/// asks of one window give the same number; a window read behind them,
+/// decoded anew, another; the forward windows after it yet another, never
+/// 0 and never one given before.
+#[test]
+fn a_number_kept_for_one_values_array_and_new_for_another() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("k.parquet");
+    let rows = 200;
+    let strings: Vec<Option<Vec<u8>>> = (0..rows)
+        .map(|r| Some(vec![b'a' + (r % 7) as u8]))
+        .collect();
+    testing::write(
+        &path,
+        &[Column::new("s", Values::Bytes(strings))],
+        rows,
+        true,
+    )
+    .unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader_of(file, col, rows, 64);
+    let asked = [(1u64 << 20) - 1];
+    let number_of = |start: usize| {
+        assert_eq!(read_at(r, start, 20), 20);
+        let (ok, _, _, _, _, _, nvalues, number, hold) = bytes_of(r, &asked, 20);
+        assert!(ok);
+        assert_eq!(nvalues, 7);
+        let (_, _, _, _, _, _, _, again, hold2) = bytes_of(r, &asked, 20);
+        assert_eq!(again, number, "two asks of one window");
+        unsafe {
+            tess_parquet_hold_free(hold);
+            tess_parquet_hold_free(hold2);
+        }
+        number
+    };
+    let forward = [number_of(0), number_of(20), number_of(40)];
+    assert!(
+        forward[0] != 0 && forward.iter().all(|&n| n == forward[0]),
+        "{forward:?}"
+    );
+    let behind = number_of(0);
+    assert!(behind != 0 && behind != forward[0]);
+    let after = number_of(60);
+    assert!(after != 0 && after != behind && after != forward[0]);
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
+
+/// Two arrays over one buffer of bytes, at other offsets, are told apart;
+/// an array is its own key.
+#[test]
+fn the_key_of_a_values_array_tells_slices_apart() {
+    let values = arrow_array::LargeBinaryArray::from(vec![&b"a"[..], b"b", b"c"]);
+    let first = values.slice(0, 2);
+    let second = values.slice(1, 2);
+    assert_eq!(values_key(&first).unwrap(), values_key(&first).unwrap());
+    assert_ne!(values_key(&first).unwrap(), values_key(&second).unwrap());
+    assert_ne!(values_key(&first).unwrap(), values_key(&values).unwrap());
+    assert!(values_key(&arrow_array::Int32Array::from(vec![1])).is_err());
+}
+
+/// Past the last number of a reader the call fails, its outputs as they
+/// were and no hold made.
+#[test]
+fn no_number_past_the_last() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("l.parquet");
+    let strings: Vec<Option<Vec<u8>>> = (0..7).map(|r| Some(vec![b'a' + r % 3])).collect();
+    testing::write(&path, &[Column::new("s", Values::Bytes(strings))], 7, true).unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader(file, col, 7);
+    unsafe { (*r).numbers = u64::MAX - 1 };
+    assert_eq!(read(r, 7, &[0b111_1111]), 7);
+    let (ok, _, _, _, _, _, _, number, hold) = bytes_of(r, &[0b111_1111], 7);
+    assert!(ok);
+    assert_eq!(number, u64::MAX);
+    unsafe { tess_parquet_hold_free(hold) };
+    assert_eq!(read(r, 7, &[0b111_1111]), 7);
+    let (ok, _, data, lengths, _, nulls, nvalues, number, hold) = bytes_of(r, &[0b111_1111], 7);
+    assert!(!ok);
+    assert!(data.iter().all(|p| p.is_null()) && lengths.iter().all(|&l| l == u32::MAX));
+    assert_eq!((nulls, nvalues, number), (0, u32::MAX, u64::MAX));
+    assert!(hold.is_null());
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
+
+/// A structure of the bytes form whose outputs the caller has not
+/// initialized: the call reads its inputs and writes its outputs without
+/// a reference to the whole, as Miri checks.
+#[test]
+fn a_bytes_structure_of_outputs_not_initialized() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("u.parquet");
+    let strings: Vec<Option<Vec<u8>>> = (0..7).map(|r| Some(vec![b'a' + r % 3])).collect();
+    testing::write(&path, &[Column::new("s", Values::Bytes(strings))], 7, true).unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader(file, col, 7);
+    assert_eq!(read(r, 7, &[0b111_1111]), 7);
+    let mut data = vec![ptr::null::<u8>(); 7];
+    let mut lengths = vec![0u32; 7];
+    let mut indexes = vec![0i32; 7];
+    let mut nulls = [0u64; 1];
+    let mut out = std::mem::MaybeUninit::<BytesOut>::uninit();
+    let place = out.as_mut_ptr();
+    unsafe {
+        std::ptr::addr_of_mut!((*place).data).write(data.as_mut_ptr());
+        std::ptr::addr_of_mut!((*place).lengths).write(lengths.as_mut_ptr());
+        std::ptr::addr_of_mut!((*place).indexes).write(indexes.as_mut_ptr());
+        std::ptr::addr_of_mut!((*place).len).write(7);
+    }
+    let mut hold = ptr::null_mut();
+    let mut st = status();
+    assert!(unsafe {
+        tess_parquet_bytes(
+            r,
+            [0b111_1111u64].as_ptr(),
+            1,
+            nulls.as_mut_ptr(),
+            1,
+            place,
+            &mut hold,
+            &mut st,
+        )
+    });
+    let out = unsafe { out.assume_init() };
+    assert_eq!((out.nvalues, out.number), (3, 1));
+    assert_eq!(lengths, vec![1; 7]);
+    unsafe {
+        tess_parquet_hold_free(hold);
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    /// `fill_rows` over windows of up to 130 rows, any masks and outputs,
+    /// keys and indexes each given or not and of any length: it refuses
+    /// exactly when an output or the keys are shorter than the window or
+    /// keys and indexes are not given together, and then writes nothing;
+    /// otherwise each row asked and not `NULL` gets its place inside the
+    /// buffer, its count and its key, and every other row is left.
+    #[test]
+    fn rows_filled_for_any_shapes(
+        lens in proptest::collection::vec(0usize..4, 0..130),
+        asked in proptest::collection::vec(proptest::prelude::any::<u64>(), 3),
+        made in proptest::collection::vec(proptest::prelude::any::<u64>(), 3),
+        data_len in 0usize..131,
+        lengths_len in 0usize..131,
+        keys_len in proptest::option::of(0usize..131),
+        indexes_len in proptest::option::of(0usize..131),
+    ) {
+        let buffer = vec![7u8; lens.iter().sum::<usize>() + 1];
+        let mut at = 0;
+        let values: Vec<&[u8]> = lens.iter().map(|&len| { let v = &buffer[at..at + len]; at += len; v }).collect();
+        let rows = values.len();
+        let keys: Option<Vec<i32>> = keys_len.map(|n| (0..n as i32).collect());
+        let mut data = vec![ptr::null::<u8>(); data_len];
+        let mut lengths = vec![u32::MAX; lengths_len];
+        let mut indexes: Option<Vec<i32>> = indexes_len.map(|n| vec![-1; n]);
+        let result = fill_rows(&values, &made, &asked, keys.as_deref(), &mut data, &mut lengths, indexes.as_deref_mut());
+        let refused = data_len < rows || lengths_len < rows
+            || keys_len.is_some_and(|n| n < rows) || indexes_len.is_some_and(|n| n < rows)
+            || keys_len.is_some() != indexes_len.is_some();
+        proptest::prop_assert_eq!(result.is_err(), refused);
+        let bit = |mask: &[u64], row: usize| mask[row / 64] >> (row % 64) & 1 == 1;
+        let base = buffer.as_ptr() as usize;
+        for row in 0..rows.min(data_len).min(lengths_len) {
+            let wanted = !refused && bit(&asked, row) && !bit(&made, row);
+            if !wanted {
+                proptest::prop_assert!(data[row].is_null() && lengths[row] == u32::MAX);
+                continue;
+            }
+            proptest::prop_assert_eq!(lengths[row] as usize, values[row].len());
+            if values[row].is_empty() {
+                proptest::prop_assert!(ptr::eq(data[row], &EMPTY));
+            } else {
+                let place = data[row] as usize;
+                proptest::prop_assert!(place >= base && place + values[row].len() <= base + buffer.len());
+            }
+            if let (Some(keys), Some(indexes)) = (&keys, &indexes) {
+                proptest::prop_assert_eq!(indexes[row], keys[row]);
+            }
+        }
+        if refused && let Some(indexes) = &indexes {
+            proptest::prop_assert!(indexes.iter().all(|&i| i == -1));
+        }
     }
 }

@@ -17,6 +17,9 @@ use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Arc;
 
+use arrow_array::cast::AsArray;
+use arrow_array::{Array, ArrayRef};
+
 use datum_arrow::{Comparison, ReadOutput, TextBytes, Unit, mask_words};
 
 use crate::clause::{ClauseKind, ClauseTest, comparison, like_checked};
@@ -98,6 +101,11 @@ pub struct ReaderHandle {
     /// The text the last call of `tess_parquet_text_size` checked, for the
     /// window still held; none after a read or a check that failed.
     text: Option<SizedText>,
+    /// The dictionary values array [`tess_parquet_bytes`] numbered last,
+    /// held so that no other array takes its addresses, and its number;
+    /// and the numbers given so far.
+    numbered: Option<(ArrayRef, u64)>,
+    numbers: u64,
 }
 
 /// The places of a window's text in its own buffers, a row each, `None`
@@ -505,6 +513,8 @@ pub unsafe extern "C" fn tess_parquet_reader(
                     reader,
                     window: None,
                     text: None,
+                    numbered: None,
+                    numbers: 0,
                 })),
             )
         })
@@ -995,6 +1005,275 @@ pub unsafe extern "C" fn tess_parquet_text(
     }
 }
 
+/// Where a window's bytes form goes, as `TessParquetBytes`: the caller's
+/// arrays of `len` entries, a row of the window each, and what the call
+/// writes of the window's dictionary.
+#[repr(C)]
+pub struct BytesOut {
+    /// A pointer a row, to the first of its bytes.
+    pub data: *mut *const u8,
+    /// A count of bytes a row.
+    pub lengths: *mut u32,
+    /// An index a row in the window's dictionary, written where the window
+    /// has one; may be null for a window without one.
+    pub indexes: *mut i32,
+    /// The entries of each array: at least the window's rows.
+    pub len: usize,
+    /// The window's count of dictionary values, 0 for a plain window.
+    pub nvalues: u32,
+    /// The reader's number of the window's array of dictionary values, 1
+    /// first and anew for each other array; 0 for a plain window.
+    pub number: u64,
+}
+
+/// A reference to a window's Arrow array, as `TessParquetHold`, which keeps
+/// the buffers that the pointers of [`tess_parquet_bytes`] name until it is
+/// freed.
+pub struct HoldHandle(#[allow(dead_code)] ArrayRef);
+
+/// The pointer of an empty value: never null, and never read.
+static EMPTY: u8 = 0;
+
+/// Why [`fill_rows`] refused its arguments.
+#[derive(Debug, PartialEq, Eq)]
+enum FillError {
+    /// Outputs or keys shorter than the window, or keys without indexes.
+    Short,
+    /// A value of more bytes than a `u32` counts.
+    Long,
+}
+
+impl From<FillError> for Error {
+    fn from(error: FillError) -> Self {
+        broken(match error {
+            FillError::Short => "outputs or keys shorter than the window",
+            FillError::Long => "a value past what a u32 counts",
+        })
+    }
+}
+
+/// Writes, for each row of `values` that `asked` asks and `made` does not
+/// mark `NULL`, the place of its bytes into `data` (that of [`EMPTY`] for an
+/// empty value), their count into `lengths` and, where `keys` is given, the
+/// row's index into `indexes`; the other rows' entries are left as they
+/// were, and on a refusal every entry is.
+///
+/// # Errors
+///
+/// [`FillError`] for outputs shorter than `values`, keys shorter than them
+/// or a value of more bytes than a `u32` counts.
+fn fill_rows(
+    values: &[&[u8]],
+    made: &[u64],
+    asked: &[u64],
+    keys: Option<&[i32]>,
+    data: &mut [*const u8],
+    lengths: &mut [u32],
+    mut indexes: Option<&mut [i32]>,
+) -> std::result::Result<(), FillError> {
+    let rows = values.len();
+    if data.len() < rows
+        || lengths.len() < rows
+        || keys.is_some_and(|keys| keys.len() < rows)
+        || indexes.as_ref().is_some_and(|indexes| indexes.len() < rows)
+        || keys.is_some() != indexes.is_some()
+    {
+        return Err(FillError::Short);
+    }
+    // Every count fits before any is written, so that a refusal writes
+    // nothing.
+    if values
+        .iter()
+        .any(|value| u32::try_from(value.len()).is_err())
+    {
+        return Err(FillError::Long);
+    }
+    for (row, value) in values.iter().enumerate() {
+        let bit = |mask: &[u64]| mask.get(row / 64).is_some_and(|w| w >> (row % 64) & 1 == 1);
+        if !bit(asked) || bit(made) {
+            continue;
+        }
+        data[row] = if value.is_empty() {
+            &EMPTY
+        } else {
+            value.as_ptr()
+        };
+        lengths[row] = u32::try_from(value.len()).map_err(|_| FillError::Long)?;
+        if let (Some(keys), Some(indexes)) = (keys, indexes.as_deref_mut()) {
+            indexes[row] = keys[row];
+        }
+    }
+    Ok(())
+}
+
+/// The addresses that tell a dictionary's values array from another while
+/// it is held: its offsets', its bytes' and its count.
+fn values_key(values: &dyn Array) -> Result<(usize, usize, usize)> {
+    let bytes = values
+        .as_any()
+        .downcast_ref::<arrow_array::LargeBinaryArray>()
+        .ok_or_else(|| broken("a dictionary of values that are not bytes"))?;
+    Ok((
+        bytes.value_offsets().as_ptr() as usize,
+        bytes.values().as_ptr() as usize,
+        bytes.len(),
+    ))
+}
+
+/// Gives the rows `asked` asks of the last window in the bytes form, as
+/// the column's read plan checks them (`22021`, `22001`, `54000` at the
+/// first row that fails, and no row not asked): into `out`'s arrays, for
+/// each row not `NULL`, the place of its bytes in the window's buffers
+/// and their count and, for a window read through a dictionary, its
+/// index; the rows' bits of `NULL` set or cleared in `nulls` as
+/// [`tess_parquet_values`] does; and the window's count of dictionary
+/// values and the reader's number of its values array, 0 and 0 for a
+/// plain window. Into `hold`, a new reference to the window's array that
+/// keeps those bytes where they are, whatever the reader reads after,
+/// until [`tess_parquet_hold_free`] frees it. On a failure no output is
+/// written and no reference is made.
+///
+/// # Safety
+///
+/// `reader` must be live; `asked` must point to `asked_words` readable
+/// words and `nulls` to `nulls_words` writable ones, initialized by the
+/// caller and not overlapping; `out` must point to a `BytesOut` whose
+/// arrays and `len` the caller set, and whose arrays point to `len`
+/// writable entries each that the caller initialized, `indexes` too
+/// unless it is null; its `nvalues` and `number` may be uninitialized;
+/// `hold` must be writable; none of `asked`, `nulls`, `out` and its three
+/// arrays may overlap another.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_bytes(
+    reader: *mut ReaderHandle,
+    asked: *const u64,
+    asked_words: usize,
+    nulls: *mut u64,
+    nulls_words: usize,
+    out: *mut BytesOut,
+    hold: *mut *mut HoldHandle,
+    status: *mut Status,
+) -> bool {
+    // SAFETY: as the function's contract says.
+    unsafe {
+        guard(status, false, || {
+            let handle = reader.as_mut().ok_or_else(|| broken("a null reader"))?;
+            let asked = words(asked, asked_words)?;
+            let nulls = words_mut(nulls, nulls_words)?;
+            if out.is_null() || hold.is_null() {
+                return Err(broken("a null output"));
+            }
+            // The fields the caller set, read without a reference to the
+            // structure, whose outputs may be uninitialized.
+            let out_data = std::ptr::addr_of!((*out).data).read();
+            let out_lengths = std::ptr::addr_of!((*out).lengths).read();
+            let out_indexes = std::ptr::addr_of!((*out).indexes).read();
+            let out_len = std::ptr::addr_of!((*out).len).read();
+            if out_data.is_null() || out_lengths.is_null() {
+                return Err(broken("a null output"));
+            }
+            let window = handle
+                .window
+                .as_ref()
+                .ok_or_else(|| broken("no window read"))?;
+            let len = window.array.len();
+            if out_len < len {
+                return Err(broken("outputs shorter than the window"));
+            }
+            let input = input_of(window.array.as_ref())?;
+            let mut values: Vec<&[u8]> = vec![&[]; len];
+            let mut made = vec![0u64; nulls.len()];
+            handle.reader.plan().read(
+                &input,
+                asked,
+                &mut ReadOutput::Bytes {
+                    values: &mut values,
+                    nulls: &mut made,
+                },
+            )?;
+            let dictionary = window
+                .array
+                .as_any_dictionary_opt()
+                .map(|d| (d.keys(), Arc::clone(d.values())));
+            let keys = match &dictionary {
+                Some((keys, _)) => Some(
+                    keys.as_any()
+                        .downcast_ref::<arrow_array::Int32Array>()
+                        .ok_or_else(|| broken("a dictionary of indexes that are not int32"))?
+                        .values()
+                        .as_ref(),
+                ),
+                None => None,
+            };
+            if keys.is_some() && out_indexes.is_null() {
+                return Err(broken("a null output of indexes for a dictionary"));
+            }
+            // The dictionary's count and number, decided before any output
+            // is written: a new number for an array other than the one
+            // numbered last.
+            let numbering = match &dictionary {
+                Some((_, dvalues)) => {
+                    let nvalues = u32::try_from(dvalues.len())
+                        .map_err(|_| broken("a dictionary past what a u32 counts"))?;
+                    let key = values_key(dvalues.as_ref())?;
+                    let held = handle.numbered.as_ref().and_then(|(held, number)| {
+                        (values_key(held.as_ref()).ok() == Some(key)).then_some(*number)
+                    });
+                    let number = match held {
+                        Some(number) => number,
+                        None => handle
+                            .numbers
+                            .checked_add(1)
+                            .ok_or_else(|| broken("no number of a dictionary is left"))?,
+                    };
+                    Some((nvalues, number, held.is_none().then(|| Arc::clone(dvalues))))
+                }
+                None => None,
+            };
+            // SAFETY: the caller gives `len` initialized, writable entries
+            // at each.
+            let data = std::slice::from_raw_parts_mut(out_data, len);
+            let lengths = std::slice::from_raw_parts_mut(out_lengths, len);
+            let indexes = keys
+                .is_some()
+                .then(|| std::slice::from_raw_parts_mut(out_indexes, len));
+            fill_rows(&values, &made, asked, keys, data, lengths, indexes)?;
+            merge_nulls(nulls, &made, asked);
+            let (nvalues, number) = match numbering {
+                Some((nvalues, number, new)) => {
+                    if let Some(values) = new {
+                        handle.numbers = number;
+                        handle.numbered = Some((values, number));
+                    }
+                    (nvalues, number)
+                }
+                None => (0, 0),
+            };
+            std::ptr::addr_of_mut!((*out).nvalues).write(nvalues);
+            std::ptr::addr_of_mut!((*out).number).write(number);
+            put(
+                hold,
+                Box::into_raw(Box::new(HoldHandle(Arc::clone(&window.array)))),
+            )
+        })
+    }
+}
+
+/// Frees a reference of [`tess_parquet_bytes`]; the pointers it kept
+/// valid may be dangling after.
+///
+/// # Safety
+///
+/// `hold` must be null or a reference of [`tess_parquet_bytes`] not yet
+/// freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_parquet_hold_free(hold: *mut HoldHandle) {
+    if !hold.is_null() {
+        // SAFETY: a reference of `tess_parquet_bytes`, freed once.
+        drop(unsafe { Box::from_raw(hold) });
+    }
+}
+
 /// Raises a panic inside the guard, for the test of the boundary.
 ///
 /// # Safety
@@ -1015,3 +1294,6 @@ pub unsafe extern "C" fn tess_parquet_test_panic(status: *mut Status) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(kani)]
+mod proofs;
