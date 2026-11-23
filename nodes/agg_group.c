@@ -184,7 +184,8 @@ reserve_rows(TessAggState *state, int nrows)
 	if (state->capacity >= nrows)
 		return;
 	state->hashes = MemoryContextAlloc(state->table_context, sizeof(uint32) * nrows);
-	state->offsets = MemoryContextAlloc(state->table_context, sizeof(uint32) * nrows);
+	/* Zeroed: a DISTINCT set reads the references of every row (agg_distinct_rows). */
+	state->offsets = MemoryContextAllocZero(state->table_context, sizeof(uint32) * nrows);
 	state->payloads = MemoryContextAlloc(state->table_context, sizeof(uint8 *) * nrows);
 	state->valid_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);
 	state->pending_bits = MemoryContextAlloc(state->table_context, sizeof(uint64) * nwords);

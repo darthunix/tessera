@@ -199,7 +199,12 @@ aggregates has:
   Usage counts it, and the set's pairs; past seven eighths of
   `hash_mem`, with 64 pairs at least, it freezes the set. A frozen set
   takes no new pair, so a pair it lacks was never counted in memory,
-  and every copy of it goes to the one partition its hash names.
+  and every copy of it goes to the one partition its hash names. Once
+  the set holds 64 pairs, the machine's answer moves with the memory
+  alone, and the memory moves seldom, as a table takes a chunk: the
+  node asks the machine again only when it moved. A question at every
+  batch cost a set about 700 instructions a batch, through the C
+  boundary twice.
 - The pairs of a level are 32 partitions of chunks of three words a
   pair. Their writers, a write buffer and a reader are what a set's
   spill holds past the limit, beside the set.

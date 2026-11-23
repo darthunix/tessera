@@ -71,7 +71,9 @@ typedef struct KeyDict KeyDict;
  * A DISTINCT set's pairs past hash_mem (agg_spill.c), as a frozen table's
  * rows: the machine of the set in memory, which freezes it; the level its
  * pairs go to once frozen, NULL before; the stack of levels to read, the
- * last written on top; and the reader of their partitions.
+ * last written on top; the reader of their partitions; and the memory the
+ * machine last weighed with a batch of pairs in the set, 0 before, since
+ * its answer then moves with the memory alone.
  */
 typedef struct PairSpill
 {
@@ -79,6 +81,7 @@ typedef struct PairSpill
 	struct RowSpill *writing;
 	List	   *pending;
 	struct RowReader *reader;
+	Size		weighed;
 } PairSpill;
 
 /* The execution state of TessAgg. */

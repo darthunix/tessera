@@ -290,18 +290,22 @@ agg_distinct_rows(TessAggState *state, AggValue *value, int nrows,
 												  set->hashes, &pending,
 												  &state->status));
 	}
-	/* The groups' references, of the rows the set reads. */
+	/*
+	 * The groups' references, of every row: a key column without a mask of
+	 * the rows ready is read on the table's quick path.
+	 */
 	Assert((group_refs != NULL) == (set->nkeys == 2));
 	if (group_refs != NULL)
 	{
-		int			row = -1;
+		/* A local: a store through set->refs could change it, as it may alias. */
+		Datum	   *ref_words = set->refs;
 
-		while ((row = tess_row_mask_next(valid, row)) >= 0)
-			set->refs[row] = (Datum) group_refs[row];
+		for (int row = 0; row < nrows; row++)
+			ref_words[row] = (Datum) group_refs[row];
 		refs.values = set->refs;
 		refs.isnull = set->ref_nulls;
 		refs.nrows = nrows;
-		keys[0] = (TessTableKey) {TESS_TABLE_KEY_INT8, &refs, valid};
+		keys[0] = (TessTableKey) {TESS_TABLE_KEY_INT8, &refs, NULL};
 	}
 	keys[set->nkeys - 1].kind = value->argument_kind;
 	keys[set->nkeys - 1].column = argument;
@@ -353,7 +357,8 @@ agg_distinct_read(TessAggState *state, AggValue *value, int nrows, Datum *const 
 /*
  * After a batch, the groups taking groups bytes: the machine of each set
  * that spills, or of only's alone, weighs the node's memory and the set's
- * pairs, and may freeze the set.
+ * pairs, and may freeze the set; a machine that weighed the same memory
+ * with a batch of pairs in the set is not asked again.
  */
 void
 agg_distinct_grown(TessAggState *state, AggValue *only, Size groups)
@@ -363,12 +368,16 @@ agg_distinct_grown(TessAggState *state, AggValue *only, Size groups)
 		AggValue   *value = &state->values[index];
 		DistinctSet *set = value->distinct;
 		TessTableStats stats = TESS_STRUCT_INITIALIZER(TessTableStats);
+		Size		memory;
 
 		if (set == NULL || set->pairs == NULL || set->pairs->writing != NULL ||
 			(only != NULL && value != only) || set->table.nchunks == 0)
 			continue;
+		memory = groups + agg_distinct_bytes(state);
+		if (memory == set->pairs->weighed)
+			continue;
 		check(state, state->kernels->table_stats(&set->table, &stats, &state->status));
-		pairs_grown(state, set->pairs, groups + agg_distinct_bytes(state), stats.records);
+		pairs_grown(state, set->pairs, memory, stats.records);
 	}
 }
 

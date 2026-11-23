@@ -1626,6 +1626,7 @@ pairs_begin(TessAggState *state, PairSpill *pairs)
 {
 	check(state, state->kernels->rows_init(&pairs->machine, &state->pairs_params,
 										   &state->status));
+	pairs->weighed = 0;
 }
 
 /*
@@ -1645,6 +1646,7 @@ pairs_grown(TessAggState *state, PairSpill *pairs, Size memory, uint64 records)
 		.memory = memory,
 		.records = records,
 	});
+	pairs->weighed = records >= state->pairs_params.least ? memory : 0;
 	if (action.kind != TESS_ROWS_FREEZE)
 		return;
 	pairs->writing = level_create(state, &action, &pairs->machine, PAIRS_WORDS, 0);
@@ -1745,6 +1747,7 @@ pairs_next_partition(TessAggState *state, PairSpill *pairs, bool last)
 				action.table.last = 1;
 			check(state, state->kernels->rows_read(&pairs->machine, &state->pairs_params,
 												   &action.table, &state->status));
+			pairs->weighed = 0;
 			return true;
 		}
 		pairs->pending = list_delete_first(pairs->pending);
