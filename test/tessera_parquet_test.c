@@ -60,11 +60,17 @@ PG_FUNCTION_INFO_V1(tessera_parquet_test_cancel_after);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_windows);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_asks);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_bytes);
+PG_FUNCTION_INFO_V1(tessera_parquet_test_holds);
+PG_FUNCTION_INFO_V1(tessera_parquet_test_point);
 PG_FUNCTION_INFO_V1(tessera_parquet_test_replace_in_worker);
 
 extern PGDLLEXPORT void tessera_parquet_test_replace_open(const char *name,
 														  const void *private_data,
 														  void *arg);
+extern PGDLLEXPORT void tessera_parquet_test_again(const char *name, const void *private_data,
+												   void *arg);
+extern PGDLLEXPORT void tessera_parquet_test_fail_bytes(const char *name,
+														const void *private_data, void *arg);
 
 /* The time of modification of a stat, to the nanosecond. */
 #ifdef __APPLE__
@@ -472,6 +478,30 @@ tessera_parquet_test_asks(PG_FUNCTION_ARGS)
 	return (Datum) 0;
 }
 
+/*
+ * The references to windows' arrays alive in this backend, counted by the
+ * reader of tessera_parquet's library: this module carries a copy of the
+ * reader of its own, whose count is another.
+ */
+static uint64
+holds_alive(void)
+{
+	static uint64 (*holds) (void) = NULL;
+
+	if (holds == NULL)
+		holds = (uint64 (*) (void)) load_external_function("$libdir/tessera_parquet",
+															"tess_parquet_test_holds",
+															true, NULL);
+	return holds();
+}
+
+/* parquet_test_holds(): the references alive in this backend. */
+Datum
+tessera_parquet_test_holds(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT64((int64) holds_alive());
+}
+
 /* A row of parquet_test_bytes: a column's bytes of a row, as one ask gave it. */
 static void
 put_bytes(ReturnSetInfo *rsinfo, Form_pg_attribute att, int base, int row, const char *ask,
@@ -506,15 +536,21 @@ put_bytes(ReturnSetInfo *rsinfo, Form_pg_attribute att, int base, int row, const
 
 /*
  * parquet_test_bytes(query text, max_rows int, skip int, mask bigint,
- * rest bool): runs the query, which plans as TessParquetScan alone, in
- * batches of max_rows rows at most, skips `skip` batches, and asks each
- * target's column of the next batch in the bytes form for the rows of
- * `mask` ('first'); with `rest`, then for every row as Datum values and
- * every other row as bytes ('rest'), and reads the first ask's places
- * again ('kept'). A
- * column not offered gives one row, its row -1, 'not offered'. Returns
- * the rows (column, row of the scan, ask, bytes, index, through a
- * dictionary).
+ * rest bool, again bool): runs the query, which plans as TessParquetScan
+ * alone, in batches of max_rows rows at most, skips `skip` batches, and
+ * asks each target's column of the next batch in the bytes form for the
+ * rows of `mask` ('first'); with `rest`, then for every row as Datum
+ * values and every other row as bytes ('rest'), and reads the first ask's
+ * places again ('kept'). `again` is for windows read again at each ask:
+ * the column is asked as Datum values before its first ask, so that the
+ * first ask's window is a read behind, whose arrays only the batch's
+ * reference keeps once the later asks replace them, and at the end the
+ * scan is rescanned, the batches skipped again and the rows of `mask`
+ * asked once more ('rescanned'). A
+ * column not offered gives one row, its row -1, 'not offered'. Fails
+ * where no reference to a window holds the bytes while the batch lives,
+ * or one is left after a rescan or the scan's end. Returns the rows
+ * (column, row of the scan, ask, bytes, index, through a dictionary).
  */
 Datum
 tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
@@ -534,7 +570,10 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 	int			skip = PG_GETARG_INT32(2);
 	uint64		mask = (uint64) PG_GETARG_INT64(3);
 	bool		ask_rest = PG_GETARG_BOOL(4);
+	bool		again = PG_GETARG_BOOL(5);
 	int			base = max_rows * skip;
+	uint64		holds_before;
+	bool		offered = false;
 
 	InitMaterializedSRF(fcinfo, 0);
 	SPI_connect();
@@ -545,6 +584,7 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 	query = CreateQueryDesc(linitial_node(PlannedStmt, cplan->stmt_list), sql,
 							GetActiveSnapshot(), InvalidSnapshot, None_Receiver, NULL, NULL, 0);
 	ExecutorStart(query, 0);
+	holds_before = holds_alive();
 	state = query->planstate;
 	if (!IsA(state, CustomScanState) ||
 		strcmp(((CustomScanState *) state)->methods->CustomName, "TessParquetScan") != 0)
@@ -577,6 +617,13 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 		TessDatumColumn datums = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 		char	  **copies = palloc0_array(char *, max_rows);
 
+		if (again)
+		{
+			rows.bits = &all;
+			batch->ops->get_datum_column(batch, column, &rows, TESS_COLUMN_FOR_PROJECTION,
+										 &datums);
+			rows.bits = &first_rows;
+		}
 		if (!tess_batch_bytes_column(batch, column, &rows, &first))
 		{
 			Datum		values[6] = {0};
@@ -589,6 +636,7 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 			continue;
 		}
+		offered = true;
 		for (int row = 0; row < max_rows; row++)
 			if (first_rows >> row & 1)
 			{
@@ -618,13 +666,92 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 				put_bytes(rsinfo, att, base, row, "kept", &first);
 			}
 	}
+	if (offered && holds_alive() == holds_before)
+		elog(ERROR, "no reference to a window holds the batch's bytes");
 	tess_input_finish(input);
+	if (again)
+	{
+		ExecReScan(state);
+		tess_input_rescan(input);
+		if (holds_alive() != holds_before)
+			elog(ERROR, "references to windows left after a rescan");
+		for (int i = 0; i <= skip; i++)
+		{
+			batch = tess_input_next(input);
+			if (batch == NULL)
+				elog(ERROR, "the scan holds fewer batches after a rescan");
+			if (i < skip)
+				tess_input_finish(input);
+		}
+		for (int target = 0; target < layout->ntargets; target++)
+		{
+			int			column = tess_layout_column(layout, target);
+			uint64		all = max_rows == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << max_rows) - 1;
+			uint64		rows_bits = mask & all;
+			TessRowMask rows = {max_rows, &rows_bits};
+			TessBytesColumn again;
+
+			if (!tess_batch_bytes_column(batch, column, &rows, &again))
+				continue;
+			for (int row = 0; row < max_rows; row++)
+				if (rows_bits >> row & 1)
+					put_bytes(rsinfo, TupleDescAttr(desc, column), base, row, "rescanned",
+							  &again);
+		}
+		tess_input_finish(input);
+	}
 	ExecutorFinish(query);
 	ExecutorEnd(query);
+	if (holds_alive() != holds_before)
+		elog(ERROR, "references to windows left after the scan's end");
 	FreeQueryDesc(query);
 	ReleaseCachedPlan(cplan, NULL);
 	SPI_finish();
 	return (Datum) 0;
+}
+
+/* The callback of "tessera-parquet-again": this backend reads windows again. */
+void
+tessera_parquet_test_again(const char *name, const void *private_data, void *arg)
+{
+	if (*(const int *) private_data == MyProcPid)
+		*(bool *) arg = true;
+}
+
+/* The callback of "tessera-parquet-bytes": this backend's query fails there. */
+void
+tessera_parquet_test_fail_bytes(const char *name, const void *private_data, void *arg)
+{
+	if (*(const int *) private_data == MyProcPid)
+		ereport(ERROR,
+				(errmsg("an error injected after a reference to a window was taken")));
+}
+
+/*
+ * parquet_test_point(module text, point text, on bool): from now on, or
+ * no longer, this backend's Parquet scans read the batch's window again
+ * at each ask ("tessera-parquet-again"), or fail once a batch's bytes hold
+ * a reference ("tessera-parquet-bytes"). The callback is loaded from
+ * `module`, this module's file without its suffix.
+ */
+Datum
+tessera_parquet_test_point(PG_FUNCTION_ARGS)
+{
+	char	   *library = module_from_pkglib(text_to_cstring(PG_GETARG_TEXT_PP(0)));
+	char	   *point = text_to_cstring(PG_GETARG_TEXT_PP(1));
+	int			pid = MyProcPid;
+	const char *callback;
+
+	if (strcmp(point, "tessera-parquet-again") == 0)
+		callback = "tessera_parquet_test_again";
+	else if (strcmp(point, "tessera-parquet-bytes") == 0)
+		callback = "tessera_parquet_test_fail_bytes";
+	else
+		elog(ERROR, "no callback of the injection point \"%s\"", point);
+	InjectionPointDetach(point);
+	if (PG_GETARG_BOOL(2))
+		InjectionPointAttach(point, library, callback, &pid, sizeof(pid));
+	PG_RETURN_VOID();
 }
 
 /*
