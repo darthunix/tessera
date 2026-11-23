@@ -204,15 +204,22 @@ using a subsystem, it then checks that table's pointer, ABI version, and
 minimum size.
 
 Optional fields are appended to the root. A consumer checks
-`TESS_ABI_HAS_FIELD` before reading such a field, then validates the subsystem
-table itself. `kernels`, the kernel registry, is the first optional field:
-a bridge built before it lacks the field, and a consumer then behaves as if
-no kernels were installed. The current required fields are covered by `TESS_API_MIN_SIZE`
-and do not need separate field checks. The kernels' table itself
-(`TessKernelOps`) is the contract of one build, not an append-only one:
-its minimum size reaches its last field and the registry refuses a table
-missing any operation, so a caller reads every field without
-`TESS_ABI_HAS_FIELD`, and a new operation moves the minimum size to it.
+`TESS_ABI_HAS_FIELD` before reading such a field, then validates the
+subsystem table itself. `kernels`, the kernel registry, is the first
+optional field: a bridge built before it lacks the field, and a consumer
+then behaves as if no kernels were installed.
+`next_dictionary_identity`, the second, gives the identities of the
+dictionaries of a batch's bytes form ([batch.md](batch.md)) from one
+counter of the backend, so that two producers, each a module of its own,
+never give one identity; a producer asks `tess_dictionary_identity()`,
+which answers 0 from a bridge without the field, and then gives no
+dictionary. The current required fields are covered by
+`TESS_API_MIN_SIZE` and do not need separate field checks. The kernels'
+table itself (`TessKernelOps`) is the contract of one build, not an
+append-only one: its minimum size reaches its last field and the
+registry refuses a table missing any operation, so a caller reads every
+field without `TESS_ABI_HAS_FIELD`, and a new operation moves the
+minimum size to it.
 
 After loading the bridge, the [producer example](../test/tessera_producer_test.c)
 uses a local helper to obtain and validate the slot-binding table:

@@ -9,6 +9,7 @@ PG_MODULE_MAGIC;
 PG_FUNCTION_INFO_V1(tessera_test_api_visible);
 PG_FUNCTION_INFO_V1(tessera_test_abi_helpers);
 PG_FUNCTION_INFO_V1(tessera_test_settings);
+PG_FUNCTION_INFO_V1(tessera_test_dictionary_identity);
 
 typedef struct TessTestOps
 {
@@ -129,4 +130,26 @@ tessera_test_abi_helpers(PG_FUNCTION_ARGS)
 	ops.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessTestOps, required);
 	PG_RETURN_BOOL(TESS_ABI_HAS_FIELD(&ops, TessTestOps, required) &&
 					   !TESS_ABI_HAS_FIELD(&ops, TessTestOps, optional));
+}
+
+/*
+ * A dictionary identity taken through the API, and 0 from the helper over
+ * a root of the size before the operation, or with the operation NULL.
+ */
+Datum
+tessera_test_dictionary_identity(PG_FUNCTION_ARGS)
+{
+	const TessApi *api = *find_rendezvous_variable(TESS_API_RENDEZVOUS);
+	/* A root of the size before the operation, allocated at that size. */
+	Size		short_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessApi, kernels);
+	TessApi    *short_api = palloc(short_size);
+	TessApi		null_api = *api;
+
+	memcpy(short_api, api, short_size);
+	short_api->struct_size = short_size;
+	null_api.next_dictionary_identity = NULL;
+	if (tess_dictionary_identity(short_api) != 0 ||
+		tess_dictionary_identity(&null_api) != 0)
+		PG_RETURN_INT64(0);
+	PG_RETURN_INT64((int64) tess_dictionary_identity(api));
 }
