@@ -111,9 +111,11 @@ read; one that does not hold is a broken shape, `XX000`. `Utf8View`
 and `BinaryView` take the pairs and the failures of `LargeUtf8` and
 `LargeBinary`.
 
-The reader makes the slice of byte slices once a window, from the
-array's buffers, and keeps it with the window, so that the input lives
-as long as the window does.
+The reader makes the slice of byte slices for each read of a window,
+from the array's buffers, into a place its caller gives, so that the
+input lives as long as that place does. A dictionary's values stay
+`LargeBinary`, so the reader keeps a plan of their own for the check of
+a dictionary once.
 
 Refused:
 
@@ -128,14 +130,15 @@ Was: a plain window's rows point into its one buffer of bytes, and one
 pass checks the bytes from the first offset to the last.
 Will be: a row's pointer is into the buffer its view names, or into
 the view itself for a value of up to 12 bytes. The array that the
-window holds keeps both alive. The window is checked once, value by
-value, over its rows that are not `NULL`:
-
-- a value of up to 12 bytes by words of its view: no byte at or above
-  0x80 and no zero byte within its length passes at once; any other
-  takes the full check;
-- a longer value by the check of UTF-8 of its bytes and a search for a
-  zero byte.
+window holds keeps both alive. The reader takes a value through the
+crate's own accessor of a view array, as it takes a dictionary's
+values by the offsets of a valid array. The window is checked once,
+value by value, over its rows that are not `NULL`, each value in one
+pass by words of 8 bytes: a zero byte found by an exact mask, and a
+byte at or above 0x80 sending the value to the full check of UTF-8,
+which a value of ASCII never takes. The check of a plain window in one
+pass goes, with its proof: no reader's array is plain bytes by offsets
+any more.
 
 A window that passes gives every row asked its bytes unchecked again,
 as today. A window that fails is read row by row through the plan,
@@ -147,10 +150,13 @@ Refused:
   together: a plain page puts each value's 4-byte length before it,
   and a short value lies in its view. The crate checks UTF-8 across
   those lengths when each is below 128. A zero byte cannot be checked
-  that way, since the lengths hold zero bytes. If the count shows the
-  check of short values costing more than the pass of today, that is
-  the first way to try: the run checked for UTF-8 in one pass, and its
-  zero bytes counted against those of the lengths.
+  that way, since the lengths hold zero bytes. The run checked for
+  UTF-8 in one pass, its zero bytes counted against those of the
+  lengths, is the way to try if the check by words costs too much.
+- A search for a zero byte and a check of UTF-8 of their own, a call
+  each a value. Counted: the two calls took 21 per cent of Q28's
+  samples, and the copies saved went to them; the pass by words keeps
+  the saving.
 - Checking each distinct value of a dictionary once in a chunk that
   falls back. The crate does not say which views came through the
   dictionary. Today these rows are checked once a row too.

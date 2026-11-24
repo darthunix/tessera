@@ -33,7 +33,8 @@ fn rows_read(file: &ParquetFile, column: &MappedColumn, group: usize) -> BTreeSe
     let rows = file.group_rows(group).unwrap() as usize;
     let mut reader = ColumnReader::new(file, column, group, every(rows).into(), 1024).unwrap();
     let window = reader.read(0, rows, &every(rows)).unwrap();
-    let input = input_of(window.array.as_ref()).unwrap();
+    let mut buffers = Vec::new();
+    let input = input_of(window.array.as_ref(), &mut buffers).unwrap();
     let mut values = vec![0u64; rows];
     let mut nulls = vec![0u64; mask_words(rows)];
     reader
@@ -211,7 +212,8 @@ fn strings_against_the_crate_s_reader() {
         // the repeats and the bytes that are not UTF-8 among them.
         let mut reader = ColumnReader::new(&file, &mapped, 0, every(6).into(), 8).unwrap();
         let window = reader.read(0, 6, &every(6)).unwrap();
-        let input = input_of(window.array.as_ref()).unwrap();
+        let mut buffers = Vec::new();
+        let input = input_of(window.array.as_ref(), &mut buffers).unwrap();
         let mut rows: Vec<&[u8]> = vec![&[]; 6];
         let mut nulls = [0u64; 1];
         reader

@@ -78,7 +78,9 @@ pub struct MappedColumn {
     nullable: bool,
     plan: ReadPlan,
     view: ArrowReaderMetadata,
-    dictionary_view: Option<(ArrowReaderMetadata, ReadPlan)>,
+    /// The view of a chunk read as a dictionary, the plan of its arrays
+    /// and the plan of its values, plain `LargeBinary`.
+    dictionary_view: Option<(ArrowReaderMetadata, ReadPlan, ReadPlan)>,
 }
 
 impl MappedColumn {
@@ -119,9 +121,17 @@ impl MappedColumn {
     /// dictionary array where `dictionary` says.
     pub(crate) fn view(&self, dictionary: bool) -> (&ArrowReaderMetadata, &ReadPlan) {
         match (&self.dictionary_view, dictionary) {
-            (Some((view, plan)), true) => (view, plan),
+            (Some((view, plan, _)), true) => (view, plan),
             _ => (&self.view, &self.plan),
         }
+    }
+
+    /// The read plan of a dictionary's values read as a column of their
+    /// own; the plain plan for a column read through no dictionary.
+    pub(crate) fn values_plan(&self) -> &ReadPlan {
+        self.dictionary_view
+            .as_ref()
+            .map_or(&self.plan, |(_, _, values)| values)
     }
 }
 
@@ -187,7 +197,8 @@ pub fn map_column(file: &ParquetFile, request: &ColumnRequest<'_>) -> Result<Map
             DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::LargeBinary));
         let view = view_of(metadata, leaf, &descr, file_type, Some(dictionary.clone()))?;
         let plan = ReadPlan::new(&dictionary, pg, options)?;
-        Some((view, plan))
+        let values = ReadPlan::new(&DataType::LargeBinary, pg, options)?;
+        Some((view, plan, values))
     } else {
         None
     };
@@ -406,7 +417,9 @@ fn view_of(
         .collect::<Result<Vec<_>>>()?;
     let view = Arc::new(ParquetMetaData::new(one, groups));
     let mut options = ArrowReaderOptions::new().with_skip_arrow_metadata(true);
-    let asked = arrow.or((file_type == FileType::Bytes).then_some(DataType::LargeBinary));
+    // Bytes not through a dictionary in every page as views, whose values
+    // stay in the decompressed pages: a LargeBinary copies each.
+    let asked = arrow.or((file_type == FileType::Bytes).then_some(DataType::BinaryView));
     if let Some(asked) = asked {
         let schema = Schema::new(vec![Field::new(info.name(), asked, nullable)]);
         options = options.with_schema(Arc::new(schema));

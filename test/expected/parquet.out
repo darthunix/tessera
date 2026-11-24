@@ -808,6 +808,137 @@ FROM unnest(ARRAY['t_check_plain', 't_check_dict', 't_vc_four']) t ORDER BY t;
  t_vc_four     | 22001
 (3 rows)
 
+-- spec: parquet-fdw/A chunk that leaves its dictionary
+-- Two groups of 2 000 rows whose string chunks begin through a small
+-- dictionary and go on in plain pages: NULLs and values of 0, 12, 13 and
+-- a thousand bytes in both parts, and short ones for a varchar(3). Each
+-- query runs with Tessera off and on, through the wrapper's rows and the
+-- source's batches, against a heap table of the same rows. A column of
+-- the same values holds bytes that are not UTF-8 in the dictionary part
+-- of the first group, row 5, and in the plain part of the second, row
+-- 3 500: they raise 22021 where a query returns them, and in the
+-- source's batches nothing under a clause the source checks that
+-- rejects them, where the wrapper's rows make every value.
+CREATE FUNCTION leaves_value(i int, bad boolean) RETURNS bytea LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE WHEN bad AND i IN (5, 3500) THEN '\xff'::bytea
+                WHEN i % 7 = 0 THEN NULL
+                ELSE convert_to(CASE i % 7
+                    WHEN 1 THEN ''
+                    WHEN 2 THEN lpad(i::text, 12, 'a')
+                    WHEN 3 THEN lpad(i::text, 13, 'b')
+                    WHEN 4 THEN repeat('ж', 495) || lpad(i::text, 10, '0')
+                    WHEN 5 THEN 'common'
+                    ELSE lpad((i % 50)::text, 14, 'c') END, 'UTF8') END $$;
+CREATE FUNCTION leaves_short(i int) RETURNS text LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE WHEN i % 5 = 0 THEN NULL
+                WHEN i % 97 = 3 THEN '😀😀😀'
+                ELSE chr(1040 + i % 32) || chr(1040 + i / 32 % 32) || (i % 10)::text END $$;
+CREATE FUNCTION leaves_json(v bytea) RETURNS json LANGUAGE sql IMMUTABLE AS $$
+    SELECT CASE WHEN v IS NOT NULL THEN json_build_object('hex', encode(v, 'hex')) END $$;
+SELECT parquet_test_write(:'dir' || '/leaves.parquet', json_build_object(
+    'group_rows', 2000, 'page_rows', 100, 'dictionary', true, 'dictionary_bytes', 4096,
+    'columns', json_build_array(
+      json_build_object('name', 'i', 'type', 'int32',
+        'values', (SELECT json_agg(i ORDER BY i) FROM generate_series(0, 3999) i)),
+      json_build_object('name', 's', 'type', 'bytes', 'values',
+        (SELECT json_agg(leaves_json(leaves_value(i, false)) ORDER BY i)
+         FROM generate_series(0, 3999) i)),
+      json_build_object('name', 'bad', 'type', 'bytes', 'values',
+        (SELECT json_agg(leaves_json(leaves_value(i, true)) ORDER BY i)
+         FROM generate_series(0, 3999) i)),
+      json_build_object('name', 'v', 'type', 'bytes', 'values',
+        (SELECT json_agg(leaves_json(convert_to(leaves_short(i), 'UTF8')) ORDER BY i)
+         FROM generate_series(0, 3999) i))))::text);
+ parquet_test_write 
+--------------------
+ 
+(1 row)
+
+\set leaves :dir '/leaves.parquet'
+CREATE FOREIGN TABLE t_leaves (i int, s text, v varchar(3), bad text)
+    SERVER pq OPTIONS (files :'leaves');
+CREATE FOREIGN TABLE t_leaves_bytes (i int, s bytea, bad bytea)
+    SERVER pq OPTIONS (files :'leaves');
+CREATE TABLE h_leaves AS
+    SELECT i, convert_from(leaves_value(i, false), 'UTF8') AS s,
+           leaves_short(i)::varchar(3) AS v, leaves_value(i, true) AS bad
+    FROM generate_series(0, 3999) i;
+CREATE TABLE leaves_queries (name text, of_file text, of_heap text);
+INSERT INTO leaves_queries VALUES
+    ('bytea', 'SELECT i, s, bad FROM t_leaves_bytes',
+     $q$SELECT i, convert_to(s, 'UTF8'), bad FROM h_leaves$q$),
+    ('text', 'SELECT i, s FROM t_leaves', 'SELECT i, s FROM h_leaves'),
+    ('grouped', 'SELECT s, count(*) FROM t_leaves GROUP BY s',
+     'SELECT s, count(*) FROM h_leaves GROUP BY s'),
+    ('length', 'SELECT i, length(s), octet_length(s) FROM t_leaves',
+     'SELECT i, length(s), octet_length(s) FROM h_leaves'),
+    ('ordered', $q$SELECT * FROM (SELECT s, i FROM t_leaves
+        ORDER BY s COLLATE "C" DESC NULLS LAST, i LIMIT 30) o$q$,
+     $q$SELECT * FROM (SELECT s, i FROM h_leaves
+        ORDER BY s COLLATE "C" DESC NULLS LAST, i LIMIT 30) o$q$),
+    ('varchar', 'SELECT i, v FROM t_leaves', 'SELECT i, v FROM h_leaves'),
+    ('varchar grouped', 'SELECT v, count(*) FROM t_leaves GROUP BY v',
+     'SELECT v, count(*) FROM h_leaves GROUP BY v');
+SET tessera.enable = off;
+SELECT name, differ(of_file, of_heap) AS rows_differ FROM leaves_queries ORDER BY name;
+      name       | rows_differ 
+-----------------+-------------
+ bytea           |           0
+ grouped         |           0
+ length          |           0
+ ordered         |           0
+ text            |           0
+ varchar         |           0
+ varchar grouped |           0
+(7 rows)
+
+SELECT q, sqlstate_of(format('SELECT bad FROM t_leaves WHERE %s', q)) AS bad_bytes
+FROM unnest(ARRAY['i = 5', 'i = 3500', 'i <> 5 AND i <> 3500']) q;
+          q           | bad_bytes 
+----------------------+-----------
+ i = 5                | 22021
+ i = 3500             | 22021
+ i <> 5 AND i <> 3500 | 22021
+(3 rows)
+
+RESET tessera.enable;
+SELECT scans_of('SELECT s FROM t_leaves') AS through,
+       checked_by('SELECT bad FROM t_leaves WHERE i <> 5 AND i <> 3500') AS checked_by;
+            through            | checked_by 
+-------------------------------+------------
+ Custom Scan (TessParquetScan) | source
+(1 row)
+
+SELECT name, differ(of_file, of_heap) AS rows_differ FROM leaves_queries ORDER BY name;
+      name       | rows_differ 
+-----------------+-------------
+ bytea           |           0
+ grouped         |           0
+ length          |           0
+ ordered         |           0
+ text            |           0
+ varchar         |           0
+ varchar grouped |           0
+(7 rows)
+
+SELECT q, sqlstate_of(format('SELECT bad FROM t_leaves WHERE %s', q)) AS bad_bytes
+FROM unnest(ARRAY['i = 5', 'i = 3500', 'i <> 5 AND i <> 3500', 'true']) q;
+          q           | bad_bytes 
+----------------------+-----------
+ i = 5                | 22021
+ i = 3500             | 22021
+ i <> 5 AND i <> 3500 | ok
+ true                 | 22021
+(4 rows)
+
+SELECT differ('SELECT i, bad FROM t_leaves WHERE i <> 5 AND i <> 3500',
+              $q$SELECT i, convert_from(bad, 'UTF8') FROM h_leaves WHERE i <> 5 AND i <> 3500$q$)
+       AS rows_differ_under_the_clause;
+ rows_differ_under_the_clause 
+------------------------------
+                            0
+(1 row)
+
 -- spec: parquet-fdw/Options refused
 -- A column compressed by a codec other than Snappy is refused, its
 -- neighbours planned.
@@ -3714,10 +3845,12 @@ DROP FOREIGN TABLE t_files, t_owned, t_plain, t_none, t_gzip, t_types, t_drop, t
     t_damaged_pages, t_eight, t_groups, t_analyzed, t_sparse, t_alternating, t_widths,
     t_one_more, t_clauses, t_far_seconds, t_mixed, t_eight_groups, t_dated_groups, t_odd_values,
     t_headed_groups, t_fallen_back, t_unsaid, t_unsigned_old, t_unsigned_old_ordered,
-    t_unsigned_unordered, t_uncounted, t_strings, t_string_groups, t_empty_groups;
+    t_unsigned_unordered, t_uncounted, t_strings, t_string_groups, t_empty_groups, t_leaves,
+    t_leaves_bytes;
 DROP TABLE h_files, h_clickbench, h_mappings, h_windows, h_wide, h_keys, h_asks, h_analyzed,
     h_clauses, h_outer, h_mixed, h_eight_groups, h_dated_groups, h_odd_values, h_fallen_back,
-    h_unsigned, h_uncounted, h_strings, h_string_groups, h_empty_groups;
+    h_unsigned, h_uncounted, h_strings, h_string_groups, h_empty_groups, h_leaves,
+    leaves_queries;
 DROP COLLATION parquet_ci;
 DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, bool, bool, int, int),
     parquet_test_head_dictionaries(text), parquet_test_replace(text, text, text),
@@ -3726,7 +3859,7 @@ DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, b
     explain_lines(text, text, text), parquet_test_asks(text, int, int), differ_serial(text),
     parallel_lines(text, text), workers_launched(text), plan_of(text), scan_cost(text, text),
     checked_by(text), rows_of(text), groups_of(text), skipping(text, text, text),
-    order_off(text);
+    order_off(text), leaves_value(int, boolean), leaves_short(int), leaves_json(bytea);
 DROP SERVER pq;
 REVOKE CREATE ON SCHEMA public FROM parquet_reader, parquet_other;
 DROP ROLE parquet_reader, parquet_other;

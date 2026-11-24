@@ -36,24 +36,23 @@ the commit before it.
 
 ## 3. The reader reads views
 
-- [ ] 3.1 `crates/tessera-parquet`: the plain view of a column of bytes
+- [x] 3.1 `crates/tessera-parquet`: the plain view of a column of bytes
       asks for `BinaryView`; the reader's input of a view array, with
-      the slices of its buffers kept with the window; the clauses'
-      strings through views. The bytes form of a window of views is
-      read row by row through the plan for now. Tests: a file whose
-      chunks fall back from their dictionary, written by the crate's
-      test writer, read by values and through the clauses; in
+      the slices of its buffers in a place its caller gives; a plan of
+      its own for a dictionary's values; the clauses' strings through
+      views; the bytes form of a window of views, each row's pointer
+      into its page or its view, and the window's cheaper check value
+      by value, which replaces the check in one pass and its proof.
+      Tests: a chunk that falls back from its dictionary read as views,
+      with NULLs and values of 0, 12, 13 and a thousand bytes; the
+      clauses over views; the check of views against each value's, by
+      a property test; the cheaper check against the plan's row by row,
+      under Miri as the bytes form's tests are; in
       `test/sql/parquet.sql` the scenario "A chunk that leaves its
-      dictionary", against a heap table. Check: `make rust-check`; the
-      suites; `make crosscheck`
-- [ ] 3.2 The bytes form of a window of views: each row's pointer into
-      its page or its view; the window's cheaper check value by value,
-      a short value by words of its view. Tests: the cheaper check over
-      views against the plan's row by row, values of 0, 12, 13 and
-      more bytes, failures in short and long values, under Miri as the
-      bytes form's tests are. The message carries the counts of Q26
-      and Q28 against 3.1. Check: `make rust-check`; the suites
-- [ ] 3.3 The contracts: `parquet-fdw`'s forecast with the clauses,
+      dictionary", against a heap table. The message carries the counts
+      of Q26 and Q28 against 2.1. Check: `make rust-check`; the suites;
+      `make crosscheck`
+- [ ] 3.2 The contracts: `parquet-fdw`'s forecast with the clauses,
       `datum-arrow`'s with the input of a column. In the roadmap, the
       deviation over the clauses' boundary in `parquet-reader-boundary`
       and a new entry for simplifying `datum-arrow`. Check:

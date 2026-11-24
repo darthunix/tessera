@@ -64,5 +64,9 @@ as they are.
   `length`, and ordered under `C` with a `LIMIT`
 - **THEN** each result equals the result over a heap table of the same
   rows, and the value that is not UTF-8 raises `22021` where a query
-  returns its row and nothing where the clause rejects it
-- **Verified by:** pending
+  returns its row, and in the source's batches nothing where the clause
+  rejects it
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/A chunk that leaves its
+  dictionary`;
+  `crates/tessera-parquet/src/reader/tests.rs::a_chunk_that_falls_back_to_plain_pages_is_read_plain`
