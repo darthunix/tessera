@@ -1,0 +1,53 @@
+MACHINE CODE; baseline=f8ee89ef1999c388312d20b874fb65ef76c92d03, candidate=WORKTREE@81f23392b5a8e5139082c58cd8e44ebf96b278a3, target=this machine
+kernels: 3245 same, 10 changed (0 in immediates only, 0 in registers only), 0 only before, 10 only after
+  changed: _tess_text_compare
+  changed: _tess_text_lengths
+  changed: _tess_text_like
+  changed: _tess_text_pieces
+  changed: _tess_text_starts_with
+  changed: _text_compare_evaluate
+  changed: _text_length_evaluate
+  changed: _text_pattern_evaluate
+  changed: _text_piece_evaluate
+  changed: tessera_capi::c::text::input
+  only after: _one_row_of
+  only after: tessera_capi::c::text::column
+  only after: tessera_kernels::text::compare::<tessera_capi::c::source::Constant<&[u8]>, tessera_capi::c::text::Bytes>
+  only after: tessera_kernels::text::compare::<tessera_capi::c::source::Constant<&[u8]>, tessera_capi::c::text::Datums>
+  only after: tessera_kernels::text::compare::<tessera_capi::c::text::Bytes, tessera_capi::c::source::Constant<&[u8]>>
+  only after: tessera_kernels::text::compare::<tessera_capi::c::text::Bytes, tessera_capi::c::text::Bytes>
+  only after: tessera_kernels::text::compare::<tessera_capi::c::text::Bytes, tessera_capi::c::text::Datums>
+  only after: tessera_kernels::text::compare::<tessera_capi::c::text::Datums, tessera_capi::c::source::Constant<&[u8]>>
+  only after: tessera_kernels::text::compare::<tessera_capi::c::text::Datums, tessera_capi::c::text::Bytes>
+  only after: tessera_kernels::text::compare::<tessera_capi::c::text::Datums, tessera_capi::c::text::Datums>
+  place in a 64-byte line: the entry's offset, then each loop as the head's offset:instructions, innermost first
+  _tess_text_compare
+    before entry 56; loops 12:3 52:3 40:3 36:3 48:5 8:5 4:5 28:5
+    after  entry 24; loops 56:3 32:3 20:3 12:3 0:6 48:6 56:6 48:6
+  _tess_text_lengths
+    before entry 56; loops 24:5 48:5 20:6 28:7 16:10 12:10 36:16 36:20
+    after  entry 44; loops 12:5 4:5 16:5 8:6 0:6 28:6 44:7 28:7
+  _tess_text_like
+    before entry 20; loops 56:6 40:7 24:9 56:10 20:10 40:10 16:12 20:12
+    after  entry 48; loops 52:6 36:6 48:7 4:9 32:10 48:10 56:10 48:10
+  _tess_text_pieces
+    before entry 24; loops 32:5 44:5 8:6 48:6 20:6 12:7 8:10 8:16
+    after  entry 52; loops 56:5 8:5 12:5 24:6 0:6 44:6 60:6 36:6
+  _tess_text_starts_with
+    before entry 56; loops 36:7 60:10 52:14 52:17 52:20 52:25 60:28 24:33
+    after  entry 56; loops 20:7 16:10 4:10 16:13 60:14 60:17 12:19 60:20
+  _text_compare_evaluate
+    before entry 48; loops 12:55 28:133 8:145 36:201 52:298 12:339
+    after  entry 48; loops 16:40 16:67 0:78 36:178 36:186 36:197 8:219 52:227
+  _text_length_evaluate
+    before entry 12; loops 16:9 16:13 20:18 16:19 24:77 4:89 40:125 60:143
+    after  entry 44; loops 48:9 0:15 4:21 0:31 36:43 16:45 0:56 56:87
+  _text_pattern_evaluate
+    before entry 8; loops 0:15 12:97 8:104 48:116 12:155 60:189 16:225 16:227
+    after  entry 28; loops 32:25 16:28 4:31 16:38 48:55 36:66 0:87 12:169
+  _text_piece_evaluate
+    before entry 12; loops 44:9 8:12 4:23 12:27 28:30 32:34 20:37 20:40
+    after  entry 44; loops 8:9 44:11 44:13 56:14 44:15 20:18 12:19 56:23
+  tessera_capi::c::text::input
+    before entry 24; loops 24:12 16:21
+    after  entry 0; loops 20:21 20:28 60:49

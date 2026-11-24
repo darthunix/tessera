@@ -199,7 +199,7 @@ named in the harness and covered by a property test.
       over the test source and the Parquet table, in an aggregate's
       argument, a filter and an output column; `docs/kernels.md`.
       Check: the suites; `make crosscheck`
-- [ ] 5.4 Count as in 4.4. Check: `.github/scripts/check-specs.sh`
+- [x] 5.4 Count as in 4.4. Check: `.github/scripts/check-specs.sh`
 
 ## 6. The sort
 

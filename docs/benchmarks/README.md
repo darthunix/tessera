@@ -7,6 +7,14 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-24, the string functions by bytes, stage 3 of
+  `text-keys-by-bytes`](2026-11-24-text-keys-by-bytes-functions/README.md):
+  ClickBench's queries over `hits.parquet` counted at 0 workers, Q34
+  and Q35 in a pair, pg_duckdb's cycles beside them, and the heap's
+  families `sort`, `anykey` and `rowwise`, against `f8ee89ef`; Q28 28
+  per cent fewer, the four tries of the way there, the heap's `LIKE`
+  1.1 per cent more, Apple M5 Pro, PostgreSQL 19.
+
 - [2026-11-24, the Parquet reader's bytes form written in
   place](2026-11-24-parquet-reader-allocs/README.md): the strings'
   queries of ClickBench over `hits.parquet` counted at 0 workers, the

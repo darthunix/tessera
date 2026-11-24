@@ -377,6 +377,11 @@ source's own form.
   of its instructions, not 15: half of the query is the reading of the
   column, which the form cannot remove, and the making of `Datum`
   values the stage removes was 7 per cent of it.
+- 2026-11-24: stage 3, the functions, kept although the heap's cases
+  `row_like` and `row_like_count` ran 1.1 per cent more instructions,
+  past the rule of 1: what is left is the checks of an argument's form
+  on a call's way, some 50 instructions a batch of 64 rows, and no
+  query of ClickBench runs that path. Q28 lost 28 per cent.
 
 ## Was and will be
 
