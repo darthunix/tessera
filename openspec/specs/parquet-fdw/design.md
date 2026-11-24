@@ -254,9 +254,17 @@ reads it. A column of bytes loses its mark in that footer: the crate
 checks UTF-8 itself in every page it decodes of a column marked as a
 string, which would fail on rows a clause rejects and on a column the
 table trusts. The checks of UTF-8 are `datum-arrow`'s, on the values
-made. Every `BYTE_ARRAY` is asked for as Arrow's `LargeBinary`, whose
-offsets are 64-bit: the strings of one window may pass the 2 GB that
-32-bit offsets hold even when each value fits PostgreSQL.
+made. A chunk of `BYTE_ARRAY` read plain is asked for as Arrow's
+`BinaryView`. A **view** is a record of 16 bytes a row: a value of up to
+12 bytes lies in it, and a longer one is its length and its place in
+one of the array's buffers. The buffers are the decompressed data pages
+and the dictionary page themselves, so that no value is copied, the
+rows a chunk reads through its dictionary before it falls back to plain
+pages among them: each of those is a copy of the dictionary's view, not
+of its bytes. A chunk read through its dictionary is asked for as a
+dictionary of `LargeBinary`, whose offsets are 64-bit: its values are
+copied once a chunk, and its values of one window may pass the 2 GB
+that 32-bit offsets hold even when each value fits PostgreSQL.
 
 Refused:
 
@@ -265,6 +273,21 @@ Refused:
 - **Marked strings read as Arrow's `Utf8`.** The crate would check every
   value it decodes, those no consumer asks for and those of a trusted
   column; and `datum-arrow` would see two types for one kind of column.
+  `Utf8View` is refused for the same reason: the crate checks a whole
+  page at once and fails with an error of its own, not `22021` at the
+  plan's row.
+- **Plain chunks as `LargeBinary`.** The crate copies each value's bytes
+  out of its page into the array's buffer, the rows read through the
+  dictionary too: a tenth of a query that reads a column of strings in
+  full.
+- **The reader's own decoding of the pages of `BYTE_ARRAY`.** It would
+  give the same places in the pages as the views, but needs the crate's
+  decoders behind its feature `experimental` and checks of damaged pages
+  of its own.
+- **Views for every chunk.** The crate gives no dictionary whose values
+  are views, and a chunk read through its dictionary would lose the
+  indexes by which TessAgg numbers its rows and the clauses answer once
+  a value.
 
 ### Windows read for a selection
 
@@ -277,29 +300,35 @@ decompressing it where the skip covers the page. The crate's default
 policy may turn a selection of short runs into a mask, which decodes
 every row and filters after.
 
-A column asked window after window, as a scan in full asks it, keeps
-one **forward reader** over the group with the group's selection, so
-that each page is decompressed and the dictionary decoded once a group.
-Its arrays hold a window's count of selected rows, so it may read into
-the next window; it keeps what it read past the window for the next
-ask. A window after a **gap**, past windows no consumer asked the column
-for, builds the forward reader anew from that window, which skips the
-pages of the gap; the windows after it are forward again. An ask
-**behind** the forward reader, a window already passed, as a top-N sort
-asks for the rows it kept, builds a reader of its own for that window
-and the rows asked. Such a reader decodes the dictionary again and
-walks the headers of the pages before the window, but decompresses only
-the pages that hold the rows, and leaves the forward reader as it was.
+A column asked window after window, as a scan in full asks it, keeps one
+**forward reader** over the group with the group's selection, so that
+each page is decompressed and the dictionary decoded once a group. Its
+arrays hold a window's count of selected rows, so it may read into the
+next window; it keeps what it read past the window for the next ask, as
+a slice of the array it was read in. A window that one array holds is a
+slice of it, and one that two arrays hold joins their slices. Not a
+slice of the joined window: a slice of an array of views keeps every
+buffer of its array, and a join every buffer of its parts, so a slice of
+the join would carry each page read before into every later window, and
+copy a list of buffers that grew a window at a time. A window after a
+**gap**, past windows no consumer asked the column for, builds the
+forward reader anew from that window, which skips the pages of the gap;
+the windows after it are forward again. An ask **behind** the forward
+reader, a window already passed, as a top-N sort asks for the rows it
+kept, builds a reader of its own for that window and the rows asked.
+Such a reader decodes the dictionary again and walks the headers of the
+pages before the window, but decompresses only the pages that hold the
+rows, and leaves the forward reader as it was.
 
 A chunk of strings with a dictionary page is read as Arrow's dictionary
 array, the dictionary and each row's index, so that a clause is checked
 once a dictionary value. A chunk whose footer says that some data page
 is encoded otherwise, as a chunk that fell back to plain pages, is read
-plain: read as a dictionary, the crate would build a dictionary of each
-array of its plain pages, hashing every value, and merge the
-dictionaries of a window's arrays, hashing again. A chunk whose footer
-does not say how its pages are encoded is read through its dictionary,
-which is right for a chunk that does not fall back.
+plain, as views: read as a dictionary, the crate would build a
+dictionary of each array of its plain pages, hashing every value, and
+merge the dictionaries of a window's arrays, hashing again. A chunk
+whose footer does not say how its pages are encoded is read through its
+dictionary, which is right for a chunk that does not fall back.
 
 The window's size, 1024 rows, sets two costs against each other. A
 larger window makes a consumer that asks for one batch of it read the
@@ -417,13 +446,13 @@ of its batches one by one.
 
 ### The bytes form
 
-The node's batches also give their `text`, `varchar` and `bytea`
-columns as the bytes the window's arrays hold, with a dictionary's
-indexes, for a consumer that reads strings so, such as a grouping by a
-string. The reader writes each row's place and length, and a reference
-that keeps the window's array for the batch, which the batch's memory
-frees. That form, its promises and its checks are the capability
-`string-bytes`; this part only offers it.
+The node's batches also give their `text`, `varchar` and `bytea` columns
+as the bytes the window's arrays hold, in the decompressed pages or in
+the views, with a dictionary's indexes, for a consumer that reads
+strings so, such as a grouping by a string. The reader writes each row's
+place and length, and a reference that keeps the window's array for the
+batch, which the batch's memory frees. That form, its promises and its
+checks are the capability `string-bytes`; this part only offers it.
 
 ## The clauses checked on stored values
 

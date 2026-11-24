@@ -220,6 +220,16 @@ fails, and the index of a `NULL` slot or of a slot not asked is not
 read, since it may point anywhere. A string's bytes are checked in
 place.
 
+A **view array**, Arrow's `Utf8View` or `BinaryView`, comes as the bytes
+of its views, 16 a slot in Arrow's layout, and the slices of its
+buffers. A value of up to 12 bytes lies in its view, so that its bytes
+are a slice of the views: the crate has no unsafe code, and a `u128`
+cannot be lent as bytes without it. A long view is checked against its
+buffers before its bytes are read, and one that does not hold is a
+broken shape. The view of a `NULL` slot is not read, since Arrow lets it
+hold anything. A dictionary of views is refused: no caller gives one,
+and its values' shape would need rules of its own.
+
 A write packs the slots asked, one Arrow value a slot asked, in their
 order: the Arrow array it makes holds only the rows the caller chose. A
 write of every slot, as a `COPY` makes, asks for every slot of the
@@ -228,9 +238,10 @@ as [`WritePlan::write`](../../../crates/datum-arrow/src/write.rs) wants
 them.
 
 Refused: a list of slot numbers for the slots asked, which makes every
-loop a gather, slow on both machines; and a copy of a dictionary
-expanded into a plain column, which converts and checks values no row
-uses.
+loop a gather, slow on both machines; a copy of a dictionary expanded
+into a plain column, which converts and checks values no row uses; and
+views turned into offsets and bytes by the caller, the copy that views
+exist to spare.
 
 ## Loops a compiler vectorizes
 

@@ -58,30 +58,35 @@ entry, `clickbench-entry`. On 2026-11-22 the maintainer took the sums
 of `bigint` values of 19 digits out of turn (done), after a profile of
 ClickBench's query 4 on the branch of `parquet-fdw`, and the same day
 `agg-distinct-spill` (done) after them, a finding of stage 2 of
-ClickBench on that branch:
+ClickBench on that branch. On 2026-11-24 he took the views of strings in
+the Parquet reader out of turn, `parquet-string-views` (done), and a
+faster decompression of Snappy after them, `parquet-snappy`, after a
+profile of ClickBench's Q26 at the end of the sort by bytes:
 
-1. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `parquet-snappy`: A faster decompression of the Snappy pages of a
+   Parquet file
+2. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-2. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-3. `explain-rows-per-loop`: The rows a node removed, per loop as the
+4. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-4. `join-pruning-cost`: The cost of a pruning join over the partitions
+5. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-6. `linux-x86-support`: Linux on x86-64 checked as the target platform
-7. `oltp-guard-bench`: OLTP guard family of benchmarks
-8. `runs-left-from-section-9`: Runs left to the maintainer from
+7. `linux-x86-support`: Linux on x86-64 checked as the target platform
+8. `oltp-guard-bench`: OLTP guard family of benchmarks
+9. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-12. `tpch-sf10`: TPC-H step 10: SF10
-13. `backward-scan-mark-restore`: Backward scan and mark/restore
-14. `pg-duckdb-comparison`: Comparison with pg_duckdb
+13. `tpch-sf10`: TPC-H step 10: SF10
+14. `backward-scan-mark-restore`: Backward scan and mark/restore
+15. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -113,8 +118,6 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `parquet-reader-boundary`: the boundaries of the Parquet reader,
   which the bytes form and the views of strings crossed beside the
   forecast
-- `parquet-string-pages`: the pages of a string column decoded by the
-  reader's own code, without the copy into an Arrow array
 - `datum-arrow-input`: the input of a column of `datum-arrow`, which
   the views of strings changed beside the forecast
 - `agg-date-min-max`: `min` and `max` of `date` by kernels
@@ -282,42 +285,32 @@ forecast of `datum-arrow`'s contract.
 - **Known:** The forecast named "the sets of types and the plans'
   rules; not the representations" for views of strings; it now names
   the input of a column for a new layout.
-- **Depends on:** `parquet-string-views`.
+- **Depends on:** none.
 - **Capabilities:** datum-arrow
 - **Size:** small.
 
-### parquet-string-pages
+### parquet-snappy
 
-The pages of a string column decoded by the Parquet reader's own code,
-each value's bytes given where the decompressed page holds them. From a
-profile of ClickBench's Q13 at the end of the second stage of
+A faster decompression of the Snappy pages of a Parquet file. From the
+profiles of ClickBench's Q26 and Q28 at the end of the sort by bytes of
 `text-keys-by-bytes`, 2026-11-24.
 
-- **What:** The reader reads a window of a string column through the
-  `parquet` crate's Arrow reader, which copies each value's bytes out of
-  the decompressed page into the buffer of an Arrow array, and a
-  dictionary chunk's values into an array of their own. Decoding the
-  plain and dictionary pages of `BYTE_ARRAY` by the reader's own code,
-  as it already reads a dictionary page alone, would give the bytes form
-  places in the decompressed page, without the copy.
-- **Why:** Half of the samples of a profile of Q13, the one of the
-  stage's report, are in the reader: snappy's decompression 24 per
-  cent of them, the check of UTF-8 11, and the copies of values into
-  the Arrow arrays about 7, the copies of memory under the crate's
-  `OffsetBuffer::try_push` and `extend_from_dictionary`, 195 of its
-  2 881 samples. The second stage
-  of `text-keys-by-bytes` removed the making of `Datum` values, 7 per
-  cent, and Q13 lost 6.9 per cent of its instructions, not the 15 its
-  plan asked; the copy is the next largest part of the reading that a
-  consumer of bytes does not need.
-- **Known:** The crate's decoders of values sit behind its feature
-  `experimental`. The reader's own decoding keeps the checks of damaged
-  pages (`XX001`), the selection of rows, the decompression and the
-  check of UTF-8. The bytes form holds a window's array past its read,
-  so the decompressed pages would be held the same way.
-- **Depends on:** `text-keys-by-bytes`.
+- **What:** The reader decompresses each Snappy page through the
+  `parquet` crate's codec, the crate `snap` in Rust. Count other
+  implementations on the pages of `hits.parquet`, among them Google's
+  snappy in C++, which DuckDB carries with its decompression without
+  branches, and take the one that pays.
+- **Why:** The decompression is 34 per cent of a profile of Q26 and 39
+  of one of Q28, the largest part of either. After the views of
+  strings, Tessera runs ClickBench's queries in 1.93 times pg_duckdb's
+  cycles at one thread by their geometric mean.
+- **Known:** Whether the crate's reader takes a codec its caller gives
+  is to be found; `parquet-fdw`'s forecast names the reader's input of
+  pages for such a change. A crate outside the workspace comes in only
+  where it is clearly better and widely used.
+- **Depends on:** none.
 - **Capabilities:** parquet-fdw
-- **Size:** large.
+- **Size:** found by the comparison.
 
 ### clickbench-entry
 
