@@ -114,6 +114,8 @@ is wanted; several wait for a measured case. `greengage-port` and
   runtime's projection, so that a batch node serves them
 - `parquet-reader-boundary`: the boundary between the Parquet node
   and its reader, which the bytes form crossed beside the forecast
+- `parquet-string-pages`: the pages of a string column decoded by the
+  reader's own code, without the copy into an Arrow array
 - `agg-date-min-max`: `min` and `max` of `date` by kernels
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
@@ -350,6 +352,39 @@ forecast of `parquet-fdw`'s contract.
 - **Depends on:** `text-keys-by-bytes`.
 - **Capabilities:** parquet-fdw
 - **Size:** small.
+
+### parquet-string-pages
+
+The pages of a string column decoded by the Parquet reader's own code,
+each value's bytes given where the decompressed page holds them. From a
+profile of ClickBench's Q13 at the end of the second stage of
+`text-keys-by-bytes`, 2026-11-24.
+
+- **What:** The reader reads a window of a string column through the
+  `parquet` crate's Arrow reader, which copies each value's bytes out of
+  the decompressed page into the buffer of an Arrow array, and a
+  dictionary chunk's values into an array of their own. Decoding the
+  plain and dictionary pages of `BYTE_ARRAY` by the reader's own code,
+  as it already reads a dictionary page alone, would give the bytes form
+  places in the decompressed page, without the copy.
+- **Why:** Half of the samples of a profile of Q13, the one of the
+  stage's report, are in the reader: snappy's decompression 24 per
+  cent of them, the check of UTF-8 11, and the copies of values into
+  the Arrow arrays about 7, the copies of memory under the crate's
+  `OffsetBuffer::try_push` and `extend_from_dictionary`, 195 of its
+  2 881 samples. The second stage
+  of `text-keys-by-bytes` removed the making of `Datum` values, 7 per
+  cent, and Q13 lost 6.9 per cent of its instructions, not the 15 its
+  plan asked; the copy is the next largest part of the reading that a
+  consumer of bytes does not need.
+- **Known:** The crate's decoders of values sit behind its feature
+  `experimental`. The reader's own decoding keeps the checks of damaged
+  pages (`XX001`), the selection of rows, the decompression and the
+  check of UTF-8. The bytes form holds a window's array past its read,
+  so the decompressed pages would be held the same way.
+- **Depends on:** `text-keys-by-bytes`.
+- **Capabilities:** parquet-fdw
+- **Size:** large.
 
 ### clickbench-entry
 
