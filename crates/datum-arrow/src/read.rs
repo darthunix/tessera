@@ -29,8 +29,8 @@ pub enum Unit {
     Microseconds,
 }
 
-/// How bytes of `Binary` or `LargeBinary` are read as text, into `text`
-/// or `varchar`.
+/// How bytes of `Binary`, `LargeBinary` or `BinaryView` are read as
+/// text, into `text` or `varchar`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextBytes {
     /// Each value made is checked as UTF-8 without a zero byte.
@@ -108,10 +108,10 @@ impl Conv {
 /// | `Timestamp` without a time zone              | `timestamp` |
 /// | `Timestamp` with a time zone                 | `timestamptz` |
 /// | `Int64` with a unit of time                  | `timestamp`, `timestamptz` |
-/// | `Utf8`, `LargeUtf8`                          | `text`, `varchar` |
-/// | `Binary`, `LargeBinary`                      | `bytea` |
-/// | `Binary`, `LargeBinary`, [`TextBytes::Checked`] | `text`, `varchar` |
-/// | `Binary`, `LargeBinary`, [`TextBytes::Trusted`] | `text`, `varchar` without a length |
+/// | `Utf8`, `LargeUtf8`, `Utf8View`              | `text`, `varchar` |
+/// | `Binary`, `LargeBinary`, `BinaryView`        | `bytea` |
+/// | the same, [`TextBytes::Checked`]             | `text`, `varchar` |
+/// | the same, [`TextBytes::Trusted`]             | `text`, `varchar` without a length |
 /// | `FixedSizeBinary`                            | `bytea` |
 /// | a `Dictionary` of one of these               | as its values |
 ///
@@ -170,8 +170,8 @@ impl ReadPlan {
     ///    apply, on the Arrow type or a dictionary's values: the unit of
     ///    days on anything but an integer of at most 32 bits, a unit of
     ///    time on anything but an `Int64`, a treatment of text on
-    ///    anything but `Binary` or `LargeBinary` read into `text` or
-    ///    `varchar`;
+    ///    anything but `Binary`, `LargeBinary` or `BinaryView` read into
+    ///    `text` or `varchar`;
     /// 3. [`ErrorKind::TypeMismatch`] for a pair the table of
     ///    [`ReadPlan`] does not list, as the unit reads it;
     /// 4. [`ErrorKind::TooLarge`] for a `FixedSizeBinary` larger than
@@ -182,7 +182,10 @@ impl ReadPlan {
         let arrow = ArrowType::new(arrow)?;
         let value = arrow.values();
         let is_text = matches!(pg, PgType::Text | PgType::Varchar(_));
-        let is_bytes = matches!(value, Plain::Binary | Plain::LargeBinary);
+        let is_bytes = matches!(
+            value,
+            Plain::Binary | Plain::LargeBinary | Plain::BinaryView
+        );
         let unit = match options.unit {
             None => None,
             Some(Unit::Days) => {
@@ -281,7 +284,11 @@ impl ReadPlan {
                 };
                 (Conv::Count(Count::time(per_second)), Failures::OUT_OF_RANGE)
             }
-            (Plain::Utf8 | Plain::LargeUtf8, None, PgType::Text | PgType::Varchar(_)) => {
+            (
+                Plain::Utf8 | Plain::LargeUtf8 | Plain::Utf8View,
+                None,
+                PgType::Text | PgType::Varchar(_),
+            ) => {
                 let chars = varchar_chars(pg);
                 let mut failures = Failures::ZERO_BYTE | Failures::TOO_LARGE;
                 if chars.is_some() {
@@ -296,10 +303,14 @@ impl ReadPlan {
                     failures,
                 )
             }
-            (Plain::Binary | Plain::LargeBinary, None, PgType::Bytea) => {
+            (Plain::Binary | Plain::LargeBinary | Plain::BinaryView, None, PgType::Bytea) => {
                 (Conv::Bytea, Failures::TOO_LARGE)
             }
-            (Plain::Binary | Plain::LargeBinary, None, PgType::Text | PgType::Varchar(_)) => {
+            (
+                Plain::Binary | Plain::LargeBinary | Plain::BinaryView,
+                None,
+                PgType::Text | PgType::Varchar(_),
+            ) => {
                 let chars = varchar_chars(pg);
                 match options.text {
                     None => {
@@ -452,8 +463,12 @@ impl ReadPlan {
     /// that asks for a slot past the column; offsets that go back or past
     /// their bytes, of a slot asked, `NULL` or not, or of a dictionary's
     /// value that a slot asked and not `NULL` refers to, as Arrow's format
-    /// wants the offsets of every slot to hold; and an index of a
-    /// dictionary outside it in a slot asked that is not `NULL`.
+    /// wants the offsets of every slot to hold; views fewer than the
+    /// column's slots, and a view whose buffer is past the buffers or
+    /// whose bytes run past its buffer, of a slot asked that is not
+    /// `NULL`, or of a dictionary's value not `NULL` that such a slot
+    /// refers to, since a `NULL` slot may hold any view; and an index of
+    /// a dictionary outside it in a slot asked that is not `NULL`.
     ///
     /// A failure the plan names, with the slot of the first slot asked
     /// that fails; the slots asked before it have their representations
@@ -503,8 +518,12 @@ impl ReadPlan {
                 check_column(column, plain)?;
                 if let Some(range) = bytes_of(column) {
                     // Arrow's format wants the offsets of every slot,
-                    // NULL or not, to hold.
-                    each_slot(asked, None, len, |slot| {
+                    // NULL or not, to hold; a NULL slot may hold any view.
+                    let nulls = match range {
+                        ByteRange::Views(..) => column.nulls,
+                        _ => None,
+                    };
+                    each_slot(asked, nulls, len, |slot| {
                         if range.slot(slot).is_some() {
                             Ok(())
                         } else {
@@ -531,8 +550,10 @@ impl ReadPlan {
                 }
                 check_column(values, value)?;
                 let range = bytes_of(values);
+                let views = matches!(range, Some(ByteRange::Views(..)));
                 each_slot(asked, *nulls, *len, |slot| match keys.get(slot) {
                     Some(index) if index < values.len => match &range {
+                        Some(_) if views && values.nulls.is_some_and(|n| !n.get(index)) => Ok(()),
                         Some(range) if range.slot(index).is_none() => broken(
                             "offsets of a dictionary's value that go back or past their bytes",
                         ),
@@ -708,12 +729,13 @@ impl ReadPlan {
                 _ => f64::from(v[index]).to_bits(),
             }),
             Values::Float64(v) => Ok(v[index].to_bits()),
-            Values::Bytes { .. } | Values::LargeBytes { .. } | Values::FixedBytes { .. } => {
-                Err(Error::new(
-                    ErrorKind::BrokenShape,
-                    "a column of another type than the plan's",
-                ))
-            }
+            Values::Bytes { .. }
+            | Values::LargeBytes { .. }
+            | Values::Views { .. }
+            | Values::FixedBytes { .. } => Err(Error::new(
+                ErrorKind::BrokenShape,
+                "a column of another type than the plan's",
+            )),
         }
     }
 
@@ -821,6 +843,9 @@ fn check_column(column: &Column<'_>, plain: Plain) -> Result<()> {
         (Values::LargeBytes { offsets, .. }, Plain::LargeUtf8 | Plain::LargeBinary) => {
             offsets.len() > len || (len == 0 && offsets.is_empty())
         }
+        (Values::Views { views, .. }, Plain::Utf8View | Plain::BinaryView) => {
+            len.checked_mul(VIEW).is_some_and(|n| views.len() >= n)
+        }
         (Values::FixedBytes { size, data }, Plain::FixedSizeBinary(plan_size)) => {
             size == plan_size && size.checked_mul(len).is_some_and(|n| data.len() >= n)
         }
@@ -833,11 +858,24 @@ fn check_column(column: &Column<'_>, plain: Plain) -> Result<()> {
     }
 }
 
+/// The bytes of a view.
+const VIEW: usize = 16;
+
+/// The most bytes of a value that lies in its view.
+const INLINE: usize = 12;
+
 /// The bytes of a column of strings or bytes, by slot.
 enum ByteRange<'a> {
     Small(&'a [i32], &'a [u8]),
     Large(&'a [i64], &'a [u8]),
+    Views(&'a [u8], &'a [&'a [u8]]),
     Fixed(usize, &'a [u8]),
+}
+
+/// The integer of 4 little-endian bytes of a view from `at`.
+fn view_word(view: &[u8], at: usize) -> Option<usize> {
+    let bytes = view.get(at..at + 4)?.try_into().ok()?;
+    usize::try_from(u32::from_le_bytes(bytes)).ok()
 }
 
 impl<'a> ByteRange<'a> {
@@ -855,6 +893,20 @@ impl<'a> ByteRange<'a> {
                 usize::try_from(*offsets.get(slot + 1)?).ok()?,
                 data,
             ),
+            ByteRange::Views(views, buffers) => {
+                let at = slot.checked_mul(VIEW)?;
+                let view = views.get(at..at.checked_add(VIEW)?)?;
+                let length = view_word(view, 0)?;
+                if length <= INLINE {
+                    return view.get(4..4 + length);
+                }
+                let start = view_word(view, 12)?;
+                (
+                    start,
+                    start.checked_add(length)?,
+                    *buffers.get(view_word(view, 8)?)?,
+                )
+            }
             ByteRange::Fixed(size, data) => {
                 let start = slot.checked_mul(size)?;
                 (start, start.checked_add(size)?, data)
@@ -872,6 +924,7 @@ fn bytes_of<'a>(column: &Column<'a>) -> Option<ByteRange<'a>> {
     match column.values {
         Values::Bytes { offsets, data } => Some(ByteRange::Small(offsets, data)),
         Values::LargeBytes { offsets, data } => Some(ByteRange::Large(offsets, data)),
+        Values::Views { views, buffers } => Some(ByteRange::Views(views, buffers)),
         Values::FixedBytes { size, data } => Some(ByteRange::Fixed(size, data)),
         _ => None,
     }

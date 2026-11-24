@@ -86,6 +86,7 @@ pub const fn datum_arrow::PgType::oid(self) -> u32
 pub const fn datum_arrow::PgType::typmod(self) -> i32
 pub enum datum_arrow::Plain
 pub datum_arrow::Plain::Binary
+pub datum_arrow::Plain::BinaryView
 pub datum_arrow::Plain::Boolean
 pub datum_arrow::Plain::Date32
 pub datum_arrow::Plain::FixedSizeBinary(usize)
@@ -104,6 +105,7 @@ pub datum_arrow::Plain::UInt16
 pub datum_arrow::Plain::UInt32
 pub datum_arrow::Plain::UInt8
 pub datum_arrow::Plain::Utf8
+pub datum_arrow::Plain::Utf8View
 pub enum datum_arrow::RangeAnswer
 pub datum_arrow::RangeAnswer::EveryValue
 pub datum_arrow::RangeAnswer::NoValue
@@ -157,6 +159,9 @@ pub datum_arrow::Values::LargeBytes::offsets: &'a [i64]
 pub datum_arrow::Values::UInt16(&'a [u16])
 pub datum_arrow::Values::UInt32(&'a [u32])
 pub datum_arrow::Values::UInt8(&'a [u8])
+pub datum_arrow::Values::Views
+pub datum_arrow::Values::Views::buffers: &'a [&'a [u8]]
+pub datum_arrow::Values::Views::views: &'a [u8]
 pub enum datum_arrow::WriteInput<'a>
 pub datum_arrow::WriteInput::Bytes
 pub datum_arrow::WriteInput::Bytes::len: usize

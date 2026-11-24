@@ -3,8 +3,8 @@
 //!
 //! A column is given as Arrow's buffers hold it, each slice starting at
 //! the column's first slot: a slice of the values of a fixed width, the
-//! offsets and the bytes of strings, or the bits of booleans from their
-//! bit offset. Its [`Bitmap`] of `NULL` values, where it has one, starts
+//! offsets and the bytes of strings or their views, or the bits of
+//! booleans from their bit offset. Its [`Bitmap`] of `NULL` values, where it has one, starts
 //! at its own bit offset. The slots a call asks for are a mask of 64-bit
 //! words, bit `i % 64` of word `i / 64` for slot `i`.
 
@@ -72,7 +72,8 @@ impl<'a> Bitmap<'a> {
 /// A `Date32` column gives its days as [`Values::Int32`], and a
 /// `Timestamp` column its counts as [`Values::Int64`]. Strings and bytes
 /// give `len + 1` offsets into their bytes: slot `i`'s bytes are
-/// `data[offsets[i]..offsets[i + 1]]`.
+/// `data[offsets[i]..offsets[i + 1]]`; or, for `Utf8View` and
+/// `BinaryView`, a view a slot ([`Values::Views`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Values<'a> {
     /// `Boolean`: a bit a value.
@@ -108,6 +109,34 @@ pub enum Values<'a> {
         offsets: &'a [i64],
         /// The bytes.
         data: &'a [u8],
+    },
+    /// `Utf8View` and `BinaryView`: a view of 16 bytes a slot, and the
+    /// buffers a long value's view points into.
+    ///
+    /// A view is laid out as Arrow's format lays it out, each of its
+    /// integers of 4 bytes little-endian. A value of up to 12 bytes lies
+    /// in its view; a longer one in a buffer, from an offset:
+    ///
+    /// ```text
+    ///  0          4                                  16
+    ///  ┌──────────┬───────────────────────────────────┐
+    ///  │ length   │ the value, up to 12 bytes         │  length <= 12
+    ///  └──────────┴───────────────────────────────────┘
+    ///  ┌──────────┬───────────┬───────────┬───────────┐
+    ///  │ length   │ prefix    │ buffer    │ offset    │  length > 12
+    ///  └──────────┴───────────┴───────────┴───────────┘
+    ///  0          4           8           12          16
+    /// ```
+    ///
+    /// A long value's bytes are `buffers[buffer][offset..offset +
+    /// length]`. The prefix, the value's first 4 bytes, is not read, nor
+    /// are the bytes of a short view past its value. A slot that is
+    /// `NULL` may hold any view.
+    Views {
+        /// The views, 16 bytes a slot, `16 * len` of them at least.
+        views: &'a [u8],
+        /// The buffers, by their index in a view.
+        buffers: &'a [&'a [u8]],
     },
     /// `FixedSizeBinary`: `size` bytes a slot.
     FixedBytes {

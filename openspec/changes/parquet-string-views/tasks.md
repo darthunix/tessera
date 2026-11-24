@@ -22,7 +22,7 @@ the commit before it.
 
 ## 2. `datum-arrow` reads views
 
-- [ ] 2.1 `crates/datum-arrow`: `Utf8View` and `BinaryView` in
+- [x] 2.1 `crates/datum-arrow`: `Utf8View` and `BinaryView` in
       `ArrowType`, a variant of `Values` for a view array, its views
       and its buffers, with the drawing of a view; the read plans of
       the pairs of `LargeUtf8` and `LargeBinary`; every long view
