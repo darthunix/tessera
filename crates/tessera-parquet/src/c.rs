@@ -111,11 +111,11 @@ pub struct ReaderHandle {
     /// rule, as one read of the whole array found, and none is `NULL`:
     /// unknown before a window names it.
     dictionary_passes: Option<bool>,
-    /// Whether the last window, a plain one, passed its one pass: unknown
-    /// before a window is asked, and again after each read.
+    /// Whether the last window, a plain one, passed its check value by
+    /// value: unknown before a window is asked, and again after each read.
     window_passes: Option<bool>,
     /// The values of dictionaries checked whole and the plain windows
-    /// checked in one pass, which the tests read.
+    /// checked, once a window, which the tests read.
     values_checked: usize,
     windows_checked: usize,
     /// The mask of the `NULL` rows of the last ask of

@@ -13,6 +13,19 @@ fn views(values: &[Option<Vec<u8>>]) -> BinaryViewArray {
     values.iter().map(Option::as_deref).collect()
 }
 
+#[test]
+fn ranges_of_slots_that_hold_and_do_not() {
+    let offsets = [0i64, 2, 2, 5];
+    assert_eq!(slot_range(&offsets, 5, 0), Some((0, 2)));
+    assert_eq!(slot_range(&offsets, 5, 1), Some((2, 0)));
+    assert_eq!(slot_range(&offsets, 5, 2), Some((2, 3)));
+    assert_eq!(slot_range(&offsets, 5, 3), None, "past the offsets");
+    assert_eq!(slot_range(&offsets, 4, 2), None, "past the buffer");
+    assert_eq!(slot_range(&[3, 1], 5, 0), None, "going back");
+    assert_eq!(slot_range(&[-1, 1], 5, 0), None, "below 0");
+    assert_eq!(slot_range(&[0, 1], 5, usize::MAX), None);
+}
+
 /// Each value of a view array checked by itself: halves of a character in
 /// two values fail, a zero byte fails in a short value and in a long one,
 /// and a NULL slot is not read.

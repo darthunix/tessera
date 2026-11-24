@@ -102,9 +102,10 @@ pub enum Key {
 /// the unsigned of 8 to 32; `Float32` and `Float64`; `Date32`;
 /// `Timestamp` in seconds, milliseconds and microseconds, with or
 /// without a time zone; `Utf8`, `LargeUtf8`, `Binary`, `LargeBinary`,
-/// `Utf8View`, `BinaryView`; `FixedSizeBinary` of a size of 0 or more; and a `Dictionary` of any of
-/// them whose indexes are of an integer type. Every other type, a
-/// dictionary of a dictionary among them, is refused.
+/// `Utf8View`, `BinaryView`; `FixedSizeBinary` of a size of 0 or more;
+/// and a `Dictionary` of any of them but the views, whose indexes are of
+/// an integer type. Every other type, a dictionary of a dictionary or of
+/// views among them, is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ArrowType {
     /// A plain array.
@@ -149,6 +150,9 @@ impl ArrowType {
                         ErrorKind::NotSupported,
                         "a dictionary of a dictionary",
                     ));
+                }
+                if matches!(value.as_ref(), DataType::Utf8View | DataType::BinaryView) {
+                    return Err(Error::new(ErrorKind::NotSupported, "a dictionary of views"));
                 }
                 Ok(ArrowType::Dictionary {
                     key,
@@ -331,6 +335,8 @@ mod tests {
             list,
             DataType::Struct(fields),
             dictionary(DataType::Int32, dictionary(DataType::Int32, DataType::Utf8)),
+            dictionary(DataType::Int32, DataType::Utf8View),
+            dictionary(DataType::UInt8, DataType::BinaryView),
             dictionary(DataType::Utf8, DataType::Int32),
             dictionary(DataType::Float32, DataType::Utf8),
             dictionary(DataType::Int32, DataType::UInt64),

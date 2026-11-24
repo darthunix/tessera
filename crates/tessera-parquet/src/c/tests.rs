@@ -1826,7 +1826,7 @@ proptest::proptest! {
 /// chunk, and the windows after take their rows' bytes without a check;
 /// a dictionary with a value that is not UTF-8 sends its windows to the
 /// read row by row, which fails a window only where a row asked names the
-/// value, at the first such row. A plain window is checked in one pass
+/// value, at the first such row. A plain window is checked value by value
 /// once, however many batches ask it.
 #[test]
 fn a_dictionary_checked_once_and_a_window_once() {
@@ -1895,7 +1895,7 @@ fn a_dictionary_checked_once_and_a_window_once() {
                 assert!(bytes_seen(r, &all, 20).is_ok());
             }
         }
-        assert_eq!(unsafe { (*r).windows_checked }, 2, "one pass a window");
+        assert_eq!(unsafe { (*r).windows_checked }, 2, "one check a window");
         unsafe {
             tess_parquet_reader_free(r);
             tess_parquet_column_free(col);
