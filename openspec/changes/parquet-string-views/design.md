@@ -99,9 +99,13 @@ Refused:
 ### The input of a view array in `datum-arrow`
 
 Was: `Values` holds a string column as offsets and bytes.
-Will be: a new variant holds a view array as its views, `&[u128]`, and
-its buffers, a slice of byte slices. The crate's documentation draws
-the view's layout. A long view's index of a buffer, its offset and its
+Will be: a new variant holds a view array as the bytes of its views,
+16 a view in Arrow's layout, and its buffers, a slice of byte slices.
+The crate's documentation draws the view's layout. The views are bytes,
+not `u128`s, so that a short value is a slice of its view: the crate
+has no unsafe code, and a `u128` cannot be borrowed as bytes without
+it. A view of a `NULL` slot is not read, since Arrow lets it hold
+anything. A long view's index of a buffer, its offset and its
 length are checked against the buffers given before its bytes are
 read; one that does not hold is a broken shape, `XX000`. `Utf8View`
 and `BinaryView` take the pairs and the failures of `LargeUtf8` and
@@ -247,8 +251,8 @@ rule "The reader's memory is the query's".
 - `test/sql/parquet.sql`: the scenario "A chunk that leaves its
   dictionary", against a heap table.
 - `make crosscheck`, whose Parquet twins hold strings.
-- Miri on `datum-arrow`'s and the reader's tests of views, as for the
-  bytes form today.
+- Miri on the reader's tests of the bytes form over views, as on its
+  tests of the bytes form today; `datum-arrow` has no unsafe code.
 
 ## Measurement plan
 

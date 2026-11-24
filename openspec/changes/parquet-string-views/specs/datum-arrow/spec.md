@@ -18,7 +18,9 @@ shapes in [`ReadPlan::read`](../../../crates/datum-arrow/src/read.rs).
   `varchar(10)`
 - **THEN** each is accepted and names the failures of its twin of
   `LargeBinary` or `LargeUtf8`
-- **Verified by:** pending
+- **Verified by:**
+  `crates/datum-arrow/src/read/tests.rs::pairs_of_views`;
+  `crates/datum-arrow/src/arrow.rs::every_plain_type_taken`
 
 #### Scenario: Views read as their twins
 - **WHEN** columns of views are read: values of 0, 1, 12 and 13 bytes
@@ -30,7 +32,10 @@ shapes in [`ReadPlan::read`](../../../crates/datum-arrow/src/read.rs).
   slot, that the same values give from `LargeBinary` and `LargeUtf8`
   under the same plan, and the `NULL` slots and the slots not asked for
   fail in nothing
-- **Verified by:** pending
+- **Verified by:**
+  `crates/datum-arrow/src/read/tests.rs::views_read_as_their_twins`;
+  `crates/datum-arrow/src/read/tests.rs::views_of_arrow_s_own_array`;
+  `crates/datum-arrow/src/read/tests.rs::no_panic_on_any_input`
 
 #### Scenario: Views of a broken shape
 - **WHEN** a read is called over views fewer than the column's slots,
@@ -38,4 +43,5 @@ shapes in [`ReadPlan::read`](../../../crates/datum-arrow/src/read.rs).
   whose bytes run past the end of its buffer
 - **THEN** each call gives `XX000`, its output unchanged, and none
   panics
-- **Verified by:** pending
+- **Verified by:**
+  `crates/datum-arrow/src/read/tests.rs::views_of_a_broken_shape`

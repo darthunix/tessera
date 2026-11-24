@@ -1745,6 +1745,8 @@ fn every_arrow_type() -> Vec<DataType> {
         D::LargeUtf8,
         D::Binary,
         D::LargeBinary,
+        D::Utf8View,
+        D::BinaryView,
         D::FixedSizeBinary(3),
     ];
     for unit in [
@@ -1789,6 +1791,7 @@ struct AnyColumn {
     offsets: Vec<i32>,
     large_offsets: Vec<i64>,
     data: Vec<u8>,
+    views: Vec<u8>,
     plain: Plain,
 }
 
@@ -1815,6 +1818,12 @@ impl AnyColumn {
             data.extend_from_slice(&word.to_le_bytes()[..len]);
             offsets.push(i32::try_from(data.len()).unwrap());
         }
+        // The same strings by views, each in its view.
+        let strings: Vec<&[u8]> = offsets
+            .windows(2)
+            .map(|w| &data[w[0] as usize..w[1] as usize])
+            .collect();
+        let views = views_of(&strings, 0, &mut Vec::new());
         if let Plain::FixedSizeBinary(size) = plain {
             data = bits
                 .iter()
@@ -1825,6 +1834,7 @@ impl AnyColumn {
         AnyColumn {
             dense: width.map(|width| Owned::of(width, bits)),
             large_offsets: offsets.iter().map(|&o| i64::from(o)).collect(),
+            views,
             offsets,
             data,
             plain,
@@ -1845,6 +1855,10 @@ impl AnyColumn {
             (None, Plain::FixedSizeBinary(size)) => Values::FixedBytes {
                 size,
                 data: &self.data,
+            },
+            (None, Plain::Utf8View | Plain::BinaryView) => Values::Views {
+                views: &self.views,
+                buffers: &[],
             },
             (None, plain) => unreachable!("{plain:?}"),
         }
@@ -1941,7 +1955,7 @@ proptest! {
             }
         }
         // Every pair the plan's table lists, by every option that applies.
-        prop_assert_eq!(accepted, 196);
+        prop_assert_eq!(accepted, 216);
         for pg in every_pg_type() {
             for server_utf8 in [true, false] {
                 let text = matches!(pg, PgType::Text | PgType::Varchar(_));
@@ -1976,4 +1990,215 @@ proptest! {
             }
         }
     }
+}
+
+/// The views of `strings` in Arrow's layout: a string of up to 12 bytes
+/// in its view, a longer one appended to `buffer`, the buffer of index
+/// `index`.
+fn views_of(strings: &[&[u8]], index: u32, buffer: &mut Vec<u8>) -> Vec<u8> {
+    let mut views = Vec::with_capacity(16 * strings.len());
+    for string in strings {
+        let mut view = [0u8; 16];
+        view[..4].copy_from_slice(&u32::try_from(string.len()).unwrap().to_le_bytes());
+        if string.len() <= 12 {
+            view[4..4 + string.len()].copy_from_slice(string);
+        } else {
+            view[4..8].copy_from_slice(&string[..4]);
+            view[8..12].copy_from_slice(&index.to_le_bytes());
+            view[12..].copy_from_slice(&u32::try_from(buffer.len()).unwrap().to_le_bytes());
+            buffer.extend_from_slice(string);
+        }
+        views.extend_from_slice(&view);
+    }
+    views
+}
+
+/// A view pointing past every buffer, as a `NULL` slot may hold.
+const WILD_VIEW: [u8; 16] = [100, 0, 0, 0, 1, 2, 3, 4, 9, 0, 0, 0, 255, 255, 255, 255];
+
+#[test]
+fn pairs_of_views() {
+    let text = [PgType::Text, PgType::Varchar(None), varchar(10)];
+    for (view, twin) in [
+        (DataType::Utf8View, DataType::LargeUtf8),
+        (DataType::BinaryView, DataType::LargeBinary),
+    ] {
+        let mut pairs: Vec<(PgType, ReadOptions)> = text.iter().map(|&pg| (pg, OPTIONS)).collect();
+        if view == DataType::BinaryView {
+            pairs = text
+                .iter()
+                .map(|&pg| (pg, with_text(TextBytes::Checked)))
+                .collect();
+            pairs.push((PgType::Bytea, OPTIONS));
+            pairs.push((PgType::Text, with_text(TextBytes::Trusted)));
+            pairs.push((PgType::Varchar(None), with_text(TextBytes::Trusted)));
+        }
+        for (pg, options) in pairs {
+            let of_view = plan(&view, pg, options);
+            assert_eq!(
+                of_view.failures(),
+                plan(&twin, pg, options).failures(),
+                "{view:?} into {pg:?}"
+            );
+            assert!(!of_view.gives_datums());
+        }
+    }
+    assert_eq!(
+        refusal(
+            &DataType::BinaryView,
+            varchar(3),
+            with_text(TextBytes::Trusted)
+        ),
+        ErrorKind::TypeMismatch
+    );
+    assert_eq!(
+        refusal(&DataType::Utf8View, PgType::Int4, OPTIONS),
+        ErrorKind::TypeMismatch
+    );
+}
+
+/// A string of the tests of views: lengths about the 12 bytes a view
+/// holds, bytes that are not UTF-8 and zero bytes among them.
+fn view_string() -> impl Strategy<Value = Vec<u8>> {
+    prop_oneof![
+        prop::collection::vec(any::<u8>(), 0..30),
+        prop::collection::vec(b'a'..=b'z', 0..30),
+        (11usize..15).prop_map(|n| "é".repeat(n).into_bytes()[..n].to_vec()),
+        Just(Vec::new()),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Views over two buffers read as the same strings of `LargeBinary`
+    /// and `LargeUtf8` under every plan of strings: the same bytes, the
+    /// same NULL slots and the same failure at the same slot, whatever
+    /// the views of the NULL slots hold.
+    #[test]
+    fn views_read_as_their_twins(
+        strings in prop::collection::vec(view_string(), 1..100),
+        valid in prop::collection::vec(any::<u8>(), 13),
+        asked_bits in prop::collection::vec(any::<u64>(), 2),
+    ) {
+        let len = strings.len();
+        let refs: Vec<&[u8]> = strings.iter().map(Vec::as_slice).collect();
+        let bitmap = Bitmap::new(&valid, 0);
+        let (half, rest) = refs.split_at(len / 2);
+        let (mut first, mut second) = (Vec::new(), Vec::new());
+        let mut views = views_of(half, 0, &mut first);
+        views.extend(views_of(rest, 1, &mut second));
+        for slot in 0..len {
+            if !bitmap.get(slot) {
+                views[16 * slot..16 * slot + 16].copy_from_slice(&WILD_VIEW);
+            }
+        }
+        let buffers: [&[u8]; 2] = [&first, &second];
+        let (offs, data) = offsets(&refs);
+        let large: Vec<i64> = offs.iter().map(|&o| i64::from(o)).collect();
+        let column = |values| Input::Plain(Column { len, values, nulls: Some(bitmap) });
+        let view_input = column(Values::Views { views: &views, buffers: &buffers });
+        let twin_input = column(Values::LargeBytes { offsets: &large, data: &data });
+        let mut asked: Vec<u64> = asked_bits[..mask_words(len)].to_vec();
+        if len % 64 != 0 {
+            *asked.last_mut().unwrap() &= (1 << (len % 64)) - 1;
+        }
+        for (view, twin, pg, options) in [
+            (DataType::BinaryView, DataType::LargeBinary, PgType::Bytea, OPTIONS),
+            (DataType::BinaryView, DataType::LargeBinary, PgType::Text, with_text(TextBytes::Checked)),
+            (DataType::BinaryView, DataType::LargeBinary, varchar(3), with_text(TextBytes::Checked)),
+            (DataType::BinaryView, DataType::LargeBinary, PgType::Text, with_text(TextBytes::Trusted)),
+            (DataType::Utf8View, DataType::LargeUtf8, PgType::Text, OPTIONS),
+            (DataType::Utf8View, DataType::LargeUtf8, varchar(3), OPTIONS),
+        ] {
+            let got = bytes(&plan(&view, pg, options), &view_input, &asked);
+            let want = bytes(&plan(&twin, pg, options), &twin_input, &asked);
+            match (got, want) {
+                (Ok(got), Ok(want)) => prop_assert_eq!(got, want),
+                (Err(got), Err(want)) => {
+                    prop_assert_eq!(got.kind(), want.kind());
+                    prop_assert_eq!(got.slot(), want.slot());
+                }
+                (got, want) => prop_assert!(false, "{:?} against {:?}", got, want),
+            }
+        }
+    }
+}
+
+/// Views of Arrow's own array, built by `arrow-array`, read as its
+/// strings: the crate's layout of a view is Arrow's.
+#[test]
+fn views_of_arrow_s_own_array() {
+    use arrow_array::Array;
+    let strings: Vec<Option<&[u8]>> = vec![
+        Some(b""),
+        Some(b"twelve bytes"),
+        None,
+        Some(b"thirteen byte"),
+        Some(b"a value longer than any view holds"),
+    ];
+    let array = arrow_array::BinaryViewArray::from_iter(strings.iter().copied());
+    let buffers: Vec<&[u8]> = array.data_buffers().iter().map(|b| b.as_slice()).collect();
+    let validity = array.nulls().unwrap().buffer().as_slice();
+    let input = Input::Plain(Column {
+        len: array.len(),
+        values: Values::Views {
+            views: array.views().inner().as_slice(),
+            buffers: &buffers,
+        },
+        nulls: Some(Bitmap::new(validity, 0)),
+    });
+    let read = plan(&DataType::BinaryView, PgType::Bytea, OPTIONS);
+    let (values, nulls) = bytes(&read, &input, &every(strings.len())).unwrap();
+    assert_eq!(nulls, vec![0b100]);
+    for (slot, string) in strings.iter().enumerate() {
+        if let Some(string) = string {
+            assert_eq!(values[slot], *string, "slot {slot}");
+        }
+    }
+}
+
+#[test]
+fn views_of_a_broken_shape() {
+    let strings: [&[u8]; 3] = [b"short", b"a long value of bytes", b"another long value"];
+    let mut buffer = Vec::new();
+    let views = views_of(&strings, 0, &mut buffer);
+    let read = plan(&DataType::BinaryView, PgType::Bytea, OPTIONS);
+    let broken = |views: &[u8], buffers: &[&[u8]]| {
+        let input = Input::Plain(Column {
+            len: 3,
+            values: Values::Views { views, buffers },
+            nulls: None,
+        });
+        let mut values: Vec<&[u8]> = vec![b"kept"; 3];
+        let mut nulls = vec![7u64];
+        let error = read
+            .read(
+                &input,
+                &every(3),
+                &mut ReadOutput::Bytes {
+                    values: &mut values,
+                    nulls: &mut nulls,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::BrokenShape);
+        assert_eq!((values, nulls), (vec![&b"kept"[..]; 3], vec![7u64]));
+    };
+    broken(&views[..47], &[&buffer]);
+    broken(&views, &[]);
+    broken(&views, &[&buffer[..buffer.len() - 1]]);
+    let mut past = views.clone();
+    past[24..28].copy_from_slice(&1u32.to_le_bytes());
+    broken(&past, &[&buffer]);
+    // The same views read whole.
+    let input = Input::Plain(Column {
+        len: 3,
+        values: Values::Views {
+            views: &views,
+            buffers: &[&buffer],
+        },
+        nulls: None,
+    });
+    assert_eq!(bytes(&read, &input, &every(3)).unwrap().0, strings.to_vec());
 }

@@ -65,6 +65,12 @@ pub enum Plain {
     Binary,
     /// `LargeBinary`, bytes with 64-bit offsets.
     LargeBinary,
+    /// `Utf8View`, strings by views of 16 bytes
+    /// ([`Values::Views`](crate::Values::Views)).
+    Utf8View,
+    /// `BinaryView`, bytes by views of 16 bytes
+    /// ([`Values::Views`](crate::Values::Views)).
+    BinaryView,
     /// `FixedSizeBinary`, of a size of 0 bytes or more.
     FixedSizeBinary(usize),
 }
@@ -95,8 +101,8 @@ pub enum Key {
 /// The crate takes `Boolean`; the signed integers of 8 to 64 bits and
 /// the unsigned of 8 to 32; `Float32` and `Float64`; `Date32`;
 /// `Timestamp` in seconds, milliseconds and microseconds, with or
-/// without a time zone; `Utf8`, `LargeUtf8`, `Binary`, `LargeBinary`;
-/// `FixedSizeBinary` of a size of 0 or more; and a `Dictionary` of any of
+/// without a time zone; `Utf8`, `LargeUtf8`, `Binary`, `LargeBinary`,
+/// `Utf8View`, `BinaryView`; `FixedSizeBinary` of a size of 0 or more; and a `Dictionary` of any of
 /// them whose indexes are of an integer type. Every other type, a
 /// dictionary of a dictionary among them, is refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -195,6 +201,8 @@ fn plain(data_type: &DataType) -> Result<Plain> {
         DataType::LargeUtf8 => Plain::LargeUtf8,
         DataType::Binary => Plain::Binary,
         DataType::LargeBinary => Plain::LargeBinary,
+        DataType::Utf8View => Plain::Utf8View,
+        DataType::BinaryView => Plain::BinaryView,
         DataType::FixedSizeBinary(size) => match usize::try_from(*size) {
             Ok(size) => Plain::FixedSizeBinary(size),
             Err(_) => return not_supported(),
@@ -237,6 +245,8 @@ mod tests {
             (DataType::LargeUtf8, Plain::LargeUtf8),
             (DataType::Binary, Plain::Binary),
             (DataType::LargeBinary, Plain::LargeBinary),
+            (DataType::Utf8View, Plain::Utf8View),
+            (DataType::BinaryView, Plain::BinaryView),
             (DataType::FixedSizeBinary(0), Plain::FixedSizeBinary(0)),
             (DataType::FixedSizeBinary(16), Plain::FixedSizeBinary(16)),
         ];
@@ -317,8 +327,6 @@ mod tests {
             DataType::Decimal128(10, 2),
             DataType::Date64,
             DataType::Null,
-            DataType::Utf8View,
-            DataType::BinaryView,
             DataType::FixedSizeBinary(-1),
             list,
             DataType::Struct(fields),
