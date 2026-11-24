@@ -396,6 +396,13 @@ value detoasted and the other side's made from its bytes.
   starts, lengths, non_nulls, rest, status)`: the bounds of `substring`,
   `left`, `right` and the trims, which the caller copies; a substring of
   negative length fails with 22011 at the first row without NULL.
+- `tess_text_sort_words(column, rows, words, non_nulls, rest, status)`:
+  a string's sort word, its first eight bytes as a big-endian integer,
+  padded with zero bytes, its top bit flipped, so that words compare as
+  signed integers as the strings' starts do as unsigned bytes; equal
+  words order by the bytes after the eighth and then by length. A proof
+  by Kani shows that order is the strings' unsigned bytes', for strings
+  of up to 16 bytes (`text/proofs.rs`).
 
 ## Proofs by Kani
 

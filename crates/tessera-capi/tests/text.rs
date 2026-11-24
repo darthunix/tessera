@@ -16,7 +16,7 @@ use std::ptr::{self, NonNull};
 use proptest::prelude::*;
 use tessera_capi::c::{
     BytesColumn, Code, DatumColumn, Mask, Status, TextArg, tess_text_compare, tess_text_lengths,
-    tess_text_like, tess_text_pieces, tess_text_starts_with,
+    tess_text_like, tess_text_pieces, tess_text_sort_words, tess_text_starts_with,
 };
 use tessera_testing::{property, words};
 
@@ -268,6 +268,11 @@ fn lengths_and_pieces_by_characters() {
     };
     assert_eq!(code, Code::Ok, "{}", status.message());
     assert_eq!((lengths[0], present[0], rest[0]), (5, 0b11, 0b10));
+    // A compressed value's sort word is left to the caller, in the rest.
+    let worded = sort_words(&source, &Rows::of(&[true, true]));
+    assert_eq!(worded.code, Code::Ok, "{}", worded.message);
+    assert_eq!((worded.masks[0][0], worded.masks[1][0]), (0b11, 0b10));
+    assert_eq!(worded.words[1], UNTOUCHED_WORD);
     let (mut starts, mut sizes) = ([0_i32; 2], [0_i32; 2]);
     // SAFETY: as above.
     let code = unsafe {
@@ -424,6 +429,7 @@ struct Outcome {
     message: String,
     masks: Vec<Vec<u64>>,
     slots: Vec<Vec<i32>>,
+    words: Vec<i64>,
 }
 
 /// A slot of a row not selected before a call, which it must keep.
@@ -473,6 +479,7 @@ fn compare(equal: bool, bpchar: bool, left: &TextArg, right: &TextArg, rows: &Ro
         message: status.message(),
         masks: vec![kept, rest],
         slots: Vec::new(),
+        words: Vec::new(),
     }
 }
 
@@ -498,6 +505,7 @@ fn starts_with(column: &TextArg, prefix: &[u8], rows: &Rows) -> Outcome {
         message: status.message(),
         masks: vec![kept, rest],
         slots: Vec::new(),
+        words: Vec::new(),
     }
 }
 
@@ -526,6 +534,7 @@ fn like(column: &TextArg, pattern: &[u8], negate: bool, rows: &Rows) -> Outcome 
         message: status.message(),
         masks: vec![kept, rest, vec![u64::from(simple)]],
         slots: Vec::new(),
+        words: Vec::new(),
     }
 }
 
@@ -554,6 +563,7 @@ fn lengths(length: i32, chars: i32, column: &TextArg, rows: &Rows) -> Outcome {
         message: status.message(),
         masks: vec![present, rest],
         slots: vec![values],
+        words: Vec::new(),
     }
 }
 
@@ -596,6 +606,7 @@ fn pieces(
             message: status.message(),
             masks: Vec::new(),
             slots: Vec::new(),
+            words: Vec::new(),
         };
     }
     Outcome {
@@ -604,17 +615,54 @@ fn pieces(
         message: status.message(),
         masks: vec![present, rest],
         slots: vec![starts, sizes],
+        words: Vec::new(),
+    }
+}
+
+/// A word of a row not selected before a call, which it must keep.
+const UNTOUCHED_WORD: i64 = i64::MIN + 7;
+
+fn sort_words(column: &TextArg, rows: &Rows) -> Outcome {
+    let full = rows.full();
+    let (nrows, rows) = (rows.nrows, &rows.words[..]);
+    let mut words = vec![UNTOUCHED_WORD; nrows];
+    let (mut present, mut rest) = (full.clone(), full.clone());
+    let mut status = Status::new();
+    // SAFETY: local arguments, masks, slots and status.
+    let code = unsafe {
+        tess_text_sort_words(
+            column,
+            &mask(nrows, &mut rows.to_vec()),
+            words.as_mut_ptr(),
+            &mut mask(nrows, &mut present),
+            &mut mask(nrows, &mut rest),
+            &raw mut status,
+        )
+    };
+    Outcome {
+        code,
+        sqlstate: status.sqlstate(),
+        message: status.message(),
+        masks: vec![present, rest],
+        slots: Vec::new(),
+        words,
     }
 }
 
 /// Whether every slot of a row not selected kept its value.
 fn untouched(outcome: &Outcome, selected: &[bool]) -> bool {
-    outcome.slots.iter().all(|slots| {
-        slots
-            .iter()
-            .zip(selected)
-            .all(|(&slot, &asked)| asked || slot == UNTOUCHED)
-    })
+    let words = outcome
+        .words
+        .iter()
+        .zip(selected)
+        .all(|(&word, &asked)| asked || word == UNTOUCHED_WORD);
+    words
+        && outcome.slots.iter().all(|slots| {
+            slots
+                .iter()
+                .zip(selected)
+                .all(|(&slot, &asked)| asked || slot == UNTOUCHED)
+        })
 }
 
 fn concat(pieces: Vec<&'static str>) -> Vec<u8> {
@@ -768,6 +816,11 @@ fn every_function_reads_both_forms_alike() {
                 )?;
             }
         }
+        same(
+            "sort words",
+            sort_words(&column(false), &rows),
+            sort_words(&column(true), &rows),
+        )?;
         for piece in 0..6 {
             for has_second in [false, true] {
                 for chars in 0..2 {
@@ -860,6 +913,24 @@ fn a_bytes_column_s_rows_not_selected_are_never_read() {
             })
         );
     }
+    // The sort words: the strings' starts, the NULL row and the rows not
+    // selected left.
+    let worded = sort_words(&column, &rows);
+    assert_eq!(worded.code, Code::Ok, "{}", worded.message);
+    assert!(untouched(&worded, &selected));
+    let word = |bytes: &[u8]| {
+        let mut first = [0_u8; 8];
+        first[..bytes.len().min(8)].copy_from_slice(&bytes[..bytes.len().min(8)]);
+        (u64::from_be_bytes(first) ^ (1 << 63)) as i64
+    };
+    assert_eq!(
+        [1, 70, 129].map(|row| worded.words[row]),
+        [word("héllo".as_bytes()), word(b""), word(b"ab  ")]
+    );
+    assert_eq!(
+        worded.words[64], UNTOUCHED_WORD,
+        "a NULL row's word is not written"
+    );
     let mut scalars = Strings(Vec::new());
     let scalar = TextArg {
         column: ptr::null(),

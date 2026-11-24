@@ -136,4 +136,20 @@ extern TessStatusCode tess_text_pieces(TessTextPiece piece,
 									   TessRowMask *rest,
 									   TessStatus *status);
 
+/*
+ * The sort words of the selected rows' strings into words: a string's
+ * first eight bytes as a big-endian integer, padded with zero bytes, its
+ * top bit flipped, so that words compare as signed integers as the
+ * strings' starts do as unsigned bytes; two strings of equal words order
+ * by their bytes after the eighth, then by length. non_nulls gets the
+ * rows without NULL, rest those of them whose string is not in place,
+ * whose words are not written.
+ */
+extern TessStatusCode tess_text_sort_words(const TessTextArg *column,
+										   const TessRowMask *rows,
+										   int64 *words,
+										   TessRowMask *non_nulls,
+										   TessRowMask *rest,
+										   TessStatus *status);
+
 #endif							/* TESSERA_TEXT_H */
