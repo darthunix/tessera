@@ -12,11 +12,13 @@
  */
 #include "postgres.h"
 
+#include "access/detoast.h"
 #include "access/parallel.h"
 #include "access/reloptions.h"
 #include "access/toast_compression.h"
 #include "access/toast_internals.h"
 #include "access/stratnum.h"
+#include "catalog/pg_collation_d.h"
 #include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_operator_d.h"
 #include "catalog/pg_type_d.h"
@@ -65,6 +67,10 @@ PG_FUNCTION_INFO_V1(tessera_test_scan_source_calls);
 PG_FUNCTION_INFO_V1(tessera_test_scan_source_listed);
 PG_FUNCTION_INFO_V1(tessera_test_scan_source_fault);
 PG_FUNCTION_INFO_V1(tessera_test_scan_source_asks);
+PG_FUNCTION_INFO_V1(tessera_test_octets);
+PG_FUNCTION_INFO_V1(tessera_test_scan_register_octets);
+PG_FUNCTION_INFO_V1(tessera_test_scan_octets_calls);
+PG_FUNCTION_INFO_V1(tessera_test_scan_call_before_bytes);
 
 #define GROUP_ROWS 64
 #define NODE_NAME "tessera_test.scan_source"
@@ -2198,6 +2204,171 @@ tessera_test_scan_source_fault(PG_FUNCTION_ARGS)
 	fault = PG_ARGISNULL(0) ? NULL :
 		MemoryContextStrdup(TopMemoryContext, text_to_cstring(PG_GETARG_TEXT_PP(0)));
 	PG_RETURN_VOID();
+}
+
+/* ---- batch functions of the bytes form ---- */
+
+/* The bytes of a text value, a row's function of the test. */
+Datum
+tessera_test_octets(PG_FUNCTION_ARGS)
+{
+	PG_RETURN_INT32(VARSIZE_ANY_EXHDR(PG_GETARG_TEXT_PP(0)));
+}
+
+/* The calls of the batch functions below, by the form each got. */
+static int64 octets_bytes_calls;
+static int64 octets_datum_calls;
+
+/*
+ * The bytes of each row of a text column, in the bytes form where the
+ * call gives it (tess_function_bytes_arg), from the Datums otherwise. A
+ * function without TESS_FUNCTION_BYTES that is given the form fails.
+ */
+static TessStatusCode
+octets_evaluate(TessFunctionCall *call)
+{
+	const TessBytesColumn *bytes = tess_function_bytes_arg(call, 0);
+	const TessDatumColumn *column = call->args[0].column;
+	int32	   *values = (int32 *) call->values;
+	int			row = -1;
+
+	if (bytes != NULL && (call->function->flags & TESS_FUNCTION_BYTES) == 0)
+		elog(ERROR, "a function without the flag got the bytes form");
+	if ((bytes == NULL) == (column == NULL))
+		elog(ERROR, "a call gives its argument in no form or in both");
+	if (bytes != NULL)
+		octets_bytes_calls++;
+	else
+		octets_datum_calls++;
+	memset(call->non_nulls->bits, 0,
+		   sizeof(uint64) * tess_row_mask_word_count(call->non_nulls->nrows));
+	while ((row = tess_row_mask_next(call->rows, row)) >= 0)
+	{
+		if (bytes != NULL ? bytes->isnull[row] : column->isnull[row])
+			continue;
+		values[row] = bytes != NULL ? (int32) bytes->lengths[row] :
+			(int32) toast_raw_datum_size(column->values[row]) - VARHDRSZ;
+		call->non_nulls->bits[row / 64] |= UINT64CONST(1) << (row % 64);
+	}
+	return TESS_OK;
+}
+
+/* Two batch implementations of tessera_test_octets: with the flag, and without. */
+static TessFunction octets_functions[2] = {
+	{
+		TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction),
+		.kind = TESS_FUNCTION_VALUE,
+		.result_format = TESS_RESULT_INT32,
+		.flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE |
+		TESS_FUNCTION_BYTES,
+		.evaluate = octets_evaluate,
+	},
+	{
+		TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction),
+		.kind = TESS_FUNCTION_VALUE,
+		.result_format = TESS_RESULT_INT32,
+		.flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE,
+		.evaluate = octets_evaluate,
+	},
+};
+
+/*
+ * Register the batch implementations for two SQL functions of
+ * tessera_test_octets: the first reads the bytes form, the second Datums.
+ */
+Datum
+tessera_test_scan_register_octets(PG_FUNCTION_ARGS)
+{
+	const TessFunctionRegistryOps *functions = tess_runtime_api()->functions;
+
+	for (int index = 0; index < 2; index++)
+	{
+		functions->remove(&octets_functions[index]);
+		octets_functions[index].funcid = PG_GETARG_OID(index);
+		functions->add(&octets_functions[index]);
+	}
+	PG_RETURN_VOID();
+}
+
+/* The calls of each form since the last call, in the calling process. */
+Datum
+tessera_test_scan_octets_calls(PG_FUNCTION_ARGS)
+{
+	char	   *calls = psprintf("bytes " INT64_FORMAT ", datums " INT64_FORMAT,
+								 octets_bytes_calls, octets_datum_calls);
+
+	octets_bytes_calls = 0;
+	octets_datum_calls = 0;
+	PG_RETURN_TEXT_P(cstring_to_text(calls));
+}
+
+/*
+ * The registered batch implementation of a function of one text argument
+ * and an int4 result, called over the strings of an array by a call
+ * allocated at the size it had before its field bytes, as a consumer
+ * built before the field allocates it: the results. The call is malloc'd,
+ * so that a sanitizer sees a read past its end.
+ */
+Datum
+tessera_test_scan_call_before_bytes(PG_FUNCTION_ARGS)
+{
+	const TessFunction *function = tess_runtime_api()->functions->find(PG_GETARG_OID(0));
+	ArrayType  *array = PG_GETARG_ARRAYTYPE_P(1);
+	Datum	   *values;
+	bool	   *isnull;
+	int			nrows;
+	int32	   *results;
+	Datum	   *out;
+	uint64		selected[2] = {0};
+	uint64		non_null_bits[2] = {0};
+	TessRowMask rows;
+	TessRowMask non_nulls;
+	TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	TessFunctionArg arg = TESS_STRUCT_INITIALIZER(TessFunctionArg);
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
+	Size		size = offsetof(TessFunctionCall, bytes);
+	void	   *memory;
+	TessStatusCode code;
+
+	if (function == NULL || function->kind != TESS_FUNCTION_VALUE ||
+		function->result_format != TESS_RESULT_INT32)
+		elog(ERROR, "no batch implementation of an int4 result");
+	deconstruct_array_builtin(array, TEXTOID, &values, &isnull, &nrows);
+	if (nrows > 128)
+		elog(ERROR, "at most 128 strings");
+	for (int row = 0; row < nrows; row++)
+		selected[row / 64] |= UINT64CONST(1) << (row % 64);
+	rows = (TessRowMask) {nrows, selected};
+	non_nulls = (TessRowMask) {nrows, non_null_bits};
+	column.values = values;
+	column.isnull = isnull;
+	column.nrows = nrows;
+	arg.column = &column;
+	results = palloc0_array(int32, Max(nrows, 1));
+	call.struct_size = size;
+	call.function = function;
+	call.nargs = 1;
+	call.args = &arg;
+	call.inputcollid = DEFAULT_COLLATION_OID;
+	call.rows = &rows;
+	call.values = results;
+	call.non_nulls = &non_nulls;
+	call.context = CurrentMemoryContext;
+	call.status = &status;
+	/* The fields before bytes, copied into memory of exactly their size. */
+	memory = malloc(size);
+	if (memory == NULL)
+		elog(ERROR, "out of memory");
+	memcpy(memory, &call, size);
+	code = function->evaluate((TessFunctionCall *) memory);
+	free(memory);
+	if (code != TESS_OK)
+		tess_status_report(&status);
+	out = palloc_array(Datum, Max(nrows, 1));
+	for (int row = 0; row < nrows; row++)
+		out[row] = Int32GetDatum(results[row]);
+	PG_RETURN_ARRAYTYPE_P(construct_array_builtin(out, nrows, INT4OID));
 }
 
 /* ---- the foreign data wrapper ---- */

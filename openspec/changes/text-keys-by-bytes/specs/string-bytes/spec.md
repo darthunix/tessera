@@ -287,13 +287,14 @@ offset size field
     16    8 bytes         a column in the bytes form, or NULL
 ```
 
-#### Scenario: A function with and without the flag
+#### Scenario: With and without the flag
 - **WHEN** a test module registers a function of a `text` argument
   with the flag and one without it, and a query calls both over the
   test source
 - **THEN** the first gets the column in the bytes form and the second
   as `Datum` values, and both give the core's results
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: string-bytes/With and without the flag`
 
 ### Requirement: String functions over bytes
 The kernels of `length`, `char_length`, `octet_length`, `LIKE`,

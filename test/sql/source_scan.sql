@@ -893,6 +893,42 @@ SELECT NOT agg_spilled('SELECT s, count(*) FROM ft_bytes_sparse GROUP BY s') AS 
 DROP FOREIGN TABLE ft_bytes_sparse;
 DROP TABLE ht_bytes_sparse;
 DROP FUNCTION agg_spilled(text);
+-- spec: string-bytes/With and without the flag
+-- Two batch implementations of one function of a text argument, the
+-- bytes of each row, the first registered with TESS_FUNCTION_BYTES and
+-- the second without, over the test source's bytes form: in an
+-- aggregate's argument and in a filter's value, the first gets the column
+-- in the bytes form and the second Datums, a call a batch each, and both
+-- give the core's results. Called at the size a call had before its field
+-- bytes, as by a consumer built before it, the first reads Datums.
+CREATE FUNCTION tessera_test_octets_bytes(text) RETURNS int4
+AS :'scan_source', 'tessera_test_octets' LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION tessera_test_octets_datums(text) RETURNS int4
+AS :'scan_source', 'tessera_test_octets' LANGUAGE C STRICT IMMUTABLE;
+CREATE FUNCTION tessera_test_scan_register_octets(regprocedure, regprocedure) RETURNS void
+AS :'scan_source', 'tessera_test_scan_register_octets' LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_scan_octets_calls() RETURNS text
+AS :'scan_source', 'tessera_test_scan_octets_calls' LANGUAGE C STRICT;
+CREATE FUNCTION tessera_test_scan_call_before_bytes(regprocedure, text[]) RETURNS int4[]
+AS :'scan_source', 'tessera_test_scan_call_before_bytes' LANGUAGE C STRICT;
+SELECT tessera_test_scan_register_octets('tessera_test_octets_bytes(text)',
+                                         'tessera_test_octets_datums(text)');
+SELECT tessera_test_scan_octets_calls();
+SELECT source_same('SELECT sum(tessera_test_octets_bytes(s)), sum(tessera_test_octets_datums(s)),
+                           sum(tessera_test_octets_bytes(n)) FROM ft_bytes');
+SELECT tessera_test_scan_octets_calls();
+EXPLAIN (COSTS OFF) SELECT a FROM ft_bytes
+    WHERE tessera_test_octets_bytes(s) > 5000 AND tessera_test_octets_datums(n) = 1;
+SELECT source_same('SELECT a FROM ft_bytes
+    WHERE tessera_test_octets_bytes(s) > 5000 AND tessera_test_octets_datums(n) = 1');
+SELECT tessera_test_scan_octets_calls();
+SELECT tessera_test_scan_call_before_bytes('tessera_test_octets_bytes(text)',
+                                           ARRAY['', 'a', 'héllo', repeat('x', 3000)]);
+SELECT tessera_test_scan_octets_calls();
+DROP FUNCTION tessera_test_scan_call_before_bytes(regprocedure, text[]);
+DROP FUNCTION tessera_test_scan_octets_calls();
+DROP FUNCTION tessera_test_scan_register_octets(regprocedure, regprocedure);
+DROP FUNCTION tessera_test_octets_datums(text), tessera_test_octets_bytes(text);
 SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 DROP FOREIGN TABLE ft_bytes;
 DROP TABLE ht_bytes;
