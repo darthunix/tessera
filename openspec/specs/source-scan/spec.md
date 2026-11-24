@@ -1,7 +1,6 @@
-# Spec Delta
+# source-scan Specification
 
 ## Purpose
-
 The way a module that keeps a relation in a format of its own hands
 Tessera batches of the relation's rows. A source is such a module's
 registered entry: Tessera asks it for a batch scan of a relation, and
@@ -28,7 +27,7 @@ relations offered, and the plans built over a source's scan. The batch
 itself and the obligations of a batch node are those of every node of
 Tessera; [design.md](design.md) explains the whole and the reasons.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Registering, finding and listing sources
 A module SHALL register a source as a `TessSource` of
