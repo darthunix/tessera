@@ -2800,6 +2800,18 @@ becomes an entry, joins one, or is dropped.
   through a pointer to a smaller object (`object-size`); clang's
   aborted the suites `agg` and `join` on them. Suggested: the job built
   with clang, or a second job with it.
+- **An integer's overflow raised with Tessera alone** (a finding of
+  `make crosscheck` in task 5.3 of `text-keys-by-bytes`; the same on
+  `main` before it). Seed 1795503868174610000 of `tessera-crosscheck`
+  shrinks to `SELECT avg(t2.s) FROM dim t0 JOIN dim t1 ON t1.c = t0.id
+  AND t1.t = t0.t JOIN fact t2 ON t2.id = t1.c WHERE (t0.id + t2.a) IN
+  (0)`, at `max_parallel_workers_per_gather` 0 and `work_mem` 256kB:
+  with Tessera on it fails with 22003, "integer out of range"; the
+  core, and the core with the relaxed settings, return a row. The tool
+  takes it as an error with Tessera only, not as the error of a row one
+  plan skips. Suggested: the two plans read for the row whose sum
+  overflows, and the evaluation of the join's filter placed as the
+  core places it, or the class of the finding corrected.
 
 ## Decided against
 
