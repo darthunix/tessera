@@ -608,7 +608,9 @@ pub fn order_by_word(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
         return by_word;
     }
     let (a_rest, b_rest) = (a.get(8..).unwrap_or(&[]), b.get(8..).unwrap_or(&[]));
-    // By hand, as the C sort's memcmp does, and as Kani can follow.
+    // By hand, as Kani can follow: the model of the type's comparison
+    // under such a collation, memcmp and then the length, which the
+    // node's sort calls for equal words.
     let mut at = 0;
     while at < a_rest.len() && at < b_rest.len() {
         if a_rest[at] != b_rest[at] {

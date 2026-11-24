@@ -187,14 +187,43 @@ top_bytes_keys(TessSortState *state, TessBatch *batch, TessBytesColumn *bytes)
 }
 
 /*
+ * An assert build's check of a decision by a string's bytes against the
+ * worst kept: the type's comparison of a value made from the bytes says
+ * the same. A release build checks nothing.
+ */
+static void
+top_check_bytes_order(TessSortState *state, const TessBytesColumn *bytes, int row, int order)
+{
+#ifdef USE_ASSERT_CHECKING
+	Datum		value = (Datum) 0;
+	int			core;
+
+	if (!bytes->isnull[row])
+	{
+		struct varlena *made = palloc(VARHDRSZ + bytes->lengths[row]);
+
+		SET_VARSIZE(made, VARHDRSZ + bytes->lengths[row]);
+		memcpy(VARDATA(made), bytes->data[row], bytes->lengths[row]);
+		value = PointerGetDatum(made);
+	}
+	core = ApplySortComparator(value, bytes->isnull[row], top_slot_values(state, 0)[0],
+							   top_slot_isnull(state, 0)[0], &state->ssup[state->generic]);
+	Assert(sort_same_sign(order, core));
+	if (!bytes->isnull[row])
+		pfree(DatumGetPointer(value));
+#endif
+}
+
+/*
  * Top-N of a generic key: a batch's key columns and its items' lanes
  * first; once the heap is full, the batch keeps only the rows that order
  * before the worst kept by their lanes, or by the comparisons when the
  * lanes are equal; those have their other columns read, are appended and
  * go into the heap one by one. A string by its bytes takes its words from
- * the bytes form where the batch offers it, and its values, and those of
- * the keys after it, only for the rows its lanes do not put after the
- * worst kept, so that the batch makes values for those rows alone.
+ * the bytes form where the batch offers it, decides by its full bytes the
+ * rows whose lanes equal the worst's, and asks for its values, and those
+ * of the keys after it, only for the rows that beat the worst or equal
+ * it by the string, so that the batch makes values for those rows alone.
  */
 void
 sort_top_batch_generic(TessSortState *state, TessBatch *batch)
@@ -279,7 +308,12 @@ sort_top_batch_generic(TessSortState *state, TessBatch *batch)
 					break;
 				}
 			}
-			/* By bytes, the lanes' ties are compared once their values are read. */
+			/*
+			 * By bytes: lanes equal to the worst's, the keys before the
+			 * string and its word, are decided by its full bytes, and only
+			 * a string equal to the worst's goes to the keys after it, once
+			 * their values are read.
+			 */
 			if (by_bytes)
 			{
 				/* A row its lanes drop orders after the worst by its full bytes too. */
@@ -287,6 +321,13 @@ sort_top_batch_generic(TessSortState *state, TessBatch *batch)
 					   sort_bytes_order(state, bytes.data[row], bytes.lengths[row],
 										bytes.isnull[row], top_slot_values(state, 0)[0],
 										top_slot_isnull(state, 0)[0]) >= 0);
+				if (result == 0)
+				{
+					result = sort_bytes_order(state, bytes.data[row], bytes.lengths[row],
+											  bytes.isnull[row], top_slot_values(state, 0)[0],
+											  top_slot_isnull(state, 0)[0]);
+					top_check_bytes_order(state, &bytes, row, result);
+				}
 				if (result > 0)
 					batch->rows.bits[row / 64] &= ~(UINT64CONST(1) << (row % 64));
 				else if (result == 0)

@@ -159,7 +159,8 @@ tess_sort_abbrev_word(TessSortAbbrev *abbrev, Datum value)
 {
 	Datum		abbreviated;
 
-	if (abbrev->order == SORT_ABBREV_NONE)
+	/* A string by its bytes has its words from the kernels, never a converter. */
+	if (abbrev->order == SORT_ABBREV_NONE || abbrev->order == SORT_ABBREV_BYTES)
 		return 0;
 	abbreviated = abbrev->ssup.abbrev_converter(value, &abbrev->ssup);
 	switch ((SortAbbrev) abbrev->order)
@@ -301,8 +302,8 @@ sort_bytes_words(TessSortState *state, const TessTextArg *column, const TessRowM
 /*
  * The order of two values of a string key by its bytes, the first given
  * as its bytes, as the key's flags place NULL and its direction: the full
- * bytes by memcmp, then the length, which the words and the comparisons
- * must have given. An assert build's checks call it.
+ * bytes by memcmp, then the length, the order of the type's comparison
+ * under a collation that orders by bytes. A copy detoasted is freed.
  */
 int
 sort_bytes_order(TessSortState *state, const char *a, Size a_len, bool a_null,
@@ -323,6 +324,8 @@ sort_bytes_order(TessSortState *state, const char *a, Size a_len, bool a_null,
 	order = memcmp(a, VARDATA_ANY(y), Min(a_len, VARSIZE_ANY_EXHDR(y)));
 	if (order == 0)
 		order = a_len < VARSIZE_ANY_EXHDR(y) ? -1 : a_len > VARSIZE_ANY_EXHDR(y) ? 1 : 0;
+	if ((Pointer) y != DatumGetPointer(b))
+		pfree(y);
 	return (flags & TESS_SORT_DESCENDING) != 0 ? -order : order;
 }
 
@@ -331,9 +334,13 @@ static int
 bytes_order(TessSortState *state, Datum a, bool a_null, Datum b, bool b_null)
 {
 	struct varlena *x = a_null ? NULL : PG_DETOAST_DATUM_PACKED(a);
+	int			order = sort_bytes_order(state, x == NULL ? NULL : VARDATA_ANY(x),
+										 x == NULL ? 0 : VARSIZE_ANY_EXHDR(x), a_null,
+										 b, b_null);
 
-	return sort_bytes_order(state, x == NULL ? NULL : VARDATA_ANY(x),
-							x == NULL ? 0 : VARSIZE_ANY_EXHDR(x), a_null, b, b_null);
+	if (x != NULL && (Pointer) x != DatumGetPointer(a))
+		pfree(x);
+	return order;
 }
 
 /*
@@ -477,6 +484,11 @@ compare_ties(const TieRow *left, const TieRow *right, TessSortState *state)
 	int			result = ApplySortComparator(left->value, (left->row & TIE_NULL) != 0,
 											 right->value, (right->row & TIE_NULL) != 0,
 											 &state->ssup[state->generic]);
+
+	/* A string by its bytes: the comparison is the order of its full bytes. */
+	Assert(!state->generic_bytes ||
+		   sort_same_sign(result, bytes_order(state, left->value, (left->row & TIE_NULL) != 0,
+											  right->value, (right->row & TIE_NULL) != 0)));
 
 	for (int key = state->generic + 1; result == 0 && key < state->nkeys; key++)
 	{
@@ -855,7 +867,7 @@ consider_abbrev_abort(TessSortState *state)
 {
 	SortSupport ssup = &state->abbrev.ssup;
 
-	if (state->external || !tess_sort_abbreviates(&state->abbrev) ||
+	if (state->external || state->generic_bytes || !tess_sort_abbreviates(&state->abbrev) ||
 		ssup->abbrev_abort == NULL || state->abbrev_rows < state->abbrev_next)
 		return;
 	while (state->abbrev_next <= state->abbrev_rows)
