@@ -2561,7 +2561,25 @@ ahead (float8, `LIMIT 10`: 10.5 ms against 16.5; text 132.7 against
 117.0 the other way): the planner leaves that case to the core.
 `EXPLAIN` shows a key's collation when it is not the default, as the core
 does. Under a limit the top-N heap of such keys is the node's, in C (see
-Top-N). At 2 M rows in memory: numeric 125 ms against 296, text under
+Top-N).
+
+A string that orders by its bytes, `text` and `varchar` under a
+collation PostgreSQL compares by bytes (`C`, `POSIX`, the builtin
+provider's) and `bytea`, each by its type's default operator class of
+B-tree, is such a key of a kind of its own (`TESS_SORT_KIND_BYTES`): its
+word is not the core's abbreviated key, which under C hashes up to 64
+bytes a row to decide whether to give the keys up, but its first eight
+bytes the kernels make (`tess_text_sort_words`, a big-endian integer,
+its top bit flipped), which the node never gives up; EXPLAIN (ANALYZE,
+VERBOSE) says "Abbreviated Keys: bytes". The groups of equal words go to
+the type's comparison as every other's, which under such a collation
+compares the bytes and then the length, the strings' order. A value
+compressed or stored apart is made plain for its word. A key of another
+operator class, or of another collation, keeps the generic kind; so
+does a string key of an ordered gather, whose merge of the workers'
+rows keeps the abbreviated keys. In an assert build the node checks each
+pair of rows one after the other in its output, after a sort in memory,
+a top-N heap and a merge of runs, by the string's full bytes. At 2 M rows in memory: numeric 125 ms against 296, text under
 `"C"` 187 against 366, text of the default collation after an int4 of
 1000 values 532 against 742 (bench/pg sort, pg-sort-WXjAaO).
 

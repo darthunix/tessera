@@ -22,6 +22,12 @@ extern bool tess_sort_key_of(PathKey *pathkey, PathTarget *target, Relids relids
  * and its abbreviated key made a word in its order.
  */
 #define TESS_SORT_KIND_GENERIC (-1)
+/*
+ * A string ordered by its bytes (tess_sort_orders_by_bytes): sorted as a
+ * key of another type, by its comparison, its word the first eight bytes
+ * the kernels make (tess_text_sort_words) instead of an abbreviated key.
+ */
+#define TESS_SORT_KIND_BYTES (-2)
 
 typedef struct TessSortAbbrev
 {
@@ -44,7 +50,7 @@ typedef struct TessSortKeys
 } TessSortKeys;
 
 extern bool tess_sort_keys(List *pathkeys, PathTarget *target, Relids relids,
-						   TessSortKeys *keys);
+						   bool by_bytes, TessSortKeys *keys);
 extern void tess_sort_support(SortSupport ssup, Oid sortop, Oid collation, bool nulls_first);
 extern void tess_sort_abbrev_init(TessSortAbbrev *abbrev, Oid sortop, Oid collation,
 								  bool nulls_first, Oid type);

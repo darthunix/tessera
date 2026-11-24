@@ -5,6 +5,7 @@
 #include "executor/executor.h"
 #include "miscadmin.h"
 #include "lib/binaryheap.h"
+#include "port/pg_bitutils.h"
 #include "utils/builtins.h"
 #include "utils/datum.h"
 #include "utils/lsyscache.h"
@@ -174,6 +175,7 @@ tess_sort_abbrev_word(TessSortAbbrev *abbrev, Datum value)
 		case SORT_ABBREV_INT32:
 			return (int64) DatumGetInt32(abbreviated);
 		case SORT_ABBREV_NONE:
+		case SORT_ABBREV_BYTES:
 			break;
 	}
 	return 0;
@@ -202,15 +204,192 @@ generic_begin(TessSortState *state, TupleDesc desc, List *sortops, List *collati
 		tess_sort_support(&state->ssup[key], sortop, (Oid) list_nth_int(collations, key),
 						  (state->keys[key].flags & TESS_SORT_NULLS_FIRST) != 0);
 	}
-	tess_sort_abbrev_init(&state->abbrev, (Oid) list_nth_int(sortops, first),
-						  state->ssup[first].ssup_collation,
-						  state->ssup[first].ssup_nulls_first, type);
+	/* A string by its bytes: the kernels' words, which the node never gives up. */
+	if (state->generic_bytes)
+		state->abbrev.order = SORT_ABBREV_BYTES;
+	else
+		tess_sort_abbrev_init(&state->abbrev, (Oid) list_nth_int(sortops, first),
+							  state->ssup[first].ssup_collation,
+							  state->ssup[first].ssup_nulls_first, type);
 	state->abbrev_taken = (SortAbbrev) state->abbrev.order;
 	state->abbrev_context = AllocSetContextCreate(CurrentMemoryContext,
 												  "TessSort abbreviated keys",
 												  ALLOCSET_DEFAULT_SIZES);
 	/* As tuplesort: the first test at ten rows. */
 	state->abbrev_next = 10;
+}
+
+/*
+ * A string by its bytes: the first generic key's words of the selected
+ * rows of its column, of either form, the kernels' sort words, into the
+ * abbreviated column; a compressed or external value detoasted for its
+ * row, in the abbreviated keys' context, which the caller reset.
+ */
+void
+sort_bytes_words(TessSortState *state, const TessTextArg *column, const TessRowMask *rows)
+{
+	TessStatus	status = TESS_STRUCT_INITIALIZER(TessStatus);
+	int			nrows = rows->nrows;
+	int			nwords = tess_row_mask_word_count(nrows);
+	TessRowMask present = {nrows, MemoryContextAllocZero(state->abbrev_context,
+														 sizeof(uint64) * Max(nwords, 1))};
+	TessRowMask rest = {nrows, MemoryContextAllocZero(state->abbrev_context,
+													  sizeof(uint64) * Max(nwords, 1))};
+	int64	   *words = (int64 *) state->abbrev_values;
+
+	tess_status_check(state->kernels->text_sort_words(column, rows, words, &present, &rest,
+													  &status),
+					  &status);
+	for (int word = 0; word < nwords; word++)
+		for (uint64 look = rest.bits[word]; look != 0; look &= look - 1)
+		{
+			int			row = word * 64 + pg_rightmost_one_pos64(look);
+			MemoryContext old = MemoryContextSwitchTo(state->abbrev_context);
+			Datum		value = PointerGetDatum(PG_DETOAST_DATUM_PACKED(column->column->values[row]));
+			bool		isnull = false;
+			uint64		one = 1;
+			uint64		none[2] = {0};
+			TessDatumColumn single = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+			TessRowMask selected = {1, &one};
+			TessRowMask single_present = {1, &none[0]};
+			TessRowMask single_rest = {1, &none[1]};
+
+			MemoryContextSwitchTo(old);
+			single.values = &value;
+			single.isnull = &isnull;
+			single.nrows = 1;
+			tess_status_check(state->kernels->text_sort_words(&(TessTextArg) {.column = &single},
+															  &selected, &words[row],
+															  &single_present, &single_rest,
+															  &status),
+							  &status);
+		}
+	for (int row = -1; (row = tess_row_mask_next(rows, row)) >= 0;)
+	{
+		state->abbrev_isnull[row] = (present.bits[row / 64] & (UINT64CONST(1) << (row % 64))) == 0;
+		if (state->abbrev_isnull[row])
+			state->abbrev_values[row] = Int64GetDatum(0);
+		else
+			state->abbrev_rows++;
+	}
+	state->abbrev_column = (TessDatumColumn) TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	state->abbrev_column.values = state->abbrev_values;
+	state->abbrev_column.isnull = state->abbrev_isnull;
+	state->abbrev_column.nrows = nrows;
+}
+
+/*
+ * The order of two values of a string key by its bytes, as the key's
+ * flags place NULL and its direction: the full bytes by memcmp, then the
+ * length, which the words and the comparisons must have given.
+ */
+static int
+bytes_order(TessSortState *state, Datum a, bool a_null, Datum b, bool b_null)
+{
+	uint32		flags = state->keys[state->generic].flags;
+	struct varlena *x;
+	struct varlena *y;
+	int			order;
+
+	if (a_null || b_null)
+	{
+		if (a_null && b_null)
+			return 0;
+		order = a_null ? 1 : -1;
+		return (flags & TESS_SORT_NULLS_FIRST) != 0 ? -order : order;
+	}
+	x = PG_DETOAST_DATUM_PACKED(a);
+	y = PG_DETOAST_DATUM_PACKED(b);
+	order = memcmp(VARDATA_ANY(x), VARDATA_ANY(y),
+				   Min(VARSIZE_ANY_EXHDR(x), VARSIZE_ANY_EXHDR(y)));
+	if (order == 0)
+		order = VARSIZE_ANY_EXHDR(x) < VARSIZE_ANY_EXHDR(y) ? -1 :
+			VARSIZE_ANY_EXHDR(x) > VARSIZE_ANY_EXHDR(y) ? 1 : 0;
+	return (flags & TESS_SORT_DESCENDING) != 0 ? -order : order;
+}
+
+/*
+ * An assert build's check of a string key by its bytes over output rows
+ * in their order, values[column][row] of the output columns: of two rows
+ * one after the other, the last of those checked before among them, whose
+ * keys before the string are equal, the second never orders before the
+ * first by the string's full bytes. A release build checks nothing.
+ */
+void
+sort_check_bytes(TessSortState *state, Datum *const *values, bool *const *isnull, int nrows)
+{
+#ifdef USE_ASSERT_CHECKING
+	int			column;
+	MemoryContext old;
+
+	if (!state->generic_bytes || nrows == 0)
+		return;
+	column = state->key_columns[state->generic];
+	if (state->check_context == NULL)
+		state->check_context = AllocSetContextCreate(state->css.ss.ps.state->es_query_cxt,
+													 "TessSort checks", ALLOCSET_SMALL_SIZES);
+	for (int row = 0; row < nrows; row++)
+	{
+		bool		same = state->check_has_last;
+
+		/* The keys before it: words the kernels order, compared whole. */
+		for (int key = 0; same && key < state->generic; key++)
+		{
+			int			before = state->key_columns[key];
+
+			same = state->check_last_null[key] == isnull[before][row] &&
+				(isnull[before][row] || state->check_last[key] == values[before][row]);
+		}
+		Assert(!same || bytes_order(state, state->check_last[state->generic],
+									state->check_last_null[state->generic],
+									values[column][row], isnull[column][row]) <= 0);
+		MemoryContextReset(state->check_context);
+		old = MemoryContextSwitchTo(state->check_context);
+		for (int key = 0; key <= state->generic; key++)
+		{
+			int			at = state->key_columns[key];
+
+			state->check_last_null[key] = isnull[at][row];
+			state->check_last[key] = key < state->generic || isnull[at][row] ? values[at][row] :
+				PointerGetDatum(PG_DETOAST_DATUM_COPY(values[at][row]));
+		}
+		MemoryContextSwitchTo(old);
+		state->check_has_last = true;
+	}
+#endif
+}
+
+/* sort_check_bytes over the records refs, in their order, from the first. */
+void
+sort_check_bytes_refs(TessSortState *state, const uint32 *refs, uint64 count)
+{
+#ifdef USE_ASSERT_CHECKING
+	Datum		values[TESS_TABLE_MAX_KEYS][SORT_ROWS];
+	bool		isnull[TESS_TABLE_MAX_KEYS][SORT_ROWS];
+	Datum	   *by_column[TESS_ROWS_MAX_COLUMNS];
+	bool	   *nulls_by_column[TESS_ROWS_MAX_COLUMNS];
+
+	if (!state->generic_bytes)
+		return;
+	state->check_has_last = false;
+	for (uint64 first = 0; first < count; first += SORT_ROWS)
+	{
+		int			n = (int) Min((uint64) SORT_ROWS, count - first);
+		uint64		bits[1] = {n == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << n) - 1};
+		TessRowMask mask = {n, bits};
+
+		for (int key = 0; key <= state->generic; key++)
+		{
+			int			column = state->key_columns[key];
+
+			tess_rows_gather(state->rows, column, &refs[first], &mask, values[key], isnull[key]);
+			by_column[column] = values[key];
+			nulls_by_column[column] = isnull[key];
+		}
+		sort_check_bytes(state, by_column, nulls_by_column, n);
+	}
+	state->check_has_last = false;
+#endif
 }
 
 /*
@@ -241,6 +420,11 @@ sort_abbreviate_column(TessSortState *state, const TessDatumColumn *column,
 													  sizeof(bool) * state->abbrev_capacity);
 	}
 	MemoryContextReset(state->abbrev_context);
+	if (state->abbrev.order == SORT_ABBREV_BYTES)
+	{
+		sort_bytes_words(state, &(TessTextArg) {.column = column}, rows);
+		return;
+	}
 	old = MemoryContextSwitchTo(state->abbrev_context);
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{
@@ -517,9 +701,13 @@ sort_begin(CustomScanState *css, EState *estate, int eflags)
 		if (key < 0 || key >= state->ncolumns)
 			elog(ERROR, "TessSort received a foreign plan");
 		state->key_columns[index] = key;
-		/* A generic key's word is its abbreviated key, an int8. */
-		if (kind == TESS_SORT_KIND_GENERIC && state->generic < 0)
+		/* A generic key's word is its abbreviated key, an int8, or its first bytes. */
+		if ((kind == TESS_SORT_KIND_GENERIC || kind == TESS_SORT_KIND_BYTES) &&
+			state->generic < 0)
+		{
 			state->generic = index;
+			state->generic_bytes = kind == TESS_SORT_KIND_BYTES;
+		}
 		kinds[index] = tess_key_kind_of_sort(kind);
 		state->keys[index].kind = kinds[index];
 		state->keys[index].flags = (uint32) list_nth_int(key_flags, index);
@@ -851,6 +1039,7 @@ sort_rows(TessSortState *state)
 			sort_ties(state, &items, state->item_words, state->refs, state->count, false);
 			free_ties(state);
 		}
+		sort_check_bytes_refs(state, state->refs, state->count);
 		sort_note_memory(state, (Size) sort_topn_heap_bytes(state, state->heap_capacity));
 		state->sorted = true;
 		state->current = -1;
@@ -888,6 +1077,7 @@ sort_rows(TessSortState *state)
 			sort_note_memory(state, mul_size(state->count, sizeof(uint32)) +
 						state->tie_capacity * sizeof(TieRow));
 			free_ties(state);
+			sort_check_bytes_refs(state, state->refs, state->count);
 		}
 		else
 			tess_rows_sort(state->rows, keys, state->refs);
@@ -1185,7 +1375,8 @@ sort_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 							state->abbrev_taken == SORT_ABBREV_SIGNED ? "signed" :
 							state->abbrev_taken == SORT_ABBREV_REVERSED ? "reversed" :
 							state->abbrev_taken == SORT_ABBREV_UINT32 ? "uint32" :
-							state->abbrev_taken == SORT_ABBREV_INT32 ? "int32" : "none", es);
+							state->abbrev_taken == SORT_ABBREV_INT32 ? "int32" :
+							state->abbrev_taken == SORT_ABBREV_BYTES ? "bytes" : "none", es);
 }
 
 /*

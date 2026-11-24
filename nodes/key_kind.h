@@ -62,11 +62,26 @@ tess_key_kind_known(int kind)
 	return kind == TESS_TABLE_KEY_INT4 || kind == TESS_TABLE_KEY_INT8;
 }
 
-/* The kind of a sort key's word: a generic key's is its abbreviated word. */
+/*
+ * The kind of a sort key's word: a generic key's is its abbreviated word,
+ * a string's by its bytes its first eight bytes, a number each.
+ */
 static inline TessTableKeyKind
 tess_key_kind_of_sort(int kind)
 {
-	return kind == TESS_SORT_KIND_GENERIC ? TESS_KEY_KIND_NUMBER : (TessTableKeyKind) kind;
+	return kind == TESS_SORT_KIND_GENERIC || kind == TESS_SORT_KIND_BYTES ?
+		TESS_KEY_KIND_NUMBER : (TessTableKeyKind) kind;
+}
+
+/*
+ * Whether PostgreSQL compares the strings of a collation by their bytes
+ * alone: C, POSIX and the builtin provider's collations (collate_is_c),
+ * so that a node may order them by their unsigned bytes.
+ */
+static inline bool
+tess_collation_orders_by_bytes(Oid collation)
+{
+	return OidIsValid(collation) && pg_newlocale_from_collation(collation)->collate_is_c;
 }
 
 /* The kernel that hashes the first key of a batch, of this kind. */

@@ -141,6 +141,7 @@
 	X(runs_step) \
 	X(shared_build_init) \
 	X(shared_build_step) \
-	X(shared_build_stop)
+	X(shared_build_stop) \
+	X(text_sort_words)
 
 #endif							/* TESSERA_KERNEL_OPS_LIST_H */

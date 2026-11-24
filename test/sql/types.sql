@@ -887,8 +887,9 @@ SET work_mem = '64kB';
 SELECT types_sort_method($$SELECT id, long, n FROM types_s ORDER BY long COLLATE "C", n DESC, id$$);
 -- The order of a type's abbreviated keys, which the node knows by the
 -- core's comparator: a core that renamed its comparators would show none
--- here and sort slower, unseen otherwise. float8 has none; long text of
--- a common prefix gives them up.
+-- here and sort slower, unseen otherwise. float8 has none; text under C
+-- orders by its bytes, by the kernels' words; long text of a common
+-- prefix under an ICU collation gives them up.
 CREATE FUNCTION types_abbrev(query text) RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -907,6 +908,7 @@ SELECT types_abbrev($$SELECT id, n FROM types_s ORDER BY n, id$$) AS numeric_key
        types_abbrev($$SELECT id, u FROM types_s ORDER BY u, id$$) AS uuid_keys,
        types_abbrev($$SELECT id, t FROM types_s ORDER BY t COLLATE "C", id$$) AS text_keys,
        types_abbrev($$SELECT id, long FROM types_s ORDER BY long COLLATE "C", id$$) AS long_text_keys,
+       types_abbrev($$SELECT id, long FROM types_s ORDER BY long COLLATE "und-x-icu", id$$) AS icu_long_keys,
        types_abbrev($$SELECT id, f FROM types_s ORDER BY f, id$$) AS float8_keys,
        types_abbrev($$SELECT id FROM types_s ORDER BY id$$) AS int_keys;
 DROP FUNCTION types_abbrev(text);
