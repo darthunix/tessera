@@ -1253,7 +1253,8 @@ fn rows_filled_over_two_words_and_short_outputs_refused() {
     let mut lengths = vec![u32::MAX; 70];
     let mut indexes = vec![-1i32; 70];
     fill_rows(
-        &values,
+        values.len(),
+        |row| values.get(row).copied(),
         &made,
         &asked,
         Some(&keys),
@@ -1279,12 +1280,22 @@ fn rows_filled_over_two_words_and_short_outputs_refused() {
     let mut short_lengths = vec![0u32; 69];
     let mut short_indexes = vec![0i32; 69];
     assert_eq!(
-        fill_rows(&values, &made, &asked, None, &mut short, &mut lengths, None),
+        fill_rows(
+            values.len(),
+            |row| values.get(row).copied(),
+            &made,
+            &asked,
+            None,
+            &mut short,
+            &mut lengths,
+            None
+        ),
         Err(FillError::Short)
     );
     assert_eq!(
         fill_rows(
-            &values,
+            values.len(),
+            |row| values.get(row).copied(),
             &made,
             &asked,
             None,
@@ -1296,7 +1307,8 @@ fn rows_filled_over_two_words_and_short_outputs_refused() {
     );
     assert_eq!(
         fill_rows(
-            &values,
+            values.len(),
+            |row| values.get(row).copied(),
             &made,
             &asked,
             Some(&keys[..69]),
@@ -1308,7 +1320,8 @@ fn rows_filled_over_two_words_and_short_outputs_refused() {
     );
     assert_eq!(
         fill_rows(
-            &values,
+            values.len(),
+            |row| values.get(row).copied(),
             &made,
             &asked,
             Some(&keys),
@@ -1320,7 +1333,8 @@ fn rows_filled_over_two_words_and_short_outputs_refused() {
     );
     assert_eq!(
         fill_rows(
-            &values,
+            values.len(),
+            |row| values.get(row).copied(),
             &made,
             &asked,
             Some(&keys),
@@ -1331,7 +1345,16 @@ fn rows_filled_over_two_words_and_short_outputs_refused() {
         Err(FillError::Short)
     );
     assert_eq!(
-        fill_rows(&values, &made, &asked, None, &mut data, &mut lengths, None),
+        fill_rows(
+            values.len(),
+            |row| values.get(row).copied(),
+            &made,
+            &asked,
+            None,
+            &mut data,
+            &mut lengths,
+            None
+        ),
         Ok(())
     );
 }
@@ -1543,9 +1566,11 @@ proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 
     /// `fill_rows` over windows of up to 130 rows, any masks and outputs,
-    /// keys and indexes each given or not and of any length: it refuses
-    /// exactly when an output or the keys are shorter than the window or
-    /// keys and indexes are not given together, and then writes nothing;
+    /// keys and indexes each given or not and of any length, and a row
+    /// without its bytes or none: it refuses exactly when an output or the
+    /// keys are shorter than the window, keys and indexes are not given
+    /// together, or a row asked and not `NULL` lacks its bytes, and then
+    /// writes nothing;
     /// otherwise each row asked and not `NULL` gets its place inside the
     /// buffer, its count and its key, and every other row is left.
     #[test]
@@ -1557,6 +1582,7 @@ proptest::proptest! {
         lengths_len in 0usize..131,
         keys_len in proptest::option::of(0usize..131),
         indexes_len in proptest::option::of(0usize..131),
+        missing in proptest::option::of(0usize..130),
     ) {
         let buffer = vec![7u8; lens.iter().sum::<usize>() + 1];
         let mut at = 0;
@@ -1566,12 +1592,22 @@ proptest::proptest! {
         let mut data = vec![ptr::null::<u8>(); data_len];
         let mut lengths = vec![u32::MAX; lengths_len];
         let mut indexes: Option<Vec<i32>> = indexes_len.map(|n| vec![-1; n]);
-        let result = fill_rows(&values, &made, &asked, keys.as_deref(), &mut data, &mut lengths, indexes.as_deref_mut());
-        let refused = data_len < rows || lengths_len < rows
+        // The bytes of every row but `missing`'s.
+        let value = |row: usize| values.get(row).copied().filter(|_| Some(row) != missing);
+        let result = fill_rows(rows, value, &made, &asked, keys.as_deref(), &mut data, &mut lengths, indexes.as_deref_mut());
+        let bit = |mask: &[u64], row: usize| mask[row / 64] >> (row % 64) & 1 == 1;
+        let short = data_len < rows || lengths_len < rows
             || keys_len.is_some_and(|n| n < rows) || indexes_len.is_some_and(|n| n < rows)
             || keys_len.is_some() != indexes_len.is_some();
-        proptest::prop_assert_eq!(result.is_err(), refused);
-        let bit = |mask: &[u64], row: usize| mask[row / 64] >> (row % 64) & 1 == 1;
+        let missed = missing.is_some_and(|row| row < rows && bit(&asked, row) && !bit(&made, row));
+        let refused = short || missed;
+        proptest::prop_assert_eq!(result, if short {
+            Err(FillError::Short)
+        } else if missed {
+            Err(FillError::Missing)
+        } else {
+            Ok(())
+        });
         let base = buffer.as_ptr() as usize;
         for row in 0..rows.min(data_len).min(lengths_len) {
             let wanted = !refused && bit(&asked, row) && !bit(&made, row);
@@ -1621,6 +1657,81 @@ fn column_typed(
         )
     };
     if ok { Ok(out) } else { Err(text(&st.sqlstate)) }
+}
+
+/// A row the cheaper check cannot give, here a value past the two bytes a
+/// test lets it give, sends its window to the read row by row, plain and
+/// through a dictionary: the rows as the cheaper check gives them where it
+/// can, the long value among them.
+#[test]
+fn a_row_the_cheaper_check_cannot_give_is_read_row_by_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("m.parquet");
+    let strings: Vec<Option<Vec<u8>>> = vec![
+        Some(b"ab".to_vec()),
+        None,
+        Some(b"abc".to_vec()),
+        Some(Vec::new()),
+    ];
+    for dictionary in [false, true] {
+        testing::write(
+            &path,
+            &[Column::new("s", Values::Bytes(strings.clone()))],
+            4,
+            dictionary,
+        )
+        .unwrap();
+        let file = open(&path);
+        let col = column(file, "s", oid::TEXT, -1).unwrap();
+        let (fast, short) = (reader(file, col, 4), reader(file, col, 4));
+        unsafe { (*short).max_fast = 2 };
+        assert_eq!(read(fast, 4, &[0b1111]), 4);
+        assert_eq!(read(short, 4, &[0b1111]), 4);
+        let got = bytes_seen(short, &[0b1111], 4);
+        assert_eq!(
+            got,
+            bytes_seen(fast, &[0b1111], 4),
+            "dictionary {dictionary}"
+        );
+        let (rows, _, _, nvalues) = got.unwrap();
+        assert_eq!(rows[2].as_deref(), Some(&b"abc"[..]));
+        assert_eq!(nvalues > 0, dictionary, "through the dictionary's slots");
+        unsafe {
+            tess_parquet_reader_free(fast);
+            tess_parquet_reader_free(short);
+            tess_parquet_column_free(col);
+            tess_parquet_file_free(file);
+        }
+    }
+}
+
+/// A cheaper check that disagrees with the plan, here a plain window taken
+/// as passing although a value is not UTF-8, fails the call in a debug
+/// build before any output is written, and makes no reference.
+#[test]
+#[cfg(debug_assertions)]
+fn a_cheaper_check_that_disagrees_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("x.parquet");
+    let strings = vec![Some(b"a".to_vec()), Some(b"\xff".to_vec())];
+    testing::write(&path, &[Column::new("s", Values::Bytes(strings))], 2, false).unwrap();
+    let file = open(&path);
+    let col = column(file, "s", oid::TEXT, -1).unwrap();
+    let r = reader(file, col, 2);
+    assert_eq!(read(r, 2, &[0b11]), 2);
+    unsafe { (*r).window_passes = Some(true) };
+    let (ok, st, data, lengths, indexes, nulls, nvalues, number, hold) = bytes_of(r, &[0b11], 2);
+    assert!(!ok);
+    assert_eq!(text(&st.sqlstate), "XX000");
+    assert!(data.iter().all(|p| p.is_null()));
+    assert_eq!((lengths, indexes), (vec![u32::MAX; 2], vec![-1; 2]));
+    assert_eq!((nulls, nvalues, number), (0, u32::MAX, u64::MAX));
+    assert!(hold.is_null());
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
 }
 
 /// What a call of the bytes form gave, comparable: the error's code and

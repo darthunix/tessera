@@ -93,83 +93,55 @@ proptest! {
     }
 }
 
-/// The slices of a window: the rows asked, a `NULL` row marked, none past
-/// the limit of a value's length, which a smaller limit stands for here
-/// so that no value of PostgreSQL's largest size is made; and no slices
-/// where a slot's offsets do not hold.
+/// The slots of a window: a row's bytes, by itself or by its key, none
+/// past the limit of a value's length, which a smaller limit stands for
+/// here so that no value of PostgreSQL's largest size is made, and none
+/// where a key or a slot's offsets do not hold.
 #[test]
-fn slices_of_rows_asked_and_the_limit_of_a_length() {
+fn slots_of_rows_and_the_limit_of_a_length() {
     let data = b"abcdef";
     let offsets = [0i64, 1, 3, 3, 6];
-    let mut made = [0u64; 1];
-    let got = slices(
-        4,
-        &[0b1011],
-        |row| row == 1,
-        |row| row,
-        (&offsets, data),
-        3,
-        &mut made,
-    );
-    assert_eq!(got, Some(vec![&b"a"[..], &[], &[], &b"def"[..]]));
-    assert_eq!(made, [0b10]);
-    let mut made = [0u64; 1];
-    assert_eq!(
-        slices(
-            4,
-            &[0b1000],
-            |_| false,
-            |row| row,
-            (&offsets, data),
-            2,
-            &mut made
-        ),
-        None
-    );
-    let mut made = [0u64; 1];
-    assert_eq!(
-        slices(4, &[0b1], |_| false, |_| 9, (&offsets, data), 3, &mut made),
-        None
-    );
-    let mut made = [0u64; 0];
-    assert_eq!(
-        slices(
-            1,
-            &[0b1],
-            |_| true,
-            |row| row,
-            (&offsets, data),
-            3,
-            &mut made
-        ),
-        None,
-        "a mask too short"
-    );
+    let plain = Slots {
+        offsets: &offsets,
+        data,
+        keys: None,
+    };
+    assert_eq!(plain.value(0, 3), Some(&b"a"[..]));
+    assert_eq!(plain.value(2, 3), Some(&b""[..]));
+    assert_eq!(plain.value(3, 3), Some(&b"def"[..]));
+    assert_eq!(plain.value(3, 2), None, "past the limit");
+    assert_eq!(plain.value(4, 3), None, "past the offsets");
+    let keys = [3i32, 0, -1, 9];
+    let keyed = Slots {
+        offsets: &offsets,
+        data,
+        keys: Some(&keys),
+    };
+    assert_eq!(keyed.value(0, 3), Some(&b"def"[..]));
+    assert_eq!(keyed.value(1, 3), Some(&b"a"[..]));
+    assert_eq!(keyed.value(2, 3), None, "a key below 0");
+    assert_eq!(keyed.value(3, 3), None, "a key past the offsets");
+    assert_eq!(keyed.value(4, 3), None, "a row past the keys");
 }
 
-/// The rows asked past the mask's first word: each set bit stands for the
-/// row of its word and place, a `NULL` one marked in its own word.
+/// The `NULL` rows asked marked, past the mask's first word too: each set
+/// bit stands for the row of its word and place, none past the window,
+/// and a mask too short for a `NULL` row asked refused.
 #[test]
-fn slices_of_rows_past_the_first_word() {
-    let data = b"abcdef";
-    let offsets = [0i64, 1, 3, 3, 6];
+fn nulls_of_rows_asked_marked() {
     let mut made = [0u64; 3];
-    let got = slices(
-        130,
-        &[1 << 2, 1 << 3, 1 << 1],
-        |row| row == 67,
-        |row| row % 4,
-        (&offsets, data),
-        3,
-        &mut made,
-    )
-    .unwrap();
-    assert_eq!(got.len(), 130);
-    assert_eq!(got[129], &b"bc"[..]);
-    assert!(
-        got.iter()
-            .enumerate()
-            .all(|(row, value)| row == 129 || value.is_empty())
+    let null = |row| row == 1 || row == 67 || row == 129 || row == 131;
+    assert_eq!(
+        mark_nulls(
+            130,
+            &[0b11, 1 << 3 | 1 << 4, 1 << 1 | 1 << 3],
+            null,
+            &mut made
+        ),
+        Some(())
     );
-    assert_eq!(made, [0, 1 << 3, 0]);
+    assert_eq!(made, [0b10, 1 << 3, 1 << 1]);
+    let mut made = [0u64; 0];
+    assert_eq!(mark_nulls(1, &[0b1], |_| true, &mut made), None);
+    assert_eq!(mark_nulls(1, &[0b1], |_| false, &mut made), Some(()));
 }

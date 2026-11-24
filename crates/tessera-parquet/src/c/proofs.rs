@@ -7,10 +7,12 @@
 //! bytes, every mask and every row's place in it, stay inside that buffer
 //! (an empty value's place is that of `EMPTY`), that the indexes written
 //! are the keys given, that a row not asked or `NULL` is left as it was,
-//! and that no call panics: each output's length up to three, and keys and
-//! indexes each given or not and of any such length, apart, a refusal
-//! exactly when one is short or only one of the two is given, writing
-//! nothing. Longer windows and outputs are the property test's. The
+//! and that no call panics: each output's length up to three, keys and
+//! indexes each given or not and of any such length, apart, and any row
+//! without its bytes or none, a refusal exactly when one is short, only
+//! one of the two is given or a row asked and not `NULL` lacks its bytes,
+//! writing nothing, for a `value` that gives a row the same answer each
+//! time, as `fill_rows` requires. Longer windows and outputs are the property test's. The
 //! lifetime of those bytes across the C boundary is Miri's and the
 //! sanitizers', in the tests.
 
@@ -41,12 +43,16 @@ fn the_places_of_a_window_s_bytes_lie_in_its_buffer() {
     let indexes_len: usize = kani::any();
     let with_keys: bool = kani::any();
     let with_indexes: bool = kani::any();
+    // The row whose bytes are not given, none at 3.
+    let missing: usize = kani::any();
+    kani::assume(missing <= 3);
     kani::assume(data_len <= 3 && lengths_len <= 3 && keys_len <= 3 && indexes_len <= 3);
     let mut data = [core::ptr::null::<u8>(); 3];
     let mut lengths = [u32::MAX; 3];
     let mut indexes = [-1i32; 3];
     let result = fill_rows(
-        values,
+        rows,
+        |row| values.get(row).copied().filter(|_| row != missing),
         &made,
         &asked,
         with_keys.then_some(&keys[..keys_len]),
@@ -54,11 +60,13 @@ fn the_places_of_a_window_s_bytes_lie_in_its_buffer() {
         &mut lengths[..lengths_len],
         with_indexes.then_some(&mut indexes[..indexes_len]),
     );
+    let missed = missing < rows && asked[0] >> missing & 1 == 1 && made[0] >> missing & 1 == 0;
     let refused = data_len < rows
         || lengths_len < rows
         || (with_keys && keys_len < rows)
         || (with_indexes && indexes_len < rows)
-        || with_keys != with_indexes;
+        || with_keys != with_indexes
+        || missed;
     assert!(result.is_err() == refused);
     let base = buffer.as_ptr() as usize;
     for row in 0..3 {
@@ -90,7 +98,11 @@ fn the_places_of_a_window_s_bytes_lie_in_its_buffer() {
         "an empty value asked"
     );
     kani::cover!(
-        refused && data_len >= rows && lengths_len >= rows,
+        refused && data_len >= rows && lengths_len >= rows && !missed,
         "keys without indexes refused"
+    );
+    kani::cover!(
+        missed && data_len >= rows && lengths_len >= rows && with_keys == with_indexes,
+        "a row without its bytes refused"
     );
 }
