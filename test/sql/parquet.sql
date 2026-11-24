@@ -809,6 +809,54 @@ SELECT explain_lines('ANALYZE', format('SELECT count(DISTINCT b) FROM %s', tbl),
 FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl);
 SELECT explain_lines('ANALYZE', 'SELECT count(DISTINCT v), sum(i) FROM t_bytes_plain',
                      'TessAgg|Decoded');
+-- spec: string-bytes/Functions of a Parquet column
+-- The string kernels read a text column of ASCII and of two-byte
+-- characters, with NULL rows and empty strings, in the bytes form, over
+-- plain pages and through a dictionary: each function of a value, each
+-- of a piece and each predicate, in a grouping's aggregate, in a filter
+-- and in an output column the scan computes for a sort, a predicate's
+-- through a CASE, give the rows of the core. The source checks a LIKE,
+-- = or <> of a constant itself, so a filter puts each predicate in an OR,
+-- which the kernels compute. The patterns with _, with an escape and of
+-- more pieces than the kernels' matcher holds go to the core's function
+-- a row, with values made from the bytes. The scans make no value of s,
+-- for a FILTER alone too: the values decoded are those of i.
+SELECT tbl, kind, e AS expression,
+       differ_off(format(CASE kind
+           WHEN 'value' THEN 'SELECT i %% 4 AS g, sum(%s) FROM %s GROUP BY 1'
+           WHEN 'piece' THEN 'SELECT i %% 4 AS g, sum(octet_length(%s)) FROM %s GROUP BY 1'
+           ELSE 'SELECT i %% 4 AS g, count(*) FILTER (WHERE %s) FROM %s GROUP BY 1' END,
+         e, tbl)) AS in_aggregate,
+       differ_off(format(CASE kind
+           WHEN 'value' THEN 'SELECT i FROM %2$s WHERE %1$s > 1'
+           WHEN 'piece' THEN 'SELECT i FROM %2$s WHERE %1$s <> ''s1'''
+           ELSE 'SELECT i FROM %2$s WHERE (%1$s) OR i < 0' END, e, tbl)) AS in_filter,
+       differ_off(format(CASE kind
+           WHEN 'predicate' THEN 'SELECT * FROM (SELECT i, CASE WHEN %s THEN 1 ELSE 0 END AS x
+                                  FROM %s WHERE i > 10 ORDER BY i) q'
+           ELSE 'SELECT * FROM (SELECT i, %s AS x FROM %s WHERE i > 10 ORDER BY i) q' END,
+         e, tbl)) AS in_output
+FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl),
+     (VALUES ('value', 'length(s)'), ('value', 'char_length(s)'), ('value', 'octet_length(s)'),
+             ('piece', 'substr(s, 2)'), ('piece', 'substr(s, 1, 2)'), ('piece', 'left(s, 1)'),
+             ('piece', 'right(s, 1)'), ('piece', 'ltrim(s)'), ('piece', 'rtrim(s)'),
+             ('piece', 'btrim(s)'),
+             ('predicate', 's LIKE ''s1%'''), ('predicate', 's NOT LIKE ''%é%'''),
+             ('predicate', 'starts_with(s, ''s1'')'), ('predicate', 's = ''s3'''),
+             ('predicate', 's <> ''s3'''), ('predicate', 's IN (''s1'', ''é2'', '''')'),
+             ('predicate', 's LIKE ''s_'''), ('predicate', 's LIKE ''\s1%'''),
+             ('predicate', 's NOT LIKE repeat(''%s'', 33)')) x(kind, e)
+ORDER BY tbl, kind, e;
+SELECT explain_lines('ANALYZE', format('SELECT i %% 4, sum(length(s)),
+                                               count(*) FILTER (WHERE s LIKE ''s_'')
+                                        FROM %s GROUP BY 1', tbl), 'TessAgg|Decoded')
+FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl);
+SELECT explain_lines('ANALYZE', 'SELECT i % 4, count(*) FILTER (WHERE s LIKE ''s1%'')
+                                 FROM t_bytes_dict GROUP BY 1', 'TessAgg|Decoded');
+SELECT explain_lines('ANALYZE', 'SELECT i FROM t_bytes_dict WHERE (s NOT LIKE ''%é%'') OR i < 0',
+                     'Custom|Filter|Decoded');
+SELECT explain_lines('ANALYZE', 'SELECT i, left(s, 1) FROM t_bytes_plain WHERE i > 10 ORDER BY i',
+                     'Custom|Decoded');
 -- spec: string-bytes/A nondeterministic collation
 -- Under a collation that ignores case, whose equal values may differ in
 -- their bytes, the key is read as Datum values, the scan making each

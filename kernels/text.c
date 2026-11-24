@@ -66,7 +66,8 @@ static TessStatusCode text_pattern_evaluate(TessFunctionCall *call);
 static TessStatusCode text_length_evaluate(TessFunctionCall *call);
 static TessStatusCode text_piece_evaluate(TessFunctionCall *call);
 
-#define TEXT_FLAGS (TESS_FUNCTION_STRICT | TESS_FUNCTION_DETERMINISTIC_COLLATION)
+#define TEXT_FLAGS (TESS_FUNCTION_STRICT | TESS_FUNCTION_DETERMINISTIC_COLLATION | \
+					TESS_FUNCTION_BYTES)
 
 /* A comparison of two strings, a column on either side or both. */
 #define TEXT_COMPARE(oid, code) \
@@ -97,7 +98,8 @@ static TessStatusCode text_piece_evaluate(TessFunctionCall *call);
 	{{TESS_ABI_INITIALIZER(TESS_FUNCTION_ABI_VERSION, TessFunction), \
 	  .funcid = (oid), .kind = TESS_FUNCTION_VALUE, \
 	  .result_format = TESS_RESULT_DATUM, \
-	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE, \
+	  .flags = TESS_FUNCTION_STRICT | TESS_FUNCTION_COLLATION_INSENSITIVE | \
+	  TESS_FUNCTION_BYTES, \
 	  .evaluate = text_piece_evaluate}, (code)}
 
 static const TextFunction text_functions[] = {
@@ -243,18 +245,98 @@ one_row_free(OneRow *one)
 	string_free(one->copy);
 }
 
-/* A kernels' argument: its column, or its scalar's bytes read in place. */
+/* Whether argument arg of a call is a column: of Datums or in the bytes form. */
+static inline bool
+arg_is_column(const TessFunctionCall *call, int arg)
+{
+	return call->args[arg].column != NULL || tess_function_bytes_arg(call, arg) != NULL;
+}
+
+/* A column argument as the kernels take it: its Datums or its bytes form. */
 static TessTextArg
-text_arg(const TessFunctionArg *arg, struct varlena **copy)
+column_arg(const TessFunctionCall *call, int arg)
+{
+	if (call->args[arg].column != NULL)
+		return (TessTextArg) {.column = call->args[arg].column};
+	return (TessTextArg) {.bytes = tess_function_bytes_arg(call, arg)};
+}
+
+static inline bool
+arg_row_null(const TessTextArg *arg, int row)
+{
+	return arg->column != NULL ? arg->column->isnull[row] : arg->bytes->isnull[row];
+}
+
+/*
+ * A kernels' argument: its column of either form, or its scalar's bytes
+ * read in place.
+ */
+static TessTextArg
+text_arg(const TessFunctionCall *call, int arg, struct varlena **copy)
 {
 	const char *data;
 	int			len;
 
 	*copy = NULL;
-	if (arg->column != NULL)
-		return (TessTextArg) {.column = arg->column};
-	*copy = string_bytes(arg->scalar, &data, &len);
-	return (TessTextArg) {.scalar = *copy != NULL ? PointerGetDatum(*copy) : arg->scalar};
+	if (arg_is_column(call, arg))
+		return column_arg(call, arg);
+	*copy = string_bytes(call->args[arg].scalar, &data, &len);
+	return (TessTextArg) {.scalar = *copy != NULL ? PointerGetDatum(*copy) :
+						  call->args[arg].scalar};
+}
+
+/*
+ * A value made from a row's bytes in the call's context, a header and the
+ * bytes, which passed their column's rule; the caller frees it.
+ */
+static struct varlena *
+bytes_value(const TessBytesColumn *bytes, int row, const TessFunctionCall *call)
+{
+	Size		len = bytes->lengths[row];
+	struct varlena *value;
+
+	value = MemoryContextAlloc(call->context != NULL ? call->context : CurrentMemoryContext,
+							   VARHDRSZ + len);
+	SET_VARSIZE(value, VARHDRSZ + len);
+	memcpy(VARDATA(value), bytes->data[row], len);
+	return value;
+}
+
+/*
+ * A row of an argument as a column of that one row, for the rows the
+ * kernels leave and those the core's functions take: a Datum's value,
+ * detoasted, a scalar's, or, of the bytes form, a value made from the
+ * row's bytes; the copy is freed by one_row_free.
+ */
+static void
+one_row_of(OneRow *one, const TessTextArg *arg, int row, const TessFunctionCall *call)
+{
+	struct varlena *value;
+
+	if (arg->bytes == NULL)
+	{
+		one_row(one, arg->column != NULL ? arg->column->values[row] : arg->scalar);
+		return;
+	}
+	value = bytes_value(arg->bytes, row, call);
+	one_row(one, PointerGetDatum(value));
+	one->copy = value;
+}
+
+/*
+ * A row of a column for the core's function: its Datum as it is, which
+ * the function detoasts as far as it needs, or, of the bytes form, a
+ * value made from its bytes, which *made holds for the caller to free.
+ */
+static Datum
+core_value(const TessTextArg *arg, int row, const TessFunctionCall *call,
+		   struct varlena **made)
+{
+	*made = NULL;
+	if (arg->bytes == NULL)
+		return arg->column->values[row];
+	*made = bytes_value(arg->bytes, row, call);
+	return PointerGetDatum(*made);
 }
 
 /*
@@ -279,13 +361,13 @@ text_compare_evaluate(TessFunctionCall *call)
 
 	if (!text_call_valid(call, 2))
 		return tess_call_invalid(call, "a string comparison takes two arguments");
-	if (call->args[0].column == NULL && call->args[1].column == NULL)
+	if (!arg_is_column(call, 0) && !arg_is_column(call, 1))
 		return tess_call_invalid(call, "a string comparison needs a column argument");
 	op = text_op(call);
 	bpchar = op == BPCHAR_EQ || op == BPCHAR_NE;
 	equal = op == TEXT_EQ || op == BPCHAR_EQ;
-	left = text_arg(&call->args[0], &left_copy);
-	right = text_arg(&call->args[1], &right_copy);
+	left = text_arg(call, 0, &left_copy);
+	right = text_arg(call, 1, &right_copy);
 	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), call->rows->nrows);
 	code = tess_text_compare(equal, bpchar, &left, &right, call->rows, &rest, call->status);
 	nwords = tess_row_mask_word_count(call->rows->nrows);
@@ -300,12 +382,12 @@ text_compare_evaluate(TessFunctionCall *call)
 			TessTextArg one_left = left;
 			TessTextArg one_right = right;
 
-			one_row(&left_row, left.column != NULL ? left.column->values[row] : left.scalar);
-			one_row(&right_row, right.column != NULL ? right.column->values[row] : right.scalar);
-			if (left.column != NULL)
-				one_left.column = &left_row.column;
-			if (right.column != NULL)
-				one_right.column = &right_row.column;
+			one_row_of(&left_row, &left, row, call);
+			one_row_of(&right_row, &right, row, call);
+			if (left.column != NULL || left.bytes != NULL)
+				one_left = left_row.arg;
+			if (right.column != NULL || right.bytes != NULL)
+				one_right = right_row.arg;
 			left_row.out = 1;
 			code = tess_text_compare(equal, bpchar, &one_left, &one_right, &left_row.result,
 									 &left_row.rest, call->status);
@@ -330,7 +412,6 @@ text_compare_evaluate(TessFunctionCall *call)
 static TessStatusCode
 text_pattern_evaluate(TessFunctionCall *call)
 {
-	const TessDatumColumn *column;
 	TessTextArg arg;
 	TextOp		op;
 	const char *pattern;
@@ -345,10 +426,9 @@ text_pattern_evaluate(TessFunctionCall *call)
 
 	if (!text_call_valid(call, 2))
 		return tess_call_invalid(call, "a string pattern takes two arguments");
-	column = call->args[0].column;
-	if (column == NULL || call->args[1].column != NULL)
+	if (!arg_is_column(call, 0) || arg_is_column(call, 1))
 		return tess_call_invalid(call, "a string pattern takes a column and a constant");
-	arg = (TessTextArg) {.column = column};
+	arg = column_arg(call, 0);
 	op = text_op(call);
 	pattern_copy = string_bytes(call->args[1].scalar, &pattern, &plen);
 	pattern_datum = pattern_copy != NULL ? PointerGetDatum(pattern_copy) : call->args[1].scalar;
@@ -376,9 +456,9 @@ text_pattern_evaluate(TessFunctionCall *call)
 			OneRow		one;
 			bool		result;
 
-			if (column->isnull[row])
+			if (arg_row_null(&arg, row))
 				continue;
-			one_row(&one, column->values[row]);
+			one_row_of(&one, &arg, row, call);
 			if (simple)
 			{
 				one.out = 1;
@@ -411,7 +491,6 @@ text_pattern_evaluate(TessFunctionCall *call)
 static TessStatusCode
 text_length_evaluate(TessFunctionCall *call)
 {
-	const TessDatumColumn *column;
 	TessTextArg arg;
 	int32	   *values;
 	TextOp		op;
@@ -424,10 +503,9 @@ text_length_evaluate(TessFunctionCall *call)
 
 	if (!text_call_valid(call, 1) || call->values == NULL || call->non_nulls == NULL)
 		return tess_call_invalid(call, "a string length takes one argument");
-	column = call->args[0].column;
-	if (column == NULL)
+	if (!arg_is_column(call, 0))
 		return tess_call_invalid(call, "a string length takes a column");
-	arg = (TessTextArg) {.column = column};
+	arg = column_arg(call, 0);
 	op = text_op(call);
 	values = (int32 *) call->values;
 	length = op == TEXT_OCTETS ? TESS_LENGTH_OCTETS :
@@ -443,11 +521,15 @@ text_length_evaluate(TessFunctionCall *call)
 			{
 				int			bit = pg_rightmost_one_pos64(look);
 				int			row = word * 64 + bit;
+				struct varlena *made;
+				Datum		value;
 
-				if (column->isnull[row])
+				if (arg_row_null(&arg, row))
 					continue;
+				value = core_value(&arg, row, call, &made);
 				values[row] = DatumGetInt32(DirectFunctionCall1(op == BPCHAR_CHARS ? bpcharlen : textlen,
-																column->values[row]));
+																value));
+				string_free(made);
 				present |= UINT64CONST(1) << bit;
 			}
 			call->non_nulls->bits[word] = present;
@@ -467,13 +549,16 @@ text_length_evaluate(TessFunctionCall *call)
 			uint64		present = 0;
 			TessRowMask one_present = {1, &present};
 
-			/* The bytes of a compressed or external value without reading it, as octet_length. */
-			if (op == TEXT_OCTETS)
+			/*
+			 * The bytes of a compressed or external value without reading
+			 * it, as octet_length; only a column of Datums holds one.
+			 */
+			if (op == TEXT_OCTETS && arg.column != NULL)
 			{
-				values[row] = toast_raw_datum_size(column->values[row]) - VARHDRSZ;
+				values[row] = toast_raw_datum_size(arg.column->values[row]) - VARHDRSZ;
 				continue;
 			}
-			one_row(&one, column->values[row]);
+			one_row_of(&one, &arg, row, call);
 			code = tess_text_lengths(length, chars, &one.arg, &one.rows, &one_value,
 									 &one_present, &one.rest, call->status);
 			values[row] = one_value;
@@ -546,8 +631,7 @@ text_piece_evaluate(TessFunctionCall *call)
 		[TEXT_RIGHT] = TESS_PIECE_RIGHT, [TEXT_RTRIM] = TESS_PIECE_RTRIM,
 		[TEXT_LTRIM] = TESS_PIECE_LTRIM, [TEXT_BTRIM] = TESS_PIECE_BTRIM,
 	};
-	const TessDatumColumn *column;
-	TessTextArg arg;
+	TessTextArg string;
 	Datum	   *values;
 	TextOp		op;
 	int			chars = text_chars();
@@ -568,10 +652,9 @@ text_piece_evaluate(TessFunctionCall *call)
 		return tess_call_invalid(call, "a string piece takes a column and constants");
 	for (int arg = 0; arg < call->nargs; arg++)
 		if (call->args[arg].struct_size < TESS_FUNCTION_ARG_MIN_SIZE ||
-			(call->args[arg].column != NULL) != (arg == 0))
+			arg_is_column(call, arg) != (arg == 0))
 			return tess_call_invalid(call, "a string piece takes a column and constants");
-	column = call->args[0].column;
-	arg = (TessTextArg) {.column = column};
+	string = column_arg(call, 0);
 	op = text_op(call);
 	if (call->nargs != (op == TEXT_SUBSTR ? Max(call->nargs, 2) :
 						op == TEXT_LEFT || op == TEXT_RIGHT ? 2 : 1))
@@ -597,10 +680,14 @@ text_piece_evaluate(TessFunctionCall *call)
 			{
 				int			bit = pg_rightmost_one_pos64(look);
 				int			row = word * 64 + bit;
+				struct varlena *made;
+				Datum		value;
 
-				if (column->isnull[row])
+				if (arg_row_null(&string, row))
 					continue;
-				values[row] = piece_core(op, call, column->values[row]);
+				value = core_value(&string, row, call, &made);
+				values[row] = piece_core(op, call, value);
+				string_free(made);
 				present |= UINT64CONST(1) << bit;
 			}
 			call->non_nulls->bits[word] = present;
@@ -612,7 +699,7 @@ text_piece_evaluate(TessFunctionCall *call)
 	starts = tess_scratch_alloc(sizeof(int32) * nrows, space.starts, sizeof(space.starts));
 	lengths = tess_scratch_alloc(sizeof(int32) * nrows, space.lengths, sizeof(space.lengths));
 	code = tess_text_pieces(pieces[op], first, second, call->nargs == 3,
-							chars < 0 ? TESS_CHARS_BYTES : chars, &arg, call->rows, starts,
+							chars < 0 ? TESS_CHARS_BYTES : chars, &string, call->rows, starts,
 							lengths, call->non_nulls, &rest, call->status);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
 	{
@@ -621,7 +708,8 @@ text_piece_evaluate(TessFunctionCall *call)
 		for (uint64 look = done; look != 0; look &= look - 1)
 		{
 			int			row = word * 64 + pg_rightmost_one_pos64(look);
-			const char *data = VARDATA_ANY(DatumGetPointer(column->values[row]));
+			const char *data = string.bytes != NULL ? string.bytes->data[row] :
+				VARDATA_ANY(DatumGetPointer(string.column->values[row]));
 
 			values[row] = PointerGetDatum(arena_text(&arena, data + starts[row], lengths[row]));
 		}
@@ -634,7 +722,7 @@ text_piece_evaluate(TessFunctionCall *call)
 			uint64		present = 0;
 			TessRowMask one_present = {1, &present};
 
-			one_row(&one, column->values[row]);
+			one_row_of(&one, &string, row, call);
 			code = tess_text_pieces(pieces[op], first, second, call->nargs == 3,
 									chars < 0 ? TESS_CHARS_BYTES : chars, &one.arg, &one.rows,
 									&start, &len, &one_present, &one.rest, call->status);

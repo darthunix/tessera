@@ -311,7 +311,8 @@ input to such a kernel in the bytes form where the input offers it.
   `NULL` rows and empty strings, in a grouping's aggregate, in a
   filter and in an output column
 - **THEN** their results are those of the core
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Functions of a Parquet column`
 
 ### Requirement: A sort key of a string by its bytes
 A collation SHALL **order by bytes** where PostgreSQL compares its

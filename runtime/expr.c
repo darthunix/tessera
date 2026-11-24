@@ -1500,6 +1500,72 @@ tess_expr_input_column(const TessExpr *expr)
 	return expr->column;
 }
 
+/* Whether expr is the batch's column alone. */
+static bool
+bare_column(const TessExpr *expr, int column)
+{
+	return expr != NULL && expr->column == column && expr->nsteps == 0 &&
+		expr->choice == NULL;
+}
+
+static bool cond_reads_bytes(const Cond *cond, int column);
+
+bool
+tess_expr_reads_bytes(const TessExpr *expr, int column)
+{
+	if (expr == NULL)
+		return false;
+	/* The first function of a chain over the column, or a filter's predicate. */
+	if (expr->column == column && expr->choice == NULL &&
+		(expr->nsteps > 0 ? expr->steps[0].reads_bytes :
+		 expr->filter && expr->predicate.reads_bytes))
+		return true;
+	for (int index = 0; index < expr->nsteps; index++)
+	{
+		const Step *step = &expr->steps[index];
+
+		if ((step->reads_bytes && bare_column(step->operand, column)) ||
+			tess_expr_reads_bytes(step->operand, column))
+			return true;
+	}
+	if (expr->filter &&
+		((expr->predicate.reads_bytes && bare_column(expr->predicate.operand, column)) ||
+		 tess_expr_reads_bytes(expr->predicate.operand, column)))
+		return true;
+	if (cond_reads_bytes(expr->cond, column))
+		return true;
+	if (expr->choice != NULL)
+	{
+		const Choice *choice = expr->choice;
+
+		for (int index = 0; index < choice->nvalues; index++)
+			if (tess_expr_reads_bytes(choice->values[index], column) ||
+				(choice->conds != NULL && index < choice->nvalues - 1 &&
+				 cond_reads_bytes(choice->conds[index], column)))
+				return true;
+		if (tess_expr_reads_bytes(choice->right, column))
+			return true;
+	}
+	return false;
+}
+
+/* tess_expr_reads_bytes of a condition: its filters, IN lists and parts. */
+static bool
+cond_reads_bytes(const Cond *cond, int column)
+{
+	if (cond == NULL)
+		return false;
+	if (cond->kind == COND_ARRAY && (cond->function->flags & TESS_FUNCTION_BYTES) != 0 &&
+		bare_column(cond->expr, column))
+		return true;
+	if (tess_expr_reads_bytes(cond->expr, column))
+		return true;
+	for (int index = 0; index < cond->nargs; index++)
+		if (cond_reads_bytes(cond->args[index], column))
+			return true;
+	return false;
+}
+
 /*
  * Compute over rows, the bound batch's selection or a subset of it, from
  * now on; the operands follow, and results are computed anew.
@@ -2077,6 +2143,28 @@ tess_expr_non_nulls(TessExpr *expr)
 	return &expr->non_nulls;
 }
 
+/*
+ * The rows of an expression's selection whose value is not NULL: for a
+ * bare column that a function with the flag reads (reads_bytes), from
+ * the bytes form where the batch offers it, written into scratch, so that
+ * no Datum of the column is asked; else from its values.
+ */
+static const uint64 *
+non_null_bits(TessExpr *expr, bool reads_bytes, uint64 *scratch)
+{
+	const TessBytesColumn *bytes = NULL;
+
+	if (reads_bytes && expr->nsteps == 0 && expr->choice == NULL)
+		bytes = input_bytes(expr);
+	if (bytes == NULL)
+		return tess_expr_non_nulls(expr)->bits;
+	memset(scratch, 0, sizeof(uint64) * tess_row_mask_word_count(expr->rows->nrows));
+	for (int row = -1; (row = tess_row_mask_next(expr->rows, row)) >= 0;)
+		if (!bytes->isnull[row])
+			scratch[row / 64] |= UINT64CONST(1) << (row % 64);
+	return scratch;
+}
+
 /* The masks of a condition node sized for nrows rows, cleared. */
 static void
 cond_masks(Cond *cond, int nrows)
@@ -2171,15 +2259,16 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 					memcpy(unknown, rows->bits, sizeof(uint64) * nwords);
 				else
 				{
-					const TessRowMask *value = tess_expr_non_nulls(cond->expr);
 					const Step *predicate = &cond->expr->predicate;
-					const TessRowMask *operand = predicate->operand != NULL ?
-						tess_expr_non_nulls(predicate->operand) : NULL;
+					const uint64 *value = non_null_bits(cond->expr, predicate->reads_bytes,
+														cond->rest.bits);
+					const uint64 *operand = predicate->operand != NULL ?
+						non_null_bits(predicate->operand, predicate->reads_bytes,
+									  cond->work.bits) : NULL;
 
 					for (int word = 0; word < nwords; word++)
 						unknown[word] = rows->bits[word] &
-							~(value->bits[word] &
-							  (operand != NULL ? operand->bits[word] : ~UINT64CONST(0)));
+							~(value[word] & (operand != NULL ? operand[word] : ~UINT64CONST(0)));
 				}
 			}
 			tess_expr_apply_filter(cond->expr);

@@ -121,6 +121,16 @@ init_computed(Computed *computed, Node *expr, const TessProjectionConfig *config
 	}
 }
 
+bool
+tess_projection_reads_bytes(const TessProjection *projection, int column)
+{
+	for (int index = 0; index < projection->ncomputed; index++)
+		if (projection->computed[index].chain != NULL &&
+			tess_expr_reads_bytes(projection->computed[index].chain, column))
+			return true;
+	return false;
+}
+
 TessProjection *
 tess_projection_create(const TessProjectionConfig *config)
 {

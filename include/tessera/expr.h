@@ -54,6 +54,14 @@ extern TessExpr *tess_expr_compile_filter(Node *node, PlanState *parent,
 
 /* The batch column the expression reads, or -1 for a scalar expression. */
 extern int tess_expr_input_column(const TessExpr *expr);
+/*
+ * Whether the expression gives the batch's column, unchanged, to a
+ * function that reads it in the bytes form where the batch offers it
+ * (TESS_FUNCTION_BYTES): the first function of a chain over it, a
+ * predicate, a comparison with another column, an IN list, anywhere in
+ * the expression's conditions and choices.
+ */
+extern bool tess_expr_reads_bytes(const TessExpr *expr, int column);
 
 /*
  * Bind to a batch for its selected rows; results are computed on the

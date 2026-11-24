@@ -158,6 +158,8 @@ typedef struct ColumnGen
 	 * keep them; not with check_bytes, which reads a Datum's bytes in place.
 	 */
 	bool		compress;
+	/* A text column the source never gives in the bytes form (bytes 'none'). */
+	bool		no_bytes;
 } ColumnGen;
 
 /* The rows of a table, taken group by group. */
@@ -372,6 +374,9 @@ generator_init(Generator *gen, Relation rel)
 				gen->columns[i].width = (int64) option_number(def);
 			else if (strcmp(def->defname, "compress") == 0)
 				gen->columns[i].compress = defGetBoolean(def);
+			else if (strcmp(def->defname, "bytes") == 0 &&
+					 strcmp(defGetString(def), "none") == 0)
+				gen->columns[i].no_bytes = true;
 			else
 				elog(ERROR, "unknown column option \"%s\"", def->defname);
 		}
@@ -1033,7 +1038,7 @@ bytes_column(TessBatch *batch, int column, const TessRowMask *rows,
 
 	if (result->struct_size < TESS_BYTES_COLUMN_MIN_SIZE ||
 		column < 0 || column >= state->gen.natts ||
-		state->gen.columns[column].type != TEXTOID ||
+		state->gen.columns[column].type != TEXTOID || state->gen.columns[column].no_bytes ||
 		(state->gen.bytes_alternate && state->batch_number % 2 == 0))
 		return false;
 	nvalues = state->identities[column] != 0 ? dictionary_values(state, column) : 0;
@@ -1209,7 +1214,7 @@ check_bytes(SourceScanState *state, TessBatch *batch)
 		CheckedColumn *checked = &state->checked[c];
 		int			row = -1;
 
-		if (state->gen.columns[c].type != TEXTOID)
+		if (state->gen.columns[c].type != TEXTOID || state->gen.columns[c].no_bytes)
 			continue;
 		if (!tess_batch_bytes_column(batch, c, &batch->rows, &bytes))
 			elog(ERROR, "the test source did not give its text column %d as bytes", c);

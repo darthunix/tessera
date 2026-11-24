@@ -1387,7 +1387,11 @@ made by the node from the bytes, which passed the column's rule, so
 that the source neither checks nor copies them again; and its read of
 the columns in their order leaves the column out. The argument of an
 ungrouped `COUNT(DISTINCT)`, a column of bytes, is read the same way and
-numbered by the same lookup, with no `Datum` made. A key of
+numbered by the same lookup, with no `Datum` made. A column that a
+computed argument or an aggregate's `FILTER` reads in the bytes form, as
+`length(s)` and `s LIKE 'a%'` read it ([function.md](function.md)), is
+left out of the read in order too, where the batch offers the form. A
+key of
 a nondeterministic collation, a key computed from a column, and a set
 operation's keys are read as `Datum` values.
 

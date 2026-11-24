@@ -929,6 +929,77 @@ DROP FUNCTION tessera_test_scan_call_before_bytes(regprocedure, text[]);
 DROP FUNCTION tessera_test_scan_octets_calls();
 DROP FUNCTION tessera_test_scan_register_octets(regprocedure, regprocedure);
 DROP FUNCTION tessera_test_octets_datums(text), tessera_test_octets_bytes(text);
+-- The string kernels over the test source's bytes form, whose filters a
+-- batch filter computes: each function of a value, of a piece and each
+-- predicate, of a column with NULL rows and of one with empty strings
+-- and long ones, in a grouping's aggregate, in a filter and in an output
+-- column computed for a sort, a predicate's through a CASE, and two
+-- columns compared, give the core's rows. The patterns with _, with an
+-- escape and of more pieces than the kernels' matcher holds go to the
+-- core's function a row, with values made from the bytes. IN lists with
+-- a NULL element, under IS UNKNOWN and NOT, take their NULL rows from
+-- the form.
+SELECT kind, e AS expression,
+       source_same(format(CASE kind
+           WHEN 'value' THEN 'SELECT a %% 4 AS g, sum(%s) FROM ft_bytes GROUP BY 1'
+           WHEN 'piece' THEN 'SELECT a %% 4 AS g, sum(octet_length(%s)) FROM ft_bytes GROUP BY 1'
+           ELSE 'SELECT a %% 4 AS g, count(*) FILTER (WHERE %s) FROM ft_bytes GROUP BY 1' END,
+         e)) AS in_aggregate,
+       source_same(format(CASE kind
+           WHEN 'value' THEN 'SELECT a FROM ft_bytes WHERE %s > 1'
+           WHEN 'piece' THEN 'SELECT a FROM ft_bytes WHERE %s <> ''1'''
+           ELSE 'SELECT a FROM ft_bytes WHERE %s' END, e)) AS in_filter,
+       source_same(format(CASE kind
+           WHEN 'predicate' THEN 'SELECT * FROM (SELECT a, CASE WHEN %s THEN 1 ELSE 0 END AS x
+                                  FROM ft_bytes WHERE a > 10 ORDER BY a) q'
+           ELSE 'SELECT * FROM (SELECT a, %s AS x FROM ft_bytes WHERE a > 10 ORDER BY a) q' END,
+         e)) AS in_output
+FROM (VALUES ('value', 'length(s)'), ('value', 'char_length(n)'), ('value', 'octet_length(s)'),
+             ('piece', 'substr(s, 2, 3)'), ('piece', 'substr(n, 2)'), ('piece', 'left(s, 2)'),
+             ('piece', 'right(n, 1)'), ('piece', 'ltrim(n)'), ('piece', 'rtrim(s)'),
+             ('piece', 'btrim(n)'),
+             ('predicate', 'n LIKE ''1%'''), ('predicate', 's NOT LIKE ''%1x%'''),
+             ('predicate', 'starts_with(s, ''2'')'), ('predicate', 'n = ''3'''),
+             ('predicate', 'n <> ''3'''), ('predicate', 'n IN (''1'', ''12'', '''')'),
+             ('predicate', '(n IN (''1'', NULL, '''')) IS UNKNOWN'),
+             ('predicate', '(n NOT IN (''1'', NULL, ''12'')) IS UNKNOWN'),
+             ('predicate', 'NOT (n IN (''1'', ''12''))'),
+             ('predicate', 'n = p'), ('predicate', 's <> n'),
+             ('predicate', 'n LIKE ''1_'''), ('predicate', 'n LIKE ''\1%'''),
+             ('predicate', 's LIKE ''1\x%'''),
+             ('predicate', 's NOT LIKE repeat(''%x'', 33)')) x(kind, e)
+ORDER BY kind, e;
+-- A count under conditions of strings read as bytes, under OR, NOT and
+-- IS UNKNOWN, which ask each value's NULL flag: no Datum is asked.
+SELECT tessera_test_scan_source_asks() IS NOT NULL AS asks_reset;
+SELECT source_same('SELECT count(*) FROM ft_bytes
+    WHERE (s LIKE ''2%'' AND n <> ''3'') OR NOT (n IN (''1'', ''12'')) OR (n = ''5'') IS UNKNOWN');
+SELECT tessera_test_scan_source_asks();
+-- A grouping by n with the sum of the length of s, a column before it:
+-- the read of the columns in their order leaves s out, which the length
+-- reads as bytes, and asks no Datum of either.
+SELECT source_same('SELECT n, sum(length(s)) FROM ft_bytes GROUP BY n');
+SELECT tessera_test_scan_source_asks();
+-- A column in the bytes form compared with one the source gives as
+-- compressed Datums alone: a row with a compressed value is compared
+-- again by the kernels over that row, the value detoasted and the
+-- other's made from its bytes.
+CREATE FOREIGN TABLE ft_bytes_packed (a int4, s text OPTIONS (mod '50', width '10000'),
+    c text OPTIONS (mod '50', width '10000', nulls '3', compress 'on', bytes 'none'))
+    SERVER scan_server OPTIONS (rows '1000', bytes 'plain');
+CREATE TABLE ht_bytes_packed AS
+    SELECT i AS a,
+        CASE WHEN i % 50 = 0 THEN ''
+             ELSE (i % 50)::text || repeat('x', (i % 50) * 7919 % 10000) END AS s,
+        CASE WHEN i % 3 = 0 THEN NULL WHEN i % 50 = 0 THEN ''
+             ELSE (i % 50)::text || repeat('x', (i % 50) * 7919 % 10000) END AS c
+    FROM generate_series(1, 1000) AS i;
+SELECT source_same('SELECT count(*) FILTER (WHERE s = c), count(*) FILTER (WHERE c <> s)
+                    FROM ft_bytes_packed');
+SELECT source_same('SELECT a FROM ft_bytes_packed WHERE s = c');
+SELECT tessera_test_scan_source_asks();
+DROP FOREIGN TABLE ft_bytes_packed;
+DROP TABLE ht_bytes_packed;
 SELECT tessera_test_scan_sources(ARRAY[]::text[]);
 DROP FOREIGN TABLE ft_bytes;
 DROP TABLE ht_bytes;
