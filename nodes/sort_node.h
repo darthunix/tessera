@@ -121,7 +121,9 @@ typedef enum SortAbbrev
 	/* numeric: the reverse of a signed integer's order. */
 	SORT_ABBREV_REVERSED,
 	SORT_ABBREV_UINT32,
-	SORT_ABBREV_INT32
+	SORT_ABBREV_INT32,
+	/* A string ordered by its bytes: the kernels' sort words, never given up. */
+	SORT_ABBREV_BYTES
 } SortAbbrev;
 
 typedef struct TessSortState
@@ -165,6 +167,17 @@ typedef struct TessSortState
 	uint64		abbrev_rows;
 	uint64		abbrev_next;
 	bool		abbrev_given_up;
+	/* The first generic key is a string by its bytes (TESS_SORT_KIND_BYTES). */
+	bool		generic_bytes;
+	/*
+	 * An assert build's check of such a key's order in the output
+	 * (sort_check_bytes): the last row checked, its keys up to that one,
+	 * the string copied into a context of its own.
+	 */
+	bool		check_has_last;
+	Datum		check_last[TESS_TABLE_MAX_KEYS];
+	bool		check_last_null[TESS_TABLE_MAX_KEYS];
+	MemoryContext check_context;
 	/* The order of the type's abbreviated keys the node took, for EXPLAIN. */
 	SortAbbrev	abbrev_taken;
 	struct TieRow *tie_rows;
@@ -271,6 +284,11 @@ typedef struct TessSortState
 } TessSortState;
 
 /* The functions one file of the node calls in another. */
+extern void sort_bytes_words(TessSortState *state, const TessTextArg *column,
+							 const TessRowMask *rows);
+extern void sort_check_bytes(TessSortState *state, Datum *const *values, bool *const *isnull,
+							 int nrows);
+extern void sort_check_bytes_refs(TessSortState *state, const uint32 *refs, uint64 count);
 extern void sort_abbreviate_column(TessSortState *state, const TessDatumColumn *column,
 								   const TessRowMask *rows);
 extern void sort_ties(TessSortState *state, uint64 **items, int words, uint32 *refs, uint64 count,

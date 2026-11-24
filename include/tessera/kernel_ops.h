@@ -9,7 +9,7 @@
  * through tess_runtime_kernels() and calls them by pointer. Every
  * operation has the prototype, arguments and contract of the entry point
  * named in its comment (tessera/kernels.h, tessera/decimal.h,
- * tessera/table.h, tessera/spill.h, tessera/sort.h). See
+ * tessera/table.h, tessera/spill.h, tessera/sort.h, tessera/text.h). See
  * docs/bridge.md.
  */
 #ifndef TESSERA_KERNEL_OPS_H
@@ -24,6 +24,7 @@
 #include "tessera/sort.h"
 #include "tessera/spill.h"
 #include "tessera/table.h"
+#include "tessera/text.h"
 
 #define TESS_KERNEL_OPS_ABI_VERSION 0
 #define TESS_KERNEL_REGISTRY_OPS_ABI_VERSION 0
@@ -55,7 +56,7 @@ typedef struct TessKernelOps
 } TessKernelOps;
 
 #define TESS_KERNEL_OPS_MIN_SIZE \
-	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, shared_build_stop)
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessKernelOps, text_sort_words)
 
 /* The operations' count, and the last of them is the last field. */
 #define TESS_KERNEL_OP_COUNT(name) + 1

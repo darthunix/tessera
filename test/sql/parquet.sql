@@ -857,6 +857,109 @@ SELECT explain_lines('ANALYZE', 'SELECT i FROM t_bytes_dict WHERE (s NOT LIKE ''
                      'Custom|Filter|Decoded');
 SELECT explain_lines('ANALYZE', 'SELECT i, left(s, 1) FROM t_bytes_plain WHERE i > 10 ORDER BY i',
                      'Custom|Decoded');
+-- spec: string-bytes/Ordered by bytes
+-- TessSort orders a text key under C and under the builtin C.UTF-8, and
+-- a bytea key, by its bytes: its word is its first eight bytes, and the
+-- rows of equal words go to the comparison. Over a file of strings that
+-- begin others or share their first eight bytes, of two- and three-byte
+-- characters, empty strings and NULL rows, and of the bytes 00, 7f, 80
+-- and ff, in both directions, NULL rows first and last, with and without
+-- LIMIT 10, in memory and spilled: the rows come in the core's order.
+SELECT parquet_test_write(:'dir' || '/bytes_sort.parquet', json_build_object(
+    'dictionary', false, 'columns', json_build_array(
+      json_build_object('name', 'i', 'type', 'int32', 'values',
+        (SELECT json_agg(n ORDER BY n) FROM generate_series(0, 1999) n)),
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg(CASE n % 11 WHEN 0 THEN NULL WHEN 1 THEN '' WHEN 2 THEN 'abcdefgh'
+                                     WHEN 3 THEN 'abcdefgh' || n % 17 WHEN 4 THEN 'abcdefg'
+                                     WHEN 5 THEN 'abcdefghé' || n % 7 WHEN 6 THEN 'é' || n % 5
+                                     WHEN 7 THEN '€' || n % 3 WHEN 8 THEN 'abcdefgh€'
+                                     WHEN 9 THEN 'Abcdefgh' || n % 13 ELSE 'z' || n % 19 END
+                         ORDER BY n)
+         FROM generate_series(0, 1999) n)),
+      json_build_object('name', 'b', 'type', 'bytes', 'values',
+        (SELECT json_agg(CASE n % 7 WHEN 0 THEN NULL
+                                    ELSE json_build_object('hex', (ARRAY['00', '7f', '80',
+                                      'ff' || lpad(to_hex(n % 5), 2, '0'), '0000', 'ff'])[n % 7])
+                         END ORDER BY n)
+         FROM generate_series(0, 1999) n))))::text);
+\set bytes_sort :dir '/bytes_sort.parquet'
+CREATE FOREIGN TABLE t_bytes_sort (i int, s text, b bytea) SERVER pq OPTIONS (files :'bytes_sort');
+-- The rows of a query in order, with Tessera and with the core: 'same, n
+-- rows' or the difference.
+CREATE FUNCTION order_off(statement text) RETURNS text LANGUAGE plpgsql AS $$
+DECLARE
+    saved text := current_setting('tessera.enable');
+    with_tessera text[];
+    by_core text[];
+    wrapped text := format('SELECT array_agg(q::text) FROM (%s) AS q', statement);
+BEGIN
+    EXECUTE wrapped INTO with_tessera;
+    PERFORM set_config('tessera.enable', 'off', true);
+    EXECUTE wrapped INTO by_core;
+    PERFORM set_config('tessera.enable', saved, true);
+    IF with_tessera IS DISTINCT FROM by_core THEN
+        RETURN format('MISMATCH %s against %s', with_tessera, by_core);
+    END IF;
+    RETURN format('same, %s rows', coalesce(cardinality(with_tessera), 0));
+END $$;
+SELECT o AS ordering,
+       order_off(format('SELECT i, s, b FROM t_bytes_sort ORDER BY %s, i', o)) AS in_full,
+       order_off(format('SELECT i, s, b FROM t_bytes_sort ORDER BY %s, i LIMIT 10', o)) AS top_10
+FROM (VALUES ('s COLLATE "C"'), ('s COLLATE "C" DESC'), ('s COLLATE "C" NULLS FIRST'),
+             ('s COLLATE "C" DESC NULLS LAST'), ('s COLLATE pg_c_utf8'),
+             ('s COLLATE pg_c_utf8 DESC'), ('b'), ('b DESC NULLS LAST')) x(o);
+SET work_mem = '64kB';
+SELECT o AS ordering,
+       order_off(format('SELECT i, s, b FROM t_bytes_sort ORDER BY %s, i', o)) AS spilled
+FROM (VALUES ('s COLLATE "C"'), ('s COLLATE pg_c_utf8 DESC NULLS LAST'), ('b')) x(o);
+SELECT explain_lines('ANALYZE, VERBOSE',
+                     'SELECT i, s FROM t_bytes_sort ORDER BY s COLLATE "C", i',
+                     'TessSort|Sort Method|Abbreviated');
+RESET work_mem;
+SELECT explain_lines('ANALYZE, VERBOSE', format('SELECT i, s, b FROM t_bytes_sort ORDER BY %s', o),
+                     'Abbreviated')
+FROM (VALUES ('s COLLATE "C"'), ('s COLLATE pg_c_utf8'), ('b')) x(o);
+-- spec: string-bytes/Another collation
+-- Under a collation of libc that is not C, and under C by an operator
+-- class that orders the other way, the key is sorted as before: by its
+-- comparison, without the words of its bytes.
+DO $$ BEGIN
+    CREATE COLLATION parquet_sort_libc (provider = libc, locale = 'en_US.UTF-8');
+EXCEPTION WHEN OTHERS THEN
+    CREATE COLLATION parquet_sort_libc (provider = libc, locale = 'C.UTF-8');
+END $$;
+CREATE FUNCTION text_reverse_cmp(text, text) RETURNS int LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT bttextcmp($2, $1)';
+CREATE FUNCTION text_reverse_lt(text, text) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT $1 > $2';
+CREATE FUNCTION text_reverse_le(text, text) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT $1 >= $2';
+CREATE FUNCTION text_reverse_ge(text, text) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT $1 <= $2';
+CREATE FUNCTION text_reverse_gt(text, text) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT $1 < $2';
+CREATE OPERATOR <<< (LEFTARG = text, RIGHTARG = text, FUNCTION = text_reverse_lt);
+CREATE OPERATOR <<<= (LEFTARG = text, RIGHTARG = text, FUNCTION = text_reverse_le);
+CREATE OPERATOR >>>= (LEFTARG = text, RIGHTARG = text, FUNCTION = text_reverse_ge);
+CREATE OPERATOR >>> (LEFTARG = text, RIGHTARG = text, FUNCTION = text_reverse_gt);
+CREATE OPERATOR CLASS text_reverse_ops FOR TYPE text USING btree AS
+    OPERATOR 1 <<<, OPERATOR 2 <<<=, OPERATOR 3 =, OPERATOR 4 >>>=, OPERATOR 5 >>>,
+    FUNCTION 1 text_reverse_cmp(text, text);
+SELECT o AS ordering,
+       order_off(format('SELECT i, s FROM t_bytes_sort ORDER BY %s, i', o)) AS in_full,
+       order_off(format('SELECT i, s FROM t_bytes_sort ORDER BY %s, i LIMIT 10', o)) AS top_10
+FROM (VALUES ('s COLLATE parquet_sort_libc'), ('s COLLATE "C" USING <<<')) x(o);
+SELECT explain_lines('ANALYZE, VERBOSE', format('SELECT i, s FROM t_bytes_sort ORDER BY %s', o),
+                     'Abbreviated')
+FROM (VALUES ('s COLLATE parquet_sort_libc'), ('s COLLATE "C" USING <<<')) x(o);
+DROP OPERATOR CLASS text_reverse_ops USING btree;
+DROP OPERATOR FAMILY text_reverse_ops USING btree;
+DROP OPERATOR <<< (text, text), <<<= (text, text), >>>= (text, text), >>> (text, text);
+DROP FUNCTION text_reverse_cmp(text, text), text_reverse_lt(text, text),
+    text_reverse_le(text, text), text_reverse_ge(text, text), text_reverse_gt(text, text);
+DROP COLLATION parquet_sort_libc;
+DROP FOREIGN TABLE t_bytes_sort;
 -- spec: string-bytes/A nondeterministic collation
 -- Under a collation that ignores case, whose equal values may differ in
 -- their bytes, the key is read as Datum values, the scan making each
@@ -1524,6 +1627,14 @@ SELECT parallel_lines('SELECT * FROM (SELECT count(*) AS n, sum(i) AS total FROM
                        RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true',
                       'Nested Loop|Parallel|Row Groups Read|Values Decoded');
 SELECT workers_launched('SELECT count(*), sum(i), max(s) FROM t_eight') > 0 AS workers_read;
+-- Ordered by a string through an ordered gather: each worker's TessSort
+-- by the words of its bytes, the gather's merge by the string's
+-- comparison, the generic kind; the rows in the core's order.
+SELECT parallel_lines('SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i',
+                      'Gather|TessSort|Abbreviated|Workers Planned');
+SELECT order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i') AS ascending,
+       order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C" DESC, i') AS descending,
+       order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i LIMIT 10') AS top_10;
 -- spec: string-bytes/A partial stage's tables sent up
 -- A parallel grouping by a string of 8000 values of some 65 bytes through
 -- the chunks' dictionaries, under a work_mem its workers' tables outgrow,
@@ -1720,7 +1831,8 @@ DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, b
     sqlstate_of(text), differ(text, text), differ_off(text), scans_of(text),
     explain_lines(text, text, text), parquet_test_asks(text, int, int), differ_serial(text),
     parallel_lines(text, text), workers_launched(text), plan_of(text), scan_cost(text, text),
-    checked_by(text), rows_of(text), groups_of(text), skipping(text, text, text);
+    checked_by(text), rows_of(text), groups_of(text), skipping(text, text, text),
+    order_off(text);
 DROP SERVER pq;
 REVOKE CREATE ON SCHEMA public FROM parquet_reader, parquet_other;
 DROP ROLE parquet_reader, parquet_other;

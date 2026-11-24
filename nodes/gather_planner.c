@@ -155,11 +155,15 @@ make_gather_merge_path(PlannerInfo *root, GatherMergePath *gather)
 	TessSortKeys keys;
 	int			nkeys = list_length(gather->path.pathkeys);
 
-	/* As TessSort takes them: a key of another type by its comparison. */
+	/*
+	 * As TessSort takes them: a key of another type by its comparison, a
+	 * string too, whose order by bytes the merge of the workers' rows does
+	 * not take.
+	 */
 	if (subpath == NULL ||
 		nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS || kernels == NULL ||
 		!tess_sort_keys(gather->path.pathkeys, subpath->pathtarget, subpath->parent->relids,
-						&keys))
+						false, &keys))
 		return NULL;
 	return make_send_and_gather(root, &gather->path, subpath, gather->num_workers,
 								list_make5(keys.places, keys.kinds, keys.flags, keys.sortops,

@@ -211,7 +211,7 @@ named in the harness and covered by a property test.
       bounds, that the words, the rest and the lengths order two strings
       as their unsigned bytes do. Check: `make rust-check`; `cargo kani
       -p tessera-kernels`; `cargo mutants` over the changed lines
-- [ ] 6.2 `nodes/key_kind.h`: whether a collation orders by bytes, from
+- [x] 6.2 `nodes/key_kind.h`: whether a collation orders by bytes, from
       PostgreSQL's locale; `nodes/sort.c`, `nodes/sort_planner.c`,
       `nodes/sort_external.c`: a key kind for `bytea` and for a string
       of such a collation under its type's default operator class, its

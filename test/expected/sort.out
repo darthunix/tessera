@@ -945,10 +945,12 @@ RESET parallel_setup_cost;
 RESET tessera.scan_parallel_setup_cost;
 RESET tessera.scan_worker_page_cost;
 RESET max_parallel_workers_per_gather;
--- Text whose first nine bytes are the same: its abbreviated keys tell no
--- row apart, and the sort gives them up as tuplesort does, past a hundred
--- rows; the comparisons order the rows, NULL in every 13th, also after an
--- int key of five values. A control whose first bytes differ keeps them.
+-- Text whose first nine bytes are the same, NULL in every 13th, also after
+-- an int key of five values. Under C its words are its first eight bytes,
+-- the same for every row, and the comparisons order the rows; a control
+-- whose first bytes differ, reversed. Under an ICU collation its
+-- abbreviated keys tell no row apart, and the sort gives them up as
+-- tuplesort does, past a hundred rows.
 CREATE TABLE sort_prefix AS
 SELECT CASE WHEN i % 13 = 0 THEN NULL
             ELSE 'customer#' || lpad((i * 7919 % 3000)::text, 9, '0') END AS p,
@@ -964,7 +966,7 @@ SELECT sort_explain($$SELECT p, v FROM sort_prefix ORDER BY p COLLATE "C", v$$);
    Memory Usage: N kB
    Input Batches: 64
    Input Rows: 3000
-   Abbreviated Keys: given up
+   Abbreviated Keys: bytes
    ->  Custom Scan (TessHeapScan) on public.sort_prefix (actual rows=3000.00 loops=1)
          Batch Size: 64
          Batches: 64
@@ -1001,7 +1003,7 @@ SELECT sort_explain($$SELECT p, v FROM sort_prefix ORDER BY reverse(p) COLLATE "
    Memory Usage: N kB
    Input Batches: 64
    Input Rows: 3000
-   Abbreviated Keys: unsigned
+   Abbreviated Keys: bytes
    ->  Custom Scan (TessHeapScan) on public.sort_prefix (actual rows=3000.00 loops=1)
          Batch Size: 64
          Batches: 64
@@ -1017,7 +1019,68 @@ SELECT sort_same($$SELECT p, v FROM sort_prefix ORDER BY reverse(p) COLLATE "C",
  3000 rows
 (1 row)
 
+SELECT sort_explain($$SELECT p, v FROM sort_prefix ORDER BY p COLLATE "und-x-icu", v$$);
+                                     sort_explain                                     
+--------------------------------------------------------------------------------------
+ Custom Scan (TessSort) (actual rows=3000.00 loops=1)
+   Sort Key: sort_prefix.p COLLATE "und-x-icu", sort_prefix.v
+   Sort Method: in memory
+   Memory Usage: N kB
+   Input Batches: 64
+   Input Rows: 3000
+   Abbreviated Keys: given up
+   ->  Custom Scan (TessHeapScan) on public.sort_prefix (actual rows=3000.00 loops=1)
+         Batch Size: 64
+         Batches: 64
+         Pages: 22
+         Deformed Datums: 6000
+         Restarted Datums: 0
+         Computed Datums: 3000
+(14 rows)
+
+SELECT sort_same($$SELECT p, v FROM sort_prefix ORDER BY p COLLATE "und-x-icu", v$$);
+ sort_same 
+-----------
+ 3000 rows
+(1 row)
+
 DROP TABLE sort_prefix;
+-- Long text under C, compressed in the table, whose words the kernels
+-- leave to the node: each row's value made plain for its word; NULL rows
+-- first and last, both directions, in memory and spilled.
+CREATE TABLE sort_long AS
+SELECT CASE WHEN i % 11 = 0 THEN NULL
+            ELSE repeat(chr(65 + i % 3), 3000) || (i * 7919 % 500)::text END AS s,
+       i AS v
+FROM generate_series(1, 500) AS i;
+SELECT count(*) FILTER (WHERE pg_column_compression(s) IS NOT NULL) > 0 AS compressed
+FROM sort_long;
+ compressed 
+------------
+ t
+(1 row)
+
+SELECT sort_same($$SELECT v, left(s, 4), length(s) FROM sort_long ORDER BY s COLLATE "C", v$$);
+ sort_same 
+-----------
+ 500 rows
+(1 row)
+
+SELECT sort_same($$SELECT v FROM sort_long ORDER BY s COLLATE "C" DESC NULLS LAST, v$$);
+ sort_same 
+-----------
+ 500 rows
+(1 row)
+
+SET work_mem = '64kB';
+SELECT sort_same($$SELECT v FROM sort_long ORDER BY s COLLATE "C" NULLS FIRST, v$$);
+ sort_same 
+-----------
+ 500 rows
+(1 row)
+
+RESET work_mem;
+DROP TABLE sort_long;
 -- A scrollable cursor: forward and backward, across batches and past both ends.
 EXPLAIN (COSTS OFF) DECLARE c SCROLL CURSOR FOR SELECT d, a FROM sort_t ORDER BY d;
                  QUERY PLAN                 

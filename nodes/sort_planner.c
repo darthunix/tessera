@@ -1,5 +1,8 @@
 #include "postgres.h"
 
+#include "catalog/pg_am_d.h"
+#include "catalog/pg_type_d.h"
+#include "commands/defrem.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -95,15 +98,38 @@ tess_sort_generic_key(PathKey *pathkey, PathTarget *target, Relids relids, int *
 }
 
 /*
+ * Whether a key of type, ordered by the operator family under collation,
+ * orders by its bytes: text and varchar under a collation PostgreSQL
+ * compares by bytes, and bytea, each by its type's default operator class
+ * of B-tree, as another class, a module's, may order otherwise.
+ */
+static bool
+sort_key_by_bytes(Oid type, Oid opfamily, Oid collation)
+{
+	Oid			opclass;
+
+	type = getBaseType(type);
+	if ((type == TEXTOID || type == VARCHAROID) && !tess_collation_orders_by_bytes(collation))
+		return false;
+	if (type != TEXTOID && type != VARCHAROID && type != BYTEAOID)
+		return false;
+	opclass = GetDefaultOpClass(type, BTREE_AM_OID);
+	return OidIsValid(opclass) && get_opclass_family(opclass) == opfamily;
+}
+
+/*
  * The keys of path keys as TessSort and TessGatherMerge take them, in
  * lists for the plan: each key's place in target, its kind and flags, the
  * operator that orders it and its collation. A key of the sort kernels
  * keeps its type's comparison for the rows a generic key before it leaves
  * equal; a key of another type orders by its comparison (sort support),
- * by its abbreviated key where it has one. False for a key neither takes.
+ * by its abbreviated key where it has one, or, with by_bytes, a string
+ * that orders by its bytes by a word of its first bytes. False for a key
+ * neither takes.
  */
 bool
-tess_sort_keys(List *pathkeys, PathTarget *target, Relids relids, TessSortKeys *keys)
+tess_sort_keys(List *pathkeys, PathTarget *target, Relids relids, bool by_bytes,
+			   TessSortKeys *keys)
 {
 	*keys = (TessSortKeys) {0};
 	foreach_node(PathKey, pathkey, pathkeys)
@@ -123,7 +149,10 @@ tess_sort_keys(List *pathkeys, PathTarget *target, Relids relids, TessSortKeys *
 		}
 		else if (tess_sort_generic_key(pathkey, target, relids, &place, &sortop, &collation))
 		{
-			key.kind = TESS_SORT_KIND_GENERIC;
+			key.kind = by_bytes &&
+				sort_key_by_bytes(exprType(list_nth(target->exprs, place)),
+								  pathkey->pk_opfamily, collation) ?
+				TESS_SORT_KIND_BYTES : TESS_SORT_KIND_GENERIC;
 			key.flags = (pathkey->pk_cmptype == COMPARE_GT ? TESS_SORT_DESCENDING : 0) |
 				(pathkey->pk_nulls_first ? TESS_SORT_NULLS_FIRST : 0);
 		}
@@ -159,7 +188,7 @@ make_sort_path(PlannerInfo *root, SortPath *sort)
 
 	if (nkeys == 0 || nkeys > TESS_TABLE_MAX_KEYS ||
 		ncolumns == 0 || ncolumns > TESS_ROWS_MAX_COLUMNS ||
-		!tess_sort_keys(sort->path.pathkeys, target, input->parent->relids, &keys))
+		!tess_sort_keys(sort->path.pathkeys, target, input->parent->relids, true, &keys))
 		return NULL;
 
 	/*

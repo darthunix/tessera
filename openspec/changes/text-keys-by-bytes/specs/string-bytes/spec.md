@@ -334,7 +334,8 @@ collation or another operator class SHALL be sorted as today.
   serial and through a parallel plan's ordered gather; and by a `bytea`
   column holding the bytes `00`, `7f`, `80` and `ff`
 - **THEN** their rows come in the core's order
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Ordered by bytes`
 
 #### Scenario: Top-N makes the kept rows' values
 - **WHEN** `ORDER BY` a `text` column under `C` with `LIMIT 10` reads
@@ -349,4 +350,5 @@ collation or another operator class SHALL be sorted as today.
   otherwise
 - **THEN** their rows come in the order of that collation or class,
   sorted as today
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Another collation`
