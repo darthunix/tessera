@@ -288,6 +288,8 @@ extern void sort_bytes_words(TessSortState *state, const TessTextArg *column,
 							 const TessRowMask *rows);
 extern void sort_check_bytes(TessSortState *state, Datum *const *values, bool *const *isnull,
 							 int nrows);
+extern int	sort_bytes_order(TessSortState *state, const char *a, Size a_len, bool a_null,
+							 Datum b, bool b_null);
 extern void sort_check_bytes_refs(TessSortState *state, const uint32 *refs, uint64 count);
 extern void sort_abbreviate_column(TessSortState *state, const TessDatumColumn *column,
 								   const TessRowMask *rows);

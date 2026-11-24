@@ -960,6 +960,30 @@ DROP FUNCTION text_reverse_cmp(text, text), text_reverse_lt(text, text),
     text_reverse_le(text, text), text_reverse_ge(text, text), text_reverse_gt(text, text);
 DROP COLLATION parquet_sort_libc;
 DROP FOREIGN TABLE t_bytes_sort;
+-- spec: string-bytes/Top-N makes the kept values
+-- ORDER BY a text column under C with LIMIT 10 over 100 000 rows in no
+-- order of the key: the top-N sort makes its words from the bytes form,
+-- and asks the scan for the values of the rows that may beat the worst
+-- kept alone, so that the scan makes values for fewer rows than it reads;
+-- the rows are the core's, in both directions and with a column beside.
+SELECT parquet_test_write(:'dir' || '/bytes_top.parquet', json_build_object(
+    'dictionary', false, 'columns', json_build_array(
+      json_build_object('name', 'i', 'type', 'int32', 'values',
+        (SELECT json_agg(n ORDER BY n) FROM generate_series(0, 99999) n)),
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg('k' || lpad((n * 7919 % 100000)::text, 6, '0') ORDER BY n)
+         FROM generate_series(0, 99999) n))))::text);
+\set bytes_top :dir '/bytes_top.parquet'
+CREATE FOREIGN TABLE t_bytes_top (i int, s text) SERVER pq OPTIONS (files :'bytes_top');
+SELECT explain_lines('ANALYZE', 'SELECT s FROM t_bytes_top ORDER BY s COLLATE "C" LIMIT 10',
+                     'TessSort|Sort Method|TessParquetScan');
+SELECT (regexp_match(line, 'Values Decoded: (\d+)'))[1]::int < 100000 AS fewer_values_made
+FROM explain_lines('ANALYZE', 'SELECT s FROM t_bytes_top ORDER BY s COLLATE "C" LIMIT 10',
+                   'Values Decoded') AS line;
+SELECT order_off('SELECT s FROM t_bytes_top ORDER BY s COLLATE "C" LIMIT 10') AS ascending,
+       order_off('SELECT s FROM t_bytes_top ORDER BY s COLLATE "C" DESC LIMIT 10') AS descending,
+       order_off('SELECT i, s FROM t_bytes_top ORDER BY s COLLATE "C", i LIMIT 10') AS beside;
+DROP FOREIGN TABLE t_bytes_top;
 -- spec: string-bytes/A nondeterministic collation
 -- Under a collation that ignores case, whose equal values may differ in
 -- their bytes, the key is read as Datum values, the scan making each
