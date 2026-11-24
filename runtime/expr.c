@@ -50,6 +50,12 @@ typedef struct Step
 	 */
 	bool		reads_decimals;
 	int			scale;
+	/*
+	 * The function reads its string arguments in the bytes form
+	 * (TESS_FUNCTION_BYTES): a column the batch offers so, read unchanged,
+	 * goes to it as bytes.
+	 */
+	bool		reads_bytes;
 } Step;
 
 /* A node of a condition over the batch, in three-valued logic. */
@@ -196,6 +202,8 @@ struct TessExpr
 	 */
 	bool		input_shared;
 	TessRowMask non_nulls;
+	/* The input column in the bytes form, as input_bytes last asked it. */
+	TessBytesColumn bytes;
 	bool		ready;
 	/* A bare column's mask is built when asked for: a filter never asks. */
 	bool		non_nulls_pending;
@@ -1152,6 +1160,7 @@ init_step(Step *step, Node *node, int column_arg, int column_operand,
 		step->function = commuted(opno, inputcollid, function->kind);
 		step->column_arg = 0;
 	}
+	step->reads_bytes = (step->function->flags & TESS_FUNCTION_BYTES) != 0;
 	foreach_ptr(Node, arg, args)
 	{
 		int			position = index++;
@@ -1715,12 +1724,67 @@ tess_expr_share_inputs(TessExpr **exprs, int nexprs)
 }
 
 /*
- * The call's arguments: the column, the operand computed over the current
- * selection, and the scalars; true when a scalar is NULL.
+ * The expression's input column in the bytes form over its selection,
+ * for a function that reads it: an expression that is the batch's column,
+ * or whose chain starts from it, where the batch offers the form; NULL
+ * otherwise. In an assert build, the first and the last byte of every row
+ * are read, so that a sanitizer sees a pointer that outlived its bytes.
+ */
+static const TessBytesColumn *
+input_bytes(TessExpr *expr)
+{
+	TessBytesColumn *bytes = &expr->bytes;
+
+	if (expr->column < 0 || expr->batch == NULL ||
+		!tess_batch_bytes_column(expr->batch, expr->column, expr->rows, bytes))
+		return NULL;
+	if (bytes->nrows != expr->rows->nrows || bytes->isnull == NULL || bytes->data == NULL ||
+		bytes->lengths == NULL)
+		elog(ERROR, "Tessera batch returned an invalid bytes column");
+#ifdef USE_ASSERT_CHECKING
+	for (int row = -1; (row = tess_row_mask_next(expr->rows, row)) >= 0;)
+	{
+		const volatile char *data = bytes->data[row];
+
+		if (bytes->isnull[row])
+			continue;
+		Assert(data != NULL);
+		if (bytes->lengths[row] == 0)
+			continue;
+		(void) data[0];
+		(void) data[bytes->lengths[row] - 1];
+	}
+#endif
+	return bytes;
+}
+
+/*
+ * The column of a bare column's expression as a step's argument: in the
+ * bytes form where the step reads it and the batch offers it, its Datum
+ * values otherwise.
+ */
+static const TessDatumColumn *
+operand_column(Step *step, TessExpr *operand, const TessBytesColumn **bytes)
+{
+	*bytes = NULL;
+	if (step->reads_bytes && operand->nsteps == 0 && operand->choice == NULL &&
+		(*bytes = input_bytes(operand)) != NULL)
+		return NULL;
+	return step->reads_decimals && wants_decimals(operand) ?
+		tess_expr_get_decimal_column(operand) :
+		tess_expr_get_column(operand);
+}
+
+/*
+ * The call's arguments: the column, or its bytes form when column_bytes
+ * is given, the operand computed over the current selection, and the
+ * scalars; bytes gets each argument's bytes form, or NULL. True when a
+ * scalar is NULL.
  */
 static bool
 build_args(TessExpr *expr, Step *step, const TessDatumColumn *column,
-		   TessFunctionArg *args)
+		   const TessBytesColumn *column_bytes, TessFunctionArg *args,
+		   const TessBytesColumn **bytes)
 {
 	bool		scalar_null = false;
 
@@ -1728,15 +1792,17 @@ build_args(TessExpr *expr, Step *step, const TessDatumColumn *column,
 	{
 		args[position] = (TessFunctionArg)
 			TESS_STRUCT_INITIALIZER(TessFunctionArg);
+		bytes[position] = NULL;
 		if (position == step->column_arg)
-			args[position].column = column;
+		{
+			args[position].column = column_bytes != NULL ? NULL : column;
+			bytes[position] = column_bytes;
+		}
 		else if (position == step->column_operand)
 		{
 			/* The selection may have narrowed since the operand was computed. */
 			step->operand->ready = false;
-			args[position].column = step->reads_decimals && wants_decimals(step->operand) ?
-				tess_expr_get_decimal_column(step->operand) :
-				tess_expr_get_column(step->operand);
+			args[position].column = operand_column(step, step->operand, &bytes[position]);
 		}
 		else
 		{
@@ -1754,7 +1820,8 @@ build_args(TessExpr *expr, Step *step, const TessDatumColumn *column,
 /* Run one step over the selected rows; a failure is raised here. */
 static void
 call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
-		  void *values, TessRowMask *non_nulls, TessRowMask *decimals)
+		  const TessBytesColumn *const *bytes, void *values, TessRowMask *non_nulls,
+		  TessRowMask *decimals)
 {
 	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
 
@@ -1772,6 +1839,9 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
 	call.function = step->function;
 	call.nargs = step->nargs;
 	call.args = args;
+	for (int position = 0; step->reads_bytes && position < step->nargs; position++)
+		if (bytes[position] != NULL)
+			call.bytes = bytes;
 	call.inputcollid = step->inputcollid;
 	call.rows = expr->rows;
 	call.values = values;
@@ -1787,19 +1857,24 @@ call_step(TessExpr *expr, const Step *step, const TessFunctionArg *args,
 }
 
 /*
- * A predicate over column and a scalar, narrowing rows in place; a failure
- * is raised here with value's status.
+ * A predicate over column, or column_bytes in the bytes form, and a
+ * scalar, narrowing rows in place; a failure is raised here with value's
+ * status.
  */
 static void
 call_predicate(TessExpr *value, const TessFunction *function,
 			   Oid inputcollid, const TessDatumColumn *column,
+			   const TessBytesColumn *column_bytes,
 			   const TessDatumColumn *operand, Datum scalar, TessRowMask *rows)
 {
 	TessFunctionCall call = TESS_STRUCT_INITIALIZER(TessFunctionCall);
 	TessFunctionArg args[2];
+	const TessBytesColumn *bytes[2] = {column_bytes, NULL};
 
 	args[0] = (TessFunctionArg) TESS_STRUCT_INITIALIZER(TessFunctionArg);
 	args[0].column = column;
+	if (column_bytes != NULL)
+		call.bytes = bytes;
 	args[1] = (TessFunctionArg) TESS_STRUCT_INITIALIZER(TessFunctionArg);
 	args[1].column = operand;
 	args[1].scalar = scalar;
@@ -1861,6 +1936,7 @@ expr_column(TessExpr *expr, bool decimals)
 {
 	TessBatch  *batch = expr->batch;
 	TessDatumColumn current = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+	const TessBytesColumn *current_bytes = NULL;
 	uint64	   *current_bits;
 	int			nrows;
 
@@ -1881,7 +1957,16 @@ expr_column(TessExpr *expr, bool decimals)
 	}
 	nrows = expr->rows->nrows;
 	ensure_capacity(expr, nrows);
-	if (expr->column >= 0)
+	/* A first step that reads bytes gets the input so, where offered. */
+	if (expr->column >= 0 && expr->nsteps > 0 && expr->steps[0].reads_bytes)
+		current_bytes = input_bytes(expr);
+	if (current_bytes != NULL)
+	{
+		/* The first step's result is the first column of the chain's own. */
+		current.nrows = nrows;
+		current_bits = NULL;
+	}
+	else if (expr->column >= 0)
 	{
 		/*
 		 * A numeric column another expression of the node reads too: its
@@ -1924,6 +2009,7 @@ expr_column(TessExpr *expr, bool decimals)
 		Step	   *step = &expr->steps[index];
 		int			set = index % 2;
 		TessFunctionArg args[MAX_ARGS];
+		const TessBytesColumn *bytes[MAX_ARGS];
 		TessRowMask non_nulls = {nrows, expr->bits[set]};
 		TessRowMask decimal_rows = {nrows, expr->decimals[set]};
 		bool		wrote_decimals = false;
@@ -1931,12 +2017,12 @@ expr_column(TessExpr *expr, bool decimals)
 		/* A step that reads no decimals gets numerics in their place. */
 		if (!step->reads_decimals && current.decimal_rows != NULL)
 			make_numerics(expr, &current, &current);
-		if (build_args(expr, step, &current, args))
+		if (build_args(expr, step, &current, current_bytes, args, bytes))
 			fill_scalar(expr, set, (Datum) 0, true);
 		else
 		{
 			wrote_decimals = step->scale >= 0;
-			call_step(expr, step, args,
+			call_step(expr, step, args, bytes,
 					  step->function->result_format == TESS_RESULT_INT32 ?
 					  (void *) expr->ints[set] : (void *) expr->values[set],
 					  &non_nulls, wrote_decimals ? &decimal_rows : NULL);
@@ -1948,6 +2034,7 @@ expr_column(TessExpr *expr, bool decimals)
 		current.decimal_rows = wrote_decimals ? expr->decimals[set] : NULL;
 		current.decimal_scale = wrote_decimals ? step->scale : 0;
 		current_bits = expr->bits[set];
+		current_bytes = NULL;
 	}
 	expr->result = current;
 	expr->non_nulls.nrows = nrows;
@@ -2162,18 +2249,30 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 			}
 		case COND_ARRAY:
 			{
-				const TessDatumColumn *column;
+				const TessDatumColumn *column = NULL;
+				const TessBytesColumn *column_bytes = NULL;
 				uint64	   *present = cond->all_true.bits;
 				uint64	   *work = cond->work.bits;
 
-				/* x once, over the selection. */
+				/* x once, over the selection: a bare column as bytes, where offered. */
 				memcpy(rest, rows->bits, sizeof(uint64) * nwords);
 				bind_selection(cond->expr, &cond->rest);
-				column = (cond->function->flags & TESS_FUNCTION_DECIMALS) != 0 &&
-					wants_decimals(cond->expr) ?
-					tess_expr_get_decimal_column(cond->expr) :
-					tess_expr_get_column(cond->expr);
-				if (want_unknown)
+				if ((cond->function->flags & TESS_FUNCTION_BYTES) != 0 &&
+					cond->expr->nsteps == 0 && cond->expr->choice == NULL)
+					column_bytes = input_bytes(cond->expr);
+				if (column_bytes == NULL)
+					column = (cond->function->flags & TESS_FUNCTION_DECIMALS) != 0 &&
+						wants_decimals(cond->expr) ?
+						tess_expr_get_decimal_column(cond->expr) :
+						tess_expr_get_column(cond->expr);
+				if (want_unknown && column_bytes != NULL)
+				{
+					memset(present, 0, sizeof(uint64) * nwords);
+					for (int row = -1; (row = tess_row_mask_next(&cond->rest, row)) >= 0;)
+						if (!column_bytes->isnull[row])
+							present[row / 64] |= UINT64CONST(1) << (row % 64);
+				}
+				else if (want_unknown)
 					memcpy(present, tess_expr_non_nulls(cond->expr)->bits,
 						   sizeof(uint64) * nwords);
 				if (cond->use_or)
@@ -2185,7 +2284,7 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 							continue;
 						memcpy(work, rest, sizeof(uint64) * nwords);
 						call_predicate(cond->expr, cond->function,
-									   cond->inputcollid, column, NULL,
+									   cond->inputcollid, column, column_bytes, NULL,
 									   cond->elements[index], &cond->work);
 						for (int word = 0; word < nwords; word++)
 						{
@@ -2208,7 +2307,7 @@ eval_cond(Cond *cond, const TessRowMask *rows, bool want_unknown)
 						if (cond->element_nulls[index])
 							continue;
 						call_predicate(cond->expr, cond->function,
-									   cond->inputcollid, column, NULL,
+									   cond->inputcollid, column, column_bytes, NULL,
 									   cond->elements[index], &cond->work);
 					}
 					for (int word = 0; word < nwords; word++)
@@ -2573,7 +2672,7 @@ eval_choice(TessExpr *expr)
 						/* The scalar where the result loses to it or is NULL. */
 						if (!mask_empty(&choice->part))
 							call_predicate(expr, choice->loses, choice->inputcollid, &result,
-										   NULL, scalar, &choice->part);
+										   NULL, NULL, scalar, &choice->part);
 						for (int word = 0; word < nwords; word++)
 							part[word] |= rows->bits[word] & ~expr->bits[1][word];
 						blend_scalar(expr, arg, part);
@@ -2587,7 +2686,7 @@ eval_choice(TessExpr *expr)
 						/* Where the argument beats the result, or the result is NULL. */
 						if (!mask_empty(&choice->part))
 							call_predicate(expr, choice->function, choice->inputcollid, column,
-										   &result, (Datum) 0, &choice->part);
+										   NULL, &result, (Datum) 0, &choice->part);
 						for (int word = 0; word < nwords; word++)
 							part[word] |= rows->bits[word] & ~expr->bits[1][word];
 						blend(expr, column, part);
@@ -2621,7 +2720,7 @@ eval_choice(TessExpr *expr)
 				}
 				memcpy(part, rows->bits, sizeof(uint64) * nwords);
 				call_predicate(choice->values[0], choice->function,
-							   choice->inputcollid, left, right, scalar,
+							   choice->inputcollid, left, NULL, right, scalar,
 							   &choice->part);
 				/* Where the arguments are equal, NULL. */
 				for (int word = 0; word < nwords; word++)
@@ -2643,8 +2742,10 @@ eval_choice(TessExpr *expr)
 void
 tess_expr_apply_filter(TessExpr *expr)
 {
-	const TessDatumColumn *column;
+	const TessDatumColumn *column = NULL;
+	const TessBytesColumn *column_bytes = NULL;
 	TessFunctionArg args[MAX_ARGS];
+	const TessBytesColumn *bytes[MAX_ARGS];
 
 	if (!expr->filter)
 		elog(ERROR, "Tessera expression is not a filter");
@@ -2671,8 +2772,12 @@ tess_expr_apply_filter(TessExpr *expr)
 		expr->predicate.operand->column < expr->column &&
 		tess_batch_is_heap(expr->batch))
 		(void) expr_column(expr->predicate.operand, false);
-	column = expr_column(expr, expr->predicate.reads_decimals && wants_decimals(expr));
-	if (build_args(expr, &expr->predicate, column, args))
+	/* A bare column as bytes, for a predicate that reads them, where offered. */
+	if (expr->predicate.reads_bytes && expr->nsteps == 0 && expr->choice == NULL)
+		column_bytes = input_bytes(expr);
+	if (column_bytes == NULL)
+		column = expr_column(expr, expr->predicate.reads_decimals && wants_decimals(expr));
+	if (build_args(expr, &expr->predicate, column, column_bytes, args, bytes))
 	{
 		/* A NULL scalar makes the strict predicate false everywhere. */
 		TessRowMask *rows = expr->rows;
@@ -2682,7 +2787,7 @@ tess_expr_apply_filter(TessExpr *expr)
 			memset(rows->bits, 0, sizeof(uint64) * nwords);
 	}
 	else
-		call_step(expr, &expr->predicate, args, NULL, NULL, NULL);
+		call_step(expr, &expr->predicate, args, bytes, NULL, NULL, NULL);
 	/* The value was computed over the wider selection. */
 	expr->ready = false;
 }

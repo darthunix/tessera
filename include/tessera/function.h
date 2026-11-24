@@ -80,6 +80,13 @@ typedef enum TessResultFormat
  * (TessFunctionCall.decimal_rows).
  */
 #define TESS_FUNCTION_DECIMALS 0x10
+/*
+ * A function that reads its string arguments in the bytes form
+ * (TessBytesColumn, tessera/batch.h): a consumer may give a column its
+ * input offers so with the argument's column NULL and its pointer in
+ * TessFunctionCall.bytes set. Without the flag, a function gets Datums.
+ */
+#define TESS_FUNCTION_BYTES 0x20
 
 /* The most arguments an equivalent's casts describe. */
 #define TESS_FUNCTION_MAX_ARGS 2
@@ -145,12 +152,34 @@ typedef struct TessFunctionCall
 	 */
 	TessRowMask *decimal_rows;
 	int			result_scale;
+	/*
+	 * A function of TESS_FUNCTION_BYTES finds this field by struct_size:
+	 * NULL, or nargs pointers, one an argument, set for an argument whose
+	 * column the consumer gives in the bytes form, with the argument's
+	 * column NULL, and NULL for every other argument. The bytes form lives
+	 * as long as the batch it comes from, at least for the call.
+	 */
+	const TessBytesColumn *const *bytes;
 } TessFunctionCall;
 
 #define TESS_FUNCTION_CALL_MIN_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessFunctionCall, status)
 #define TESS_FUNCTION_CALL_DECIMALS_SIZE \
 	TESS_ABI_SIZE_INCLUDING_FIELD(TessFunctionCall, result_scale)
+#define TESS_FUNCTION_CALL_BYTES_SIZE \
+	TESS_ABI_SIZE_INCLUDING_FIELD(TessFunctionCall, bytes)
+
+/*
+ * The column in the bytes form of argument arg of a call, or NULL: none
+ * given, or a call of a consumer that knows no field bytes.
+ */
+static inline const TessBytesColumn *
+tess_function_bytes_arg(const TessFunctionCall *call, int arg)
+{
+	if (call->struct_size < TESS_FUNCTION_CALL_BYTES_SIZE || call->bytes == NULL)
+		return NULL;
+	return call->bytes[arg];
+}
 
 /*
  * The description of one implementation. The provider owns it and keeps it

@@ -179,21 +179,22 @@ named in the harness and covered by a property test.
       both forms of an argument, which Miri's job of CI runs. Check:
       `make rust-check`; the suites; `cargo miri test -p tessera-capi
       --test text`; `cargo mutants` over the changed lines
-- [ ] 5.2 `include/tessera/function.h`: the flag `TESS_FUNCTION_BYTES`
+- [x] 5.2 `include/tessera/function.h`: the flag `TESS_FUNCTION_BYTES`
       and the field `bytes` appended to `TessFunctionCall`, its offsets
       asserted in the installed headers' check, and a test function
       that reads a call allocated at the size before `bytes`;
       `runtime/expr.c` gives the form of a column it reads unchanged to
       a function with the flag; in an assert build, it reads the first
-      and the last byte of every row it hands a kernel in the form;
-      `kernels/text.c` takes it for the kernels' own rows; a test
-      module's functions with and without the flag; `docs/function.md`.
-      Check: the suites
-- [ ] 5.3 `kernels/text.c`: every row a kernel sends to the core's
-      function gets a value made from its bytes in the call's memory
-      context; cases of `LIKE` with `_`, an escape and more pieces than
-      the matcher holds, of a comparison of a column of bytes with a
-      compressed column of the test source, of `sum(length(s))` over
+      and the last byte of every row it hands a kernel in the form; a
+      test module's functions with and without the flag;
+      `docs/function.md`. Check: the suites
+- [ ] 5.3 `kernels/text.c`: the flag, the form taken for the kernels'
+      own rows, and every row a kernel sends to the core's function
+      given a value made from its bytes in the call's memory context,
+      in one commit, since a function with the flag must take every row
+      it is given; cases of `LIKE` with `_`, an escape and more pieces
+      than the matcher holds, of a comparison of a column of bytes with
+      a compressed column of the test source, of `sum(length(s))` over
       `(s, n)` read in reverse order, and of each function of the spec
       over the test source and the Parquet table, in an aggregate's
       argument, a filter and an output column; `docs/kernels.md`.

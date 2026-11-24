@@ -237,6 +237,12 @@ other types and from other extensions use the same structure.
   value, writes decimals where the call asks: with `decimal_rows` set, a
   row's result of at most 18 digits at `result_scale` goes into `values` as
   its int64 and its bit into `decimal_rows`, any other as a numeric.
+- **Bytes.** `TESS_FUNCTION_BYTES` says a function reads its string
+  arguments in the bytes form of the batch contract (`TessBytesColumn`,
+  `tessera/batch.h`): where a batch offers a column so, the consumer may
+  give it with the argument's `column` `NULL` and its pointer in the
+  call's `bytes` set (see "Calling"). Without the flag, a function gets
+  `Datum`s, whatever the batch offers.
 - **Shape.** With `TESS_FUNCTION_ANY_SHAPE` every combination of column and
   scalar arguments is accepted. Without it, `args[0]` is the only column and
   the others are scalars: the consumer moves the column first through the
@@ -270,8 +276,19 @@ the function's kind:
   where PostgreSQL would.
 
 The columns are the batch contract's mandatory Datum representation; the
-kernels read it directly, and native column interfaces will extend
-`TessFunctionArg` when a producer offers them. Implementations return the
+kernels read it directly. A function of `TESS_FUNCTION_BYTES` may get a
+string column in the bytes form instead, through a field of the call, not
+of `TessFunctionArg`, whose array a function indexes by the size its own
+header gives. The field `bytes`, which the function finds by the call's
+`struct_size` (`tess_function_bytes_arg`), is `NULL` or holds one pointer
+an argument: set for an argument whose `column` is `NULL` and that is a
+column in the bytes form, `NULL` for every other. The expression compiler
+gives the form for a column it reads unchanged from its input, where the
+input offers it: the first function of a chain over the column, the
+column compared by a predicate, and the column of an `IN` list. The
+pointers of the form stay valid while the batch lives, at least for the
+call; every row of it is in place, never compressed. Implementations
+return the
 code they also store in `status`, never raising `ERROR`; the consumer
 reports a failure with `ereport` after the call returns (see
 [kernels.md](kernels.md)). After a failure the mutable outputs are
