@@ -310,20 +310,32 @@ SELECT sort_same($$SELECT p, v FROM sort_prefix ORDER BY reverse(p) COLLATE "C",
 SELECT sort_explain($$SELECT p, v FROM sort_prefix ORDER BY p COLLATE "und-x-icu", v$$);
 SELECT sort_same($$SELECT p, v FROM sort_prefix ORDER BY p COLLATE "und-x-icu", v$$);
 DROP TABLE sort_prefix;
--- Long text under C, compressed in the table, whose words the kernels
--- leave to the node: each row's value made plain for its word; NULL rows
--- first and last, both directions, in memory and spilled.
-CREATE TABLE sort_long AS
+-- Long text under C, compressed in the table and stored out of line,
+-- whose words the kernels leave to the node: each row's value made plain
+-- for its word; NULL rows first and last, both directions, in memory and
+-- spilled.
+CREATE TABLE sort_long (s text, e text, v int);
+ALTER TABLE sort_long ALTER COLUMN e SET STORAGE EXTERNAL;
+INSERT INTO sort_long
 SELECT CASE WHEN i % 11 = 0 THEN NULL
-            ELSE repeat(chr(65 + i % 3), 3000) || (i * 7919 % 500)::text END AS s,
-       i AS v
-FROM generate_series(1, 500) AS i;
-SELECT count(*) FILTER (WHERE pg_column_compression(s) IS NOT NULL) > 0 AS compressed
+            ELSE repeat(chr(65 + i % 3), 3000) || (i * 7919 % 2000)::text END,
+       CASE WHEN i % 13 = 0 THEN NULL
+            ELSE repeat(chr(65 + i % 5), 2500) || (i * 7919 % 2000)::text END,
+       i
+FROM generate_series(1, 2000) AS i;
+SELECT count(*) FILTER (WHERE pg_column_compression(s) IS NOT NULL) > 0 AS compressed,
+       count(*) FILTER (WHERE pg_column_compression(e) IS NULL AND octet_length(e) > 2000) > 0 AND
+       pg_relation_size((SELECT reltoastrelid FROM pg_class WHERE relname = 'sort_long')) > 0
+           AS out_of_line
 FROM sort_long;
 SELECT sort_same($$SELECT v, left(s, 4), length(s) FROM sort_long ORDER BY s COLLATE "C", v$$);
 SELECT sort_same($$SELECT v FROM sort_long ORDER BY s COLLATE "C" DESC NULLS LAST, v$$);
+SELECT sort_same($$SELECT v FROM sort_long ORDER BY e COLLATE "C", v$$);
 SET work_mem = '64kB';
+SELECT line FROM sort_explain($$SELECT v FROM sort_long ORDER BY s COLLATE "C" NULLS FIRST, v$$)
+    AS line WHERE line ~ 'Sort Method';
 SELECT sort_same($$SELECT v FROM sort_long ORDER BY s COLLATE "C" NULLS FIRST, v$$);
+SELECT sort_same($$SELECT v FROM sort_long ORDER BY e COLLATE "C" DESC, v$$);
 RESET work_mem;
 DROP TABLE sort_long;
 

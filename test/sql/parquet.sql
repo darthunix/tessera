@@ -864,7 +864,8 @@ SELECT explain_lines('ANALYZE', 'SELECT i, left(s, 1) FROM t_bytes_plain WHERE i
 -- begin others or share their first eight bytes, of two- and three-byte
 -- characters, empty strings and NULL rows, and of the bytes 00, 7f, 80
 -- and ff, in both directions, NULL rows first and last, with and without
--- LIMIT 10, in memory and spilled: the rows come in the core's order.
+-- LIMIT 10, after a key of its own, in memory and spilled: the rows come
+-- in the core's order.
 SELECT parquet_test_write(:'dir' || '/bytes_sort.parquet', json_build_object(
     'dictionary', false, 'columns', json_build_array(
       json_build_object('name', 'i', 'type', 'int32', 'values',
@@ -908,7 +909,8 @@ SELECT o AS ordering,
        order_off(format('SELECT i, s, b FROM t_bytes_sort ORDER BY %s, i LIMIT 10', o)) AS top_10
 FROM (VALUES ('s COLLATE "C"'), ('s COLLATE "C" DESC'), ('s COLLATE "C" NULLS FIRST'),
              ('s COLLATE "C" DESC NULLS LAST'), ('s COLLATE pg_c_utf8'),
-             ('s COLLATE pg_c_utf8 DESC'), ('b'), ('b DESC NULLS LAST')) x(o);
+             ('s COLLATE pg_c_utf8 DESC'), ('b'), ('b DESC NULLS LAST'),
+             ('i % 3, s COLLATE "C"'), ('i % 3 DESC, s COLLATE "C" DESC')) x(o);
 SET work_mem = '64kB';
 SELECT o AS ordering,
        order_off(format('SELECT i, s, b FROM t_bytes_sort ORDER BY %s, i', o)) AS spilled
@@ -923,7 +925,8 @@ FROM (VALUES ('s COLLATE "C"'), ('s COLLATE pg_c_utf8'), ('b')) x(o);
 -- spec: string-bytes/Another collation
 -- Under a collation of libc that is not C, and under C by an operator
 -- class that orders the other way, the key is sorted as before: by its
--- comparison, without the words of its bytes.
+-- comparison, without the words of its bytes; and so is a varchar key
+-- under C whose type's default class is one that orders the other way.
 DO $$ BEGIN
     CREATE COLLATION parquet_sort_libc (provider = libc, locale = 'en_US.UTF-8');
 EXCEPTION WHEN OTHERS THEN
@@ -946,13 +949,50 @@ CREATE OPERATOR >>> (LEFTARG = text, RIGHTARG = text, FUNCTION = text_reverse_gt
 CREATE OPERATOR CLASS text_reverse_ops FOR TYPE text USING btree AS
     OPERATOR 1 <<<, OPERATOR 2 <<<=, OPERATOR 3 =, OPERATOR 4 >>>=, OPERATOR 5 >>>,
     FUNCTION 1 text_reverse_cmp(text, text);
+-- The same reverse order made the default class of varchar, which has
+-- none of its own: a varchar key under C by it, as before.
+CREATE FUNCTION varchar_reverse_cmp(varchar, varchar) RETURNS int LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT bttextcmp($2::text, $1::text)';
+CREATE FUNCTION varchar_reverse_op(varchar, varchar, int) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT CASE $3 WHEN 1 THEN $1::text > $2::text WHEN 2 THEN $1::text >= $2::text
+                       WHEN 3 THEN $1::text = $2::text WHEN 4 THEN $1::text <= $2::text
+                       ELSE $1::text < $2::text END';
+CREATE FUNCTION varchar_reverse_lt(varchar, varchar) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT varchar_reverse_op($1, $2, 1)';
+CREATE FUNCTION varchar_reverse_le(varchar, varchar) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT varchar_reverse_op($1, $2, 2)';
+CREATE FUNCTION varchar_reverse_eq(varchar, varchar) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT varchar_reverse_op($1, $2, 3)';
+CREATE FUNCTION varchar_reverse_ge(varchar, varchar) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT varchar_reverse_op($1, $2, 4)';
+CREATE FUNCTION varchar_reverse_gt(varchar, varchar) RETURNS bool LANGUAGE sql IMMUTABLE STRICT
+    AS 'SELECT varchar_reverse_op($1, $2, 5)';
+CREATE OPERATOR <<< (LEFTARG = varchar, RIGHTARG = varchar, FUNCTION = varchar_reverse_lt);
+CREATE OPERATOR <<<= (LEFTARG = varchar, RIGHTARG = varchar, FUNCTION = varchar_reverse_le);
+CREATE OPERATOR === (LEFTARG = varchar, RIGHTARG = varchar, FUNCTION = varchar_reverse_eq);
+CREATE OPERATOR >>>= (LEFTARG = varchar, RIGHTARG = varchar, FUNCTION = varchar_reverse_ge);
+CREATE OPERATOR >>> (LEFTARG = varchar, RIGHTARG = varchar, FUNCTION = varchar_reverse_gt);
+CREATE OPERATOR CLASS varchar_reverse_ops DEFAULT FOR TYPE varchar USING btree AS
+    OPERATOR 1 <<< (varchar, varchar), OPERATOR 2 <<<= (varchar, varchar),
+    OPERATOR 3 === (varchar, varchar), OPERATOR 4 >>>= (varchar, varchar),
+    OPERATOR 5 >>> (varchar, varchar), FUNCTION 1 varchar_reverse_cmp(varchar, varchar);
 SELECT o AS ordering,
        order_off(format('SELECT i, s FROM t_bytes_sort ORDER BY %s, i', o)) AS in_full,
        order_off(format('SELECT i, s FROM t_bytes_sort ORDER BY %s, i LIMIT 10', o)) AS top_10
-FROM (VALUES ('s COLLATE parquet_sort_libc'), ('s COLLATE "C" USING <<<')) x(o);
+FROM (VALUES ('s COLLATE parquet_sort_libc'), ('s COLLATE "C" USING <<<'),
+             ('s::varchar COLLATE "C"')) x(o);
 SELECT explain_lines('ANALYZE, VERBOSE', format('SELECT i, s FROM t_bytes_sort ORDER BY %s', o),
                      'Abbreviated')
-FROM (VALUES ('s COLLATE parquet_sort_libc'), ('s COLLATE "C" USING <<<')) x(o);
+FROM (VALUES ('s COLLATE parquet_sort_libc'), ('s COLLATE "C" USING <<<'),
+             ('s::varchar COLLATE "C"')) x(o);
+DROP OPERATOR CLASS varchar_reverse_ops USING btree;
+DROP OPERATOR FAMILY varchar_reverse_ops USING btree;
+DROP OPERATOR <<< (varchar, varchar), <<<= (varchar, varchar), === (varchar, varchar),
+    >>>= (varchar, varchar), >>> (varchar, varchar);
+DROP FUNCTION varchar_reverse_cmp(varchar, varchar), varchar_reverse_lt(varchar, varchar),
+    varchar_reverse_le(varchar, varchar), varchar_reverse_eq(varchar, varchar),
+    varchar_reverse_ge(varchar, varchar), varchar_reverse_gt(varchar, varchar),
+    varchar_reverse_op(varchar, varchar, int);
 DROP OPERATOR CLASS text_reverse_ops USING btree;
 DROP OPERATOR FAMILY text_reverse_ops USING btree;
 DROP OPERATOR <<< (text, text), <<<= (text, text), >>>= (text, text), >>> (text, text);
@@ -983,7 +1023,22 @@ FROM explain_lines('ANALYZE', 'SELECT s FROM t_bytes_top ORDER BY s COLLATE "C" 
 SELECT order_off('SELECT s FROM t_bytes_top ORDER BY s COLLATE "C" LIMIT 10') AS ascending,
        order_off('SELECT s FROM t_bytes_top ORDER BY s COLLATE "C" DESC LIMIT 10') AS descending,
        order_off('SELECT i, s FROM t_bytes_top ORDER BY s COLLATE "C", i LIMIT 10') AS beside;
-DROP FOREIGN TABLE t_bytes_top;
+-- Strings whose first nine bytes are all the same, whose words are thus
+-- all equal: the rows are decided by their full bytes, still before any
+-- value is made.
+SELECT parquet_test_write(:'dir' || '/bytes_prefix.parquet', json_build_object(
+    'dictionary', false, 'columns', json_build_array(
+      json_build_object('name', 's', 'type', 'bytes', 'logical', 'string', 'values',
+        (SELECT json_agg('commonpre' || lpad((n * 7919 % 20000)::text, 5, '0') ORDER BY n)
+         FROM generate_series(0, 19999) n))))::text);
+\set bytes_prefix :dir '/bytes_prefix.parquet'
+CREATE FOREIGN TABLE t_bytes_prefix (s text) SERVER pq OPTIONS (files :'bytes_prefix');
+SELECT (regexp_match(line, 'Values Decoded: (\d+)'))[1]::int < 20000 AS fewer_values_made
+FROM explain_lines('ANALYZE', 'SELECT s FROM t_bytes_prefix ORDER BY s COLLATE "C" LIMIT 10',
+                   'Values Decoded') AS line;
+SELECT order_off('SELECT s FROM t_bytes_prefix ORDER BY s COLLATE "C" LIMIT 10') AS ascending,
+       order_off('SELECT s FROM t_bytes_prefix ORDER BY s COLLATE "C" DESC LIMIT 10') AS descending;
+DROP FOREIGN TABLE t_bytes_top, t_bytes_prefix;
 -- spec: string-bytes/A nondeterministic collation
 -- Under a collation that ignores case, whose equal values may differ in
 -- their bytes, the key is read as Datum values, the scan making each
@@ -1651,11 +1706,13 @@ SELECT parallel_lines('SELECT * FROM (SELECT count(*) AS n, sum(i) AS total FROM
                        RIGHT JOIN (VALUES (1), (2), (3)) v(x) ON true',
                       'Nested Loop|Parallel|Row Groups Read|Values Decoded');
 SELECT workers_launched('SELECT count(*), sum(i), max(s) FROM t_eight') > 0 AS workers_read;
+-- spec: string-bytes/Ordered by bytes
 -- Ordered by a string through an ordered gather: each worker's TessSort
 -- by the words of its bytes, the gather's merge by the string's
 -- comparison, the generic kind; the rows in the core's order.
-SELECT parallel_lines('SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i',
-                      'Gather|TessSort|Abbreviated|Workers Planned');
+SELECT regexp_replace(line, ' \(actual [^)]*\)', '')
+FROM explain_lines('ANALYZE, VERBOSE', 'SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i',
+                   'Gather|TessSort|Abbreviated|Workers Planned') AS line;
 SELECT order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i') AS ascending,
        order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C" DESC, i') AS descending,
        order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i LIMIT 10') AS top_10;

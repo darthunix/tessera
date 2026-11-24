@@ -1,8 +1,7 @@
 #include "postgres.h"
 
-#include "catalog/pg_am_d.h"
+#include "catalog/pg_opfamily_d.h"
 #include "catalog/pg_type_d.h"
-#include "commands/defrem.h"
 #include "nodes/nodeFuncs.h"
 #include "optimizer/pathnode.h"
 #include "optimizer/paths.h"
@@ -100,21 +99,17 @@ tess_sort_generic_key(PathKey *pathkey, PathTarget *target, Relids relids, int *
 /*
  * Whether a key of type, ordered by the operator family under collation,
  * orders by its bytes: text and varchar under a collation PostgreSQL
- * compares by bytes, and bytea, each by its type's default operator class
- * of B-tree, as another class, a module's, may order otherwise.
+ * compares by bytes, by the built-in family of text, and bytea by its
+ * own. Another family, a module's, may order otherwise, a default class
+ * of varchar of its own among them.
  */
 static bool
 sort_key_by_bytes(Oid type, Oid opfamily, Oid collation)
 {
-	Oid			opclass;
-
 	type = getBaseType(type);
-	if ((type == TEXTOID || type == VARCHAROID) && !tess_collation_orders_by_bytes(collation))
-		return false;
-	if (type != TEXTOID && type != VARCHAROID && type != BYTEAOID)
-		return false;
-	opclass = GetDefaultOpClass(type, BTREE_AM_OID);
-	return OidIsValid(opclass) && get_opclass_family(opclass) == opfamily;
+	if (type == TEXTOID || type == VARCHAROID)
+		return opfamily == TEXT_BTREE_FAM_OID && tess_collation_orders_by_bytes(collation);
+	return type == BYTEAOID && opfamily == BYTEA_BTREE_FAM_OID;
 }
 
 /*

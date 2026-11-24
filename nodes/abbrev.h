@@ -23,9 +23,10 @@ extern bool tess_sort_key_of(PathKey *pathkey, PathTarget *target, Relids relids
  */
 #define TESS_SORT_KIND_GENERIC (-1)
 /*
- * A string ordered by its bytes (tess_sort_orders_by_bytes): sorted as a
- * key of another type, by its comparison, its word the first eight bytes
- * the kernels make (tess_text_sort_words) instead of an abbreviated key.
+ * A string ordered by its bytes (sort_key_by_bytes in sort_planner.c): a
+ * key of another type, its ties by its comparison, its word the first
+ * eight bytes the kernels make (tess_text_sort_words) instead of an
+ * abbreviated key.
  */
 #define TESS_SORT_KIND_BYTES (-2)
 

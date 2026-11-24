@@ -2561,7 +2561,9 @@ ahead (float8, `LIMIT 10`: 10.5 ms against 16.5; text 132.7 against
 117.0 the other way): the planner leaves that case to the core.
 `EXPLAIN` shows a key's collation when it is not the default, as the core
 does. Under a limit the top-N heap of such keys is the node's, in C (see
-Top-N).
+Top-N). At 2 M rows in memory: numeric 125 ms against 296, text under
+`"C"` 187 against 366, text of the default collation after an int4 of
+1000 values 532 against 742 (bench/pg sort, pg-sort-WXjAaO).
 
 A string that orders by its bytes, `text` and `varchar` under a
 collation PostgreSQL compares by bytes (`C`, `POSIX`, the builtin
@@ -2579,9 +2581,7 @@ operator class, or of another collation, keeps the generic kind; so
 does a string key of an ordered gather, whose merge of the workers'
 rows keeps the abbreviated keys. In an assert build the node checks each
 pair of rows one after the other in its output, after a sort in memory,
-a top-N heap and a merge of runs, by the string's full bytes. At 2 M rows in memory: numeric 125 ms against 296, text under
-`"C"` 187 against 366, text of the default collation after an int4 of
-1000 values 532 against 742 (bench/pg sort, pg-sort-WXjAaO).
+a top-N heap and a merge of runs, by the string's full bytes.
 
 ### External sort
 
@@ -2667,15 +2667,20 @@ whose lanes order before the worst's, or, when they are equal, whose
 values do by the comparisons; those are appended and pushed one by one.
 A rebuild keeps the slots in place with their new references and values.
 At the end the kernels sort the heap's items and the groups of equal
-words are ordered as in a full sort. A string by its bytes whose batch
-offers it in the bytes form takes its words from the bytes, and its
-values, with those of the keys after it, only for the rows whose lanes
-do not order after the worst's: the source makes values for those rows
-alone (`Values Decoded` of the Parquet scan), and the rows whose lanes
-equal the worst's are compared once their values are read. In an assert
-build each row the lanes drop, when the string is the first key, is
-checked by its full bytes against the worst kept. The first 10 of 2 M rows: numeric
+words are ordered as in a full sort. The first 10 of 2 M rows: numeric
 90 ms against 159, text under `"C"` 49 against 94 (pg-sort-kLXeKY).
+
+A string by its bytes whose batch offers it in the bytes form takes its
+words from the bytes. A row whose lanes equal the worst's, the keys
+before the string and its first eight bytes, is decided by its full
+bytes against the worst's value, the order of the type's comparison
+under such a collation, and only a string equal to the worst's goes on
+to the keys after it. The string's values, and those of the keys after
+it, are asked only for the rows left: the source makes values for those
+rows alone (`Values Decoded` of the Parquet scan), strings of one long
+prefix too. In an assert build each row the lanes drop, when the string
+is the first key, is checked by its full bytes against the worst kept,
+and each decision by the full bytes against the type's comparison.
 
 ### Tests
 

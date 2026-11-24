@@ -241,16 +241,20 @@ module's, may order otherwise, and keeps the generic kind. Its word is
 the first eight bytes, big-endian, zero-padded, its top bit flipped,
 since the sort's words compare as signed integers, as the generic kind
 flips the core's abbreviated key: so words compare as the strings'
-starts do, unsigned. Equal words compare by `memcmp` of the rest and
-then by length. An ordered gather, which merges its workers' sorted rows
-by the same keys and knows how to compare only the generic kind beyond
-the words, keeps the generic kind for a string key. The word comes from
-the bytes form where the input offers it, and otherwise from the
-`Datum`, unpacked when compressed. In a top-N sort the key's values are
-asked, with the other columns, for the rows that beat the worst kept, so
-that the source makes values for those rows alone. Refused: keeping the
-core's abbreviated key under `C`, which hashes every row to decide
-whether to stop abbreviating, a decision a top-N sort never uses.
+starts do, unsigned. Equal words go to the type's comparison, which
+under such a collation compares the bytes and then the length, and a
+top-N sort decides the rows whose words equal the worst's by their full
+bytes before it asks their values. An ordered gather, which merges its
+workers' sorted rows by the same keys and knows how to compare only the
+generic kind beyond the words, keeps the generic kind for a string key.
+The word comes from the bytes form where the input offers it, and
+otherwise from the `Datum`, unpacked when compressed; a full sort keeps
+every row's value in its records, so it reads the `Datum`s and makes the
+words from them. In a top-N sort the key's values are asked, with the
+other columns, for the rows that beat the worst kept, so that the source
+makes values for those rows alone. Refused: keeping the core's
+abbreviated key under `C`, which hashes every row to decide whether to
+stop abbreviating, a decision a top-N sort never uses.
 
 ### How the code is checked
 

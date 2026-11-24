@@ -175,6 +175,8 @@ typedef struct TessSortState
 	 * the string copied into a context of its own.
 	 */
 	bool		check_has_last;
+	/* The place the next window of an external sort's rows checked starts at. */
+	uint64		check_next;
 	Datum		check_last[TESS_TABLE_MAX_KEYS];
 	bool		check_last_null[TESS_TABLE_MAX_KEYS];
 	MemoryContext check_context;
@@ -290,6 +292,13 @@ extern void sort_check_bytes(TessSortState *state, Datum *const *values, bool *c
 							 int nrows);
 extern int	sort_bytes_order(TessSortState *state, const char *a, Size a_len, bool a_null,
 							 Datum b, bool b_null);
+
+/* Whether two orders agree: both before, both after or both equal. */
+static inline bool
+sort_same_sign(int a, int b)
+{
+	return (a > 0) == (b > 0) && (a < 0) == (b < 0);
+}
 extern void sort_check_bytes_refs(TessSortState *state, const uint32 *refs, uint64 count);
 extern void sort_abbreviate_column(TessSortState *state, const TessDatumColumn *column,
 								   const TessRowMask *rows);

@@ -846,12 +846,14 @@ sort_external_window(TessSortState *state, uint64 start, bool backward)
 	state->batch.rows.nrows = n;
 	state->batch.rows.bits = state->window_bits;
 	memset(state->gathered, true, sizeof(bool) * state->ncolumns);
-	/* The merge's rows, one window after another, from its first: in order. */
-	if (!state->single)
-	{
-		if (start == 0)
-			state->check_has_last = false;
-		sort_check_bytes(state, state->values, state->isnull, n);
-	}
+	/*
+	 * The rows of a window are in order, and so are two windows one after
+	 * the other read forward from the first, of a merge or of the single
+	 * run; a window read elsewhere is checked by itself.
+	 */
+	if (start == 0 || start != state->check_next)
+		state->check_has_last = false;
+	sort_check_bytes(state, state->values, state->isnull, n);
+	state->check_next = start + n;
 	return n;
 }
