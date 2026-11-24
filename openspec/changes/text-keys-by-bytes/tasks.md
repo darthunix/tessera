@@ -167,7 +167,7 @@ named in the harness and covered by a property test.
 
 ## 5. The kernels
 
-- [ ] 5.1 `crates/tessera-capi`: the Rust mirror of `TessBytesColumn`
+- [x] 5.1 `crates/tessera-capi`: the Rust mirror of `TessBytesColumn`
       with a test of its size and offsets, and a second string source
       of the kernels over it; `include/tessera/text.h`: `TessTextArg`
       with its field `bytes`, and the entry points that take a bare

@@ -106,8 +106,8 @@ pub fn bpchar_len(bytes: &[u8]) -> usize {
         .map_or(0, |at| at + 1)
 }
 
-/// The first place of `needle` in `haystack`.
-#[inline]
+/// The first place of `needle` in `haystack`, inlined into the match.
+#[inline(always)]
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     let Some((&first, rest)) = needle.split_first() else {
         return Some(0);
@@ -179,8 +179,9 @@ impl<'p> Like<'p> {
         &self.pattern[from as usize..(from + len) as usize]
     }
 
-    /// Whether a string matches the pattern.
-    #[inline]
+    /// Whether a string matches the pattern. Inlined into each loop that
+    /// calls it: a call a row costs what the match of a short string does.
+    #[inline(always)]
     pub fn matches(&self, string: &[u8]) -> bool {
         if self.exact {
             return string == self.pattern;
@@ -468,7 +469,7 @@ impl Piece {
     /// # Errors
     ///
     /// A substring of negative length.
-    #[inline]
+    #[inline(always)]
     pub fn bounds(self, string: &[u8], chars: Chars) -> Result<(usize, usize), TextError> {
         let (skip, take) = match self {
             Self::Rtrim => return Ok((0, bpchar_len(string))),

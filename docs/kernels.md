@@ -353,12 +353,17 @@ names and the rows the kernels leave.
 ## Text
 
 `tessera/text.h` declares the kernels of strings (`tessera_kernels::text`)
-the text functions of `kernels/text.c` call, a batch a call. A string is
-read in place behind its Datum, a varlena of either header; a compressed or
-external one the kernels leave in `rest`, and the caller detoasts it for
-its row and calls again with a column of that one row, so no batch holds
-more than one detoasted value. Characters count as the database encoding
-counts them (`TessTextChars`: a byte each, or UTF-8 by its lead bytes).
+the text functions of `kernels/text.c` call, a batch a call. A string
+argument is a `TessTextArg`: a column of `Datum` values, a column in the
+bytes form of `tessera/batch.h`, or a scalar. A string is read in place
+behind its Datum, a varlena of either header, or from the bytes form,
+where every string is in place; a compressed or external value the
+kernels leave in `rest`, and the caller detoasts it for its row and calls
+again with a column of that one row, so no batch holds more than one
+detoasted value. Each entry point has a loop for each form of each
+argument, and the logic of a function is the same for all of them.
+Characters count as the database encoding counts them (`TessTextChars`: a
+byte each, or UTF-8 by its lead bytes).
 
 - `tess_text_compare(equal, bpchar, left, right, rows, rest, status)`:
   equality or inequality of text, or of bpchar without trailing spaces;

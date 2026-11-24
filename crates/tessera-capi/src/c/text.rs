@@ -1,15 +1,22 @@
 //! The text entry points, declared in `include/tessera/text.h`: strings
-//! read in place behind their Datums ([`tessera_kernels::text`]), a
-//! compressed or external one left to the caller.
+//! read in place behind their Datums or given in the bytes form
+//! ([`tessera_kernels::text`]), a compressed or external one left to the
+//! caller.
 //!
 //! # Arguments
 //!
-//! A `TessTextArg` points to a column or holds a scalar Datum. A column must
-//! be a valid `TessDatumColumn` of the call's row count whose `values` and
-//! `isnull` hold that many elements, unchanged for the call; a selected
-//! row's flag must be initialized and, when not NULL, its value a pointer
-//! to a whole varlena. A scalar must point to a whole varlena read in place
-//! (not compressed nor external).
+//! A `TessTextArg` points to a column of `Datum` values, to a column in the
+//! bytes form, or holds a scalar Datum when neither is set. A column of
+//! `Datum` values must be a valid `TessDatumColumn` of the call's row count
+//! whose `values` and `isnull` hold that many elements, unchanged for the
+//! call; a selected row's flag must be initialized and, when not NULL, its
+//! value a pointer to a whole varlena. A column in the bytes form must be a
+//! valid `TessBytesColumn` of the call's row count whose `isnull`, `data`
+//! and `lengths` hold that many elements, unchanged for the call; a
+//! selected row's flag must be initialized and, when not NULL, its pointer
+//! point to as many bytes as its length says, unchanged for the call. A
+//! scalar must point to a whole varlena read in place (not compressed nor
+//! external).
 
 use std::ffi::{c_char, c_int};
 use std::marker::PhantomData;
@@ -18,32 +25,35 @@ use std::slice;
 use anyhow::{Context, Result, bail, ensure};
 use tessera_kernels::text::{self, Bounds, Chars, Length, Like, Piece, Strings, Text};
 
-use super::column::DatumColumn;
+use super::column::{BytesColumn, DatumColumn};
 use super::mask::Mask;
-use super::source::{self, Constant, output, selection, slots, with_source};
+use super::source::{self, Constant, output, selection, slots, with_sources};
 use super::status::{Code, Status, guard};
 use super::varlena::varlena_data;
 
-/// `TessTextArg`: a column, or a scalar Datum when it is null.
+/// `TessTextArg`: a column of `Datum` values, a column in the bytes form,
+/// or a scalar Datum when both are null.
 #[repr(C)]
 #[derive(Debug)]
 pub struct TextArg {
-    /// The column, or null.
+    /// The column of `Datum` values, or null.
     pub column: *const DatumColumn,
-    /// The scalar when `column` is null.
+    /// The scalar when both columns are null.
     pub scalar: u64,
+    /// The column in the bytes form, or null; never set with `column`.
+    pub bytes: *const BytesColumn,
 }
 
-/// A column's strings, read through raw pointers behind one check of the
-/// row against the row count.
-struct Column<'a> {
+/// A column's strings behind their Datums, read through raw pointers
+/// behind one check of the row against the row count.
+struct Datums<'a> {
     values: *const u64,
     isnull: *const u8,
     nrows: usize,
     borrow: PhantomData<&'a ()>,
 }
 
-impl Strings for Column<'_> {
+impl Strings for Datums<'_> {
     #[inline(always)]
     fn get(&self, row: usize) -> Text<'_> {
         assert!(row < self.nrows, "a text row past its column");
@@ -62,6 +72,35 @@ impl Strings for Column<'_> {
     }
 }
 
+/// A column's strings in the bytes form, read through raw pointers behind
+/// one check of the row against the row count: every string is in place.
+struct Bytes<'a> {
+    isnull: *const u8,
+    data: *const *const u8,
+    lengths: *const u32,
+    nrows: usize,
+    borrow: PhantomData<&'a ()>,
+}
+
+impl Strings for Bytes<'_> {
+    #[inline(always)]
+    fn get(&self, row: usize) -> Text<'_> {
+        assert!(row < self.nrows, "a text row past its column");
+        // SAFETY: the row is within the arrays, and the calls read selected
+        // rows only, whose flags, pointers and lengths the constructor's
+        // caller guarantees; a flag is read as its byte.
+        unsafe {
+            if *self.isnull.add(row) != 0 {
+                return Text::Null;
+            }
+            Text::Bytes(slice::from_raw_parts(
+                *self.data.add(row),
+                *self.lengths.add(row) as usize,
+            ))
+        }
+    }
+}
+
 impl Strings for Constant<&[u8]> {
     #[inline(always)]
     fn get(&self, _row: usize) -> Text<'_> {
@@ -74,16 +113,40 @@ impl Strings for Constant<&[u8]> {
     }
 }
 
-/// A call's argument: a column or a scalar's bytes, a loop for each.
+/// A column of strings in either form.
+enum Column<'a> {
+    Datums(Datums<'a>),
+    Bytes(Bytes<'a>),
+}
+
+/// Run `$body` with `$source` bound to the column of either form: a loop
+/// for each.
+macro_rules! with_column {
+    ($column:expr, |$source:ident| $body:expr) => {
+        match $column {
+            Column::Datums(column) => {
+                let $source = &column;
+                $body
+            }
+            Column::Bytes(column) => {
+                let $source = &column;
+                $body
+            }
+        }
+    };
+}
+
+/// A call's argument: a column of either form or a scalar's bytes, a loop
+/// for each.
 type Input<'a> = source::Input<Column<'a>, &'a [u8]>;
 
-/// Borrow a column of `nrows` rows.
+/// Borrow a column of `Datum` values of `nrows` rows.
 ///
 /// # Safety
 ///
-/// As the module documentation says of a column.
+/// As the module documentation says of a column of `Datum` values.
 #[inline]
-unsafe fn column<'a>(column: *const DatumColumn, nrows: usize) -> Result<Column<'a>> {
+unsafe fn datums<'a>(column: *const DatumColumn, nrows: usize) -> Result<Datums<'a>> {
     // SAFETY: the caller's contract.
     let column = unsafe { column.as_ref() }.context("a null column")?;
     ensure!(
@@ -98,9 +161,40 @@ unsafe fn column<'a>(column: *const DatumColumn, nrows: usize) -> Result<Column<
         nrows == 0 || (!column.values.is_null() && !column.isnull.is_null()),
         "a column has null buffers"
     );
-    Ok(Column {
+    Ok(Datums {
         values: column.values,
         isnull: column.isnull.cast(),
+        nrows,
+        borrow: PhantomData,
+    })
+}
+
+/// Borrow a column in the bytes form of `nrows` rows.
+///
+/// # Safety
+///
+/// As the module documentation says of a column in the bytes form.
+#[inline]
+unsafe fn bytes_column<'a>(column: *const BytesColumn, nrows: usize) -> Result<Bytes<'a>> {
+    // SAFETY: the caller's contract.
+    let column = unsafe { column.as_ref() }.context("a null column")?;
+    ensure!(
+        column.struct_size >= BytesColumn::MIN_SIZE,
+        "a bytes column is smaller than its required fields"
+    );
+    ensure!(
+        usize::try_from(column.nrows).ok() == Some(nrows),
+        "a text column has another row count than its rows"
+    );
+    ensure!(
+        nrows == 0
+            || (!column.isnull.is_null() && !column.data.is_null() && !column.lengths.is_null()),
+        "a column has null buffers"
+    );
+    Ok(Bytes {
+        isnull: column.isnull.cast(),
+        data: column.data,
+        lengths: column.lengths,
         nrows,
         borrow: PhantomData,
     })
@@ -126,12 +220,31 @@ unsafe fn scalar<'a>(datum: u64) -> Result<&'a [u8]> {
 unsafe fn input<'a>(arg: *const TextArg, nrows: usize) -> Result<Input<'a>> {
     // SAFETY: the caller's contract.
     unsafe {
-        let arg = arg.as_ref().context("a null text argument")?;
-        Ok(if arg.column.is_null() {
-            Input::Scalar(scalar(arg.scalar)?)
+        let given = arg.as_ref().context("a null text argument")?;
+        Ok(if given.column.is_null() && given.bytes.is_null() {
+            Input::Scalar(scalar(given.scalar)?)
         } else {
-            Input::Column(column(arg.column, nrows)?)
+            Input::Column(column(arg, nrows)?)
         })
+    }
+}
+
+/// The column of an argument that must be one, of either form.
+///
+/// # Safety
+///
+/// As the module documentation says of an argument.
+#[inline]
+unsafe fn column<'a>(arg: *const TextArg, nrows: usize) -> Result<Column<'a>> {
+    // SAFETY: the caller's contract.
+    unsafe {
+        let arg = arg.as_ref().context("a null text argument")?;
+        match (arg.column.is_null(), arg.bytes.is_null()) {
+            (false, true) => Ok(Column::Datums(datums(arg.column, nrows)?)),
+            (true, false) => Ok(Column::Bytes(bytes_column(arg.bytes, nrows)?)),
+            (true, true) => bail!("a text function takes a column"),
+            (false, false) => bail!("a text argument of two columns"),
+        }
     }
 }
 
@@ -186,9 +299,9 @@ pub unsafe extern "C" fn tess_text_compare(
             let nrows = rows.as_view().nrows();
             let (left, right) = (input(left, nrows)?, input(right, nrows)?);
             let mut rest = output(rest)?;
-            with_source!(left, |left| with_source!(right, |right| text::compare(
+            with_sources!(left, right, with_column!, |left, right| text::compare(
                 equal, bpchar, left, right, &mut rows, &mut rest
-            )))
+            ))
         })
     }
 }
@@ -198,13 +311,13 @@ pub unsafe extern "C" fn tess_text_compare(
 ///
 /// # Safety
 ///
-/// `column` must be a valid column (see the module documentation) of
-/// `rows`' row count, `prefix` point to `len` bytes, `rows` and `rest` to
+/// `column` must be a valid argument (see the module documentation) of
+/// `rows`' row count, a column of either form, `prefix` point to `len` bytes, `rows` and `rest` to
 /// valid masks that nothing else accesses for the call; `status` as for
 /// every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_text_starts_with(
-    column: *const DatumColumn,
+    column: *const TextArg,
     prefix: *const c_char,
     len: usize,
     rows: *mut Mask,
@@ -215,9 +328,12 @@ pub unsafe extern "C" fn tess_text_starts_with(
     unsafe {
         guard(status, || {
             let mut rows = output(rows)?;
-            let source = self::column(column, rows.as_view().nrows())?;
+            let column = self::column(column, rows.as_view().nrows())?;
             let prefix = bytes(prefix, len)?;
-            text::starts_with(&source, prefix, &mut rows, &mut output(rest)?)
+            let mut rest = output(rest)?;
+            with_column!(column, |source| text::starts_with(
+                source, prefix, &mut rows, &mut rest
+            ))
         })
     }
 }
@@ -232,7 +348,7 @@ pub unsafe extern "C" fn tess_text_starts_with(
 /// flag.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_text_like(
-    column: *const DatumColumn,
+    column: *const TextArg,
     pattern: *const c_char,
     len: usize,
     negate: bool,
@@ -251,8 +367,11 @@ pub unsafe extern "C" fn tess_text_like(
                 return Ok(());
             };
             let mut rows = output(rows)?;
-            let source = self::column(column, rows.as_view().nrows())?;
-            text::like(&source, &like, negate, &mut rows, &mut output(rest)?)?;
+            let column = self::column(column, rows.as_view().nrows())?;
+            let mut rest = output(rest)?;
+            with_column!(column, |source| text::like(
+                source, &like, negate, &mut rows, &mut rest
+            ))?;
             *simple = true;
             Ok(())
         })
@@ -265,15 +384,15 @@ pub unsafe extern "C" fn tess_text_like(
 ///
 /// # Safety
 ///
-/// `column` must be a valid column (see the module documentation) of
-/// `rows`' row count, `values` point to as many writable int32 slots,
+/// `column` must be a valid argument (see the module documentation) of
+/// `rows`' row count, a column of either form, `values` point to as many writable int32 slots,
 /// `non_nulls` and `rest` to valid masks, none accessed by anything else
 /// for the call; `status` as for every entry point.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tess_text_lengths(
     length: c_int,
     chars: c_int,
-    column: *const DatumColumn,
+    column: *const TextArg,
     rows: *const Mask,
     values: *mut i32,
     non_nulls: *mut Mask,
@@ -291,16 +410,18 @@ pub unsafe extern "C" fn tess_text_lengths(
             };
             let chars = chars_of(chars)?;
             let rows = selection(rows)?;
-            let source = self::column(column, rows.nrows())?;
-            text::lengths(
+            let column = self::column(column, rows.nrows())?;
+            let values = slots(values, rows.nrows())?;
+            let (mut non_nulls, mut rest) = (output(non_nulls)?, output(rest)?);
+            with_column!(column, |source| text::lengths(
                 length,
                 chars,
-                &source,
+                source,
                 rows,
-                slots(values, rows.nrows())?,
-                &mut output(non_nulls)?,
-                &mut output(rest)?,
-            )
+                values,
+                &mut non_nulls,
+                &mut rest,
+            ))
         })
     }
 }
@@ -312,8 +433,8 @@ pub unsafe extern "C" fn tess_text_lengths(
 ///
 /// # Safety
 ///
-/// `column` must be a valid column (see the module documentation) of
-/// `rows`' row count, `starts` and `lengths` point to as many writable
+/// `column` must be a valid argument (see the module documentation) of
+/// `rows`' row count, a column of either form, `starts` and `lengths` point to as many writable
 /// int32 slots, `non_nulls` and `rest` to valid masks, none accessed by
 /// anything else for the call; `status` as for every entry point.
 #[unsafe(no_mangle)]
@@ -323,7 +444,7 @@ pub unsafe extern "C" fn tess_text_pieces(
     second: i32,
     has_second: bool,
     chars: c_int,
-    column: *const DatumColumn,
+    column: *const TextArg,
     rows: *const Mask,
     starts: *mut i32,
     lengths: *mut i32,
@@ -349,14 +470,16 @@ pub unsafe extern "C" fn tess_text_pieces(
             let chars = chars_of(chars)?;
             let rows = selection(rows)?;
             let nrows = rows.nrows();
-            let source = self::column(column, nrows)?;
+            let column = self::column(column, nrows)?;
             let mut out = Bounds {
                 starts: slots(starts, nrows)?,
                 lengths: slots(lengths, nrows)?,
                 non_nulls: output(non_nulls)?,
                 rest: output(rest)?,
             };
-            text::pieces(piece, chars, &source, rows, &mut out)
+            with_column!(column, |source| text::pieces(
+                piece, chars, source, rows, &mut out
+            ))
         })
     }
 }
@@ -367,6 +490,8 @@ mod tests {
 
     #[test]
     fn layout_matches_the_header() {
-        assert_eq!(size_of::<TextArg>(), 16);
+        assert_eq!(size_of::<TextArg>(), 24);
+        assert_eq!(std::mem::offset_of!(TextArg, scalar), 8);
+        assert_eq!(std::mem::offset_of!(TextArg, bytes), 16);
     }
 }

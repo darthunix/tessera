@@ -495,7 +495,8 @@ jobs:
   # Miri over the tests of the unsafe code (plan 9.6): every test of
   # relhash, the crate of the hash table, whose promise is that no call
   # touches memory outside its blocks, and the C entry points' borrows in
-  # tessera-capi, those of the spill among them.
+  # tessera-capi, those of the spill and of strings in the bytes form among
+  # them.
   # tessera-core forbids unsafe code and relspill has none. The
   # vector code of tessera-kernels is cut out under Miri, and the rest of
   # it denies unsafe code. A nightly pinned here, not in
@@ -524,7 +525,7 @@ jobs:
           cargo miri test --locked -p relspill --test records
           cargo miri test --locked -p tessera-capi --test columns --test table --test float \
             --test spill --test join --test group --test runs --test build --test smallint \
-            --test date_bound
+            --test date_bound --test text
           # The spill's entry points write places C has not filled yet: no
           # value may be read or borrowed there.
           MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \

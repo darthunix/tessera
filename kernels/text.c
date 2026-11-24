@@ -207,6 +207,8 @@ typedef struct OneRow
 	uint64		out;
 	uint64		other;
 	TessDatumColumn column;
+	/* The column as the kernels' argument. */
+	TessTextArg arg;
 	TessRowMask rows;
 	TessRowMask result;
 	TessRowMask rest;
@@ -229,6 +231,7 @@ one_row(OneRow *one, Datum value)
 	one->column.values = &one->value;
 	one->column.isnull = &one->isnull;
 	one->column.nrows = 1;
+	one->arg = (TessTextArg) {.column = &one->column};
 	one->rows = (TessRowMask) {1, &one->selected};
 	one->result = (TessRowMask) {1, &one->out};
 	one->rest = (TessRowMask) {1, &one->other};
@@ -249,9 +252,9 @@ text_arg(const TessFunctionArg *arg, struct varlena **copy)
 
 	*copy = NULL;
 	if (arg->column != NULL)
-		return (TessTextArg) {arg->column, 0};
+		return (TessTextArg) {.column = arg->column};
 	*copy = string_bytes(arg->scalar, &data, &len);
-	return (TessTextArg) {NULL, *copy != NULL ? PointerGetDatum(*copy) : arg->scalar};
+	return (TessTextArg) {.scalar = *copy != NULL ? PointerGetDatum(*copy) : arg->scalar};
 }
 
 /*
@@ -328,6 +331,7 @@ static TessStatusCode
 text_pattern_evaluate(TessFunctionCall *call)
 {
 	const TessDatumColumn *column;
+	TessTextArg arg;
 	TextOp		op;
 	const char *pattern;
 	int			plen;
@@ -344,6 +348,7 @@ text_pattern_evaluate(TessFunctionCall *call)
 	column = call->args[0].column;
 	if (column == NULL || call->args[1].column != NULL)
 		return tess_call_invalid(call, "a string pattern takes a column and a constant");
+	arg = (TessTextArg) {.column = column};
 	op = text_op(call);
 	pattern_copy = string_bytes(call->args[1].scalar, &pattern, &plen);
 	pattern_datum = pattern_copy != NULL ? PointerGetDatum(pattern_copy) : call->args[1].scalar;
@@ -352,10 +357,10 @@ text_pattern_evaluate(TessFunctionCall *call)
 	if (op == TEXT_STARTS_WITH)
 	{
 		simple = true;
-		code = tess_text_starts_with(column, pattern, plen, call->rows, &rest, call->status);
+		code = tess_text_starts_with(&arg, pattern, plen, call->rows, &rest, call->status);
 	}
 	else if (text_chars() >= 0)
-		code = tess_text_like(column, pattern, plen, op == TEXT_NOT_LIKE, call->rows, &rest,
+		code = tess_text_like(&arg, pattern, plen, op == TEXT_NOT_LIKE, call->rows, &rest,
 							  &simple, call->status);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
 	{
@@ -378,9 +383,9 @@ text_pattern_evaluate(TessFunctionCall *call)
 			{
 				one.out = 1;
 				code = op == TEXT_STARTS_WITH ?
-					tess_text_starts_with(&one.column, pattern, plen, &one.result, &one.rest,
+					tess_text_starts_with(&one.arg, pattern, plen, &one.result, &one.rest,
 										  call->status) :
-					tess_text_like(&one.column, pattern, plen, op == TEXT_NOT_LIKE, &one.result,
+					tess_text_like(&one.arg, pattern, plen, op == TEXT_NOT_LIKE, &one.result,
 								   &one.rest, &simple, call->status);
 				result = one.out != 0;
 			}
@@ -407,6 +412,7 @@ static TessStatusCode
 text_length_evaluate(TessFunctionCall *call)
 {
 	const TessDatumColumn *column;
+	TessTextArg arg;
 	int32	   *values;
 	TextOp		op;
 	int			chars = text_chars();
@@ -421,6 +427,7 @@ text_length_evaluate(TessFunctionCall *call)
 	column = call->args[0].column;
 	if (column == NULL)
 		return tess_call_invalid(call, "a string length takes a column");
+	arg = (TessTextArg) {.column = column};
 	op = text_op(call);
 	values = (int32 *) call->values;
 	length = op == TEXT_OCTETS ? TESS_LENGTH_OCTETS :
@@ -448,7 +455,7 @@ text_length_evaluate(TessFunctionCall *call)
 		return TESS_OK;
 	}
 	rest = tess_scratch_mask(space.words[0], sizeof(space.words[0]), call->rows->nrows);
-	code = tess_text_lengths(length, chars < 0 ? TESS_CHARS_BYTES : chars, column, call->rows,
+	code = tess_text_lengths(length, chars < 0 ? TESS_CHARS_BYTES : chars, &arg, call->rows,
 							 values, call->non_nulls, &rest, call->status);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
 	{
@@ -467,7 +474,7 @@ text_length_evaluate(TessFunctionCall *call)
 				continue;
 			}
 			one_row(&one, column->values[row]);
-			code = tess_text_lengths(length, chars, &one.column, &one.rows, &one_value,
+			code = tess_text_lengths(length, chars, &one.arg, &one.rows, &one_value,
 									 &one_present, &one.rest, call->status);
 			values[row] = one_value;
 			one_row_free(&one);
@@ -540,6 +547,7 @@ text_piece_evaluate(TessFunctionCall *call)
 		[TEXT_LTRIM] = TESS_PIECE_LTRIM, [TEXT_BTRIM] = TESS_PIECE_BTRIM,
 	};
 	const TessDatumColumn *column;
+	TessTextArg arg;
 	Datum	   *values;
 	TextOp		op;
 	int			chars = text_chars();
@@ -563,6 +571,7 @@ text_piece_evaluate(TessFunctionCall *call)
 			(call->args[arg].column != NULL) != (arg == 0))
 			return tess_call_invalid(call, "a string piece takes a column and constants");
 	column = call->args[0].column;
+	arg = (TessTextArg) {.column = column};
 	op = text_op(call);
 	if (call->nargs != (op == TEXT_SUBSTR ? Max(call->nargs, 2) :
 						op == TEXT_LEFT || op == TEXT_RIGHT ? 2 : 1))
@@ -603,7 +612,7 @@ text_piece_evaluate(TessFunctionCall *call)
 	starts = tess_scratch_alloc(sizeof(int32) * nrows, space.starts, sizeof(space.starts));
 	lengths = tess_scratch_alloc(sizeof(int32) * nrows, space.lengths, sizeof(space.lengths));
 	code = tess_text_pieces(pieces[op], first, second, call->nargs == 3,
-							chars < 0 ? TESS_CHARS_BYTES : chars, column, call->rows, starts,
+							chars < 0 ? TESS_CHARS_BYTES : chars, &arg, call->rows, starts,
 							lengths, call->non_nulls, &rest, call->status);
 	for (int word = 0; code == TESS_OK && word < nwords; word++)
 	{
@@ -627,7 +636,7 @@ text_piece_evaluate(TessFunctionCall *call)
 
 			one_row(&one, column->values[row]);
 			code = tess_text_pieces(pieces[op], first, second, call->nargs == 3,
-									chars < 0 ? TESS_CHARS_BYTES : chars, &one.column, &one.rows,
+									chars < 0 ? TESS_CHARS_BYTES : chars, &one.arg, &one.rows,
 									&start, &len, &one_present, &one.rest, call->status);
 			if (code == TESS_OK)
 				values[row] = PointerGetDatum(arena_text(&arena,

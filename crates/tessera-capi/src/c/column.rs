@@ -125,14 +125,79 @@ impl DatumColumn {
     }
 }
 
+/// `TessBytesColumn` from `tessera/batch.h`: a string column in the bytes
+/// form, borrowed from its batch. For a row asked that is not `NULL`,
+/// `data` points to its bytes, never null, and `lengths` gives their
+/// count; the bytes stay valid and unchanged until the batch is released.
+/// Rows not asked hold entries of no meaning.
+#[repr(C)]
+#[derive(Debug)]
+pub struct BytesColumn {
+    /// The size the caller allocated, at least [`BytesColumn::MIN_SIZE`].
+    pub struct_size: usize,
+    /// The number of rows of the arrays.
+    pub nrows: c_int,
+    /// The dictionary's count of values, or 0 without one.
+    pub nvalues: u32,
+    /// One flag per row.
+    pub isnull: *const bool,
+    /// One pointer per row: the value's first byte.
+    pub data: *const *const u8,
+    /// One count of bytes per row.
+    pub lengths: *const u32,
+    /// One index into the dictionary per row, or null without one.
+    pub indexes: *const i32,
+    /// The dictionary's identity, 0 without one.
+    pub dictionary: u64,
+}
+
+impl BytesColumn {
+    /// The size through `dictionary` (`TESS_BYTES_COLUMN_MIN_SIZE`).
+    pub const MIN_SIZE: usize = offset_of!(BytesColumn, dictionary) + size_of::<u64>();
+
+    /// A column of no rows, to complete a literal with.
+    pub const EMPTY: BytesColumn = BytesColumn {
+        struct_size: size_of::<BytesColumn>(),
+        nrows: 0,
+        nvalues: 0,
+        isnull: std::ptr::null(),
+        data: std::ptr::null(),
+        lengths: std::ptr::null(),
+        indexes: std::ptr::null(),
+        dictionary: 0,
+    };
+}
+
 #[cfg(test)]
 mod tests {
-    use super::DatumColumn;
+    use std::mem::offset_of;
+
+    use super::{BytesColumn, DatumColumn};
 
     #[test]
     fn layout_matches_the_header() {
         assert_eq!(size_of::<DatumColumn>(), 48);
         assert_eq!(DatumColumn::MIN_SIZE, 28);
-        assert_eq!(std::mem::offset_of!(DatumColumn, decimal_rows), 32);
+        assert_eq!(offset_of!(DatumColumn, decimal_rows), 32);
+    }
+
+    #[test]
+    fn the_bytes_form_s_layout_matches_the_header() {
+        assert_eq!(size_of::<BytesColumn>(), 56);
+        assert_eq!(align_of::<BytesColumn>(), 8);
+        assert_eq!(BytesColumn::MIN_SIZE, 56);
+        assert_eq!(
+            [
+                offset_of!(BytesColumn, struct_size),
+                offset_of!(BytesColumn, nrows),
+                offset_of!(BytesColumn, nvalues),
+                offset_of!(BytesColumn, isnull),
+                offset_of!(BytesColumn, data),
+                offset_of!(BytesColumn, lengths),
+                offset_of!(BytesColumn, indexes),
+                offset_of!(BytesColumn, dictionary),
+            ],
+            [0, 8, 12, 16, 24, 32, 40, 48]
+        );
     }
 }
