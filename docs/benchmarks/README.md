@@ -32,6 +32,12 @@ with the plans of the cases the README cites, newest first:
   new cases of `spill`, of the path that fits against `main` and of
   ClickBench's Q9 and Q10, Apple M5 Pro, PostgreSQL 20devel and 19rc2,
   the change `agg-distinct-spill` against 75fb4ba4.
+- [2026-11-22, the sums of `bigint` values of 19
+  digits](2026-11-22-agg-int128/README.md): the counts of the family
+  `anyagg` with its cases of 19 digits and their twins of 18, the
+  times of Tessera on and off, and the machine code of the kernels,
+  Apple M5 Pro, PostgreSQL 20devel, the change `agg-int128` against
+  `624937e9`.
 - [2026-11-22, ClickBench over Parquet, stage
   2](2026-11-22-clickbench-stage2/README.md): the 17 queries that read
   no string, over ten of its files and over `hits.parquet`, Tessera on

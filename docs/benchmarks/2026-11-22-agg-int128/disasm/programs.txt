@@ -1,0 +1,16 @@
+MACHINE CODE; baseline=624937e9bffa3309c2a8968006cdf5fce2382e73, candidate=WORKTREE@493ad71556822fcc61caa998a627c845fb5600e1, target=this machine
+column_reader: 24 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+filter_int32: 50 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+compare_int32: 27 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+aggregate_int32: 60 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+arith_int32: 135 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+hash_int32: 33 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+filter_int64: 50 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+arith_int64: 81 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+aggregate_int64: 49 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+hash_int64: 34 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+cast_int32: 17 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+set_int32: 29 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+table_int32: 64 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+table_large: 21 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
+spill: 0 same, 0 changed (0 in immediates only, 0 in registers only), 0 only before, 0 only after
