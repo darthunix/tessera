@@ -1,0 +1,38 @@
+Q28, `sample` of its backend for 4 s, once a millisecond: the base
+(a build of the code of main 2f08e7db) and the first build of the views,
+each value checked by a search for a zero byte and from_utf8 of its own,
+the functions on top of the stacks by samples.
+
+## base: 2900 samples
+
+  1130  _RNvMNtCsgZ9gphfnaV6_4snap10decompressNtB2_7Decoder10decompress
+   441  _platform_memmove
+   314  INvNtCscYP4l1DRTzs_15tessera_kernels4text7lengthsNtNtNtCsj1FhAhtLhTo_12tessera_capi1c4text5BytesEBS_
+   144  _RNvNtNtCs8Mbv00yxnRz_4core3str8converts9from_utf8
+   117  pread
+   101  s_15tessera_kernels10accumulate9sum_termsNtNtNtCsj1FhAhtLhTo_12tessera_capi1c7decimal9SumColumnEB11_
+    76  e_rowsNtNtB4_6region9RawRegionNtNtNtCsj1FhAhtLhTo_12tessera_capi1c5table9TableKeysKj1_Kj0_KB28_EB1n_
+    63  _RNvMNtNtNtCsc4M94bu6IWm_7parquet5arrow6buffer13offset_bufferINtB2_12OffsetBufferxE8try_pushB8_
+    61  _RNvNtNtCs8Mbv00yxnRz_4core5slice6memchr14memchr_aligned
+    54  _RINvNtCskPJOGBJ9Uzp_15tessera_parquet1c9fill_rowsNCNCNvB2_18tess_parquet_bytes0sa_0EB4_
+    34  _RNvNtCscYP4l1DRTzs_15tessera_kernels10accumulate10count_rows
+    31  _RNvMs_NtCskPJOGBJ9Uzp_15tessera_parquet6clauseNtB4_10StringTest6passes
+    31  batch_bytes
+    28  __bzero
+
+## views, a call each a value: 2854 samples
+
+  1051  _RNvMNtCsgZ9gphfnaV6_4snap10decompressNtB2_7Decoder10decompress
+   362  INvNtCscYP4l1DRTzs_15tessera_kernels4text7lengthsNtNtNtCsj1FhAhtLhTo_12tessera_capi1c4text5BytesEBS_
+   300  _RNvNtNtCs8Mbv00yxnRz_4core5slice6memchr14memchr_aligned
+   273  _RNvNtNtCs8Mbv00yxnRz_4core3str8converts9from_utf8
+   101  s_15tessera_kernels10accumulate9sum_termsNtNtNtCsj1FhAhtLhTo_12tessera_capi1c7decimal9SumColumnEB11_
+    95  e_rowsNtNtB4_6region9RawRegionNtNtNtCsj1FhAhtLhTo_12tessera_capi1c5table9TableKeysKj1_Kj0_KB28_EB1n_
+    79  pread
+    65  _platform_memmove
+    61  _RNvNtNtCsjSChVPSeKys_11arrow_array7builder26generic_bytes_view_builder9make_view
+    60  _RINvNtCskPJOGBJ9Uzp_15tessera_parquet1c9fill_rowsNCNCNvB2_18tess_parquet_bytes0sa_0EB4_
+    51  <deduplicated_symbol>
+    36  _RNvNtCskPJOGBJ9Uzp_15tessera_parquet5bytes10views_pass
+    35  batch_bytes
+    32  _RNvMs_NtCslUGbNMoHpqg_11datum_arrow4readNtB4_8ReadPlan4read
