@@ -44,8 +44,8 @@ entries out of turn on 2026-11-03, after an analysis of TPC-H with
 with the foreign keys of the schema left undeclared for now; the same
 day he moved `agg-dependent-columns` between `agg-table-presize` and
 `tpch-q9-plan`, and on 2026-11-04 widened `lookup-outer-compaction`
-into `gather-sparse-batches`. The maintainer took `source-scan` and then
-`parquet-fdw` out of turn on 2026-11-20, for Tessera's entry into
+into `gather-sparse-batches`. The maintainer took `source-scan` (done)
+and then `parquet-fdw` out of turn on 2026-11-20, for Tessera's entry into
 ClickBench over the benchmark's Parquet files, and made the Parquet
 wrapper the first source of the planning contract, so that
 `parquet-fdw` no longer waits for `compressed-table-source`. On
@@ -229,36 +229,6 @@ ClickBench's query 4 on the branch of `parquet-fdw`; it is the change
 - **Depends on:** nothing.
 - **Capabilities:** aggregate, kernel-abi
 - **Size:** small: one pull request after the proposal.
-
-### source-scan
-
-The planning contract of a batch source, for foreign tables first.
-Taken by the maintainer out of turn on 2026-11-20, with `parquet-fdw`
-after it; it is the change `source-scan`.
-
-- **What:** A source in the registry reads a relation that is not a
-  heap table: given the core's foreign scan path, it returns the path
-  of its own batch node, and answers for each of the relation's
-  clauses whether it does not use it, uses it only to skip rows, or
-  checks it exactly. Tessera marks the clauses a source may use, so
-  that none runs ahead of the security clauses that guard it. The
-  registry lists its sources. Tessera plans `TessFilter` with the
-  clauses the source leaves, or the source's path alone, and
-  `TessGather` over it, serial and partial, and its batch parents read
-  it without `TessPack`; the source's paths cost what the source says.
-  A test source shows it.
-- **Why:** Only heap tables are read in batches. A foreign table's rows
-  come from its wrapper one by one: a batch parent packs them, and its
-  clauses stay with the core. A columnar source can plan a batch node
-  of its own, but cannot share the clauses with `TessFilter`, which
-  takes no such child and cannot learn which clauses the source
-  checks.
-- **Known:** The design of the change. The maintainer asked on
-  2026-11-20 that the source filter: the answers per clause, which
-  `compressed-table-source` carried, come with this change.
-- **Depends on:** nothing.
-- **Capabilities:** source-scan
-- **Size:** medium: one pull request.
 
 ### parquet-fdw
 

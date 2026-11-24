@@ -162,6 +162,13 @@ planner could choose. The path then becomes Tessera's: Tessera sets its
 target and, when it stands alone, its rows, and the planner may free
 it.
 
+The node the source plans is a custom scan, not a `ForeignScan`, and
+the planner gives it no user to check as, where a `ForeignScan` gets the
+user whose rights its wrapper reads with. A source whose wrapper reads
+its data with the rights of a user mapping, a server's login for a
+user, takes the relation's user while it plans, in its callback, and
+keeps it in its plan.
+
 ## The answers and the filter above
 
 A source answers for each clause that it does not use it, that it uses

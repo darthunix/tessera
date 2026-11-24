@@ -223,6 +223,12 @@ last pass resolves against the relation. `TessFilter`
 refuses with `XX000` a source plan under it with qualifiers, or without
 a clause the source answered for among its expressions.
 
+The plan is a custom scan's, and PostgreSQL gives it no user to check
+as, where it gives a `ForeignScan` the user its wrapper reads as. A
+source whose wrapper reads with the rights of a user mapping takes the
+relation's user in its callback, while it plans, and keeps it in its
+node's data.
+
 ## Executing
 
 The node is an ordinary batch node ([node.md](node.md)): it publishes
