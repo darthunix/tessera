@@ -61,7 +61,7 @@ the commit before it.
 
 ## 4. The count
 
-- [ ] 4.1 Count as the design's measurement plan says, against the
+- [x] 4.1 Count as the design's measurement plan says, against the
       commit the work starts from, with pg_duckdb's cycles beside. Keep
       the report under `docs/benchmarks/`. Check:
       `.github/scripts/check-specs.sh`
