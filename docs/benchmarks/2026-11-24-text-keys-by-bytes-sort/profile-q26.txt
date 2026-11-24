@@ -1,0 +1,44 @@
+Q26 at the end (abbeeb22), `sample` of its backend for 4 s, once a millisecond;
+the functions on top of the stacks, by samples (2443 in all).
+
+   829  _RNvMNtCsgZ9gphfnaV6_4snap10decompressNtB2_7Decoder10decompress (in tessera_parquet.dylib) 
+   389  _RNvNtNtCs8Mbv00yxnRz_4core3str8converts9from_utf8 (in tessera_parquet.dylib) 
+   286  _platform_memmove (in libsystem_platform.dylib) 
+    76  _RNvMs_NtCskPJOGBJ9Uzp_15tessera_parquet6clauseNtB4_10StringTest6passes (in tessera_parquet.dylib) 
+    68  _RNvNtCskPJOGBJ9Uzp_15tessera_parquet6reader9selectors (in tessera_parquet.dylib) 
+    59  _RNvMNtNtNtCsc4M94bu6IWm_7parquet5arrow6buffer13offset_bufferINtB2_12OffsetBufferxE8try_pushB8_ (in tessera_parquet.dylib) 
+    59  sort_top_batch_generic (in tessera_nodes.dylib) 
+    58  _RNvMs0_NtCskPJOGBJ9Uzp_15tessera_parquet6clauseNtB5_10ClauseTest5apply (in tessera_parquet.dylib) 
+    48  pread (in libsystem_kernel.dylib) 
+    45  _platform_memcmp (in libsystem_platform.dylib) 
+    44  _RINvMs2_NtNtNtCsc4M94bu6IWm_7parquet5arrow12array_reader10byte_arrayNtB6_21ByteArrayDecoderPlain4readxEBc_ (in tessera_parquet.dylib) 
+    39  _RNvNtNtCs8Mbv00yxnRz_4core5slice6memchr14memchr_aligned (in tessera_parquet.dylib) 
+    36  _RINvMNtNtNtCsc4M94bu6IWm_7parquet5arrow6buffer13offset_bufferINtB3_12OffsetBufferxE22extend_from_dictionarylxEB9_ (in tessera_parquet.dylib) 
+    34  _RNvMs2_NtNtNtCsc4M94bu6IWm_7parquet5arrow12array_reader10byte_arrayNtB5_21ByteArrayDecoderPlain4skip (in tessera_parquet.dylib) 
+    30  <deduplicated_symbol> (in tessera_parquet.dylib) 
+    29  _platform_memset (in libsystem_platform.dylib) 
+    25  _RINvNtCskPJOGBJ9Uzp_15tessera_parquet1c9fill_rowsNCNCNvB2_18tess_parquet_bytes0sa_0EB4_ (in tessera_parquet.dylib) 
+    21  _RNvXs1_NtNtNtCsc4M94bu6IWm_7parquet5arrow12arrow_reader9selectionNtB5_12RowSelectionINtNtCs8Mbv00yxnRz_4core7convert4FromINtNtCshxvaOLs88l5_5
+    20  _RINvMs_NtNtCsc4M94bu6IWm_7parquet9encodings3rleNtB5_10RleDecoder9get_batchlEB9_ (in tessera_parquet.dylib) 
+    19  sort_bytes_words (in tessera_nodes.dylib) 
+    18  _RNvMNtNtNtCsc4M94bu6IWm_7parquet5arrow6buffer17dictionary_bufferINtB2_16DictionaryBufferlxE10into_arrayB8_ (in tessera_parquet.dylib) 
+    18  batch_bytes (in tessera_parquet.dylib) 
+    17  _RINvNtCscYP4l1DRTzs_15tessera_kernels4sort9key_lanesNtNtNtCsj1FhAhtLhTo_12tessera_capi1c5table9TableKeysEBU_ (in tessera_kernels.dylib) 
+    16  next_batch (in tessera_parquet.dylib) 
+    15  __bzero (in libsystem_platform.dylib) 
+    14  _xzm_free (in libsystem_malloc.dylib) 
+    12  _RNvMs_NtNtCsc4M94bu6IWm_7parquet6column6readerINtB4_19GenericColumnReaderNtNtB4_7decoder26RepetitionLevelDecoderImplNtNtNtNtB8_5arrow13record
+    11  _RNvMNtNtCsc4M94bu6IWm_7parquet5arrow13record_readerINtB2_19GenericRecordReaderINtNtNtB4_6buffer13offset_buffer12OffsetBufferxEINtNtNtB4_12arr
+    10  <deduplicated_symbol> (in libsystem_malloc.dylib) 
+    10  DYLD-STUB$$memcmp (in tessera_parquet.dylib) 
+    10  _RNvMs_NtNtCsc4M94bu6IWm_7parquet6column6readerINtB4_19GenericColumnReaderNtNtB4_7decoder26RepetitionLevelDecoderImplNtNtNtNtB8_5arrow13record
+     9  _RINvNtCscYP4l1DRTzs_15tessera_kernels4text10sort_wordsNtNtNtCsj1FhAhtLhTo_12tessera_capi1c4text5BytesEBW_ (in tessera_kernels.dylib) 
+     9  _RNvNtCskPJOGBJ9Uzp_15tessera_parquet5bytes13window_passes (in tessera_parquet.dylib) 
+     8  _RNvXs9_NtNtCsc4M94bu6IWm_7parquet5arrow12arrow_readerNtB5_24ParquetRecordBatchReaderNtNtNtNtCs8Mbv00yxnRz_4core4iter6traits8iterator8Iterator
+     7  MemoryContextAllocZero (in postgres) 
+     7  _RNvMs3_NtCs9WP5d7Jjpfo_10arrow_data4dataNtB5_16ArrayDataBuilder5build (in tessera_parquet.dylib) 
+     7  _RNvXs_NtNtNtCsc4M94bu6IWm_7parquet5arrow12array_reader12struct_arrayNtB4_17StructArrayReaderNtB6_11ArrayReader12skip_records (in tessera_parq
+     7  _xzm_xzone_malloc (in libsystem_malloc.dylib) 
+     7  mach_absolute_time (in libsystem_kernel.dylib) 
+     6  AllocSetAlloc (in postgres) 
+     6  DYLD-STUB$$memcpy (in tessera_parquet.dylib) 

@@ -386,6 +386,11 @@ source's own form.
   past the rule of 1: what is left is the checks of an argument's form
   on a call's way, some 50 instructions a batch of 64 rows, and no
   query of ClickBench runs that path. Q28 lost 28 per cent.
+- 2026-11-24: stage 4, the sort, kept although Q26 lost 12.4 per cent
+  of its instructions, not 15: 94 per cent of the query is the reading
+  of its column, the pages' decompression, the check of UTF-8 and the
+  copies, and the making of values and abbreviated keys the stage
+  removes was 12 per cent of it.
 
 ## Was and will be
 
