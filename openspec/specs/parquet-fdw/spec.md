@@ -268,6 +268,24 @@ as they are.
 - **Verified by:**
   `test/sql/parquet.sql::-- spec: parquet-fdw/A database of another encoding`
 
+#### Scenario: A chunk that leaves its dictionary
+- **WHEN** a file's string columns, `text`, `varchar(3)` and `bytea`,
+  have chunks that begin through a dictionary and go on in plain
+  pages, with `NULL`s and values of 0, 12, 13 and a thousand bytes in
+  each part, and a value that is not UTF-8 in the dictionary part of
+  one chunk and in the plain part of another; and queries read them
+  through the wrapper's rows and through the source's batches: whole,
+  under a clause the source checks, grouped by the string, by
+  `length`, and ordered under `C` with a `LIMIT`
+- **THEN** each result equals the result over a heap table of the same
+  rows, and the value that is not UTF-8 raises `22021` where a query
+  returns its row, and in the source's batches nothing where the clause
+  rejects it
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/A chunk that leaves its
+  dictionary`;
+  `crates/tessera-parquet/src/reader/tests.rs::a_chunk_that_falls_back_to_plain_pages_is_read_plain`
+
 ### Requirement: Reading rows
 When the planner takes the wrapper's own scan, the wrapper SHALL return
 every row of the files once, with the values the requirements on the

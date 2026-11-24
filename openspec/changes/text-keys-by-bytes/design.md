@@ -132,10 +132,12 @@ characters of, the check costs less. For a chunk read through its
 dictionary, the first window that names the dictionary's values array
 reads the whole array once through the plan; where every value passes
 and none is `NULL`, the windows over it take their rows' bytes with no
-check again. For a plain window, one pass checks the encoding and the
-zero bytes of the window's bytes, all its rows' together, and each
-value's start for a byte that continues a character; the pass is made
-once a window, however many batches ask it. Every other case, a
+check again. A plain window is an array of views, whose values lie in
+the decompressed pages and in the views themselves, not together: its
+rows' values are checked one by one, each in one pass by words of 8
+bytes, a zero byte by an exact mask and only a value with a byte at or
+above 0x80 by the full check of UTF-8; the check is made once a window,
+however many batches ask it. Every other case, a
 dictionary with a value that fails, a window that fails its pass, a
 value past PostgreSQL's size, an offset or an index that does not hold,
 `varchar(n)`, trusted text and `bytea`, reads the rows asked one by one
