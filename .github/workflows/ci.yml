@@ -36,6 +36,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format, Clippy, debug and release tests
         run: make rust-check
+      # The reader of Parquet files links one crate of Tessera, for the
+      # pattern of LIKE alone, as the contract of parquet-fdw asks
+      # ("Only the public C API"); datum-arrow is meant for use outside
+      # Tessera.
+      - name: The crates of the workspace the reader of Parquet files links
+        run: |
+          cargo tree --locked -p tessera-parquet -e normal,build --target all --depth 1 --prefix none |
+            sed 1d | grep ' (/' | cut -d' ' -f1 | sort -u > target/tessera-parquet-deps.txt
+          printf '%s\n' datum-arrow tessera-kernels | diff -u - target/tessera-parquet-deps.txt
+          grep -rh tessera_kernels crates/tessera-parquet/src |
+            diff -u - <(echo 'use tessera_kernels::text::Like;')
 
   # The crate relhash alone, as its contract asks ("Free of Tessera", "A
   # small surface"): its tests as the only package, its documentation

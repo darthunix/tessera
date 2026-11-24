@@ -627,4 +627,6 @@ clauses it checks (`Source Exact`).
 - **THEN** each shows its lines as listed above, and the counts with
   `ANALYZE` equal the serial ones in the parallel plan
 - **Verified by:**
-  `test/sql/parquet.sql::-- spec: parquet-fdw/What EXPLAIN shows`
+  `test/sql/parquet.sql::-- spec: parquet-fdw/What EXPLAIN shows`;
+  the parallel plan's counts in
+  `test/sql/parquet.sql::-- spec: parquet-fdw/One file in parallel`

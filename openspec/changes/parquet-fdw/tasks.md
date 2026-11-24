@@ -128,7 +128,7 @@ maintainer to say that the machine is idle.
 
 ## 8. The spec, the design and the contract
 
-- [ ] 8.1 Every scenario of the spec delta names its test, and every
+- [x] 8.1 Every scenario of the spec delta names its test, and every
       pending check of the contract its check. Check: `openspec validate
       parquet-fdw --strict`; `.github/scripts/check-specs.sh`
 - [ ] 8.2 `openspec/specs/parquet-fdw/design.md`, written for a reader
