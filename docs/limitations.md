@@ -19,10 +19,11 @@ decides. The [nodes guide](nodes.md) explains each node's planning.
   `INSERT … SELECT … GROUP BY`, can use the batch nodes.
 - **Tables other than heap tables.** A foreign table keeps its wrapper's
   scan unless a registered source reads it in batches
-  ([source.md](source.md)); tables of another access method and
-  `TABLESAMPLE` keep the core's scan. A foreign table with lateral
-  references, a pseudoconstant clause, or only paths with parameters
-  or path keys is offered to no source.
+  ([source.md](source.md)), as the Parquet wrapper's source reads its
+  tables ([parquet.md](parquet.md), and below); tables of another
+  access method and `TABLESAMPLE` keep the core's scan. A foreign table
+  with lateral references, a pseudoconstant clause, or only paths with
+  parameters or path keys is offered to no source.
 - **Parameterized paths.** A batch path is never parameterized by an outer
   row (`check_path_config` in `runtime/planner.c`), so the inner side of a
   nested loop that probes an index for each outer row, and a scan with
@@ -138,6 +139,65 @@ those it checks.
   of the inner side runs once for an inner row that several outer rows
   look up, as in the core's hash join and unlike its nested loop, where
   it runs for each. The core's own plans differ the same way.
+
+## Parquet foreign tables
+
+The wrapper `tessera_parquet` ([parquet.md](parquet.md)) reads local
+Parquet files; its suite is `test/sql/parquet.sql`, whose cases are
+named below.
+
+- **Files on the server's file system alone**, named by absolute paths
+  or patterns of the shell; no object store, no URL, and no path that
+  holds a comma. A table is read-only, and its columns are declared by
+  hand: there is no `IMPORT FOREIGN SCHEMA`.
+- **Codecs**: chunks uncompressed or compressed with Snappy. A query
+  that reads a column compressed another way, such as GZIP or ZSTD,
+  fails; one that reads only the file's other columns does not
+  (case "Options refused").
+- **Types**: no `INT96`, decimal, time of day, time in nanoseconds,
+  unsigned 64-bit integer, list, map, group or repeated column, and no
+  bytes marked as JSON or a UUID; no declared `numeric`, `char(n)` or
+  `timestamp(n)`. A query fails on such a column only when it reads it
+  (case "Columns refused"). A `text` or `varchar` column needs a
+  database of the encoding `UTF8` (case "A database of another
+  encoding").
+- **A whole row and the system columns**, such as `SELECT t FROM t` or
+  `tableoid`, are read by the wrapper's scan, row by row, not by the
+  source (case "A whole row and a system column").
+- **Clauses the source leaves to `TessFilter`**: any clause outside the
+  source's list ([parquet.md](parquet.md), "What the source checks"),
+  such as `ILIKE`, a regular expression, a `LIKE` with `_`, an escape
+  or more than 31 `%`, a comparison of two columns, of floating-point
+  numbers or of the order of strings, a `timestamp` compared with a
+  `timestamptz`, and clauses on strings under a nondeterministic
+  collation (case "Clauses left to the filter").
+- **Skipping by the footer** is by whole groups of rows only: no page
+  index, no Bloom filter, no row skipped inside a group. Of strings only
+  the emptiness of the least and greatest values is used, for `= ''`
+  and `<> ''`; a dictionary only where the footer says every data page
+  of the chunk is encoded through it; the older least and greatest
+  values only of signed columns (case "Groups the footer cannot rule
+  out").
+- **Parallel reading** divides the files by groups of rows: a file of
+  one group is read by one process.
+- **Errors of values the source never makes.** With Tessera off the
+  wrapper makes every value of every column a query reads, so a string
+  that is not UTF-8 or a time out of range in a row a clause rejects
+  stops the query; the source's batches make only the values asked and
+  do not (case "Bytes checked when they become values").
+- **Changes of a file that keep its size and time.** A scan compares a
+  file's size, time of modification, device and inode with what it
+  found when it began. A file rewritten in place with its size and time
+  kept, as `cp -p` or `rsync -t` may do, written through a shared
+  `mmap`, whose time changes only at `msync` or writeback, read over
+  NFS, whose answers come from a cache of attributes for seconds, or
+  written within one tick of a coarse clock, as Linux before 6.13 gives
+  a file's time, is not seen, and the rows may then be wrong. A file
+  replaced by a rename is seen (case "Files replaced, added, removed and
+  damaged").
+- **The cache of footers** of a backend holds a thousand files, the
+  least recently used dropped first; a backend that reads more files
+  than that, query after query, reads their footers again.
 
 ## Platforms
 

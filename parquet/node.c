@@ -1,12 +1,14 @@
 /*
  * The module's batch source and its node, TessParquetScan. The source
  * reads every table of the wrapper the scan planner offers it, and checks
- * the clauses on integers, dates and times, IN and the tests of NULL on
- * the files' stored values; the node reads a group in two passes: first
- * the columns of those clauses, every row, into the group's selection,
- * then batches of up to 64 selected rows of one window, making the
- * PostgreSQL values of a column only when a consumer asks for it, for the
- * rows it asks for, keeping them until the next batch. Each column is read
+ * the clauses on integers, dates and times, IN, the tests of NULL, and
+ * the equality, <> '' and LIKE of fixed parts of strings on the files'
+ * stored values; the node reads a group in two passes: first the columns
+ * of those clauses, every row, into the group's selection, then batches
+ * of up to 64 selected rows of one window, making the PostgreSQL values
+ * of a column only when a consumer asks for it, for the rows it asks for,
+ * keeping them until the next batch, or giving a string column's bytes
+ * where the window holds them. Each column is read
  * by one reader a group, forward window by window, or, for a window
  * behind, for the rows asked alone.
  */

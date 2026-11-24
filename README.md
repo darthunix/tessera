@@ -6,7 +6,8 @@ PostgreSQL or copying the data anywhere.
 
 - **No fork.** Three modules loaded into a stock PostgreSQL server.
 - **No data migration.** The batch nodes read the heap pages and indexes
-  PostgreSQL already has, under the query's snapshot.
+  PostgreSQL already has, under the query's snapshot, and Parquet files
+  where they lie, through a foreign data wrapper of the repository.
 - **Mixed plans.** Batch nodes take the parts of a plan they support;
   PostgreSQL's own nodes run the rest, in the same plan.
 - **Composable.** Other extensions add their own batch nodes, sources and
@@ -37,6 +38,15 @@ PostgreSQL master and the data in shared buffers:
   faster, from 1.1 to 3 times, 1.7 times on the geometric mean; two of
   the 22 run past the time limit in both modes without indexes on the
   foreign keys.
+- **Parquet files read in place** ([docs/parquet.md](docs/parquet.md)):
+  ClickBench's 17 queries that read no string column, over 10 M rows in
+  the page cache with PostgreSQL 19, against PostgreSQL reading the
+  same wrapper's rows: every query faster serially, from 1.2 to 30
+  times, 8 on the geometric mean; about 4 with eight workers, where one
+  grouping is slower. pg_duckdb over the same files is 2 to 3 times
+  faster by the mean, and slower on the queries that a clause on the
+  file's values decides. The queries over strings are not measured
+  against PostgreSQL yet.
 - **Where Tessera is slower**: a sort feeding a window function (about
   1.2 times the core's time: PostgreSQL's window node stores every row
   the batch sort serves it), planning (a few hundredths of a millisecond
@@ -47,8 +57,11 @@ PostgreSQL master and the data in shared buffers:
 The runs: the [full run of the benchmark families](docs/benchmarks/2026-10-01/README.md)
 (190 cases, medians of 31 runs) and the [run of the queries derived from
 TPC-H](docs/benchmarks/2026-10-02-tpch/README.md) (SF 1, 11 pairs in
-alternating order); [`docs/benchmarks`](docs/benchmarks/README.md) lists
-them, newest first.
+alternating order), and the runs of ClickBench over its Parquet files
+([stage 1](docs/benchmarks/2026-11-22-clickbench-stage1/README.md),
+[stage 2](docs/benchmarks/2026-11-22-clickbench-stage2/README.md));
+[`docs/benchmarks`](docs/benchmarks/README.md) lists them, newest
+first.
 
 ## Why trust the results
 
@@ -82,7 +95,7 @@ them, newest first.
 
 | | in batches | stays with PostgreSQL |
 |---|---|---|
-| scans | heap tables: sequential, bitmap, index, index-only, BRIN; foreign tables a registered source reads ([docs/source.md](docs/source.md)) | other access methods, other foreign tables, `TABLESAMPLE` |
+| scans | heap tables: sequential, bitmap, index, index-only, BRIN; Parquet files through the wrapper `tessera_parquet` ([docs/parquet.md](docs/parquet.md)); foreign tables another registered source reads ([docs/source.md](docs/source.md)) | other access methods, other foreign tables, `TABLESAMPLE` |
 | conditions | comparisons, arithmetic, `IN`, `BETWEEN`, `LIKE`, `CASE` over integers, numeric, dates and text; other functions row by row inside the batch filter | — |
 | aggregation | `count`, `sum`, `avg`, `min`, `max` by kernels, other aggregates of PostgreSQL's own functions; `GROUP BY` up to 16 keys; `DISTINCT`; spilling | grouping sets, ordered-set aggregates, `ORDER BY` inside an aggregate, aggregates of other extensions in C |
 | joins | hash joins: inner, left, right, full, semi, anti, right anti; spilling; one shared table in parallel plans; partitions pruned by the join's keys | nested loop, merge join, right semi joins |
