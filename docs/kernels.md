@@ -365,6 +365,18 @@ argument, and the logic of a function is the same for all of them.
 Characters count as the database encoding counts them (`TessTextChars`: a
 byte each, or UTF-8 by its lead bytes).
 
+The text functions read their string columns in the bytes form where the
+expression gives it (`TESS_FUNCTION_BYTES`, [function.md](function.md)).
+A row of the form they hand to the core's function, for a pattern with
+`_`, an escape or more pieces than the matcher holds, or for the
+characters of a multibyte encoding other than UTF-8, gets a value made
+from its bytes in the call's context, a header and the bytes, which
+passed their column's rule; it is freed after the row, as a detoasted
+copy is. A Datum goes to the core's function as it is, which detoasts as
+much of it as it needs. A row whose other argument is compressed or
+stored apart is compared again by the kernels over that one row, the
+value detoasted and the other side's made from its bytes.
+
 - `tess_text_compare(equal, bpchar, left, right, rows, rest, status)`:
   equality or inequality of text, or of bpchar without trailing spaces;
   a bpchar scalar is trimmed once a call, and each value compared by

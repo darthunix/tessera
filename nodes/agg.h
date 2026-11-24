@@ -167,6 +167,12 @@ typedef struct TessAggState
 	 */
 	int		   *read_columns;
 	int			nread_columns;
+	/*
+	 * Of each read column, whether a computed argument reads it as bytes
+	 * (tess_projection_reads_bytes), found at the first read: then each
+	 * batch is asked whether it offers the form for that column alone.
+	 */
+	bool	   *read_as_bytes;
 	/* Generic aggregates: their states' context, and the AggState they see. */
 	AggState   *generic_agg;
 	/*

@@ -77,4 +77,11 @@ extern void tess_projection_reset(TessProjection *projection);
 
 extern const TessProjectionStats *tess_projection_stats(const TessProjection *projection);
 
+/*
+ * Whether a computed column reads the child's column in the bytes form
+ * where the child offers it (tess_expr_reads_bytes): a consumer that
+ * reads the child's columns ahead leaves it out then.
+ */
+extern bool tess_projection_reads_bytes(const TessProjection *projection, int column);
+
 #endif							/* TESSERA_RUNTIME_PROJECT_H */

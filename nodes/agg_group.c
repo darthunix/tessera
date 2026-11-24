@@ -233,9 +233,32 @@ read_by_bytes(const TessAggState *state, int column)
 }
 
 /*
+ * Whether a computed argument or filter reads the read column at index
+ * in the bytes form from this batch: what the expressions read is found
+ * once, and the batch asked, which the function's own read asks again,
+ * to make no value of the column.
+ */
+static bool
+function_reads_bytes(TessAggState *state, TessBatch *batch, int index)
+{
+	TessBytesColumn bytes;
+
+	if (state->read_as_bytes == NULL)
+	{
+		state->read_as_bytes = MemoryContextAllocZero(GetMemoryChunkContext(state->read_columns),
+													  sizeof(bool) * state->nread_columns);
+		for (int read = 0; state->projection != NULL && read < state->nread_columns; read++)
+			state->read_as_bytes[read] =
+				tess_projection_reads_bytes(state->projection, state->read_columns[read]);
+	}
+	return state->read_as_bytes[index] &&
+		tess_batch_bytes_column(batch, state->read_columns[index], &batch->rows, &bytes);
+}
+
+/*
  * The child's columns the node reads, in their order, before it computes
- * anything; not a column a key read as bytes, whose values it would make
- * for every row.
+ * anything; not a column a key or a function reads as bytes, whose values
+ * it would make for every row.
  */
 void
 agg_read_in_order(TessAggState *state, TessBatch *batch)
@@ -246,7 +269,8 @@ agg_read_in_order(TessAggState *state, TessBatch *batch)
 	{
 		TessDatumColumn column = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 
-		if (read_by_bytes(state, state->read_columns[index]))
+		if (read_by_bytes(state, state->read_columns[index]) ||
+			function_reads_bytes(state, batch, index))
 			continue;
 		batch->ops->get_datum_column(batch, state->read_columns[index], &batch->rows,
 									 TESS_COLUMN_FOR_PROJECTION, &column);

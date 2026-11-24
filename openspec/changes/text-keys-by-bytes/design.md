@@ -221,12 +221,14 @@ gets `Datum`s, as today. The spec draws both structures.
 
 Some rows of a kernel go to the core's function today, with both
 arguments as `Datum`s: a `LIKE` pattern the kernels' matcher refuses,
-for `_`, an escape or more pieces than it holds, and a row whose other
-argument is compressed or stored apart. A row of the bytes form is
+for `_`, an escape or more pieces than it holds, and the characters of
+a multibyte encoding other than UTF-8. A row of the bytes form is
 never compressed itself; for every row the kernel sends to the core,
 it makes a value from the row's bytes in the call's memory context and
 calls the core's function, as it calls it today with the row's
-`Datum`.
+`Datum`. A row whose other argument is compressed or stored apart is
+compared again by the kernels over that one row, the compressed value
+detoasted and the row of the form made a value the same way.
 
 ### Order by bytes
 

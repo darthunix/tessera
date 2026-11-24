@@ -188,7 +188,7 @@ named in the harness and covered by a property test.
       and the last byte of every row it hands a kernel in the form; a
       test module's functions with and without the flag;
       `docs/function.md`. Check: the suites
-- [ ] 5.3 `kernels/text.c`: the flag, the form taken for the kernels'
+- [x] 5.3 `kernels/text.c`: the flag, the form taken for the kernels'
       own rows, and every row a kernel sends to the core's function
       given a value made from its bytes in the call's memory context,
       in one commit, since a function with the flag must take every row
