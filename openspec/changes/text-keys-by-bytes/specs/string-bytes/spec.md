@@ -337,12 +337,13 @@ collation or another operator class SHALL be sorted as today.
 - **Verified by:**
   `test/sql/parquet.sql::-- spec: string-bytes/Ordered by bytes`
 
-#### Scenario: Top-N makes the kept rows' values
+#### Scenario: Top-N makes the kept values
 - **WHEN** `ORDER BY` a `text` column under `C` with `LIMIT 10` reads
   the Parquet table of 100 000 rows whose order is not the key's
 - **THEN** the scan's count of values made for the column is below
   what it reads, and the rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Top-N makes the kept values`
 
 #### Scenario: Another collation
 - **WHEN** the same queries order under a libc collation other than

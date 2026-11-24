@@ -157,11 +157,44 @@ top_push_slot(TessSortState *state)
 }
 
 /*
+ * A string by its bytes, where the batch offers its first generic key so:
+ * the keys before it read, and its words made from the bytes, into the
+ * keys the kernels take, its values not read. False to read every key
+ * as Datums (sort_batch_keys).
+ */
+static bool
+top_bytes_keys(TessSortState *state, TessBatch *batch, TessBytesColumn *bytes)
+{
+	int			generic = state->generic;
+
+	if (!state->generic_bytes ||
+		!tess_batch_bytes_column(batch, state->child_columns[state->key_columns[generic]],
+								 &batch->rows, bytes))
+		return false;
+	for (int key = 0; key < generic; key++)
+	{
+		sort_batch_column(state, batch, state->key_columns[key]);
+		state->table_keys[key].kind = state->keys[key].kind;
+		state->table_keys[key].column = &state->columns[state->key_columns[key]];
+		state->table_keys[key].prepared = NULL;
+	}
+	MemoryContextReset(state->abbrev_context);
+	sort_bytes_words(state, &(TessTextArg) {.bytes = bytes}, &batch->rows);
+	state->table_keys[generic].kind = state->keys[generic].kind;
+	state->table_keys[generic].column = &state->abbrev_column;
+	state->table_keys[generic].prepared = NULL;
+	return true;
+}
+
+/*
  * Top-N of a generic key: a batch's key columns and its items' lanes
  * first; once the heap is full, the batch keeps only the rows that order
  * before the worst kept by their lanes, or by the comparisons when the
  * lanes are equal; those have their other columns read, are appended and
- * go into the heap one by one.
+ * go into the heap one by one. A string by its bytes takes its words from
+ * the bytes form where the batch offers it, and its values, and those of
+ * the keys after it, only for the rows its lanes do not put after the
+ * worst kept, so that the batch makes values for those rows alone.
  */
 void
 sort_top_batch_generic(TessSortState *state, TessBatch *batch)
@@ -174,6 +207,9 @@ sort_top_batch_generic(TessSortState *state, TessBatch *batch)
 	int			count;
 	int			row = -1;
 	int			lane = 0;
+	bool		by_bytes;
+	TessBytesColumn bytes;
+	uint64	   *ties = NULL;
 
 	if (nrows > state->top_batch_capacity)
 	{
@@ -199,9 +235,17 @@ sort_top_batch_generic(TessSortState *state, TessBatch *batch)
 		state->top_gathered_null = MemoryContextAllocZero(context,
 														  sizeof(bool) * state->top_batch_capacity);
 	}
-	sort_batch_keys(state, batch);
-	for (int key = state->generic + 1; key < state->nkeys; key++)
-		sort_batch_column(state, batch, state->key_columns[key]);
+	by_bytes = top_bytes_keys(state, batch, &bytes);
+	/* The rows whose lanes equal the worst's, in the context reset per batch. */
+	if (by_bytes)
+		ties = MemoryContextAllocZero(state->abbrev_context,
+									  sizeof(uint64) * Max(tess_row_mask_word_count(nrows), 1));
+	else
+	{
+		sort_batch_keys(state, batch);
+		for (int key = state->generic + 1; key < state->nkeys; key++)
+			sort_batch_column(state, batch, state->key_columns[key]);
+	}
 	tess_status_check(state->kernels->sort_key_lanes(state->nkernel, state->ext_keys,
 													 state->table_keys, &batch->rows, words,
 													 state->top_lanes, state->top_batch_capacity,
@@ -235,6 +279,47 @@ sort_top_batch_generic(TessSortState *state, TessBatch *batch)
 					break;
 				}
 			}
+			/* By bytes, the lanes' ties are compared once their values are read. */
+			if (by_bytes)
+			{
+				/* A row its lanes drop orders after the worst by its full bytes too. */
+				Assert(result <= 0 || state->generic > 0 ||
+					   sort_bytes_order(state, bytes.data[row], bytes.lengths[row],
+										bytes.isnull[row], top_slot_values(state, 0)[0],
+										top_slot_isnull(state, 0)[0]) >= 0);
+				if (result > 0)
+					batch->rows.bits[row / 64] &= ~(UINT64CONST(1) << (row % 64));
+				else if (result == 0)
+					ties[row / 64] |= UINT64CONST(1) << (row % 64);
+				continue;
+			}
+			for (int key = state->generic; result == 0 && key < state->nkeys; key++)
+			{
+				const TessDatumColumn *column = &state->columns[state->key_columns[key]];
+
+				result = ApplySortComparator(column->values[row], column->isnull[row],
+											 top_slot_values(state, 0)[key - state->generic],
+											 top_slot_isnull(state, 0)[key - state->generic],
+											 &state->ssup[key]);
+			}
+			if (result >= 0)
+				batch->rows.bits[row / 64] &= ~(UINT64CONST(1) << (row % 64));
+		}
+		if (tess_row_mask_count(&batch->rows) == 0)
+			return;
+	}
+	if (by_bytes)
+	{
+		/* The values of the rows that may stay, and of the keys after it. */
+		for (int key = state->generic; key < state->nkeys; key++)
+			sort_batch_column(state, batch, state->key_columns[key]);
+		row = -1;
+		while ((row = tess_row_mask_next(&batch->rows, row)) >= 0)
+		{
+			int			result = 0;
+
+			if ((ties[row / 64] & (UINT64CONST(1) << (row % 64))) == 0)
+				continue;
 			for (int key = state->generic; result == 0 && key < state->nkeys; key++)
 			{
 				const TessDatumColumn *column = &state->columns[state->key_columns[key]];

@@ -226,7 +226,7 @@ named in the harness and covered by a property test.
       first and last, both directions, in memory, spilled and through
       an ordered gather; `docs/nodes.md`. Check: the suites; `make
       crosscheck`
-- [ ] 6.3 `nodes/sort_topn.c`: the key's values asked only for the rows
+- [x] 6.3 `nodes/sort_topn.c`: the key's values asked only for the rows
       that beat the worst kept when their batch is read; in an assert
       build, each row it drops checked by its full bytes against the
       worst kept; a case of the `parquet` suite over rows in no order of

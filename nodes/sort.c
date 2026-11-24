@@ -219,6 +219,24 @@ generic_begin(TessSortState *state, TupleDesc desc, List *sortops, List *collati
 	state->abbrev_next = 10;
 }
 
+/* The abbreviated column's arrays, for nrows rows. */
+static void
+abbrev_capacity(TessSortState *state, int nrows)
+{
+	MemoryContext context = state->css.ss.ps.state->es_query_cxt;
+
+	if (nrows <= state->abbrev_capacity)
+		return;
+	if (state->abbrev_values != NULL)
+	{
+		pfree(state->abbrev_values);
+		pfree(state->abbrev_isnull);
+	}
+	state->abbrev_capacity = Max(nrows, SORT_ROWS);
+	state->abbrev_values = MemoryContextAllocZero(context, sizeof(Datum) * state->abbrev_capacity);
+	state->abbrev_isnull = MemoryContextAllocZero(context, sizeof(bool) * state->abbrev_capacity);
+}
+
 /*
  * A string by its bytes: the first generic key's words of the selected
  * rows of its column, of either form, the kernels' sort words, into the
@@ -235,8 +253,10 @@ sort_bytes_words(TessSortState *state, const TessTextArg *column, const TessRowM
 														 sizeof(uint64) * Max(nwords, 1))};
 	TessRowMask rest = {nrows, MemoryContextAllocZero(state->abbrev_context,
 													  sizeof(uint64) * Max(nwords, 1))};
-	int64	   *words = (int64 *) state->abbrev_values;
+	int64	   *words;
 
+	abbrev_capacity(state, nrows);
+	words = (int64 *) state->abbrev_values;
 	tess_status_check(state->kernels->text_sort_words(column, rows, words, &present, &rest,
 													  &status),
 					  &status);
@@ -279,15 +299,16 @@ sort_bytes_words(TessSortState *state, const TessTextArg *column, const TessRowM
 }
 
 /*
- * The order of two values of a string key by its bytes, as the key's
- * flags place NULL and its direction: the full bytes by memcmp, then the
- * length, which the words and the comparisons must have given.
+ * The order of two values of a string key by its bytes, the first given
+ * as its bytes, as the key's flags place NULL and its direction: the full
+ * bytes by memcmp, then the length, which the words and the comparisons
+ * must have given. An assert build's checks call it.
  */
-static int
-bytes_order(TessSortState *state, Datum a, bool a_null, Datum b, bool b_null)
+int
+sort_bytes_order(TessSortState *state, const char *a, Size a_len, bool a_null,
+				 Datum b, bool b_null)
 {
 	uint32		flags = state->keys[state->generic].flags;
-	struct varlena *x;
 	struct varlena *y;
 	int			order;
 
@@ -298,14 +319,21 @@ bytes_order(TessSortState *state, Datum a, bool a_null, Datum b, bool b_null)
 		order = a_null ? 1 : -1;
 		return (flags & TESS_SORT_NULLS_FIRST) != 0 ? -order : order;
 	}
-	x = PG_DETOAST_DATUM_PACKED(a);
 	y = PG_DETOAST_DATUM_PACKED(b);
-	order = memcmp(VARDATA_ANY(x), VARDATA_ANY(y),
-				   Min(VARSIZE_ANY_EXHDR(x), VARSIZE_ANY_EXHDR(y)));
+	order = memcmp(a, VARDATA_ANY(y), Min(a_len, VARSIZE_ANY_EXHDR(y)));
 	if (order == 0)
-		order = VARSIZE_ANY_EXHDR(x) < VARSIZE_ANY_EXHDR(y) ? -1 :
-			VARSIZE_ANY_EXHDR(x) > VARSIZE_ANY_EXHDR(y) ? 1 : 0;
+		order = a_len < VARSIZE_ANY_EXHDR(y) ? -1 : a_len > VARSIZE_ANY_EXHDR(y) ? 1 : 0;
 	return (flags & TESS_SORT_DESCENDING) != 0 ? -order : order;
+}
+
+/* sort_bytes_order of two values. */
+static int
+bytes_order(TessSortState *state, Datum a, bool a_null, Datum b, bool b_null)
+{
+	struct varlena *x = a_null ? NULL : PG_DETOAST_DATUM_PACKED(a);
+
+	return sort_bytes_order(state, x == NULL ? NULL : VARDATA_ANY(x),
+							x == NULL ? 0 : VARSIZE_ANY_EXHDR(x), a_null, b, b_null);
 }
 
 /*
@@ -404,27 +432,13 @@ sort_abbreviate_column(TessSortState *state, const TessDatumColumn *column,
 	MemoryContext old;
 	int			row = -1;
 
-	if (column->nrows > state->abbrev_capacity)
-	{
-		MemoryContext context = state->css.ss.ps.state->es_query_cxt;
-
-		if (state->abbrev_values != NULL)
-		{
-			pfree(state->abbrev_values);
-			pfree(state->abbrev_isnull);
-		}
-		state->abbrev_capacity = Max(column->nrows, SORT_ROWS);
-		state->abbrev_values = MemoryContextAllocZero(context,
-													  sizeof(Datum) * state->abbrev_capacity);
-		state->abbrev_isnull = MemoryContextAllocZero(context,
-													  sizeof(bool) * state->abbrev_capacity);
-	}
 	MemoryContextReset(state->abbrev_context);
 	if (state->abbrev.order == SORT_ABBREV_BYTES)
 	{
 		sort_bytes_words(state, &(TessTextArg) {.column = column}, rows);
 		return;
 	}
+	abbrev_capacity(state, column->nrows);
 	old = MemoryContextSwitchTo(state->abbrev_context);
 	while ((row = tess_row_mask_next(rows, row)) >= 0)
 	{

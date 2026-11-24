@@ -2667,7 +2667,14 @@ whose lanes order before the worst's, or, when they are equal, whose
 values do by the comparisons; those are appended and pushed one by one.
 A rebuild keeps the slots in place with their new references and values.
 At the end the kernels sort the heap's items and the groups of equal
-words are ordered as in a full sort. The first 10 of 2 M rows: numeric
+words are ordered as in a full sort. A string by its bytes whose batch
+offers it in the bytes form takes its words from the bytes, and its
+values, with those of the keys after it, only for the rows whose lanes
+do not order after the worst's: the source makes values for those rows
+alone (`Values Decoded` of the Parquet scan), and the rows whose lanes
+equal the worst's are compared once their values are read. In an assert
+build each row the lanes drop, when the string is the first key, is
+checked by its full bytes against the worst kept. The first 10 of 2 M rows: numeric
 90 ms against 159, text under `"C"` 49 against 94 (pg-sort-kLXeKY).
 
 ### Tests
