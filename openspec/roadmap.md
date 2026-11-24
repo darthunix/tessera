@@ -45,9 +45,9 @@ with the foreign keys of the schema left undeclared for now; the same
 day he moved `agg-dependent-columns` between `agg-table-presize` and
 `tpch-q9-plan`, and on 2026-11-04 widened `lookup-outer-compaction`
 into `gather-sparse-batches`. The maintainer took `source-scan` (done)
-and then `parquet-fdw` out of turn on 2026-11-20, for Tessera's entry into
-ClickBench over the benchmark's Parquet files, and made the Parquet
-wrapper the first source of the planning contract, so that
+and then `parquet-fdw` (done) out of turn on 2026-11-20, for Tessera's
+entry into ClickBench over the benchmark's Parquet files, and made the
+Parquet wrapper the first source of the planning contract, so that
 `parquet-fdw` no longer waits for `compressed-table-source`. On
 2026-11-21 he put the boundary of types between PostgreSQL and Arrow,
 `types-crate`, before `parquet-fdw`, as a crate of its own (done, the
@@ -206,47 +206,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
 
 ## Entries
 
-### parquet-fdw
-
-Parquet FDW. From plan 6.6, line 6004, where it is an Arrow FDW; the
-review of pull request 45, 2026-10-05; the analysis of ClickBench,
-2026-11-20. Taken by the maintainer out of turn on 2026-11-20; it is
-the change `parquet-fdw`.
-
-- **What:** A foreign data wrapper over Parquet files, a module of this
-  repository, whose source, with its batch node, is the first real
-  source of `source-scan`. It reads the files in place, one file or a
-  list of them; decodes the columns a query asks for into batches, on
-  request; checks exactly the clauses it can, such as a comparison of a
-  column with a constant on the column's encoded form; skips groups of
-  rows by their least and greatest values; reads in parallel by groups
-  of rows; serves rows when Tessera is off; and maps a file's physical
-  types to the declared ones: seconds to `timestamp`, days to `date`,
-  bytes to `text` checked as UTF-8. Then the entries of ClickBench over
-  its Parquet files, one file and a hundred.
-- **Why:** The maintainer's decision 2026-10-05: a Parquet FDW gives the
-  same Arrow batches, but from Parquet files, the form of cold storage.
-  On 2026-11-20 he chose it as Tessera's way into ClickBench. On a tenth
-  of ClickBench's rows in a heap table, in memory, Tessera took 21.4 s
-  for the 43 queries, the core 40.5 s and pg_duckdb 53.4 s; but a column
-  behind the text columns cost Tessera what it cost the core, and on
-  ClickBench's main machine, with 32 GB, the heap table does not fit in
-  memory and every heap entry takes about 258 s a query.
-- **Known:** ClickBench's files are written by parquet-cpp 1.5.1:
-  Snappy, dictionary and plain encodings, about 500 000 rows a group
-  with their least and greatest values, strings as bytes without a UTF-8
-  mark, `EventTime` as seconds and `EventDate` as days in an unsigned
-  16-bit number; read on 2026-11-21, each of the hundred files holds two
-  groups of rows, every chunk with its least and greatest values, its
-  count of `NULL` values and its statistics of encodings. The crate
-  `datum-arrow` holds the boundary of types. The reader is the `parquet`
-  crate of Apache Arrow's Rust implementation (the change's proposal).
-  The plan's item was to be done without nanoarrow as a Git submodule;
-  pg_batch's dirty nanoarrow submodule is not carried over (line 7478).
-- **Depends on:** `source-scan`.
-- **Capabilities:** parquet-fdw, new; source-scan unchanged
-- **Size:** large.
-
 ### text-keys-by-bytes
 
 Grouping by a string on the file's bytes, one value a group. From the
@@ -348,9 +307,14 @@ Tessera's entry of ClickBench over its Parquet files.
   plan: a Parquet entry when the 43 queries' hot geometric mean is
   within twice pg_duckdb's on the same machine, otherwise the Parquet
   times only beside the heap result on a machine that holds the table in
-  memory. The machine, c6a.4xlarge, and who runs it are open.
-- **Depends on:** `parquet-fdw`, and `text-keys-by-bytes` for the
-  groupings by strings.
+  memory. The machine, c6a.4xlarge, and who runs it are open. Two
+  stages of that plan were left to this entry when the change closed:
+  the times of the 18 queries that filter on a string and of the 15
+  that group by one, Tessera on against Tessera off and pg_duckdb; every
+  query has been counted by instructions since
+  (`docs/benchmarks/2026-11-23-text-keys-by-bytes-form`,
+  `docs/benchmarks/2026-11-24-text-keys-by-bytes-keys`), none timed.
+- **Depends on:** `text-keys-by-bytes` for the groupings by strings.
 - **Capabilities:** none: scripts outside the extension
 - **Size:** medium.
 
@@ -2427,6 +2391,29 @@ becomes an entry, joins one, or is dropped.
   where the selection holds no row between its end and the window, once
   counts show the rebuilds cost, as a sparse clause over many columns
   would.
+- **The selection of a window's rows untried both ways** (a finding of
+  the close of the change `parquet-fdw`). The reader hands the `parquet`
+  crate a group's selection as runs of rows selected and skipped, in
+  windows of 1024 rows; the change's design meant to count that against
+  a mask of rows, and to weigh the window's size under a top-N sort of
+  `SELECT *`, and neither was counted. Suggested: count both where a
+  sparse clause selects few rows of many columns.
+- **Bounds outside a mark's width** (a finding of the close of the
+  change `parquet-fdw`, for the maintainer to decide). The reader takes
+  no least or greatest value of a chunk when it lies outside its mark's
+  width, as 300 in a column marked 8-bit, since it narrows such a row,
+  and so skips no group by it (`crates/tessera-parquet/src/stats.rs`).
+  The spec's requirement of the groups skipped says only "where the
+  format lets a reader trust them": a sentence there would name the
+  rule. Bounds narrowed to the mark would not do: 1, 127 and 257 in a
+  column marked 8-bit narrow to 1, 127 and 1, while the narrowed bounds
+  1 and 1 would skip the group under `= 127`.
+- **An entry of the reader the module does not call** (a finding of the
+  close of the change `parquet-fdw`). `tess_parquet_check`, declared in
+  `parquet/tessera_parquet_reader.h`, is called by the reader's Rust
+  tests alone: the check of a file after each read is inside
+  `tess_parquet_read`. Dropped, or kept for a caller that checks a file
+  without reading it.
 - **A distinct aggregate chosen serially over the core's parallel plan**
   (a finding of the change `parquet-fdw`, its stage 1 measured).
   `TessAgg`'s `COUNT(DISTINCT)` has no parallel form, and the costs

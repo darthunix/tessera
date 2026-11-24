@@ -1,7 +1,6 @@
-# Spec Delta
+# parquet-fdw Specification
 
 ## Purpose
-
 A foreign data wrapper over Parquet files and its batch source. A
 Parquet file keeps a table by columns: its rows come in **groups of
 rows**, and in a group each column is a **column chunk**, compressed and
@@ -38,7 +37,7 @@ the batches, the clauses, the groups of rows skipped, the parallel
 reading, the estimates and `EXPLAIN`; [design.md](design.md) explains
 the whole and the reasons.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: A Parquet foreign table
 `CREATE EXTENSION tessera_parquet`, which needs the extension `tessera`,
@@ -122,11 +121,11 @@ over its older converted type:
   signed 32-bit integer or as an unsigned 16-bit one to `integer` or
   `bigint`; marked as an unsigned 32-bit one to `bigint`;
 - `INT32` marked `DATE`, or with the column option `unit 'days'`, days
-  since 1970-01-01, to `date`, the option taken only on a column without
-  a mark of a date or a time;
+  since the Unix epoch, the first of January 1970, to `date`, the option
+  taken only on a column without a mark of a date or a time;
 - `INT64`, unmarked or marked as a signed 64-bit integer, to `bigint`;
   with the column option `unit` `'seconds'`, `'milliseconds'` or
-  `'microseconds'` since 1970-01-01 00:00:00, to `timestamp` or
+  `'microseconds'` since the epoch's midnight, to `timestamp` or
   `timestamptz`, the option taken only on a column without a mark of a
   time;
 - `INT64` marked `TIMESTAMP` in milliseconds or microseconds, to
