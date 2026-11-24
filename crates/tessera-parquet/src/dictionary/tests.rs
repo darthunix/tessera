@@ -202,8 +202,11 @@ fn strings_against_the_crate_s_reader() {
             panic!("no dictionary of strings");
         };
         let distinct: BTreeSet<Vec<u8>> = words.iter().map(|w| w.to_vec()).collect();
-        assert_eq!(values.iter().cloned().collect::<BTreeSet<_>>(), distinct);
-        assert_eq!(values.len(), distinct.len());
+        assert_eq!(
+            values.iter().map(<[u8]>::to_vec).collect::<BTreeSet<_>>(),
+            distinct
+        );
+        assert_eq!(values.iter().count(), distinct.len());
         // The crate's reader reads the chunk's rows as they were written,
         // the repeats and the bytes that are not UTF-8 among them.
         let mut reader = ColumnReader::new(&file, &mapped, 0, every(6).into(), 8).unwrap();
@@ -224,7 +227,7 @@ fn strings_against_the_crate_s_reader() {
             .unwrap();
         assert_eq!(rows, words);
         // Every row is a value of the dictionary.
-        assert!(rows.iter().all(|r| values.iter().any(|v| v == r)));
+        assert!(rows.iter().all(|r| values.iter().any(|v| v == *r)));
     }
 }
 
@@ -254,14 +257,25 @@ fn no_dictionary_and_types_the_source_does_not_check() {
 
 #[test]
 fn values_shorter_than_their_page_says() {
+    let page = |bytes: &'static [u8]| Bytes::from_static(bytes);
     assert_eq!(
-        plain_bytes(&[3, 0, 0, 0, b'a'], 1).unwrap_err().sqlstate(),
+        plain_bytes(&page(&[3, 0, 0, 0, b'a']), 1)
+            .unwrap_err()
+            .sqlstate(),
         "XX001"
     );
-    assert_eq!(plain_bytes(&[1, 0, 0], 1).unwrap_err().sqlstate(), "XX001");
     assert_eq!(
-        plain_bytes(&[1, 0, 0, 0, b'a', 0, 0, 0, 0], 2).unwrap(),
-        vec![b"a".to_vec(), vec![]]
+        plain_bytes(&page(&[1, 0, 0]), 1).unwrap_err().sqlstate(),
+        "XX001"
+    );
+    assert_eq!(
+        plain_bytes(&page(&[1, 0, 0, 0, b'a', 0, 0, 0, 0]), 2).unwrap(),
+        [&b"a"[..], b""].into_iter().collect()
+    );
+    // Equal by their values alone, wherever their pages lay them.
+    assert_ne!(
+        plain_bytes(&page(&[1, 0, 0, 0, b'a', 0, 0, 0, 0]), 2).unwrap(),
+        [&b"a"[..], b"b"].into_iter().collect()
     );
     let int = FileType::Int {
         bits: 32,
