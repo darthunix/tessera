@@ -1134,7 +1134,8 @@ node folds itself in place of the transition function, its state its own
 in that context: the sum of the values that are decimals (a numeric of at
 most 18 digits read from its stored form) or integers (of any size, at
 scale 0) in an int128 at the largest scale met, kept below 10^36 in
-magnitude, the count, and the numeric sum of the rest (NaN, infinities,
+magnitude, the count, within an int64's most (22003 past it), and the
+numeric sum of the rest (NaN, infinities,
 longer values, the sums past the bound); the value is the core's final
 function's: the decimals' sum plus the rest's by `numeric_add` (NaN and
 the infinities as the core's sum keeps them, the display scale the

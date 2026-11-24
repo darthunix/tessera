@@ -1,0 +1,24 @@
+MACHINE CODE; baseline=624937e9bffa3309c2a8968006cdf5fce2382e73, candidate=WORKTREE@493ad71556822fcc61caa998a627c845fb5600e1, target=this machine
+kernels: 3249 same, 4 changed (0 in immediates only, 0 in registers only), 0 only before, 2 only after
+  changed: _tess_decimal_sum
+  changed: _tess_table_accumulate_extremes
+  changed: _tess_table_accumulate_sums
+  changed: tessera_capi::c::decimal::state_partial
+  only after: <core::panic::unwind_safe::AssertUnwindSafe<tessera_capi::c::table::tess_table_accumulate_sums::{closure#0}> as core::ops::function::FnOnce<()>>::call_once
+  only after: tessera_kernels::decimal::add_integer
+  place in a 64-byte line: the entry's offset, then each loop as the head's offset:instructions, innermost first
+  <core::panic::unwind_safe::AssertUnwindSafe<tessera_capi::c::table::tess_table_accumulate_sums::{closure#0}> as core::ops::function::FnOnce<()>>::call_once
+    before absent
+    after  entry 20; loops 12:5 44:6 40:7 16:8 52:8 8:8 36:8 44:8
+  _tess_decimal_sum
+    before entry 24; loops 8:7 20:8 60:8 12:8 16:10 28:11 12:13 24:13
+    after  entry 8; loops 40:7 36:8 4:8 12:8 56:10 28:10 52:10 24:11
+  _tess_table_accumulate_extremes
+    before entry 0; loops 0:7 4:7 52:8 8:8 8:11 4:12 36:18 60:19
+    after  entry 48; loops 48:7 52:7 36:8 56:8 56:11 52:12 20:18 44:19
+  _tess_table_accumulate_sums
+    before entry 12; loops 48:5 40:6 12:7 60:7 56:8 28:8 52:8 0:8
+    after  entry 60; loops 48:7 36:33 44:91 44:98 28:100 20:154 20:172 28:181
+  tessera_capi::c::decimal::state_partial
+    before entry 24; loops 12:17
+    after  entry 24; loops 16:17

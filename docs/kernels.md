@@ -284,6 +284,31 @@ reads its argument's, and the expression compiler reads a constant's scale
 and writes the numerics of a chain's decimals, through `TessKernelOps`.
 A call costs about 10 ns besides its rows, so the callers make one a batch.
 
+The sums of integers take every value at scale 0, one of 19 digits too.
+An int4 or int8 column hands each word's values over in bulk, which add
+as an `i128`; a value of 19 digits taken alone, as after a word refused
+at the bound or for a group past a word's 16, is a term of its own
+kind, `Term::Integer`, so that a grouping whose keys follow one another
+does not send its rows to `numeric_add`, while a shorter one stays a
+`Decimal` at scale 0. No `Decimal` holds 19 digits: the rescaling, the
+comparisons and the writing of numeric rest on 18. Every integer as the
+new term was refused: each place that takes a decimal of scale 0 would
+need its arm on the path of 18 digits too. The
+bound stays 10^36 and the state is the decimals', where the core keeps
+a state of its own for bigint: integers reach the bound only after some
+10^17 rows of the largest values, and a second range would give the
+partial format two meanings. A magnitude is compared with the bound by
+`unsigned_abs`, since a bulk sum rescaled to scale 18 can land exactly
+on `i128::MIN`. A sum counts its rows within an int64's most
+(`SUM_COUNT_MOST`), as C keeps the count: a state past it is refused on
+the way in, a term or a sum that would count past it goes to the rest,
+and the aggregate node adds its own counts by one function that fails
+with 22003 "bigint out of range". Proofs by Kani
+(`crates/tessera-kernels/src/decimal/proofs.rs`) show the arithmetic of
+the integer terms for every state the entry points let in; property
+tests compare both loops with a model that adds row by row, and start
+from states near the bound, which no query of integers reaches.
+
 ## Calendar
 
 `tessera/calendar.h` declares the kernels of dates and timestamps

@@ -54,36 +54,34 @@ wrapper the first source of the planning contract, so that
 crate `datum-arrow`), had `parquet-fdw` built on `source-scan`'s branch
 before it is merged, and set the order of what follows them: grouping by
 strings on the files' bytes, `text-keys-by-bytes`, then the ClickBench
-entry, `clickbench-entry`. On 2026-11-22 the maintainer took
-`agg-int128` out of turn, after a profile of ClickBench's query 4 on the
-branch of `parquet-fdw`, to be done first, and the same day
-`agg-distinct-spill` (done) after it, a finding of stage 2 of ClickBench
-on that branch:
+entry, `clickbench-entry`. On 2026-11-22 the maintainer took the sums
+of `bigint` values of 19 digits out of turn (done), after a profile of
+ClickBench's query 4 on the branch of `parquet-fdw`, and the same day
+`agg-distinct-spill` (done) after them, a finding of stage 2 of
+ClickBench on that branch:
 
-1. `agg-int128`: `sum` and `avg` of `bigint` values of 19 digits in the
-   kernels' 128-bit sum
-2. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+2. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-4. `explain-rows-per-loop`: The rows a node removed, per loop as the
+3. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-5. `join-pruning-cost`: The cost of a pruning join over the partitions
+4. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-7. `linux-x86-support`: Linux on x86-64 checked as the target platform
-8. `oltp-guard-bench`: OLTP guard family of benchmarks
-9. `runs-left-from-section-9`: Runs left to the maintainer from
+6. `linux-x86-support`: Linux on x86-64 checked as the target platform
+7. `oltp-guard-bench`: OLTP guard family of benchmarks
+8. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-13. `tpch-sf10`: TPC-H step 10: SF10
-14. `backward-scan-mark-restore`: Backward scan and mark/restore
-15. `pg-duckdb-comparison`: Comparison with pg_duckdb
+12. `tpch-sf10`: TPC-H step 10: SF10
+13. `backward-scan-mark-restore`: Backward scan and mark/restore
+14. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -207,28 +205,6 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
   aggregates in Rust
 
 ## Entries
-
-### agg-int128
-
-`sum` and `avg` of `bigint` values of 19 digits in the kernels' 128-bit
-sum. The maintainer took it on 2026-11-22, after a profile of
-ClickBench's query 4 on the branch of `parquet-fdw`; it is the change
-`agg-int128`.
-
-- **What:** The integer terms of a sum take every `bigint` value,
-  without `GROUP BY` and with it, in partial aggregates and in the rows
-  that go to disk and come back; a value of 19 digits taken alone is a
-  term of its own kind; the checks of the bound use `unsigned_abs`.
-- **Why:** The kernels take an integer only below 10^18 in magnitude
-  and leave a value of 19 digits to the node, which adds it with
-  `numeric_add`, a call a row: 43 to 55 % of the time of `avg(UserID)`
-  over `hits.parquet`, about 1075 instructions a row against DuckDB's
-  78.
-- **Known:** The design of the change. The answers stay the core's; the
-  state's words, its partial format and the bound of 10^36 stay.
-- **Depends on:** nothing.
-- **Capabilities:** aggregate, kernel-abi
-- **Size:** small: one pull request after the proposal.
 
 ### parquet-fdw
 
@@ -1103,7 +1079,7 @@ TessAgg's `min` and `max` of `date`, by kernels.
 - **Why:** A profile of ClickBench's Q7, `min` and `max` of `EventDate`
   over `hits.parquet`, serial, found 32 % of Tessera's time in the
   generic path, `date_smaller` and `date_larger` called a row. The sums
-  of `bigint` the same profile found are the change `agg-int128`, done.
+  of `bigint` the same profile found are done.
 - **Known:** Not Parquet's own: a heap table takes the same path. Not
   measured beyond the profile.
 - **Depends on:** nothing.
