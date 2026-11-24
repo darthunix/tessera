@@ -158,5 +158,5 @@ pub use table::{
 };
 pub use text::{
     TextArg, tess_text_compare, tess_text_lengths, tess_text_like, tess_text_pieces,
-    tess_text_starts_with,
+    tess_text_sort_words, tess_text_starts_with,
 };

@@ -203,7 +203,7 @@ named in the harness and covered by a property test.
 
 ## 6. The sort
 
-- [ ] 6.1 `crates/tessera-kernels`: the kernel that makes a string's
+- [x] 6.1 `crates/tessera-kernels`: the kernel that makes a string's
       sort word, its first eight bytes, big-endian, zero-padded, its
       top bit flipped, from either form; unit and property tests over
       lengths about eight bytes, equal prefixes, the bytes `00`, `7f`,

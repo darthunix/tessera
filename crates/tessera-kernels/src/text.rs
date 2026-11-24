@@ -583,6 +583,83 @@ pub fn pieces(
     Ok(())
 }
 
+/// A string's sort word: its first eight bytes as a big-endian integer,
+/// padded with zero bytes, its top bit flipped, so that two words compare
+/// as signed integers as the strings' first eight bytes compare as
+/// unsigned bytes. Two strings of equal words order by their bytes after
+/// the eighth and then by their lengths ([`order_by_word`]).
+#[inline(always)]
+pub fn sort_word(string: &[u8]) -> i64 {
+    let mut first = [0_u8; 8];
+    let len = string.len().min(8);
+    first[..len].copy_from_slice(&string[..len]);
+    (u64::from_be_bytes(first) ^ (1 << 63)) as i64
+}
+
+/// The order of two strings as a sort by [`sort_word`] gives it: by their
+/// words, then by their bytes after the eighth compared one by one, then
+/// by their lengths, the shorter first. It is the order of their unsigned
+/// bytes, a string before every longer one it begins, as `memcmp` and
+/// then the length give it; the proofs by Kani show it within their
+/// bounds.
+pub fn order_by_word(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
+    let by_word = sort_word(a).cmp(&sort_word(b));
+    if by_word != std::cmp::Ordering::Equal {
+        return by_word;
+    }
+    let (a_rest, b_rest) = (a.get(8..).unwrap_or(&[]), b.get(8..).unwrap_or(&[]));
+    // By hand, as the C sort's memcmp does, and as Kani can follow.
+    let mut at = 0;
+    while at < a_rest.len() && at < b_rest.len() {
+        if a_rest[at] != b_rest[at] {
+            return a_rest[at].cmp(&b_rest[at]);
+        }
+        at += 1;
+    }
+    a.len().cmp(&b.len())
+}
+
+/// The sort words ([`sort_word`]) of the selected rows' strings into
+/// `words`: `non_nulls` gets the rows without NULL, `rest` those of them
+/// whose string is not in place, whose words are not written.
+pub fn sort_words(
+    source: &impl Strings,
+    rows: RowMaskView<'_>,
+    words: &mut [MaybeUninit<i64>],
+    non_nulls: &mut RowMask<'_>,
+    rest: &mut RowMask<'_>,
+) -> Result<()> {
+    check_rows(
+        rows.nrows(),
+        &[
+            words.len(),
+            non_nulls.as_view().nrows(),
+            rest.as_view().nrows(),
+        ],
+    )?;
+    for word in 0..rows.nrows().div_ceil(64) {
+        let look = rows.word(word);
+        let (mut present, mut other) = (0, 0);
+        for bit in ones(look) {
+            let row = word * 64 + bit;
+            match source.get(row) {
+                Text::Null => continue,
+                Text::Bytes(string) => {
+                    words[row].write(sort_word(string));
+                }
+                Text::Other => other |= 1 << bit,
+            }
+            present |= 1 << bit;
+        }
+        non_nulls.set_word(word, present)?;
+        rest.set_word(word, other)?;
+    }
+    Ok(())
+}
+
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -691,5 +768,86 @@ mod tests {
         assert_eq!(trim(Piece::Ltrim), b"ab c  ");
         assert_eq!(trim(Piece::Btrim), b"ab c");
         assert_eq!(Piece::Btrim.bounds(b"   ", Chars::Bytes), Ok((0, 0)));
+    }
+
+    /// Strings about eight bytes long that share their starts, of the bytes
+    /// whose order a signed comparison would get wrong.
+    fn sort_strings() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+        use proptest::prelude::*;
+        let byte = proptest::sample::select(vec![0x00_u8, 0x01, 0x7f, 0x80, 0xff, b'a']);
+        prop_oneof![
+            4 => proptest::collection::vec(byte.clone(), 6..11),
+            1 => proptest::collection::vec(byte, 0..24),
+        ]
+    }
+
+    /// Two strings that begin alike for up to twelve bytes, so that their
+    /// words are often equal and their bytes after the eighth decide.
+    fn sort_pairs() -> impl proptest::strategy::Strategy<Value = (Vec<u8>, Vec<u8>)> {
+        use proptest::prelude::*;
+        let byte = proptest::sample::select(vec![0x00_u8, 0x7f, 0x80, 0xff, b'a']);
+        let part = |most| proptest::collection::vec(byte.clone(), 0..most);
+        prop_oneof![
+            1 => (sort_strings(), sort_strings()),
+            2 => (part(13), part(4), part(4)).prop_map(|(start, a, b)| {
+                ([start.clone(), a].concat(), [start, b].concat())
+            }),
+        ]
+    }
+
+    #[test]
+    fn sort_words_order_as_the_bytes() {
+        tessera_testing::property(sort_pairs(), |(a, b)| -> Result<(), String> {
+            if order_by_word(&a, &b) != a.cmp(&b) {
+                return Err(format!("{a:?} and {b:?} out of their order"));
+            }
+            // A word orders the strings' starts, never against them.
+            let words = sort_word(&a).cmp(&sort_word(&b));
+            if words != std::cmp::Ordering::Equal && words != a.cmp(&b) {
+                return Err(format!("{a:?} and {b:?}: words against the bytes"));
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn a_sort_word_of_the_bytes_signed_comparison_gets_wrong() {
+        assert_eq!(sort_word(b""), i64::MIN);
+        assert!(sort_word(b"\x7f") < sort_word(b"\x80"));
+        assert!(sort_word(b"\x80") < sort_word(b"\xff"));
+        assert_eq!(sort_word(b""), sort_word(b"\x00"));
+        assert_eq!(order_by_word(b"", b"\x00"), std::cmp::Ordering::Less);
+        assert_eq!(sort_word(b"abcdefgh"), sort_word(b"abcdefghij"));
+        assert_eq!(
+            sort_word(b"ab"),
+            sort_word(b"ab\x00"),
+            "padding is zero bytes"
+        );
+        assert_eq!(
+            order_by_word(b"ab", b"ab\x00"),
+            std::cmp::Ordering::Less,
+            "a shorter string first"
+        );
+        assert_eq!(
+            order_by_word(b"abcdefghij", b"abcdefghi\xff"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            order_by_word(b"abcdefgh\x80", b"abcdefgh\x7f"),
+            std::cmp::Ordering::Greater
+        );
+        // The bytes after the eighth, one string's the start of the other's.
+        assert_eq!(
+            order_by_word(b"abcdefghi", b"abcdefghij"),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            order_by_word(b"abcdefghij", b"abcdefghi"),
+            std::cmp::Ordering::Greater
+        );
+        assert_eq!(
+            order_by_word(b"abcdefghij", b"abcdefghij"),
+            std::cmp::Ordering::Equal
+        );
     }
 }

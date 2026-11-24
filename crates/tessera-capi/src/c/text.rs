@@ -484,6 +484,46 @@ pub unsafe extern "C" fn tess_text_pieces(
     }
 }
 
+/// `tess_text_sort_words`: the sort words of the selected rows' strings,
+/// their first eight bytes big-endian, zero-padded, the top bit flipped
+/// ([`text::sort_word`]); `non_nulls` gets the rows without NULL, `rest`
+/// those of them whose string is not in place, whose words are not
+/// written.
+///
+/// # Safety
+///
+/// `column` must be a valid argument (see the module documentation) of
+/// `rows`' row count, a column of either form, `words` point to as many
+/// writable int64 slots, `non_nulls` and `rest` to valid masks, none
+/// accessed by anything else for the call; `status` as for every entry
+/// point.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tess_text_sort_words(
+    column: *const TextArg,
+    rows: *const Mask,
+    words: *mut i64,
+    non_nulls: *mut Mask,
+    rest: *mut Mask,
+    status: *mut Status,
+) -> Code {
+    // SAFETY: the caller's contract.
+    unsafe {
+        guard(status, || {
+            let rows = selection(rows)?;
+            let column = self::column(column, rows.nrows())?;
+            let words = slots(words, rows.nrows())?;
+            let (mut non_nulls, mut rest) = (output(non_nulls)?, output(rest)?);
+            with_column!(column, |source| text::sort_words(
+                source,
+                rows,
+                words,
+                &mut non_nulls,
+                &mut rest
+            ))
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::TextArg;
