@@ -41,7 +41,7 @@ pub use calendar::{
     tess_timestamp_trunc_local,
 };
 pub use cast::{tess_int4_to_int8, tess_int8_to_int4};
-pub use column::DatumColumn;
+pub use column::{BytesColumn, DatumColumn};
 pub use count::tess_count;
 pub use decimal::{
     DecimalArg, DecimalExtreme, DecimalSum, tess_decimal_compute, tess_decimal_extreme,

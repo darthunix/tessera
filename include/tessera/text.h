@@ -1,9 +1,10 @@
 /*
  * Strings as the text functions read them: the C entry points of the Rust
  * kernels (tessera_kernels::text) for kernels/text.c. A string is read in
- * place behind its Datum, a varlena of either header; a compressed or
- * external one is left in rest, for the caller to unpack and hand back as
- * a column of its own. Characters count as the database encoding counts
+ * place behind its Datum, a varlena of either header, or from a column in
+ * the bytes form (tessera/batch.h), whose strings are all in place; a
+ * compressed or external value is left in rest, for the caller to unpack
+ * and hand back as a column of its own. Characters count as the database encoding counts
  * them: a byte each or UTF-8 (TessTextChars); other multibyte encodings
  * stay with the core's functions.
  *
@@ -20,11 +21,15 @@
 
 #include "tessera/kernels.h"
 
-/* An argument: a column, or a scalar Datum without one. */
+/*
+ * An argument: a column of Datum values, a column in the bytes form, or a
+ * scalar Datum with neither; never both columns.
+ */
 typedef struct TessTextArg
 {
 	const TessDatumColumn *column;
 	Datum		scalar;
+	const TessBytesColumn *bytes;
 } TessTextArg;
 
 /* How the database encoding counts characters. */
@@ -71,8 +76,11 @@ extern TessStatusCode tess_text_compare(bool equal, bool bpchar,
 										TessRowMask *rest,
 										TessStatus *status);
 
-/* starts_with of a column and len bytes of prefix, rest as above. */
-extern TessStatusCode tess_text_starts_with(const TessDatumColumn *column,
+/*
+ * starts_with of a column, of either form, and len bytes of prefix, rest
+ * as above. So for every function below that takes a column.
+ */
+extern TessStatusCode tess_text_starts_with(const TessTextArg *column,
 											const char *prefix,
 											Size len,
 											TessRowMask *rows,
@@ -85,7 +93,7 @@ extern TessStatusCode tess_text_starts_with(const TessDatumColumn *column,
  * nothing done, for a pattern with _ or an escape, or of too many pieces,
  * which the core's function matches.
  */
-extern TessStatusCode tess_text_like(const TessDatumColumn *column,
+extern TessStatusCode tess_text_like(const TessTextArg *column,
 									 const char *pattern,
 									 Size len,
 									 bool negate,
@@ -100,7 +108,7 @@ extern TessStatusCode tess_text_like(const TessDatumColumn *column,
  */
 extern TessStatusCode tess_text_lengths(TessTextLength length,
 										TessTextChars chars,
-										const TessDatumColumn *column,
+										const TessTextArg *column,
 										const TessRowMask *rows,
 										int32 *values,
 										TessRowMask *non_nulls,
@@ -120,7 +128,7 @@ extern TessStatusCode tess_text_pieces(TessTextPiece piece,
 									   int32 second,
 									   bool has_second,
 									   TessTextChars chars,
-									   const TessDatumColumn *column,
+									   const TessTextArg *column,
 									   const TessRowMask *rows,
 									   int32 *starts,
 									   int32 *lengths,

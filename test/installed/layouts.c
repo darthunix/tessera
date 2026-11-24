@@ -7,6 +7,7 @@
 #include "postgres.h"
 
 #include "tessera/batch.h"
+#include "tessera/text.h"
 
 #if SIZEOF_VOID_P == 8
 StaticAssertDecl(sizeof(TessBytesColumn) == 56, "TessBytesColumn is 56 bytes");
@@ -19,4 +20,8 @@ StaticAssertDecl(offsetof(TessBytesColumn, lengths) == 32, "lengths at 32");
 StaticAssertDecl(offsetof(TessBytesColumn, indexes) == 40, "indexes at 40");
 StaticAssertDecl(offsetof(TessBytesColumn, dictionary) == 48, "dictionary at 48");
 StaticAssertDecl(TESS_BYTES_COLUMN_MIN_SIZE == 56, "the whole structure is its minimum");
+StaticAssertDecl(sizeof(TessTextArg) == 24, "TessTextArg is 24 bytes");
+StaticAssertDecl(offsetof(TessTextArg, column) == 0, "column at 0");
+StaticAssertDecl(offsetof(TessTextArg, scalar) == 8, "scalar at 8");
+StaticAssertDecl(offsetof(TessTextArg, bytes) == 16, "bytes at 16");
 #endif
