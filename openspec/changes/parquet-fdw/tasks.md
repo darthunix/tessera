@@ -121,7 +121,7 @@ maintainer to say that the machine is idle.
 
 ## 7. The guides
 
-- [ ] 7.1 `docs/parquet.md`, the guide of the wrapper: creating a table,
+- [x] 7.1 `docs/parquet.md`, the guide of the wrapper: creating a table,
       the types and options, what the source checks and skips, parallel
       reading, `EXPLAIN`; the README and `docs/limitations.md`. Check:
       `.github/scripts/check-specs.sh`
@@ -131,7 +131,7 @@ maintainer to say that the machine is idle.
 - [x] 8.1 Every scenario of the spec delta names its test, and every
       pending check of the contract its check. Check: `openspec validate
       parquet-fdw --strict`; `.github/scripts/check-specs.sh`
-- [ ] 8.2 `openspec/specs/parquet-fdw/design.md`, written for a reader
+- [x] 8.2 `openspec/specs/parquet-fdw/design.md`, written for a reader
       who knows nothing of the part; `## Files` and `## Tests` last.
       Check: `.github/scripts/check-specs.sh`
 - [ ] 8.3 The pull request's description, an index of evidence. Check:
