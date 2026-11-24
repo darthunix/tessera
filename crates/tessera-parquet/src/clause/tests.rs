@@ -385,7 +385,7 @@ fn dictionaries_rule_groups_out() {
     assert!(!of(Kind::In(vec![0, 1])).rules_out_by(&values));
     assert!(!of(Kind::IsNull).rules_out_by(&values));
     assert!(!of(Kind::IsNotNull).rules_out_by(&Dictionary::Integers(vec![])));
-    assert!(!equal(2).rules_out_by(&Dictionary::Bytes(vec![b"x".to_vec()])));
+    assert!(!equal(2).rules_out_by(&Dictionary::Bytes([&b"x"[..]].into_iter().collect())));
 }
 
 /// A file's groups ruled out through its footer: by the statistics, by
@@ -795,7 +795,7 @@ fn statistics_of_strings_rule_groups_out() {
 fn dictionaries_of_strings_rule_groups_out() {
     let dir = tempfile::tempdir().unwrap();
     let (_, s) = strings_file(dir.path(), &[Some(b"x")], 1, false);
-    let values = Dictionary::Bytes(vec![b"ab".to_vec(), b"ba".to_vec()]);
+    let values = Dictionary::Bytes([&b"ab"[..], b"ba"].into_iter().collect());
     let test = |kind, value: &[u8]| ClauseTest::of_bytes(&s, kind, Some(value)).unwrap();
     assert!(test(ClauseKind::BytesEq, b"x").rules_out_by(&values));
     assert!(!test(ClauseKind::BytesEq, b"ba").rules_out_by(&values));

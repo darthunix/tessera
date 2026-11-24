@@ -9,6 +9,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use parquet::basic::Encoding;
 use parquet::column::page::{Page, PageReader};
 use parquet::file::serialized_reader::SerializedPageReader;
@@ -27,7 +28,54 @@ pub enum Dictionary {
     /// 1970.
     Integers(Vec<i64>),
     /// Strings, as their bytes.
-    Bytes(Vec<Vec<u8>>),
+    Bytes(DictionaryBytes),
+}
+
+/// The strings of a dictionary page, read in place: the page's buffer and
+/// where each value's bytes lie in it, so that a dictionary of many values
+/// costs no allocation a value. Two are equal where their values are.
+#[derive(Clone, Debug)]
+pub struct DictionaryBytes {
+    page: Bytes,
+    /// The start and the end of each value's bytes in `page`, each inside
+    /// it.
+    ranges: Vec<(usize, usize)>,
+}
+
+impl DictionaryBytes {
+    /// The values, in the page's order.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> {
+        self.ranges
+            .iter()
+            .map(|&(start, end)| &self.page[start..end])
+    }
+}
+
+impl PartialEq for DictionaryBytes {
+    fn eq(&self, other: &Self) -> bool {
+        self.iter().eq(other.iter())
+    }
+}
+
+impl Eq for DictionaryBytes {}
+
+/// A dictionary of `values` laid one after another in a buffer of its own.
+impl<'a> FromIterator<&'a [u8]> for DictionaryBytes {
+    fn from_iter<I: IntoIterator<Item = &'a [u8]>>(values: I) -> Self {
+        let mut page = Vec::new();
+        let ranges = values
+            .into_iter()
+            .map(|value| {
+                let start = page.len();
+                page.extend_from_slice(value);
+                (start, page.len())
+            })
+            .collect();
+        Self {
+            page: Bytes::from(page),
+            ranges,
+        }
+    }
 }
 
 /// The dictionary of `column`'s chunk in group `group` of `file`: `None`
@@ -141,18 +189,24 @@ pub(crate) fn narrowed(word: i32, file_type: FileType) -> i64 {
 
 /// `count` plain values of `BYTE_ARRAY`: each a 4-byte little-endian
 /// length and its bytes.
-fn plain_bytes(buf: &[u8], count: usize) -> Result<Vec<Vec<u8>>> {
-    let mut values = Vec::with_capacity(count.min(buf.len() / 4));
+fn plain_bytes(buf: &Bytes, count: usize) -> Result<DictionaryBytes> {
+    let mut ranges = Vec::with_capacity(count.min(buf.len() / 4));
     let mut at = 0usize;
     for _ in 0..count {
         let head = buf.get(at..at + 4).ok_or_else(short)?;
         let len = u32::from_le_bytes([head[0], head[1], head[2], head[3]]) as usize;
         at += 4;
-        let end = at.checked_add(len).ok_or_else(short)?;
-        values.push(buf.get(at..end).ok_or_else(short)?.to_vec());
+        let end = at
+            .checked_add(len)
+            .filter(|&end| end <= buf.len())
+            .ok_or_else(short)?;
+        ranges.push((at, end));
         at = end;
     }
-    Ok(values)
+    Ok(DictionaryBytes {
+        page: buf.clone(),
+        ranges,
+    })
 }
 
 fn short() -> Error {

@@ -32,7 +32,7 @@ pub mod testing;
 
 pub use clause::{ClauseKind, ClauseTest};
 pub use column::{ColumnRequest, FileType, MappedColumn, map_column};
-pub use dictionary::{Dictionary, read_dictionary};
+pub use dictionary::{Dictionary, DictionaryBytes, read_dictionary};
 pub use error::{Error, Result};
 pub use file::{Identity, ParquetFile};
 pub use reader::{ColumnReader, Window, input_of};
