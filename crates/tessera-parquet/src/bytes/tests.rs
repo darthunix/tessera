@@ -2,120 +2,128 @@ use proptest::prelude::*;
 
 use super::*;
 
-/// The offsets of `values` laid one after another from `at` in a buffer.
-fn laid(values: &[Vec<u8>], at: usize) -> (Vec<i64>, Vec<u8>) {
-    let mut data = vec![b'p'; at];
-    let mut offsets = vec![at as i64];
-    for value in values {
-        data.extend_from_slice(value);
-        offsets.push(data.len() as i64);
-    }
-    data.extend_from_slice(b"\xff\x00 after");
-    (offsets, data)
-}
-
-fn each_passes(values: &[Vec<u8>]) -> bool {
+fn each_passes(values: &[Option<Vec<u8>>]) -> bool {
     values
         .iter()
+        .flatten()
         .all(|v| !v.contains(&0) && std::str::from_utf8(v).is_ok())
 }
 
-#[test]
-fn ranges_of_slots_that_hold_and_do_not() {
-    let offsets = [0i64, 2, 2, 5];
-    assert_eq!(slot_range(&offsets, 5, 0), Some((0, 2)));
-    assert_eq!(slot_range(&offsets, 5, 1), Some((2, 0)));
-    assert_eq!(slot_range(&offsets, 5, 2), Some((2, 3)));
-    assert_eq!(slot_range(&offsets, 5, 3), None, "past the offsets");
-    assert_eq!(slot_range(&offsets, 4, 2), None, "past the buffer");
-    assert_eq!(slot_range(&[3, 1], 5, 0), None, "going back");
-    assert_eq!(slot_range(&[-1, 1], 5, 0), None, "below 0");
-    assert_eq!(slot_range(&[0, 1], 5, usize::MAX), None);
+fn views(values: &[Option<Vec<u8>>]) -> BinaryViewArray {
+    values.iter().map(Option::as_deref).collect()
 }
 
+/// Each value of a view array checked by itself: halves of a character in
+/// two values fail, a zero byte fails in a short value and in a long one,
+/// and a NULL slot is not read.
 #[test]
-fn a_window_whose_values_split_a_character() {
-    // "é" is c3 a9: split between two values, each fails, the whole does not.
-    let values = vec![b"a\xc3".to_vec(), b"\xa9b".to_vec()];
-    let (offsets, data) = laid(&values, 0);
-    assert!(!window_passes(&offsets, &data));
-    // Across an empty value between them.
-    let values = vec![b"a\xc3".to_vec(), Vec::new(), b"\xa9b".to_vec()];
-    let (offsets, data) = laid(&values, 0);
-    assert!(!window_passes(&offsets, &data));
-    let values = vec!["é".as_bytes().to_vec(), Vec::new(), b"z".to_vec()];
-    let (offsets, data) = laid(&values, 3);
-    assert!(window_passes(&offsets, &data));
-    assert!(window_passes(&[], &data), "no value");
-    assert!(!window_passes(&[0, 9, 2], &data), "offsets that go back");
-    assert!(
-        !window_passes(&[4, 2], &data),
-        "a last offset before the first"
+fn views_checked_value_by_value() {
+    let some = |v: &[u8]| Some(v.to_vec());
+    assert!(!views_pass(&views(&[some(b"a\xc3"), some(b"\xa9b")])));
+    assert!(views_pass(&views(&[
+        some("é".as_bytes()),
+        some(b""),
+        some(b"z")
+    ])));
+    assert!(views_pass(&views(&[])), "no value");
+    assert!(!views_pass(&views(&[some(b"twelve\0bytes")])));
+    assert!(!views_pass(&views(&[some(b"a long value with \0 inside")])));
+    assert!(!views_pass(&views(&[some(
+        &"é".repeat(7).as_bytes()[..13]
+    )])));
+    assert!(views_pass(&views(&[some("é".repeat(7).as_bytes()), None])));
+    let nulled = views(&[some(b"\xff"), some(b"ok")]);
+    let nulled = BinaryViewArray::new(
+        nulled.views().clone(),
+        nulled.data_buffers().to_vec(),
+        Some(arrow_buffer::NullBuffer::from(vec![false, true])),
     );
-    assert!(
-        !window_passes(&[0, 99], &data),
-        "a last offset past the buffer"
-    );
-    // A window that ends where its buffer ends, as an Arrow array's does.
-    let exact = "é z".as_bytes();
-    assert!(window_passes(&[0, 2, 2, 4], exact));
-    assert!(window_passes(&[4, 4], exact), "one empty value at the end");
-    assert!(
-        !window_passes(&[0, 1, 4], exact),
-        "a character cut at the end"
-    );
+    assert!(views_pass(&nulled), "a NULL slot's bytes are not read");
+}
+
+/// One value's check by words against the checks of UTF-8 and of zero
+/// bytes, for every length up to 40: a zero byte, a byte that is not
+/// UTF-8 and a character of two bytes at each place, and the value of
+/// ASCII alone.
+#[test]
+fn a_value_checked_by_words_at_every_place() {
+    let each = |v: &[u8]| !v.contains(&0) && std::str::from_utf8(v).is_ok();
+    for len in 0..40 {
+        let ascii = vec![b'a'; len];
+        assert!(value_passes(&ascii), "{len}");
+        for at in 0..len {
+            for (bytes, width) in [
+                (&b"\0"[..], 1),
+                (b"\xff", 1),
+                (b"\x80", 1),
+                ("é".as_bytes(), 2),
+            ] {
+                if at + width > len {
+                    continue;
+                }
+                let mut value = ascii.clone();
+                value[at..at + width].copy_from_slice(bytes);
+                assert_eq!(value_passes(&value), each(&value), "{len} {at} {bytes:?}");
+            }
+        }
+    }
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
-    /// The one pass passes exactly where each value's checks of UTF-8 and
-    /// zero bytes pass, over values of bytes of every kind, laid at any
-    /// place of a buffer with bytes that fail before and after them.
+    /// The check of a view array passes exactly where each value's checks
+    /// of UTF-8 and zero bytes pass, over values of bytes of every kind,
+    /// short and long, and NULL slots.
     #[test]
-    fn the_one_pass_is_each_value_s_check(
+    fn views_pass_where_each_value_passes(
         values in prop::collection::vec(
-            prop::collection::vec(prop_oneof![
+            prop::option::of(prop::collection::vec(prop_oneof![
                 Just(0u8), Just(b'a'), Just(0x7f), Just(0x80), Just(0xa9), Just(0xbf),
                 Just(0xc3), Just(0xe2), Just(0xf0), Just(0xff), any::<u8>()
-            ], 0..6),
-            0..6),
-        utf8 in prop::collection::vec(".{0,3}", 0..6),
-        at in 0usize..4,
+            ], 0..20)),
+            0..8),
+        utf8 in prop::collection::vec(prop::option::of(".{0,8}"), 0..8),
         mixed in any::<bool>(),
     ) {
-        let values: Vec<Vec<u8>> = if mixed { values } else { utf8.into_iter().map(String::into_bytes).collect() };
-        let (offsets, data) = laid(&values, at);
-        prop_assert_eq!(window_passes(&offsets, &data), each_passes(&values));
-        // And over a buffer that ends where the last value does.
-        let end = *offsets.last().unwrap() as usize;
-        prop_assert_eq!(window_passes(&offsets, &data[..end]), each_passes(&values));
+        let values: Vec<Option<Vec<u8>>> = if mixed {
+            values
+        } else {
+            utf8.into_iter().map(|v| v.map(String::into_bytes)).collect()
+        };
+        prop_assert_eq!(views_pass(&views(&values)), each_passes(&values));
+        for value in values.iter().flatten() {
+            prop_assert_eq!(value_passes(value), each_passes(&[Some(value.clone())]));
+        }
     }
 }
 
-/// The slots of a window: a row's bytes, by itself or by its key, none
+/// The slots of a window: a row's bytes, by its view or by its key, none
 /// past the limit of a value's length, which a smaller limit stands for
 /// here so that no value of PostgreSQL's largest size is made, and none
-/// where a key or a slot's offsets do not hold.
+/// where a row is past the window or a key or a slot's offsets do not
+/// hold.
 #[test]
 fn slots_of_rows_and_the_limit_of_a_length() {
     let data = b"abcdef";
     let offsets = [0i64, 1, 3, 3, 6];
-    let plain = Slots {
-        offsets: &offsets,
-        data,
-        keys: None,
-    };
+    let array = views(&[
+        Some(b"a".to_vec()),
+        Some(Vec::new()),
+        None,
+        Some(b"a value of thirteen".to_vec()),
+    ]);
+    let plain = Slots::Views(&array);
     assert_eq!(plain.value(0, 3), Some(&b"a"[..]));
-    assert_eq!(plain.value(2, 3), Some(&b""[..]));
-    assert_eq!(plain.value(3, 3), Some(&b"def"[..]));
-    assert_eq!(plain.value(3, 2), None, "past the limit");
-    assert_eq!(plain.value(4, 3), None, "past the offsets");
+    assert_eq!(plain.value(1, 3), Some(&b""[..]));
+    assert_eq!(plain.value(3, 19), Some(&b"a value of thirteen"[..]));
+    assert_eq!(plain.value(3, 18), None, "past the limit");
+    assert_eq!(plain.value(4, 3), None, "past the window");
     let keys = [3i32, 0, -1, 9];
-    let keyed = Slots {
+    let keyed = Slots::Dictionary {
         offsets: &offsets,
         data,
-        keys: Some(&keys),
+        keys: &keys,
     };
     assert_eq!(keyed.value(0, 3), Some(&b"def"[..]));
     assert_eq!(keyed.value(1, 3), Some(&b"a"[..]));

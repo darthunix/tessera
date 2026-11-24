@@ -7,7 +7,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use arrow_array::types::Int32Type;
-use arrow_array::{Array, ArrayRef, DictionaryArray};
+use arrow_array::{Array, ArrayRef, BinaryViewArray, DictionaryArray, LargeBinaryArray};
 use datum_arrow::{Comparison, Input, RangeAnswer, ReadPlan, Test, Values, mask_words, oid};
 use tessera_kernels::text::Like;
 
@@ -373,14 +373,16 @@ impl ClauseTest {
                 }
             }
             Kind::Compare(test) => {
-                let Input::Plain(column) = input_of(array)? else {
+                let mut buffers = Vec::new();
+                let Input::Plain(column) = input_of(array, &mut buffers)? else {
                     return Err(broken("a test of a dictionary of integers"));
                 };
                 test.apply(&column, &mut passed[..words])
                     .map_err(|e| Error::new(INTERNAL_ERROR, e.to_string()))?;
             }
             Kind::In(bounds) => {
-                let Input::Plain(column) = input_of(array)? else {
+                let mut buffers = Vec::new();
+                let Input::Plain(column) = input_of(array, &mut buffers)? else {
                     return Err(broken("a test of a dictionary of integers"));
                 };
                 match column.values {
@@ -478,46 +480,61 @@ impl ClauseTest {
     }
 }
 
-/// The strings of an array of bytes, by their 64-bit offsets: the reader
-/// gives every column of bytes so.
-struct Strings<'a> {
-    offsets: &'a [i64],
-    data: &'a [u8],
+/// The strings of an array of bytes: by their 64-bit offsets, as the
+/// reader gives a dictionary's values, or by their views, as it gives a
+/// plain column of bytes.
+enum Strings<'a> {
+    Offsets { offsets: &'a [i64], data: &'a [u8] },
+    Views(&'a BinaryViewArray),
 }
 
 impl<'a> Strings<'a> {
     fn of(array: &'a dyn Array) -> Result<Self> {
-        match input_of(array)? {
-            Input::Plain(column) => match column.values {
-                Values::LargeBytes { offsets, data } => Ok(Strings { offsets, data }),
-                _ => Err(broken(
-                    "a test of strings of an array that is not of strings",
-                )),
-            },
-            Input::Dictionary { .. } => Err(broken("a dictionary of a dictionary")),
+        if let Some(views) = array.as_any().downcast_ref::<BinaryViewArray>() {
+            return Ok(Strings::Views(views));
+        }
+        match array.as_any().downcast_ref::<LargeBinaryArray>() {
+            Some(bytes) => Ok(Strings::Offsets {
+                offsets: bytes.value_offsets(),
+                data: bytes.values().as_slice(),
+            }),
+            None => Err(broken(
+                "a test of strings of an array that is not of strings",
+            )),
         }
     }
 
     fn len(&self) -> usize {
-        self.offsets.len().saturating_sub(1)
+        match self {
+            Strings::Offsets { offsets, .. } => offsets.len().saturating_sub(1),
+            Strings::Views(views) => views.len(),
+        }
     }
 
-    /// The addresses of the offsets and the bytes, and the count of
-    /// values, which tell one dictionary from another while it lives.
+    /// The addresses of the offsets and the bytes, or of the views, and
+    /// the count of values, which tell one dictionary from another while
+    /// it lives.
     fn key(&self) -> (usize, usize, usize) {
-        (
-            self.offsets.as_ptr().addr(),
-            self.data.as_ptr().addr(),
-            self.len(),
-        )
+        match self {
+            Strings::Offsets { offsets, data } => {
+                (offsets.as_ptr().addr(), data.as_ptr().addr(), self.len())
+            }
+            Strings::Views(views) => (views.views().as_ptr().addr(), 0, self.len()),
+        }
     }
 
     /// The bytes of slot `i`, below [`Strings::len`]: Arrow's offsets of a
-    /// valid array are in order and within its bytes.
+    /// valid array are in order and within its bytes, and its views
+    /// within its buffers.
     fn get(&self, i: usize) -> &'a [u8] {
-        let from = usize::try_from(self.offsets[i]).unwrap_or(0);
-        let to = usize::try_from(self.offsets[i + 1]).unwrap_or(0);
-        self.data.get(from..to).unwrap_or_default()
+        match self {
+            Strings::Offsets { offsets, data } => {
+                let from = usize::try_from(offsets[i]).unwrap_or(0);
+                let to = usize::try_from(offsets[i + 1]).unwrap_or(0);
+                data.get(from..to).unwrap_or_default()
+            }
+            Strings::Views(views) => views.value(i),
+        }
     }
 }
 

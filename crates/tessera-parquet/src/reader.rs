@@ -226,10 +226,10 @@ impl ColumnReader {
         self.column.view(self.dictionary).1
     }
 
-    /// The read plan of the column's plain arrays, which reads the values
-    /// of a dictionary as a column of their own.
+    /// The read plan of a dictionary's values read as a column of their
+    /// own.
     pub fn plain_plan(&self) -> &ReadPlan {
-        self.column.plan()
+        self.column.values_plan()
     }
 
     /// Reads the window of `len` rows from the group's row `start`.
@@ -498,12 +498,14 @@ pub(crate) fn panicked(payload: &(dyn std::any::Any + Send)) -> Error {
     )
 }
 
-/// The buffers of an Arrow array as the input of `datum-arrow`, borrowed.
+/// The buffers of an Arrow array as the input of `datum-arrow`, borrowed;
+/// for a view array, `buffers` takes the slices of its buffers, which the
+/// input borrows, so that it lives as long as the input does.
 ///
 /// # Errors
 ///
 /// `XX000` for an array of a type the reader does not give.
-pub fn input_of(array: &dyn Array) -> Result<Input<'_>> {
+pub fn input_of<'a>(array: &'a dyn Array, buffers: &'a mut Vec<&'a [u8]>) -> Result<Input<'a>> {
     let len = array.len();
     let nulls = nulls_of(array);
     let plain = |values| Input::Plain(Column { len, values, nulls });
@@ -511,7 +513,7 @@ pub fn input_of(array: &dyn Array) -> Result<Input<'_>> {
         DataType::Dictionary(key, _) if **key == DataType::Int32 => {
             let dictionary = array.as_dictionary::<Int32Type>();
             let values = dictionary.values();
-            let Input::Plain(values) = input_of(values.as_ref())? else {
+            let Input::Plain(values) = input_of(values.as_ref(), buffers)? else {
                 return Err(broken("a dictionary of a dictionary"));
             };
             Input::Dictionary {
@@ -553,6 +555,15 @@ pub fn input_of(array: &dyn Array) -> Result<Input<'_>> {
             plain(Values::LargeBytes {
                 offsets: bytes.value_offsets(),
                 data: bytes.values().as_slice(),
+            })
+        }
+        DataType::BinaryView => {
+            let views = array.as_binary_view();
+            buffers.clear();
+            buffers.extend(views.data_buffers().iter().map(|b| b.as_slice()));
+            plain(Values::Views {
+                views: views.views().inner().as_slice(),
+                buffers,
             })
         }
         DataType::FixedSizeBinary(size) => {

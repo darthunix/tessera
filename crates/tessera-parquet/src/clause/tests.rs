@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use arrow_array::{
-    Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray, UInt8Array, UInt16Array,
-    UInt32Array,
+    BinaryViewArray, Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray, UInt8Array,
+    UInt16Array, UInt32Array,
 };
 use datum_arrow::{Unit, oid};
 use proptest::prelude::*;
@@ -626,8 +626,9 @@ fn dictionary_strings(values: &[Option<Vec<u8>>]) -> DictionaryArray<Int32Type> 
     DictionaryArray::try_new(keys, Arc::new(values)).unwrap()
 }
 
-/// The examples of the spec, each kind of string test on plain and on
-/// dictionary arrays: `<> ''` by the length, `LIKE 'ab%ba'` that rejects
+/// The examples of the spec, each kind of string test on plain arrays, of
+/// offsets and of views, long values among them, and on dictionary
+/// arrays: `<> ''` by the length, `LIKE 'ab%ba'` that rejects
 /// `'aba'`, `LIKE 'a%a'` that rejects `'a'`, bytes that are not UTF-8
 /// compared as any other, `NULL` passing none.
 #[test]
@@ -643,12 +644,14 @@ fn strings_checked_by_their_bytes() {
         None,
         Some(b"\xff\xfe"),
         Some(b"ab"),
+        Some(b"ab a value longer than a view ba"),
     ]
     .iter()
     .map(|v| v.map(<[u8]>::to_vec))
     .collect();
     let len = values.len();
     let plain = plain_strings(&values);
+    let views: BinaryViewArray = values.iter().map(|v| v.as_deref()).collect();
     let dictionary = dictionary_strings(&values);
     let cases: [(ClauseKind, &[u8]); 10] = [
         (ClauseKind::BytesNe, b""),
@@ -668,7 +671,7 @@ fn strings_checked_by_their_bytes() {
             .iter()
             .map(|v| string_answer(kind, constant, v.as_deref()))
             .collect();
-        for array in [&plain as &dyn Array, &dictionary as &dyn Array] {
+        for array in [&plain as &dyn Array, &views, &dictionary] {
             let mut passed = vec![u64::MAX; 2];
             test.apply(array, &mut passed).unwrap();
             assert_eq!(bits(&passed, len), expected, "{kind:?} {constant:?}");

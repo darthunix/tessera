@@ -483,7 +483,10 @@ fn a_column_read_beside_hostile_neighbours_and_an_arrow_schema() {
         let mut reader = ColumnReader::new(&f, &column, 0, vec![0b111u64].into(), 8).unwrap();
         let window = reader.read(0, 3, &[0b111]).unwrap();
         assert_eq!(window.array.len(), 3, "{name}");
-        assert!(input_of(window.array.as_ref()).is_ok(), "{name}");
+        assert!(
+            input_of(window.array.as_ref(), &mut Vec::new()).is_ok(),
+            "{name}"
+        );
     }
 }
 

@@ -37,7 +37,8 @@ fn rows_of(mask: &[u64], len: usize) -> Vec<usize> {
 
 /// The `Datum` words of a window's rows, through the reader's plan.
 fn datums(reader: &ColumnReader, window: &Window) -> Result<Vec<Option<u64>>> {
-    let input = input_of(window.array.as_ref())?;
+    let mut buffers = Vec::new();
+    let input = input_of(window.array.as_ref(), &mut buffers)?;
     let len = window.array.len();
     let mut values = vec![0u64; len];
     let mut nulls = vec![0u64; mask_words(len)];
@@ -56,7 +57,8 @@ fn datums(reader: &ColumnReader, window: &Window) -> Result<Vec<Option<u64>>> {
 
 /// The strings of a window's rows, through the reader's plan.
 fn strings(reader: &ColumnReader, window: &Window) -> Result<Vec<Option<Vec<u8>>>> {
-    let input = input_of(window.array.as_ref())?;
+    let mut buffers = Vec::new();
+    let input = input_of(window.array.as_ref(), &mut buffers)?;
     let len = window.array.len();
     let mut values: Vec<&[u8]> = vec![&[]; len];
     let mut nulls = vec![0u64; mask_words(len)];
@@ -436,7 +438,8 @@ fn arrays_sliced_and_of_another_key() {
     use arrow_array::{DictionaryArray, FixedSizeBinaryArray, Int8Array, LargeBinaryArray};
     let fixed = FixedSizeBinaryArray::try_from_iter([b"ab", b"cd", b"ef"].into_iter()).unwrap();
     let sliced = fixed.slice(1, 2);
-    let input = input_of(&sliced).unwrap();
+    let mut buffers = Vec::new();
+    let input = input_of(&sliced, &mut buffers).unwrap();
     let plan = datum_arrow::ReadPlan::new(
         &DataType::FixedSizeBinary(2),
         datum_arrow::PgType::Bytea,
@@ -462,9 +465,12 @@ fn arrays_sliced_and_of_another_key() {
     let keys = Int8Array::from(vec![0i8, 0]);
     let other =
         DictionaryArray::try_new(keys, Arc::new(LargeBinaryArray::from(vec![&b"x"[..]]))).unwrap();
-    assert_eq!(input_of(&other).unwrap_err().sqlstate(), "XX000");
     assert_eq!(
-        input_of(&arrow_array::NullArray::new(1))
+        input_of(&other, &mut Vec::new()).unwrap_err().sqlstate(),
+        "XX000"
+    );
+    assert_eq!(
+        input_of(&arrow_array::NullArray::new(1), &mut Vec::new())
             .unwrap_err()
             .sqlstate(),
         "XX000"
@@ -830,20 +836,28 @@ fn windows_of_a_chunk_share_its_dictionary() {
 }
 
 /// A chunk of strings whose writer fell back from its dictionary to plain
-/// pages is read as a plain array, so that no array of its plain pages
-/// gets a dictionary of its own; a footer that does not say how the pages
-/// are encoded leaves it read through the dictionary.
+/// pages is read as an array of views, so that no array of its plain
+/// pages gets a dictionary of its own and no value is copied: NULLs and
+/// values of 0, 12, 13 and a thousand bytes, through the dictionary and
+/// in the plain pages; a footer that does not say how the pages are
+/// encoded leaves it read through the dictionary.
 #[test]
 fn a_chunk_that_falls_back_to_plain_pages_is_read_plain() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("s.parquet");
     let rows = 2000;
     let strings: Vec<Option<Vec<u8>>> = (0..rows)
-        .map(|i| Some(format!("value {i}").into_bytes()))
+        .map(|i| match i % 5 {
+            0 => None,
+            1 => Some(Vec::new()),
+            2 => Some(format!("{i:0>12}").into_bytes()),
+            3 => Some(format!("{i:0>13}").into_bytes()),
+            _ => Some(format!("{i:0>1000}").into_bytes()),
+        })
         .collect();
     let options = Options {
         page_rows: Some(100),
-        dictionary_bytes: Some(256),
+        dictionary_bytes: Some(4096),
         ..Options::new(rows, true)
     };
     testing::write_with(
@@ -866,6 +880,10 @@ fn a_chunk_that_falls_back_to_plain_pages_is_read_plain() {
         let file = ParquetFile::open(&path).unwrap();
         let chunk = file.metadata().row_group(0).column(0);
         assert!(chunk.dictionary_page_offset().is_some());
+        assert_eq!(
+            crate::stats::through_dictionary(chunk),
+            (!drop_encoding_stats).then_some(false)
+        );
         let column = map_column(&file, &request("s", oid::TEXT)).unwrap();
         let selection: Arc<[u64]> = vec![u64::MAX; mask_words(rows)].into();
         // Windows that straddle the arrays the crate gives.
@@ -874,10 +892,13 @@ fn a_chunk_that_falls_back_to_plain_pages_is_read_plain() {
             let got = reader
                 .read(start, 500, &bits(&selection, start, 500))
                 .unwrap();
-            assert_eq!(
-                matches!(got.array.data_type(), DataType::Dictionary(..)),
-                drop_encoding_stats
-            );
+            let expected = match drop_encoding_stats {
+                true => {
+                    DataType::Dictionary(Box::new(DataType::Int32), Box::new(DataType::LargeBinary))
+                }
+                false => DataType::BinaryView,
+            };
+            assert_eq!(got.array.data_type(), &expected);
             let made = strings_of(&reader, &got).unwrap();
             assert_eq!(made, strings[start..start + 500]);
         }

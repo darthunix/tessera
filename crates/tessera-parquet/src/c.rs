@@ -652,7 +652,8 @@ pub unsafe extern "C" fn tess_parquet_values(
                 .ok_or_else(|| broken("no window read"))?;
             let asked = words(asked, asked_words)?;
             let nulls = words_mut(nulls, nulls_words)?;
-            let input = input_of(window.array.as_ref())?;
+            let mut buffers = Vec::new();
+            let input = input_of(window.array.as_ref(), &mut buffers)?;
             let mut made = vec![0u64; nulls.len()];
             let output = &mut ReadOutput::Datums {
                 values: words_mut(values, values_len)?,
@@ -936,7 +937,8 @@ pub unsafe extern "C" fn tess_parquet_text_size(
                 .as_ref()
                 .ok_or_else(|| broken("no window read"))?;
             let len = window.array.len();
-            let input = input_of(window.array.as_ref())?;
+            let mut buffers = Vec::new();
+            let input = input_of(window.array.as_ref(), &mut buffers)?;
             let mut values: Vec<&[u8]> = vec![&[]; len];
             let mut made = vec![0u64; nulls.len()];
             handle.reader.plan().read(
@@ -1200,14 +1202,16 @@ fn values_key(values: &dyn Array) -> Result<(usize, usize, usize)> {
 
 /// The rows `asked` asks of `window`, read row by row through the column's
 /// plan, which checks each by the column's rule: their bytes, and a mask
-/// of `words` words of their `NULL` rows.
+/// of `words` words of their `NULL` rows; `buffers` takes the slices of a
+/// view array's buffers that the bytes are read through.
 fn read_by_rows<'a>(
     reader: &ColumnReader,
     window: &'a Window,
     asked: &[u64],
     words: usize,
+    buffers: &'a mut Vec<&'a [u8]>,
 ) -> Result<(Vec<&'a [u8]>, Vec<u64>)> {
-    let input = input_of(window.array.as_ref())?;
+    let input = input_of(window.array.as_ref(), buffers)?;
     let mut values: Vec<&[u8]> = vec![&[]; window.array.len()];
     let mut made = vec![0u64; words];
     reader.plan().read(
@@ -1227,8 +1231,8 @@ fn read_by_rows<'a>(
 /// dictionary, the first window that names its values array reads the
 /// whole array once through the plan, into `dictionary_passes`: where
 /// every value passes and none is `NULL`, every window over it takes its
-/// rows' bytes unchecked again. Plain, the window's bytes pass in one pass
-/// ([`crate::bytes::window_passes`]), made once a window into
+/// rows' bytes unchecked again. Plain, the window's views pass value by
+/// value ([`crate::bytes::views_pass`]), made once a window into
 /// `window_passes`. `made` gets the bits of the rows asked that are `NULL`.
 /// `None` where the column is of another rule, or where the dictionary or
 /// the window did not pass: the caller then reads row by row, which fails
@@ -1290,7 +1294,7 @@ fn cheaper_check<'a>(
                     reader
                         .plain_plan()
                         .read(
-                            &input_of(values)?,
+                            &input_of(values, &mut Vec::new())?,
                             &all,
                             &mut ReadOutput::Bytes {
                                 values: &mut sink,
@@ -1306,34 +1310,31 @@ fn cheaper_check<'a>(
                 return Ok(None);
             }
             Ok(
-                mark_nulls(rows, asked, |row| keys.is_null(row), made).map(|()| Slots {
-                    offsets: bytes.value_offsets(),
-                    data: bytes.values(),
-                    keys: Some(keys.values()),
+                mark_nulls(rows, asked, |row| keys.is_null(row), made).map(|()| {
+                    Slots::Dictionary {
+                        offsets: bytes.value_offsets(),
+                        data: bytes.values(),
+                        keys: keys.values(),
+                    }
                 }),
             )
         }
         None => {
-            let Some(bytes) = array
+            let Some(views) = array
                 .as_any()
-                .downcast_ref::<arrow_array::LargeBinaryArray>()
+                .downcast_ref::<arrow_array::BinaryViewArray>()
             else {
                 return Ok(None);
             };
             let passes = *window_passes.get_or_insert_with(|| {
                 *checks.1 += 1;
-                crate::bytes::window_passes(bytes.value_offsets(), bytes.values())
+                crate::bytes::views_pass(views)
             });
             if !passes {
                 return Ok(None);
             }
-            Ok(
-                mark_nulls(rows, asked, |row| bytes.is_null(row), made).map(|()| Slots {
-                    offsets: bytes.value_offsets(),
-                    data: bytes.values(),
-                    keys: None,
-                }),
-            )
+            Ok(mark_nulls(rows, asked, |row| views.is_null(row), made)
+                .map(|()| Slots::Views(views)))
         }
     }
 }
@@ -1482,7 +1483,8 @@ pub unsafe extern "C" fn tess_parquet_bytes(
                     })
                     .collect();
                 if let Some(fast_values) = fast_values {
-                    match read_by_rows(&handle.reader, window, asked, nulls.len()) {
+                    let mut buffers = Vec::new();
+                    match read_by_rows(&handle.reader, window, asked, nulls.len(), &mut buffers) {
                         Ok((by_rows, rows_made)) if by_rows == fast_values && rows_made == made => {
                         }
                         _ => {
@@ -1523,7 +1525,9 @@ pub unsafe extern "C" fn tess_parquet_bytes(
                 None => false,
             };
             if !filled {
-                let (values, rows_made) = read_by_rows(&handle.reader, window, asked, nulls.len())?;
+                let mut buffers = Vec::new();
+                let (values, rows_made) =
+                    read_by_rows(&handle.reader, window, asked, nulls.len(), &mut buffers)?;
                 made = rows_made;
                 fill_rows(
                     len,
