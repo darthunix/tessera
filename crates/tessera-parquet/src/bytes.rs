@@ -45,24 +45,39 @@ pub(crate) fn window_passes(offsets: &[i64], data: &[u8]) -> bool {
     })
 }
 
-/// The bytes of the rows of `asked` that are not `NULL`, sliced from the
-/// `offsets` into the `data` of `strings`, for a window of `rows` rows
-/// whose values passed their checks, with each row's bit of `NULL` set in
-/// `made`; `None` where a slot's offsets do not hold or a value is longer
-/// than `max`, so that the caller reads the window row by row and fails as
-/// the plan fails. `slot_of` gives the slot of a row: itself, or its index
-/// in a dictionary.
-pub(crate) fn slices<'a>(
+/// The bytes of a window's rows where its cheaper check passed, read in
+/// place: the `offsets` into the `data` of its strings, and, through a
+/// dictionary, the `keys` that give each row the slot of its value; a
+/// plain window's row is its own slot.
+pub(crate) struct Slots<'a> {
+    pub(crate) offsets: &'a [i64],
+    pub(crate) data: &'a [u8],
+    pub(crate) keys: Option<&'a [i32]>,
+}
+
+impl<'a> Slots<'a> {
+    /// The bytes of `row`: `None` where its key or its slot's offsets do
+    /// not hold, or where the value is longer than `max`, so that the
+    /// caller reads the window row by row and fails as the plan fails.
+    pub(crate) fn value(&self, row: usize, max: usize) -> Option<&'a [u8]> {
+        let slot = match self.keys {
+            Some(keys) => usize::try_from(*keys.get(row)?).ok()?,
+            None => row,
+        };
+        let (start, len) = slot_range(self.offsets, self.data.len(), slot)?;
+        (len <= max).then(|| &self.data[start..start + len])
+    }
+}
+
+/// Sets in `made` the bit of each row of `asked` below `rows` that
+/// `is_null` says is `NULL`; `None` where `made` is shorter than a row
+/// asked.
+pub(crate) fn mark_nulls(
     rows: usize,
     asked: &[u64],
     is_null: impl Fn(usize) -> bool,
-    slot_of: impl Fn(usize) -> usize,
-    strings: (&[i64], &'a [u8]),
-    max: usize,
     made: &mut [u64],
-) -> Option<Vec<&'a [u8]>> {
-    let (offsets, data) = strings;
-    let mut values: Vec<&[u8]> = vec![&[]; rows];
+) -> Option<()> {
     // The rows asked alone, by the set bits of their words: a batch asks
     // 64 rows of a window of 1024.
     for (word, &bits) in asked.iter().enumerate() {
@@ -70,21 +85,15 @@ pub(crate) fn slices<'a>(
         while bits != 0 {
             let row = word * 64 + bits.trailing_zeros() as usize;
             bits &= bits - 1;
-            let Some(value) = values.get_mut(row) else {
+            if row >= rows {
                 break;
-            };
+            }
             if is_null(row) {
-                *made.get_mut(row / 64)? |= 1 << (row % 64);
-                continue;
+                *made.get_mut(word)? |= 1 << (row % 64);
             }
-            let (start, len) = slot_range(offsets, data.len(), slot_of(row))?;
-            if len > max {
-                return None;
-            }
-            *value = &data[start..start + len];
         }
     }
-    Some(values)
+    Some(())
 }
 
 #[cfg(test)]

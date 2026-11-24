@@ -22,6 +22,7 @@ use arrow_array::{Array, ArrayRef};
 
 use datum_arrow::{Comparison, Failures, MAX_VALUE_BYTES, ReadOutput, TextBytes, Unit, mask_words};
 
+use crate::bytes::{Slots, mark_nulls};
 use crate::clause::{ClauseKind, ClauseTest, comparison, like_checked};
 use crate::column::{ColumnRequest, MappedColumn, map_column};
 use crate::error::{DATA_CORRUPTED, Error, INTERNAL_ERROR, Result};
@@ -117,9 +118,16 @@ pub struct ReaderHandle {
     /// checked in one pass, which the tests read.
     values_checked: usize,
     windows_checked: usize,
+    /// The mask of the `NULL` rows of the last ask of
+    /// [`tess_parquet_bytes`], kept for the next one.
+    made: Vec<u64>,
     /// Every window read row by row through the plan, for the tests.
     #[cfg(test)]
     rows_only: bool,
+    /// The longest value the cheaper check gives, for the tests: a longer
+    /// one sends its window to the read row by row.
+    #[cfg(test)]
+    max_fast: usize,
 }
 
 /// The places of a window's text in its own buffers, a row each, `None`
@@ -533,8 +541,11 @@ pub unsafe extern "C" fn tess_parquet_reader(
                     window_passes: None,
                     values_checked: 0,
                     windows_checked: 0,
+                    made: Vec::new(),
                     #[cfg(test)]
                     rows_only: false,
+                    #[cfg(test)]
+                    max_fast: MAX_VALUE_BYTES,
                 })),
             )
         })
@@ -1081,6 +1092,8 @@ enum FillError {
     Short,
     /// A value of more bytes than a `u32` counts.
     Long,
+    /// A row asked whose bytes the window does not give.
+    Missing,
 }
 
 impl From<FillError> for Error {
@@ -1088,22 +1101,28 @@ impl From<FillError> for Error {
         broken(match error {
             FillError::Short => "outputs or keys shorter than the window",
             FillError::Long => "a value past what a u32 counts",
+            FillError::Missing => "a row asked without its bytes",
         })
     }
 }
 
-/// Writes, for each row of `values` that `asked` asks and `made` does not
-/// mark `NULL`, the place of its bytes into `data` (that of [`EMPTY`] for an
-/// empty value), their count into `lengths` and, where `keys` is given, the
-/// row's index into `indexes`; the other rows' entries are left as they
-/// were, and on a refusal every entry is.
+/// Writes, for each row of a window of `rows` rows that `asked` asks and
+/// `made` does not mark `NULL`, the place of its bytes, which `value`
+/// gives, into `data` (that of [`EMPTY`] for an empty value), their count
+/// into `lengths` and, where `keys` is given, the row's index into
+/// `indexes`; the other rows' entries are left as they were, and on a
+/// refusal every entry is. `value` must give a row the same answer each
+/// time: it is asked once to check every row and again to write it.
 ///
 /// # Errors
 ///
-/// [`FillError`] for outputs shorter than `values`, keys shorter than them
-/// or a value of more bytes than a `u32` counts.
-fn fill_rows(
-    values: &[&[u8]],
+/// [`FillError`] for outputs shorter than the window, keys shorter than it,
+/// a row whose bytes `value` does not give, or a value of more bytes than
+/// a `u32` counts.
+#[allow(clippy::too_many_arguments)]
+fn fill_rows<'v>(
+    rows: usize,
+    value: impl Fn(usize) -> Option<&'v [u8]>,
     made: &[u64],
     asked: &[u64],
     keys: Option<&[i32]>,
@@ -1111,7 +1130,6 @@ fn fill_rows(
     lengths: &mut [u32],
     mut indexes: Option<&mut [i32]>,
 ) -> std::result::Result<(), FillError> {
-    let rows = values.len();
     if data.len() < rows
         || lengths.len() < rows
         || keys.is_some_and(|keys| keys.len() < rows)
@@ -1120,28 +1138,15 @@ fn fill_rows(
     {
         return Err(FillError::Short);
     }
-    // The rows asked alone, by the set bits of their words, the NULL ones
-    // left out.
-    let given = |word: usize| {
-        let bits = asked.get(word).copied().unwrap_or(0) & !made.get(word).copied().unwrap_or(0);
-        std::iter::successors((bits != 0).then_some(bits), |&b| {
-            let next = b & (b - 1);
-            (next != 0).then_some(next)
-        })
-        .map(move |b| word * 64 + b.trailing_zeros() as usize)
-        .take_while(move |&row| row < rows)
-    };
-    let words = rows.div_ceil(64);
-    // Every count fits before any is written, so that a refusal writes
-    // nothing.
-    if (0..words)
-        .flat_map(given)
-        .any(|row| u32::try_from(values[row].len()).is_err())
-    {
-        return Err(FillError::Long);
-    }
-    for row in (0..words).flat_map(given) {
-        let value = values[row];
+    // Every row's bytes given and their count fitting before any is
+    // written, so that a refusal writes nothing.
+    each_given(rows, asked, made, |row| {
+        let value = value(row).ok_or(FillError::Missing)?;
+        u32::try_from(value.len()).map_err(|_| FillError::Long)?;
+        Ok(())
+    })?;
+    each_given(rows, asked, made, |row| {
+        let value = value(row).ok_or(FillError::Missing)?;
         data[row] = if value.is_empty() {
             &EMPTY
         } else {
@@ -1150,6 +1155,30 @@ fn fill_rows(
         lengths[row] = u32::try_from(value.len()).map_err(|_| FillError::Long)?;
         if let (Some(keys), Some(indexes)) = (keys, indexes.as_deref_mut()) {
             indexes[row] = keys[row];
+        }
+        Ok(())
+    })
+}
+
+/// Calls `each` for each row below `rows` that `asked` asks and `made`
+/// does not mark `NULL`, in order, by the set bits of their words, up to
+/// the first error.
+fn each_given<E>(
+    rows: usize,
+    asked: &[u64],
+    made: &[u64],
+    mut each: impl FnMut(usize) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    for word in 0..rows.div_ceil(64) {
+        let mut bits =
+            asked.get(word).copied().unwrap_or(0) & !made.get(word).copied().unwrap_or(0);
+        while bits != 0 {
+            let row = word * 64 + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            if row >= rows {
+                break;
+            }
+            each(row)?;
         }
     }
     Ok(())
@@ -1192,19 +1221,19 @@ fn read_by_rows<'a>(
     Ok((values, made))
 }
 
-/// The bytes of the rows `asked` asks of a window of a column of text that
-/// the plan checks for UTF-8 and zero bytes and counts no characters of,
-/// by a check cheaper than the plan's row by row. Through a dictionary,
-/// the first window that names its values array reads the whole array
-/// once through the plan, into `dictionary_passes`: where every value
-/// passes and none is `NULL`, every window over it takes its rows' bytes
-/// unchecked again. Plain, the window's bytes pass in one pass
+/// Where the rows `asked` asks of a window of a column of text that the
+/// plan checks for UTF-8 and zero bytes and counts no characters of find
+/// their bytes, by a check cheaper than the plan's row by row. Through a
+/// dictionary, the first window that names its values array reads the
+/// whole array once through the plan, into `dictionary_passes`: where
+/// every value passes and none is `NULL`, every window over it takes its
+/// rows' bytes unchecked again. Plain, the window's bytes pass in one pass
 /// ([`crate::bytes::window_passes`]), made once a window into
 /// `window_passes`. `made` gets the bits of the rows asked that are `NULL`.
-/// `None` where the column is of another rule, where the dictionary or
-/// the window did not pass, or where an offset or an index does not hold:
-/// the caller then reads row by row, which fails as the plan fails, and
-/// at the plan's row.
+/// `None` where the column is of another rule, or where the dictionary or
+/// the window did not pass: the caller then reads row by row, which fails
+/// as the plan fails, and at the plan's row; as it does where a row's
+/// offsets or index do not hold ([`Slots::value`]).
 #[allow(clippy::too_many_arguments)]
 fn cheaper_check<'a>(
     reader: &ColumnReader,
@@ -1215,7 +1244,7 @@ fn cheaper_check<'a>(
     dictionary_passes: &mut Option<bool>,
     window_passes: &mut Option<bool>,
     made: &mut [u64],
-) -> Result<Option<Vec<&'a [u8]>>> {
+) -> Result<Option<Slots<'a>>> {
     let text = Failures::NOT_UTF8 | Failures::ZERO_BYTE | Failures::TOO_LARGE;
     let rows = array.len();
     // A mask the plan refuses, shorter than the window or asking past it,
@@ -1276,15 +1305,13 @@ fn cheaper_check<'a>(
             if *dictionary_passes != Some(true) {
                 return Ok(None);
             }
-            Ok(crate::bytes::slices(
-                rows,
-                asked,
-                |row| keys.is_null(row),
-                |row| usize::try_from(keys.value(row)).unwrap_or(usize::MAX),
-                (bytes.value_offsets(), bytes.values()),
-                MAX_VALUE_BYTES,
-                made,
-            ))
+            Ok(
+                mark_nulls(rows, asked, |row| keys.is_null(row), made).map(|()| Slots {
+                    offsets: bytes.value_offsets(),
+                    data: bytes.values(),
+                    keys: Some(keys.values()),
+                }),
+            )
         }
         None => {
             let Some(bytes) = array
@@ -1300,15 +1327,13 @@ fn cheaper_check<'a>(
             if !passes {
                 return Ok(None);
             }
-            Ok(crate::bytes::slices(
-                rows,
-                asked,
-                |row| bytes.is_null(row),
-                |row| row,
-                (bytes.value_offsets(), bytes.values()),
-                MAX_VALUE_BYTES,
-                made,
-            ))
+            Ok(
+                mark_nulls(rows, asked, |row| bytes.is_null(row), made).map(|()| Slots {
+                    offsets: bytes.value_offsets(),
+                    data: bytes.values(),
+                    keys: None,
+                }),
+            )
         }
     }
 }
@@ -1418,11 +1443,15 @@ pub unsafe extern "C" fn tess_parquet_bytes(
                 Some((_, _, None)) => handle.dictionary_passes,
                 _ => None,
             };
-            let mut made = vec![0u64; nulls.len()];
+            // The mask of the rows asked that are NULL, the reader's own,
+            // so that an ask allocates none.
+            let mut made = std::mem::take(&mut handle.made);
+            made.clear();
+            made.resize(nulls.len(), 0);
             #[cfg(test)]
-            let rows_only = handle.rows_only;
+            let (rows_only, max) = (handle.rows_only, handle.max_fast);
             #[cfg(not(test))]
-            let rows_only = false;
+            let (rows_only, max) = (false, MAX_VALUE_BYTES);
             let fast = if rows_only {
                 None
             } else {
@@ -1437,41 +1466,78 @@ pub unsafe extern "C" fn tess_parquet_bytes(
                     &mut made,
                 )?
             };
-            let values = match fast {
-                Some(values) => {
-                    if cfg!(debug_assertions) {
-                        // The cheaper check agrees with the plan's, row by
-                        // row: every row asked passes it, at the same bytes;
-                        // a row the plan fails is the check's fault, not the
-                        // row's, and so an error of its own.
-                        match read_by_rows(&handle.reader, window, asked, nulls.len()) {
-                            Ok((by_rows, rows_made)) if by_rows == values && rows_made == made => {}
-                            _ => {
-                                return Err(broken(
-                                    "the cheaper check of a window differs from the plan's",
-                                ));
-                            }
+            if cfg!(debug_assertions)
+                && let Some(slots) = &fast
+            {
+                // The cheaper check agrees with the plan's, row by row,
+                // before any output is written: every row asked passes it,
+                // at the same bytes; a row the plan fails is the check's
+                // fault, not the row's, and so an error of its own. Rows
+                // it cannot give go to the read row by row below.
+                let bit = |mask: &[u64], row: usize| mask[row / 64] >> (row % 64) & 1 == 1;
+                let fast_values: Option<Vec<&[u8]>> = (0..len)
+                    .map(|row| match bit(asked, row) && !bit(&made, row) {
+                        true => slots.value(row, max),
+                        false => Some(&[][..]),
+                    })
+                    .collect();
+                if let Some(fast_values) = fast_values {
+                    match read_by_rows(&handle.reader, window, asked, nulls.len()) {
+                        Ok((by_rows, rows_made)) if by_rows == fast_values && rows_made == made => {
+                        }
+                        _ => {
+                            return Err(broken(
+                                "the cheaper check of a window differs from the plan's",
+                            ));
                         }
                     }
-
-                    values
                 }
-                None => {
-                    let (values, rows_made) =
-                        read_by_rows(&handle.reader, window, asked, nulls.len())?;
-                    made = rows_made;
-                    values
-                }
-            };
+            }
             // SAFETY: the caller gives `len` initialized, writable entries
             // at each.
             let data = std::slice::from_raw_parts_mut(out_data, len);
             let lengths = std::slice::from_raw_parts_mut(out_lengths, len);
-            let indexes = keys
+            let mut indexes = keys
                 .is_some()
                 .then(|| std::slice::from_raw_parts_mut(out_indexes, len));
-            fill_rows(&values, &made, asked, keys, data, lengths, indexes)?;
+            // The cheaper check's rows written in place; a row it cannot
+            // give, as a refusal that writes nothing, sends the window to
+            // the read row by row.
+            let filled = match &fast {
+                Some(slots) => match fill_rows(
+                    len,
+                    |row| slots.value(row, max),
+                    &made,
+                    asked,
+                    keys,
+                    data,
+                    lengths,
+                    indexes.as_deref_mut(),
+                ) {
+                    Err(FillError::Missing) => false,
+                    filled => {
+                        filled?;
+                        true
+                    }
+                },
+                None => false,
+            };
+            if !filled {
+                let (values, rows_made) = read_by_rows(&handle.reader, window, asked, nulls.len())?;
+                made = rows_made;
+                fill_rows(
+                    len,
+                    |row| values.get(row).copied(),
+                    &made,
+                    asked,
+                    keys,
+                    data,
+                    lengths,
+                    indexes,
+                )?;
+            }
             merge_nulls(nulls, &made, asked);
+            handle.made = made;
             let (nvalues, number) = match numbering {
                 Some((nvalues, number, new)) => {
                     if let Some(values) = new {
