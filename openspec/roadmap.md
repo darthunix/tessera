@@ -61,30 +61,42 @@ ClickBench's query 4 on the branch of `parquet-fdw`, and the same day
 ClickBench on that branch. On 2026-11-24 he took the views of strings in
 the Parquet reader out of turn, `parquet-string-views` (done), and a
 faster decompression of Snappy after them, `parquet-snappy` (done),
-after a profile of ClickBench's Q26 at the end of the sort by bytes:
+after a profile of ClickBench's Q26 at the end of the sort by bytes.
+The same day, after profiles of ClickBench's queries furthest behind
+pg_duckdb, he placed five entries after it in this order:
+`parquet-page-headers`, `agg-date-min-max`, `parquet-batch-arrays`,
+`parquet-integer-columns`, `agg-sum-plus-constant`:
 
-1. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `parquet-page-headers`: The headers of a Parquet file's pages read
+   through a buffer
+2. `agg-date-min-max`: TessAgg's `min` and `max` of `date`, by kernels
+3. `parquet-batch-arrays`: The arrays of a Parquet batch kept for its
+   scan
+4. `parquet-integer-columns`: The integers of a Parquet file given to
+   the kernels at less cost
+5. `agg-sum-plus-constant`: A sum of a column and a constant, folded
+6. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-2. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+7. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-3. `explain-rows-per-loop`: The rows a node removed, per loop as the
+8. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-4. `join-pruning-cost`: The cost of a pruning join over the partitions
+9. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
-   counters
-6. `linux-x86-support`: Linux on x86-64 checked as the target platform
-7. `oltp-guard-bench`: OLTP guard family of benchmarks
-8. `runs-left-from-section-9`: Runs left to the maintainer from
-   section 9
-9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+10. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+    counters
+11. `linux-x86-support`: Linux on x86-64 checked as the target platform
+12. `oltp-guard-bench`: OLTP guard family of benchmarks
+13. `runs-left-from-section-9`: Runs left to the maintainer from
+    section 9
+14. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+15. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+16. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-12. `tpch-sf10`: TPC-H step 10: SF10
-13. `backward-scan-mark-restore`: Backward scan and mark/restore
-14. `pg-duckdb-comparison`: Comparison with pg_duckdb
+17. `tpch-sf10`: TPC-H step 10: SF10
+18. `backward-scan-mark-restore`: Backward scan and mark/restore
+19. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -118,7 +130,6 @@ is wanted; several wait for a measured case. `greengage-port` and
   forecast
 - `datum-arrow-input`: the input of a column of `datum-arrow`, which
   the views of strings changed beside the forecast
-- `agg-date-min-max`: `min` and `max` of `date` by kernels
 - `snappy-on-x86`: the decoder of Snappy counted on Linux x86-64, and
   the shuffle of SSSE3 chosen while running
 - `parquet-pages-cost`: what the reader's own pages cost a query of
@@ -290,6 +301,96 @@ forecast of `datum-arrow`'s contract.
 - **Depends on:** none.
 - **Capabilities:** datum-arrow
 - **Size:** small.
+
+### parquet-page-headers
+
+The headers of a Parquet file's pages read through a buffer. From
+profiles of ClickBench's Q8 and Q11 at the end of
+`parquet-string-views`, 2026-11-24.
+
+- **What:** The reader gives the `parquet` crate a reader of the file
+  that calls `pread` for each read the crate asks of it. The crate
+  parses a page's header by small reads, so that each header of a page
+  it reads or skips costs a system call for each of them. Read the
+  headers through a buffer of a few hundred bytes, and the pages'
+  bytes as today.
+- **Why:** `pread` is 26 per cent of a profile of Q8, which skips most
+  pages of `AdvEngineID` for the rows its clause passes, and 12 of
+  Q11; the calls come from the parsing of page headers under the
+  crate's skip of records. Q8 runs in 3.3 times pg_duckdb's cycles,
+  Q11 in 3.7.
+- **Known:** The reader counts its reads for its tests, and those
+  counts change. `parquet-fdw`'s forecast names the reader's input of
+  pages for such a change.
+- **Depends on:** nothing.
+- **Capabilities:** parquet-fdw
+- **Size:** small.
+
+### parquet-batch-arrays
+
+The arrays of a Parquet batch kept for its scan. From profiles of
+ClickBench's Q1 and Q3 at the end of `parquet-string-views`,
+2026-11-24.
+
+- **What:** Each batch the Parquet node makes allocates and zeroes, in
+  a memory context reset at each batch, three arrays of an entry for
+  each attribute of the foreign table, 105 for `hits`, whatever the
+  columns the query reads, and arrays for each column it reads. Keep
+  them for the scan and clear the entries of the columns read alone.
+- **Why:** The zeroing and the allocations are about half of a profile
+  of Q1, `COUNT(*)`, which reads no column, and a tenth of Q3: a batch
+  of 64 rows pays some 2.5 KB of `memset`. Q1 runs in 1.7 times
+  pg_duckdb's cycles.
+- **Known:** `next_batch` and `batch_column` of `parquet/node.c`.
+- **Depends on:** nothing.
+- **Capabilities:** parquet-fdw
+- **Size:** small.
+
+### parquet-integer-columns
+
+The integers of a Parquet file given to the kernels at less cost. From
+profiles of ClickBench's Q3 and Q7 at the end of
+`parquet-string-views`, 2026-11-24.
+
+- **What:** A column of integers reaches the kernels as `Datum` words:
+  `datum-arrow` widens each value of a batch's 64 rows into a word, and
+  the node gathers the column in C. Find which part costs: the
+  conversion itself, which a form of integers in their own width, as
+  the bytes form gives strings, would spare; or the call for each batch
+  of 64 rows, which converting a window of 1 024 rows at once would
+  spare. Then take the cheaper way that removes it.
+- **Why:** `datum-arrow`'s read and the node's column take 36 per cent
+  of a profile of Q3, sums of two integers, and 27 of Q7. Q3 runs in
+  4.5 times pg_duckdb's cycles, the furthest of the queries without
+  strings but Q7.
+- **Known:** A form of integers in their own width is a change of the C
+  API, of the kernels and of the nodes; `direct-arrow-batches` holds
+  the wider idea. Not measured beyond the profiles.
+- **Depends on:** nothing.
+- **Capabilities:** parquet-fdw, batch-format
+- **Size:** found by the diagnosis: small for whole windows, large for
+  a form of its own.
+
+### agg-sum-plus-constant
+
+A sum of a column and a constant, folded. From the count of ClickBench
+at the end of `parquet-string-views`, 2026-11-24.
+
+- **What:** `sum(x + c)`, with `c` a constant, is `sum(x) + c *
+  count(x)` for the exact types. Fold the sums of one column and of
+  constants into one sum and one count, where the folded form fails as
+  the sums would: an overflow of `x + c` in a row, which the range of
+  `x`'s type rules out for a `smallint` and a small constant.
+- **Why:** ClickBench's Q30 sums `ResolutionWidth + k` for `k` from 0
+  to 89. It runs in 137 times pg_duckdb's cycles, 139 billion, 16 per
+  cent of Tessera's cycles over the 39 queries counted; DuckDB folds
+  the sums.
+- **Known:** With 90 aggregates Q30 runs in the core's aggregate, past
+  TessAgg's cap of 64 (the finding of "Not placed"); folded, its sums
+  fit TessAgg. Floating-point sums are not exact and stay as they are.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate
+- **Size:** medium.
 
 ### parquet-pages-cost
 
@@ -1085,7 +1186,10 @@ TessAgg's `min` and `max` of `date`, by kernels.
   eight bytes that compare as integers, by the kernels of the integers.
 - **Why:** A profile of ClickBench's Q7, `min` and `max` of `EventDate`
   over `hits.parquet`, serial, found 32 % of Tessera's time in the
-  generic path, `date_smaller` and `date_larger` called a row. The sums
+  generic path, `date_smaller` and `date_larger` called a row; at the
+  end of `parquet-string-views` the generic path and the two functions
+  took 55 % of a profile of Q7, which runs in 5.3 times pg_duckdb's
+  cycles. The sums
   of `bigint` the same profile found are done.
 - **Known:** Not Parquet's own: a heap table takes the same path. Not
   measured beyond the profile.
