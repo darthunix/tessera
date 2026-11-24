@@ -7,6 +7,13 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-24, the Parquet reader's bytes form written in
+  place](2026-11-24-parquet-reader-allocs/README.md): the strings'
+  queries of ClickBench over `hits.parquet` counted at 0 workers, the
+  others as controls, Q34 and Q35 in a pair, against `a3420684`; a
+  first try whose loop over rows called out of line, Apple M5 Pro,
+  PostgreSQL 19.
+
 - [2026-11-24, TessAgg's keys by bytes, stage 2 of
   `text-keys-by-bytes`](2026-11-24-text-keys-by-bytes-keys/README.md):
   ClickBench's queries over `hits.parquet` counted at 0 workers, Q34
