@@ -46,8 +46,9 @@ reader and a writer cannot drift apart.
   conversions, both ways; not the plans of other types.
 - **A writer of Parquet files, such as `COPY` to a file.** Its callers
   only: the write plans and conversions exist.
-- **More of Arrow's types, such as views of strings or nanoseconds.**
-  The sets of types and the plans' rules; not the representations.
+- **More of Arrow's types, such as nanoseconds or a new layout of
+  strings.** The sets of types, the plans' rules and, for a new layout,
+  the input of a column; not the representations.
 - **A C API.** Entry points over the plans and conversions, with their
   statuses; not the plans' rules.
 - **Explicit vector code for a conversion.** That conversion's loop,

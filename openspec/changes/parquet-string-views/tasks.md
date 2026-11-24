@@ -52,7 +52,7 @@ the commit before it.
       dictionary", against a heap table. The message carries the counts
       of Q26 and Q28 against 2.1. Check: `make rust-check`; the suites;
       `make crosscheck`
-- [ ] 3.2 The contracts: `parquet-fdw`'s forecast with the clauses,
+- [x] 3.2 The contracts: `parquet-fdw`'s forecast with the clauses,
       `datum-arrow`'s with the input of a column. In the roadmap, the
       deviation over the clauses' boundary in `parquet-reader-boundary`
       and a new entry for simplifying `datum-arrow`. Check:
