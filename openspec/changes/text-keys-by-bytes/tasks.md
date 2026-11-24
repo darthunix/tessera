@@ -232,7 +232,7 @@ named in the harness and covered by a property test.
       worst kept; a case of the `parquet` suite over rows in no order of
       the key, whose count of values made is below the rows read.
       Check: the suites; `make crosscheck`
-- [ ] 6.4 Count as in 4.4. Check: `.github/scripts/check-specs.sh`
+- [x] 6.4 Count as in 4.4. Check: `.github/scripts/check-specs.sh`
 
 ## 7. The spec, the design and the close
 
