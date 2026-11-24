@@ -344,10 +344,21 @@ impl ColumnReader {
             have += array.len();
             parts.push(array);
         }
-        let all = concat(&parts, &empty)?;
-        forward.pending = vec![all.slice(count, all.len() - count)];
+        // The rows past the window lie in the last part, since the parts
+        // before it held fewer rows than the window. They stay a slice of
+        // that part alone, not of the joined window: a slice of an array of
+        // views keeps every buffer of its array, and a join every buffer of
+        // its parts, so that a slice of the join would carry each page read
+        // so far into every window after it.
+        let over = have - count;
+        if over > 0
+            && let Some(last) = parts.last_mut()
+        {
+            forward.pending.push(last.slice(last.len() - over, over));
+            *last = last.slice(0, last.len() - over);
+        }
         forward.next = end;
-        Ok(all.slice(0, count))
+        concat(&parts, &empty)
     }
 
     fn read_rows(&self, start: usize, len: usize, asked: &[u64]) -> Result<ArrayRef> {

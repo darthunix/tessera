@@ -477,6 +477,17 @@ CREATE TABLE h_leaves AS
     SELECT i, convert_from(leaves_value(i, false), 'UTF8') AS s,
            leaves_short(i)::varchar(3) AS v, leaves_value(i, true) AS bad
     FROM generate_series(0, 3999) i;
+CREATE FUNCTION leaves_order(o text) RETURNS boolean LANGUAGE plpgsql AS $$
+DECLARE
+    of_file text[];
+    of_heap text[];
+BEGIN
+    EXECUTE format('SELECT array_agg(q::text) FROM (SELECT s, i FROM t_leaves ORDER BY %s) q', o)
+        INTO of_file;
+    EXECUTE format('SELECT array_agg(q::text) FROM (SELECT s, i FROM h_leaves ORDER BY %s) q', o)
+        INTO of_heap;
+    RETURN of_file IS NOT DISTINCT FROM of_heap;
+END $$;
 CREATE TABLE leaves_queries (name text, of_file text, of_heap text);
 INSERT INTO leaves_queries VALUES
     ('bytea', 'SELECT i, s, bad FROM t_leaves_bytes',
@@ -497,12 +508,18 @@ SET tessera.enable = off;
 SELECT name, differ(of_file, of_heap) AS rows_differ FROM leaves_queries ORDER BY name;
 SELECT q, sqlstate_of(format('SELECT bad FROM t_leaves WHERE %s', q)) AS bad_bytes
 FROM unnest(ARRAY['i = 5', 'i = 3500', 'i <> 5 AND i <> 3500']) q;
+SELECT o, leaves_order(o) AS same_order
+FROM unnest(ARRAY['s COLLATE "C" DESC NULLS LAST, i LIMIT 30',
+                  's COLLATE "C" NULLS FIRST, i LIMIT 30']) o;
 RESET tessera.enable;
 SELECT scans_of('SELECT s FROM t_leaves') AS through,
        checked_by('SELECT bad FROM t_leaves WHERE i <> 5 AND i <> 3500') AS checked_by;
 SELECT name, differ(of_file, of_heap) AS rows_differ FROM leaves_queries ORDER BY name;
 SELECT q, sqlstate_of(format('SELECT bad FROM t_leaves WHERE %s', q)) AS bad_bytes
 FROM unnest(ARRAY['i = 5', 'i = 3500', 'i <> 5 AND i <> 3500', 'true']) q;
+SELECT o, leaves_order(o) AS same_order
+FROM unnest(ARRAY['s COLLATE "C" DESC NULLS LAST, i LIMIT 30',
+                  's COLLATE "C" NULLS FIRST, i LIMIT 30']) o;
 SELECT differ('SELECT i, bad FROM t_leaves WHERE i <> 5 AND i <> 3500',
               $q$SELECT i, convert_from(bad, 'UTF8') FROM h_leaves WHERE i <> 5 AND i <> 3500$q$)
        AS rows_differ_under_the_clause;
@@ -1995,7 +2012,8 @@ DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, b
     explain_lines(text, text, text), parquet_test_asks(text, int, int), differ_serial(text),
     parallel_lines(text, text), workers_launched(text), plan_of(text), scan_cost(text, text),
     checked_by(text), rows_of(text), groups_of(text), skipping(text, text, text),
-    order_off(text), leaves_value(int, boolean), leaves_short(int), leaves_json(bytea);
+    order_off(text), leaves_value(int, boolean), leaves_short(int), leaves_json(bytea),
+    leaves_order(text);
 DROP SERVER pq;
 REVOKE CREATE ON SCHEMA public FROM parquet_reader, parquet_other;
 DROP ROLE parquet_reader, parquet_other;

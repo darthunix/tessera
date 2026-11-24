@@ -50,7 +50,8 @@ the commit before it.
       under Miri as the bytes form's tests are; in
       `test/sql/parquet.sql` the scenario "A chunk that leaves its
       dictionary", against a heap table. The message carries the counts
-      of Q26 and Q28 against 2.1. Check: `make rust-check`; the suites;
+      of Q26 and Q28 against `main`, which 1.1 and 2.1 leave the same on
+      every path of the reader. Check: `make rust-check`; the suites;
       `make crosscheck`
 - [x] 3.2 The contracts: `parquet-fdw`'s forecast with the clauses,
       `datum-arrow`'s with the input of a column. In the roadmap, the

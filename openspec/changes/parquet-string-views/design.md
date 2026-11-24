@@ -164,8 +164,10 @@ Refused:
 ### The clauses over views
 
 Was: the clauses read a plain window's strings by their offsets.
-Will be: they read each value's bytes through its view, from the same
-input of `datum-arrow` the plans read. The dictionary's path does not
+Will be: they read each value's bytes through the crate's own accessor
+of a view array, as they took a valid array's offsets: the parquet
+crate builds each view from a length it checked against its page, and
+a `NULL` slot's view as an empty one. The dictionary's path does not
 change.
 
 ### Memory held
@@ -173,8 +175,13 @@ change.
 A window held by a batch holds the array it is a slice of, and with it
 the decompressed pages its views point into, whole. Before, it held a
 copy of its rows' bytes. The reader reads a fixed count of rows at a
-time, so an array spans a few pages of one chunk. A column held
-through a batch therefore holds a few decompressed pages at most. The
+time, so an array spans a few pages of one chunk. The rows a forward
+reader keeps past a window stay a slice of the array they were read
+in, not of the joined window: a slice of a view array keeps every
+buffer of its array, and a join every buffer of its parts, so a slice
+of the join would carry each page read before into every later window.
+A column held through a batch therefore holds a few decompressed pages
+at most. The
 memory stays the reader's, freed with the window, under the contract's
 rule "The reader's memory is the query's".
 
@@ -183,8 +190,8 @@ rule "The reader's memory is the query's".
 - `parquet-fdw`'s forecast names the reader's windows and its C
   entries of the bytes form for this kind of change, "not the node's
   batches, the clauses or the wrapper". The change touches the
-  clauses. They read a window's strings through `datum-arrow`'s input,
-  and that input changes. This is a deviation over the boundary
+  clauses. They read the strings of the reader's arrays, and the type
+  of those arrays changes. This is a deviation over the boundary
   between the clauses and the reader's arrays. It goes into the
   roadmap's entry for simplifying the part, `parquet-reader-boundary`.
 - `datum-arrow`'s forecast names "the sets of types and the plans'
@@ -210,7 +217,9 @@ rule "The reader's memory is the query's".
 - A plain chunk: the same.
 - A chunk that is a dictionary in every page: unchanged.
 - `datum-arrow`: was `Utf8View` and `BinaryView` refused, `0A000`;
-  will be read as `LargeUtf8` and `LargeBinary`.
+  will be read as `LargeUtf8` and `LargeBinary`. A dictionary of views
+  stays refused: no caller gives one, and its values' shape would need
+  rules of its own.
 - The bytes form of a plain window: was a pointer into one buffer of
   copies, checked in one pass; will be a pointer into a page or a
   view, checked value by value.
@@ -236,10 +245,12 @@ rule "The reader's memory is the query's".
   "The bytes form and its check over views".
 - [A held window holds whole pages] → bounded by the few pages of one
   array of the reader; freed with the window, as today.
-- [The crate's views break a shape] → `datum-arrow` checks every long
-  view against its buffers before it reads them, and refuses one that
-  does not hold. The bytes form checks the same before it gives a
-  pointer.
+- [The crate's views break a shape] → the bytes form and the clauses
+  take the crate's views as valid, as they took its offsets: the crate
+  builds each view from a length it checked against its page.
+  `datum-arrow`, which takes views from any caller, checks every long
+  view against its buffers before it reads it, and refuses one that does
+  not hold.
 - [A consumer keeps a pointer of the form past its batch] → the rule
   of `string-bytes` forbids it, as today; a page outlives no batch that
   holds it.

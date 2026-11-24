@@ -466,9 +466,8 @@ impl ReadPlan {
     /// wants the offsets of every slot to hold; views fewer than the
     /// column's slots, and a view whose buffer is past the buffers or
     /// whose bytes run past its buffer, of a slot asked that is not
-    /// `NULL`, or of a dictionary's value not `NULL` that such a slot
-    /// refers to, since a `NULL` slot may hold any view; and an index of
-    /// a dictionary outside it in a slot asked that is not `NULL`.
+    /// `NULL`, since a `NULL` slot may hold any view; and an index of a
+    /// dictionary outside it in a slot asked that is not `NULL`.
     ///
     /// A failure the plan names, with the slot of the first slot asked
     /// that fails; the slots asked before it have their representations
@@ -519,15 +518,21 @@ impl ReadPlan {
                 if let Some(range) = bytes_of(column) {
                     // Arrow's format wants the offsets of every slot,
                     // NULL or not, to hold; a NULL slot may hold any view.
-                    let nulls = match range {
-                        ByteRange::Views(..) => column.nulls,
-                        _ => None,
+                    let (nulls, message) = match range {
+                        ByteRange::Views(..) => (
+                            column.nulls,
+                            "a view of a slot asked whose buffer or bytes do not hold",
+                        ),
+                        _ => (
+                            None,
+                            "offsets of a slot asked that go back or past their bytes",
+                        ),
                     };
                     each_slot(asked, nulls, len, |slot| {
                         if range.slot(slot).is_some() {
                             Ok(())
                         } else {
-                            broken("offsets of a slot asked that go back or past their bytes")
+                            broken(message)
                         }
                     })?;
                 }
@@ -550,10 +555,8 @@ impl ReadPlan {
                 }
                 check_column(values, value)?;
                 let range = bytes_of(values);
-                let views = matches!(range, Some(ByteRange::Views(..)));
                 each_slot(asked, *nulls, *len, |slot| match keys.get(slot) {
                     Some(index) if index < values.len => match &range {
-                        Some(_) if views && values.nulls.is_some_and(|n| !n.get(index)) => Ok(()),
                         Some(range) if range.slot(index).is_none() => broken(
                             "offsets of a dictionary's value that go back or past their bytes",
                         ),

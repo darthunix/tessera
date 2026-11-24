@@ -1759,6 +1759,7 @@ fn every_arrow_type() -> Vec<DataType> {
     }
     let dictionaries: Vec<DataType> = plain
         .iter()
+        .filter(|value| !matches!(value, D::Utf8View | D::BinaryView))
         .map(|value| dictionary(D::UInt8, value.clone()))
         .collect();
     plain.extend(dictionaries);
@@ -1955,7 +1956,7 @@ proptest! {
             }
         }
         // Every pair the plan's table lists, by every option that applies.
-        prop_assert_eq!(accepted, 216);
+        prop_assert_eq!(accepted, 206);
         for pg in every_pg_type() {
             for server_utf8 in [true, false] {
                 let text = matches!(pg, PgType::Text | PgType::Varchar(_));
@@ -2054,6 +2055,11 @@ fn pairs_of_views() {
     assert_eq!(
         refusal(&DataType::Utf8View, PgType::Int4, OPTIONS),
         ErrorKind::TypeMismatch
+    );
+    let views = dictionary(DataType::Int32, DataType::BinaryView);
+    assert_eq!(
+        refusal(&views, PgType::Bytea, OPTIONS),
+        ErrorKind::NotSupported
     );
 }
 

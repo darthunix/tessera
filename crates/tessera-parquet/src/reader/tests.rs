@@ -835,6 +835,60 @@ fn windows_of_a_chunk_share_its_dictionary() {
     }
 }
 
+/// Windows read forward through a chunk of many pages hold the pages of
+/// their own reads alone, not every page read before them: windows as
+/// long as the reader's arrays, and shorter ones that leave rows of an
+/// array for the next window, each with the rows of the chunk.
+#[test]
+fn windows_forward_hold_the_pages_of_their_own_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("s.parquet");
+    let rows = 6000;
+    let strings: Vec<Option<Vec<u8>>> = (0..rows)
+        .map(|i| Some(format!("a value of row {i:0>20}").into_bytes()))
+        .collect();
+    let options = Options {
+        page_rows: Some(50),
+        ..Options::new(rows, false)
+    };
+    testing::write_with(
+        &path,
+        &[Column::new("s", testing::Values::Bytes(strings.clone()))],
+        options,
+    )
+    .unwrap();
+    let file = ParquetFile::open(&path).unwrap();
+    let column = map_column(&file, &request("s", oid::BYTEA)).unwrap();
+    let selection: Arc<[u64]> = vec![u64::MAX; mask_words(rows)].into();
+    for window in [200, 70] {
+        let mut reader = ColumnReader::new(&file, &column, 0, Arc::clone(&selection), 200).unwrap();
+        let mut start = 0;
+        while start < rows {
+            let len = window.min(rows - start);
+            let got = reader
+                .read(start, len, &bits(&selection, start, len))
+                .unwrap();
+            let views = got
+                .array
+                .as_any()
+                .downcast_ref::<arrow_array::BinaryViewArray>()
+                .unwrap();
+            // An array of 200 rows spans five pages of 50, a window at most
+            // two arrays; a page more where a page is cut between them.
+            assert!(
+                views.data_buffers().len() <= 12,
+                "window at {start}: {}",
+                views.data_buffers().len()
+            );
+            assert_eq!(
+                strings_of(&reader, &got).unwrap(),
+                strings[start..start + len]
+            );
+            start += len;
+        }
+    }
+}
+
 /// A chunk of strings whose writer fell back from its dictionary to plain
 /// pages is read as an array of views, so that no array of its plain
 /// pages gets a dictionary of its own and no value is copied: NULLs and
