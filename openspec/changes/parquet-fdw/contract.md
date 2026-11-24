@@ -18,21 +18,43 @@ and loaded as a module of another extension would be. The one crate of
 Tessera the reader links is `tessera-kernels`, for the pattern of LIKE
 alone, so that the source and `TessFilter` match a string by one rule,
 until that pattern moves to a crate meant for use outside Tessera.
-- **Checked by:** pending
+- **Checked by:**
+  `test/installed/Makefile::installcheck-parquet`, the module built
+  from copies against the installed headers and runtime library;
+  `.github/workflows/ci.yml::cargo tree --locked -p tessera-parquet`,
+  the crates of the workspace the reader depends on, `datum-arrow`, a
+  crate meant for use outside Tessera, and `tessera-kernels`, and its
+  one use of `tessera-kernels`, the pattern of LIKE
 
 ### The same rows by every path
 A query that ends without an error returns the same rows by the
 wrapper's rows, the source's batches and a parallel plan of either,
 since one reader and one making of values serve them all, so that the
 plan the planner chooses never changes a result.
-- **Checked by:** pending
+- **Checked by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Batch parents over the source`
+  and `test/sql/parquet.sql::-- spec: parquet-fdw/Every mapping of the list`,
+  the source's batches against the wrapper's rows and a heap table;
+  `test/sql/parquet.sql::-- spec: parquet-fdw/One file in parallel`,
+  a parallel plan of either against the serial one;
+  `.github/workflows/ci.yml::cargo run --release --locked -p
+  tessera-crosscheck`, random queries over a Parquet twin with Tessera
+  on against its heap table with Tessera off
 
 ### No text unchecked by its column's rule
 No value of a `text` or `varchar` column reaches a query without the
 check its column's read plan asks, whatever path made it, so that a
 string that is not UTF-8 never becomes a value of a column that
 promised to check it.
-- **Checked by:** pending
+- **Checked by:**
+  `test/sql/parquet.sql::-- spec: parquet-fdw/Bytes checked when they
+  become values` and
+  `test/sql/parquet.sql::-- spec: parquet-fdw/The length of a varchar`,
+  the wrapper's rows and the source's values;
+  `crates/tessera-parquet/src/c/tests.rs::the_cheaper_check_is_the_plan_s_row_by_row`,
+  the bytes form against each value's check;
+  `test/sql/parquet.sql::-- contract: parquet-fdw/text checked by
+  ANALYZE`, the sample of `ANALYZE`
 
 ### No Rust frame under an error
 Every call into the reader returns before PostgreSQL raises an error

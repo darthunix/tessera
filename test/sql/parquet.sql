@@ -420,7 +420,14 @@ SELECT sqlstate_of('SELECT s FROM t_vc_four') AS four_characters;
 SELECT sqlstate_of('EXPLAIN SELECT s FROM t_vc_trust') AS trusted_varchar;
 SELECT scans_of('SELECT s FROM t_vc_four WHERE k = 1') AS under_a_clause;
 SELECT s FROM t_vc_four WHERE k = 1;
+-- contract: parquet-fdw/text checked by ANALYZE
+-- ANALYZE makes the values of its sample by each column's check too: a
+-- string that is not UTF-8, in plain pages and through a dictionary, and
+-- one longer than its varchar fail it.
+SELECT t, sqlstate_of(format('ANALYZE %I', t)) AS analyzed
+FROM unnest(ARRAY['t_check_plain', 't_check_dict', 't_vc_four']) t ORDER BY t;
 
+-- spec: parquet-fdw/Options refused
 -- A column compressed by a codec other than Snappy is refused, its
 -- neighbours planned.
 SELECT parquet_test_write(current_setting('parquet.dir') || '/gzip.parquet',

@@ -795,6 +795,20 @@ SELECT s FROM t_vc_four WHERE k = 1;
  абв
 (1 row)
 
+-- contract: parquet-fdw/text checked by ANALYZE
+-- ANALYZE makes the values of its sample by each column's check too: a
+-- string that is not UTF-8, in plain pages and through a dictionary, and
+-- one longer than its varchar fail it.
+SELECT t, sqlstate_of(format('ANALYZE %I', t)) AS analyzed
+FROM unnest(ARRAY['t_check_plain', 't_check_dict', 't_vc_four']) t ORDER BY t;
+       t       | analyzed 
+---------------+----------
+ t_check_dict  | 22021
+ t_check_plain | 22021
+ t_vc_four     | 22001
+(3 rows)
+
+-- spec: parquet-fdw/Options refused
 -- A column compressed by a codec other than Snappy is refused, its
 -- neighbours planned.
 SELECT parquet_test_write(current_setting('parquet.dir') || '/gzip.parquet',
