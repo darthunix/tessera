@@ -110,10 +110,13 @@ is wanted; several wait for a measured case. `greengage-port` and
 
 - `projection-whole-row`: a whole row and `tableoid` computed by the
   runtime's projection, so that a batch node serves them
-- `parquet-reader-boundary`: the boundary between the Parquet node
-  and its reader, which the bytes form crossed beside the forecast
+- `parquet-reader-boundary`: the boundaries of the Parquet reader,
+  which the bytes form and the views of strings crossed beside the
+  forecast
 - `parquet-string-pages`: the pages of a string column decoded by the
   reader's own code, without the copy into an Arrow array
+- `datum-arrow-input`: the input of a column of `datum-arrow`, which
+  the views of strings changed beside the forecast
 - `agg-date-min-max`: `min` and `max` of `date` by kernels
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
@@ -253,9 +256,34 @@ forecast of `parquet-fdw`'s contract.
   boundary calls for a diagnosis.
 - **Known:** The forecast said "not the reader"; the pointers into the
   reader's arrays can only be taken in the reader's crate. The forecast
-  was updated with the departure.
+  was updated with the departure. A second departure, of the change
+  `parquet-string-views`, crossed the boundary between the clauses and
+  the reader's arrays: the forecast said "not the clauses", but the
+  clauses read the strings of the reader's arrays, so a new type of
+  array reaches them. The forecast now names them.
 - **Depends on:** `text-keys-by-bytes`.
 - **Capabilities:** parquet-fdw
+- **Size:** small.
+
+### datum-arrow-input
+
+The input of a column of `datum-arrow`, `Values`. Opened by the change
+`parquet-string-views`, whose views of strings changed it beside the
+forecast of `datum-arrow`'s contract.
+
+- **What:** Find whether the input of a column has worn: each layout of
+  Arrow's strings is a variant of its own, offsets of two widths, fixed
+  sizes and now views with their buffers, which the caller lends as a
+  slice of slices it must keep for the call. Simplify it where it has,
+  before the next layout or type adds to it.
+- **Why:** The rules of contracts: a change that touches a part its
+  forecast did not name opens an entry for simplifying that part,
+  naming the boundary it crossed.
+- **Known:** The forecast named "the sets of types and the plans'
+  rules; not the representations" for views of strings; it now names
+  the input of a column for a new layout.
+- **Depends on:** `parquet-string-views`.
+- **Capabilities:** datum-arrow
 - **Size:** small.
 
 ### parquet-string-pages
