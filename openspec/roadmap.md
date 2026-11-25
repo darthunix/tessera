@@ -60,33 +60,31 @@ ClickBench's query 4 on the branch of `parquet-fdw`, and the same day
 `agg-distinct-spill` (done) after them, a finding of stage 2 of
 ClickBench on that branch. On 2026-11-24 he took the views of strings in
 the Parquet reader out of turn, `parquet-string-views` (done), and a
-faster decompression of Snappy after them, `parquet-snappy`, after a
-profile of ClickBench's Q26 at the end of the sort by bytes:
+faster decompression of Snappy after them, `parquet-snappy` (done),
+after a profile of ClickBench's Q26 at the end of the sort by bytes:
 
-1. `parquet-snappy`: A faster decompression of the Snappy pages of a
-   Parquet file
-2. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+2. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-4. `explain-rows-per-loop`: The rows a node removed, per loop as the
+3. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-5. `join-pruning-cost`: The cost of a pruning join over the partitions
+4. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-7. `linux-x86-support`: Linux on x86-64 checked as the target platform
-8. `oltp-guard-bench`: OLTP guard family of benchmarks
-9. `runs-left-from-section-9`: Runs left to the maintainer from
+6. `linux-x86-support`: Linux on x86-64 checked as the target platform
+7. `oltp-guard-bench`: OLTP guard family of benchmarks
+8. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-13. `tpch-sf10`: TPC-H step 10: SF10
-14. `backward-scan-mark-restore`: Backward scan and mark/restore
-15. `pg-duckdb-comparison`: Comparison with pg_duckdb
+12. `tpch-sf10`: TPC-H step 10: SF10
+13. `backward-scan-mark-restore`: Backward scan and mark/restore
+14. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -121,6 +119,8 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `datum-arrow-input`: the input of a column of `datum-arrow`, which
   the views of strings changed beside the forecast
 - `agg-date-min-max`: `min` and `max` of `date` by kernels
+- `snappy-on-x86`: the decoder of Snappy counted on Linux x86-64, and
+  the shuffle of SSSE3 chosen while running
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
   maintainer took it out of `spill-crate` on 2026-11-14
@@ -289,28 +289,28 @@ forecast of `datum-arrow`'s contract.
 - **Capabilities:** datum-arrow
 - **Size:** small.
 
-### parquet-snappy
+### snappy-on-x86
 
-A faster decompression of the Snappy pages of a Parquet file. From the
-profiles of ClickBench's Q26 and Q28 at the end of the sort by bytes of
-`text-keys-by-bytes`, 2026-11-24.
+The reader's decoder of Snappy counted on Linux x86-64, the target, and
+the shuffle of SSSE3 chosen while running. From the close of
+`parquet-snappy`, 2026-11-25.
 
-- **What:** The reader decompresses each Snappy page through the
-  `parquet` crate's codec, the crate `snap` in Rust. Count other
-  implementations on the pages of `hits.parquet`, among them Google's
-  snappy in C++, which DuckDB carries with its decompression without
-  branches, and take the one that pays.
-- **Why:** The decompression is 34 per cent of a profile of Q26 and 39
-  of one of Q28, the largest part of either. After the views of
-  strings, Tessera runs ClickBench's queries in 1.93 times pg_duckdb's
-  cycles at one thread by their geometric mean.
-- **Known:** Whether the crate's reader takes a codec its caller gives
-  is to be found; `parquet-fdw`'s forecast names the reader's input of
-  pages for such a change. A crate outside the workspace comes in only
-  where it is clearly better and widely used.
-- **Depends on:** none.
+- **What:** Count the decoder against `snap`'s on x86-64 by `cargo
+  clickbench decoders`, and every query of ClickBench against the
+  commit before `parquet-snappy`; on a build of x86-64 that does not
+  target SSSE3, as Linux's default build does not, choose the shuffle of
+  a short pattern while running, as the kernels' module of AVX2
+  chooses, and count it.
+- **Why:** The decoder was counted on the M5 Pro alone: at 0.45 to 0.59
+  of `snap`'s cycles on the pages of strings, with about DuckDB's
+  branch misses. The cost of a misprediction differs on x86-64, and a
+  build without SSSE3 copies a short pattern by plain code. The count
+  of the queries covered eight of them, at the maintainer's word.
+- **Known:** The machine code of the fast loop on
+  `x86_64-unknown-linux-gnu` has no branch on an element's kind.
+- **Depends on:** `bench-in-four-cells` for counts on Linux.
 - **Capabilities:** parquet-fdw
-- **Size:** found by the comparison.
+- **Size:** a count and a few dozen lines.
 
 ### clickbench-entry
 

@@ -95,9 +95,10 @@ by its count of files and owned by the module for the backend's life.
   as the views a string's bytes are read through: the reader's windows,
   its C entries of the bytes form, and the clauses, which read the
   reader's arrays; not the node's batches or the wrapper.
-- **Another decompression of pages.** Such as another implementation
-  of Snappy: the reader's input of pages; not the windows, the clauses
-  or the node.
+- **Another decompression of pages.** Such as another codec, beside the
+  reader's decoder of Snappy: a module of the reader and its page
+  reader's choice by a chunk's compression; not the windows, the
+  clauses or the node.
 - **Another format of files, such as Arrow's own.** A reader of its own
   and its module, which take the node's pattern; not this module.
 - **Files in an object store.** The reader's input and the option of

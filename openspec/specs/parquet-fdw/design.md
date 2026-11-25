@@ -294,11 +294,12 @@ Refused:
 A [`ColumnReader`](../../../crates/tessera-parquet/src/reader.rs) reads
 one column of one group, for a selection of its rows, window by window.
 It builds the crate's record batch reader from the footer already read,
-for its group, its column and a selection of rows, under the crate's
-policy of selectors: a row not selected is skipped, a whole page without
-decompressing it where the skip covers the page. The crate's default
-policy may turn a selection of short runs into a mask, which decodes
-every row and filters after.
+for its group, its column and a selection of rows, over pages the
+reader itself gives (see "Pages and Snappy"). The crate reads the
+selection by its default policy: a selection whose runs average 32 rows
+or more by skipping and reading runs, a row not selected skipped, a
+whole page without decompressing it where the skip covers the page; one
+of shorter runs by a mask, which decodes every row and filters after.
 
 A column asked window after window, as a scan in full asks it, keeps one
 **forward reader** over the group with the group's selection, so that
@@ -357,6 +358,98 @@ Refused:
 - **A reader for each column and window.** Each reader starts at the
   chunk's start: over a scan in full it would decode the dictionary and
   decompress the page under each window's start once a window.
+
+### Pages and Snappy
+
+The `parquet` crate decompresses a page by the codec of its chunk's
+compression, and its builder of readers takes no other. The reader
+therefore builds each read through the crate's lower entry,
+`try_new_with_row_groups` of `ParquetRecordBatchReader`, over row
+groups and page readers of its
+[own](../../../crates/tessera-parquet/src/pages.rs): one group, and for
+each chunk the crate's page reader, over the chunk's metadata marked
+uncompressed when the chunk is compressed with Snappy, so that it hands
+the pages over as the file stores them. The reader decompresses each
+one, the levels of a page of the format's second version kept as they
+are, and gives it on. A chunk without compression keeps the crate's
+page reader. The dictionary page read for a column's keys takes the
+same way.
+
+```text
+  ParquetRecordBatchReader              the crate's
+    '- the reader's row groups          one group of rows
+         '- the reader's page reader    a Snappy chunk: each page
+              |                           decompressed by the reader
+              '- the crate's page       over the chunk's metadata
+                 reader                   marked uncompressed
+```
+
+The decoder, the module
+[`snappy`](../../../crates/tessera-parquet/src/snappy.rs), ports the
+decompression of a whole buffer of Google's snappy 1.2.1. A Snappy
+stream is its length as a varint, then elements: a literal, whose
+bytes follow its tag, or a copy of bytes written before, at an offset
+back. The crate `snap`, which the crate's codec calls, branches on each
+element's kind and mispredicts some forty branches a kilobyte on the
+pages of strings; Google's loop does not, and takes half the cycles.
+
+```text
+  input   [len][tag|data][tag|data] ...                [tag|data]
+           |   '--------- fast loop --------------''--careful--'
+           v
+  output  [.......................................][...........]
+
+  fast loop, two elements a turn, while 130 bytes of input remain
+  and 128 of output:
+    entry = TABLE[tag]          the length less the offset's bits
+    one comparison              literal or copy, no branch on the kind
+    the element before          copied now, as 32 or 64 bytes at once
+    this element                waits for the next one
+  careful loop: one element, every length and offset checked
+```
+
+- **The fast loop** takes literals of up to 60 bytes and copies of 1 and
+  2 bytes of offset. A table of 256 entries gives each tag's length less
+  the bits of its offset that the tag holds, so that one subtraction
+  both tells a literal from a copy whose offset is below its length and
+  gives the offset; a literal gets a false offset of 256. The next tag
+  and the source of a copy are chosen by conditional selects, and each
+  element's bytes are moved as 32 or 64 at once into room that later
+  elements overwrite. A copy of a pattern shorter than its length is
+  written by a shuffle of bytes, NEON's on AArch64 and SSSE3's on a
+  build that targets it, by plain copies otherwise. The position in the
+  input is a pointer, not an index: an index puts an addition on the
+  chain from one tag's load to the next, and cost a tenth of the
+  loop's cycles.
+- **The careful loop**, in safe Rust, decodes one element, every length
+  and offset checked before it is used: a long literal, a copy of 4
+  bytes of offset, a copy from before the output's start or of an
+  offset of 0, and the rest of a stream near its ends. A stream it
+  cannot decode is an error, and the read raises `XX001`.
+- **The bounds** of the fast loop are its guard: a turn starts only with
+  130 bytes of input from its tag on and 128 of output past what is
+  written and the copy that waits. Kani proves that a turn from any
+  state the guard admits stays inside its buffers and leaves a state it
+  can admit again; a debug assertion checks the guard's room before
+  every turn of every test; a fuzz target compares the decoder with
+  `snap`'s on any bytes under AddressSanitizer.
+
+Refused:
+
+- **A crate of the workspace in place of `snap`,** through Cargo's
+  patch of a dependency. Such a crate cannot depend on the real `snap`
+  of crates.io, two versions of one crate from one source, which Cargo
+  resolves for the whole workspace but refuses for the reader alone;
+  the real crate from another source, a copy or a dependency of git,
+  would serve, at the cost of keeping it.
+- **A fork of `snap`:** its 2 500 lines to format, lint, mutate and
+  keep in step, to change one file.
+- **Google's snappy in C++:** a compiler of C++ and its library in the
+  extension, outside Miri, Kani and the mutants, and slower when built
+  by GCC, Linux's compiler by default, by DuckDB's own note.
+- **The selection's policy of selectors kept:** the lower entry takes
+  none. A query whose source checks a clause reads by a mask where its
+  runs are short, with fewer instructions and about as many cycles.
 
 ### Values made into the C side's memory
 
@@ -745,6 +838,11 @@ place in the code where a test module can act.
   format's rules of trust
 - `crates/tessera-parquet/src/dictionary.rs`: a dictionary page read
   alone
+- `crates/tessera-parquet/src/pages.rs`: the reader's row groups and
+  page reader over the crate's lower entry
+- `crates/tessera-parquet/src/snappy.rs`: the decoder of Snappy, and
+  `crates/tessera-parquet/LICENSE-snappy`, the notice of the code it
+  ports
 - `crates/tessera-parquet/src/c.rs`: the C entry points, their statuses
   and their caught panics
 - `crates/tessera-parquet/src/bytes.rs`: the bytes form's places and
@@ -776,9 +874,20 @@ place in the code where a test module can act.
   comparisons. Miri runs the tests of the C entry points.
 - `crates/tessera-parquet/src/clause/proofs.rs`,
   `crates/tessera-parquet/src/bytes/proofs.rs`,
-  `crates/tessera-parquet/src/c/proofs.rs`: the proofs by Kani of the
-  bounds of `IN`, of a group ruled out by its statistics, and of the
-  bytes form's arithmetic.
+  `crates/tessera-parquet/src/c/proofs.rs`,
+  `crates/tessera-parquet/src/snappy/proofs.rs`: the proofs by Kani of
+  the bounds of `IN`, of a group ruled out by its statistics, of the
+  bytes form's arithmetic, and of a turn of the decoder's fast loop and
+  its copy of a pattern.
+- `crates/tessera-parquet/src/snappy/tests.rs`: the decoder against
+  `snap`'s, on every kind of element, streams cut and given wrong
+  lengths, and property tests, decoded between fences a stray write
+  would change; and the fast loop at each edge of its guard.
+- `crates/tessera-parquet/fuzz`: the fuzz target of the decoder against
+  `snap`'s.
+- `cargo clickbench decoders` (`tools/tessera-clickbench`): the
+  decoder's instructions, cycles, branches and misses on a file's
+  pages, against `snap`'s.
 - `tools/tessera-crosscheck`: random queries over a table of the
   wrapper whose files hold a heap table's rows, with Tessera on, decided
   against the heap table with Tessera off.
