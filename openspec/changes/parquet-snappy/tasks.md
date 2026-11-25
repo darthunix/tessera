@@ -42,7 +42,7 @@ changes the decoder carries in its message the mode's counts against
 
 ## 3. The decoder
 
-- [ ] 3.1 `crates/tessera-parquet/src/snappy.rs`: the careful loop of
+- [x] 3.1 `crates/tessera-parquet/src/snappy.rs`: the careful loop of
       the design, in safe Rust, decoding whole streams; `snap` a
       dependency of the tests alone; the notice of Google's snappy,
       whose code the module ports. Tests: every kind of element

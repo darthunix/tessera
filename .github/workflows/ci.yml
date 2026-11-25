@@ -535,6 +535,8 @@ jobs:
           # tests write: outputs the caller has not initialized among them.
           MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
             cargo miri test --locked -p tessera-parquet --lib c::tests
+          # The reader's decoder of Snappy, against snap's.
+          cargo miri test --locked -p tessera-parquet --lib snappy
 
   # Miri over relspill's tests on a target whose bytes run from the most
   # significant: the packing narrows values by their low bytes, which lie

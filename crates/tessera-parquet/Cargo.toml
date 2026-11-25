@@ -22,12 +22,13 @@ arrow-select.workspace = true
 bytes.workspace = true
 datum-arrow.workspace = true
 parquet.workspace = true
-snap.workspace = true
 # The pattern of LIKE of fixed parts and `%`, the kernels' own, so that
 # the source and the filter match a string by one rule.
 tessera-kernels.workspace = true
 
 [dev-dependencies]
+# The decoder the module snappy is checked against.
+snap.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 
