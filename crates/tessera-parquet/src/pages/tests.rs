@@ -8,7 +8,9 @@ use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::{
     ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelectionPolicy, RowSelector,
 };
-use parquet::file::properties::{WriterProperties, WriterVersion};
+use parquet::arrow::arrow_writer::ArrowWriterOptions;
+use parquet::file::metadata::{PageIndexPolicy, ParquetMetaDataReader};
+use parquet::file::properties::{EnabledStatistics, WriterProperties, WriterVersion};
 
 use super::*;
 use crate::file::ParquetFile;
@@ -88,11 +90,15 @@ fn pages_are_decompressed_as_the_crate_decompresses_them() {
                     .unwrap()
                     .map(Result::unwrap)
                     .collect();
-                let theirs: Vec<Page> =
-                    SerializedPageReader::new(Arc::new(shared.clone()), chunk, rows, None)
-                        .unwrap()
-                        .map(Result::unwrap)
-                        .collect();
+                let theirs: Vec<Page> = SerializedPageReader::new(
+                    Arc::new(File::open(&path).unwrap()),
+                    chunk,
+                    rows,
+                    None,
+                )
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
                 assert_eq!(mine.len(), theirs.len(), "{path:?}");
                 for (a, b) in mine.iter().zip(&theirs) {
                     assert_eq!(a.page_type(), b.page_type());
@@ -116,7 +122,8 @@ fn pages_are_decompressed_as_the_crate_decompresses_them() {
 }
 
 /// The rows of `selection` of each group by the reader's pages and by
-/// the crate's builder under `Selectors`, in batches of 128.
+/// the crate's builder under `Selectors` over a `File` of its own, in
+/// batches of 128.
 fn both(path: &Path, selection: impl Fn(usize) -> RowSelection) {
     let file = ParquetFile::open(path).unwrap();
     let shared = SharedFile::of(&file);
@@ -134,16 +141,18 @@ fn both(path: &Path, selection: impl Fn(usize) -> RowSelection) {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        let theirs: Vec<RecordBatch> =
-            ParquetRecordBatchReaderBuilder::new_with_metadata(shared.clone(), view.clone())
-                .with_row_groups(vec![group])
-                .with_row_selection(selection(rows))
-                .with_row_selection_policy(RowSelectionPolicy::Selectors)
-                .with_batch_size(128)
-                .build()
-                .unwrap()
-                .map(Result::unwrap)
-                .collect();
+        let theirs: Vec<RecordBatch> = ParquetRecordBatchReaderBuilder::new_with_metadata(
+            File::open(path).unwrap(),
+            view.clone(),
+        )
+        .with_row_groups(vec![group])
+        .with_row_selection(selection(rows))
+        .with_row_selection_policy(RowSelectionPolicy::Selectors)
+        .with_batch_size(128)
+        .build()
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
         assert_eq!(mine, theirs, "{path:?}, group {group}");
     }
 }
@@ -234,9 +243,15 @@ fn a_selection_of_short_runs_skips_the_pages_of_its_long_skip() {
 /// changed by one.
 fn with_a_wrong_size(path: &Path) {
     let file = ParquetFile::open(path).unwrap();
-    let chunk = file.metadata().row_group(0).column(1).clone();
+    let at = file.metadata().row_group(0).column(1).data_page_offset();
+    with_a_wrong_size_at(path, u64::try_from(at).unwrap());
+}
+
+/// The file at `path` with the size the header of the data page at `at`
+/// gives for the page decompressed changed by one.
+fn with_a_wrong_size_at(path: &Path, at: u64) {
     let mut bytes = std::fs::read(path).unwrap();
-    let mut at = usize::try_from(chunk.data_page_offset()).unwrap();
+    let mut at = usize::try_from(at).unwrap();
     // Field 1, the page's type, then field 2, its size, both i32.
     assert_eq!(bytes[at], 0x15);
     at += 2;
@@ -263,7 +278,7 @@ fn a_page_whose_header_gives_another_size_is_an_error() {
         let rows = file.metadata().row_group(0).num_rows() as usize;
         let mine: Result<Vec<Page>> = open(&shared, chunk, rows).unwrap().collect();
         let theirs: Result<Vec<Page>> =
-            SerializedPageReader::new(Arc::new(shared.clone()), chunk, rows, None)
+            SerializedPageReader::new(Arc::new(File::open(&path).unwrap()), chunk, rows, None)
                 .unwrap()
                 .collect();
         assert!(theirs.is_err(), "{version:?}");
@@ -347,4 +362,265 @@ fn a_group_of_few_rows_is_read_by_selectors_too() {
         "{}",
         DECOMPRESSED.with(Cell::get)
     );
+}
+
+/// A file of one group and one column of strings, plain, in pages of
+/// `per` rows, of the format's `version`; with `headers`, each page's
+/// least and greatest values, uncut, in its header.
+fn strings(
+    path: &Path,
+    values: Vec<String>,
+    per: usize,
+    compression: Compression,
+    version: WriterVersion,
+    headers: bool,
+) {
+    let batch =
+        RecordBatch::try_from_iter([("s", Arc::new(StringArray::from(values)) as ArrayRef)])
+            .unwrap();
+    let mut properties = WriterProperties::builder()
+        .set_compression(compression)
+        .set_writer_version(version)
+        .set_dictionary_enabled(false)
+        .set_data_page_row_count_limit(per)
+        .set_write_batch_size(per);
+    if headers {
+        properties = properties
+            .set_statistics_enabled(EnabledStatistics::Page)
+            .set_write_page_header_statistics(true)
+            .set_statistics_truncate_length(None);
+    }
+    let options = ArrowWriterOptions::new()
+        .with_properties(properties.build())
+        .with_skip_arrow_metadata(true);
+    let mut writer =
+        ArrowWriter::try_new_with_options(File::create(path).unwrap(), batch.schema(), options)
+            .unwrap();
+    writer.write(&batch).unwrap();
+    writer.close().unwrap();
+}
+
+/// The offsets and sizes, headers within, of the pages of the first
+/// chunk of the file at `path`, from its offset index.
+fn locations(path: &Path) -> Vec<(u64, u64)> {
+    let metadata = ParquetMetaDataReader::new()
+        .with_offset_index_policy(PageIndexPolicy::Required)
+        .parse_and_finish(&File::open(path).unwrap())
+        .unwrap();
+    metadata.offset_index().unwrap()[0][0]
+        .page_locations()
+        .iter()
+        .map(|p| {
+            (
+                u64::try_from(p.offset).unwrap(),
+                u64::try_from(p.compressed_page_size).unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// One step over a page reader.
+#[derive(Clone, Copy, Debug)]
+enum Step {
+    Read,
+    Peek,
+    Skip,
+}
+
+/// The pages `reader` gives over the steps of `pattern`, repeated over
+/// the chunk's `count` pages, or the first error. A skip past the last
+/// page is not taken: the crate's page reader, unpeeked, would read a
+/// header past the chunk, and its callers peek before they skip.
+fn walk(reader: &mut dyn PageReader, pattern: &[Step], count: usize) -> Result<Vec<Page>> {
+    let mut pages = Vec::new();
+    let mut passed = 0;
+    loop {
+        for step in pattern {
+            if passed == count {
+                assert!(reader.get_next_page()?.is_none());
+                return Ok(pages);
+            }
+            match step {
+                Step::Peek => assert!(reader.peek_next_page()?.is_some()),
+                Step::Skip => {
+                    reader.skip_next_page()?;
+                    passed += 1;
+                }
+                Step::Read => {
+                    pages.push(reader.get_next_page()?.unwrap());
+                    passed += 1;
+                }
+            }
+        }
+    }
+}
+
+const PATTERNS: [&[Step]; 5] = [
+    &[Step::Read],
+    &[Step::Peek, Step::Read],
+    &[Step::Peek, Step::Peek, Step::Read],
+    &[Step::Peek, Step::Skip, Step::Read],
+    &[Step::Skip, Step::Read],
+];
+
+/// The pages of the first chunk of the file at `path` over `pattern`,
+/// by the reader's page reader and by the crate's over a `File` of its
+/// own.
+fn walk_both(path: &Path, pattern: &[Step]) -> (Result<Vec<Page>>, Result<Vec<Page>>) {
+    let file = ParquetFile::open(path).unwrap();
+    let shared = SharedFile::of(&file);
+    let chunk = file.metadata().row_group(0).column(0);
+    let rows = file.metadata().row_group(0).num_rows() as usize;
+    let count = locations(path).len();
+    let mine = walk(&mut *open(&shared, chunk, rows).unwrap(), pattern, count);
+    let mut theirs =
+        SerializedPageReader::new(Arc::new(File::open(path).unwrap()), chunk, rows, None).unwrap();
+    (mine, walk(&mut theirs, pattern, count))
+}
+
+fn same(mine: &[Page], theirs: &[Page], what: &str) {
+    assert_eq!(mine.len(), theirs.len(), "{what}");
+    for (a, b) in mine.iter().zip(theirs) {
+        assert_eq!(a.page_type(), b.page_type(), "{what}");
+        assert_eq!(a.num_values(), b.num_values(), "{what}");
+        assert_eq!(a.buffer(), b.buffer(), "{what}");
+    }
+}
+
+#[test]
+fn a_page_s_header_is_read_from_the_file_by_one_read() {
+    let dir = tempfile::tempdir().unwrap();
+    for path in files(dir.path()) {
+        let file = ParquetFile::open(&path).unwrap();
+        let shared = SharedFile::of(&file);
+        for group in file.metadata().row_groups() {
+            let rows = group.num_rows() as usize;
+            for chunk in group.columns() {
+                let before = shared.reads();
+                let pages = open(&shared, chunk, rows)
+                    .unwrap()
+                    .map(Result::unwrap)
+                    .count() as u64;
+                // One read of the header and one of the data, a page.
+                assert_eq!(shared.reads() - before, 2 * pages, "{path:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn pages_whose_headers_pass_a_kilobyte_are_read_and_skipped_as_the_crate_reads_them() {
+    // Pages of four values: of some 600 bytes in the even pages, whose
+    // headers then hold some 1 200, and of 600 and 3 000 in the odd,
+    // whose headers hold some 3 600.
+    let values: Vec<String> = (0..64)
+        .map(|i| {
+            if (i / 4) % 2 == 0 || i % 2 == 0 {
+                format!("a{}{i}", "x".repeat(600))
+            } else {
+                format!("b{}{i}", "y".repeat(3_000))
+            }
+        })
+        .collect();
+    let dir = tempfile::tempdir().unwrap();
+    for compression in [Compression::SNAPPY, Compression::UNCOMPRESSED] {
+        for version in [WriterVersion::PARQUET_1_0, WriterVersion::PARQUET_2_0] {
+            let path = dir
+                .path()
+                .join(format!("long-{compression:?}-{version:?}.parquet"));
+            strings(&path, values.clone(), 4, compression, version, true);
+            let what = format!("{compression:?}, {version:?}");
+            let (mine, theirs) = walk_both(&path, &[Step::Read]);
+            let theirs = theirs.unwrap();
+            same(&mine.unwrap(), &theirs, &what);
+            assert_eq!(theirs.len(), 16, "{what}");
+            if compression == Compression::UNCOMPRESSED {
+                // A page's size in the index holds its header; its
+                // data, stored as it is, is the page's bytes.
+                for ((_, size), page) in locations(&path).iter().zip(&theirs) {
+                    let header = size - page.buffer().len() as u64;
+                    assert!(header > 1_024, "{what}: a header of {header} bytes");
+                }
+            }
+            for pattern in PATTERNS {
+                let (mine, theirs) = walk_both(&path, pattern);
+                same(
+                    &mine.unwrap(),
+                    &theirs.unwrap(),
+                    &format!("{what}, {pattern:?}"),
+                );
+            }
+        }
+    }
+}
+
+/// A Snappy file whose 12 pages of 20 strings each hold values of a
+/// length of their own, so that no two decompress to one size.
+fn sizes(dir: &Path, version: WriterVersion) -> PathBuf {
+    let values: Vec<String> = (0..240)
+        .map(|i| format!("{}{i:03}", "v".repeat(8 + 5 * (i / 20))))
+        .collect();
+    let path = dir.join(format!("sizes-{version:?}.parquet"));
+    strings(&path, values, 20, Compression::SNAPPY, version, false);
+    path
+}
+
+#[test]
+fn a_page_s_size_is_checked_after_peeks_and_skips() {
+    let dir = tempfile::tempdir().unwrap();
+    for version in [WriterVersion::PARQUET_1_0, WriterVersion::PARQUET_2_0] {
+        let path = sizes(dir.path(), version);
+        for pattern in PATTERNS {
+            let what = format!("{version:?}, {pattern:?}");
+            let (mine, theirs) = walk_both(&path, pattern);
+            same(&mine.unwrap(), &theirs.unwrap(), &what);
+        }
+        // Page 3, which every pattern reads, with a wrong size.
+        let at = locations(&path)[3].0;
+        with_a_wrong_size_at(&path, at);
+        for pattern in PATTERNS {
+            let what = format!("{version:?}, {pattern:?}");
+            let (mine, theirs) = walk_both(&path, pattern);
+            assert!(theirs.is_err(), "{what}");
+            let mine = mine.unwrap_err().to_string();
+            assert!(mine.contains("where its header says"), "{what}: {mine}");
+        }
+    }
+}
+
+#[test]
+fn the_last_page_of_a_file_reads_and_a_cut_file_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tail.parquet");
+    let values = (0..3).map(|i| format!("v{i}")).collect();
+    strings(
+        &path,
+        values,
+        3,
+        Compression::SNAPPY,
+        WriterVersion::PARQUET_1_0,
+        false,
+    );
+    let (at, size) = locations(&path)[0];
+    let len = std::fs::metadata(&path).unwrap().len();
+    // The buffer's fill at the page's header ends at the file's end.
+    assert!(len - at < 1_024, "{} bytes after the header", len - at);
+    let (mine, theirs) = walk_both(&path, &[Step::Read]);
+    same(&mine.unwrap(), &theirs.unwrap(), "whole");
+    // Cut in the page's header, then in its data, once the file is open.
+    for cut in [at + 3, at + size - 1] {
+        let copy = dir.path().join(format!("cut-{cut}.parquet"));
+        std::fs::copy(&path, &copy).unwrap();
+        let file = ParquetFile::open(&copy).unwrap();
+        File::options()
+            .write(true)
+            .open(&copy)
+            .unwrap()
+            .set_len(cut)
+            .unwrap();
+        let shared = SharedFile::of(&file);
+        let chunk = file.metadata().row_group(0).column(0);
+        let mine: Result<Vec<Page>> = open(&shared, chunk, 3).unwrap().collect();
+        assert!(mine.is_err(), "cut at {cut}");
+    }
 }

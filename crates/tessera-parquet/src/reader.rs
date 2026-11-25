@@ -12,7 +12,7 @@
 //! leaves the forward one as it was.
 
 use std::fs::File;
-use std::io::{self, Read};
+use std::io::{self, BufReader, Read};
 use std::os::unix::fs::FileExt;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,9 +44,10 @@ use crate::file::ParquetFile;
 /// counts the reads that reached the file, so that a reader checks the
 /// file after the windows whose pages it read, not after those it took
 /// from pages read before. A copy made by [`SharedFile::capturing`] also
-/// keeps the bytes read through its readers from an offset, which the
-/// `parquet` crate's page reader reads a page's header by and nothing
-/// else: the reader's own page reader checks a page's sizes by them.
+/// keeps the first [`KEPT`] bytes read through each of its readers from
+/// an offset, which the `parquet` crate's page reader reads a page's
+/// header by and nothing else: the reader's own page reader checks a
+/// page's size by them.
 #[derive(Clone, Debug)]
 pub(crate) struct SharedFile {
     file: Arc<File>,
@@ -67,8 +68,9 @@ impl SharedFile {
         }
     }
 
-    /// A copy of the file that keeps the bytes its readers from an offset
-    /// read, until [`SharedFile::take_captured`] takes them.
+    /// A copy of the file that keeps the first [`KEPT`] bytes each of its
+    /// readers from an offset reads, until [`SharedFile::take_captured`]
+    /// takes them.
     pub(crate) fn capturing(&self) -> Self {
         SharedFile {
             captured: Some(Arc::new(Mutex::new(Vec::new()))),
@@ -76,7 +78,7 @@ impl SharedFile {
         }
     }
 
-    /// The bytes read through this copy's readers from an offset since the
+    /// The bytes kept from this copy's readers from an offset since the
     /// last call; none for a copy that does not keep them.
     pub(crate) fn take_captured(&self) -> Vec<u8> {
         self.captured
@@ -119,9 +121,20 @@ impl Length for SharedFile {
     }
 }
 
+/// The bytes of a page's header a capturing copy keeps: the most the
+/// page reader parses of its first fields.
+pub(crate) const KEPT: u64 = 12;
+
+/// The buffer of a reader from an offset: one read of the file for a
+/// header of up to a kilobyte, which the crate's Thrift reader reads
+/// mostly a byte at a time, and little of the page's data after it,
+/// which the crate reads again by `get_bytes`.
+const BUFFER: usize = 1024;
+
 /// A reader of the shared file from an offset forward.
 pub(crate) struct At {
     file: Arc<File>,
+    start: u64,
     position: u64,
     failed: Arc<Mutex<Option<(io::ErrorKind, String)>>>,
     reads: Arc<AtomicU64>,
@@ -135,27 +148,35 @@ impl Read for At {
             .file
             .read_at(buf, self.position)
             .inspect_err(|e| SharedFile::note(&self.failed, e))?;
+        let kept = (self.start + KEPT).saturating_sub(self.position);
         self.position += read as u64;
-        if let Some(captured) = &self.captured
+        if kept > 0
+            && let Some(captured) = &self.captured
             && let Ok(mut captured) = captured.lock()
         {
-            captured.extend_from_slice(&buf[..read]);
+            captured.extend_from_slice(&buf[..read.min(kept as usize)]);
         }
         Ok(read)
     }
 }
 
 impl ChunkReader for SharedFile {
-    type T = At;
+    type T = BufReader<At>;
 
-    fn get_read(&self, start: u64) -> parquet::errors::Result<At> {
-        Ok(At {
-            file: Arc::clone(&self.file),
-            position: start,
-            failed: Arc::clone(&self.failed),
-            reads: Arc::clone(&self.reads),
-            captured: self.captured.clone(),
-        })
+    /// A buffered reader from `start`: it gives each read no more bytes
+    /// than it asks, so the crate's count of a header's bytes holds.
+    fn get_read(&self, start: u64) -> parquet::errors::Result<BufReader<At>> {
+        Ok(BufReader::with_capacity(
+            BUFFER,
+            At {
+                file: Arc::clone(&self.file),
+                start,
+                position: start,
+                failed: Arc::clone(&self.failed),
+                reads: Arc::clone(&self.reads),
+                captured: self.captured.clone(),
+            },
+        ))
     }
 
     fn get_bytes(&self, start: u64, length: usize) -> parquet::errors::Result<Bytes> {

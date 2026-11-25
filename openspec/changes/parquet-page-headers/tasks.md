@@ -19,7 +19,7 @@ runs 19 and 18.
 
 ## 2. The headers through a buffer
 
-- [ ] 2.1 `crates/tessera-parquet/src/reader.rs`: `get_read` gives a
+- [x] 2.1 `crates/tessera-parquet/src/reader.rs`: `get_read` gives a
       `BufReader` of 1 KiB over `At`; `At` keeps the bytes it reads
       within 12 bytes of its start only. The comments that say what the
       kept bytes are follow: `SharedFile`'s, `capturing`'s and
