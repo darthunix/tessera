@@ -689,14 +689,14 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 			uint64		all = max_rows == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << max_rows) - 1;
 			uint64		rows_bits = mask & all;
 			TessRowMask rows = {max_rows, &rows_bits};
-			TessBytesColumn again;
+			TessBytesColumn rescanned;
 
-			if (!tess_batch_bytes_column(batch, column, &rows, &again))
+			if (!tess_batch_bytes_column(batch, column, &rows, &rescanned))
 				continue;
 			for (int row = 0; row < max_rows; row++)
 				if (rows_bits >> row & 1)
 					put_bytes(rsinfo, TupleDescAttr(desc, column), base, row, "rescanned",
-							  &again);
+							  &rescanned);
 		}
 		tess_input_finish(input);
 	}

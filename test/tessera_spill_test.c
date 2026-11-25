@@ -901,11 +901,11 @@ tessera_test_spill_error(PG_FUNCTION_ARGS)
 				TessColumnsReader columns;
 				static const bool byvals[4] = {true, true, true, true};
 				static const int16 typlens[4] = {8, 8, 8, 8};
-				void	   *chunk = columns_chunk(3, 4, &len);
+				void	   *columns_bytes = columns_chunk(3, 4, &len);
 				int			words = which == 30 ? 4 : 3;
 
 				tess_spill_write(spill, 0, TESS_SPILL_VALUES, 0, body, 0, NULL);
-				tess_spill_write(spill, 0, TESS_SPILL_COLUMNS, 0, chunk, len, NULL);
+				tess_spill_write(spill, 0, TESS_SPILL_COLUMNS, 0, columns_bytes, len, NULL);
 				tess_spill_finish(spill);
 				tess_columns_reader_init(&columns, &kernels, CurrentMemoryContext, words, words,
 										 byvals, typlens);
