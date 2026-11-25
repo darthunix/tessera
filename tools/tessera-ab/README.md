@@ -127,7 +127,9 @@ cargo ab measure --base main --family anyagg --counters
 (`METRIC=cycles`): they see stalls on memory and mispredicted branches,
 which the instructions do not, and they move with the machine and the
 code's place as a time does, so the control's move tells how settled
-they are.
+they are. Which count decides is the rule of
+[docs/measuring.md](../../docs/measuring.md): the cycles, with the
+instructions beside them, a run of each.
 
 On Linux the count of a serial case repeats to the instruction, so one
 round a side and three readings a case are enough (`--rounds 1` and

@@ -51,10 +51,12 @@ test and a line in its README.
   [bench/pg/README.md](../bench/pg/README.md).
 - **Did a change make queries slower?** `cargo ab measure --base REF`,
   described in [tools/tessera-ab](../tools/tessera-ab/README.md).
-- **Did a change make queries do more work?** The same with
-  `--counters`: the instructions of every case, which
-  [pg_pmu](https://github.com/darthunix/pg_pmu) counts, in one round a
-  side and three readings a case.
+- **Did a change make queries cost the processor more?** The same with
+  `--counters --cycles`: the cycles of every case, which
+  [pg_pmu](https://github.com/darthunix/pg_pmu) counts, three readings
+  a case and the base and the change in turns, `--rounds 2` or more.
+  Their instructions, the second count, are a run of their own:
+  `--counters` without `--cycles`, one round a side.
 - **Does a cut of a file only move lines?** `cargo ab moved`, described
   in the same place.
 - **Did the machine code of a loop change?**
@@ -81,31 +83,40 @@ there. CI checks correctness, not speed.
 
 ## Counts or times
 
-A count of instructions repeats where a time wanders, so an A/B by
-counts takes seconds instead of minutes. But it shows whether the work
-grew, not whether it got slower, and the same saving pays differently
-on different processors. One change of the deform of tuples cut the
-instructions of TPC-H Q12 by 19 %. Its time fell by 16–20 % on an
-Apple M5 Pro, and by 2.5 % on a Neoverse-N2. So the choice follows
-what a change touches, not the family:
+A count of instructions repeats where a time wanders, so an A/B by them
+takes seconds instead of minutes. Cycles do not repeat so: they move
+with the machine and the code's place as a time does, and need an idle
+machine as a time does. Yet cycles decide a count, by the maintainer's
+rule. An instruction may stall: on a miss of a cache, a mispredicted
+branch or a call into the system. So the same instructions can take more
+cycles, and fewer instructions can take as many, above all where the
+work waits on memory or on input and output. Instructions come second.
+They show whether the work grew, not whether it got slower. The same
+saving pays differently on different processors: one change of the
+deform of tuples cut the instructions of TPC-H Q12 by 19 %; its time
+fell by 16–20 % on an Apple M5 Pro, and by 2.5 % on a Neoverse-N2. So
+the choice follows what a change touches, not the family:
 
-- **Counts** (`cargo ab measure --counters`): the kernels, the
-  expressions, the deform of tuples, the code inside a node, while the
-  plan stays the same.
+- **Counts** (`cargo ab measure --counters --cycles`, `cargo
+  clickbench run --counters`): the kernels, the expressions, the deform
+  of tuples, the code inside a node, the readers of sources, while the
+  plan stays the same. The cycles decide. The instructions stand beside
+  them: `cargo clickbench` counts both in one run, `cargo ab` in a
+  second run without `--cycles`. Count the base and the change in
+  turns, `--rounds 2` or more, where the cycles' readings spread past a
+  percent.
 - **Counts and disk**: a spill's format, encoding or partitioning. The
   report's `disk` column gives the volume a case writes beside its
-  instructions.
-- **Cycles** (`cargo ab measure --counters --cycles`): what pg_pmu
-  counts of the processor's time, with the stalls a count of
-  instructions misses, where a time is wanted without its other noise;
-  they move with the machine as a time does.
-- **Times**:
+  counts.
+- **Times**, with the cycles counted first where pg_pmu can count
+  them; the cycles see the stalls these changes trade, and a time
+  stands for the claim of speed:
   - the I/O of a spill: the size and number of its writes, the reads
     ahead, the number of its files;
   - the layout of a hash table, prefetching, and any other change that
     trades instructions for memory;
-  - SIMD and branches: a count sees how many instructions there are,
-    not how wide they are or how often a branch is mispredicted;
+  - SIMD and branches: a count of instructions sees how many there
+    are, not how wide they are or how often a branch is mispredicted;
   - costs, gates and planning, which change plans. The report marks a
     case `plan differs` when its nodes, their relations, indexes, join
     types or workers changed, but not every change of a plan, such as
@@ -136,11 +147,18 @@ asking for one:
 
 ## Reading a result
 
-- **Counters.** Instructions decide: more than 1 % is a failure. Cycles
-  warn at 3 % and fail at 10 % on operations of 500 cycles or more.
-  Summarize a report as how many cases have fewer, the same and more
-  instructions, with the median change, before judging it: a net gain
-  still prints failures.
+- **Counters.** Cycles decide. A change of cycles is read against the
+  spread of its readings and the control's move, and a change's own
+  measurement plan sets its threshold. Instructions stand beside them,
+  the steadier check: a change that moves them past 1 % while the
+  cycles stay is explained, not taken for a gain or a loss. The tools
+  flag by thresholds of their own. `tessera-bench` flags instructions
+  past 1 %, and cycles that warn at 3 % and fail at 10 % on operations
+  of 500 cycles or more. `cargo ab --counters` flags the count it takes
+  past 1 % beyond the control (`--threshold`). Read their verdicts by
+  these rules. Summarize a report as how many cases have fewer, the
+  same and more cycles, with the median change, before judging it: a
+  net gain still prints failures.
 - **A branch is judged on inputs the predictor has not learned.** The
   predictor learns any input it meets call after call, not only regular
   patterns. A branch against a choice made as data is judged on the
@@ -149,14 +167,17 @@ asking for one:
   The [benchmarks' README](../crates/tessera-capi/benches/README.md)
   lists both kinds and where the inputs of a ring lie.
 - **Counts of a family.** `cargo ab measure --counters` flags a case
-  whose instructions move past 1 %. On Linux a serial case repeats to
-  the instruction once its tables are in the buffers, and a case with
+  whose count moves past 1 % beyond the control's move, cycles or
+  instructions, whichever the run counts. On Linux a serial case repeats
+  to the instruction once its tables are in the buffers, and a case with
   parallel workers within a fraction of a percent; macOS counts the
   kernel as well, so there count serial cases on a server that has
-  settled since its restart. Which changes counts can judge is said
-  under "Counts or times". They never compare Tessera with the core:
-  EXPLAIN ANALYZE counts the rows of every node, which the core pays a
-  row and a batch node a batch.
+  settled since its restart. Cycles do not repeat so: their spread and
+  the control's move say how settled a run is, and the verdict is
+  theirs, as "Counters" above says. Which changes counts can judge is
+  said under "Counts or times". They never compare Tessera with the
+  core: EXPLAIN ANALYZE counts the rows of every node, which the core
+  pays a row and a batch node a batch.
 - **More cycles with fewer instructions** is first compared with a run
   of three repeats, then with the address of the loop's head. A function
   moved by 16 bytes against a 64-byte line has cost 5 %: build both
