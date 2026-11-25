@@ -1651,7 +1651,8 @@ interfaces it touched.
   AddressSanitizer: `damaged` builds a table from the fuzzer's bytes,
   damages it where they choose and runs the calls they choose;
   `arguments` gives the calls of a valid table any references, chunks,
-  places, partitions and steps. CI runs each for a minute
+  places, partitions and steps. CI runs each for a minute on a pull
+  request and for twenty minutes every night
   (`.github/workflows/fuzz.yml`), and for longer when started by hand.
 - `crates/tessera-capi/tests/table.rs` and `test/sql/table.sql`: the
   calls through Tessera's C API.

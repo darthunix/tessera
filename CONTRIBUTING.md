@@ -102,6 +102,10 @@ and more ([ci.yml](.github/workflows/ci.yml)), the fuzz targets of
 pull request's changed lines ([mutants.yml](.github/workflows/mutants.yml)):
 only Rust tests judge a mutant, so an entry point needs a Rust test of
 its own.
+Every night CI also runs the random queries with a new seed, under the
+sanitizers too, the suites against PostgreSQL's master of that night,
+and each fuzz target for twenty minutes
+([nightly.yml](.github/workflows/nightly.yml)).
 
 Before a result is copied into `test/expected/`, read its diff: every
 `ERROR`, every removed line. The expected file is the oracle.

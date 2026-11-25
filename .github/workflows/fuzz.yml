@@ -7,11 +7,12 @@
 # numbers. That of tessera-parquet: any bytes, and streams of snap's
 # encoder with a byte changed, into the reader's decoder of Snappy
 # against snap's. A pull request that changes one of the crates runs
-# each target of all three for a minute; a run by hand
-# (workflow_dispatch) for as long as it is given, an hour by default,
-# before a release of a crate. An input that fails is kept as an
-# artifact, and becomes a case of the crate's matrix of damage or of a
-# machine's tests.
+# each target of all three for a minute; the nightly checks
+# (nightly.yml) for twenty minutes; a run by hand (workflow_dispatch) for
+# as long as it is given, an hour by default, before a release of a
+# crate. Each run starts from the corpus the runs before it grew, kept
+# in the cache. An input that fails is kept as an artifact, and becomes
+# a case of the crate's matrix of damage or of a machine's tests.
 name: Fuzz
 
 on:
@@ -26,6 +27,12 @@ on:
       seconds:
         description: Seconds each target runs
         default: "3600"
+  workflow_call:
+    inputs:
+      seconds:
+        description: Seconds each target runs
+        type: string
+        required: true
 
 concurrency:
   group: fuzz-${{ github.ref }}
@@ -61,6 +68,13 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
+      # The newest corpus of the crate's targets, saved again with what
+      # this run adds.
+      - uses: actions/cache@v4
+        with:
+          path: crates/${{ matrix.crate }}/fuzz/corpus
+          key: fuzz-corpus-${{ matrix.crate }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.crate }}-
       - name: Each target
         working-directory: crates/${{ matrix.crate }}
         # The cargo-fuzz installed is built for musl and builds for it

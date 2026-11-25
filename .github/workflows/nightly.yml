@@ -1,0 +1,170 @@
+# Checks that run every night on main, at 02:17 in Bangkok, the
+# maintainer's night, beside CI's on every push, which after its first
+# green run finds nothing new in the code no pull request changes. The
+# random queries with Tessera on and off: the seeds of seeds.txt, then
+# 20,000 queries of a seed from Bangkok's date, so that each night draws
+# new ones, over a build of the pinned master and under AddressSanitizer
+# and UndefinedBehaviorSanitizer. A disagreement or a crash fails the
+# run; its shrunk case is the artifact, and the date repeats it. The
+# suites against PostgreSQL's master as it is that night, beside the
+# revision postgres.env pins, so that a change of the core's interfaces
+# is seen before the pin moves. Each fuzz target for twenty minutes,
+# from the corpus of the nights before (fuzz.yml). A pull request that
+# changes this file runs it with 3000 queries and without the fuzzing,
+# which fuzz.yml's own pull requests run.
+name: Nightly
+
+on:
+  schedule:
+    # 02:17 in Bangkok (UTC+7): the schedule takes UTC alone.
+    - cron: "17 19 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/nightly.yml"
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  QUERIES: ${{ github.event_name == 'pull_request' && '3000' || '20000' }}
+
+jobs:
+  postgres:
+    name: PostgreSQL ${{ matrix.postgres }} master (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        postgres: [pinned, latest]
+    env:
+      # The temporary instance's locale (test/Makefile).
+      LANG: C.UTF-8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Revision
+        id: revision
+        run: |
+          if [ "${{ matrix.postgres }}" = latest ]; then
+            revision=$(git ls-remote https://github.com/postgres/postgres.git refs/heads/master | cut -f1)
+          else
+            . .github/postgres.env
+            revision=$POSTGRES_MASTER
+          fi
+          echo "PostgreSQL master at $revision"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "PG_CONFIG=$HOME/postgres/bin/pg_config" >> "$GITHUB_ENV"
+      - name: Build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bison flex libicu-dev libreadline-dev zlib1g-dev pkg-config
+      # The pinned build is CI's own; a build of each night's master would
+      # only push other caches out.
+      - uses: actions/cache@v4
+        if: matrix.postgres == 'pinned'
+        id: postgres
+        with:
+          path: ~/postgres
+          key: postgres-${{ runner.os }}-${{ runner.arch }}-${{ steps.revision.outputs.revision }}-${{ hashFiles('.github/scripts/build-postgres.sh') }}
+      - name: Build PostgreSQL
+        if: steps.postgres.outputs.cache-hit != 'true'
+        run: .github/scripts/build-postgres.sh ${{ steps.revision.outputs.revision }} "$HOME/postgres"
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      # As in CI: warnings are errors, so that a warning the core's new
+      # headers bring is seen too.
+      - name: Build and install Tessera
+        run: |
+          make COPT=-Werror
+          make install COPT=-Werror
+      - name: Regression suites and the installed set
+        run: make installcheck COPT=-Werror EXTRA_REGRESS_OPTS="--temp-instance=$RUNNER_TEMP/cluster"
+      - name: Random queries against the core
+        if: matrix.postgres == 'pinned'
+        # The Rust cache brings target/ back, with what a run left there.
+        run: |
+          rm -rf target/bench-runs
+          cargo run --release --locked -p tessera-crosscheck -- --seed "$(TZ=Asia/Bangkok date +%Y%m%d)" --queries "$QUERIES" --time-limit 1800 --no-install
+      - name: The random queries' findings
+        if: always() && matrix.postgres == 'pinned'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosscheck-findings
+          path: |
+            target/bench-runs/crosscheck
+            target/bench-runs/crosscheck-server.log
+          if-no-files-found: ignore
+      - name: Differences and the server's log
+        if: failure()
+        run: |
+          cat test/regression.diffs 2>/dev/null || true
+          # A failed assertion or a signal, with the trace that follows it.
+          grep -n -A30 -E 'TRAP:|terminated by signal' test/log/postmaster.log 2>/dev/null | head -300 || true
+          tail -n 50 test/log/postmaster.log 2>/dev/null || true
+
+  sanitizers:
+    name: Random queries under ASan and UBSan (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      LANG: C.UTF-8
+      # As in CI's job of the sanitizers (ci.yml), where the reasons are.
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:print_stacktrace=1:detect_stack_use_after_return=0:detect_odr_violation=0:strict_string_checks=1
+      UBSAN_OPTIONS: print_stacktrace=1:abort_on_error=1:halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Revision
+        id: revision
+        run: |
+          . .github/postgres.env
+          echo "revision=$POSTGRES_MASTER" >> "$GITHUB_OUTPUT"
+          echo "PG_CONFIG=$HOME/postgres/bin/pg_config" >> "$GITHUB_ENV"
+      - name: Build tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bison flex libicu-dev libreadline-dev zlib1g-dev pkg-config
+      - name: Address space for ASan
+        run: sudo sysctl vm.mmap_rnd_bits=28
+      - uses: actions/cache@v4
+        id: postgres
+        with:
+          path: ~/postgres
+          key: postgres-asan-${{ runner.os }}-${{ runner.arch }}-${{ steps.revision.outputs.revision }}-${{ hashFiles('.github/scripts/build-postgres.sh') }}
+      - name: Build PostgreSQL with the sanitizers
+        if: steps.postgres.outputs.cache-hit != 'true'
+        run: .github/scripts/build-postgres.sh ${{ steps.revision.outputs.revision }} "$HOME/postgres" asan
+      - name: Toolchain of rust-toolchain.toml
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Build and install Tessera
+        run: |
+          make
+          make install
+      - name: Random queries against the core
+        run: |
+          rm -rf target/bench-runs
+          cargo run --release --locked -p tessera-crosscheck -- --seed "$(TZ=Asia/Bangkok date +%Y%m%d)" --queries "$QUERIES" --time-limit 3600 --no-install
+      # The first report and the crash it caused, before the noise of the
+      # queries that ran into the recovery after it.
+      - name: The sanitizers' reports
+        if: failure()
+        run: |
+          grep -n -B2 -A60 -E 'AddressSanitizer|runtime error:|TRAP:|terminated by signal' target/bench-runs/crosscheck-server.log 2>/dev/null | head -300 || true
+      - name: The random queries' findings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crosscheck-findings-sanitizers
+          path: |
+            target/bench-runs/crosscheck
+            target/bench-runs/crosscheck-server.log
+          if-no-files-found: ignore
+
+  fuzz:
+    if: github.event_name != 'pull_request'
+    uses: ./.github/workflows/fuzz.yml
+    with:
+      seconds: "1200"
