@@ -223,6 +223,22 @@ model test or a proof reaches it; most C calls PostgreSQL and stays.
 - `float-aggregate-transitions`: The float transitions of the generic
   aggregates in Rust
 
+From a reading on 2026-11-25 of how two other projects check their
+code: pgrust, PostgreSQL rewritten in Rust, and S3R, the object store
+of Picodata, in a talk of its author. Both try their checks on known
+faults, and S3R makes each race a case with a name.
+
+- `kernel-proofs-against-c`: Kani proofs of the kernels against
+  PostgreSQL's own C
+- `checks-with-teeth`: The random queries and the suites tried on
+  planted faults
+- `phase-injection-points`: Injection points at the boundaries of the
+  parallel phases, held by tests
+- `shared-state-in-designs`: The four answers of a design that changes
+  state shared by processes
+- `invariant-holders-review`: A review that names the code keeping
+  each requirement
+
 ## Entries
 
 ### text-keys-by-bytes
@@ -2368,13 +2384,18 @@ takes the "Not placed" item on subqueries in FROM (plan 9.8, lines
   cursor fetched backward. A strict mode for kernels fixes the order of
   evaluation, compares the SQLSTATE, and compares the order of rows
   where it is total. The runner records which node and path ran
-  (native or Datum, a spill, workers), and keeps the SQL of a finding,
-  not only its seed.
+  (native or Datum, a spill, workers), fails a run in which a path of
+  its list never ran, and keeps the SQL of a finding, not only its
+  seed.
 - **Why:** It draws none of these today. The calendar holds the most
   surviving mutants, and the time-zone caches of `kernels/date.c` are
   judged only by hand-written suites. Faults of rescans (f26ce59d) and
   of the direction of a scan (2f3c00f3, 8948fbfc) were found by other
-  means.
+  means. A run that reached no spill says nothing of spills, yet passes:
+  the runner counts only the queries whose plan has a node of Tessera.
+  S3R counts a run in which no operation met a fault as failed, and
+  pgrust makes the parts of the grammar a run never drew visible
+  (both read on 2026-11-25).
 - **Known:** The broad mode accepts two different errors on purpose;
   `kernel-errors-on-demand` is why.
 - **Depends on:** nothing.
@@ -2512,6 +2533,140 @@ close of `float-kernels-in-rust`, 2026-11-01.
 - **Depends on:** nothing.
 - **Capabilities:** aggregate, batch-functions
 - **Size:** medium: two or three pull requests.
+
+### kernel-proofs-against-c
+
+Kani proofs of the kernels against PostgreSQL's own C. From a reading
+of pgrust on 2026-11-25.
+
+- **What:** A proof gives the same symbolic inputs to a function of a
+  kernel and to the function of PostgreSQL it ports, and proves their
+  outputs equal for every input within its bounds. The C is copied
+  from the commit `.github/postgres.env` pins, its logic unchanged, and
+  Kani links it with `-Z c-ffi --c-lib <file>`. The proofs live in the
+  crate beside its other proofs and reach the functions of one value,
+  below the entries of a column. First: the hashes (`murmurhash32`,
+  `hash_combine`, the fold of `hashint8`), the integer arithmetic of
+  each width with its errors, the digits of decimals, the arithmetic of
+  dates. Each family keeps a proof that must fail
+  (`#[kani::should_panic]`), so that a rig which links no C cannot
+  pass. A list names each ported function as proved, with its bounds,
+  tested, or neither.
+- **Why:** The kernels' proofs compare them with a reference in Rust
+  written by hand, which repeats the reading of the core it checks.
+  pgrust proved 1,086 of PostgreSQL's functions so and found eight
+  faults of its port and four of PostgreSQL.
+- **Known:** A probe on 2026-11-25, with Kani 0.68 on Apple silicon,
+  proved `murmurhash32` and `hash_combine` equal to the C of
+  `common/hashfn.h`, in 23 s and 0.03 s. With one constant of the C
+  changed the proof failed, and the control that must fail did. A
+  proof of `int4div` through `int32::arith_scalar` did not compile: a
+  path that builds an `anyhow` error panics Kani 0.68
+  (`docs/kernels.md`), hence the functions of one value. The C needs
+  shims of `ereport` and of the arguments of fmgr; a shim replaces
+  plumbing, never logic. A proof finds an error of the port, not a
+  fault the port copied. Divisors prepared by a multiplier time out at
+  every width. A proof of Kani kills no mutant, so `golden-corpus`
+  stays the oracle of the Rust tests.
+- **Depends on:** nothing.
+- **Capabilities:** kernel-abi, ci
+- **Size:** one pull request for the rig and the hashes, then one a
+  family.
+
+### checks-with-teeth
+
+The random queries and the suites tried on planted faults. From a
+reading of pgrust and of S3R on 2026-11-25.
+
+- **What:** A setting of the assert build plants one fault of a list:
+  a NULL row taken as false by a filter, the last row of a word left
+  out of a sum, a batch lost in a round of a spill, a chunk read twice
+  by a participant that attached late. A CI job runs, for each fault,
+  `tessera-crosscheck` and the suite of its part with the fault
+  planted, and fails when nothing finds it.
+- **Why:** Only Rust tests judge a mutant. Nothing judges the random
+  queries and the SQL suites, and a check that always passes proves
+  nothing. pgrust tries its oracles on a planted wrong server that
+  must be caught (`--test-null-bug`). S3R plants known faults, and in
+  each layer of its tests turns off the mechanism that layer watches.
+- **Known:** The faults stay out of a release build. Kani's covers
+  already fail a proof whose case no value reaches.
+- **Depends on:** nothing.
+- **Capabilities:** tools, ci
+- **Size:** one pull request for the setting and two faults, then a
+  fault a pull request.
+
+### phase-injection-points
+
+Injection points at the boundaries of the parallel phases, held by
+tests. From a reading of S3R on 2026-11-25.
+
+- **What:** An injection point at each boundary between the phases of
+  the shared hash table (a participant's attach and detach, the build,
+  each round of its spill, the probe), of the shared spill, and of the
+  children of a set operation that workers share. A test holds a
+  participant at a boundary with the action `wait` of the module
+  `injection_points` and lets it go with `injection_points_wakeup`, so
+  that a race is a case with a name. The order that `pg_sleep` sets in
+  `test/sql/union.sql` becomes such a case. The part's contract gains
+  a rule: each boundary of a phase has its point, checked by a script
+  that lists the phases and the points.
+- **Why:** The late participant that cleared the chunks of values
+  (pull request 3) was found by four suites run at once under load. A
+  test that orders processes by sleeping measures the sleep: on a slow
+  build, under the sanitizers, the order changes, and the test passes
+  having checked another order. S3R keeps 160 named points, and its CI
+  refuses a boundary between the steps of an operation without one.
+- **Known:** Seven points exist: two in `runtime/spill.c`, one at the
+  turn of a spill's loop, where a test marks a cancel pending, and four
+  in the Parquet reader. None stands at a boundary of a parallel
+  phase. PostgreSQL compiles them only with
+  `--enable-injection-points`, which the build of CI has. A
+  `statement_timeout` that turns a hang into a failure is a guard, not
+  a wait, and stays.
+- **Depends on:** nothing.
+- **Capabilities:** hash-table, relspill, ci
+- **Size:** two pull requests: the hash table, then the rest.
+
+### shared-state-in-designs
+
+The four answers of a design that changes state shared by processes.
+From a reading of S3R on 2026-11-25.
+
+- **What:** A rule in `openspec/config.yaml`, which every agent reads
+  with the instructions of a design: a change that touches state the
+  processes of a plan share (its dynamic shared memory, the shared
+  spill's files), or state kept on disk, answers four questions in its
+  design. What lies in shared memory and on disk after each phase. Who
+  finishes or undoes the work of a participant that stopped, and by
+  which record. What happens on an error, a cancel or the death of a
+  worker at each boundary. In what state everything is once all
+  participants are done: files freed, segments detached, nobody
+  waiting.
+- **Why:** Faults of this kind were found late and by other means: the
+  late participant (pull request 3), the loops a cancel did not end
+  (e4586795). S3R puts the same four questions, asked of state in
+  several shards, into every agent's context.
+- **Depends on:** nothing.
+- **Capabilities:** -
+- **Size:** small.
+
+### invariant-holders-review
+
+A review that names the code keeping each requirement. From a reading
+of S3R on 2026-11-25.
+
+- **What:** A procedure of `agent review` for the contracts. A reviewer
+  that may not edit lists, for each requirement of a spec the change
+  touches and each rule of a contract it touches, the function that
+  keeps it and the test that shows it. A requirement without a holder
+  is a finding.
+- **Why:** A promise whose holder a change removed passes a review
+  that reads only the diff. S3R's reviewer works so, and may not
+  change the code it reads.
+- **Depends on:** nothing.
+- **Capabilities:** -
+- **Size:** small.
 
 ## Not placed: the maintainer decides
 
