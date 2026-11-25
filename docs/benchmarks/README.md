@@ -11,10 +11,10 @@ with the plans of the cases the README cites, newest first:
   `parquet-snappy`](2026-11-25-parquet-snappy/README.md): eight of
   ClickBench's queries over `hits.parquet` counted at 0 workers, the
   base and the end in turns, pg_duckdb's cycles beside them, against
-  `d16e43c8`, cycles deciding; Q28 26 per cent fewer cycles, Q26 11,
-  Q22 35, the queries of numbers within noise; and the decoder against
-  `snap`'s and DuckDB's on the file's pages, Apple M5 Pro, PostgreSQL
-  19.
+  `d16e43c8`, cycles deciding; Q28 25 per cent fewer cycles, Q26 12 to
+  15, Q22 28 to 34, Q8 3 per cent more instructions and up to 2.4 more
+  cycles in a clean pair; and the decoder against `snap`'s and DuckDB's
+  on the file's pages, Apple M5 Pro, PostgreSQL 19.
 
 - [2026-11-24, strings read by views,
   `parquet-string-views`](2026-11-24-parquet-string-views/README.md):
