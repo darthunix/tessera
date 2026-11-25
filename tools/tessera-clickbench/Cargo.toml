@@ -11,12 +11,17 @@ publish.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 console.workspace = true
+parquet.workspace = true
+pmu.workspace = true
 postgres.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+snap.workspace = true
+tessera-parquet = { path = "../../crates/tessera-parquet" }
 tessera-pgtool.workspace = true
 
 [dev-dependencies]
+arrow-array.workspace = true
 tempfile.workspace = true
 
 [lints]
