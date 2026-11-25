@@ -82,8 +82,8 @@ pub(crate) fn open(
         .into_builder()
         .set_compression(Compression::UNCOMPRESSED)
         .build()?;
-    // A copy of the file of its own, which keeps the bytes of each page's
-    // header as the crate's page reader reads them.
+    // A copy of the file of its own, which keeps the first bytes of each
+    // page's header as the crate's page reader reads them.
     let file = file.capturing();
     Ok(Box::new(Snappy {
         pages: SerializedPageReader::new(Arc::new(file.clone()), &stored, rows, None)?,
@@ -138,8 +138,8 @@ impl Iterator for Once {
 impl PageIterator for Once {}
 
 /// The pages of a Snappy chunk, as the file stores them, decompressed;
-/// `file` keeps the bytes of the header of the page the crate's page
-/// reader read last.
+/// `file` keeps the first bytes of the header of the page the crate's
+/// page reader read last.
 struct Snappy {
     pages: SerializedPageReader<SharedFile>,
     file: SharedFile,
