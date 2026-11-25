@@ -7,6 +7,14 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-25, page headers through a buffer,
+  `parquet-page-headers`](2026-11-25-parquet-page-headers/README.md):
+  seven of ClickBench's queries over `hits.parquet` counted at 0
+  workers, the base and the end in turns, against `fc6b0208`, cycles
+  deciding, pg_duckdb's beside them; Q8 19 to 24 per cent fewer cycles
+  in three pairs, unsettled by the plan's spread, Q11 7 to 8, Q2 3 to
+  7, the rest within 2 or below their spread; buffers of 256 bytes and
+  8 KiB no better than 1 KiB.
 - [2026-11-25, the reader's decoder of Snappy,
   `parquet-snappy`](2026-11-25-parquet-snappy/README.md): eight of
   ClickBench's queries over `hits.parquet` counted at 0 workers, the

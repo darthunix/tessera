@@ -43,7 +43,7 @@ runs 19 and 18.
 
 ## 3. The count
 
-- [ ] 3.1 Count as the design's measurement plan says, the base and the
+- [x] 3.1 Count as the design's measurement plan says, the base and the
       end in turns, with pg_duckdb's cycles beside; Q8 and Q28 once
       more with buffers of 256 bytes and 8 KiB. The size stays 1 KiB
       unless one of the others gives Q8 2 per cent fewer cycles and Q28
