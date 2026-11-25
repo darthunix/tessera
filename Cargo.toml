@@ -61,6 +61,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
+# The decoder of Snappy that the parquet crate calls, which the reader's
+# own decoder of pages is checked against.
+snap = "1.1.2"
 tpchgen = "3.0"
 pmu = { path = "tools/pmu" }
 relhash = { path = "crates/relhash", version = "0.1.0", default-features = false }

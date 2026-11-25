@@ -27,10 +27,7 @@ use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, TimeUnit};
 use bytes::Bytes;
 use datum_arrow::{Bitmap, Column, Input, Keys, ReadPlan, Values, mask_words};
-use parquet::arrow::arrow_reader::{
-    ParquetRecordBatchReader, ParquetRecordBatchReaderBuilder, RowSelection, RowSelectionPolicy,
-    RowSelector,
-};
+use parquet::arrow::arrow_reader::{ParquetRecordBatchReader, RowSelection, RowSelector};
 use parquet::errors::ParquetError;
 use parquet::file::reader::{ChunkReader, Length};
 
@@ -392,12 +389,7 @@ impl ColumnReader {
 
     fn build(&self, selection: RowSelection, batch: usize) -> Result<ParquetRecordBatchReader> {
         let (view, _) = self.column.view(self.dictionary);
-        ParquetRecordBatchReaderBuilder::new_with_metadata(self.shared.clone(), view.clone())
-            .with_row_groups(vec![self.group])
-            .with_row_selection(selection)
-            .with_row_selection_policy(RowSelectionPolicy::Selectors)
-            .with_batch_size(batch)
-            .build()
+        crate::pages::rows(&self.shared, view, self.group, selection, batch)
             .map_err(|e| crate::error::damaged(&e))
     }
 
