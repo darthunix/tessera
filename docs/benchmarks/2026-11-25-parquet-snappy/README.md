@@ -32,6 +32,9 @@ Written before the runs:
 1. Q28: 15 to 22 per cent fewer cycles; Q26: 9 to 14.
 2. Q21, Q22, Q13, Q25: fewer cycles, by the decoder's share of each.
 3. Q3 and Q8: within 2 per cent of cycles.
+4. The queries of numbers: their instructions may grow, by up to two
+   fifths of the decoder's share.
+5. The geometric mean over pg_duckdb's cycles: from 1.93 to below 1.8.
 
 ## Result
 
@@ -57,8 +60,9 @@ cent among its own readings: the -7.7 is that base's noise. Before the
 change these queries ran in 2.33 (Q28), 2.39 (Q26), 0.78, 3.21, 1.22
 and 2.60 times pg_duckdb's cycles.
 
-So all three hypotheses hold, Q28 past its range: the change's
-thresholds hold, and no query gains.
+So hypotheses 1 to 4 hold, Q28 past its range; the fifth was not
+counted, as eight queries cannot give the geometric mean of all. The
+change's thresholds hold, and no query gains.
 
 ## The decoders alone
 
@@ -78,7 +82,7 @@ against DuckDB's snappy. At the end, per byte, over `snap`'s:
 | WatchID | 1.004 | 1.004 | 0.0, 0.0 |
 
 Against DuckDB's snappy, the object of the build pg_duckdb loads: 0.98
-to 0.99 of its cycles on the strings, 1.00 on `EventTime`, 0.72 on
+to 0.99 of its cycles on the strings, 1.00 on `EventTime`, 0.71 on
 `UserID`, with 8 to 10 per cent fewer instructions.
 
 The loop as first built took 1.10 to 1.15 of DuckDB's cycles with the

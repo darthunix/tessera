@@ -65,7 +65,8 @@ corrupts the memory of a backend.
   `crates/tessera-parquet/src/snappy/proofs.rs::a_turn_of_the_fast_loop_stays_in_its_buffers`
   and
   `crates/tessera-parquet/src/snappy/proofs.rs::the_copy_of_a_pattern_writes_its_64_bytes_only`,
-  Kani's proofs of the fast loop for every stream;
+  Kani's proofs of a turn of the fast loop from every state its guard
+  admits, over any bytes;
   `crates/tessera-parquet/fuzz/fuzz_targets/snappy.rs::fuzz_target!`,
   any bytes against snap's decoder under AddressSanitizer;
   `.github/workflows/ci.yml::cargo miri test --locked -p

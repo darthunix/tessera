@@ -376,10 +376,12 @@ struct Fast {
 ///
 /// # Safety
 ///
-/// `ip` is readable for 66 bytes; `ob` is writable for 128 bytes past
+/// `ip` is readable for 65 bytes; `ob` is writable for 64 bytes past
 /// `op` plus the waiting copy's length, at most 64; the waiting copy's
 /// source is readable for 64 bytes: `none`, of 64 bytes, or in the input
-/// before `ip`, or in `ob` ending at or before `op`.
+/// before `ip`, or in `ob` ending at or before `op`. A turn of two steps
+/// needs twice the output's room, 128 bytes, and 126 bytes of input from
+/// its first `ip`; the loop's guard gives 130.
 #[inline(always)]
 unsafe fn step(s: &mut Fast, ob: *mut u8, none: *const u8) -> bool {
     // SAFETY: the caller's bounds. A literal's tag is read up to 64 bytes
@@ -451,10 +453,12 @@ fn fast(input: &[u8], ip: usize, out: &mut [u8], op: usize) -> (usize, usize) {
     let ob = out.as_mut_ptr();
     let none = [0u8; SLOP];
     // SAFETY: the guard of each turn, `ip` below `in_limit` and `op` with
-    // the waiting copy below `out_limit`, gives the first `step` its
-    // bounds; it moves `ip` at most 61 and `op` with the waiting copy at
-    // most 64, which leaves the second its own. `in_limit` and every `ip`
-    // lie in the input.
+    // the waiting copy below `out_limit`, leaves 130 bytes of input past
+    // `ip` and 128 of output past the frontier and the waiting copy. The
+    // first `step` takes 65 and 64 of them; it moves `ip` at most 61 and
+    // the frontier with the waiting copy at most 64, which leaves the
+    // second its own 65 and 64. `in_limit` and every `ip` lie in the
+    // input.
     unsafe {
         let in_limit = ib.add(input.len() - (2 * SLOP + 1));
         let mut s = Fast {

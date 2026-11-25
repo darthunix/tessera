@@ -36,6 +36,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format, Clippy, debug and release tests
         run: make rust-check
+      # The reader's decoder of Snappy copies a short pattern by SSSE3's
+      # shuffle where the build targets it, which the default target of
+      # x86-64 does not: its tests built with it, on x86-64 alone.
+      - name: The decoder of Snappy with SSSE3
+        if: runner.arch == 'X64'
+        env:
+          RUSTFLAGS: -C target-feature=+ssse3
+          CARGO_TARGET_DIR: target/ssse3
+        run: cargo test --locked -p tessera-parquet --lib snappy
       # The reader of Parquet files links one crate of Tessera, for the
       # pattern of LIKE alone, as the contract of parquet-fdw asks
       # ("Only the public C API"); datum-arrow is meant for use outside

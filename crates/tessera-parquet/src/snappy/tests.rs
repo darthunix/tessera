@@ -387,7 +387,7 @@ fn the_fast_loop_starts_only_with_its_room() {
     // wherever it starts.
     let input = [0u8; 300];
     let mut out = [0u8; 300];
-    // 130 bytes of input from the tag on, or 127 of output past the
+    // 130 bytes of input with the tag, or 127 of output past the
     // frontier, and the loop does not start; 131 and 128, and it does.
     assert_eq!(fast(&input, 300 - 130, &mut out, 0), (300 - 130, 0));
     assert!(fast(&input, 300 - 131, &mut out, 0).0 > 300 - 131);
@@ -396,8 +396,8 @@ fn the_fast_loop_starts_only_with_its_room() {
     assert_eq!(fast(&input, 0, &mut out[..127], 0), (0, 0));
     assert!(fast(&input, 0, &mut out[..128], 0).1 > 0);
     // A turn decodes two literals, 4 bytes of input and 2 of output; the
-    // next starts only with its room still there: 130 bytes of input from
-    // its tag on and 128 of output past the frontier and the copy that
+    // next starts only with its room still there: 130 bytes of input past
+    // its tag and 128 of output past the frontier and the copy that
     // waits. So one turn, or two, at each side's edge.
     assert_eq!(fast(&input[..134], 0, &mut out, 0), (4, 2));
     assert_eq!(fast(&input[..135], 0, &mut out, 0), (8, 4));
