@@ -1,8 +1,11 @@
 //! The proofs by Kani of the fast loop's bounds, which `cargo kani -p
 //! tessera-parquet` runs: one turn of two elements, from any state its
 //! guard admits, over any bytes, reads and writes inside its buffers and
-//! leaves a state the guard can admit again; and the copy of a pattern
-//! writes only its 64 bytes, for every offset up to 64.
+//! leaves a state the guard can admit again, with room for the copy
+//! that still waits when the loop ends; and the copy of a pattern writes
+//! only its 64 bytes, for every offset up to 64. That the loop starts a
+//! turn only where the first proof's state holds, the tests see: a debug
+//! assertion checks it before every turn.
 //!
 //! Kani reads the plain copy of a pattern: the shuffles of NEON and SSSE3
 //! are cut out under it.
@@ -68,6 +71,9 @@ fn a_turn_of_the_fast_loop_stays_in_its_buffers() {
     assert!(moved >= ip && moved <= ip + 122);
     assert!(s.len_from <= SLOP);
     assert!(s.op + s.len_from <= op + len_from + 2 * SLOP);
+    // A copy that waits when the loop stops here has its 64 bytes; a
+    // copy of a pattern wrote its own and leaves none waiting.
+    assert!(s.len_from == 0 || s.op + SLOP <= OUT);
     kani::cover!(both, "two elements decoded");
     kani::cover!(!both, "an element left to the careful loop");
 }

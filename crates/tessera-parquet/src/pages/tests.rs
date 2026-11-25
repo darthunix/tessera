@@ -1,7 +1,8 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
+use arrow_array::types::Int64Type;
+use arrow_array::{ArrayRef, Int64Array, ListArray, RecordBatch, StringArray};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::{
     ArrowReaderOptions, ParquetRecordBatchReaderBuilder, RowSelectionPolicy, RowSelector,
@@ -14,8 +15,9 @@ use crate::file::ParquetFile;
 const ROWS: usize = 6_000;
 
 /// A file of strings, through a dictionary that grows past its limit and
-/// then plain, and of integers, both with `NULL`s, in groups of 2 500
-/// rows and pages of 300, of the format's `version`.
+/// then plain, of integers, and of lists of integers, whose pages hold
+/// levels of repetition, all with `NULL`s, in groups of 2 500 rows and
+/// pages of 300, of the format's `version`.
 fn file(dir: &Path, compression: Compression, version: WriterVersion) -> PathBuf {
     let urls: Vec<Option<String>> = (0..ROWS)
         .map(|i| (i % 7 != 0).then(|| format!("http://example.com/{}/{}", i % 50, i)))
@@ -23,9 +25,17 @@ fn file(dir: &Path, compression: Compression, version: WriterVersion) -> PathBuf
     let ids: Vec<Option<i64>> = (0..ROWS as i64)
         .map(|i| (i % 5 != 0).then_some(i * 3))
         .collect();
+    let lists = ListArray::from_iter_primitive::<Int64Type, _, _>((0..ROWS as i64).map(|i| {
+        (i % 11 != 0).then(|| {
+            (0..i % 4)
+                .map(|j| (j != 2).then_some(i * 10 + j))
+                .collect::<Vec<_>>()
+        })
+    }));
     let batch = RecordBatch::try_from_iter([
         ("url", Arc::new(StringArray::from(urls)) as ArrayRef),
         ("id", Arc::new(Int64Array::from(ids)) as ArrayRef),
+        ("lists", Arc::new(lists) as ArrayRef),
     ])
     .unwrap();
     let properties = WriterProperties::builder()
@@ -108,6 +118,12 @@ fn both(path: &Path, selection: impl Fn(usize) -> RowSelection) {
         .unwrap();
     for group in 0..file.metadata().num_row_groups() {
         let rows = file.metadata().row_group(group).num_rows() as usize;
+        let one = Group {
+            file: shared.clone(),
+            metadata: Arc::clone(file.metadata()),
+            group,
+        };
+        assert_eq!(one.num_rows(), rows);
         let mine: Vec<RecordBatch> = super::rows(&shared, &view, group, selection(rows), 128)
             .unwrap()
             .map(Result::unwrap)
