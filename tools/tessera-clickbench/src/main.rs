@@ -5,6 +5,7 @@
 
 mod check;
 mod cluster;
+mod decoders;
 mod measure;
 mod queries;
 mod report;
@@ -56,6 +57,29 @@ enum Command {
     },
     /// Stop the cluster; its data stays.
     Stop(ClusterArgs),
+    /// Decode the compressed pages of a file's columns by the reader's
+    /// decoder of Snappy and by the crate snap's; check that they give
+    /// the same bytes, and count both: instructions, cycles, branches and
+    /// branch misses. The counters need root: run the built tool through
+    /// sudo -n.
+    Decoders(DecodersArgs),
+}
+
+#[derive(Debug, Clone, Args)]
+struct DecodersArgs {
+    /// The Parquet file, compressed with Snappy.
+    #[arg(long, value_name = "PATH")]
+    file: PathBuf,
+    /// Its columns, by name.
+    #[arg(long, value_delimiter = ',', default_value = decoders::COLUMNS)]
+    columns: Vec<String>,
+    /// About this many megabytes of compressed pages of each column,
+    /// from groups of rows spread over the file.
+    #[arg(long, default_value_t = 128, value_name = "MB")]
+    megabytes: usize,
+    /// Passes of each decoder over the pages, in turns.
+    #[arg(long, default_value_t = 7, value_parser = clap::value_parser!(u32).range(1..))]
+    passes: u32,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -601,6 +625,13 @@ fn main() -> Result<()> {
                 print!("{}", report::side_by_side(&runs)?);
             }
         }
+        Command::Decoders(args) => {
+            let columns = decoders::collect(&args.file, &args.columns, args.megabytes << 20)?;
+            decoders::check(&columns)?;
+            println!("same bytes on every page of {}", args.file.display());
+            let rows = decoders::count(&columns, args.passes as usize)?;
+            print!("{}", decoders::table(&columns, &rows));
+        }
         Command::Stop(args) => {
             let pg = Pg::discover()?;
             let duckdb = cluster::duckdb_installed(&pg);
@@ -680,5 +711,17 @@ mod tests {
         assert_eq!(args.queries.queries.0.len(), queries::COUNT);
         assert_eq!(args.queries.work_mem, "64MB");
         assert!(Cli::try_parse_from(["tessera-clickbench", "report"]).is_err());
+    }
+
+    #[test]
+    fn decoders_take_a_file_and_its_columns() {
+        let cli = Cli::try_parse_from(["tessera-clickbench", "decoders", "--file", "/h.parquet"])
+            .unwrap();
+        let Command::Decoders(args) = cli.command else {
+            panic!("{cli:?}");
+        };
+        assert_eq!(args.columns.len(), 8);
+        assert_eq!((args.megabytes, args.passes), (128, 7));
+        assert!(Cli::try_parse_from(["tessera-clickbench", "decoders"]).is_err());
     }
 }

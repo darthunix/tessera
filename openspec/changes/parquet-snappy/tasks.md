@@ -32,7 +32,7 @@ changes the decoder carries in its message the mode's counts against
       damaged stream an error. The message carries the count of the
       design's first step. Check: `make rust-check`; the suites; `make
       crosscheck`
-- [ ] 2.2 `tools/tessera-clickbench`: the mode that decodes the pages
+- [x] 2.2 `tools/tessera-clickbench`: the mode that decodes the pages
       of named columns of the ClickBench file by the reader's decoder
       and by `snap`'s, checks their bytes, and counts instructions,
       cycles, branches and branch misses per byte with `pmu`; its

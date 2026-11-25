@@ -1512,12 +1512,17 @@ name = "tessera-clickbench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
  "clap",
  "console",
+ "parquet",
+ "pmu",
  "postgres",
  "serde",
  "serde_json",
+ "snap",
  "tempfile",
+ "tessera-parquet",
  "tessera-pgtool",
 ]
 

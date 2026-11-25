@@ -67,6 +67,9 @@ are installed.
   runs of one query each do, make one column: the same mode, workers,
   DuckDB threads, files and rows, commit, server, power and settings.
 - `cargo clickbench stop`: stop the cluster; its data stays.
+- `cargo clickbench decoders --file <file>`: the reader's decoder of
+  Snappy against the crate `snap`'s on the file's compressed pages
+  (see "Decoders"); no cluster.
 
 `check` and `run` stop the server at the end if they started it, and
 leave it running if it ran before or with `--keep-running`. Both take
@@ -194,6 +197,32 @@ side, their ratios. On macOS pg_pmu counts the kernel's work too, and
 counts with workers spread by a few percent. Counts say how much work a
 query does, not how long it takes: compare engines by cycles and time
 both.
+
+## Decoders
+
+`cargo clickbench decoders` counts the reader's decoder of Snappy,
+`tessera_parquet::snappy`, against the crate `snap`'s, the one the
+`parquet` crate calls, on the compressed pages of one file. It needs
+no cluster:
+
+```sh
+cargo build --release --locked -p tessera-clickbench
+sudo -v
+sudo -n target/release/tessera-clickbench decoders --file /data/clickbench/hits.parquet
+```
+
+It takes about `--megabytes` (128) of compressed pages of each column
+of `--columns`, by default `URL`, `Title`, `Referer`, `SearchPhrase`,
+`EventTime`, `CounterID`, `UserID` and `WatchID`, from groups of rows
+spread over the file. It checks that both decoders give the same bytes
+on every page, then decodes all pages of each column `--passes` (7)
+times by each decoder, the two in turns, into one buffer. It prints,
+per byte decompressed, the medians of the passes: instructions, cycles,
+branches and branch misses (a kilobyte), and the reader's decoder over
+`snap`'s. The counters are those of the crate
+[pmu](../../tools/pmu/README.md), of the tool's thread in user space;
+they need root, so the tool runs through `sudo -n`, built as yourself
+first.
 
 ## A run's directory
 
