@@ -102,6 +102,10 @@ by its count of files and owned by the module for the backend's life.
   clauses or the node.
 - **Another format of files, such as Arrow's own.** A reader of its own
   and its module, which take the node's pattern; not this module.
+- **Another way of reading a file's bytes.** Such as a buffer over
+  the reads of page headers, reads ahead of a window, or a cache of
+  pages: the shared file's readers and its count of reads; not the page
+  reader, the windows, the clauses or the node.
 - **Files in an object store.** The reader's input and the option of
   files; not the node, the clauses or the parallel handout.
 - **Page indexes and Bloom filters of a file.** The reader and the

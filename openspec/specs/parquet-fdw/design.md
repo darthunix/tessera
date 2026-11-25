@@ -370,15 +370,38 @@ uncompressed when the chunk is compressed with Snappy, so that it hands
 the pages over as the file stores them. The reader decompresses each
 one, the levels of a page of the format's second version kept as they
 are, and gives it on, to the size the page's header gives, as the
-crate's codec does: a page of another size is an error. The crate
-reads a header through the file's reader from an offset and a page's
-data apart, so a copy of the file of the page reader's own keeps the
-bytes it reads from an offset, and the reader takes the size from
-them, field 2 of the header in Thrift's compact form. A header whose
-first fields are written otherwise, which no writer known does, leaves
-the size unchecked. A chunk without compression keeps the crate's page
-reader. The dictionary page read for a column's keys takes the same
-way.
+crate's codec does: a page of another size is an error. A copy of the
+file of the page reader's own keeps the first 12 bytes of the last
+header it read, and the reader takes the size from them, field 2 of the
+header in Thrift's compact form: the crate reads an index page's header
+and the next page's in one call, and the page is checked against its
+own. A header whose first fields are
+written otherwise, which no writer known does, leaves the size
+unchecked. A chunk without compression keeps the crate's page reader.
+The dictionary page read for a column's keys takes the same way.
+
+The crate reads a page's header through the file's reader from an
+offset, and the page's data apart, by one read of its length. Its
+Thrift reader reads a header's field markers, varints and numbers a
+byte at a time, so the reader from an offset is a buffer of 1 KiB over
+the file, as the crate's own reader of a file is: a header of up to a
+kilobyte costs one system call, where a call for each field cost a
+quarter of a query that skips most of a column's pages by their headers.
+The buffer gives a read no more bytes than it asks, so the crate's
+count of a header's bytes, where the page's data starts, holds. A
+larger buffer reads more of each page's data, which the data's own read
+reads again, for each page skipped too; neither 256 bytes nor 8 KiB
+took 2 per cent fewer cycles.
+
+```text
+  the crate's page reader
+    | a header: from its offset        | the data: its offset, its length
+    v                                  v
+  a buffer of 1 KiB                  one read of the file
+    | one read a kilobyte
+    v
+  the file, a copy of which keeps a header's first 12 bytes
+```
 
 The lower entry takes no policy of row selection, and the crate's
 default reads a selection whose runs are short on average by a mask:
@@ -470,6 +493,11 @@ Refused:
 - **A page's size unchecked against its header:** a page whose stream
   is valid but whose header says another size would be read, where the
   crate refused it.
+- **Headers parsed by the reader,** from bytes it reads with a page's
+  data: a parser of Thrift's compact form for the whole header, reads
+  of a fixed length kept within the file's end, and the crate's page
+  reader, which without a page index has no other way to find its
+  pages, no longer reading them.
 
 ### Values made into the C side's memory
 
@@ -899,6 +927,10 @@ place in the code where a test module can act.
   the bounds of `IN`, of a group ruled out by its statistics, of the
   bytes form's arithmetic, and of a turn of the decoder's fast loop and
   its copy of a pattern.
+- `crates/tessera-parquet/src/pages/tests.rs`: the reader's pages
+  against the crate's over a file of its own, a header read by one read
+  of the file, headers longer than the buffer read and skipped, and a
+  page's size checked after reads, peeks and skips in every order.
 - `crates/tessera-parquet/src/snappy/tests.rs`: the decoder against
   `snap`'s, on every kind of element, streams cut and given wrong
   lengths, and property tests, decoded between fences a stray write
