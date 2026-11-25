@@ -73,6 +73,7 @@ first.
 - **Random queries.** Every push runs 3000 generated queries, plus the
   seeds that once found a bug, with Tessera on and off, and fails on any
   difference ([tessera-crosscheck](tools/tessera-crosscheck/README.md)).
+  Every night 20,000 more run with a new seed, under the sanitizers too.
   The queries mix joins of every kind, `EXISTS`, grouping, set
   operations, limits and parallel plans over data full of NULLs and edge
   values. The tool found five bugs before this gate went up, among them a

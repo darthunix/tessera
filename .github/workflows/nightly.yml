@@ -42,6 +42,9 @@ jobs:
     env:
       # The temporary instance's locale (test/Makefile).
       LANG: C.UTF-8
+      # The release kernels, as CI's job of the suites on Linux; the same
+      # variable gives the same key of the Rust cache, so CI's is reused.
+      RUST_PROFILE: release
     steps:
       - uses: actions/checkout@v4
       - name: Revision

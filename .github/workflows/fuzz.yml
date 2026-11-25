@@ -34,8 +34,10 @@ on:
         type: string
         required: true
 
+# By the event too: a run by hand on main and the nightly one, whose
+# call gives this workflow main's ref, do not cancel each other.
 concurrency:
-  group: fuzz-${{ github.ref }}
+  group: fuzz-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 jobs:
@@ -68,9 +70,9 @@ jobs:
         run: |
           cargo fmt --check
           cargo clippy --locked --all-targets -- -D warnings
-      # The newest corpus of the crate's targets, saved again with what
-      # this run adds.
-      - uses: actions/cache@v4
+      # The newest corpus of the crate's targets, saved again below with
+      # what this run adds, even when a target failed.
+      - uses: actions/cache/restore@v4
         with:
           path: crates/${{ matrix.crate }}/fuzz/corpus
           key: fuzz-corpus-${{ matrix.crate }}-${{ github.run_id }}
@@ -86,6 +88,11 @@ jobs:
             cargo fuzz run --target "$host" "$target" -- \
               -max_total_time="$SECONDS_EACH" -timeout=10 -rss_limit_mb=4096
           done
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: crates/${{ matrix.crate }}/fuzz/corpus
+          key: fuzz-corpus-${{ matrix.crate }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: The inputs that failed
         if: failure()
         uses: actions/upload-artifact@v4
