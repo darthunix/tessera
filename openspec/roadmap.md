@@ -64,39 +64,38 @@ faster decompression of Snappy after them, `parquet-snappy` (done),
 after a profile of ClickBench's Q26 at the end of the sort by bytes.
 The same day, after profiles of ClickBench's queries furthest behind
 pg_duckdb, he placed five entries after it in this order:
-`parquet-page-headers`, `agg-date-min-max`, `parquet-batch-arrays`,
-`parquet-integer-columns`, `agg-sum-plus-constant`:
+`parquet-page-headers` (done), `agg-date-min-max`,
+`parquet-batch-arrays`, `parquet-integer-columns`,
+`agg-sum-plus-constant`:
 
-1. `parquet-page-headers`: The headers of a Parquet file's pages read
-   through a buffer
-2. `agg-date-min-max`: TessAgg's `min` and `max` of `date`, by kernels
-3. `parquet-batch-arrays`: The arrays of a Parquet batch kept for its
+1. `agg-date-min-max`: TessAgg's `min` and `max` of `date`, by kernels
+2. `parquet-batch-arrays`: The arrays of a Parquet batch kept for its
    scan
-4. `parquet-integer-columns`: The integers of a Parquet file given to
+3. `parquet-integer-columns`: The integers of a Parquet file given to
    the kernels at less cost
-5. `agg-sum-plus-constant`: A sum of a column and a constant, folded
-6. `whole-word-decisions`: When and where a driver takes a word whole,
+4. `agg-sum-plus-constant`: A sum of a column and a constant, folded
+5. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-7. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+6. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-8. `explain-rows-per-loop`: The rows a node removed, per loop as the
+7. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-9. `join-pruning-cost`: The cost of a pruning join over the partitions
+8. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-10. `bench-in-four-cells`: `tessera-bench` in the four cells of the
-    counters
-11. `linux-x86-support`: Linux on x86-64 checked as the target platform
-12. `oltp-guard-bench`: OLTP guard family of benchmarks
-13. `runs-left-from-section-9`: Runs left to the maintainer from
+9. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+   counters
+10. `linux-x86-support`: Linux on x86-64 checked as the target platform
+11. `oltp-guard-bench`: OLTP guard family of benchmarks
+12. `runs-left-from-section-9`: Runs left to the maintainer from
     section 9
-14. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-15. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+13. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+14. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-16. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+15. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-17. `tpch-sf10`: TPC-H step 10: SF10
-18. `backward-scan-mark-restore`: Backward scan and mark/restore
-19. `pg-duckdb-comparison`: Comparison with pg_duckdb
+16. `tpch-sf10`: TPC-H step 10: SF10
+17. `backward-scan-mark-restore`: Backward scan and mark/restore
+18. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -316,30 +315,6 @@ forecast of `datum-arrow`'s contract.
   the input of a column for a new layout.
 - **Depends on:** none.
 - **Capabilities:** datum-arrow
-- **Size:** small.
-
-### parquet-page-headers
-
-The headers of a Parquet file's pages read through a buffer. From
-profiles of ClickBench's Q8 and Q11 at the end of
-`parquet-string-views`, 2026-11-24.
-
-- **What:** The reader gives the `parquet` crate a reader of the file
-  that calls `pread` for each read the crate asks of it. The crate
-  parses a page's header by small reads, so that each header of a page
-  it reads or skips costs a system call for each of them. Read the
-  headers through a buffer of a few hundred bytes, and the pages'
-  bytes as today.
-- **Why:** `pread` is 26 per cent of a profile of Q8, which skips most
-  pages of `AdvEngineID` for the rows its clause passes, and 12 of
-  Q11; the calls come from the parsing of page headers under the
-  crate's skip of records. Q8 runs in 3.3 times pg_duckdb's cycles,
-  Q11 in 3.7.
-- **Known:** The reader counts its reads for its tests, and those
-  counts change. `parquet-fdw`'s forecast names the reader's input of
-  pages for such a change.
-- **Depends on:** nothing.
-- **Capabilities:** parquet-fdw
 - **Size:** small.
 
 ### parquet-batch-arrays
