@@ -275,3 +275,74 @@ proptest! {
         same(&stream(len, &elements));
     }
 }
+
+/// `count` literals of 60 bytes: input for the fast loop on either side
+/// of an element.
+fn literals(count: usize) -> Vec<Element> {
+    (0..count).map(|_| literal(60)).collect()
+}
+
+#[test]
+fn every_copy_inside_the_fast_loop_decodes_as_the_reference_decodes() {
+    for width in [1, 2, 4] {
+        let lens = if width == 1 { 4..=11 } else { 1..=64 };
+        for len in lens {
+            for offset in (0..=20)
+                .chain([31, 32, 33, 63, 64, 65, 180, 181, 300])
+                .step_by(sized(1, 4))
+            {
+                let mut elements = literals(3);
+                elements.push(Element::Copy { len, offset, width });
+                elements.extend(literals(4));
+                let out = same(&stream(written(&elements), &elements));
+                assert_eq!(
+                    out.is_some(),
+                    (1..=180).contains(&offset),
+                    "{width} {len} {offset}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn the_fast_loop_stops_at_each_place_near_the_ends() {
+    // A copy and a literal at every place of a stream around the fast
+    // loop's guards: 130 bytes of input left, 128 of output.
+    for prefix in (0..=200).step_by(sized(1, 13)) {
+        let mut elements = vec![literal(prefix.max(1))];
+        elements.extend([
+            Element::Copy {
+                len: 64,
+                offset: 1,
+                width: 2,
+            },
+            literal(5),
+            Element::Copy {
+                len: 11,
+                offset: 3,
+                width: 1,
+            },
+            Element::Copy {
+                len: 40,
+                offset: 20,
+                width: 2,
+            },
+            literal(60),
+            literal(61),
+            Element::Copy {
+                len: 7,
+                offset: 9,
+                width: 4,
+            },
+        ]);
+        for slack in [0, 1] {
+            let len = written(&elements) + slack;
+            assert_eq!(
+                same(&stream(len, &elements)).is_some(),
+                slack == 0,
+                "{prefix}"
+            );
+        }
+    }
+}
