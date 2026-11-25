@@ -65,7 +65,7 @@ changes the decoder carries in its message the mode's counts against
 
 ## 4. The proofs
 
-- [ ] 4.1 `crates/tessera-parquet/src/snappy/proofs.rs`: Kani's proofs
+- [x] 4.1 `crates/tessera-parquet/src/snappy/proofs.rs`: Kani's proofs
       of one turn of the fast loop and of the copy of a pattern for
       every offset from 1 to 16. Check: `cargo kani -p tessera-parquet`
 - [ ] 4.2 `crates/tessera-parquet/fuzz`: the target that gives any

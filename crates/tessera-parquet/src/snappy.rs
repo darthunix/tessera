@@ -480,5 +480,8 @@ fn fast(input: &[u8], ip: usize, out: &mut [u8], op: usize) -> (usize, usize) {
     }
 }
 
+#[cfg(kani)]
+mod proofs;
+
 #[cfg(test)]
 mod tests;
