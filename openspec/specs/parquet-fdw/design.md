@@ -295,11 +295,9 @@ A [`ColumnReader`](../../../crates/tessera-parquet/src/reader.rs) reads
 one column of one group, for a selection of its rows, window by window.
 It builds the crate's record batch reader from the footer already read,
 for its group, its column and a selection of rows, over pages the
-reader itself gives (see "Pages and Snappy"). The crate reads the
-selection by its default policy: a selection whose runs average 32 rows
-or more by skipping and reading runs, a row not selected skipped, a
-whole page without decompressing it where the skip covers the page; one
-of shorter runs by a mask, which decodes every row and filters after.
+reader itself gives (see "Pages and Snappy"), under the crate's policy
+of selectors: a row not selected is skipped, a whole page without
+decompressing it where the skip covers the page.
 
 A column asked window after window, as a scan in full asks it, keeps one
 **forward reader** over the group with the group's selection, so that
@@ -371,9 +369,26 @@ each chunk the crate's page reader, over the chunk's metadata marked
 uncompressed when the chunk is compressed with Snappy, so that it hands
 the pages over as the file stores them. The reader decompresses each
 one, the levels of a page of the format's second version kept as they
-are, and gives it on. A chunk without compression keeps the crate's
-page reader. The dictionary page read for a column's keys takes the
-same way.
+are, and gives it on, to the size the page's header gives, as the
+crate's codec does: a page of another size is an error. The crate
+reads a header through the file's reader from an offset and a page's
+data apart, so a copy of the file of the page reader's own keeps the
+bytes it reads from an offset, and the reader takes the size from
+them, field 2 of the header in Thrift's compact form. A header whose
+first fields are written otherwise, which no writer known does, leaves
+the size unchecked. A chunk without compression keeps the crate's page
+reader. The dictionary page read for a column's keys takes the same
+way.
+
+The lower entry takes no policy of row selection, and the crate's
+default reads a selection whose runs are short on average by a mask:
+every row of a batch's span decoded and filtered, a long skip inside it
+too, so that one batch might decompress and hold the pages of most of a
+group. The reader appends to each selection a skip that the policy
+counts when it chooses and the plan trims before it reads, which makes
+it choose selectors. The choice leans on that order of the crate's
+private steps; a test sees the pages of a long skip left undecompressed
+after short runs, and fails if a release of the crate changes it.
 
 ```text
   ParquetRecordBatchReader              the crate's
@@ -427,12 +442,14 @@ pages of strings; Google's loop does not, and takes half the cycles.
   offset of 0, and the rest of a stream near its ends. A stream it
   cannot decode is an error, and the read raises `XX001`.
 - **The bounds** of the fast loop are its guard: a turn starts only with
-  130 bytes of input from its tag on and 128 of output past what is
+  130 bytes of input past its tag and 128 of output past what is
   written and the copy that waits. Kani proves that a turn from any
-  state the guard admits stays inside its buffers and leaves a state it
-  can admit again; a debug assertion checks the guard's room before
-  every turn of every test; a fuzz target compares the decoder with
-  `snap`'s on any bytes under AddressSanitizer.
+  state the guard admits stays inside its buffers and leaves a state the
+  next turn may assume, the source of the copy that waits among it, and
+  that the copy after the loop stays inside them too; a debug assertion
+  checks the guard's room before every turn of every test; a fuzz target
+  compares the decoder with `snap`'s on any bytes under
+  AddressSanitizer.
 
 Refused:
 
@@ -447,9 +464,12 @@ Refused:
 - **Google's snappy in C++:** a compiler of C++ and its library in the
   extension, outside Miri, Kani and the mutants, and slower when built
   by GCC, Linux's compiler by default, by DuckDB's own note.
-- **The selection's policy of selectors kept:** the lower entry takes
-  none. A query whose source checks a clause reads by a mask where its
-  runs are short, with fewer instructions and about as many cycles.
+- **The crate's default policy of row selection:** a selection of short
+  runs read by a mask, with fewer instructions and about as many cycles
+  on ClickBench's queries, but a long skip after them decoded whole.
+- **A page's size unchecked against its header:** a page whose stream
+  is valid but whose header says another size would be read, where the
+  crate refused it.
 
 ### Values made into the C side's memory
 

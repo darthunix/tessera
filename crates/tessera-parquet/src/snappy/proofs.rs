@@ -1,11 +1,22 @@
 //! The proofs by Kani of the fast loop's bounds, which `cargo kani -p
 //! tessera-parquet` runs: one turn of two elements, from any state its
 //! guard admits, over any bytes, reads and writes inside its buffers and
-//! leaves a state the guard can admit again, with room for the copy
-//! that still waits when the loop ends; and the copy of a pattern writes
-//! only its 64 bytes, for every offset up to 64. That the loop starts a
-//! turn only where the first proof's state holds, the tests see: a debug
-//! assertion checks it before every turn.
+//! leaves a state the next turn's assumption admits, its waiting copy's
+//! source among them, and the copy after the loop, made as `fast` makes
+//! it, stays inside them too; and the copy of a pattern writes only its
+//! 64 bytes, for every offset up to 64. That the loop starts a turn only
+//! where the first proof's state holds, the tests see: a debug assertion
+//! checks it before every turn.
+//!
+//! The buffers are small and the positions in them bounded. A turn reads
+//! and writes only at its positions: up to 66 bytes of input past `ip`,
+//! 64 bytes of output past the frontier, and a copy's 64 bytes from a
+//! source behind the frontier or behind `ip`. Where the positions stand
+//! in their buffers does not change what it touches relative to them, so
+//! what the proof needs is the room past them, which the guard fixes, and
+//! a source behind them, which the assumption fixes; an offset of a copy
+//! larger than the model's output is refused by the same comparison as
+//! one before its start.
 //!
 //! Kani reads the plain copy of a pattern: the shuffles of NEON and SSSE3
 //! are cut out under it.
@@ -74,6 +85,20 @@ fn a_turn_of_the_fast_loop_stays_in_its_buffers() {
     // A copy that waits when the loop stops here has its 64 bytes; a
     // copy of a pattern wrote its own and leaves none waiting.
     assert!(s.len_from == 0 || s.op + SLOP <= OUT);
+    // The waiting copy's source is one the next turn may assume: none, a
+    // literal's bytes before `ip`, or bytes written that end at or before
+    // the frontier, each with its 64 bytes.
+    let (at, i0, o0) = (s.from as usize, ib as usize, ob as usize);
+    assert!(
+        (s.len_from == 0 && at == none.as_ptr() as usize)
+            || (at >= i0 && at < i0 + moved && at + SLOP <= i0 + IN)
+            || (at >= o0 && at + s.len_from <= o0 + s.op && at + SLOP <= o0 + OUT)
+    );
+    // The copy after the loop, as `fast` makes it.
+    if s.len_from != 0 {
+        // SAFETY: what the assertions above show.
+        unsafe { super::copy64(ob.add(s.op), s.from, s.len_from) };
+    }
     kani::cover!(both, "two elements decoded");
     kani::cover!(!both, "an element left to the careful loop");
 }
