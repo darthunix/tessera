@@ -44,10 +44,10 @@ use crate::file::ParquetFile;
 /// counts the reads that reached the file, so that a reader checks the
 /// file after the windows whose pages it read, not after those it took
 /// from pages read before. A copy made by [`SharedFile::capturing`] also
-/// keeps the first [`KEPT`] bytes read through each of its readers from
-/// an offset, which the `parquet` crate's page reader reads a page's
-/// header by and nothing else: the reader's own page reader checks a
-/// page's size by them.
+/// keeps the first [`KEPT`] bytes of the last of its readers from an
+/// offset that read, which the `parquet` crate's page reader reads a
+/// page's header by and nothing else: the reader's own page reader
+/// checks a page's size by them, those of the header it read last.
 #[derive(Clone, Debug)]
 pub(crate) struct SharedFile {
     file: Arc<File>,
@@ -68,9 +68,9 @@ impl SharedFile {
         }
     }
 
-    /// A copy of the file that keeps the first [`KEPT`] bytes each of its
-    /// readers from an offset reads, until [`SharedFile::take_captured`]
-    /// takes them.
+    /// A copy of the file that keeps the first [`KEPT`] bytes of the last
+    /// of its readers from an offset that read, until
+    /// [`SharedFile::take_captured`] takes them.
     pub(crate) fn capturing(&self) -> Self {
         SharedFile {
             captured: Some(Arc::new(Mutex::new(Vec::new()))),
@@ -78,8 +78,8 @@ impl SharedFile {
         }
     }
 
-    /// The bytes kept from this copy's readers from an offset since the
-    /// last call; none for a copy that does not keep them.
+    /// The bytes kept since the last call, of the last reader from an
+    /// offset that read; none for a copy that does not keep them.
     pub(crate) fn take_captured(&self) -> Vec<u8> {
         self.captured
             .as_ref()
@@ -148,12 +148,17 @@ impl Read for At {
             .file
             .read_at(buf, self.position)
             .inspect_err(|e| SharedFile::note(&self.failed, e))?;
+        let first = self.position == self.start;
         let kept = (self.start + KEPT).saturating_sub(self.position);
         self.position += read as u64;
-        if kept > 0
-            && let Some(captured) = &self.captured
+        if let Some(captured) = &self.captured
             && let Ok(mut captured) = captured.lock()
         {
+            // A reader's first read starts a header, which replaces the one
+            // kept: the crate reads an index page's header, then the next.
+            if first {
+                captured.clear();
+            }
             captured.extend_from_slice(&buf[..read.min(kept as usize)]);
         }
         Ok(read)

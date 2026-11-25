@@ -958,3 +958,51 @@ fn a_chunk_that_falls_back_to_plain_pages_is_read_plain() {
         }
     }
 }
+
+#[test]
+fn a_capturing_copy_keeps_the_first_bytes_of_the_last_reader_from_an_offset() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = write_ints(dir.path(), &(0..5_000).collect::<Vec<_>>(), 1_000);
+    let bytes = std::fs::read(dir.path().join("ints.parquet")).unwrap();
+    assert!(bytes.len() > 5_000);
+    let shared = SharedFile::of(&file).capturing();
+    // Reads of 100 bytes at most, as the crate's Thrift reader makes small
+    // ones, so that a read past a kilobyte takes more than one fill.
+    let read = |at: usize, len: usize| {
+        let mut reader = shared.get_read(at as u64).unwrap();
+        let mut out = vec![0; len];
+        for part in out.chunks_mut(100) {
+            reader.read_exact(part).unwrap();
+        }
+        assert_eq!(out, bytes[at..at + len]);
+    };
+    // A header's first 12 bytes, within one fill and past three.
+    read(100, 300);
+    assert_eq!(shared.take_captured(), bytes[100..112]);
+    read(200, 3_000);
+    assert_eq!(shared.take_captured(), bytes[200..212]);
+    // A read of 3 bytes keeps 12 all the same: its fill reads more.
+    read(7, 3);
+    assert_eq!(shared.take_captured(), bytes[7..19]);
+    // Two readers before a take: the last one's, as when the crate reads
+    // an index page's header and then the next page's.
+    read(1_000, 50);
+    read(2_000, 50);
+    assert_eq!(shared.take_captured(), bytes[2_000..2_012]);
+    // A reader made and not read, as after a peek, keeps those before it.
+    read(3_000, 50);
+    drop(shared.get_read(4_000).unwrap());
+    assert_eq!(shared.take_captured(), bytes[3_000..3_012]);
+    // A reader near the file's end keeps what is there.
+    let end = bytes.len() - 5;
+    read(end, 5);
+    assert_eq!(shared.take_captured(), bytes[end..]);
+    // A copy that does not capture keeps nothing.
+    let plain = SharedFile::of(&file);
+    plain
+        .get_read(100)
+        .unwrap()
+        .read_exact(&mut [0; 20])
+        .unwrap();
+    assert!(plain.take_captured().is_empty());
+}
