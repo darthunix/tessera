@@ -203,7 +203,7 @@ what else would make Tessera more reliable, in the order the review
 proposes. The gain of a move is one owner of a rule and a place where a
 model test or a proof reaches it; most C calls PostgreSQL and stays.
 
-- `nightly-checks`: Checks that run every night and every week
+- `weekly-mutants`: Every mutant of the workspace, every week
 - `capi-miri-and-fuzz`: Miri over every test of `tessera-capi`, and a
   fuzz target of its arguments
 - `golden-corpus`: The answers of PostgreSQL's functions as the
@@ -2191,30 +2191,25 @@ The crate `relhash` published on crates.io. Left by the close of
 - **Capabilities:** relhash
 - **Size:** small.
 
-### nightly-checks
+### weekly-mutants
 
-Checks that run every night and every week. From the review of
-2026-11-01.
+Every mutant of the workspace, every week. From the review of
+2026-11-01; the checks of every night it named run since 2026-11-25
+(`.github/workflows/nightly.yml`).
 
-- **What:** One workflow on a schedule. Every night:
-  `tessera-crosscheck` with the date as its seed and some 20,000
-  queries, serial and with workers, at small `work_mem`, its shrunk
-  findings kept as artifacts; each fuzz target for twenty minutes, its
-  corpus cached; the suites against PostgreSQL's latest master beside
-  the pinned commit. Every week: every mutant of the workspace, failing
-  on a survivor that `.cargo/mutants.toml` does not list. And the
-  random queries in the sanitizer job.
-- **Why:** CI runs the random queries with one seed, `--seed 1
-  --queries 3000`, so after the first green run they find nothing new.
-  No workflow has a `schedule:` trigger; fuzzing and the full mutant
-  run start only by hand. Code that no pull request changes is never
-  looked at again.
+- **What:** A run on a schedule, every week, of every mutant of the
+  workspace, failing on a survivor that `.cargo/mutants.toml` does not
+  list.
+- **Why:** The full mutant run starts only by hand, so code that no
+  pull request changes is never judged again.
 - **Known:** `relhash` keeps its zero survivors by a list that decides
   (2c8ec60c). A shard of the full mutant run took two and a half to
-  three and a half hours.
-- **Depends on:** nothing.
-- **Capabilities:** ci, tools
-- **Size:** one or two pull requests.
+  three and a half hours. Taken now, the run would fail every week on
+  the 353 survivors outside `relhash`; on 2026-11-25 the maintainer put
+  it after them.
+- **Depends on:** `mutants-of-other-crates`.
+- **Capabilities:** ci
+- **Size:** small.
 
 ### capi-miri-and-fuzz
 
