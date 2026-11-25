@@ -78,7 +78,7 @@ changes the decoder carries in its message the mode's counts against
 
 ## 5. The count
 
-- [ ] 5.1 Count as the design's measurement plan says: the mode, then
+- [x] 5.1 Count as the design's measurement plan says: the mode, then
       every query of ClickBench against the commit the work starts
       from, with pg_duckdb's cycles beside. Keep the report under
       `docs/benchmarks/`. Check: `.github/scripts/check-specs.sh`
