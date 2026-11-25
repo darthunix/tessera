@@ -10,13 +10,15 @@ change is kept when Q28 loses at least 12 per cent of its cycles, Q26
 at least 8, and no query counted gains more than 2.
 
 - **Tessera**, release builds: the base `d16e43c8`, `main`; the end
-  `5815c83e`, the change's last code.
+  `09a6d50a`, the change's last code with the reviews' fixes, and
+  `5815c83e`, the code before them.
 - **PostgreSQL** 19rc2, release, without LLVM, with pg_pmu.
 - **Data**: `hits.parquet`, 100 M rows, 14.8 GB, in the page cache.
 - **Method**: `cargo clickbench run --mode on --counters --tries 5
   --workers 0`, one query a run, five readings after one that warms up,
-  their medians. The base and the end in turns, twice: `base-h`,
-  `end-h`, `base-i`, `end-i` in [runs.txt](runs.txt). pg_duckdb's
+  their medians. The base and the end in turns, twice: `base-j`,
+  `end-j`, `base-k`, `end-k` in [runs.txt](runs.txt) for the end, and
+  `base-h` to `end-i` for the code before the reviews' fixes. pg_duckdb's
   cycles are those of the run `duckdb` of the sort by bytes, of the
   same server and file, with one thread of DuckDB.
 - **Queries**: at the maintainer's word, a count of about 30 minutes:
@@ -38,31 +40,59 @@ Written before the runs:
 
 ## Result
 
-Billions of cycles at the base and at the end in each pair, the
-change, and the end's cycles over pg_duckdb's; lower is better:
+Billions of cycles at the base and at the end in the second pair, the
+change in each pair, and the end's cycles over pg_duckdb's; lower is
+better:
 
 | query | what | base | end | change, two pairs | over pg_duckdb |
 |---|---|--:|--:|--:|--:|
-| Q28 | `avg(length(URL))` | 53.7 | 39.2 | -25.6, -27.0 % | 1.72 |
-| Q26 | the first phrases | 13.5 | 12.1 | -11.3, -10.2 % | 2.14 |
-| Q21 | `URL LIKE '%google%'` | 23.1 | 16.3 | -28.7, -29.3 % | 0.55 |
-| Q22 | phrases with `google` | 57.7 | 37.7 | -34.6, -34.7 % | 2.09 |
-| Q25 | phrases by the time | 9.7 | 8.5 | -12.9, -11.7 % | 1.09 |
-| Q13 | grouped by the phrase | 22.0 | 20.0 | -7.6, -9.2 % | 2.36 |
-| Q3 | sums of two numbers | 4.7 | 4.4 | +0.3, -7.7 % | 4.51 |
-| Q8 | grouped by a number | 1.4 | 1.4 | -0.5, +1.8 % | 3.27 |
+| Q28 | `avg(length(URL))` | 54.1 | 40.4 | -24.8, -25.4 % | 1.77 |
+| Q26 | the first phrases | 13.8 | 11.8 | -12.4, -14.9 % | 2.07 |
+| Q21 | `URL LIKE '%google%'` | 23.3 | 16.6 | -27.9, -28.7 % | 0.56 |
+| Q22 | phrases with `google` | 58.2 | 38.3 | -27.7, -34.2 % | 2.12 |
+| Q25 | phrases by the time | 9.5 | 8.5 | -10.3, -10.0 % | 1.09 |
+| Q13 | grouped by the phrase | 22.1 | 21.1 | -5.1, -4.3 % | 2.50 |
+| Q3 | sums of two numbers | 4.4 | 4.3 | -2.3, -1.7 % | 4.48 |
+| Q8 | grouped by a number | 1.44 | 1.48 | +10.5, +2.4 % | 3.35 |
 
-The bases and ends of the table are those of the second pair. The
-instructions fell 3.2 to 9.7 per cent on the queries of strings and
-stayed within 0.5 per cent on Q3 and Q8. Q3's base read 4.38 billion
-cycles in the first pair and 4.72 in the second, a spread of 3.4 per
-cent among its own readings: the -7.7 is that base's noise. Before the
-change these queries ran in 2.33 (Q28), 2.39 (Q26), 0.78, 3.21, 1.22
-and 2.60 times pg_duckdb's cycles.
+The first pair's end ran noisy: the spread of its readings reached 17
+per cent on Q13 and 8 on Q22, against 1 or less elsewhere. The
+instructions fell 1.3 to 9.4 per cent on Q13, Q21, Q22, Q26 and Q28,
+rose 0.7 on Q25, stayed on Q3, and rose 3.0 on Q8 in both pairs.
+Before the change these queries ran in 2.33 (Q28), 2.39 (Q26), 0.78,
+3.21, 1.22 and 2.60 times pg_duckdb's cycles.
 
-So hypotheses 1 to 4 hold, Q28 past its range; the fifth was not
-counted, as eight queries cannot give the geometric mean of all. The
-change's thresholds hold, and no query gains.
+So hypotheses 1 to 3 hold, Q28 past its range; the fourth holds but on
+Q8, whose instructions rose 3 per cent; the fifth was not counted, as
+eight queries cannot give the geometric mean of all. The thresholds for
+Q28 and Q26 hold. Q8's cycles rose past the threshold of 2 per cent in
+both pairs; counted again in two more pairs (`base-l` to `end-m`), +0.6
+and -7.2 per cent, the last over a base whose readings spread 15 per
+cent. The maintainer took the change with Q8 so.
+
+**Q8's instructions.** The code before the reviews' fixes ran Q8 in 0.1
+per cent more instructions than the base. A count in turns of three
+variants of the end (`end-l` to `noskip-m`) splits the 3 per cent:
+
+| variant | Q8 | Q13 | Q25 |
+|---|--:|--:|--:|
+| the end | +3.0 % | -1.4 % | +0.7 % |
+| no header's bytes kept, its size unchecked | +2.2 % | -1.4 % | +0.6 % |
+| no trailing skip, the crate's default policy | +2.6 % | -2.4 % | -4.7 % |
+
+Keeping a page's header costs Q8 0.8 per cent of its instructions; the
+trailing skip, which makes the crate read by selectors, 0.4 on Q8 and 5
+on Q25, with no more cycles. About 2 per cent of Q8's are in both
+variants and not in the code before the fixes, and not explained: Q8's
+instructions repeat within 0.1 per cent, and pg_pmu counts the kernel
+on macOS, so the work of the system for the pages' memory is a
+candidate, not shown.
+
+**Before the reviews' fixes**, which put the selectors back and check a
+page's size against its header, the same count gave Q28 -25.6 and -27.0
+per cent of cycles, Q26 -11.3 and -10.2, Q21 -28.7 and -29.3, Q22 -34.6
+and -34.7, Q25 -12.9 and -11.7, Q13 -7.6 and -9.2, Q3 +0.3 and -7.7,
+Q8 -0.5 and +1.8, with Q8's instructions within 0.2 per cent.
 
 ## The decoders alone
 
@@ -108,7 +138,8 @@ took the step with it; the end above covers it.
 
 ## Files
 
-- [runs.txt](runs.txt): every run, by its side and query.
+- [runs.txt](runs.txt): every run, by its side and query; `nocap` and
+  `noskip` are the variants of the end above.
 - [compare.sh](compare.sh): a side against its base, instructions and
   cycles; [duckdb.sh](duckdb.sh): a side's cycles over pg_duckdb's.
 - `source-base.txt`, `source-end.txt` and `source-duckdb.txt`: the

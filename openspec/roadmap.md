@@ -121,6 +121,8 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `agg-date-min-max`: `min` and `max` of `date` by kernels
 - `snappy-on-x86`: the decoder of Snappy counted on Linux x86-64, and
   the shuffle of SSSE3 chosen while running
+- `parquet-pages-cost`: what the reader's own pages cost a query of
+  numbers, 2 per cent of Q8's instructions not explained
 - `spill-rows-writer`: the rows a node writes by partition through
   the one writer of chunks of columns, once it costs no more; the
   maintainer took it out of `spill-crate` on 2026-11-14
@@ -288,6 +290,26 @@ forecast of `datum-arrow`'s contract.
 - **Depends on:** none.
 - **Capabilities:** datum-arrow
 - **Size:** small.
+
+### parquet-pages-cost
+
+What the reader's own pages cost ClickBench's Q8. From the count of the
+reviews' fixes of `parquet-snappy`, 2026-11-25.
+
+- **What:** Find, by profiles of Q8 at `main` and at the end of
+  `parquet-snappy` and a count of user and kernel instructions apart,
+  why the reader's pages cost Q8 2 per cent of its instructions in
+  every variant counted; take the cost of keeping a page's header, 0.8
+  per cent, down with it.
+- **Why:** Q8 runs 3 per cent more instructions than at `main`, its
+  cycles about as many, past the change's threshold of 2 in one clean
+  pair of four. The code before the reviews' fixes ran it at `main`'s.
+- **Known:** The trailing skip that makes the crate read by selectors
+  costs Q8 0.4 per cent and Q25 5, with no more cycles; pg_pmu counts
+  the kernel on macOS.
+- **Depends on:** none.
+- **Capabilities:** parquet-fdw
+- **Size:** a profile and a few lines.
 
 ### snappy-on-x86
 
