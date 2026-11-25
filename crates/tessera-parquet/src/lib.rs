@@ -24,7 +24,9 @@ mod column;
 mod dictionary;
 mod error;
 mod file;
+mod pages;
 mod reader;
+pub mod snappy;
 mod stats;
 
 #[cfg(any(test, feature = "test-files"))]

@@ -1568,6 +1568,7 @@ dependencies = [
  "datum-arrow",
  "parquet",
  "proptest",
+ "snap",
  "tempfile",
  "tessera-kernels",
 ]

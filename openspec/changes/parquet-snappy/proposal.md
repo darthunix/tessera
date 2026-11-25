@@ -42,34 +42,35 @@ This change takes up the roadmap's entry `parquet-snappy`.
 
 ## What Changes
 
-- A crate of the workspace, `crates/snap`, takes the place of `snap`
-  in every build of the workspace, through Cargo's `[patch.crates-io]`.
-  It is named `snap` and gives the four items and the error type the
-  `parquet` crate calls. Its compressor, its error type and its reading
-  of a stream's length are those of the real `snap`, on which it
-  depends under another name. Only the decoder is its own. The
-  `parquet` crate and Tessera's reader stay as they are.
+- The Parquet reader decompresses the Snappy pages itself. It reads
+  through the `parquet` crate's lower entry,
+  `try_new_with_row_groups`, over row groups and page readers of its
+  own: the crate's page reader hands it the pages of a Snappy chunk as
+  stored, and the reader's decoder decompresses them. A chunk without
+  compression is read as now. The `parquet` crate does not change.
+- That entry reads a selection of rows by the crate's default policy,
+  which reads one of short runs by a mask. The first step makes only
+  this change, with `snap` still decoding, and is counted alone.
 - The decoder is a port to Rust of the decompression of a whole buffer
-  in Google's snappy 1.2.1: the table, the loop without a branch on
-  each element, the copies of short repeated patterns by a shuffle of
-  bytes (NEON on AArch64, SSSE3 where the build targets it, plain code
-  otherwise) and the careful steps at the end of a buffer.
+  in Google's snappy 1.2.1, in a module of `tessera-parquet`: the
+  table, the loop without a branch on each element, the copies of
+  short repeated patterns by a shuffle of bytes (NEON on AArch64, SSSE3
+  where the build targets it, plain code otherwise) and a careful loop,
+  in safe Rust, for the end of a buffer.
 - The decoder gives the same bytes as `snap` on every valid stream, and
   an error on every stream `snap` refuses. No stream, valid or not,
   makes it read or write outside its buffers, or panic. Tests compare
-  it with `snap`'s decoder; Kani proves the bounds of its steps; Miri
-  runs its tests; a fuzz target compares the two decoders on any bytes;
-  mutants judge its lines.
-- CI fails when the patch is not used, so that the build never falls
-  back to the real `snap`'s decoder unnoticed.
+  it with `snap`'s decoder; Kani proves the bounds of its fast loop;
+  Miri runs its tests; a fuzz target compares the two decoders on any
+  bytes; mutants judge its lines.
 - `cargo clickbench` gains a mode that decodes the pages of a file's
   columns by both decoders and counts their instructions, cycles,
   branches and branch misses.
 - Results, errors, EXPLAIN and the settings stay as they are. A damaged
   page still fails a query with `XX001`.
 - Not in this change: a choice of the SSSE3 shuffle while running, on
-  x86-64 builds that do not target it; a count on x86-64; Tessera's own
-  decompression of pages; other codecs.
+  x86-64 builds that do not target it; a count on x86-64; a compressor;
+  other codecs.
 
 ## Capabilities
 
@@ -85,14 +86,16 @@ decoder's memory.
 
 ## Impact
 
-- Crates: a new `crates/snap`, the workspace's `Cargo.toml` and
-  `Cargo.lock`. `tessera-parquet` does not change. The workspace takes
-  no crate from outside that it does not already build.
+- Crates: `tessera-parquet`, its reads (`src/reader.rs`,
+  `src/dictionary.rs`), its pages (`src/pages.rs`) and its decoder
+  (`src/snappy.rs`); `snap` becomes its dependency for the tests. The
+  workspace takes no new crate.
 - Tools: `tools/tessera-clickbench`, its mode of decoders.
-- CI: the crate's proofs in the job of Kani, its tests in Miri's, its
-  fuzz target in `fuzz.yml`, the check of an unused patch.
+- CI: the decoder's tests in Miri's job, its fuzz target in
+  `fuzz.yml`; its proofs run in the job of Kani with the crate's.
 - Public headers, settings, SQL suites: none.
-- Contracts: `parquet-fdw`, a rule on the decoder's memory and its
-  forecast of another decompression of pages.
+- Contracts: `parquet-fdw`, a rule on the decoder's memory. Its
+  forecast of another decompression of pages names the reader's input
+  of pages, which is what the change touches.
 - Licenses: the port carries the notice of Google's snappy, BSD-3.
 - Roadmap: the entry `parquet-snappy` leaves it at the close.

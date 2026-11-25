@@ -19,59 +19,62 @@ changes the decoder carries in its message the mode's counts against
       Check: `openspec validate parquet-snappy --strict`;
       `.github/scripts/check-specs.sh`
 
-## 2. The crate in place and the count
+## 2. The reader's own pages and the count of the decoders
 
-- [ ] 2.1 `crates/snap`: the crate `snap` 1.1.3 over `snap = "=1.1.2"`
-      named `upstream`; `Error`, `Result`, `raw::Encoder`,
-      `raw::max_compress_len`, `raw::decompress_len` and
-      `reference::Decoder` upstream's, and `raw::Decoder` its own type,
-      which here calls upstream's, so that no byte of a result
-      changes. The workspace's member and `[patch.crates-io]`;
-      `Cargo.lock`. CI: no `[[patch.unused]]` in `Cargo.lock`, and
-      `parquet` above `snap@1.1.3` in `cargo tree`. Check: `make
-      rust-check`; the suites
+- [x] 2.1 `crates/tessera-parquet`: the reads through
+      `try_new_with_row_groups`, over the reader's `RowGroups` of one
+      group and its page reader (`src/pages.rs`), which takes a Snappy
+      chunk's pages as stored and decompresses them by the module
+      `snappy`, here a call of `snap`'s decoder; the dictionary page of
+      the keys through the same page reader. Tests: the pages of
+      chunks with and without Snappy, of data pages of both versions
+      and of a dictionary, read as the crate's builder reads them; a
+      damaged stream an error. The message carries the count of the
+      design's first step. Check: `make rust-check`; the suites; `make
+      crosscheck`
 - [ ] 2.2 `tools/tessera-clickbench`: the mode that decodes the pages
-      of named columns of the ClickBench file by `raw::Decoder` and by
-      `reference::Decoder`, checks their bytes, and counts
-      instructions, cycles, branches and branch misses per byte with
-      `pmu`; its line in the README. Tests: the pages of a file of
-      `tessera-parquet-testing` collected and decoded by both. Its
-      first run, both decoders still the same, shows the mode's noise.
-      Check: `make rust-check`
+      of named columns of the ClickBench file by the reader's decoder
+      and by `snap`'s, checks their bytes, and counts instructions,
+      cycles, branches and branch misses per byte with `pmu`; its
+      section in the README. Tests: the pages of a written file
+      collected and decoded by both. Its first run, both decoders still
+      the same, shows the mode's noise. Check: `make rust-check`
 
 ## 3. The decoder
 
-- [ ] 3.1 `crates/snap`: the decoder element by element, the careful
-      loop of the design, with the table of tags and the copies of a
-      short pattern by NEON, by SSSE3 where the build targets it, and
-      by plain code; the notice of Google's snappy, whose code it
-      ports. Tests: every kind of element against `snap`'s
-      decoder, the lengths and offsets of the design, a stream cut at
-      each element; property tests of valid, random and changed
-      streams against `snap`'s; under Miri in CI's job. Check: `make
-      rust-check`; `cargo miri test -p snap`; the suites; the mode
-- [ ] 3.2 `crates/snap`: the fast loop of the design, two elements a
-      turn with the copy before deferred. Tests: those of 3.1 over
-      streams long enough for the fast loop, with its edges: 130 bytes
-      of input left, 64 bytes of output room. The message carries the
-      count of the fast loop's branches in the disassembly of
-      `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, and the
-      hints of `asm!` it needed. Check: `make rust-check`; `cargo miri
-      test -p snap`; the suites; `make crosscheck`; the mode
+- [ ] 3.1 `crates/tessera-parquet/src/snappy.rs`: the careful loop of
+      the design, in safe Rust, decoding whole streams; `snap` a
+      dependency of the tests alone; the notice of Google's snappy,
+      whose code the module ports. Tests: every kind of element
+      against `snap`'s decoder, the lengths and offsets of the design,
+      a stream cut at each byte; property tests of valid, random,
+      changed and hand-written streams against `snap`'s; in CI's job of
+      Miri. Check: `make rust-check`; `cargo miri test -p
+      tessera-parquet --lib snappy`; the suites; the mode
+- [ ] 3.2 `crates/tessera-parquet/src/snappy.rs`: the fast loop of the
+      design, two elements a turn with the copy before deferred, with
+      the table of tags and the copies of a short pattern by NEON, by
+      SSSE3 where the build targets it, and by plain code. Tests: those
+      of 3.1 over streams long enough for the fast loop, with its
+      edges: 130 bytes of input left, 64 bytes of output room. The
+      message carries the count of the fast loop's branches in the
+      disassembly of `aarch64-apple-darwin` and
+      `x86_64-unknown-linux-gnu`, and the hints of `asm!` it needed.
+      Check: `make rust-check`; `cargo miri test -p tessera-parquet
+      --lib snappy`; the suites; `make crosscheck`; the mode
 
 ## 4. The proofs
 
-- [ ] 4.1 `crates/snap/src/proofs.rs`: Kani's proofs of one turn of
-      the fast loop, of the copy of a pattern for every offset from 1
-      to 16, and of the careful loop's checks; the crate in the job of
-      Kani. Check: `cargo kani -p snap`
-- [ ] 4.2 `crates/snap/fuzz`: the target that gives any bytes to both
-      decoders, in `fuzz.yml`. The contract of `parquet-fdw` gains the
-      rule that no stream makes the decoder read or write outside its
-      buffers, checked by the proofs of 4.1 and this target. The
-      mutants of the crate's lines, run locally on the whole diff.
-      Check: `cargo +nightly fuzz run decode -- -max_total_time=300`;
-      `.github/scripts/check-specs.sh`
+- [ ] 4.1 `crates/tessera-parquet/src/snappy/proofs.rs`: Kani's proofs
+      of one turn of the fast loop and of the copy of a pattern for
+      every offset from 1 to 16. Check: `cargo kani -p tessera-parquet`
+- [ ] 4.2 `crates/tessera-parquet/fuzz`: the target that gives any
+      bytes to both decoders, in `fuzz.yml`. The contract of
+      `parquet-fdw` gains the rule that no stream makes the decoder
+      read or write outside its buffers, checked by the proofs of 4.1
+      and this target. The mutants of the decoder's lines, run locally
+      on the whole diff. Check: `cargo +nightly fuzz run snappy --
+      -max_total_time=300`; `.github/scripts/check-specs.sh`
 
 ## 5. The count
 

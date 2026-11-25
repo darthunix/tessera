@@ -7,12 +7,9 @@
 //! writers of the format's first version do. A page of any other encoding
 //! leaves the dictionary untried, without an error.
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use parquet::basic::Encoding;
-use parquet::column::page::{Page, PageReader};
-use parquet::file::serialized_reader::SerializedPageReader;
+use parquet::column::page::Page;
 
 use crate::column::{FileType, MappedColumn};
 use crate::error::{self, DATA_CORRUPTED, Error, Result};
@@ -110,7 +107,7 @@ pub fn read_dictionary(
     let rows = usize::try_from(meta.num_rows()).unwrap_or(0);
     let shared = SharedFile::of(file);
     let page = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        SerializedPageReader::new(Arc::new(shared.clone()), chunk, rows, None)
+        crate::pages::open(&shared, chunk, rows)
             .and_then(|mut pages| pages.get_next_page())
             .map_err(|e| error::damaged(&e))
     }))
