@@ -1,0 +1,29 @@
+# The fuzz target of tessera-parquet's decoder of Snappy, run by
+# cargo-fuzz under AddressSanitizer (.github/workflows/fuzz.yml). A crate
+# of its own, out of the workspace: it needs a nightly compiler and
+# builds libFuzzer's C++.
+[package]
+name = "tessera-parquet-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Out of the repository's workspace.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+snap = "1.1.2"
+
+[dependencies.tessera-parquet]
+path = ".."
+
+[[bin]]
+name = "snappy"
+path = "fuzz_targets/snappy.rs"
+test = false
+doc = false
+bench = false

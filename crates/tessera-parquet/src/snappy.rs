@@ -93,10 +93,7 @@ pub fn decompress(input: &[u8], output: &mut [u8]) -> Result<usize, Damaged> {
 
 /// The little-endian number of `bytes`.
 fn little(bytes: &[u8]) -> usize {
-    bytes
-        .iter()
-        .rev()
-        .fold(0, |n, &b| (n << 8) | usize::from(b))
+    bytes.iter().rev().fold(0, |n, &b| n * 256 + usize::from(b))
 }
 
 /// Decodes the elements of `input` into the whole of `out`: by the fast
@@ -105,10 +102,9 @@ fn little(bytes: &[u8]) -> usize {
 fn decode(input: &[u8], out: &mut [u8]) -> Result<(), Damaged> {
     let (mut ip, mut op) = (0, 0);
     while ip < input.len() {
+        // The fast loop stops short of the input's end, at an element.
         (ip, op) = fast(input, ip, out, op);
-        if ip < input.len() {
-            (ip, op) = element(input, ip, out, op)?;
-        }
+        (ip, op) = element(input, ip, out, op)?;
     }
     if op != out.len() {
         return Err(damaged("elements short of its length"));
@@ -150,7 +146,7 @@ fn element(input: &[u8], ip: usize, out: &mut [u8], op: usize) -> Result<(usize,
     let (len, offset) = if tag & 3 == 1 {
         (
             usize::from((tag >> 2) & 7) + 4,
-            (usize::from(tag >> 5) << 8) | little(after),
+            usize::from(tag >> 5) * 256 + little(after),
         )
     } else {
         (usize::from(tag >> 2) + 1, little(after))
@@ -449,7 +445,8 @@ fn fast(input: &[u8], ip: usize, out: &mut [u8], op: usize) -> (usize, usize) {
     {
         return (ip, op);
     }
-    let out_limit = out.len() - (2 * SLOP - 1);
+    let out_len = out.len();
+    let out_limit = out_len - (2 * SLOP - 1);
     let ib = input.as_ptr();
     let ob = out.as_mut_ptr();
     let none = [0u8; SLOP];
@@ -467,11 +464,23 @@ fn fast(input: &[u8], ip: usize, out: &mut [u8], op: usize) -> (usize, usize) {
             from: none.as_ptr(),
             len_from: 0,
         };
-        while step(&mut s, ob, none.as_ptr())
-            && step(&mut s, ob, none.as_ptr())
-            && s.ip < in_limit
-            && s.op + s.len_from < out_limit
-        {}
+        loop {
+            // The room the proof of a turn takes for granted, counted
+            // from the buffers' lengths rather than the limits above, so
+            // that a test sees a guard that lets a turn start without it.
+            debug_assert!(
+                input.len() - s.ip.offset_from_unsigned(ib) >= 2 * SLOP + 2
+                    && out_len - (s.op + s.len_from) >= 2 * SLOP
+                    && s.len_from <= SLOP,
+                "a turn of the fast loop without its room"
+            );
+            if !(step(&mut s, ob, none.as_ptr()) && step(&mut s, ob, none.as_ptr())) {
+                break;
+            }
+            if s.ip >= in_limit || s.op + s.len_from >= out_limit {
+                break;
+            }
+        }
         if s.len_from != 0 {
             copy64(ob.add(s.op), s.from, s.len_from);
             s.op += s.len_from;

@@ -227,9 +227,8 @@ impl PageReader for Snappy {
         self.0.skip_next_page()
     }
 
-    fn at_record_boundary(&mut self) -> Result<bool> {
-        self.0.at_record_boundary()
-    }
+    // `at_record_boundary` is the trait's own, which peeks at the next
+    // page, as the crate's page reader answers without a page index.
 }
 
 #[cfg(test)]

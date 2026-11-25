@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a4797741478c5930e59580dec0a0891dfd7f2ded5b54ddb7490b73d4f089485f # shrinks to elements = [Copy { len: 49, offset: 0, width: 2 }, Literal { bytes: [11, 48, 85, 122, 159, 196, 233, 14, 51, 88, 125, 162, 199, 236, 17, 54, 91, 128, 165, 202, 239, 20, 57, 94, 131, 168, 205, 242, 23, 60, 97, 134, 171, 208, 245, 26, 63, 100, 137, 174, 211, 248, 29, 66, 103, 140, 177, 214, 251, 32, 69, 106, 143, 180, 217, 254, 35, 72, 109, 146, 183, 220, 1, 38, 75, 112, 149, 186, 223, 4, 41, 78, 115, 152, 189, 226, 7, 44, 81], extra: 1 }], slack = 0
+cc 8bd7981596afb38548b2d8b24788928b1035a2f39033c8b6743833c9e26abe1f # shrinks to rows = 5, at = Index(351366553784943841), byte = 0
+cc 853eeb84ec4e0908df42c6083b8053189166b786cc8d3a34c33c29d8f8b66603 # shrinks to input = [128, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+cc b6c578839dd0102c8c2a812a187f42279f7b97af6bc61fcef7940295c3d82e08 # shrinks to rows = 136, at = Index(1005796950654697130), byte = 0

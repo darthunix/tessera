@@ -68,7 +68,7 @@ changes the decoder carries in its message the mode's counts against
 - [x] 4.1 `crates/tessera-parquet/src/snappy/proofs.rs`: Kani's proofs
       of one turn of the fast loop and of the copy of a pattern for
       every offset from 1 to 16. Check: `cargo kani -p tessera-parquet`
-- [ ] 4.2 `crates/tessera-parquet/fuzz`: the target that gives any
+- [x] 4.2 `crates/tessera-parquet/fuzz`: the target that gives any
       bytes to both decoders, in `fuzz.yml`. The contract of
       `parquet-fdw` gains the rule that no stream makes the decoder
       read or write outside its buffers, checked by the proofs of 4.1

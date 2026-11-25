@@ -1,14 +1,17 @@
-# The fuzz targets of relhash and relspill (crates/*/fuzz), under
-# AddressSanitizer. Those of relhash: tables built from the fuzzer's
-# bytes, damaged where they choose, and the crate's calls over them,
-# with any arguments. Those of relspill: any bytes as a set's file, a
-# set written and damaged where they choose, every read over it; and
-# the machines stepped by any events and numbers. A pull request that
-# changes either crate runs each target of both for a minute; a run by
-# hand (workflow_dispatch) for as long as it is given, an hour by
-# default, before a release of a crate. An input that fails is kept as
-# an artifact, and becomes a case of the crate's matrix of damage or of
-# a machine's tests.
+# The fuzz targets of relhash, relspill and tessera-parquet
+# (crates/*/fuzz), under AddressSanitizer. Those of relhash: tables
+# built from the fuzzer's bytes, damaged where they choose, and the
+# crate's calls over them, with any arguments. Those of relspill: any
+# bytes as a set's file, a set written and damaged where they choose,
+# every read over it; and the machines stepped by any events and
+# numbers. That of tessera-parquet: any bytes, and streams of snap's
+# encoder with a byte changed, into the reader's decoder of Snappy
+# against snap's. A pull request that changes one of the crates runs
+# each target of all three for a minute; a run by hand
+# (workflow_dispatch) for as long as it is given, an hour by default,
+# before a release of a crate. An input that fails is kept as an
+# artifact, and becomes a case of the crate's matrix of damage or of a
+# machine's tests.
 name: Fuzz
 
 on:
@@ -16,6 +19,7 @@ on:
     paths:
       - "crates/relhash/**"
       - "crates/relspill/**"
+      - "crates/tessera-parquet/**"
       - ".github/workflows/fuzz.yml"
   workflow_dispatch:
     inputs:
@@ -35,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [relhash, relspill]
+        crate: [relhash, relspill, tessera-parquet]
     env:
       # cargo-fuzz needs a nightly: the one Miri's job pins.
       RUSTUP_TOOLCHAIN: nightly-2026-09-11
