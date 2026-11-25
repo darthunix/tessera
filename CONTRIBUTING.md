@@ -107,9 +107,10 @@ Before a result is copied into `test/expected/`, read its diff: every
 `ERROR`, every removed line. The expected file is the oracle.
 
 An `EXPLAIN` in a suite whose plan holds a subplan, a branch of a set
-operation or a `Result` in place of a scan goes through
-`explain_neutral` (`test/sql/include/core_neutral.sql`): the cores name
-these parts apart, and one expected file serves them all.
+operation, a `Result` in place of a scan or, under `ANALYZE`, a
+Function Scan goes through `explain_neutral`
+(`test/sql/include/core_neutral.sql`): the cores name or print these
+parts apart, and one expected file serves them all.
 
 ## When work needs an OpenSpec change
 
