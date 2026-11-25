@@ -51,7 +51,7 @@ changes the decoder carries in its message the mode's counts against
       changed and hand-written streams against `snap`'s; in CI's job of
       Miri. Check: `make rust-check`; `cargo miri test -p
       tessera-parquet --lib snappy`; the suites; the mode
-- [ ] 3.2 `crates/tessera-parquet/src/snappy.rs`: the fast loop of the
+- [x] 3.2 `crates/tessera-parquet/src/snappy.rs`: the fast loop of the
       design, two elements a turn with the copy before deferred, with
       the table of tags and the copies of a short pattern by NEON, by
       SSSE3 where the build targets it, and by plain code. Tests: those
