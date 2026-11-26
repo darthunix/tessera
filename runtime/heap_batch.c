@@ -786,7 +786,7 @@ same_layout(TupleDesc a, TupleDesc b)
 		return false;
 	for (int attr = 0; attr < a->natts; attr++)
 	{
-#if TESS_GREENGAGE
+#if TESS_PG_MAJOR < 18
 		const Form_pg_attribute left = TupleDescAttr(a, attr);
 		const Form_pg_attribute right = TupleDescAttr(b, attr);
 

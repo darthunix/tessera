@@ -81,7 +81,7 @@ typedef struct DateFunction
 static TessStatusCode date_evaluate(TessFunctionCall *call);
 static TessStatusCode trunc_evaluate(TessFunctionCall *call);
 static TessStatusCode interval_evaluate(TessFunctionCall *call);
-#if !TESS_GREENGAGE
+#if TESS_PG_MAJOR >= 14
 static TessStatusCode extract_evaluate(TessFunctionCall *call);
 #endif
 static TessStatusCode zone_cast_evaluate(TessFunctionCall *call);
@@ -118,14 +118,14 @@ static const DateFunction date_functions[] = {
 				  interval_evaluate),
 	DATE_FUNCTION(F_DATE_MI_INTERVAL, DATE_MINUS_INTERVAL, TESS_RESULT_DATUM,
 				  interval_evaluate),
-#if !TESS_GREENGAGE
-	/* Greengage's EXTRACT is date_part, a float8: no kernel. */
+#if TESS_PG_MAJOR >= 14
+	/* Before PostgreSQL 14 EXTRACT is date_part, a float8: no kernel. */
 	EXTRACT_FUNCTION(F_EXTRACT_TEXT_DATE, DATE_EXTRACT),
 	EXTRACT_FUNCTION(F_EXTRACT_TEXT_TIMESTAMP, TIMESTAMP_EXTRACT),
 #endif
 	DATE_FUNCTION(F_DATE_TRUNC_TEXT_TIMESTAMPTZ, TIMESTAMPTZ_TRUNC, TESS_RESULT_DATUM,
 				  trunc_evaluate),
-#if !TESS_GREENGAGE
+#if TESS_PG_MAJOR >= 14
 	EXTRACT_FUNCTION(F_EXTRACT_TEXT_TIMESTAMPTZ, TIMESTAMPTZ_EXTRACT),
 #endif
 	DATE_FUNCTION(F_TIMESTAMPTZ_DATE, DATE_TO_TIMESTAMPTZ, TESS_RESULT_DATUM,
@@ -598,7 +598,7 @@ interval_evaluate(TessFunctionCall *call)
 									   call->non_nulls, call->status);
 }
 
-#if !TESS_GREENGAGE
+#if TESS_PG_MAJOR >= 14
 /* A core function of two arguments on one row, its NULL result allowed. */
 static Datum
 call_core(PGFunction function, Datum first, Datum second, bool *isnull)

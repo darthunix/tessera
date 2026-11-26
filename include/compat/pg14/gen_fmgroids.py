@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Write utils/fmgroids.h for Greengage 7: the F_* names Tessera uses.
+"""Write utils/fmgroids.h for a core before PostgreSQL 14: the F_* names
+Tessera uses.
 
 PostgreSQL 14 named the F_* macros by function name and argument types;
-Greengage 7 (PostgreSQL 12) names them by the C function. For every
-F_* name the sources use that Greengage lacks or gives another function
-(F_DATE_TIMESTAMP is timestamp(date) there, date(timestamp) in master),
-this takes the OID from a master build's fmgroids.h and defines it only
-when Greengage's catalog has a function of that OID with the same name,
-argument types and result. The others are listed as unavailable: the
-code that needs them is compiled out on Greengage.
+an older core, such as Greengage 7 (PostgreSQL 12), names them by the C
+function. For every F_* name the sources use that the older core lacks
+or gives another function (F_DATE_TIMESTAMP is timestamp(date) there,
+date(timestamp) in master), this takes the OID from a master build's
+fmgroids.h and defines it only when the older core's catalog has a
+function of that OID with the same name, argument types and result. The
+others are listed as unavailable: the code that needs them is compiled
+out there. The file is made from one core's catalog, Greengage 7's in
+the tree; another core of that age makes its own.
 
 Usage: gen_fmgroids.py MASTER_PG_CONFIG GREENGAGE_PG_CONFIG \
     MASTER_SRC GREENGAGE_SRC TESSERA_ROOT > utils/fmgroids.h

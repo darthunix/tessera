@@ -73,9 +73,9 @@ make_limit_path(PlannerInfo *root, LimitPath *limit)
 	return tess_path_create(&config);
 }
 
-#if TESS_GREENGAGE
+#if TESS_MPP
 /*
- * Greengage limits rows on each segment before a Gather Motion too, with
+ * The Greenplum family limits rows on each segment before a Gather Motion, with
  * a preliminary limit of offset + count rows, and again above it: the
  * final relation's path is a chain of Motion and Limit paths over the
  * ordered rows. The chain with its lowest limit, one under a Motion, the
@@ -139,7 +139,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		LimitPath  *limit;
 		CustomPath *path;
 
-#if TESS_GREENGAGE
+#if TESS_MPP
 		{
 			Path	   *chain = with_preliminary_limit(root, lfirst(lc), false);
 
@@ -154,8 +154,8 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		if (!IsA(lfirst(lc), LimitPath))
 			continue;
 		limit = lfirst(lc);
-#if !TESS_GREENGAGE
-		/* WITH TIES stays with the core node; PostgreSQL 12 has none. */
+#if TESS_PG_MAJOR >= 13
+		/* WITH TIES stays with the core node; PostgreSQL 13 brought it. */
 		if (limit->limitOption != LIMIT_OPTION_COUNT)
 			continue;
 #endif

@@ -27,6 +27,7 @@
 #include "port/pg_bitutils.h"
 #include "utils/fmgroids.h"
 #include "utils/timestamp.h"
+#include "varatt.h"
 
 #include "tessera/bridge.h"
 #include "tessera/calendar.h"
@@ -709,6 +710,28 @@ aggregate_evaluate(TessFunctionCall *call)
 	return code;
 }
 
+/*
+ * The kernels read varlena headers in one layout, chosen when they were
+ * built (host.mk, rust.mk): the core must write them so. A 4-byte header
+ * of 5 bytes is 0x14 in its first byte in PostgreSQL's little-endian
+ * layout and 0 in network byte order.
+ */
+static void
+check_varlena_layout(void)
+{
+	uint32		probe[2] = {0, 0};
+	bool		network;
+
+	SET_VARSIZE(probe, 5);
+	network = ((unsigned char *) probe)[0] == 0;
+	if (network != (TESS_NETWORK_VARLENA != 0))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("tessera_kernels was built for another layout of varlena headers than this server's"),
+				 errhint("Build the kernels with TESS_NETWORK_VARLENA %s in host.mk.",
+						 network ? "set" : "unset")));
+}
+
 void
 _PG_init(void)
 {
@@ -716,6 +739,7 @@ _PG_init(void)
 	void	  **rendezvous;
 	int			i;
 
+	check_varlena_layout();
 	rendezvous = find_rendezvous_variable(TESS_API_RENDEZVOUS);
 	api = *rendezvous;
 	if (api == NULL)

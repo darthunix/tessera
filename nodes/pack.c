@@ -9,10 +9,20 @@
 #include "optimizer/optimizer.h"
 #include "optimizer/plancat.h"
 #include "optimizer/tlist.h"
-#if TESS_GREENGAGE
+#if TESS_MPP
 #include "access/tableam.h"
 #include "cdb/cdbaocsam.h"
 #include "cdb/cdbappendonlyam.h"
+#endif
+/*
+ * The pack reads append-only tables in blocks itself where the fork's
+ * append-only scans give their rows in batches, a patch that announces
+ * itself in their headers.
+ */
+#if TESS_MPP && defined(AOCS_HAS_GETNEXT_BATCH) && defined(APPENDONLY_HAS_GETNEXT_BATCH)
+#define PACK_AO_BLOCKS 1
+#else
+#define PACK_AO_BLOCKS 0
 #endif
 
 #include "tessera/plan.h"
@@ -62,15 +72,15 @@ typedef struct PackState
 	int64		tuples_needed;
 	int64		produced;
 	uint64		batches;
-#if TESS_GREENGAGE
+#if PACK_AO_BLOCKS
 	/* An append-only table the pack reads in blocks, or NULL. */
 	struct PackAocs *aocs;
 #endif
 } PackState;
 
-#if TESS_GREENGAGE
+#if PACK_AO_BLOCKS
 /*
- * Greengage's append-only table read by the pack itself, in place of the
+ * An append-only table read by the pack itself, in place of the
  * core's sequential scan under it, with no tuple slot: for ao_column
  * aocs_getnext_batch gives the rows of the projected columns column by
  * column straight from their blocks, for ao_row appendonly_getnext_batch
@@ -147,7 +157,7 @@ physical_targets(PlannerInfo *root, const Path *child)
 		child->pathtype != T_SeqScan || !IS_SIMPLE_REL(rel) ||
 		rel->rtekind != RTE_RELATION)
 		return NIL;
-#if TESS_GREENGAGE
+#if TESS_MPP
 	/*
 	 * Only a heap scan returns its buffer's tuples: an append-only scan
 	 * would read every column for the physical list, and a column-oriented
@@ -407,7 +417,7 @@ pack_begin(CustomScanState *css, EState *estate, int eflags)
 	state->output = tess_output_create(estate->es_query_cxt, &css->ss.ps,
 									   css->ss.ps.ps_ResultTupleSlot,
 									   &info.layout);
-#if TESS_GREENGAGE
+#if PACK_AO_BLOCKS
 	/* Only a dense layout maps batch column N to the child's target N. */
 	if (info.node_data == NULL)
 		state->aocs = pack_aocs_create(state, estate);
@@ -453,7 +463,7 @@ pack_create_provider(PackState *state, TupleTableSlot *slot)
 	}
 }
 
-#if TESS_GREENGAGE
+#if PACK_AO_BLOCKS
 static void
 aocs_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 					  TessColumnPurpose purpose, TessDatumColumn *result)
@@ -626,7 +636,7 @@ pack_exec(CustomScanState *css)
 			return NULL;
 		limit = (int) Min((int64) limit, state->tuples_needed - state->produced);
 	}
-#if TESS_GREENGAGE
+#if PACK_AO_BLOCKS
 	if (state->aocs != NULL)
 	{
 		batch = pack_aocs_next(state, limit);
@@ -683,7 +693,7 @@ pack_end(CustomScanState *css)
 		tess_unary_end(state->unary);
 	else
 		tess_output_end(state->output);
-#if TESS_GREENGAGE
+#if PACK_AO_BLOCKS
 	/* Before the child, which closes the relation the scan reads. */
 	if (state->aocs != NULL && state->aocs->scan != NULL)
 		aocs_endscan(state->aocs->scan);
@@ -704,7 +714,7 @@ pack_rescan(CustomScanState *css)
 		return;
 	}
 	tess_output_clear(state->output);
-#if TESS_GREENGAGE
+#if PACK_AO_BLOCKS
 	if (state->aocs != NULL && state->aocs->scan != NULL)
 		aocs_rescan(state->aocs->scan);
 	if (state->aocs != NULL && state->aocs->row_scan != NULL)
@@ -737,7 +747,7 @@ pack_explain(CustomScanState *css, List *ancestors, ExplainState *es)
 	/* The parent's request, and so the size, is known once executed. */
 	if (state->request != NULL)
 		ExplainPropertyInteger("Batch Size", NULL, state->capacity, es);
-#if TESS_GREENGAGE
+#if PACK_AO_BLOCKS
 	if (state->aocs != NULL)
 		ExplainPropertyText("Rows Kept As",
 							state->aocs->columns ? "ao_column blocks" : "ao_row blocks", es);

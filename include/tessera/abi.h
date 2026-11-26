@@ -12,14 +12,10 @@
 /*
  * Tessera follows PostgreSQL master (20devel) and builds against 19 and 18
  * as well. Where an interface differs, it is read in two ways where it is
- * used, by PG_VERSION_NUM. Older cores differ much more: of them only
- * Greengage 7 builds, through compat.h. Every module includes this header,
- * so the headers of another older server stop the build here rather than
- * at the first declaration they lack.
+ * used, by PG_VERSION_NUM. Older cores differ much more: one builds only
+ * through the shims of compat.h, which stops the build of a core it has
+ * none for.
  */
-#if PG_VERSION_NUM < 180000 && !TESS_GREENGAGE
-#error "Tessera needs PostgreSQL 18, 19 or master (20devel)"
-#endif
 
 /*
  * The version of Tessera's modules, which PG_MODULE_MAGIC_EXT records: the

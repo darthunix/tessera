@@ -1,4 +1,4 @@
-/* Greengage 7 (PostgreSQL 12) lacks this header: copied from PostgreSQL master as it is. */
+/* PostgreSQL 14 added this header: copied from PostgreSQL master as it is. */
 /*-------------------------------------------------------------------------
  *
  * sort_template.h

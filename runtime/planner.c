@@ -57,10 +57,10 @@ tess_path_create(const TessPathConfig *config)
 	path->path.pathtype = T_CustomScan;
 	path->flags = config->flags;
 	path->custom_paths = list_copy(config->children);
-#if TESS_GREENGAGE
-	/* shortcut: PostgreSQL 12 has no custom_restrictinfo; TessFilter's clauses are not ported yet. */
+#if TESS_PG_MAJOR < 17
+	/* shortcut: no custom_restrictinfo before PostgreSQL 17; TessFilter's clauses are not ported there. */
 	if (config->restrictinfo != NIL)
-		elog(ERROR, "Tessera cannot keep a custom path's clauses on Greengage");
+		elog(ERROR, "Tessera cannot keep a custom path's clauses on this core");
 #else
 	path->custom_restrictinfo = copyObject(config->restrictinfo);
 #endif
@@ -334,8 +334,8 @@ tess_path_setop_constant(const Path *path)
 			}
 			return false;
 		case T_SetOpPath:
-#if TESS_GREENGAGE
-			/* PostgreSQL 12's set operation reads one appended input. */
+#if TESS_PG_MAJOR < 18
+			/* Before PostgreSQL 18 a set operation reads one appended input. */
 			return tess_path_setop_constant(((const SetOpPath *) path)->subpath);
 #else
 			return tess_path_setop_constant(((const SetOpPath *) path)->leftpath) ||
@@ -351,7 +351,7 @@ tess_path_setop_constant(const Path *path)
 		case T_AggPath:
 			return tess_path_setop_constant(((const AggPath *) path)->subpath);
 		case T_SortPath:
-#if !TESS_GREENGAGE
+#if TESS_PG_MAJOR >= 13
 		case T_IncrementalSortPath:
 #endif
 			return tess_path_setop_constant(((const SortPath *) path)->subpath);
