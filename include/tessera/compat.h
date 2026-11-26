@@ -90,6 +90,25 @@ pg_prevpower2_64(uint64 num)
 	return ((uint64) 1) << pg_leftmost_one_pos64(num);
 }
 
+/* a + b into *result, true where it overflows (PostgreSQL 13). */
+static inline bool
+pg_add_u64_overflow(uint64 a, uint64 b, uint64 *result)
+{
+#if defined(HAVE__BUILTIN_OP_OVERFLOW)
+	return __builtin_add_overflow(a, b, result);
+#else
+	uint64		res = a + b;
+
+	if (res < a)
+	{
+		*result = 0x5EED;		/* to avoid spurious warnings */
+		return true;
+	}
+	*result = res;
+	return false;
+#endif
+}
+
 /* The least power of two not below num, num > 0 (PostgreSQL 13). */
 static inline uint64
 pg_nextpower2_64(uint64 num)

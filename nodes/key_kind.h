@@ -82,7 +82,12 @@ tess_key_kind_of_sort(int kind)
 static inline bool
 tess_collation_orders_by_bytes(Oid collation)
 {
+#if TESS_PG_MAJOR < 18
+	/* Before PostgreSQL 18 a locale does not say it; the core's test of C does. */
+	return OidIsValid(collation) && lc_collate_is_c(collation);
+#else
 	return OidIsValid(collation) && pg_newlocale_from_collation(collation)->collate_is_c;
+#endif
 }
 
 /* The kernel that hashes the first key of a batch, of this kind. */

@@ -1073,6 +1073,8 @@ give_out(HeapScanState *state, TessBatch *batch)
 	return batch;
 }
 
+/* The index-only mode's next row, where the core has the mode (HEAP_INDEX_MODES). */
+#if HEAP_INDEX_MODES
 #if PG_VERSION_NUM < 200000
 /*
  * PostgreSQL 19 and 18 have no table_index_getnext_slot: the next entry's
@@ -1150,6 +1152,7 @@ index_only_next(IndexOnlyScanState *ios, IndexScanDesc scan, ScanDirection direc
 {
 	return table_index_getnext_slot(scan, direction, slot);
 }
+#endif
 #endif
 
 /*

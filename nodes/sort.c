@@ -331,7 +331,8 @@ sort_bytes_order(TessSortState *state, const char *a, Size a_len, bool a_null,
 	return (flags & TESS_SORT_DESCENDING) != 0 ? -order : order;
 }
 
-/* sort_bytes_order of two values. */
+/* sort_bytes_order of two values, for the assertions. */
+#ifdef USE_ASSERT_CHECKING
 static int
 bytes_order(TessSortState *state, Datum a, bool a_null, Datum b, bool b_null)
 {
@@ -344,6 +345,7 @@ bytes_order(TessSortState *state, Datum a, bool a_null, Datum b, bool b_null)
 		pfree(x);
 	return order;
 }
+#endif
 
 /*
  * An assert build's check of a string key by its bytes over output rows

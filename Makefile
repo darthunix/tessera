@@ -1,6 +1,11 @@
 SUBDIRS = bridge kernels runtime nodes parquet test
 PG_CONFIG ?= pg_config
 CARGO ?= cargo
+# A core of the Greenplum family (host.mk) builds the modules alone: the
+# Parquet wrapper and the suites are not ported there.
+ifneq ($(shell $(PG_CONFIG) --gp_version 2>/dev/null),)
+SUBDIRS := $(filter-out parquet test,$(SUBDIRS))
+endif
 
 .PHONY: all clean install installcheck $(SUBDIRS) \
 	rust rust-release rust-check rust-mutants rust-loom rust-clean \
@@ -26,7 +31,9 @@ install:
 	$(MAKE) -C kernels PG_CONFIG="$(PG_CONFIG)" install
 	$(MAKE) -C runtime PG_CONFIG="$(PG_CONFIG)" install
 	$(MAKE) -C nodes PG_CONFIG="$(PG_CONFIG)" install
+ifneq ($(filter parquet,$(SUBDIRS)),)
 	$(MAKE) -C parquet PG_CONFIG="$(PG_CONFIG)" install
+endif
 
 installcheck: all
 	$(MAKE) -C test PG_CONFIG="$(PG_CONFIG)" installcheck

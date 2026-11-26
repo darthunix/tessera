@@ -76,18 +76,19 @@ static const TessSource *
 next_source(const TessSource *previous)
 {
 	ListCell   *cell;
+	bool		found = false;
 
 	if (previous == NULL)
 		return sources != NIL ? linitial(sources) : NULL;
+	/* The cell after previous's, without lnext, whose arguments differ by core. */
 	foreach(cell, sources)
 	{
-		if (lfirst(cell) == previous)
-		{
-			ListCell   *after = lnext(sources, cell);
-
-			return after != NULL ? lfirst(after) : NULL;
-		}
+		if (found)
+			return lfirst(cell);
+		found = lfirst(cell) == previous;
 	}
+	if (found)
+		return NULL;
 	elog(ERROR, "Tessera source is not registered");
 	pg_unreachable();
 }
