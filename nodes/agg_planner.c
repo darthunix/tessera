@@ -1021,6 +1021,17 @@ has_distinct_aggregate(List *tlist)
 	return false;
 }
 
+/* Whether an expression holds a DISTINCT aggregate, at any depth. */
+static bool
+contains_distinct_aggregate(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+	if (IsA(node, Aggref) && ((Aggref *) node)->aggdistinct != NIL)
+		return true;
+	return expression_tree_walker(node, contains_distinct_aggregate, context);
+}
+
 /*
  * The bytes the pairs of group and argument of the DISTINCT aggregates
  * take together, with their arguments' dictionaries, as the planner
@@ -1568,11 +1579,14 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	 * generic aggregates spill: the groups with their states must fit. The
 	 * pairs must fit too, or, with GROUP BY and a word for every argument,
 	 * they go to disk, the groups leaving them half of hash_mem at least;
-	 * only then does the node weigh the groups by the estimate.
+	 * only then does the node weigh the groups by the estimate. A gate, not
+	 * a price: what does not spill must fit the memory the node is sure of,
+	 * hash_mem, not the family's planning estimate
+	 * (tess_planned_memory_limit).
 	 */
 	if (has_distinct_aggregate(tlist))
 	{
-		double		limit = (double) tess_planned_memory_limit(root);
+		double		limit = (double) tess_hash_memory_limit();
 		bool		words;
 
 		spill.pairs = distinct_bytes(root, input_rel, keys, tlist, &words, &spill);
@@ -1912,7 +1926,8 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	 * A grouping, a set operation or a DISTINCT aggregate keeps a table:
 	 * a share of the query's memory, as the core's hashed Agg asks.
 	 */
-	if (nkeys > 0 || setop != 0 || has_distinct_aggregate(tlist))
+	if (nkeys > 0 || setop >= 0 || contains_distinct_aggregate((Node *) info.expressions, NULL) ||
+		contains_distinct_aggregate((Node *) tlist, NULL))
 		tess_path_ask_memory(best_path);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
