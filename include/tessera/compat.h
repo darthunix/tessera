@@ -242,6 +242,9 @@ typedef Datum bh_node_type;
 #define get_opfamily_member_for_cmptype(family, left, right, cmp) \
 	get_opfamily_member((family), (left), (right), (cmp))
 #define TupleDescCompactAttr(desc, i) TupleDescAttr((desc), (i))
+#define att_nominal_alignby(cur_offset, attalignby) TYPEALIGN((attalignby), (cur_offset))
+/* No virtual generated column before PostgreSQL 18: no attribute has this. */
+#define ATTRIBUTE_GENERATED_VIRTUAL 'v'
 /* No incremental sort before PostgreSQL 13: no path has this tag. */
 #define T_IncrementalSortPath T_Invalid
 

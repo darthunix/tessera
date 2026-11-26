@@ -13,6 +13,18 @@
 #include "decimal_cache.h"
 #include "heap_batch_internal.h"
 
+#if PG_VERSION_NUM >= 180000
+typedef CompactAttribute TessHeapAttr;
+#else
+/* Of PostgreSQL 18's CompactAttribute, the fields a walk reads. */
+typedef struct TessHeapAttr
+{
+	int16		attlen;
+	bool		attbyval;
+	uint8		attalignby;
+} TessHeapAttr;
+#endif
+
 struct TessHeapBatch
 {
 	TessBatch	batch;
@@ -32,6 +44,13 @@ struct TessHeapBatch
 	 */
 	int			first_non_cached;
 	int		   *offsets;
+#endif
+#if PG_VERSION_NUM < 180000
+	/*
+	 * PostgreSQL 12 has no compact attributes: of each column the fields a
+	 * walk reads, taken with the descriptor (cache_offsets).
+	 */
+	TessHeapAttr *attrs;
 #endif
 	/* Tuples copied from slots without a pinned page; reset per batch. */
 	MemoryContext copies;
@@ -107,6 +126,13 @@ struct TessHeapBatch
 #define KEEP_SAMPLE 4
 #define KEEP_WINDOW_ROWS 1024
 
+/* The batch's columns, as a walk reads them. */
+#if PG_VERSION_NUM >= 180000
+#define heap_attrs(heap) ((heap)->tuple_desc->compact_attrs)
+#else
+#define heap_attrs(heap) ((const TessHeapAttr *) (heap)->attrs)
+#endif
+
 /* The leading columns at cached offsets. */
 static inline int
 first_non_cached(const TessHeapBatch *heap)
@@ -123,7 +149,7 @@ first_non_cached(const TessHeapBatch *heap)
  * a tuple with no NULL up to it.
  */
 static inline int
-cached_offset(const TessHeapBatch *heap, const CompactAttribute *cattr, int column)
+cached_offset(const TessHeapBatch *heap, const TessHeapAttr *cattr, int column)
 {
 #if PG_VERSION_NUM >= 190000
 	return cattr->attcacheoff;
@@ -138,7 +164,9 @@ cached_offset(const TessHeapBatch *heap, const CompactAttribute *cattr, int colu
  * PostgreSQL 19's TupleDescFinalize does: the fixed-width ones before the
  * first of varying length or a virtual generated one, while an offset fits
  * the 16 bits of 19's attcacheoff. Only the batch's columns are counted,
- * and no request reaches past them.
+ * and no request reaches past them. Before PostgreSQL 18, which has no
+ * compact attributes, it takes the fields a walk reads of each column
+ * first.
  */
 static void
 cache_offsets(TessHeapBatch *heap)
@@ -147,9 +175,22 @@ cache_offsets(TessHeapBatch *heap)
 	int			off = 0;
 	int			column;
 
+#if PG_VERSION_NUM < 180000
 	for (column = 0; column < heap->ncolumns; column++)
 	{
-		CompactAttribute *cattr = TupleDescCompactAttr(desc, column);
+		Form_pg_attribute att = TupleDescAttr(desc, column);
+		TessHeapAttr *attr = &heap->attrs[column];
+
+		attr->attlen = att->attlen;
+		attr->attbyval = att->attbyval;
+		attr->attalignby = att->attalign == 'd' ? ALIGNOF_DOUBLE :
+			att->attalign == 'i' ? ALIGNOF_INT :
+			att->attalign == 's' ? ALIGNOF_SHORT : 1;
+	}
+#endif
+	for (column = 0; column < heap->ncolumns; column++)
+	{
+		const TessHeapAttr *cattr = &heap_attrs(heap)[column];
 
 		if (cattr->attlen <= 0 ||
 			TupleDescAttr(desc, column)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
@@ -204,7 +245,7 @@ keep_value(TessHeapBatch *heap, int column, int row, Datum value, bool isnull)
  * step's checks for padding, an external value and a four-byte header.
  */
 static pg_always_inline Datum
-walk_step(const char *tp, uint32 *off, const CompactAttribute *cattr)
+walk_step(const char *tp, uint32 *off, const TessHeapAttr *cattr)
 {
 	pg_assume(cattr->attlen > 0 || cattr->attlen == -1);
 	if (cattr->attlen == -1)
@@ -239,7 +280,7 @@ deform_walk(TessHeapBatch *heap, int column, int row, bool keeping)
 	HeapTupleHeader tup = tuple->t_data;
 	TessDeformCursor *cursor = &heap->cursors[row];
 	TupleDesc	desc = heap->tuple_desc;
-	CompactAttribute *cattrs = desc->compact_attrs;
+	const TessHeapAttr *cattrs = heap_attrs(heap);
 	const bool *kept = heap->kept;
 	char	   *tp = (char *) tup + tup->t_hoff;
 	int			end = Min(HeapTupleHeaderGetNatts(tup), column + 1);
@@ -253,7 +294,7 @@ deform_walk(TessHeapBatch *heap, int column, int row, bool keeping)
 		   heap->first_kept >= first_non_cached(heap));
 	if (attr < cached)
 	{
-		CompactAttribute *cattr = &cattrs[cached - 1];
+		const TessHeapAttr *cattr = &cattrs[cached - 1];
 
 		Assert(cached_offset(heap, cattr, cached - 1) >= 0 && cattr->attlen > 0);
 		off = cached_offset(heap, cattr, cached - 1) + cattr->attlen;
@@ -368,7 +409,6 @@ deform_kept_rows(TessHeapBatch *heap, int column, const TessRowMask *rows,
  * cached offsets anyway. A tuple with a NULL among the attributes up to
  * this one, or too short for it, goes through the cursor.
  */
-#if !TESS_GREENGAGE
 static pg_always_inline void
 deform_cached_width(TessHeapBatch *heap, int column, const TessRowMask *rows,
 					const uint64 *deformed, int nwords, int offset, int attlen)
@@ -408,7 +448,7 @@ static void
 deform_cached(TessHeapBatch *heap, int column, const TessRowMask *rows,
 			  const uint64 *deformed, int nwords)
 {
-	const CompactAttribute *cattr = &heap->tuple_desc->compact_attrs[column];
+	const TessHeapAttr *cattr = &heap_attrs(heap)[column];
 	int			offset = cached_offset(heap, cattr, column);
 
 	Assert(offset >= 0 && cattr->attbyval);
@@ -431,7 +471,6 @@ deform_cached(TessHeapBatch *heap, int column, const TessRowMask *rows,
 				 column + 1, cattr->attlen);
 	}
 }
-#endif
 
 /*
  * Count a request's rows behind their cursor: a row whose cursor a read of
@@ -471,8 +510,6 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 		elog(ERROR, "Tessera heap batch received a row mask of another batch");
 	deformed = &heap->deformed[(Size) column * heap->nwords];
 	nwords = tess_row_mask_word_count(rows->nrows);
-#if !TESS_GREENGAGE
-	/* Greengage keeps no cached offsets: every column goes by the cursor. */
 	if (column >= first_non_cached(heap))
 	{
 		if (unlikely(!heap->asked[column]))
@@ -483,13 +520,11 @@ heap_get_datum_column(TessBatch *batch, int column, const TessRowMask *rows,
 		if (heap->nasked > 1 && heap->counting)
 			count_behind(heap, column, rows, deformed, nwords);
 	}
-	if (column < first_non_cached(heap) &&
-		heap->tuple_desc->compact_attrs[column].attbyval)
+	if (column < first_non_cached(heap) && heap_attrs(heap)[column].attbyval)
 		deform_cached(heap, column, rows, deformed, nwords);
 	else if (heap->kept[column] || heap->first_kept < column)
 		deform_kept_rows(heap, column, rows, deformed, nwords);
 	else
-#endif
 	{
 		for (int word = 0; word < nwords; word++)
 		{
@@ -606,6 +641,10 @@ tess_heap_batch_create(const TessHeapBatchConfig *config)
 	}
 #if PG_VERSION_NUM < 190000
 	heap->offsets = MemoryContextAlloc(context, sizeof(int) * Max(config->ncolumns, 1));
+#if PG_VERSION_NUM < 180000
+	heap->attrs = MemoryContextAlloc(context,
+									 sizeof(TessHeapAttr) * Max(config->ncolumns, 1));
+#endif
 	if (heap->tuple_desc != NULL)
 		cache_offsets(heap);
 #endif
