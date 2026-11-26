@@ -1003,14 +1003,16 @@ next_page(HeapScanState *state)
 static inline void
 count_heap_rows(Relation rel, bool fetched, int count)
 {
-#if TESS_PG_MAJOR < 16
-	/* The counters of the table before PostgreSQL 16. */
+#if TESS_PG_MAJOR < 15
+	/* The counters of the table before PostgreSQL 15. */
 	if (count <= 0 || rel->pgstat_info == NULL)
 		return;
 	if (fetched)
 		rel->pgstat_info->t_counts.t_tuples_fetched += count;
 	else
 		rel->pgstat_info->t_counts.t_tuples_returned += count;
+#elif TESS_PG_MAJOR < 18
+#error "the table counters of PostgreSQL 15 to 17 are not written"
 #else
 	PgStat_TableCounts *counts;
 

@@ -151,7 +151,8 @@ int64_div_fast_to_numeric(int64 value, int scale)
 #define VARHDRSZ_COMPRESSED offsetof(varattrib_4b, va_compressed.va_data)
 
 /*
- * hash_mem: an older core has no hash_mem_multiplier, so work_mem.
+ * The memory of a hash table in bytes (PostgreSQL 14): hash_mem in
+ * kilobytes in PostgreSQL 13, work_mem before its hash_mem_multiplier.
  * shortcut: the Greenplum family gives a node its own budget,
  * operatorMemKB; take it when the nodes read their memory through the
  * plan state.
@@ -159,12 +160,16 @@ int64_div_fast_to_numeric(int64 value, int scale)
 static inline size_t
 get_hash_memory_limit(void)
 {
+#if TESS_PG_MAJOR < 13
 	return (size_t) work_mem * 1024;
+#else
+	return (size_t) get_hash_mem() * 1024;
+#endif
 }
 
 /*
  * The member of an equivalence class that is expr, binary relabeling
- * aside (PostgreSQL 13): no constant, and a child only of relids.
+ * aside (PostgreSQL 14): no constant, and a child only of relids.
  */
 static inline EquivalenceMember *
 find_ec_member_matching_expr(EquivalenceClass *ec, Expr *expr, Relids relids)
