@@ -111,6 +111,20 @@ pub fn same_finding(original: &Verdict, verdict: &Verdict) -> bool {
 /// machine too, and that is no finding.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The outcomes of two modes. When one ran out of time and the other
+/// returned its rows after half of it, both ran near the limit, and which
+/// of them ends first is the machine's: the rows count as timed out too.
+/// A crash or an error stays what it was.
+fn near_limit(a: &(Outcome, Duration), b: &(Outcome, Duration)) -> (Outcome, Outcome) {
+    let near = |(outcome, time): &(Outcome, Duration), other: &Outcome| match outcome {
+        Outcome::Rows(_) if *other == Outcome::Timeout && *time > STATEMENT_TIMEOUT / 2 => {
+            Outcome::Timeout
+        }
+        _ => outcome.clone(),
+    };
+    (near(a, &b.0), near(b, &a.0))
+}
+
 /// How one mode of a query ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -337,20 +351,23 @@ impl<'c> Oracle<'c> {
             format!("SELECT array_agg(q::text ORDER BY q::text) FROM ({sql}) AS q")
         };
         let prelude = query.settings.statements();
-        let mut run = |mode: &str, sql: &str| -> Result<Outcome> {
+        let mut run = |mode: &str, sql: &str| -> Result<(Outcome, Duration)> {
             self.reconnect()?;
             self.client
                 .batch_execute(&format!("{prelude} SET tessera.enable = {mode};"))?;
-            Ok(self.run(sql))
+            let start = Instant::now();
+            let outcome = self.run(sql);
+            Ok((outcome, start.elapsed()))
         };
         let on = run("on", &wrapped)?;
         let off = run("off", &wrapped)?;
         let twin = (reads_twinned(&sql))
             .then(|| run("on", &twinned(&wrapped)))
             .transpose()?;
+        let (on_outcome, off_outcome) = near_limit(&on, &off);
         let mut verdict = Verdict {
-            on,
-            off,
+            on: on_outcome,
+            off: off_outcome,
             relaxed: None,
             twin: false,
         };
@@ -363,9 +380,10 @@ impl<'c> Oracle<'c> {
         if verdict.is_finding() {
             return Ok(verdict);
         }
+        let (twin, off) = near_limit(&twin, &off);
         let mut over_twin = Verdict {
             on: twin,
-            off: verdict.off.clone(),
+            off,
             relaxed: None,
             twin: true,
         };
@@ -573,6 +591,27 @@ mod tests {
             verdict(rows("{1}"), error("XX000")).kind(),
             "internal error"
         );
+    }
+
+    #[test]
+    fn rows_after_half_the_limit_beside_a_timeout_timed_out_too() {
+        let half = STATEMENT_TIMEOUT / 2;
+        let late = (rows("{1}"), half + Duration::from_millis(1));
+        let early = (rows("{1}"), half);
+        let out = (Outcome::Timeout, STATEMENT_TIMEOUT);
+        let both = (Outcome::Timeout, Outcome::Timeout);
+        assert_eq!(near_limit(&late, &out), both);
+        assert_eq!(near_limit(&out, &late), both);
+        assert_eq!(near_limit(&early, &out), (rows("{1}"), Outcome::Timeout));
+        assert_eq!(near_limit(&out, &early), (Outcome::Timeout, rows("{1}")));
+        // Without a timeout the times decide nothing.
+        let slow = (rows("{2}"), STATEMENT_TIMEOUT);
+        assert_eq!(near_limit(&late, &slow), (rows("{1}"), rows("{2}")));
+        // A crash or an error near the limit stays a finding.
+        for outcome in [Outcome::Lost("x".into()), error("XX000"), error("53200")] {
+            let late = (outcome.clone(), STATEMENT_TIMEOUT);
+            assert_eq!(near_limit(&late, &out), (outcome, Outcome::Timeout));
+        }
     }
 
     #[test]
