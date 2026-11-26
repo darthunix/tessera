@@ -2154,13 +2154,15 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	config.node_data = (Node *) tess_plan_writer_finish(writer);
 	/*
 	 * A grouping, a set operation or a DISTINCT aggregate keeps a table:
-	 * a share of the query's memory, as the core's hashed Agg asks.
+	 * a share of the query's memory, as the core's hashed Agg asks. A set
+	 * operation builds it from its left side and keeps it while it reads
+	 * the right one.
 	 */
 	if (nkeys > 0 || setop >= 0 ||
 		((flags & AGG_PATH_DEDUPLICATED) == 0 &&
 		 (contains_distinct_aggregate((Node *) info.expressions, NULL) ||
 		  contains_distinct_aggregate((Node *) tlist, NULL))))
-		tess_path_ask_memory(best_path);
+		tess_path_ask_memory(best_path, setop >= 0);
 	return tess_plan_create(best_path, tlist, custom_plans, &config);
 }
 

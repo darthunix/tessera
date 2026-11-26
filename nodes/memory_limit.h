@@ -45,15 +45,24 @@ tess_node_memory_limit(const PlanState *ps, Size elsewhere)
 
 /*
  * Ask the core, on a core of the family, for a share of the query's memory
- * for the node a path plans (a fork's patch); nothing elsewhere.
+ * for the node a path plans (a fork's patch); nothing elsewhere. A node
+ * that builds its table from one child and keeps it while it reads the
+ * next, as a hash join or a set operation does, needs the memory at the
+ * same time as the operators under it (overlaps_children), and the core
+ * then gives the table a share beside theirs.
  */
 static inline void
-tess_path_ask_memory(CustomPath *path)
+tess_path_ask_memory(CustomPath *path, bool overlaps_children)
 {
-#ifdef CUSTOMPATH_GP_MEMORY_INTENSIVE
+#if defined(CUSTOMPATH_GP_MEMORY_OVERLAPS_CHILDREN)
+	path->flags |= overlaps_children ? CUSTOMPATH_GP_MEMORY_OVERLAPS_CHILDREN :
+		CUSTOMPATH_GP_MEMORY_INTENSIVE;
+#elif defined(CUSTOMPATH_GP_MEMORY_INTENSIVE)
 	path->flags |= CUSTOMPATH_GP_MEMORY_INTENSIVE;
+	(void) overlaps_children;
 #else
 	(void) path;
+	(void) overlaps_children;
 #endif
 }
 

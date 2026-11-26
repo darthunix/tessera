@@ -2325,8 +2325,13 @@ make_join_path(PlannerInfo *root, RelOptInfo *joinrel, JoinType jointype,
 		list_make2(inner, outer);
 	/* A target above the join becomes the node's, computed over the pairs. */
 	config.flags = CUSTOMPATH_SUPPORT_PROJECTION | TESS_CHILD_ROWS_ONLY;
-#ifdef CUSTOMPATH_GP_MEMORY_INTENSIVE
-	/* Its table takes a share of the query's memory, as a Hash does (tess_path_ask_memory). */
+	/*
+	 * Its table takes a share of the query's memory, as a Hash does, and
+	 * keeps it while the outer side runs (tess_path_ask_memory).
+	 */
+#if defined(CUSTOMPATH_GP_MEMORY_OVERLAPS_CHILDREN)
+	config.flags |= CUSTOMPATH_GP_MEMORY_OVERLAPS_CHILDREN;
+#elif defined(CUSTOMPATH_GP_MEMORY_INTENSIVE)
 	config.flags |= CUSTOMPATH_GP_MEMORY_INTENSIVE;
 #endif
 	config.expressions = list_make5(keys->clauses, keys->outer, keys->inner,
