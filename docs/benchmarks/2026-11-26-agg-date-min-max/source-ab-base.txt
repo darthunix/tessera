@@ -1,0 +1,18 @@
+base f708ef0d55206426b61f15f63ac16c9c365d437e
+HEAD 639f1b0bfd5665acdd736955481ba6e47bfc2622
+metric cycles
+workers 0
+cases minmax|bool_and
+repetitions 3
+scale 1
+shared_buffers 2GB
+status:
+sha256:
+617a8436dada4369312c99ba4a2ebba226907fc58189b52ac2d9a6a3e05ff596  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/tessera.dylib
+24895a6c16aebdb97dd862dde1c665b0f8653eaf3451f1de009a7296c4decbd1  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/tessera_nodes.dylib
+403e3e7f1b72bf47711f9f5b6b204286d3ed9c9a4101adebf26aee94bf3492dd  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/tessera_kernels.dylib
+6209a7f830d0a236c3003885884a76dce379a88496d3d0a7fcfc48438ea72428  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/libtessera_runtime.a
+baf397782b4b548ddaf2107aeffb4265eb98ccc920f2485aa393ce63b50b2da1  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/bin/postgres
+Now drawing from 'Battery Power'
+ -InternalBattery-0 (id=34996323)	91%; discharging; 6:14 remaining present: true
+Thu Nov 26 14:05:13 +07 2026
