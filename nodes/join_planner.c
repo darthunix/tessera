@@ -434,7 +434,8 @@ partition_column(PlannerInfo *root, RelOptInfo *child, Var *var)
  */
 /*
  * The partitions the planner's pruning left (PostgreSQL 15 keeps them as
- * live_parts): before, the pruned ones are dummy relations.
+ * live_parts): before, a partition it pruned has no relation, and one
+ * proved empty later is a dummy relation, left out too.
  */
 #if TESS_PG_MAJOR >= 15
 #define live_parts(rel) ((rel)->live_parts)
@@ -457,6 +458,7 @@ static PartitionScheme
 key_partitioning(PlannerInfo *root, RelOptInfo *rel, Var *column, Oid opno)
 {
 	PartitionScheme scheme = rel->part_scheme;
+	Bitmapset  *parts;
 	int			part = -1;
 
 	if (scheme == NULL || scheme->partnatts == 0)
@@ -470,7 +472,8 @@ key_partitioning(PlannerInfo *root, RelOptInfo *rel, Var *column, Oid opno)
 				return scheme;
 		}
 	}
-	while ((part = bms_next_member(live_parts(rel), part)) >= 0)
+	parts = live_parts(rel);
+	while ((part = bms_next_member(parts, part)) >= 0)
 	{
 		RelOptInfo *child = rel->part_rels[part];
 		PartitionScheme found;
