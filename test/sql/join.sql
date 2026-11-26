@@ -303,6 +303,10 @@ CREATE TABLE jprobe WITH (autovacuum_enabled = off) AS
 SELECT CASE WHEN g % 97 = 0 THEN NULL ELSE g END AS k, g AS v FROM generate_series(1, 20000) AS g;
 CREATE TABLE jhit WITH (autovacuum_enabled = off) AS
 SELECT (g % 5000 + 1) * 100 AS k, g AS v FROM generate_series(1, 20000) AS g;
+-- The clauses below match patterns against v::text. Without statistics
+-- of that expression the core guesses their share of rows by a rule
+-- that differs between its versions, and the sides of the join follow.
+CREATE STATISTICS jprobe_v_text ON (v::text) FROM jprobe;
 ANALYZE jbuild, jprobe, jhit;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
 SELECT join_same($$SELECT jprobe.v, jbuild.w FROM jprobe JOIN jbuild ON jprobe.k = jbuild.k$$);
@@ -418,6 +422,10 @@ CREATE TABLE jpprobe_1 PARTITION OF jpprobe FOR VALUES FROM (1) TO (10001);
 CREATE TABLE jpprobe_2 (k int, v int);
 ALTER TABLE jpprobe ATTACH PARTITION jpprobe_2 FOR VALUES FROM (10001) TO (20001);
 INSERT INTO jpprobe SELECT g, CASE WHEN g % 97 = 0 THEN NULL ELSE g * 37 % 20011 END FROM generate_series(1, 20000) AS g;
+-- The statistics of v::text for the reason given at jprobe, on each
+-- partition, as the core estimates the partitions' rows one by one.
+CREATE STATISTICS jpprobe_1_v_text ON (v::text) FROM jpprobe_1;
+CREATE STATISTICS jpprobe_2_v_text ON (v::text) FROM jpprobe_2;
 ANALYZE jpprobe;
 SELECT join_explain($$SELECT count(*), sum(jbuild.w) FROM jpprobe JOIN jbuild ON jpprobe.k = jbuild.k WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%'$$);
 SELECT join_same($$SELECT jpprobe.v, jbuild.w FROM jpprobe JOIN jbuild ON jpprobe.k = jbuild.k WHERE jpprobe.v > 0 AND jpprobe.v::text LIKE '%1%'$$);
