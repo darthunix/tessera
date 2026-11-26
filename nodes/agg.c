@@ -208,6 +208,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	{
 		Aggref	   *agg;
 		AggValue   *value;
+		TessTableKeyKind kind;
 
 		if (foreach_current_index(entry) < state->nkeys)
 			continue;
@@ -218,7 +219,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		if (DO_AGGSPLIT_SKIPFINAL(agg->aggsplit) != state->partial)
 			elog(ERROR, "TessAgg received a foreign plan");
 		value->kind = aggregate_kind(agg->aggfnoid);
-		value->wide = agg->aggtranstype == INT8OID;
+		/* An extreme's width is its word's, by the type of its value. */
+		value->wide = tess_word_key_kind(agg->aggtranstype, &kind) &&
+			tess_key_kind_wide(kind);
 		value->function = tess_runtime_api()->functions->find(agg->aggfnoid);
 		value->computed = -1;
 		value->filter = -1;

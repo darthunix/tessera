@@ -32,7 +32,7 @@ maintainer's word and takes five minutes at most.
 
 ## 3. The work
 
-- [ ] 3.1 The extremes by the kernels: `kernels/int.c` registers `min`
+- [x] 3.1 The extremes by the kernels: `kernels/int.c` registers `min`
       and `max` of `smallint` and `date`, `bool_and`, `bool_or` and
       `every` with the codes of `integer`, and `min` and `max` of
       `timestamp` and `timestamptz` with those of `bigint`;

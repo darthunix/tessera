@@ -147,6 +147,18 @@ static const Function functions[] = {
 	AGGREGATE(F_SUM_INT4, AGG_SUM_INT4),
 	AGGREGATE(F_MIN_INT4, AGG_MIN_INT4),
 	AGGREGATE(F_MAX_INT4, AGG_MAX_INT4),
+	/*
+	 * The extremes of the types held as int4, their Datums an int4's of the
+	 * same value: smallint, date, and booleans as 0 and 1, bool_and and
+	 * every their least, bool_or their greatest.
+	 */
+	AGGREGATE(F_MIN_INT2, AGG_MIN_INT4),
+	AGGREGATE(F_MAX_INT2, AGG_MAX_INT4),
+	AGGREGATE(F_MIN_DATE, AGG_MIN_INT4),
+	AGGREGATE(F_MAX_DATE, AGG_MAX_INT4),
+	AGGREGATE(F_BOOL_AND, AGG_MIN_INT4),
+	AGGREGATE(F_EVERY, AGG_MIN_INT4),
+	AGGREGATE(F_BOOL_OR, AGG_MAX_INT4),
 	/* int8 */
 	COMPARE(F_INT8EQ, TESS_CMP_EQ, compare8_evaluate),
 	COMPARE(F_INT8NE, TESS_CMP_NE, compare8_evaluate),
@@ -212,6 +224,11 @@ static const Function functions[] = {
 	VALUE(F_INT4_INT8, 0, TESS_RESULT_INT32, 0, narrow_evaluate),
 	AGGREGATE(F_MIN_INT8, AGG_MIN_INT8),
 	AGGREGATE(F_MAX_INT8, AGG_MAX_INT8),
+	/* The extremes of the types held as int8: timestamp and timestamptz. */
+	AGGREGATE(F_MIN_TIMESTAMP, AGG_MIN_INT8),
+	AGGREGATE(F_MAX_TIMESTAMP, AGG_MAX_INT8),
+	AGGREGATE(F_MIN_TIMESTAMPTZ, AGG_MIN_INT8),
+	AGGREGATE(F_MAX_TIMESTAMPTZ, AGG_MAX_INT8),
 	/* boolean as int4: 0 and 1 */
 	COMPARE(F_BOOLEQ, TESS_CMP_EQ, compare_evaluate),
 	COMPARE(F_BOOLNE, TESS_CMP_NE, compare_evaluate),
