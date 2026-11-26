@@ -1616,7 +1616,10 @@ SELECT parallel_same($$SELECT count(c), count(*) FROM parallel_t WHERE a > 100$$
 -- fill a message's half of its queue before its rows do, twenty columns
 -- that narrow a message's rows, the workers alone, a limit that stops them
 -- while they send, and the core's Gather with tessera.batch_gather off.
-CREATE TABLE parallel_wide AS
+-- No autovacuum: a vacuum during the suite may count the rows from part
+-- of the pages, and the two plans of the wide values below, within one
+-- per cent of each other in cost, would trade places on that count.
+CREATE TABLE parallel_wide WITH (autovacuum_enabled = off) AS
 SELECT g AS k, CASE WHEN g % 9 = 0 THEN NULL ELSE g % 1000 END AS a,
        CASE WHEN g % 11 = 0 THEN NULL ELSE repeat('t', g % 40) || g END AS t,
        CASE WHEN g % 997 = 0 THEN repeat('w', 2000) END AS w,
