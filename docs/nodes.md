@@ -959,7 +959,15 @@ a chain the [expression compiler](expr.md) accepts, with constants and
 parameters, by the chain over the batch, anything else row by row (see
 "Computing columns on demand" in [runtime.md](runtime.md)); expressions
 above the aggregates and `HAVING` are left to the plan's own projection
-and qualifier over the aggregates. Any other aggregate without `GROUP BY`
+and qualifier over the aggregates. The extremes of all these types share
+the kernels of int4 and int8, registered with their codes: a kernel
+reads a Datum's low 32 or all 64 bits and gives back the Datum of the
+same value. Kernels of their own would repeat those loops line for line;
+the generic path below calls the transition function a row and keeps
+its state outside the group's word. On ClickBench's Q7, `min` and `max`
+of a date over 100 M rows, the kernels count 43 % fewer cycles than that
+path ([2026-11-26-agg-date-min-max](benchmarks/2026-11-26-agg-date-min-max/README.md)).
+Any other aggregate without `GROUP BY`
 (of text, numeric, float8, int8 states, of several arguments such as
 `string_agg(t, ',')` or `corr(x, y)`, of polymorphic ones such as
 `array_agg`) goes through the core's own functions: its transition

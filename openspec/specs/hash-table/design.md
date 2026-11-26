@@ -148,7 +148,10 @@ for. Nor does a join take the equality of two different types other
 than the integers, such as `float4` with `float8`: both sides must
 make their numbers with one function. Only the types the spec lists go
 in as their value; a type whose equality is not its bits, such as
-`interval`, where `1 day` equals `24 hours`, takes the second form.
+`interval`, where `1 day` equals `24 hours`, takes the second form. A
+type takes one form for every use, as one list names it: `time` is a
+value in a grouping, a join, a sort and its extremes alike, never a
+value in one and a number in another.
 
 ## Values longer than a word
 

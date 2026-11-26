@@ -64,38 +64,37 @@ faster decompression of Snappy after them, `parquet-snappy` (done),
 after a profile of ClickBench's Q26 at the end of the sort by bytes.
 The same day, after profiles of ClickBench's queries furthest behind
 pg_duckdb, he placed five entries after it in this order:
-`parquet-page-headers` (done), `agg-date-min-max`,
+`parquet-page-headers` (done), `agg-date-min-max` (done),
 `parquet-batch-arrays`, `parquet-integer-columns`,
 `agg-sum-plus-constant`:
 
-1. `agg-date-min-max`: TessAgg's `min` and `max` of `date`, by kernels
-2. `parquet-batch-arrays`: The arrays of a Parquet batch kept for its
+1. `parquet-batch-arrays`: The arrays of a Parquet batch kept for its
    scan
-3. `parquet-integer-columns`: The integers of a Parquet file given to
+2. `parquet-integer-columns`: The integers of a Parquet file given to
    the kernels at less cost
-4. `agg-sum-plus-constant`: A sum of a column and a constant, folded
-5. `whole-word-decisions`: When and where a driver takes a word whole,
+3. `agg-sum-plus-constant`: A sum of a column and a constant, folded
+4. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-6. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+5. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-7. `explain-rows-per-loop`: The rows a node removed, per loop as the
+6. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-8. `join-pruning-cost`: The cost of a pruning join over the partitions
+7. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-9. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+8. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-10. `linux-x86-support`: Linux on x86-64 checked as the target platform
-11. `oltp-guard-bench`: OLTP guard family of benchmarks
-12. `runs-left-from-section-9`: Runs left to the maintainer from
+9. `linux-x86-support`: Linux on x86-64 checked as the target platform
+10. `oltp-guard-bench`: OLTP guard family of benchmarks
+11. `runs-left-from-section-9`: Runs left to the maintainer from
     section 9
-13. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-14. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+12. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+13. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-15. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+14. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-16. `tpch-sf10`: TPC-H step 10: SF10
-17. `backward-scan-mark-restore`: Backward scan and mark/restore
-18. `pg-duckdb-comparison`: Comparison with pg_duckdb
+15. `tpch-sf10`: TPC-H step 10: SF10
+16. `backward-scan-mark-restore`: Backward scan and mark/restore
+17. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -1169,25 +1168,6 @@ task 6.8).
 - **Capabilities:** relspill
 - **Size:** a pull request.
 
-### agg-date-min-max
-
-TessAgg's `min` and `max` of `date`, by kernels.
-
-- **What:** `min` and `max` of `date`, and of the other types of four or
-  eight bytes that compare as integers, by the kernels of the integers.
-- **Why:** A profile of ClickBench's Q7, `min` and `max` of `EventDate`
-  over `hits.parquet`, serial, found 32 % of Tessera's time in the
-  generic path, `date_smaller` and `date_larger` called a row; at the
-  end of `parquet-string-views` the generic path and the two functions
-  took 55 % of a profile of Q7, which runs in 5.3 times pg_duckdb's
-  cycles. The sums
-  of `bigint` the same profile found are done.
-- **Known:** Not Parquet's own: a heap table takes the same path. Not
-  measured beyond the profile.
-- **Depends on:** nothing.
-- **Capabilities:** aggregate
-- **Size:** small.
-
 ### numeric-reading
 
 Faster reading of numeric. From plan 4.23 analysis of 2026-09-30, lines
@@ -1247,17 +1227,17 @@ reach the table through a stand-in.
 - **What:** Let the table keep and compare keys of more types itself,
   so that a join and a grouping stop paying for a stand-in. The table
   has two kinds of key, `int4` and `int8`. `int2`, `bool` and `date` go
-  in as `int4`, and `timestamp` and `timestamptz` as `int8`. A key of
+  in as `int4`, and `timestamp`, `timestamptz`, `time` and `money` as
+  `int8`. A key of
   any other type whose equality hashes goes in as a number of 64 bits:
   a grouping numbers its values in a dictionary of its own, in C; a
   join puts in the value's hash from the type's function, called
   through fmgr for every row, and then decides the match by the
   equality as a residual clause. Candidates, each measured before it is
   built:
-  - more word kinds: `time`, `xid8` and `pg_lsn`, 8 bytes passed by
-    value and equal exactly when their bits are, as `int8` at once;
-    `money` too, which has no hash operator class, so that today its
-    keys stay with the core altogether; `macaddr8`, 8 bytes passed by
+  - more word kinds: `xid8` and `pg_lsn`, 8 bytes passed by value and
+    equal exactly when their bits are, as `int8` at once; `macaddr8`,
+    8 bytes passed by
     reference; `oid` and `"char"`, left out of the word keys on purpose
     (`types-outside-tpch`);
   - `float4` and `float8`, once -0 and every NaN have one form, since
@@ -1597,17 +1577,18 @@ lines 4678–4679.
   note listed bool, "char", int2, float4/8, tid, time, timestamptz
   "later, as a separate section". Most of it is done since: bool, int2,
   float4/8 and timestamptz have kernels (4.21) and bool, int2, date,
-  timestamp, timestamptz are word keys (5.13 step 1). Left of the list:
-  time (as int8), "char" and oid (as int4), tid (only for scanning).
+  timestamp, timestamptz are word keys (5.13 step 1), and time, with
+  the kernels of int8, since. Left of the list: "char" and oid (as
+  int4), tid (only for scanning).
 - **Why:** The note of 2026-09-26 records the set as the maintainer's
   general one.
 - **Known:** oid and "char" were left out of the word keys on purpose:
   an oid key would come out sign-extended, unlike the core's Datum (line
   4678–4679). 4.20 puts oid in lane class I32 and time and money in I64
   (line 931–932). Checked in the code: the kernels register nothing for
-  time, oid, "char", uuid or interval; an interval comparison is row by
-  row in the coverage suite. The keys of this list, `time`, `"char"`
-  and `oid`, go with `table-key-types`.
+  oid, "char", uuid or interval; an interval comparison is row by row in
+  the coverage suite. The keys of this list, `"char"` and `oid`, go
+  with `table-key-types`.
 - **Depends on:** nothing.
 - **Capabilities:** type-support, batch-functions, batch-expressions
 - **Size:** small per type.
@@ -3084,6 +3065,26 @@ becomes an entry, joins one, or is dropped.
   plan skips. Suggested: the two plans read for the row whose sum
   overflows, and the evaluation of the join's filter placed as the
   core places it, or the class of the finding corrected.
+- **The word types written twice** (a finding of the change
+  `agg-date-min-max`, task 3.2). Which types the node holds as words is
+  written in two places: `tess_word_key_kind` in `nodes/key_kind.h`,
+  for the keys and the extremes, and `set_key_kind` in
+  `runtime/expr.c`, for the sets of `IN`. The equalities of words are
+  written twice too: `word_equality` in `nodes/join_planner.c` and
+  `set_function` in `runtime/expr.c`. `time` and `money` had to be
+  added to both copies. A type added to one copy only stays correct,
+  but takes the slower path in the other. Suggested: one list that
+  both read.
+- **A build against another core left in the tree** (a finding of the
+  count of `agg-date-min-max`). `make` in a tree built last with
+  another `PG_CONFIG` compiles only the sources that changed, so the
+  libraries it installs can link objects compiled with another core's
+  headers. `cargo clickbench`, `cargo tpch` and `make crosscheck`
+  install from the tree this way, through `tessera-pgtool`, which runs
+  no `make clean`; `cargo ab` builds in snapshots of its own. Before
+  the count, a `make` for PostgreSQL 19 in a tree built for master
+  compiled 29 of its 110 objects. Suggested: the installer keeps the
+  `pg_config` of the last build and cleans the tree when it changes.
 
 ## Decided against
 
