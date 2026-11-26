@@ -1,6 +1,7 @@
 -- The wordkey family: joins, groupings, DISTINCT and sorts keyed by types
 -- the table keeps in a word besides int4 and int8 (date, timestamp, int2,
--- bool). A ratio below one is the win.
+-- bool, time, money), and comparisons of time and money. A ratio below one
+-- is the win.
 \set ON_ERROR_STOP on
 \if :{?repetitions}
 \else
@@ -72,6 +73,21 @@ SELECT pg_temp.measure_pair('key_ts_distinct',
     'SELECT count(*) FROM (SELECT DISTINCT ts FROM bench_dates) AS s', :repetitions);
 SELECT pg_temp.measure_pair('key_date_order',
     format('SELECT d, v FROM bench_dates ORDER BY d OFFSET %s', 2000000 * :scale), :repetitions);
+-- Time and money, words of eight bytes: a grouping by each (1440 and 1000
+-- groups), DISTINCT of the time, a join on it with the 1440 minutes, a
+-- filter by both, a sort by the money.
+SELECT pg_temp.measure_pair('key_time_group',
+    'SELECT count(*), sum(n) FROM (SELECT tm, count(*) AS n FROM bench_clock GROUP BY tm) AS g', :repetitions);
+SELECT pg_temp.measure_pair('key_money_group',
+    'SELECT count(*), sum(n) FROM (SELECT mo, count(*) AS n FROM bench_clock GROUP BY mo) AS g', :repetitions);
+SELECT pg_temp.measure_pair('key_time_distinct',
+    'SELECT count(*) FROM (SELECT DISTINCT tm FROM bench_clock) AS s', :repetitions);
+SELECT pg_temp.measure_pair('key_time_join',
+    'SELECT count(*), sum(w) FROM bench_clock JOIN bench_minutes USING (tm)', :repetitions);
+SELECT pg_temp.measure_pair('key_clock_filter',
+    $$SELECT count(*) FROM bench_clock WHERE tm < time '12:00' AND mo > 100::money$$, :repetitions);
+SELECT pg_temp.measure_pair('key_money_order',
+    format('SELECT mo, v FROM bench_clock ORDER BY mo OFFSET %s', 2000000 * :scale), :repetitions);
 
 \copy timings TO 'timings.csv' CSV HEADER
 
@@ -90,11 +106,11 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order']) AS name
+FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order', 'key_time_group', 'key_money_group', 'key_time_distinct', 'key_time_join', 'key_clock_filter', 'key_money_order']) AS name
 WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order']) AS name
+FROM unnest(ARRAY['key_date_group', 'key_ts_group', 'key_int2_group', 'key_date_join', 'key_ts_distinct', 'key_date_order', 'key_time_group', 'key_money_group', 'key_time_distinct', 'key_time_join', 'key_clock_filter', 'key_money_order']) AS name
 WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 RESET work_mem;
