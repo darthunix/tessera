@@ -62,7 +62,8 @@ those it checks.
   aggregation to the core.
 - **A grouping with `DISTINCT` past `hash_mem`**: its pairs go to disk
   only with `GROUP BY` and an argument a word holds (`smallint`,
-  `integer`, `bigint`, `date`, `boolean`, `timestamp`, `timestamptz`).
+  `integer`, `bigint`, `date`, `boolean`, `timestamp`, `timestamptz`,
+  `time`, `money`).
   The pairs of a text or `numeric` argument, and the set of an aggregate
   without `GROUP BY`, stay in memory: the node takes such a grouping only
   when the planner's estimate of its pairs fits `hash_mem`. The groups of

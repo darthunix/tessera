@@ -798,6 +798,29 @@ SELECT filter_same($$SELECT a FROM filter_t WHERE a IN (3::bigint, 5000000000)$$
  {(3)}
 (1 row)
 
+-- An empty list stays the core's: = ANY of no element is false and <> ALL
+-- true, x NULL too.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a <> ALL ('{}'::int[]);
+                     QUERY PLAN                     
+----------------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessFilter) on filter_t
+         Filter: (a <> ALL ('{}'::integer[]))
+         ->  Custom Scan (TessHeapScan) on filter_t
+(4 rows)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a <> ALL ('{}'::int[])$$);
+ filter_same 
+-------------
+ {(200)}
+(1 row)
+
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE NOT (a = ANY ('{}'::int[]))$$);
+ filter_same 
+-------------
+ {(200)}
+(1 row)
+
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE c IS NOT NULL AND a + 1 IS NULL$$);
  filter_same 
 -------------

@@ -1090,9 +1090,12 @@ SELECT types_same($$SELECT a.id, b.id FROM types_k AS a LEFT JOIN types_k AS b O
 -- A grouping by money, which the core can only sort, is the node's.
 EXPLAIN (COSTS OFF) SELECT mo, count(*) FROM types_k GROUP BY mo;
 SELECT types_same($$SELECT mo, count(*), min(tm), max(tm) FROM types_k GROUP BY mo$$);
+EXPLAIN (COSTS OFF) SELECT DISTINCT tm FROM types_k;
 SELECT types_same($$SELECT DISTINCT tm FROM types_k$$);
+SELECT explain_neutral($$SELECT tm FROM types_k WHERE id < 100 UNION SELECT tm FROM types_k WHERE id > 1900$$, 'COSTS OFF');
 SELECT types_same($$SELECT tm FROM types_k WHERE id < 100 UNION SELECT tm FROM types_k WHERE id > 1900$$);
 SELECT types_same($$SELECT count(DISTINCT tm), count(DISTINCT mo) FROM types_k$$);
+EXPLAIN (COSTS OFF) SELECT id, tm FROM types_k ORDER BY tm DESC NULLS LAST, id;
 SELECT types_order($$SELECT id, tm FROM types_k ORDER BY tm DESC NULLS LAST, id$$);
 SELECT types_order($$SELECT id, mo FROM types_k ORDER BY mo, id$$);
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k WHERE tm < '12:00' AND mo > '0'::money;
@@ -1101,20 +1104,38 @@ SELECT types_same($$SELECT count(*), sum(id) FROM types_k WHERE mo <= '-5'::mone
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k WHERE tm IN ('08:01', '08:02', '00:00') AND mo NOT IN ('1', '-2');
 SELECT types_same($$SELECT count(*) FROM types_k WHERE tm IN ('08:01', '08:02', '00:00', '24:00')$$);
 SELECT types_same($$SELECT count(*) FROM types_k WHERE mo NOT IN ('1', '-2', '92233720368547758.07')$$);
+SELECT types_same($$SELECT count(*) FROM types_k WHERE tm <> ALL ('{}'::time[]) AND NOT (mo = ANY ('{}'::money[]))$$);
+-- The extremes by the kernels of int8: a call a batch and aggregate.
+CREATE FUNCTION types_kernels(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        IF line ~ 'Custom Scan|Kernel Calls' THEN
+            RETURN NEXT btrim(line);
+        END IF;
+    END LOOP;
+END $$;
+SELECT types_kernels($$SELECT min(tm), max(tm), min(mo), max(mo) FROM types_k$$);
+DROP FUNCTION types_kernels(text);
 SELECT types_same($$SELECT min(tm), max(tm), min(mo), max(mo) FROM types_k$$);
 SELECT types_same($$SELECT id % 7, min(tm), max(tm), min(mo), max(mo) FROM types_k GROUP BY 1$$);
 
 -- Keys left to the core: a grouping and a join by bit varying, which has
 -- no hash function; a join by money, whose equality PostgreSQL does not
--- let a hash join use; DISTINCT of money, which the core can only sort;
--- and a join by the equality of two types other than the integers,
--- float4 with float8.
+-- let a hash join use; DISTINCT and INTERSECT of money, which the core
+-- can only sort, where the node offers its plan beside the core's hashed
+-- one alone; and a join by the equality of two types other than the
+-- integers, float4 with float8.
 EXPLAIN (COSTS OFF) SELECT vb, count(*) FROM types_k GROUP BY vb;
 SET enable_material = off;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.vb = b.vb;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.mo = b.mo;
 RESET enable_material;
 EXPLAIN (COSTS OFF) SELECT DISTINCT mo FROM types_k;
+SELECT explain_neutral($$SELECT mo FROM types_k INTERSECT SELECT mo FROM types_k WHERE id < 100$$, 'COSTS OFF');
+SELECT types_same($$SELECT mo FROM types_k INTERSECT SELECT mo FROM types_k WHERE id < 100$$);
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.f4 = b.f8;
 DROP TABLE types_k;
 
