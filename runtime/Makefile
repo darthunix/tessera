@@ -1,6 +1,6 @@
 # Runtime helpers for batch nodes, as a static library that node modules
 # and tests link. Built with the PostgreSQL flags of PG_CONFIG.
-PG_CPPFLAGS = -I$(srcdir)/../include
+PG_CPPFLAGS = -I$(srcdir)/../include $(TESS_HOST_CPPFLAGS)
 
 # Set before PGXS is read: its clean rule takes EXTRA_CLEAN as it is read,
 # and a later definition never reaches it. The list is not OBJS, which PGXS
@@ -11,6 +11,7 @@ RUNTIME_OBJS = api.o builder.o decimal_cache.o expr.o gathered.o heap_batch.o in
 EXTRA_CLEAN = $(RUNTIME_LIB) $(RUNTIME_OBJS)
 
 PG_CONFIG ?= pg_config
+include ../host.mk
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
 
