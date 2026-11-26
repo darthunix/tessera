@@ -115,8 +115,10 @@ parallel.
 - **Disagree.** Different rows. An error in one mode only that neither
   the relaxed query nor a probe confirms. An internal error. A timeout in
   one mode only (5 s), the limit of the query alone; a query whose limit
-  fires while its rows go out has timed out. A lost connection, which
-  means the backend crashed.
+  fires while its rows go out has timed out. Rows the other mode
+  returned after half the limit count as timed out too: both modes ran
+  near it, and which ends first is the machine's. A lost connection,
+  which means the backend crashed.
 
 Outputs that stand for equal values take no stand on which value shows:
 a group's key, a distinct or set-operation row, min and max, and every
