@@ -20,7 +20,7 @@ maintainer's word and takes five minutes at most.
 
 ## 2. The cases
 
-- [ ] 2.1 `bench/pg/setup.sql` makes `bench_clock` and `bench_minutes`;
+- [x] 2.1 `bench/pg/setup.sql` makes `bench_clock` and `bench_minutes`;
       `bench/pg/anyagg.sql` and `bench/pg/wordkey.sql` get the cases of
       the design's measurement plan; the families' entries in
       `bench/pg/README.md` name them. Check: `cargo ab measure --base

@@ -217,8 +217,10 @@ query down, and where it can, does it speed one up.
   keep in a word besides int4 and int8, over `bench_dates` (2 M rows): a
   grouping by a date, by a timestamp and by an int2 and a boolean, a join
   on the date with the 1826 days of `bench_days`, `DISTINCT` of the
-  timestamp and a sort by the date skipped with `OFFSET`. A ratio below
-  one is the win.
+  timestamp and a sort by the date skipped with `OFFSET`; over
+  `bench_clock` (2 M rows), a grouping by a time and by a money, `DISTINCT`
+  of the time, a join on it with the 1440 minutes of `bench_minutes`, a
+  filter by both and a sort by the money. A ratio below one is the win.
 - **anyagg** (`anyagg.sql`): aggregates that `TessAgg` computes through
   the core's transition and final functions over the batches, or folds
   itself: without `GROUP BY`, `max` of text, `sum` and `avg` of int8,
@@ -233,7 +235,13 @@ query down, and where it can, does it speed one up.
   int8 values of 19 digits, each beside a twin of 18 digits
   (`g_*_digits19`, `g_*_digits18`): without groups, by 100 groups whose
   keys come in runs of 64 rows (`runs`) and by 100 groups whose keys
-  follow one another (`spread`). A ratio below one is the win.
+  follow one another (`spread`); and `min` and `max` of the types the node
+  holds as integers, each beside the twin `g_minmax_int4` over the same
+  table (`g_minmax_*`): of a date, a timestamp and an int2 of
+  `bench_dates`, `bool_and` and `bool_or` of its boolean, of a time and a
+  money of `bench_clock`; by the 1000 groups of the int2
+  (`g_group_minmax_*`); and the twins with `DISTINCT` in each extreme
+  (`*_distinct`). A ratio below one is the win.
 - **anykey** (`anykey.sql`): groupings, `DISTINCT` and `UNION` keyed by
   text and numeric over `bench_mixed`: a text expression of 99 values, a
   text column of 450 000, with aggregates, numeric of 1000 values, and

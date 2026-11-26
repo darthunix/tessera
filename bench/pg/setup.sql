@@ -124,6 +124,17 @@ FROM generate_series(1, 2000000 * :scale) AS g;
 DROP TABLE IF EXISTS bench_days;
 CREATE TABLE bench_days AS
 SELECT date '2020-01-01' + g AS d, g AS w FROM generate_series(0, 1825) AS g;
+-- The time and money cases of the wordkey and anyagg families: tm, the
+-- minutes of a day in a scrambled order, mo, 1000 sums of whole units of
+-- both signs, v an int4; and a dimension of the 1440 minutes.
+DROP TABLE IF EXISTS bench_clock;
+CREATE TABLE bench_clock AS
+SELECT time '00:00' + (g::bigint * 7919 % 1440) * interval '1 minute' AS tm,
+       (g::bigint * 7907 % 1000 - 500)::money AS mo, g AS v
+FROM generate_series(1, 2000000 * :scale) AS g;
+DROP TABLE IF EXISTS bench_minutes;
+CREATE TABLE bench_minutes AS
+SELECT time '00:00' + g * interval '1 minute' AS tm, g AS w FROM generate_series(0, 1439) AS g;
 
 -- The joins of the anykey family by text and numeric keys: a dimension of
 -- 100 000 keys and a fact table whose keys spread over it, every 13th NULL.
@@ -219,6 +230,8 @@ VACUUM (ANALYZE) bench_part;
 VACUUM (ANALYZE) bench_dates;
 VACUUM (ANALYZE) bench_tstz;
 VACUUM (ANALYZE) bench_days;
+VACUUM (ANALYZE) bench_clock;
+VACUUM (ANALYZE) bench_minutes;
 VACUUM (ANALYZE) bench_tdim;
 VACUUM (ANALYZE) bench_tfact;
 VACUUM (ANALYZE) bench_idx;
@@ -248,4 +261,6 @@ SELECT count(*) FROM bench_part;
 SELECT count(*) FROM bench_dates;
 SELECT count(*) FROM bench_tstz;
 SELECT count(*) FROM bench_days;
+SELECT count(*) FROM bench_clock;
+SELECT count(*) FROM bench_minutes;
 SELECT count(*) FROM bench_idx;
