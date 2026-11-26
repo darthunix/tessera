@@ -987,11 +987,17 @@ word; another of a type whose equality hashes (text, numeric, float8,
 under its collation, a nondeterministic one too) goes by its number in a
 dictionary of its values of the aggregate's own, as a grouping key does,
 made anew with the pairs; that holds for `count`, while `sum` and `avg`
-(through the core's functions) and `min` and `max` take integers only,
-whose value neither the order of the values nor which of equal ones comes
-first changes: `string_agg`, `array_agg`, a float's sum and a numeric
-one's scale (1.0 and 1.00) would, and stay with the core, which feeds a
-`DISTINCT` aggregate its values sorted. Against the core's sorted
+(through the core's functions) take integers only, whose value neither
+the order of the values nor which of equal ones comes first changes:
+`string_agg`, `array_agg`, a float's sum and a numeric one's scale (1.0
+and 1.00) would, and stay with the core, which feeds a `DISTINCT`
+aggregate its values sorted. An extreme the node computes as its own
+(`min`, `max`, `bool_and`, `bool_or` and `every` of a type a word holds)
+ignores its `DISTINCT` and keeps no pairs (`distinct_matters`): two equal
+values are one word, so the least of the distinct values is the least of
+all, as the core's planner reads such an aggregate from an index; of
+text or numeric, whose equal values may differ in their bytes, `DISTINCT`
+in an extreme stays the core's. Against the core's sorted
 `DISTINCT` over the same scan (2 M rows, medians of 7, ms): `count` of
 100 000 texts 646 and 62, of numerics 287 and 110, of dates 61 and 20;
 grouped by int2, of dates 325 and 54, by int4 of texts 699 and 88;

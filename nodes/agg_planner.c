@@ -176,10 +176,11 @@ generic_supported(const Aggref *agg)
 /*
  * DISTINCT in an aggregate of one argument: a table of the pairs of group
  * and argument seen. count over any type whose equality hashes, a value a
- * word does not hold by its number in a dictionary; sum, avg, min and max
- * over integers, whose value neither the order of the values nor which of
- * equal ones comes first changes, unlike string_agg's order, a float's
- * sum or the scale of a numeric one.
+ * word does not hold by its number in a dictionary; sum and avg over
+ * integers, whose value neither the order of the values nor which of equal
+ * ones comes first changes, unlike string_agg's order, a float's sum or
+ * the scale of a numeric one. The node's own extremes keep no pairs, their
+ * DISTINCT changing nothing (distinct_matters).
  */
 static bool
 distinct_supported(const Aggref *agg)
@@ -202,14 +203,28 @@ distinct_supported(const Aggref *agg)
 		case F_AVG_INT2:
 		case F_AVG_INT4:
 		case F_AVG_INT8:
-		case F_MIN_INT4:
-		case F_MIN_INT8:
-		case F_MAX_INT4:
-		case F_MAX_INT8:
 			return true;
 		default:
 			return false;
 	}
+}
+
+/*
+ * Whether an aggregate's DISTINCT changes its answer: not in an extreme the
+ * node computes as its own, whose values are words, two equal ones the same
+ * bits, so the least of the distinct values is the least of all, as
+ * PostgreSQL's planner reads such an aggregate from an index (planagg.c).
+ * The node computes it as without DISTINCT, and keeps no pairs for it.
+ */
+bool
+distinct_matters(const Aggref *agg)
+{
+	int			kind;
+
+	if (agg->aggdistinct == NIL)
+		return false;
+	kind = aggregate_kind(agg->aggfnoid);
+	return !((kind == AGG_MIN || kind == AGG_MAX) && batch_aggregate(agg));
 }
 
 /* Whether a batch function computes the aggregate: else the core's do. */
@@ -400,7 +415,7 @@ aggregate_supported(const Aggref *agg)
 		 agg->aggsplit != AGGSPLIT_INITIAL_SERIAL) || agg->aggorder != NIL ||
 		contain_subplans((Node *) agg->aggfilter) ||
 		agg->aggdirectargs != NIL || agg->aggvariadic ||
-		(agg->aggdistinct != NIL && !distinct_supported(agg)))
+		(distinct_matters(agg) && !distinct_supported(agg)))
 		return false;
 	if (!batch_aggregate(agg))
 		return generic_supported(agg);
@@ -1030,7 +1045,7 @@ static bool
 has_distinct_aggregate(List *tlist)
 {
 	foreach_node(TargetEntry, entry, tlist)
-		if (IsA(entry->expr, Aggref) && ((Aggref *) entry->expr)->aggdistinct != NIL)
+		if (IsA(entry->expr, Aggref) && distinct_matters((Aggref *) entry->expr))
 			return true;
 	return false;
 }
@@ -1056,7 +1071,7 @@ distinct_bytes(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist
 		Aggref	   *agg;
 		double		pairs;
 
-		if (!IsA(entry->expr, Aggref) || ((Aggref *) entry->expr)->aggdistinct == NIL)
+		if (!IsA(entry->expr, Aggref) || !distinct_matters((Aggref *) entry->expr))
 			continue;
 		agg = (Aggref *) entry->expr;
 		pairs = estimate_num_groups(root,
