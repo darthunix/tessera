@@ -203,7 +203,8 @@ groups read back.
 A `TessAgg` grouping with `GROUP BY` SHALL send to disk the pairs of
 group and value of a DISTINCT aggregate whose argument is a
 `smallint`, an `integer`, a `bigint`, a `date`, a `boolean`, a
-`timestamp` or a `timestamptz`, once the node's memory passes seven
+`timestamp`, a `timestamptz`, a `time` or a `money`, once the node's
+memory passes seven
 eighths of `hash_mem`, and SHALL count each pair in its group once.
 Where the planner gave the node the grouping although its estimate of
 the pairs did not fit `hash_mem`, that memory SHALL count the groups,
@@ -239,13 +240,20 @@ pairs of a partition that no bit of their hash is left to split.
   `test/sql/agg.sql::spec: table-memory/A partition read back past the limit`
 
 #### Scenario: Aggregates through the spill
-- **WHEN** `count`, `sum`, `avg`, `min` and `max` with DISTINCT of
-  integers, two DISTINCT aggregates of one grouping, one with `FILTER`,
-  NULL arguments and a generic aggregate beside them go through a spill
-  of pairs
+- **WHEN** `count`, `sum` and `avg` with DISTINCT of integers, two
+  DISTINCT aggregates of one grouping, one with `FILTER`, NULL
+  arguments, a generic aggregate, and `min` and `max` with DISTINCT,
+  which keep no pairs, beside them go through a spill of pairs
 - **THEN** the rows are the core's
 - **Verified by:**
   `test/sql/agg.sql::spec: table-memory/Aggregates through the spill`
+
+#### Scenario: Pairs of time and money past the limit
+- **WHEN** a grouping of 100 groups counts the distinct values of a
+  `money` and of a `time`, its pairs several times `hash_mem`
+- **THEN** its pairs go to disk, and its rows are the core's
+- **Verified by:**
+  `test/sql/agg.sql::spec: table-memory/Pairs of time and money past the limit`
 
 #### Scenario: Groups thought more than they are
 - **WHEN** a grouping by two keys that depend on each other, with

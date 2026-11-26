@@ -469,22 +469,27 @@ set_key(Datum value, bool wide)
 
 /*
  * Whether x IN or NOT IN a constant array is a set, looked up by the
- * kernels: of integer words on both sides, x a supported value.
+ * kernels: of integer words on both sides, x a supported value, the array
+ * not empty. Of no element, = ANY is false and <> ALL true, x NULL too,
+ * which the set's masks do not give: the core keeps such a list.
  */
 static bool
 set_supported(ScalarArrayOpExpr *array_op, Index relid)
 {
 	Const	   *array = (Const *) strip_relabel(lsecond(array_op->args));
 	Node	   *left = linitial(array_op->args);
+	ArrayType  *elements;
 	bool		wide;
 	int			nvars;
 
 	set_opfuncid((OpExpr *) array_op);
-	return tess_runtime_kernels() != NULL &&
-		IsA(array, Const) && !array->constisnull &&
+	if (tess_runtime_kernels() == NULL || !IsA(array, Const) || array->constisnull)
+		return false;
+	elements = DatumGetArrayTypeP(array->constvalue);
+	return ArrayGetNItems(ARR_NDIM(elements), ARR_DIMS(elements)) > 0 &&
 		set_function(array_op->opfuncid, array_op->useOr) &&
 		set_key_kind(exprType(left), &wide) &&
-		set_key_kind(ARR_ELEMTYPE(DatumGetArrayTypeP(array->constvalue)), &wide) &&
+		set_key_kind(ARR_ELEMTYPE(elements), &wide) &&
 		analyze_value(left, relid, &nvars) && nvars > 0;
 }
 

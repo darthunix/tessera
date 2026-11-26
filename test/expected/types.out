@@ -3190,11 +3190,35 @@ SELECT types_same($$SELECT mo, count(*), min(tm), max(tm) FROM types_k GROUP BY 
  same
 (1 row)
 
+EXPLAIN (COSTS OFF) SELECT DISTINCT tm FROM types_k;
+                 QUERY PLAN                  
+---------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: tm
+   ->  Custom Scan (TessHeapScan) on types_k
+(3 rows)
+
 SELECT types_same($$SELECT DISTINCT tm FROM types_k$$);
  types_same 
 ------------
  same
 (1 row)
+
+SELECT explain_neutral($$SELECT tm FROM types_k WHERE id < 100 UNION SELECT tm FROM types_k WHERE id > 1900$$, 'COSTS OFF');
+                             explain_neutral                             
+-------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: subquery.tm
+   ->  Custom Scan (TessAppend)
+         ->  Custom Scan (TessPack)
+               ->  Custom Scan (TessFilter) on types_k
+                     Batch Filter: (types_k.id < 100)
+                     ->  Custom Scan (TessHeapScan) on types_k
+         ->  Custom Scan (TessPack)
+               ->  Custom Scan (TessFilter) on types_k types_k_1
+                     Batch Filter: (types_k_1.id > 1900)
+                     ->  Custom Scan (TessHeapScan) on types_k types_k_1
+(11 rows)
 
 SELECT types_same($$SELECT tm FROM types_k WHERE id < 100 UNION SELECT tm FROM types_k WHERE id > 1900$$);
  types_same 
@@ -3207,6 +3231,14 @@ SELECT types_same($$SELECT count(DISTINCT tm), count(DISTINCT mo) FROM types_k$$
 ------------
  same
 (1 row)
+
+EXPLAIN (COSTS OFF) SELECT id, tm FROM types_k ORDER BY tm DESC NULLS LAST, id;
+                 QUERY PLAN                  
+---------------------------------------------
+ Custom Scan (TessSort)
+   Sort Key: tm DESC NULLS LAST, id
+   ->  Custom Scan (TessHeapScan) on types_k
+(3 rows)
 
 SELECT types_order($$SELECT id, tm FROM types_k ORDER BY tm DESC NULLS LAST, id$$);
  types_order 
@@ -3262,6 +3294,33 @@ SELECT types_same($$SELECT count(*) FROM types_k WHERE mo NOT IN ('1', '-2', '92
  same
 (1 row)
 
+SELECT types_same($$SELECT count(*) FROM types_k WHERE tm <> ALL ('{}'::time[]) AND NOT (mo = ANY ('{}'::money[]))$$);
+ types_same 
+------------
+ same
+(1 row)
+
+-- The extremes by the kernels of int8: a call a batch and aggregate.
+CREATE FUNCTION types_kernels(query text) RETURNS SETOF text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        IF line ~ 'Custom Scan|Kernel Calls' THEN
+            RETURN NEXT btrim(line);
+        END IF;
+    END LOOP;
+END $$;
+SELECT types_kernels($$SELECT min(tm), max(tm), min(mo), max(mo) FROM types_k$$);
+                                 types_kernels                                  
+--------------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+ Kernel Calls: 148
+ ->  Custom Scan (TessHeapScan) on public.types_k (actual rows=2000.00 loops=1)
+(3 rows)
+
+DROP FUNCTION types_kernels(text);
 SELECT types_same($$SELECT min(tm), max(tm), min(mo), max(mo) FROM types_k$$);
  types_same 
 ------------
@@ -3276,9 +3335,10 @@ SELECT types_same($$SELECT id % 7, min(tm), max(tm), min(mo), max(mo) FROM types
 
 -- Keys left to the core: a grouping and a join by bit varying, which has
 -- no hash function; a join by money, whose equality PostgreSQL does not
--- let a hash join use; DISTINCT of money, which the core can only sort;
--- and a join by the equality of two types other than the integers,
--- float4 with float8.
+-- let a hash join use; DISTINCT and INTERSECT of money, which the core
+-- can only sort, where the node offers its plan beside the core's hashed
+-- one alone; and a join by the equality of two types other than the
+-- integers, float4 with float8.
 EXPLAIN (COSTS OFF) SELECT vb, count(*) FROM types_k GROUP BY vb;
                     QUERY PLAN                     
 ---------------------------------------------------
@@ -3323,6 +3383,26 @@ EXPLAIN (COSTS OFF) SELECT DISTINCT mo FROM types_k;
          Sort Key: mo
          ->  Custom Scan (TessHeapScan) on types_k
 (4 rows)
+
+SELECT explain_neutral($$SELECT mo FROM types_k INTERSECT SELECT mo FROM types_k WHERE id < 100$$, 'COSTS OFF');
+                       explain_neutral                       
+-------------------------------------------------------------
+ SetOp Intersect
+   ->  Sort
+         Sort Key: types_k.mo
+         ->  Custom Scan (TessFilter) on types_k
+               Batch Filter: (types_k.id < 100)
+               ->  Custom Scan (TessHeapScan) on types_k
+   ->  Sort
+         Sort Key: types_k_1.mo
+         ->  Custom Scan (TessHeapScan) on types_k types_k_1
+(9 rows)
+
+SELECT types_same($$SELECT mo FROM types_k INTERSECT SELECT mo FROM types_k WHERE id < 100$$);
+ types_same 
+------------
+ same
+(1 row)
 
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.f4 = b.f8;
                            QUERY PLAN                            

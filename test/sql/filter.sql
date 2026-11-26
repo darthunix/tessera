@@ -225,6 +225,11 @@ SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a + 1 IN (4, NULL) OR b
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE b = 0 OR 10 / b > 1$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE (b IN (1, NULL)) IS UNKNOWN$$);
 SELECT filter_same($$SELECT a FROM filter_t WHERE a IN (3::bigint, 5000000000)$$);
+-- An empty list stays the core's: = ANY of no element is false and <> ALL
+-- true, x NULL too.
+EXPLAIN (COSTS OFF) SELECT count(*) FROM filter_t WHERE a <> ALL ('{}'::int[]);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE a <> ALL ('{}'::int[])$$);
+SELECT filter_same($$SELECT count(*) FROM filter_t WHERE NOT (a = ANY ('{}'::int[]))$$);
 SELECT filter_same($$SELECT count(*) FROM filter_t WHERE c IS NOT NULL AND a + 1 IS NULL$$);
 -- Conditional values: CASE, a simple CASE, COALESCE and NULLIF, a branch
 -- computed only over the rows that take it.

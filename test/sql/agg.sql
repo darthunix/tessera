@@ -791,11 +791,16 @@ SELECT agg_pairs($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$);
 SELECT agg_memory($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) <= 4096 + 512 AS within;
 SELECT agg_same($$SELECT g, count(DISTINCT v) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
 -- Every aggregate the node takes with DISTINCT, two sets and a FILTER,
--- NULL arguments, a generic aggregate and a sum state beside them; at
--- 256 kB a partition read back passes the limit and splits into a level
--- below.
+-- NULL arguments, a generic aggregate and a sum state beside them, and
+-- the extremes, which ignore their DISTINCT and keep no set; at 256 kB a
+-- partition read back passes the limit and splits into a level below.
 -- spec: table-memory/Aggregates through the spill
 SELECT agg_same($$SELECT g, count(DISTINCT v), sum(DISTINCT w), avg(DISTINCT w), min(DISTINCT v), max(DISTINCT v), count(DISTINCT w) FILTER (WHERE s > 500), max(t), sum(s) FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
+-- The pairs of a money and of a time, words of eight bytes, go to disk
+-- as those of a bigint do.
+-- spec: table-memory/Pairs of time and money past the limit
+SELECT agg_pairs($$SELECT g, count(DISTINCT v::money), count(DISTINCT time '00:00' + v * interval '1 microsecond') FROM agg_dspill GROUP BY g$$);
+SELECT agg_same($$SELECT g, count(DISTINCT v::money), count(DISTINCT time '00:00' + v * interval '1 microsecond') FROM agg_dspill GROUP BY g$$) NOT LIKE 'MISMATCH%' AS same;
 SET work_mem = '256kB';
 -- A partition of one set past the limit: its first level's 32
 -- partitions, and a level below.
