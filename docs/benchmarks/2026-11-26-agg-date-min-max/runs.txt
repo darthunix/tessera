@@ -16,3 +16,12 @@ report anyagg-again cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-T
 report wordkey cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-J6wFTa
 report wordkey instructions ~/git/tessera-agg-date-min-max/target/bench-runs/ab-AIcXZX
 report wordkey-again cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-2FriQD
+twin cycles base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-Py5uk8 ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-YhU5af
+twin cycles end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-EyLT4D ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-DqaLsp
+twin instructions base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-elebfa ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-IWvuD8
+twin instructions end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-mKHFB4 ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-lM0tq1
+twin-spoiled cycles base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-4wMZwU ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-2k9j9I
+twin-spoiled cycles end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-Z7JSAn ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-q4C7kq
+report twin cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-o8SYqz
+report twin instructions ~/git/tessera-agg-date-min-max/target/bench-runs/ab-ZXdtAd
+report twin-spoiled cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-I7US3M

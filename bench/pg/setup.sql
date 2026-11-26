@@ -109,6 +109,15 @@ SELECT date '2020-01-01' + (g::bigint * 7919 % 1826)::int AS d,
        timestamp '2020-01-01' + (g::bigint * 7907 % 43824) * interval '1 hour' AS ts,
        (g % 1000 - 500)::int2 AS s, g % 3 = 0 AS b, g AS v
 FROM generate_series(1, 2000000 * :scale) AS g;
+-- The twin of the extremes of the dates in the anyagg family: bench_dates
+-- with d and ts as the integers PostgreSQL holds them as, the days and the
+-- microseconds since 2000-01-01, in the same order and layout.
+DROP TABLE IF EXISTS bench_dates_int;
+CREATE TABLE bench_dates_int AS
+SELECT d - date '2000-01-01' AS d,
+       (extract(epoch FROM ts - timestamp '2000-01-01') * 1000000)::bigint AS ts,
+       s, b, v
+FROM bench_dates ORDER BY v;
 -- The timestamptz cases of the win family: tz, hourly instants over five
 -- years in a scrambled order, about 11 spans of a zone with summer time
 -- and 1826 local days; tz_spread, row g in span (g * 37) % 80 of the 80
@@ -228,6 +237,7 @@ VACUUM (ANALYZE) bench_mj_outer;
 VACUUM (ANALYZE) bench_mj_inner;
 VACUUM (ANALYZE) bench_part;
 VACUUM (ANALYZE) bench_dates;
+VACUUM (ANALYZE) bench_dates_int;
 VACUUM (ANALYZE) bench_tstz;
 VACUUM (ANALYZE) bench_days;
 VACUUM (ANALYZE) bench_clock;
@@ -259,6 +269,7 @@ SELECT count(*) FROM bench_mj_outer;
 SELECT count(*) FROM bench_mj_inner;
 SELECT count(*) FROM bench_part;
 SELECT count(*) FROM bench_dates;
+SELECT count(*) FROM bench_dates_int;
 SELECT count(*) FROM bench_tstz;
 SELECT count(*) FROM bench_days;
 SELECT count(*) FROM bench_clock;

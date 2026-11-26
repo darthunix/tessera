@@ -120,6 +120,7 @@ SELECT pg_temp.measure_pair('g_minmax_clock', 'SELECT min(tm), max(tm), min(mo),
 SELECT pg_temp.measure_pair('g_minmax_int4', 'SELECT min(v), max(v) FROM bench_dates', :repetitions);
 SELECT pg_temp.measure_pair('g_minmax_int4_distinct', 'SELECT min(DISTINCT v), max(DISTINCT v) FROM bench_dates', :repetitions);
 SELECT pg_temp.measure_pair('g_group_minmax_dates', 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(d) AS a, max(ts) AS b FROM bench_dates GROUP BY 1) AS g', :repetitions);
+SELECT pg_temp.measure_pair('g_group_minmax_ints', 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(d) AS a, max(ts) AS b FROM bench_dates_int GROUP BY 1) AS g', :repetitions);
 SELECT pg_temp.measure_pair('g_group_minmax_int4', 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(v) AS a, max(v) AS b FROM bench_dates GROUP BY 1) AS g', :repetitions);
 SELECT pg_temp.measure_pair('g_group_minmax_int4_distinct', 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(DISTINCT v) AS a, max(DISTINCT v) AS b FROM bench_dates GROUP BY 1) AS g', :repetitions);
 
@@ -140,11 +141,11 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric', 'g_sum_digits19', 'g_sum_digits18', 'g_avg_digits19', 'g_avg_digits18', 'g_runs_digits19', 'g_runs_digits18', 'g_spread_digits19', 'g_spread_digits18', 'g_minmax_date', 'g_minmax_timestamp', 'g_minmax_int2', 'g_bool_and_or', 'g_minmax_clock', 'g_minmax_int4', 'g_minmax_int4_distinct', 'g_group_minmax_dates', 'g_group_minmax_int4', 'g_group_minmax_int4_distinct']) AS name
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric', 'g_sum_digits19', 'g_sum_digits18', 'g_avg_digits19', 'g_avg_digits18', 'g_runs_digits19', 'g_runs_digits18', 'g_spread_digits19', 'g_spread_digits18', 'g_minmax_date', 'g_minmax_timestamp', 'g_minmax_int2', 'g_bool_and_or', 'g_minmax_clock', 'g_minmax_int4', 'g_minmax_int4_distinct', 'g_group_minmax_dates', 'g_group_minmax_ints', 'g_group_minmax_int4', 'g_group_minmax_int4_distinct']) AS name
 WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric', 'g_sum_digits19', 'g_sum_digits18', 'g_avg_digits19', 'g_avg_digits18', 'g_runs_digits19', 'g_runs_digits18', 'g_spread_digits19', 'g_spread_digits18', 'g_minmax_date', 'g_minmax_timestamp', 'g_minmax_int2', 'g_bool_and_or', 'g_minmax_clock', 'g_minmax_int4', 'g_minmax_int4_distinct', 'g_group_minmax_dates', 'g_group_minmax_int4', 'g_group_minmax_int4_distinct']) AS name
+FROM unnest(ARRAY['g_max_text', 'g_sum_int8', 'g_avg_int8', 'g_sum_numeric', 'g_max_numeric', 'g_max_numeric_col', 'g_avg_float8', 'g_bit_or', 'g_filter', 'g_three', 'g_group_few', 'g_group_many', 'g_group_numeric', 'g_group_numeric_col', 'g_group_int2', 'g_group_sum', 'g_group_sum_numeric', 'g_sum_digits19', 'g_sum_digits18', 'g_avg_digits19', 'g_avg_digits18', 'g_runs_digits19', 'g_runs_digits18', 'g_spread_digits19', 'g_spread_digits18', 'g_minmax_date', 'g_minmax_timestamp', 'g_minmax_int2', 'g_bool_and_or', 'g_minmax_clock', 'g_minmax_int4', 'g_minmax_int4_distinct', 'g_group_minmax_dates', 'g_group_minmax_ints', 'g_group_minmax_int4', 'g_group_minmax_int4_distinct']) AS name
 WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 DEALLOCATE ALL;

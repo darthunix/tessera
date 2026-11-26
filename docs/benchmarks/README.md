@@ -16,8 +16,9 @@ with the plans of the cases the README cites, newest first:
   without groups and 25 with them, `DISTINCT` in them 81 to 91, the
   comparisons, sorts and keys of `time` and `money` 52 to 83, Q7 43 to
   44, the twins and controls within 2; `key_time_distinct`
-  unsettled by the plan's spread, and `g_group_minmax_dates` 10.5 per
-  cent above its twin, which reads one column less.
+  unsettled by the plan's spread; `g_group_minmax_dates` 10.5 per cent
+  above the twin of one column the plan named, 0.4 above a twin of the
+  same layout.
 - [2026-11-25, page headers through a buffer,
   `parquet-page-headers`](2026-11-25-parquet-page-headers/README.md):
   seven of ClickBench's queries over `hits.parquet` counted at 0

@@ -240,8 +240,11 @@ query down, and where it can, does it speed one up.
   table (`g_minmax_*`): of a date, a timestamp and an int2 of
   `bench_dates`, `bool_and` and `bool_or` of its boolean, of a time and a
   money of `bench_clock`; by the 1000 groups of the int2
-  (`g_group_minmax_*`); and the twins with `DISTINCT` in each extreme
-  (`*_distinct`). A ratio below one is the win.
+  (`g_group_minmax_*`), the date and the timestamp beside the twin
+  `g_group_minmax_ints` over `bench_dates_int`, the same table with
+  both as the integers PostgreSQL holds them as; and the twins with
+  `DISTINCT` in each extreme (`*_distinct`). A ratio below one is the
+  win.
 - **anykey** (`anykey.sql`): groupings, `DISTINCT` and `UNION` keyed by
   text and numeric over `bench_mixed`: a text expression of 99 values, a
   text column of 450 000, with aggregates, numeric of 1000 values, and
