@@ -336,6 +336,69 @@ DROP TABLE agg_pk;
 SET enable_hashagg = off;
 EXPLAIN (COSTS OFF) SELECT b, count(*) FROM agg_t GROUP BY b;
 RESET enable_hashagg;
+
+-- The extremes of the types the node holds as integers go to the kernels
+-- of the integers' extremes: min and max of smallint, date, timestamp and
+-- timestamptz, bool_and and every the least boolean, bool_or the
+-- greatest. NULL in every seventh row; the infinities and the edges of
+-- the ranges in a few.
+CREATE TABLE agg_ext WITH (autovacuum_enabled = off) AS
+SELECT i, i % 37 AS g,
+       CASE WHEN i % 7 = 0 THEN NULL WHEN i = 500 THEN -32768 WHEN i = 600 THEN 32767
+            ELSE i * 7919 % 60000 - 30000 END::int2 AS s,
+       CASE WHEN i % 7 = 0 THEN NULL WHEN i = 100 THEN date '-infinity'
+            WHEN i = 200 THEN date 'infinity' WHEN i = 300 THEN date '4714-11-24 BC'
+            WHEN i = 400 THEN date '5874897-12-31'
+            ELSE date '2000-01-01' + (i * 7907 % 20000 - 10000) END AS d,
+       CASE WHEN i % 7 = 0 THEN NULL WHEN i = 100 THEN timestamp '-infinity'
+            WHEN i = 200 THEN timestamp 'infinity'
+            WHEN i = 300 THEN timestamp '4714-11-24 00:00:00 BC'
+            WHEN i = 400 THEN timestamp '294276-12-31 23:59:59.999999'
+            ELSE timestamp '2000-01-01' + (i * 7901 % 100000 - 50000) * interval '1 minute' END AS ts,
+       CASE WHEN i % 7 = 0 THEN NULL WHEN i = 100 THEN timestamptz '-infinity'
+            WHEN i = 200 THEN timestamptz 'infinity'
+            WHEN i = 300 THEN timestamptz '4714-11-24 00:00:00+00 BC'
+            WHEN i = 400 THEN timestamptz '294276-12-31 23:59:59.999999+00'
+            ELSE timestamptz '2000-01-01 00:00+00' + (i * 7901 % 100000 - 50000) * interval '1 minute' END AS tz,
+       CASE WHEN i % 7 = 0 THEN NULL ELSE i % 5 <> 0 END AS b
+FROM generate_series(1, 3000) AS i;
+ANALYZE agg_ext;
+-- One kernel call an aggregate a batch, which the generic path makes none.
+SELECT line FROM agg_explain($$SELECT min(s), max(s), min(d), max(d), min(ts), max(ts), min(tz), max(tz), bool_and(b), bool_or(b), every(b) FROM agg_ext$$) AS line
+WHERE line ~ 'TessAgg|Kernel Calls';
+SELECT agg_same($$SELECT min(s), max(s), min(d), max(d), min(ts), max(ts), min(tz), max(tz), bool_and(b), bool_or(b), every(b) FROM agg_ext$$);
+-- Without the infinities, the edges of the ranges; a value inside them.
+SELECT agg_same($$SELECT min(s), max(s), min(d), max(d), min(ts), max(ts), min(tz), max(tz) FROM agg_ext WHERE i NOT IN (100, 200)$$);
+SELECT agg_same($$SELECT min(s), max(s), min(d), max(d), min(ts), max(ts), min(tz), max(tz), bool_and(b), bool_or(b) FROM agg_ext WHERE i > 1000$$);
+-- Every value NULL, no row, and booleans of one value.
+SELECT agg_same($$SELECT min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b), every(b) FROM agg_ext WHERE i % 7 = 0$$);
+SELECT agg_same($$SELECT min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b), every(b) FROM agg_ext WHERE i < 0$$);
+SELECT agg_same($$SELECT bool_and(b), bool_or(b), every(b) FROM agg_ext WHERE i % 5 = 0$$);
+SELECT agg_same($$SELECT bool_and(b), bool_or(b), every(b) FROM agg_ext WHERE i % 5 = 1$$);
+-- Expressions as arguments, and FILTER.
+SELECT agg_same($$SELECT min(d + 1), max(ts + interval '1 hour'), bool_and(s > 0), bool_or(d > date '2000-01-01') FROM agg_ext WHERE i > 1000$$);
+SELECT agg_same($$SELECT min(d) FILTER (WHERE b), max(tz) FILTER (WHERE s < 0), bool_or(b) FILTER (WHERE g = 3) FROM agg_ext$$);
+-- With groups: 37, and 1000 that the outer query reads.
+EXPLAIN (COSTS OFF) SELECT g, min(d), max(ts), bool_and(b) FROM agg_ext GROUP BY g;
+SELECT agg_same($$SELECT g, min(s), max(s), min(d), max(d), min(ts), max(ts), min(tz), max(tz), bool_and(b), bool_or(b), every(b) FROM agg_ext GROUP BY g$$);
+SELECT agg_same($$SELECT count(*), min(a), max(z), min(t), max(u) FROM (SELECT i % 1000, min(d) AS a, max(s) AS z, min(ts) AS t, max(tz) AS u FROM agg_ext GROUP BY 1) AS q$$);
+SELECT agg_same($$SELECT count(*), sum(CASE WHEN o THEN 1 END), sum(CASE WHEN a THEN 1 END) FROM (SELECT i % 1000, bool_or(b) AS o, bool_and(b) AS a FROM agg_ext GROUP BY 1) AS q$$);
+-- Past hash_mem the groups go to disk and come back, their extremes
+-- merged as integers.
+CREATE TABLE agg_ext_spill WITH (autovacuum_enabled = off) AS
+SELECT g % 100000 AS k, (g % 30000)::int2 AS s, date '2000-01-01' + g % 5000 AS d,
+       timestamptz '2000-01-01 00:00+00' + g * interval '1 second' AS tz, g % 3 = 0 AS b
+FROM generate_series(1, 300000) AS g;
+ANALYZE agg_ext_spill;
+SET work_mem = '128kB';
+SET enable_sort = off;
+SELECT count(*) > 0 AS spilled
+FROM agg_explain($$SELECT k, min(s), max(d), min(tz), bool_and(b), bool_or(b) FROM agg_ext_spill GROUP BY k$$) AS line
+WHERE line ~ 'Spilled Chunks';
+SELECT agg_same($$SELECT count(*), sum(s), max(d), min(tz), sum(CASE WHEN a THEN 1 END), sum(CASE WHEN o THEN 1 END) FROM (SELECT k, min(s) AS s, max(d) AS d, min(tz) AS tz, bool_and(b) AS a, bool_or(b) AS o FROM agg_ext_spill GROUP BY k) AS q$$);
+RESET enable_sort;
+RESET work_mem;
+DROP TABLE agg_ext, agg_ext_spill;
 DROP FUNCTION agg_explain(text);
 
 -- SELECT DISTINCT groups without aggregates: NULL a value of its own, two

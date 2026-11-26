@@ -950,7 +950,10 @@ batches of a batch child and returns the one result row, in place of the
 core's plain `Aggregate`, which would receive the child's rows one at a
 time: `TessHeapScan → TessFilter → TessAgg → parent`. It handles
 `count(*)`, `count` of an expression of any type, `sum` of an int4
-expression and `min` and `max` of an int4 or int8 expression over the
+expression, and `min` and `max` of an expression of a type the node
+holds as an integer (int2, int4, date and bool as int4, int8, timestamp
+and timestamptz as int8; `bool_and` and `every` the least boolean,
+`bool_or` the greatest) over the
 child's columns, computed through the projection provider: a column or
 a chain the [expression compiler](expr.md) accepts, with constants and
 parameters, by the chain over the batch, anything else row by row (see
@@ -1109,8 +1112,9 @@ plain call, without `ORDER BY` (with `FILTER`, see below), whole or the
 partial one of a parallel plan, of an aggregate the node combines and the
 [function registry](function.md) implements over batches (kind
 `TESS_FUNCTION_AGGREGATE`, registered by the kernels module), with an
-int4 or int8 argument (any type for `count`, which reads NULL flags
-alone), or, without `GROUP BY` and `DISTINCT`, of any other ordinary
+argument of a type the node holds as an integer (any type for `count`,
+which reads NULL flags alone), or, without `GROUP BY` and `DISTINCT`, of
+any other ordinary
 aggregate of one argument or more, through the core's functions, without
 a subplan whose columns, and no placeholder, the batch child's target
 has. For such an aggregate `BeginCustomScan` reads `pg_aggregate` as the
@@ -1591,7 +1595,8 @@ the function returns joins the running value, by
 int8 addition checked for overflow (`bigint out of range`, as the core's
 `int8inc`; the core's `int4_sum` does not check, which differs only past
 four billion rows) for `count` and `sum`, by comparison, as int4 or int8
-after the aggregate's transition type, for `min` and `max`; `sum`, `min` and `max` stay NULL without a contributing row, `count`
+by the width of the word of the aggregate's transition type, for `min`
+and `max`; `sum`, `min` and `max` stay NULL without a contributing row, `count`
 is 0. The row is built in the scan slot, `HAVING` is evaluated over it, the
 plan's projection runs when the targets are not the bare aggregates, and
 the row is published as a one-row batch: a batch-aware parent such as

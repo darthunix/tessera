@@ -78,7 +78,12 @@ static Node *aggregate_argument(const Aggref *agg);
 static bool key_eqop(Node *key, List *clauses, int *eqop);
 static void create_nonunion_paths(PlannerInfo *root, RelOptInfo *output_rel);
 
-/* The kind of a supported aggregate, or -1: the node knows how to combine these. */
+/*
+ * The kind of a supported aggregate, or -1: the node knows how to combine
+ * these. The extremes are those of the types a word holds, compared as
+ * the word's integer: bool_and and every the least boolean, bool_or the
+ * greatest.
+ */
 int
 aggregate_kind(Oid aggfnoid)
 {
@@ -89,11 +94,22 @@ aggregate_kind(Oid aggfnoid)
 			return AGG_COUNT;
 		case F_SUM_INT4:
 			return AGG_SUM;
+		case F_MIN_INT2:
 		case F_MIN_INT4:
 		case F_MIN_INT8:
+		case F_MIN_DATE:
+		case F_MIN_TIMESTAMP:
+		case F_MIN_TIMESTAMPTZ:
+		case F_BOOL_AND:
+		case F_EVERY:
 			return AGG_MIN;
+		case F_MAX_INT2:
 		case F_MAX_INT4:
 		case F_MAX_INT8:
+		case F_MAX_DATE:
+		case F_MAX_TIMESTAMP:
+		case F_MAX_TIMESTAMPTZ:
+		case F_BOOL_OR:
 			return AGG_MAX;
 		default:
 			return -1;
@@ -197,15 +213,14 @@ bool
 batch_aggregate(const Aggref *agg)
 {
 	const TessFunction *function = tess_runtime_api()->functions->find(agg->aggfnoid);
-	Oid			type;
+	TessTableKeyKind kind;
 
 	if (aggregate_kind(agg->aggfnoid) < 0 || function == NULL ||
 		function->kind != TESS_FUNCTION_AGGREGATE)
 		return false;
 	if (agg->aggfnoid == F_COUNT_ || agg->aggfnoid == F_COUNT_ANY)
 		return true;
-	type = exprType(aggregate_argument(agg));
-	return type == INT4OID || type == INT8OID;
+	return tess_word_key_kind(exprType(aggregate_argument(agg)), &kind);
 }
 
 /*
@@ -366,7 +381,7 @@ aggregate_argument(const Aggref *agg)
  * partial one of a parallel plan, of an aggregate the node combines and
  * the registry implements over batches, with no argument for count(*),
  * one expression of any type for count (the count reads NULL flags
- * alone) or one int4 or int8 expression for the others, which the
+ * alone) or one expression of a type a word holds for the others, which the
  * projection provider computes by a chain or row by row, and a FILTER
  * condition, which it computes too; a subplan in them would need fixing
  * against the scan tuple, which the arguments do not go through.

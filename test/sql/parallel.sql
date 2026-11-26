@@ -245,6 +245,25 @@ SELECT plan_property($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$, 'TessAgg',
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 RESET parallel_leader_participation;
+-- The extremes of smallint, date, timestamp, timestamptz and booleans:
+-- a participant's partial value is of the aggregate's type, which the
+-- final stage compares as an integer, with groups and without; with
+-- participants that read no row.
+CREATE TABLE parallel_ext AS
+SELECT i AS id, i % 13 AS g, (i % 60000 - 30000)::int2 AS s,
+       date '2000-01-01' + (i * 7919 % 20000 - 10000) AS d,
+       timestamp '2000-01-01' + (i * 7907 % 100000 - 50000) * interval '1 minute' AS ts,
+       timestamptz '2000-01-01 00:00+00' + (i * 7901 % 100000 - 50000) * interval '1 minute' AS tz,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i % 4 <> 0 END AS b
+FROM generate_series(1, 20000) AS i;
+ANALYZE parallel_ext;
+EXPLAIN (COSTS OFF) SELECT min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b) FROM parallel_ext;
+SELECT parallel_same($$SELECT min(s), max(s), min(d), max(d), min(ts), max(ts), min(tz), max(tz), bool_and(b), bool_or(b), every(b) FROM parallel_ext$$);
+EXPLAIN (COSTS OFF) SELECT g, min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b) FROM parallel_ext GROUP BY g;
+SELECT parallel_same($$SELECT g, min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b), every(b) FROM parallel_ext GROUP BY g$$);
+SELECT parallel_same($$SELECT min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b) FROM parallel_ext WHERE id > 19995$$);
+SELECT parallel_same($$SELECT g, min(s), max(d), bool_or(b) FROM parallel_ext WHERE id > 19995 GROUP BY g$$);
+DROP TABLE parallel_ext;
 -- Over the node's partial aggregate, always the node's final one (plan
 -- 4.23, item 4b), even where the core's Gather would cost less: without
 -- GROUP BY the node's stack still, with it the core's own parallel plan,

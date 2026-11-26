@@ -758,6 +758,71 @@ SELECT parallel_same($$SELECT b, sum(a) FROM parallel_t GROUP BY b$$);
 (1 row)
 
 RESET parallel_leader_participation;
+-- The extremes of smallint, date, timestamp, timestamptz and booleans:
+-- a participant's partial value is of the aggregate's type, which the
+-- final stage compares as an integer, with groups and without; with
+-- participants that read no row.
+CREATE TABLE parallel_ext AS
+SELECT i AS id, i % 13 AS g, (i % 60000 - 30000)::int2 AS s,
+       date '2000-01-01' + (i * 7919 % 20000 - 10000) AS d,
+       timestamp '2000-01-01' + (i * 7907 % 100000 - 50000) * interval '1 minute' AS ts,
+       timestamptz '2000-01-01 00:00+00' + (i * 7901 % 100000 - 50000) * interval '1 minute' AS tz,
+       CASE WHEN i % 11 = 0 THEN NULL ELSE i % 4 <> 0 END AS b
+FROM generate_series(1, 20000) AS i;
+ANALYZE parallel_ext;
+EXPLAIN (COSTS OFF) SELECT min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b) FROM parallel_ext;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_ext
+(8 rows)
+
+SELECT parallel_same($$SELECT min(s), max(s), min(d), max(d), min(ts), max(ts), min(tz), max(tz), bool_and(b), bool_or(b), every(b) FROM parallel_ext$$);
+                                                                                parallel_same                                                                                
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(-29999,-10000,08-15-1972,05-18-2027,\"Sat Nov 27 06:45:00 1999\",\"Fri Feb 04 17:19:00 2000\",\"Fri Nov 26 22:41:00 1999 PST\",\"Fri Feb 04 08:41:00 2000 PST\",f,t,f)"}
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT g, min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b) FROM parallel_ext GROUP BY g;
+                                 QUERY PLAN                                  
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg)
+   Group Key: g
+   Partial Mode: Finalize
+   ->  Custom Scan (TessGather)
+         Workers Planned: 2
+         ->  Parallel Custom Scan (TessSend)
+               ->  Parallel Custom Scan (TessAgg)
+                     Group Key: g
+                     Partial Mode: Partial
+                     ->  Parallel Custom Scan (TessHeapScan) on parallel_ext
+(10 rows)
+
+SELECT parallel_same($$SELECT g, min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b), every(b) FROM parallel_ext GROUP BY g$$);
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  parallel_same                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,-29987,05-07-2027,\"Sat Nov 27 07:45:00 1999\",\"Fri Feb 04 08:34:00 2000 PST\",f,t,f)","(1,-29999,05-17-2027,\"Sat Nov 27 06:50:00 1999\",\"Fri Feb 04 08:39:00 2000 PST\",f,t,f)","(10,-29990,05-12-2027,\"Sat Nov 27 07:15:00 1999\",\"Fri Feb 04 07:46:00 2000 PST\",f,t,f)","(11,-29989,04-29-2027,\"Sat Nov 27 07:25:00 1999\",\"Fri Feb 04 08:37:00 2000 PST\",f,t,f)","(12,-29988,05-09-2027,\"Sat Nov 27 07:35:00 1999\",\"Fri Feb 04 06:11:00 2000 PST\",f,t,f)","(2,-29998,05-15-2027,\"Sat Nov 27 07:00:00 1999\",\"Fri Feb 04 07:45:00 2000 PST\",f,t,f)","(3,-29997,05-13-2027,\"Sat Nov 27 07:10:00 1999\",\"Fri Feb 04 08:36:00 2000 PST\",f,t,f)","(4,-29996,05-11-2027,\"Sat Nov 27 07:20:00 1999\",\"Fri Feb 04 08:41:00 2000 PST\",f,t,f)","(5,-29995,05-10-2027,\"Sat Nov 27 07:30:00 1999\",\"Fri Feb 04 08:33:00 2000 PST\",f,t,f)","(6,-29994,05-08-2027,\"Sat Nov 27 07:40:00 1999\",\"Fri Feb 04 08:38:00 2000 PST\",f,t,f)","(7,-29993,05-18-2027,\"Sat Nov 27 06:45:00 1999\",\"Fri Feb 04 06:58:00 2000 PST\",f,t,f)","(8,-29992,05-16-2027,\"Sat Nov 27 06:55:00 1999\",\"Fri Feb 04 08:35:00 2000 PST\",f,t,f)","(9,-29991,05-14-2027,\"Sat Nov 27 07:05:00 1999\",\"Fri Feb 04 08:40:00 2000 PST\",f,t,f)"}
+(1 row)
+
+SELECT parallel_same($$SELECT min(s), max(d), min(ts), max(tz), bool_and(b), bool_or(b) FROM parallel_ext WHERE id > 19995$$);
+                                       parallel_same                                       
+-------------------------------------------------------------------------------------------
+ {"(-10004,02-03-2017,\"Fri Dec 03 02:12:00 1999\",\"Tue Feb 01 19:37:00 2000 PST\",f,t)"}
+(1 row)
+
+SELECT parallel_same($$SELECT g, min(s), max(d), bool_or(b) FROM parallel_ext WHERE id > 19995 GROUP BY g$$);
+                                                           parallel_same                                                            
+------------------------------------------------------------------------------------------------------------------------------------
+ {"(2,-10004,05-31-1995,f)","(3,-10003,02-03-2017,t)","(4,-10002,01-07-1984,)","(5,-10001,09-12-2005,t)","(6,-10000,08-15-1972,f)"}
+(1 row)
+
+DROP TABLE parallel_ext;
 -- Over the node's partial aggregate, always the node's final one (plan
 -- 4.23, item 4b), even where the core's Gather would cost less: without
 -- GROUP BY the node's stack still, with it the core's own parallel plan,

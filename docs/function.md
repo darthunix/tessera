@@ -204,8 +204,11 @@ an integer rounded to even and checked as `dtoi4` checks it, all
 computed a batch at a time by the Rust kernels (`tessera/float.h`,
 `tessera_kernels::float`);
 and `count(*)`,
-`count(any)`, `sum(int4)`, `min(int4)`, `max(int4)`, `min(int8)` and
-`max(int8)` as aggregates, by the aggregate's own OID. An int4 column
+`count(any)`, `sum(int4)`, and `min` and `max` of int2, int4, int8,
+date, timestamp and timestamptz, with `bool_and`, `bool_or` and `every`
+as the least and the greatest boolean, as aggregates, by the aggregate's
+own OID: the extremes of the types held as int4 with the int4 kernels,
+of those held as int8 with the int8 ones. An int4 column
 against a bigint constant is therefore widened and compared as int8. The
 module also installs the key hashes and the hash table in the bridge's
 kernel registry, for nodes that do not link the kernels (see
