@@ -209,7 +209,8 @@ makes every row that is not false unknown for `ALL`, as the array
 operators say. A cross-type operator in the list stands for its
 equivalent, the elements cast once. A list of any length, `x IN (…)` or
 `x NOT IN (…)`, of integer words (int2, int4, int8, date, timestamp,
-timestamptz, bool, the integers in any combination of widths) is a set:
+timestamptz, time, money, bool, the integers in any combination of
+widths) is a set:
 the elements' integers sorted without repeats once, in `x`'s width (an
 int4 `x` equals no element beyond its range), and one kernel call a
 batch finds the rows whose word the set holds ([kernels.md](kernels.md),

@@ -36,7 +36,8 @@ core's node.
   among them
 - **THEN** Tessera's node runs it, a join's plan shows no join filter
   for the key, and the rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/types.sql::Keys of time and money in a word`
 
 #### Scenario: Keys through a number for the value
 - **WHEN** a grouping or a join has keys of `text` or `numeric`, with
@@ -63,4 +64,4 @@ core's node.
 - **WHEN** a grouping or a join is by a key of `bit varying`, a join by
   `money`, or a join by `float4` equal to `float8`
 - **THEN** the core's node runs it
-- **Verified by:** pending
+- **Verified by:** `test/sql/types.sql::Keys left to the core`

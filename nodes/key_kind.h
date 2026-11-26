@@ -30,9 +30,10 @@
  * The table's kind of a key of this type: a value its word holds whole and
  * compares bit for bit, sign-extended to eight bytes as the kernels hash,
  * order and give it back, as PostgreSQL's Datum of the type is: int2,
- * int4, date and bool as INT4, int8, timestamp and timestamptz as INT8.
- * False for any other type: its values go by reference, or compare other
- * than bit for bit, or come back unlike the core's Datum (oid).
+ * int4, date and bool as INT4, int8, timestamp, timestamptz, time and
+ * money as INT8. False for any other type: its values go by reference, or
+ * compare other than bit for bit, or come back unlike the core's Datum
+ * (oid).
  */
 static inline bool
 tess_word_key_kind(Oid type, TessTableKeyKind *kind)
@@ -48,6 +49,8 @@ tess_word_key_kind(Oid type, TessTableKeyKind *kind)
 		case INT8OID:
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID:
+		case TIMEOID:
+		case CASHOID:
 			*kind = TESS_TABLE_KEY_INT8;
 			return true;
 		default:

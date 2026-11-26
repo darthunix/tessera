@@ -1067,24 +1067,54 @@ RESET enable_sort;
 DROP TABLE types_v;
 DROP COLLATION types_ci;
 
--- Keys of other types of 8 bytes: time, which a word could hold, goes
--- through the stand-in as text does, its value's number in a grouping
--- and its hash in a join; money has no hash function, so a grouping and
--- a join by it stay the core's, and so does a join by the equality of
--- two types, float4 with float8, other than the integers'.
+-- Keys of time and money in a word: int8 values, of the microseconds of a
+-- day and of cents, equal exactly when their words are. A grouping,
+-- DISTINCT, UNION and a join by time, a grouping by money, a sort by
+-- each; their comparisons, IN lists and extremes run in batches as an
+-- int8's. The edges of the ranges, both signs of money, NULL.
 CREATE TABLE types_k AS
-SELECT i AS id, time '08:00' + (i % 50) * interval '1 minute' AS tm,
-       (i % 40)::money AS mo, (i % 30)::float4 AS f4, (i % 30)::float8 AS f8
+SELECT i AS id,
+       CASE WHEN i % 17 = 0 THEN NULL WHEN i = 1 THEN time '00:00' WHEN i = 2 THEN time '24:00'
+            ELSE time '08:00' + (i % 50) * interval '1 minute' END AS tm,
+       CASE WHEN i % 19 = 0 THEN NULL WHEN i = 3 THEN '-92233720368547758.08'::money
+            WHEN i = 4 THEN '92233720368547758.07'::money ELSE (i % 40 - 20)::money END AS mo,
+       (i % 30)::float4 AS f4, (i % 30)::float8 AS f8, (i % 8)::bit(3)::varbit AS vb
 FROM generate_series(1, 2000) AS i;
 ANALYZE types_k;
 EXPLAIN (COSTS OFF) SELECT tm, count(*) FROM types_k GROUP BY tm;
 SELECT types_same($$SELECT tm, count(*) FROM types_k GROUP BY tm$$);
+-- The join keeps no filter of the equality: equal words are equal times.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.tm = b.tm;
 SELECT types_same($$SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.tm = b.tm$$);
+SELECT types_same($$SELECT a.id, b.id FROM types_k AS a LEFT JOIN types_k AS b ON a.tm = b.tm AND b.id < 5 WHERE a.id < 60$$);
+-- A grouping by money, which the core can only sort, is the node's.
 EXPLAIN (COSTS OFF) SELECT mo, count(*) FROM types_k GROUP BY mo;
+SELECT types_same($$SELECT mo, count(*), min(tm), max(tm) FROM types_k GROUP BY mo$$);
+SELECT types_same($$SELECT DISTINCT tm FROM types_k$$);
+SELECT types_same($$SELECT tm FROM types_k WHERE id < 100 UNION SELECT tm FROM types_k WHERE id > 1900$$);
+SELECT types_same($$SELECT count(DISTINCT tm), count(DISTINCT mo) FROM types_k$$);
+SELECT types_order($$SELECT id, tm FROM types_k ORDER BY tm DESC NULLS LAST, id$$);
+SELECT types_order($$SELECT id, mo FROM types_k ORDER BY mo, id$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k WHERE tm < '12:00' AND mo > '0'::money;
+SELECT types_same($$SELECT count(*), sum(id) FROM types_k WHERE tm >= '08:10' AND tm <> '08:20' OR tm = '24:00'$$);
+SELECT types_same($$SELECT count(*), sum(id) FROM types_k WHERE mo <= '-5'::money OR mo > '92233720368547758.00'::money$$);
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k WHERE tm IN ('08:01', '08:02', '00:00') AND mo NOT IN ('1', '-2');
+SELECT types_same($$SELECT count(*) FROM types_k WHERE tm IN ('08:01', '08:02', '00:00', '24:00')$$);
+SELECT types_same($$SELECT count(*) FROM types_k WHERE mo NOT IN ('1', '-2', '92233720368547758.07')$$);
+SELECT types_same($$SELECT min(tm), max(tm), min(mo), max(mo) FROM types_k$$);
+SELECT types_same($$SELECT id % 7, min(tm), max(tm), min(mo), max(mo) FROM types_k GROUP BY 1$$);
+
+-- Keys left to the core: a grouping and a join by bit varying, which has
+-- no hash function; a join by money, whose equality PostgreSQL does not
+-- let a hash join use; DISTINCT of money, which the core can only sort;
+-- and a join by the equality of two types other than the integers,
+-- float4 with float8.
+EXPLAIN (COSTS OFF) SELECT vb, count(*) FROM types_k GROUP BY vb;
 SET enable_material = off;
+EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.vb = b.vb;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.mo = b.mo;
 RESET enable_material;
+EXPLAIN (COSTS OFF) SELECT DISTINCT mo FROM types_k;
 EXPLAIN (COSTS OFF) SELECT count(*) FROM types_k AS a JOIN types_k AS b ON a.f4 = b.f8;
 DROP TABLE types_k;
 
