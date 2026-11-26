@@ -1,0 +1,28 @@
+HEAD f708ef0d5520
+command run
+modes on
+workers 0
+work_mem 64MB
+timeout 60 s
+deadline 295 s
+tries 5
+counters true
+duckdb threads Some(1)
+pg_config /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/bin/pg_config
+postgres PostgreSQL 19rc2
+pg_duckdb 1.2.0
+started 2026-11-26 14:14:40.273694+07
+power AC Power
+load average { 1.69 2.18 2.35 }
+rows 99997496
+files:
+   14779976446  /Users/darthunix/git/tessera-duckdb/target/clickbench-one/hits.parquet
+sha256:
+  617a8436dada4369312c99ba4a2ebba226907fc58189b52ac2d9a6a3e05ff596  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/tessera.dylib
+  24895a6c16aebdb97dd862dde1c665b0f8653eaf3451f1de009a7296c4decbd1  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/tessera_nodes.dylib
+  c322853b50cd1c4a20a6ddcbae6bfd34bc4d2d093dfe7528387341aebce8d76a  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/tessera_kernels.dylib
+  e294de665a15eefdd93d605cda73e5967272bf90f0a42bbd540cadec598f5cab  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/libtessera_runtime.a
+  baf397782b4b548ddaf2107aeffb4265eb98ccc920f2485aa393ce63b50b2da1  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/bin/postgres
+  59c56ed15edb2b028b649b566ff43cfec5ec319f9744cede13a7b86a9ee5ba96  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/tessera_parquet.dylib
+  68e1a1e2bffadf3b73411a34f71671471e50e7e254845743115a26d8659ce232  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/pg_duckdb.dylib
+  b88932717e6fbc4012cceb9d5400e04a3a90bdbd29b45f0b5564759940f1370f  /private/tmp/claude-501/-Users-darthunix-git-tessera/f99ef354-9b45-4d6b-b33c-dc545bd7e2a0/scratchpad/pg19-count/lib/postgresql/pg_pmu.dylib

@@ -1,0 +1,18 @@
+anyagg cycles base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-jFLiAt ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-IvZbxW
+anyagg cycles end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-nyxNpd ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-q3kLX9
+anyagg instructions base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-JgsJcA ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-kR0jhj
+anyagg instructions end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-W0rwHf ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-IqTvNq
+anyagg-again cycles base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-qeAhxD ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-aQmOZt
+anyagg-again cycles end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-HPnS7q ~/git/tessera-agg-date-min-max/target/bench-runs/pg-anyagg-wgDoRO
+wordkey cycles base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-KIN5TP ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-Alg6OT
+wordkey cycles end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-0h8gHx ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-73dY21
+wordkey instructions base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-pGxL4g ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-MHQQEC
+wordkey instructions end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-VZES6m ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-ANTK6z
+wordkey-again cycles base ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-oxVBut ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-DHNntF
+wordkey-again cycles end ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-lTrmWj ~/git/tessera-agg-date-min-max/target/bench-runs/pg-wordkey-JUZcNP
+report anyagg cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-upJnhZ
+report anyagg instructions ~/git/tessera-agg-date-min-max/target/bench-runs/ab-5m6Vqy
+report anyagg-again cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-Tb8111
+report wordkey cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-J6wFTa
+report wordkey instructions ~/git/tessera-agg-date-min-max/target/bench-runs/ab-AIcXZX
+report wordkey-again cycles ~/git/tessera-agg-date-min-max/target/bench-runs/ab-2FriQD

@@ -1,0 +1,65 @@
+\set q_twin 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(v) AS a, max(v) AS b FROM bench_dates GROUP BY 1) AS g'
+\set q_dates 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(d) AS a, max(ts) AS b FROM bench_dates GROUP BY 1) AS g'
+\set q_dd 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(d) AS a, max(d) AS b FROM bench_dates GROUP BY 1) AS g'
+\set q_vts 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(v) AS a, max(ts) AS b FROM bench_dates GROUP BY 1) AS g'
+\set q_dv 'SELECT count(*), min(a), max(b) FROM (SELECT s, min(d) AS a, max(v) AS b FROM bench_dates GROUP BY 1) AS g'
+\echo twin
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_twin;
+\echo dates
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dates;
+\echo dd
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dd;
+\echo vts
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_vts;
+\echo dv
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dv;
+\echo twin
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_twin;
+\echo dates
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dates;
+\echo dd
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dd;
+\echo vts
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_vts;
+\echo dv
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dv;
+\echo twin
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_twin;
+\echo dates
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dates;
+\echo dd
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dd;
+\echo vts
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_vts;
+\echo dv
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dv;
+\echo twin
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_twin;
+\echo dates
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dates;
+\echo dd
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dd;
+\echo vts
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_vts;
+\echo dv
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dv;
+\echo twin
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_twin;
+\echo dates
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dates;
+\echo dd
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dd;
+\echo vts
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_vts;
+\echo dv
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dv;
+\echo twin
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_twin;
+\echo dates
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dates;
+\echo dd
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dd;
+\echo vts
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_vts;
+\echo dv
+EXPLAIN (ANALYZE, PMU, COSTS OFF, TIMING OFF, SUMMARY OFF) :q_dv;

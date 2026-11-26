@@ -70,7 +70,7 @@ maintainer's word and takes five minutes at most.
 
 ## 4. The count and the close
 
-- [ ] 4.1 Count as the design's measurement plan says, the base the
+- [x] 4.1 Count as the design's measurement plan says, the base the
       commit of 2.1, each hypothesis judged as written there; keep the
       report under `docs/benchmarks/`. Check: `cargo ab measure --base
       <the commit of 2.1> --family anyagg --cases 'minmax|bool_and'

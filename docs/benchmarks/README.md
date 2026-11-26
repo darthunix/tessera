@@ -7,6 +7,17 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-26, extremes and keys of the word types,
+  `agg-date-min-max`](2026-11-26-agg-date-min-max/README.md): the
+  cases of `anyagg` and `wordkey` the change adds and their twins, and
+  ClickBench's Q7, Q3 and Q1 over `hits.parquet` at 0 workers, the base
+  and the end in turns, against `f708ef0d`, cycles deciding,
+  pg_duckdb's beside them; the extremes 44 to 54 per cent fewer cycles
+  without groups and 25 with them, `DISTINCT` in them 81 to 91, the
+  comparisons, sorts and keys of `time` and `money` 52 to 83, Q7 43 to
+  44, the twins and controls within 2; `key_time_distinct`
+  unsettled by the plan's spread, and `g_group_minmax_dates` 10.5 per
+  cent above its twin, which reads one column less.
 - [2026-11-25, page headers through a buffer,
   `parquet-page-headers`](2026-11-25-parquet-page-headers/README.md):
   seven of ClickBench's queries over `hits.parquet` counted at 0
