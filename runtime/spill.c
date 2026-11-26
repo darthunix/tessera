@@ -165,8 +165,8 @@ tess_spill_value_damaged(void)
 
 /* Of the TOAST pointers only one to data on disk means the same in another process. */
 /*
- * tessera-capi sizes a TOAST pointer by these tags and bodies (ondisk_body,
- * varlena_size): its writer copies one, its check ends one.
+ * tessera-capi sizes a TOAST pointer by these tags and bodies
+ * (tessera_kernels::varlena): its writer copies one, its check ends one.
  */
 #if PG_VERSION_NUM >= 200000
 StaticAssertDecl(VARTAG_INDIRECT == 1 && sizeof(varatt_indirect) == 8 &&

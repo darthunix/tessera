@@ -5,26 +5,10 @@
 
 use std::slice;
 
-use tessera_kernels::varlena::{Kind, kind, long_size};
+use tessera_kernels::varlena::{Kind, external_size, kind, long_size};
 
 #[cfg(all(not(target_endian = "little"), not(feature = "network-varlena")))]
 compile_error!("the varlena headers here are little-endian's");
-
-/// The bytes of the body of a TOAST pointer to data on disk after its
-/// 2-byte header, by its tag: VARTAG_ONDISK_OID's `varatt_external_oid`
-/// of 16 bytes and, where the core has pointers of 64-bit chunk ids
-/// (`oid8`), VARTAG_ONDISK_OID8's `varatt_external_oid8` of 20, as
-/// `runtime/spill.c` asserts against PostgreSQL's headers; `None` for
-/// another tag. PostgreSQL 19 and 18 have tag 18 alone: there a value of
-/// tag 4 is no pointer, and their core would read it as a short varlena
-/// whose length is below its header's.
-pub(super) fn ondisk_body(tag: u8, oid8: bool) -> Option<usize> {
-    match tag {
-        18 => Some(16),
-        4 if oid8 => Some(20),
-        _ => None,
-    }
-}
 
 /// The bytes after a varlena's header, or `None` for a compressed or
 /// external value or a null pointer.
@@ -75,15 +59,8 @@ pub(super) unsafe fn varlena_size(pointer: *const u8) -> anyhow::Result<usize> {
     unsafe {
         match kind(*pointer) {
             Kind::External => {
-                // VARTAG_INDIRECT holds a pointer; VARTAG_EXPANDED_RO and
-                // _RW are 2 and 3.
-                let body = match *pointer.add(1) {
-                    1 => 8,
-                    // A value of this process, which its core made: master's
-                    // tags take every one either core makes.
-                    tag => ondisk_body(tag, true).ok_or_else(|| external_refused(tag))?,
-                };
-                Ok(2 + body)
+                let tag = *pointer.add(1);
+                external_size(tag).ok_or_else(|| external_refused(tag))
             }
             Kind::Short(size) => Ok(size),
             Kind::Long | Kind::Compressed => {
