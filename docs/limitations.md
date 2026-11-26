@@ -55,9 +55,11 @@ those it checks.
 - **Ordered-set aggregates** (`WITHIN GROUP`) and **`ORDER BY` inside an
   aggregate**.
 - **`DISTINCT` inside an aggregate** only for `count` of a type whose
-  equality hashes and for `sum`, `avg`, `min` and `max` of integers
-  (`distinct_supported`); any other, such as `sum(DISTINCT numeric)`,
-  leaves the whole aggregation to the core.
+  equality hashes, for `sum` and `avg` of integers
+  (`distinct_supported`), and for the extremes the node computes as its
+  own, which ignore it (`distinct_matters`); any other, such as
+  `sum(DISTINCT numeric)` or `min(DISTINCT text)`, leaves the whole
+  aggregation to the core.
 - **A grouping with `DISTINCT` past `hash_mem`**: its pairs go to disk
   only with `GROUP BY` and an argument a word holds (`smallint`,
   `integer`, `bigint`, `date`, `boolean`, `timestamp`, `timestamptz`).

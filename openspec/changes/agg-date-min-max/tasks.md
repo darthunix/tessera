@@ -58,7 +58,7 @@ maintainer's word and takes five minutes at most.
       `openspec/specs/hash-table/design.md`, `docs/nodes.md` and
       `docs/function.md` say the types are words. Check: the suites,
       the diffs read line by line; `make crosscheck`
-- [ ] 3.3 `DISTINCT` in an extreme: one function in
+- [x] 3.3 `DISTINCT` in an extreme: one function in
       `nodes/agg_planner.c` says whether an aggregate's `DISTINCT`
       matters, false for an extreme of the node's own; every place in
       `nodes/agg_planner.c` and `nodes/agg.c` that reads `aggdistinct`

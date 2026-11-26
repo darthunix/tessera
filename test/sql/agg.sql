@@ -399,6 +399,34 @@ SELECT agg_same($$SELECT count(*), sum(s), max(d), min(tz), sum(CASE WHEN a THEN
 RESET enable_sort;
 RESET work_mem;
 DROP TABLE agg_ext, agg_ext_spill;
+
+-- DISTINCT in an extreme the node computes as its own changes no answer:
+-- two equal values are one word. The node keeps no pairs for it, so
+-- their memory no longer limits the grouping, and FILTER still applies.
+-- DISTINCT in min of text stays the core's: equal values may differ in
+-- their bytes.
+CREATE TABLE agg_dext WITH (autovacuum_enabled = off) AS
+SELECT i, i % 50 AS g, CASE WHEN i % 9 = 0 THEN NULL ELSE i % 1000 - 500 END AS v,
+       date '2000-01-01' + i % 3000 AS d, i % 3 = 0 AS b, 'w' || i % 100 AS t
+FROM generate_series(1, 20000) AS i;
+ANALYZE agg_dext;
+EXPLAIN (COSTS OFF) SELECT min(DISTINCT v), max(DISTINCT d), bool_or(DISTINCT b) FROM agg_dext;
+SELECT agg_same($$SELECT min(DISTINCT v), max(DISTINCT v), min(DISTINCT d), max(DISTINCT d), bool_and(DISTINCT b), bool_or(DISTINCT b), every(DISTINCT b) FROM agg_dext$$);
+SELECT agg_same($$SELECT min(DISTINCT v), count(DISTINCT v), max(DISTINCT d) FILTER (WHERE b) FROM agg_dext$$);
+EXPLAIN (COSTS OFF) SELECT g, min(DISTINCT v), max(DISTINCT d) FROM agg_dext GROUP BY g;
+SELECT agg_same($$SELECT count(*), md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT g, min(DISTINCT v), max(DISTINCT v), min(DISTINCT d) FILTER (WHERE v > 0), bool_and(DISTINCT b) FROM agg_dext GROUP BY g) AS q$$);
+-- 20 000 pairs would pass a hash_mem of 128 kB: with groups they went to
+-- disk, without them the grouping was the core's; now none is kept.
+SET work_mem = '64kB';
+EXPLAIN (COSTS OFF) SELECT min(DISTINCT i), max(DISTINCT d) FROM agg_dext;
+SELECT agg_same($$SELECT min(DISTINCT i), max(DISTINCT d) FROM agg_dext$$);
+SELECT count(*) AS pairs_spilled
+FROM agg_explain($$SELECT g, min(DISTINCT i), max(DISTINCT d) FROM agg_dext GROUP BY g$$) AS line
+WHERE line ~ 'Spilled Pairs';
+SELECT agg_same($$SELECT count(*), md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT g, min(DISTINCT i), max(DISTINCT d) FROM agg_dext GROUP BY g) AS q$$);
+RESET work_mem;
+EXPLAIN (COSTS OFF) SELECT min(DISTINCT t) FROM agg_dext;
+DROP TABLE agg_dext;
 DROP FUNCTION agg_explain(text);
 
 -- SELECT DISTINCT groups without aggregates: NULL a value of its own, two

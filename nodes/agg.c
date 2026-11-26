@@ -252,7 +252,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		 */
 		if (state->finalize && ((value->kind == AGG_GENERIC && state->nkeys > 0 &&
 								 !value->generic->sum_state) ||
-								agg->aggdistinct != NIL))
+								distinct_matters(agg)))
 			elog(ERROR, "TessAgg received a foreign plan");
 		if (state->partial && value->kind == AGG_GENERIC && state->nkeys > 0 &&
 			!value->generic->sum_state)
@@ -306,7 +306,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			}
 			value->gathered_values = palloc_array(Datum, 64);
 			value->gathered_isnull = palloc_array(bool, 64);
-			if (agg->aggdistinct != NIL)
+			if (distinct_matters(agg))
 			{
 				SortGroupClause *clause = linitial_node(SortGroupClause, agg->aggdistinct);
 

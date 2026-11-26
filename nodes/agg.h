@@ -53,6 +53,7 @@ typedef struct KeyEntry
 extern int	aggregate_kind(Oid aggfnoid);
 extern bool generic_supported(const Aggref *agg);
 extern bool batch_aggregate(const Aggref *agg);
+extern bool distinct_matters(const Aggref *agg);
 extern bool sum_state_aggregate(const Aggref *agg);
 extern bool own_partial_aggregate(const Aggref *agg);
 extern Size agg_float_state_bytes(const Aggref *agg);
