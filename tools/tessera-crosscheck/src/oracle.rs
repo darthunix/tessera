@@ -104,7 +104,11 @@ pub fn same_finding(original: &Verdict, verdict: &Verdict) -> bool {
         && verdict.twin == original.twin
 }
 
-/// How long one mode of a query may run.
+/// How long one mode of a query may run. Only the query runs under it,
+/// and after a query that failed in the relaxed query's transaction, the
+/// ROLLBACK of that transaction: the oracle's own statements, its
+/// settings, transactions and the data's setup, can stall on a slow
+/// machine too, and that is no finding.
 pub const STATEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// How one mode of a query ended.
@@ -332,11 +336,7 @@ impl<'c> Oracle<'c> {
         } else {
             format!("SELECT array_agg(q::text ORDER BY q::text) FROM ({sql}) AS q")
         };
-        let prelude = format!(
-            "{} SET statement_timeout = {};",
-            query.settings.statements(),
-            STATEMENT_TIMEOUT.as_millis()
-        );
+        let prelude = query.settings.statements();
         let mut run = |mode: &str, sql: &str| -> Result<Outcome> {
             self.reconnect()?;
             self.client
@@ -431,24 +431,28 @@ impl<'c> Oracle<'c> {
             "{} SET tessera.enable = on;",
             query.settings.statements()
         ))?;
-        let plan = match self
-            .client
-            .simple_query(&format!("EXPLAIN (FORMAT JSON) {}", query.sql()))
-        {
-            Ok(messages) => messages
-                .into_iter()
-                .find_map(|message| match message {
-                    SimpleQueryMessage::Row(row) => row.get(0).map(str::to_string),
-                    _ => None,
-                })
-                .unwrap_or_default(),
-            Err(_) => return Ok(false),
+        let Outcome::Rows(Some(plan)) = self.run(&format!("EXPLAIN (FORMAT JSON) {}", query.sql()))
+        else {
+            return Ok(false);
         };
         Ok(plan.contains("\"Custom Plan Provider\": \"Tess"))
     }
 
+    /// Runs one query of a mode under the limit, set in the query's own
+    /// message and reset at its end. The message is a transaction of its
+    /// own, or a part of the relaxed query's, which keeps the limit to its
+    /// ROLLBACK only after a query that failed and skipped the reset.
     fn run(&mut self, sql: &str) -> Outcome {
-        match self.client.simple_query(sql) {
+        // The reset also takes a cancel that the limit leaves pending when
+        // it fires after the query's last check for interrupts, while its
+        // rows go out: the query ran to the limit, and the message fails.
+        // Without it the cancel would fail the session's next statement,
+        // one of the oracle's own, before that statement runs.
+        let sql = format!(
+            "SET LOCAL statement_timeout = {}; {sql}; SET LOCAL statement_timeout = 0",
+            STATEMENT_TIMEOUT.as_millis()
+        );
+        match self.client.simple_query(&sql) {
             Ok(messages) => Outcome::Rows(
                 messages
                     .into_iter()
