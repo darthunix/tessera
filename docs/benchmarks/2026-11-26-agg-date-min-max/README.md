@@ -121,9 +121,12 @@ counted once more:
   end's cycles.
 
 So hypotheses 1 and 3 to 9 hold, `key_time_distinct` unsettled by the
-plan's letter. The second fails by half a point: `g_group_minmax_dates`
-lost 25.3 per cent of its cycles, past its threshold of 20, but ran
-10.5 per cent above its twin at the end, not 10.
+plan's letter. The second failed by half a point against the twin the
+plan named: `g_group_minmax_dates` lost 25.3 per cent of its cycles,
+past its threshold of 20, but ran 10.5 per cent above
+`g_group_minmax_int4` at the end, not 10. Against a twin of the same
+layout, which the maintainer asked for after this count, it holds (see
+below).
 
 ## The gap of `g_group_minmax_dates` to its twin
 
@@ -151,6 +154,40 @@ guess holds: the twin reads less than the case. The 2.8 per cent of
 date of 1 826 scrambled values against `v` in the order of the rows,
 and were not looked into further.
 
+## A twin of the same layout
+
+At the maintainer's word the case got a twin that differs from it in
+the types alone: `g_group_minmax_ints`, the same query over
+`bench_dates_int`. That table is `bench_dates` with `d` and `ts` as the
+integers PostgreSQL holds them as, the days and the microseconds since
+2000-01-01, in the same order of rows; both tables have 12 800 pages
+and rows of 48 bytes. `g_group_minmax_int4` stays as the twin of the
+case of `DISTINCT`. The same `cargo ab` with `--candidate 639f1b0b`,
+the code of the end, and `--cases '^g_group_minmax_(dates|ints)$'`;
+the families' SQL, with the new case, is the worktree's on both sides.
+Millions of cycles, each the mean of two turns' medians:
+
+| case | base | end | change |
+|---|--:|--:|--:|
+| `g_group_minmax_dates` | 190.6 | 139.4 | -26.9 % |
+| `g_group_minmax_ints`, the twin | 142.2 | 138.8 | -2.4 % |
+
+At the end the case ran 0.4 per cent above its twin, within the 10 of
+hypothesis 2, and both ran 838.5 million instructions, the same to
+0.01 per cent. The two ends spread 0.3 and 1.0 per cent between their
+turns. The base's turns spread 4.2 and 4.8 per cent, the second higher
+for both; that leaves the comparison at the end alone, and the case's
+change from the base is the one of the first count, -25.3 per cent,
+whose sides spread 0.4 and 0.1. The twin's code did not change, and its
+-2.4 per cent is within its base's spread.
+
+A recount ran while another session compiled Rust, two `rustc` at 164
+and 70 per cent of a core; its controls, the core alone, moved 5 to 7
+per cent. It is kept in [runs.txt](runs.txt) and not judged: the case
+ran 1.2 per cent above its twin at the end there. A third count waited
+twenty minutes for a quiet minute and found none, Spotlight and a
+video call each taking a core, and did not run.
+
 ## Result of ClickBench
 
 Billions of cycles at the base and at the end in the second pair, the
@@ -166,15 +203,16 @@ base's before the arrow; lower is better:
 Q7 is `min` and `max` of `EventDate`; Q3 sums and counts integers on
 the node's own path; Q1 reads no column. The instructions of Q7 fell
 51.4 and 51.6 per cent, from 33.2 to 16.2 and 16.1 billion; those of
-Q1 and Q3 moved by less than 0.01 per cent. Every side spread within 1.5 per cent
-between its turns ([turns.sh](turns.sh)). Hypothesis 10 holds: Q7 lost
-43 to 44 per cent of its cycles, past the plan's threshold of 30, and
-Q1 and Q3 stayed within 2.
+Q1 and Q3 moved by less than 0.01 per cent. Every side spread within
+1.5 per cent between its turns ([turns.sh](turns.sh)). Hypothesis 10
+holds: Q7 lost 43 to 44 per cent of its cycles, past the plan's
+threshold of 30, and Q1 and Q3 stayed within 2.
 
 ## Files
 
 - [runs.txt](runs.txt): the runs of `bench/pg`, by family, measure and
-  side, and the directories of `cargo ab`'s reports;
+  side, the twin's among them, and the directories of `cargo ab`'s
+  reports;
   [clickbench-runs.txt](clickbench-runs.txt): the runs of ClickBench,
   by side and query.
 - [abturns.sh](abturns.sh) `<base> <base-b> <end> <end-b>`: the median
