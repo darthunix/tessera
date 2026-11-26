@@ -138,13 +138,17 @@ A grouping and a join make that number in different ways.
   measured on the developer's machine, counts 18.6 ns a row for a
   hashed key, where a probe by a word costs 1.9 ns a row.
 
-A type without a hash function, such as `money`, cannot take the
-second form, so a grouping or a join by it stays the core's. Nor does
-a join take the equality of two different types other than the
-integers, such as `float4` with `float8`: both sides must make their
-numbers with one function. Some types whose values would fit in a
-word, such as `time`, still take the second form: only the types the
-spec lists go in as their value.
+A type without a hash function, such as `bit varying`, cannot take
+the second form, so a grouping or a join by it stays the core's.
+`money` has no hash function either, but its value is a word, so it
+goes in as itself, and a grouping by it is the node's. A join by
+`money` stays the core's all the same: PostgreSQL does not let a hash
+join use its equality, so the planner makes no hash join to stand in
+for. Nor does a join take the equality of two different types other
+than the integers, such as `float4` with `float8`: both sides must
+make their numbers with one function. Only the types the spec lists go
+in as their value; a type whose equality is not its bits, such as
+`interval`, where `1 day` equals `24 hours`, takes the second form.
 
 ## Values longer than a word
 

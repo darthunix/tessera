@@ -84,8 +84,9 @@ cast `int8(int4)`, all as values with `TESS_RESULT_DATUM`, since an int8
 is its Datum; the cast `int4(int8)` as a value with `TESS_RESULT_INT32`,
 failing with 22003 past the int4 range; the six comparisons of `date`
 (`date_eq` … `date_ge`) as those of int4, and of `timestamp` and
-`timestamptz` (`timestamp_eq` …, `timestamptz_eq` …) as those of int8, in
-every shape, since those types are their integers in the integers' order,
+`timestamptz` (`timestamp_eq` …, `timestamptz_eq` …), of `time`
+(`time_eq` …) and of `money` (`cash_eq` …) as those of int8, in every
+shape, since those types are their integers in the integers' order,
 infinities being the extremes; the functions over an int4 and an int8 (`int84eq` …
 `int84ge`, `int48eq` … `int48ge`, `int84pl`, `int84mi`, `int84mul`,
 `int84div`, `int48pl`, `int48mi`, `int48mul`, `int48div`) as equivalents of
@@ -205,8 +206,9 @@ computed a batch at a time by the Rust kernels (`tessera/float.h`,
 `tessera_kernels::float`);
 and `count(*)`,
 `count(any)`, `sum(int4)`, and `min` and `max` of int2, int4, int8,
-date, timestamp and timestamptz, with `bool_and`, `bool_or` and `every`
-as the least and the greatest boolean, as aggregates, by the aggregate's
+date, timestamp, timestamptz, time and money, with `bool_and`, `bool_or`
+and `every` as the least and the greatest boolean, as aggregates, by the
+aggregate's
 own OID: the extremes of the types held as int4 with the int4 kernels,
 of those held as int8 with the int8 ones. An int4 column
 against a bigint constant is therefore widened and compared as int8. The

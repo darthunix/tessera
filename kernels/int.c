@@ -185,6 +185,19 @@ static const Function functions[] = {
 	COMPARE(F_TIMESTAMPTZ_LE, TESS_CMP_LE, compare8_evaluate),
 	COMPARE(F_TIMESTAMPTZ_GT, TESS_CMP_GT, compare8_evaluate),
 	COMPARE(F_TIMESTAMPTZ_GE, TESS_CMP_GE, compare8_evaluate),
+	/* time and money as int8: microseconds of the day, and cents */
+	COMPARE(F_TIME_EQ, TESS_CMP_EQ, compare8_evaluate),
+	COMPARE(F_TIME_NE, TESS_CMP_NE, compare8_evaluate),
+	COMPARE(F_TIME_LT, TESS_CMP_LT, compare8_evaluate),
+	COMPARE(F_TIME_LE, TESS_CMP_LE, compare8_evaluate),
+	COMPARE(F_TIME_GT, TESS_CMP_GT, compare8_evaluate),
+	COMPARE(F_TIME_GE, TESS_CMP_GE, compare8_evaluate),
+	COMPARE(F_CASH_EQ, TESS_CMP_EQ, compare8_evaluate),
+	COMPARE(F_CASH_NE, TESS_CMP_NE, compare8_evaluate),
+	COMPARE(F_CASH_LT, TESS_CMP_LT, compare8_evaluate),
+	COMPARE(F_CASH_LE, TESS_CMP_LE, compare8_evaluate),
+	COMPARE(F_CASH_GT, TESS_CMP_GT, compare8_evaluate),
+	COMPARE(F_CASH_GE, TESS_CMP_GE, compare8_evaluate),
 	/* bigint against an integer, an integer against bigint */
 	EQUIVALENT(F_INT84EQ, F_INT8EQ, InvalidOid, F_INT8_INT4),
 	EQUIVALENT(F_INT84NE, F_INT8NE, InvalidOid, F_INT8_INT4),
@@ -224,11 +237,18 @@ static const Function functions[] = {
 	VALUE(F_INT4_INT8, 0, TESS_RESULT_INT32, 0, narrow_evaluate),
 	AGGREGATE(F_MIN_INT8, AGG_MIN_INT8),
 	AGGREGATE(F_MAX_INT8, AGG_MAX_INT8),
-	/* The extremes of the types held as int8: timestamp and timestamptz. */
+	/*
+	 * The extremes of the types held as int8: timestamp, timestamptz, time
+	 * and money.
+	 */
 	AGGREGATE(F_MIN_TIMESTAMP, AGG_MIN_INT8),
 	AGGREGATE(F_MAX_TIMESTAMP, AGG_MAX_INT8),
 	AGGREGATE(F_MIN_TIMESTAMPTZ, AGG_MIN_INT8),
 	AGGREGATE(F_MAX_TIMESTAMPTZ, AGG_MAX_INT8),
+	AGGREGATE(F_MIN_TIME, AGG_MIN_INT8),
+	AGGREGATE(F_MAX_TIME, AGG_MAX_INT8),
+	AGGREGATE(F_MIN_MONEY, AGG_MIN_INT8),
+	AGGREGATE(F_MAX_MONEY, AGG_MAX_INT8),
 	/* boolean as int4: 0 and 1 */
 	COMPARE(F_BOOLEQ, TESS_CMP_EQ, compare_evaluate),
 	COMPARE(F_BOOLNE, TESS_CMP_NE, compare_evaluate),

@@ -43,7 +43,7 @@ maintainer's word and takes five minutes at most.
       `test/sql/parallel.sql`; `docs/nodes.md` and `docs/function.md`
       name the new aggregates. Check: the suites, the diffs of the
       expected outputs read line by line; `make crosscheck`
-- [ ] 3.2 `time` and `money` as integers: `tess_word_key_kind` gives
+- [x] 3.2 `time` and `money` as integers: `tess_word_key_kind` gives
       both the kind of eight bytes; `kernels/int.c` registers their
       comparisons with those of `bigint` and their extremes;
       `word_equality` in `nodes/join_planner.c` takes the equality of
@@ -52,7 +52,10 @@ maintainer's word and takes five minutes at most.
       becomes "Keys of time and money in a word" and "Keys left to the
       core", which the spec's two pending scenarios then name; tests of
       the comparisons, the lists of `IN`, a sort and the extremes of
-      both. `openspec/specs/hash-table/design.md`, `docs/nodes.md` and
+      both. The changed requirement goes into
+      `openspec/specs/hash-table/spec.md` in this commit, since the
+      spec must say what the code does and its tests' names change.
+      `openspec/specs/hash-table/design.md`, `docs/nodes.md` and
       `docs/function.md` say the types are words. Check: the suites,
       the diffs read line by line; `make crosscheck`
 - [ ] 3.3 `DISTINCT` in an extreme: one function in
@@ -75,9 +78,10 @@ maintainer's word and takes five minutes at most.
       `wordkey` with `--cases 'time|money|clock|key_date_group'`;
       `cargo clickbench run --counters --tries 5 --mode on --workers 0`
       for Q7, Q1 and Q3; `.github/scripts/check-specs.sh`
-- [ ] 4.2 Close the change: `openspec archive agg-date-min-max` writes
-      the requirement into `openspec/specs/hash-table/spec.md`, and the
-      folder it makes under `openspec/changes/archive/` is deleted;
+- [ ] 4.2 Close the change: `openspec archive agg-date-min-max` finds
+      the requirement in `openspec/specs/hash-table/spec.md` as 3.2 put
+      it, and the folder it makes under `openspec/changes/archive/` is
+      deleted;
       what was decided goes into `docs/nodes.md` and the design of
       `hash-table`; the entry `agg-date-min-max` leaves the roadmap,
       the entries `types-outside-tpch` and `table-key-types` no longer

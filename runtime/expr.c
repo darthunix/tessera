@@ -388,8 +388,8 @@ array_clauses(ScalarArrayOpExpr *array_op)
 
 /*
  * A type a set of words holds: its values as int32 (int2, int4, date,
- * bool) or int64 (int8, timestamp, timestamptz), whose equality is the
- * integers'.
+ * bool) or int64 (int8, timestamp, timestamptz, time, money), whose
+ * equality is the integers'.
  */
 static bool
 set_key_kind(Oid type, bool *wide)
@@ -405,6 +405,8 @@ set_key_kind(Oid type, bool *wide)
 		case INT8OID:
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID:
+		case TIMEOID:
+		case CASHOID:
 			*wide = true;
 			return true;
 		default:
@@ -433,6 +435,8 @@ set_function(Oid funcid, bool use_or)
 		case F_DATE_EQ:
 		case F_TIMESTAMP_EQ:
 		case F_TIMESTAMPTZ_EQ:
+		case F_TIME_EQ:
+		case F_CASH_EQ:
 		case F_BOOLEQ:
 			return use_or;
 		case F_INT2NE:
@@ -447,6 +451,8 @@ set_function(Oid funcid, bool use_or)
 		case F_DATE_NE:
 		case F_TIMESTAMP_NE:
 		case F_TIMESTAMPTZ_NE:
+		case F_TIME_NE:
+		case F_CASH_NE:
 		case F_BOOLNE:
 			return !use_or;
 		default:

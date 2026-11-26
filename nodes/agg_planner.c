@@ -100,6 +100,8 @@ aggregate_kind(Oid aggfnoid)
 		case F_MIN_DATE:
 		case F_MIN_TIMESTAMP:
 		case F_MIN_TIMESTAMPTZ:
+		case F_MIN_TIME:
+		case F_MIN_MONEY:
 		case F_BOOL_AND:
 		case F_EVERY:
 			return AGG_MIN;
@@ -109,6 +111,8 @@ aggregate_kind(Oid aggfnoid)
 		case F_MAX_DATE:
 		case F_MAX_TIMESTAMP:
 		case F_MAX_TIMESTAMPTZ:
+		case F_MAX_TIME:
+		case F_MAX_MONEY:
 		case F_BOOL_OR:
 			return AGG_MAX;
 		default:

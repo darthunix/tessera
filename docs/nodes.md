@@ -951,8 +951,8 @@ core's plain `Aggregate`, which would receive the child's rows one at a
 time: `TessHeapScan → TessFilter → TessAgg → parent`. It handles
 `count(*)`, `count` of an expression of any type, `sum` of an int4
 expression, and `min` and `max` of an expression of a type the node
-holds as an integer (int2, int4, date and bool as int4, int8, timestamp
-and timestamptz as int8; `bool_and` and `every` the least boolean,
+holds as an integer (int2, int4, date and bool as int4, int8, timestamp,
+timestamptz, time and money as int8; `bool_and` and `every` the least boolean,
 `bool_or` the greatest) over the
 child's columns, computed through the projection provider: a column or
 a chain the [expression compiler](expr.md) accepts, with constants and
@@ -981,7 +981,8 @@ argument (the argument alone without `GROUP BY`), whatever the group's
 keys, its pairs hashed by the group's hash folded with the argument's: a
 batch's rows go into the aggregate only where they inserted their pair,
 NULL arguments dropped by the hash. An
-argument a word holds (int2, int4, int8, date, timestamp, bool) is its
+argument a word holds (int2, int4, int8, date, timestamp, time, money,
+bool) is its
 word; another of a type whose equality hashes (text, numeric, float8,
 under its collation, a nondeterministic one too) goes by its number in a
 dictionary of its values of the aggregate's own, as a grouping key does,
@@ -1324,8 +1325,9 @@ subquery, does rescan the node.
 With `GROUP BY` the hook takes the grouping expressions of the query,
 1 to 16 values of a type the table keeps in a word, whole and compared
 bit for bit, as PostgreSQL's Datum of the type holds it: int2, int4,
-date and bool, sign-extended as int4 keys, int8, timestamp and
-timestamptz as int8 keys (`tess_word_key_kind` of `nodes/key_kind.h`,
+date and bool, sign-extended as int4 keys, int8, timestamp,
+timestamptz, time and money as int8 keys (`tess_word_key_kind` of
+`nodes/key_kind.h`,
 which owns the kinds of the nodes' keys), or of any other type
 whose equality hashes (text, numeric, ...): such a key's values get
 numbers through a dictionary of the node's, a `simplehash` table that
@@ -2463,7 +2465,8 @@ sort's input, with the same rows, costs and path keys, when
   type a key's word holds through the operator family whose order the
   word keeps (`tess_word_key_order`): int2, int4 and int8 through the
   integer one, date, timestamp and timestamptz through `datetime_ops`,
-  bool through its own, or of any type with an ordering operator of the
+  time and money and bool through their own, or of any type with an
+  ordering operator of the
   path key's operator family for the type that family compares it as
   (varchar as text; see Other types below), ascending or
   descending, NULLs first or last, at most 16 keys; under a limit, the

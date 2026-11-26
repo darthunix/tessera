@@ -107,7 +107,9 @@ typedef struct JoinLookup
  * table does: of integers in any combination, since the table keeps int2,
  * int4 and int8 as 8-byte keys and an int8 in the range of a smaller type
  * hashes as that type's; of two dates, of two timestamps, of two
- * timestamps with time zone, of two booleans.
+ * timestamps with time zone, of two times, of two booleans. Not of two
+ * money values: PostgreSQL's equality of money is no hash join's, so no
+ * clause of it reaches the join.
  */
 static bool
 word_equality(Oid funcid)
@@ -126,6 +128,7 @@ word_equality(Oid funcid)
 		case F_DATE_EQ:
 		case F_TIMESTAMP_EQ:
 		case F_TIMESTAMPTZ_EQ:
+		case F_TIME_EQ:
 		case F_BOOLEQ:
 			return true;
 		default:

@@ -216,7 +216,7 @@ a plan, in the value's width, sorted in increasing order without repeats:
   their int4; a key beyond the int4 range equals no value and is left out
   by the caller.
 - `tess_int8_in_set(…)`: the same over int8 values with int64 keys, for
-  int8, timestamp and timestamptz words.
+  int8, timestamp, timestamptz, time and money words.
 
 The caller makes IN and NOT IN, and their NULLs, of the two masks. A full
 word of at least a dozen selected rows is compared with vector code while
