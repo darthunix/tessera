@@ -95,11 +95,8 @@ _PG_init(void)
 
 	RegisterCustomScanMethods(&tess_pack_scan_methods);
 	api->nodes->add(&tess_pack_node);
-#if !TESS_GREENGAGE
-	/* Greengage reads every table by the core's scan under TessPack. */
 	RegisterCustomScanMethods(&tess_heap_scan_scan_methods);
 	api->nodes->add(&tess_heap_scan_node);
-#endif
 	RegisterCustomScanMethods(&tess_filter_scan_methods);
 	api->nodes->add(&tess_filter_node);
 	tess_filter_planner_init();

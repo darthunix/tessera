@@ -215,6 +215,14 @@ static void heap_scan_initialize_worker(CustomScanState *css, shm_toc *toc,
 										void *coordinate);
 static void heap_scan_shutdown(CustomScanState *css);
 
+/*
+ * Greengage 7 keeps PostgreSQL 12's table AM calls: no flags argument to
+ * begin a scan, as on 18 (SCAN_FLAGS), and a bitmap iterated by the
+ * executor rather than the AM. There the node reads whole tables only, a
+ * page at a time; the bitmap, index and index-only modes are left to the
+ * core.
+ */
+
 static const CustomPathMethods heap_scan_path_methods = {
 	.CustomName = "TessHeapScan",
 	.PlanCustomPath = heap_scan_plan,
@@ -392,6 +400,9 @@ tess_bitmap_only_brin(Path *bitmapqual)
 Path *
 tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *target)
 {
+#if TESS_GREENGAGE
+	return NULL;
+#else
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	RelOptInfo *rel = bitmap->path.parent;
 	Path		template = bitmap->path;
@@ -424,6 +435,7 @@ tess_heap_bitmap_path(PlannerInfo *root, BitmapHeapPath *bitmap, PathTarget *tar
 	scan->path.rows = clamp_row_est(tuples / (bitmap->path.parallel_workers > 0 ?
 											  tess_parallel_divisor(&bitmap->path) : 1.0));
 	return &scan->path;
+#endif
 }
 
 /*
@@ -489,6 +501,9 @@ tess_index_correlation(PlannerInfo *root, IndexOptInfo *index)
 Path *
 tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
 {
+#if TESS_GREENGAGE
+	return NULL;
+#else
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	RelOptInfo *rel = index->path.parent;
 	Path		template = index->path;
@@ -519,6 +534,7 @@ tess_heap_index_path(PlannerInfo *root, IndexPath *index, PathTarget *target)
 									(index->path.parallel_workers > 0 ?
 									 tess_parallel_divisor(&index->path) : 1.0));
 	return &scan->path;
+#endif
 }
 
 /*
@@ -811,6 +827,7 @@ begin_scan(HeapScanState *state, TableScanDesc scan)
 	state->pagemode = (scan->rs_flags & SO_ALLOW_PAGEMODE) != 0;
 }
 
+#if !TESS_GREENGAGE
 /*
  * A parallel bitmap: whether this participant builds it, as the core's
  * BitmapShouldInitializeSharedState: the first to come does, the others
@@ -858,6 +875,8 @@ build_bitmap(HeapScanState *state)
 		elog(ERROR, "TessHeapScan bitmap child returned an invalid result");
 }
 
+#endif
+
 /*
  * Bitmap mode: build the bitmap from the child's plan and begin the
  * core's bitmap scan over its pages, which always collects a page's
@@ -869,6 +888,9 @@ build_bitmap(HeapScanState *state)
 static void
 begin_bitmap_scan(HeapScanState *state)
 {
+#if TESS_GREENGAGE
+	elog(ERROR, "TessHeapScan reads no bitmap on Greengage");
+#else
 	EState	   *estate = state->css.ss.ps.state;
 	SharedBitmap *shared = state->shared_bitmap;
 	TableScanDesc scan;
@@ -888,6 +910,7 @@ begin_bitmap_scan(HeapScanState *state)
 												InvalidDsaPointer);
 	begin_scan(state, scan);
 	state->pagemode = true;
+#endif
 }
 
 /* Drop the batch's pins and the landing slot's, then the scan and its bitmap. */
@@ -899,9 +922,11 @@ end_scan(HeapScanState *state)
 	ExecClearTuple(state->landing);
 	if (state->scan != NULL)
 	{
+#if !TESS_GREENGAGE
 		if (state->bitmap_plan != NULL &&
 			!tbm_exhausted(&state->scan->st.rs_tbmiterator))
 			tbm_end_iterate(&state->scan->st.rs_tbmiterator);
+#endif
 		table_endscan(state->scan);
 	}
 	state->scan = NULL;
@@ -931,6 +956,7 @@ next_page(HeapScanState *state)
 {
 	HeapScanDesc hscan = (HeapScanDesc) state->scan;
 
+#if !TESS_GREENGAGE
 	if (state->bitmap_plan != NULL)
 	{
 		bool		recheck;
@@ -950,6 +976,7 @@ next_page(HeapScanState *state)
 		state->pages++;
 		return true;
 	}
+#endif
 	/* Skip the rest of the current page: the next call fetches another. */
 	if (state->page_active)
 		hscan->rs_cindex = hscan->rs_ntuples - 1;
@@ -974,6 +1001,15 @@ next_page(HeapScanState *state)
 static inline void
 count_heap_rows(Relation rel, bool fetched, int count)
 {
+#if TESS_GREENGAGE
+	/* PostgreSQL 12's counters of the table. */
+	if (count <= 0 || rel->pgstat_info == NULL)
+		return;
+	if (fetched)
+		rel->pgstat_info->t_counts.t_tuples_fetched += count;
+	else
+		rel->pgstat_info->t_counts.t_tuples_returned += count;
+#else
 	PgStat_TableCounts *counts;
 
 	if (count <= 0 || !pgstat_should_count_relation(rel))
@@ -988,6 +1024,7 @@ count_heap_rows(Relation rel, bool fetched, int count)
 		counts->tuples_fetched += count;
 	else
 		counts->tuples_returned += count;
+#endif
 }
 
 /* Take up to limit visible tuples of the current page into the batch; how many. */
@@ -1118,6 +1155,10 @@ index_only_next(IndexOnlyScanState *ios, IndexScanDesc scan, ScanDirection direc
 static TessBatch *
 index_only_batch(HeapScanState *state, int limit)
 {
+#if TESS_GREENGAGE
+	elog(ERROR, "TessHeapScan reads no index on Greengage");
+	return NULL;
+#else
 	IndexOnlyScanState *ios = state->ios_plan;
 	EState	   *estate = state->css.ss.ps.state;
 	TupleTableSlot *slot = ios->ss.ss_ScanTupleSlot;
@@ -1191,6 +1232,7 @@ index_only_batch(HeapScanState *state, int limit)
 	state->ios_batch.rows = state->built->rows;
 	state->ios_batch.table_oid = state->built->table_oid;
 	return &state->ios_batch;
+#endif
 }
 
 /* The next batch of the relation's rows, or NULL at the end. */
