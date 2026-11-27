@@ -65,36 +65,34 @@ after a profile of ClickBench's Q26 at the end of the sort by bytes.
 The same day, after profiles of ClickBench's queries furthest behind
 pg_duckdb, he placed five entries after it in this order:
 `parquet-page-headers` (done), `agg-date-min-max` (done),
-`parquet-batch-arrays`, `parquet-integer-columns`,
+`parquet-batch-arrays` (done), `parquet-integer-columns`,
 `agg-sum-plus-constant`:
 
-1. `parquet-batch-arrays`: The arrays of a Parquet batch kept for its
-   scan
-2. `parquet-integer-columns`: The integers of a Parquet file given to
+1. `parquet-integer-columns`: The integers of a Parquet file given to
    the kernels at less cost
-3. `agg-sum-plus-constant`: A sum of a column and a constant, folded
-4. `whole-word-decisions`: When and where a driver takes a word whole,
+2. `agg-sum-plus-constant`: A sum of a column and a constant, folded
+3. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-5. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+4. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-6. `explain-rows-per-loop`: The rows a node removed, per loop as the
+5. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-7. `join-pruning-cost`: The cost of a pruning join over the partitions
+6. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-8. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+7. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-9. `linux-x86-support`: Linux on x86-64 checked as the target platform
-10. `oltp-guard-bench`: OLTP guard family of benchmarks
-11. `runs-left-from-section-9`: Runs left to the maintainer from
+8. `linux-x86-support`: Linux on x86-64 checked as the target platform
+9. `oltp-guard-bench`: OLTP guard family of benchmarks
+10. `runs-left-from-section-9`: Runs left to the maintainer from
     section 9
-12. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-13. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+11. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+12. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-14. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+13. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-15. `tpch-sf10`: TPC-H step 10: SF10
-16. `backward-scan-mark-restore`: Backward scan and mark/restore
-17. `pg-duckdb-comparison`: Comparison with pg_duckdb
+14. `tpch-sf10`: TPC-H step 10: SF10
+15. `backward-scan-mark-restore`: Backward scan and mark/restore
+16. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -314,26 +312,6 @@ forecast of `datum-arrow`'s contract.
   the input of a column for a new layout.
 - **Depends on:** none.
 - **Capabilities:** datum-arrow
-- **Size:** small.
-
-### parquet-batch-arrays
-
-The arrays of a Parquet batch kept for its scan. From profiles of
-ClickBench's Q1 and Q3 at the end of `parquet-string-views`,
-2026-11-24.
-
-- **What:** Each batch the Parquet node makes allocates and zeroes, in
-  a memory context reset at each batch, three arrays of an entry for
-  each attribute of the foreign table, 105 for `hits`, whatever the
-  columns the query reads, and arrays for each column it reads. Keep
-  them for the scan and clear the entries of the columns read alone.
-- **Why:** The zeroing and the allocations are about half of a profile
-  of Q1, `COUNT(*)`, which reads no column, and a tenth of Q3: a batch
-  of 64 rows pays some 2.5 KB of `memset`. Q1 runs in 1.7 times
-  pg_duckdb's cycles.
-- **Known:** `next_batch` and `batch_column` of `parquet/node.c`.
-- **Depends on:** nothing.
-- **Capabilities:** parquet-fdw
 - **Size:** small.
 
 ### parquet-integer-columns
@@ -3085,6 +3063,15 @@ becomes an entry, joins one, or is dropped.
   the count, a `make` for PostgreSQL 19 in a tree built for master
   compiled 29 of its 110 objects. Suggested: the installer keeps the
   `pg_config` of the last build and cleans the tree when it changes.
+- **The reset of a batch's empty memory** (a finding of the count of
+  `parquet-batch-arrays`). The Parquet node resets its memory of a
+  batch before each batch, through a call into PostgreSQL that returns
+  at once when nothing was allocated in it since the last reset, as
+  for a query that reads no column or only integers. In a profile of
+  ClickBench's Q1, `COUNT(*)`, after the change, those calls are 203 of
+  3 374 samples, 6 per cent of the query. Suggested: the node resets
+  the context only when the batch allocated in it, by a flag it keeps
+  or by the context's own mark of a reset.
 
 ## Decided against
 
