@@ -204,7 +204,33 @@ struct AggValue
 	bool		distinct_by_bytes;
 	TessBytesColumn distinct_bytes;
 	GenericAgg *generic;
+	/*
+	 * The check of errors of the forms folded over its argument e, whose
+	 * values the check takes from its column (AggCheck), or -1.
+	 */
+	int			check;
 };
+
+/*
+ * The check of errors of the forms folded over one e and one FILTER that
+ * can pass their types: the least and the greatest e of the rows they
+ * read, over the whole input, and the forms' arguments with e an inner
+ * column (probes), which the end of the input evaluates at both. An
+ * integer step is monotone in e and fails only past its type, so a form
+ * fails for some row read exactly when it fails at one of them.
+ */
+typedef struct AggCheck
+{
+	/* e's column is the state's argument: an int8, else an int4. */
+	bool		wide;
+	bool		seen;
+	int64		low;
+	int64		high;
+	/* e's type, and a slot of one column of it, the probes' inner tuple. */
+	Oid			type;
+	TupleTableSlot *slot;
+	List	   *probes;
+} AggCheck;
 
 /*
  * A key of a type a word does not hold (text, numeric, ...): its values
@@ -372,7 +398,15 @@ extern void agg_generic_group_accumulate(TessAggState *state, int index,
 										 const TessRowMask *rows,
 										 const TessRowMask *inserted);
 extern Datum agg_generic_value(GenericAgg *generic, bool *isnull);
-extern Datum agg_derive(const AggOutput *output, int64 sum, int64 count, bool *isnull);
+#ifdef HAVE_INT128
+extern Datum agg_derive(const AggOutput *output, const AggSum *sum, bool *isnull);
+extern void agg_fast_sum(const GenericAgg *generic, AggSum *sum);
+extern void agg_sum_state_sum(const uint64 *words, AggSum *sum);
+#endif
+extern void agg_check_reset(TessAggState *state);
+extern void agg_check_take(TessAggState *state, const AggValue *value,
+						   const TessDatumColumn *column, const TessRowMask *rows);
+extern void agg_check_finish(TessAggState *state);
 
 /* Key dictionaries and DISTINCT sets (agg_keydict.c). */
 extern void agg_distinct_reset(TessAggState *state, AggValue *value);

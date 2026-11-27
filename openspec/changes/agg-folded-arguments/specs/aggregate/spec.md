@@ -57,11 +57,12 @@ those the core gives, with and without `GROUP BY` and with groups past
 #### Scenario: Aggregates of one expression left as they are
 - **WHEN** a query computes `sum(x + 1)` of an `integer` alone, or
   `sum(x)`, `avg(x)` and `count(x)` of it, or two forms of `x` under
-  `FILTER (WHERE random() < 0.5)`, or `sum(nextval('s'))` beside
-  `max(nextval('s'))`
+  a volatile `FILTER`, `random() < 2`, which holds for every row, or
+  `sum(nextval('s'))` beside `max(nextval('s'))`
 - **THEN** its plan is `TessAgg`'s, it folds nothing, and its rows are
   the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/Aggregates of one expression left as they are`
 
 ### Requirement: The errors of a folded argument
 Where the core's computation of a folded aggregate's argument fails for
@@ -79,7 +80,8 @@ reads alone.
   and a nested form passes the range of an inner step
 - **THEN** each query fails with SQLSTATE `22003` and the core's message
   of one of the steps that fail
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/Past the range of each integer`
 
 #### Scenario: Failing rows left out and kept
 - **WHEN** the only rows whose argument fails are left out by `WHERE`,
@@ -88,7 +90,8 @@ reads alone.
   past `hash_mem`
 - **THEN** the first two queries return the core's rows, and the others
   fail as the core's hashed aggregation does
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/Failing rows left out and kept`
 
 #### Scenario: A rescan with other rows
 - **WHEN** the folded grouping is the inner side of a nested loop whose
@@ -96,7 +99,8 @@ reads alone.
   value fail
 - **THEN** the query fails as the core does, and without those rows it
   returns the core's rows
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/A rescan with other rows`
 
 ### Requirement: Folded Aggregates in EXPLAIN
 `EXPLAIN VERBOSE` of a `TessAgg` that folds SHALL show `Folded
@@ -109,7 +113,8 @@ of the kind where it folds none.
 - **WHEN** a query computes `sum(x)`, `sum(x + 1)`, `avg(x * 2)` and
   `count(x - 3)` of an `integer`, and `sum(y)` of another column
 - **THEN** `EXPLAIN VERBOSE` shows `Folded Aggregates: 4`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/The count shown`
 
 ### Requirement: Arguments the node does not fold
 `TessAgg` SHALL compute from its own argument, without folding, an

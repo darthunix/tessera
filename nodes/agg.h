@@ -77,12 +77,26 @@ typedef enum AggDerivedKind
 } AggDerivedKind;
 
 /*
- * The plan data's derivations: for each derived output, its states (the
- * sum and the count of e) and its constants a and b, each an int8 Const
- * or, past an int8, a numeric one.
+ * The plan data's derivations: for each derived output, its states, the
+ * sum of e and their count (-1 where the sum state counts them, for a
+ * bigint e), and its constants a and b, each an int8 Const or, past an
+ * int8, a numeric one. Its checks of errors: for each, the state whose
+ * argument is e and e's type, and the probes, each form's argument with
+ * e an inner column (AggCheck).
  */
 #define AGG_DERIVED_STATES 2
 #define AGG_DERIVED_CONSTANTS 2
+#define AGG_CHECK_FIELDS 2
+
+#ifdef HAVE_INT128
+/* The sum of e over the rows a derived output reads, its rest past 128 bits, their count. */
+typedef struct AggSum
+{
+	int128		sum;
+	Datum		rest;			/* a numeric to add, or 0 */
+	int64		count;
+} AggSum;
+#endif
 
 /* An aggregate of the scan tuple: a state's value, or derived from states. */
 typedef struct AggOutput
@@ -170,6 +184,9 @@ typedef struct TessAggState
 	/* The outputs derived, and whether one is by reference, a numeric. */
 	int			nderived;
 	bool		derived_by_ref;
+	/* The checks of errors of the forms folded (AggCheck). */
+	struct AggCheck *checks;
+	int			nchecks;
 	/* Written by a batch function on failure only. */
 	TessStatus	status;
 	/* The row was returned; the next call ends the scan. */

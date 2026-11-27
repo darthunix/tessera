@@ -1373,6 +1373,35 @@ agg_sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull
 }
 
 /*
+ * The sum of the integers of a sum state and their count, for the outputs
+ * derived from it (agg_derive): of a group's words, or of the state
+ * without GROUP BY, nothing for an empty one.
+ */
+void
+agg_sum_state_sum(const uint64 *words, AggSum *sum)
+{
+	sum->sum = (int128) (((uint128) words[1] << 64) | words[0]);
+	sum->rest = (Datum) words[TESS_TABLE_SUM_WORDS];
+	sum->count = (int64) words[2];
+}
+
+void
+agg_fast_sum(const GenericAgg *generic, AggSum *sum)
+{
+	const FastState *fast = (const FastState *) DatumGetPointer(generic->state);
+
+	*sum = (AggSum)
+	{
+		0
+	};
+	if (generic->state_null)
+		return;
+	sum->sum = fast->sum;
+	sum->rest = fast->has_rest ? fast->rest : (Datum) 0;
+	sum->count = fast->count;
+}
+
+/*
  * A group's sum state as its partial value, for the node's final grouping
  * (TessTableSumInput): the node's own bytea of the tag, the words and the
  * rest, NULL for the empty state; for avg of integer or smallint, the

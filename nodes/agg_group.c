@@ -511,6 +511,19 @@ group_batch(TessAggState *state, TessBatch *batch)
 				computed_column(state, batch, column, TESS_COLUMN_FOR_PROJECTION, false,
 								&state->computed_columns[column]);
 		}
+		/* The extremes of the rows taken aside, which are not taken again when read back. */
+		for (int index = 0; !state->replaying && index < state->nvalues; index++)
+		{
+			AggValue   *value = &state->values[index];
+
+			if (value->check >= 0)
+			{
+				TessRowMask read = value->filter >= 0 ?
+					agg_filtered_rows(state, batch, value->filter, &missing) : missing;
+
+				agg_check_take(state, value, &state->computed_columns[value->computed], &read);
+			}
+		}
 		rows_write(state, state->rows_spill, &missing);
 	}
 	else if (probe)
@@ -579,6 +592,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 		if (value->computed >= 0)
 			computed_column(state, batch, value->computed,
 							TESS_COLUMN_FOR_PROJECTION, fast_decimals(value), &column);
+		if (value->check >= 0 && !state->replaying)
+			agg_check_take(state, value, &column, &rows);
 		if (value->generic != NULL)
 		{
 			value->generic->columns[0] = column;
@@ -781,6 +796,7 @@ agg_group_drain(TessAggState *state)
 		ReScanExprContext(state->generic_agg->curaggcontext);
 	create_table(state);
 	agg_reset_distinct(state);
+	agg_check_reset(state);
 	for (;;)
 	{
 		TessBatch  *batch;
@@ -840,6 +856,8 @@ agg_group_drain(TessAggState *state)
 		}
 		tess_input_finish(state->input);
 	}
+	/* Before a set or a partition is read back, and before any group goes out. */
+	agg_check_finish(state);
 	if (state->spilling_sets > 0)
 		distinct_read_back(state);
 	state->drained = true;
@@ -916,24 +934,32 @@ static void
 output_value_into(TessAggState *state, int number, int group, Datum *datum, bool *isnull)
 {
 	const AggOutput *output = &state->outputs[number];
-	Datum		sum;
-	Datum		count;
-	bool		sum_null;
-	bool		count_null;
-	MemoryContext old;
 
 	if (output->state >= 0)
 	{
 		group_value_into(state, output->state, group, datum, isnull);
 		return;
 	}
-	group_value_into(state, output->sum_state, group, &sum, &sum_null);
-	group_value_into(state, output->count_state, group, &count, &count_null);
-	old = state->generic_output != NULL ?
-		MemoryContextSwitchTo(state->generic_output) : CurrentMemoryContext;
-	*datum = agg_derive(output, sum_null ? 0 : DatumGetInt64(sum), DatumGetInt64(count),
-						isnull);
-	MemoryContextSwitchTo(old);
+#ifdef HAVE_INT128
+	{
+		AggSum		sum = {0};
+		MemoryContext old;
+
+		/* A bigint's sum state of avg(e), or the words of sum(e) and count(e). */
+		if (output->count_state < 0)
+			agg_sum_state_sum((const uint64 *) state->walked_payloads[group] +
+							  state->values[output->sum_state].slot, &sum);
+		else
+		{
+			sum.sum = (int64) state->state_words[output->sum_state * AGG_GROUP_ROWS + group];
+			sum.count = (int64) state->state_words[output->count_state * AGG_GROUP_ROWS + group];
+		}
+		old = state->generic_output != NULL ?
+			MemoryContextSwitchTo(state->generic_output) : CurrentMemoryContext;
+		*datum = agg_derive(output, &sum, isnull);
+		MemoryContextSwitchTo(old);
+	}
+#endif
 }
 
 /* Every aggregate of a group into the scan slot, after the keys: each its output's value. */
