@@ -254,7 +254,14 @@ written that way.
 - A loop takes the 64 slots of a word of the mask at a time.
 - A plain array of integers, floating-point numbers, days, times or
   booleans converts every slot of a word, asked or not, into the
-  output's places, so that the loop is dense. A dictionary and bytes of
+  output's places, so that the loop is dense. It converts the words
+  from the first of the mask that asks a slot to the last, found once
+  a call; the words before and after keep their places, and their words
+  of the mask of `NULL` slots are 0. A caller that asks a few rows of a
+  long column, as the Parquet node asks a batch of 64 rows of a window
+  of 1 024, then converts their one or two words, not the column. A
+  branch for each word that asks no slot, refused, would put a branch
+  on the caller's data in the dense loop. A dictionary and bytes of
   fixed size are outside this set: they write the places of the slots
   asked alone. A slot not asked that is not `NULL` gets its true
   representation where its value converts, so a place the caller filled

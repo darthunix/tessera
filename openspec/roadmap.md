@@ -65,34 +65,32 @@ after a profile of ClickBench's Q26 at the end of the sort by bytes.
 The same day, after profiles of ClickBench's queries furthest behind
 pg_duckdb, he placed five entries after it in this order:
 `parquet-page-headers` (done), `agg-date-min-max` (done),
-`parquet-batch-arrays` (done), `parquet-integer-columns`,
+`parquet-batch-arrays` (done), `parquet-integer-columns` (done),
 `agg-sum-plus-constant`:
 
-1. `parquet-integer-columns`: The integers of a Parquet file given to
-   the kernels at less cost
-2. `agg-sum-plus-constant`: A sum of a column and a constant, folded
-3. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `agg-sum-plus-constant`: A sum of a column and a constant, folded
+2. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-4. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-5. `explain-rows-per-loop`: The rows a node removed, per loop as the
+4. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-6. `join-pruning-cost`: The cost of a pruning join over the partitions
+5. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-7. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-8. `linux-x86-support`: Linux on x86-64 checked as the target platform
-9. `oltp-guard-bench`: OLTP guard family of benchmarks
-10. `runs-left-from-section-9`: Runs left to the maintainer from
-    section 9
-11. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-12. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+7. `linux-x86-support`: Linux on x86-64 checked as the target platform
+8. `oltp-guard-bench`: OLTP guard family of benchmarks
+9. `runs-left-from-section-9`: Runs left to the maintainer from
+   section 9
+10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-13. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-14. `tpch-sf10`: TPC-H step 10: SF10
-15. `backward-scan-mark-restore`: Backward scan and mark/restore
-16. `pg-duckdb-comparison`: Comparison with pg_duckdb
+13. `tpch-sf10`: TPC-H step 10: SF10
+14. `backward-scan-mark-restore`: Backward scan and mark/restore
+15. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -313,31 +311,6 @@ forecast of `datum-arrow`'s contract.
 - **Depends on:** none.
 - **Capabilities:** datum-arrow
 - **Size:** small.
-
-### parquet-integer-columns
-
-The integers of a Parquet file given to the kernels at less cost. From
-profiles of ClickBench's Q3 and Q7 at the end of
-`parquet-string-views`, 2026-11-24.
-
-- **What:** A column of integers reaches the kernels as `Datum` words:
-  `datum-arrow` widens each value of a batch's 64 rows into a word, and
-  the node gathers the column in C. Find which part costs: the
-  conversion itself, which a form of integers in their own width, as
-  the bytes form gives strings, would spare; or the call for each batch
-  of 64 rows, which converting a window of 1 024 rows at once would
-  spare. Then take the cheaper way that removes it.
-- **Why:** `datum-arrow`'s read and the node's column take 36 per cent
-  of a profile of Q3, sums of two integers, and 27 of Q7. Q3 runs in
-  4.5 times pg_duckdb's cycles, the furthest of the queries without
-  strings but Q7.
-- **Known:** A form of integers in their own width is a change of the C
-  API, of the kernels and of the nodes; `direct-arrow-batches` holds
-  the wider idea. Not measured beyond the profiles.
-- **Depends on:** nothing.
-- **Capabilities:** parquet-fdw, batch-format
-- **Size:** found by the diagnosis: small for whole windows, large for
-  a form of its own.
 
 ### agg-sum-plus-constant
 
@@ -3072,6 +3045,19 @@ becomes an entry, joins one, or is dropped.
   3 374 samples, 6 per cent of the query. Suggested: the node resets
   the context only when the batch allocated in it, by a flag it keeps
   or by the context's own mark of a reset.
+- **The node's copy of a batch's values** (a finding of the count of
+  `parquet-integer-columns`). For each batch the Parquet node asks the
+  reader for a column's rows into its window's array of words, then
+  copies each row's value and `NULL` flag into the batch's arrays in
+  `batch_column`. In a profile of ClickBench's Q3 after the change that
+  copy is on top of 644 of 3 239 samples, 20 per cent, the most of any
+  function; the conversion is 6. A batch whose rows follow each other
+  among the rows the window holds could point at the window's words
+  without a copy, if the window's array outlives the batch's asks, as
+  the node's reads of a window behind would have to keep. A form of
+  integers in their own width would spare the 6 per cent, not the
+  copy. Suggested: an entry for the batch pointing at the window's
+  values, measured on Q3, Q4 and Q7.
 
 ## Decided against
 

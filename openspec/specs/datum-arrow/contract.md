@@ -56,3 +56,7 @@ reader and a writer cannot drift apart.
   rules nor the proofs of that code.
 - **A new major version of `arrow-schema`.** The dependency's version
   and the snapshot of the public API; not the plans' rules.
+- **How a dense loop goes over a mask.** Such as the words of a mask a
+  conversion's loop converts: that loop and the tests of the places it
+  keeps; not the plans' rules, the representations or the promises of
+  a read.

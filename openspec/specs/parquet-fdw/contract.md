@@ -117,3 +117,6 @@ by its count of files and owned by the module for the backend's life.
   given from the window's arrays without a copy, or arrays kept in
   another way: the node's batch, its asks and what it clears at each
   batch; not the reader, the windows, the clauses or the wrapper.
+- **The reader's work for a call of a window's values.** Such as the
+  memory a call of the C entries reuses: those entries and the
+  reader's handle; not the node, the windows' reading or the clauses.
