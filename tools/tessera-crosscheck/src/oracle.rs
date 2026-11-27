@@ -13,14 +13,18 @@
 //! mode only is a row that mode's plan evaluates and the other's does not:
 //! rows past a LIMIT in a batch of 64 or in a parallel worker, a group the
 //! core's sorted grouping never reaches under a limit, a join condition
-//! one plan hashes on and the other checks after a match. Expressions
-//! carry no promise of which rows they are evaluated for, in the core
-//! either, so that is agreement when the error is the data's: the mode
-//! that returned rows raises a data exception too on the relaxed query (no
-//! LIMIT, no DISTINCT, joins that read every row) or on a probe of one
-//! table (every row of it, through each largest part of the query's
-//! expressions that reads it alone). Otherwise the error is one mode's
-//! own, an overflow that is none, or one missed.
+//! one plan hashes on and the other checks after a match, a condition over
+//! two tables that one join order tests at their join and the other after
+//! a third table. Expressions carry no promise of which rows they are
+//! evaluated for, in the core either, so that is agreement when the error
+//! is the data's: the mode that returned rows raises a data exception too
+//! on the relaxed query (no LIMIT, no DISTINCT, joins that read every
+//! row), on a probe of one table (every row of it, through each largest
+//! part of the query's expressions that reads it alone), or on a probe of
+//! a condition over several tables (every row of their join by the
+//! query's other conditions over them, where all joins are inner).
+//! Otherwise the error is one mode's own, an overflow that is none, or
+//! one missed.
 //!
 //! The table of strings has a Parquet twin, `words_pq`: its rows, read
 //! back from the heap table, written by the reader's crate in three
@@ -125,10 +129,28 @@ fn near_limit(a: &(Outcome, Duration), b: &(Outcome, Duration)) -> (Outcome, Out
     (near(a, &b.0), near(b, &a.0))
 }
 
+/// Whether a plan in EXPLAIN's JSON has `joins` joins or more, and inner
+/// and semi joins alone: no outer join, and no anti join, which the
+/// planner also makes of an outer join whose nullable side a condition
+/// above tests for NULL. A semi join of an EXISTS adds to the count.
+fn joins_inner(plan: &str, joins: usize) -> bool {
+    const KEY: &str = "\"Join Type\": \"";
+    let mut kinds = plan
+        .match_indices(KEY)
+        .map(|(at, _)| &plan[at + KEY.len()..]);
+    let inner = |kind: &&str| {
+        ["Inner\"", "Semi\"", "Right Semi\""]
+            .iter()
+            .any(|inner| kind.starts_with(inner))
+    };
+    plan.matches(KEY).count() >= joins && kinds.all(|kind| inner(&kind))
+}
+
 /// How one mode of a query ended.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// The rows' text, sorted, in one array; `None` without rows.
+    /// The first column of the first row: the rows' text, sorted, in one
+    /// array, or a probe's sum of their lengths; `None` without rows.
     Rows(Option<String>),
     /// An error: its SQLSTATE and message.
     Error { code: String, message: String },
@@ -397,18 +419,26 @@ impl<'c> Oracle<'c> {
         })
     }
 
-    /// The relaxed query in one mode, then the probes of its tables, in a
-    /// transaction whose settings make joins read every row of both
-    /// sides: no nested loop or merge join, no index, and with Tessera on
-    /// the core's hash join over Tessera's scans and filters (the least
-    /// join cost unit makes the node's join cost thousands of times the
-    /// core's). A hash join still skips its inner side after an empty
-    /// outer one, in the core and in Tessera alike; the probes do not.
-    /// With `twin`, all of them over the Parquet twin.
+    /// The relaxed query in one mode, then its probes, in a transaction
+    /// whose settings make joins read every row of both sides: no nested
+    /// loop or merge join, no index, and with Tessera on the core's hash
+    /// join over Tessera's scans and filters (the least join cost unit
+    /// makes the node's join cost thousands of times the core's). A hash
+    /// join still skips its inner side after an empty outer one, in the
+    /// core and in Tessera alike; the probes do not.
+    /// With `twin`, all of them over the Parquet twin. The outcome is the
+    /// first data exception or crash among them, or else the relaxed
+    /// query's.
     fn relaxed(&mut self, query: &Query, prelude: &str, on: bool, twin: bool) -> Result<Outcome> {
         let over = |sql: String| if twin { twinned(&sql) } else { sql };
         let sql = over(query.relaxed().sql());
         let wrapped = format!("SELECT array_agg(q::text ORDER BY q::text) FROM ({sql}) AS q");
+        let mut joint = Vec::new();
+        for (branch, joins) in query.branches() {
+            if self.inner_joins_only(&branch, joins)? {
+                joint.extend(branch.joint_probes());
+            }
+        }
         let mode = if on {
             "SET LOCAL tessera.enable = on; SET LOCAL tessera.join_cost_unit = 0.001;"
         } else {
@@ -420,26 +450,52 @@ impl<'c> Oracle<'c> {
              SET LOCAL enable_mergejoin = off; SET LOCAL enable_indexscan = off; \
              SET LOCAL enable_indexonlyscan = off; SET LOCAL enable_bitmapscan = off;"
         ));
-        // Then each table's probe, until one raises a data exception.
-        let outcome = settings.map(|()| {
-            let mut outcome = self.run(&wrapped);
-            for probe in query.probes() {
-                if !matches!(outcome, Outcome::Rows(_)) {
-                    break;
+        // Then each probe, those of one table first, which are small, until
+        // one raises a data exception. One that times out or fails otherwise
+        // tells nothing, and a savepoint lets the next one run; an internal
+        // error or a crash is a finding of its own and ends them.
+        let probes = query.probes().into_iter().chain(joint).map(over);
+        let outcome = settings.map_err(anyhow::Error::from).and_then(|()| {
+            let mut outcome = None;
+            for sql in std::iter::once(wrapped).chain(probes) {
+                self.client.batch_execute("SAVEPOINT probe")?;
+                let probed = self.run(&sql);
+                let internal =
+                    matches!(&probed, Outcome::Error { code, .. } if code.starts_with("XX"));
+                if internal || probed.is_data_exception() || matches!(probed, Outcome::Lost(_)) {
+                    return Ok(probed);
                 }
-                let probed = self.run(&over(probe));
                 if !matches!(probed, Outcome::Rows(_)) {
-                    outcome = probed;
+                    self.client.batch_execute("ROLLBACK TO SAVEPOINT probe")?;
                 }
+                outcome.get_or_insert(probed);
             }
-            outcome
+            Ok(outcome.unwrap_or(Outcome::Rows(None)))
         });
         // The transaction ends whatever happened in it, the session's
         // settings with it.
         if !self.client.is_closed() {
             self.client.batch_execute("ROLLBACK")?;
         }
-        Ok(outcome?)
+        outcome
+    }
+
+    /// Whether the core's plan of `query`, one SELECT of `joins` joins,
+    /// has every one of them, and inner and semi joins alone: the planner
+    /// made its outer joins inner where a condition above rejects their
+    /// NULLs, and may then join any of its tables first. A plan short of a
+    /// join is one the planner proved empty, and tests no condition.
+    fn inner_joins_only(&mut self, query: &Query, joins: usize) -> Result<bool> {
+        self.reconnect()?;
+        self.client.batch_execute(&format!(
+            "{} SET tessera.enable = off;",
+            query.settings.statements()
+        ))?;
+        let Outcome::Rows(Some(plan)) = self.run(&format!("EXPLAIN (FORMAT JSON) {}", query.sql()))
+        else {
+            return Ok(false);
+        };
+        Ok(joins_inner(&plan, joins))
     }
 
     /// Whether the plan of `query` with Tessera on has a node of Tessera.
@@ -517,6 +573,21 @@ mod tests {
 
     fn rows(text: &str) -> Outcome {
         Outcome::Rows(Some(text.into()))
+    }
+
+    #[test]
+    fn a_joint_probe_stands_for_inner_and_semi_joins_alone() {
+        assert!(joins_inner(r#"[{"Plan": {"Node Type": "Seq Scan"}}]"#, 0));
+        let inner = r#"{"Join Type": "Inner", "Plans": [{"Join Type": "Semi"}, {"Join Type": "Right Semi"}]}"#;
+        assert!(joins_inner(inner, 2));
+        for outer in ["Left", "Right", "Full", "Anti", "Right Anti"] {
+            let plan =
+                format!(r#"{{"Join Type": "Inner", "Plans": [{{"Join Type": "{outer}"}}]}}"#);
+            assert!(!joins_inner(&plan, 1), "{plan}");
+        }
+        // A SELECT the planner proved empty keeps none of its joins.
+        let empty = r#"[{"Plan": {"Node Type": "Result", "One-Time Filter": "false"}}]"#;
+        assert!(!joins_inner(empty, 2));
     }
 
     fn error(code: &str) -> Outcome {

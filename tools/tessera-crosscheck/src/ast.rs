@@ -667,42 +667,133 @@ impl Select {
         for (table, at, part) in parts {
             match probes
                 .iter_mut()
-                .find(|probe| probe.table.name == table.name && probe.place == at)
+                .find(|probe| probe.tables == [(at, table)])
             {
                 Some(probe) if probe.parts.contains(&part) => {}
                 Some(probe) => probe.parts.push(part),
                 None => probes.push(Probe {
-                    table,
-                    place: at,
+                    tables: vec![(at, table)],
                     parts: vec![part],
                     filter: Vec::new(),
                 }),
             }
         }
+        // A constant one, as false, holds for the rows of every table, the
+        // subquery's too.
         let conjuncts = self.filter.iter().flat_map(Expr::conjuncts);
         for conjunct in conjuncts {
-            let Some(tables) = conjunct.tables() else {
+            let Some(read) = conjunct.tables() else {
                 continue;
             };
-            let Some(&at) = tables.first().filter(|_| tables.len() == 1) else {
+            for probe in &mut probes {
+                let at = probe.tables[0].0;
+                if read.is_empty() || (at < place && read.iter().all(|&table| table == at)) {
+                    probe.filter.push(conjunct.clone());
+                }
+            }
+        }
+        probes
+    }
+
+    /// The conditions of the query joined by AND at their tops, of the
+    /// WHERE condition and of each join, a join's keys as equalities; with
+    /// each, whether it can raise an error over several tables of its own:
+    /// a key whose expression reads one table only compares two values.
+    fn conditions(&self) -> Vec<(Expr, bool)> {
+        let mut conditions: Vec<(Expr, bool)> = self
+            .filter
+            .iter()
+            .flat_map(Expr::conjuncts)
+            .map(|conjunct| (conjunct.clone(), true))
+            .collect();
+        for (index, join) in self.joins.iter().enumerate() {
+            for (column, other) in &join.keys {
+                let key = Expr::Binary {
+                    op: "=",
+                    left: Box::new(Expr::Column {
+                        table: index + 1,
+                        name: column,
+                    }),
+                    right: Box::new(other.clone()),
+                };
+                let joint = other.tables().is_some_and(|tables| tables.len() > 1);
+                conditions.push((key, joint));
+            }
+            conditions.extend(
+                join.extra
+                    .iter()
+                    .flat_map(Expr::conjuncts)
+                    .map(|conjunct| (conjunct.clone(), true)),
+            );
+        }
+        conditions
+    }
+
+    /// Each condition over several tables, over those tables joined by the
+    /// query's other conditions that read them alone. Where every join is
+    /// inner, a plan may test the condition as soon as it has joined those
+    /// tables, before the joins with the others: the core does when its
+    /// join order puts them together first. The rows that fail one of the
+    /// other conditions it tests first are never tested. An outer join
+    /// keeps the rows of its preserved side that fail its conditions, and
+    /// lets no plan join its nullable side before the tables it is joined
+    /// to: these probes stand for no query with one. A side of an equality
+    /// between expressions over two sets of tables is probed by itself too:
+    /// a hash or merge join on the equality computes each side over the
+    /// join of its own tables, before the other's are joined.
+    fn joint_probes(&self) -> Vec<Probe> {
+        let tables: Vec<Table> = std::iter::once(self.from)
+            .chain(self.joins.iter().map(|join| join.table))
+            .collect();
+        let conditions = self.conditions();
+        let mut probes = Vec::new();
+        for (index, (condition, joint)) in conditions.iter().enumerate() {
+            if !*joint {
                 continue;
-            };
-            if let Some(probe) = probes
-                .iter_mut()
-                .find(|probe| probe.place == at && at < place)
+            }
+            let mut parts = vec![condition];
+            if let Expr::Binary {
+                op: "=",
+                left,
+                right,
+            } = condition
+                && let (Some(on_left), Some(on_right)) = (left.tables(), right.tables())
+                && on_left.is_disjoint(&on_right)
             {
-                probe.filter.push(conjunct.clone());
+                parts.extend([&**left, &**right]);
+            }
+            for part in parts {
+                let Some(read) = part.tables().filter(|read| read.len() > 1) else {
+                    continue;
+                };
+                // Constant conditions too: false joins no rows.
+                let filter = conditions
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, (expr, _))| {
+                        *other != index && expr.tables().is_some_and(|by| by.is_subset(&read))
+                    })
+                    .map(|(_, (expr, _))| expr.clone())
+                    .collect();
+                probes.push(Probe {
+                    tables: read
+                        .iter()
+                        .filter_map(|&at| tables.get(at).map(|table| (at, *table)))
+                        .collect(),
+                    parts: vec![part.clone()],
+                    filter,
+                });
             }
         }
         probes
     }
 }
 
-/// A probe of one table: parts of the query's expressions over the rows
-/// that pass the table's own conditions.
+/// A probe: parts of the query's expressions over the rows of its tables
+/// that pass their own conditions, each table at its place in the query's
+/// FROM list.
 struct Probe {
-    table: Table,
-    place: usize,
+    tables: Vec<(usize, Table)>,
     parts: Vec<Expr>,
     filter: Vec<Expr>,
 }
@@ -710,32 +801,70 @@ struct Probe {
 impl Query {
     /// Queries that evaluate, for every row of each table that passes the
     /// table's own conditions, the largest parts of the query's
-    /// expressions that read that table alone, as rows of text so that
-    /// nothing is left out of the plan. One raises an error when a row of
-    /// the data does, whatever rows a plan of the query would skip.
+    /// expressions that read that table alone. One raises an error when a
+    /// row of the data does, whatever rows a plan of the query would skip.
     pub fn probes(&self) -> Vec<String> {
-        let selects = std::iter::once(&self.select).chain(self.set.iter().map(|(_, other)| other));
-        selects
+        self.selects()
             .flat_map(Select::probes)
-            .map(|probe| {
-                let depth = probe.place + 1;
-                let mut out = String::from("SELECT array_agg(q::text) FROM (SELECT ");
-                for (index, expr) in probe.parts.iter().enumerate() {
-                    if index > 0 {
-                        out.push_str(", ");
-                    }
-                    expr.write(&mut out, depth);
-                    let _ = write!(out, " AS p{index}");
-                }
-                let _ = write!(out, " FROM {} AS t{}", probe.table.name, probe.place);
-                for (index, conjunct) in probe.filter.iter().enumerate() {
-                    out.push_str(if index == 0 { " WHERE " } else { " AND " });
-                    conjunct.write(&mut out, depth);
-                }
-                out.push_str(") AS q");
-                out
+            .map(|probe| probe.sql())
+            .collect()
+    }
+
+    /// Queries that evaluate each condition over several tables for every
+    /// row of their join by the query's other conditions over them alone
+    /// (Select::joint_probes): for a query whose joins are all inner, as
+    /// the planner leaves them.
+    pub fn joint_probes(&self) -> Vec<String> {
+        self.selects()
+            .flat_map(Select::joint_probes)
+            .map(|probe| probe.sql())
+            .collect()
+    }
+
+    /// Each SELECT of the query as a query of its own, under its settings,
+    /// with the count of its joins.
+    pub fn branches(&self) -> Vec<(Query, usize)> {
+        self.selects()
+            .map(|select| {
+                let branch = Query {
+                    select: select.clone(),
+                    set: None,
+                    settings: self.settings,
+                };
+                (branch, select.joins.len())
             })
             .collect()
+    }
+
+    fn selects(&self) -> impl Iterator<Item = &Select> {
+        std::iter::once(&self.select).chain(self.set.iter().map(|(_, other)| other))
+    }
+}
+
+impl Probe {
+    /// The probe's query. The rows go to text, so that nothing is left out
+    /// of the plan, and only their lengths add up, so that a join of two
+    /// large tables keeps no array of its rows.
+    fn sql(&self) -> String {
+        let depth = self.tables.iter().map(|(at, _)| at + 1).max().unwrap_or(1);
+        let mut out = String::from("SELECT sum(length(q::text)) FROM (SELECT ");
+        for (index, expr) in self.parts.iter().enumerate() {
+            if index > 0 {
+                out.push_str(", ");
+            }
+            expr.write(&mut out, depth);
+            let _ = write!(out, " AS p{index}");
+        }
+        for (index, (at, table)) in self.tables.iter().enumerate() {
+            out.push_str(if index == 0 { " FROM " } else { ", " });
+            let _ = write!(out, "{} AS t{at}", table.name);
+        }
+        for (index, conjunct) in self.filter.iter().enumerate() {
+            out.push_str(if index == 0 { " WHERE " } else { " AND " });
+            conjunct.write(&mut out, depth);
+        }
+        out.push_str(") AS q");
+        out
     }
 }
 
@@ -954,12 +1083,141 @@ mod tests {
         assert_eq!(
             query.probes(),
             vec![
-                "SELECT array_agg(q::text) FROM (SELECT t0.a AS p0, (t0.a + 1::int4) AS p1, \
+                "SELECT sum(length(q::text)) FROM (SELECT t0.a AS p0, (t0.a + 1::int4) AS p1, \
                  (t0.b IS NOT NULL) AS p2 FROM fact AS t0 WHERE (t0.b IS NOT NULL)) AS q",
-                "SELECT array_agg(q::text) FROM (SELECT t1.a AS p0, (t1.c)::int4 AS p1, \
+                "SELECT sum(length(q::text)) FROM (SELECT t1.a AS p0, (t1.c)::int4 AS p1, \
                  t1.id AS p2 FROM dim AS t1) AS q",
-                "SELECT array_agg(q::text) FROM (SELECT ((1::int4 / t2.a) IS NULL) AS p0 \
+                "SELECT sum(length(q::text)) FROM (SELECT ((1::int4 / t2.a) IS NULL) AS p0 \
                  FROM dim AS t2) AS q",
+            ]
+        );
+    }
+
+    /// The finding of seed 20261127: the core tested the WHERE condition
+    /// over t0 and t2 at their join, which Tessera's costs put first, and
+    /// divided by a zero of t0.c that its own order never reaches. The
+    /// probe of the condition joins the two by the key between them alone;
+    /// keys of a column and of an expression over one table make none.
+    #[test]
+    fn a_condition_over_two_tables_is_probed_over_their_join_by_the_others() {
+        let query = Query {
+            select: Select {
+                distinct: false,
+                items: vec![column(0, "id")],
+                from: DIM,
+                joins: vec![
+                    Join {
+                        kind: JoinKind::Inner,
+                        table: FACT,
+                        keys: vec![("a", column(0, "id"))],
+                        extra: None,
+                    },
+                    Join {
+                        kind: JoinKind::Left,
+                        table: FACT,
+                        keys: vec![
+                            (
+                                "t",
+                                Expr::Collate {
+                                    arg: Box::new(column(0, "t")),
+                                    collation: "C",
+                                },
+                            ),
+                            ("id", column(1, "c")),
+                        ],
+                        extra: Some(Expr::Binary {
+                            op: "<=",
+                            left: Box::new(column(1, "c")),
+                            right: Box::new(column(1, "s")),
+                        }),
+                    },
+                ],
+                filter: Some(Expr::InList {
+                    arg: Box::new(Expr::Binary {
+                        op: "/",
+                        left: Box::new(column(2, "c")),
+                        right: Box::new(column(0, "c")),
+                    }),
+                    list: vec![Expr::literal("'-14'::int8"), Expr::literal("NULL::int8")],
+                    negated: true,
+                }),
+                grouping: None,
+                limit: None,
+                ordered: false,
+            },
+            set: None,
+            settings: Settings {
+                workers: 0,
+                work_mem: "64kB",
+            },
+        };
+        assert!(
+            query
+                .probes()
+                .iter()
+                .all(|probe| !probe.contains(", fact AS"))
+        );
+        assert_eq!(
+            query.joint_probes(),
+            vec![
+                "SELECT sum(length(q::text)) FROM (SELECT ((t2.c / t0.c) NOT IN \
+                 ('-14'::int8, NULL::int8)) AS p0 FROM dim AS t0, fact AS t2 \
+                 WHERE (t2.t = (t0.t COLLATE \"C\"))) AS q"
+            ]
+        );
+    }
+
+    /// A hash join on t2.a = (t0.c / t1.c) computes the division over the
+    /// join of t0 and t1, before t2 drops a pair: that side has a probe of
+    /// its own. A constant condition stays in the probes it holds for.
+    #[test]
+    fn a_side_of_an_equality_over_two_tables_is_probed_by_itself() {
+        let query = Query {
+            select: Select {
+                distinct: false,
+                items: vec![column(0, "id")],
+                from: DIM,
+                joins: vec![
+                    Join {
+                        kind: JoinKind::Inner,
+                        table: FACT,
+                        keys: vec![("id", column(0, "id"))],
+                        extra: Some(Expr::literal("false")),
+                    },
+                    Join {
+                        kind: JoinKind::Inner,
+                        table: TINY,
+                        keys: vec![("id", column(0, "id"))],
+                        extra: None,
+                    },
+                ],
+                filter: Some(Expr::Binary {
+                    op: "=",
+                    left: Box::new(column(2, "a")),
+                    right: Box::new(Expr::Binary {
+                        op: "/",
+                        left: Box::new(column(0, "c")),
+                        right: Box::new(column(1, "c")),
+                    }),
+                }),
+                grouping: None,
+                limit: None,
+                ordered: false,
+            },
+            set: None,
+            settings: Settings {
+                workers: 0,
+                work_mem: "64kB",
+            },
+        };
+        assert_eq!(
+            query.joint_probes(),
+            vec![
+                "SELECT sum(length(q::text)) FROM (SELECT (t2.a = (t0.c / t1.c)) AS p0 \
+                 FROM dim AS t0, fact AS t1, tiny AS t2 \
+                 WHERE (t1.id = t0.id) AND false AND (t2.id = t0.id)) AS q",
+                "SELECT sum(length(q::text)) FROM (SELECT (t0.c / t1.c) AS p0 \
+                 FROM dim AS t0, fact AS t1 WHERE (t1.id = t0.id) AND false) AS q",
             ]
         );
     }
