@@ -21,7 +21,7 @@ injection points; CI runs 19 and 18.
 
 ## 2. Aggregates folded from shared states
 
-- [ ] 2.1 `bench/pg`: the family `aggfold`, its tables in `setup.sql`,
+- [x] 2.1 `bench/pg`: the family `aggfold`, which makes its own table,
       its cases and twins as the design's measurement plan lists them,
       and its entry in `bench/pg/README.md`; nothing of the node
       changes. Check: the family's queries run against a cluster of the
