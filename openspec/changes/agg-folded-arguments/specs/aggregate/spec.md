@@ -152,7 +152,8 @@ reads no row, but 0 for `count`.
   `count(3)`, with `GROUP BY`, over no rows, and under a `FILTER` that
   leaves no row of a group
 - **THEN** its rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/A sum of 1 and an average of a numeric`
 
 ### Requirement: DISTINCT folded
 `TessAgg` SHALL fold `sum(DISTINCT ...)`, `avg(DISTINCT ...)` and

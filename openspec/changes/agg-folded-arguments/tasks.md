@@ -61,7 +61,7 @@ injection points; CI runs 19 and 18.
       state of `avg(DISTINCT e)`, and `count` of `numeric` from
       `count(DISTINCT e)`; tests with a factor of 0, `NaN` and pairs past
       `hash_mem`. Check: the suites
-- [ ] 2.8 Aggregates of a constant, from `count(*)` with the
+- [x] 2.8 Aggregates of a constant, from `count(*)` with the
       aggregate's `FILTER`; tests over no rows and a `FILTER` that
       leaves none. Check: the suites
 

@@ -109,10 +109,10 @@ extreme_state(const AggValue *value)
 }
 
 /*
- * Whether a derived output's states are those it derives from: an extreme
+ * Whether a derived output's states are those it derives from: a count
+ * alone, count(DISTINCT e) or count(*) of a constant's rows; an extreme
  * of e alone; the words of sum(e), or the sum state of avg(e) of numeric,
- * with count(e); the sum state of avg(e) of an integer alone; or for count,
- * count(DISTINCT e) alone.
+ * with count(e); or the sum state of avg(e) of an integer alone.
  */
 static bool
 derived_sources(const TessAggState *state, const AggOutput *output)
@@ -121,11 +121,12 @@ derived_sources(const TessAggState *state, const AggOutput *output)
 	const AggValue *count = output->count_state >= 0 ?
 		&state->values[output->count_state] : NULL;
 
+	/* count(DISTINCT e) of a numeric, or count(*) of the constants' rows. */
+	if (count == source)
+		return source->kind == AGG_COUNT;
 	if (output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX)
 		return count == NULL &&
 			(source->kind == AGG_MIN || source->kind == AGG_MAX || extreme_state(source));
-	if (output->kind == AGG_DERIVED_COUNT && count == source)
-		return source->kind == AGG_COUNT;
 	if (count == NULL)
 		return integer_sum_state(source);
 	return (source->kind == AGG_SUM || numeric_sum_state(source)) && count->kind == AGG_COUNT;
@@ -1454,16 +1455,23 @@ result_row(TessAggState *state)
 				Datum		extreme = plain_value(state, output->source,
 												  &scan->tts_isnull[number]);
 
+				/* Of a constant: the count of rows, 0 none, the form at e = 0. */
+				if (value->kind == AGG_COUNT)
+					scan->tts_isnull[number] = value->total == 0;
 				scan->tts_values[number] =
 					agg_derive_extreme(output, extreme, value->kind == AGG_GENERIC,
-									   value->kind == AGG_GENERIC ? 0 : value->extreme,
+									   value->kind == AGG_GENERIC || value->kind == AGG_COUNT ?
+									   0 : value->extreme,
 									   &scan->tts_isnull[number]);
 				continue;
 			}
-			/* A sum state, of avg(e) of bigint or numeric, or the words of sum(e). */
+			/*
+			 * A sum state, of avg(e) of bigint or numeric, or the words of
+			 * sum(e); a constant's count of rows, no e.
+			 */
 			if (value->kind == AGG_GENERIC)
 				agg_fast_sum(value->generic, &sum);
-			else
+			else if (value->kind == AGG_SUM)
 				sum.sum = value->total;
 			if (output->count_state >= 0)
 				sum.count = state->values[output->count_state].total;

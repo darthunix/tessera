@@ -956,8 +956,11 @@ output_value_into(TessAggState *state, int number, int group, Datum *datum, bool
 			bool		numeric = source->kind == AGG_GENERIC;
 
 			group_value_into(state, output->source, group, &extreme, isnull);
+			/* Of a constant: the count of rows, 0 none, the form at e = 0. */
+			if (source->kind == AGG_COUNT)
+				*isnull = DatumGetInt64(extreme) == 0;
 			*datum = agg_derive_extreme(output, extreme, numeric,
-										numeric || *isnull ? 0 :
+										numeric || *isnull || source->kind == AGG_COUNT ? 0 :
 										source->wide ? DatumGetInt64(extreme) :
 										(int64) DatumGetInt32(extreme), isnull);
 			MemoryContextSwitchTo(old);
@@ -967,7 +970,7 @@ output_value_into(TessAggState *state, int number, int group, Datum *datum, bool
 		if (source->kind == AGG_GENERIC)
 			agg_sum_state_sum((const uint64 *) state->walked_payloads[group] + source->slot,
 							  &sum);
-		else
+		else if (source->kind == AGG_SUM)
 			sum.sum = (int64) state->state_words[output->source * AGG_GROUP_ROWS + group];
 		if (output->count_state >= 0)
 			sum.count = (int64) state->state_words[output->count_state * AGG_GROUP_ROWS + group];

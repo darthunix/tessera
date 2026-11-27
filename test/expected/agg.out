@@ -3979,6 +3979,62 @@ SELECT agg_error($$SELECT sum(DISTINCT i), sum(DISTINCT i + 1) FROM agg_fold$$);
  2 folded; on: 22003 integer out of range; off: 22003 integer out of range
 (1 row)
 
+-- spec: aggregate/A sum of 1 and an average of a numeric
+-- Aggregates of constants read no column: the count of the rows under
+-- their FILTER gives them, NULL without a row, 0 for count. PostgreSQL 19
+-- makes count(3) count(*) itself: the folded ones are counted without it.
+SELECT agg_folded($$SELECT sum(1), avg(2.50), max(7), min(1.5), sum(2::bigint), sum(2.25), avg(3::smallint) FROM agg_fold$$);
+    agg_folded     
+-------------------
+ TessAgg, 7 folded
+(1 row)
+
+SELECT agg_same($$SELECT sum(1), avg(2.50), max(7), count(3), min(1.5), sum(2::bigint), sum(2.25), avg(3::smallint),
+                  pg_typeof(sum(1)), pg_typeof(sum(2::bigint)), pg_typeof(avg(2.50)), pg_typeof(max(7)) FROM agg_fold$$);
+                                                agg_same                                                 
+---------------------------------------------------------------------------------------------------------
+ {"(3000,2.5000000000000000,7,3000,1.5,6000,6750.00,3.0000000000000000,bigint,numeric,numeric,integer)"}
+(1 row)
+
+SELECT agg_folded($$SELECT k, sum(1), avg(2.50), max(7), sum(1) FILTER (WHERE k = 3), max(7) FILTER (WHERE k = 3),
+                    count(*) FROM agg_fold GROUP BY k$$);
+    agg_folded     
+-------------------
+ TessAgg, 5 folded
+(1 row)
+
+SELECT agg_same($$SELECT k, sum(1), avg(2.50), max(7), count(3), sum(1) FILTER (WHERE k = 3), max(7) FILTER (WHERE k = 3),
+                  count(3) FILTER (WHERE k = 3), count(*) FROM agg_fold GROUP BY k$$);
+                                                                                                                                                       agg_same                                                                                                                                                       
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,428,2.5000000000000000,7,428,,,0,428)","(1,429,2.5000000000000000,7,429,,,0,429)","(2,429,2.5000000000000000,7,429,,,0,429)","(3,429,2.5000000000000000,7,429,429,7,429,429)","(4,429,2.5000000000000000,7,429,,,0,429)","(5,428,2.5000000000000000,7,428,,,0,428)","(6,428,2.5000000000000000,7,428,,,0,428)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(1), avg(2.50), max(7), count(3), min(1.5) FROM agg_fold WHERE k > 100$$);
+  agg_same   
+-------------
+ {"(,,,0,)"}
+(1 row)
+
+SELECT agg_same($$SELECT k, sum(1), avg(2.50) FROM agg_fold WHERE k > 100 GROUP BY k$$);
+ agg_same 
+----------
+ 
+(1 row)
+
+-- With DISTINCT a constant keeps its own state.
+SELECT agg_folded($$SELECT count(DISTINCT 3), sum(DISTINCT 1) FROM agg_fold$$);
+    agg_folded     
+-------------------
+ TessAgg, 0 folded
+(1 row)
+
+SELECT agg_same($$SELECT count(DISTINCT 3), sum(DISTINCT 1) FROM agg_fold$$);
+ agg_same  
+-----------
+ {"(1,1)"}
+(1 row)
+
 -- spec: aggregate/Past the range of each integer
 -- Each fails at the least or the greatest value of its e.
 SELECT agg_error($$SELECT sum(i), sum(i + 1) FROM agg_fold$$);
