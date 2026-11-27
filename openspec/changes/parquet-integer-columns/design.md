@@ -237,13 +237,15 @@ says.
     places stay as the first call made them;
   - single slots asked: slot 0, slot 63, slot 64 and the last slot of
     the partial word;
-  - words 0 and 2 asked: word 1 between them may be converted, the
-    last word's places are kept;
+  - words 0 and 2 asked: word 1 between them may be converted;
   - no slot asked: no place written, the mask of `NULL` slots 0.
 - `datum-arrow`: a column of days or times read with the first failing
   slot in the last word of the span, after words outside it hold
   values that would fail: the failure names that slot, and the slots
   asked before it give their values.
+- `datum-arrow`: masks longer than the column's words, of zeros past
+  them, asking nothing or a slot of the partial word, and an empty
+  column; a mask that asks past the column refused, nothing written.
 - `datum-arrow`: the property test of the dense families, its masks
   drawn so that some words ask no slot.
 - `tessera-parquet`: `tess_parquet_values` over two windows of
