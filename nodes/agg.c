@@ -99,6 +99,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	List	   *filters;
 	List	   *eqops;
 	List	   *keys;
+	List	   *states;
+	List	   *outputs;
 	TessPlanReader *reader;
 	int			groups;
 	int			groups_kb;
@@ -111,6 +113,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "TessAgg received a foreign plan");
 	reader = tess_plan_reader_create((List *) info.node_data, TESS_AGG_DATA,
 									 TESS_AGG_DATA_VERSION);
+	states = tess_plan_read_list(reader, "states");
+	outputs = tess_plan_read_int_list(reader, "outputs");
 	arguments = tess_plan_read_list(reader, "arguments");
 	more = tess_plan_read_list(reader, "more");
 	filters = tess_plan_read_list(reader, "filters");
@@ -134,12 +138,22 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		elog(ERROR, "TessAgg received a foreign plan");
 	state->nkeys = list_length(keys);
 	if (state->nkeys > TESS_TABLE_MAX_KEYS ||
-		list_length(arguments) + state->nkeys != list_length(cscan->custom_scan_tlist) ||
+		list_length(outputs) + state->nkeys != list_length(cscan->custom_scan_tlist) ||
+		list_length(states) != list_length(arguments) ||
 		(state->nkeys == 0 && arguments == NIL) ||
 		list_length(arguments) > AGG_MAX_GROUPED ||
 		list_length(filters) != list_length(arguments) ||
+		list_length(more) != list_length(arguments) ||
 		list_length(eqops) != state->nkeys)
 		elog(ERROR, "TessAgg received a foreign plan");
+	state->noutputs = list_length(outputs);
+	state->output_states = palloc_array(int, Max(state->noutputs, 1));
+	foreach_int(output, outputs)
+	{
+		if (output < 0 || output >= list_length(states))
+			elog(ERROR, "TessAgg received a foreign plan");
+		state->output_states[foreach_current_index(output)] = output;
+	}
 	state->child = ExecInitNode(child_plan, estate, eflags);
 	css->custom_ps = list_make1(state->child);
 	state->input = tess_input_create(estate->es_query_cxt, state->child);
@@ -204,16 +218,10 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			projection = bms_add_member(projection, column);
 		}
 	}
-	foreach_ptr(TargetEntry, entry, cscan->custom_scan_tlist)
+	foreach_node(Aggref, agg, states)
 	{
-		Aggref	   *agg;
-		AggValue   *value;
+		AggValue   *value = &state->values[index++];
 		TessTableKeyKind kind;
-
-		if (foreach_current_index(entry) < state->nkeys)
-			continue;
-		agg = castNode(Aggref, entry->expr);
-		value = &state->values[index++];
 
 		/* The partial values are the whole ones' types: nothing to convert. */
 		if (DO_AGGSPLIT_SKIPFINAL(agg->aggsplit) != state->partial)
@@ -283,10 +291,34 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			Node	   *argument = list_nth(arguments, index - 1);
 			List	   *vars = pull_var_clause(argument, 0);
 
-			value->computed = list_length(computed);
-			computed = lappend(computed,
-							   makeTargetEntry((Expr *) argument,
-											   value->computed + 1, NULL, false));
+			value->computed = -1;
+			/*
+			 * An argument equal to an earlier state's, with no volatile
+			 * function, its FILTER's among them, is that state's computed
+			 * column: its values are the same, computed once. A volatile one
+			 * is computed for each, as the core computes it for each, and an
+			 * argument followed by more has its own, which they follow; a
+			 * key's column is not shared, as its values may become numbers.
+			 */
+			if (list_nth(more, index - 1) == NIL && !contain_volatile_functions(argument))
+			{
+				foreach_node(TargetEntry, earlier, computed)
+				{
+					if (foreach_current_index(earlier) >= state->nkeys &&
+						equal(earlier->expr, argument))
+					{
+						value->computed = foreach_current_index(earlier);
+						break;
+					}
+				}
+			}
+			if (value->computed < 0)
+			{
+				value->computed = list_length(computed);
+				computed = lappend(computed,
+								   makeTargetEntry((Expr *) argument,
+												   value->computed + 1, NULL, false));
+			}
 			/* The other arguments of a generic aggregate follow the first. */
 			foreach_ptr(Node, other, (List *) list_nth(more, index - 1))
 			{
@@ -532,8 +564,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		css->ss.ps.qual == NULL && css->ss.ps.ps_ProjInfo == NULL)
 	{
 		state->direct = true;
-		state->agg_values = palloc0_array(Datum, Max(state->nvalues, 1) * AGG_GROUP_ROWS);
-		state->agg_isnull = palloc0_array(bool, Max(state->nvalues, 1) * AGG_GROUP_ROWS);
+		state->agg_values = palloc0_array(Datum, Max(state->noutputs, 1) * AGG_GROUP_ROWS);
+		state->agg_isnull = palloc0_array(bool, Max(state->noutputs, 1) * AGG_GROUP_ROWS);
 		state->groups_batch.abi_version = TESS_BATCH_ABI_VERSION;
 		state->groups_batch.struct_size = sizeof(TessBatch);
 		state->groups_batch.values_stored = true;
@@ -893,36 +925,36 @@ drain(TessAggState *state)
 		flush_gathered(state, &state->values[index]);
 }
 
-/* The one result row: the aggregates in the scan slot. */
+/* The one result row: the aggregates in the scan slot, each its state's value. */
 static TupleTableSlot *
 result_row(TessAggState *state)
 {
 	TupleTableSlot *scan = state->css.ss.ss_ScanTupleSlot;
 
 	ExecClearTuple(scan);
-	for (int index = 0; index < state->nvalues; index++)
+	for (int output = 0; output < state->noutputs; output++)
 	{
-		AggValue   *value = &state->values[index];
+		AggValue   *value = &state->values[state->output_states[output]];
 
-		scan->tts_isnull[index] = !value->has_value;
+		scan->tts_isnull[output] = !value->has_value;
 		switch (value->kind)
 		{
 			case AGG_COUNT:
-				scan->tts_values[index] = Int64GetDatum(value->total);
-				scan->tts_isnull[index] = false;
+				scan->tts_values[output] = Int64GetDatum(value->total);
+				scan->tts_isnull[output] = false;
 				break;
 			case AGG_SUM:
-				scan->tts_values[index] = Int64GetDatum(value->total);
+				scan->tts_values[output] = Int64GetDatum(value->total);
 				break;
 			case AGG_MIN:
 			case AGG_MAX:
-				scan->tts_values[index] = value->wide ?
+				scan->tts_values[output] = value->wide ?
 					Int64GetDatum(value->extreme) :
 					Int32GetDatum((int32) value->extreme);
 				break;
 			case AGG_GENERIC:
-				scan->tts_values[index] = agg_generic_value(value->generic,
-														&scan->tts_isnull[index]);
+				scan->tts_values[output] = agg_generic_value(value->generic,
+														 &scan->tts_isnull[output]);
 				break;
 		}
 	}
@@ -941,7 +973,7 @@ groups_get_column(TessBatch *batch, int column, const TessRowMask *rows,
 {
 	TessAggState *state = (TessAggState *) batch->private_data;
 
-	if (column < 0 || column >= state->nkeys + state->nvalues)
+	if (column < 0 || column >= state->nkeys + state->noutputs)
 		elog(ERROR, "TessAgg has no column %d", column);
 	if (column < state->nkeys)
 	{

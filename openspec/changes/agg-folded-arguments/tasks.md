@@ -26,7 +26,7 @@ injection points; CI runs 19 and 18.
       and its entry in `bench/pg/README.md`; nothing of the node
       changes. Check: the family's queries run against a cluster of the
       base, their plans read
-- [ ] 2.2 The outputs apart from the states, with no change of
+- [x] 2.2 The outputs apart from the states, with no change of
       behavior: the plan data carries the states and an output for each
       aggregate of the scan tuple, every output its own state; equal
       arguments with no volatile function share a computed column, and

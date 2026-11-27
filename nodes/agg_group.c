@@ -850,7 +850,7 @@ agg_group_drain(TessAggState *state)
 }
 
 /*
- * Aggregate index of a group into the scan slot: a count as it is, a sum
+ * The value of state index of a group: a count as it is, a sum
  * or an extreme NULL without the flag of a value, an int4 extreme as an
  * int4 Datum.
  */
@@ -908,13 +908,17 @@ group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *
 	}
 }
 
+/* Every aggregate of a group into the scan slot, after the keys: each its state's value. */
 static void
-group_value(TessAggState *state, int index, int group, TupleTableSlot *scan)
+group_values(TessAggState *state, int group, TupleTableSlot *scan)
 {
-	int			attribute = state->nkeys + index;
+	for (int output = 0; output < state->noutputs; output++)
+	{
+		int			attribute = state->nkeys + output;
 
-	group_value_into(state, index, group, &scan->tts_values[attribute],
-					 &scan->tts_isnull[attribute]);
+		group_value_into(state, state->output_states[output], group,
+						 &scan->tts_values[attribute], &scan->tts_isnull[attribute]);
+	}
 }
 
 /*
@@ -1110,8 +1114,7 @@ setop_groups(TessAggState *state)
 				scan->tts_values[key] = state->key_values[key][group];
 				scan->tts_isnull[key] = state->key_isnull[key][group];
 			}
-			for (int index = 0; index < state->nvalues; index++)
-				group_value(state, index, group, scan);
+			group_values(state, group, scan);
 			ExecStoreVirtualTuple(scan);
 			ResetExprContext(state->css.ss.ps.ps_ExprContext);
 			state->css.ss.ps.ps_ExprContext->ecxt_scantuple = scan;
@@ -1156,11 +1159,11 @@ agg_next_groups(TessAggState *state)
 
 		if (count == 0)
 			return NULL;
-		for (int index = 0; index < state->nvalues; index++)
+		for (int output = 0; output < state->noutputs; output++)
 			for (int group = 0; group < count; group++)
-				group_value_into(state, index, group,
-								 &state->agg_values[index * AGG_GROUP_ROWS + group],
-								 &state->agg_isnull[index * AGG_GROUP_ROWS + group]);
+				group_value_into(state, state->output_states[output], group,
+								 &state->agg_values[output * AGG_GROUP_ROWS + group],
+								 &state->agg_isnull[output * AGG_GROUP_ROWS + group]);
 		state->groups_bits[0] = count == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << count) - 1;
 		state->groups_batch.rows.nrows = count;
 		state->groups_batch.rows.bits = state->groups_bits;
@@ -1186,8 +1189,7 @@ agg_next_groups(TessAggState *state)
 				scan->tts_values[key] = state->key_values[key][group];
 				scan->tts_isnull[key] = state->key_isnull[key][group];
 			}
-			for (int index = 0; index < state->nvalues; index++)
-				group_value(state, index, group, scan);
+			group_values(state, group, scan);
 			ExecStoreVirtualTuple(scan);
 			ResetExprContext(econtext);
 			econtext->ecxt_scantuple = scan;

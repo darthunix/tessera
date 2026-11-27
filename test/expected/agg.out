@@ -102,6 +102,36 @@ SELECT agg_same($$SELECT count(*) + 1 AS above, count(*)::int AS narrow, count(*
  {"(301,300,t)"}
 (1 row)
 
+-- Equal arguments of two aggregates are one computed column, computed once;
+-- a volatile one is computed for each, as the core computes it: two calls of
+-- nextval a row.
+SELECT agg_same($$SELECT count(a), sum(a), max(a + 1), min(a + 1) FROM agg_t$$);
+       agg_same        
+-----------------------
+ {"(258,38829,301,2)"}
+(1 row)
+
+CREATE SEQUENCE agg_seq;
+EXPLAIN (COSTS OFF) SELECT sum(nextval('agg_seq')), max(nextval('agg_seq')) FROM agg_t;
+                QUERY PLAN                 
+-------------------------------------------
+ Custom Scan (TessAgg)
+   ->  Custom Scan (TessHeapScan) on agg_t
+(2 rows)
+
+SELECT sum(nextval('agg_seq')) > 0 AS summed, max(nextval('agg_seq')) > 0 AS greatest FROM agg_t;
+ summed | greatest 
+--------+----------
+ t      | t
+(1 row)
+
+SELECT currval('agg_seq') AS calls;
+ calls 
+-------
+   600
+(1 row)
+
+DROP SEQUENCE agg_seq;
 -- HAVING is the plan's qual over the aggregates: a true and a false one.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 100;
                    QUERY PLAN                    

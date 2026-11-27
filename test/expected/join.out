@@ -211,7 +211,7 @@ SELECT join_explain($$SELECT count(jf.m), sum(jf.m), sum(jdup.w) FROM jf JOIN jd
    Input Batches: 6
    Input Rows: 357
    Kernel Calls: 18
-   Computed Datums: 1071
+   Computed Datums: 714
    ->  Custom Scan (TessHashJoin) (actual rows=357.00 loops=1)
          Hash Cond: (jf.fk = jdup.k)
          Buckets: 1024
@@ -821,7 +821,7 @@ SELECT join_explain($$SELECT count(*), count(jdup.w), sum(jdup.w) FROM jf LEFT J
    Input Rows: 1228
    Gathered Rows: 10
    Kernel Calls: 108
-   Computed Datums: 2456
+   Computed Datums: 1228
    ->  Custom Scan (TessHashJoin) (actual rows=1228.00 loops=1)
          Join Type: Left
          Hash Cond: (jf.fk = jdup.k)

@@ -48,6 +48,15 @@ SELECT agg_same($$SELECT count(*) FROM agg_t WHERE upper(c) <> 'R5'$$);
 SELECT agg_same($$SELECT count(*), count(*) FROM agg_t WHERE a > 290$$);
 EXPLAIN (COSTS OFF, VERBOSE) SELECT count(*) + 1 AS above, count(*)::int AS narrow FROM agg_t;
 SELECT agg_same($$SELECT count(*) + 1 AS above, count(*)::int AS narrow, count(*) > 100 AS many FROM agg_t$$);
+-- Equal arguments of two aggregates are one computed column, computed once;
+-- a volatile one is computed for each, as the core computes it: two calls of
+-- nextval a row.
+SELECT agg_same($$SELECT count(a), sum(a), max(a + 1), min(a + 1) FROM agg_t$$);
+CREATE SEQUENCE agg_seq;
+EXPLAIN (COSTS OFF) SELECT sum(nextval('agg_seq')), max(nextval('agg_seq')) FROM agg_t;
+SELECT sum(nextval('agg_seq')) > 0 AS summed, max(nextval('agg_seq')) > 0 AS greatest FROM agg_t;
+SELECT currval('agg_seq') AS calls;
+DROP SEQUENCE agg_seq;
 -- HAVING is the plan's qual over the aggregates: a true and a false one.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 100;
 SELECT agg_same($$SELECT count(*) FROM agg_t WHERE a > 100 HAVING count(*) > 100$$);
