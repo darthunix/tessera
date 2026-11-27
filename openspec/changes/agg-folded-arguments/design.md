@@ -427,7 +427,8 @@ says before the maintainer is asked. The reports are kept under
 - `test/sql/agg.sql`, `test/sql/parallel.sql`, `test/sql/table.sql` and
   their expected output; `crates/tessera-kernels/src/accumulate.rs`,
   `crates/tessera-capi/tests/table.rs`.
-- `bench/pg/aggfold.sql`, `bench/pg/setup.sql`, `bench/pg/README.md`.
+- `bench/pg/aggfold.sql`, which makes its own table, and
+  `bench/pg/README.md`.
 - `docs/limitations.md`, `docs/nodes.md`; at the close
   `openspec/specs/aggregate/design.md` and
   `openspec/specs/hash-table/design.md`.

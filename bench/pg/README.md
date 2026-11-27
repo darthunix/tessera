@@ -221,6 +221,19 @@ query down, and where it can, does it speed one up.
   `bench_clock` (2 M rows), a grouping by a time and by a money, `DISTINCT`
   of the time, a join on it with the 1440 minutes of `bench_minutes`, a
   filter by both and a sort by the money. A ratio below one is the win.
+- **aggfold** (`aggfold.sql`): aggregates of one expression under
+  constants, which `TessAgg` folds into states of the expression it
+  shares, over the family's own table `bench_fold` of 2 M rows of a
+  smallint, an integer, a bigint and a numeric(12,2), each case
+  (`fold_*`) beside a twin (`twin_*`) that keeps the states the fold
+  keeps and derives nothing: two sums and ten of a column under
+  constants, of each type, every kind of aggregate over one column, ten
+  sums of `abs(i) + k`; ten sums with 37 groups and with a million, of
+  two rows each, the outer query reading every sum, and spilled past a
+  `work_mem` of 4 MB; `DISTINCT` with 37 groups; folded and unfolded
+  aggregates together; and guards that fold nothing (`guard_*`): a form
+  alone, `sum`, `avg` and `count` of a column alone, forms of double
+  precision and a parallel plan. A ratio below one is the win.
 - **anyagg** (`anyagg.sql`): aggregates that `TessAgg` computes through
   the core's transition and final functions over the batches, or folds
   itself: without `GROUP BY`, `max` of text, `sum` and `avg` of int8,
