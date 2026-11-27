@@ -7,6 +7,15 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-27, integers of a window converted for the rows asked,
+  `parquet-integer-columns`](2026-11-27-parquet-integer-columns/README.md):
+  ClickBench's Q3, Q4, Q7 and Q28 over `hits.parquet` at 0 workers, Q3
+  with Tessera off as a guard and Q1 off as the control, the base and
+  the end in turns, against `119e8c93`, cycles deciding, pg_duckdb's
+  beside them, with times and profiles of Q3; Q3 20 per cent fewer
+  cycles, Q4 18, Q7 35 to 36, Q28 0.2 to 1.2, the control within 0.6;
+  Q3 with Tessera off unsettled by the plan's spread, its instructions
+  unchanged.
 - [2026-11-27, the Parquet node's batch arrays kept for the scan,
   `parquet-batch-arrays`](2026-11-27-parquet-batch-arrays/README.md):
   ClickBench's Q1, Q3, Q7 and Q28 over `hits.parquet` at 0 workers and
