@@ -113,3 +113,7 @@ by its count of files and owned by the module for the backend's life.
 - **More types, such as decimals into `numeric`.** `datum-arrow`'s
   plans, the mapping of columns and the making of values; not the
   clauses already checked.
+- **Another way the node keeps a batch's values.** Such as values
+  given from the window's arrays without a copy, or arrays kept in
+  another way: the node's batch, its asks and what it clears at each
+  batch; not the reader, the windows, the clauses or the wrapper.

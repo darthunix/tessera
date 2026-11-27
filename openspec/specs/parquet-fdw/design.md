@@ -520,9 +520,25 @@ What an earlier ask made stays, by what `datum-arrow`'s read promises:
 for a plain column of integers, floating-point numbers, days, times or
 booleans it may write the place of a row not asked, but only with that
 row's own value where the value converts; for strings, bytes and
-dictionaries it writes the places of the rows asked alone. The arrays
-of a batch are zeroed when the batch is made, since the batch's
-contract wants every row below its count written.
+dictionaries it writes the places of the rows asked alone.
+
+The arrays a batch gives are the scan's, not the batch's. For each
+column the plan reads, by the scan's number of the column, the node
+keeps an array of 64 values, one of 64 flags and a view of the bytes
+form, allocated zeroed in the query's memory at the column's first
+ask, in the form asked. Each batch, and a rescan, clears each column's
+rows made and each view's dictionary, and writes nothing else. The rows
+a batch does not make thus keep an earlier batch's values, which the
+batch's contract allows: every row below the count is written memory,
+by the first zeroing, and holds a value of no meaning where it was not
+asked; an asked `NULL` row of the bytes form gets a place, a length and
+an index of 0. Arrays made and zeroed at each batch, an entry for each
+attribute of the table, cost a query that reads no column half its
+cycles: ClickBench's `COUNT(*)` over its 105 columns. Under assertions
+the node wipes the values and the bytes' places at each batch, as
+PostgreSQL wipes freed memory, so that a consumer that reads a column
+kept past its batch reads the wipe where the next batch has not made
+the row again.
 
 ### Errors and panics
 
@@ -833,12 +849,14 @@ of the memory context that owns it, so that an error or a cancel frees
 it too. A scan keeps three contexts, siblings so that a reset of one
 does not delete the others: one for the file open and its columns
 mapped, one for the readers of the group, one for a window's values.
-The node keeps a fourth for a batch's values, arenas and references,
-reset at the next batch, and a fifth for the values of the clauses'
-sides that are known only at execution, reset at each rescan; it frees
-the clauses' tests with the file's context, since a test is made for a
-file. The cache of footers is the
-one exception, bounded by its count of files.
+The node keeps a fourth for a batch's arenas of strings, its
+references to windows and the scratch of its checks under assertions,
+reset at the next batch and at a rescan; a batch's arrays are the
+scan's, in the query's memory. A fifth holds the values of the clauses'
+sides that are known only at execution, reset at each rescan. The node
+frees the clauses' tests with the file's context, since a test is made
+for a file. The cache of footers is the one exception, bounded by its
+count of files.
 
 The node checks for a cancel between windows and between the calls
 that read a window; the wrapper's rows check it between windows. The
@@ -906,7 +924,11 @@ place in the code where a test module can act.
   rows and batches against the same queries over heap tables of the
   same rows, the clauses checked and left, groups skipped and not,
   files replaced and damaged, parallel plans and their rescans,
-  estimates, `ANALYZE` and `EXPLAIN`. The test module writes every file
+  estimates, `ANALYZE` and `EXPLAIN`. The module's consumers of a batch
+  ask the batches before the one they check, as values and in the
+  bytes form, so that a row a batch does not make again shows, and a
+  table whose first batch is short reads its columns into full batches
+  after it. The test module writes every file
   the suite reads, so that no binary file is kept in the tree, and
   rewrites footers as older writers wrote them.
 - `test/sql/parquet_cancel.sql`: a cancel within a group, and a file
