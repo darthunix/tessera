@@ -41,7 +41,8 @@ those the core gives, with and without `GROUP BY` and with groups past
 - **WHEN** a query sums a `smallint` and the `smallint` plus each
   integer from 1 to 89, 90 sums
 - **THEN** its plan is `TessAgg`'s, and its row is the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/Ninety sums of one column`
 
 #### Scenario: Every aggregate, type and step
 - **WHEN** `sum`, `avg`, `count`, `min` and `max` of a `smallint`, an

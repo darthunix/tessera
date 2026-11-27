@@ -209,6 +209,15 @@ SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), sum(s), avg(f8), 
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), avg(f8) FROM parallel_fast$$);
 RESET parallel_leader_participation;
+-- Aggregates of one expression under constants, which a serial plan folds
+-- into shared states: the participants and the final aggregation keep a
+-- state for each.
+SELECT line FROM parallel_explain($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast$$) AS line
+WHERE line ~ '(TessAgg|Partial Mode|Folded)';
+SELECT parallel_same($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast$$);
+SELECT line FROM parallel_explain($$SELECT id % 7, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast GROUP BY id % 7$$) AS line
+WHERE line ~ '(TessAgg|Partial Mode|Folded)';
+SELECT parallel_same($$SELECT id % 7, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast GROUP BY id % 7$$);
 -- With the core's Gather its Finalize Aggregate reads the core's own
 -- transition values; numeric and bigint sums then go through the core's
 -- functions, serialized.

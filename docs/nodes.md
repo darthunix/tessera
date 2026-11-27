@@ -1669,7 +1669,9 @@ shows the totals.
 
 `EXPLAIN` shows the grouping expressions as the core's `Group Key`,
 `HAVING` as the core's `Filter` and `Partial Mode: Partial` under a
-`Gather`; with `ANALYZE` and `GROUP BY`, the table's `Memory Usage`, the
+`Gather`; with `VERBOSE`, `Folded Aggregates`, the aggregates it derives
+from the states it keeps for several aggregates of one expression, when
+there are any; with `ANALYZE` and `GROUP BY`, the table's `Memory Usage`, the
 most its tables took at once in one process (their chunks and indexes,
 both indexes while one replaces the other, the sets of `DISTINCT`
 aggregates from their first index on, the chunks a reload merges, and

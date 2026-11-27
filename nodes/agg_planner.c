@@ -12,6 +12,7 @@
 #include "optimizer/cost.h"
 #include "optimizer/optimizer.h"
 #include "optimizer/pathnode.h"
+#include "optimizer/plancat.h"
 #include "optimizer/clauses.h"
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
@@ -624,6 +625,475 @@ aggregate_templates(const List *pathlist, AggStrategy strategy, AggSplit aggspli
  */
 
 /*
+ * The aggregates a node keeps and the aggregates of its scan tuple: each
+ * an output, the value of a state or derived from the states of an
+ * expression it folds (fold_aggregates), with the derivations' states and
+ * constants as the plan data carries them (AGG_DERIVED_*).
+ */
+typedef struct AggFold
+{
+	List	   *states;
+	List	   *outputs;
+	List	   *derived;
+	List	   *constants;
+	int			nfolded;
+} AggFold;
+
+#ifdef HAVE_INT128
+
+/*
+ * A folded form of an argument, a·e + b over an expression e of the
+ * input: the steps from e out, each the core's own function of an
+ * integer with a non-NULL constant on its other side, and the range of
+ * the form's values over every e of its type, where no step failed;
+ * safe when no step can fail on that range.
+ */
+typedef struct FoldForm
+{
+	Node	   *e;
+	int128		a;
+	int128		b;
+	int128		low;
+	int128		high;
+	bool		safe;
+	bool		steps;
+} FoldForm;
+
+typedef enum FoldStep
+{
+	FOLD_NONE,
+	FOLD_ADD,
+	FOLD_SUB,
+	FOLD_MUL,
+	FOLD_NEGATE,
+	FOLD_WIDEN
+} FoldStep;
+
+/* The step a function is, by its identity: an extension's is none. */
+static FoldStep
+fold_step(Oid function)
+{
+	switch (function)
+	{
+		case F_INT2PL:
+		case F_INT4PL:
+		case F_INT8PL:
+		case F_INT24PL:
+		case F_INT42PL:
+		case F_INT28PL:
+		case F_INT82PL:
+		case F_INT48PL:
+		case F_INT84PL:
+			return FOLD_ADD;
+		case F_INT2MI:
+		case F_INT4MI:
+		case F_INT8MI:
+		case F_INT24MI:
+		case F_INT42MI:
+		case F_INT28MI:
+		case F_INT82MI:
+		case F_INT48MI:
+		case F_INT84MI:
+			return FOLD_SUB;
+		case F_INT2MUL:
+		case F_INT4MUL:
+		case F_INT8MUL:
+		case F_INT24MUL:
+		case F_INT42MUL:
+		case F_INT28MUL:
+		case F_INT82MUL:
+		case F_INT48MUL:
+		case F_INT84MUL:
+			return FOLD_MUL;
+		case F_INT2UM:
+		case F_INT4UM:
+		case F_INT8UM:
+			return FOLD_NEGATE;
+		case F_INT4_INT2:
+		case F_INT8_INT2:
+		case F_INT8_INT4:
+			return FOLD_WIDEN;
+		default:
+			return FOLD_NONE;
+	}
+}
+
+/* An integer type's range; false for another type. */
+static bool
+integer_range(Oid type, int128 *low, int128 *high)
+{
+	switch (type)
+	{
+		case INT2OID:
+			*low = PG_INT16_MIN;
+			*high = PG_INT16_MAX;
+			return true;
+		case INT4OID:
+			*low = PG_INT32_MIN;
+			*high = PG_INT32_MAX;
+			return true;
+		case INT8OID:
+			*low = PG_INT64_MIN;
+			*high = PG_INT64_MAX;
+			return true;
+		default:
+			return false;
+	}
+}
+
+/* A step's constant: a non-NULL Const of an integer type. */
+static bool
+integer_constant(Node *node, int128 *value)
+{
+	Const	   *constant = (Const *) node;
+
+	if (!IsA(node, Const) || constant->constisnull)
+		return false;
+	switch (constant->consttype)
+	{
+		case INT2OID:
+			*value = DatumGetInt16(constant->constvalue);
+			return true;
+		case INT4OID:
+			*value = DatumGetInt32(constant->constvalue);
+			return true;
+		case INT8OID:
+			*value = DatumGetInt64(constant->constvalue);
+			return true;
+		default:
+			return false;
+	}
+}
+
+/*
+ * The folded form of an expression; false where it is none: e, where the
+ * steps stop, of an integer type, no constant and with no volatile
+ * function, and a and b within 128 bits. Each step is monotone in e and
+ * fails only past its type's range, which the range of the next step's
+ * values leaves out.
+ */
+static bool
+fold_form(Node *node, FoldForm *form)
+{
+	FoldStep	step = FOLD_NONE;
+	List	   *args = NIL;
+	Node	   *inner = NULL;
+	int128		constant = 0;
+	bool		constant_first = false;
+	int128		low;
+	int128		high;
+	int128		type_low;
+	int128		type_high;
+
+	if (IsA(node, OpExpr))
+	{
+		OpExpr	   *op = (OpExpr *) node;
+
+		step = fold_step(OidIsValid(op->opfuncid) ? op->opfuncid : get_opcode(op->opno));
+		args = op->args;
+	}
+	else if (IsA(node, FuncExpr))
+	{
+		step = fold_step(((FuncExpr *) node)->funcid);
+		args = ((FuncExpr *) node)->args;
+	}
+	if (step == FOLD_NEGATE || step == FOLD_WIDEN)
+		inner = linitial(args);
+	else if (step != FOLD_NONE && integer_constant(linitial(args), &constant))
+	{
+		inner = lsecond(args);
+		constant_first = true;
+	}
+	else if (step != FOLD_NONE && integer_constant(lsecond(args), &constant))
+		inner = linitial(args);
+	/* e: an expression no step of a constant makes. */
+	if (inner == NULL)
+	{
+		if (IsA(node, Const) || contain_volatile_functions(node) ||
+			!integer_range(exprType(node), &form->low, &form->high))
+			return false;
+		form->e = node;
+		form->a = 1;
+		form->b = 0;
+		form->safe = true;
+		form->steps = false;
+		return true;
+	}
+	if (!fold_form(inner, form))
+		return false;
+	form->steps = true;
+	low = form->low;
+	high = form->high;
+	switch (step)
+	{
+		case FOLD_ADD:
+			if (__builtin_add_overflow(form->b, constant, &form->b))
+				return false;
+			low += constant;
+			high += constant;
+			break;
+		case FOLD_SUB:
+			if (constant_first)
+			{
+				form->a = -form->a;
+				if (__builtin_sub_overflow(constant, form->b, &form->b))
+					return false;
+				low = constant - form->high;
+				high = constant - form->low;
+			}
+			else
+			{
+				if (__builtin_sub_overflow(form->b, constant, &form->b))
+					return false;
+				low -= constant;
+				high -= constant;
+			}
+			break;
+		case FOLD_MUL:
+			if (__builtin_mul_overflow(form->a, constant, &form->a) ||
+				__builtin_mul_overflow(form->b, constant, &form->b))
+				return false;
+			low = (constant >= 0 ? form->low : form->high) * constant;
+			high = (constant >= 0 ? form->high : form->low) * constant;
+			break;
+		case FOLD_NEGATE:
+			form->a = -form->a;
+			form->b = -form->b;
+			low = -form->high;
+			high = -form->low;
+			break;
+		case FOLD_WIDEN:
+		case FOLD_NONE:
+			break;
+	}
+	/* The values past the step's type fail; the rest go on. */
+	if (!integer_range(exprType(node), &type_low, &type_high))
+		return false;
+	if (low < type_low || high > type_high)
+		form->safe = false;
+	form->low = Max(low, type_low);
+	form->high = Min(high, type_high);
+	return form->low <= form->high;
+}
+
+/*
+ * Whether an aggregate of the scan tuple may fold, and its form: sum, avg
+ * and count of one argument, a plain call without DISTINCT, its FILTER
+ * without a volatile function, its argument a form of a smallint or an
+ * integer e whose steps cannot fail.
+ */
+static bool
+fold_candidate(const Aggref *agg, FoldForm *form)
+{
+	switch (agg->aggfnoid)
+	{
+		case F_SUM_INT2:
+		case F_SUM_INT4:
+		case F_SUM_INT8:
+		case F_AVG_INT2:
+		case F_AVG_INT4:
+		case F_AVG_INT8:
+		case F_COUNT_ANY:
+			break;
+		default:
+			return false;
+	}
+	if (agg->aggsplit != AGGSPLIT_SIMPLE || agg->aggdistinct != NIL ||
+		list_length(agg->args) != 1 || contain_volatile_functions((Node *) agg->aggfilter) ||
+		!fold_form(aggregate_argument(agg), form))
+		return false;
+	return (exprType(form->e) == INT2OID || exprType(form->e) == INT4OID) && form->safe;
+}
+
+/* A state the planner makes of e: sum of integer or count("any"), int8 both. */
+static Aggref *
+fold_state(Oid aggfnoid, Node *argument, Expr *filter)
+{
+	Aggref	   *agg = makeNode(Aggref);
+
+	agg->aggfnoid = aggfnoid;
+	agg->aggtype = INT8OID;
+	agg->aggtranstype = INT8OID;
+	agg->aggargtypes = list_make1_oid(exprType(argument));
+	agg->args = list_make1(makeTargetEntry((Expr *) copyObject(argument), 1, NULL, false));
+	agg->aggfilter = copyObject(filter);
+	agg->aggkind = AGGKIND_NORMAL;
+	agg->aggsplit = AGGSPLIT_SIMPLE;
+	agg->aggno = -1;
+	agg->aggtransno = -1;
+	agg->location = -1;
+	return agg;
+}
+
+/* A derivation's constant: an int8, or past one a numeric. */
+static Const *
+fold_constant(int128 value)
+{
+	if (value >= PG_INT64_MIN && value <= PG_INT64_MAX)
+		return makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
+						 Int64GetDatum((int64) value), false, true);
+	return makeConst(NUMERICOID, -1, InvalidOid, -1, agg_int128_numeric(value, 0),
+					 false, false);
+}
+
+#endif							/* HAVE_INT128 */
+
+/*
+ * The states and outputs of the aggregates of a scan tuple after its keys.
+ * Where fold, the aggregates of one e and one FILTER, at least two and
+ * one of a form other than e itself, keep two states of words, sum(e)
+ * and count(e), e cast to integer for a smallint, of the rows they read:
+ * below 2^32 rows the sum of e holds every sum their forms' own sums
+ * hold. Each of them is derived from those, sum(e) and count(e) among
+ * them. Every other aggregate is a state of its own, as without fold.
+ */
+static void
+fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
+{
+	int			naggs = list_length(tlist) - nkeys;
+	int		   *group = palloc_array(int, Max(naggs, 1));
+	int		   *members = palloc0_array(int, Max(naggs, 1));
+	bool	   *steps = palloc0_array(bool, Max(naggs, 1));
+	int		   *sum_state = palloc_array(int, Max(naggs, 1));
+#ifdef HAVE_INT128
+	FoldForm   *forms = palloc0_array(FoldForm, Max(naggs, 1));
+#endif
+
+	*result = (AggFold)
+	{
+		0
+	};
+	for (int i = 0; i < naggs; i++)
+	{
+		Aggref	   *agg = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
+
+		group[i] = -1;
+		sum_state[i] = -1;
+#ifdef HAVE_INT128
+		if (!fold || !IsA(agg, Aggref) || !fold_candidate(agg, &forms[i]))
+			continue;
+		group[i] = i;
+		for (int j = 0; j < i; j++)
+		{
+			Aggref	   *other = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + j)->expr;
+
+			if (group[j] == j && equal(forms[j].e, forms[i].e) &&
+				equal(other->aggfilter, agg->aggfilter))
+			{
+				group[i] = j;
+				break;
+			}
+		}
+		members[group[i]]++;
+		steps[group[i]] |= forms[i].steps;
+#endif
+	}
+	for (int i = 0; i < naggs; i++)
+	{
+		Expr	   *expr = list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
+		int			j = group[i];
+
+		if (j < 0 || members[j] < 2 || !steps[j])
+		{
+			result->outputs = lappend_int(result->outputs, list_length(result->states));
+			result->states = lappend(result->states, copyObject(expr));
+			continue;
+		}
+#ifdef HAVE_INT128
+		if (sum_state[j] < 0)
+		{
+			Node	   *e = forms[j].e;
+			Expr	   *filter = ((Aggref *) expr)->aggfilter;
+
+			if (exprType(e) == INT2OID)
+				e = (Node *) makeFuncExpr(F_INT4_INT2, INT4OID, list_make1(copyObject(e)),
+										  InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST);
+			sum_state[j] = list_length(result->states);
+			result->states = lappend(result->states, fold_state(F_SUM_INT4, e, filter));
+			result->states = lappend(result->states, fold_state(F_COUNT_ANY, e, filter));
+		}
+		result->outputs = lappend_int(result->outputs,
+									  -1 - list_length(result->derived) / AGG_DERIVED_STATES);
+		result->derived = lappend_int(result->derived, sum_state[j]);
+		result->derived = lappend_int(result->derived, sum_state[j] + 1);
+		result->constants = lappend(result->constants, fold_constant(forms[i].a));
+		result->constants = lappend(result->constants, fold_constant(forms[i].b));
+		result->nfolded++;
+#endif
+	}
+}
+
+/* The keys of a scan tuple and the states of its fold, as a target list. */
+static List *
+fold_target_list(List *tlist, int nkeys, const AggFold *fold)
+{
+	List	   *result = list_copy_head(tlist, nkeys);
+
+	foreach_ptr(Expr, state, fold->states)
+		result = lappend(result, makeTargetEntry(state, list_length(result) + 1, NULL, false));
+	return result;
+}
+
+/*
+ * The costs of a node's aggregates where it folds some, in place of the
+ * core's costs of the query's (get_agg_clause_costs), which the folded
+ * aggregates' own arguments make: each state's transition function and
+ * the evaluation of its argument and FILTER a row, its final function a
+ * group, the space of its transition value as the core counts it, and a
+ * derivation of each folded aggregate a group.
+ */
+static void
+aggregate_costs(PlannerInfo *root, AggSplit split, List *state_tlist, int nfolded,
+				AggClauseCosts *costs)
+{
+	MemSet(costs, 0, sizeof(*costs));
+	if (nfolded == 0)
+	{
+		if (root->parse->hasAggs)
+			get_agg_clause_costs(root, split, costs);
+		return;
+	}
+	foreach_node(TargetEntry, entry, state_tlist)
+	{
+		Aggref	   *agg = (Aggref *) entry->expr;
+		HeapTuple	tuple;
+		Form_pg_aggregate form;
+		QualCost	eval;
+		int16		len;
+		bool		byval;
+
+		if (!IsA(agg, Aggref))
+			continue;
+		tuple = SearchSysCache1(AGGFNOID, ObjectIdGetDatum(agg->aggfnoid));
+		if (!HeapTupleIsValid(tuple))
+			elog(ERROR, "cache lookup failed for aggregate %u", agg->aggfnoid);
+		form = (Form_pg_aggregate) GETSTRUCT(tuple);
+		add_function_cost(root, form->aggtransfn, NULL, &costs->transCost);
+		if (OidIsValid(form->aggfinalfn))
+			add_function_cost(root, form->aggfinalfn, NULL, &costs->finalCost);
+		get_typlenbyval(agg->aggtranstype, &len, &byval);
+		if (!byval)
+			costs->transitionSpace +=
+				MAXALIGN(form->aggtransspace > 0 ? form->aggtransspace :
+						 get_typavgwidth(agg->aggtranstype, -1)) + 2 * sizeof(void *);
+		else if (agg->aggtranstype == INTERNALOID)
+			costs->transitionSpace += form->aggtransspace > 0 ? form->aggtransspace :
+				ALLOCSET_DEFAULT_INITSIZE;
+		ReleaseSysCache(tuple);
+		cost_qual_eval_node(&eval, (Node *) agg->args, root);
+		costs->transCost.startup += eval.startup;
+		costs->transCost.per_tuple += eval.per_tuple;
+		if (agg->aggfilter != NULL)
+		{
+			cost_qual_eval_node(&eval, (Node *) agg->aggfilter, root);
+			costs->transCost.startup += eval.startup;
+			costs->transCost.per_tuple += eval.per_tuple;
+		}
+	}
+	costs->finalCost.per_tuple += nfolded * cpu_operator_cost;
+}
+
+/*
  * The cost a row of the aggregates' arguments that the kernels do not
  * compute, none when the aggregates combine partial values: the node's
  * projection evaluates them row by row, as the core's aggregate does.
@@ -654,7 +1124,8 @@ rowwise_argument_cost(PlannerInfo *root, List *tlist, AggSplit split)
 
 static void
 group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
-		   List *tlist, AggSplit split, const PairsEstimate *pairs, Path *result)
+		   List *tlist, int nfolded, AggSplit split, const PairsEstimate *pairs,
+		   Path *result)
 {
 	AggClauseCosts costs;
 	double		rows = child->rows;
@@ -668,9 +1139,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	Cost		startup;
 	Cost		run;
 
-	MemSet(&costs, 0, sizeof(costs));
-	if (root->parse->hasAggs)
-		get_agg_clause_costs(root, split, &costs);
+	aggregate_costs(root, split, tlist, nfolded, &costs);
 	foreach_node(TargetEntry, entry_node, tlist)
 	{
 		List	   *exprs = IsA(entry_node->expr, Aggref) ?
@@ -771,7 +1240,7 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
  * included.
  */
 static void
-plain_cost(PlannerInfo *root, const Path *child, List *tlist, AggSplit split,
+plain_cost(PlannerInfo *root, const Path *child, List *tlist, int nfolded, AggSplit split,
 		   Path *result)
 {
 	AggClauseCosts costs;
@@ -779,9 +1248,7 @@ plain_cost(PlannerInfo *root, const Path *child, List *tlist, AggSplit split,
 	double		share = sum_states(tlist) < 0 ? tess_agg_generic_share : tess_agg_kernel_share;
 	double		rows = child->rows;
 
-	MemSet(&costs, 0, sizeof(costs));
-	if (root->parse->hasAggs)
-		get_agg_clause_costs(root, split, &costs);
+	aggregate_costs(root, split, tlist, nfolded, &costs);
 	result->startup_cost = child->total_cost + rowwise * rows +
 		share * (costs.transCost.startup + (costs.transCost.per_tuple - rowwise) * rows +
 				 costs.finalCost.startup + costs.finalCost.per_tuple);
@@ -805,7 +1272,12 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	TessPathConfig config = TESS_STRUCT_INITIALIZER(TessPathConfig);
 	Path	   *child;
 	Path		template;
+	AggFold		fold;
+	List	   *states;
 
+	/* The states are those the plan keeps (agg_plan): the costs are theirs. */
+	fold_aggregates(tlist, nkeys, (flags & (AGG_PATH_PARTIAL | AGG_PATH_FINALIZE)) == 0, &fold);
+	states = fold_target_list(tlist, nkeys, &fold);
 	child = agg->subpath;
 	/* A sort the core put below for its sorted grouping: hashing needs none. */
 	while (IsA(child, SortPath) || IsA(child, IncrementalSortPath))
@@ -813,7 +1285,7 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	child = tess_batch_input_path(root, child);
 	if (child == NULL ||
 		!((flags & AGG_PATH_FINALIZE) ? partials_available(tlist, child) :
-		  arguments_available(tlist, child)))
+		  arguments_available(states, child)))
 		return NULL;
 	template = agg->path;
 	/*
@@ -821,9 +1293,10 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	 * cost; a final one the core's: its work is a row a participant.
 	 */
 	if (nkeys > 0)
-		group_cost(root, child, agg->path.rows, nkeys, tlist, agg->aggsplit, pairs, &template);
+		group_cost(root, child, agg->path.rows, nkeys, states, fold.nfolded, agg->aggsplit,
+				   pairs, &template);
 	else if ((flags & AGG_PATH_FINALIZE) == 0)
-		plain_cost(root, child, tlist, agg->aggsplit, &template);
+		plain_cost(root, child, states, fold.nfolded, agg->aggsplit, &template);
 	/* The groups come in no order, whatever order the core's had. */
 	template.pathkeys = NIL;
 	config.template_path = &template;
@@ -960,7 +1433,9 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 	if (partial_rel == NULL || extra == NULL || !extra->partial_costs_set ||
 		(keys != NIL && groups <= 0))
 		return;
-	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist))
+	/* A partial aggregation folds nothing: each aggregate is a state. */
+	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist) ||
+		list_length(tlist) - list_length(keys) > AGG_MAX_GROUPED)
 		return;
 	if (list_length(tlist) == list_length(keys))
 	{
@@ -1453,6 +1928,8 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	double		groups = 0;
 	PairsEstimate spill;
 	const PairsEstimate *pairs = NULL;
+	AggFold		fold;
+	List	   *states;
 
 	if (previous_create_upper_paths_hook != NULL)
 		previous_create_upper_paths_hook(root, stage, input_rel, output_rel,
@@ -1481,13 +1958,19 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 		tlist = add_to_flat_tlist(NIL, keys);
 		strategy = AGG_HASHED;
 	}
-	/* The node takes AGG_MAX_GROUPED aggregates at most, with groups or without. */
 	if (!collect_aggregates((Node *) list_make2(output_rel->reltarget->exprs,
 												root->parse->havingQual),
 							keys, &tlist) ||
-		tlist == NIL ||
-		list_length(tlist) - list_length(keys) > AGG_MAX_GROUPED)
+		tlist == NIL)
 		return;
+	/*
+	 * The node keeps AGG_MAX_GROUPED states at most, with groups or without,
+	 * those of the aggregates it folds counted once.
+	 */
+	fold_aggregates(tlist, list_length(keys), true, &fold);
+	if (list_length(fold.states) > AGG_MAX_GROUPED)
+		return;
+	states = fold_target_list(tlist, list_length(keys), &fold);
 	/*
 	 * Beside a DISTINCT aggregate's table neither the groups nor the rows of
 	 * generic aggregates spill: the groups with their states must fit. The
@@ -1495,16 +1978,16 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	 * they go to disk, the groups leaving them half of hash_mem at least;
 	 * only then does the node weigh the groups by the estimate.
 	 */
-	if (has_distinct_aggregate(tlist))
+	if (has_distinct_aggregate(states))
 	{
 		double		limit = (double) tess_hash_memory_limit();
 		bool		words;
 
-		spill.pairs = distinct_bytes(root, input_rel, keys, tlist, &words, &spill);
+		spill.pairs = distinct_bytes(root, input_rel, keys, states, &words, &spill);
 		spill.groups = 0;
 		if (keys != NIL)
 		{
-			spill.groups = groups_bytes(root, output_rel, list_length(keys), tlist);
+			spill.groups = groups_bytes(root, output_rel, list_length(keys), states);
 			if (spill.groups < 0 || spill.groups > limit)
 				return;
 		}
@@ -1597,7 +2080,9 @@ collect_params(Node *node, List **params)
  * or a set operation above. The private data carries the states the node
  * keeps, each an aggregate with one argument, a NULL constant for
  * count(*), and one FILTER condition, NULL without one; and for each
- * aggregate of the scan tuple its output, the state whose value it is.
+ * aggregate of the scan tuple its output, the state whose value it is or
+ * a derivation from states (fold_aggregates), with the derivations'
+ * states and constants.
  */
 /*
  * A set operation's counts as aggregates of the scan tuple: count(*) of a
@@ -1696,8 +2181,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	List	   *filters = NIL;
 	List	   *keys = NIL;
 	List	   *params = NIL;
-	List	   *states = NIL;
-	List	   *outputs = NIL;
+	AggFold		fold;
 	List	   *path_data;
 	TessPlanWriter *writer;
 	int			nkeys;
@@ -1751,26 +2235,24 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 								   makeTargetEntry((Expr *) setop_count(true),
 												   nkeys + 2, NULL, false));
 	}
+	/* The grouping expressions, then the states of the aggregates. */
 	foreach_ptr(TargetEntry, entry, info.expressions)
+	{
+		if (foreach_current_index(entry) < nkeys && setop < 0)
+			keys = lappend(keys, resolve_argument((Node *) copyObject(entry->expr),
+												  &child));
+	}
+	fold_aggregates(info.expressions, nkeys,
+					setop < 0 && (flags & (AGG_PATH_PARTIAL | AGG_PATH_FINALIZE)) == 0, &fold);
+	foreach_node(Aggref, agg, fold.states)
 	{
 		Node	   *argument;
 		Expr	   *filter;
 
-		/* The grouping expressions, then the aggregates. */
-		if (foreach_current_index(entry) < nkeys)
-		{
-			if (setop < 0)
-				keys = lappend(keys, resolve_argument((Node *) copyObject(entry->expr),
-													  &child));
-			continue;
-		}
-		/* Each aggregate of the scan tuple is the value of a state of its own. */
-		outputs = lappend_int(outputs, list_length(states));
-		states = lappend(states, copyObject(entry->expr));
 		/* Above a gather: the aggregate's partial value, a column of the child. */
 		if (flags & AGG_PATH_FINALIZE)
 		{
-			Aggref	   *partial = copyObject((Aggref *) entry->expr);
+			Aggref	   *partial = copyObject(agg);
 
 			mark_partial_aggref(partial, AGGSPLIT_INITIAL_SERIAL);
 			arguments = lappend(arguments, resolve_argument((Node *) partial, &child));
@@ -1779,10 +2261,10 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			continue;
 		}
 		/* FILTER (WHERE ...): which rows the aggregate reads, NULL for every row. */
-		filter = ((Aggref *) entry->expr)->aggfilter;
+		filter = agg->aggfilter;
 		filters = lappend(filters, filter == NULL ? NULL :
 						  resolve_argument(filter_value(copyObject(filter)), &child));
-		argument = aggregate_argument((Aggref *) entry->expr);
+		argument = aggregate_argument(agg);
 		arguments = lappend(arguments, argument == NULL ?
 							(Node *) makeNullConst(INT4OID, -1, InvalidOid) :
 							resolve_argument(filter == NULL ? copyObject(argument) :
@@ -1792,10 +2274,9 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 		{
 			List	   *rest = NIL;
 
-			for (int n = 1; n < list_length(((Aggref *) entry->expr)->args); n++)
+			for (int n = 1; n < list_length(agg->args); n++)
 			{
-				Node	   *other = (Node *) copyObject(list_nth_node(TargetEntry,
-																	  ((Aggref *) entry->expr)->args,
+				Node	   *other = (Node *) copyObject(list_nth_node(TargetEntry, agg->args,
 																	  n)->expr);
 
 				rest = lappend(rest, resolve_argument(filter == NULL ? other :
@@ -1810,8 +2291,10 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	collect_params((Node *) filters, &params);
 	collect_params((Node *) keys, &params);
 	writer = tess_plan_writer_create(TESS_AGG_DATA, TESS_AGG_DATA_VERSION);
-	tess_plan_write_list(writer, "states", states);
-	tess_plan_write_int_list(writer, "outputs", outputs);
+	tess_plan_write_list(writer, "states", fold.states);
+	tess_plan_write_int_list(writer, "outputs", fold.outputs);
+	tess_plan_write_int_list(writer, "derived", fold.derived);
+	tess_plan_write_list(writer, "constants", fold.constants);
 	tess_plan_write_list(writer, "arguments", arguments);
 	tess_plan_write_list(writer, "more", more);
 	tess_plan_write_list(writer, "filters", filters);

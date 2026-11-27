@@ -617,6 +617,41 @@ SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), avg(f8) FROM para
 (1 row)
 
 RESET parallel_leader_participation;
+-- Aggregates of one expression under constants, which a serial plan folds
+-- into shared states: the participants and the final aggregation keep a
+-- state for each.
+SELECT line FROM parallel_explain($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast$$) AS line
+WHERE line ~ '(TessAgg|Partial Mode|Folded)';
+                                    line                                     
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=1.00 loops=1)
+   Partial Mode: Finalize
+               ->  Parallel Custom Scan (TessAgg) (actual rows=1.00 loops=3)
+                     Partial Mode: Partial
+(4 rows)
+
+SELECT parallel_same($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast$$);
+                     parallel_same                     
+-------------------------------------------------------
+ {"(-399990000,-399970000,-39999.000000000000,20000)"}
+(1 row)
+
+SELECT line FROM parallel_explain($$SELECT id % 7, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast GROUP BY id % 7$$) AS line
+WHERE line ~ '(TessAgg|Partial Mode|Folded)';
+                                    line                                     
+-----------------------------------------------------------------------------
+ Custom Scan (TessAgg) (actual rows=7.00 loops=1)
+   Partial Mode: Finalize
+               ->  Parallel Custom Scan (TessAgg) (actual rows=2.33 loops=3)
+                     Partial Mode: Partial
+(4 rows)
+
+SELECT parallel_same($$SELECT id % 7, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast GROUP BY id % 7$$);
+                                                                                                                                                                             parallel_same                                                                                                                                                                              
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,-57131429,-57128572,-39994.000000000000,2857)","(1,-57158571,-57155713,-39999.000000000000,2858)","(2,-57145714,-57142857,-40004.000000000000,2857)","(3,-57142857,-57140000,-40002.000000000000,2857)","(4,-57140000,-57137143,-40000.000000000000,2857)","(5,-57137143,-57134286,-39998.000000000000,2857)","(6,-57134286,-57131429,-39996.000000000000,2857)"}
+(1 row)
+
 -- With the core's Gather its Finalize Aggregate reads the core's own
 -- transition values; numeric and bigint sums then go through the core's
 -- functions, serialized.
