@@ -7,6 +7,14 @@ of the kernels' benchmarks of
 [`crates/tessera-capi/benches`](../../crates/tessera-capi/benches/README.md),
 with the plans of the cases the README cites, newest first:
 
+- [2026-11-27, the Parquet node's batch arrays kept for the scan,
+  `parquet-batch-arrays`](2026-11-27-parquet-batch-arrays/README.md):
+  ClickBench's Q1, Q3, Q7 and Q28 over `hits.parquet` at 0 workers and
+  Q1 with Tessera off as the control, the base and the end in turns,
+  against `201f2bee`, cycles deciding, pg_duckdb's beside them, with
+  profiles of Q1 and Q3; Q1 54 to 58 per cent fewer cycles, unsettled
+  by the plan's spread, Q3 6 to 7, Q7 10 to 11, Q28 1.5 to 1.8, the
+  control within 0.2.
 - [2026-11-26, extremes and keys of the word types,
   `agg-date-min-max`](2026-11-26-agg-date-min-max/README.md): the
   cases of `anyagg` and `wordkey` the change adds and their twins, and
