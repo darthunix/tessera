@@ -82,13 +82,68 @@ enum
 static const CustomExecMethods agg_exec_methods;
 static const TessBatchOps groups_batch_ops;
 
-/* Whether a state is the node's own sum state of avg of bigint. */
+/* Whether a state is the node's own sum state of avg of bigint, or of numeric. */
 static bool
 integer_sum_state(const AggValue *value)
 {
 	return value->kind == AGG_GENERIC && value->generic->fast == FAST_AVG &&
 		value->generic->fast_wide && !value->generic->fast_numeric;
 }
+
+static bool
+numeric_sum_state(const AggValue *value)
+{
+	return value->kind == AGG_GENERIC && value->generic->fast == FAST_AVG &&
+		value->generic->fast_numeric;
+}
+
+/* Whether a state is the node's own extreme of numeric. */
+static bool
+extreme_state(const AggValue *value)
+{
+	return value->kind == AGG_GENERIC && value->generic->fast_numeric &&
+		(value->generic->fast == FAST_MIN || value->generic->fast == FAST_MAX);
+}
+
+#ifdef HAVE_INT128
+/*
+ * A derivation's constant as a decimal, a mantissa at a scale: an int8 at
+ * scale 0, a numeric by its digits as numeric_out writes them, its scale
+ * the count after the point; false past 10^36.
+ */
+static bool
+constant_decimal(const Const *constant, int128 *mantissa, int *scale)
+{
+	const char *text;
+	bool		negative;
+
+	*mantissa = 0;
+	*scale = 0;
+	if (constant->consttype == INT8OID)
+	{
+		*mantissa = DatumGetInt64(constant->constvalue);
+		return true;
+	}
+	text = DatumGetCString(DirectFunctionCall1(numeric_out, constant->constvalue));
+	negative = *text == '-';
+	for (const char *digit = text + negative; *digit != '\0'; digit++)
+	{
+		if (*digit == '.')
+		{
+			*scale = (int) strlen(digit + 1);
+			continue;
+		}
+		/* 10^35 before the next digit: 10^36 at most after it. */
+		if (*digit < '0' || *digit > '9' ||
+			*mantissa > (int128) INT64CONST(100000000000000000) * INT64CONST(1000000000000000000))
+			return false;
+		*mantissa = *mantissa * 10 + (*digit - '0');
+	}
+	if (negative)
+		*mantissa = -*mantissa;
+	return true;
+}
+#endif
 
 /*
  * The checks of errors of the plan: each of a state whose argument is e,
@@ -205,7 +260,19 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 				output->kind = AGG_DERIVED_AVG_INT8;
 				break;
 			case F_AVG_INT8:
+			case F_AVG_NUMERIC:
 				output->kind = AGG_DERIVED_AVG_NUMERIC;
+				break;
+			case F_SUM_NUMERIC:
+				output->kind = AGG_DERIVED_SUM_NUMERIC;
+				break;
+			case F_MIN_NUMERIC:
+				output->kind = AGG_DERIVED_MIN;
+				output->type = NUMERICOID;
+				break;
+			case F_MAX_NUMERIC:
+				output->kind = AGG_DERIVED_MAX;
+				output->type = NUMERICOID;
 				break;
 			case F_COUNT_ANY:
 				output->kind = AGG_DERIVED_COUNT;
@@ -214,15 +281,18 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 				elog(ERROR, "TessAgg received a foreign plan");
 		}
 		/*
-		 * An extreme of e alone; or words of sum(e) and count(e), or a sum
-		 * state of avg(e) of bigint.
+		 * An extreme of e alone; or the words of sum(e), or the sum state
+		 * of avg(e) of numeric, with count(e); or the sum state of avg(e) of
+		 * bigint alone.
 		 */
 		if (output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX ?
 			output->count_state >= 0 ||
-			(state->values[output->source].kind != AGG_MIN &&
-			 state->values[output->source].kind != AGG_MAX) :
+			!(state->values[output->source].kind == AGG_MIN ||
+			  state->values[output->source].kind == AGG_MAX ||
+			  extreme_state(&state->values[output->source])) :
 			!(output->count_state >= 0 ?
-			  state->values[output->source].kind == AGG_SUM &&
+			  (state->values[output->source].kind == AGG_SUM ||
+			   numeric_sum_state(&state->values[output->source])) &&
 			  state->values[output->count_state].kind == AGG_COUNT :
 			  integer_sum_state(&state->values[output->source])))
 			elog(ERROR, "TessAgg received a foreign plan");
@@ -230,43 +300,56 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 		b = list_nth_node(Const, constants, number * AGG_DERIVED_CONSTANTS + 1);
 		output->a_numeric = constant_numeric(a);
 		output->b_numeric = constant_numeric(b);
-		output->integers = a->consttype == INT8OID && b->consttype == INT8OID;
 #ifdef HAVE_INT128
-		if (output->integers)
-		{
-			output->a = DatumGetInt64(a->constvalue);
-			output->b = DatumGetInt64(b->constvalue);
-		}
+		output->exact = constant_decimal(a, &output->a, &output->a_scale) &&
+			constant_decimal(b, &output->b, &output->b_scale);
 #else
 		/* The planner folds nothing without 128-bit integers. */
 		elog(ERROR, "TessAgg received a foreign plan");
 #endif
 		state->nderived++;
 		state->derived_by_ref |= output->kind == AGG_DERIVED_SUM_NUMERIC ||
-			output->kind == AGG_DERIVED_AVG_INT8 || output->kind == AGG_DERIVED_AVG_NUMERIC;
+			output->kind == AGG_DERIVED_AVG_INT8 || output->kind == AGG_DERIVED_AVG_NUMERIC ||
+			output->type == NUMERICOID;
 	}
 }
 
 #ifdef HAVE_INT128
+/* A decimal at a scale raised to a greater one, false past 128 bits. */
+static bool
+decimal_rescale(int128 value, int from, int to, int128 *result)
+{
+	*result = value;
+	for (int scale = from; scale < to; scale++)
+		if (__builtin_mul_overflow(*result, 10, result))
+			return false;
+	return true;
+}
+
 /*
- * a * sum + b * count of a derived output in 128 bits, false where a step
- * passes them, the sum has a rest or a constant is past an int8.
+ * a * sum + b * count of a derived output as a decimal in 128 bits, at
+ * the greater of the scales of the two products, as numeric_mul and
+ * numeric_add give it; false where a step passes them, the sum has a
+ * rest or NaN, or a constant is past 10^36.
  */
 static bool
 derived_exact(const AggOutput *output, const AggSum *sum, Datum *total, int64 *narrow,
 			  bool bigint)
 {
+	int			scale = Max(output->a_scale + sum->scale, output->b_scale);
 	int128		left;
 	int128		right;
 	int128		exact;
 
-	if (!output->integers || sum->rest != (Datum) 0 ||
+	if (!output->exact || sum->rest != (Datum) 0 ||
 		__builtin_mul_overflow(output->a, sum->sum, &left) ||
+		!decimal_rescale(left, output->a_scale + sum->scale, scale, &left) ||
 		__builtin_mul_overflow(output->b, (int128) sum->count, &right) ||
+		!decimal_rescale(right, output->b_scale, scale, &right) ||
 		__builtin_add_overflow(left, right, &exact))
 		return false;
 	if (!bigint)
-		*total = agg_int128_numeric(exact, 0);
+		*total = agg_int128_numeric(exact, scale);
 	else if (exact < PG_INT64_MIN || exact > PG_INT64_MAX)
 		ereport(ERROR,
 				(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
@@ -279,10 +362,10 @@ derived_exact(const AggOutput *output, const AggSum *sum, Datum *total, int64 *n
 /*
  * A derived output's value from the sum of its e and their count, as the
  * core's aggregate of its form gives it: a * sum + b * count, exact in 128
- * bits and in numeric where a step passes them; a bigint for a form of
- * smallint or integer, 22003 past one, as numeric_int8 refuses it; the
- * average numeric_div of that sum and the count, as the core's final
- * functions divide; NULL without a row, but 0 for count.
+ * bits and in numeric where a step passes them, NaN after a NaN; a bigint
+ * for a form of smallint or integer, 22003 past one, as numeric_int8
+ * refuses it; the average numeric_div of that sum and the count, as the
+ * core's final functions divide; NULL without a row, but 0 for count.
  */
 Datum
 agg_derive(const AggOutput *output, const AggSum *sum, bool *isnull)
@@ -302,7 +385,7 @@ agg_derive(const AggOutput *output, const AggSum *sum, bool *isnull)
 	}
 	if (!derived_exact(output, sum, &total, &narrow, bigint))
 	{
-		Datum		whole = agg_int128_numeric(sum->sum, 0);
+		Datum		whole = agg_int128_numeric(sum->sum, sum->scale);
 
 		if (sum->rest != (Datum) 0)
 			whole = DirectFunctionCall2(numeric_add, sum->rest, whole);
@@ -327,16 +410,24 @@ agg_derive(const AggOutput *output, const AggSum *sum, bool *isnull)
  * min or max of a form, from the extreme of e that gives it, the least
  * where the form grows with e: a * e + b, which the check of errors keeps
  * within each step's type (a form that cannot fail needs none), in the
- * form's type; NULL without a row.
+ * form's type; of a numeric form a numeric, NaN of a NaN; NULL without a
+ * row. The extreme is a numeric where e is one, else an integer.
  */
 Datum
-agg_derive_extreme(const AggOutput *output, int64 e, bool *isnull)
+agg_derive_extreme(const AggOutput *output, Datum extreme, bool numeric, int64 e,
+				   bool *isnull)
 {
 	int128		value;
 
 	if (*isnull)
 		return (Datum) 0;
-	if (output->integers)
+	if (output->type == NUMERICOID)
+		return DirectFunctionCall2(numeric_add,
+								   DirectFunctionCall2(numeric_mul, output->a_numeric,
+													   numeric ? extreme :
+													   NumericGetDatum(int64_to_numeric(e))),
+								   output->b_numeric);
+	if (output->exact && output->a_scale == 0 && output->b_scale == 0)
 		value = output->a * (int128) e + output->b;
 	else
 		value = DatumGetInt64(DirectFunctionCall1(numeric_int8,
@@ -1348,18 +1439,22 @@ result_row(TessAggState *state)
 
 			if (output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX)
 			{
-				scan->tts_isnull[number] = !value->has_value;
-				scan->tts_values[number] = agg_derive_extreme(output, value->extreme,
-															  &scan->tts_isnull[number]);
+				Datum		extreme = plain_value(state, output->source,
+												  &scan->tts_isnull[number]);
+
+				scan->tts_values[number] =
+					agg_derive_extreme(output, extreme, value->kind == AGG_GENERIC,
+									   value->kind == AGG_GENERIC ? 0 : value->extreme,
+									   &scan->tts_isnull[number]);
 				continue;
 			}
-			if (output->count_state < 0)
+			/* A sum state, of avg(e) of bigint or numeric, or the words of sum(e). */
+			if (value->kind == AGG_GENERIC)
 				agg_fast_sum(value->generic, &sum);
 			else
-			{
 				sum.sum = value->total;
+			if (output->count_state >= 0)
 				sum.count = state->values[output->count_state].total;
-			}
 			scan->tts_values[number] = agg_derive(output, &sum, &scan->tts_isnull[number]);
 #endif
 		}

@@ -1246,7 +1246,8 @@ BEGIN
     END;
     RETURN format('%s folded; on: %s; off: %s', folded, with_tessera, without_tessera);
 END $$;
--- A smallint, an integer and a bigint with their extremes and NULLs,
+-- A smallint, an integer and a bigint with their extremes, a numeric of a
+-- declared precision with NaN, a numeric of none, NULLs among them all,
 -- seven groups.
 CREATE TABLE agg_fold WITH (autovacuum_enabled = off) AS
 SELECT CASE WHEN g % 11 = 0 THEN NULL WHEN g = 1 THEN 32767 WHEN g = 2 THEN -32768
@@ -1256,6 +1257,9 @@ SELECT CASE WHEN g % 11 = 0 THEN NULL WHEN g = 1 THEN 32767 WHEN g = 2 THEN -327
        CASE WHEN g % 17 = 0 THEN NULL WHEN g = 5 THEN 9223372036854775807
             WHEN g = 6 THEN -9223372036854775808
             ELSE (g * 104729 % 2000000 - 1000000)::bigint * 3037000493 END AS b,
+       CASE WHEN g % 19 = 0 THEN NULL WHEN g % 23 = 0 THEN 'NaN'
+            ELSE (g * 7919 % 2000003 - 1000001) / 100.0 END::numeric(12,2) AS n,
+       CASE WHEN g % 19 = 0 THEN NULL ELSE g / 8.0 END::numeric AS u,
        g % 7 AS k
 FROM generate_series(1, 3000) AS g;
 -- spec: aggregate/Ninety sums of one column
@@ -1268,9 +1272,12 @@ SELECT agg_same(format('SELECT md5(q::text) FROM (%s) AS q', :'ninety'));
 SELECT agg_same(format('SELECT md5(q::text) FROM (%s GROUP BY k) AS q', :'ninety'));
 -- spec: aggregate/The count shown
 EXPLAIN (VERBOSE, COSTS OFF) SELECT sum(i), sum(i + 1), avg(i * 2), count(i - 3), sum(s) FROM agg_fold;
+-- spec: aggregate/Every aggregate, type and step
 -- The steps of a smallint: a constant on either side, products, nested
 -- forms and a cast to bigint; sum and avg of each, count of some, with
--- their types, as the core gives them.
+-- their types, as the core gives them; then those of an integer, a
+-- bigint and a numeric, min and max, groups, FILTER, no rows and groups
+-- past hash_mem.
 SELECT agg_folded($$SELECT sum(s), sum(s + 1), sum(1 + s), sum(s - 7), sum(7 - s), sum(s * 3), sum(-3 * s),
                     sum((s + 1) * 2 - 7), sum(s::bigint * 100000 + 1), avg(s), avg(s + 1), avg(7 - s * 2),
                     avg(s::bigint * -3), count(s + 1), count(s) FROM agg_fold$$);
@@ -1324,6 +1331,66 @@ SELECT agg_same($$SELECT k, min(s), max(s + 1), min(-s * 2), max(i::bigint - 1),
 SELECT agg_same($$SELECT min(s), max(s + 1), min(b + 1), max(-b) FROM agg_fold WHERE k > 100$$);
 SELECT agg_error($$SELECT max(i), max(i + 1) FROM agg_fold$$);
 SELECT agg_error($$SELECT k, min(b), min(b - 1) FROM agg_fold GROUP BY k$$);
+-- A numeric(12,2): its steps keep their scales, NaN makes a sum or an
+-- average NaN, and the greatest value; min and max with a positive factor.
+SELECT agg_folded($$SELECT sum(n), sum(n + 1), sum(n * 1.5), sum(2.5 - n), sum(-n), avg(n), avg(n * 3 + 0.25),
+                    count(n + 1), min(n), max(n + 1), min(n * 1.5), max(n - 0.001) FROM agg_fold$$);
+SELECT agg_same($$SELECT sum(n), sum(n + 1), sum(n * 1.5), sum(2.5 - n), sum(-n), avg(n), avg(n * 3 + 0.25),
+                  count(n + 1), min(n), max(n + 1), min(n * 1.5), max(n - 0.001),
+                  pg_typeof(sum(n * 1.5)), pg_typeof(max(n + 1)) FROM agg_fold$$);
+SELECT agg_same($$SELECT sum(n), sum(n + 1), sum(n * 1.5), sum(2.5 - n), sum(-n), avg(n), avg(n * 3 + 0.25),
+                  count(n + 1), min(n), max(n + 1), min(n * 1.5), max(n - 0.001), min(-n), max(n * -2)
+                  FROM agg_fold WHERE n <> 'NaN'$$);
+SELECT agg_same($$SELECT k, sum(n), sum(n * 1.5 + 0.125), avg(n - 1), count(n + 1), min(n + 1), max(n * 2)
+                  FROM agg_fold GROUP BY k$$);
+-- A group of NaN alone, one of numbers alone and one of NULL alone.
+SELECT agg_folded($$SELECT n = 'NaN', sum(n), sum(n + 1), avg(n * 2), count(n - 1), min(n), max(n + 1)
+                    FROM agg_fold GROUP BY n = 'NaN'$$);
+SELECT agg_same($$SELECT n = 'NaN', sum(n), sum(n + 1), avg(n * 2), count(n - 1), min(n), max(n + 1)
+                  FROM agg_fold GROUP BY n = 'NaN'$$);
+-- Integers made numeric, before and after integer steps.
+SELECT agg_folded($$SELECT sum(i), sum(i::numeric * 1.5 + 0.25), avg((i + 1)::numeric * 2), min(i::numeric * -0.5),
+                    max(i::numeric - 0.5), sum(s::numeric / 1 * 2), sum(s), count(b::numeric + 1), sum(b)
+                    FROM agg_fold WHERE i BETWEEN -700000000 AND 700000000$$);
+SELECT agg_same($$SELECT sum(i), sum(i::numeric * 1.5 + 0.25), avg((i + 1)::numeric * 2), min(i::numeric * -0.5),
+                  max(i::numeric - 0.5), sum(s::numeric / 1 * 2), sum(s), count(b::numeric + 1), sum(b),
+                  pg_typeof(sum(i::numeric * 1.5 + 0.25)), pg_typeof(min(i::numeric * -0.5))
+                  FROM agg_fold WHERE i BETWEEN -700000000 AND 700000000$$);
+SELECT agg_error($$SELECT sum(i), sum((i + 1)::numeric * 2) FROM agg_fold$$);
+-- At the bounds: a factor of 99 961 digits folds and one of 99 971 does
+-- not, nor a scale past 1 000; their sums are the core's.
+SELECT agg_folded($$SELECT sum(n), sum(n * 1e99960) FROM agg_fold WHERE n <> 'NaN'$$);
+SELECT agg_folded($$SELECT sum(n), sum(n * 1e99970) FROM agg_fold WHERE n <> 'NaN'$$);
+SELECT agg_same($$SELECT md5(sum(n * 1e99960)::text), md5(sum(n * 1e99970)::text), sum(n) FROM agg_fold WHERE n <> 'NaN'$$);
+SELECT agg_folded(format('SELECT sum(n), sum(n * %s), sum(n * %s) FROM agg_fold', '0.' || repeat('0', 997) || '1', '0.' || repeat('0', 998) || '1'));
+SELECT agg_same(format('SELECT md5(sum(n * %s)::text), md5(sum(n * %s)::text), sum(n) FROM agg_fold', '0.' || repeat('0', 997) || '1', '0.' || repeat('0', 998) || '1'));
+-- spec: aggregate/Forms the node does not fold
+-- Each beside the same aggregate of its column alone.
+CREATE TABLE agg_fold_other WITH (autovacuum_enabled = off) AS
+SELECT g / 4.0::float8 AS f, date '2000-01-01' + g AS d, timestamp '2000-01-31' + g * interval '1 day' AS t,
+       g AS x FROM generate_series(1, 300) AS g;
+SELECT agg_folded($$SELECT sum(f), sum(f + 0.5) FROM agg_fold_other$$);
+SELECT agg_same($$SELECT sum(f), sum(f + 0.5) FROM agg_fold_other$$);
+SELECT agg_folded($$SELECT max(d), max(d + 1) FROM agg_fold_other$$);
+SELECT agg_same($$SELECT max(d), max(d + 1) FROM agg_fold_other$$);
+SELECT agg_folded($$SELECT max(t), max(t + interval '1 month') FROM agg_fold_other$$);
+SELECT agg_same($$SELECT max(t), max(t + interval '1 month') FROM agg_fold_other$$);
+SELECT agg_folded($$SELECT sum(x / 2 + 1), sum(x / 3) FROM agg_fold_other$$);
+SELECT agg_same($$SELECT sum(x / 2 + 1), sum(x / 3) FROM agg_fold_other$$);
+SELECT agg_folded($$SELECT sum(u), sum(u + 1) FROM agg_fold$$);
+SELECT agg_same($$SELECT sum(u), sum(u + 1) FROM agg_fold$$);
+SELECT agg_folded($$SELECT sum(n), sum(n * 'Infinity') FROM agg_fold WHERE n <> 'NaN'$$);
+SELECT agg_same($$SELECT sum(n), sum(n * 'Infinity') FROM agg_fold WHERE n <> 'NaN'$$);
+SELECT agg_folded($$SELECT sum(x), sum(x + 1) FROM json_to_recordset('[{"x": 1.5}, {"x": 2.25}]') AS r(x numeric(12,2))$$);
+SELECT agg_same($$SELECT sum(x), sum(x + 1) FROM json_to_recordset('[{"x": 1.5}, {"x": 2.25}]') AS r(x numeric(12,2))$$);
+PREPARE agg_fold_param(int) AS SELECT sum(x), sum(x + $1) FROM agg_fold_other;
+SET plan_cache_mode = force_generic_plan;
+EXPLAIN (VERBOSE, COSTS OFF) EXECUTE agg_fold_param(7);
+EXECUTE agg_fold_param(7);
+RESET plan_cache_mode;
+EXECUTE agg_fold_param(7);
+DEALLOCATE agg_fold_param;
+DROP TABLE agg_fold_other;
 -- Grouped, under FILTER conditions that leave groups no row, and over no rows.
 SELECT agg_folded($$SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3), sum(i::bigint * 3), avg(i::bigint + 1),
                     sum(b - 1), avg(b + 1) FROM agg_fold WHERE b BETWEEN -3000000000000000000 AND 3000000000000000000 GROUP BY k$$);
@@ -1367,7 +1434,8 @@ SELECT agg_error($$SELECT k, sum(i), sum(i + 1) FROM agg_fold GROUP BY k LIMIT 1
 CREATE TABLE agg_fold_spill WITH (autovacuum_enabled = off) AS
 SELECT g % 200000 AS k, CASE WHEN g % 17 = 0 THEN NULL ELSE g % 30001 - 15000 END::smallint AS s,
        CASE WHEN g = 599999 THEN 2147483647 ELSE g END AS v,
-       CASE WHEN g = 599999 THEN 9223372036854775807 ELSE g END AS w
+       CASE WHEN g = 599999 THEN 9223372036854775807 ELSE g END AS w,
+       CASE WHEN g % 29 = 0 THEN 'NaN' ELSE g / 100.0 END::numeric(10,2) AS m
 FROM generate_series(1, 600000) AS g;
 ANALYZE agg_fold_spill;
 SET work_mem = '1MB';
@@ -1377,6 +1445,8 @@ SELECT agg_folded($$SELECT k, min(s), max(s + 1), min(-s * 2), max(s::bigint + 7
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, min(s), max(s + 1), min(-s * 2), max(s::bigint + 7) FROM agg_fold_spill GROUP BY k) AS q$$);
 SELECT agg_folded($$SELECT k, sum(w), sum(w + 1), avg(w * 2) FROM agg_fold_spill WHERE w < 600000 GROUP BY k$$);
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(w), sum(w + 1), avg(w * 2) FROM agg_fold_spill WHERE w < 600000 GROUP BY k) AS q$$);
+SELECT agg_folded($$SELECT k, sum(m), sum(m + 1), avg(m * 2), count(m), min(m), max(m + 0.5) FROM agg_fold_spill GROUP BY k$$);
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(m), sum(m + 1), avg(m * 2), count(m), min(m), max(m + 0.5) FROM agg_fold_spill GROUP BY k) AS q$$);
 SELECT agg_error($$SELECT k, sum(v), sum(v + 1) FROM agg_fold_spill GROUP BY k$$);
 SELECT agg_error($$SELECT k, sum(w), sum(w + 1) FROM agg_fold_spill GROUP BY k$$);
 RESET work_mem;

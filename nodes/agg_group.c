@@ -945,29 +945,32 @@ output_value_into(TessAggState *state, int number, int group, Datum *datum, bool
 		AggSum		sum = {0};
 		MemoryContext old;
 
-		/* min or max from the extreme of e, a word: int4 or int8 as the state's. */
+		const AggValue *source = &state->values[output->source];
+
+		old = state->generic_output != NULL ?
+			MemoryContextSwitchTo(state->generic_output) : CurrentMemoryContext;
+		/* min or max from the extreme of e: a numeric, or a word int4 or int8 as the state's. */
 		if (output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX)
 		{
 			Datum		extreme;
+			bool		numeric = source->kind == AGG_GENERIC;
 
 			group_value_into(state, output->source, group, &extreme, isnull);
-			*datum = agg_derive_extreme(output,
-										state->values[output->source].wide ?
-										DatumGetInt64(extreme) :
+			*datum = agg_derive_extreme(output, extreme, numeric,
+										numeric || *isnull ? 0 :
+										source->wide ? DatumGetInt64(extreme) :
 										(int64) DatumGetInt32(extreme), isnull);
+			MemoryContextSwitchTo(old);
 			return;
 		}
-		/* A bigint's sum state of avg(e), or the words of sum(e) and count(e). */
-		if (output->count_state < 0)
-			agg_sum_state_sum((const uint64 *) state->walked_payloads[group] +
-							  state->values[output->source].slot, &sum);
+		/* A sum state of avg(e), of bigint or numeric, or the words of sum(e); count(e). */
+		if (source->kind == AGG_GENERIC)
+			agg_sum_state_sum((const uint64 *) state->walked_payloads[group] + source->slot,
+							  &sum);
 		else
-		{
 			sum.sum = (int64) state->state_words[output->source * AGG_GROUP_ROWS + group];
+		if (output->count_state >= 0)
 			sum.count = (int64) state->state_words[output->count_state * AGG_GROUP_ROWS + group];
-		}
-		old = state->generic_output != NULL ?
-			MemoryContextSwitchTo(state->generic_output) : CurrentMemoryContext;
 		*datum = agg_derive(output, &sum, isnull);
 		MemoryContextSwitchTo(old);
 	}

@@ -52,7 +52,8 @@ those the core gives, with and without `GROUP BY` and with groups past
   `NaN`, a group of `NaN` alone, no rows, a `FILTER` that leaves no row
   of a group, `GROUP BY` and groups past `hash_mem`
 - **THEN** every row is the core's, with its types and scales
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/Every aggregate, type and step`
 
 #### Scenario: Aggregates of one expression left as they are
 - **WHEN** a query computes `sum(x + 1)` of an `integer` alone, or
@@ -136,7 +137,8 @@ be the core's.
   plan
 - **THEN** its rows are the core's, and `EXPLAIN VERBOSE` shows no
   `Folded Aggregates`
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/Forms the node does not fold`
 
 ### Requirement: Aggregates of a constant
 A plain aggregation or a grouping of `TessAgg` SHALL compute `sum`,

@@ -50,7 +50,7 @@ injection points; CI runs 19 and 18.
       the suites; `make crosscheck`
 - [x] 2.5 `min` and `max` of folded forms of integers. Tests. Check: the
       suites
-- [ ] 2.6 Forms whose type is `numeric`: columns of tables of a declared
+- [x] 2.6 Forms whose type is `numeric`: columns of tables of a declared
       precision and integers cast to `numeric`, the bounds of their
       steps and of the derived sum, `count(e)` beside the sum state of a
       `numeric` `e`, `sum`, `avg`, `count`, and `min` and `max` with a
