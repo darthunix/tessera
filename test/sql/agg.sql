@@ -1301,6 +1301,29 @@ SELECT agg_folded($$SELECT sum(i), avg(i), count(i), sum(i::bigint + 5), sum(i::
 SELECT agg_same($$SELECT sum(i), avg(i), count(i), sum(i::bigint + 5), sum(i::bigint * 1000003),
                   sum(5 - i::bigint), sum(-(i::bigint)), avg(i::bigint - 1), avg(i::bigint * -7),
                   count(i::bigint) FROM agg_fold$$);
+-- min and max: the form at the least e, or at the greatest where its
+-- factor is negative, a constant where it is 0, beside sums of the same e.
+SELECT agg_folded($$SELECT min(s), max(s), min(s + 1), max(s + 1), min(-3 * s), max(-3 * s), min(7 - s),
+                    max(s::bigint * 100000), min(s * 0 + 5), max(s + 1::smallint), sum(s + 2)
+                    FROM agg_fold WHERE s BETWEEN -32000 AND 32000$$);
+SELECT agg_same($$SELECT min(s), max(s), min(s + 1), max(s + 1), min(-3 * s), max(-3 * s), min(7 - s),
+                  max(s::bigint * 100000), min(s * 0 + 5), max(s + 1::smallint), sum(s + 2),
+                  pg_typeof(min(s + 1)), pg_typeof(max(s + 1::smallint)), pg_typeof(max(s::bigint * 100000))
+                  FROM agg_fold WHERE s BETWEEN -32000 AND 32000$$);
+SELECT agg_folded($$SELECT max(i), max(i + 1), min(i * -3), max(1 - i), min(i::bigint * 5) FROM agg_fold
+                    WHERE i BETWEEN -700000000 AND 700000000$$);
+SELECT agg_same($$SELECT max(i), max(i + 1), min(i * -3), max(1 - i), min(i::bigint * 5) FROM agg_fold
+                  WHERE i BETWEEN -700000000 AND 700000000$$);
+SELECT agg_folded($$SELECT min(b), max(b - 1), min(-b), max(b * 2), avg(b + 1) FROM agg_fold
+                    WHERE b BETWEEN -3000000000000000000 AND 3000000000000000000$$);
+SELECT agg_same($$SELECT min(b), max(b - 1), min(-b), max(b * 2), avg(b + 1), pg_typeof(max(b * 2)) FROM agg_fold
+                  WHERE b BETWEEN -3000000000000000000 AND 3000000000000000000$$);
+SELECT agg_same($$SELECT k, min(s), max(s + 1), min(-s * 2), max(i::bigint - 1), min(i::bigint + 1),
+                  max(s + 1) FILTER (WHERE k = 3), min(s) FILTER (WHERE k = 3) FROM agg_fold
+                  WHERE s BETWEEN -32000 AND 32000 GROUP BY k$$);
+SELECT agg_same($$SELECT min(s), max(s + 1), min(b + 1), max(-b) FROM agg_fold WHERE k > 100$$);
+SELECT agg_error($$SELECT max(i), max(i + 1) FROM agg_fold$$);
+SELECT agg_error($$SELECT k, min(b), min(b - 1) FROM agg_fold GROUP BY k$$);
 -- Grouped, under FILTER conditions that leave groups no row, and over no rows.
 SELECT agg_folded($$SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3), sum(i::bigint * 3), avg(i::bigint + 1),
                     sum(b - 1), avg(b + 1) FROM agg_fold WHERE b BETWEEN -3000000000000000000 AND 3000000000000000000 GROUP BY k$$);
@@ -1350,6 +1373,8 @@ ANALYZE agg_fold_spill;
 SET work_mem = '1MB';
 SELECT agg_folded($$SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM agg_fold_spill GROUP BY k$$);
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM agg_fold_spill GROUP BY k) AS q$$);
+SELECT agg_folded($$SELECT k, min(s), max(s + 1), min(-s * 2), max(s::bigint + 7) FROM agg_fold_spill GROUP BY k$$);
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, min(s), max(s + 1), min(-s * 2), max(s::bigint + 7) FROM agg_fold_spill GROUP BY k) AS q$$);
 SELECT agg_folded($$SELECT k, sum(w), sum(w + 1), avg(w * 2) FROM agg_fold_spill WHERE w < 600000 GROUP BY k$$);
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(w), sum(w + 1), avg(w * 2) FROM agg_fold_spill WHERE w < 600000 GROUP BY k) AS q$$);
 SELECT agg_error($$SELECT k, sum(v), sum(v + 1) FROM agg_fold_spill GROUP BY k$$);

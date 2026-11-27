@@ -48,7 +48,7 @@ injection points; CI runs 19 and 18.
       reset at a rescan; tests of each integer's range, nested forms,
       `WHERE`, `FILTER`, `HAVING`, `LIMIT`, a spill and a rescan. Check:
       the suites; `make crosscheck`
-- [ ] 2.5 `min` and `max` of folded forms of integers. Tests. Check: the
+- [x] 2.5 `min` and `max` of folded forms of integers. Tests. Check: the
       suites
 - [ ] 2.6 Forms whose type is `numeric`: columns of tables of a declared
       precision and integers cast to `numeric`, the bounds of their

@@ -3545,6 +3545,79 @@ SELECT agg_same($$SELECT sum(i), avg(i), count(i), sum(i::bigint + 5), sum(i::bi
  {"(3223891,1163.8595667870036101,2770,3237741,3223900671673,-3210041,-3223891,1162.8595667870036101,-8147.0169675090252708,2770)"}
 (1 row)
 
+-- min and max: the form at the least e, or at the greatest where its
+-- factor is negative, a constant where it is 0, beside sums of the same e.
+SELECT agg_folded($$SELECT min(s), max(s), min(s + 1), max(s + 1), min(-3 * s), max(-3 * s), min(7 - s),
+                    max(s::bigint * 100000), min(s * 0 + 5), max(s + 1::smallint), sum(s + 2)
+                    FROM agg_fold WHERE s BETWEEN -32000 AND 32000$$);
+     agg_folded     
+--------------------
+ TessAgg, 11 folded
+(1 row)
+
+SELECT agg_same($$SELECT min(s), max(s), min(s + 1), max(s + 1), min(-3 * s), max(-3 * s), min(7 - s),
+                  max(s::bigint * 100000), min(s * 0 + 5), max(s + 1::smallint), sum(s + 2),
+                  pg_typeof(min(s + 1)), pg_typeof(max(s + 1::smallint)), pg_typeof(max(s::bigint * 100000))
+                  FROM agg_fold WHERE s BETWEEN -32000 AND 32000$$);
+                                                agg_same                                                
+--------------------------------------------------------------------------------------------------------
+ {"(-31935,31999,-31934,32000,-95997,95805,-31992,3199900000,5,32000,-175258,integer,smallint,bigint)"}
+(1 row)
+
+SELECT agg_folded($$SELECT max(i), max(i + 1), min(i * -3), max(1 - i), min(i::bigint * 5) FROM agg_fold
+                    WHERE i BETWEEN -700000000 AND 700000000$$);
+    agg_folded     
+-------------------
+ TessAgg, 5 folded
+(1 row)
+
+SELECT agg_same($$SELECT max(i), max(i + 1), min(i * -3), max(1 - i), min(i::bigint * 5) FROM agg_fold
+                  WHERE i BETWEEN -700000000 AND 700000000$$);
+                   agg_same                   
+----------------------------------------------
+ {"(999568,999569,-2998704,998490,-4992445)"}
+(1 row)
+
+SELECT agg_folded($$SELECT min(b), max(b - 1), min(-b), max(b * 2), avg(b + 1) FROM agg_fold
+                    WHERE b BETWEEN -3000000000000000000 AND 3000000000000000000$$);
+    agg_folded     
+-------------------
+ TessAgg, 5 folded
+(1 row)
+
+SELECT agg_same($$SELECT min(b), max(b - 1), min(-b), max(b * 2), avg(b + 1), pg_typeof(max(b * 2)) FROM agg_fold
+                  WHERE b BETWEEN -3000000000000000000 AND 3000000000000000000$$);
+                                               agg_same                                                
+-------------------------------------------------------------------------------------------------------
+ {"(-3032411585255077,3035688508787023,-3035688508787024,6071377017574048,1119356376250.3653,bigint)"}
+(1 row)
+
+SELECT agg_same($$SELECT k, min(s), max(s + 1), min(-s * 2), max(i::bigint - 1), min(i::bigint + 1),
+                  max(s + 1) FILTER (WHERE k = 3), min(s) FILTER (WHERE k = 3) FROM agg_fold
+                  WHERE s BETWEEN -32000 AND 32000 GROUP BY k$$);
+                                                                                                                                                             agg_same                                                                                                                                                              
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ {"(0,-31855,31968,-63934,995032,-998056,,)","(1,-31903,31765,-63528,999135,-993953,,)","(2,-31839,31984,-63966,998271,-996760,,)","(3,-31887,31781,-63560,2147483646,-990714,31781,-31887)","(4,-31935,32000,-63998,999567,-2147483647,,)","(5,-31871,31685,-63368,998703,-994385,,)","(6,-31919,31861,-63720,997839,-997192,,)"}
+(1 row)
+
+SELECT agg_same($$SELECT min(s), max(s + 1), min(b + 1), max(-b) FROM agg_fold WHERE k > 100$$);
+ agg_same  
+-----------
+ {"(,,,)"}
+(1 row)
+
+SELECT agg_error($$SELECT max(i), max(i + 1) FROM agg_fold$$);
+                                 agg_error                                 
+---------------------------------------------------------------------------
+ 2 folded; on: 22003 integer out of range; off: 22003 integer out of range
+(1 row)
+
+SELECT agg_error($$SELECT k, min(b), min(b - 1) FROM agg_fold GROUP BY k$$);
+                                agg_error                                
+-------------------------------------------------------------------------
+ 2 folded; on: 22003 bigint out of range; off: 22003 bigint out of range
+(1 row)
+
 -- Grouped, under FILTER conditions that leave groups no row, and over no rows.
 SELECT agg_folded($$SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3), sum(i::bigint * 3), avg(i::bigint + 1),
                     sum(b - 1), avg(b + 1) FROM agg_fold WHERE b BETWEEN -3000000000000000000 AND 3000000000000000000 GROUP BY k$$);
@@ -3703,7 +3776,7 @@ SELECT agg_same($$SELECT sum(i / 2 * 4) FILTER (WHERE i BETWEEN -500000000 AND 5
 SELECT agg_error($$SELECT k, sum(i), sum(i + 1) FROM agg_fold GROUP BY k HAVING max(i) < 2147483647$$);
                                  agg_error                                 
 ---------------------------------------------------------------------------
- 2 folded; on: 22003 integer out of range; off: 22003 integer out of range
+ 3 folded; on: 22003 integer out of range; off: 22003 integer out of range
 (1 row)
 
 SELECT agg_error($$SELECT k, sum(i), sum(i + 1) FROM agg_fold GROUP BY k LIMIT 1$$);
@@ -3732,6 +3805,18 @@ SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SE
                agg_same               
 --------------------------------------
  {(21190582d9363e0e18d459988849fa1a)}
+(1 row)
+
+SELECT agg_folded($$SELECT k, min(s), max(s + 1), min(-s * 2), max(s::bigint + 7) FROM agg_fold_spill GROUP BY k$$);
+         agg_folded         
+----------------------------
+ TessAgg, 4 folded, spilled
+(1 row)
+
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, min(s), max(s + 1), min(-s * 2), max(s::bigint + 7) FROM agg_fold_spill GROUP BY k) AS q$$);
+               agg_same               
+--------------------------------------
+ {(8494e150946401b726c7b3abcd4c26b8)}
 (1 row)
 
 SELECT agg_folded($$SELECT k, sum(w), sum(w + 1), avg(w * 2) FROM agg_fold_spill WHERE w < 600000 GROUP BY k$$);

@@ -174,18 +174,25 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 			elog(ERROR, "TessAgg received a foreign plan");
 		if (index >= 0)
 			continue;
-		output->sum_state = list_nth_int(derived, number * AGG_DERIVED_STATES);
+		output->source = list_nth_int(derived, number * AGG_DERIVED_STATES);
 		output->count_state = list_nth_int(derived, number * AGG_DERIVED_STATES + 1);
-		/* Words of sum(e) and count(e), or a sum state of avg(e) of bigint. */
-		if (output->sum_state < 0 || output->sum_state >= state->nvalues ||
-			output->count_state < -1 || output->count_state >= state->nvalues ||
-			!(output->count_state >= 0 ?
-			  state->values[output->sum_state].kind == AGG_SUM &&
-			  state->values[output->count_state].kind == AGG_COUNT :
-			  integer_sum_state(&state->values[output->sum_state])))
+		if (output->source < 0 || output->source >= state->nvalues ||
+			output->count_state < -1 || output->count_state >= state->nvalues)
 			elog(ERROR, "TessAgg received a foreign plan");
 		switch (agg->aggfnoid)
 		{
+			case F_MIN_INT2:
+			case F_MIN_INT4:
+			case F_MIN_INT8:
+				output->kind = AGG_DERIVED_MIN;
+				output->type = agg->aggtype;
+				break;
+			case F_MAX_INT2:
+			case F_MAX_INT4:
+			case F_MAX_INT8:
+				output->kind = AGG_DERIVED_MAX;
+				output->type = agg->aggtype;
+				break;
 			case F_SUM_INT2:
 			case F_SUM_INT4:
 				output->kind = AGG_DERIVED_SUM_INT8;
@@ -206,6 +213,19 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 			default:
 				elog(ERROR, "TessAgg received a foreign plan");
 		}
+		/*
+		 * An extreme of e alone; or words of sum(e) and count(e), or a sum
+		 * state of avg(e) of bigint.
+		 */
+		if (output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX ?
+			output->count_state >= 0 ||
+			(state->values[output->source].kind != AGG_MIN &&
+			 state->values[output->source].kind != AGG_MAX) :
+			!(output->count_state >= 0 ?
+			  state->values[output->source].kind == AGG_SUM &&
+			  state->values[output->count_state].kind == AGG_COUNT :
+			  integer_sum_state(&state->values[output->source])))
+			elog(ERROR, "TessAgg received a foreign plan");
 		a = list_nth_node(Const, constants, number * AGG_DERIVED_CONSTANTS);
 		b = list_nth_node(Const, constants, number * AGG_DERIVED_CONSTANTS + 1);
 		output->a_numeric = constant_numeric(a);
@@ -222,8 +242,8 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 		elog(ERROR, "TessAgg received a foreign plan");
 #endif
 		state->nderived++;
-		state->derived_by_ref |= output->kind != AGG_DERIVED_SUM_INT8 &&
-			output->kind != AGG_DERIVED_COUNT;
+		state->derived_by_ref |= output->kind == AGG_DERIVED_SUM_NUMERIC ||
+			output->kind == AGG_DERIVED_AVG_INT8 || output->kind == AGG_DERIVED_AVG_NUMERIC;
 	}
 }
 
@@ -301,6 +321,51 @@ agg_derive(const AggOutput *output, const AggSum *sum, bool *isnull)
 		return total;
 	return DirectFunctionCall2(numeric_div, total,
 							   NumericGetDatum(int64_to_numeric(sum->count)));
+}
+
+/*
+ * min or max of a form, from the extreme of e that gives it, the least
+ * where the form grows with e: a * e + b, which the check of errors keeps
+ * within each step's type (a form that cannot fail needs none), in the
+ * form's type; NULL without a row.
+ */
+Datum
+agg_derive_extreme(const AggOutput *output, int64 e, bool *isnull)
+{
+	int128		value;
+
+	if (*isnull)
+		return (Datum) 0;
+	if (output->integers)
+		value = output->a * (int128) e + output->b;
+	else
+		value = DatumGetInt64(DirectFunctionCall1(numeric_int8,
+												  DirectFunctionCall2(numeric_add,
+																	  DirectFunctionCall2(numeric_mul,
+																						  output->a_numeric,
+																						  NumericGetDatum(int64_to_numeric(e))),
+																	  output->b_numeric)));
+	switch (output->type)
+	{
+		case INT2OID:
+			if (value < PG_INT16_MIN || value > PG_INT16_MAX)
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("smallint out of range")));
+			return Int16GetDatum((int16) value);
+		case INT4OID:
+			if (value < PG_INT32_MIN || value > PG_INT32_MAX)
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("integer out of range")));
+			return Int32GetDatum((int32) value);
+		default:
+			if (value < PG_INT64_MIN || value > PG_INT64_MAX)
+				ereport(ERROR,
+						(errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+						 errmsg("bigint out of range")));
+			return Int64GetDatum((int64) value);
+	}
 }
 #endif
 
@@ -1278,9 +1343,16 @@ result_row(TessAggState *state)
 		else
 		{
 #ifdef HAVE_INT128
-			AggValue   *value = &state->values[output->sum_state];
+			AggValue   *value = &state->values[output->source];
 			AggSum		sum = {0};
 
+			if (output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX)
+			{
+				scan->tts_isnull[number] = !value->has_value;
+				scan->tts_values[number] = agg_derive_extreme(output, value->extreme,
+															  &scan->tts_isnull[number]);
+				continue;
+			}
 			if (output->count_state < 0)
 				agg_fast_sum(value->generic, &sum);
 			else

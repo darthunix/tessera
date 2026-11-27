@@ -73,14 +73,16 @@ typedef enum AggDerivedKind
 	AGG_DERIVED_SUM_NUMERIC,	/* sum of a bigint form: a numeric */
 	AGG_DERIVED_AVG_INT8,		/* avg of a smallint or integer form, its sum a bigint */
 	AGG_DERIVED_AVG_NUMERIC,	/* avg of a bigint form */
-	AGG_DERIVED_COUNT
+	AGG_DERIVED_COUNT,
+	AGG_DERIVED_MIN,			/* min or max: the form at an extreme of e */
+	AGG_DERIVED_MAX
 } AggDerivedKind;
 
 /*
  * The plan data's derivations: for each derived output, its states, the
  * sum of e and their count (-1 where the sum state counts them, for a
- * bigint e), and its constants a and b, each an int8 Const or, past an
- * int8, a numeric one. Its checks of errors: for each, the state whose
+ * bigint e), or for min and max the extreme of e it takes and -1, and its
+ * constants a and b, each an int8 Const or, past an int8, a numeric one. Its checks of errors: for each, the state whose
  * argument is e and e's type, and the probes, each form's argument with
  * e an inner column (AggCheck).
  */
@@ -103,8 +105,11 @@ typedef struct AggOutput
 {
 	int			state;			/* the state, or -1 when derived */
 	AggDerivedKind kind;
-	int			sum_state;
+	/* The sum of e, or an extreme of e; the count of e, or -1. */
+	int			source;
 	int			count_state;
+	/* min and max: the form's type. */
+	Oid			type;
 	/* a and b as integers where both are int8 Consts, and as numerics. */
 	bool		integers;
 #ifdef HAVE_INT128

@@ -196,9 +196,12 @@ for a form whose type is `numeric`, in `numeric`:
   first, as the core's average keeps it in a `bigint`; `NULL` where `n`
   is 0; `NaN` where `S` is, a group of `NaN` alone among them;
 - `count`: `n`;
-- `min`, `max`: the argument evaluated at `min(e)`, or at `max(e)` where
-  the factor of `e` is negative, by the core's executor, `NULL` without
-  one.
+- `min`, `max`: the form's value at `min(e)`, or at `max(e)` where the
+  factor of `e` is negative, `a * v + b` in the form's type, `NULL`
+  without one. The check of errors keeps every step of the form within
+  its type at the extremes of `e` over the input, which hold a group's
+  own, so the value is the one the core's steps compute; the node's
+  executor evaluates no expression a group.
 
 A nested form, `((x + 2^30) * 2^30) * 2^30`, has `a` = 2^60 and `b` =
 2^90, which 128-bit `a` and `b` hold; a form whose `a` or `b` passes 128

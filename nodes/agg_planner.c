@@ -878,11 +878,20 @@ fold_form(Node *node, FoldForm *form)
 	return form->low <= form->high;
 }
 
+/* The extreme of e that gives min or max of a form, by the sign of its factor. */
+static bool
+fold_extreme_min(const Aggref *agg, const FoldForm *form)
+{
+	bool		least = aggregate_kind(agg->aggfnoid) == AGG_MIN;
+
+	return form->a >= 0 ? least : !least;
+}
+
 /*
- * Whether an aggregate of the scan tuple may fold, and its form: sum, avg
- * and count of one argument, a plain call without DISTINCT, its FILTER
- * without a volatile function, its argument a form of a smallint, an
- * integer or, with the kernels' sums, a bigint e.
+ * Whether an aggregate of the scan tuple may fold, and its form: sum,
+ * avg, count, min and max of one argument, a plain call without DISTINCT,
+ * its FILTER without a volatile function, its argument a form of a
+ * smallint, an integer or, with the kernels' sums, a bigint e.
  */
 static bool
 fold_candidate(const Aggref *agg, FoldForm *form)
@@ -896,6 +905,12 @@ fold_candidate(const Aggref *agg, FoldForm *form)
 		case F_AVG_INT4:
 		case F_AVG_INT8:
 		case F_COUNT_ANY:
+		case F_MIN_INT2:
+		case F_MIN_INT4:
+		case F_MIN_INT8:
+		case F_MAX_INT2:
+		case F_MAX_INT4:
+		case F_MAX_INT8:
 			break;
 		default:
 			return false;
@@ -910,7 +925,8 @@ fold_candidate(const Aggref *agg, FoldForm *form)
 
 /*
  * A state the planner makes of e: sum of integer or count("any"), int8
- * both, or avg of bigint, whose sum state the node keeps.
+ * both, avg of bigint, whose sum state the node keeps, or an extreme of
+ * an integer or a bigint, of its type.
  */
 static Aggref *
 fold_state(Oid aggfnoid, Node *argument, Expr *filter)
@@ -918,8 +934,9 @@ fold_state(Oid aggfnoid, Node *argument, Expr *filter)
 	Aggref	   *agg = makeNode(Aggref);
 
 	agg->aggfnoid = aggfnoid;
-	agg->aggtype = aggfnoid == F_AVG_INT8 ? NUMERICOID : INT8OID;
-	agg->aggtranstype = aggfnoid == F_AVG_INT8 ? INTERNALOID : INT8OID;
+	agg->aggtype = aggfnoid == F_AVG_INT8 ? NUMERICOID :
+		aggfnoid == F_MIN_INT4 || aggfnoid == F_MAX_INT4 ? INT4OID : INT8OID;
+	agg->aggtranstype = aggfnoid == F_AVG_INT8 ? INTERNALOID : agg->aggtype;
 	agg->aggargtypes = list_make1_oid(exprType(argument));
 	agg->args = list_make1(makeTargetEntry((Expr *) copyObject(argument), 1, NULL, false));
 	agg->aggfilter = copyObject(filter);
@@ -956,15 +973,17 @@ fold_constant(int128 value)
 /*
  * The states and outputs of the aggregates of a scan tuple after its keys.
  * Where fold, the aggregates of one e and one FILTER, at least two and
- * one of a form other than e itself, keep the states of e's sum and
- * count over the rows they read, from which each of them is derived,
- * sum(e) and count(e) among them: for a smallint or an integer e, sum(e)
- * and count(e), words, e cast to integer for a smallint, as below 2^32
- * rows the sum of e holds every sum their forms' own sums hold; for a
- * bigint e, the sum state of avg(e), which holds the count too. Where a
- * form can pass a step's type, the group has a check of errors, the
- * extremes of e and the arguments of those forms as its probes. Every
- * other aggregate is a state of its own, as without fold.
+ * one of a form other than e itself, keep the states of e they need over
+ * the rows they read, from which each of them is derived, those of e
+ * itself among them. Sum, avg and count need e's sum and count: for a
+ * smallint or an integer e, sum(e) and count(e), words, e cast to
+ * integer for a smallint, as below 2^32 rows the sum of e holds every sum
+ * their forms' own sums hold; for a bigint e, the sum state of avg(e),
+ * which holds the count too. min and max need min(e), or max(e) where the
+ * factor of e is negative, words of e's type, integer for a smallint.
+ * Where a form can pass a step's type, the group has a check of errors,
+ * the extremes of e and the arguments of those forms as its probes.
+ * Every other aggregate is a state of its own, as without fold.
  */
 static void
 fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
@@ -974,7 +993,11 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 	int		   *members = palloc0_array(int, Max(naggs, 1));
 	bool	   *steps = palloc0_array(bool, Max(naggs, 1));
 	bool	   *unsafe = palloc0_array(bool, Max(naggs, 1));
-	int		   *sum_state = palloc_array(int, Max(naggs, 1));
+	/* Of each group's first: the states it needs, and where they went. */
+	bool	   *need_sum = palloc0_array(bool, Max(naggs, 1));
+	bool	   *need_min = palloc0_array(bool, Max(naggs, 1));
+	bool	   *need_max = palloc0_array(bool, Max(naggs, 1));
+	int		   *first = palloc_array(int, Max(naggs, 1));
 	int		   *check = palloc_array(int, Max(naggs, 1));
 #ifdef HAVE_INT128
 	FoldForm   *forms = palloc0_array(FoldForm, Max(naggs, 1));
@@ -989,7 +1012,7 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 		Aggref	   *agg = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
 
 		group[i] = -1;
-		sum_state[i] = -1;
+		first[i] = -1;
 		check[i] = -1;
 #ifdef HAVE_INT128
 		if (!fold || !IsA(agg, Aggref) || !fold_candidate(agg, &forms[i]))
@@ -1009,41 +1032,59 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 		members[group[i]]++;
 		steps[group[i]] |= forms[i].steps;
 		unsafe[group[i]] |= !forms[i].safe;
+		if (aggregate_kind(agg->aggfnoid) == AGG_MIN || aggregate_kind(agg->aggfnoid) == AGG_MAX)
+		{
+			need_min[group[i]] |= fold_extreme_min(agg, &forms[i]);
+			need_max[group[i]] |= !fold_extreme_min(agg, &forms[i]);
+		}
+		else
+			need_sum[group[i]] = true;
 #endif
 	}
 	for (int i = 0; i < naggs; i++)
 	{
-		Expr	   *expr = list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
+		Aggref	   *agg = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
 		int			j = group[i];
 
 		if (j < 0 || members[j] < 2 || !steps[j])
 		{
 			result->outputs = lappend_int(result->outputs, list_length(result->states));
-			result->states = lappend(result->states, copyObject(expr));
+			result->states = lappend(result->states, copyObject(agg));
 			continue;
 		}
 #ifdef HAVE_INT128
-		if (sum_state[j] < 0)
+		/* The group's states, at its first: sum and count, min, max, as it needs them. */
+		if (first[j] < 0)
 		{
 			Node	   *e = forms[j].e;
-			Expr	   *filter = ((Aggref *) expr)->aggfilter;
+			bool		wide = exprType(e) == INT8OID;
+			Node	   *word = exprType(e) != INT2OID ? e :
+				(Node *) makeFuncExpr(F_INT4_INT2, INT4OID, list_make1(copyObject(e)),
+									  InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST);
 
-			sum_state[j] = list_length(result->states);
-			if (exprType(e) == INT8OID)
-				result->states = lappend(result->states, fold_state(F_AVG_INT8, e, filter));
-			else
+			first[j] = list_length(result->states);
+			if (need_sum[j] && wide)
+				result->states = lappend(result->states,
+										 fold_state(F_AVG_INT8, e, agg->aggfilter));
+			else if (need_sum[j])
 			{
-				Node	   *wide = exprType(e) == INT4OID ? e :
-					(Node *) makeFuncExpr(F_INT4_INT2, INT4OID, list_make1(copyObject(e)),
-										  InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST);
-
-				result->states = lappend(result->states, fold_state(F_SUM_INT4, wide, filter));
-				result->states = lappend(result->states, fold_state(F_COUNT_ANY, wide, filter));
+				result->states = lappend(result->states,
+										 fold_state(F_SUM_INT4, word, agg->aggfilter));
+				result->states = lappend(result->states,
+										 fold_state(F_COUNT_ANY, word, agg->aggfilter));
 			}
+			if (need_min[j])
+				result->states = lappend(result->states,
+										 fold_state(wide ? F_MIN_INT8 : F_MIN_INT4, word,
+													agg->aggfilter));
+			if (need_max[j])
+				result->states = lappend(result->states,
+										 fold_state(wide ? F_MAX_INT8 : F_MAX_INT4, word,
+													agg->aggfilter));
 			if (unsafe[j])
 			{
 				check[j] = list_length(result->probes);
-				result->checks = lappend_int(result->checks, sum_state[j]);
+				result->checks = lappend_int(result->checks, first[j]);
 				result->checks = lappend_int(result->checks, (int) exprType(e));
 				result->probes = lappend(result->probes, NIL);
 			}
@@ -1053,13 +1094,26 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 			ListCell   *probes = list_nth_cell(result->probes, check[j]);
 
 			lfirst(probes) = lappend((List *) lfirst(probes),
-									 fold_probe(aggregate_argument((Aggref *) expr), forms[i].e));
+									 fold_probe(aggregate_argument(agg), forms[i].e));
 		}
 		result->outputs = lappend_int(result->outputs,
 									  -1 - list_length(result->derived) / AGG_DERIVED_STATES);
-		result->derived = lappend_int(result->derived, sum_state[j]);
-		result->derived = lappend_int(result->derived,
-									  exprType(forms[j].e) == INT8OID ? -1 : sum_state[j] + 1);
+		if (aggregate_kind(agg->aggfnoid) == AGG_MIN || aggregate_kind(agg->aggfnoid) == AGG_MAX)
+		{
+			/* After the sum's states, if any: min(e) first. */
+			int			extreme = first[j] +
+				(need_sum[j] ? (exprType(forms[j].e) == INT8OID ? 1 : 2) : 0) +
+				(fold_extreme_min(agg, &forms[i]) ? 0 : need_min[j] ? 1 : 0);
+
+			result->derived = lappend_int(result->derived, extreme);
+			result->derived = lappend_int(result->derived, -1);
+		}
+		else
+		{
+			result->derived = lappend_int(result->derived, first[j]);
+			result->derived = lappend_int(result->derived,
+										  exprType(forms[j].e) == INT8OID ? -1 : first[j] + 1);
+		}
 		result->constants = lappend(result->constants, fold_constant(forms[i].a));
 		result->constants = lappend(result->constants, fold_constant(forms[i].b));
 		result->nfolded++;
