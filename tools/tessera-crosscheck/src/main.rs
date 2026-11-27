@@ -8,8 +8,8 @@
 //! the rows as a multiset and the errors by SQLSTATE. A query whose modes
 //! disagree, or whose backend crashes, is shrunk by proptest to a small
 //! one that still does, and written with the data's SQL as a ready case
-//! for a suite. Seeds that ever found something are kept in seeds.txt and
-//! run first.
+//! for a suite; the run then goes on with the next query. Seeds that ever
+//! found something are kept in seeds.txt and run first.
 #![forbid(unsafe_code)]
 
 mod ast;
@@ -35,7 +35,7 @@ use oracle::{Oracle, Verdict};
 #[derive(Parser)]
 #[command(
     about = "Random queries with Tessera on and off, compared; disagreements shrunk to small cases",
-    after_help = "Exit: 0 no finding, 1 a finding (written under target/bench-runs/crosscheck), 2 an error."
+    after_help = "Exit: 0 no finding, 1 findings (written under target/bench-runs/crosscheck), 2 an error."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -147,6 +147,8 @@ struct Counts {
 /// of its own, and the query first found with what its modes did then.
 struct Finding {
     seed: u64,
+    /// Its place among the findings of its seed's run, from 1.
+    number: usize,
     query: Query,
     verdict: Verdict,
     original: (Query, Verdict),
@@ -171,17 +173,18 @@ impl Finding {
     }
 }
 
-/// Runs the queries of one seed; a finding, shrunk, if any.
+/// Runs the queries of one seed and gives `report` each finding, shrunk,
+/// when it is made: an error later in the run loses none.
 fn run_seed(
     oracle: &RefCell<Oracle<'_>>,
     seed: u64,
     queries: u32,
     args: &RunArgs,
     deadline: Option<Instant>,
-) -> Result<(Counts, Option<Finding>)> {
+    report: &mut dyn FnMut(&Finding) -> Result<()>,
+) -> Result<Counts> {
     oracle.borrow_mut().load(&schema::setup(seed, args.rows))?;
     let config = Config {
-        cases: queries,
         failure_persistence: None,
         // Each step of shrinking runs a query twice: a minute at most.
         max_shrink_iters: 10_000,
@@ -190,15 +193,18 @@ fn run_seed(
     };
     let mut seed_bytes = [0_u8; 32];
     seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
-    let mut runner = TestRunner::new_with_rng(
-        config,
-        TestRng::from_seed(RngAlgorithm::ChaCha, &seed_bytes),
-    );
+    let mut rng = TestRng::from_seed(RngAlgorithm::ChaCha, &seed_bytes);
     let counts = RefCell::new(Counts::default());
     // Once a query fails, the calls that follow shrink it: not counted,
     // and a failure of another class does not stand for it.
     let original: RefCell<Option<(Query, Verdict)>> = RefCell::new(None);
-    let result = runner.run(&generate::query(), |query| {
+    // A server that failed a query fails the run: the calls of shrinking
+    // fail at once, so that none is counted or makes a finding.
+    let broken: RefCell<Option<String>> = RefCell::new(None);
+    let test = |query: Query| {
+        if let Some(reason) = broken.borrow().as_ref() {
+            return Err(TestCaseError::fail(reason.clone()));
+        }
         let shrinking = original
             .borrow()
             .as_ref()
@@ -213,7 +219,11 @@ fn run_seed(
             // While shrinking, a query the server fails on stands for no
             // finding; the last check reports a server that stays down.
             Err(_) if shrinking.is_some() => return Ok(()),
-            Err(error) => return Err(TestCaseError::fail(format!("the server: {error:#}"))),
+            Err(error) => {
+                let reason = format!("the server: {error:#}");
+                *broken.borrow_mut() = Some(reason.clone());
+                return Err(TestCaseError::fail(reason));
+            }
         };
         match shrinking {
             Some(original) if oracle::same_finding(&original, &verdict) => {
@@ -236,28 +246,51 @@ fn run_seed(
                 Ok(())
             }
         }
-    });
-    let counts = counts.into_inner();
-    match result {
-        Ok(()) => Ok((counts, None)),
-        Err(TestError::Fail(reason, query)) => {
-            // Without a first finding the failure is the server's.
-            let Some(original) = original.into_inner() else {
-                anyhow::bail!("{reason}");
-            };
-            let verdict = oracle.borrow_mut().check(&query)?;
-            Ok((
-                counts,
-                Some(Finding {
+    };
+    // A run stops at its first failure, shrunk. The queries then go on
+    // from the next one: a query's draw reads the runner's generator,
+    // its shrinking does not, so a run from where that one stopped draws
+    // what the stopped run would have.
+    let mut number = 0;
+    loop {
+        let cases = queries.saturating_sub(counts.borrow().queries);
+        let mut runner = TestRunner::new_with_rng(
+            Config {
+                cases,
+                ..config.clone()
+            },
+            rng,
+        );
+        let result = runner.run(&generate::query(), test);
+        rng = runner.rng().clone();
+        match result {
+            Ok(()) => break,
+            Err(TestError::Fail(reason, query)) => {
+                // Without a first finding the failure is the server's.
+                let Some(original) = original.take() else {
+                    anyhow::bail!("{reason}");
+                };
+                number += 1;
+                let checked = oracle.borrow_mut().check(&query);
+                // A server that stays down after a crash: the query first
+                // found is the finding.
+                let (query, verdict) = match &checked {
+                    Ok(verdict) => (query, verdict.clone()),
+                    Err(_) => original.clone(),
+                };
+                report(&Finding {
                     seed,
+                    number,
                     query,
                     verdict,
                     original,
-                }),
-            ))
+                })?;
+                checked?;
+            }
+            Err(TestError::Abort(reason)) => anyhow::bail!("the run stopped: {reason}"),
         }
-        Err(TestError::Abort(reason)) => anyhow::bail!("the run stopped: {reason}"),
     }
+    Ok(counts.into_inner())
 }
 
 /// Writes a finding as a file a suite case can be made of: the data's
@@ -269,7 +302,7 @@ fn write_finding(
     directory: &Path,
 ) -> Result<PathBuf> {
     fs::create_dir_all(directory)?;
-    let path = directory.join(format!("finding-{}.sql", finding.seed));
+    let path = directory.join(format!("finding-{}-{}.sql", finding.seed, finding.number));
     let sql = finding.query.sql();
     let comment = |text: String| text.replace('\n', "\n-- ");
     // A finding over the twin, first or on its run of its own, keeps the
@@ -277,7 +310,10 @@ fn write_finding(
     let twin = if finding.original.1.twin || finding.verdict.twin {
         let mut copies = Vec::new();
         for (index, file) in twin_files.iter().enumerate() {
-            let copy = directory.join(format!("finding-{}-words-{index}.parquet", finding.seed));
+            let copy = directory.join(format!(
+                "finding-{}-{}-words-{index}.parquet",
+                finding.seed, finding.number
+            ));
             fs::copy(file, &copy)?;
             copies.push(copy);
         }
@@ -292,11 +328,12 @@ fn write_finding(
         String::new()
     };
     let text = format!(
-        "-- tessera-crosscheck finding, seed {seed}, {rows} rows: {headline}\n\
+        "-- tessera-crosscheck finding {number}, seed {seed}, {rows} rows: {headline}\n\
          -- {verdict}\n\
          -- first found as:\n-- {original}\n-- {original_verdict}\n\n\
          {setup}\n{settings}\n\
          SET tessera.enable = on;\n{sql};\nSET tessera.enable = off;\n{sql};\n{twin}",
+        number = finding.number,
         seed = finding.seed,
         rows = args.rows,
         headline = finding.headline(),
@@ -338,9 +375,28 @@ fn run(args: RunArgs) -> Result<u8> {
     let deadline =
         (args.time_limit > 0).then(|| Instant::now() + Duration::from_secs(args.time_limit));
     let mut findings = 0;
+    let mut report = |finding: &Finding| -> Result<()> {
+        findings += 1;
+        let path = write_finding(
+            finding,
+            &args,
+            &oracle.borrow().twin_files(),
+            &runs_dir().join("crosscheck"),
+        )?;
+        println!(
+            "FINDING ({}), shrunk:\n{}\n{}\nfirst found as:\n{}\n{}\nwritten to {}",
+            finding.headline(),
+            finding.query,
+            finding.verdict.describe(),
+            finding.original.0,
+            finding.original.1.describe(),
+            path.display()
+        );
+        Ok(())
+    };
     for (seed, queries) in seeds {
         let started = Instant::now();
-        let (counts, finding) = run_seed(&oracle, seed, queries, &args, deadline)
+        let counts = run_seed(&oracle, seed, queries, &args, deadline, &mut report)
             .with_context(|| format!("seed {seed}"))?;
         let kinds: Vec<String> = counts
             .kinds
@@ -355,24 +411,6 @@ fn run(args: RunArgs) -> Result<u8> {
             counts.with_tessera,
             counts.over_twin,
         );
-        if let Some(finding) = finding {
-            findings += 1;
-            let path = write_finding(
-                &finding,
-                &args,
-                &oracle.borrow().twin_files(),
-                &runs_dir().join("crosscheck"),
-            )?;
-            println!(
-                "FINDING ({}), shrunk:\n{}\n{}\nfirst found as:\n{}\n{}\nwritten to {}",
-                finding.headline(),
-                finding.query,
-                finding.verdict.describe(),
-                finding.original.0,
-                finding.original.1.describe(),
-                path.display()
-            );
-        }
     }
     Ok(u8::from(findings > 0))
 }
@@ -447,6 +485,7 @@ mod tests {
         };
         let finding = Finding {
             seed: 9,
+            number: 2,
             query: query.clone(),
             verdict: verdict("{a}", false),
             original: (query, verdict("{b}", true)),
@@ -454,10 +493,11 @@ mod tests {
         let args = Cli::parse_from(["tessera-crosscheck"]).run;
         let out = dir.path().join("crosscheck");
         let path = write_finding(&finding, &args, &sources, &out).unwrap();
+        assert_eq!(path, out.join("finding-9-2.sql"));
         let text = fs::read_to_string(path).unwrap();
         assert!(text.contains("FROM words_pq AS t0"), "{text}");
         for (index, source) in sources.iter().enumerate() {
-            let copy = out.join(format!("finding-9-words-{index}.parquet"));
+            let copy = out.join(format!("finding-9-2-words-{index}.parquet"));
             assert!(text.contains(&copy.display().to_string()), "{text}");
             fs::write(source, "the next seed's").unwrap();
             assert_eq!(
@@ -466,5 +506,66 @@ mod tests {
             );
         }
         assert!(text.contains("over the Parquet twin"), "{text}");
+    }
+
+    /// What run_seed counts on to go on after a finding: a run started
+    /// from the generator where a failed run stopped, after shrinking,
+    /// draws the queries the whole run would have drawn after that one.
+    #[test]
+    fn a_run_from_where_a_finding_stopped_draws_what_the_whole_run_would() {
+        let config = Config {
+            failure_persistence: None,
+            max_shrink_iters: 1000,
+            ..Config::default()
+        };
+        let rng = || TestRng::from_seed(RngAlgorithm::ChaCha, &[7; 32]);
+        let whole = RefCell::new(Vec::new());
+        TestRunner::new_with_rng(
+            Config {
+                cases: 40,
+                ..config.clone()
+            },
+            rng(),
+        )
+        .run(&generate::query(), |query| {
+            whole.borrow_mut().push(query.sql());
+            Ok(())
+        })
+        .unwrap();
+        let parts = RefCell::new(Vec::new());
+        let shrinking = std::cell::Cell::new(false);
+        let mut first = TestRunner::new_with_rng(
+            Config {
+                cases: 40,
+                ..config.clone()
+            },
+            rng(),
+        );
+        let result = first.run(&generate::query(), |query| {
+            // Every step of shrinking fails too: the longest shrinking.
+            if shrinking.get() {
+                return Err(TestCaseError::fail("shrinking"));
+            }
+            parts.borrow_mut().push(query.sql());
+            if parts.borrow().len() == 10 {
+                shrinking.set(true);
+                return Err(TestCaseError::fail("a finding"));
+            }
+            Ok(())
+        });
+        assert!(matches!(result, Err(TestError::Fail(..))));
+        TestRunner::new_with_rng(
+            Config {
+                cases: 30,
+                ..config
+            },
+            first.rng().clone(),
+        )
+        .run(&generate::query(), |query| {
+            parts.borrow_mut().push(query.sql());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(parts.into_inner(), whole.into_inner());
     }
 }
