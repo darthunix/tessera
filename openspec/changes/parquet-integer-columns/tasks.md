@@ -39,7 +39,7 @@ runs 19 and 18.
 
 ## 3. The count
 
-- [ ] 3.1 Count as the design's measurement plan says, at the
+- [x] 3.1 Count as the design's measurement plan says, at the
       maintainer's word that the machine is idle: a worktree of the
       base beside the branch's, release builds checked, plans compared,
       the base and the end in turns, twice, with the control and
