@@ -20,7 +20,7 @@
 
 /* The plan data of the nodes of this module, written by their planners. */
 #define TESS_AGG_DATA "tessera.agg"
-#define TESS_AGG_DATA_VERSION 9
+#define TESS_AGG_DATA_VERSION 10
 #define TESS_FILTER_DATA "tessera.filter"
 #define TESS_FILTER_DATA_VERSION 1
 #define TESS_HASH_JOIN_DATA "tessera.hash_join"

@@ -1594,9 +1594,10 @@ collect_params(Node *node, List **params)
  * hidden. HAVING is the plan's qual, as it is the core aggregate's, for the
  * query's grouping only (AGG_PATH_HAVING): not for the partial aggregates of
  * a parallel plan, whose Finalize Aggregate applies it, nor for a DISTINCT
- * or a set operation above. The private data carries one argument per
- * aggregate, a NULL constant for count(*), and one FILTER condition, NULL
- * without one.
+ * or a set operation above. The private data carries the states the node
+ * keeps, each an aggregate with one argument, a NULL constant for
+ * count(*), and one FILTER condition, NULL without one; and for each
+ * aggregate of the scan tuple its output, the state whose value it is.
  */
 /*
  * A set operation's counts as aggregates of the scan tuple: count(*) of a
@@ -1695,6 +1696,8 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	List	   *filters = NIL;
 	List	   *keys = NIL;
 	List	   *params = NIL;
+	List	   *states = NIL;
+	List	   *outputs = NIL;
 	List	   *path_data;
 	TessPlanWriter *writer;
 	int			nkeys;
@@ -1761,6 +1764,9 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 													  &child));
 			continue;
 		}
+		/* Each aggregate of the scan tuple is the value of a state of its own. */
+		outputs = lappend_int(outputs, list_length(states));
+		states = lappend(states, copyObject(entry->expr));
 		/* Above a gather: the aggregate's partial value, a column of the child. */
 		if (flags & AGG_PATH_FINALIZE)
 		{
@@ -1804,6 +1810,8 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 	collect_params((Node *) filters, &params);
 	collect_params((Node *) keys, &params);
 	writer = tess_plan_writer_create(TESS_AGG_DATA, TESS_AGG_DATA_VERSION);
+	tess_plan_write_list(writer, "states", states);
+	tess_plan_write_int_list(writer, "outputs", outputs);
 	tess_plan_write_list(writer, "arguments", arguments);
 	tess_plan_write_list(writer, "more", more);
 	tess_plan_write_list(writer, "filters", filters);

@@ -116,8 +116,14 @@ typedef struct TessAggState
 	/* The arguments as computed columns after the child's; NULL without any. */
 	TessProjection *projection;
 	TessLayout	child_layout;
+	/*
+	 * The states the node keeps, and for each aggregate of the scan tuple
+	 * after the keys, its output: the state whose value it is.
+	 */
 	AggValue   *values;
 	int			nvalues;
+	int			noutputs;
+	int		   *output_states;
 	/* Written by a batch function on failure only. */
 	TessStatus	status;
 	/* The row was returned; the next call ends the scan. */
