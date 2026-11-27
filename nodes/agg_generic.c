@@ -1380,9 +1380,15 @@ agg_sum_state_value(const GenericAgg *generic, const uint64 *words, bool *isnull
 void
 agg_sum_state_sum(const uint64 *words, AggSum *sum)
 {
+	uint64		flags = words[3];
+
 	sum->sum = (int128) (((uint128) words[1] << 64) | words[0]);
+	sum->scale = (int) (flags & TESS_TABLE_SUM_SCALE_MASK);
 	sum->rest = (Datum) words[TESS_TABLE_SUM_WORDS];
 	sum->count = (int64) words[2];
+	/* NaN in the flags, which numeric_add of the rest keeps: a table's column has no infinity. */
+	if ((flags & TESS_TABLE_SUM_NAN) != 0)
+		sum->rest = sum_state_special("NaN");
 }
 
 void
@@ -1397,6 +1403,7 @@ agg_fast_sum(const GenericAgg *generic, AggSum *sum)
 	if (generic->state_null)
 		return;
 	sum->sum = fast->sum;
+	sum->scale = fast->scale;
 	sum->rest = fast->has_rest ? fast->rest : (Datum) 0;
 	sum->count = fast->count;
 }

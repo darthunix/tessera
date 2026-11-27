@@ -91,10 +91,14 @@ typedef enum AggDerivedKind
 #define AGG_CHECK_FIELDS 2
 
 #ifdef HAVE_INT128
-/* The sum of e over the rows a derived output reads, its rest past 128 bits, their count. */
+/*
+ * The sum of e over the rows a derived output reads, at its scale, its
+ * rest past 128 bits or NaN, and their count.
+ */
 typedef struct AggSum
 {
 	int128		sum;
+	int			scale;
 	Datum		rest;			/* a numeric to add, or 0 */
 	int64		count;
 } AggSum;
@@ -110,12 +114,17 @@ typedef struct AggOutput
 	int			count_state;
 	/* min and max: the form's type. */
 	Oid			type;
-	/* a and b as integers where both are int8 Consts, and as numerics. */
-	bool		integers;
+	/*
+	 * a and b as decimals, a mantissa at a scale, where both are within
+	 * 128 bits (exact), and as numerics.
+	 */
+	bool		exact;
 #ifdef HAVE_INT128
 	int128		a;
 	int128		b;
 #endif
+	int			a_scale;
+	int			b_scale;
 	Datum		a_numeric;
 	Datum		b_numeric;
 } AggOutput;

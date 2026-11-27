@@ -4,6 +4,7 @@
 
 #include "access/htup_details.h"
 #include "catalog/pg_aggregate.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_language.h"
 #include "catalog/pg_proc.h"
 #include "miscadmin.h"
@@ -22,6 +23,8 @@
 #include "utils/typcache.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/fmgrprotos.h"
+#include "utils/numeric.h"
 #include "utils/selfuncs.h"
 
 #include "tessera/expr.h"
@@ -644,11 +647,24 @@ typedef struct AggFold
 #ifdef HAVE_INT128
 
 /*
+ * The bounds of a form of numeric, within a margin of the format: the
+ * digits before the point of any value of a step or of a derived sum,
+ * and their scale, past which numeric_mul would round (NUMERIC_DSCALE_MAX,
+ * 16 383). The digits of a count of rows, below 2^63.
+ */
+#define FOLD_NUMERIC_DIGITS 100000
+#define FOLD_NUMERIC_SCALE 1000
+#define FOLD_COUNT_DIGITS 19
+
+/*
  * A folded form of an argument, a·e + b over an expression e of the
- * input: the steps from e out, each the core's own function of an
- * integer with a non-NULL constant on its other side, and the range of
- * the form's values over every e of its type, where no step failed;
- * safe when no step can fail on that range.
+ * input: the steps from e out, each the core's own function with a
+ * non-NULL constant on its other side. While its type is an integer, a
+ * and b and the range of its values over every e of e's type where no
+ * step failed, safe when no step can fail on that range; from the step
+ * that makes it numeric, a and b as the core's numeric functions make
+ * them, their scales kept, and bounds of its values' digits and scale.
+ * The digits and the scale of e itself bound its sum.
  */
 typedef struct FoldForm
 {
@@ -657,6 +673,13 @@ typedef struct FoldForm
 	int128		b;
 	int128		low;
 	int128		high;
+	bool		numeric;
+	Datum		a_numeric;
+	Datum		b_numeric;
+	int			digits;
+	int			scale;
+	int			e_digits;
+	int			e_scale;
 	bool		safe;
 	bool		steps;
 } FoldForm;
@@ -668,7 +691,8 @@ typedef enum FoldStep
 	FOLD_SUB,
 	FOLD_MUL,
 	FOLD_NEGATE,
-	FOLD_WIDEN
+	FOLD_WIDEN,
+	FOLD_TO_NUMERIC
 } FoldStep;
 
 /* The step a function is, by its identity: an extension's is none. */
@@ -686,6 +710,7 @@ fold_step(Oid function)
 		case F_INT82PL:
 		case F_INT48PL:
 		case F_INT84PL:
+		case F_NUMERIC_ADD:
 			return FOLD_ADD;
 		case F_INT2MI:
 		case F_INT4MI:
@@ -696,6 +721,7 @@ fold_step(Oid function)
 		case F_INT82MI:
 		case F_INT48MI:
 		case F_INT84MI:
+		case F_NUMERIC_SUB:
 			return FOLD_SUB;
 		case F_INT2MUL:
 		case F_INT4MUL:
@@ -706,44 +732,53 @@ fold_step(Oid function)
 		case F_INT82MUL:
 		case F_INT48MUL:
 		case F_INT84MUL:
+		case F_NUMERIC_MUL:
 			return FOLD_MUL;
 		case F_INT2UM:
 		case F_INT4UM:
 		case F_INT8UM:
+		case F_NUMERIC_UMINUS:
 			return FOLD_NEGATE;
 		case F_INT4_INT2:
 		case F_INT8_INT2:
 		case F_INT8_INT4:
 			return FOLD_WIDEN;
+		case F_NUMERIC_INT2:
+		case F_NUMERIC_INT4:
+		case F_NUMERIC_INT8:
+			return FOLD_TO_NUMERIC;
 		default:
 			return FOLD_NONE;
 	}
 }
 
-/* An integer type's range; false for another type. */
+/* An integer type's range and digits; false for another type. */
 static bool
-integer_range(Oid type, int128 *low, int128 *high)
+integer_range(Oid type, int128 *low, int128 *high, int *digits)
 {
 	switch (type)
 	{
 		case INT2OID:
 			*low = PG_INT16_MIN;
 			*high = PG_INT16_MAX;
+			*digits = 5;
 			return true;
 		case INT4OID:
 			*low = PG_INT32_MIN;
 			*high = PG_INT32_MAX;
+			*digits = 10;
 			return true;
 		case INT8OID:
 			*low = PG_INT64_MIN;
 			*high = PG_INT64_MAX;
+			*digits = 19;
 			return true;
 		default:
 			return false;
 	}
 }
 
-/* A step's constant: a non-NULL Const of an integer type. */
+/* An integer step's constant: a non-NULL Const of an integer type. */
 static bool
 integer_constant(Node *node, int128 *value)
 {
@@ -767,25 +802,88 @@ integer_constant(Node *node, int128 *value)
 	}
 }
 
+/* A numeric step's constant: a non-NULL, finite Const of numeric. */
+static bool
+numeric_constant(Node *node, Datum *value)
+{
+	Const	   *constant = (Const *) node;
+
+	if (!IsA(node, Const) || constant->constisnull || constant->consttype != NUMERICOID ||
+		numeric_is_nan(DatumGetNumeric(constant->constvalue)) ||
+		numeric_is_inf(DatumGetNumeric(constant->constvalue)))
+		return false;
+	*value = constant->constvalue;
+	return true;
+}
+
+/* The digits before the point, at least one, and after it of a finite numeric. */
+static void
+numeric_digits(Datum value, int *before, int *after)
+{
+	const char *text = DatumGetCString(DirectFunctionCall1(numeric_out, value));
+	const char *point;
+
+	if (*text == '-')
+		text++;
+	point = strchr(text, '.');
+	*before = point != NULL ? (int) (point - text) : (int) strlen(text);
+	*after = point != NULL ? (int) strlen(point + 1) : 0;
+}
+
 /*
- * The folded form of an expression; false where it is none: e, where the
- * steps stop, of an integer type, no constant and with no volatile
- * function, and a and b within 128 bits. Each step is monotone in e and
- * fails only past its type's range, which the range of the next step's
- * values leaves out.
+ * A numeric column of a plain table or a materialized view of a declared
+ * precision, and its values' digits before the point and scale: the table
+ * keeps every value it stores within its typmod, finite or NaN, which a
+ * function in FROM, a foreign table or a partition of another kind does
+ * not promise. The typmod's fields as numeric.c packs them.
  */
 static bool
-fold_form(Node *node, FoldForm *form)
+numeric_column(PlannerInfo *root, Node *node, int *digits, int *scale)
+{
+	Var		   *var = (Var *) node;
+	RangeTblEntry *rte;
+	int			precision;
+	int			declared;
+
+	if (!IsA(node, Var) || var->vartype != NUMERICOID || var->varlevelsup != 0 ||
+		var->varattno <= 0 || var->varno < 1 || var->varno >= root->simple_rel_array_size ||
+		var->vartypmod < (int32) VARHDRSZ)
+		return false;
+	rte = root->simple_rte_array[var->varno];
+	if (rte == NULL || rte->rtekind != RTE_RELATION || rte->inh ||
+		(rte->relkind != RELKIND_RELATION && rte->relkind != RELKIND_MATVIEW))
+		return false;
+	precision = ((var->vartypmod - VARHDRSZ) >> 16) & 0xffff;
+	declared = (((var->vartypmod - VARHDRSZ) & 0x7ff) ^ 1024) - 1024;
+	*digits = Max(precision - declared, 1);
+	*scale = Max(declared, 0);
+	return true;
+}
+
+/*
+ * The folded form of an expression; false where it is none: e, where the
+ * steps stop, no constant and with no volatile function, of an integer
+ * type or a numeric column (numeric_column); a and b of an integer form
+ * within 128 bits, a numeric form within the bounds. Each integer step
+ * is monotone in e and fails only past its type's range, which the range
+ * of the next step's values leaves out; a numeric step within the bounds
+ * neither fails nor rounds, and passes NaN on.
+ */
+static bool
+fold_form(PlannerInfo *root, Node *node, FoldForm *form)
 {
 	FoldStep	step = FOLD_NONE;
 	List	   *args = NIL;
 	Node	   *inner = NULL;
+	bool		numeric = exprType(node) == NUMERICOID;
 	int128		constant = 0;
+	Datum		decimal = (Datum) 0;
 	bool		constant_first = false;
 	int128		low;
 	int128		high;
 	int128		type_low;
 	int128		type_high;
+	int			digits;
 
 	if (IsA(node, OpExpr))
 	{
@@ -799,31 +897,93 @@ fold_form(Node *node, FoldForm *form)
 		step = fold_step(((FuncExpr *) node)->funcid);
 		args = ((FuncExpr *) node)->args;
 	}
-	if (step == FOLD_NEGATE || step == FOLD_WIDEN)
+	if (step == FOLD_NEGATE || step == FOLD_WIDEN || step == FOLD_TO_NUMERIC)
 		inner = linitial(args);
-	else if (step != FOLD_NONE && integer_constant(linitial(args), &constant))
+	else if (step != FOLD_NONE &&
+			 (numeric ? numeric_constant(linitial(args), &decimal) :
+			  integer_constant(linitial(args), &constant)))
 	{
 		inner = lsecond(args);
 		constant_first = true;
 	}
-	else if (step != FOLD_NONE && integer_constant(lsecond(args), &constant))
+	else if (step != FOLD_NONE &&
+			 (numeric ? numeric_constant(lsecond(args), &decimal) :
+			  integer_constant(lsecond(args), &constant)))
 		inner = linitial(args);
 	/* e: an expression no step of a constant makes. */
 	if (inner == NULL)
 	{
-		if (IsA(node, Const) || contain_volatile_functions(node) ||
-			!integer_range(exprType(node), &form->low, &form->high))
+		if (IsA(node, Const) || contain_volatile_functions(node))
 			return false;
 		form->e = node;
 		form->a = 1;
 		form->b = 0;
 		form->safe = true;
 		form->steps = false;
+		form->numeric = false;
+		form->e_scale = 0;
+		if (integer_range(exprType(node), &form->low, &form->high, &form->e_digits))
+			return true;
+		if (!numeric_column(root, node, &form->e_digits, &form->e_scale))
+			return false;
+		form->numeric = true;
+		form->a_numeric = NumericGetDatum(int64_to_numeric(1));
+		form->b_numeric = NumericGetDatum(int64_to_numeric(0));
+		form->digits = form->e_digits;
+		form->scale = form->e_scale;
 		return true;
 	}
-	if (!fold_form(inner, form))
+	if (!fold_form(root, inner, form) || form->numeric != (numeric && step != FOLD_TO_NUMERIC))
 		return false;
 	form->steps = true;
+	/* An integer form made numeric: a and b as numerics, its values an integer type's. */
+	if (step == FOLD_TO_NUMERIC)
+	{
+		form->numeric = true;
+		form->a_numeric = agg_int128_numeric(form->a, 0);
+		form->b_numeric = agg_int128_numeric(form->b, 0);
+		if (!integer_range(exprType(inner), &type_low, &type_high, &form->digits))
+			return false;
+		form->scale = 0;
+		return true;
+	}
+	if (numeric)
+	{
+		int			before = 0;
+		int			after = 0;
+
+		if (step != FOLD_NEGATE)
+			numeric_digits(decimal, &before, &after);
+		switch (step)
+		{
+			case FOLD_ADD:
+			case FOLD_SUB:
+				if (step == FOLD_SUB && constant_first)
+				{
+					form->a_numeric = DirectFunctionCall1(numeric_uminus, form->a_numeric);
+					form->b_numeric = DirectFunctionCall2(numeric_sub, decimal, form->b_numeric);
+				}
+				else
+					form->b_numeric = DirectFunctionCall2(step == FOLD_ADD ? numeric_add : numeric_sub,
+														  form->b_numeric, decimal);
+				form->digits = Max(form->digits, before) + 1;
+				form->scale = Max(form->scale, after);
+				break;
+			case FOLD_MUL:
+				form->a_numeric = DirectFunctionCall2(numeric_mul, form->a_numeric, decimal);
+				form->b_numeric = DirectFunctionCall2(numeric_mul, form->b_numeric, decimal);
+				form->digits += before;
+				form->scale += after;
+				break;
+			case FOLD_NEGATE:
+				form->a_numeric = DirectFunctionCall1(numeric_uminus, form->a_numeric);
+				form->b_numeric = DirectFunctionCall1(numeric_uminus, form->b_numeric);
+				break;
+			default:
+				return false;
+		}
+		return form->digits <= FOLD_NUMERIC_DIGITS && form->scale <= FOLD_NUMERIC_SCALE;
+	}
 	low = form->low;
 	high = form->high;
 	switch (step)
@@ -864,12 +1024,11 @@ fold_form(Node *node, FoldForm *form)
 			low = -form->high;
 			high = -form->low;
 			break;
-		case FOLD_WIDEN:
-		case FOLD_NONE:
+		default:
 			break;
 	}
 	/* The values past the step's type fail; the rest go on. */
-	if (!integer_range(exprType(node), &type_low, &type_high))
+	if (!integer_range(exprType(node), &type_low, &type_high, &digits))
 		return false;
 	if (low < type_low || high > type_high)
 		form->safe = false;
@@ -878,23 +1037,77 @@ fold_form(Node *node, FoldForm *form)
 	return form->low <= form->high;
 }
 
+/* The sign of a form's factor: of its int128 a, or of its numeric one. */
+static int
+fold_sign(const FoldForm *form)
+{
+	if (form->numeric)
+		return DatumGetInt32(DirectFunctionCall2(numeric_cmp, form->a_numeric,
+												 NumericGetDatum(int64_to_numeric(0))));
+	return form->a > 0 ? 1 : form->a < 0 ? -1 : 0;
+}
+
+/*
+ * Whether a numeric form's derived sum a * S + b * n stays within the
+ * bounds, for 2^63 rows at most, S of e's digits and scale.
+ */
+static bool
+fold_sum_bounded(const FoldForm *form)
+{
+	int			a_before;
+	int			a_after;
+	int			b_before;
+	int			b_after;
+
+	if (!form->numeric)
+		return true;
+	numeric_digits(form->a_numeric, &a_before, &a_after);
+	numeric_digits(form->b_numeric, &b_before, &b_after);
+	return a_before + form->e_digits + FOLD_COUNT_DIGITS + 1 <= FOLD_NUMERIC_DIGITS &&
+		b_before + FOLD_COUNT_DIGITS + 1 <= FOLD_NUMERIC_DIGITS &&
+		a_after + form->e_scale <= FOLD_NUMERIC_SCALE && b_after <= FOLD_NUMERIC_SCALE;
+}
+
 /* The extreme of e that gives min or max of a form, by the sign of its factor. */
 static bool
 fold_extreme_min(const Aggref *agg, const FoldForm *form)
 {
-	bool		least = aggregate_kind(agg->aggfnoid) == AGG_MIN;
+	bool		least = agg->aggfnoid == F_MIN_INT2 || agg->aggfnoid == F_MIN_INT4 ||
+		agg->aggfnoid == F_MIN_INT8 || agg->aggfnoid == F_MIN_NUMERIC;
 
-	return form->a >= 0 ? least : !least;
+	return fold_sign(form) >= 0 ? least : !least;
+}
+
+/* Whether an aggregate is min or max of a fold. */
+static bool
+fold_extreme(const Aggref *agg)
+{
+	switch (agg->aggfnoid)
+	{
+		case F_MIN_INT2:
+		case F_MIN_INT4:
+		case F_MIN_INT8:
+		case F_MIN_NUMERIC:
+		case F_MAX_INT2:
+		case F_MAX_INT4:
+		case F_MAX_INT8:
+		case F_MAX_NUMERIC:
+			return true;
+		default:
+			return false;
+	}
 }
 
 /*
  * Whether an aggregate of the scan tuple may fold, and its form: sum,
  * avg, count, min and max of one argument, a plain call without DISTINCT,
  * its FILTER without a volatile function, its argument a form of a
- * smallint, an integer or, with the kernels' sums, a bigint e.
+ * smallint, an integer or, with the kernels' sums, a bigint or a numeric
+ * column e; min and max of a numeric e only with a positive factor, as
+ * NaN, the greatest of numerics, would not follow a negative one.
  */
 static bool
-fold_candidate(const Aggref *agg, FoldForm *form)
+fold_candidate(PlannerInfo *root, const Aggref *agg, FoldForm *form)
 {
 	switch (agg->aggfnoid)
 	{
@@ -911,32 +1124,46 @@ fold_candidate(const Aggref *agg, FoldForm *form)
 		case F_MAX_INT2:
 		case F_MAX_INT4:
 		case F_MAX_INT8:
+		case F_SUM_NUMERIC:
+		case F_AVG_NUMERIC:
+		case F_MIN_NUMERIC:
+		case F_MAX_NUMERIC:
 			break;
 		default:
 			return false;
 	}
 	if (agg->aggsplit != AGGSPLIT_SIMPLE || agg->aggdistinct != NIL ||
 		list_length(agg->args) != 1 || contain_volatile_functions((Node *) agg->aggfilter) ||
-		!fold_form(aggregate_argument(agg), form))
+		!fold_form(root, aggregate_argument(agg), form) || !fold_sum_bounded(form))
 		return false;
-	return exprType(form->e) == INT2OID || exprType(form->e) == INT4OID ||
-		(exprType(form->e) == INT8OID && tess_runtime_kernels() != NULL);
+	switch (exprType(form->e))
+	{
+		case INT2OID:
+		case INT4OID:
+			return true;
+		case INT8OID:
+			return tess_runtime_kernels() != NULL;
+		default:
+			return tess_runtime_kernels() != NULL &&
+				(!fold_extreme(agg) || fold_sign(form) > 0);
+	}
 }
 
 /*
  * A state the planner makes of e: sum of integer or count("any"), int8
- * both, avg of bigint, whose sum state the node keeps, or an extreme of
- * an integer or a bigint, of its type.
+ * both, avg of bigint or numeric, whose sum state the node keeps, or an
+ * extreme of an integer, a bigint or a numeric, of its type.
  */
 static Aggref *
 fold_state(Oid aggfnoid, Node *argument, Expr *filter)
 {
 	Aggref	   *agg = makeNode(Aggref);
+	bool		sum_state = aggfnoid == F_AVG_INT8 || aggfnoid == F_AVG_NUMERIC;
 
 	agg->aggfnoid = aggfnoid;
-	agg->aggtype = aggfnoid == F_AVG_INT8 ? NUMERICOID :
-		aggfnoid == F_MIN_INT4 || aggfnoid == F_MAX_INT4 ? INT4OID : INT8OID;
-	agg->aggtranstype = aggfnoid == F_AVG_INT8 ? INTERNALOID : agg->aggtype;
+	agg->aggtype = sum_state || aggfnoid == F_MIN_NUMERIC || aggfnoid == F_MAX_NUMERIC ?
+		NUMERICOID : aggfnoid == F_MIN_INT4 || aggfnoid == F_MAX_INT4 ? INT4OID : INT8OID;
+	agg->aggtranstype = sum_state ? INTERNALOID : agg->aggtype;
 	agg->aggargtypes = list_make1_oid(exprType(argument));
 	agg->args = list_make1(makeTargetEntry((Expr *) copyObject(argument), 1, NULL, false));
 	agg->aggfilter = copyObject(filter);
@@ -957,10 +1184,18 @@ fold_probe(Node *node, Node *e)
 	return expression_tree_mutator(node, fold_probe, e);
 }
 
-/* A derivation's constant: an int8, or past one a numeric. */
+/*
+ * A derivation's constant: of an integer form an int8, or past one a
+ * numeric; of a numeric form the numeric as its steps made it.
+ */
 static Const *
-fold_constant(int128 value)
+fold_constant(const FoldForm *form, bool factor)
 {
+	int128		value = factor ? form->a : form->b;
+
+	if (form->numeric)
+		return makeConst(NUMERICOID, -1, InvalidOid, -1,
+						 factor ? form->a_numeric : form->b_numeric, false, false);
 	if (value >= PG_INT64_MIN && value <= PG_INT64_MAX)
 		return makeConst(INT8OID, -1, InvalidOid, sizeof(int64),
 						 Int64GetDatum((int64) value), false, true);
@@ -986,7 +1221,7 @@ fold_constant(int128 value)
  * Every other aggregate is a state of its own, as without fold.
  */
 static void
-fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
+fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *result)
 {
 	int			naggs = list_length(tlist) - nkeys;
 	int		   *group = palloc_array(int, Max(naggs, 1));
@@ -1015,7 +1250,7 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 		first[i] = -1;
 		check[i] = -1;
 #ifdef HAVE_INT128
-		if (!fold || !IsA(agg, Aggref) || !fold_candidate(agg, &forms[i]))
+		if (!fold || !IsA(agg, Aggref) || !fold_candidate(root, agg, &forms[i]))
 			continue;
 		group[i] = i;
 		for (int j = 0; j < i; j++)
@@ -1032,7 +1267,7 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 		members[group[i]]++;
 		steps[group[i]] |= forms[i].steps;
 		unsafe[group[i]] |= !forms[i].safe;
-		if (aggregate_kind(agg->aggfnoid) == AGG_MIN || aggregate_kind(agg->aggfnoid) == AGG_MAX)
+		if (fold_extreme(agg))
 		{
 			need_min[group[i]] |= fold_extreme_min(agg, &forms[i]);
 			need_max[group[i]] |= !fold_extreme_min(agg, &forms[i]);
@@ -1057,30 +1292,33 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 		if (first[j] < 0)
 		{
 			Node	   *e = forms[j].e;
-			bool		wide = exprType(e) == INT8OID;
-			Node	   *word = exprType(e) != INT2OID ? e :
+			Oid			type = exprType(e);
+			Node	   *word = type != INT2OID ? e :
 				(Node *) makeFuncExpr(F_INT4_INT2, INT4OID, list_make1(copyObject(e)),
 									  InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST);
 
 			first[j] = list_length(result->states);
-			if (need_sum[j] && wide)
+			if (need_sum[j] && type == INT8OID)
 				result->states = lappend(result->states,
 										 fold_state(F_AVG_INT8, e, agg->aggfilter));
 			else if (need_sum[j])
 			{
 				result->states = lappend(result->states,
-										 fold_state(F_SUM_INT4, word, agg->aggfilter));
+										 fold_state(type == NUMERICOID ? F_AVG_NUMERIC : F_SUM_INT4,
+													word, agg->aggfilter));
 				result->states = lappend(result->states,
 										 fold_state(F_COUNT_ANY, word, agg->aggfilter));
 			}
 			if (need_min[j])
 				result->states = lappend(result->states,
-										 fold_state(wide ? F_MIN_INT8 : F_MIN_INT4, word,
-													agg->aggfilter));
+										 fold_state(type == NUMERICOID ? F_MIN_NUMERIC :
+													type == INT8OID ? F_MIN_INT8 : F_MIN_INT4,
+													word, agg->aggfilter));
 			if (need_max[j])
 				result->states = lappend(result->states,
-										 fold_state(wide ? F_MAX_INT8 : F_MAX_INT4, word,
-													agg->aggfilter));
+										 fold_state(type == NUMERICOID ? F_MAX_NUMERIC :
+													type == INT8OID ? F_MAX_INT8 : F_MAX_INT4,
+													word, agg->aggfilter));
 			if (unsafe[j])
 			{
 				check[j] = list_length(result->probes);
@@ -1098,7 +1336,7 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 		}
 		result->outputs = lappend_int(result->outputs,
 									  -1 - list_length(result->derived) / AGG_DERIVED_STATES);
-		if (aggregate_kind(agg->aggfnoid) == AGG_MIN || aggregate_kind(agg->aggfnoid) == AGG_MAX)
+		if (fold_extreme(agg))
 		{
 			/* After the sum's states, if any: min(e) first. */
 			int			extreme = first[j] +
@@ -1114,8 +1352,8 @@ fold_aggregates(List *tlist, int nkeys, bool fold, AggFold *result)
 			result->derived = lappend_int(result->derived,
 										  exprType(forms[j].e) == INT8OID ? -1 : first[j] + 1);
 		}
-		result->constants = lappend(result->constants, fold_constant(forms[i].a));
-		result->constants = lappend(result->constants, fold_constant(forms[i].b));
+		result->constants = lappend(result->constants, fold_constant(&forms[i], true));
+		result->constants = lappend(result->constants, fold_constant(&forms[i], false));
 		result->nfolded++;
 #endif
 	}
@@ -1374,7 +1612,8 @@ make_agg_path(PlannerInfo *root, const AggPath *agg, List *tlist, int nkeys, int
 	List	   *states;
 
 	/* The states are those the plan keeps (agg_plan): the costs are theirs. */
-	fold_aggregates(tlist, nkeys, (flags & (AGG_PATH_PARTIAL | AGG_PATH_FINALIZE)) == 0, &fold);
+	fold_aggregates(root, tlist, nkeys, (flags & (AGG_PATH_PARTIAL | AGG_PATH_FINALIZE)) == 0,
+					&fold);
 	states = fold_target_list(tlist, nkeys, &fold);
 	child = agg->subpath;
 	/* A sort the core put below for its sorted grouping: hashing needs none. */
@@ -2065,7 +2304,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	 * The node keeps AGG_MAX_GROUPED states at most, with groups or without,
 	 * those of the aggregates it folds counted once.
 	 */
-	fold_aggregates(tlist, list_length(keys), true, &fold);
+	fold_aggregates(root, tlist, list_length(keys), true, &fold);
 	if (list_length(fold.states) > AGG_MAX_GROUPED)
 		return;
 	states = fold_target_list(tlist, list_length(keys), &fold);
@@ -2340,7 +2579,7 @@ agg_plan(PlannerInfo *root, RelOptInfo *rel, CustomPath *best_path,
 			keys = lappend(keys, resolve_argument((Node *) copyObject(entry->expr),
 												  &child));
 	}
-	fold_aggregates(info.expressions, nkeys,
+	fold_aggregates(root, info.expressions, nkeys,
 					setop < 0 && (flags & (AGG_PATH_PARTIAL | AGG_PATH_FINALIZE)) == 0, &fold);
 	foreach_node(Aggref, agg, fold.states)
 	{
