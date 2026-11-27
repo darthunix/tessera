@@ -1038,6 +1038,34 @@ fold_form(PlannerInfo *root, Node *node, FoldForm *form)
 	return form->low <= form->high;
 }
 
+/*
+ * The form of a constant c, 0·e + c without an e: of an integer type or a
+ * finite numeric, not NULL; its aggregates read no column.
+ */
+static bool
+fold_constant_form(Node *node, FoldForm *form)
+{
+	int			digits;
+
+	*form = (FoldForm)
+	{
+		0
+	};
+	form->safe = true;
+	form->steps = true;
+	if (integer_constant(node, &form->b))
+	{
+		form->low = form->high = form->b;
+		return integer_range(exprType(node), &form->low, &form->high, &digits);
+	}
+	if (!numeric_constant(node, &form->b_numeric))
+		return false;
+	form->numeric = true;
+	form->a_numeric = NumericGetDatum(int64_to_numeric(0));
+	numeric_digits(form->b_numeric, &form->digits, &form->scale);
+	return true;
+}
+
 /* The sign of a form's factor: of its int128 a, or of its numeric one. */
 static int
 fold_sign(const FoldForm *form)
@@ -1135,8 +1163,13 @@ fold_candidate(PlannerInfo *root, const Aggref *agg, FoldForm *form)
 	}
 	if (agg->aggsplit != AGGSPLIT_SIMPLE || list_length(agg->args) != 1 ||
 		contain_volatile_functions((Node *) agg->aggfilter) ||
-		(agg->aggdistinct != NIL && (fold_extreme(agg) || list_length(agg->aggdistinct) != 1)) ||
-		!fold_form(root, aggregate_argument(agg), form) || !fold_sum_bounded(form))
+		(agg->aggdistinct != NIL && (fold_extreme(agg) || list_length(agg->aggdistinct) != 1)))
+		return false;
+	/* A constant, without DISTINCT: from the count of the rows read. */
+	if (IsA(aggregate_argument(agg), Const))
+		return agg->aggdistinct == NIL &&
+			fold_constant_form(aggregate_argument(agg), form) && fold_sum_bounded(form);
+	if (!fold_form(root, aggregate_argument(agg), form) || !fold_sum_bounded(form))
 		return false;
 	/*
 	 * DISTINCT: a factor not 0 maps the distinct values of e one to one, NaN
@@ -1163,7 +1196,8 @@ fold_candidate(PlannerInfo *root, const Aggref *agg, FoldForm *form)
 /*
  * A state the planner makes of e: sum of integer or count("any"), int8
  * both, avg of bigint or numeric, whose sum state the node keeps, or an
- * extreme of an integer, a bigint or a numeric, of its type.
+ * extreme of an integer, a bigint or a numeric, of its type; count(*)
+ * without an argument.
  */
 static Aggref *
 fold_state(Oid aggfnoid, Node *argument, Expr *filter, bool distinct)
@@ -1171,7 +1205,24 @@ fold_state(Oid aggfnoid, Node *argument, Expr *filter, bool distinct)
 	Aggref	   *agg = makeNode(Aggref);
 	bool		sum_state = aggfnoid == F_AVG_INT4 || aggfnoid == F_AVG_INT8 ||
 		aggfnoid == F_AVG_NUMERIC;
-	TargetEntry *entry = makeTargetEntry((Expr *) copyObject(argument), 1, NULL, false);
+	TargetEntry *entry;
+
+	/* count(*) of the rows a FILTER keeps. */
+	if (argument == NULL)
+	{
+		agg->aggfnoid = F_COUNT_;
+		agg->aggtype = INT8OID;
+		agg->aggtranstype = INT8OID;
+		agg->aggstar = true;
+		agg->aggfilter = copyObject(filter);
+		agg->aggkind = AGGKIND_NORMAL;
+		agg->aggsplit = AGGSPLIT_SIMPLE;
+		agg->aggno = -1;
+		agg->aggtransno = -1;
+		agg->location = -1;
+		return agg;
+	}
+	entry = makeTargetEntry((Expr *) copyObject(argument), 1, NULL, false);
 
 	agg->aggfnoid = aggfnoid;
 	agg->aggtype = sum_state || aggfnoid == F_MIN_NUMERIC || aggfnoid == F_MAX_NUMERIC ?
@@ -1241,7 +1292,8 @@ fold_constant(const FoldForm *form, bool factor)
  * which holds the count too. min and max need min(e), or max(e) where the
  * factor of e is negative, words of e's type, integer for a smallint.
  * DISTINCT aggregates of e keep one set of pairs for them all, of
- * avg(DISTINCT e) of an integer or count(DISTINCT e) of a numeric.
+ * avg(DISTINCT e) of an integer or count(DISTINCT e) of a numeric. The
+ * aggregates of constants under one FILTER, one or more, keep count(*).
  * Where a form can pass a step's type, the group has a check of errors,
  * the extremes of e and the arguments of those forms as its probes.
  * Every other aggregate is a state of its own, as without fold.
@@ -1308,7 +1360,8 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 		Aggref	   *agg = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
 		int			j = group[i];
 
-		if (j < 0 || members[j] < 2 || !steps[j])
+		/* Aggregates of constants fold alone too. */
+		if (j < 0 || (forms[j].e != NULL && (members[j] < 2 || !steps[j])))
 		{
 			result->outputs = lappend_int(result->outputs, list_length(result->states));
 			result->states = lappend(result->states, copyObject(agg));
@@ -1319,18 +1372,25 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 		if (first[j] < 0)
 		{
 			Node	   *e = forms[j].e;
-			Oid			type = exprType(e);
+			Oid			type = e != NULL ? exprType(e) : InvalidOid;
 			Node	   *word = type != INT2OID ? e :
 				(Node *) makeFuncExpr(F_INT4_INT2, INT4OID, list_make1(copyObject(e)),
 									  InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST);
 
 			first[j] = list_length(result->states);
+			/* Of constants: count(*) under their FILTER. */
+			if (e == NULL)
+			{
+				Aggref	   *rows = fold_state(F_COUNT_, NULL, agg->aggfilter, false);
+
+				result->states = lappend(result->states, rows);
+			}
 			/*
 			 * DISTINCT, one set of pairs for them all: the sum state of
 			 * avg(DISTINCT e) of an integer, which holds the count of the
 			 * distinct values too, or count(DISTINCT e) of a numeric.
 			 */
-			if (agg->aggdistinct != NIL)
+			else if (agg->aggdistinct != NIL)
 				result->states = lappend(result->states,
 										 fold_state(type == NUMERICOID ? F_COUNT_ANY :
 													type == INT8OID ? F_AVG_INT8 : F_AVG_INT4,
@@ -1346,12 +1406,12 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 				result->states = lappend(result->states,
 										 fold_state(F_COUNT_ANY, word, agg->aggfilter, false));
 			}
-			if (need_min[j])
+			if (need_min[j] && e != NULL)
 				result->states = lappend(result->states,
 										 fold_state(type == NUMERICOID ? F_MIN_NUMERIC :
 													type == INT8OID ? F_MIN_INT8 : F_MIN_INT4,
 													word, agg->aggfilter, false));
-			if (need_max[j])
+			if (need_max[j] && e != NULL)
 				result->states = lappend(result->states,
 										 fold_state(type == NUMERICOID ? F_MAX_NUMERIC :
 													type == INT8OID ? F_MAX_INT8 : F_MAX_INT4,
@@ -1373,7 +1433,13 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 		}
 		result->outputs = lappend_int(result->outputs,
 									  -1 - list_length(result->derived) / AGG_DERIVED_STATES);
-		if (fold_extreme(agg))
+		if (forms[j].e == NULL)
+		{
+			/* A constant's: the count of rows, as the sum's count and its own. */
+			result->derived = lappend_int(result->derived, first[j]);
+			result->derived = lappend_int(result->derived, first[j]);
+		}
+		else if (fold_extreme(agg))
 		{
 			/* After the sum's states, if any: min(e) first. */
 			int			extreme = first[j] +
