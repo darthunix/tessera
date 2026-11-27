@@ -497,32 +497,74 @@ agg_check_reset(TessAggState *state)
 		state->checks[number].seen = false;
 }
 
+/*
+ * The least and the greatest of a column's values over the rows of a mask,
+ * NULL skipped, into low and high, which hold those of the batches before
+ * (low > high before any value): a word of 64 rows all read in one pass
+ * without a branch a row, a NULL taking the extremes' neutral values; the
+ * other words row by row.
+ */
+static inline void
+word_extremes(const Datum *values, const bool *isnull, uint64 bits, bool wide,
+			  int64 *low, int64 *high)
+{
+	int64		lo = *low;
+	int64		hi = *high;
+
+	if (bits == UINT64_MAX)
+	{
+		for (int row = 0; row < 64; row++)
+		{
+			int64		e = wide ? DatumGetInt64(values[row]) : (int64) DatumGetInt32(values[row]);
+
+			lo = Min(lo, isnull[row] ? PG_INT64_MAX : e);
+			hi = Max(hi, isnull[row] ? PG_INT64_MIN : e);
+		}
+	}
+	else
+	{
+		while (bits != 0)
+		{
+			int			row = pg_rightmost_one_pos64(bits);
+			int64		e = wide ? DatumGetInt64(values[row]) : (int64) DatumGetInt32(values[row]);
+
+			bits &= bits - 1;
+			if (isnull[row])
+				continue;
+			lo = Min(lo, e);
+			hi = Max(hi, e);
+		}
+	}
+	*low = lo;
+	*high = hi;
+}
+
 /* The least and the greatest e of the rows of a batch a check's forms read. */
 void
 agg_check_take(TessAggState *state, const AggValue *value, const TessDatumColumn *column,
 			   const TessRowMask *rows)
 {
 	AggCheck   *check = &state->checks[value->check];
-	int64		low = check->low;
-	int64		high = check->high;
-	bool		seen = check->seen;
-	int			row = -1;
+	int64		low = check->seen ? check->low : PG_INT64_MAX;
+	int64		high = check->seen ? check->high : PG_INT64_MIN;
+	int			nwords = tess_row_mask_word_count(rows->nrows);
 
-	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	for (int word = 0; word < nwords; word++)
 	{
-		int64		e;
-
-		if (column->isnull[row])
-			continue;
-		e = check->wide ? DatumGetInt64(column->values[row]) :
-			(int64) DatumGetInt32(column->values[row]);
-		low = seen ? Min(low, e) : e;
-		high = seen ? Max(high, e) : e;
-		seen = true;
+		if (check->wide)
+			word_extremes(column->values + word * 64, column->isnull + word * 64,
+						  rows->bits[word], true, &low, &high);
+		else
+			word_extremes(column->values + word * 64, column->isnull + word * 64,
+						  rows->bits[word], false, &low, &high);
 	}
-	check->low = low;
-	check->high = high;
-	check->seen = seen;
+	/* A value seen leaves low at most high; none leaves them as they started. */
+	if (low <= high)
+	{
+		check->low = low;
+		check->high = high;
+		check->seen = true;
+	}
 }
 
 /*
