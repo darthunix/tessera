@@ -109,9 +109,28 @@ parallel.
   plans min and max of a constant as a subquery with LIMIT 1), joins
   hashed so that they read every row, and with Tessera on the core's join
   over Tessera's scans. Then it runs a probe of each table: every row that
-  passes the table's own WHERE conditions, through each largest part of
-  the query's expressions that reads that table alone. If either raises a
-  data exception too, the error is the data's.
+  passes the table's own WHERE conditions and the constant ones, through
+  each largest part of the query's expressions that reads that table
+  alone.
+- **Agree: a condition over two tables that one join order tests
+  first.** The planner tests a condition over several tables, of the
+  WHERE condition or of a join, as soon as its join order has joined
+  them, and a hash join computes each side of its key over the join of
+  that side's tables alone; the two modes' orders differ by their costs.
+  So a probe evaluates each such condition, and each side of an equality
+  between two sets of tables, over every row of the join of its tables
+  by the query's other conditions over them, the constant ones too. It
+  does so only for a SELECT whose plan in the core keeps all its joins,
+  as inner and semi joins alone: the planner makes an outer join inner
+  when a condition above rejects its NULLs. An outer join keeps the rows
+  of its preserved side that fail its conditions, and joins its nullable
+  side to no table before the tables it is joined to. A SELECT the
+  planner proved empty keeps no join and tests no condition. A
+  condition inside EXISTS gets no such probe.
+- **The probes.** The probes of one table run first. One that times out
+  or fails otherwise tells nothing, and the next one runs; an internal
+  error or a crash ends them, a finding of its own. If any of them
+  raises a data exception too, the error is the data's.
 - **Disagree.** Different rows. An error in one mode only that neither
   the relaxed query nor a probe confirms. An internal error. A timeout in
   one mode only (5 s), the limit of the query alone; a query whose limit
