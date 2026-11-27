@@ -82,12 +82,15 @@ enum
 static const CustomExecMethods agg_exec_methods;
 static const TessBatchOps groups_batch_ops;
 
-/* Whether a state is the node's own sum state of avg of bigint, or of numeric. */
+/*
+ * Whether a state is the node's own sum state of avg of an integer, of
+ * bigint or of DISTINCT values, which counts them too, or of numeric.
+ */
 static bool
 integer_sum_state(const AggValue *value)
 {
 	return value->kind == AGG_GENERIC && value->generic->fast == FAST_AVG &&
-		value->generic->fast_wide && !value->generic->fast_numeric;
+		!value->generic->fast_numeric;
 }
 
 static bool
@@ -103,6 +106,29 @@ extreme_state(const AggValue *value)
 {
 	return value->kind == AGG_GENERIC && value->generic->fast_numeric &&
 		(value->generic->fast == FAST_MIN || value->generic->fast == FAST_MAX);
+}
+
+/*
+ * Whether a derived output's states are those it derives from: an extreme
+ * of e alone; the words of sum(e), or the sum state of avg(e) of numeric,
+ * with count(e); the sum state of avg(e) of an integer alone; or for count,
+ * count(DISTINCT e) alone.
+ */
+static bool
+derived_sources(const TessAggState *state, const AggOutput *output)
+{
+	const AggValue *source = &state->values[output->source];
+	const AggValue *count = output->count_state >= 0 ?
+		&state->values[output->count_state] : NULL;
+
+	if (output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX)
+		return count == NULL &&
+			(source->kind == AGG_MIN || source->kind == AGG_MAX || extreme_state(source));
+	if (output->kind == AGG_DERIVED_COUNT && count == source)
+		return source->kind == AGG_COUNT;
+	if (count == NULL)
+		return integer_sum_state(source);
+	return (source->kind == AGG_SUM || numeric_sum_state(source)) && count->kind == AGG_COUNT;
 }
 
 #ifdef HAVE_INT128
@@ -280,21 +306,7 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 			default:
 				elog(ERROR, "TessAgg received a foreign plan");
 		}
-		/*
-		 * An extreme of e alone; or the words of sum(e), or the sum state
-		 * of avg(e) of numeric, with count(e); or the sum state of avg(e) of
-		 * bigint alone.
-		 */
-		if (output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX ?
-			output->count_state >= 0 ||
-			!(state->values[output->source].kind == AGG_MIN ||
-			  state->values[output->source].kind == AGG_MAX ||
-			  extreme_state(&state->values[output->source])) :
-			!(output->count_state >= 0 ?
-			  (state->values[output->source].kind == AGG_SUM ||
-			   numeric_sum_state(&state->values[output->source])) &&
-			  state->values[output->count_state].kind == AGG_COUNT :
-			  integer_sum_state(&state->values[output->source])))
+		if (!derived_sources(state, output))
 			elog(ERROR, "TessAgg received a foreign plan");
 		a = list_nth_node(Const, constants, number * AGG_DERIVED_CONSTANTS);
 		b = list_nth_node(Const, constants, number * AGG_DERIVED_CONSTANTS + 1);

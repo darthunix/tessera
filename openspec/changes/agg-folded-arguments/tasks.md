@@ -57,7 +57,7 @@ injection points; CI runs 19 and 18.
       positive factor; tests with `NaN`, groups of `NaN` alone, at the
       bounds, and a function's column left unfolded. Check: the suites;
       `make crosscheck`
-- [ ] 2.7 `DISTINCT`: `sum`, `avg` and `count` of integers from the sum
+- [x] 2.7 `DISTINCT`: `sum`, `avg` and `count` of integers from the sum
       state of `avg(DISTINCT e)`, and `count` of `numeric` from
       `count(DISTINCT e)`; tests with a factor of 0, `NaN` and pairs past
       `hash_mem`. Check: the suites

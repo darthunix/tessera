@@ -18,6 +18,7 @@
 #include "optimizer/planner.h"
 #include "optimizer/prep.h"
 #include "optimizer/tlist.h"
+#include "parser/parse_oper.h"
 #include "utils/fmgroids.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
@@ -1132,15 +1133,25 @@ fold_candidate(PlannerInfo *root, const Aggref *agg, FoldForm *form)
 		default:
 			return false;
 	}
-	if (agg->aggsplit != AGGSPLIT_SIMPLE || agg->aggdistinct != NIL ||
-		list_length(agg->args) != 1 || contain_volatile_functions((Node *) agg->aggfilter) ||
+	if (agg->aggsplit != AGGSPLIT_SIMPLE || list_length(agg->args) != 1 ||
+		contain_volatile_functions((Node *) agg->aggfilter) ||
+		(agg->aggdistinct != NIL && (fold_extreme(agg) || list_length(agg->aggdistinct) != 1)) ||
 		!fold_form(root, aggregate_argument(agg), form) || !fold_sum_bounded(form))
+		return false;
+	/*
+	 * DISTINCT: a factor not 0 maps the distinct values of e one to one, NaN
+	 * to NaN, so the forms' distinct values are e's; of a numeric e only
+	 * their count, as which of equal values comes first sets a sum's scale.
+	 */
+	if (agg->aggdistinct != NIL &&
+		(fold_sign(form) == 0 ||
+		 (exprType(form->e) == NUMERICOID && agg->aggfnoid != F_COUNT_ANY)))
 		return false;
 	switch (exprType(form->e))
 	{
 		case INT2OID:
 		case INT4OID:
-			return true;
+			return agg->aggdistinct == NIL || tess_runtime_kernels() != NULL;
 		case INT8OID:
 			return tess_runtime_kernels() != NULL;
 		default:
@@ -1155,17 +1166,30 @@ fold_candidate(PlannerInfo *root, const Aggref *agg, FoldForm *form)
  * extreme of an integer, a bigint or a numeric, of its type.
  */
 static Aggref *
-fold_state(Oid aggfnoid, Node *argument, Expr *filter)
+fold_state(Oid aggfnoid, Node *argument, Expr *filter, bool distinct)
 {
 	Aggref	   *agg = makeNode(Aggref);
-	bool		sum_state = aggfnoid == F_AVG_INT8 || aggfnoid == F_AVG_NUMERIC;
+	bool		sum_state = aggfnoid == F_AVG_INT4 || aggfnoid == F_AVG_INT8 ||
+		aggfnoid == F_AVG_NUMERIC;
+	TargetEntry *entry = makeTargetEntry((Expr *) copyObject(argument), 1, NULL, false);
 
 	agg->aggfnoid = aggfnoid;
 	agg->aggtype = sum_state || aggfnoid == F_MIN_NUMERIC || aggfnoid == F_MAX_NUMERIC ?
 		NUMERICOID : aggfnoid == F_MIN_INT4 || aggfnoid == F_MAX_INT4 ? INT4OID : INT8OID;
-	agg->aggtranstype = sum_state ? INTERNALOID : agg->aggtype;
+	agg->aggtranstype = aggfnoid == F_AVG_INT4 ? INT8ARRAYOID :
+		sum_state ? INTERNALOID : agg->aggtype;
 	agg->aggargtypes = list_make1_oid(exprType(argument));
-	agg->args = list_make1(makeTargetEntry((Expr *) copyObject(argument), 1, NULL, false));
+	/* DISTINCT over the argument, by its type's equality, as the parser sorts it. */
+	if (distinct)
+	{
+		SortGroupClause *clause = makeNode(SortGroupClause);
+
+		get_sort_group_operators(exprType(argument), true, true, false, &clause->sortop,
+								 &clause->eqop, NULL, &clause->hashable);
+		clause->tleSortGroupRef = entry->ressortgroupref = 1;
+		agg->aggdistinct = list_make1(clause);
+	}
+	agg->args = list_make1(entry);
 	agg->aggfilter = copyObject(filter);
 	agg->aggkind = AGGKIND_NORMAL;
 	agg->aggsplit = AGGSPLIT_SIMPLE;
@@ -1216,6 +1240,8 @@ fold_constant(const FoldForm *form, bool factor)
  * their forms' own sums hold; for a bigint e, the sum state of avg(e),
  * which holds the count too. min and max need min(e), or max(e) where the
  * factor of e is negative, words of e's type, integer for a smallint.
+ * DISTINCT aggregates of e keep one set of pairs for them all, of
+ * avg(DISTINCT e) of an integer or count(DISTINCT e) of a numeric.
  * Where a form can pass a step's type, the group has a check of errors,
  * the extremes of e and the arguments of those forms as its probes.
  * Every other aggregate is a state of its own, as without fold.
@@ -1258,7 +1284,8 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 			Aggref	   *other = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + j)->expr;
 
 			if (group[j] == j && equal(forms[j].e, forms[i].e) &&
-				equal(other->aggfilter, agg->aggfilter))
+				equal(other->aggfilter, agg->aggfilter) &&
+				(other->aggdistinct != NIL) == (agg->aggdistinct != NIL))
 			{
 				group[i] = j;
 				break;
@@ -1298,27 +1325,37 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 									  InvalidOid, InvalidOid, COERCE_IMPLICIT_CAST);
 
 			first[j] = list_length(result->states);
-			if (need_sum[j] && type == INT8OID)
+			/*
+			 * DISTINCT, one set of pairs for them all: the sum state of
+			 * avg(DISTINCT e) of an integer, which holds the count of the
+			 * distinct values too, or count(DISTINCT e) of a numeric.
+			 */
+			if (agg->aggdistinct != NIL)
 				result->states = lappend(result->states,
-										 fold_state(F_AVG_INT8, e, agg->aggfilter));
+										 fold_state(type == NUMERICOID ? F_COUNT_ANY :
+													type == INT8OID ? F_AVG_INT8 : F_AVG_INT4,
+													word, agg->aggfilter, true));
+			else if (need_sum[j] && type == INT8OID)
+				result->states = lappend(result->states,
+										 fold_state(F_AVG_INT8, e, agg->aggfilter, false));
 			else if (need_sum[j])
 			{
 				result->states = lappend(result->states,
 										 fold_state(type == NUMERICOID ? F_AVG_NUMERIC : F_SUM_INT4,
-													word, agg->aggfilter));
+													word, agg->aggfilter, false));
 				result->states = lappend(result->states,
-										 fold_state(F_COUNT_ANY, word, agg->aggfilter));
+										 fold_state(F_COUNT_ANY, word, agg->aggfilter, false));
 			}
 			if (need_min[j])
 				result->states = lappend(result->states,
 										 fold_state(type == NUMERICOID ? F_MIN_NUMERIC :
 													type == INT8OID ? F_MIN_INT8 : F_MIN_INT4,
-													word, agg->aggfilter));
+													word, agg->aggfilter, false));
 			if (need_max[j])
 				result->states = lappend(result->states,
 										 fold_state(type == NUMERICOID ? F_MAX_NUMERIC :
 													type == INT8OID ? F_MAX_INT8 : F_MAX_INT4,
-													word, agg->aggfilter));
+													word, agg->aggfilter, false));
 			if (unsafe[j])
 			{
 				check[j] = list_length(result->probes);
@@ -1345,6 +1382,13 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 
 			result->derived = lappend_int(result->derived, extreme);
 			result->derived = lappend_int(result->derived, -1);
+		}
+		else if (agg->aggdistinct != NIL)
+		{
+			/* The distinct values' sum state, or their count of numeric alone. */
+			result->derived = lappend_int(result->derived, first[j]);
+			result->derived = lappend_int(result->derived,
+										  exprType(forms[j].e) == NUMERICOID ? first[j] : -1);
 		}
 		else
 		{

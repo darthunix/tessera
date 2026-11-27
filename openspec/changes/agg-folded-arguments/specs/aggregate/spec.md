@@ -169,7 +169,8 @@ Results and errors SHALL be the core's.
   ...)` of a `numeric(12,2)` `n`, `n * 1.5`, `n + 1` and `-n` with
   `NaN`, with `GROUP BY` and groups past `hash_mem`
 - **THEN** its rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/Distinct values shifted and scaled`
 
 ### Requirement: The aggregates a node takes
 `TessAgg` SHALL take a grouping of any count of aggregates, with or
