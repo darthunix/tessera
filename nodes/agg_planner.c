@@ -955,6 +955,23 @@ fold_form(PlannerInfo *root, Node *node, FoldForm *form)
 
 		if (step != FOLD_NEGATE)
 			numeric_digits(decimal, &before, &after);
+		/*
+		 * The bounds first: a and b have no more digits than the step's
+		 * values, and an arithmetic past the format would raise an error
+		 * the query need not.
+		 */
+		if (step == FOLD_MUL)
+		{
+			form->digits += before;
+			form->scale += after;
+		}
+		else if (step != FOLD_NEGATE)
+		{
+			form->digits = Max(form->digits, before) + 1;
+			form->scale = Max(form->scale, after);
+		}
+		if (form->digits > FOLD_NUMERIC_DIGITS || form->scale > FOLD_NUMERIC_SCALE)
+			return false;
 		switch (step)
 		{
 			case FOLD_ADD:
@@ -967,14 +984,10 @@ fold_form(PlannerInfo *root, Node *node, FoldForm *form)
 				else
 					form->b_numeric = DirectFunctionCall2(step == FOLD_ADD ? numeric_add : numeric_sub,
 														  form->b_numeric, decimal);
-				form->digits = Max(form->digits, before) + 1;
-				form->scale = Max(form->scale, after);
 				break;
 			case FOLD_MUL:
 				form->a_numeric = DirectFunctionCall2(numeric_mul, form->a_numeric, decimal);
 				form->b_numeric = DirectFunctionCall2(numeric_mul, form->b_numeric, decimal);
-				form->digits += before;
-				form->scale += after;
 				break;
 			case FOLD_NEGATE:
 				form->a_numeric = DirectFunctionCall1(numeric_uminus, form->a_numeric);
@@ -983,7 +996,7 @@ fold_form(PlannerInfo *root, Node *node, FoldForm *form)
 			default:
 				return false;
 		}
-		return form->digits <= FOLD_NUMERIC_DIGITS && form->scale <= FOLD_NUMERIC_SCALE;
+		return true;
 	}
 	low = form->low;
 	high = form->high;
@@ -998,8 +1011,8 @@ fold_form(PlannerInfo *root, Node *node, FoldForm *form)
 		case FOLD_SUB:
 			if (constant_first)
 			{
-				form->a = -form->a;
-				if (__builtin_sub_overflow(constant, form->b, &form->b))
+				if (__builtin_sub_overflow((int128) 0, form->a, &form->a) ||
+					__builtin_sub_overflow(constant, form->b, &form->b))
 					return false;
 				low = constant - form->high;
 				high = constant - form->low;
@@ -1020,8 +1033,9 @@ fold_form(PlannerInfo *root, Node *node, FoldForm *form)
 			high = (constant >= 0 ? form->high : form->low) * constant;
 			break;
 		case FOLD_NEGATE:
-			form->a = -form->a;
-			form->b = -form->b;
+			if (__builtin_sub_overflow((int128) 0, form->a, &form->a) ||
+				__builtin_sub_overflow((int128) 0, form->b, &form->b))
+				return false;
 			low = -form->high;
 			high = -form->low;
 			break;
@@ -1131,9 +1145,10 @@ fold_extreme(const Aggref *agg)
  * Whether an aggregate of the scan tuple may fold, and its form: sum,
  * avg, count, min and max of one argument, a plain call without DISTINCT,
  * its FILTER without a volatile function, its argument a form of a
- * smallint, an integer or, with the kernels' sums, a bigint or a numeric
- * column e; min and max of a numeric e only with a positive factor, as
- * NaN, the greatest of numerics, would not follow a negative one.
+ * smallint, an integer, a bigint or a numeric column e, with the kernels
+ * module, whose batch aggregates and sum states the fold's states are;
+ * min and max of a numeric e only with a positive factor, as NaN, the
+ * greatest of numerics, would not follow a negative one.
  */
 static bool
 fold_candidate(PlannerInfo *root, const Aggref *agg, FoldForm *form)
@@ -1161,7 +1176,9 @@ fold_candidate(PlannerInfo *root, const Aggref *agg, FoldForm *form)
 		default:
 			return false;
 	}
-	if (agg->aggsplit != AGGSPLIT_SIMPLE || list_length(agg->args) != 1 ||
+	/* The states a fold makes are the kernels' batch aggregates and sum states. */
+	if (tess_runtime_kernels() == NULL ||
+		agg->aggsplit != AGGSPLIT_SIMPLE || list_length(agg->args) != 1 ||
 		contain_volatile_functions((Node *) agg->aggfilter) ||
 		(agg->aggdistinct != NIL && (fold_extreme(agg) || list_length(agg->aggdistinct) != 1)))
 		return false;
@@ -1180,17 +1197,7 @@ fold_candidate(PlannerInfo *root, const Aggref *agg, FoldForm *form)
 		(fold_sign(form) == 0 ||
 		 (exprType(form->e) == NUMERICOID && agg->aggfnoid != F_COUNT_ANY)))
 		return false;
-	switch (exprType(form->e))
-	{
-		case INT2OID:
-		case INT4OID:
-			return agg->aggdistinct == NIL || tess_runtime_kernels() != NULL;
-		case INT8OID:
-			return tess_runtime_kernels() != NULL;
-		default:
-			return tess_runtime_kernels() != NULL &&
-				(!fold_extreme(agg) || fold_sign(form) > 0);
-	}
+	return exprType(form->e) != NUMERICOID || !fold_extreme(agg) || fold_sign(form) > 0;
 }
 
 /*
@@ -1305,6 +1312,9 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 	int		   *group = palloc_array(int, Max(naggs, 1));
 	int		   *members = palloc0_array(int, Max(naggs, 1));
 	bool	   *steps = palloc0_array(bool, Max(naggs, 1));
+	/* A group of constants, which folds alone too. */
+	bool	   *alone = palloc0_array(bool, Max(naggs, 1));
+#ifdef HAVE_INT128
 	bool	   *unsafe = palloc0_array(bool, Max(naggs, 1));
 	/* Of each group's first: the states it needs, and where they went. */
 	bool	   *need_sum = palloc0_array(bool, Max(naggs, 1));
@@ -1312,7 +1322,6 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 	bool	   *need_max = palloc0_array(bool, Max(naggs, 1));
 	int		   *first = palloc_array(int, Max(naggs, 1));
 	int		   *check = palloc_array(int, Max(naggs, 1));
-#ifdef HAVE_INT128
 	FoldForm   *forms = palloc0_array(FoldForm, Max(naggs, 1));
 #endif
 
@@ -1322,11 +1331,13 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 	};
 	for (int i = 0; i < naggs; i++)
 	{
+#ifdef HAVE_INT128
 		Aggref	   *agg = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
 
-		group[i] = -1;
 		first[i] = -1;
 		check[i] = -1;
+#endif
+		group[i] = -1;
 #ifdef HAVE_INT128
 		if (!fold || !IsA(agg, Aggref) || !fold_candidate(root, agg, &forms[i]))
 			continue;
@@ -1344,6 +1355,7 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 			}
 		}
 		members[group[i]]++;
+		alone[group[i]] = forms[i].e == NULL;
 		steps[group[i]] |= forms[i].steps;
 		unsafe[group[i]] |= !forms[i].safe;
 		if (fold_extreme(agg))
@@ -1360,8 +1372,7 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 		Aggref	   *agg = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
 		int			j = group[i];
 
-		/* Aggregates of constants fold alone too. */
-		if (j < 0 || (forms[j].e != NULL && (members[j] < 2 || !steps[j])))
+		if (j < 0 || (!alone[j] && (members[j] < 2 || !steps[j])))
 		{
 			result->outputs = lappend_int(result->outputs, list_length(result->states));
 			result->states = lappend(result->states, copyObject(agg));

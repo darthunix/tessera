@@ -34,6 +34,13 @@ EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
    ->  Custom Scan (TessHeapScan) on agg_t
 (2 rows)
 
+-- Nor does anything fold, whose states are the kernels' aggregates.
+SELECT agg_same($$SELECT sum(a), sum(a + 1), sum(1) FROM agg_t$$);
+       agg_same        
+-----------------------
+ {"(38829,39087,300)"}
+(1 row)
+
 LOAD 'tessera_kernels';
 -- The node above the native scan, above the filter with a batch clause and
 -- with a row-wise one.
@@ -3701,6 +3708,66 @@ SELECT agg_error($$SELECT sum(i), sum((i + 1)::numeric * 2) FROM agg_fold$$);
  2 folded; on: 22003 integer out of range; off: 22003 integer out of range
 (1 row)
 
+-- Totals past 9.2 * 10^36 in 128 bits, constants and factors past an int8
+-- and past 10^36, and a factor whose computation would pass the format,
+-- which folds nothing rather than fail the plan.
+SELECT agg_folded($$SELECT sum(n), sum(n * 1000000000000000000000000000000) FROM agg_fold WHERE n <> 'NaN'$$);
+    agg_folded     
+-------------------
+ TessAgg, 2 folded
+(1 row)
+
+SELECT agg_same($$SELECT sum(n), sum(n * 1000000000000000000000000000000), avg(n * 1000000000000000000000000000000)
+                  FROM agg_fold WHERE n <> 'NaN'$$);
+                                            agg_same                                            
+------------------------------------------------------------------------------------------------
+ {"(-140602.91,-140602910000000000000000000000000000.00,-51711257815373299006987863184994.48)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(1::numeric(40,36)), avg(1::numeric(40,36)) FROM agg_fold WHERE k = 0$$);
+                                       agg_same                                        
+---------------------------------------------------------------------------------------
+ {"(428.000000000000000000000000000000000000,1.000000000000000000000000000000000000)"}
+(1 row)
+
+CREATE TABLE agg_fold_one WITH (autovacuum_enabled = off) AS
+SELECT g % 1000 AS k, 1 AS x, 4611686018427387904 AS y FROM generate_series(1, 3000) AS g;
+SELECT agg_folded($$SELECT k, sum(x), sum((x - 1) * 1000000000 * 1000000000 * 1000000000 * 1000000000 * 2)
+                    FROM agg_fold_one GROUP BY k$$);
+    agg_folded     
+-------------------
+ TessAgg, 2 folded
+(1 row)
+
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(x),
+                  sum((x - 1) * 1000000000 * 1000000000 * 1000000000 * 1000000000 * 2),
+                  max((x - 1) * 1000000000 * 1000000000 * 1000000000 * 1000000000 * 2)
+                  FROM agg_fold_one GROUP BY k) AS q$$);
+               agg_same               
+--------------------------------------
+ {(c5bdcdcaf98a21909afed56ffcb32d14)}
+(1 row)
+
+SELECT agg_folded($$SELECT sum(y), sum((y - 4611686018427387904) * 4611686018427387904) FROM agg_fold_one$$);
+    agg_folded     
+-------------------
+ TessAgg, 2 folded
+(1 row)
+
+SELECT agg_same($$SELECT sum(y), sum((y - 4611686018427387904) * 4611686018427387904),
+                  sum((y - 4611686018427387904) * 4611686018427387904 + 7) FROM agg_fold_one$$);
+               agg_same                
+---------------------------------------
+ {"(13835058055282163712000,0,21000)"}
+(1 row)
+
+SELECT agg_same($$SELECT sum(x - 1), sum(((x - 1)::numeric * 1e70000) * 1e70000) FROM agg_fold_one$$);
+ agg_same  
+-----------
+ {"(0,0)"}
+(1 row)
+
+DROP TABLE agg_fold_one;
 -- At the bounds: a factor of 99 961 digits folds and one of 99 971 does
 -- not, nor a scale past 1 000; their sums are the core's.
 SELECT agg_folded($$SELECT sum(n), sum(n * 1e99960) FROM agg_fold WHERE n <> 'NaN'$$);

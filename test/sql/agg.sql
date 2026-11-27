@@ -33,6 +33,8 @@ FROM generate_series(1, 300) AS i;
 
 -- Without the kernels module no aggregate is registered: the core aggregates.
 EXPLAIN (COSTS OFF) SELECT count(*) FROM agg_t;
+-- Nor does anything fold, whose states are the kernels' aggregates.
+SELECT agg_same($$SELECT sum(a), sum(a + 1), sum(1) FROM agg_t$$);
 LOAD 'tessera_kernels';
 
 -- The node above the native scan, above the filter with a batch clause and
@@ -1362,6 +1364,26 @@ SELECT agg_same($$SELECT sum(i), sum(i::numeric * 1.5 + 0.25), avg((i + 1)::nume
                   pg_typeof(sum(i::numeric * 1.5 + 0.25)), pg_typeof(min(i::numeric * -0.5))
                   FROM agg_fold WHERE i BETWEEN -700000000 AND 700000000$$);
 SELECT agg_error($$SELECT sum(i), sum((i + 1)::numeric * 2) FROM agg_fold$$);
+-- Totals past 9.2 * 10^36 in 128 bits, constants and factors past an int8
+-- and past 10^36, and a factor whose computation would pass the format,
+-- which folds nothing rather than fail the plan.
+SELECT agg_folded($$SELECT sum(n), sum(n * 1000000000000000000000000000000) FROM agg_fold WHERE n <> 'NaN'$$);
+SELECT agg_same($$SELECT sum(n), sum(n * 1000000000000000000000000000000), avg(n * 1000000000000000000000000000000)
+                  FROM agg_fold WHERE n <> 'NaN'$$);
+SELECT agg_same($$SELECT sum(1::numeric(40,36)), avg(1::numeric(40,36)) FROM agg_fold WHERE k = 0$$);
+CREATE TABLE agg_fold_one WITH (autovacuum_enabled = off) AS
+SELECT g % 1000 AS k, 1 AS x, 4611686018427387904 AS y FROM generate_series(1, 3000) AS g;
+SELECT agg_folded($$SELECT k, sum(x), sum((x - 1) * 1000000000 * 1000000000 * 1000000000 * 1000000000 * 2)
+                    FROM agg_fold_one GROUP BY k$$);
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(x),
+                  sum((x - 1) * 1000000000 * 1000000000 * 1000000000 * 1000000000 * 2),
+                  max((x - 1) * 1000000000 * 1000000000 * 1000000000 * 1000000000 * 2)
+                  FROM agg_fold_one GROUP BY k) AS q$$);
+SELECT agg_folded($$SELECT sum(y), sum((y - 4611686018427387904) * 4611686018427387904) FROM agg_fold_one$$);
+SELECT agg_same($$SELECT sum(y), sum((y - 4611686018427387904) * 4611686018427387904),
+                  sum((y - 4611686018427387904) * 4611686018427387904 + 7) FROM agg_fold_one$$);
+SELECT agg_same($$SELECT sum(x - 1), sum(((x - 1)::numeric * 1e70000) * 1e70000) FROM agg_fold_one$$);
+DROP TABLE agg_fold_one;
 -- At the bounds: a factor of 99 961 digits folds and one of 99 971 does
 -- not, nor a scale past 1 000; their sums are the core's.
 SELECT agg_folded($$SELECT sum(n), sum(n * 1e99960) FROM agg_fold WHERE n <> 'NaN'$$);

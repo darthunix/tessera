@@ -182,11 +182,22 @@ fast_numeric(int128 value, int scale)
 																		 scale)));
 }
 
-/* fast_numeric for the planner and the derived outputs. */
+/*
+ * fast_numeric over the whole range of an int128, for the planner and the
+ * derived outputs: fast_numeric's part above 10^18 must fit an int8, so
+ * a value of 10^36 or more goes in its part above 10^36 and the rest.
+ */
 Datum
 agg_int128_numeric(int128 value, int scale)
 {
-	return fast_numeric(value, scale);
+	int128		bound = (int128) INT64CONST(1000000000000000000) * INT64CONST(1000000000000000000);
+
+	if (value > -bound && value < bound)
+		return fast_numeric(value, scale);
+	return DirectFunctionCall2(numeric_add,
+							   NumericGetDatum(int64_div_fast_to_numeric((int64) (value / bound),
+																		 scale - 2 * TESS_DECIMAL_DIGITS)),
+							   fast_numeric(value % bound, scale));
 }
 
 /*
