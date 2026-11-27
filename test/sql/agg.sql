@@ -1194,7 +1194,8 @@ RESET work_mem;
 -- Aggregates folded from shared states: the aggregates of one expression e
 -- under constants keep the sum and the count of e, from which each is
 -- derived. Whether TessAgg computes a query, how many aggregates it
--- derives, and whether its groups, or its rows, went past hash_mem.
+-- derives, and whether its groups, its rows or its DISTINCT pairs went
+-- past hash_mem.
 CREATE FUNCTION agg_folded(query text) RETURNS text
 LANGUAGE plpgsql AS $$
 DECLARE
@@ -1203,6 +1204,7 @@ DECLARE
     folded int := 0;
     spilled bool := false;
     rows_spilled bool := false;
+    pairs_spilled bool := false;
     inside bool := false;
 BEGIN
     FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
@@ -1214,9 +1216,11 @@ BEGIN
         folded := coalesce(substring(line FROM 'Folded Aggregates: (\d+)')::int, folded);
         spilled := spilled OR (inside AND line ~ '^\s*Batches: ');
         rows_spilled := rows_spilled OR (inside AND line ~ 'Spilled Rows: ');
+        pairs_spilled := pairs_spilled OR (inside AND line ~ 'Spilled Pairs: ');
     END LOOP;
-    RETURN format('%s, %s folded%s%s', node, folded, CASE WHEN spilled THEN ', spilled' ELSE '' END,
-                  CASE WHEN rows_spilled THEN ' rows' ELSE '' END);
+    RETURN format('%s, %s folded%s%s%s', node, folded, CASE WHEN spilled THEN ', spilled' ELSE '' END,
+                  CASE WHEN rows_spilled THEN ' rows' ELSE '' END,
+                  CASE WHEN pairs_spilled THEN ', pairs spilled' ELSE '' END);
 END $$;
 -- An error with Tessera and with the core's hashed aggregation, which reads
 -- every row before a group goes out, and the aggregates the node folds.
@@ -1260,6 +1264,7 @@ SELECT CASE WHEN g % 11 = 0 THEN NULL WHEN g = 1 THEN 32767 WHEN g = 2 THEN -327
        CASE WHEN g % 19 = 0 THEN NULL WHEN g % 23 = 0 THEN 'NaN'
             ELSE (g * 7919 % 2000003 - 1000001) / 100.0 END::numeric(12,2) AS n,
        CASE WHEN g % 19 = 0 THEN NULL ELSE g / 8.0 END::numeric AS u,
+       CASE WHEN g % 31 = 0 THEN NULL ELSE g % 50 - 20 END::smallint AS r,
        g % 7 AS k
 FROM generate_series(1, 3000) AS g;
 -- spec: aggregate/Ninety sums of one column
@@ -1409,6 +1414,29 @@ SELECT agg_same($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FILTER (WH
 SELECT agg_same($$SELECT sum(s + 1) FILTER (WHERE k > 100), avg(s * 2) FILTER (WHERE k > 100), count(s) FILTER (WHERE k > 100) FROM agg_fold$$);
 SELECT agg_same($$SELECT k, sum(s), sum(s + 1), avg(s * 2), sum(b + 1), avg(b - 1) FROM agg_fold WHERE k > 100 GROUP BY k$$);
 SELECT agg_same($$SELECT sum(b + 1), avg(b - 1), count(b + 1) FROM agg_fold WHERE k > 100$$);
+-- spec: aggregate/Distinct values shifted and scaled
+-- A factor not 0 maps the distinct values of e one to one: one set of
+-- pairs for them all; a factor of 0, and sum and avg of a numeric's
+-- distinct values, keep their own.
+SELECT agg_folded($$SELECT count(DISTINCT r + 1), sum(DISTINCT r * 2), avg(DISTINCT 10 - r), count(DISTINCT r),
+                    count(DISTINCT r * 0), count(DISTINCT n), count(DISTINCT n * 1.5),
+                    count(DISTINCT n + 1), count(DISTINCT -n), sum(r + 1) FROM agg_fold$$);
+SELECT agg_same($$SELECT count(DISTINCT r + 1), sum(DISTINCT r * 2), avg(DISTINCT 10 - r), count(DISTINCT r),
+                  count(DISTINCT r * 0), count(DISTINCT n), count(DISTINCT n * 1.5),
+                  count(DISTINCT n + 1), count(DISTINCT -n), sum(r + 1),
+                  pg_typeof(sum(DISTINCT r * 2)), pg_typeof(avg(DISTINCT 10 - r)) FROM agg_fold$$);
+-- The core's grouping, which the node leaves sum(DISTINCT) of numeric to.
+SELECT agg_folded($$SELECT sum(DISTINCT n), sum(DISTINCT n + 1) FROM agg_fold$$);
+SELECT agg_same($$SELECT sum(DISTINCT n), sum(DISTINCT n + 1) FROM agg_fold$$);
+SELECT agg_folded($$SELECT k, count(DISTINCT r + 1), sum(DISTINCT r * 2), avg(DISTINCT 10 - r), count(DISTINCT r * 0),
+                    count(DISTINCT n), count(DISTINCT n * 1.5), count(DISTINCT i::bigint * 3), sum(DISTINCT i::bigint * 3 + 1)
+                    FROM agg_fold GROUP BY k$$);
+SELECT agg_same($$SELECT k, count(DISTINCT r + 1), sum(DISTINCT r * 2), avg(DISTINCT 10 - r), count(DISTINCT r * 0),
+                  count(DISTINCT n), count(DISTINCT n * 1.5), count(DISTINCT i::bigint * 3), sum(DISTINCT i::bigint * 3 + 1)
+                  FROM agg_fold GROUP BY k$$);
+SELECT agg_same($$SELECT count(DISTINCT r + 1), sum(DISTINCT r * 2) FILTER (WHERE k = 3), count(DISTINCT r) FILTER (WHERE k = 3)
+                  FROM agg_fold WHERE k > 100$$);
+SELECT agg_error($$SELECT sum(DISTINCT i), sum(DISTINCT i + 1) FROM agg_fold$$);
 -- spec: aggregate/Past the range of each integer
 -- Each fails at the least or the greatest value of its e.
 SELECT agg_error($$SELECT sum(i), sum(i + 1) FROM agg_fold$$);
@@ -1445,6 +1473,15 @@ SELECT agg_folded($$SELECT k, min(s), max(s + 1), min(-s * 2), max(s::bigint + 7
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, min(s), max(s + 1), min(-s * 2), max(s::bigint + 7) FROM agg_fold_spill GROUP BY k) AS q$$);
 SELECT agg_folded($$SELECT k, sum(w), sum(w + 1), avg(w * 2) FROM agg_fold_spill WHERE w < 600000 GROUP BY k$$);
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(w), sum(w + 1), avg(w * 2) FROM agg_fold_spill WHERE w < 600000 GROUP BY k) AS q$$);
+-- DISTINCT pairs past hash_mem: the statistics, taken before the table
+-- grew, let the node take the grouping.
+CREATE TABLE agg_fold_pairs (g int, v int) WITH (autovacuum_enabled = off);
+INSERT INTO agg_fold_pairs SELECT i % 100, i % 10 FROM generate_series(1, 1000) AS i;
+ANALYZE agg_fold_pairs;
+INSERT INTO agg_fold_pairs SELECT i % 100, i % 300000 FROM generate_series(1, 600000) AS i;
+SELECT agg_folded($$SELECT g, count(DISTINCT v + 1), sum(DISTINCT v * 2), avg(DISTINCT 10 - v) FROM agg_fold_pairs GROUP BY g$$);
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT g, count(DISTINCT v + 1), sum(DISTINCT v * 2), avg(DISTINCT 10 - v) FROM agg_fold_pairs GROUP BY g) AS q$$);
+DROP TABLE agg_fold_pairs;
 SELECT agg_folded($$SELECT k, sum(m), sum(m + 1), avg(m * 2), count(m), min(m), max(m + 0.5) FROM agg_fold_spill GROUP BY k$$);
 SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(m), sum(m + 1), avg(m * 2), count(m), min(m), max(m + 0.5) FROM agg_fold_spill GROUP BY k) AS q$$);
 SELECT agg_error($$SELECT k, sum(v), sum(v + 1) FROM agg_fold_spill GROUP BY k$$);
