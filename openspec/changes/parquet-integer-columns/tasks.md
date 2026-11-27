@@ -29,7 +29,7 @@ runs 19 and 18.
       the dense loops at the base and here, by `cargo rustc --release
       -p datum-arrow --lib -- --emit asm`; `cargo mutants --in-diff`
       on the diff; the suites; `make crosscheck`
-- [ ] 2.2 `crates/tessera-parquet/src/c.rs`: the reader's handle keeps
+- [x] 2.2 `crates/tessera-parquet/src/c.rs`: the reader's handle keeps
       the mask of `NULL` rows that `tess_parquet_values` gives the read,
       sized to the caller's mask at each call;
       `crates/tessera-parquet/src/c/tests.rs`: two windows of different

@@ -2098,3 +2098,112 @@ fn masks_the_plan_refuses_are_refused() {
         }
     }
 }
+
+/// The values of a window through the C entry, every row of it asked:
+/// the call's answer, its values and its mask of NULL rows.
+fn values_of(r: *mut ReaderHandle, len: usize, nulls_words: usize) -> (bool, Vec<u64>, Vec<u64>) {
+    let asked: Vec<u64> = (0..mask_words(len))
+        .map(|w| match (len - w * 64).min(64) {
+            64 => u64::MAX,
+            rows => (1u64 << rows) - 1,
+        })
+        .collect();
+    values_asked(r, len, &asked, nulls_words)
+}
+
+/// The values of the rows `asked` of a window through the C entry, its
+/// outputs filled before with 7 and with ones.
+fn values_asked(
+    r: *mut ReaderHandle,
+    len: usize,
+    asked: &[u64],
+    nulls_words: usize,
+) -> (bool, Vec<u64>, Vec<u64>) {
+    let mut values = vec![7u64; len];
+    let mut nulls = vec![u64::MAX; nulls_words];
+    let mut st = status();
+    let ok = unsafe {
+        tess_parquet_values(
+            r,
+            asked.as_ptr(),
+            asked.len(),
+            values.as_mut_ptr(),
+            values.len(),
+            nulls.as_mut_ptr(),
+            nulls.len(),
+            &mut st,
+        )
+    };
+    if !ok {
+        assert_eq!(text(&st.sqlstate), "XX000");
+    }
+    (ok, values, nulls)
+}
+
+/// One reader's mask of NULL rows serves its windows, longer and shorter
+/// in either order, and a caller's mask of NULL rows a word shorter than
+/// the window is refused, with the outputs as they were.
+#[test]
+fn the_mask_of_nulls_kept_for_windows_of_other_sizes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("t.parquet");
+    let data: Vec<Option<i32>> = (0..200).map(|i| (i % 7 != 3).then_some(i)).collect();
+    testing::write(
+        &path,
+        &[Column::new("a", Values::Int32(data.clone()))],
+        200,
+        false,
+    )
+    .unwrap();
+    let file = open(&path);
+    let col = column(file, "a", oid::INT8, -1).unwrap();
+    for windows in [[130usize, 70], [70, 130]] {
+        let r = reader_of(file, col, 200, 200);
+        let mut start = 0;
+        for len in windows {
+            assert_eq!(read_at(r, start, len), len);
+            let (ok, values, nulls) = values_of(r, len, mask_words(len));
+            assert!(ok, "window of {len} from {start}");
+            for row in 0..len {
+                let null = nulls[row / 64] >> (row % 64) & 1 == 1;
+                match data[start + row] {
+                    Some(v) => assert!(!null && values[row] == v as u64, "row {}", start + row),
+                    None => assert!(null, "row {}", start + row),
+                }
+            }
+            start += len;
+        }
+        unsafe { tess_parquet_reader_free(r) };
+    }
+    // A part of a shorter window after a longer one: the rows not asked
+    // keep their places and their bits, through the mask reused.
+    let r = reader_of(file, col, 200, 200);
+    assert_eq!(read_at(r, 0, 130), 130);
+    assert!(values_of(r, 130, mask_words(130)).0);
+    assert_eq!(read_at(r, 130, 70), 70);
+    let (ok, values, nulls) = values_asked(r, 70, &[u64::MAX, 0], 2);
+    assert!(ok);
+    for row in 0..64 {
+        let null = nulls[0] >> row & 1 == 1;
+        match data[130 + row] {
+            Some(v) => assert!(!null && values[row] == v as u64, "row {}", 130 + row),
+            None => assert!(null, "row {}", 130 + row),
+        }
+    }
+    assert!(nulls[1] == u64::MAX && values[64..].iter().all(|&v| v == 7));
+    unsafe { tess_parquet_reader_free(r) };
+    // A short mask refused on a reader whose mask a call of the full
+    // length made, then a call of the full length again.
+    let r = reader_of(file, col, 200, 200);
+    assert_eq!(read_at(r, 0, 130), 130);
+    assert!(values_of(r, 130, mask_words(130)).0);
+    let (ok, values, nulls) = values_of(r, 130, mask_words(130) - 1);
+    assert!(!ok);
+    assert!(values.iter().all(|&v| v == 7) && nulls.iter().all(|&n| n == u64::MAX));
+    assert!(values_of(r, 130, mask_words(130)).0);
+    unsafe {
+        tess_parquet_reader_free(r);
+        tess_parquet_column_free(col);
+        tess_parquet_file_free(file);
+    }
+}
