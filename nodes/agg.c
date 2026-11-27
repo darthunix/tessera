@@ -90,7 +90,7 @@ static bool
 integer_sum_state(const AggValue *value)
 {
 	return value->kind == AGG_GENERIC && value->generic->fast == FAST_AVG &&
-		!value->generic->fast_numeric;
+		!value->generic->fast_numeric && !OidIsValid(value->generic->fast_float);
 }
 
 static bool
@@ -235,27 +235,33 @@ constant_numeric(const Const *constant)
  * their count, with its constants a and b, by its aggregate's kind.
  */
 static void
-derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *derived,
-				List *constants)
+derived_outputs(TessAggState *state, CustomScan *cscan, List *states, List *outputs,
+				List *derived, List *constants)
 {
 	state->outputs = palloc0_array(AggOutput, Max(state->noutputs, 1));
 	foreach_int(index, outputs)
 	{
 		int			position = foreach_current_index(index);
 		AggOutput  *output = &state->outputs[position];
-		Aggref	   *agg = castNode(Aggref,
-								   list_nth_node(TargetEntry, cscan->custom_scan_tlist,
-												 state->nkeys + position)->expr);
+		Aggref	   *agg = (Aggref *) list_nth_node(TargetEntry, cscan->custom_scan_tlist,
+												   state->nkeys + position)->expr;
 		int			number = -1 - index;
 		const Const *a;
 		const Const *b;
 
 		output->state = index;
-		if (index >= state->nvalues ||
+		if (!IsA(agg, Aggref) || index >= state->nvalues ||
 			(index < 0 && number >= list_length(derived) / AGG_DERIVED_STATES))
 			elog(ERROR, "TessAgg received a foreign plan");
+		/* A state's own value: of the aggregate in the scan tuple's place. */
 		if (index >= 0)
+		{
+			Aggref	   *own = list_nth(states, index);
+
+			if (own->aggfnoid != agg->aggfnoid || own->aggtype != agg->aggtype)
+				elog(ERROR, "TessAgg received a foreign plan");
 			continue;
+		}
 		output->source = list_nth_int(derived, number * AGG_DERIVED_STATES);
 		output->count_state = list_nth_int(derived, number * AGG_DERIVED_STATES + 1);
 		if (output->source < 0 || output->source >= state->nvalues ||
@@ -309,8 +315,10 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 		}
 		if (!derived_sources(state, output))
 			elog(ERROR, "TessAgg received a foreign plan");
-		a = list_nth_node(Const, constants, number * AGG_DERIVED_CONSTANTS);
-		b = list_nth_node(Const, constants, number * AGG_DERIVED_CONSTANTS + 1);
+		a = list_nth(constants, number * AGG_DERIVED_CONSTANTS);
+		b = list_nth(constants, number * AGG_DERIVED_CONSTANTS + 1);
+		if (!IsA(a, Const) || !IsA(b, Const))
+			elog(ERROR, "TessAgg received a foreign plan");
 		output->a_numeric = constant_numeric(a);
 		output->b_numeric = constant_numeric(b);
 #ifdef HAVE_INT128
@@ -321,9 +329,16 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 		elog(ERROR, "TessAgg received a foreign plan");
 #endif
 		state->nderived++;
+		/*
+		 * By reference: a numeric, or the numerics the derivation makes on
+		 * its way to an integer where a and b pass an int8 and 128 bits may
+		 * not hold their products; in memory a group resets.
+		 */
 		state->derived_by_ref |= output->kind == AGG_DERIVED_SUM_NUMERIC ||
 			output->kind == AGG_DERIVED_AVG_INT8 || output->kind == AGG_DERIVED_AVG_NUMERIC ||
-			output->type == NUMERICOID;
+			output->type == NUMERICOID ||
+			(output->kind != AGG_DERIVED_COUNT &&
+			 (a->consttype != INT8OID || b->consttype != INT8OID));
 	}
 }
 
@@ -440,9 +455,10 @@ agg_derive_extreme(const AggOutput *output, Datum extreme, bool numeric, int64 e
 													   numeric ? extreme :
 													   NumericGetDatum(int64_to_numeric(e))),
 								   output->b_numeric);
-	if (output->exact && output->a_scale == 0 && output->b_scale == 0)
-		value = output->a * (int128) e + output->b;
-	else
+	/* In 128 bits where they hold it, else in numeric. */
+	if (!output->exact || output->a_scale != 0 || output->b_scale != 0 ||
+		__builtin_mul_overflow(output->a, (int128) e, &value) ||
+		__builtin_add_overflow(value, output->b, &value))
 		value = DatumGetInt64(DirectFunctionCall1(numeric_int8,
 												  DirectFunctionCall2(numeric_add,
 																	  DirectFunctionCall2(numeric_mul,
@@ -850,7 +866,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			}
 		}
 	}
-	derived_outputs(state, cscan, outputs, derived, constants);
+	derived_outputs(state, cscan, states, outputs, derived, constants);
 	init_checks(state, estate, arguments, checks, probes);
 	/* The FILTER conditions, computed columns after every argument. */
 	foreach_ptr(Node, filter, filters)
