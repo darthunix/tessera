@@ -119,7 +119,9 @@ pub struct ReaderHandle {
     values_checked: usize,
     windows_checked: usize,
     /// The mask of the `NULL` rows of the last ask of
-    /// [`tess_parquet_bytes`], kept for the next one.
+    /// [`tess_parquet_bytes`] or [`tess_parquet_values`], kept for the
+    /// next one, which reuses it while its capacity suffices; an ask that
+    /// fails once it took it leaves none, and the next allocates one.
     made: Vec<u64>,
     /// Every window read row by row through the plan, for the tests.
     #[cfg(test)]
@@ -652,15 +654,21 @@ pub unsafe extern "C" fn tess_parquet_values(
                 .ok_or_else(|| broken("no window read"))?;
             let asked = words(asked, asked_words)?;
             let nulls = words_mut(nulls, nulls_words)?;
+            let values = words_mut(values, values_len)?;
             let mut buffers = Vec::new();
             let input = input_of(window.array.as_ref(), &mut buffers)?;
-            let mut made = vec![0u64; nulls.len()];
+            // The reader's own mask of the rows asked that are NULL, of the
+            // caller's length, so that a short one is refused as before.
+            let mut made = std::mem::take(&mut handle.made);
+            made.clear();
+            made.resize(nulls.len(), 0);
             let output = &mut ReadOutput::Datums {
-                values: words_mut(values, values_len)?,
+                values,
                 nulls: &mut made,
             };
             handle.reader.plan().read(&input, asked, output)?;
             merge_nulls(nulls, &made, asked);
+            handle.made = made;
             Ok(())
         })
     }
