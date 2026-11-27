@@ -1,0 +1,27 @@
+Now drawing from 'AC Power'
+base Q30 -> tessera-afa-base/target/bench-runs/clickbench-jwhz99 rc=0
+end Q30 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-aEgiZz rc=0
+base Q3 -> tessera-afa-base/target/bench-runs/clickbench-QF1VGi rc=0
+end Q3 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-ym7xSi rc=0
+base Q4 -> tessera-afa-base/target/bench-runs/clickbench-E8CHTH rc=0
+end Q4 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-ZoavVq rc=0
+base-off Q1 -> tessera-afa-base/target/bench-runs/clickbench-Ke6vFj rc=0
+end-off Q1 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-C7UWKT rc=0
+base-b Q30 -> tessera-afa-base/target/bench-runs/clickbench-EBusmt rc=0
+end-b Q30 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-facUhp rc=0
+base-b Q3 -> tessera-afa-base/target/bench-runs/clickbench-XNmPfd rc=0
+end-b Q3 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-P7W1VC rc=0
+base-b Q4 -> tessera-afa-base/target/bench-runs/clickbench-JNewZn rc=0
+end-b Q4 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-NzPZ1d rc=0
+base-b-off Q1 -> tessera-afa-base/target/bench-runs/clickbench-Nd85HO rc=0
+end-b-off Q1 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-pyyVmX rc=0
+duckdb Q30 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-hgrF2w rc=0
+duckdb Q3 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-LmHOa0 rc=0
+duckdb Q4 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-DmlOO3 rc=0
+base-time Q30 -> tessera-afa-base/target/bench-runs/clickbench-nILxYi rc=0
+end-time Q30 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-Zy83NN rc=0
+ %CPU COMM
+ 12.1 /usr/libexec/syspolicyd
+  0.7 /usr/libexec/sysmond
+  0.6 /usr/libexec/airportd
+done

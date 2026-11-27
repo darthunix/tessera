@@ -1,0 +1,4 @@
+Now drawing from 'AC Power'
+base Q30 -> tessera-afa-base/target/bench-runs/clickbench-bkTWfz rc=0
+end Q30 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-instal rc=1
+base Q3 -> tessera-afa-base/target/bench-runs/clickbench-7pAKw4 rc=0
