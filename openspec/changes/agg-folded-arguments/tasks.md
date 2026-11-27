@@ -67,7 +67,7 @@ injection points; CI runs 19 and 18.
 
 ## 3. The count of the first stage
 
-- [ ] 3.1 Count as the design's measurement plan says, at the
+- [x] 3.1 Count as the design's measurement plan says, at the
       maintainer's word that the machine is idle: `aggfold` against 2.1,
       ClickBench's Q30, Q3, Q4 and the control against the same base in
       turns, with pg_duckdb's cycles beside, and the times of Q30. Keep
