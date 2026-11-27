@@ -34,7 +34,7 @@ injection points; CI runs 19 and 18.
       states and fills the scan slot and the groups' batch from the
       outputs; the plan data's version raised. Check: the suites; `make
       crosscheck`
-- [ ] 2.3 The folded forms of integers for `sum`, `avg` and `count`,
+- [x] 2.3 The folded forms of integers for `sum`, `avg` and `count`,
       where the static ranges rule out every failure: the steps and
       their constants, the groups by `e`, `FILTER` and `DISTINCT` and
       their rule, ahead of the cap and the estimates; the shared

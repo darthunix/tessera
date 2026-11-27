@@ -57,6 +57,49 @@ extern bool distinct_matters(const Aggref *agg);
 extern bool sum_state_aggregate(const Aggref *agg);
 extern bool own_partial_aggregate(const Aggref *agg);
 extern Size agg_float_state_bytes(const Aggref *agg);
+#ifdef HAVE_INT128
+extern Datum agg_int128_numeric(int128 value, int scale);
+#endif
+
+/*
+ * An aggregate of the scan tuple the node derives from states it keeps
+ * for several aggregates of one expression e, its argument a form a·e +
+ * b of e (agg_derive): from S, the sum of e over the rows it reads, and
+ * n, their count. Its kind is its aggregate's, by the type of its form.
+ */
+typedef enum AggDerivedKind
+{
+	AGG_DERIVED_SUM_INT8,		/* sum of a smallint or integer form: a bigint */
+	AGG_DERIVED_SUM_NUMERIC,	/* sum of a bigint form: a numeric */
+	AGG_DERIVED_AVG_INT8,		/* avg of a smallint or integer form, its sum a bigint */
+	AGG_DERIVED_AVG_NUMERIC,	/* avg of a bigint form */
+	AGG_DERIVED_COUNT
+} AggDerivedKind;
+
+/*
+ * The plan data's derivations: for each derived output, its states (the
+ * sum and the count of e) and its constants a and b, each an int8 Const
+ * or, past an int8, a numeric one.
+ */
+#define AGG_DERIVED_STATES 2
+#define AGG_DERIVED_CONSTANTS 2
+
+/* An aggregate of the scan tuple: a state's value, or derived from states. */
+typedef struct AggOutput
+{
+	int			state;			/* the state, or -1 when derived */
+	AggDerivedKind kind;
+	int			sum_state;
+	int			count_state;
+	/* a and b as integers where both are int8 Consts, and as numerics. */
+	bool		integers;
+#ifdef HAVE_INT128
+	int128		a;
+	int128		b;
+#endif
+	Datum		a_numeric;
+	Datum		b_numeric;
+} AggOutput;
 
 /*
  * The state of the node and the groups it gives out (agg.c), read and
@@ -123,7 +166,10 @@ typedef struct TessAggState
 	AggValue   *values;
 	int			nvalues;
 	int			noutputs;
-	int		   *output_states;
+	AggOutput  *outputs;
+	/* The outputs derived, and whether one is by reference, a numeric. */
+	int			nderived;
+	bool		derived_by_ref;
 	/* Written by a batch function on failure only. */
 	TessStatus	status;
 	/* The row was returned; the next call ends the scan. */

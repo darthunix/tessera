@@ -908,7 +908,35 @@ group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *
 	}
 }
 
-/* Every aggregate of a group into the scan slot, after the keys: each its state's value. */
+/*
+ * The value of output number of a group: its state's, or derived from the
+ * sum of its e and their count, a numeric in the generic values' memory.
+ */
+static void
+output_value_into(TessAggState *state, int number, int group, Datum *datum, bool *isnull)
+{
+	const AggOutput *output = &state->outputs[number];
+	Datum		sum;
+	Datum		count;
+	bool		sum_null;
+	bool		count_null;
+	MemoryContext old;
+
+	if (output->state >= 0)
+	{
+		group_value_into(state, output->state, group, datum, isnull);
+		return;
+	}
+	group_value_into(state, output->sum_state, group, &sum, &sum_null);
+	group_value_into(state, output->count_state, group, &count, &count_null);
+	old = state->generic_output != NULL ?
+		MemoryContextSwitchTo(state->generic_output) : CurrentMemoryContext;
+	*datum = agg_derive(output, sum_null ? 0 : DatumGetInt64(sum), DatumGetInt64(count),
+						isnull);
+	MemoryContextSwitchTo(old);
+}
+
+/* Every aggregate of a group into the scan slot, after the keys: each its output's value. */
 static void
 group_values(TessAggState *state, int group, TupleTableSlot *scan)
 {
@@ -916,8 +944,8 @@ group_values(TessAggState *state, int group, TupleTableSlot *scan)
 	{
 		int			attribute = state->nkeys + output;
 
-		group_value_into(state, state->output_states[output], group,
-						 &scan->tts_values[attribute], &scan->tts_isnull[attribute]);
+		output_value_into(state, output, group,
+						  &scan->tts_values[attribute], &scan->tts_isnull[attribute]);
 	}
 }
 
@@ -1161,9 +1189,9 @@ agg_next_groups(TessAggState *state)
 			return NULL;
 		for (int output = 0; output < state->noutputs; output++)
 			for (int group = 0; group < count; group++)
-				group_value_into(state, state->output_states[output], group,
-								 &state->agg_values[output * AGG_GROUP_ROWS + group],
-								 &state->agg_isnull[output * AGG_GROUP_ROWS + group]);
+				output_value_into(state, output, group,
+								  &state->agg_values[output * AGG_GROUP_ROWS + group],
+								  &state->agg_isnull[output * AGG_GROUP_ROWS + group]);
 		state->groups_bits[0] = count == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << count) - 1;
 		state->groups_batch.rows.nrows = count;
 		state->groups_batch.rows.bits = state->groups_bits;

@@ -75,6 +75,9 @@ those it checks.
   loadable library, and aggregates whose arguments contain a subquery
   (`generic_supported`).
 - **More than 64 aggregates or more than 16 grouping keys** in one query.
+  Aggregates of one expression under constants that the node folds count
+  as the two states they share (`sum(x)`, `sum(x + 1)`, ...); a parallel
+  plan folds none.
 
 ## Sorting
 

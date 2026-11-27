@@ -372,6 +372,7 @@ extern void agg_generic_group_accumulate(TessAggState *state, int index,
 										 const TessRowMask *rows,
 										 const TessRowMask *inserted);
 extern Datum agg_generic_value(GenericAgg *generic, bool *isnull);
+extern Datum agg_derive(const AggOutput *output, int64 sum, int64 count, bool *isnull);
 
 /* Key dictionaries and DISTINCT sets (agg_keydict.c). */
 extern void agg_distinct_reset(TessAggState *state, AggValue *value);

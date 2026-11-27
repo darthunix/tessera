@@ -1191,6 +1191,102 @@ SELECT agg_same($$SELECT count(DISTINCT s) FROM agg_past WHERE i % 3 <> 0$$);
 DROP TABLE agg_past;
 RESET work_mem;
 
+-- Aggregates folded from shared states: the aggregates of one expression e
+-- under constants keep the sum and the count of e, from which each is
+-- derived. Whether TessAgg computes a query, how many aggregates it
+-- derives, and whether its groups went past hash_mem.
+CREATE FUNCTION agg_folded(query text) RETURNS text
+LANGUAGE plpgsql AS $$
+DECLARE
+    line text;
+    node text := 'core';
+    folded int := 0;
+    spilled bool := false;
+    inside bool := false;
+BEGIN
+    FOR line IN EXECUTE 'EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) ' || query LOOP
+        -- The node's own lines, up to its child's.
+        inside := line ~ 'Custom Scan \(TessAgg\)' OR (inside AND line !~ '->');
+        IF inside THEN
+            node := 'TessAgg';
+        END IF;
+        folded := coalesce(substring(line FROM 'Folded Aggregates: (\d+)')::int, folded);
+        spilled := spilled OR (inside AND line ~ '^\s*Batches: ');
+    END LOOP;
+    RETURN format('%s, %s folded%s', node, folded, CASE WHEN spilled THEN ', spilled' ELSE '' END);
+END $$;
+-- A smallint and an integer with their extremes and NULLs, seven groups.
+CREATE TABLE agg_fold WITH (autovacuum_enabled = off) AS
+SELECT CASE WHEN g % 11 = 0 THEN NULL WHEN g = 1 THEN 32767 WHEN g = 2 THEN -32768
+            ELSE g * 7919 % 65536 - 32768 END::smallint AS s,
+       CASE WHEN g % 13 = 0 THEN NULL WHEN g = 3 THEN 2147483647 WHEN g = 4 THEN -2147483648
+            ELSE g * 104729 % 2000000 - 1000000 END AS i,
+       g % 7 AS k
+FROM generate_series(1, 3000) AS g;
+-- spec: aggregate/Ninety sums of one column
+SELECT format('SELECT %s FROM agg_fold',
+              string_agg(CASE k WHEN 0 THEN 'sum(s)' ELSE format('sum(s + %s)', k) END, ', '
+                         ORDER BY k)) AS ninety
+FROM generate_series(0, 89) AS k \gset
+SELECT agg_folded(:'ninety');
+SELECT agg_same(format('SELECT md5(q::text) FROM (%s) AS q', :'ninety'));
+SELECT agg_same(format('SELECT md5(q::text) FROM (%s GROUP BY k) AS q', :'ninety'));
+-- The steps of a smallint: a constant on either side, products, nested
+-- forms and a cast to bigint; sum and avg of each, count of some, with
+-- their types, as the core gives them.
+EXPLAIN (VERBOSE, COSTS OFF) SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3), sum(i) FROM agg_fold;
+SELECT agg_folded($$SELECT sum(s), sum(s + 1), sum(1 + s), sum(s - 7), sum(7 - s), sum(s * 3), sum(-3 * s),
+                    sum((s + 1) * 2 - 7), sum(s::bigint * 100000 + 1), avg(s), avg(s + 1), avg(7 - s * 2),
+                    avg(s::bigint * -3), count(s + 1), count(s) FROM agg_fold$$);
+SELECT agg_same($$SELECT sum(s), sum(s + 1), sum(1 + s), sum(s - 7), sum(7 - s), sum(s * 3), sum(-3 * s),
+                  sum((s + 1) * 2 - 7), sum(s::bigint * 100000 + 1), avg(s), avg(s + 1), avg(7 - s * 2),
+                  avg(s::bigint * -3), count(s + 1), count(s),
+                  pg_typeof(sum(s + 1)), pg_typeof(sum(s::bigint * 100000 + 1)), pg_typeof(avg(s + 1)),
+                  pg_typeof(avg(s::bigint * -3)), pg_typeof(count(s + 1)) FROM agg_fold$$);
+-- A step of smallint, which can pass its range, keeps a state of its own.
+SELECT agg_folded($$SELECT sum(s), sum(s + 1), sum(s + 1::smallint) FROM agg_fold WHERE s < 32767$$);
+SELECT agg_same($$SELECT sum(s), sum(s + 1), sum(s + 1::smallint) FROM agg_fold WHERE s < 32767$$);
+-- An integer cast to bigint, whose steps cannot pass a bigint.
+SELECT agg_folded($$SELECT sum(i), avg(i), count(i), sum(i::bigint + 5), sum(i::bigint * 1000003),
+                    sum(5 - i::bigint), sum(-(i::bigint)), avg(i::bigint - 1), avg(i::bigint * -7),
+                    count(i::bigint) FROM agg_fold$$);
+SELECT agg_same($$SELECT sum(i), avg(i), count(i), sum(i::bigint + 5), sum(i::bigint * 1000003),
+                  sum(5 - i::bigint), sum(-(i::bigint)), avg(i::bigint - 1), avg(i::bigint * -7),
+                  count(i::bigint) FROM agg_fold$$);
+-- Grouped, under FILTER conditions that leave groups no row, and over no rows.
+SELECT agg_folded($$SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3), sum(i::bigint * 3), avg(i::bigint + 1) FROM agg_fold GROUP BY k$$);
+SELECT agg_same($$SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3), sum(i::bigint * 3), avg(i::bigint + 1) FROM agg_fold GROUP BY k$$);
+-- HAVING over a folded aggregate the targets do not show.
+SELECT agg_folded($$SELECT k, sum(s) FROM agg_fold GROUP BY k HAVING avg(s + 1) > 0$$);
+SELECT agg_same($$SELECT k, sum(s) FROM agg_fold GROUP BY k HAVING avg(s + 1) > 0$$);
+SELECT agg_folded($$SELECT k, sum(s + 1) FILTER (WHERE k = 3), count(s - 1) FILTER (WHERE k = 3),
+                    avg(s * 2) FILTER (WHERE k = 3), sum(s) FILTER (WHERE s IS NULL),
+                    count(s + 1) FILTER (WHERE s IS NULL) FROM agg_fold GROUP BY k$$);
+SELECT agg_same($$SELECT k, sum(s + 1) FILTER (WHERE k = 3), count(s - 1) FILTER (WHERE k = 3),
+                  avg(s * 2) FILTER (WHERE k = 3), sum(s) FILTER (WHERE s IS NULL),
+                  count(s + 1) FILTER (WHERE s IS NULL) FROM agg_fold GROUP BY k$$);
+SELECT agg_same($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FILTER (WHERE k = 3) FROM agg_fold WHERE k > 100$$);
+SELECT agg_same($$SELECT sum(s + 1) FILTER (WHERE k > 100), avg(s * 2) FILTER (WHERE k > 100), count(s) FILTER (WHERE k > 100) FROM agg_fold$$);
+SELECT agg_same($$SELECT k, sum(s), sum(s + 1), avg(s * 2) FROM agg_fold WHERE k > 100 GROUP BY k$$);
+-- Groups past hash_mem.
+CREATE TABLE agg_fold_spill WITH (autovacuum_enabled = off) AS
+SELECT g % 200000 AS k, CASE WHEN g % 17 = 0 THEN NULL ELSE g % 30001 - 15000 END::smallint AS s
+FROM generate_series(1, 600000) AS g;
+ANALYZE agg_fold_spill;
+SET work_mem = '1MB';
+SELECT agg_folded($$SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM agg_fold_spill GROUP BY k$$);
+SELECT agg_same($$SELECT md5(string_agg(q::text, ',' ORDER BY q::text)) FROM (SELECT k, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM agg_fold_spill GROUP BY k) AS q$$);
+RESET work_mem;
+DROP TABLE agg_fold_spill;
+-- Aggregates of one expression left as they are: a form alone, e's own
+-- sum, avg and count, and forms under a volatile FILTER.
+SELECT agg_folded($$SELECT sum(s + 1) FROM agg_fold$$);
+SELECT agg_folded($$SELECT sum(s), avg(s), count(s) FROM agg_fold$$);
+SELECT agg_folded($$SELECT sum(s + 1) FILTER (WHERE random() < 2), sum(s + 2) FILTER (WHERE random() < 2) FROM agg_fold$$);
+SELECT agg_same($$SELECT sum(s + 1) FILTER (WHERE random() < 2), sum(s + 2) FILTER (WHERE random() < 2) FROM agg_fold$$);
+DROP TABLE agg_fold;
+DROP FUNCTION agg_folded(text);
+
 DROP TABLE agg_t;
 DROP FUNCTION agg_spill(text);
 DROP FUNCTION agg_same(text);

@@ -182,6 +182,13 @@ fast_numeric(int128 value, int scale)
 																		 scale)));
 }
 
+/* fast_numeric for the planner and the derived outputs. */
+Datum
+agg_int128_numeric(int128 value, int scale)
+{
+	return fast_numeric(value, scale);
+}
+
 /*
  * sum(int2)'s int8 from a sum at scale 0 and its rest, or 0: the sum
  * wrapped as int2_sum's addition wraps, a sum with a rest (past 10^36)
