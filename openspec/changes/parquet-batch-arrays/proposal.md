@@ -28,10 +28,10 @@ This change takes up the roadmap's entry `parquet-batch-arrays`.
   for each column the scan reads, not for each attribute of the table.
   A column's arrays of 64 rows, the most a batch holds, are allocated,
   zeroed, at its first ask in the scan, and serve every batch after it.
-- At each batch the node clears, for the scan's columns alone, the
-  rows made in both forms and a view's dictionary: a few words a
-  column. A query that reads no column clears nothing and allocates
-  nothing.
+- At each batch, and at a rescan, the node clears, for the scan's
+  columns alone, the rows made in both forms and a view's dictionary: a
+  few words a column. A query that reads no column clears nothing and
+  allocates nothing.
 - The rows a batch does not make keep what an earlier batch wrote:
   written memory of no meaning, which the batch's API allows and the
   heap's provider already leaves. The rows a batch makes, and the
@@ -40,8 +40,8 @@ This change takes up the roadmap's entry `parquet-batch-arrays`.
   as the zeroed arrays gave it.
 - Under assertions, the node wipes the values and the bytes' places of
   its arrays at each batch, so that a consumer that keeps a column past
-  the batch's release reads the wipe in the suites, as it read freed
-  memory before.
+  the batch's release reads the wipe in the suites where the next batch
+  has not made the row again.
 - The memory reset at each batch keeps only what lives for one batch:
   the arenas of strings made as values, the references that keep a
   window's bytes, and the scratch of the checks under assertions.
@@ -67,8 +67,8 @@ design of `parquet-fdw` says how the node keeps a batch's values.
 - Tests: the test module's consumers of a batch,
   `test/tessera_parquet_test.c` (`parquet_test_asks` and
   `parquet_test_bytes`, which gain an optional argument), and the
-  suite `test/sql/parquet.sql`, with new queries and their expected
-  output; `test/sql/parquet_cancel.sql` runs as it is.
+  suites `test/sql/parquet.sql` and `test/sql/parquet_cancel.sql`, with
+  new queries and their expected output.
 - Public headers, settings, other suites: none.
 - Contracts: the change keeps to the node, one part of `parquet-fdw`,
   and crosses no boundary: the arrays are the node's, in the query's

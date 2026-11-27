@@ -66,7 +66,9 @@ typedef struct ParquetNode ParquetNode;
  * row, its NULL flag, the place of its bytes in a window's buffers, their
  * count and its index; the dictionary's count of values and identity, 0
  * where the column has none or two asks named two dictionaries; and the
- * rows made.
+ * rows made. The arrays, of BATCH_ROWS rows, are NULL until the scan's
+ * first ask of the column in the form and serve every batch after it;
+ * the rest is cleared at each batch.
  */
 typedef struct BatchBytes
 {
@@ -92,7 +94,14 @@ typedef struct BatchHolds
 	MemoryContextCallback callback;
 } BatchHolds;
 
-/* The batch the node publishes: selected rows of one window of a group. */
+/*
+ * The batch the node publishes: selected rows of one window of a group.
+ * Its arrays are of each column the scan reads, by the scan's number,
+ * kept for the scan: a column's values and flags, of BATCH_ROWS rows, are
+ * NULL until its first ask and zeroed then, and each batch clears the
+ * rows made alone, so that the rows a batch does not make hold an earlier
+ * batch's, which the batch's API allows.
+ */
 typedef struct ParquetBatch
 {
 	TessBatch	batch;
@@ -105,11 +114,11 @@ typedef struct ParquetBatch
 	int			nrows;
 	uint64		mask;			/* its rows selected, which a consumer narrows */
 	uint64		all;			/* every row of it, BATCH_ROWS at most */
-	Datum	  **values;			/* of each column of the relation asked */
+	int			ncolumns;		/* the scan's columns */
+	Datum	  **values;			/* of each column of the scan */
 	bool	  **isnull;
 	uint64	   *made;			/* of each column, the rows made */
-	BatchBytes **bytes;			/* of each column asked in the bytes form, NULL
-								 * until the batch's first ask of the form */
+	BatchBytes *bytes;			/* of each column, in the bytes form */
 } ParquetBatch;
 
 /* What the node keeps of a column it reads: the window its reader holds. */
@@ -181,7 +190,10 @@ struct ParquetNode
 	int			capacity;
 	bool		exhausted;
 	uint64		next_row;		/* of the group read, the next to publish */
-	MemoryContext batch_cxt;	/* the values of the batch, reset at the next */
+	MemoryContext batch_cxt;	/* the arenas of the batch's strings, its
+								 * references to windows and the scratch of
+								 * the checks under assertions, reset at the
+								 * next */
 	BatchHolds *holds;			/* in batch_cxt, NULL after each reset */
 	ParquetBatch batch;
 	/* The clauses checked, their columns' order, and their sides' values. */
@@ -575,6 +587,11 @@ node_begin(CustomScanState *css, EState *estate, int eflags)
 	foreach_int(attnum, attnums)
 		node->column_of[attnum - 1] = c++;
 	node->columns = palloc0_array(NodeColumn, Max(list_length(attnums), 1));
+	node->batch.ncolumns = list_length(attnums);
+	node->batch.values = palloc0_array(Datum *, Max(node->batch.ncolumns, 1));
+	node->batch.isnull = palloc0_array(bool *, Max(node->batch.ncolumns, 1));
+	node->batch.made = palloc0_array(uint64, Max(node->batch.ncolumns, 1));
+	node->batch.bytes = palloc0_array(BatchBytes, Max(node->batch.ncolumns, 1));
 	node->nclauses = list_length(cscan->custom_exprs);
 	node->clauses = palloc0_array(NodeClause, Max(node->nclauses, 1));
 	node->clause_order = palloc_array(int, Max(node->nclauses, 1));
@@ -760,11 +777,11 @@ held_place(const ParquetBatch *b, const NodeColumn *col, int i)
 }
 
 /*
- * Makes the values of the rows `need` of the batch, of its column `column`,
- * the scan's column `c`, from its window held.
+ * Makes the values of the rows `need` of the batch, of the scan's column
+ * `c`, from its window held.
  */
 static void
-make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
+make_values(ParquetNode *node, ParquetBatch *b, int c, uint64 need)
 {
 	ParquetScan *scan = node->scan;
 	NodeColumn *col = &node->columns[c];
@@ -800,8 +817,8 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 		{
 			bool		null = (col->nulls[(base + i) / 64] >> ((base + i) % 64)) & 1;
 
-			b->isnull[column][i] = null;
-			b->values[column][i] = null ? (Datum) 0 : (Datum) col->values[base + i];
+			b->isnull[c][i] = null;
+			b->values[c][i] = null ? (Datum) 0 : (Datum) col->values[base + i];
 		}
 	}
 	else
@@ -813,11 +830,11 @@ make_values(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 				rank_of(col->held, position_of(b, i));
 			bool		null = (col->nulls[p / 64] >> (p % 64)) & 1;
 
-			b->isnull[column][i] = null;
-			b->values[column][i] = null ? (Datum) 0 : (Datum) col->values[p];
+			b->isnull[c][i] = null;
+			b->values[c][i] = null ? (Datum) 0 : (Datum) col->values[p];
 		}
 	}
-	b->made[column] |= need;
+	b->made[c] |= need;
 	scan->own[PARQUET_VALUES_DECODED] += pg_popcount64(need);
 }
 
@@ -829,22 +846,24 @@ batch_column(TessBatch *batch, int column, const TessRowMask *rows,
 	ParquetBatch *b = batch->private_data;
 	ParquetNode *node = b->node;
 	uint64		need;
+	int			c;
 
 	if (column < 0 || column >= node->relation.ncolumns || node->column_of[column] < 0)
 		elog(ERROR, "TessParquetScan was asked for a column its plan does not read");
-	if (b->values[column] == NULL)
+	c = node->column_of[column];
+	if (b->values[c] == NULL)
 	{
-		b->values[column] = MemoryContextAllocZero(node->batch_cxt,
-												   sizeof(Datum) * Max(b->nrows, 1));
-		b->isnull[column] = MemoryContextAllocZero(node->batch_cxt,
-												   sizeof(bool) * Max(b->nrows, 1));
+		MemoryContext query = node->css.ss.ps.state->es_query_cxt;
+
+		b->values[c] = MemoryContextAllocZero(query, sizeof(Datum) * BATCH_ROWS);
+		b->isnull[c] = MemoryContextAllocZero(query, sizeof(bool) * BATCH_ROWS);
 	}
 	/* A row asked is made even when a consumer took it out of the mask. */
-	need = rows->bits[0] & b->all & ~b->made[column];
+	need = rows->bits[0] & b->all & ~b->made[c];
 	if (need != 0)
-		make_values(node, b, column, node->column_of[column], need);
-	result->values = b->values[column];
-	result->isnull = b->isnull[column];
+		make_values(node, b, c, need);
+	result->values = b->values[c];
+	result->isnull = b->isnull[c];
 	result->nrows = b->nrows;
 	if (result->struct_size >= TESS_DATUM_COLUMN_DECIMALS_SIZE)
 	{
@@ -897,8 +916,8 @@ next_hold(ParquetNode *node)
 }
 
 /*
- * Makes the bytes form of the rows `need` of the batch, of its column
- * `column`, the scan's column `c`, from its window held: each row's place
+ * Makes the bytes form of the rows `need` of the batch, of the scan's
+ * column `c`, from its window held: each row's place
  * of its bytes, their count and, through a dictionary, its index, with a
  * reference that keeps the window's array for the batch. A dictionary gets
  * an identity of Tessera's API for each new number the reader gives it; a
@@ -906,11 +925,11 @@ next_hold(ParquetNode *node)
  * without one.
  */
 static void
-make_bytes(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
+make_bytes(ParquetNode *node, ParquetBatch *b, int c, uint64 need)
 {
 	ParquetScan *scan = node->scan;
 	NodeColumn *col = &node->columns[c];
-	BatchBytes *view = b->bytes[column];
+	BatchBytes *view = &b->bytes[c];
 	uint64		asked[WINDOW_WORDS] = {0};
 	int			held_words = window_asked(node, b, c, need, asked);
 	TessParquetReader *reader = parquet_scan_reader(scan, c);
@@ -955,7 +974,13 @@ make_bytes(ParquetNode *node, ParquetBatch *b, int column, int c, uint64 need)
 
 		view->isnull[i] = null;
 		if (null)
+		{
+			/* As the arrays' zeroing gave a NULL row asked. */
+			view->data[i] = NULL;
+			view->lengths[i] = 0;
+			view->indexes[i] = 0;
 			continue;
+		}
 		view->data[i] = (const char *) col->bytes_data[p];
 		view->lengths[i] = col->bytes_lengths[p];
 		view->indexes[i] = out.number != 0 ? col->bytes_indexes[p] : 0;
@@ -1016,30 +1041,27 @@ batch_bytes(TessBatch *batch, int column, const TessRowMask *rows, TessBytesColu
 	ParquetNode *node = b->node;
 	BatchBytes *view;
 	uint64		need;
-	int			n = Max(b->nrows, 1);
+	int			c;
 
 	if (column < 0 || column >= node->relation.ncolumns || node->column_of[column] < 0)
 		elog(ERROR, "TessParquetScan was asked for a column its plan does not read");
-	if (result->struct_size < TESS_BYTES_COLUMN_MIN_SIZE ||
-		node->scan->info[node->column_of[column]].gives_datums)
+	c = node->column_of[column];
+	if (result->struct_size < TESS_BYTES_COLUMN_MIN_SIZE || node->scan->info[c].gives_datums)
 		return false;
-	if (b->bytes == NULL)
-		b->bytes = MemoryContextAllocZero(node->batch_cxt,
-										  sizeof(BatchBytes *) * Max(node->relation.ncolumns, 1));
-	view = b->bytes[column];
-	if (view == NULL)
+	view = &b->bytes[c];
+	if (view->isnull == NULL)
 	{
-		view = MemoryContextAllocZero(node->batch_cxt, sizeof(BatchBytes));
-		view->isnull = MemoryContextAllocZero(node->batch_cxt, sizeof(bool) * n);
-		view->data = MemoryContextAllocZero(node->batch_cxt, sizeof(const char *) * n);
-		view->lengths = MemoryContextAllocZero(node->batch_cxt, sizeof(uint32) * n);
-		view->indexes = MemoryContextAllocZero(node->batch_cxt, sizeof(int32) * n);
-		b->bytes[column] = view;
+		MemoryContext query = node->css.ss.ps.state->es_query_cxt;
+
+		view->isnull = MemoryContextAllocZero(query, sizeof(bool) * BATCH_ROWS);
+		view->data = MemoryContextAllocZero(query, sizeof(const char *) * BATCH_ROWS);
+		view->lengths = MemoryContextAllocZero(query, sizeof(uint32) * BATCH_ROWS);
+		view->indexes = MemoryContextAllocZero(query, sizeof(int32) * BATCH_ROWS);
 	}
 	/* A row asked is made even when a consumer took it out of the mask. */
 	need = rows->bits[0] & b->all & ~view->made;
 	if (need != 0)
-		make_bytes(node, b, column, node->column_of[column], need);
+		make_bytes(node, b, c, need);
 	result->nrows = b->nrows;
 	result->isnull = view->isnull;
 	result->data = view->data;
@@ -1299,6 +1321,36 @@ select_rows(ParquetNode *node)
 }
 
 /*
+ * Clears the rows made of each of the scan's columns, in both forms, and
+ * the dictionary of each view, for a batch that makes them anew. An ask of
+ * no row then names no dictionary, as of a batch no ask made.
+ */
+static void
+clear_batch(ParquetBatch *b)
+{
+	for (int c = 0; c < b->ncolumns; c++)
+	{
+		b->made[c] = 0;
+		b->bytes[c].made = 0;
+		b->bytes[c].dictionary = 0;
+#ifdef USE_ASSERT_CHECKING
+
+		/*
+		 * Wiped as PostgreSQL wipes freed memory: a consumer that reads a
+		 * column kept past its batch reads the wipe where the next batch has
+		 * not made the row again. The flags, lengths and indexes, which a
+		 * consumer may load for a row it did not ask, keep values of their
+		 * types.
+		 */
+		if (b->values[c] != NULL)
+			memset(b->values[c], 0x7F, sizeof(Datum) * BATCH_ROWS);
+		if (b->bytes[c].data != NULL)
+			memset((void *) b->bytes[c].data, 0x7F, sizeof(const char *) * BATCH_ROWS);
+#endif
+	}
+}
+
+/*
  * The next batch: up to the batch's rows of the selected rows of one
  * window of the group read, from the next row to publish, or NULL past the
  * last group. A query that reads no column publishes the rows and opens
@@ -1309,7 +1361,6 @@ next_batch(ParquetNode *node)
 {
 	ParquetScan *scan = node->scan;
 	ParquetBatch *b = &node->batch;
-	int			natts = node->relation.ncolumns;
 	int			n = 0;
 	uint64		window = 0;
 
@@ -1384,8 +1435,10 @@ next_batch(ParquetNode *node)
 		if (n == 0)
 			node->next_row = end;
 	}
+	Assert(n <= BATCH_ROWS);
 	MemoryContextReset(node->batch_cxt);
 	node->holds = NULL;
+	clear_batch(b);
 	b->window = window;
 	b->first = selected_before(scan, window, b->positions[0]);
 	b->contiguous = scan->selection == NULL ||
@@ -1393,10 +1446,6 @@ next_batch(ParquetNode *node)
 	b->nrows = n;
 	b->all = b->nrows == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << b->nrows) - 1;
 	b->mask = b->all;
-	b->values = MemoryContextAllocZero(node->batch_cxt, sizeof(Datum *) * Max(natts, 1));
-	b->isnull = MemoryContextAllocZero(node->batch_cxt, sizeof(bool *) * Max(natts, 1));
-	b->made = MemoryContextAllocZero(node->batch_cxt, sizeof(uint64) * Max(natts, 1));
-	b->bytes = NULL;
 	b->batch.rows.nrows = b->nrows;
 	if (node->projection != NULL)
 		return tess_projection_wrap(node->projection, &b->batch);
@@ -1498,6 +1547,7 @@ node_rescan(CustomScanState *css)
 		tess_projection_reset(node->projection);
 	MemoryContextReset(node->batch_cxt);
 	node->holds = NULL;
+	clear_batch(&node->batch);
 	if (node->scan != NULL)
 		parquet_scan_rescan(node->scan);
 	/* The sides' values may change: computed again, and the tests made. */

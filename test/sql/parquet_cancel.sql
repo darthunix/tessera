@@ -131,7 +131,7 @@ RESET parallel_leader_participation;
 -- reference lives while the batch does, or one is left after a rescan
 -- or the scan's end; an error raised right after a reference is taken
 -- leaves none either.
-CREATE FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool)
+CREATE FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool, bool DEFAULT false)
     RETURNS TABLE (col text, n int, ask text, bytes bytea, ind int, dict bool)
     AS :'parquet_test', 'tessera_parquet_test_bytes' LANGUAGE C STRICT;
 CREATE FUNCTION parquet_test_holds() RETURNS bigint
@@ -162,6 +162,15 @@ FROM (VALUES ('t_held_plain'), ('t_held_dict')) t(tbl),
                         x'5555555555555555'::bigint, true, true) p
      JOIN h_held h ON h.n = p.n
 GROUP BY tbl, max_rows, ask ORDER BY tbl, max_rows, ask;
+-- The same in batches of ten, the six before the one checked, and those
+-- after the rescan, asked first for every row in the bytes form.
+SELECT tbl, ask, count(*) AS asked,
+       count(*) FILTER (WHERE bytes IS DISTINCT FROM convert_to(h.s, 'UTF8')) AS differ
+FROM (VALUES ('t_held_plain'), ('t_held_dict')) t(tbl),
+     parquet_test_bytes(format('SELECT s FROM %s', tbl), 10, 6,
+                        x'5555555555555555'::bigint, true, true, true) p
+     JOIN h_held h ON h.n = p.n
+GROUP BY tbl, ask ORDER BY tbl, ask;
 -- spec: string-bytes/A dictionary given again
 -- A grouping over windows read again at each ask, over two chunks of 1100
 -- rows whose dictionaries give one index to two values: in each chunk the
@@ -201,7 +210,7 @@ DROP SERVER pq;
 DROP FUNCTION parquet_test_injection(), parquet_test_write(text, text),
     parquet_test_cancel_after(text, int), parquet_test_windows(),
     parquet_test_replace_in_worker(text, bool),
-    parquet_test_bytes(text, int, int, bigint, bool, bool), parquet_test_holds(),
+    parquet_test_bytes(text, int, int, bigint, bool, bool, bool), parquet_test_holds(),
     parquet_test_point(text, text, bool);
 DROP EXTENSION tessera_parquet;
 DROP EXTENSION tessera;
