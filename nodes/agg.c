@@ -82,6 +82,58 @@ enum
 static const CustomExecMethods agg_exec_methods;
 static const TessBatchOps groups_batch_ops;
 
+/* Whether a state is the node's own sum state of avg of bigint. */
+static bool
+integer_sum_state(const AggValue *value)
+{
+	return value->kind == AGG_GENERIC && value->generic->fast == FAST_AVG &&
+		value->generic->fast_wide && !value->generic->fast_numeric;
+}
+
+/*
+ * The checks of errors of the plan: each of a state whose argument is e,
+ * which takes e's extremes from its column, and the probes, the forms'
+ * arguments over e as the slot's one column, which agg_check_finish
+ * evaluates.
+ */
+static void
+init_checks(TessAggState *state, EState *estate, List *arguments, List *checks,
+			List *probes)
+{
+	if (list_length(checks) != list_length(probes) * AGG_CHECK_FIELDS)
+		elog(ERROR, "TessAgg received a foreign plan");
+	state->nchecks = list_length(probes);
+	state->checks = palloc0_array(AggCheck, Max(state->nchecks, 1));
+	foreach_node(List, forms, probes)
+	{
+		int			number = foreach_current_index(forms);
+		AggCheck   *check = &state->checks[number];
+		int			index = list_nth_int(checks, number * AGG_CHECK_FIELDS);
+		Oid			type = (Oid) list_nth_int(checks, number * AGG_CHECK_FIELDS + 1);
+		AggValue   *value;
+		Oid			column;
+
+		if (index < 0 || index >= state->nvalues || forms == NIL ||
+			(type != INT2OID && type != INT4OID && type != INT8OID))
+			elog(ERROR, "TessAgg received a foreign plan");
+		value = &state->values[index];
+		column = exprType(list_nth(arguments, index));
+		if (value->check >= 0 || value->computed < 0 ||
+			(column != INT4OID && column != INT8OID))
+			elog(ERROR, "TessAgg received a foreign plan");
+		value->check = number;
+		check->wide = column == INT8OID;
+		check->type = type;
+		check->slot = ExecInitExtraTupleSlot(estate,
+											 ExecTypeFromTL(list_make1(makeTargetEntry((Expr *) makeNullConst(type, -1, InvalidOid),
+																					   1, NULL, false))),
+											 &TTSOpsVirtual);
+		foreach_ptr(Expr, probe, forms)
+			check->probes = lappend(check->probes,
+									ExecInitExpr(probe, &state->css.ss.ps));
+	}
+}
+
 /* A derivation's constant as a numeric: an int8 one, or a numeric past it. */
 static Datum
 constant_numeric(const Const *constant)
@@ -124,10 +176,13 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 			continue;
 		output->sum_state = list_nth_int(derived, number * AGG_DERIVED_STATES);
 		output->count_state = list_nth_int(derived, number * AGG_DERIVED_STATES + 1);
+		/* Words of sum(e) and count(e), or a sum state of avg(e) of bigint. */
 		if (output->sum_state < 0 || output->sum_state >= state->nvalues ||
-			output->count_state < 0 || output->count_state >= state->nvalues ||
-			state->values[output->sum_state].kind != AGG_SUM ||
-			state->values[output->count_state].kind != AGG_COUNT)
+			output->count_state < -1 || output->count_state >= state->nvalues ||
+			!(output->count_state >= 0 ?
+			  state->values[output->sum_state].kind == AGG_SUM &&
+			  state->values[output->count_state].kind == AGG_COUNT :
+			  integer_sum_state(&state->values[output->sum_state])))
 			elog(ERROR, "TessAgg received a foreign plan");
 		switch (agg->aggfnoid)
 		{
@@ -162,6 +217,9 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 			output->a = DatumGetInt64(a->constvalue);
 			output->b = DatumGetInt64(b->constvalue);
 		}
+#else
+		/* The planner folds nothing without 128-bit integers. */
+		elog(ERROR, "TessAgg received a foreign plan");
 #endif
 		state->nderived++;
 		state->derived_by_ref |= output->kind != AGG_DERIVED_SUM_INT8 &&
@@ -169,22 +227,22 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *outputs, List *der
 	}
 }
 
+#ifdef HAVE_INT128
 /*
  * a * sum + b * count of a derived output in 128 bits, false where a step
- * passes them or a constant is past an int8.
+ * passes them, the sum has a rest or a constant is past an int8.
  */
 static bool
-derived_exact(const AggOutput *output, int64 sum, int64 count, Datum *total, int64 *narrow,
+derived_exact(const AggOutput *output, const AggSum *sum, Datum *total, int64 *narrow,
 			  bool bigint)
 {
-#ifdef HAVE_INT128
 	int128		left;
 	int128		right;
 	int128		exact;
 
-	if (!output->integers ||
-		__builtin_mul_overflow(output->a, (int128) sum, &left) ||
-		__builtin_mul_overflow(output->b, (int128) count, &right) ||
+	if (!output->integers || sum->rest != (Datum) 0 ||
+		__builtin_mul_overflow(output->a, sum->sum, &left) ||
+		__builtin_mul_overflow(output->b, (int128) sum->count, &right) ||
 		__builtin_add_overflow(left, right, &exact))
 		return false;
 	if (!bigint)
@@ -196,9 +254,6 @@ derived_exact(const AggOutput *output, int64 sum, int64 count, Datum *total, int
 	else
 		*narrow = (int64) exact;
 	return true;
-#else
-	return false;
-#endif
 }
 
 /*
@@ -210,7 +265,7 @@ derived_exact(const AggOutput *output, int64 sum, int64 count, Datum *total, int
  * functions divide; NULL without a row, but 0 for count.
  */
 Datum
-agg_derive(const AggOutput *output, int64 sum, int64 count, bool *isnull)
+agg_derive(const AggOutput *output, const AggSum *sum, bool *isnull)
 {
 	bool		bigint = output->kind == AGG_DERIVED_SUM_INT8 ||
 		output->kind == AGG_DERIVED_AVG_INT8;
@@ -219,19 +274,22 @@ agg_derive(const AggOutput *output, int64 sum, int64 count, bool *isnull)
 
 	*isnull = false;
 	if (output->kind == AGG_DERIVED_COUNT)
-		return Int64GetDatum(count);
-	if (count == 0)
+		return Int64GetDatum(sum->count);
+	if (sum->count == 0)
 	{
 		*isnull = true;
 		return (Datum) 0;
 	}
-	if (!derived_exact(output, sum, count, &total, &narrow, bigint))
+	if (!derived_exact(output, sum, &total, &narrow, bigint))
 	{
+		Datum		whole = agg_int128_numeric(sum->sum, 0);
+
+		if (sum->rest != (Datum) 0)
+			whole = DirectFunctionCall2(numeric_add, sum->rest, whole);
 		total = DirectFunctionCall2(numeric_add,
-									DirectFunctionCall2(numeric_mul, output->a_numeric,
-														NumericGetDatum(int64_to_numeric(sum))),
+									DirectFunctionCall2(numeric_mul, output->a_numeric, whole),
 									DirectFunctionCall2(numeric_mul, output->b_numeric,
-														NumericGetDatum(int64_to_numeric(count))));
+														NumericGetDatum(int64_to_numeric(sum->count))));
 		if (bigint)
 			narrow = DatumGetInt64(DirectFunctionCall1(numeric_int8, total));
 	}
@@ -241,7 +299,83 @@ agg_derive(const AggOutput *output, int64 sum, int64 count, bool *isnull)
 		total = NumericGetDatum(int64_to_numeric(narrow));
 	if (output->kind == AGG_DERIVED_SUM_NUMERIC)
 		return total;
-	return DirectFunctionCall2(numeric_div, total, NumericGetDatum(int64_to_numeric(count)));
+	return DirectFunctionCall2(numeric_div, total,
+							   NumericGetDatum(int64_to_numeric(sum->count)));
+}
+#endif
+
+/* The checks of errors before an input: no row read. */
+void
+agg_check_reset(TessAggState *state)
+{
+	for (int number = 0; number < state->nchecks; number++)
+		state->checks[number].seen = false;
+}
+
+/* The least and the greatest e of the rows of a batch a check's forms read. */
+void
+agg_check_take(TessAggState *state, const AggValue *value, const TessDatumColumn *column,
+			   const TessRowMask *rows)
+{
+	AggCheck   *check = &state->checks[value->check];
+	int64		low = check->low;
+	int64		high = check->high;
+	bool		seen = check->seen;
+	int			row = -1;
+
+	while ((row = tess_row_mask_next(rows, row)) >= 0)
+	{
+		int64		e;
+
+		if (column->isnull[row])
+			continue;
+		e = check->wide ? DatumGetInt64(column->values[row]) :
+			(int64) DatumGetInt32(column->values[row]);
+		low = seen ? Min(low, e) : e;
+		high = seen ? Max(high, e) : e;
+		seen = true;
+	}
+	check->low = low;
+	check->high = high;
+	check->seen = seen;
+}
+
+/*
+ * The end of the input: every form evaluated at the least and the greatest
+ * e its rows had, by the core's executor, each step in its own type; the
+ * error it raises is the query's, before any row goes out.
+ */
+void
+agg_check_finish(TessAggState *state)
+{
+	ExprContext *econtext = state->css.ss.ps.ps_ExprContext;
+
+	for (int number = 0; number < state->nchecks; number++)
+	{
+		AggCheck   *check = &state->checks[number];
+
+		if (!check->seen)
+			continue;
+		for (int side = 0; side < 2; side++)
+		{
+			int64		e = side == 0 ? check->low : check->high;
+			TupleTableSlot *slot = check->slot;
+
+			ExecClearTuple(slot);
+			slot->tts_values[0] = check->type == INT2OID ? Int16GetDatum((int16) e) :
+				check->type == INT4OID ? Int32GetDatum((int32) e) : Int64GetDatum(e);
+			slot->tts_isnull[0] = false;
+			ExecStoreVirtualTuple(slot);
+			econtext->ecxt_innertuple = slot;
+			foreach_ptr(ExprState, probe, check->probes)
+			{
+				bool		isnull;
+
+				(void) ExecEvalExprSwitchContext(probe, econtext, &isnull);
+			}
+			ResetExprContext(econtext);
+		}
+	}
 }
 
 static void
@@ -265,6 +399,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	List	   *outputs;
 	List	   *derived;
 	List	   *constants;
+	List	   *checks;
+	List	   *probes;
 	TessPlanReader *reader;
 	int			groups;
 	int			groups_kb;
@@ -281,6 +417,8 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 	outputs = tess_plan_read_int_list(reader, "outputs");
 	derived = tess_plan_read_int_list(reader, "derived");
 	constants = tess_plan_read_list(reader, "constants");
+	checks = tess_plan_read_int_list(reader, "checks");
+	probes = tess_plan_read_list(reader, "probes");
 	arguments = tess_plan_read_list(reader, "arguments");
 	more = tess_plan_read_list(reader, "more");
 	filters = tess_plan_read_list(reader, "filters");
@@ -395,6 +533,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		value->computed = -1;
 		value->filter = -1;
 		value->distinct_bytes_column = -1;
+		value->check = -1;
 		if (!batch_aggregate(agg))
 		{
 			if (!generic_supported(agg) ||
@@ -543,6 +682,7 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		}
 	}
 	derived_outputs(state, cscan, outputs, derived, constants);
+	init_checks(state, estate, arguments, checks, probes);
 	/* The FILTER conditions, computed columns after every argument. */
 	foreach_ptr(Node, filter, filters)
 	{
@@ -932,6 +1072,8 @@ accumulate(TessAggState *state, AggValue *value, TessBatch *batch, int nrows)
 			computed.nrows != batch->rows.nrows)
 			elog(ERROR, "Tessera projection returned an invalid column");
 	}
+	if (value->check >= 0)
+		agg_check_take(state, value, &computed, &rows);
 	/*
 	 * Above a gather: a row a participant's partial value, NULL skipped (a
 	 * participant without rows gives a count of 0 and NULL otherwise), not
@@ -1049,6 +1191,7 @@ static void
 drain(TessAggState *state)
 {
 	agg_reset_distinct(state);
+	agg_check_reset(state);
 	/* The states of a previous scan go, with the callbacks they registered. */
 	if (state->generic_agg != NULL)
 		ReScanExprContext(state->generic_agg->curaggcontext);
@@ -1091,6 +1234,7 @@ drain(TessAggState *state)
 	}
 	for (int index = 0; index < state->nvalues; index++)
 		flush_gathered(state, &state->values[index]);
+	agg_check_finish(state);
 }
 
 /* A state's value without GROUP BY. */
@@ -1132,10 +1276,21 @@ result_row(TessAggState *state)
 			scan->tts_values[number] = plain_value(state, output->state,
 												   &scan->tts_isnull[number]);
 		else
-			scan->tts_values[number] =
-				agg_derive(output, state->values[output->sum_state].total,
-						   state->values[output->count_state].total,
-						   &scan->tts_isnull[number]);
+		{
+#ifdef HAVE_INT128
+			AggValue   *value = &state->values[output->sum_state];
+			AggSum		sum = {0};
+
+			if (output->count_state < 0)
+				agg_fast_sum(value->generic, &sum);
+			else
+			{
+				sum.sum = value->total;
+				sum.count = state->values[output->count_state].total;
+			}
+			scan->tts_values[number] = agg_derive(output, &sum, &scan->tts_isnull[number]);
+#endif
+		}
 	}
 	return ExecStoreVirtualTuple(scan);
 }

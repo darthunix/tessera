@@ -42,7 +42,7 @@ injection points; CI runs 19 and 18.
       `Folded Aggregates` in `EXPLAIN VERBOSE`; no folding in a partial
       or final aggregation. Tests of the design's "Tests" for these,
       with their spec marks. Check: the suites; `make crosscheck`
-- [ ] 2.4 The check of errors, and the forms it lets fold: the extremes
+- [x] 2.4 The check of errors, and the forms it lets fold: the extremes
       of each folded `e` over the input, before a row spill, the
       evaluation of the argument at both when the input ends, their
       reset at a rescan; tests of each integer's range, nested forms,

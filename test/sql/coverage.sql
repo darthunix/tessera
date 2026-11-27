@@ -185,9 +185,13 @@ FROM unnest(ARRAY[
 ]) WITH ORDINALITY AS c(q, o)
 ORDER BY o;
 DROP TABLE cov_sink;
--- Many aggregates and many grouping keys.
+-- Many aggregates and many grouping keys: 65 sums of one column under
+-- constants share two states, 65 of different expressions keep 65.
 SELECT cov_query('SELECT ' || string_agg(format('sum(i4 + %s)', g), ', ') || ' FROM cov') AS level,
        'sum(i4 + 1), …, sum(i4 + 65)' AS query
+FROM generate_series(1, 65) AS g;
+SELECT cov_query('SELECT ' || string_agg(format('sum(i4 + i2 * %s)', g), ', ') || ' FROM cov') AS level,
+       'sum(i4 + i2 * 1), …, sum(i4 + i2 * 65)' AS query
 FROM generate_series(1, 65) AS g;
 SELECT cov_query('SELECT count(*) FROM cov GROUP BY ' || string_agg(format('i4 + %s', g), ', ')) AS level,
        'GROUP BY i4 + 1, …, i4 + ' || max(g) AS query
