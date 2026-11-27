@@ -150,8 +150,14 @@ it is not an output, and the groups compare by their aggregates, and
 min and max of text take no collation but a deterministic one.
 
 A disagreement is shrunk by proptest within a minute, keeping its class: a
-crash stays a crash, different rows stay different rows. It is written to
-`target/bench-runs/crosscheck/finding-<seed>.sql`. The file holds the
+crash stays a crash, different rows stay different rows. The run then
+goes on from the next query, the one it would have drawn without the
+finding, to the count of queries or the time limit, so that a run
+reports every finding among its queries and not the first alone. Each
+is written to `target/bench-runs/crosscheck/finding-<seed>-<n>.sql`,
+the n-th finding of its seed, as soon as it is shrunk, so that an error
+later in the run loses none; when the server stays down after a crash,
+the query first found stands for the shrunk one. The file holds the
 query first found and what its modes did, the data's SQL, the settings
 and the shrunk query in both modes. The shrunk query runs once more on its
 own, and the file's first line says when it then agrees: a parallel plan

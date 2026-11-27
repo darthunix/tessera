@@ -5,7 +5,8 @@
 # 20,000 queries of a seed from Bangkok's date, so that each night draws
 # new ones, over a build of the pinned master and under AddressSanitizer
 # and UndefinedBehaviorSanitizer. A disagreement or a crash fails the
-# run; its shrunk case is the artifact, and the date repeats it. The
+# run, which goes on to its last query; the shrunk cases are the
+# artifact, and the date repeats them. The
 # suites against PostgreSQL's master as it is that night, beside the
 # revision postgres.env pins, so that a change of the core's interfaces
 # is seen before the pin moves. Each fuzz target for twenty minutes,
