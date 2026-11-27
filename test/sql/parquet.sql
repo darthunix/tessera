@@ -758,7 +758,7 @@ SELECT differ_off('SELECT t::text AS row FROM t_files t') AS whole_row,
 -- asked, and the first ask's arrays still hold row 63, NULL in one
 -- column. Then, in batches of 10 rows, the batch of rows 60 to 69,
 -- across a word of the window's masks, the same way.
-CREATE FUNCTION parquet_test_asks(text, int, int)
+CREATE FUNCTION parquet_test_asks(text, int, int, bool DEFAULT false)
     RETURNS TABLE (col text, n int, ask text, value text)
     AS :'parquet_test', 'tessera_parquet_test_asks' LANGUAGE C STRICT;
 SELECT parquet_test_write(:'dir' || '/asks.parquet', json_build_object('columns', json_build_array(
@@ -794,6 +794,41 @@ SELECT max_rows, differ(
               FROM h_asks, unnest(ARRAY['i', 't', 's']) c WHERE n >= %s AND n < %s)$$,
            first + max_rows - 1, first, first + max_rows - 1)) AS asks_differ
 FROM (VALUES (64, 0, 0), (10, 6, 60)) b(max_rows, skip, first) ORDER BY max_rows;
+-- The same batch of ten after the six before it were asked for every
+-- row of each column: those rows were made at the checked batch's places,
+-- where it makes its own again.
+SELECT differ(
+    $$SELECT col, n, ask, value FROM parquet_test_asks('SELECT i, t, s FROM t_asks', 10, 6, true)$$,
+    $$(SELECT c, n, a, CASE c WHEN 'i' THEN i::text WHEN 't' THEN t::text ELSE s END
+       FROM h_asks, unnest(ARRAY['i', 't', 's']) c,
+            unnest(ARRAY['first', 'kept', 'again']) a WHERE n = 69
+       UNION ALL
+       SELECT c, n, 'second', CASE c WHEN 'i' THEN i::text WHEN 't' THEN t::text ELSE s END
+       FROM h_asks, unnest(ARRAY['i', 't', 's']) c WHERE n >= 60 AND n < 69)$$) AS asks_differ;
+-- Columns first asked in a batch of three rows, a group of its own, and
+-- then in the full batches of the next file, up to row 63 of the first:
+-- as values for the rows returned, and s in the bytes form for the
+-- grouping by it.
+SELECT parquet_test_write(:'dir' || '/short.parquet', json_build_object(
+    'group_rows', 3, 'columns', json_build_array(
+      json_build_object('name', 'i', 'type', 'int32', 'values', json_build_array(-1, NULL, -3)),
+      json_build_object('name', 't', 'type', 'int64', 'logical', 'timestamp_us',
+                        'values', json_build_array(NULL, -1000000, -2000000)),
+      json_build_object('name', 's', 'type', 'bytes',
+                        'values', json_build_array('a', 'b', NULL))))::text);
+\set short :dir '/short.parquet,' :asks
+CREATE FOREIGN TABLE t_short (i int, t timestamp, s text) SERVER pq OPTIONS (files :'short');
+CREATE TABLE h_short AS
+SELECT * FROM (VALUES (-1, NULL, 'a'), (NULL, '1969-12-31 23:59:59'::timestamp, 'b'),
+                      (-3, '1969-12-31 23:59:58', NULL)) v(i, t, s)
+UNION ALL SELECT i, t, s FROM h_asks;
+SELECT scans_of('SELECT i, t, s FROM t_short') AS rows_returned,
+       scans_of('SELECT s, count(*), sum(i), max(t) FROM t_short GROUP BY s') AS grouped;
+SELECT differ('SELECT i, t, s FROM t_short', 'SELECT i, t, s FROM h_short') AS rows_differ,
+       differ('SELECT s, count(*), sum(i), max(t) FROM t_short GROUP BY s',
+              'SELECT s, count(*), sum(i), max(t) FROM h_short GROUP BY s') AS groups_differ;
+DROP FOREIGN TABLE t_short;
+DROP TABLE h_short;
 
 -- The bytes form of the node's batches, which TessAgg and the kernels
 -- read: the test module asks one batch's text, bytea and varchar columns
@@ -805,7 +840,7 @@ FROM (VALUES (64, 0, 0), (10, 6, 60)) b(max_rows, skip, first) ORDER BY max_rows
 -- every row's bytes are its value's, the first ask's still after the
 -- others, and the rows through a dictionary carry indexes, which the
 -- module checks lie among the dictionary's values, one a value.
-CREATE FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool)
+CREATE FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool, bool DEFAULT false)
     RETURNS TABLE (col text, n int, ask text, bytes bytea, ind int, dict bool)
     AS :'parquet_test', 'tessera_parquet_test_bytes' LANGUAGE C STRICT;
 SELECT parquet_test_write(:'dir' || '/bytes_' || f || '.parquet', json_build_object(
@@ -864,6 +899,26 @@ SELECT tbl, max_rows, differ(
 FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl),
      (VALUES (64, 0, 0), (10, 6, 60)) b(max_rows, skip, first)
 ORDER BY tbl, max_rows;
+-- The same batch of ten after the six before it were asked for every
+-- row in the bytes form, at the checked batch's places.
+SELECT tbl, differ(
+    format($$SELECT col, n, ask, bytes FROM parquet_test_bytes('SELECT s, b, v FROM %s', 10, 6,
+                                                                x'5555555555555555'::bigint, true, false,
+                                                                true)$$, tbl),
+    $$(SELECT c, n, a, CASE c WHEN 's' THEN convert_to(s, 'UTF8') WHEN 'b' THEN b
+                             ELSE convert_to(v, 'UTF8') END
+       FROM h_bytes, unnest(ARRAY['s', 'b', 'v']) c, unnest(ARRAY['first', 'kept']) a
+       WHERE n >= 60 AND n < 70 AND n % 2 = 0
+       UNION ALL
+       SELECT c, n, 'rest', CASE c WHEN 's' THEN convert_to(s, 'UTF8') WHEN 'b' THEN b
+                                 ELSE convert_to(v, 'UTF8') END
+       FROM h_bytes, unnest(ARRAY['s', 'b', 'v']) c
+       WHERE n >= 60 AND n < 70 AND n % 2 = 1)$$) AS bytes_differ
+FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl) ORDER BY tbl;
+-- An ask of no row of that batch, through the dictionary the six before
+-- it named: it names none, as a batch of which no ask made the column.
+SELECT col, n, ask, dict
+FROM parquet_test_bytes('SELECT s FROM t_bytes_dict', 10, 6, 0, false, false, true);
 -- Bytes that are not UTF-8 and a value longer than its varchar fail
 -- only where a row asked holds them, with the errors of their Datums;
 -- the last fails in the ask of every row as Datums, after the first ask
@@ -1179,7 +1234,7 @@ RESET work_mem;
 DROP FOREIGN TABLE t_bytes_many;
 DROP FOREIGN TABLE t_bytes_plain, t_bytes_dict, t_bytes_bad;
 DROP TABLE h_bytes;
-DROP FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool);
+DROP FUNCTION parquet_test_bytes(text, int, int, bigint, bool, bool, bool);
 
 -- spec: parquet-fdw/What EXPLAIN shows
 -- Plain, with VERBOSE and with ANALYZE, through the wrapper's rows and
@@ -2009,7 +2064,7 @@ DROP FUNCTION parquet_test_write(text, text), parquet_test_rewrite(text, bool, b
     parquet_test_head_dictionaries(text), parquet_test_replace(text, text, text),
     parquet_test_remove(text), parquet_test_cut(text, int), parquet_test_damage(text, int, int),
     sqlstate_of(text), differ(text, text), differ_off(text), scans_of(text),
-    explain_lines(text, text, text), parquet_test_asks(text, int, int), differ_serial(text),
+    explain_lines(text, text, text), parquet_test_asks(text, int, int, bool), differ_serial(text),
     parallel_lines(text, text), workers_launched(text), plan_of(text), scan_cost(text, text),
     checked_by(text), rows_of(text), groups_of(text), skipping(text, text, text),
     order_off(text), leaves_value(int, boolean), leaves_short(int), leaves_json(bytea),

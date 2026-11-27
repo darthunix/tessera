@@ -19,25 +19,28 @@ runs 19 and 18.
 
 ## 2. The arrays kept for the scan
 
-- [ ] 2.1 `parquet/node.c`: `node_begin` allocates the batch's arrays
+- [x] 2.1 `parquet/node.c`: `node_begin` allocates the batch's arrays
       for the plan's columns; `batch_column` and `batch_bytes` index
       them by the scan's column and allocate a column's arrays of 64
       rows, zeroed, at its first ask in the scan, in the query's
-      memory; `next_batch` clears the rows made of the scan's columns
-      in both forms and the views' dictionaries and counts, wipes the
-      values and the bytes' places under assertions, asserts that a
-      batch holds at most 64 rows, and allocates nothing; `make_bytes`
-      writes zeros for an asked `NULL` row. The
-      comments that say where a batch's values live follow,
+      memory; `next_batch` and a rescan clear the rows made of the
+      scan's columns in both forms and the views' dictionaries, and
+      wipe the values and the bytes' places under assertions;
+      `next_batch` asserts that a batch holds at most 64 rows and
+      allocates nothing; `make_bytes` writes zeros for an asked `NULL`
+      row. The comments that say where a batch's values live follow,
       `ParquetBatch`'s and `ParquetNode`'s `batch_cxt`.
       `test/tessera_parquet_test.c`: `parquet_test_asks` and
       `parquet_test_bytes` take an optional last argument to ask every
       target's column of each batch they skip, as `Datum` values and in
-      the bytes form, the second again after its rescan; their comments
-      say so. `test/sql/parquet.sql`: the calls with the argument true
-      beside the calls as they are, and the table whose first batch is
-      short, as the design's "Tests" lists them; the expected output
-      gains their rows alone. Check: the suites; `make crosscheck`
+      the bytes form, the second again after its rescan; the second
+      reports an ask of no row and fails on an asked `NULL` row with a
+      place, a length or an index; their comments say so.
+      `test/sql/parquet.sql` and `test/sql/parquet_cancel.sql`: the
+      calls with the argument true beside the calls as they are, the
+      ask of no row, and the table whose first batch is short, as the
+      design's "Tests" lists them; the expected output gains their rows
+      alone. Check: the suites; `make crosscheck`
 
 ## 3. The count
 

@@ -86,7 +86,7 @@ A batch's memory, now and after the change:
    at a column's first ask in the scan:
      its arrays of 64 rows, zeroed once
  at each batch
-   made[0..n) = 0; each view: rows made, dictionary, count = 0
+   made[0..n) = 0; each view: rows made, dictionary = 0
    under assertions: the values and the bytes' places wiped
    reset of the batch's memory: the arenas of strings, the
    references to windows, the checks' scratch, where a batch made them
@@ -119,11 +119,11 @@ A batch's memory, now and after the change:
 
 - **Was:** a batch's rows made, and its views' dictionaries, start at
   zero because the arrays are new.
-- **Will be:** `next_batch` clears, for each of the scan's columns, the
-  word of the rows made as values and, for a column asked in the bytes
-  form, its view's rows made, dictionary and count of values. An ask
-  that makes no row, of an empty mask, then answers without a
-  dictionary, as now.
+- **Will be:** `next_batch`, and a rescan, clear for each of the scan's
+  columns the word of the rows made as values and its view's rows made
+  and dictionary; a view's count of values is read only with a
+  dictionary. An ask that makes no row, of an empty mask, then answers
+  without a dictionary, as now.
 - An asked `NULL` row of the bytes form gets a place, a length and an
   index of 0, as the zeroed arrays gave it; an asked `NULL` row of
   values gets 0 already.
@@ -137,11 +137,13 @@ A batch's memory, now and after the change:
 A consumer that kept a column's arrays past the batch's release read
 freed memory before the change, which PostgreSQL's builds with
 assertions wipe; after it, the next batch's values would look valid.
-Under assertions, `next_batch` therefore writes the byte `0x7F`, as
-PostgreSQL's wipe does, into every kept array of values and of the
-bytes' places. The flags, lengths and indexes are left: a consumer may
-load a flag of a row it did not ask, and a `bool` of another byte is
-not a value. A build without assertions does none of it.
+Under assertions, `next_batch` and a rescan therefore write the byte
+`0x7F`, as PostgreSQL's wipe does, into every kept array of values and
+of the bytes' places. Such a consumer reads the wipe where the next
+batch has not made the row again: an aid to the suites, not a proof.
+The flags, lengths and indexes are left: a consumer may load a flag of
+a row it did not ask, and a `bool` of another byte is not a value. A
+build without assertions does none of it.
 
 ### The memory reset at each batch
 
@@ -271,7 +273,8 @@ says.
 - `parquet/node.c`: the node's batch.
 - `test/tessera_parquet_test.c`: the consumers of a batch that ask the
   batches they skip.
-- `test/sql/parquet.sql` and its expected output: the new queries.
+- `test/sql/parquet.sql`, `test/sql/parquet_cancel.sql` and their
+  expected output: the new queries.
 - `openspec/specs/parquet-fdw/design.md` and
   `openspec/specs/parquet-fdw/contract.md`, at the close.
 
@@ -287,13 +290,19 @@ says.
   argument true. The rows the checked batch asks were then made by the
   batch before it, at the same places, so that a row not made again
   would give the earlier batch's value and differ from the heap
-  table's.
+  table's. `parquet_cancel` makes such a call with each ask reading
+  its window again and a rescan.
+- After those six batches asked in the bytes form through a dictionary,
+  an ask of no row of the seventh names no dictionary.
+- `parquet_test_bytes` fails on an asked `NULL` row of the bytes form
+  that has a place, a length or an index; the rows asked after the six
+  batches change from a value to `NULL` at some places.
 - A table over a file of a group of three rows and then the file of
   `t_asks`, against a heap table of the same rows: an integer, a time
   and a `text` column read as values, and the `text` column in the
   bytes form, first asked in the batch of three rows and then in full
   batches up to row 63.
-- The suites `parquet` and `parquet_cancel` as they are: one column
+- The suites `parquet` and `parquet_cancel` as they were: one column
   asked again, values kept across the asks of a batch, the bytes form,
   its references and its dictionaries given again, a rescan for each
   outer row, parallel scans; and `make crosscheck`, whose table `words`

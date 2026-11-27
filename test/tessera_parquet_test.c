@@ -387,11 +387,35 @@ put_ask(ReturnSetInfo *rsinfo, Form_pg_attribute att, int base, int row, const c
 }
 
 /*
- * parquet_test_asks(query text, max_rows int, skip int): runs the query,
- * which plans as TessParquetScan alone, in batches of max_rows rows at
- * most, skips `skip` batches, of max_rows rows each, takes the next
- * batch's last row out of its mask, and asks each target's column of
- * that batch for its last row ('first'), then for
+ * Asks each target's column of a batch for every row: in the bytes form
+ * where `bytes` and the column is offered so, as Datum values otherwise.
+ */
+static void
+ask_every_column(TessBatch *batch, const TessLayout *layout, bool bytes)
+{
+	int			nrows = batch->rows.nrows;
+	uint64		all = nrows == 64 ? ~UINT64CONST(0) : (UINT64CONST(1) << nrows) - 1;
+	TessRowMask rows = {nrows, &all};
+
+	for (int target = 0; target < layout->ntargets; target++)
+	{
+		int			column = tess_layout_column(layout, target);
+		TessBytesColumn form;
+		TessDatumColumn datums = TESS_STRUCT_INITIALIZER(TessDatumColumn);
+
+		if (!bytes || !tess_batch_bytes_column(batch, column, &rows, &form))
+			batch->ops->get_datum_column(batch, column, &rows, TESS_COLUMN_FOR_PROJECTION,
+										 &datums);
+	}
+}
+
+/*
+ * parquet_test_asks(query text, max_rows int, skip int[, ask_skipped
+ * bool]): runs the query, which plans as TessParquetScan alone, in
+ * batches of max_rows rows at most, skips `skip` batches, of max_rows rows
+ * each, asking each target's column of them for every row where
+ * `ask_skipped`, takes the next batch's last row out of its mask, and asks
+ * each target's column of that batch for its last row ('first'), then for
  * the others ('second'), then for the last again ('again'), keeping the
  * arrays each ask gave, and reads the last row of the first ask's arrays
  * after the second ('kept'). Returns the rows (column, row of the scan,
@@ -413,6 +437,7 @@ tessera_parquet_test_asks(PG_FUNCTION_ARGS)
 	TupleDesc	desc;
 	int			max_rows = PG_GETARG_INT32(1);
 	int			skip = PG_GETARG_INT32(2);
+	bool		ask_skipped = PG_NARGS() > 3 && PG_GETARG_BOOL(3);
 	int			base = max_rows * skip;
 	int			last;
 
@@ -436,8 +461,10 @@ tessera_parquet_test_asks(PG_FUNCTION_ARGS)
 	tess_input_set_request(input, &request);
 	for (int i = 0; i < skip; i++)
 	{
-		if (tess_input_next(input) == NULL)
+		if ((batch = tess_input_next(input)) == NULL)
 			elog(ERROR, "the scan holds fewer batches than it skips");
+		if (ask_skipped)
+			ask_every_column(batch, tess_input_layout(input), false);
 		tess_input_finish(input);
 	}
 	batch = tess_input_next(input);
@@ -514,6 +541,10 @@ put_bytes(ReturnSetInfo *rsinfo, Form_pg_attribute att, int base, int row, const
 	values[1] = Int32GetDatum(base + row);
 	values[2] = CStringGetTextDatum(ask);
 	nulls[3] = column->isnull[row];
+	/* The node gives an asked NULL row no place, length or index. */
+	if (nulls[3] && (column->data[row] != NULL || column->lengths[row] != 0 ||
+					 (column->indexes != NULL && column->indexes[row] != 0)))
+		elog(ERROR, "NULL row %d of the bytes form has a place, a length or an index", row);
 	if (!nulls[3])
 	{
 		bytea	   *bytes = palloc(VARHDRSZ + column->lengths[row]);
@@ -536,8 +567,11 @@ put_bytes(ReturnSetInfo *rsinfo, Form_pg_attribute att, int base, int row, const
 
 /*
  * parquet_test_bytes(query text, max_rows int, skip int, mask bigint,
- * rest bool, again bool): runs the query, which plans as TessParquetScan
- * alone, in batches of max_rows rows at most, skips `skip` batches, and
+ * rest bool, again bool[, ask_skipped bool]): runs the query, which plans
+ * as TessParquetScan alone, in batches of max_rows rows at most, skips
+ * `skip` batches, asking each target's column of them for every row in
+ * the bytes form, or as Datum values where not offered so, where
+ * `ask_skipped`, after a rescan too, and
  * asks each target's column of the next batch in the bytes form for the
  * rows of `mask` ('first'); with `rest`, then for every row as Datum
  * values and every other row as bytes ('rest'), and reads the first ask's
@@ -547,9 +581,11 @@ put_bytes(ReturnSetInfo *rsinfo, Form_pg_attribute att, int base, int row, const
  * reference keeps once the later asks replace them, and at the end the
  * scan is rescanned, the batches skipped again and the rows of `mask`
  * asked once more ('rescanned'). A
- * column not offered gives one row, its row -1, 'not offered'. Fails
+ * column not offered gives one row, its row -1, 'not offered', and an
+ * empty mask one row, its row -1, 'empty', with its dictionary. Fails
  * where no reference to a window holds the bytes while the batch lives,
- * or one is left after a rescan or the scan's end. Returns the rows
+ * or one is left after a rescan or the scan's end, and on an asked NULL
+ * row with a place, a length or an index. Returns the rows
  * (column, row of the scan, ask, bytes, index, through a dictionary).
  */
 Datum
@@ -571,6 +607,7 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 	uint64		mask = (uint64) PG_GETARG_INT64(3);
 	bool		ask_rest = PG_GETARG_BOOL(4);
 	bool		again = PG_GETARG_BOOL(5);
+	bool		ask_skipped = PG_NARGS() > 6 && PG_GETARG_BOOL(6);
 	int			base = max_rows * skip;
 	uint64		holds_before;
 	bool		offered = false;
@@ -596,8 +633,10 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 	tess_input_set_request(input, &request);
 	for (int i = 0; i < skip; i++)
 	{
-		if (tess_input_next(input) == NULL)
+		if ((batch = tess_input_next(input)) == NULL)
 			elog(ERROR, "the scan holds fewer batches than it skips");
+		if (ask_skipped)
+			ask_every_column(batch, tess_input_layout(input), true);
 		tess_input_finish(input);
 	}
 	batch = tess_input_next(input);
@@ -636,7 +675,20 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 			continue;
 		}
-		offered = true;
+		/* A reference lives where an ask made rows. */
+		offered |= first_rows != 0 || ask_rest;
+		if (first_rows == 0)
+		{
+			/* An ask of no row: whether it names a dictionary. */
+			Datum		values[6] = {0};
+			bool		nulls[6] = {false, false, false, true, true, false};
+
+			values[0] = CStringGetTextDatum(NameStr(att->attname));
+			values[1] = Int32GetDatum(-1);
+			values[2] = CStringGetTextDatum("empty");
+			values[5] = BoolGetDatum(first.dictionary != 0);
+			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
+		}
 		for (int row = 0; row < max_rows; row++)
 			if (first_rows >> row & 1)
 			{
@@ -680,6 +732,8 @@ tessera_parquet_test_bytes(PG_FUNCTION_ARGS)
 			batch = tess_input_next(input);
 			if (batch == NULL)
 				elog(ERROR, "the scan holds fewer batches after a rescan");
+			if (i < skip && ask_skipped)
+				ask_every_column(batch, layout, true);
 			if (i < skip)
 				tess_input_finish(input);
 		}
