@@ -960,9 +960,32 @@ fn each_slot(
     Ok(())
 }
 
+/// The words of a mask over `words` words, from the first that asks a
+/// slot to the last that asks one, empty when none does. A dense loop
+/// converts these alone, so that a caller asking a few slots of a long
+/// column, as a batch of a window, converts their words, not the column;
+/// the loop over them keeps no branch a word.
+fn asked_span(asked: &[u64], words: usize) -> std::ops::Range<usize> {
+    let asked = &asked[..words];
+    let start = asked.iter().position(|&ask| ask != 0).unwrap_or(words);
+    let end = asked
+        .iter()
+        .rposition(|&ask| ask != 0)
+        .map_or(start, |last| last + 1);
+    start..end
+}
+
+/// Clears the words of the mask of `NULL` slots outside `span`, of the
+/// `words` of a column: no slot there is asked.
+fn clear_outside(nulls: &mut [u64], span: &std::ops::Range<usize>, words: usize) {
+    nulls[..span.start].fill(0);
+    nulls[span.end..words].fill(0);
+}
+
 /// A dense loop over a plain column of a fixed width: every slot of a
 /// word converted, then the word's failures, masked by the slots asked
-/// and not `NULL`, found by their first bit.
+/// and not `NULL`, found by their first bit; over the words of
+/// [`asked_span`] alone, the places of the others kept.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn dense<T>(
@@ -976,7 +999,13 @@ fn dense<T>(
     failure: Option<Error>,
 ) -> Result<()> {
     let len = values.len();
-    for (word, chunk) in values.chunks(64).enumerate() {
+    let words = mask_words(len);
+    let span = asked_span(asked, words);
+    clear_outside(nulls, &span, words);
+    // Chunks of 64 over the span, as over the column, so that each
+    // word's loop keeps the shape a slice of at most 64 gives it.
+    let chunks = values[(span.start * 64).min(len)..len.min(span.end * 64)].chunks(64);
+    for (word, chunk) in (span.start..).zip(chunks) {
         let first = word * 64;
         let out = &mut out[first..first + chunk.len()];
         let mut bad = 0u64;
@@ -996,6 +1025,7 @@ fn dense<T>(
     Ok(())
 }
 
+/// The dense loop of booleans, over the words of [`asked_span`] alone.
 fn dense_bits(
     bits: Bitmap<'_>,
     len: usize,
@@ -1004,15 +1034,17 @@ fn dense_bits(
     out: &mut [u64],
     nulls: &mut [u64],
 ) {
-    let words = asked.iter().zip(nulls.iter_mut()).take(mask_words(len));
-    for (word, (&ask, null)) in words.enumerate() {
+    let words = mask_words(len);
+    let span = asked_span(asked, words);
+    clear_outside(nulls, &span, words);
+    for word in span {
         let first = word * 64;
         let values = bits.word(first, len);
         let count = (len - first).min(64);
         for (i, place) in out[first..first + count].iter_mut().enumerate() {
             *place = values >> i & 1;
         }
-        *null = ask & !valid_word(valid, first, len);
+        nulls[word] = asked[word] & !valid_word(valid, first, len);
     }
 }
 

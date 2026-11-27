@@ -19,7 +19,7 @@ runs 19 and 18.
 
 ## 2. The rows not asked left alone
 
-- [ ] 2.1 `crates/datum-arrow/src/read.rs`: `dense` and `dense_bits`
+- [x] 2.1 `crates/datum-arrow/src/read.rs`: `dense` and `dense_bits`
       convert the words of the mask from the first that asks a slot to
       the last, the others' places kept and their words of `NULL`
       slots written 0; their comments say so.

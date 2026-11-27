@@ -1459,7 +1459,8 @@ proptest! {
         ),
         valid in prop::collection::vec(any::<u8>(), 22),
         offset in 0usize..8,
-        asked_bits in prop::collection::vec(any::<u64>(), 3),
+        // Some words ask no slot, as a batch's mask over a window does.
+        asked_bits in prop::collection::vec(prop_oneof![Just(0u64), any::<u64>()], 3),
         before in any::<u64>(),
     ) {
         let cases = families();
@@ -2207,4 +2208,236 @@ fn views_of_a_broken_shape() {
         nulls: None,
     });
     assert_eq!(bytes(&read, &input, &every(3)).unwrap().0, strings.to_vec());
+}
+
+/// A column of 150 slots of one dense family, its last word partial,
+/// with a `NULL` slot in each word and small values that every family
+/// converts, a slot's value unlike the one a word before or after it.
+fn span_column(width: usize) -> (Owned, Vec<u8>) {
+    let bits: Vec<u64> = (0..150u64)
+        .map(|i| ((i * 7 % 100) << 8) | (i % 3))
+        .collect();
+    let mut valid = vec![0xffu8; 22];
+    for slot in [5usize, 70, 140] {
+        valid[slot / 8] &= !(1 << (slot % 8));
+    }
+    (Owned::of(width, &bits), valid)
+}
+
+/// The dense loops convert the words of the mask from the first that
+/// asks a slot to the last: the places of the words outside keep what
+/// the output held, and their words of the mask of NULL slots are 0, in
+/// every dense family, with the buffers reused from call to call.
+#[test]
+fn dense_loops_convert_the_asked_span_alone() {
+    const FILLED: u64 = 0xdead_0000_0000;
+    for (width, data_type, pg, options, family) in families() {
+        let (owned, valid) = span_column(width);
+        let len = owned.len();
+        let bitmap = Bitmap::new(&valid, 0);
+        let input = Input::Plain(Column {
+            len,
+            values: owned.values(),
+            nulls: Some(bitmap),
+        });
+        let plan = plan(&data_type, pg, options);
+        let filled: Vec<u64> = (0..len as u64).map(|i| FILLED + i).collect();
+        let null_word = |word: usize| {
+            (word * 64..len.min(word * 64 + 64))
+                .filter(|&slot| !bitmap.get(slot))
+                .fold(0u64, |acc, slot| acc | 1 << (slot % 64))
+        };
+        let last = (1u64 << (len % 64)) - 1;
+        let read = |asked: &[u64], values: &mut Vec<u64>, nulls: &mut Vec<u64>| {
+            plan.read(&input, asked, &mut ReadOutput::Datums { values, nulls })
+                .unwrap();
+        };
+        let check_asked = |asked: &[u64], values: &[u64], nulls: &[u64]| {
+            for slot in 0..len {
+                if asked[slot / 64] >> (slot % 64) & 1 == 1 && bitmap.get(slot) {
+                    assert_eq!(
+                        Some(values[slot]),
+                        one_value(family, &owned, slot),
+                        "{data_type:?} slot {slot}"
+                    );
+                }
+            }
+            for word in 0..3 {
+                assert_eq!(
+                    nulls[word],
+                    asked[word] & null_word(word),
+                    "{data_type:?} word {word}"
+                );
+            }
+        };
+        let kept = |values: &[u64], before: &[u64], words: &[usize]| {
+            for &word in words {
+                for slot in word * 64..len.min(word * 64 + 64) {
+                    assert_eq!(values[slot], before[slot], "{data_type:?} slot {slot} kept");
+                }
+            }
+        };
+
+        // The middle word alone, then the first, reusing both buffers.
+        let mut values = filled.clone();
+        let mut nulls = vec![u64::MAX; 3];
+        let middle = [0, u64::MAX, 0];
+        read(&middle, &mut values, &mut nulls);
+        check_asked(&middle, &values, &nulls);
+        kept(&values, &filled, &[0, 2]);
+        let after_middle = values.clone();
+        let first = [u64::MAX, 0, 0];
+        read(&first, &mut values, &mut nulls);
+        check_asked(&first, &values, &nulls);
+        kept(&values, &after_middle, &[1, 2]);
+
+        // Single slots: the first and last of the first word, the first
+        // of the second, the last of the partial word.
+        for slot in [0usize, 63, 64, len - 1] {
+            let mut asked = [0u64; 3];
+            asked[slot / 64] = 1 << (slot % 64);
+            let mut values = filled.clone();
+            let mut nulls = vec![u64::MAX; 3];
+            read(&asked, &mut values, &mut nulls);
+            check_asked(&asked, &values, &nulls);
+            let outside: Vec<usize> = (0..3).filter(|&w| w != slot / 64).collect();
+            kept(&values, &filled, &outside);
+        }
+
+        // Words 0 and 2: the word between may be converted, its NULL
+        // slots not asked; nothing is kept but what the span leaves.
+        let ends = [u64::MAX, 0, last];
+        let mut values = filled.clone();
+        let mut nulls = vec![u64::MAX; 3];
+        read(&ends, &mut values, &mut nulls);
+        check_asked(&ends, &values, &nulls);
+        for slot in 64..128 {
+            assert!(
+                values[slot] == filled[slot]
+                    || Some(values[slot]) == one_value(family, &owned, slot)
+                    || !bitmap.get(slot),
+                "{data_type:?} slot {slot} between"
+            );
+        }
+
+        // A mask and a mask of NULL slots longer than the column's words:
+        // the words past them are the caller's and stay as they were.
+        let long = [0, u64::MAX, 0, 0];
+        let mut values = filled.clone();
+        let mut nulls = vec![u64::MAX; 4];
+        plan.read(
+            &input,
+            &long,
+            &mut ReadOutput::Datums {
+                values: &mut values,
+                nulls: &mut nulls,
+            },
+        )
+        .unwrap();
+        check_asked(&long, &values, &nulls);
+        assert_eq!(nulls[3], u64::MAX, "{data_type:?} a word past the column");
+
+        // No slot asked: nothing written, no NULL slot.
+        let none = [0u64; 3];
+        let mut values = filled.clone();
+        let mut nulls = vec![u64::MAX; 3];
+        read(&none, &mut values, &mut nulls);
+        assert_eq!(values, filled, "{data_type:?} nothing asked");
+        assert_eq!(nulls, vec![0; 3], "{data_type:?} nothing asked");
+    }
+}
+
+/// A failure in the span names its first slot asked, the slots asked
+/// before it give their values and their bits of `NULL`, a word outside
+/// the span gets no `NULL` bit, and a value there that would fail raises
+/// nothing.
+#[test]
+fn a_failure_in_the_span_after_words_outside_it() {
+    let mut days: Vec<i32> = (0..150).collect();
+    days[10] = i32::MAX;
+    days[140] = i32::MAX;
+    days[145] = i32::MIN;
+    // Slots 3 and 70 NULL, one outside the span and one in it.
+    let mut valid = vec![0xffu8; 19];
+    valid[0] &= !(1 << 3);
+    valid[70 / 8] &= !(1 << (70 % 8));
+    let input = Input::Plain(Column {
+        len: days.len(),
+        values: Values::Int32(&days),
+        nulls: Some(Bitmap::new(&valid, 0)),
+    });
+    let plan = plan(&DataType::Int32, PgType::Date, with_unit(Unit::Days));
+    let asked = [0, u64::MAX, (1u64 << 22) - 1];
+    let mut values = vec![0u64; days.len()];
+    let mut nulls = vec![u64::MAX; 3];
+    let error = plan
+        .read(
+            &input,
+            &asked,
+            &mut ReadOutput::Datums {
+                values: &mut values,
+                nulls: &mut nulls,
+            },
+        )
+        .unwrap_err();
+    assert_eq!(
+        (error.kind(), error.slot()),
+        (ErrorKind::OutOfRange, Some(140))
+    );
+    assert_eq!((nulls[0], nulls[1]), (0, 1u64 << (70 - 64)));
+    for slot in (64..140).filter(|&slot| slot != 70) {
+        assert_eq!(
+            values[slot],
+            (i64::from(days[slot]) - EPOCH_DAYS) as u64,
+            "slot {slot}"
+        );
+    }
+}
+
+/// Masks longer than the column's words, of zeros past them: asking
+/// nothing writes nothing, a slot of the partial word gives its value,
+/// and the caller's words of the mask of NULL slots past the column stay;
+/// a mask that asks past the column is refused with nothing written; an
+/// empty column reads nothing.
+#[test]
+fn masks_past_the_column_s_words() {
+    let ints: Vec<i32> = (0..150).map(|i| i * 3).collect();
+    let input = Input::Plain(Column {
+        len: ints.len(),
+        values: Values::Int32(&ints),
+        nulls: None,
+    });
+    let plan = plan(&DataType::Int32, PgType::Int8, OPTIONS);
+    let read = |asked: &[u64], values: &mut Vec<u64>, nulls: &mut Vec<u64>| {
+        plan.read(&input, asked, &mut ReadOutput::Datums { values, nulls })
+    };
+    let (mut values, mut nulls) = (vec![7u64; 150], vec![u64::MAX; 4]);
+    read(&[0; 5], &mut values, &mut nulls).unwrap();
+    assert_eq!((values, nulls), (vec![7u64; 150], vec![0, 0, 0, u64::MAX]));
+    let (mut values, mut nulls) = (vec![7u64; 150], vec![u64::MAX; 4]);
+    read(&[0, 0, 1 << 21, 0, 0], &mut values, &mut nulls).unwrap();
+    assert_eq!(values[149], 447);
+    assert!(values[..128].iter().all(|&v| v == 7));
+    assert_eq!(nulls, vec![0, 0, 0, u64::MAX]);
+    let (mut values, mut nulls) = (vec![7u64; 150], vec![u64::MAX; 4]);
+    let error = read(&[0, 0, 0, 1], &mut values, &mut nulls).unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::BrokenShape);
+    assert_eq!((values, nulls), (vec![7u64; 150], vec![u64::MAX; 4]));
+    let empty: Vec<i32> = Vec::new();
+    let input = Input::Plain(Column {
+        len: 0,
+        values: Values::Int32(&empty),
+        nulls: None,
+    });
+    let (mut values, mut nulls) = (Vec::<u64>::new(), vec![u64::MAX]);
+    plan.read(
+        &input,
+        &[0],
+        &mut ReadOutput::Datums {
+            values: &mut values,
+            nulls: &mut nulls,
+        },
+    )
+    .unwrap();
+    assert_eq!(nulls, vec![u64::MAX]);
 }
