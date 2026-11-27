@@ -400,6 +400,7 @@ extern void agg_generic_group_accumulate(TessAggState *state, int index,
 extern Datum agg_generic_value(GenericAgg *generic, bool *isnull);
 #ifdef HAVE_INT128
 extern Datum agg_derive(const AggOutput *output, const AggSum *sum, bool *isnull);
+extern Datum agg_derive_extreme(const AggOutput *output, int64 e, bool *isnull);
 extern void agg_fast_sum(const GenericAgg *generic, AggSum *sum);
 extern void agg_sum_state_sum(const uint64 *words, AggSum *sum);
 #endif
