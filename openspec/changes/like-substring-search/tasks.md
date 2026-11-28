@@ -26,7 +26,7 @@
       --disasm`; the counts kept in the report's folder. Check: the
       counts read, the way with the fewest cycles that keeps the guards
       named in the design
-- [ ] 3.2 The way kept, in `Like`, with its tests, and the design's
+- [x] 3.2 The way kept, in `Like`, with its tests, and the design's
       "Which searcher" updated with the counts of the others. Check:
       `make rust-check`; the suites; mutants of the changed lines
 

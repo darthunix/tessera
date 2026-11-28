@@ -183,6 +183,10 @@ exclude_globs = [
 # general concatenation instead (concat); and an | of the bits of rows
 # asked and of the others, which never meet, that ^ gives alike
 # (merge_nulls).
+# Like::matches finds an inner piece by a searcher of memmem made once a
+# pattern, or by memchr of its first byte: both give the piece's first
+# place, and only the time tells them apart, so the arm of the searcher
+# gone is named.
 exclude_re = [
     "<impl [a-z:]*Debug for ",
     "<impl Iterator for Ones>::next",
@@ -193,6 +197,7 @@ exclude_re = [
     "replace local_group -> Option<usize> with None$",
     "accumulate\\.rs:255:25: replace == with != in local_group$",
     "delete match arm Term::Null in sum_terms$",
+    "delete match arm Some\\(Some\\(finder\\)\\) in Like<'p>::matches$",
     "replace match guard decimal\\.scale\\(\\) <= .* with false in sum_terms$",
     "replace <= with > in sum_terms$",
     "accumulate\\.rs:400:50: replace \\|\\| with && in sum_terms$",

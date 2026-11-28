@@ -44,27 +44,31 @@ kernels' entry points.
 
 ### Which searcher
 
-Three ways are counted, and the one with the fewest cycles on the
-family's cases of inner pieces that keeps the guards is kept:
+Three ways were counted on the family's cases by cycles, against the
+commit that adds the family:
 
-1. **`memmem::Finder` for each inner piece, made in `Like::parse`.** The
-   pair of rare bytes and the vector loop, at the cost of making the
-   searchers once a call. `Finder` is neither `Copy` nor small, so
-   `Like` keeps the searchers of its first few inner pieces in an array
-   of its own and finds the others as today; the count of them is the
-   measurement's.
-2. **`memmem::find` a row**, with no searcher kept: nothing made once a
-   call, a searcher made for each string past 64 bytes, Rabin-Karp
-   below.
-3. **`memchr` of the piece's rarest byte**, the byte of the pair that
-   `memchr`'s public `arch::all::packedpair::Pair::new` chooses by its
-   ranking of bytes, then a comparison of the piece around it: the loop
-   of today with fewer stops, and nothing to make but an offset a
-   piece.
+1. **`memmem::Finder` for each of the first four inner pieces, made in
+   `Like::parse`,** found the pieces in the fewest cycles: TPC-H query
+   13's predicate at 0.41 of the base, `'%google%'` over URLs 0.63,
+   short strings 0.75, a piece of one byte 0.93. Kept in `Like` itself,
+   the four searchers took the guards that search nothing 3 to 6 per
+   cent more cycles, as every call made, moved and dropped them.
+2. **`memmem::find` a row** lost on most cases: a searcher made for each
+   string past 64 bytes, `'%google%'` at 1.28 and a piece of one byte at
+   1.68.
+3. **`memchr` of the piece's rarest byte**, the byte that `memchr`'s
+   public `arch::all::packedpair::Pair::new` ranks first, gained on the
+   predicate alone, 0.72, and not on `'%google%'`, whose rarest byte is
+   about as common as its first.
 
-The first is expected to win on long strings and the third on short
-ones; the measurement decides, and the design is updated with the way
-kept and the counts of the others.
+Kept: the first, with its searchers boxed and made only for a pattern
+that has an inner piece, so that a pattern that searches nothing costs
+no more than before: the guards at 0.99 to 1.01 of the base's cycles,
+and the predicate at 0.42, `'%google%'` 0.66, the short strings 0.75.
+A searcher made once a call costs some 3 500 instructions a batch, so
+the short strings run 12 per cent more instructions for 25 per cent
+fewer cycles. A piece past the fourth is found by `memchr` of its first
+byte, as before.
 
 Refused:
 
@@ -85,11 +89,11 @@ needle keeps its lifetime, as `Like` keeps the pattern's.
 ## Was and will be
 
 - **The search of an inner piece.** Was: `memchr` of its first byte and
-  a comparison at each place found. Will be: the searcher the
-  measurement keeps.
+  a comparison at each place found. Will be: a searcher of `memmem`
+  made once a pattern for the first four, as before for the others.
 - **`Like`.** Was: offsets of its pieces, `Copy`. Will be: the same, and
-  the searchers of its first inner pieces where the first way is kept,
-  `Clone` alone.
+  a box of the searchers of its first four inner pieces, made only for
+  a pattern that has one; `Clone` alone.
 
 ## What we do not do
 

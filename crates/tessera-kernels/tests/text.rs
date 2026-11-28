@@ -205,10 +205,11 @@ fn like_matches_as_dynamic_programming() {
     });
 }
 
-/// Patterns of one to four inner pieces of 1 to 40 bytes, with or without
+/// Patterns of one to six inner pieces of 1 to 40 bytes, with or without
 /// a head and a tail, against strings of 0 to 300 bytes, so that a
 /// search of a piece runs over strings long enough for its loops over
-/// vectors: most pieces are cut from the string itself, found where they
+/// vectors, and the pieces past the searchers made once a pattern run the
+/// search kept for them: most pieces are cut from the string itself, found where they
 /// were cut or earlier, and the others drawn apart, found late or not at
 /// all. Three common bytes and a rare one, so that a piece's first byte
 /// stops a search often and its rarest seldom.
@@ -223,7 +224,7 @@ fn like_long_strings_as_dynamic_programming() {
     );
     let case = (
         vec(alphabet(), 0..=300),
-        vec(piece, 1..=4),
+        vec(piece, 1..=6),
         any::<bool>(),
         any::<bool>(),
     );
