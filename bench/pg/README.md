@@ -237,6 +237,18 @@ query down, and where it can, does it speed one up.
   (`many_*`), without groups, in 37 groups and 65 in 100 000 groups past
   `work_mem`, which only a node past 64 aggregates takes. A ratio below
   one is the win.
+- **like** (`like.sql`): patterns of `LIKE` whose pieces between `%`
+  signs the kernels search for in each string, over the family's own
+  table `bench_like` of 2 M rows: comments of four to twelve words of
+  TPC-H's kind, 19 to 78 bytes, as `o_comment`; URLs of a host, three
+  words and a hash, 40 to 95 bytes, one in a hundred of Google's; and
+  strings of 8 to 16 hexadecimal digits. Cases (`like_*`): TPC-H query
+  13's `NOT LIKE '%special%requests%'`, `'%google%'` over the URLs, a
+  piece found near the start of every URL, a piece of one byte, and a
+  piece over the short strings, where making a search once a call
+  shows most; guards (`guard_*`) that search nothing: a prefix, an
+  exact pattern, a suffix, and a pattern with `_`, which the core
+  matches. A ratio below one is the win.
 - **anyagg** (`anyagg.sql`): aggregates that `TessAgg` computes through
   the core's transition and final functions over the batches, or folds
   itself: without `GROUP BY`, `max` of text, `sum` and `avg` of int8,
