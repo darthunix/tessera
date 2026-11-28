@@ -186,7 +186,8 @@ FROM unnest(ARRAY[
 ORDER BY o;
 DROP TABLE cov_sink;
 -- Many aggregates and many grouping keys: 65 sums of one column under
--- constants share two states, 65 of different expressions keep 65.
+-- constants share two states, 65 of different expressions keep 65, past
+-- the 64 a word of flags holds.
 SELECT cov_query('SELECT ' || string_agg(format('sum(i4 + %s)', g), ', ') || ' FROM cov') AS level,
        'sum(i4 + 1), …, sum(i4 + 65)' AS query
 FROM generate_series(1, 65) AS g;

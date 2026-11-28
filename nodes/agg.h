@@ -24,9 +24,6 @@
 /* min or max of numeric with groups: the kernels' extreme state (TESS_TABLE_EXTREME_WORDS). */
 #define AGG_EXTREME_STATE_WORDS TESS_TABLE_EXTREME_WORDS
 
-/* A group's aggregate states have one flag bit each in a payload word. */
-#define AGG_MAX_GROUPED 64
-
 /*
  * The words of flags of a group's record of n states, before the states:
  * one for each 64 and one for none, the flag of state i the bit i % 64 of

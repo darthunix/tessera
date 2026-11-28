@@ -74,10 +74,10 @@ those it checks.
 - **Aggregates of other extensions** whose functions are C functions of a
   loadable library, and aggregates whose arguments contain a subquery
   (`generic_supported`).
-- **More than 64 aggregates or more than 16 grouping keys** in one query.
-  Aggregates of one expression under constants that the node folds count
-  as the two states they share (`sum(x)`, `sum(x + 1)`, ...); a parallel
-  plan folds none.
+- **More than 16 grouping keys** in one query, and a grouping whose
+  keys, states' arguments and `FILTER` conditions pass 1 664 computed
+  columns or whose group's record passes 64 kB, the table's first chunk:
+  the states of the aggregates the node folds count once.
 
 ## Sorting
 

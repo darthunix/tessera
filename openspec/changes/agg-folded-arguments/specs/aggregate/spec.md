@@ -186,11 +186,14 @@ past either bound, the grouping SHALL be the core's.
   without and with `GROUP BY`, in a parallel plan and with groups past
   `hash_mem`
 - **THEN** its plans are `TessAgg`'s, and its rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/More than 64 aggregates`;
+  `test/sql/parallel.sql::spec: aggregate/More than 64 aggregates`
 
 #### Scenario: Past the bounds
 - **WHEN** a grouping's aggregates of 900 arguments under 900 `FILTER`
   conditions pass 1 664 columns, and another's 1 650 averages of
   `bigint` expressions take more than 64 kB a group
 - **THEN** both plans are the core's, and their rows are the core's
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/agg.sql::spec: aggregate/Past the bounds`
