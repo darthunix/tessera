@@ -34,9 +34,9 @@ whose plans differ.
 - **ClickBench**: `hits.parquet`, 100 M rows, in the page cache, `cargo
   clickbench run --mode <on|off> --counters --tries 5 --workers 0
   --queries <n> --files hits.parquet`, one query a run, the medians of
-  five readings after one that warms up; base and end in turns, query
-  by query, three pairs of Q3 and Q4 and two of the control
-  ([clickbench-runs.txt](clickbench-runs.txt)).
+  five readings the tool keeps after its own that warms up; base and
+  end in turns, query by query, three pairs of Q3 and Q4 and two of the
+  control ([clickbench-runs.txt](clickbench-runs.txt)).
 - **Machine**: Apple M5 Pro, 18 cores, 64 GB, idle at the maintainer's
   word, on mains, under `caffeinate -i`. From 09:08 another agent's
   test under Miri held one core to the end of the count. At the
@@ -182,25 +182,34 @@ at the end, the change of cycles and of instructions; lower is better:
 
 | query | pair | base | end | cycles | instructions |
 |---|---|--:|--:|--:|--:|
-| Q3 | first, unstable | 3.226 | 3.643 | +12.9 % | +0.42 % |
-| Q3 | second | 3.211 | 3.224 | +0.4 % | +0.33 % |
-| Q3 | third | 3.190 | 3.184 | -0.2 % | +0.00 % |
-| Q4 | first, unstable | 2.089 | 1.807 | -13.5 % | +0.06 % |
-| Q4 | second | 1.857 | 1.808 | -2.6 % | +0.02 % |
-| Q4 | third | 1.806 | 1.849 | +2.4 % | +0.03 % |
-| Q1, off | first | 23.946 | 23.956 | +0.0 % | -0.00 % |
-| Q1, off | second | 23.797 | 23.872 | +0.3 % | -0.00 % |
+| Q3 | first, unstable | 3.226 | 3.576 | +10.9 % | +0.42 % |
+| Q3 | second | 3.209 | 3.224 | +0.5 % | +0.33 % |
+| Q3 | third | 3.193 | 3.184 | -0.3 % | +0.00 % |
+| Q4 | first, unstable | 2.102 | 1.810 | -13.9 % | +0.06 % |
+| Q4 | second | 1.859 | 1.810 | -2.6 % | +0.02 % |
+| Q4 | third | 1.806 | 1.859 | +3.0 % | +0.04 % |
+| Q1, off | first | 23.948 | 23.956 | +0.0 % | -0.00 % |
+| Q1, off | second | 23.796 | 23.873 | +0.3 % | +0.00 % |
 
-Q4's third pair, +2.4 per cent, is within the spread of each side
-between its stable pairs, 2.8 per cent at the base and 2.3 at the end;
-its instructions did not move.
+The medians are of the five readings each run keeps. An earlier version
+of this report left the first of them out, as if it warmed up, which
+the tool does apart; it gave Q4's third pair +2.4 per cent.
+
+Q4's third pair, +3.0 per cent, is a little past the spread of each
+side between its stable pairs, 2.9 per cent at the base and 2.7 at the
+end, while its instructions moved by 0.04 per cent: by the design's
+rule, a side past 2 per cent in its third pair, the case is unsettled,
+for the maintainer to decide. He judged it noise: its instructions did
+not move.
 
 ## Verdict
 
-Hypothesis 7 holds: no case of 64 aggregates or fewer, and neither Q3
-nor Q4, moved past 2 per cent by the design's rule of judging, and the
+Hypothesis 7 holds for every case of 64 aggregates or fewer and for Q3:
+none moved past 2 per cent by the design's rule of judging, and the
 instructions moved by 1.7 per cent at most, in the merge of spilled
-records. Hypothesis 6 holds in its direction alone: without a spill the
+records. Q4 is unsettled by that rule: its third pair took 3.0 per cent
+more cycles, a little past both sides' spreads, with its instructions
+the same; the maintainer judged it noise. Hypothesis 6 holds in its direction alone: without a spill the
 node takes 0.60 to 0.83 of the core's time, not half; with a spill of
 cold groups, 1.85, a loss that predates this stage and that the
 maintainer put into the roadmap. By its own rule the stage is kept
