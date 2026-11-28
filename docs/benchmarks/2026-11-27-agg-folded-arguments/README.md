@@ -33,6 +33,11 @@ the claim of speed and for the cases whose plans differ.
   in turns, query by query, `base`, `end`, then `base-b`, `end-b` in
   [clickbench-runs.txt](clickbench-runs.txt); pg_duckdb's counts with
   one thread of DuckDB; the times of Q30, five tries, after the counts.
+- **The commits' ids** are those of the branch when it was counted. It
+  was merged by rebase over four commits of `tools/tessera-crosscheck`,
+  which build no part of the extension, so in `main` the same trees of
+  the extension carry other ids: `457b80d9` is `3b3da07c`, `d55788d2`
+  `3030b2a0`, `da90e0c6` `fc12cc07`, `fb7c6178` `8f6b1c1d`.
 - **Machine**: Apple M5 Pro, 18 cores, 64 GB, idle at the maintainer's
   word, on mains. Before each run a script waited for a minute in which
   no process but the agent's took more than 60 per cent of a core: a
