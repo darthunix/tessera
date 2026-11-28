@@ -1555,17 +1555,22 @@ SELECT agg_folded($$SELECT sum(nextval('agg_fold_seq')), sum(nextval('agg_fold_s
 DROP SEQUENCE agg_fold_seq;
 -- spec: aggregate/More than 64 aggregates
 -- Aggregates no form folds, each of an expression of its own, of every
--- kind in turn: sums, extremes, averages of numerics (generic states)
--- and DISTINCT counts; a record of more than 64 states keeps a word of
--- flags for each 64.
+-- kind in turn: sums, extremes, averages of numerics (sum states), the
+-- greatest text (generic states) and DISTINCT counts; a record of more
+-- than 64 states keeps a word of flags for each 64. Past the 64th, a
+-- FILTER leaves some groups without a value, so that a state's flag
+-- differs from the flags of the states 64 before it.
 CREATE FUNCTION agg_many_list(n int, with_distinct bool) RETURNS text LANGUAGE sql AS $f$
-    SELECT string_agg(CASE k % 4
+    SELECT string_agg(CASE k % 5
                           WHEN 0 THEN format('sum(i / 4 + s * %s)', k)
                           WHEN 1 THEN format('max(i / 4 - s * %s)', k)
                           WHEN 2 THEN format('avg(n + i::bigint * %s)', k)
+                          WHEN 3 THEN format('max(i::text || %L)', '-' || k)
                           ELSE CASE WHEN with_distinct THEN format('count(DISTINCT s * %s + k)', k)
                                     ELSE format('min(b / 4 - i::bigint * %s)', k) END
-                      END, ', ' ORDER BY k)
+                      END ||
+                      CASE WHEN k > 64 AND k % 5 <> 4 THEN format(' FILTER (WHERE k < %s)', k % 7)
+                           ELSE '' END, ', ' ORDER BY k)
     FROM generate_series(1, n) AS k
 $f$;
 SELECT format('SELECT %s FROM agg_fold', agg_many_list(65, true)) AS many65,
@@ -1577,7 +1582,15 @@ SELECT agg_same(format('SELECT md5(q::text) FROM (%s) AS q', :'many65'));
 SELECT agg_same(format('SELECT md5(q::text) FROM (%s) AS q', :'many65_k'));
 SELECT agg_same(format('SELECT md5(q::text) FROM (%s) AS q', :'many200'));
 SELECT agg_same(format('SELECT md5(q::text) FROM (%s) AS q', :'many200_k'));
--- Groups past hash_mem with 200 states of words, which spill as groups.
+-- 900 sums of one column under 900 FILTER conditions share their
+-- argument, the column itself: 902 computed columns, within the bound.
+SELECT format('SELECT k, %s FROM agg_fold GROUP BY k',
+              string_agg(format('sum(i) FILTER (WHERE s > %s)', k), ', ')) AS shared900
+FROM generate_series(1, 900) AS k \gset
+SELECT agg_folded(:'shared900');
+SELECT agg_same(format('SELECT md5(string_agg(q::text, %L ORDER BY q::text)) FROM (%s) AS q', ',', :'shared900'));
+-- Groups past hash_mem with 200 states of words, which spill as groups,
+-- the flags of those past the 64th set by a FILTER in some groups alone.
 CREATE TABLE agg_many_spill WITH (autovacuum_enabled = off) AS
 SELECT g % 50000 AS k, (g % 1000)::smallint AS s, g % 7919 AS i, g::bigint AS b,
        (g % 1000 / 8.0)::numeric(12,3) AS n
@@ -1587,7 +1600,9 @@ SET work_mem = '1MB';
 SELECT format('SELECT k, %s FROM agg_many_spill GROUP BY k',
               string_agg(CASE k % 3 WHEN 0 THEN format('sum(i / 4 + s * %s)', k)
                                     WHEN 1 THEN format('max(i / 4 - s * %s)', k)
-                                    ELSE format('min(b / 4 - i::bigint * %s)', k) END, ', ' ORDER BY k)) AS spill200
+                                    ELSE format('min(b / 4 - i::bigint * %s)', k) END ||
+                         CASE WHEN k > 64 THEN format(' FILTER (WHERE k %% 5 < %s)', k % 5)
+                              ELSE '' END, ', ' ORDER BY k)) AS spill200
 FROM generate_series(1, 200) AS k \gset
 SELECT agg_folded(:'spill200');
 SELECT agg_same(format('SELECT md5(string_agg(q::text, %L ORDER BY q::text)) FROM (%s) AS q', ',', :'spill200'));

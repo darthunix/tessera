@@ -1578,6 +1578,8 @@ aggregate_costs(PlannerInfo *root, AggSplit split, List *state_tlist, int nfolde
 	costs->finalCost.per_tuple += nfolded * cpu_operator_cost;
 }
 
+static Node *filtered_argument(Expr *condition, Node *argument);
+
 /*
  * Whether the node takes the states of a target list after its keys, of
  * any count within two bounds: its computed columns, the keys, the
@@ -1585,32 +1587,56 @@ aggregate_costs(PlannerInfo *root, AggSplit split, List *state_tlist, int nfolde
  * TESS_ROWS_MAX_COLUMNS, the bound of a tuple's columns, which a spill of
  * the rows keeps; and a group's record, its keys, its words of flags and
  * its states, within the table's first chunk, as a larger one would have
- * the table add a chunk at every try. A state takes a word, a sum state or
- * a numeric extreme the words of its record the node keeps where the
+ * the table add a chunk at every try. The columns are counted as the node
+ * lays them out: an argument equal to an earlier column, alone in its
+ * aggregate and with no volatile function, takes none of its own; for a
+ * parallel plan, the final aggregation's too, where each state reads its
+ * partial value, a column of its own. A state takes a word, a sum state
+ * or a numeric extreme the words of its record the node keeps where the
  * kernels fold it: at most what the node lays out.
  */
 static bool
-states_fit(List *tlist, int nkeys)
+states_fit(List *tlist, int nkeys, bool parallel)
 {
-	int			columns = nkeys;
+	List	   *columns = NIL;
+	int			ncolumns = nkeys;
+	int			nfinal = nkeys;
 	int			words = AGG_FLAG_WORDS(list_length(tlist) - nkeys);
+	bool		fit;
 
 	foreach_node(TargetEntry, entry, tlist)
 	{
 		Aggref	   *agg = (Aggref *) entry->expr;
+		Node	   *argument;
 
 		if (foreach_current_index(entry) < nkeys || !IsA(agg, Aggref))
 			continue;
-		columns += list_length(agg->args) + (agg->aggfilter != NULL ? 1 : 0);
+		nfinal++;
+		argument = aggregate_argument(agg);
+		if (argument != NULL)
+		{
+			if (agg->aggfilter != NULL)
+				argument = filtered_argument(agg->aggfilter, copyObject(argument));
+			if (list_length(agg->args) > 1 || contain_volatile_functions(argument) ||
+				!list_member(columns, argument))
+				columns = lappend(columns, argument);
+			for (int n = 1; n < list_length(agg->args); n++)
+				columns = lappend(columns, list_nth_node(TargetEntry, agg->args, n)->expr);
+		}
+		ncolumns += agg->aggfilter != NULL ? 1 : 0;
 		words += batch_aggregate(agg) ? 1 :
 			sum_state_aggregate(agg) ? AGG_SUM_STATE_WORDS :
 			agg->aggfnoid == F_MIN_NUMERIC || agg->aggfnoid == F_MAX_NUMERIC ?
 			AGG_EXTREME_STATE_WORDS : 1;
 	}
-	return columns <= TESS_ROWS_MAX_COLUMNS &&
+	ncolumns += list_length(columns);
+	fit = ncolumns <= TESS_ROWS_MAX_COLUMNS &&
+		(!parallel || nfinal <= TESS_ROWS_MAX_COLUMNS) &&
 		(nkeys == 0 ||
 		 tess_table_record_bytes(nkeys, sizeof(uint64) * words) <=
 		 TABLE_FIRST_CHUNK - TESS_TABLE_CHUNK_HEADER);
+	list_free(columns);
+	return fit;
 }
 
 /*
@@ -1957,7 +1983,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		return;
 	/* A partial aggregation folds nothing: each aggregate is a state. */
 	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist) ||
-		!states_fit(tlist, list_length(keys)))
+		!states_fit(tlist, list_length(keys), true))
 		return;
 	if (list_length(tlist) == list_length(keys))
 	{
@@ -2489,7 +2515,7 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 	/* The states the node keeps, those of the aggregates it folds counted once. */
 	fold_aggregates(root, tlist, list_length(keys), true, &fold);
 	states = fold_target_list(tlist, list_length(keys), &fold);
-	if (!states_fit(states, list_length(keys)))
+	if (!states_fit(states, list_length(keys), false))
 		return;
 	/*
 	 * Beside a DISTINCT aggregate's table neither the groups nor the rows of

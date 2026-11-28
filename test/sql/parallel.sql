@@ -211,13 +211,18 @@ SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), avg(f8) FROM para
 RESET parallel_leader_participation;
 -- spec: aggregate/More than 64 aggregates
 -- 65 aggregates no form folds in the participants and above, their
--- records of two words of flags, grouped and not.
+-- records of two words of flags, grouped and not; the 65th under a
+-- FILTER that leaves some groups without a value.
 SELECT format('SELECT %s FROM parallel_fast',
               string_agg(CASE k % 2 WHEN 0 THEN format('sum(i4 + s * %s)', k)
-                                    ELSE format('max(i4 - s * %s)', k) END, ', ' ORDER BY k)) AS many65,
+                                    ELSE format('max(i4 - s * %s)', k) END ||
+                         CASE WHEN k > 64 THEN ' FILTER (WHERE f4 < 100)' ELSE '' END,
+                         ', ' ORDER BY k)) AS many65,
        format('SELECT f4, %s FROM parallel_fast GROUP BY f4',
               string_agg(CASE k % 2 WHEN 0 THEN format('sum(i4 + s * %s)', k)
-                                    ELSE format('max(i4 - s * %s)', k) END, ', ' ORDER BY k)) AS many65_k
+                                    ELSE format('max(i4 - s * %s)', k) END ||
+                         CASE WHEN k > 64 THEN ' FILTER (WHERE f4 < 100)' ELSE '' END,
+                         ', ' ORDER BY k)) AS many65_k
 FROM generate_series(1, 65) AS k \gset
 SELECT regexp_replace(line, ' \(actual.*\)$', '') AS line FROM parallel_explain(:'many65') AS line
 WHERE line ~ '(TessAgg|Partial Mode)';
