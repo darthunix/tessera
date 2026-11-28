@@ -119,11 +119,19 @@ SHALL NOT pass from one process to another. Without a dictionary,
   in turn, and one also asks through a root of the size before the
   operation and through one whose operation is `NULL`
 - **THEN** each identity is above 0 and above the one taken before it,
-  so that no dictionary of one producer shares an identity of
-  another's, and both of those asks get 0, so that their producer gives
-  no dictionary
+  and both of those asks get 0, so that their producer gives no
+  dictionary
 - **Verified by:**
   `test/sql/bridge.sql::-- spec: string-bytes/Identities of one backend`
+
+#### Scenario: Dictionaries of two producers
+- **WHEN** one backend reads the test source and the Parquet table, each
+  through dictionaries
+- **THEN** no identity of one producer is an identity of the other
+- **Verified by:** review only — a producer's identities are not
+  visible from SQL: the review lists each producer's call of
+  `tess_dictionary_identity`, the bridge's one counter, which the
+  scenario "Identities of one backend" shows to grow across modules
 
 #### Scenario: Two indexes of one value
 - **WHEN** a dictionary holds the same bytes at two indexes and a
@@ -148,9 +156,12 @@ values are.
 - **WHEN** a consumer asks a Parquet column marked for the check, which
   holds a value that is not UTF-8, in the bytes form for a mask of the
   rows before that value, then for a mask of its row, and then asks
-  every row as `Datum` values after an ask of the bytes
-- **THEN** the first returns its rows, and the others fail with
-  SQLSTATE `22021`, the error of that value's `Datum`
+  every row as `Datum` values after an ask of the bytes; the same of a
+  column that holds a zero byte; and a grouping by each column reads it
+  with Tessera on and off
+- **THEN** the first ask of each returns its rows, and the others fail
+  with SQLSTATE `22021`, the error of that value's `Datum`; both
+  groupings fail with `22021`
 - **Verified by:**
   `test/sql/parquet.sql::-- spec: string-bytes/Bytes that are not UTF-8`
 
@@ -159,7 +170,9 @@ values are.
   a value of four characters, in the bytes form for a mask of the rows
   before that value, then for a mask of its row
 - **THEN** the first returns its rows, and the second fails with
-  SQLSTATE `22001`, as the value fails when it is made as a `Datum`
+  SQLSTATE `22001`, as the value fails when it is made as a `Datum`,
+  and a grouping by the column with Tessera on and off fails with
+  `22001` too
 - **Verified by:**
   `test/sql/parquet.sql::-- spec: string-bytes/A value longer than its varchar`
 
@@ -191,6 +204,17 @@ bytes. A column of a group whose chunk the source reads through its
 dictionary SHALL give the dictionary's indexes and identity. The count
 of values the source made, in `EXPLAIN (ANALYZE)`, SHALL count the
 `Datum` values alone.
+
+#### Scenario: Indexes of a dictionary chunk
+- **WHEN** a consumer asks a batch of a file read through its
+  dictionary, and one of a file of plain pages, for their `text`,
+  `bytea` and `varchar` columns in the bytes form, every other row and
+  then every row, in batches of 64 rows and of 10
+- **THEN** each row asked holds its value's bytes, the first ask's
+  still after the others, and the rows through the dictionary carry
+  indexes among the dictionary's values, one index a value
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Indexes of a dictionary chunk`
 
 #### Scenario: Plain and dictionary chunks
 - **WHEN** a grouping by a `text` column, and a count of its distinct

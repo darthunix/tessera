@@ -40,6 +40,10 @@ the form never changes a result.
   and `test/sql/parquet.sql::-- spec: string-bytes/Groups by bytes`,
   a query over batches of either form against the same over a heap
   table or with Tessera off;
+  `test/sql/parquet.sql::-- spec: string-bytes/Bytes that are not UTF-8`
+  and `test/sql/parquet.sql::-- spec: string-bytes/A value longer than
+  its varchar`, the SQLSTATEs of groupings through the form against
+  those with Tessera off;
   `.github/workflows/ci.yml::cargo run --release --locked -p
   tessera-crosscheck`, random queries over a Parquet twin, whose
   strings its batches offer as bytes, with Tessera on against its heap
@@ -51,7 +55,12 @@ form's own, a batch's operations, Tessera's API and a batch function's
 call, gain fields only at their end and are read by the size their
 caller gives, so that a module built against an older header reads them
 as it did.
-- **Checked by:** `test/installed/layouts.c::TessBytesColumn is 56 bytes`
+- **Checked by:** `test/installed/layouts.c::TessBytesColumn is 56 bytes`;
+  `test/sql/source_scan.sql::-- spec: string-bytes/A column or a batch
+  without the form`, batch operations of the size before the form,
+  which no consumer reads past; `test/sql/bridge.sql::-- spec:
+  string-bytes/Identities of one backend`, a root of Tessera's API of
+  the size before its operation
 
 ### No collation library of Tessera's own
 No module of Tessera links a library of collations, ICU among them, and

@@ -127,8 +127,9 @@ through indexes, and not values in different pages.
 Where the producer holds a column through a dictionary, it gives each
 row's index too, and an **identity** of the dictionary: a 64-bit number
 from one counter of the backend, which the bridge keeps and gives
-through an optional operation of Tessera's API
-(`tess_dictionary_identity`). Every producer, each a module of its own,
+through an optional operation of Tessera's API,
+`next_dictionary_identity`, which a producer asks through the helper
+`tess_dictionary_identity`. Every producer, each a module of its own,
 takes its numbers from that one counter, so no two dictionaries share
 an identity. A consumer keeps what it learned of each index, such as a
 key's number in TessAgg's dictionary, while the identity stays the
@@ -292,9 +293,11 @@ key.
 The word comes from the bytes form where the input offers it, and
 otherwise from the `Datum`, unpacked when compressed. A full sort keeps
 every row's value in its records, so it reads the `Datum`s and makes
-the words from them. In a top-N sort the key's values are asked, with
-the other columns, for the rows that beat the worst kept, so that the
-source makes values for those rows alone.
+the words from them. In a top-N sort the string's values are asked,
+with the other columns, for the rows that beat the worst kept, so that
+the source makes them for those rows alone; a row whose string equals
+the worst's gets the values of the keys after it first, by which it may
+still beat the worst.
 
 Refused: the core's abbreviated key under `C`, which hashes every row
 to decide whether to stop abbreviating, a decision a top-N sort never
@@ -350,8 +353,8 @@ gets the check that can see it, and the contract names them.
   review.
 - **Random queries.** `tessera-crosscheck` draws string columns under
   `C`, the builtin `C.UTF-8`, a libc collation and a nondeterministic
-  one, and gives each table of strings a Parquet twin, its rows written
-  in dictionary, plain and mixed chunks; each query over the twin is
+  one, and gives its table of words a Parquet twin, its rows written in
+  dictionary, plain and mixed chunks; each query over the twin is
   compared with the same query over the heap table.
 - **The layouts.** The installed headers' check asserts the offsets the
   spec draws, the Rust mirror of `TessBytesColumn` tests its own, and a
@@ -416,11 +419,13 @@ work before it:
 - `crates/tessera-parquet/src/bytes.rs`,
   `crates/tessera-parquet/src/c.rs`: the reader's bytes, its check once
   a dictionary or a window, and its entry points
-- `nodes/agg_keydict.c`, `nodes/agg_group.c`, `nodes/agg_spill.c`: the
-  keys by bytes, the arrays from index to number, the values made for
-  the rows a spill writes
-- `nodes/key_kind.h`, `nodes/sort.c`, `nodes/sort_topn.c`: the order
-  by bytes and its key kind
+- `nodes/agg_keydict.c`, `nodes/agg_group.c`, `nodes/agg_spill.c`,
+  `nodes/agg.c`: the keys by bytes, the arrays from index to number,
+  the values made for the rows a spill writes, and the
+  argument of an ungrouped count of distinct values
+- `nodes/key_kind.h`, `nodes/sort_planner.c`, `nodes/sort.c`,
+  `nodes/sort_topn.c`: the order by bytes, the choice of its key kind,
+  and its sorts
 - `kernels/text.c`, `crates/tessera-kernels/src/text.rs`,
   `crates/tessera-capi/src/c/text.rs`: the string kernels over either
   form, and the sort word of a string
@@ -449,5 +454,5 @@ work before it:
 - `crates/tessera-capi/tests/text.rs` and
   `crates/tessera-kernels/src/text/proofs.rs`: the string kernels over
   both forms, and the sort word against the comparison of bytes.
-- `tools/tessera-crosscheck`: random queries over Parquet twins of the
-  tables of strings.
+- `tools/tessera-crosscheck`: random queries over the Parquet twin of
+  its table of words.

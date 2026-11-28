@@ -830,6 +830,7 @@ SELECT differ('SELECT i, t, s FROM t_short', 'SELECT i, t, s FROM h_short') AS r
 DROP FOREIGN TABLE t_short;
 DROP TABLE h_short;
 
+-- spec: string-bytes/Indexes of a dictionary chunk
 -- The bytes form of the node's batches, which TessAgg and the kernels
 -- read: the test module asks one batch's text, bytea and varchar columns
 -- as bytes for every other row, then every row as Datum values and the
@@ -921,22 +922,41 @@ SELECT col, n, ask, dict
 FROM parquet_test_bytes('SELECT s FROM t_bytes_dict', 10, 6, 0, false, false, true);
 -- spec: string-bytes/Bytes that are not UTF-8
 -- spec: string-bytes/A value longer than its varchar
--- Bytes that are not UTF-8 and a value longer than its varchar fail
--- only where a row asked holds them, with the errors of their Datums;
--- the last fails in the ask of every row as Datums, after the first ask
--- took a reference to the window's array, which the error frees.
+-- Bytes that are not UTF-8, a zero byte and a value longer than its
+-- varchar fail only where a row asked holds them, with the SQLSTATEs of
+-- their Datums; the last fails in the ask of every row as Datums, after
+-- the first ask took a reference to the window's array, which the error
+-- frees. A grouping by each column, through the bytes form and with
+-- Tessera off through Datums, fails with the same SQLSTATE.
 SELECT parquet_test_write(:'dir' || '/bytes_bad.parquet', '{"dictionary": false, "columns": [
       {"name": "s", "type": "bytes", "logical": "string",
        "values": ["a", "b", "c", "d", "e", {"hex": "ff"}, "g", "h"]},
       {"name": "v", "type": "bytes", "logical": "string",
-       "values": ["a", "b", "c", "d", "e", "f", "g", "long"]}]}');
+       "values": ["a", "b", "c", "d", "e", "f", "g", "long"]},
+      {"name": "z", "type": "bytes", "logical": "string",
+       "values": ["a", "b", "c", "d", "e", "f", {"hex": "610062"}, "h"]}]}');
 \set bytes_bad :dir '/bytes_bad.parquet'
-CREATE FOREIGN TABLE t_bytes_bad (s text, v varchar(3)) SERVER pq OPTIONS (files :'bytes_bad');
+CREATE FOREIGN TABLE t_bytes_bad (s text, v varchar(3), z text) SERVER pq
+    OPTIONS (files :'bytes_bad');
 SELECT count(*) AS asked FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, false, false);
-SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 32, false, false);
+SELECT sqlstate_of($q$SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 32,
+                                                              false, false)$q$) AS not_utf8;
+SELECT count(*) AS asked FROM parquet_test_bytes('SELECT z FROM t_bytes_bad', 8, 0, 63, false, false);
+SELECT sqlstate_of($q$SELECT count(*) FROM parquet_test_bytes('SELECT z FROM t_bytes_bad', 8, 0, 64,
+                                                              false, false)$q$) AS zero_byte;
 SELECT count(*) AS asked FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 127, false, false);
-SELECT count(*) FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 128, false, false);
-SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31, true, false);
+SELECT sqlstate_of($q$SELECT count(*) FROM parquet_test_bytes('SELECT v FROM t_bytes_bad', 8, 0, 128,
+                                                              false, false)$q$) AS too_long;
+SELECT sqlstate_of($q$SELECT count(*) FROM parquet_test_bytes('SELECT s FROM t_bytes_bad', 8, 0, 31,
+                                                              true, false)$q$) AS as_datums;
+SELECT explain_lines('ANALYZE false', 'SELECT s, count(*) FROM t_bytes_bad GROUP BY 1',
+                     'TessAgg|Scan');
+SELECT c, sqlstate_of(format('SELECT %s, count(*) FROM t_bytes_bad GROUP BY 1', c)) AS tessera_on
+FROM unnest(ARRAY['s', 'z', 'v']) c;
+SET tessera.enable = off;
+SELECT c, sqlstate_of(format('SELECT %s, count(*) FROM t_bytes_bad GROUP BY 1', c)) AS tessera_off
+FROM unnest(ARRAY['s', 'z', 'v']) c;
+RESET tessera.enable;
 -- spec: string-bytes/Groups by bytes
 -- TessAgg reads a grouping's string keys in the bytes form: by text, by
 -- varchar and the int column before it, whose values the grouping makes,
