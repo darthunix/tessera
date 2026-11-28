@@ -99,7 +99,7 @@ injection points; CI runs 19 and 18.
 
 ## 5. The count of the second stage
 
-- [ ] 5.1 Count as the design's measurement plan says: the times of the
+- [x] 5.1 Count as the design's measurement plan says: the times of the
       cases of more than 64 aggregates, the counts of the cases of 64 or
       fewer of `aggfold`, Q3 and Q4, against the first stage's end. Keep
       the report under `docs/benchmarks/`. Check:

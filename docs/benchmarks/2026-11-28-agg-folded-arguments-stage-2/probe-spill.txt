@@ -1,0 +1,35 @@
+# The spill of groups of many states: TessAgg against the core at the end (68e233db),
+# bench/pg/run.sh measure over a probe of the family's table, 3 repetitions, run pg-aggfold_probe_spill-Bvfj3K.
+
+        test         | mode | runs |   min    |  median  
+---------------------+------+------+----------+----------
+ probe_many_16_spill | on   |    3 |  352.684 |  355.905
+ probe_many_16_spill | off  |    3 |  449.782 |  451.393
+ probe_many_64_spill | on   |    3 | 1866.596 | 1869.545
+ probe_many_64_spill | off  |    3 | 1095.627 | 1097.525
+ probe_many_65_spill | on   |    3 | 2036.849 | 2037.541
+ probe_many_65_spill | off  |    3 | 1109.365 | 1110.503
+(6 rows)
+
+
+ Custom Scan (TessAgg)  (cost=794348.38..794348.39 rows=1 width=40) (actual rows=1.00 loops=1)
+               ->  Custom Scan (TessAgg)  (cost=482523.69..782814.41 rows=1025242 width=12) (actual rows=100000.00 loops=1)
+                     Memory Usage: 21359 kB
+                     Disk Usage: 1027792 kB
+                     Evictions: 572879
+ Custom Scan (TessAgg)  (cost=804782.03..804782.04 rows=1 width=40) (actual rows=1.00 loops=1)
+               ->  Custom Scan (TessAgg)  (cost=488990.52..793248.06 rows=1025242 width=12) (actual rows=100000.00 loops=1)
+                     Memory Usage: 21359 kB
+                     Disk Usage: 1045541 kB
+                     Evictions: 658564
+ Custom Scan (TessAgg)  (cost=195916.82..195916.83 rows=1 width=40) (actual rows=1.00 loops=1)
+               ->  Custom Scan (TessAgg)  (cost=123307.91..184382.84 rows=1025242 width=12) (actual rows=100000.00 loops=1)
+                     Memory Usage: 7233 kB
+                     Disk Usage: 267721 kB
+                     Evictions: 6042
+   ->  HashAggregate  (cost=787206.00..977122.14 rows=1025242 width=12) (actual rows=100000.00 loops=1)
+         Planned Partitions: 256  Batches: 257  Memory Usage: 8345kB  Disk Usage: 103176kB
+   ->  HashAggregate  (cost=797206.00..989685.25 rows=1025242 width=12) (actual rows=100000.00 loops=1)
+         Planned Partitions: 256  Batches: 257  Memory Usage: 8345kB  Disk Usage: 103432kB
+   ->  HashAggregate  (cost=307206.00..374093.10 rows=1025242 width=12) (actual rows=100000.00 loops=1)
+         Planned Partitions: 64  Batches: 65  Memory Usage: 8217kB  Disk Usage: 61088kB
