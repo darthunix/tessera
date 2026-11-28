@@ -808,9 +808,15 @@ ALTER FOREIGN TABLE ft_bytes OPTIONS (DROP bridge_identities);
 ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'plain', DROP check_bytes, ADD bytes_ops 'short');
 SELECT source_same('SELECT s, count(*), count(n) FROM ft_bytes GROUP BY s');
 SELECT tessera_test_scan_source_asks();
+-- Through the source's projection, whose own check of the size passes
+-- no bytes on either.
+SELECT source_same('SELECT s, lower(n), count(*) FROM ft_bytes GROUP BY s, lower(n)');
+SELECT tessera_test_scan_source_asks();
 ALTER FOREIGN TABLE ft_bytes OPTIONS (DROP bytes_ops, ADD check_bytes 'on', SET bytes 'dictionary');
 ALTER FOREIGN TABLE ft_bytes ALTER COLUMN n OPTIONS (ADD bytes 'none');
 SELECT source_same('SELECT s, n, count(*) FROM ft_bytes GROUP BY s, n');
+SELECT tessera_test_scan_source_asks();
+SELECT source_same('SELECT s, lower(n), count(*) FROM ft_bytes GROUP BY s, lower(n)');
 SELECT tessera_test_scan_source_asks();
 ALTER FOREIGN TABLE ft_bytes ALTER COLUMN n OPTIONS (DROP bytes);
 -- Values bounded past what an index holds: given plain, in either form of

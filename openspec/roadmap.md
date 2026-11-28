@@ -54,10 +54,10 @@ Parquet wrapper the first source of the planning contract, so that
 crate `datum-arrow`), had `parquet-fdw` built on `source-scan`'s branch
 before it is merged, and set the order of what follows them: grouping by
 strings on the files' bytes, `text-keys-by-bytes` (done), then the
-ClickBench entry, `clickbench-entry`. On 2026-11-22 the maintainer took the sums
-of `bigint` values of 19 digits out of turn (done), after a profile of
-ClickBench's query 4 on the branch of `parquet-fdw`, and the same day
-`agg-distinct-spill` (done) after them, a finding of stage 2 of
+ClickBench entry, `clickbench-entry`. On 2026-11-22 the maintainer took
+the sums of `bigint` values of 19 digits out of turn (done), after a
+profile of ClickBench's query 4 on the branch of `parquet-fdw`, and the
+same day `agg-distinct-spill` (done) after them, a finding of stage 2 of
 ClickBench on that branch. On 2026-11-24 he took the views of strings in
 the Parquet reader out of turn, `parquet-string-views` (done), and a
 faster decompression of Snappy after them, `parquet-snappy` (done),
@@ -1441,6 +1441,27 @@ vector kernel. From the review of pull request 68 on 2026-10-14.
 - **Capabilities:** kernel-abi
 - **Size:** small to medium.
 
+### direct-arrow-batches
+
+Direct Arrow batches. From plan 6.7, lines 6005–6006.
+
+- **What:** Hand Arrow batches to the nodes directly, with column
+  selection and filter pushdown. The Arrow interface reports physical
+  properties — time units, epoch, encoding, dictionary representation;
+  the nodes do not derive them from the PostgreSQL type OID.
+- **Why:** Follows the rule that a logical type and a physical
+  representation are independent (lines 73–85).
+- **Known:** Runtime picks a native kernel only when type, operation,
+  collation and physical representation all match; otherwise the Datum
+  path is mandatory (line 80–82). The masks of rows take words alone:
+  their form over a window of bytes from a bit offset, the form of
+  Arrow's bitmaps, went when nothing built it, so a batch of Arrow
+  brings it back or copies its bitmaps into words (see
+  `sturdy-bulk-loops` for what the form's absence cost).
+- **Depends on:** `parquet-fdw`.
+- **Capabilities:** batch-format, kernel-abi, type-support
+- **Size:** the log does not say.
+
 ### bytes-form-consumers
 
 The bytes form of a string column read where it is not yet. What the
@@ -1464,27 +1485,6 @@ needed it.
 - **Depends on:** a measured case.
 - **Capabilities:** string-bytes
 - **Size:** a change for each.
-
-### direct-arrow-batches
-
-Direct Arrow batches. From plan 6.7, lines 6005–6006.
-
-- **What:** Hand Arrow batches to the nodes directly, with column
-  selection and filter pushdown. The Arrow interface reports physical
-  properties — time units, epoch, encoding, dictionary representation;
-  the nodes do not derive them from the PostgreSQL type OID.
-- **Why:** Follows the rule that a logical type and a physical
-  representation are independent (lines 73–85).
-- **Known:** Runtime picks a native kernel only when type, operation,
-  collation and physical representation all match; otherwise the Datum
-  path is mandatory (line 80–82). The masks of rows take words alone:
-  their form over a window of bytes from a bit offset, the form of
-  Arrow's bitmaps, went when nothing built it, so a batch of Arrow
-  brings it back or copies its bitmaps into words (see
-  `sturdy-bulk-loops` for what the form's absence cost).
-- **Depends on:** `parquet-fdw`.
-- **Capabilities:** batch-format, kernel-abi, type-support
-- **Size:** the log does not say.
 
 ### datum-fallback-native-forms
 

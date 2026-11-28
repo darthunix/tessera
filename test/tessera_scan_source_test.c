@@ -1241,8 +1241,15 @@ check_bytes(SourceScanState *state, TessBatch *batch)
 		CheckedColumn *checked = &state->checked[c];
 		int			row = -1;
 
-		if (state->gen.columns[c].type != TEXTOID || state->gen.columns[c].no_bytes)
+		if (state->gen.columns[c].type != TEXTOID)
 			continue;
+		/* A column the source never gives as bytes answers false. */
+		if (state->gen.columns[c].no_bytes)
+		{
+			if (tess_batch_bytes_column(batch, c, &batch->rows, &bytes))
+				elog(ERROR, "the test source gave its column %d as bytes", c);
+			continue;
+		}
 		if (!tess_batch_bytes_column(batch, c, &batch->rows, &bytes))
 			elog(ERROR, "the test source did not give its text column %d as bytes", c);
 		if (bytes.struct_size != sizeof(TessBytesColumn) ||
@@ -1420,6 +1427,13 @@ check_projection_bytes(SourceScanState *state, TessBatch *batch)
 		}
 		if (state->gen.columns[c].type != TEXTOID)
 			continue;
+		/* A column its source never gives as bytes is not given through it. */
+		if (state->gen.columns[c].no_bytes)
+		{
+			if (tess_batch_bytes_column(batch, c, &batch->rows, &through))
+				elog(ERROR, "the projection gave column %d as bytes, which its source does not", c);
+			continue;
+		}
 		if (!tess_batch_bytes_column(batch, c, &batch->rows, &through) ||
 			!tess_batch_bytes_column(&state->bytes_batch, c, &batch->rows, &own))
 			elog(ERROR, "the projection did not pass the bytes of column %d on", c);

@@ -2168,6 +2168,20 @@ SELECT tessera_test_scan_source_asks();
  datum 32, bytes 0, checked 0, through a projection 0
 (1 row)
 
+-- Through the source's projection, whose own check of the size passes
+-- no bytes on either.
+SELECT source_same('SELECT s, lower(n), count(*) FROM ft_bytes GROUP BY s, lower(n)');
+  source_same   
+----------------
+ same, 658 rows
+(1 row)
+
+SELECT tessera_test_scan_source_asks();
+            tessera_test_scan_source_asks             
+------------------------------------------------------
+ datum 32, bytes 0, checked 0, through a projection 0
+(1 row)
+
 ALTER FOREIGN TABLE ft_bytes OPTIONS (DROP bytes_ops, ADD check_bytes 'on', SET bytes 'dictionary');
 ALTER FOREIGN TABLE ft_bytes ALTER COLUMN n OPTIONS (ADD bytes 'none');
 SELECT source_same('SELECT s, n, count(*) FROM ft_bytes GROUP BY s, n');
@@ -2180,6 +2194,18 @@ SELECT tessera_test_scan_source_asks();
              tessera_test_scan_source_asks              
 --------------------------------------------------------
  datum 16, bytes 16, checked 16, through a projection 0
+(1 row)
+
+SELECT source_same('SELECT s, lower(n), count(*) FROM ft_bytes GROUP BY s, lower(n)');
+  source_same   
+----------------
+ same, 658 rows
+(1 row)
+
+SELECT tessera_test_scan_source_asks();
+              tessera_test_scan_source_asks              
+---------------------------------------------------------
+ datum 16, bytes 16, checked 16, through a projection 16
 (1 row)
 
 ALTER FOREIGN TABLE ft_bytes ALTER COLUMN n OPTIONS (DROP bytes);
