@@ -388,19 +388,22 @@ value detoasted and the other side's made from its bytes.
   status)`: a prefix, and a LIKE pattern of literals and `%` matched by its
   pieces; `*simple` false for a pattern with `_` or an escape, which the
   core's function matches. The pieces at the start and at the end compare
-  at one place. Each of the first four inner pieces is found by a
-  searcher of `memchr::memmem` made once a call, which looks for a pair
-  of the piece's rare bytes by vector instructions and compares the
-  piece only where both are found; the searchers are boxed and made only
-  for a pattern that has an inner piece, so that a prefix, a suffix or an
-  exact pattern costs no more than without them. A piece past the fourth
-  is found by `memchr` of its first byte, which matched the C library's
+  at one place. Each of the first four non-empty inner pieces is found
+  by a searcher of `memchr::memmem` made once a call: over a string long
+  enough for its vectors, 17 bytes on AArch64, it looks for a pair of
+  the piece's rare bytes and compares the piece only where both are
+  found; over a shorter string it takes Rabin-Karp, and a piece of one
+  byte `memchr`. The searchers are boxed and made only for a pattern that
+  has an inner piece, so that a prefix, a suffix or an exact pattern
+  costs no more than without them. A piece past the fourth is found by
+  `memchr` of its first byte, which matched the C library's
   `memchr` where the standard library's search was 9 % slower on `LIKE
   '%12%'`. Against that search for every piece, TPC-H query 13's `NOT
   LIKE '%special%requests%'` took 0.42 of the cycles and query 13 itself
   0.69 of its time, ClickBench's Q21, `URL LIKE '%google%'`, 0.70 of its
-  cycles; short strings take 25 % fewer cycles though 12 % more
-  instructions, a searcher made once a call. The two other ways counted,
+  cycles; strings of 8 to 16 bytes, by Rabin-Karp, take 25 % fewer cycles
+  though 12 % more instructions, a searcher made once a call. The two
+  other ways counted,
   `memmem::find` a row, which makes a searcher for each string past 64
   bytes, and `memchr` of a piece's rarest byte, lost on most cases or
   gained on one (see

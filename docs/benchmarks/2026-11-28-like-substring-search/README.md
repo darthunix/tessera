@@ -6,9 +6,11 @@ between the signs; a piece neither at the start nor at the end of the
 string, an **inner piece**, is searched for in it. The search was
 `memchr` of the piece's first byte and a comparison of the rest at each
 place found. It is now a searcher of `memchr::memmem` made once a
-pattern for each of its first four inner pieces, which looks for a pair
-of the piece's rare bytes by vector instructions; the searchers are
-boxed and made only for a pattern that has an inner piece. Cycles
+pattern for each of its first four non-empty inner pieces, which over a
+string of 17 bytes or more looks for a pair of the piece's rare bytes
+by vector instructions, over a shorter one takes Rabin-Karp, and for a
+piece of one byte `memchr`; the searchers are boxed and made only for a
+pattern that has an inner piece. Cycles
 decide, by the maintainer's rule; instructions stand beside them, and
 times stand for TPC-H's query 13.
 
@@ -31,7 +33,8 @@ times stand for TPC-H's query 13.
 - **ClickBench**: `hits.parquet`, 100 M rows, in the page cache, `cargo
   clickbench run --mode <on|off> --counters --tries 5 --workers 0
   --queries <n> --files hits.parquet`, one query a run, the medians of
-  the four readings after one that warms up; base and end in turns,
+  the five readings the tool keeps after its own that warms up; base and
+  end in turns,
   query by query, two pairs ([runs.txt](runs.txt)).
 - **TPC-H**: scale factor 1, `cargo tpch run --queries 13 --pairs 11`,
   serial, each tree's own cluster, base and end in turns, twice.
@@ -65,7 +68,7 @@ the guards, which search nothing, 3 to 6 per cent more: its searchers,
 kept in `Like` itself, were made, moved and dropped by every call.
 Written before the try: boxed and made only for a pattern with an inner
 piece, they cost the guards nothing. Way 1b held it and was kept. Way
-3's run of cycles was itself unsettled: its control moved 5 to 15 per
+3's run of cycles was itself unsettled: its control moved 3 to 15 per
 cent.
 
 ## Hypotheses
@@ -105,8 +108,9 @@ is the same with Tessera off ([family.md](family.md)); lower is better:
 control's move of 4.6 and its median below the base: no change by the
 design's rule of judging. Three cases take more instructions for fewer
 cycles: the short strings 12 per cent, the making of a searcher once a
-call, some 3 500 instructions a batch of 64 rows; `'%google%'` and the
-piece near the start about 3, the searcher's setup over each string.
+call, some 3 500 instructions a batch of 64 rows, and a search by
+Rabin-Karp under 17 bytes; `'%google%'` and the piece near the start
+about 3, the searcher's setup over each string.
 
 ## Result: ClickBench
 
@@ -116,16 +120,16 @@ at the end, the change of cycles and of instructions; lower is better:
 
 | query | pair | base | end | cycles | instructions |
 |---|---|--:|--:|--:|--:|
-| Q21 | first | 16.14 | 11.33 | -29.8 % | -0.10 % |
+| Q21 | first | 16.14 | 11.34 | -29.8 % | -0.10 % |
 | Q21 | second | 16.13 | 11.37 | -29.5 % | -0.11 % |
-| Q22 | first | 36.09 | 31.40 | -13.0 % | +0.32 % |
+| Q22 | first | 36.08 | 31.40 | -13.0 % | +0.32 % |
 | Q22 | second | 36.08 | 31.45 | -12.8 % | +0.32 % |
-| Q1, off | first | 24.07 | 25.50 | +6.0 % | +0.00 % |
-| Q1, off | second | 23.96 | 23.99 | +0.1 % | -0.00 % |
+| Q1, off | first | 24.07 | 25.49 | +5.9 % | +0.00 % |
+| Q1, off | second | 23.95 | 23.99 | +0.2 % | +0.00 % |
 
 The control's first pair ran in the processor's unstable state, the
 end's readings 24.8 to 25.9 billion; its second pair is the control.
-Q21 took 3.58 s at the base and 2.55 s at the end. Its instructions do
+Q21 took 3.57 s at the base and 2.55 s at the end. Its instructions do
 not move while its cycles fall by 30 per cent; the query was not
 profiled to say which of its parts gave them.
 
