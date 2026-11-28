@@ -3926,6 +3926,158 @@ fn a_merge_that_cannot_be_done_fails() -> Result<()> {
     Ok(())
 }
 
+/// Groups of 65 and of 130 aggregates of every kind merge through the C
+/// API, each by its flag in its own word of flags, and a kind unknown past
+/// the 64th or a payload a word short of the aggregates is refused before
+/// any change.
+#[test]
+fn groups_of_more_than_64_aggregates_merge() -> Result<()> {
+    let values = [7_u64];
+    let isnull = [false];
+    let column = DatumColumn {
+        struct_size: size_of::<DatumColumn>(),
+        values: values.as_ptr(),
+        isnull: isnull.as_ptr(),
+        nrows: 1,
+        ..DatumColumn::EMPTY
+    };
+    let key = TableKey {
+        kind: 1,
+        column: &raw const column,
+        prepared: ptr::null(),
+    };
+    let hashes = [int32::murmurhash32(7)];
+    for n in [65_usize, 130] {
+        let words = n.div_ceil(64);
+        let payload_size = 8 * (words + n);
+        // Ours has a value where the aggregate is odd, theirs where it is
+        // not a multiple of 3: flags set and clear in each word.
+        let states_of = |has: &dyn Fn(usize) -> bool, base: i64| -> Vec<u8> {
+            let mut payload = vec![0_u64; words + n];
+            for index in 0..n {
+                if has(index) {
+                    payload[index / 64] |= 1 << (index % 64);
+                }
+                payload[words + index] = (base + index as i64) as u64;
+            }
+            payload.iter().flat_map(|word| word.to_ne_bytes()).collect()
+        };
+        let ours_has = |index: usize| index % 2 == 1;
+        let theirs_has = |index: usize| !index.is_multiple_of(3);
+        let kinds: Vec<u32> = (0..n).map(|index| (index % 4) as u32 + 1).collect();
+        let chunk_bytes = CHUNK_HEADER + 4 * (16 + payload_size);
+        // SAFETY: local buffers of the declared sizes, aliased by nothing
+        // else, throughout this test.
+        unsafe {
+            let mut table = CTable::new(payload_size, 16);
+            let mut pending_words = [1];
+            let mut pending = Mask {
+                nrows: 1,
+                bits: pending_words.as_mut_ptr(),
+            };
+            let mut offsets = [0];
+            let payload = states_of(&ours_has, 10);
+            table.insert(
+                chunk_bytes,
+                hashes.as_ptr(),
+                &raw const key,
+                payload.as_ptr(),
+                &raw mut pending,
+                offsets.as_mut_ptr(),
+                false,
+            );
+            table.add_chunk(chunk_bytes);
+            let source = table.chunks.len() as i32 - 1;
+            let mut pending_words = [1];
+            let mut pending = Mask {
+                nrows: 1,
+                bits: pending_words.as_mut_ptr(),
+            };
+            let mut source_offsets = [0];
+            let payload = states_of(&theirs_has, 1000);
+            let mut status = Status::new();
+            let code = tess_table_append(
+                table.ptr(),
+                source,
+                payload_size,
+                hashes.as_ptr(),
+                1,
+                &raw const key,
+                payload.as_ptr(),
+                &raw mut pending,
+                source_offsets.as_mut_ptr(),
+                &raw mut status,
+            );
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            table.add_chunk(chunk_bytes);
+            let into = table.chunks.len() as i32 - 1;
+            let merge = |naggregates: usize, kinds: &[u32], status: &mut Status| {
+                let (mut from, mut merged, mut stop) = (CHUNK_HEADER, -1, -1);
+                let code = tess_table_combine(
+                    table.ptr(),
+                    source,
+                    &raw mut from,
+                    into,
+                    naggregates as i32,
+                    kinds.as_ptr(),
+                    &raw mut merged,
+                    &raw mut stop,
+                    status,
+                );
+                (code, from, merged, stop)
+            };
+            // A kind unknown past the 64th, and one aggregate more than the
+            // payload holds: refused, nothing moved.
+            let mut unknown = kinds.clone();
+            unknown[64] = 5;
+            let longer: Vec<u32> = kinds.iter().copied().chain([1]).collect();
+            for (naggregates, kinds) in [(n, &unknown[..]), (n + 1, &longer[..])] {
+                let mut status = Status::new();
+                let result = merge(naggregates, kinds, &mut status);
+                assert_eq!(
+                    result,
+                    (Code::InvalidArgument, CHUNK_HEADER, -1, -1),
+                    "{naggregates} aggregates"
+                );
+            }
+            let mut status = Status::new();
+            let (code, _, merged, stop) = merge(n, &kinds, &mut status);
+            assert_eq!(
+                (code, merged, stop),
+                (Code::Ok, 1, 0),
+                "{}",
+                status.message()
+            );
+            let mut record = ptr::null_mut();
+            let code = payload_of(table.ptr(), offsets[0], &raw mut record, &raw mut status);
+            assert_eq!(code, Code::Ok, "{}", status.message());
+            let read = |slot: usize| {
+                let mut word = [0_u8; 8];
+                ptr::copy_nonoverlapping(record.add(8 * slot), word.as_mut_ptr(), 8);
+                u64::from_ne_bytes(word)
+            };
+            for (index, &kind) in kinds.iter().enumerate() {
+                let (ours, theirs) = (10 + index as i64, 1000 + index as i64);
+                let (fa, fb) = (ours_has(index), theirs_has(index));
+                let state = read(words + index) as i64;
+                let expected = match kind {
+                    1 => ours + theirs,
+                    _ if !fb => ours,
+                    _ if !fa => theirs,
+                    2 => ours + theirs,
+                    3 => ours.min(theirs),
+                    _ => ours.max(theirs),
+                };
+                assert_eq!(state, expected, "{n} aggregates, aggregate {index}");
+                let flag = read(index / 64) >> (index % 64) & 1 == 1;
+                let expected_flag = if kind == 1 { fa } else { fa || fb };
+                assert_eq!(flag, expected_flag, "{n} aggregates, the flag of {index}");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The filter's entry points as C calls them: the sizes, a filter filled
 /// from a table, by adding rows and by adding them atomically, a shared
 /// filter that one call builds and a second leaves, and the shapes each

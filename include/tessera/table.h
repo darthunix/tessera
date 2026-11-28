@@ -575,9 +575,11 @@ extern TessStatusCode tess_table_find_or_insert_partitioned(const TessTableRef *
 
 /*
  * How a group's aggregate state merges into the state of the same group
- * in another record. The payload is a word of flags, bit i set once
- * aggregate i has a value, then a word per aggregate, at most 64. The flag
- * of each aggregate but a count is set when the incoming record has one.
+ * in another record. The payload of n aggregates is w = max(1, (n + 63) /
+ * 64) words of flags, bit i % 64 of word i / 64 set once aggregate i has
+ * a value, then a word per aggregate, aggregate i at 8 * (w + i). The
+ * flag of each aggregate but a count is set when the incoming record has
+ * one.
  */
 typedef enum TessTableCombine
 {
@@ -607,8 +609,10 @@ typedef enum TessTableCombineStop
  * Merge the records of chunk `source` from byte *from on (at first
  * TESS_TABLE_CHUNK_HEADER), each the states of a group, a chunk a
  * grouping wrote to disk and read back, into the table: the record of the
- * same keys takes the states in as combines[i] says for aggregate i, and
- * a group the table lacks is copied whole to chunk `chunk` and linked.
+ * same keys takes the states in as combines[i] says for aggregate i, of
+ * any count naggregates whose words of flags and states fit the table's
+ * payload, and a group the table lacks is copied whole to chunk `chunk`
+ * and linked.
  * *from moves past the records merged, *merged receives their count and
  * *stop why the call stopped. The source is none of the linked chunks.
  */
