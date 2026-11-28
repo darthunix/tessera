@@ -233,7 +233,10 @@ query down, and where it can, does it speed one up.
   `work_mem` of 4 MB; `DISTINCT` with 37 groups; folded and unfolded
   aggregates together; and guards that fold nothing (`guard_*`): a form
   alone, `sum`, `avg` and `count` of a column alone, forms of double
-  precision and a parallel plan. A ratio below one is the win.
+  precision and a parallel plan; and 65 and 200 sums that no form folds
+  (`many_*`), without groups, in 37 groups and 65 in 100 000 groups past
+  `work_mem`, which only a node past 64 aggregates takes. A ratio below
+  one is the win.
 - **anyagg** (`anyagg.sql`): aggregates that `TessAgg` computes through
   the core's transition and final functions over the batches, or folds
   itself: without `GROUP BY`, `max` of text, `sum` and `avg` of int8,
