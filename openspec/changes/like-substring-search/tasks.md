@@ -6,7 +6,7 @@
 
 ## 2. The family and the tests
 
-- [ ] 2.1 `bench/pg/like.sql`, the family of the design's measurement
+- [x] 2.1 `bench/pg/like.sql`, the family of the design's measurement
       plan, over a table of its own, each case's plan read in
       `plans.txt`; `bench/pg/README.md` describes it. No code changes:
       this commit is the base of the count. Check: the family run once
