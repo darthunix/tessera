@@ -503,9 +503,8 @@ jobs:
 
   # Miri over the tests of the unsafe code (plan 9.6): every test of
   # relhash, the crate of the hash table, whose promise is that no call
-  # touches memory outside its blocks, and the C entry points' borrows in
-  # tessera-capi, those of the spill and of strings in the bytes form among
-  # them.
+  # touches memory outside its blocks, and those of the reader of Parquet
+  # files; the C entry points of tessera-capi in a job of their own below.
   # tessera-core forbids unsafe code and relspill has none. The
   # vector code of tessera-kernels is cut out under Miri, and the rest of
   # it denies unsafe code. A nightly pinned here, not in
@@ -532,20 +531,38 @@ jobs:
         run: |
           cargo miri test --locked -p relhash
           cargo miri test --locked -p relspill --test records
-          cargo miri test --locked -p tessera-capi --test columns --test table --test float \
-            --test spill --test join --test group --test runs --test build --test smallint \
-            --test date_bound --test text
-          # The spill's entry points write places C has not filled yet: no
-          # value may be read or borrowed there.
-          MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
-            cargo miri test --locked -p tessera-capi --test join --test group --test runs --test build \
-              --test spill
           # The entry points of the reader of Parquet files, over files its
           # tests write: outputs the caller has not initialized among them.
           MIRIFLAGS="$MIRIFLAGS -Zmiri-recursive-validation" \
             cargo miri test --locked -p tessera-parquet --lib c::tests
           # The reader's decoder of Snappy, against snap's.
           cargo miri test --locked -p tessera-parquet --lib snappy
+
+  # Miri over every test target of tessera-capi, the C entry points of
+  # the kernels, the table, the sorts and the spill, a job of its own for
+  # its time. Recursive validation fails a read or a borrow of a place
+  # that holds no value, such as a result C hands over unset, a variable
+  # on its stack. Left out: the tests of the benchmarks' machinery
+  # (benchmark.rs) and two cases that ignore Miri for their length.
+  miri-capi:
+    name: Miri, tessera-capi (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      RUSTUP_TOOLCHAIN: nightly-2026-09-11
+      PROPTEST_CASES: "16"
+      MIRIFLAGS: -Zmiri-disable-isolation -Zmiri-recursive-validation
+    steps:
+      - uses: actions/checkout@v4
+      - name: The pinned nightly with Miri
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component miri,rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: miri-capi
+      - name: Miri's standard library
+        run: cargo miri setup
+      - name: The tests of the C entry points
+        run: cargo miri test --locked -p tessera-capi --lib --tests
 
   # Miri over relspill's tests on a target whose bytes run from the most
   # significant: the packing narrows values by their low bytes, which lie

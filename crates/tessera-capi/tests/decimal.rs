@@ -34,9 +34,10 @@ impl Numerics {
         let mut words = Box::new([0_u64; 5]);
         // SAFETY: the words hold 40 bytes, more than any numeric here.
         unsafe { ptr::copy_nonoverlapping(bytes.as_ptr(), words.as_mut_ptr().cast(), bytes.len()) };
-        let datum = words.as_ptr() as u64;
+        // The Datum is taken once the box has moved into place: the move
+        // takes the box's words back from any pointer made before it.
         self.0.push(words);
-        datum
+        self.0.last().map_or(0, |words| words.as_ptr() as u64)
     }
 
     /// The numeric of a decimal with a 4-byte header.

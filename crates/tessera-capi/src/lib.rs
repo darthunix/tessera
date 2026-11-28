@@ -70,16 +70,18 @@
 //!
 //! # Checking uninitialized-buffer access
 //!
-//! The Miri job of CI (.github/workflows/ci.yml) runs the tests of the
+//! The Miri jobs of CI (.github/workflows/ci.yml) run the tests of the
 //! unsafe code under Miri on a pinned nightly, without changing the
-//! project's pinned compiler. Ordinary tests also cover NULLs, unprepared
-//! rows, and borrowing rules, but timing measurements do not establish
-//! memory safety. To run the same locally:
+//! project's pinned compiler: every test of this crate, but those of the
+//! benchmarks' machinery, with recursive validation. Ordinary tests also
+//! cover NULLs, unprepared rows, and borrowing rules, but timing
+//! measurements do not establish memory safety. To run the same locally:
 //!
 //! ```sh
-//! export PROPTEST_CASES=16 MIRIFLAGS=-Zmiri-disable-isolation
+//! export PROPTEST_CASES=16
+//! export MIRIFLAGS="-Zmiri-disable-isolation -Zmiri-recursive-validation"
 //! cargo +nightly miri test -p tessera-kernels --lib --locked table::
-//! cargo +nightly miri test -p tessera-capi --test columns --test table --test float --locked
+//! cargo +nightly miri test -p tessera-capi --lib --tests --locked
 //! ```
 
 pub mod c;
