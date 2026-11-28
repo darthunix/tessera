@@ -1667,6 +1667,12 @@ chunk, a worker attaches to its own, each stores its counters when the
 executor shuts the node down after the plan's last row, and the leader
 shows the totals.
 
+How the node folds aggregates of one expression under constants into
+states they share, and how many aggregates one node takes, are the
+capability [aggregate](../openspec/specs/aggregate/spec.md): its spec
+holds the promises, its [design](../openspec/specs/aggregate/design.md)
+how they are built.
+
 `EXPLAIN` shows the grouping expressions as the core's `Group Key`,
 `HAVING` as the core's `Filter` and `Partial Mode: Partial` under a
 `Gather`; with `VERBOSE`, `Folded Aggregates`, the aggregates it derives

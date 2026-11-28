@@ -314,10 +314,21 @@ the spec of `spill-format` says.
 ### Requirement: Merging groups read back
 `tess_table_combine` SHALL merge the records of chunk `source`, from
 byte `*from` on, into the table. Each record is a group: its keys, then
-a payload of a word of flags, bit `i` set once aggregate `i` has a
-value, and a word for each aggregate, at most 64 of them within the
-table's payload. The record of the same keys in the table SHALL take
-each state in as `combines[i]` says:
+a payload of `n` aggregates, as many as the call is given, within the
+table's payload:
+
+```
+ offset    size     field
+ 0         8 * w    the words of flags, w = max(1, (n + 63) / 64):
+                    the bit i % 64 of word i / 64 set once aggregate
+                    i has a value
+ 8 * w     8 * n    a word for each aggregate, aggregate i at
+                    8 * (w + i)
+```
+
+A payload of 64 aggregates or fewer thus holds one word of flags. The
+record of the same keys in the table SHALL take each state in as
+`combines[i]` says:
 
 - `TESS_TABLE_COMBINE_COUNT` (1): the two add, whatever the flags;
 - `TESS_TABLE_COMBINE_SUM` (2): the two add when both have a value; when
@@ -337,12 +348,13 @@ and linked. `*from` SHALL move past each record merged or copied, and
 `chunk` has no room, `*stop` being `TESS_TABLE_COMBINE_CHUNK_FULL` (1),
 or when the linked records reach half the buckets,
 `TESS_TABLE_COMBINE_INDEX_FULL` (2), and otherwise at the source's end,
-`TESS_TABLE_COMBINE_DONE` (0). More than 64 aggregates, a payload too
-small for them, an unknown kind of merge and a source that is `chunk`
-SHALL be refused before any change. A merge that fails after these
-checks leaves some states merged and some groups copied, and the caller
-uses the table no more. The source is not linked: the caller keeps it
-out of a regrow, which links every record of every chunk it is given.
+`TESS_TABLE_COMBINE_DONE` (0). A payload too small for its words of
+flags and its aggregates, an unknown kind of merge and a source that is
+`chunk` SHALL be refused before any change. A merge that fails after
+these checks leaves some states merged and some groups copied, and the
+caller uses the table no more. The source is not linked: the caller
+keeps it out of a regrow, which links every record of every chunk it is
+given.
 
 #### Scenario: The states of a group merge
 - **WHEN** groups of a count, a sum, a minimum and a maximum, with every
@@ -352,6 +364,16 @@ out of a regrow, which links every record of every chunk it is given.
 - **Verified by:**
   `crates/tessera-kernels/src/accumulate.rs::states_of_a_group_merge`;
   `test/sql/table.sql::tessera_test_table_combine`
+
+#### Scenario: Groups of more than 64 aggregates merge
+- **WHEN** groups of 65 and of 130 aggregates of every kind, with flags
+  set and clear in each word of flags, are merged into a table that
+  holds some of them
+- **THEN** each state is as the rules give, by its flag in its own word,
+  and the groups the table lacked are copied and found
+- **Verified by:**
+  `crates/tessera-kernels/src/accumulate.rs::groups_of_more_than_64_aggregates_merge`;
+  `crates/tessera-capi/tests/table.rs::groups_of_more_than_64_aggregates_merge`
 
 #### Scenario: A merge stops for a chunk or a larger index
 - **WHEN** the new groups of a source need more room than `chunk` has,
@@ -363,14 +385,15 @@ out of a regrow, which links every record of every chunk it is given.
   `crates/relhash/src/table/tests.rs::a_merge_stops_for_a_chunk_or_a_larger_index`
 
 #### Scenario: A merge that cannot be done fails
-- **WHEN** a count or a sum would pass the int8 range, or a merge has 65
-  aggregates, a payload too small, an unknown kind or a source that is
-  `chunk`
+- **WHEN** a count or a sum would pass the int8 range, or a merge has a
+  payload too small for its words of flags and its aggregates, an
+  unknown kind or a source that is `chunk`
 - **THEN** the first fails with status
   `TESS_ERROR_INTEGER_OUT_OF_RANGE` and SQLSTATE `22003`, the others
   with `TESS_ERROR_INVALID_ARGUMENT` before any change
 - **Verified by:**
   `crates/tessera-kernels/src/accumulate.rs::a_merged_count_past_the_int8_range_fails`;
+  `crates/tessera-kernels/src/accumulate.rs::a_payload_short_of_its_states_is_refused`;
   `crates/tessera-capi/tests/table.rs::a_merge_that_cannot_be_done_fails`
 
 ### Requirement: The C API over the spill of the crate
@@ -462,4 +485,3 @@ mark.
 - **Verified by:**
   `test/sql/join.sql::A partition on disk chosen again`;
   `test/sql/join.sql::A shared table's partition on disk chosen again`
-

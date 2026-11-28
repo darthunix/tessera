@@ -66,31 +66,30 @@ The same day, after profiles of ClickBench's queries furthest behind
 pg_duckdb, he placed five entries after it in this order:
 `parquet-page-headers` (done), `agg-date-min-max` (done),
 `parquet-batch-arrays` (done), `parquet-integer-columns` (done),
-`agg-sum-plus-constant`:
+`agg-sum-plus-constant` (done):
 
-1. `agg-sum-plus-constant`: A sum of a column and a constant, folded
-2. `whole-word-decisions`: When and where a driver takes a word whole,
+1. `whole-word-decisions`: When and where a driver takes a word whole,
    on both machines
-3. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
+2. `relhash-prefetch-by-size`: The prefetch hint of `relhash` by the
    size of the table
-4. `explain-rows-per-loop`: The rows a node removed, per loop as the
+3. `explain-rows-per-loop`: The rows a node removed, per loop as the
    core shows them
-5. `join-pruning-cost`: The cost of a pruning join over the partitions
+4. `join-pruning-cost`: The cost of a pruning join over the partitions
    left
-6. `bench-in-four-cells`: `tessera-bench` in the four cells of the
+5. `bench-in-four-cells`: `tessera-bench` in the four cells of the
    counters
-7. `linux-x86-support`: Linux on x86-64 checked as the target platform
-8. `oltp-guard-bench`: OLTP guard family of benchmarks
-9. `runs-left-from-section-9`: Runs left to the maintainer from
+6. `linux-x86-support`: Linux on x86-64 checked as the target platform
+7. `oltp-guard-bench`: OLTP guard family of benchmarks
+8. `runs-left-from-section-9`: Runs left to the maintainer from
    section 9
-10. `tpch-short-set`: TPC-H step 7: the short query set for A/B
-11. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
+9. `tpch-short-set`: TPC-H step 7: the short query set for A/B
+10. `tpch-parallel-and-jit`: TPC-H step 8: parallel series and the
     `jit = on` control run
-12. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
+11. `tpch-indexed-schema`: TPC-H step 9: schema with indexes on foreign
     keys and dates
-13. `tpch-sf10`: TPC-H step 10: SF10
-14. `backward-scan-mark-restore`: Backward scan and mark/restore
-15. `pg-duckdb-comparison`: Comparison with pg_duckdb
+12. `tpch-sf10`: TPC-H step 10: SF10
+13. `backward-scan-mark-restore`: Backward scan and mark/restore
+14. `pg-duckdb-comparison`: Comparison with pg_duckdb
 
 ## By measurement
 
@@ -166,6 +165,10 @@ is wanted; several wait for a measured case. `greengage-port` and
   to disk, and its partial form for parallel plans
 - `agg-wide-record-spill`: The spill of wide records of cold groups by
   the input's columns
+- `agg-fold-more-forms`: Aggregates folded over dates and times,
+  `numeric` without a precision and parameters of a generic plan
+- `agg-fold-parallel`: Aggregates folded in the partial and final
+  stages of a parallel plan
 - `merge-append`: Batch MergeAppend
 - `one-sum-state-shape`: "One sum state" record form
 - `hot-code-alignment`: Alignment of hot code
@@ -313,27 +316,6 @@ forecast of `datum-arrow`'s contract.
 - **Depends on:** none.
 - **Capabilities:** datum-arrow
 - **Size:** small.
-
-### agg-sum-plus-constant
-
-A sum of a column and a constant, folded. From the count of ClickBench
-at the end of `parquet-string-views`, 2026-11-24.
-
-- **What:** `sum(x + c)`, with `c` a constant, is `sum(x) + c *
-  count(x)` for the exact types. Fold the sums of one column and of
-  constants into one sum and one count, where the folded form fails as
-  the sums would: an overflow of `x + c` in a row, which the range of
-  `x`'s type rules out for a `smallint` and a small constant.
-- **Why:** ClickBench's Q30 sums `ResolutionWidth + k` for `k` from 0
-  to 89. It runs in 137 times pg_duckdb's cycles, 139 billion, 16 per
-  cent of Tessera's cycles over the 39 queries counted; DuckDB folds
-  the sums.
-- **Known:** With 90 aggregates Q30 runs in the core's aggregate, past
-  TessAgg's cap of 64 (the finding of "Not placed"); folded, its sums
-  fit TessAgg. Floating-point sums are not exact and stay as they are.
-- **Depends on:** nothing.
-- **Capabilities:** aggregate
-- **Size:** medium.
 
 ### parquet-pages-cost
 
@@ -1008,6 +990,52 @@ Spill of sum states instead of rows. From plan 4.23 item 4б, lines 1574,
   `tpch-indexed-schema`, `tpch-sf10`) for the measurement.
 - **Capabilities:** aggregate, spill-format, hash-table
 - **Size:** the log does not say.
+
+### agg-fold-more-forms
+
+Aggregates of one expression folded where the change
+`agg-folded-arguments` left them apart: what its design names as not
+done.
+
+- **What:** `TessAgg` folds `sum`, `avg`, `count`, `min` and `max` of
+  forms `a·e + b` of an integer or of a `numeric` column of a declared
+  precision into states of `e` they share. Three kinds of argument stay
+  apart: dates and times under an interval or a number of days;
+  `numeric` without a precision; and forms whose constant is a
+  parameter of a generic plan or a stable function.
+- **Why:** each keeps an argument and a state of its own an aggregate,
+  where the fold keeps one of the expression.
+- **Known:** `timestamp` plus a month clamps the day and keeps the time,
+  so its order is not `e`'s; `timestamptz` plus a day goes through the
+  local time; an infinite date stays infinite where the last finite one
+  fails, so the extremes of `e` do not tell whether a row fails.
+  `numeric` without a precision can pass the format's range in a sum
+  where the forms' sums would not, two rows of `6e131071` minus that
+  constant. A parameter's value, sign or `NULL` is known only when the
+  query runs, so a form would be chosen at the node's start. No query
+  of ClickBench or TPC-H needs them.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate
+- **Size:** a change for each kind, by a measured case.
+
+### agg-fold-parallel
+
+Aggregates folded in the partial and final stages of a parallel plan.
+
+- **What:** a partial `TessAgg` and its final one fold nothing today:
+  their partial states of `bigint` and `numeric` are the core's
+  serialized ones or the node's own. Build the partial states of the
+  states a fold shares, and derive the outputs in the final stage.
+- **Why:** a parallel plan of many aggregates of one expression
+  computes each argument and keeps each state in every worker; a serial
+  plan that folds took 0.34 of the time of such a parallel one in the
+  family `aggfold`, so the planner now prefers it.
+- **Known:** the final stage's input is the partial states the workers
+  send up, one row a group; the check of errors needs the extremes of
+  every worker.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate
+- **Size:** a change.
 
 ### agg-wide-record-spill
 
@@ -2694,12 +2722,6 @@ becomes an entry, joins one, or is dropped.
   one exception, the boundary between the module and Tessera's own
   crates. Suggested: move `Like` with its search into a crate meant for
   use outside Tessera that both take, and drop the exception.
-- **`TessAgg` refuses more than 64 aggregates** (a finding of the change
-  `parquet-fdw`, its stage 2 measured). `AGG_MAX_GROUPED` caps a node's
-  aggregates at 64; ClickBench's Q30 has 90 sums and runs in the core's
-  aggregate, 704 billion instructions over `hits.parquet`, 143 times
-  DuckDB's time serially. Suggested: lift the cap, or split the
-  aggregates into nodes of 64 over one input.
 - **The workers of a Parquet scan bounded by its groups** (a finding of
   the review of the change `parquet-fdw`, task 4.3). A partial path
   takes the workers the core gives a scan of the files' size, as the

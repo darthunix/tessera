@@ -1,12 +1,13 @@
-## Purpose
+# aggregate Specification
 
+## Purpose
 The aggregates the batch grouping `TessAgg` folds into states shared
 with other aggregates, the errors of their arguments, what `EXPLAIN`
 shows of them, the arguments it does not fold, and the count of
 aggregates one node takes. The node's other promises stay described in
 `docs/nodes.md` until this capability holds them.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Aggregates folded from shared states
 A folded form SHALL be an expression `e` of the input under these
