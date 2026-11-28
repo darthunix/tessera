@@ -240,7 +240,7 @@ named in the harness and covered by a property test.
       pending check of the contract its check. Check: `openspec
       validate text-keys-by-bytes --strict`;
       `.github/scripts/check-specs.sh`
-- [ ] 7.2 `openspec/specs/string-bytes/design.md`, written for a reader
+- [x] 7.2 `openspec/specs/string-bytes/design.md`, written for a reader
       who knows nothing of the part; `## Files` and `## Tests` last;
       the contract moved beside the spec. Check:
       `.github/scripts/check-specs.sh`
