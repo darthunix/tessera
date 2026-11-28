@@ -330,7 +330,10 @@ first stage's end.
     `parallel_setup_cost` and `parallel_tuple_cost` of 0.
   Each folded case has a twin over the same input that keeps the same
   states and derives nothing, `sum(x), count(x)` for sums of `x + k`,
-  and its plan's states are read in `plans.txt`.
+  and its plan's states are read in `plans.txt`. The twin of the ten
+  numeric sums of a million groups computes the same ten values from
+  the same states above the aggregates, `sum(n) + k * count(n)`, as
+  their reading adds ten numerics a group.
 - ClickBench over `hits.parquet`, `cargo clickbench run --mode on
   --counters --tries 5 --workers 0`, one query a run, the base and the
   end in turns, twice, pg_duckdb's cycles beside: Q30, whose run at the

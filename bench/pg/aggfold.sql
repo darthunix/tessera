@@ -105,7 +105,11 @@ SELECT pg_temp.measure_pair('twin_ten_int4_k37', 'SELECT count(*), sum(t) FROM (
 SELECT pg_temp.measure_pair('fold_ten_int4_m1m', format('SELECT count(*), sum(t) FROM (SELECT m, %s AS t FROM bench_fold GROUP BY 1) AS g', pg_temp.ten_read('i * 2 + K')), :repetitions);
 SELECT pg_temp.measure_pair('twin_ten_int4_m1m', 'SELECT count(*), sum(t) FROM (SELECT m, sum(i) + count(i) + min(i) + max(i) AS t FROM bench_fold GROUP BY 1) AS g', :repetitions);
 SELECT pg_temp.measure_pair('fold_ten_numeric_m1m', format('SELECT count(*), sum(t) FROM (SELECT m, %s AS t FROM bench_fold GROUP BY 1) AS g', pg_temp.ten_read('n + K')), :repetitions);
-SELECT pg_temp.measure_pair('twin_ten_numeric_m1m', 'SELECT count(*), sum(t) FROM (SELECT m, avg(n) + count(n) AS t FROM bench_fold GROUP BY 1) AS g', :repetitions);
+-- The twin of numerics computes the same ten values from the same states
+-- above the aggregates, sum(n) + k * count(n), as the case's reading adds
+-- ten numerics a group: what differs is who derives them, the fold or the
+-- core's executor.
+SELECT pg_temp.measure_pair('twin_ten_numeric_m1m', format('SELECT count(*), sum(t) FROM (SELECT m, %s AS t FROM bench_fold GROUP BY 1) AS g', (SELECT string_agg(format('(sum(n) + %s * count(n))', k), ' + ' ORDER BY k) FROM generate_series(0, 9) AS k)), :repetitions);
 -- DISTINCT, with 37 groups.
 SELECT pg_temp.measure_pair('fold_distinct_int4_k37', 'SELECT count(*), sum(a + b + c) FROM (SELECT k, count(DISTINCT i + 1) AS a, sum(DISTINCT i * 2) AS b, avg(DISTINCT 10 - i) AS c FROM bench_fold GROUP BY 1) AS g', :repetitions);
 SELECT pg_temp.measure_pair('twin_distinct_int4_k37', 'SELECT count(*), sum(a) FROM (SELECT k, avg(DISTINCT i) AS a FROM bench_fold GROUP BY 1) AS g', :repetitions);
