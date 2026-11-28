@@ -366,10 +366,15 @@ the grouping returns them.
 
 To merge, the grouping must know which states hold a value. A sum of no
 rows is NULL, not 0, and so is a minimum. So a grouping that spills
-keeps a word of flags at the start of its payload, a bit for each
-aggregate, then a word for each aggregate. A count always has a value,
-and its flag is not used. An example with a count, a sum and a maximum,
-whose flags are bits 1 and 2:
+keeps words of flags at the start of its payload, a bit for each
+aggregate, then a word for each aggregate. A word of flags holds 64
+aggregates, and a payload of `n` aggregates keeps `max(1, (n + 63) /
+64)` of them: the flag of aggregate `i` is bit `i % 64` of word `i /
+64`. A payload of 64 aggregates or fewer thus keeps one word, and the
+merge finds each flag in its word, so it takes any count of aggregates
+that fits the payload. A count always has a value, and its flag is not
+used. An example with a count, a sum and a maximum, whose flags are
+bits 1 and 2:
 
 ```
               table's record   read back        after the merge

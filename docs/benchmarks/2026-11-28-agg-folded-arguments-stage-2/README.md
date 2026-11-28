@@ -17,6 +17,10 @@ whose plans differ.
   takes the family from the branch for both, so the base runs the new
   cases too; ClickBench's base is a worktree at `a71b632a`, its end the
   branch's worktree, both built clean for the server below.
+- **The commits' ids** are those of the branch when it was counted. A
+  merge by rebase gives the same trees other ids in `main`: the end is
+  the commit "agg-folded-arguments: the cases of more than 64
+  aggregates".
 - **PostgreSQL** 19rc2, release, without LLVM, with pg_pmu: the
   binaries of the first stage's count, by their hashes in the sources
   ([source-base.txt](source-base.txt),
