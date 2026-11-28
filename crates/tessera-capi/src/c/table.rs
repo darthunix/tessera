@@ -1395,26 +1395,24 @@ pub unsafe extern "C" fn tess_table_combine(
             let source = usize::try_from(source).context("a negative chunk")?;
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let count = usize::try_from(naggregates).context("a negative aggregate count")?;
-            ensure!(
-                count <= 64,
-                "{count} aggregates are more than a word of flags holds"
-            );
-            let codes = values(combines, count, "combines")?;
-            let mut decoded = [Combine::Count; 64];
-            for (slot, &code) in decoded.iter_mut().zip(codes) {
-                *slot = match code {
-                    1 => Combine::Count,
-                    2 => Combine::Sum,
-                    3 => Combine::Min,
-                    4 => Combine::Max,
-                    _ => bail!("unknown combine {code}"),
-                };
-            }
+            // Any count of aggregates: the kernel checks them against the payload.
+            let decoded = values(combines, count, "combines")?
+                .iter()
+                .map(|&code| {
+                    Ok(match code {
+                        1 => Combine::Count,
+                        2 => Combine::Sum,
+                        3 => Combine::Min,
+                        4 => Combine::Max,
+                        _ => bail!("unknown combine {code}"),
+                    })
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
             let from = from.as_mut().context("a null from")?;
             let merged = merged.as_mut().context("a null merged count")?;
             let stop = stop.as_mut().context("a null stop")?;
             let (count_merged, stopped) =
-                accumulate::combine(&mut table, source, from, chunk, &decoded[..count])?;
+                accumulate::combine(&mut table, source, from, chunk, &decoded)?;
             *merged = count_merged as c_int;
             *stop = match stopped {
                 MergeStop::Done => 0,

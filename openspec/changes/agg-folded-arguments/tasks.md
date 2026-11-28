@@ -76,7 +76,7 @@ injection points; CI runs 19 and 18.
 
 ## 4. The words of flags
 
-- [ ] 4.1 `crates/tessera-kernels/src/accumulate.rs`,
+- [x] 4.1 `crates/tessera-kernels/src/accumulate.rs`,
       `crates/tessera-capi/src/c/table.rs`, `include/tessera/table.h`:
       `tess_table_combine` over `max(1, (n + 63) / 64)` words of flags,
       its check of the payload's size in place of the count, its decoded

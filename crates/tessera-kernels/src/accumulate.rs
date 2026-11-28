@@ -585,8 +585,9 @@ pub fn extremes<T: Terms>(
 }
 
 /// How an aggregate's state of a record merges into the state of the same
-/// group in another: the payload holds a word of flags, bit `i` set once
-/// aggregate `i` has a value, then a word per aggregate.
+/// group in another: the payload holds the words of flags, one for each 64
+/// aggregates and one for none ([`flag_words`]), bit `i % 64` of word
+/// `i / 64` set once aggregate `i` has a value, then a word per aggregate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Combine {
     /// A count: the two add, an overflow failing as the transition would.
@@ -599,12 +600,19 @@ pub enum Combine {
     Max,
 }
 
+/// The words of flags of a payload of `aggregates` states: one for each
+/// 64, and one for none.
+pub fn flag_words(aggregates: usize) -> usize {
+    aggregates.div_ceil(64).max(1)
+}
+
 /// Merge the records of chunk `source` from byte `*from` on, each the
-/// states of a group after a word of flags, into the table by
-/// [`TableMut::merge`]: the record of the same keys takes the states in,
-/// each as `combines` says, and a group the table lacks is copied whole
-/// to chunk `chunk`. A count that overflows an `i64` fails, as the
-/// transition would.
+/// states of a group after its words of flags ([`flag_words`]), into the
+/// table by [`TableMut::merge`]: the record of the same keys takes the
+/// states in, each as `combines` says, and a group the table lacks is
+/// copied whole to chunk `chunk`. A count that overflows an `i64` fails,
+/// as the transition would; a payload smaller than the words of flags and
+/// a word a state is refused before any change.
 pub fn combine(
     table: &mut TableMut<'_>,
     source: usize,
@@ -622,38 +630,46 @@ fn combine_inner(
     chunk: usize,
     combines: &[Combine],
 ) -> Result<(usize, MergeStop)> {
+    let words = flag_words(combines.len());
     ensure!(
-        combines.len() <= 64 && 8 * (1 + combines.len()) <= table.payload_size(),
-        "{} aggregates do not fit a payload of {} bytes with a word of flags",
+        combines
+            .len()
+            .checked_add(words)
+            .and_then(|slots| slots.checked_mul(8))
+            .is_some_and(|bytes| bytes <= table.payload_size()),
+        "{} aggregates do not fit a payload of {} bytes with {words} words of flags",
         combines.len(),
         table.payload_size()
     );
     table.merge(source, from, chunk, |incoming, payload| {
-        let theirs_flags = read_word(incoming, 0);
-        let mut flags = read_word(payload, 0);
-        for (index, &how) in combines.iter().enumerate() {
-            let at = 8 * (1 + index);
-            let flag = 1u64 << index;
-            let theirs = read_word(incoming, at) as i64;
-            let ours = read_word(payload, at) as i64;
-            let next = match how {
-                Combine::Count => ours
-                    .checked_add(theirs)
-                    .ok_or(ArithmeticError::BigintOutOfRange)?,
-                _ if theirs_flags & flag == 0 => continue,
-                _ if flags & flag == 0 => theirs,
-                Combine::Sum => ours
-                    .checked_add(theirs)
-                    .ok_or(ArithmeticError::BigintOutOfRange)?,
-                Combine::Min => ours.min(theirs),
-                Combine::Max => ours.max(theirs),
-            };
-            if how != Combine::Count {
-                flags |= flag;
+        // Each 64 aggregates by their word of flags, the states after all the words.
+        for (word, group) in combines.chunks(64).enumerate() {
+            let theirs_flags = read_word(incoming, 8 * word);
+            let mut flags = read_word(payload, 8 * word);
+            for (bit, &how) in group.iter().enumerate() {
+                let at = 8 * (words + 64 * word + bit);
+                let flag = 1u64 << bit;
+                let theirs = read_word(incoming, at) as i64;
+                let ours = read_word(payload, at) as i64;
+                let next = match how {
+                    Combine::Count => ours
+                        .checked_add(theirs)
+                        .ok_or(ArithmeticError::BigintOutOfRange)?,
+                    _ if theirs_flags & flag == 0 => continue,
+                    _ if flags & flag == 0 => theirs,
+                    Combine::Sum => ours
+                        .checked_add(theirs)
+                        .ok_or(ArithmeticError::BigintOutOfRange)?,
+                    Combine::Min => ours.min(theirs),
+                    Combine::Max => ours.max(theirs),
+                };
+                if how != Combine::Count {
+                    flags |= flag;
+                }
+                write_word(payload, at, next as u64);
             }
-            write_word(payload, at, next as u64);
+            write_word(payload, 8 * word, flags);
         }
-        write_word(payload, 0, flags);
         Ok(())
     })
 }
@@ -678,17 +694,20 @@ mod tests {
         (hashes, words)
     }
 
-    /// A table of the keys, each with the states `of` gives it.
-    fn grouped(
+    /// A table of the keys, each with the payload's words `of` gives it,
+    /// `words` words a payload.
+    fn grouped<S: AsRef<[i64]>>(
         keys: &[i32],
-        of: impl Fn(i32) -> [i64; 5],
+        words: usize,
+        of: impl Fn(i32) -> S,
         capacity: u64,
     ) -> (OwnedTable, Vec<u32>) {
         let config = TableConfig {
             nkeys: 1,
-            payload_size: 40,
+            payload_size: 8 * words,
         };
-        let mut table = OwnedTable::new(&config, capacity, CHUNK_HEADER + 16 * 56).unwrap();
+        let mut table =
+            OwnedTable::new(&config, capacity, CHUNK_HEADER + 16 * (16 + 8 * words)).unwrap();
         let column = [ColumnView::try_new(keys, None).unwrap()];
         let (hashes, rows) = key_batch(keys);
         let mut inserted_words = vec![0; rows.len()];
@@ -705,23 +724,24 @@ mod tests {
         for (row, &key) in keys.iter().enumerate() {
             let mut writer = table.table_mut().unwrap();
             let payload = writer.payload_mut(offsets[row]).unwrap();
-            for (index, word) in of(key).iter().enumerate() {
+            for (index, word) in of(key).as_ref().iter().enumerate() {
                 payload[8 * index..8 * index + 8].copy_from_slice(&word.to_ne_bytes());
             }
         }
         (table, offsets)
     }
 
-    /// The states of a group: flags, count, sum, min, max.
-    fn states(table: &OwnedTable, offset: u32) -> [i64; 5] {
+    /// The payload's words of a group.
+    fn states(table: &OwnedTable, offset: u32) -> Vec<i64> {
         let reader = table.table().unwrap();
         let record = reader.record(offset).unwrap();
-        let mut out = [0; 5];
-        for (index, word) in out.iter_mut().enumerate() {
-            *word =
-                i64::from_ne_bytes(record.payload[8 * index..8 * index + 8].try_into().unwrap());
-        }
-        out
+        record
+            .payload
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|&word| i64::from_ne_bytes(word))
+            .collect()
     }
 
     const COMBINES: [Combine; 4] = [Combine::Count, Combine::Sum, Combine::Min, Combine::Max];
@@ -730,14 +750,19 @@ mod tests {
     /// `into`: their records go to chunks of their own in `into`, unlinked,
     /// as the chunks of a table on disk come back, and the kernel merges
     /// those chunks, adding chunks and growing the index as it asks.
-    fn merge(into: &mut OwnedTable, keys: &[i32], of: impl Fn(i32) -> [i64; 5]) -> Result<()> {
+    fn merge<S: AsRef<[i64]>>(
+        into: &mut OwnedTable,
+        keys: &[i32],
+        of: impl Fn(i32) -> S,
+        combines: &[Combine],
+    ) -> Result<()> {
         let column = [ColumnView::try_new(keys, None)?];
         let columns = KeyColumns(&column);
         let (hashes, mut pending_words) = key_batch(keys);
         let mut refs = vec![0; keys.len()];
         let payload: Vec<u8> = keys
             .iter()
-            .flat_map(|&key| of(key))
+            .flat_map(|&key| of(key).as_ref().to_vec())
             .flat_map(i64::to_ne_bytes)
             .collect();
         let mut batch = Batch::new(&hashes, &columns, &mut pending_words, &mut refs)?;
@@ -752,7 +777,7 @@ mod tests {
         for source in sources {
             let mut at = CHUNK_HEADER;
             loop {
-                let (_, stop) = combine(&mut into.table_mut()?, source, &mut at, chunk, &COMBINES)?;
+                let (_, stop) = combine(&mut into.table_mut()?, source, &mut at, chunk, combines)?;
                 match stop {
                     MergeStop::Done => break,
                     MergeStop::ChunkFull => chunk = into.add_chunk()?,
@@ -780,8 +805,8 @@ mod tests {
             let flags = if key % 3 == 0 { 0 } else { 0b1110 };
             [flags, 1, key, key - 100, key + 100]
         };
-        let (mut into, _) = grouped(&(0..50).collect::<Vec<_>>(), ours, 64);
-        merge(&mut into, &(25..100).collect::<Vec<_>>(), theirs).unwrap();
+        let (mut into, _) = grouped(&(0..50).collect::<Vec<_>>(), 5, ours, 64);
+        merge(&mut into, &(25..100).collect::<Vec<_>>(), theirs, &COMBINES).unwrap();
         let keys: Vec<i32> = (0..100).collect();
         let column = [ColumnView::try_new(&keys, None).unwrap()];
         let (hashes, rows) = key_batch(&keys);
@@ -818,16 +843,140 @@ mod tests {
                     merged
                 }
             };
-            assert_eq!(states(&into, offsets[key as usize]), expected, "key {key}");
+            assert_eq!(
+                states(&into, offsets[key as usize]),
+                expected.to_vec(),
+                "key {key}"
+            );
+        }
+    }
+
+    /// The states of a group of `n` aggregates of every kind in turn, its
+    /// words of flags first: `flagged` says which aggregates have a value.
+    fn wide_group(key: i32, n: usize, flagged: impl Fn(usize) -> bool) -> Vec<i64> {
+        let words = flag_words(n);
+        let mut payload = vec![0; words + n];
+        for index in 0..n {
+            if flagged(index) {
+                payload[index / 64] |= 1 << (index % 64);
+            }
+            payload[words + index] = i64::from(key) * 1000 + index as i64;
+        }
+        payload
+    }
+
+    /// Every kind in turn, aggregate `i` the kind `i % 4`.
+    fn kinds(n: usize) -> Vec<Combine> {
+        (0..n).map(|index| COMBINES[index % 4]).collect()
+    }
+
+    #[test]
+    fn groups_of_more_than_64_aggregates_merge() {
+        for n in [0, 63, 64, 65, 127, 128, 130] {
+            let words = flag_words(n);
+            let combines = kinds(n);
+            // Flags set and clear in each word, by the key and the aggregate.
+            let ours_flag = |key: i32, index: usize| !(key as usize + index).is_multiple_of(3);
+            let theirs_flag =
+                |key: i32, index: usize| !(key as usize * 7 + index).is_multiple_of(5);
+            let ours = |key: i32| wide_group(key, n, |index| ours_flag(key, index));
+            let theirs = |key: i32| {
+                let mut payload = wide_group(key, n, |index| theirs_flag(key, index));
+                for value in &mut payload[words..] {
+                    *value += 7;
+                }
+                payload
+            };
+            let (mut into, _) = grouped(&(0..20).collect::<Vec<_>>(), words + n, ours, 64);
+            merge(&mut into, &(10..30).collect::<Vec<_>>(), theirs, &combines).unwrap();
+            let keys: Vec<i32> = (0..30).collect();
+            let column = [ColumnView::try_new(&keys, None).unwrap()];
+            let (hashes, rows) = key_batch(&keys);
+            let mut inserted_words = vec![0; rows.len()];
+            let mut offsets = vec![0; keys.len()];
+            into.find_or_insert(
+                &hashes,
+                &KeyColumns(&column),
+                RowMaskView::try_new(keys.len(), &rows).unwrap(),
+                &mut offsets,
+                &mut RowMask::try_new(keys.len(), &mut inserted_words).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                inserted_words.iter().all(|&word| word == 0),
+                "{n}: a group was lost"
+            );
+            for &key in &keys {
+                let (a, b) = (ours(key), theirs(key));
+                let expected = match (key < 20, key >= 10) {
+                    (true, false) => a,
+                    (false, true) => b,
+                    _ => {
+                        let mut merged = a.clone();
+                        for (index, &how) in combines.iter().enumerate() {
+                            let (word, flag) = (index / 64, 1i64 << (index % 64));
+                            let (fa, fb) = (a[word] & flag != 0, b[word] & flag != 0);
+                            let (x, y) = (a[words + index], b[words + index]);
+                            merged[words + index] = match how {
+                                Combine::Count => x + y,
+                                _ if !fb => x,
+                                _ if !fa => y,
+                                Combine::Sum => x + y,
+                                Combine::Min => x.min(y),
+                                Combine::Max => x.max(y),
+                            };
+                            if how != Combine::Count && fb {
+                                merged[word] |= flag;
+                            }
+                        }
+                        merged
+                    }
+                };
+                assert_eq!(
+                    states(&into, offsets[key as usize]),
+                    expected,
+                    "{n} aggregates, key {key}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_payload_short_of_its_states_is_refused() {
+        for n in [1, 63, 64, 65, 128, 130] {
+            let words = flag_words(n);
+            let combines = kinds(n);
+            // Exact: merged; a word short: refused, the table unchanged.
+            for (payload, fits) in [(words + n, true), (words + n - 1, false)] {
+                let (mut table, offsets) = grouped(&[7], payload, |_| vec![0; payload], 64);
+                let before = states(&table, offsets[0]);
+                let source = table.add_chunk().unwrap();
+                let chunk = table.chunks() - 2;
+                let mut at = CHUNK_HEADER;
+                let result = combine(
+                    &mut table.table_mut().unwrap(),
+                    source,
+                    &mut at,
+                    chunk,
+                    &combines,
+                );
+                assert_eq!(result.is_ok(), fits, "{n} aggregates in {payload} words");
+                if !fits {
+                    let error = result.unwrap_err().to_string();
+                    assert!(error.contains("do not fit a payload"), "{error}");
+                    assert_eq!(at, CHUNK_HEADER);
+                    assert_eq!(states(&table, offsets[0]), before);
+                }
+            }
         }
     }
 
     #[test]
     fn a_merged_count_past_the_int8_range_fails() {
-        let (mut into, _) = grouped(&[7], |_| [0, i64::MAX, 0, 0, 0], 64);
-        let error = merge(&mut into, &[7], |_| [0, 1, 0, 0, 0]).unwrap_err();
+        let (mut into, _) = grouped(&[7], 5, |_| [0, i64::MAX, 0, 0, 0], 64);
+        let error = merge(&mut into, &[7], |_| [0, 1, 0, 0, 0], &COMBINES).unwrap_err();
         assert!(error.to_string().contains("bigint out of range"), "{error}");
-        let (mut table, _) = grouped(&[7], |_| [0; 5], 64);
+        let (mut table, _) = grouped(&[7], 5, |_| [0; 5], 64);
         let chunk = table.chunks() - 1;
         let mut at = CHUNK_HEADER;
         let error = combine(

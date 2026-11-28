@@ -60,7 +60,9 @@ given.
   holds some of them
 - **THEN** each state is as the rules give, by its flag in its own word,
   and the groups the table lacked are copied and found
-- **Verified by:** pending
+- **Verified by:**
+  `crates/tessera-kernels/src/accumulate.rs::groups_of_more_than_64_aggregates_merge`;
+  `crates/tessera-capi/tests/table.rs::groups_of_more_than_64_aggregates_merge`
 
 #### Scenario: A merge stops for a chunk or a larger index
 - **WHEN** the new groups of a source need more room than `chunk` has,
@@ -80,4 +82,5 @@ given.
   with `TESS_ERROR_INVALID_ARGUMENT` before any change
 - **Verified by:**
   `crates/tessera-kernels/src/accumulate.rs::a_merged_count_past_the_int8_range_fails`;
+  `crates/tessera-kernels/src/accumulate.rs::a_payload_short_of_its_states_is_refused`;
   `crates/tessera-capi/tests/table.rs::a_merge_that_cannot_be_done_fails`
