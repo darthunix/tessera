@@ -151,8 +151,11 @@ and `NaN` passes through each step as through the core's. A form of
 The planner groups the aggregates of the scan tuple by `e`, `FILTER`
 and `DISTINCT`, before it checks the count of states, estimates the
 pairs of DISTINCT and prices the path. A group of at least two
-aggregates it can fold, one of them of a form other than `e` itself, is
-folded; any other aggregate keeps its own state. A folded group keeps:
+aggregates it can fold, one of them of a form other than `e` itself,
+that would share no more states than it has aggregates, is folded:
+`sum(x + 1), max(x)` would keep three, `sum(x)`, `count(x)` and
+`max(x)`, and keeps its two. Any other aggregate keeps its own state. A
+folded group keeps:
 
 - for a `smallint` or an `integer` `e`, `sum(e)` and `count(e)`, words of
   the group's record: below 2^32 rows the 64-bit sum of `e` holds every

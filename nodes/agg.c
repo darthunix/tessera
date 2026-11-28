@@ -216,6 +216,15 @@ init_checks(TessAggState *state, EState *estate, List *arguments, List *checks,
 	}
 }
 
+/* A derivation's constant's scale: 0 of an int8, a numeric's own. */
+static int
+constant_scale(const Const *constant)
+{
+	if (constant->consttype != NUMERICOID)
+		return 0;
+	return DatumGetInt32(DirectFunctionCall1(numeric_scale, constant->constvalue));
+}
+
 /* A derivation's constant as a numeric: an int8 one, or a numeric past it. */
 static Datum
 constant_numeric(const Const *constant)
@@ -321,6 +330,12 @@ derived_outputs(TessAggState *state, CustomScan *cscan, List *states, List *outp
 			elog(ERROR, "TessAgg received a foreign plan");
 		output->a_numeric = constant_numeric(a);
 		output->b_numeric = constant_numeric(b);
+		/* A form whose value is an integer has integer constants. */
+		if ((output->kind == AGG_DERIVED_SUM_INT8 || output->kind == AGG_DERIVED_AVG_INT8 ||
+			 ((output->kind == AGG_DERIVED_MIN || output->kind == AGG_DERIVED_MAX) &&
+			  output->type != NUMERICOID)) &&
+			(constant_scale(a) != 0 || constant_scale(b) != 0))
+			elog(ERROR, "TessAgg received a foreign plan");
 #ifdef HAVE_INT128
 		output->exact = constant_decimal(a, &output->a, &output->a_scale) &&
 			constant_decimal(b, &output->b, &output->b_scale);
@@ -1628,7 +1643,17 @@ agg_exec(CustomScanState *css)
 	drain(state);
 	state->done = true;
 	ResetExprContext(econtext);
-	econtext->ecxt_scantuple = result_row(state);
+	/*
+	 * The row's values, a derivation's numerics and their temporaries among
+	 * them, in the row's memory: the builder copies the row below, and a
+	 * rescan makes another without keeping the last.
+	 */
+	{
+		MemoryContext old = MemoryContextSwitchTo(econtext->ecxt_per_tuple_memory);
+
+		econtext->ecxt_scantuple = result_row(state);
+		MemoryContextSwitchTo(old);
+	}
 	if (css->ss.ps.qual != NULL && !ExecQual(css->ss.ps.qual, econtext))
 		return NULL;
 	row = css->ss.ps.ps_ProjInfo != NULL ? ExecProject(css->ss.ps.ps_ProjInfo) :

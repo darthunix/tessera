@@ -1383,6 +1383,11 @@ SELECT agg_folded($$SELECT sum(y), sum((y - 4611686018427387904) * 4611686018427
 SELECT agg_same($$SELECT sum(y), sum((y - 4611686018427387904) * 4611686018427387904),
                   sum((y - 4611686018427387904) * 4611686018427387904 + 7) FROM agg_fold_one$$);
 SELECT agg_same($$SELECT sum(x - 1), sum(((x - 1)::numeric * 1e70000) * 1e70000) FROM agg_fold_one$$);
+-- Rescanned under a nested loop, each row's numeric fallback made anew in
+-- the row's memory.
+SELECT agg_same($$SELECT sum(q.a), sum(q.b) FROM generate_series(1, 1000) AS o(i),
+                  LATERAL (SELECT max(x) AS a, max((x - 1) * 1000000000 * 1000000000 * 1000000000 * 1000000000 * 2) AS b
+                           FROM agg_fold_one WHERE k = o.i % 2) AS q$$);
 DROP TABLE agg_fold_one;
 -- At the bounds: a factor of 99 961 digits folds and one of 99 971 does
 -- not, nor a scale past 1 000; their sums are the core's.
@@ -1536,10 +1541,13 @@ SELECT agg_error($$SELECT o.v, q.* FROM (VALUES (4), (3)) AS o(v),
 SELECT agg_same($$SELECT o.v, q.* FROM (VALUES (4), (5)) AS o(v),
                   LATERAL (SELECT sum(i), sum(i + 1) FROM agg_fold WHERE k = o.v) AS q$$);
 -- spec: aggregate/Aggregates left as they are
--- A form alone, e's own sum, avg and count, forms under a volatile FILTER
--- (which holds for every row), and forms of a volatile e.
+-- A form alone, e's own sum, avg and count, aggregates that would share
+-- more states than they are, forms under a volatile FILTER (which holds
+-- for every row), and forms of a volatile e.
 SELECT agg_folded($$SELECT sum(i + 1) FROM agg_fold WHERE i BETWEEN -700000000 AND 700000000$$);
 SELECT agg_folded($$SELECT sum(i), avg(i), count(i) FROM agg_fold$$);
+SELECT agg_folded($$SELECT sum(s + 1), max(s) FROM agg_fold$$);
+SELECT agg_same($$SELECT sum(s + 1), max(s) FROM agg_fold$$);
 SELECT agg_folded($$SELECT sum(i + 1) FILTER (WHERE random() < 2), sum(i + 2) FILTER (WHERE random() < 2) FROM agg_fold WHERE i BETWEEN -700000000 AND 700000000$$);
 SELECT agg_same($$SELECT sum(i + 1) FILTER (WHERE random() < 2), sum(i + 2) FILTER (WHERE random() < 2) FROM agg_fold WHERE i BETWEEN -700000000 AND 700000000$$);
 CREATE SEQUENCE agg_fold_seq;
