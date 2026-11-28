@@ -132,9 +132,9 @@ call at 8 rows on the Intel Mac and none on the M5 Pro, 2.8 at 12 on
 both, where the model says 12; from 24 rows it missed 12 to 17. A loop
 over a few rows takes a few branches a word, so the history that tells
 the predictor where it is spans many words, and the predictor held the
-exits of the 1024 words of the ring. Two probes on `probe-density-ring`,
-a branch never merged, measured `density-8` and `density-12` of
-`column_reader` over longer rings:
+exits of the 1024 words of the ring. Two probes on `28785e62`, never
+merged, measured `density-8` and `density-12` of `column_reader` over
+longer rings; each run keeps the sources of both its sides:
 
 - whole inputs, rings of 256 and 1024, at `e36171fd`
   (`compare-92rqnx` on the Intel Mac, `compare-tmWkj1` on the M5 Pro):
@@ -321,13 +321,14 @@ Refused:
 
 ### What the two builds measured
 
-The rows build (`probe-rows-build`) and the whole build
-(`probe-whole-build`), both on `c51ee23b`, ran against each other twice
-on each machine. Each run took the density cases at 1024 rows and the
-full words of a program, `/1024/all/nulls-none/ready/`. `table_int32`
-and `column_reader` did not run: no operation they measure calls a
-driver, and `int32::hash` runs only when a case is made. The runs, Intel
-first, the first round before the second:
+The rows build (`66397887`) and the whole build (`82b542d0`), both on
+`c51ee23b` and never merged, ran against each other twice on each
+machine; each run keeps the sources of both builds. Each run took the
+density cases at 1024 rows and the full words of a program,
+`/1024/all/nulls-none/ready/`. `table_int32` and `column_reader` did not
+run: no operation they measure calls a driver, and `int32::hash` runs
+only when a case is made. The runs, Intel first, the first round before
+the second:
 
 - `aggregate_int32`: `compare-ftt25S`, `compare-sXTdRR`;
   `compare-VYnb8d`, `compare-GiR1Cn`.
