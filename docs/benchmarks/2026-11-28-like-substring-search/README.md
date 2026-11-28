@@ -18,6 +18,10 @@ times stand for TPC-H's query 13.
   the family from the branch for both; ClickBench's and TPC-H's base is
   a worktree at `cfcbfecf`, their end the branch's worktree, both built
   clean for the server below.
+- **The commits' ids** are those of the branch when it was counted. A
+  merge by rebase gives the same trees other ids in `main`: the base is
+  the commit "like-substring-search 2.1: the family like", the end
+  "like-substring-search 3.2: the pieces found by memmem's searchers".
 - **PostgreSQL** 19rc2, release, without LLVM, with pg_pmu, by the
   hashes in the sources ([source-base.txt](source-base.txt),
   [source-end.txt](source-end.txt)).
