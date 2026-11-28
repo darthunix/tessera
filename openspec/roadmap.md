@@ -164,6 +164,8 @@ is wanted; several wait for a measured case. `greengage-port` and
   dictionary numbers, and the set without `GROUP BY`, past `hash_mem`
 - `agg-distinct-groups-spill`: The groups of a grouping with DISTINCT
   to disk, and its partial form for parallel plans
+- `agg-wide-record-spill`: The spill of wide records of cold groups by
+  the input's columns
 - `merge-append`: Batch MergeAppend
 - `one-sum-state-shape`: "One sum state" record form
 - `hot-code-alignment`: Alignment of hot code
@@ -1006,6 +1008,39 @@ Spill of sum states instead of rows. From plan 4.23 item 4б, lines 1574,
   `tpch-indexed-schema`, `tpch-sf10`) for the measurement.
 - **Capabilities:** aggregate, spill-format, hash-table
 - **Size:** the log does not say.
+
+### agg-wide-record-spill
+
+The spill of a grouping whose records are wide and whose groups are
+cold, by the input's columns. A finding of the second stage of the
+change `agg-folded-arguments`; the maintainer put it here on
+2026-11-28 and decided against calibrating the costs instead.
+
+- **What:** `TessAgg` spills a partition's records whole, each a
+  group's keys, its words of flags and every state, and a partition
+  that went to disk makes new records of its next rows. With many
+  states and groups whose rows lie far apart, nearly every input row
+  becomes a record on disk. The node's spill of rows does not help: it
+  writes the computed keys and arguments, as wide as the record. Spill
+  instead the child's columns the node's projection reads, and compute
+  the keys, the arguments and the `FILTER` conditions again when the
+  rows are read back, as the core's hashed aggregation does. The node
+  would choose it by bytes: the groups estimated past `hash_mem`, and a
+  record much wider than the input row.
+- **Why:** 65 sums of `i / k` in 100 000 groups of 20 rows past a
+  `work_mem` of 4 MB take 1.85 times the core's time: `TessAgg` writes
+  1 045 541 kB, the core 103 432 kB of its rows. 64 sums, which the
+  node took before the cap was lifted, take 1.70 times; 16 sums win,
+  0.79. The runs are in
+  `docs/benchmarks/2026-11-28-agg-folded-arguments-stage-2`.
+- **Known:** The planner's costs count the bytes written and weigh
+  them too lightly against the core's. The case is the family
+  `aggfold`'s `many_65_spill`.
+- **Depends on:** nothing.
+- **Capabilities:** aggregate, spill-format
+- **Size:** an OpenSpec change: a mode of the spill, the columns it
+  writes and how it reads them back, and how it meets dictionary keys,
+  generic states and `DISTINCT`.
 
 ### projection-whole-row
 
