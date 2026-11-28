@@ -1,7 +1,6 @@
-# Spec Delta
+# string-bytes Specification
 
 ## Purpose
-
 The bytes of a string column in a batch. A **batch** is a group of up
 to 64 rows that Tessera's nodes pass from one to the next by column;
 its **producer** is the node or source that made it, and its
@@ -21,7 +20,7 @@ and the Parquet source that offers it, and then to its consumers:
 TessAgg's keys, the string kernels and TessSort's keys.
 [design.md](design.md) explains the whole and the reasons.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: The bytes form of a string column
 A batch's operations MAY end with an optional operation,
