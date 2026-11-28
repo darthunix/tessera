@@ -1397,9 +1397,15 @@ agg_sum_state_sum(const uint64 *words, AggSum *sum)
 	sum->scale = (int) (flags & TESS_TABLE_SUM_SCALE_MASK);
 	sum->rest = (Datum) words[TESS_TABLE_SUM_WORDS];
 	sum->count = (int64) words[2];
-	/* NaN in the flags, which numeric_add of the rest keeps: a table's column has no infinity. */
-	if ((flags & TESS_TABLE_SUM_NAN) != 0)
+	/* NaN and the infinities in the flags, as the rest numeric_add keeps. */
+	if ((flags & TESS_TABLE_SUM_NAN) != 0 ||
+		((flags & TESS_TABLE_SUM_POSITIVE_INFINITY) != 0 &&
+		 (flags & TESS_TABLE_SUM_NEGATIVE_INFINITY) != 0))
 		sum->rest = sum_state_special("NaN");
+	else if ((flags & TESS_TABLE_SUM_POSITIVE_INFINITY) != 0)
+		sum->rest = sum_state_special("Infinity");
+	else if ((flags & TESS_TABLE_SUM_NEGATIVE_INFINITY) != 0)
+		sum->rest = sum_state_special("-Infinity");
 }
 
 void

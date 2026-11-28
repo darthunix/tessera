@@ -1287,10 +1287,25 @@ fold_constant(const FoldForm *form, bool factor)
 
 #endif							/* HAVE_INT128 */
 
+#ifdef HAVE_INT128
+/*
+ * The states a group of e keeps: one set for DISTINCT, the sum state of a
+ * bigint's avg, sum and count of the others, and its extremes.
+ */
+static int
+fold_states(Node *e, bool distinct, bool sum, bool least, bool greatest)
+{
+	if (distinct)
+		return 1;
+	return (sum ? (exprType(e) == INT8OID ? 1 : 2) : 0) + (least ? 1 : 0) + (greatest ? 1 : 0);
+}
+#endif
+
 /*
  * The states and outputs of the aggregates of a scan tuple after its keys.
- * Where fold, the aggregates of one e and one FILTER, at least two and
- * one of a form other than e itself, keep the states of e they need over
+ * Where fold, the aggregates of one e and one FILTER, at least two, one
+ * of a form other than e itself, and no fewer than the states they would
+ * share, keep the states of e they need over
  * the rows they read, from which each of them is derived, those of e
  * itself among them. Sum, avg and count need e's sum and count: for a
  * smallint or an integer e, sum(e) and count(e), words, e cast to
@@ -1310,11 +1325,11 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 {
 	int			naggs = list_length(tlist) - nkeys;
 	int		   *group = palloc_array(int, Max(naggs, 1));
+#ifdef HAVE_INT128
 	int		   *members = palloc0_array(int, Max(naggs, 1));
 	bool	   *steps = palloc0_array(bool, Max(naggs, 1));
 	/* A group of constants, which folds alone too. */
 	bool	   *alone = palloc0_array(bool, Max(naggs, 1));
-#ifdef HAVE_INT128
 	bool	   *unsafe = palloc0_array(bool, Max(naggs, 1));
 	/* Of each group's first: the states it needs, and where they went. */
 	bool	   *need_sum = palloc0_array(bool, Max(naggs, 1));
@@ -1371,8 +1386,18 @@ fold_aggregates(PlannerInfo *root, List *tlist, int nkeys, bool fold, AggFold *r
 	{
 		Aggref	   *agg = (Aggref *) list_nth_node(TargetEntry, tlist, nkeys + i)->expr;
 		int			j = group[i];
+		bool		own = j < 0;
 
-		if (j < 0 || (!alone[j] && (members[j] < 2 || !steps[j])))
+#ifdef HAVE_INT128
+		/* Aggregates of constants fold alone too; the others as they save states. */
+		own = own || (!alone[j] &&
+					  (members[j] < 2 || !steps[j] ||
+					   fold_states(forms[j].e,
+								   ((Aggref *) list_nth_node(TargetEntry, tlist,
+															 nkeys + j)->expr)->aggdistinct != NIL,
+								   need_sum[j], need_min[j], need_max[j]) > members[j]));
+#endif
+		if (own)
 		{
 			result->outputs = lappend_int(result->outputs, list_length(result->states));
 			result->states = lappend(result->states, copyObject(agg));

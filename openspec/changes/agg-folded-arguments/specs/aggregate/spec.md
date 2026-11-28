@@ -25,8 +25,8 @@ or be rounded.
 
 A plain aggregation or a grouping of `TessAgg` SHALL fold the
 aggregates of one `e`, one `FILTER` and one `DISTINCT` where at least
-two of them are of the kinds below and one of those has a form other
-than `e` itself:
+two of them are of the kinds below, one of those has a form other than
+`e` itself, and the states they would share are no more than they are:
 
 - `sum`, `avg` and `count` of a folded form;
 - `min` and `max` of a folded form of an integer `e`, and of a
@@ -57,7 +57,8 @@ those the core gives, with and without `GROUP BY` and with groups past
 
 #### Scenario: Aggregates left as they are
 - **WHEN** a query computes `sum(x + 1)` of an `integer` alone, or
-  `sum(x)`, `avg(x)` and `count(x)` of it, or two forms of `x` under
+  `sum(x)`, `avg(x)` and `count(x)` of it, or `sum(x + 1)` beside
+  `max(x)`, which would share three states, or two forms of `x` under
   a volatile `FILTER`, `random() < 2`, which holds for every row, or
   `sum(nextval('s'))` beside `max(nextval('s'))`
 - **THEN** its plan is `TessAgg`'s, it folds nothing, and its rows are
