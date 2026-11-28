@@ -1535,7 +1535,7 @@ SELECT agg_error($$SELECT o.v, q.* FROM (VALUES (4), (3)) AS o(v),
                    LATERAL (SELECT sum(i), sum(i + 1) FROM agg_fold WHERE k = o.v) AS q$$);
 SELECT agg_same($$SELECT o.v, q.* FROM (VALUES (4), (5)) AS o(v),
                   LATERAL (SELECT sum(i), sum(i + 1) FROM agg_fold WHERE k = o.v) AS q$$);
--- spec: aggregate/Aggregates of one expression left as they are
+-- spec: aggregate/Aggregates left as they are
 -- A form alone, e's own sum, avg and count, forms under a volatile FILTER
 -- (which holds for every row), and forms of a volatile e.
 SELECT agg_folded($$SELECT sum(i + 1) FROM agg_fold WHERE i BETWEEN -700000000 AND 700000000$$);

@@ -55,7 +55,7 @@ those the core gives, with and without `GROUP BY` and with groups past
 - **Verified by:**
   `test/sql/agg.sql::spec: aggregate/Every aggregate, type and step`
 
-#### Scenario: Aggregates of one expression left as they are
+#### Scenario: Aggregates left as they are
 - **WHEN** a query computes `sum(x + 1)` of an `integer` alone, or
   `sum(x)`, `avg(x)` and `count(x)` of it, or two forms of `x` under
   a volatile `FILTER`, `random() < 2`, which holds for every row, or
@@ -63,7 +63,7 @@ those the core gives, with and without `GROUP BY` and with groups past
 - **THEN** its plan is `TessAgg`'s, it folds nothing, and its rows are
   the core's
 - **Verified by:**
-  `test/sql/agg.sql::spec: aggregate/Aggregates of one expression left as they are`
+  `test/sql/agg.sql::spec: aggregate/Aggregates left as they are`
 
 ### Requirement: The errors of a folded argument
 Where the core's computation of a folded aggregate's argument fails for
