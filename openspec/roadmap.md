@@ -53,8 +53,8 @@ Parquet wrapper the first source of the planning contract, so that
 `types-crate`, before `parquet-fdw`, as a crate of its own (done, the
 crate `datum-arrow`), had `parquet-fdw` built on `source-scan`'s branch
 before it is merged, and set the order of what follows them: grouping by
-strings on the files' bytes, `text-keys-by-bytes`, then the ClickBench
-entry, `clickbench-entry`. On 2026-11-22 the maintainer took the sums
+strings on the files' bytes, `text-keys-by-bytes` (done), then the
+ClickBench entry, `clickbench-entry`. On 2026-11-22 the maintainer took the sums
 of `bigint` values of 19 digits out of turn (done), after a profile of
 ClickBench's query 4 on the branch of `parquet-fdw`, and the same day
 `agg-distinct-spill` (done) after them, a finding of stage 2 of
@@ -149,6 +149,8 @@ is wanted; several wait for a measured case. `greengage-port` and
 - `mixed-inputs`: Mixed inputs
 - `compressed-table-source`: Compressed test table AM
 - `direct-arrow-batches`: Direct Arrow batches
+- `bytes-form-consumers`: The bytes form of strings through TessAppend,
+  in `min` and `max` of a string and in joins by a string
 - `datum-fallback-native-forms`: Datum fallback for date, timestamp and
   text representations
 - `greengage-port`: Greengage 7 port
@@ -240,35 +242,6 @@ faults, and S3R makes each race a case with a name.
 
 ## Entries
 
-### text-keys-by-bytes
-
-Grouping by a string on the file's bytes, one value a group. From the
-maintainer's review of ClickBench's queries, 2026-11-21; widened by him
-on 2026-11-23 to the string functions and the order by bytes, in one
-change. It is the change `text-keys-by-bytes`.
-
-- **What:** A batch offers a string column in a second form beside its
-  `Datum` values, the bytes of each row as the source holds them, and
-  TessAgg hashes and compares a key of that form on its bytes, making a
-  `text` value once a group; the Parquet source offers the form, and a
-  chunk encoded by a dictionary may be keyed by its indexes. The string
-  kernels read the form, and TessSort orders a string by its bytes
-  under a collation that orders by bytes.
-- **Why:** 15 of ClickBench's 43 queries group by a string (`URL`,
-  `SearchPhrase`, `Title`, `MobilePhoneModel` and others), and Q34 and
-  Q35 group all 100 M rows by `URL`: a value made for each row before
-  its hash costs what reading the file saved.
-- **Known:** The maintainer's order of 2026-11-21 puts it after the
-  Parquet wrapper's parallel reading and its queries that read no
-  string. `Datum` stays the batches' common language: this is one form
-  for one use, narrower than `direct-arrow-batches`. The fourth stage of
-  `parquet-fdw`'s measurement is its base. The contract of
-  `parquet-fdw` forecasts it in `tessera/batch.h`, the source's batches
-  and TessAgg.
-- **Depends on:** `parquet-fdw`.
-- **Capabilities:** string-bytes, new
-- **Size:** large: one pull request of four stages after the proposal.
-
 ### parquet-reader-boundary
 
 The boundary between the Parquet node and its reader. Opened by the
@@ -292,7 +265,7 @@ forecast of `parquet-fdw`'s contract.
   the reader's arrays: the forecast said "not the clauses", but the
   clauses read the strings of the reader's arrays, so a new type of
   array reaches them. The forecast now names them.
-- **Depends on:** `text-keys-by-bytes`.
+- **Depends on:** nothing.
 - **Capabilities:** parquet-fdw
 - **Size:** small.
 
@@ -383,7 +356,7 @@ Tessera's entry of ClickBench over its Parquet files.
   query has been counted by instructions since
   (`docs/benchmarks/2026-11-23-text-keys-by-bytes-form`,
   `docs/benchmarks/2026-11-24-text-keys-by-bytes-keys`), none timed.
-- **Depends on:** `text-keys-by-bytes` for the groupings by strings.
+- **Depends on:** nothing.
 - **Capabilities:** none: scripts outside the extension
 - **Size:** medium.
 
@@ -1467,6 +1440,30 @@ vector kernel. From the review of pull request 68 on 2026-10-14.
 - **Depends on:** nothing.
 - **Capabilities:** kernel-abi
 - **Size:** small to medium.
+
+### bytes-form-consumers
+
+The bytes form of a string column read where it is not yet. What the
+change `text-keys-by-bytes` decided against, for no query of ClickBench
+needed it.
+
+- **What:** TessAppend passes on the form of its children's batches, so
+  that a partitioned Parquet table or a `UNION ALL` of Parquet tables is
+  read by its consumers as bytes; `min` and `max` of a string read their
+  argument as bytes, under a collation that orders by bytes; a hash join
+  by a string key hashes and compares its bytes, as TessAgg's keys do.
+- **Why:** each is a consumer that reads a value made for every row
+  where its bytes would do, the cost the form removed from groupings,
+  the string functions and the sorts: a quarter to a third of the time
+  of those queries in ClickBench.
+- **Known:** the spec of `string-bytes` names the batches that give no
+  form, TessAppend's among them. In ClickBench `min` and `max` of a
+  string appear over the rows a `LIKE` passes, whose grouping the core
+  runs, and in a query that spends its time in `regexp_replace`; no
+  query joins. A case measured is needed before any of them.
+- **Depends on:** a measured case.
+- **Capabilities:** string-bytes
+- **Size:** a change for each.
 
 ### direct-arrow-batches
 
