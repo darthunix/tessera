@@ -212,10 +212,10 @@ RESET parallel_leader_participation;
 -- Aggregates of one expression under constants, which a serial plan folds
 -- into shared states: the participants and the final aggregation keep a
 -- state for each.
-SELECT line FROM parallel_explain($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast$$) AS line
+SELECT regexp_replace(line, ' \(actual.*\)$', '') AS line FROM parallel_explain($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast$$) AS line
 WHERE line ~ '(TessAgg|Partial Mode|Folded)';
 SELECT parallel_same($$SELECT sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast$$);
-SELECT line FROM parallel_explain($$SELECT id % 7, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast GROUP BY id % 7$$) AS line
+SELECT regexp_replace(line, ' \(actual.*\)$', '') AS line FROM parallel_explain($$SELECT id % 7, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast GROUP BY id % 7$$) AS line
 WHERE line ~ '(TessAgg|Partial Mode|Folded)';
 SELECT parallel_same($$SELECT id % 7, sum(s), sum(s + 1), avg(s * 2), count(s - 3) FROM parallel_fast GROUP BY id % 7$$);
 -- With the core's Gather its Finalize Aggregate reads the core's own
