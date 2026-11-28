@@ -342,7 +342,12 @@ the masks of 64 rows of a batch do not change.
 
 Two bounds take the place of a count of aggregates. The planner checks
 them (`states_fit`), and the node checks them again when it reads its
-plan:
+plan. The planner counts the columns as the node lays them out: an
+argument equal to an earlier column, alone in its aggregate and with
+no volatile function, shares that column, so 900 sums of one column
+under 900 `FILTER` conditions take 902 columns; and in a parallel plan
+the final aggregation's columns count too, where each state reads its
+partial value, `count(*)` among them.
 
 - The node's computed columns, its keys, its states' arguments and
   their `FILTER` conditions, are at most 1 664, PostgreSQL's bound of a
