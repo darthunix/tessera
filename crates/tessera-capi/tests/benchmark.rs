@@ -2,6 +2,10 @@
 //!
 //! Check the unchanged input matrices, scalar models and bounded mask preparation.
 //! Counter readings are not needed: block bookkeeping is checked with a fake reader.
+//!
+//! Not under Miri: the benchmarks' input matrices take it hours, and the
+//! entry points they reach are the other tests'.
+#![cfg(not(miri))]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
