@@ -1,0 +1,19 @@
+Now drawing from 'AC Power'
+base Q3 -> tessera-afa-base/target/bench-runs/clickbench-Cbf5hT rc=0
+end Q3 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-gGNsvT rc=0
+base Q4 -> tessera-afa-base/target/bench-runs/clickbench-ErrB0l rc=0
+end Q4 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-ThXGVm rc=0
+base-off Q1 -> tessera-afa-base/target/bench-runs/clickbench-Sl8IOj rc=0
+end-off Q1 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-TU3kpo rc=0
+base-b Q3 -> tessera-afa-base/target/bench-runs/clickbench-cT239h rc=0
+end-b Q3 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-p2Bhgh rc=0
+base-b Q4 -> tessera-afa-base/target/bench-runs/clickbench-gzxBxG rc=0
+end-b Q4 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-nZeQTJ rc=0
+base-b-off Q1 -> tessera-afa-base/target/bench-runs/clickbench-7CYHlR rc=0
+end-b-off Q1 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-z3KKWj rc=0
+done
+base-c Q3 -> tessera-afa-base/target/bench-runs/clickbench-UkiP7x rc=0
+end-c Q3 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-eRiMCl rc=0
+base-c Q4 -> tessera-afa-base/target/bench-runs/clickbench-PRjv7e rc=0
+end-c Q4 -> tessera-agg-folded-arguments/target/bench-runs/clickbench-vHVBNx rc=0
+done
