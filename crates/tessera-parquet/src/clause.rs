@@ -145,7 +145,8 @@ pub struct ClauseTest {
 }
 
 /// A test of a string's bytes, borrowed from a test's kind. One lives on
-/// the stack for a call: a box of the pattern would allocate a window.
+/// the stack for a call, a window or a dictionary; a pattern of LIKE with
+/// an inner piece allocates once a call the searchers of its pieces.
 #[allow(clippy::large_enum_variant)]
 enum StringTest<'a> {
     Equal(&'a [u8], bool),

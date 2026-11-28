@@ -130,9 +130,10 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// The most pieces between `%`s a LIKE pattern [`Like::parse`] takes.
 pub const MAX_PIECES: usize = 32;
 
-/// The inner pieces of a pattern found by a searcher of `memchr::memmem`
-/// made once a pattern, which looks for a pair of the piece's rare bytes
-/// by vector instructions; those after them by [`find`].
+/// The non-empty inner pieces of a pattern found by a searcher of
+/// `memchr::memmem` made once a pattern, which over a string long enough
+/// for its vectors looks for a pair of the piece's rare bytes; those
+/// after them by [`find`].
 const SEARCHERS: usize = 4;
 
 /// A LIKE pattern of literals and `%`: its pieces, and whether the first
@@ -146,16 +147,20 @@ pub struct Like<'p> {
     end: bool,
     count: usize,
     pieces: [(u32, u32); MAX_PIECES],
-    /// The searchers of the first inner pieces, by their place among them,
-    /// made only for a pattern that has one: out of line, so that a pattern
-    /// that searches nothing costs no more than before.
+    /// The searchers of the first non-empty inner pieces, by their place
+    /// among them, made only for a pattern that has one: out of line, so
+    /// that a pattern that searches nothing costs no more than before.
     finders: Option<Box<[Option<memchr::memmem::Finder<'p>>; SEARCHERS]>>,
 }
 
 impl<'p> Like<'p> {
-    /// The pieces of a pattern, or `None` for one with `_` or an escape, or
-    /// with more than [`MAX_PIECES`] pieces.
+    /// The pieces of a pattern, or `None` for one with `_` or an escape,
+    /// with more than [`MAX_PIECES`] pieces, or of more bytes than a piece's
+    /// offset of 32 bits holds, far past a value of PostgreSQL.
     pub fn parse(pattern: &'p [u8]) -> Option<Self> {
+        if u32::try_from(pattern.len()).is_err() {
+            return None;
+        }
         let mut like = Self {
             pattern,
             exact: true,
@@ -186,12 +191,18 @@ impl<'p> Like<'p> {
         if !like.exact {
             let (first, last) = like.inner();
             let mut finders: Option<Box<[Option<memchr::memmem::Finder<'p>>; SEARCHERS]>> = None;
-            for (slot, index) in (first..=last).take(SEARCHERS).enumerate() {
+            let mut slot = 0;
+            for index in first..=last {
                 let piece = like.piece(index);
-                if !piece.is_empty() {
-                    finders.get_or_insert_with(Default::default)[slot] =
-                        Some(memchr::memmem::Finder::new(piece));
+                if piece.is_empty() {
+                    continue;
                 }
+                if slot == SEARCHERS {
+                    break;
+                }
+                finders.get_or_insert_with(Default::default)[slot] =
+                    Some(memchr::memmem::Finder::new(piece));
+                slot += 1;
             }
             like.finders = finders;
         }
@@ -241,15 +252,18 @@ impl<'p> Like<'p> {
             // Not exact: at least two pieces, so one stays before the tail.
             last -= 1;
         }
+        // The place of the next non-empty piece among its searchers.
+        let mut slot = 0;
         for index in first..=last {
             let piece = self.piece(index);
             if piece.is_empty() {
                 continue;
             }
-            let found = match self.finders.as_ref().and_then(|all| all.get(index - first)) {
+            let found = match self.finders.as_ref().and_then(|all| all.get(slot)) {
                 Some(Some(finder)) => finder.find(&string[from..to]),
                 _ => find(&string[from..to], piece),
             };
+            slot += 1;
             match found {
                 Some(at) => from += at + piece.len(),
                 None => return false,
@@ -773,11 +787,11 @@ mod tests {
         for pattern in [&b"abc"[..], b"ab%", b"%bc", b"a%c", b"%", b"%%"] {
             assert!(Like::parse(pattern).unwrap().finders.is_none());
         }
-        // Its pieces: "", "a", "", "b", then four the plain search finds.
+        // Its non-empty inner pieces a, b, c and d take the searchers, and
+        // e and f the plain search; the empty ones take none.
         let like = Like::parse(b"%a%%b%c%d%e%f%").unwrap();
         let finders = like.finders.as_deref().unwrap();
-        assert!(finders[0].is_none() && finders[1].is_some());
-        assert!(finders[2].is_none() && finders[3].is_some());
+        assert!(finders.iter().all(Option::is_some));
         assert!(like.matches(b"xaxbxcxdxexfx") && !like.matches(b"abcdeg"));
         // n %s make n + 1 pieces.
         assert!(Like::parse(&[b'%'; MAX_PIECES - 1]).is_some());
