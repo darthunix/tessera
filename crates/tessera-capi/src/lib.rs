@@ -72,10 +72,18 @@
 //!
 //! The Miri jobs of CI (.github/workflows/ci.yml) run the tests of the
 //! unsafe code under Miri on a pinned nightly, without changing the
-//! project's pinned compiler: every test of this crate, but those of the
-//! benchmarks' machinery, with recursive validation. Ordinary tests also
-//! cover NULLs, unprepared rows, and borrowing rules, but timing
-//! measurements do not establish memory safety. To run the same locally:
+//! project's pinned compiler: every test of this crate with recursive
+//! validation, but the benchmarks' machinery and two cases too long for
+//! Miri, which they say. A result an entry point returns through a plain
+//! pointer may come unset, as a variable on C's stack does, so the entry
+//! point writes it whole through the pointer and never reads or borrows
+//! it first; the tests hand it unset where they call the entry point and
+//! it succeeds, and the validation fails a read or a borrow of it. No
+//! test calls `tess_table_split`, `tess_sort_top_candidates` or
+//! `tess_sort_key_lanes`, and `tess_table_combine` gets its results set.
+//! Ordinary tests also cover NULLs, unprepared rows, and borrowing rules,
+//! but timing measurements do not establish memory safety. To run the
+//! same locally:
 //!
 //! ```sh
 //! export PROPTEST_CASES=16

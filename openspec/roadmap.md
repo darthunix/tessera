@@ -203,8 +203,8 @@ proposes. The gain of a move is one owner of a rule and a place where a
 model test or a proof reaches it; most C calls PostgreSQL and stays.
 
 - `weekly-mutants`: Every mutant of the workspace, every week
-- `capi-miri-and-fuzz`: Miri over every test of `tessera-capi`, and a
-  fuzz target of its arguments
+- `capi-fuzz`: A fuzz target of the arguments of `tessera-capi`'s
+  entry points
 - `golden-corpus`: The answers of PostgreSQL's functions as the
   kernels' oracle
 - `zone-rules-in-rust`: The rules of local time of a zone in Rust, as
@@ -2181,35 +2181,37 @@ Every mutant of the workspace, every week. From the review of
 - **Capabilities:** ci
 - **Size:** small.
 
-### capi-miri-and-fuzz
+### capi-fuzz
 
-Miri over every test of `tessera-capi`, and a fuzz target of its
-arguments. From the review of 2026-11-01.
+A fuzz target of the arguments of `tessera-capi`'s entry points. From
+the review of 2026-11-01, the half of its entry `capi-miri-and-fuzz`
+that Miri left.
 
-- **What:** Miri runs every test of `tessera-capi`, not only `columns`
-  and `table`, with fewer property cases under Miri. A fuzz target,
-  like `relhash`'s `arguments`, calls every entry point with any
-  arguments over real buffers the fuzzer sizes: a wrong `struct_size`,
-  row counts that disagree between a column and its masks, null
-  pointers, codes out of range. Each call returns a code, never a
-  panic, and leaves its outputs as its documentation says.
-- **Why:** The other entry points hold most of the crate's unsafe code:
+- **What:** A fuzz target, like `relhash`'s `arguments`, calls every
+  entry point with any arguments over real buffers the fuzzer sizes: a
+  wrong `struct_size`, row counts that disagree between a column and
+  its masks, null pointers, codes out of range. Each call returns a
+  code, never a panic, and leaves its outputs as its documentation
+  says.
+- **Why:** The entry points hold most of the crate's unsafe code:
   `c/decimal.rs`, `c/spill.rs`, `c/calendar.rs`, `c/int.rs`,
-  `c/text.rs`, `c/sort.rs`. Both faults of undefined behavior found at
-  this boundary so far were found by Miri (69eb701b, a640abb8).
-- **Known:** The spill's part is task 2.5 of `spill-crate`. Random
-  pointers are not fuzzed: a false length is the caller's undefined
-  behavior, not a fault of a kernel. Under Miri the vector code is cut
-  out, so it checks the scalar paths. Most entry points make a Rust
-  reference of an output that C hands over unset, a variable on its
-  stack: undefined behavior, which Miri shows only with
-  `-Zmiri-recursive-validation` and a test that hands it unset too.
-  The spill machines and the set write theirs whole through the
-  pointer (`spill-crate`); the others are to be swept so, and their
-  tests run with that flag.
+  `c/text.rs`, `c/sort.rs`, `c/table.rs`. Miri judges the arguments
+  their tests give; a wrong size or count no test thought of reaches a
+  slice made from a C pointer only through such a target.
+- **Known:** Miri runs every test target of the crate with recursive
+  validation in CI's job `miri-capi`, and a result returned through a
+  plain pointer is written whole through it. No Rust test calls
+  `tess_table_split`, `tess_sort_top_candidates` or
+  `tess_sort_key_lanes`, and `tess_table_combine` gets its results set:
+  the target is the first to hand them unset. Random pointers are not
+  fuzzed: a false length is the caller's undefined behavior, not a
+  fault of a kernel. A Datum of a type passed by reference is a
+  pointer, so the target builds real varlenas for numeric and text.
+  The entries of the spill's machines are fuzzed in `relspill`'s own
+  targets, over the crate's API.
 - **Depends on:** nothing.
 - **Capabilities:** kernel-abi
-- **Size:** small for Miri, medium for the fuzz target.
+- **Size:** medium.
 
 ### golden-corpus
 
@@ -2778,16 +2780,6 @@ becomes an entry, joins one, or is dropped.
   `spill-crate`, a residual risk of its task 2.10). The partition
   passes its share by 91 to 165 kB, after the fix that cut 867 kB to
   165 kB; the rest was not traced.
-- **Outputs of the kernels' entry points borrowed unfilled** (the
-  outside reviews of `spill-crate`, task 3.26). The spill's entry points
-  write their results to the places C hands them, which C may not have
-  filled; many entry points of the kernels and of the hash table, in
-  `crates/tessera-capi/src/c/` (the decimals, the integers, the sorts'
-  keys, the Bloom filter's words and its readiness, a table's
-  fingerprint), still take such a place as a reference first, which is
-  undefined behavior when it holds no value. CI's strict Miri runs the
-  tests of the spill alone. Suggested: write them as the spill's do,
-  and add their tests to the strict Miri of CI.
 - **The key filter's order under correlated clauses** (the close of
   `early-key-filter`, a finding of its review). A TessFilter of batch
   clauses alone compares the filter's share of all its rows with the
@@ -2829,10 +2821,19 @@ becomes an entry, joins one, or is dropped.
   `spill-crate` task 3.6, 2026-11-02). An entry point that takes a
   region C allocated makes a `&mut [u8]` over it, which Rust allows only
   over initialized bytes. The set's writer gets its buffer, scratch and
-  lists zeroed; `tess_spill_columns_init` still gets the sort's chunks
-  as `palloc` leaves them (`nodes/sort_external.c`), as the packing's
-  entry points did. No compiler is known to miscompile it. Suggested:
-  zero such regions where they are made, or take them as
+  lists zeroed, and `tess_decimal_write` writes its space through the
+  pointer, though it still borrows its values and scales, which
+  `kernels/numeric.c` hands over from `tess_decimal_compute` with the
+  rows it did not select unspecified; `tess_spill_columns_init` still
+  gets the sort's chunks as `palloc` leaves them
+  (`nodes/sort_external.c`), as the packing's entry points did. Arrays
+  of results are taken the same way by the hash table's and the sorts'
+  entry points (`slots` in `crates/tessera-capi/src/c/table.rs`), and
+  some of them come from `MemoryContextAlloc` unzeroed: the references
+  and hashes of `nodes/agg_keydict.c`, the hashes of `nodes/filter.c`,
+  the references of `nodes/sort.c`. No compiler is known to miscompile
+  it.
+  Suggested: zero such regions where they are made, or take them as
   `MaybeUninit` in `tessera-capi`.
 - **The cost of a hashed join key** (the close of `native-key-hashes`,
   2026-11-02). `tessera.join_hashed_key_cost` was measured when every
@@ -2877,8 +2878,8 @@ becomes an entry, joins one, or is dropped.
   caller that allocates only the required fields
   (`TESS_DATUM_COLUMN_MIN_SIZE`) gets undefined behavior, as the reader
   of the calendar and float entry points did until that change read
-  the fields one by one. Suggested: the same, with a Miri test, in
-  `capi-miri-and-fuzz` or alone.
+  the fields one by one. Suggested: the same, with a Miri test, alone
+  or in `capi-fuzz`.
 - **A grouping inside a subquery** (plan 5.11 and 5.13, lines 4328–4330,
   4913–4914): no partial (parallel) stack for it, and GROUP BY without
   aggregates in a subquery stays the core's. Suggested: check the

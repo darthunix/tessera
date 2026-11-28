@@ -20,6 +20,9 @@ use tessera_capi::c::{
 };
 use tessera_testing::{property, words};
 
+mod support;
+use support::unset;
+
 /// Varlenas kept at stable addresses, each in words so that a 4-byte
 /// header is aligned. They are kept as raw pointers, freed on drop: a
 /// `Box` moved after its address was taken would, under Miri's rules of
@@ -188,41 +191,44 @@ fn comparisons_patterns_and_the_rest() {
     };
     assert_eq!(code, Code::Ok, "{}", status.message());
     assert_eq!((rows[0], rest[0]), (0b0011, 0b1000));
-    // LIKE of pieces, a pattern it does not take.
-    let (mut rows, mut rest, mut simple) = ([0b1_1111_u64], [0_u64], false);
+    // LIKE of pieces, a pattern it does not take; the flag comes unset, as
+    // C's variable does.
+    let (mut rows, mut rest) = ([0b1_1111_u64], [0_u64]);
     let pattern = b"a%c";
     // SAFETY: as above; the pattern is a local byte string.
-    let code = unsafe {
-        tess_text_like(
-            &raw const left,
-            pattern.as_ptr().cast(),
-            pattern.len(),
-            false,
-            &mut mask(5, &mut rows),
-            &mut mask(5, &mut rest),
-            &raw mut simple,
-            &raw mut status,
-        )
+    let simple = unsafe {
+        unset(|simple| {
+            tess_text_like(
+                &raw const left,
+                pattern.as_ptr().cast(),
+                pattern.len(),
+                false,
+                &mut mask(5, &mut rows),
+                &mut mask(5, &mut rest),
+                simple,
+                &raw mut status,
+            )
+        })
     };
-    assert_eq!(code, Code::Ok);
     assert!(simple);
     assert_eq!((rows[0], rest[0]), (0b0011, 0b1000));
     let underscore = b"a_c";
     let mut untouched = [0b1_1111_u64];
     // SAFETY: as above.
-    let code = unsafe {
-        tess_text_like(
-            &raw const left,
-            underscore.as_ptr().cast(),
-            underscore.len(),
-            false,
-            &mut mask(5, &mut untouched),
-            &mut mask(5, &mut rest),
-            &raw mut simple,
-            &raw mut status,
-        )
+    let simple = unsafe {
+        unset(|simple| {
+            tess_text_like(
+                &raw const left,
+                underscore.as_ptr().cast(),
+                underscore.len(),
+                false,
+                &mut mask(5, &mut untouched),
+                &mut mask(5, &mut rest),
+                simple,
+                &raw mut status,
+            )
+        })
     };
-    assert_eq!(code, Code::Ok);
     assert!(!simple);
     assert_eq!(untouched[0], 0b1_1111);
     let prefix = b"ab";

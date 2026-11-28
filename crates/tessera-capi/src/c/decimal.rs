@@ -23,7 +23,7 @@
 use std::ffi::{c_int, c_uint, c_void};
 use std::marker::PhantomData;
 use std::mem::offset_of;
-use std::slice;
+use std::{ptr, slice};
 
 use anyhow::{Context, Result, bail, ensure};
 use tessera_core::ones;
@@ -37,7 +37,7 @@ use super::column::DatumColumn;
 use super::mask::Mask;
 use super::source::{self, Constant, output, selection, slots, with_source, with_sources};
 use super::status::{Code, Status, guard};
-use super::table::{SUM_INT4, SUM_INT8, SUM_NUMERIC, SUM_STATE};
+use super::table::{SUM_INT4, SUM_INT8, SUM_NUMERIC, SUM_STATE, output as place};
 use super::varlena::varlena_data;
 
 /// `TessDecimalArg`: a column, or a scalar numeric when it is null.
@@ -1053,7 +1053,7 @@ pub unsafe extern "C" fn tess_decimal_extreme(
             let rows = selection(rows)?;
             let terms = SumColumn::new(SumInput::Numeric, column, rows.nrows())?;
             let extreme = extreme.as_mut().context("a null extreme")?;
-            let row = row.as_mut().context("a null row")?;
+            let row = place(row, "row")?;
             let mut rest = output(rest)?;
             let state = if extreme.valid {
                 let scale = u32::try_from(extreme.scale).context("a negative scale")?;
@@ -1062,17 +1062,18 @@ pub unsafe extern "C" fn tess_decimal_extreme(
                 None
             };
             let found = decimal::extreme(&terms, rows, max, state, &mut rest)?;
-            *row = match found {
+            let at = match found {
                 None => -1,
-                Some((at, decimal)) => {
-                    *extreme = DecimalExtreme {
-                        value: decimal.value(),
-                        scale: decimal.scale() as c_int,
-                        valid: true,
-                    };
-                    c_int::try_from(at).context("a row past an int")?
-                }
+                Some((at, _)) => c_int::try_from(at).context("a row past an int")?,
             };
+            if let Some((_, decimal)) = found {
+                *extreme = DecimalExtreme {
+                    value: decimal.value(),
+                    scale: decimal.scale() as c_int,
+                    valid: true,
+                };
+            }
+            row.write(at);
             Ok(())
         })
     }
@@ -1106,7 +1107,7 @@ pub unsafe extern "C" fn tess_decimal_write(
         guard(status, || {
             let rows = selection(rows)?;
             let nrows = rows.nrows();
-            let used = used.as_mut().context("a null size")?;
+            let used = place(used, "size")?;
             ensure!(
                 len == 0 || (!space.is_null() && space.align_offset(8) == 0),
                 "a decimal write needs space aligned to 8 bytes"
@@ -1122,12 +1123,10 @@ pub unsafe extern "C" fn tess_decimal_write(
             } else {
                 Some(slice::from_raw_parts(scales, nrows))
             };
-            let space = if len == 0 {
-                &mut []
-            } else {
-                slice::from_raw_parts_mut(space.cast::<u8>(), len)
-            };
-            let base = space.as_mut_ptr() as usize;
+            // The space may hold no values yet, as palloc leaves it: it is
+            // written through its pointer, never borrowed as bytes.
+            let space = space.cast::<u8>();
+            let base = space as usize;
             let mut offset = 0;
             for row in rows.selected_rows() {
                 let scale = match scales {
@@ -1139,12 +1138,13 @@ pub unsafe extern "C" fn tess_decimal_write(
                 let mut numeric = [0; NUMERIC_MAX];
                 let size = decimal.write(&mut numeric);
                 let end = offset + size;
-                ensure!(end <= space.len(), "a decimal write ran out of space");
-                space[offset..end].copy_from_slice(&numeric[..size]);
+                ensure!(end <= len, "a decimal write ran out of space");
+                // SAFETY: offset..end lies within the len writable bytes.
+                ptr::copy_nonoverlapping(numeric.as_ptr(), space.add(offset), size);
                 values[row] = (base + offset) as u64;
-                offset = end.next_multiple_of(8).min(space.len());
+                offset = end.next_multiple_of(8).min(len);
             }
-            *used = offset;
+            used.write(offset);
             Ok(())
         })
     }
@@ -1170,15 +1170,17 @@ pub unsafe extern "C" fn tess_decimal_read_datum(
     unsafe {
         guard(status, || {
             let (value, scale, found) = (
-                value.as_mut().context("a null value")?,
-                scale.as_mut().context("a null scale")?,
-                found.as_mut().context("a null flag")?,
+                place(value, "value")?,
+                place(scale, "scale")?,
+                place(found, "flag")?,
             );
-            *found = false;
-            if let Arg::Decimal(decimal) = read_numeric(datum) {
-                *value = decimal.value();
-                *scale = decimal.scale() as c_int;
-                *found = true;
+            match read_numeric(datum) {
+                Arg::Decimal(decimal) => {
+                    value.write(decimal.value());
+                    scale.write(decimal.scale() as c_int);
+                    found.write(true);
+                }
+                _ => found.write(false),
             }
             Ok(())
         })
@@ -1204,7 +1206,7 @@ pub unsafe extern "C" fn tess_decimal_write_datum(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let size = size.as_mut().context("a null size")?;
+            let size = place(size, "size")?;
             let decimal = u32::try_from(scale)
                 .ok()
                 .filter(|&scale| scale <= MAX_SCALE)
@@ -1214,8 +1216,11 @@ pub unsafe extern "C" fn tess_decimal_write_datum(
                 !out.is_null() && len >= NUMERIC_MAX,
                 "a numeric needs {NUMERIC_MAX} bytes"
             );
-            let out = &mut *out.cast::<[u8; NUMERIC_MAX]>();
-            *size = decimal.write(out);
+            // The bytes of out may hold no values yet: written, not borrowed.
+            let mut numeric = [0; NUMERIC_MAX];
+            let written = decimal.write(&mut numeric);
+            ptr::copy_nonoverlapping(numeric.as_ptr(), out.cast::<u8>(), written);
+            size.write(written);
             Ok(())
         })
     }

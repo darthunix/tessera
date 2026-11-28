@@ -20,7 +20,7 @@ use tessera_kernels::table::MAX_KEYS;
 
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
-use super::table::{TableKey, TableKeys, TableRef, attach, attach_mut, slots, values};
+use super::table::{TableKey, TableKeys, TableRef, attach, attach_mut, output, slots, values};
 
 /// `TESS_SORT_DESCENDING`.
 pub const DESCENDING: u32 = 0x1;
@@ -114,8 +114,8 @@ pub unsafe extern "C" fn tess_sort_item_words(
         guard(status, || {
             let mut decoded = [UNUSED; MAX_KEYS];
             let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
-            let out = words.as_mut().context("a null result")?;
-            *out = item_words(&decoded[..nkeys])? as c_int;
+            let out = output(words, "result")?;
+            out.write(item_words(&decoded[..nkeys])? as c_int);
             Ok(())
         })
     }
@@ -140,8 +140,8 @@ pub unsafe extern "C" fn tess_sort_run_words(
         guard(status, || {
             let mut decoded = [UNUSED; MAX_KEYS];
             let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
-            let out = words.as_mut().context("a null result")?;
-            *out = run_words(&decoded[..nkeys])? as c_int;
+            let out = output(words, "result")?;
+            out.write(run_words(&decoded[..nkeys])? as c_int);
             Ok(())
         })
     }
@@ -172,8 +172,8 @@ pub unsafe extern "C" fn tess_sort_items(
             let mut decoded = [UNUSED; MAX_KEYS];
             let nkeys = sort_keys(nkeys, keys, &mut decoded)?;
             let items = slots(items, nwords, "items")?;
-            let out = count.as_mut().context("a null count")?;
-            *out = order::items(&table, &decoded[..nkeys], items)? as u64;
+            let out = output(count, "count")?;
+            out.write(order::items(&table, &decoded[..nkeys], items)? as u64);
             Ok(())
         })
     }
@@ -239,7 +239,7 @@ pub unsafe extern "C" fn tess_sort_top_candidates(
             let mut rows = rows.as_mut().context("a null row mask")?.mask()?;
             let worst = values(worst, item_words(keys)?, "worst item")?;
             let count = top_candidates(keys, &batch, &mut rows, worst)?;
-            *kept.as_mut().context("a null count")? = count as c_int;
+            output(kept, "count")?.write(count as c_int);
             Ok(())
         })
     }
@@ -287,7 +287,7 @@ pub unsafe extern "C" fn tess_sort_key_lanes(
                 storage[index] = slots(pointer, capacity, "lane")?;
             }
             let written = key_lanes(keys, &batch, &rows, &mut storage[..words])?;
-            *count.as_mut().context("a null count")? = written as c_int;
+            output(count, "count")?.write(written as c_int);
             Ok(())
         })
     }
@@ -352,9 +352,9 @@ pub unsafe extern "C" fn tess_sort_merge(
             let out = slots(out, max_out, "merge output")?;
             let state = slots(state, MERGE_STATE_WORDS, "merge state")?;
             let merged = merge(words, lanes, left, more, state, out)?;
-            *count.as_mut().context("a null count")? = merged.count as c_int;
-            *refill.as_mut().context("a null refill")? =
-                merged.refill.map_or(-1, |run| run as c_int);
+            let (count, refill) = (output(count, "count")?, output(refill, "refill")?);
+            count.write(merged.count as c_int);
+            refill.write(merged.refill.map_or(-1, |run| run as c_int));
             Ok(())
         })
     }

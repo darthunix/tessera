@@ -1,12 +1,12 @@
 //! The count entry point, for a column of any type.
 
-use anyhow::Context;
 use tessera_kernels::count;
 
 use super::args::inputs;
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
+use super::table::output;
 
 /// `tess_count`: the number of selected non-NULL rows of a column of any
 /// type, from its NULL flags alone.
@@ -28,10 +28,10 @@ pub unsafe extern "C" fn tess_count(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let out = count.as_mut().context("a null result")?;
+            let out = output(count, "result")?;
             let (column, rows) = inputs::<()>(column, prepared, rows)?;
             let value = count::count(&column, &rows)?;
-            *out = i64::try_from(value)?;
+            out.write(i64::try_from(value)?);
             Ok(())
         })
     }

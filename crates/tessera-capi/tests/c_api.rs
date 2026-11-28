@@ -21,6 +21,9 @@ use tessera_capi::c::{
 };
 use tessera_kernels::int32::{hash_combine, murmurhash32};
 
+mod support;
+use support::{unset, unset2};
+
 /// A column of `nrows` int4 Datums with every fifth row NULL, and the
 /// selection words of every row but each third.
 struct Fixture {
@@ -311,56 +314,21 @@ fn aggregates_match_a_scalar_loop_and_are_null_without_rows() {
     let column = fixture.column();
     let rows = fixture.mask();
     let mut status = Status::new();
-    let (mut got_count, mut got_sum, mut got_min, mut got_max) = (-1, -1, -1, -1);
-    let (mut sum_null, mut min_null, mut max_null) = (true, true, true);
+    // The results come unset, as C's variables do: each call writes them.
     // SAFETY: local buffers of the declared sizes.
-    unsafe {
-        let column = &raw const column;
-        let rows = &raw const rows;
-        assert_eq!(
-            tess_count(
-                column,
-                ptr::null(),
-                rows,
-                &raw mut got_count,
-                &raw mut status
-            ),
-            Code::Ok
-        );
-        assert_eq!(
-            tess_int4_sum(
-                column,
-                ptr::null(),
-                rows,
-                &raw mut sum_null,
-                &raw mut got_sum,
-                &raw mut status
-            ),
-            Code::Ok
-        );
-        assert_eq!(
-            tess_int4_min(
-                column,
-                ptr::null(),
-                rows,
-                &raw mut min_null,
-                &raw mut got_min,
-                &raw mut status
-            ),
-            Code::Ok
-        );
-        assert_eq!(
-            tess_int4_max(
-                column,
-                ptr::null(),
-                rows,
-                &raw mut max_null,
-                &raw mut got_max,
-                &raw mut status
-            ),
-            Code::Ok
-        );
-    }
+    let (mut got_count, (mut sum_null, mut got_sum), (mut min_null, mut got_min)) = unsafe {
+        let (column, rows, status) = (&raw const column, &raw const rows, &raw mut status);
+        (
+            unset(|count| tess_count(column, ptr::null(), rows, count, status)),
+            unset2(|null, sum| tess_int4_sum(column, ptr::null(), rows, null, sum, status)),
+            unset2(|null, value| tess_int4_min(column, ptr::null(), rows, null, value, status)),
+        )
+    };
+    // SAFETY: as above.
+    let (mut max_null, mut got_max) = unsafe {
+        let (column, rows, status) = (&raw const column, &raw const rows, &raw mut status);
+        unset2(|null, value| tess_int4_max(column, ptr::null(), rows, null, value, status))
+    };
     assert_eq!(
         (got_count, got_sum, got_min, got_max),
         (count, sum, least, greatest)
@@ -791,45 +759,16 @@ fn int8_extremes_and_the_count_of_any_type_match_a_scalar_loop() {
     let column = fixture.column();
     let rows = fixture.mask();
     let mut status = Status::new();
-    let (mut got_count, mut got_min, mut got_max) = (-1, -1, -1);
-    let (mut min_null, mut max_null) = (true, true);
+    // The results come unset, as C's variables do: each call writes them.
     // SAFETY: local buffers of the declared sizes.
-    unsafe {
-        let column = &raw const column;
-        let rows = &raw const rows;
-        assert_eq!(
-            tess_count(
-                column,
-                ptr::null(),
-                rows,
-                &raw mut got_count,
-                &raw mut status
-            ),
-            Code::Ok
-        );
-        assert_eq!(
-            tess_int8_min(
-                column,
-                ptr::null(),
-                rows,
-                &raw mut min_null,
-                &raw mut got_min,
-                &raw mut status
-            ),
-            Code::Ok
-        );
-        assert_eq!(
-            tess_int8_max(
-                column,
-                ptr::null(),
-                rows,
-                &raw mut max_null,
-                &raw mut got_max,
-                &raw mut status
-            ),
-            Code::Ok
-        );
-    }
+    let (mut got_count, (mut min_null, mut got_min), (mut max_null, mut got_max)) = unsafe {
+        let (column, rows, status) = (&raw const column, &raw const rows, &raw mut status);
+        (
+            unset(|count| tess_count(column, ptr::null(), rows, count, status)),
+            unset2(|null, value| tess_int8_min(column, ptr::null(), rows, null, value, status)),
+            unset2(|null, value| tess_int8_max(column, ptr::null(), rows, null, value, status)),
+        )
+    };
     assert_eq!((got_count, got_min, got_max), (count, least, greatest));
     assert_eq!((min_null, max_null), (false, false));
     // The count reads flags alone: the Datums may hold anything, such as
