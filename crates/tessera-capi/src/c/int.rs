@@ -14,6 +14,7 @@ use super::args::{arith_op, compare_op, hash_outputs, inputs, null_keys, outputs
 use super::column::DatumColumn;
 use super::mask::Mask;
 use super::status::{Code, Status, guard};
+use super::table::output;
 use crate::{DatumIntColumn, FromDatum};
 
 /// The ABI version of `tessera/kernels.h` this library implements.
@@ -423,12 +424,12 @@ pub unsafe extern "C" fn tess_int4_sum(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let null = isnull.as_mut().context("a null flag")?;
-            let out = sum.as_mut().context("a null result")?;
+            let null = output(isnull, "flag")?;
+            let out = output(sum, "result")?;
             let (column, rows) = inputs(column, prepared, rows)?;
             let value = int32::sum(&column, &rows)?;
-            *null = value.is_none();
-            *out = value.unwrap_or(0);
+            null.write(value.is_none());
+            out.write(value.unwrap_or(0));
             Ok(())
         })
     }
@@ -451,12 +452,12 @@ unsafe fn extreme<T: FromDatum + Default>(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let null = isnull.as_mut().context("a null flag")?;
-            let out = value.as_mut().context("a null result")?;
+            let null = output(isnull, "flag")?;
+            let out = output(value, "result")?;
             let (column, rows) = inputs(column, prepared, rows)?;
             let found = kernel(&column, &rows)?;
-            *null = found.is_none();
-            *out = found.unwrap_or_default();
+            null.write(found.is_none());
+            out.write(found.unwrap_or_default());
             Ok(())
         })
     }

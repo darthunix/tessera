@@ -8,14 +8,19 @@
     reason = "a test reports a failure by panicking"
 )]
 
+use std::mem::MaybeUninit;
 use std::ptr;
 
 use tessera_capi::c::{
-    Code, DatumColumn, DecimalArg, DecimalSum, Mask, Status, tess_decimal_compute,
-    tess_decimal_filter, tess_decimal_read, tess_decimal_read_datum, tess_decimal_sum,
-    tess_decimal_to_int4, tess_decimal_to_int8, tess_decimal_write, tess_decimal_write_datum,
+    Code, DatumColumn, DecimalArg, DecimalExtreme, DecimalSum, Mask, Status, tess_decimal_compute,
+    tess_decimal_extreme, tess_decimal_filter, tess_decimal_read, tess_decimal_read_datum,
+    tess_decimal_sum, tess_decimal_to_int4, tess_decimal_to_int8, tess_decimal_write,
+    tess_decimal_write_datum,
 };
 use tessera_kernels::decimal::{Decimal, NUMERIC_MAX};
+
+mod support;
+use support::unset;
 
 /// Numerics kept at stable addresses, each in words so that a 4-byte
 /// header is aligned as PostgreSQL aligns it.
@@ -83,20 +88,23 @@ fn mask(nrows: usize, words: &mut [u64]) -> Mask {
 
 /// The decimal of a numeric Datum by the entry point.
 fn read_datum(datum: u64) -> Option<(i64, i32)> {
-    let (mut value, mut scale, mut found) = (0, 0, false);
+    // The results come unset, as C's variables do.
+    let (mut value, mut scale) = (MaybeUninit::uninit(), MaybeUninit::uninit());
     let mut status = Status::new();
     // SAFETY: a numeric Datum and local outputs.
-    let code = unsafe {
-        tess_decimal_read_datum(
-            datum,
-            &raw mut value,
-            &raw mut scale,
-            &raw mut found,
-            &raw mut status,
-        )
+    let found = unsafe {
+        unset(|found| {
+            tess_decimal_read_datum(
+                datum,
+                value.as_mut_ptr(),
+                scale.as_mut_ptr(),
+                found,
+                &raw mut status,
+            )
+        })
     };
-    assert_eq!(code, Code::Ok, "{}", status.message());
-    found.then_some((value, scale))
+    // SAFETY: a call that finds a decimal writes its value and scale.
+    found.then(|| unsafe { (value.assume_init(), scale.assume_init()) })
 }
 
 #[test]
@@ -203,24 +211,25 @@ fn compute_reads_the_decimal_side_and_writes_decimals_at_the_scale() {
     assert_eq!((results[1], scales[1]), (-5 * 1_000_000_000, 3));
     assert_eq!((results[2], scales[2]), (-250 * 1_000_000_000, 4));
 
-    // The numerics of the rows that are no decimals of scale 4.
-    let mut space = [0_u64; 8];
-    let mut used = 0;
+    // The numerics of the rows that are no decimals of scale 4, into space
+    // that holds no values yet, as palloc leaves it, and a size unset.
+    let mut space = MaybeUninit::<[u64; 8]>::uninit();
     let write = [0b10_u64];
     // SAFETY: local buffers aligned to 8 bytes.
-    let code = unsafe {
-        tess_decimal_write(
-            results.as_mut_ptr().cast(),
-            scales.as_ptr(),
-            -1,
-            &mask(5, &mut write.clone()),
-            space.as_mut_ptr().cast(),
-            size_of_val(&space),
-            &raw mut used,
-            &raw mut status,
-        )
+    let used = unsafe {
+        unset(|used| {
+            tess_decimal_write(
+                results.as_mut_ptr().cast(),
+                scales.as_ptr(),
+                -1,
+                &mask(5, &mut write.clone()),
+                space.as_mut_ptr().cast(),
+                size_of_val(&space),
+                used,
+                &raw mut status,
+            )
+        })
     };
-    assert_eq!(code, Code::Ok, "{}", status.message());
     assert_eq!(results[1] as u64, space.as_ptr() as u64);
     assert_eq!(used, 8);
     assert_eq!(read_datum(results[1] as u64), Some((-5_000_000_000, 3)));
@@ -345,21 +354,22 @@ fn datums_round_trip_and_bad_inputs_fail() {
     let mut numerics = Numerics::new();
     assert_eq!(read_datum(numerics.short(-123_456, 3)), Some((-123_456, 3)));
     assert_eq!(read_datum(numerics.nan()), None);
-    let mut out = [0_u64; 4];
-    let mut size = 0;
+    // A buffer and a size that hold no values yet, as C's do.
+    let mut out = MaybeUninit::<[u64; 4]>::uninit();
     let mut status = Status::new();
     // SAFETY: a local buffer of 32 bytes.
-    let code = unsafe {
-        tess_decimal_write_datum(
-            -42,
-            1,
-            out.as_mut_ptr().cast(),
-            size_of_val(&out),
-            &raw mut size,
-            &raw mut status,
-        )
+    let mut size = unsafe {
+        unset(|size| {
+            tess_decimal_write_datum(
+                -42,
+                1,
+                out.as_mut_ptr().cast(),
+                size_of_val(&out),
+                size,
+                &raw mut status,
+            )
+        })
     };
-    assert_eq!(code, Code::Ok, "{}", status.message());
     assert_eq!(size, 10);
     assert_eq!(read_datum(out.as_ptr() as u64), Some((-42, 1)));
     for (value, scale, len) in [(i64::MAX, 0, 32), (1, 37, 32), (1, -1, 32), (1, 0, 31)] {
@@ -527,4 +537,37 @@ fn an_int8_sum_takes_values_of_19_digits_and_refuses_i128_min() {
         (min.low, min.high, min.scale, min.count),
         (0, i64::MIN, 0, 1)
     );
+}
+
+/// The greatest of the decimals, its row a result C hands over unset.
+#[test]
+fn an_extreme_writes_its_row_whole() {
+    let mut numerics = Numerics::new();
+    let values = vec![numerics.long(15, 1), numerics.short(3, 0), 0];
+    let isnull = [false, false, true];
+    let source = column(&values, &isnull);
+    let mut extreme = DecimalExtreme {
+        value: 0,
+        scale: 0,
+        valid: false,
+    };
+    let (mut rows, mut rest) = ([0b111_u64], [0_u64]);
+    let mut status = Status::new();
+    // SAFETY: a local column, masks and results.
+    let row = unsafe {
+        unset(|row| {
+            tess_decimal_extreme(
+                &raw const source,
+                &mask(3, &mut rows),
+                true,
+                &raw mut extreme,
+                row,
+                &mut mask(3, &mut rest),
+                &raw mut status,
+            )
+        })
+    };
+    assert_eq!(row, 1);
+    assert_eq!((extreme.value, extreme.scale, extreme.valid), (3, 0, true));
+    assert_eq!(rest, [0]);
 }

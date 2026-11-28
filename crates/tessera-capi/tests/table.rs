@@ -9,6 +9,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
+use std::mem::MaybeUninit;
 use std::ptr;
 use std::slice;
 
@@ -21,15 +22,16 @@ use tessera_capi::c::{
     tess_build_add_duplicates, tess_build_counters_init, tess_build_report, tess_build_step,
     tess_build_stop, tess_build_stopped, tess_build_take_chunk, tess_build_totals, tess_int4_hash,
     tess_int8_hash, tess_round_step, tess_sort, tess_sort_item_words, tess_sort_items,
-    tess_sort_layout, tess_sort_merge, tess_table_accumulate, tess_table_accumulate_sums,
-    tess_table_append, tess_table_append_columns, tess_table_append_partitioned_columns,
-    tess_table_bloom, tess_table_bloom_words, tess_table_bloom_words_within, tess_table_chunk_init,
-    tess_table_chunk_used, tess_table_clear_key, tess_table_combine, tess_table_create,
-    tess_table_find_or_insert, tess_table_format_version, tess_table_gather, tess_table_gather_key,
+    tess_sort_layout, tess_sort_merge, tess_sort_run_words, tess_table_accumulate,
+    tess_table_accumulate_sums, tess_table_append, tess_table_append_columns,
+    tess_table_append_partitioned_columns, tess_table_bloom, tess_table_bloom_words,
+    tess_table_bloom_words_within, tess_table_chunk_init, tess_table_chunk_used,
+    tess_table_clear_key, tess_table_combine, tess_table_create, tess_table_find_or_insert,
+    tess_table_fingerprint, tess_table_format_version, tess_table_gather, tess_table_gather_key,
     tess_table_gather_words, tess_table_layout, tess_table_link, tess_table_link_grouped,
     tess_table_mark, tess_table_mark_words, tess_table_next_in_group, tess_table_next_match,
     tess_table_next_unmarked, tess_table_payloads, tess_table_probe, tess_table_record,
-    tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
+    tess_table_record_size, tess_table_regrow, tess_table_scan, tess_table_size, tess_table_stats,
     tess_table_try_build_bloom,
 };
 use tessera_core::{ColumnView, RowMask, RowMaskView};
@@ -40,6 +42,9 @@ use tessera_kernels::table::{
     CHUNK_HEADER, MAX_CHUNK_LEN, MAX_PAYLOAD_COLUMNS, Matches, OwnedTable, RECORD_NEXT_OFFSET,
     TableConfig, UNIT_BITS, VERSION_OFFSET, index_size, payload_null_words,
 };
+
+mod support;
+use support::{unset, unset2};
 
 thread_local! {
     /// The allocations this thread has made, for a test that a call makes
@@ -173,11 +178,11 @@ impl CTable {
     /// None beyond the entry points' own: every buffer is local.
     unsafe fn new(payload_size: usize, capacity: u64) -> Self {
         let mut status = Status::new();
-        let mut size = 0;
-        // SAFETY: local buffers of the declared sizes.
+        // SAFETY: local buffers of the declared sizes; the size comes
+        // unset, as C's variable does.
         unsafe {
-            let code = tess_table_size(1, payload_size, capacity, &raw mut size, &raw mut status);
-            assert_eq!(code, Code::Ok, "{}", status.message());
+            let size =
+                unset(|size| tess_table_size(1, payload_size, capacity, size, &raw mut status));
             let mut index = vec![0_u64; size / 8];
             let code = tess_table_create(
                 index.as_mut_ptr().cast(),
@@ -286,27 +291,28 @@ impl CTable {
             let mut duplicates = 0;
             for chunk in 0..self.chunks.len() {
                 let mut from = self.linked[chunk];
-                let mut repeated = 0;
-                let code = if grouped {
-                    tess_table_link_grouped(
-                        self.ptr(),
-                        chunk as i32,
-                        &raw mut from,
-                        ptr::null_mut(),
-                        &raw mut repeated,
-                        &raw mut status,
-                    )
-                } else {
-                    tess_table_link(
-                        self.ptr(),
-                        chunk as i32,
-                        &raw mut from,
-                        ptr::null_mut(),
-                        &raw mut repeated,
-                        &raw mut status,
-                    )
-                };
-                assert_eq!(code, Code::Ok, "{}", status.message());
+                // The counts come unset, as C's variables do.
+                let (_, repeated) = unset2(|linked, repeated| {
+                    if grouped {
+                        tess_table_link_grouped(
+                            self.ptr(),
+                            chunk as i32,
+                            &raw mut from,
+                            linked,
+                            repeated,
+                            &raw mut status,
+                        )
+                    } else {
+                        tess_table_link(
+                            self.ptr(),
+                            chunk as i32,
+                            &raw mut from,
+                            linked,
+                            repeated,
+                            &raw mut status,
+                        )
+                    }
+                });
                 self.linked[chunk] = from;
                 duplicates += repeated;
             }
@@ -409,15 +415,13 @@ unsafe fn slice_of<'a>(bits: *const u64, words: usize) -> &'a [u64] {
 ///
 /// As for [`tess_table_stats`].
 unsafe fn attach(table: *const TableRef, status: *mut Status) -> Code {
-    let mut stats = TableStats {
-        struct_size: size_of::<TableStats>(),
-        records: 0,
-        buckets: 0,
-        bytes_used: 0,
-        region_len: 0,
-    };
+    // C sets the size alone and leaves the counts unset.
+    let mut stats = MaybeUninit::<TableStats>::uninit();
     // SAFETY: the caller's contract, the counts local.
-    unsafe { tess_table_stats(table, &raw mut stats, status) }
+    unsafe {
+        (&raw mut (*stats.as_mut_ptr()).struct_size).write(size_of::<TableStats>());
+        tess_table_stats(table, stats.as_mut_ptr(), status)
+    }
 }
 
 /// The payload of the record at `offset`, through the call for a batch.
@@ -1740,19 +1744,20 @@ fn the_mark_entry_points_leave_marked_records_out() -> Result<()> {
             // A call gives at least a record until the walk is over: a
             // cursor that stood still fails here, not hangs.
             for _ in 0..=NROWS {
-                let mut count = 0;
-                let code = tess_table_next_unmarked(
-                    table.ptr(),
-                    32,
-                    marks,
-                    shared,
-                    &raw mut cursor,
-                    out.as_mut_ptr(),
-                    7,
-                    &raw mut count,
-                    &raw mut status,
-                );
-                assert_eq!(code, Code::Ok, "{}", status.message());
+                // The count comes unset, as C's variable does.
+                let count = unset(|count| {
+                    tess_table_next_unmarked(
+                        table.ptr(),
+                        32,
+                        marks,
+                        shared,
+                        &raw mut cursor,
+                        out.as_mut_ptr(),
+                        7,
+                        count,
+                        &raw mut status,
+                    )
+                });
                 if count == 0 {
                     return found;
                 }
@@ -1879,18 +1884,38 @@ fn the_writer_entry_points_round_trip() -> Result<()> {
         assert_eq!(inserted_words, [0b1111, 0]);
         let mut cursor = 0;
         let mut walked = [0; 8];
-        let mut count = 0;
-        let code = tess_table_scan(
-            table.ptr(),
-            &raw mut cursor,
-            walked.as_mut_ptr(),
-            8,
-            &raw mut count,
-            &raw mut status,
-        );
-        assert_eq!((code, count), (Code::Ok, 4));
+        // The results of these calls come unset, as C's variables do.
+        let mut count = unset(|count| {
+            tess_table_scan(
+                table.ptr(),
+                &raw mut cursor,
+                walked.as_mut_ptr(),
+                8,
+                count,
+                &raw mut status,
+            )
+        });
+        assert_eq!(count, 4);
         assert_eq!(walked[..4], offsets[..4]);
         assert_ne!(cursor, 0);
+        let mut record = MaybeUninit::<TableRecord>::uninit();
+        (&raw mut (*record.as_mut_ptr()).struct_size).write(size_of::<TableRecord>());
+        let code = tess_table_record(
+            table.ptr(),
+            offsets[0],
+            record.as_mut_ptr(),
+            &raw mut status,
+        );
+        assert_eq!(code, Code::Ok, "{}", status.message());
+        let record = record.assume_init();
+        assert_eq!((record.hash, *record.keys), (hashes[0], 0));
+        let fingerprint = |status| unset(|out| tess_table_fingerprint(table.ptr(), out, status));
+        assert_eq!(fingerprint(&raw mut status), fingerprint(&raw mut status));
+        let record_size = unset(|size| tess_table_record_size(1, 8, size, &raw mut status));
+        assert_eq!(record_size, 32, "the records of the chunk of 4");
+        let words =
+            unset(|words| tess_table_mark_words(8 + 4 * 32, record_size, words, &raw mut status));
+        assert_eq!(words, 1);
         // A walk of no records is refused: its count of 0 would read as
         // the end of the walk.
         let before = cursor;
@@ -2577,11 +2602,8 @@ fn the_lookups_narrow_a_mask_in_place() -> Result<()> {
         }
 
         // The filter, plain and shared, with two masks and in place.
-        let mut nwords = 0;
-        assert_eq!(
-            tess_table_bloom_words(64, &raw mut nwords, &raw mut status),
-            Code::Ok
-        );
+        // The sizes and the flag come unset, as C's variables do.
+        let nwords = unset(|nwords| tess_table_bloom_words(64, nwords, &raw mut status));
         let mut filter = vec![0_u64; nwords];
         let code = tess_table_bloom(table.ptr(), filter.as_mut_ptr(), nwords, &raw mut status);
         assert_eq!(code, Code::Ok, "{}", status.message());
@@ -2614,21 +2636,20 @@ fn the_lookups_narrow_a_mask_in_place() -> Result<()> {
             &raw mut status,
         );
         assert_eq!((code, words), (Code::Ok, passed_words));
-        let mut shared_words = 0;
-        let code = tess_bloom_shared_words(64, &raw mut shared_words, &raw mut status);
-        assert_eq!(code, Code::Ok, "{}", status.message());
+        let shared_words = unset(|words| tess_bloom_shared_words(64, words, &raw mut status));
         let mut shared = vec![0_u64; shared_words];
         let code = tess_bloom_shared_init(shared.as_mut_ptr(), shared_words, &raw mut status);
         assert_eq!(code, Code::Ok, "{}", status.message());
-        let mut built = false;
-        let code = tess_table_try_build_bloom(
-            table.ptr(),
-            shared.as_mut_ptr(),
-            shared_words,
-            &raw mut built,
-            &raw mut status,
-        );
-        assert_eq!((code, built), (Code::Ok, true), "{}", status.message());
+        let built = unset(|built| {
+            tess_table_try_build_bloom(
+                table.ptr(),
+                shared.as_mut_ptr(),
+                shared_words,
+                built,
+                &raw mut status,
+            )
+        });
+        assert!(built);
         let mut words = [u64::MAX];
         let bits = words.as_mut_ptr();
         let same = Mask { nrows: 64, bits };
@@ -2681,6 +2702,38 @@ fn a_merge_refuses_an_impossible_item_width() {
     }
 }
 
+/// A merge of one run writes its count and its run to load whole: C
+/// hands them over unset, as variables on its stack.
+#[test]
+fn a_merge_writes_its_results_whole() {
+    let lane = [0_u64; 4];
+    let lanes = [lane.as_ptr(); 2];
+    let left = [4_u32];
+    let more = [false];
+    let mut state = [0_u32; tessera_kernels::sort::MERGE_STATE_WORDS];
+    let mut out = [0_u32; 4];
+    let mut status = Status::new();
+    // SAFETY: as above.
+    let (count, refill) = unsafe {
+        unset2(|count, refill| {
+            tess_sort_merge(
+                1,
+                1,
+                lanes.as_ptr(),
+                left.as_ptr(),
+                more.as_ptr(),
+                state.as_mut_ptr(),
+                out.as_mut_ptr(),
+                4,
+                count,
+                refill,
+                &raw mut status,
+            )
+        })
+    };
+    assert_eq!((count, refill), (4, -1));
+}
+
 #[test]
 fn the_sort_layout_probes_match_the_type() {
     assert_eq!(tess_sort_layout(0), size_of::<CSortKey>());
@@ -2726,27 +2779,29 @@ fn the_sort_entry_points_order_every_record() -> Result<()> {
                 | if descending { DESCENDING } else { 0 }
                 | if nulls_first { NULLS_FIRST } else { 0 };
             let sort_key = CSortKey { kind: 1, flags };
-            let mut words = 0;
-            let code =
-                tess_sort_item_words(1, &raw const sort_key, &raw mut words, &raw mut status);
-            assert_eq!(code, Code::Ok, "{}", status.message());
+            // The counts come unset, as C's variables do.
+            let words =
+                unset(|words| tess_sort_item_words(1, &raw const sort_key, words, &raw mut status));
+            let run =
+                unset(|words| tess_sort_run_words(1, &raw const sort_key, words, &raw mut status));
+            assert!(run > 0);
             assert_eq!(
                 words, 2,
                 "an int4 that may be NULL and a reference take 65 bits"
             );
             let words = words as usize;
             let mut items = vec![0_u64; keys.nrows() * words];
-            let mut count = 0;
-            let code = tess_sort_items(
-                table.ptr(),
-                1,
-                &raw const sort_key,
-                items.as_mut_ptr(),
-                items.len(),
-                &raw mut count,
-                &raw mut status,
-            );
-            assert_eq!(code, Code::Ok, "{}", status.message());
+            let count = unset(|count| {
+                tess_sort_items(
+                    table.ptr(),
+                    1,
+                    &raw const sort_key,
+                    items.as_mut_ptr(),
+                    items.len(),
+                    count,
+                    &raw mut status,
+                )
+            });
             assert_eq!(count as usize, keys.nrows());
             let mut refs = vec![0_u32; keys.nrows()];
             let code = tess_sort(
@@ -3592,6 +3647,9 @@ fn outputs_are_checked_before_anything_changes() -> Result<()> {
             assert_eq!(code, Code::Ok, "{}", status.message());
             assert_eq!(*record.keys, *value as i64, "the key is not cleared");
         }
+        // Cleared with a count unset, as C's variable is: every record.
+        let cleared = unset(|count| tess_table_clear_key(table.ptr(), 0, count, &raw mut status));
+        assert_eq!(cleared, offsets.len() as u64);
 
         // A walk without a place for the count: refused, the cursor where
         // it was.
@@ -4108,10 +4166,10 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
             Code::Ok
         );
         assert_eq!(nwords, 4, "160 bits, rounded up to a power of two");
-        let mut within = 0;
-        let code =
-            tess_table_bloom_words_within(NROWS as u64, 64, &raw mut within, &raw mut status);
-        assert_eq!((code, within), (Code::Ok, 1), "an eighth of 64 bytes");
+        let within = unset(|within| {
+            tess_table_bloom_words_within(NROWS as u64, 64, within, &raw mut status)
+        });
+        assert_eq!(within, 1, "an eighth of 64 bytes");
         let mut shared_words = 0;
         let code = tess_bloom_shared_words(NROWS as u64, &raw mut shared_words, &raw mut status);
         assert_eq!((code, shared_words), (Code::Ok, 5), "a state word and four");
@@ -4187,15 +4245,11 @@ fn the_filter_entry_points_size_fill_and_probe() -> Result<()> {
         assert_eq!(code, Code::Ok, "{}", status.message());
         assert!(shared.iter().all(|&word| word == 0), "cleared");
         let ready = |shared: &mut Vec<u64>| {
-            let (mut ready, mut status) = (true, Status::new());
-            let code = tess_bloom_shared_ready(
-                shared.as_mut_ptr(),
-                shared.len(),
-                &raw mut ready,
-                &raw mut status,
-            );
-            assert_eq!(code, Code::Ok, "{}", status.message());
-            ready
+            // The flag comes unset, as C's variable does.
+            let mut status = Status::new();
+            unset(|ready| {
+                tess_bloom_shared_ready(shared.as_mut_ptr(), shared.len(), ready, &raw mut status)
+            })
         };
         let shared_probe = |shared: &mut Vec<u64>| {
             let mut status = Status::new();
@@ -4809,6 +4863,9 @@ fn the_mark_of_a_chunk() {
         // Three records of 32 bytes after the mark.
         base.cast::<u64>().write(8 + 3 * 32);
         assert_eq!(mark_of(base, 128, 32), (Code::Ok, 104));
+        // The mark comes unset, as C's variable does.
+        let used = unset(|used| tess_table_chunk_used(base, 128, 32, used, &raw mut status));
+        assert_eq!(used, 104);
     }
 }
 

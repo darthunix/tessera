@@ -29,6 +29,7 @@ use super::column::{BytesColumn, DatumColumn};
 use super::mask::Mask;
 use super::source::{self, Constant, output, selection, slots, with_sources};
 use super::status::{Code, Status, guard};
+use super::table::output as place;
 use super::varlena::varlena_data;
 
 /// `TessTextArg`: a column of `Datum` values, a column in the bytes form,
@@ -360,10 +361,10 @@ pub unsafe extern "C" fn tess_text_like(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let simple = simple.as_mut().context("a null flag")?;
+            let simple = place(simple, "flag")?;
             let pattern = bytes(pattern, len)?;
             let Some(like) = Like::parse(pattern) else {
-                *simple = false;
+                simple.write(false);
                 return Ok(());
             };
             let mut rows = output(rows)?;
@@ -372,7 +373,7 @@ pub unsafe extern "C" fn tess_text_like(
             with_column!(column, |source| text::like(
                 source, &like, negate, &mut rows, &mut rest
             ))?;
-            *simple = true;
+            simple.write(true);
             Ok(())
         })
     }

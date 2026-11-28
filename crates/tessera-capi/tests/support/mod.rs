@@ -147,3 +147,25 @@ impl<T: Width> Storage<T> {
         unsafe { DatumIntColumn::try_new(&self.datums, &self.isnull, self.prepared()) }.unwrap()
     }
 }
+
+/// The result of a call that writes it whole, given the call a place
+/// that holds no value yet, as a variable on C's stack: Miri, with
+/// `-Zmiri-recursive-validation`, fails the call if it reads or borrows
+/// the place first.
+pub fn unset<T>(call: impl FnOnce(*mut T) -> tessera_capi::c::Code) -> T {
+    let mut place = MaybeUninit::<T>::uninit();
+    assert_eq!(call(place.as_mut_ptr()), tessera_capi::c::Code::Ok);
+    // SAFETY: the call succeeded, and a call that succeeds writes it.
+    unsafe { place.assume_init() }
+}
+
+/// As [`unset`], for two results of one call.
+pub fn unset2<A, B>(call: impl FnOnce(*mut A, *mut B) -> tessera_capi::c::Code) -> (A, B) {
+    let (mut a, mut b) = (MaybeUninit::<A>::uninit(), MaybeUninit::<B>::uninit());
+    assert_eq!(
+        call(a.as_mut_ptr(), b.as_mut_ptr()),
+        tessera_capi::c::Code::Ok
+    );
+    // SAFETY: as for `unset`.
+    unsafe { (a.assume_init(), b.assume_init()) }
+}

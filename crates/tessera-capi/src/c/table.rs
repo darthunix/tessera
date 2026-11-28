@@ -360,6 +360,11 @@ pub(super) fn output<T>(place: *mut T, what: &str) -> Result<*mut T> {
     Ok(place)
 }
 
+/// As [`output`], for a result the caller may decline with null.
+pub(super) fn optional_output<T>(place: *mut T, what: &str) -> Result<Option<*mut T>> {
+    (!place.is_null()).then(|| output(place, what)).transpose()
+}
+
 /// `nrows` slots at `pointer`, empty when there are none.
 ///
 /// # Safety
@@ -400,7 +405,7 @@ pub unsafe extern "C" fn tess_table_size(
                 payload_size,
             };
             let bytes = index_size(&config, capacity)?;
-            *size.as_mut().context("a null size")? = bytes;
+            output(size, "size")?.write(bytes);
             Ok(())
         })
     }
@@ -427,7 +432,7 @@ pub unsafe extern "C" fn tess_table_record_size(
                 nkeys,
                 payload_size,
             })?;
-            *size.as_mut().context("a null size")? = bytes;
+            output(size, "size")?.write(bytes);
             Ok(())
         })
     }
@@ -479,16 +484,17 @@ pub unsafe extern "C" fn tess_table_stats(
     unsafe {
         guard(status, || {
             let table = attach(table)?;
-            let out = stats.as_mut().context("a null stats structure")?;
+            let out = output(stats, "stats structure")?;
+            // C sets the size alone: the fields are written, never borrowed.
             ensure!(
-                out.struct_size >= TableStats::MIN_SIZE,
+                (&raw const (*out).struct_size).read() >= TableStats::MIN_SIZE,
                 "a stats structure is smaller than its required fields"
             );
             let stats = table.stats();
-            out.records = stats.records;
-            out.buckets = stats.buckets;
-            out.bytes_used = stats.bytes_used;
-            out.region_len = stats.region_len;
+            (&raw mut (*out).records).write(stats.records);
+            (&raw mut (*out).buckets).write(stats.buckets);
+            (&raw mut (*out).bytes_used).write(stats.bytes_used);
+            (&raw mut (*out).region_len).write(stats.region_len);
             Ok(())
         })
     }
@@ -528,8 +534,8 @@ pub unsafe extern "C" fn tess_table_chunk_used(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let used = used.as_mut().context("a null used mark")?;
-            *used = Chunks::used(base, len, record_size)?;
+            let used = output(used, "used mark")?;
+            used.write(Chunks::used(base, len, record_size)?);
             Ok(())
         })
     }
@@ -865,8 +871,8 @@ pub unsafe extern "C" fn tess_table_split(
             let offsets = slots(offsets, capacity, "offsets")?;
             let hashes = slots(hashes, capacity, "hashes")?;
             let from = from.as_mut().context("a null from")?;
-            let count = count.as_mut().context("a null count")?;
-            let full = full.as_mut().context("a null full")?;
+            let count = output(count, "count")?;
+            let full = output(full, "full")?;
             // SAFETY: as in `tess_table_append_partitioned_columns`.
             let split = ChunkWriter::new(&config, chunks)?.split(
                 &partitions,
@@ -875,8 +881,8 @@ pub unsafe extern "C" fn tess_table_split(
                 offsets,
                 hashes,
             )?;
-            *count = split.count as c_int;
-            *full = split.full.map_or(-1, |partition| partition as c_int);
+            count.write(split.count as c_int);
+            full.write(split.full.map_or(-1, |partition| partition as c_int));
             Ok(())
         })
     }
@@ -907,18 +913,20 @@ pub unsafe extern "C" fn tess_table_link(
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let from = from.as_mut().context("a null link cursor")?;
             let table = attach(table)?;
+            let linked = optional_output(linked, "count linked")?;
+            let duplicates = optional_output(duplicates, "count of duplicates")?;
             // SAFETY: `table.h` lets each participant link its own chunks,
             // and the C side borrows no record of them.
-            let count = match duplicates.as_mut() {
+            let count = match duplicates {
                 Some(duplicates) => {
                     let (count, repeated) = table.link_counting(chunk, from)?;
-                    *duplicates = repeated as u64;
+                    duplicates.write(repeated as u64);
                     count
                 }
                 None => table.link(chunk, from)?,
             };
-            if let Some(linked) = linked.as_mut() {
-                *linked = count as u64;
+            if let Some(linked) = linked {
+                linked.write(count as u64);
             }
             Ok(())
         })
@@ -947,12 +955,14 @@ pub unsafe extern "C" fn tess_table_link_grouped(
         guard(status, || {
             let chunk = usize::try_from(chunk).context("a negative chunk")?;
             let from = from.as_mut().context("a null link cursor")?;
+            let linked = optional_output(linked, "count linked")?;
+            let duplicates = optional_output(duplicates, "count of duplicates")?;
             let (count, repeated) = attach_mut(table)?.link_grouped(chunk, from)?;
-            if let Some(linked) = linked.as_mut() {
-                *linked = count as u64;
+            if let Some(linked) = linked {
+                linked.write(count as u64);
             }
-            if let Some(duplicates) = duplicates.as_mut() {
-                *duplicates = repeated as u64;
+            if let Some(duplicates) = duplicates {
+                duplicates.write(repeated as u64);
             }
             Ok(())
         })
@@ -1270,17 +1280,18 @@ pub unsafe extern "C" fn tess_table_record(
     unsafe {
         guard(status, || {
             let table = attach(table)?;
-            let out = record.as_mut().context("a null record structure")?;
+            let out = output(record, "record structure")?;
+            // C sets the size alone: the fields are written, never borrowed.
             ensure!(
-                out.struct_size >= TableRecord::MIN_SIZE,
+                (&raw const (*out).struct_size).read() >= TableRecord::MIN_SIZE,
                 "a record structure is smaller than its required fields"
             );
             let record = table.record(offset)?;
-            out.hash = record.hash;
-            out.null_bits = record.null_bits;
-            out.keys = record.keys.as_ptr();
-            out.payload = record.payload.as_ptr();
-            out.payload_size = record.payload.len();
+            (&raw mut (*out).hash).write(record.hash);
+            (&raw mut (*out).null_bits).write(record.null_bits);
+            (&raw mut (*out).keys).write(record.keys.as_ptr());
+            (&raw mut (*out).payload).write(record.payload.as_ptr());
+            (&raw mut (*out).payload_size).write(record.payload.len());
             Ok(())
         })
     }
@@ -1409,17 +1420,18 @@ pub unsafe extern "C" fn tess_table_combine(
                 })
                 .collect::<anyhow::Result<Vec<_>>>()?;
             let from = from.as_mut().context("a null from")?;
-            let merged = merged.as_mut().context("a null merged count")?;
-            let stop = stop.as_mut().context("a null stop")?;
+            let merged = output(merged, "merged count")?;
+            let stop = output(stop, "stop")?;
             let (count_merged, stopped) =
                 accumulate::combine(&mut table, source, from, chunk, &decoded)?;
-            *merged = count_merged as c_int;
-            *stop = match stopped {
+            let code = match stopped {
                 MergeStop::Done => 0,
                 MergeStop::ChunkFull => 1,
                 MergeStop::IndexFull => 2,
                 stopped => bail!("a merge stop the C API has no code for: {stopped:?}"),
             };
+            merged.write(count_merged as c_int);
+            stop.write(code);
             Ok(())
         })
     }
@@ -1477,8 +1489,8 @@ pub unsafe extern "C" fn tess_table_clear_key(
         guard(status, || {
             let mut table = attach_mut(table)?;
             let key = usize::try_from(key).context("a negative key")?;
-            let count = count.as_mut().context("a null count")?;
-            *count = table.clear_key(key)?;
+            let count = output(count, "count")?;
+            count.write(table.clear_key(key)?);
             Ok(())
         })
     }
@@ -1515,10 +1527,10 @@ pub unsafe extern "C" fn tess_table_scan(
             // the walk is over.
             ensure!(capacity > 0, "a walk visits at least one record a call");
             let out = slots(offsets, capacity, "offsets")?;
-            let count = count.as_mut().context("a null count")?;
+            let count = output(count, "count")?;
             let visited = table.scan(&mut cursor, out)?;
             *raw = cursor.raw();
-            *count = visited as c_int;
+            count.write(visited as c_int);
             Ok(())
         })
     }
@@ -1622,8 +1634,8 @@ pub unsafe extern "C" fn tess_table_mark_words(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let words = words.as_mut().context("a null count of words")?;
-            *words = mark_words(chunk_len, record_size)?;
+            let words = output(words, "count of words")?;
+            words.write(mark_words(chunk_len, record_size)?);
             Ok(())
         })
     }
@@ -1715,10 +1727,10 @@ pub unsafe extern "C" fn tess_table_next_unmarked(
                 chunks: marks,
                 shared,
             });
-            let count = count.as_mut().context("a null count")?;
+            let count = output(count, "count")?;
             let visited = scan_unmarked(&chunks, record_size, &mut cursor, marks.as_ref(), out)?;
             *raw = cursor.raw();
-            *count = visited as c_int;
+            count.write(visited as c_int);
             Ok(())
         })
     }
@@ -2037,8 +2049,8 @@ pub unsafe extern "C" fn tess_table_bloom_words(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let out = nwords.as_mut().context("a null result")?;
-            *out = tessera_kernels::table::bloom::words_for(records)?;
+            let out = output(nwords, "result")?;
+            out.write(tessera_kernels::table::bloom::words_for(records)?);
             Ok(())
         })
     }
@@ -2061,8 +2073,8 @@ pub unsafe extern "C" fn tess_table_bloom_words_within(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let out = nwords.as_mut().context("a null result")?;
-            *out = tessera_kernels::table::bloom::words_within(records, limit)?;
+            let out = output(nwords, "result")?;
+            out.write(tessera_kernels::table::bloom::words_within(records, limit)?);
             Ok(())
         })
     }
@@ -2165,8 +2177,8 @@ pub unsafe extern "C" fn tess_bloom_shared_words(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            let out = nwords.as_mut().context("a null result")?;
-            *out = tessera_kernels::table::bloom::shared_words_for(records)?;
+            let out = output(nwords, "result")?;
+            out.write(tessera_kernels::table::bloom::shared_words_for(records)?);
             Ok(())
         })
     }
@@ -2226,8 +2238,8 @@ pub unsafe extern "C" fn tess_table_try_build_bloom(
         guard(status, || {
             let table = attach(table)?;
             let filter = shared_filter(words, nwords)?;
-            let built = built.as_mut().context("a null result")?;
-            *built = table.try_build_bloom(&filter)?;
+            let built = output(built, "result")?;
+            built.write(table.try_build_bloom(&filter)?);
             Ok(())
         })
     }
@@ -2250,7 +2262,7 @@ pub unsafe extern "C" fn tess_bloom_shared_ready(
     unsafe {
         guard(status, || {
             let filter = shared_filter(words, nwords)?;
-            *ready.as_mut().context("a null result")? = filter.ready();
+            output(ready, "result")?.write(filter.ready());
             Ok(())
         })
     }
@@ -2537,7 +2549,7 @@ pub unsafe extern "C" fn tess_table_fingerprint(
     // SAFETY: the caller's contract.
     unsafe {
         guard(status, || {
-            *fingerprint.as_mut().context("a null fingerprint")? = attach(table)?.fingerprint();
+            output(fingerprint, "fingerprint")?.write(attach(table)?.fingerprint());
             Ok(())
         })
     }
