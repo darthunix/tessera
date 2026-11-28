@@ -687,7 +687,6 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		list_length(outputs) + state->nkeys != list_length(cscan->custom_scan_tlist) ||
 		list_length(states) != list_length(arguments) ||
 		(state->nkeys == 0 && arguments == NIL) ||
-		list_length(arguments) > AGG_MAX_GROUPED ||
 		list_length(filters) != list_length(arguments) ||
 		list_length(more) != list_length(arguments) ||
 		list_length(eqops) != state->nkeys ||
@@ -946,6 +945,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		}
 	}
 	state->ncomputed = list_length(computed);
+	/* The planner's bound: the computed columns within a tuple's, as a spill of rows keeps them. */
+	if (state->ncomputed > TESS_ROWS_MAX_COLUMNS)
+		elog(ERROR, "TessAgg received a foreign plan");
 	state->computed_lens = palloc_array(int16, Max(state->ncomputed, 1));
 	state->computed_byvals = palloc_array(bool, Max(state->ncomputed, 1));
 	state->computed_columns = palloc0_array(TessDatumColumn, Max(state->ncomputed, 1));
@@ -1075,6 +1077,9 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 		check(state, state->kernels->table_record_size(state->nkeys, state->payload_size,
 													   &state->record_size,
 													   &state->status));
+		/* The planner's bound: a record within the first chunk. */
+		if (state->record_size > TABLE_FIRST_CHUNK - TESS_TABLE_CHUNK_HEADER)
+			elog(ERROR, "TessAgg received a foreign plan");
 		state->table_context = AllocSetContextCreate(estate->es_query_cxt,
 													 "TessAgg groups",
 													 ALLOCSET_DEFAULT_SIZES);

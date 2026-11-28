@@ -209,6 +209,22 @@ SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), sum(s), avg(f8), 
 SET parallel_leader_participation = off;
 SELECT parallel_same($$SELECT sum(n), avg(u), sum(b), avg(i4), avg(f8) FROM parallel_fast$$);
 RESET parallel_leader_participation;
+-- spec: aggregate/More than 64 aggregates
+-- 65 aggregates no form folds in the participants and above, their
+-- records of two words of flags, grouped and not.
+SELECT format('SELECT %s FROM parallel_fast',
+              string_agg(CASE k % 2 WHEN 0 THEN format('sum(i4 + s * %s)', k)
+                                    ELSE format('max(i4 - s * %s)', k) END, ', ' ORDER BY k)) AS many65,
+       format('SELECT f4, %s FROM parallel_fast GROUP BY f4',
+              string_agg(CASE k % 2 WHEN 0 THEN format('sum(i4 + s * %s)', k)
+                                    ELSE format('max(i4 - s * %s)', k) END, ', ' ORDER BY k)) AS many65_k
+FROM generate_series(1, 65) AS k \gset
+SELECT regexp_replace(line, ' \(actual.*\)$', '') AS line FROM parallel_explain(:'many65') AS line
+WHERE line ~ '(TessAgg|Partial Mode)';
+SELECT parallel_same(format('SELECT md5(q::text) FROM (%s) AS q', :'many65'));
+SELECT regexp_replace(line, ' \(actual.*\)$', '') AS line FROM parallel_explain(:'many65_k') AS line
+WHERE line ~ '(TessAgg|Partial Mode)';
+SELECT parallel_same(format('SELECT md5(q::text) FROM (%s) AS q', :'many65_k'));
 -- Aggregates of one expression under constants, which a serial plan folds
 -- into shared states: the participants and the final aggregation keep a
 -- state for each.

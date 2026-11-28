@@ -88,7 +88,7 @@ injection points; CI runs 19 and 18.
 - [x] 4.2 `nodes/`: every place the design's "The words of flags" lists,
       in words for each 64 states; `PairsEstimate.set_pairs` sized by
       the DISTINCT aggregates. Check: the suites
-- [ ] 4.3 The cap lifted: the planner's and the node's checks of the
+- [x] 4.3 The cap lifted: the planner's and the node's checks of the
       count gone, the bounds of 1 664 computed columns and of a group's
       record within the first chunk in their place;
       `docs/limitations.md` without the cap. `test/sql/agg.sql` and

@@ -1579,6 +1579,41 @@ aggregate_costs(PlannerInfo *root, AggSplit split, List *state_tlist, int nfolde
 }
 
 /*
+ * Whether the node takes the states of a target list after its keys, of
+ * any count within two bounds: its computed columns, the keys, the
+ * states' arguments and their FILTER conditions, at most
+ * TESS_ROWS_MAX_COLUMNS, the bound of a tuple's columns, which a spill of
+ * the rows keeps; and a group's record, its keys, its words of flags and
+ * its states, within the table's first chunk, as a larger one would have
+ * the table add a chunk at every try. A state takes a word, a sum state or
+ * a numeric extreme the words of its record the node keeps where the
+ * kernels fold it: at most what the node lays out.
+ */
+static bool
+states_fit(List *tlist, int nkeys)
+{
+	int			columns = nkeys;
+	int			words = AGG_FLAG_WORDS(list_length(tlist) - nkeys);
+
+	foreach_node(TargetEntry, entry, tlist)
+	{
+		Aggref	   *agg = (Aggref *) entry->expr;
+
+		if (foreach_current_index(entry) < nkeys || !IsA(agg, Aggref))
+			continue;
+		columns += list_length(agg->args) + (agg->aggfilter != NULL ? 1 : 0);
+		words += batch_aggregate(agg) ? 1 :
+			sum_state_aggregate(agg) ? AGG_SUM_STATE_WORDS :
+			agg->aggfnoid == F_MIN_NUMERIC || agg->aggfnoid == F_MAX_NUMERIC ?
+			AGG_EXTREME_STATE_WORDS : 1;
+	}
+	return columns <= TESS_ROWS_MAX_COLUMNS &&
+		(nkeys == 0 ||
+		 tess_table_record_bytes(nkeys, sizeof(uint64) * words) <=
+		 TABLE_FIRST_CHUNK - TESS_TABLE_CHUNK_HEADER);
+}
+
+/*
  * The cost a row of the aggregates' arguments that the kernels do not
  * compute, none when the aggregates combine partial values: the node's
  * projection evaluates them row by row, as the core's aggregate does.
@@ -1922,7 +1957,7 @@ create_partial_paths(PlannerInfo *root, RelOptInfo *grouped_rel,
 		return;
 	/* A partial aggregation folds nothing: each aggregate is a state. */
 	if (!collect_aggregates((Node *) partial_rel->reltarget->exprs, keys, &tlist) ||
-		list_length(tlist) - list_length(keys) > AGG_MAX_GROUPED)
+		!states_fit(tlist, list_length(keys)))
 		return;
 	if (list_length(tlist) == list_length(keys))
 	{
@@ -2451,14 +2486,11 @@ create_upper_paths(PlannerInfo *root, UpperRelationKind stage,
 							keys, &tlist) ||
 		tlist == NIL)
 		return;
-	/*
-	 * The node keeps AGG_MAX_GROUPED states at most, with groups or without,
-	 * those of the aggregates it folds counted once.
-	 */
+	/* The states the node keeps, those of the aggregates it folds counted once. */
 	fold_aggregates(root, tlist, list_length(keys), true, &fold);
-	if (list_length(fold.states) > AGG_MAX_GROUPED)
-		return;
 	states = fold_target_list(tlist, list_length(keys), &fold);
+	if (!states_fit(states, list_length(keys)))
+		return;
 	/*
 	 * Beside a DISTINCT aggregate's table neither the groups nor the rows of
 	 * generic aggregates spill: the groups with their states must fit. The
