@@ -100,3 +100,12 @@ Runs: base pg-aggfold-ANbDTr, pg-aggfold-jOTd9I; candidate pg-aggfold-OHOvPe, pg
 
 Runs: base pg-aggfold-Ha6Xjg, pg-aggfold-rszFrX; candidate pg-aggfold-7nTqVX, pg-aggfold-GzDrPK.
 
+
+### ab-cntjxv, the twin that computes the same ten values (fb7c6178)
+
+| case | base, M cycles | candidate, M cycles | min | median | control | disk | |
+|---|---:|---:|---:|---:|---:|---:|---|
+| fold_ten_numeric_m1m | 8215.455 | 2006.787 | – | – | 0.993 | 0.204 | **plan differs**, less disk |
+| twin_ten_numeric_m1m | 2855.230 | 2638.598 | 0.922 | 0.924 | 0.989 | 0.556 | faster, less disk |
+
+Runs: base pg-aggfold-EYMu1D, pg-aggfold-iNUBQG; candidate pg-aggfold-ap2FOd, pg-aggfold-dsz1ZL.

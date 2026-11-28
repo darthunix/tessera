@@ -118,7 +118,7 @@ derives nothing; lower is better:
 | `ten_abs` | 525.3 | 76.5 | 0.15 | 1.05 |
 | `ten_int4_k37` | 500.9 | 152.1 | 0.30 | 0.84 |
 | `ten_int4_m1m` | 1 271.8 | 768.2 | 0.60 | 1.18 |
-| `ten_numeric_m1m` | 8 214.7 | 1 998.7 | plan differs | 1.89 |
+| `ten_numeric_m1m` | 8 214.7 | 1 998.7 | plan differs | 0.76 |
 | `distinct_int4_k37` | 1 122.5 | 459.1 | 0.41 | – |
 | `mixed` | 216.3 | 186.7 | 0.86 | – |
 | `ten_int4_spill` | 1 270.0 | 760.4 | 0.60 | 1.18 |
@@ -162,10 +162,10 @@ disk, 23 MB written where the core wrote 114.
 
 ### `fold_ten_numeric_m1m` against its twin
 
-The twin keeps the same states, `avg(n)` and `count(n)`, but gives two
-values a group where the case gives ten numerics, and its outer query
-adds two values a group where the case's adds ten. A probe of four
-statements at the end, the outer query reading the ten sums by counts
+The first twin of the case kept the same states, `avg(n)` and
+`count(n)`, but gave two values a group where the case gives ten
+numerics, which its reading adds: the case took 1.89 of its cycles. A
+probe of four statements at the end, the reading counting the ten sums
 in place of adding them, millions of cycles with Tessera on
 ([probe-numeric-m1m.txt](probe-numeric-m1m.txt)):
 
@@ -174,9 +174,17 @@ in place of adding them, millions of cycles with Tessera on
 | the outer query adds the sums | 1 993 | 1 072 | 921 |
 | the outer query counts them | 1 620 | 794 | 826 |
 
-The outer additions are a tenth of the difference; the rest is the ten
-numerics a group that the derivation makes and the output copies, some
-80 cycles each, which the base makes too, one a sum state.
+The additions are a tenth of the difference; the rest is the ten
+numerics a group the derivation makes and the output copies, some 80
+cycles each, which the base makes too, one a sum state. At the
+maintainer's word the twin was made to read as the case does
+(`fb7c6178`): the same states, `sum(n)` and `count(n)`, and the same
+ten values computed from them above the aggregates, `sum(n) + k *
+count(n)`, which the reading adds. Counted again in two rounds
+(`ab-cntjxv`), the case takes 2 006.8 million cycles and the twin
+2 638.6: 0.76 of the twin's, the fold deriving the values cheaper than
+the core's executor computes them. The ratio in the table above is
+this one.
 
 ## Result: ClickBench
 
@@ -205,11 +213,10 @@ tries: 29.0 s at the base, 0.56 s at the end.
    19 per cent fewer cycles than the base with two forms and 70 to 86
    with ten; `ten_int4` and `ten_abs` pass the range's 85 per cent by
    half a point.
-3. Holds for the integers, 40 per cent fewer cycles than the base and
-   18 per cent over the twin; fails for `fold_ten_numeric_m1m` against
-   its twin, 89 per cent over it, while it takes a quarter of the
-   base's time. The probe above shows why: the twin gives two values a
-   group, the case ten numerics. **The maintainer decides.**
+3. Holds: the integers take 40 per cent fewer cycles than the base and
+   18 per cent more than the twin; the numerics a quarter of the
+   base's time and 0.76 of the cycles of the twin that computes the
+   same values, after the first twin, which computed two, was fixed.
 4. Holds: the spilled case takes 0.60 of the base's time and writes
    0.18 of its bytes.
 5. Holds: the guards within 2 per cent, `guard_float` with its third
