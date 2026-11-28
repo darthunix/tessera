@@ -27,6 +27,13 @@
 /* A group's aggregate states have one flag bit each in a payload word. */
 #define AGG_MAX_GROUPED 64
 
+/*
+ * The words of flags of a group's record of n states, before the states:
+ * one for each 64 and one for none, the flag of state i the bit i % 64 of
+ * word i / 64, as tess_table_combine reads them.
+ */
+#define AGG_FLAG_WORDS(n) Max(1, ((n) + 63) / 64)
+
 /* How the partials of an aggregate combine, and what an empty input gives. */
 typedef enum AggKind
 {
@@ -363,7 +370,9 @@ typedef struct TessAggState
 	uint32		walked[AGG_GROUP_ROWS];
 	Datum		key_values[TESS_TABLE_MAX_KEYS][AGG_GROUP_ROWS];
 	bool		key_isnull[TESS_TABLE_MAX_KEYS][AGG_GROUP_ROWS];
-	uint64		flag_words[AGG_GROUP_ROWS];
+	/* The words of flags of a batch of groups, AGG_GROUP_ROWS a word of each. */
+	uint64	   *flag_words;
+	int			nflag_words;
 	/* The states of a batch of groups, AGG_GROUP_ROWS per aggregate. */
 	uint64	   *state_words;
 	TessBatch  *published;

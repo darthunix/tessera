@@ -623,7 +623,8 @@ group_batch(TessAggState *state, TessBatch *batch)
 													  value->computed >= 0 ? &column : NULL,
 													  NULL,
 													  sizeof(uint64) * value->slot,
-													  0, (uint32) index,
+													  sizeof(uint64) * (index / 64),
+													  (uint32) (index % 64),
 													  &state->status));
 	}
 #ifdef HAVE_INT128
@@ -694,8 +695,9 @@ distinct_step(TessAggState *state, int index, const TessRowMask *rows,
 	state->calls++;
 	check(state, state->kernels->table_accumulate(&state->table, state->offsets, rows,
 												  value->accumulate, column, NULL,
-												  sizeof(uint64) * value->slot, 0,
-												  (uint32) index, &state->status));
+												  sizeof(uint64) * value->slot,
+												  sizeof(uint64) * (index / 64),
+												  (uint32) (index % 64), &state->status));
 }
 
 /*
@@ -877,7 +879,8 @@ group_value_into(TessAggState *state, int index, int group, Datum *datum, bool *
 {
 	AggValue   *value = &state->values[index];
 	uint64		word = state->state_words[index * AGG_GROUP_ROWS + group];
-	bool		seen = ((state->flag_words[group] >> index) & 1) != 0;
+	bool		seen = ((state->flag_words[(index / 64) * AGG_GROUP_ROWS + group] >>
+							 (index % 64)) & 1) != 0;
 
 	*isnull = value->kind != AGG_COUNT && !seen;
 	switch (value->kind)
@@ -1100,10 +1103,12 @@ next_chunk(TessAggState *state)
 				}
 			}
 		}
-		check(state, state->kernels->table_gather(&state->table,
-												  state->walked, &groups, 0,
-												  (Datum *) state->flag_words,
-												  &state->status));
+		for (int word = 0; word < state->nflag_words; word++)
+			check(state, state->kernels->table_gather(&state->table,
+													  state->walked, &groups,
+													  sizeof(uint64) * word,
+													  (Datum *) &state->flag_words[word * AGG_GROUP_ROWS],
+													  &state->status));
 		for (int index = 0; index < state->nvalues; index++)
 			check(state, state->kernels->table_gather(&state->table,
 													  state->walked, &groups,

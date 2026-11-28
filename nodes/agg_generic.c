@@ -1598,7 +1598,9 @@ agg_generic_group_accumulate(TessAggState *state, int index, const TessRowMask *
 	MemoryContext states = state->generic_agg->curaggcontext->ecxt_per_tuple_memory;
 	MemoryContext temporary = state->css.ss.ps.ps_ExprContext->ecxt_per_tuple_memory;
 	MemoryContext old;
-	uint64		bit = UINT64CONST(1) << index;
+	/* The state's flag, in the word of its 64. */
+	int			word = index / 64;
+	uint64		bit = UINT64CONST(1) << (index % 64);
 	int			row = -1;
 
 #ifdef HAVE_INT128
@@ -1622,7 +1624,7 @@ agg_generic_group_accumulate(TessAggState *state, int index, const TessRowMask *
 
 		payload[slot] = generic->init_null ? 0 :
 			(uint64) datumCopy(generic->init, generic->transbyval, generic->translen);
-		payload[0] = generic->init_null ? payload[0] & ~bit : payload[0] | bit;
+		payload[word] = generic->init_null ? payload[word] & ~bit : payload[word] | bit;
 	}
 	MemoryContextSwitchTo(temporary);
 	row = -1;
@@ -1632,7 +1634,7 @@ agg_generic_group_accumulate(TessAggState *state, int index, const TessRowMask *
 		uint64	   *payload = (uint64 *) state->payloads[row];
 
 		generic->state = (Datum) payload[slot];
-		generic->state_null = (payload[0] & bit) == 0;
+		generic->state_null = (payload[word] & bit) == 0;
 #ifdef HAVE_INT128
 		if (generic->fast != FAST_NONE)
 			fast_advance(generic, row, states);
@@ -1640,7 +1642,7 @@ agg_generic_group_accumulate(TessAggState *state, int index, const TessRowMask *
 #endif
 			generic_advance(generic, row, states, temporary);
 		payload[slot] = generic->state_null ? 0 : (uint64) generic->state;
-		payload[0] = generic->state_null ? payload[0] & ~bit : payload[0] | bit;
+		payload[word] = generic->state_null ? payload[word] & ~bit : payload[word] | bit;
 	}
 	MemoryContextSwitchTo(old);
 }
