@@ -19,7 +19,7 @@
 
 ## 3. The search
 
-- [ ] 3.1 The three ways of the design, each on a branch of its own
+- [x] 3.1 The three ways of the design, each on a branch of its own
       that is never merged, counted on the family's cases of inner
       pieces and its guards by `cargo ab measure --counters --cycles
       --rounds 2`, with the machine code of each loop by `tessera-bench
