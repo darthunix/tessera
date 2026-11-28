@@ -125,6 +125,20 @@ SET work_mem = '4MB';
 SELECT pg_temp.measure_pair('fold_ten_int4_spill', format('SELECT count(*), sum(t) FROM (SELECT m, %s AS t FROM bench_fold GROUP BY 1) AS g', pg_temp.ten_read('i * 2 + K')), :repetitions);
 SELECT pg_temp.measure_pair('twin_ten_int4_spill', 'SELECT count(*), sum(t) FROM (SELECT m, sum(i) + count(i) + min(i) + max(i) AS t FROM bench_fold GROUP BY 1) AS g', :repetitions);
 RESET work_mem;
+-- More than 64 aggregates no form folds, sum(i / k) for k from 1 to n,
+-- without groups, in 37 groups, and in 100 000 groups past work_mem: the
+-- node takes them past the 64 one word of flags held, the base runs them
+-- in the core's aggregate. Timed, as their plans differ.
+CREATE FUNCTION pg_temp.many(n integer, glue text) RETURNS text LANGUAGE sql AS $$
+    SELECT string_agg(format('sum(i / %s)', k), glue ORDER BY k) FROM generate_series(1, n) AS k
+$$;
+SELECT pg_temp.measure_pair('many_65', format('SELECT %s FROM bench_fold', pg_temp.many(65, ', ')), :repetitions);
+SELECT pg_temp.measure_pair('many_200', format('SELECT %s FROM bench_fold', pg_temp.many(200, ', ')), :repetitions);
+SELECT pg_temp.measure_pair('many_65_k37', format('SELECT count(*), sum(t) FROM (SELECT k, %s AS t FROM bench_fold GROUP BY 1) AS g', pg_temp.many(65, ' + ')), :repetitions);
+SELECT pg_temp.measure_pair('many_200_k37', format('SELECT count(*), sum(t) FROM (SELECT k, %s AS t FROM bench_fold GROUP BY 1) AS g', pg_temp.many(200, ' + ')), :repetitions);
+SET work_mem = '4MB';
+SELECT pg_temp.measure_pair('many_65_spill', format('SELECT count(*), sum(t) FROM (SELECT m %% 100000, %s AS t FROM bench_fold GROUP BY 1) AS g', pg_temp.many(65, ' + ')), :repetitions);
+RESET work_mem;
 -- A parallel plan, which folds nothing.
 SET parallel_setup_cost = 0;
 SET parallel_tuple_cost = 0;
@@ -153,11 +167,11 @@ ORDER BY test, mode DESC;
 \o plans.txt
 SET tessera.enable = on;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE on_%s', name)
-FROM unnest(ARRAY['fold_two_int4', 'twin_two_int4', 'fold_ten_int2', 'twin_ten_int2', 'fold_ten_int4', 'twin_ten_int4', 'fold_ten_int8', 'twin_ten_int8', 'fold_ten_numeric', 'twin_ten_numeric', 'fold_kinds_int4', 'twin_kinds_int4', 'fold_ten_abs', 'twin_ten_abs', 'fold_ten_int4_k37', 'twin_ten_int4_k37', 'fold_ten_int4_m1m', 'twin_ten_int4_m1m', 'fold_ten_numeric_m1m', 'twin_ten_numeric_m1m', 'fold_distinct_int4_k37', 'twin_distinct_int4_k37', 'fold_mixed', 'guard_lone', 'guard_tie', 'guard_float', 'fold_ten_int4_spill', 'twin_ten_int4_spill', 'guard_parallel']) AS name
+FROM unnest(ARRAY['fold_two_int4', 'twin_two_int4', 'fold_ten_int2', 'twin_ten_int2', 'fold_ten_int4', 'twin_ten_int4', 'fold_ten_int8', 'twin_ten_int8', 'fold_ten_numeric', 'twin_ten_numeric', 'fold_kinds_int4', 'twin_kinds_int4', 'fold_ten_abs', 'twin_ten_abs', 'fold_ten_int4_k37', 'twin_ten_int4_k37', 'fold_ten_int4_m1m', 'twin_ten_int4_m1m', 'fold_ten_numeric_m1m', 'twin_ten_numeric_m1m', 'fold_distinct_int4_k37', 'twin_distinct_int4_k37', 'fold_mixed', 'guard_lone', 'guard_tie', 'guard_float', 'fold_ten_int4_spill', 'twin_ten_int4_spill', 'many_65', 'many_200', 'many_65_k37', 'many_200_k37', 'many_65_spill', 'guard_parallel']) AS name
 WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 SET tessera.enable = off;
 SELECT format('EXPLAIN (ANALYZE, VERBOSE, COSTS OFF, TIMING OFF, SUMMARY OFF, BUFFERS OFF) EXECUTE off_%s', name)
-FROM unnest(ARRAY['fold_two_int4', 'twin_two_int4', 'fold_ten_int2', 'twin_ten_int2', 'fold_ten_int4', 'twin_ten_int4', 'fold_ten_int8', 'twin_ten_int8', 'fold_ten_numeric', 'twin_ten_numeric', 'fold_kinds_int4', 'twin_kinds_int4', 'fold_ten_abs', 'twin_ten_abs', 'fold_ten_int4_k37', 'twin_ten_int4_k37', 'fold_ten_int4_m1m', 'twin_ten_int4_m1m', 'fold_ten_numeric_m1m', 'twin_ten_numeric_m1m', 'fold_distinct_int4_k37', 'twin_distinct_int4_k37', 'fold_mixed', 'guard_lone', 'guard_tie', 'guard_float', 'fold_ten_int4_spill', 'twin_ten_int4_spill', 'guard_parallel']) AS name
+FROM unnest(ARRAY['fold_two_int4', 'twin_two_int4', 'fold_ten_int2', 'twin_ten_int2', 'fold_ten_int4', 'twin_ten_int4', 'fold_ten_int8', 'twin_ten_int8', 'fold_ten_numeric', 'twin_ten_numeric', 'fold_kinds_int4', 'twin_kinds_int4', 'fold_ten_abs', 'twin_ten_abs', 'fold_ten_int4_k37', 'twin_ten_int4_k37', 'fold_ten_int4_m1m', 'twin_ten_int4_m1m', 'fold_ten_numeric_m1m', 'twin_ten_numeric_m1m', 'fold_distinct_int4_k37', 'twin_distinct_int4_k37', 'fold_mixed', 'guard_lone', 'guard_tie', 'guard_float', 'fold_ten_int4_spill', 'twin_ten_int4_spill', 'many_65', 'many_200', 'many_65_k37', 'many_200_k37', 'many_65_spill', 'guard_parallel']) AS name
 WHERE name ~ coalesce(nullif(current_setting('bench.cases', true), ''), '.') \gexec
 \o
 DEALLOCATE ALL;
