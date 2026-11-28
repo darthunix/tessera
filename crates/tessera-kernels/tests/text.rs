@@ -205,6 +205,66 @@ fn like_matches_as_dynamic_programming() {
     });
 }
 
+/// Patterns of one to four inner pieces of 1 to 40 bytes, with or without
+/// a head and a tail, against strings of 0 to 300 bytes, so that a
+/// search of a piece runs over strings long enough for its loops over
+/// vectors: most pieces are cut from the string itself, found where they
+/// were cut or earlier, and the others drawn apart, found late or not at
+/// all. Three common bytes and a rare one, so that a piece's first byte
+/// stops a search often and its rarest seldom.
+#[test]
+fn like_long_strings_as_dynamic_programming() {
+    let alphabet = || select(b"aabbcz".to_vec());
+    let piece = (
+        any::<bool>(),
+        any::<usize>(),
+        1..=40usize,
+        vec(alphabet(), 1..=40),
+    );
+    let case = (
+        vec(alphabet(), 0..=300),
+        vec(piece, 1..=4),
+        any::<bool>(),
+        any::<bool>(),
+    );
+    property(vec(case, 1..=16), |cases| -> Result<()> {
+        for (string, pieces, head, tail) in cases {
+            let cut = |from: usize, len: usize| -> Vec<u8> {
+                if string.is_empty() {
+                    return b"a".to_vec();
+                }
+                let from = from % string.len();
+                string[from..(from + len).min(string.len())].to_vec()
+            };
+            let mut pattern = Vec::new();
+            if head {
+                pattern.extend(cut(0, 3));
+            }
+            for (from_string, from, len, own) in &pieces {
+                pattern.push(b'%');
+                pattern.extend(if *from_string {
+                    cut(*from, *len)
+                } else {
+                    own.clone()
+                });
+            }
+            pattern.push(b'%');
+            if tail {
+                pattern.extend(cut(string.len().saturating_sub(2), 2));
+            }
+            let like = Like::parse(&pattern).unwrap();
+            assert_eq!(
+                like.matches(&string),
+                like_reference(&pattern, &string),
+                "{} {}",
+                String::from_utf8_lossy(&pattern),
+                String::from_utf8_lossy(&string)
+            );
+        }
+        Ok(())
+    });
+}
+
 /// A piece by the string's characters, as the core's functions describe it.
 fn piece_reference(piece: Piece, string: &str) -> String {
     let chars: Vec<char> = string.chars().collect();

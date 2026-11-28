@@ -12,7 +12,7 @@
       this commit is the base of the count. Check: the family run once
       with `cargo ab measure --base HEAD`, every case through TessFilter
       or the kernels' function as the plan says
-- [ ] 2.2 The property test of the matcher against its reference over
+- [x] 2.2 The property test of the matcher against its reference over
       strings of 0 to 300 bytes and pieces of 1 to 40 bytes at every
       place, so that a search over vectors runs. Check: `make
       rust-check`
