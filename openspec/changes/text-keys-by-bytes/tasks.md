@@ -236,7 +236,7 @@ named in the harness and covered by a property test.
 
 ## 7. The spec, the design and the close
 
-- [ ] 7.1 Every scenario of the spec delta names its test, and every
+- [x] 7.1 Every scenario of the spec delta names its test, and every
       pending check of the contract its check. Check: `openspec
       validate text-keys-by-bytes --strict`;
       `.github/scripts/check-specs.sh`

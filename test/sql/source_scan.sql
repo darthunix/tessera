@@ -782,6 +782,12 @@ SELECT tessera_test_scan_source_asks();
 EXPLAIN (COSTS OFF, VERBOSE) SELECT s, lower(n), p || 'y' FROM ft_bytes;
 SELECT source_same('SELECT s, lower(n), p || ''y'' FROM ft_bytes');
 SELECT tessera_test_scan_source_asks();
+-- spec: string-bytes/Through a projection
+-- A grouping over that projection by the column it passes on and by one
+-- it computes: TessAgg reads s in the bytes form and lower(n) as Datums,
+-- and its groups are the heap's.
+SELECT source_same('SELECT s, lower(n), count(*) FROM ft_bytes GROUP BY s, lower(n)');
+SELECT tessera_test_scan_source_asks();
 ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'twice');
 SELECT source_same('SELECT n, count(*) FROM ft_bytes GROUP BY n');
 SELECT tessera_test_scan_source_asks();
@@ -794,6 +800,19 @@ ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'dictionary', ADD bridge_identit
 SELECT source_same('SELECT n, count(*) FROM ft_bytes GROUP BY n');
 SELECT tessera_test_scan_source_asks();
 ALTER FOREIGN TABLE ft_bytes OPTIONS (DROP bridge_identities);
+-- spec: string-bytes/A column or a batch without the form
+-- Batches whose operations end at release, as a producer built before
+-- the form gives them, and then a column the source never gives in the
+-- bytes form beside one it gives: TessAgg reads those columns as Datums,
+-- and its groups are the heap's.
+ALTER FOREIGN TABLE ft_bytes OPTIONS (SET bytes 'plain', DROP check_bytes, ADD bytes_ops 'short');
+SELECT source_same('SELECT s, count(*), count(n) FROM ft_bytes GROUP BY s');
+SELECT tessera_test_scan_source_asks();
+ALTER FOREIGN TABLE ft_bytes OPTIONS (DROP bytes_ops, ADD check_bytes 'on', SET bytes 'dictionary');
+ALTER FOREIGN TABLE ft_bytes ALTER COLUMN n OPTIONS (ADD bytes 'none');
+SELECT source_same('SELECT s, n, count(*) FROM ft_bytes GROUP BY s, n');
+SELECT tessera_test_scan_source_asks();
+ALTER FOREIGN TABLE ft_bytes ALTER COLUMN n OPTIONS (DROP bytes);
 -- Values bounded past what an index holds: given plain, in either form of
 -- a dictionary; and a scan of one row in the form of two indexes a value,
 -- whose one row stands at an even place.

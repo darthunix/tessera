@@ -34,7 +34,16 @@ lets a string through that its column promised to check.
 A query returns the same rows, and fails with the same SQLSTATE,
 whichever form each of its consumers reads, so that a batch's offer of
 the form never changes a result.
-- **Checked by:** pending
+- **Checked by:**
+  `test/sql/source_scan.sql::-- spec: string-bytes/A column or a batch
+  without the form`
+  and `test/sql/parquet.sql::-- spec: string-bytes/Groups by bytes`,
+  a query over batches of either form against the same over a heap
+  table or with Tessera off;
+  `.github/workflows/ci.yml::cargo run --release --locked -p
+  tessera-crosscheck`, random queries over a Parquet twin, whose
+  strings its batches offer as bytes, with Tessera on against its heap
+  table with Tessera off
 
 ### Structures that grow at their end
 The structures by which one module gives the form to another, the
