@@ -85,7 +85,7 @@ injection points; CI runs 19 and 18.
       wrong kind past the 64th, in Rust and through the C API. Check:
       `make rust-check`; the machine code of the merge's loop before and
       after; the mutants of the diff; the suites
-- [ ] 4.2 `nodes/`: every place the design's "The words of flags" lists,
+- [x] 4.2 `nodes/`: every place the design's "The words of flags" lists,
       in words for each 64 states; `PairsEstimate.set_pairs` sized by
       the DISTINCT aggregates. Check: the suites
 - [ ] 4.3 The cap lifted: the planner's and the node's checks of the

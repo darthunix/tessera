@@ -1035,9 +1035,15 @@ agg_begin(CustomScanState *css, EState *estate, int eflags)
 			 (column = bms_next_member(projection, column)) >= 0;)
 			state->read_columns[state->nread_columns++] = column;
 	}
-	/* The states' places in a record: a word each, a sum or extreme state's more. */
+	/*
+	 * The states' places in a record, after its words of flags: a word
+	 * each, a sum or extreme state's more.
+	 */
 	{
-		int			slot = 1;
+		int			slot = AGG_FLAG_WORDS(state->nvalues);
+
+		state->nflag_words = slot;
+		state->flag_words = palloc0_array(uint64, slot * AGG_GROUP_ROWS);
 
 		for (int number = 0; number < state->nvalues; number++)
 		{

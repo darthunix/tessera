@@ -65,7 +65,8 @@ typedef struct PairsEstimate
 	double		pairs;
 	double		groups;
 	int			sets;
-	double		set_pairs[AGG_MAX_GROUPED];
+	/* Of each DISTINCT aggregate, as many as the states have. */
+	double	   *set_pairs;
 } PairsEstimate;
 
 static create_upper_paths_hook_type previous_create_upper_paths_hook = NULL;
@@ -327,7 +328,9 @@ groups_bytes(PlannerInfo *root, RelOptInfo *output_rel, int nkeys, List *tlist)
 			groups = Max(groups, ((AggPath *) path)->numGroups);
 	if (groups <= 0)
 		return -1;
-	bytes = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
+	/* A record of the keys and its words of flags. */
+	bytes = (double) tess_table_record_bytes(nkeys, sizeof(uint64) *
+											  AGG_FLAG_WORDS(list_length(tlist) - nkeys));
 	foreach_node(TargetEntry, entry, tlist)
 	{
 		Aggref	   *agg = (Aggref *) entry->expr;
@@ -1612,7 +1615,8 @@ group_cost(PlannerInfo *root, const Path *child, double groups, int nkeys,
 	AggClauseCosts costs;
 	double		rows = child->rows;
 	double		width = 0;
-	double		entry = (double) tess_table_record_bytes(nkeys, sizeof(uint64));
+	double		entry = (double) tess_table_record_bytes(nkeys, sizeof(uint64) *
+														 AGG_FLAG_WORDS(list_length(tlist) - nkeys));
 	double		limit = (double) tess_hash_memory_limit() / 8 * AGG_SPILL_FILL;
 	int			naggs = 0;
 	int			ncolumns = 0;
@@ -2023,6 +2027,7 @@ distinct_bytes(PlannerInfo *root, RelOptInfo *input_rel, List *keys, List *tlist
 
 	*words = true;
 	each->sets = 0;
+	each->set_pairs = palloc_array(double, Max(list_length(tlist), 1));
 
 	foreach_node(TargetEntry, entry, tlist)
 	{
