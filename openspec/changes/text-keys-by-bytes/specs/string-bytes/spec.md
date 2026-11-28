@@ -67,11 +67,14 @@ offset size field
   `test/sql/source_scan.sql::-- spec: string-bytes/A column offered as bytes`
 
 #### Scenario: A column or a batch without the form
-- **WHEN** a consumer reads a batch whose operations end at `release`,
-  and a batch that returns false for a column
+- **WHEN** a grouping reads a test source's batches whose operations
+  end at `release`, and then batches that return false for one text
+  column and give another in the bytes form
 - **THEN** it reads those columns through `get_datum_column`, and its
-  results are those of the same query over batches without the form
-- **Verified by:** pending
+  groups are those of the same query over a heap table
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: string-bytes/A column or a batch
+  without the form`
 
 ### Requirement: The dictionary of the bytes form
 Where the producer holds a column through a dictionary, it MAY give
@@ -117,16 +120,11 @@ SHALL NOT pass from one process to another. Without a dictionary,
   in turn, and one also asks through a root of the size before the
   operation and through one whose operation is `NULL`
 - **THEN** each identity is above 0 and above the one taken before it,
-  and both of those asks get 0, so that their producer gives no
-  dictionary
+  so that no dictionary of one producer shares an identity of
+  another's, and both of those asks get 0, so that their producer gives
+  no dictionary
 - **Verified by:**
   `test/sql/bridge.sql::-- spec: string-bytes/Identities of one backend`
-
-#### Scenario: Dictionaries of two producers
-- **WHEN** one query reads the test source and the Parquet table, each
-  through dictionaries, in the same backend
-- **THEN** no identity of one producer is an identity of the other
-- **Verified by:** pending
 
 #### Scenario: Two indexes of one value
 - **WHEN** a dictionary holds the same bytes at two indexes and a
@@ -148,20 +146,23 @@ column of `utf8 'trust'`, SHALL give them unchecked, as its `Datum`
 values are.
 
 #### Scenario: Bytes that are not UTF-8
-- **WHEN** a Parquet column marked for the check holds a value that is
-  not UTF-8 and one with a zero byte, and a grouping by the column
-  reads a batch whose mask asks for each of them, and then a batch
-  whose mask leaves them out
-- **THEN** the first fails with SQLSTATE `22021`, as the query with
-  Tessera off fails; the second returns its rows
-- **Verified by:** pending
+- **WHEN** a consumer asks a Parquet column marked for the check, which
+  holds a value that is not UTF-8, in the bytes form for a mask of the
+  rows before that value, then for a mask of its row, and then asks
+  every row as `Datum` values after an ask of the bytes
+- **THEN** the first returns its rows, and the others fail with
+  SQLSTATE `22021`, the error of that value's `Datum`
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Bytes that are not UTF-8`
 
 #### Scenario: A value longer than its varchar
-- **WHEN** a column of `varchar(3)` holds a value of four characters
-  and a grouping by it reads that row
-- **THEN** the query fails with SQLSTATE `22001`, as it fails when the
-  value is made as a `Datum`
-- **Verified by:** pending
+- **WHEN** a consumer asks a Parquet column of `varchar(3)`, which holds
+  a value of four characters, in the bytes form for a mask of the rows
+  before that value, then for a mask of its row
+- **THEN** the first returns its rows, and the second fails with
+  SQLSTATE `22001`, as the value fails when it is made as a `Datum`
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/A value longer than its varchar`
 
 ### Requirement: The form passed on
 A batch that a projection makes SHALL offer in the bytes form a column
@@ -175,12 +176,13 @@ batches, as a parallel plan's leader does from its workers. Whichever
 form a consumer reads, a query's results SHALL be the same.
 
 #### Scenario: Through a projection
-- **WHEN** a grouping reads a test source through a projection that
-  passes one string column on and computes another, `lower(s)`, and
-  groups by both
+- **WHEN** a grouping reads a test source through the source's
+  projection, which passes one string column on and computes another,
+  `lower(n)`, and groups by both
 - **THEN** it reads the first as bytes and the second as `Datum`
-  values, and its groups are those of the core
-- **Verified by:** pending
+  values, and its groups are those of a heap table
+- **Verified by:**
+  `test/sql/source_scan.sql::-- spec: string-bytes/Through a projection`
 
 ### Requirement: The Parquet source's bytes
 The batches of the Parquet source (capability `parquet-fdw`) SHALL
@@ -192,13 +194,14 @@ of values the source made, in `EXPLAIN (ANALYZE)`, SHALL count the
 `Datum` values alone.
 
 #### Scenario: Plain and dictionary chunks
-- **WHEN** a grouping by a `text` column reads a table of two files,
-  one whose chunks are encoded through a dictionary and one of plain
-  pages, with `NULL` rows and empty strings, serial and in a parallel
-  plan
+- **WHEN** a grouping by a `text` column, and a count of its distinct
+  values, read a table of two files, one whose chunks are encoded
+  through a dictionary and one of plain pages, with `NULL` rows and
+  empty strings
 - **THEN** its groups and counts are those of the core, and
   `EXPLAIN (ANALYZE)` of the scan counts no value made for the column
-- **Verified by:** pending
+- **Verified by:**
+  `test/sql/parquet.sql::-- spec: string-bytes/Plain and dictionary chunks`
 
 ### Requirement: Keys of a grouping by their bytes
 TessAgg SHALL read a grouping key of `text`, `varchar` or `bytea` in the

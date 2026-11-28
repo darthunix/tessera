@@ -143,6 +143,11 @@ typedef struct TableOptions
 	 * as a producer may that gives the same dictionary again.
 	 */
 	bool		keep_identities;
+	/*
+	 * The batches' operations of the size before get_bytes_column
+	 * (bytes_ops 'short'), as a producer built before the form gives them.
+	 */
+	bool		short_ops;
 } TableOptions;
 
 /* How one column's values are made. */
@@ -182,6 +187,7 @@ typedef struct Generator
 	bool		bridge_identities;
 	bool		bytes_alternate;
 	bool		keep_identities;
+	bool		short_ops;
 } Generator;
 
 /* The sources, by the position of their name. */
@@ -330,6 +336,12 @@ read_options(Oid relid, TableOptions *options)
 		}
 		else if (strcmp(def->defname, "check_bytes") == 0)
 			options->check_bytes = defGetBoolean(def);
+		else if (strcmp(def->defname, "bytes_ops") == 0)
+		{
+			if (strcmp(defGetString(def), "short") != 0)
+				elog(ERROR, "unknown bytes_ops \"%s\"", defGetString(def));
+			options->short_ops = true;
+		}
 		else if (strcmp(def->defname, "bridge_identities") == 0)
 			options->bridge_identities = defGetBoolean(def);
 		else
@@ -387,6 +399,9 @@ generator_init(Generator *gen, Relation rel)
 	gen->bridge_identities = options.bridge_identities;
 	gen->bytes_alternate = options.bytes_alternate;
 	gen->keep_identities = options.keep_identities;
+	gen->short_ops = options.short_ops;
+	if (gen->short_ops && gen->check_bytes)
+		elog(ERROR, "check_bytes reads the bytes form, which bytes_ops 'short' does not give");
 	for (int i = 0; i < gen->natts && gen->check_bytes; i++)
 		if (gen->bytes_alternate || gen->columns[i].compress)
 			elog(ERROR, "check_bytes reads every batch's plain values in both forms: "
@@ -1091,6 +1106,18 @@ static const TessBatchOps bytes_ops = {
 };
 
 /*
+ * The same operations at the size they had before get_bytes_column: a
+ * consumer reads the field past the size never, so it asks Datums alone.
+ */
+static const TessBatchOps bytes_ops_short = {
+	.abi_version = TESS_BATCH_OPS_ABI_VERSION,
+	.struct_size = TESS_ABI_SIZE_INCLUDING_FIELD(TessBatchOps, release),
+	.get_datum_column = bytes_datum_column,
+	.release = bytes_release,
+	.get_bytes_column = bytes_column,
+};
+
+/*
  * The count of values the check expects of a text column's dictionary, by
  * its own reading of the table's options and of the bridge: 0 for a plain
  * form, a bridge whose root lacks the identities' operation or a table
@@ -1296,7 +1323,7 @@ check_bytes(SourceScanState *state, TessBatch *batch)
 	{
 		TessDatumColumn datums = TESS_STRUCT_INITIALIZER(TessDatumColumn);
 
-		if (state->gen.columns[c].type != TEXTOID)
+		if (state->gen.columns[c].type != TEXTOID || state->gen.columns[c].no_bytes)
 			continue;
 		batch->ops->get_datum_column(batch, c, &batch->rows, TESS_COLUMN_FOR_PROJECTION,
 									 &datums);
@@ -1311,7 +1338,7 @@ check_bytes(SourceScanState *state, TessBatch *batch)
 		TessBytesColumn reused;
 		char	   *before;
 
-		if (state->gen.columns[c].type != TEXTOID)
+		if (state->gen.columns[c].type != TEXTOID || state->gen.columns[c].no_bytes)
 			continue;
 		if (expected_values(state, c) == 0 && dictionary_view.dictionary != 0)
 		{
@@ -1445,7 +1472,7 @@ bytes_wrap(SourceScanState *state, TessBatch *inner)
 	}
 	state->inner = inner;
 	state->bytes_batch = *inner;
-	state->bytes_batch.ops = &bytes_ops;
+	state->bytes_batch.ops = state->gen.short_ops ? &bytes_ops_short : &bytes_ops;
 	state->bytes_batch.private_data = state;
 	if (state->gen.check_bytes)
 	{

@@ -919,6 +919,8 @@ FROM (VALUES ('t_bytes_plain'), ('t_bytes_dict')) t(tbl) ORDER BY tbl;
 -- it named: it names none, as a batch of which no ask made the column.
 SELECT col, n, ask, dict
 FROM parquet_test_bytes('SELECT s FROM t_bytes_dict', 10, 6, 0, false, false, true);
+-- spec: string-bytes/Bytes that are not UTF-8
+-- spec: string-bytes/A value longer than its varchar
 -- Bytes that are not UTF-8 and a value longer than its varchar fail
 -- only where a row asked holds them, with the errors of their Datums;
 -- the last fails in the ask of every row as Datums, after the first ask
@@ -1868,6 +1870,20 @@ FROM explain_lines('ANALYZE, VERBOSE', 'SELECT s, i FROM t_eight ORDER BY s COLL
 SELECT order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i') AS ascending,
        order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C" DESC, i') AS descending,
        order_off('SELECT s, i FROM t_eight ORDER BY s COLLATE "C", i LIMIT 10') AS top_10;
+-- spec: string-bytes/Plain and dictionary chunks
+-- A grouping by a text column, and a count of its distinct values, over a
+-- table of two files, one of plain pages and one through a dictionary,
+-- with NULL rows and empty strings, against Tessera off: the scan makes
+-- no value of the column, Values Decoded counting none.
+\set bytes_both :bytes_plain ',' :bytes_dict
+CREATE FOREIGN TABLE t_bytes_both (s text, i int) SERVER pq OPTIONS (files :'bytes_both');
+SET max_parallel_workers_per_gather = 0;
+SELECT differ_off('SELECT s, count(*) FROM t_bytes_both GROUP BY s') AS by_text,
+       differ_off('SELECT count(DISTINCT s) FROM t_bytes_both') AS distinct_text;
+SELECT explain_lines('ANALYZE', 'SELECT s, count(*) FROM t_bytes_both GROUP BY s',
+                     'TessAgg|Decoded');
+SET max_parallel_workers_per_gather = 2;
+DROP FOREIGN TABLE t_bytes_both;
 -- spec: string-bytes/A partial stage's tables sent up
 -- A parallel grouping by a string of 8000 values of some 65 bytes through
 -- the chunks' dictionaries, under a work_mem its workers' tables outgrow,
