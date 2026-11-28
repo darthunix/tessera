@@ -32,7 +32,7 @@
 
 ## 4. The count
 
-- [ ] 4.1 Count as the design's measurement plan says: the family by
+- [x] 4.1 Count as the design's measurement plan says: the family by
       cycles and instructions, ClickBench's Q21 and Q22 with the
       control, TPC-H's query 13 by time, against 2.1. Keep the report
       under `docs/benchmarks/`. Check: `.github/scripts/check-specs.sh`
