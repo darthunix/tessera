@@ -39,11 +39,11 @@ Q10 showed its aggregate's input row-wise. The maintainer took seven
 entries out of turn on 2026-11-03, after an analysis of TPC-H with
 `batch-index-join`, in the order `deform-past-varlena` (done),
 `gather-sparse-batches` (done), `semi-anti-lookups` (done),
-`numeric-reading`,
-`like-substring-search`, `agg-table-presize`, `tpch-q9-plan`, the last
-with the foreign keys of the schema left undeclared for now; the same
-day he moved `agg-dependent-columns` between `agg-table-presize` and
-`tpch-q9-plan`, and on 2026-11-04 widened `lookup-outer-compaction`
+`numeric-reading`, `like-substring-search` (done), `agg-table-presize`,
+`tpch-q9-plan`, the last with the foreign keys of the schema left
+undeclared for now; the same day he moved `agg-dependent-columns`
+between `agg-table-presize` and `tpch-q9-plan`, and on 2026-11-04
+widened `lookup-outer-compaction`
 into `gather-sparse-batches`. The maintainer took `source-scan` (done)
 and then `parquet-fdw` (done) out of turn on 2026-11-20, for Tessera's
 entry into ClickBench over the benchmark's Parquet files, and made the
@@ -382,23 +382,6 @@ TessAgg with columns its keys determine.
 - **Depends on:** nothing.
 - **Capabilities:** aggregate
 - **Size:** medium: one pull request.
-
-### like-substring-search
-
-LIKE with % patterns by a fast substring search.
-
-- **What:** `tess_text_like` finds the fixed parts of a pattern between
-  `%` signs with a substring search over the value's bytes, under the
-  deterministic collations the kernel serves.
-- **Why:** TPC-H Q13's `o_comment NOT LIKE '%special%requests%'` takes
-  45 % of the query in `tess_text_like`, about 60 ms over 1.5 million
-  rows (profile of 2026-11-03).
-- **Known:** A crate such as `memchr`'s `memmem` only where it is
-  clearly better and widely used; the kernel's rules for escapes, `_`
-  and collations stay.
-- **Depends on:** nothing.
-- **Capabilities:** text kernels
-- **Size:** small.
 
 ### agg-table-presize
 
@@ -2638,6 +2621,20 @@ Remarks of finished plan items that the plan neither closes nor
 schedules, and findings of closed changes without a decision. Each
 becomes an entry, joins one, or is dropped.
 
+- **LIKE's searchers made anew each call** (a finding of the change
+  `like-substring-search`, task 4.1). `tess_text_like` parses its
+  pattern and makes the `memmem` searchers of its inner pieces once a
+  call, a batch of up to 64 rows, some 3 500 instructions: over strings
+  of 8 to 16 bytes the case `like_short` of the family `like` runs 12
+  per cent more instructions than the search it replaced, for 25 per
+  cent fewer cycles. Suggested: a parsed pattern kept from one call of
+  a node to the next, a handle in the kernels' entry point, a change of
+  the C API, once a case shows the making dear in cycles.
+- **LIKE's searchers not counted on x86-64** (a finding of the change
+  `like-substring-search`, task 4.1). `memchr`'s searchers take other
+  vector instructions on x86-64 than on AArch64, and the change counted
+  the M5 Pro alone. Suggested: the family `like` counted on Linux
+  x86-64 when `bench-in-four-cells` counts there.
 - **A batch's text past one allocation** (a finding of the review of
   the change `text-keys-by-bytes`, task 3.3). The Parquet node makes the
   text of a batch's rows in one arena of its memory, allocated as one

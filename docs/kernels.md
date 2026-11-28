@@ -386,10 +386,25 @@ value detoasted and the other side's made from its bytes.
 - `tess_text_starts_with(column, prefix, len, rows, rest, status)` and
   `tess_text_like(column, pattern, len, negate, rows, rest, simple,
   status)`: a prefix, and a LIKE pattern of literals and `%` matched by its
-  pieces (the search for a piece's first byte by the `memchr` crate, which
-  matched the C library's `memchr` where the standard library's search was
-  9 % slower on `LIKE '%12%'`); `*simple` false for a pattern with `_` or an
-  escape, which the core's function matches.
+  pieces; `*simple` false for a pattern with `_` or an escape, which the
+  core's function matches. The pieces at the start and at the end compare
+  at one place. Each of the first four inner pieces is found by a
+  searcher of `memchr::memmem` made once a call, which looks for a pair
+  of the piece's rare bytes by vector instructions and compares the
+  piece only where both are found; the searchers are boxed and made only
+  for a pattern that has an inner piece, so that a prefix, a suffix or an
+  exact pattern costs no more than without them. A piece past the fourth
+  is found by `memchr` of its first byte, which matched the C library's
+  `memchr` where the standard library's search was 9 % slower on `LIKE
+  '%12%'`. Against that search for every piece, TPC-H query 13's `NOT
+  LIKE '%special%requests%'` took 0.42 of the cycles and query 13 itself
+  0.69 of its time, ClickBench's Q21, `URL LIKE '%google%'`, 0.70 of its
+  cycles; short strings take 25 % fewer cycles though 12 % more
+  instructions, a searcher made once a call. The two other ways counted,
+  `memmem::find` a row, which makes a searcher for each string past 64
+  bytes, and `memchr` of a piece's rarest byte, lost on most cases or
+  gained on one (see
+  [2026-11-28-like-substring-search](benchmarks/2026-11-28-like-substring-search/README.md)).
 - `tess_text_lengths(length, chars, column, rows, values, non_nulls, rest,
   status)`: characters, a bpchar's characters, or bytes.
 - `tess_text_pieces(piece, first, second, has_second, chars, column, rows,
